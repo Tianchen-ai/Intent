@@ -1,0 +1,40 @@
+add_mlir_library(MLIRIntentGPUAnalysis
+  Helpers.cpp
+  Workspace.cpp
+  ConfigurationExpressions.cpp
+  PhysicalProgram.cpp
+  ScalarExpressions.cpp
+  IndexBounds.cpp
+  IntegerRanges.cpp
+  PhysicalExpressionBounds.cpp
+  CoordinateRanges.cpp
+  RangeProvenance.cpp
+  AxisRealization.cpp
+  Replay.cpp
+  AccessRelations.cpp
+  AccessBounds.cpp
+  ProgramInterface.cpp
+  IndexPredicates.cpp
+  IndexRelations.cpp
+  IterationDependencies.cpp
+  ReductionConsumers.cpp
+  TraversalPartitions.cpp
+  PhysicalParameters.cpp
+  ResourceAlias.cpp
+  MemoryEffects.cpp
+  Resources.cpp
+  ValueSchema.cpp
+  UniformValues.cpp
+
+  LINK_LIBS PUBLIC
+  MLIRAnalysis
+  MLIRArithDialect
+  MLIRFuncDialect
+  MLIRIR
+  MLIRSCFDialect
+  MLIRControlFlowInterfaces
+  MLIRSideEffectInterfaces
+  MLIRViewLikeInterface
+  MLIRIntentGPUDialect
+  MLIRIntentAnalysis
+)

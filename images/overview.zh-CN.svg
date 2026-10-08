@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="610" viewBox="0 0 1240 610" role="img" aria-labelledby="title description">
+  <title id="title">IntentDSL：一个算法，不同执行模型</title>
+  <desc id="description">作者描述算法与显式 kernel 编排。MLIR 编译器应用共享语义分析和执行模型各自的 passes，再发射到 GPU 的 Triton 或 cuTile、CPU 的 Mojo 或 Weft，以及 MLU 的 BANG C。生成源码与 IR 可查阅，随后进入原生编译、调优和 Python 调用。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M1 1L7 4L1 7" fill="none" stroke="#8997aa" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <style>
+      text { font-family: Inter, "Noto Sans CJK SC", "Microsoft YaHei", Arial, sans-serif; }
+      .label { font-size: 14px; font-weight: 700; letter-spacing: 1.4px; fill: #64748b; }
+      .heading { font-size: 21px; font-weight: 700; fill: #18263d; }
+      .body { font-size: 17px; fill: #52627a; }
+      .mono { font-family: "DejaVu Sans Mono", Consolas, monospace; font-size: 16px; }
+      .line { fill: none; stroke: #8997aa; stroke-width: 1.8; }
+    </style>
+  </defs>
+  <rect x="1" y="1" width="1238" height="608" rx="24" fill="#f8fafc" stroke="#e2e8f0"/>
+  <rect x="48" y="40" width="40" height="40" rx="12" fill="#18263d"/>
+  <path d="M61 51h14M68 51v18M61 69h14" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round"/>
+  <text x="104" y="71" font-size="33" font-weight="750" fill="#18263d">IntentDSL</text>
+  <text x="48" y="112" font-size="22" fill="#52627a">一个算法，不同执行模型。</text>
+  <rect x="980" y="47" width="212" height="34" rx="17" fill="#ffffff" stroke="#dce4ee"/>
+  <text x="1086" y="69" text-anchor="middle" font-size="13" font-weight="700" letter-spacing="1" fill="#52627a">PYTHON + MLIR</text>
+  <path d="M48 135H1192" stroke="#e2e8f0"/>
+  <text x="48" y="169" class="label">01 / 作者程序</text>
+  <text x="370" y="169" class="label">02 / 编译器</text>
+  <text x="852" y="169" class="label">03 / 后端发射</text>
+  <rect x="48" y="188" width="270" height="310" rx="16" fill="#ffffff" stroke="#dce4ee"/>
+  <rect x="48" y="188" width="270" height="7" rx="3.5" fill="#3b82b6"/>
+  <text x="72" y="232" class="heading">显式表达算法</text>
+  <circle cx="79" cy="273" r="5" fill="#3b82b6"/>
+  <text x="94" y="279" class="body">逻辑域与张量运算</text>
+  <circle cx="79" cy="311" r="5" fill="#14968d"/>
+  <text x="94" y="317" class="body">逻辑访问与状态</text>
+  <circle cx="79" cy="349" r="5" fill="#8671b0"/>
+  <text x="94" y="355" class="body">Kernel 与 host 编排</text>
+  <path d="M72 382H294" stroke="#e8edf3"/>
+  <rect x="72" y="403" width="222" height="70" rx="9" fill="#f1f5f9"/>
+  <text x="88" y="429" class="mono" fill="#6c55a0">@intent.kernel</text>
+  <text x="88" y="454" class="mono" fill="#334155">def algorithm(...):</text>
+  <path d="M323 343H364" class="line" marker-end="url(#arrow)"/>
+  <rect x="370" y="188" width="430" height="310" rx="16" fill="#ffffff" stroke="#dce4ee"/>
+  <rect x="370" y="188" width="430" height="7" rx="3.5" fill="#8671b0"/>
+  <text x="394" y="232" class="heading">Typed MLIR 与可复用 passes</text>
+  <rect x="394" y="253" width="382" height="81" rx="10" fill="#eff5fb"/>
+  <text x="414" y="281" font-size="18" font-weight="650" fill="#275c8b">共享语义知识</text>
+  <text x="414" y="310" font-size="16" fill="#52627a">类型 · 坐标关系 · Effects · 生命周期</text>
+  <path d="M585 338V355" class="line" marker-end="url(#arrow)"/>
+  <rect x="394" y="360" width="382" height="81" rx="10" fill="#f2eef8"/>
+  <text x="414" y="388" font-size="18" font-weight="650" fill="#6b5399">执行模型各自的 passes</text>
+  <text x="414" y="417" font-size="16" fill="#52627a">Ownership · 遍历 · 复用 · 存储</text>
+  <text x="394" y="471" font-size="15" fill="#64748b">执行决定保存在当前 IR 中。</text>
+  <path d="M805 343H828M828 233V445M828 233H846M828 339H846M828 445H846" class="line"/>
+  <path d="M838 233H846" class="line" marker-end="url(#arrow)"/>
+  <path d="M838 339H846" class="line" marker-end="url(#arrow)"/>
+  <path d="M838 445H846" class="line" marker-end="url(#arrow)"/>
+  <rect x="852" y="188" width="340" height="90" rx="14" fill="#eaf4fa" stroke="#d0e4f1"/>
+  <rect x="874" y="211" width="46" height="44" rx="10" fill="#d2e7f4"/>
+  <g fill="#3b82b6"><rect x="884" y="221" width="10" height="10" rx="2"/><rect x="900" y="221" width="10" height="10" rx="2"/><rect x="884" y="237" width="10" height="10" rx="2"/><rect x="900" y="237" width="10" height="10" rx="2"/></g>
+  <text x="938" y="226" class="heading">GPU</text>
+  <text x="938" y="253" class="body">Triton / cuTile</text>
+  <rect x="852" y="294" width="340" height="90" rx="14" fill="#f2eef8" stroke="#e2d9ef"/>
+  <rect x="874" y="317" width="46" height="44" rx="10" fill="#e2d9ef"/>
+  <g fill="#8671b0"><rect x="884" y="327" width="26" height="5" rx="2"/><rect x="884" y="337" width="26" height="5" rx="2"/><rect x="884" y="347" width="26" height="5" rx="2"/></g>
+  <text x="938" y="332" class="heading">CPU</text>
+  <text x="938" y="359" class="body">Mojo / Weft</text>
+  <rect x="852" y="400" width="340" height="98" rx="14" fill="#eaf6f3" stroke="#cce7df"/>
+  <rect x="874" y="426" width="46" height="44" rx="10" fill="#cce7df"/>
+  <path d="M885 438h24v19h-24zM891 433v5M903 433v5M891 457v5M903 457v5" fill="none" stroke="#14968d" stroke-width="2" stroke-linejoin="round"/>
+  <text x="938" y="440" class="heading">MLU</text>
+  <text x="938" y="467" class="body">BANG C</text>
+  <rect x="48" y="526" width="1144" height="44" rx="12" fill="#18263d"/>
+  <text x="72" y="554" font-size="15" font-weight="650" fill="#ffffff">查看源码与 IR</text>
+  <path d="M354 548H390M748 548H784" stroke="#8191a7" stroke-width="1.5"/>
+  <text x="427" y="554" font-size="15" font-weight="650" fill="#ffffff">原生编译与调优</text>
+  <text x="856" y="554" font-size="15" font-weight="650" fill="#ffffff">从 Python 调用</text>
+</svg>

@@ -1,0 +1,7 @@
+set(LLVM_TARGET_DEFINITIONS WeftDialect.td)
+mlir_tablegen(WeftDialect.h.inc -gen-dialect-decls -dialect=intent_weft)
+mlir_tablegen(WeftDialect.cpp.inc -gen-dialect-defs -dialect=intent_weft)
+set(LLVM_TARGET_DEFINITIONS WeftAttrs.td)
+mlir_tablegen(WeftAttrs.h.inc -gen-attrdef-decls)
+mlir_tablegen(WeftAttrs.cpp.inc -gen-attrdef-defs)
+add_public_tablegen_target(IntentWeftIncGen)

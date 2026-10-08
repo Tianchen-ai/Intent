@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.log
+.venv/
+build/
+dist/
+*.egg-info/
+/.codegraph/
+/.agents/
+/.codex/
+/autotuner.log
+/.venv-*/
+/experiments/
+/report/
+/tasks/
+/AGENTS.md
+/environment/cutile.txt

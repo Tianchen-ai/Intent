@@ -1,0 +1,135 @@
+site_name: IntentDSL 工具书
+site_description: 面向算法作者和编译器开发者的 IntentDSL 双语工具书
+site_url: https://tianchen-ai.github.io/Intent/
+repo_url: https://github.com/Tianchen-ai/Intent
+repo_name: Tianchen-ai/Intent
+edit_uri: edit/main/doc/
+docs_dir: doc
+site_dir: !ENV [INTENT_DOCS_SITE_DIR, /tmp/intentdsl-docs-site]
+use_directory_urls: true
+
+theme:
+  name: material
+  language: zh
+  font: false
+  palette:
+    - scheme: default
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/brightness-4
+        name: 切换深色模式
+    - scheme: slate
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/brightness-7
+        name: 切换浅色模式
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - search.suggest
+    - search.highlight
+
+plugins:
+  - search
+  - i18n:
+      docs_structure: suffix
+      fallback_to_default: false
+      languages:
+        - locale: zh
+          name: 中文
+          default: true
+          build: true
+        - locale: en
+          name: English
+          build: true
+          site_name: IntentDSL Handbook
+          site_description: A bilingual handbook for kernel authors and compiler developers
+          theme:
+            language: en
+          nav_translations:
+            首页: Home
+            开始使用: Getting started
+            安装: Installation
+            编译与运行: Compile and run
+            配置与调优: Configuration and tuning
+            Agent 与 MCP: Agents and MCP
+            编程模型: Programming model
+            概述: Overview
+            Kernel 与 Host: Kernel and host
+            逻辑程序: Logical program
+            语言参考: Language reference
+            作者速查: Authoring quick reference
+            语言构造: Language constructs
+            类型、数值与 Effects: Types, numerics and effects
+            量化计算: Quantized operations
+            规范示例: Specification examples
+            编译器: Compiler
+            KIR 到 GPU: KIR to GPU
+            GPU 程序 IR: GPU program IR
+            CPU 程序 IR: CPU program IR
+            Pass 与分析: Passes and analyses
+            物理参数: Physical parameters
+            目标 Lowering: Target lowering
+            开发与贡献: Development
+            扩展 Pass: Extending passes
+            编译器开发入口: Compiler development entry points
+            文档构建与发布: Build and publish documentation
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+
+nav:
+  - 首页: index.md
+  - 开始使用:
+      - 安装: getting-started/installation.md
+      - 编译与运行: getting-started/usage.md
+      - 配置与调优: getting-started/configuration.md
+      - Agent 与 MCP: getting-started/mcp.md
+  - 编程模型:
+      - 概述: programming-model/README.md
+      - Kernel 与 Host: programming-model/kernel-and-host.md
+      - 逻辑程序: programming-model/logical-program.md
+  - 语言参考:
+      - 概述: dsl/README.md
+      - 作者速查: dsl/authoring.md
+      - 语言构造: dsl/core.md
+      - 类型、数值与 Effects: dsl/types-numerics-and-effects.md
+      - 量化计算: dsl/quantized-operations.md
+      - 规范示例: dsl/examples/README.md
+  - 编译器:
+      - 概述: compiler/README.md
+      - KIR 到 GPU: compiler/kir-to-gpu.md
+      - GPU 程序 IR: compiler/gpu-program-ir.md
+      - CPU 程序 IR: compiler/cpu-program-ir.md
+      - Pass 与分析: compiler/passes-and-analyses.md
+      - 物理参数: compiler/physical-parameters.md
+      - 目标 Lowering: compiler/target-lowering.md
+  - 开发与贡献:
+      - 扩展 Pass: development/passes.md
+      - 编译器开发入口: development/compiler-reference.md
+      - 文档构建与发布: development/documentation.md
+
+validation:
+  nav:
+    omitted_files: info
+  links:
+    not_found: warn
+    anchors: warn

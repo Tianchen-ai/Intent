@@ -1,0 +1,51 @@
+cmake_minimum_required(VERSION 3.20)
+project(IntentDSL LANGUAGES CXX C)
+
+find_package(MLIR REQUIRED CONFIG)
+if(NOT LLVM_VERSION_MAJOR EQUAL 20)
+  message(FATAL_ERROR "IntentDSL currently requires the LLVM/MLIR 20 SDK")
+endif()
+
+include(GNUInstallDirs)
+if(SKBUILD)
+  if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(FATAL_ERROR "IntentDSL binary wheels currently support Linux")
+  endif()
+  if(CMAKE_CROSSCOMPILING)
+    message(FATAL_ERROR "IntentDSL wheel runtime collection requires a native build")
+  endif()
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  find_program(INTENT_PATCHELF_EXECUTABLE NAMES patchelf REQUIRED)
+  set(INTENT_RUNTIME_NOTICES "" CACHE FILEPATH
+      "JSON mapping of external runtime library paths to their copyright/license files")
+  set(INTENT_RUNTIME_INSTALL_DIR "intent/_bin")
+  foreach(section dsl programming-model)
+    file(GLOB manual_documents "${PROJECT_SOURCE_DIR}/doc/${section}/*.md")
+    install(FILES ${manual_documents}
+      DESTINATION "intent/_manual/doc/${section}"
+      COMPONENT IntentRuntime)
+  endforeach()
+else()
+  set(INTENT_RUNTIME_INSTALL_DIR "${CMAKE_INSTALL_BINDIR}")
+endif()
+
+list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}" "${LLVM_CMAKE_DIR}")
+include(TableGen)
+include(AddLLVM)
+include(AddMLIR)
+include(HandleLLVMOptions)
+include(cmake/PassReference.cmake)
+
+set(CMAKE_CXX_STANDARD 17 CACHE STRING "C++ standard")
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+include_directories("${MLIR_INCLUDE_DIRS}")
+include_directories("${LLVM_INCLUDE_DIRS}")
+include_directories("${PROJECT_SOURCE_DIR}/include")
+include_directories("${PROJECT_BINARY_DIR}/include")
+add_definitions("${LLVM_DEFINITIONS}")
+
+add_subdirectory(include)
+add_subdirectory(lib)
+add_subdirectory(tools)

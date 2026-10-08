@@ -1,0 +1,26 @@
+# Resolve both linked build artifacts, whose RPATH identifies the selected SDK.
+# Only the staged tools and copied libraries are patched below.
+file(GET_RUNTIME_DEPENDENCIES
+  EXECUTABLES "$<TARGET_FILE:intent-compile>" "$<TARGET_FILE:intent-opt>"
+  RESOLVED_DEPENDENCIES_VAR runtime_libraries
+  UNRESOLVED_DEPENDENCIES_VAR unresolved_libraries
+  CONFLICTING_DEPENDENCIES_PREFIX conflicting_libraries)
+if(unresolved_libraries OR conflicting_libraries_FILENAMES)
+  message(FATAL_ERROR
+    "Cannot close compiler runtime dependencies. Unresolved: ${unresolved_libraries}; conflicting: ${conflicting_libraries_FILENAMES}")
+endif()
+
+string(REPLACE ";" "\n" dependency_text "${runtime_libraries}")
+set(dependency_file "@CMAKE_CURRENT_BINARY_DIR@/compiler-runtime-$<CONFIG>.txt")
+file(WRITE "${dependency_file}" "${dependency_text}\n")
+execute_process(
+  COMMAND "@Python3_EXECUTABLE@" "@PROJECT_SOURCE_DIR@/cmake/bundle_runtime.py"
+    --executable "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/@INTENT_RUNTIME_INSTALL_DIR@/intent-compile"
+    --executable "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/@INTENT_RUNTIME_INSTALL_DIR@/intent-opt"
+    --dependencies "${dependency_file}"
+    --patchelf "@INTENT_PATCHELF_EXECUTABLE@"
+    --notices "@INTENT_RUNTIME_NOTICES@"
+  RESULT_VARIABLE bundle_result)
+if(NOT bundle_result EQUAL 0)
+  message(FATAL_ERROR "Cannot package the compiler runtime and third-party notices")
+endif()

@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "intent_manual": {
+      "command": "/absolute/path/to/.venv/bin/intent-manual",
+      "args": []
+    },
+    "intent_compiler": {
+      "command": "/absolute/path/to/.venv/bin/intent-compiler-mcp",
+      "args": []
+    }
+  }
+}

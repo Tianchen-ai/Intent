@@ -1,0 +1,32 @@
+add_mlir_library(MLIRIntentCPUAnalysis
+  PhysicalProgram.cpp
+  Contractions.cpp
+  Storage.cpp
+  ViewRelations.cpp
+  ProducerReplay.cpp
+  Ownership.cpp
+  ExtentRelations.cpp
+  AxisRelations.cpp
+  RegionPartition.cpp
+  RegionPredicates.cpp
+  UniformValues.cpp
+  LINK_LIBS PUBLIC
+  MLIRIntentCPUDialect
+  MLIRIntentAnalysis
+  MLIRAnalysis
+  MLIRArithDialect
+  MLIRDialectUtils
+  MLIRBufferizationTransforms
+  MLIRBufferizationDialect
+  MLIRCallInterfaces
+  MLIRControlFlowInterfaces
+  MLIRFuncDialect
+  MLIRLinalgDialect
+  MLIRMathDialect
+  MLIRMemRefDialect
+  MLIRSCFDialect
+  MLIRIR
+  MLIRSideEffectInterfaces
+  MLIRViewLikeInterface
+  MLIRValueBoundsOpInterface
+)

@@ -1,0 +1,35 @@
+add_mlir_library(MLIRIntentAnalysis
+  Canonical/Kernel.cpp
+  Canonical/Shapes.cpp
+  BufferStorage.cpp
+  ContractionAxes.cpp
+  ControlFlow.cpp
+  UniformValues.cpp
+  IntegerRelations.cpp
+  IntegerRanges.cpp
+  RegionSemantics.cpp
+  OnlineSummary.cpp
+  ProductSchema.cpp
+
+  LINK_LIBS PUBLIC
+  MLIRFuncDialect
+  MLIRAnalysis
+  MLIRBufferizationTransforms
+  MLIRBufferizationDialect
+  MLIRCallInterfaces
+  MLIRMemRefDialect
+  MLIRSideEffectInterfaces
+  MLIRViewLikeInterface
+  MLIRArithDialect
+  MLIRMathDialect
+  MLIRSCFDialect
+  MLIRTensorDialect
+  MLIRInferIntRangeInterface
+  MLIRInferIntRangeCommon
+  MLIRLoopLikeInterface
+  MLIRValueBoundsOpInterface
+  MLIRControlFlowInterfaces
+  MLIRIR
+  MLIRIntentDialect
+  MLIRIntentStructuredOpInterface
+)

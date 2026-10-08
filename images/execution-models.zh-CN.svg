@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="650" viewBox="0 0 1240 650" role="img" aria-labelledby="title description">
+  <title id="title">同一个 region 算法，三种物理组织</title>
+  <desc id="description">作者定义的 attention 计算逐个处理源 region 并合并 summary。GPU program 拥有 query tile 并携带状态；CPU task 包含 query block 与局部计算；DSA work unit 将源 region 供给局部存储并在最后使用后复用缓冲。颜色区分 query 数据、源 region、状态和计算。此图展示结构，不表示性能对比。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M1 1L7 4L1 7" fill="none" stroke="#8997aa" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <style>
+      text { font-family: Inter, "Noto Sans CJK SC", "Microsoft YaHei", Arial, sans-serif; }
+      .heading { font-size: 20px; font-weight: 700; fill: #18263d; }
+      .body { font-size: 16px; fill: #52627a; }
+      .small { font-size: 14px; fill: #52627a; }
+      .box { font-size: 15px; font-weight: 650; fill: #334155; text-anchor: middle; }
+      .line { fill: none; stroke: #8997aa; stroke-width: 1.8; }
+    </style>
+  </defs>
+  <rect x="1" y="1" width="1238" height="648" rx="24" fill="#f8fafc" stroke="#e2e8f0"/>
+  <text x="48" y="57" font-size="28" font-weight="700" fill="#18263d">共享算法，保留各自的执行模型。</text>
+  <text x="48" y="90" font-size="17" fill="#52627a">同一个 attention region 计算，在三个执行模型中形成不同的物理程序。</text>
+
+  <rect x="48" y="117" width="1144" height="81" rx="13" fill="#ffffff" stroke="#dce4ee"/>
+  <text x="70" y="144" font-size="12" font-weight="700" letter-spacing="1.2" fill="#64748b">作者定义的算法结构</text>
+  <rect x="70" y="155" width="125" height="27" rx="7" fill="#fff3dc"/>
+  <text x="132.5" y="174" class="box">初始状态</text>
+  <path d="M201 169H234" class="line" marker-end="url(#arrow)"/>
+  <rect x="241" y="155" width="216" height="27" rx="7" fill="#eaf6f3"/>
+  <text x="349" y="174" class="box">计算源 region</text>
+  <path d="M463 169H496" class="line" marker-end="url(#arrow)"/>
+  <rect x="503" y="155" width="204" height="27" rx="7" fill="#f2eef8"/>
+  <text x="605" y="174" class="box">合并 summary</text>
+  <path d="M713 169H746" class="line" marker-end="url(#arrow)"/>
+  <rect x="753" y="155" width="137" height="27" rx="7" fill="#fff3dc"/>
+  <text x="821.5" y="174" class="box">更新状态</text>
+  <path d="M896 169H929" class="line" marker-end="url(#arrow)"/>
+  <text x="949" y="174" font-size="15" font-weight="650" fill="#334155">归一化输出</text>
+  <text x="505" y="143" font-size="12" fill="#64748b">逐个处理源 region</text>
+
+  <rect x="48" y="226" width="360" height="329" rx="16" fill="#ffffff" stroke="#dce4ee"/>
+  <rect x="48" y="226" width="360" height="6" rx="3" fill="#3b82b6"/>
+  <text x="70" y="265" class="heading">GPU</text>
+  <text x="70" y="291" class="body">Program 拥有 query tile</text>
+  <rect x="70" y="312" width="316" height="191" rx="12" fill="#f8fafc" stroke="#e2e8f0"/>
+  <rect x="86" y="330" width="134" height="39" rx="8" fill="#dcecf8"/>
+  <text x="153" y="355" class="box">Query tile Q[I]</text>
+  <rect x="239" y="330" width="131" height="39" rx="8" fill="#fff3dc"/>
+  <text x="304.5" y="355" class="box">状态 S[I]</text>
+  <path d="M153 373V390H295V406" class="line" marker-end="url(#arrow)"/>
+  <rect x="86" y="412" width="105" height="43" rx="8" fill="#d9efea"/>
+  <text x="138.5" y="439" class="box">Region Rj</text>
+  <path d="M197 433H211" class="line" marker-end="url(#arrow)"/>
+  <rect x="218" y="412" width="152" height="43" rx="8" fill="#e9e0f3"/>
+  <text x="294" y="439" class="box">分块计算</text>
+  <path d="M372 433H378V350H374" class="line" marker-end="url(#arrow)"/>
+  <text x="86" y="483" class="small">状态在源 region 之间传递。</text>
+  <text x="70" y="533" class="small">Ownership 与 tensor program 执行</text>
+
+  <rect x="440" y="226" width="360" height="329" rx="16" fill="#ffffff" stroke="#dce4ee"/>
+  <rect x="440" y="226" width="360" height="6" rx="3" fill="#8671b0"/>
+  <text x="462" y="265" class="heading">CPU</text>
+  <text x="462" y="291" class="body">Task 包含多个 query block</text>
+  <rect x="462" y="312" width="316" height="40" rx="9" fill="#dcecf8"/>
+  <text x="620" y="337" class="box">Task t → query blocks I₀, I₁, …</text>
+  <path d="M620 357V372" class="line" marker-end="url(#arrow)"/>
+  <rect x="462" y="378" width="316" height="125" rx="12" fill="#f8fafc" stroke="#e2e8f0"/>
+  <text x="480" y="407" font-size="16" font-weight="650" fill="#334155">Query block Ic</text>
+  <rect x="641" y="390" width="119" height="29" rx="7" fill="#fff3dc"/>
+  <text x="700.5" y="410" class="box">状态 S[Ic]</text>
+  <rect x="480" y="443" width="105" height="40" rx="8" fill="#d9efea"/>
+  <text x="532.5" y="468" class="box">Region Rj</text>
+  <path d="M591 463H619" class="line" marker-end="url(#arrow)"/>
+  <rect x="626" y="443" width="134" height="40" rx="8" fill="#e9e0f3"/>
+  <text x="693" y="468" class="box">局部计算</text>
+  <path d="M762 463H770V404H764" class="line" marker-end="url(#arrow)"/>
+  <text x="462" y="533" class="small">Task 层次与局部实现</text>
+
+  <rect x="832" y="226" width="360" height="329" rx="16" fill="#ffffff" stroke="#dce4ee"/>
+  <rect x="832" y="226" width="360" height="6" rx="3" fill="#14968d"/>
+  <text x="854" y="265" class="heading">DSA / MLU</text>
+  <text x="854" y="291" class="body">Work unit 拥有局部存储</text>
+  <g class="box">
+    <rect x="854" y="312" width="57" height="36" rx="7" fill="#eaf6f3"/><text x="882.5" y="335">R₀</text>
+    <rect x="919" y="312" width="57" height="36" rx="7" fill="#eaf6f3"/><text x="947.5" y="335">R₁</text>
+    <rect x="984" y="312" width="57" height="36" rx="7" fill="#b9e2d9"/><text x="1012.5" y="335">Rj</text>
+    <rect x="1049" y="312" width="57" height="36" rx="7" fill="#eaf6f3"/><text x="1077.5" y="335">Rj+1</text>
+    <rect x="1114" y="312" width="57" height="36" rx="7" fill="#eaf6f3"/><text x="1142.5" y="335">…</text>
+  </g>
+  <rect x="854" y="378" width="316" height="125" rx="12" fill="#f8fafc" stroke="#e2e8f0"/>
+  <path d="M1012.5 352V387" class="line" marker-end="url(#arrow)"/>
+  <rect x="870" y="393" width="89" height="34" rx="7" fill="#dcecf8"/>
+  <text x="914.5" y="415" class="box">Query</text>
+  <rect x="969" y="393" width="89" height="34" rx="7" fill="#d9efea"/>
+  <text x="1013.5" y="415" class="box">输入</text>
+  <rect x="1068" y="393" width="86" height="34" rx="7" fill="#fff3dc"/>
+  <text x="1111" y="415" class="box">状态</text>
+  <path d="M914.5 431V451" class="line" marker-end="url(#arrow)"/>
+  <path d="M1013.5 431V451" class="line" marker-end="url(#arrow)"/>
+  <rect x="870" y="457" width="284" height="30" rx="8" fill="#e9e0f3"/>
+  <text x="1012" y="478" class="box">局部张量计算</text>
+  <path d="M1111 453V433" class="line" marker-end="url(#arrow)"/>
+  <text x="854" y="533" class="small">Region 供给与最后使用后的复用</text>
+
+  <path d="M48 583H1192" stroke="#e2e8f0"/>
+  <rect x="48" y="605" width="14" height="14" rx="3" fill="#dcecf8"/>
+  <text x="72" y="618" class="small">Query 数据</text>
+  <rect x="306" y="605" width="14" height="14" rx="3" fill="#d9efea"/>
+  <text x="330" y="618" class="small">源 region</text>
+  <rect x="625" y="605" width="14" height="14" rx="3" fill="#fff3dc"/>
+  <text x="649" y="618" class="small">状态与 summary</text>
+  <rect x="992" y="605" width="14" height="14" rx="3" fill="#e9e0f3"/>
+  <text x="1016" y="618" class="small">计算</text>
+</svg>

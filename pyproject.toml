@@ -1,0 +1,52 @@
+[build-system]
+requires = ["scikit-build-core>=0.11,<1", "setuptools-scm>=9,<10", "patchelf>=0.17; sys_platform == 'linux'"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "intentdsl"
+dynamic = ["version"]
+description = "A structured kernel DSL with native compilation across execution models"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = ["compiler", "MLIR", "kernel", "GPU", "CPU", "DSL"]
+classifiers = [
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: C++",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Compilers",
+]
+
+[project.urls]
+Repository = "https://github.com/Tianchen-ai/Intent"
+Documentation = "https://tianchen-ai.github.io/Intent/"
+Issues = "https://github.com/Tianchen-ai/Intent/issues"
+
+[project.optional-dependencies]
+manual = ["mcp>=1.28,<2"]
+examples = ["numpy>=1.26,<3", "ml-dtypes>=0.5,<0.6"]
+docs = ["mkdocs-material>=9.6,<10", "mkdocs-static-i18n>=1.3,<2", "tomli>=2,<3; python_version < '3.11'"]
+
+[project.scripts]
+intent = "intent.tools.cli:main"
+intent-manual = "intent.mcp.manual:main"
+intent-compiler-mcp = "intent.mcp.compiler:main"
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+cmake.build-type = "Release"
+build.targets = ["intent-compile", "intent-opt"]
+install.components = ["IntentRuntime"]
+wheel.packages = ["python/intent"]
+wheel.py-api = "py3"
+sdist.exclude = [".codegraph", ".agents", ".codex", "AGENTS.md", "experiments", "report", "tasks", "environment/cutile.txt"]
+metadata.version.provider = "scikit_build_core.metadata.setuptools_scm"
+
+[tool.setuptools_scm]
+local_scheme = "no-local-version"
+
+[tool.setuptools_scm.scm.git]
+describe_command = "git describe --dirty --tags --long --match *[0-9]*"

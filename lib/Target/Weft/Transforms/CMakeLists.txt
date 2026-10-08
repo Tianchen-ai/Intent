@@ -1,0 +1,32 @@
+add_mlir_library(MLIRIntentWeftTransforms
+  Legalize.cpp
+  Passes.cpp
+  Implementations.cpp
+  Quantization.cpp
+  Reductions.cpp
+  TaskInterface.cpp
+  TaskLowering.cpp
+  TaskViews.cpp
+  TaskStorage.cpp
+  TaskComputations.cpp
+  TaskControl.cpp
+  ScalarValues.cpp
+  Views.cpp
+  DEPENDS IntentWeftTransformsIncGen
+  LINK_LIBS PUBLIC
+  IntentWeftCanonical
+  MLIRIntentWeftDialect
+  MLIRIntentCPUAnalysis
+  MLIRIntentCPUTransforms
+  MLIRIntentScalarSerialization
+  MLIRArithDialect
+  MLIRAffineToStandard
+  MLIRFuncDialect
+  MLIRLinalgDialect
+  MLIRMemRefDialect
+  MLIRMemRefTransforms
+  MLIRSCFDialect
+  MLIRIR
+  MLIRPass
+  MLIRTransforms
+)
