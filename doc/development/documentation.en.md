@@ -44,14 +44,8 @@ GitHub preview and PyPI are separate publication channels; uploading GitHub asse
 
 ## Configure PyPI publication
 
-Distribution's separate manual `publish-pypi` option uses PyPI Trusted Publishing, without storing a long-lived upload token in the repository. Before the first release, a PyPI project maintainer must configure a [pending publisher](https://pypi.org/manage/account/publishing/) with:
+Distribution's separate manual `publish-pypi` option authenticates with a PyPI API token. A repository administrator configures repository secret `PYPI_API_TOKEN` under GitHub **Settings → Secrets and variables → Actions**. The workflow reads that secret; tokens do not belong in source, packages or logs.
 
-| Field | Value |
-|---|---|
-| PyPI project | `intentdsl` |
-| GitHub owner | `Tianchen-ai` |
-| Repository | `Intent` |
-| Workflow | `distribution.yml` |
-| Environment | `pypi` |
+Manually run Distribution on GitHub `main` with `publish-pypi` selected. Its `pypi` job uploads the sdist and wheel that passed that run's build and isolated installation checks to PyPI project `intentdsl`. This option is independent of `publish-preview`: update either channel or both.
 
-After configuration, manually run Distribution on GitHub `main` with `publish-pypi` selected. Its publication job consumes the sdist and wheel that passed that run's checks. See the [official PyPI guide](https://docs.pypi.org/trusted-publishers/creating-a-project-through-oidc/) for first-project creation and OIDC configuration. Change the installation entry to `pip install intentdsl` only after an actual successful PyPI upload.
+Ordinary pushes and pull requests do not upload packages. Check that run's publication job and the PyPI project page to confirm an actual successful upload. A GitHub token cannot replace PyPI credentials, and a successful build does not establish availability from the package index.

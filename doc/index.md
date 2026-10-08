@@ -4,7 +4,7 @@ IntentDSL 是用于编写结构化 kernel 算法的 Python DSL 和 MLIR 编译�
 
 ## 从这里开始
 
-- [安装](getting-started/installation.md)：从源码或现有 wheel 安装，选择一个后端环境。
+- [安装](getting-started/installation.md)：通过 PyPI、源码或现有 wheel 安装，选择一个后端环境。
 - [编译与运行](getting-started/usage.md)：运行现有完整程序，查看 KIR、物理 IR 与生成源码。
 - [配置与调优](getting-started/configuration.md)：完整经验配置、首次调优与热调用的边界。
 - [Agent 与 MCP](getting-started/mcp.md)：连接只读语言手册和显式编译工具。

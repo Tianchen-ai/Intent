@@ -93,6 +93,8 @@ Generated IR/source, build caches and performance observations stay outside the 
 
 For distribution changes, run the existing `environment/build.py` recipe. For documentation changes, build the bilingual site as described in the [documentation guide](https://tianchen-ai.github.io/Intent/en/development/documentation/).
 
+Package publication is a separate maintainer action in the Distribution workflow: `publish-preview` updates public GitHub assets and `publish-pypi` uploads the checked build using repository secret `PYPI_API_TOKEN`. Pull requests do not upload packages. See the [publication instructions](doc/development/documentation.en.md#configure-pypi-publication).
+
 Keep a pull request coherent. Describe the concrete problem, resulting behavior, relevant compiler boundary, and verification actually performed. For optimization, separate compile/tuning costs from hot complete-call time and explain the structural reason for a gain. Follow the surrounding code's style and preserve third-party notices.
 
 IntentDSL uses [Apache-2.0](LICENSE). Public implementation APIs and reuse locations are listed in the [compiler development guide](doc/development/compiler-reference.en.md).

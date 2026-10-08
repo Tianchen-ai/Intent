@@ -18,11 +18,11 @@ and its shared worker; it does not maintain a second compiler implementation.
 
 ## Install
 
-Download the Linux wheel from the [public preview](https://github.com/Tianchen-ai/Intent/releases/tag/preview). Set `INTENT_WHEEL` to its actual local `.whl` path:
+Install the [PyPI package](https://pypi.org/project/intentdsl/) with the MCP extra in its own environment:
 
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install "${INTENT_WHEEL}[manual]"
+.venv/bin/python -m pip install 'intentdsl[manual]'
 .venv/bin/intent-manual --help
 .venv/bin/intent-compiler-mcp --help
 ```
@@ -39,8 +39,9 @@ installer can also set up a selected backend:
 python3 environment/install.py --backend triton --venv .venv-triton --examples
 ```
 
-This command installs the MCP extra too. GitHub preview artifacts are public
-downloads; there is no PyPI release yet, so use the wheel or source route above.
+This command installs the MCP extra too. For an existing wheel from the
+[public preview](https://github.com/Tianchen-ai/Intent/releases/tag/preview),
+use `python -m pip install "${INTENT_WHEEL}[manual]"` with its actual `.whl` path.
 
 ## Connect a client
 

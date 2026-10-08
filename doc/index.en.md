@@ -4,7 +4,7 @@ IntentDSL combines a Python DSL for structured kernel algorithms with an MLIR co
 
 ## Start here
 
-- [Installation](getting-started/installation.md): install from source or an existing wheel and select one backend environment.
+- [Installation](getting-started/installation.md): install from PyPI, source or an existing wheel and select one backend environment.
 - [Compile and run](getting-started/usage.md): run complete programs and inspect KIR, physical IR and generated source.
 - [Configuration and tuning](getting-started/configuration.md): understand complete empirical configurations, first-call tuning and warm calls.
 - [Agents and MCP](getting-started/mcp.md): connect the read-only language manual and explicit compilation tools.

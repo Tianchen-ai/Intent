@@ -45,7 +45,7 @@ on:
         type: boolean
         default: false
       publish-pypi:
-        description: Publish to PyPI after configuring its Trusted Publisher for this workflow
+        description: Publish to PyPI using the configured PYPI_API_TOKEN repository secret
         type: boolean
         default: false
 
@@ -167,9 +167,9 @@ jobs:
           - The wheel includes the compiler, optimizer and non-system compiler libraries. Installation does not require an LLVM/MLIR build SDK.
           - Download the wheel and install it with `python -m pip install "./intentdsl-…whl[manual,examples]"`, using its actual filename. Then run `intent setup --target triton` and `intent doctor --target triton`. Use a separate environment for cuTile.
           - The distribution workflow built the wheel from the source archive and checked metadata, native dependencies, isolated installation, compiler tools and MCP entry points. Hardware execution is separate from these build checks.
-          - This preview is not a PyPI publication. The handbook covers source builds and CPU/MLU toolchains.
+          - PyPI uploads are selected separately in Distribution. The handbook covers PyPI installation, source builds and CPU/MLU toolchains.
 
-          本附件由同一份公开源码构建，包含编译器、优化器与所需的非系统编译库，安装无需 LLVM/MLIR SDK。下载 wheel 后使用 pip 安装，再选择 Triton 或 cuTile 后端；两者使用独立环境。构建流程检查源码包、平台依赖、隔离安装、编译工具和 MCP 入口；硬件运行与这些构建检查分别说明。当前使用公开附件或源码安装，尚未上传 PyPI。许可证为 Apache-2.0，第三方依赖保留自己的许可声明。
+          本附件由同一份公开源码构建，包含编译器、优化器与所需的非系统编译库，安装无需 LLVM/MLIR SDK。下载 wheel 后使用 pip 安装，再选择 Triton 或 cuTile 后端；两者使用独立环境。构建流程检查源码包、平台依赖、隔离安装、编译工具和 MCP 入口；硬件运行与这些构建检查分别说明。PyPI 上传与 GitHub 预览由维护者分别选择，安装方式见工具书。许可证为 Apache-2.0，第三方依赖保留自己的许可声明。
           NOTES
           gh release edit preview --title "IntentDSL preview" \
             --prerelease --draft=false --notes-file "$RUNNER_TEMP/intent-preview-notes.md"
@@ -182,7 +182,6 @@ jobs:
     environment: pypi
     permissions:
       actions: read
-      id-token: write
     steps:
       - name: Download this run's checked packages
         env:
@@ -192,7 +191,8 @@ jobs:
           gh run download "${{ github.run_id }}" \
             --name intentdsl-ubuntu-22.04-x86_64 --dir dist
 
-      - name: Publish with the configured Trusted Publisher
+      - name: Publish with the configured PyPI API token
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
           attestations: false

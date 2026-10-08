@@ -1,10 +1,17 @@
 # Image sources / 图片来源
 
-These diagrams belong to the IntentDSL project. They are redrawn as scalable, bilingual illustrations for the product guide, using the paper's compiler and region-computation diagrams as the source of their structure. They illustrate responsibilities and execution organization, not measured performance or identical backend support.
+These are original figures from the IntentDSL paper. The PDFs are copied without modification; PNGs are rendered at 3,200 pixels on the longest side and cropped only to remove white margins. English and Chinese READMEs share the same figures and provide their own captions. No diagrams, labels, data, or performance values have been redrawn or changed.
 
-- **`overview.svg` / `overview.zh-CN.svg`**: a new product overview based on `paper/figv2/fig1.pdf`. It shows the author's algorithm, typed MLIR and shared/execution-model passes, provider lowering, and artifact use. Provider labels follow the current implementation: Triton, cuTile, Mojo, Weft, and BANG C.
-- **`execution-models.svg` / `execution-models.zh-CN.svg`**: a simplified illustration based on `paper/figv2/fig4.pdf` and `paper/figv2/fig5.pdf`. It keeps the author-defined region computation and the distinction between GPU query-tile ownership, a CPU task hierarchy, and DSA local supply. Low-level equations and notation are omitted to keep the README readable.
+| Public files | Original paper file | Meaning |
+|---|---|---|
+| `paper-fig1-overview.pdf` / `.png` | `paper/figv2/fig1.pdf` | Algorithm reuse and the compiler workflow. Target labels describe the paper implementation, including its RISC-V C path. |
+| `paper-fig5-execution-models.pdf` / `.png` | `paper/figv2/fig5.pdf` | GPU program ownership, CPU tasks and local blocks, and DSA local storage/supply for the same logical work. |
+| `paper-eval-pass-mechanisms.pdf` / `.png` | `paper/fig/eval-pass-mechanisms.pdf` | Single-mechanism ablations: causal pruning, partial accumulation, fused matrix update, and coordinated supply across five implementation paths. |
 
-以上配图依据 IntentDSL 论文重新绘制，提供中英文两套 SVG，按产品手册的阅读尺度简化排版。总览图依据 `paper/figv2/fig1.pdf`，展示作者程序、typed MLIR、shared 与执行模型 passes、后端及产物使用；执行模型图依据 `paper/figv2/fig4.pdf` 和 `fig5.pdf`，保留 region 算法和三种物理组织，省略细粒度方程与记号。配图不表示性能成绩，也不表示所有后端具有相同支持范围。
+The performance figure belongs to the historical paper evaluation. As described in `paper/evaluation.tex`, it compares mechanism-disabled and mechanism-enabled latency with inputs, precision, tiles, and micro-kernels fixed. The five paths are H100 Triton, H100 cuTile, x86 Mojo, RISC-V intrinsic C, and MLU BANG C. Its RISC-V measurements do not describe the current Weft deployment. The figure does not measure the current Python distribution or the 30 product programs.
+
+这些是 IntentDSL 论文原图，PDF 原文件直接保留，PNG 仅高分辨率转换并裁去白边。中英文 README 共用原图并使用各自图注，没有重画图形、标签或数值。总览图对应论文实现路径，包括当时的 RISC-V C 路径；执行模型图展示同一逻辑工作的三种物理组织。
+
+性能图属于论文历史评测，定义来自 `paper/evaluation.tex`：固定输入、精度、tile 与 micro-kernel，比较单个机制关闭与开启的耗时。五条路径是 H100 Triton、H100 cuTile、x86 Mojo、RISC-V intrinsic C 与 MLU BANG C。RISC-V 成绩不等同于当前 Weft 部署，整张图也不是当前 Python 安装包或 30 个产品程序的新测量。
 
 The project [Apache-2.0 license](../LICENSE) applies to these project-owned images.

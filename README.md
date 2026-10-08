@@ -8,7 +8,9 @@
 
 IntentDSL is a Python kernel language and an MLIR compiler for GPU, CPU, and accelerator programs. Authors describe tensor computations, logical domains, accesses, state, and explicit multi-kernel composition. Compiler passes form the physical program and lower it through Triton, cuTile, Mojo, Weft, or BANG C.
 
-![IntentDSL algorithm, compiler, and target workflow](https://raw.githubusercontent.com/Tianchen-ai/Intent/main/images/overview.svg)
+![Original IntentDSL paper overview: algorithm reuse and compiler workflow](https://raw.githubusercontent.com/Tianchen-ai/Intent/main/images/paper-fig1-overview.png)
+
+*Original paper overview ([PDF](https://github.com/Tianchen-ai/Intent/blob/main/images/paper-fig1-overview.pdf)). Labels describe the paper's implementation paths; current provider entry points are listed below.*
 
 - **Programmable algorithms:** compose reductions, contractions, indexed access, control flow, and region computations inside a kernel.
 - **Reusable optimization:** shared semantic analyses and execution-family passes organize computation, reuse, and storage; provider compilers perform their own layout and instruction lowering.
@@ -18,19 +20,19 @@ IntentDSL is a Python kernel language and an MLIR compiler for GPU, CPU, and acc
 
 The GPU setup uses **Linux, Python 3.10–3.12, and an NVIDIA GPU**. A prebuilt wheel installs the compiler without an LLVM/MLIR SDK. See the [installation guide](https://github.com/Tianchen-ai/Intent/blob/main/environment/README.md) for other backends and source-build prerequisites.
 
-### Install a wheel with pip
+### Install with pip
 
-Download a wheel from the [public development preview](https://github.com/Tianchen-ai/Intent/releases/tag/preview), or build one locally. Set `INTENT_WHEEL` to the actual downloaded `.whl` filename:
+Install the compiler from [PyPI](https://pypi.org/project/intentdsl/). The optional extras add the MCP servers and portable example inputs:
 
 ```bash
 python3 -m venv .venv-triton
 source .venv-triton/bin/activate
-python -m pip install "$INTENT_WHEEL[manual,examples]"
+python -m pip install 'intentdsl[manual,examples]'
 intent setup --target triton
 intent doctor --target triton
 ```
 
-The distribution recipe targets **Linux x86-64 with glibc 2.35 or newer**, using `auditwheel` to repair the wheel for `manylinux_2_35_x86_64`. It includes the native compiler, optimizer, profiles, manual, and compiler runtime libraries, so installation needs no LLVM/MLIR SDK. Backend SDKs and drivers are selected separately. The package name is `intentdsl`, and its Python import is `intent`; **a public PyPI release has not been published yet**.
+The wheel targets **Linux x86-64 with glibc 2.35 or newer**. It includes the native compiler, optimizer, profiles, manual, and compiler runtime libraries, so installation needs no LLVM/MLIR SDK. Backend SDKs and drivers are selected separately. The base compiler installs with `pip install intentdsl`; its Python import is `intent`. Downloadable wheels are also available in the [GitHub preview](https://github.com/Tianchen-ai/Intent/releases/tag/preview).
 
 ### Install from source
 
@@ -102,11 +104,19 @@ Generation, native compilation, and execution are separate stages. Backend cover
 
 Passes consume typed semantics, def-use, coordinate relations, effects, and target capabilities. Execution decisions live in the current MLIR program. GPU, CPU, and DSA can reuse semantic knowledge while retaining their own execution and storage models.
 
-![One attention region algorithm, realized as GPU program ownership, a CPU task hierarchy, and DSA local storage](https://raw.githubusercontent.com/Tianchen-ai/Intent/main/images/execution-models.svg)
+![Original paper figure: one logical computation realized as a GPU program, CPU task hierarchy, and DSA local-storage program](https://raw.githubusercontent.com/Tianchen-ai/Intent/main/images/paper-fig5-execution-models.png)
 
-*Adapted from the paper's region-computation diagrams for this guide. Colors distinguish data, source regions, state, and computation; see [image sources](https://github.com/Tianchen-ai/Intent/blob/main/images/README.md).*
+*Original execution-construction figure ([PDF](https://github.com/Tianchen-ai/Intent/blob/main/images/paper-fig5-execution-models.pdf)): each execution model assigns query ownership and carries state across source regions. CPU implementation requirements shape local blocks; DSA dependencies govern input-buffer reuse.*
 
 Read the [language manual](https://tianchen-ai.github.io/Intent/en/), [compiler specification](https://github.com/Tianchen-ai/Intent/blob/main/doc/compiler/README.en.md), or [contribution guide](https://github.com/Tianchen-ai/Intent/blob/main/CONTRIBUTING.md) for the relevant entry point.
+
+## Optimization reuse in the paper
+
+The paper evaluated four optimization mechanisms on five implementation paths: H100 Triton/cuTile, x86 Mojo, RISC-V intrinsic C, and MLU BANG C. Each off/on pair keeps inputs, precision, tiles, and micro-kernels fixed; bars show disabled/enabled latency.
+
+![Paper measurements of four optimization mechanisms across five implementation paths](https://raw.githubusercontent.com/Tianchen-ai/Intent/main/images/paper-eval-pass-mechanisms.png)
+
+*Historical paper measurements, reproduced unchanged ([PDF](https://github.com/Tianchen-ai/Intent/blob/main/images/paper-eval-pass-mechanisms.pdf)). These are measurements of the paper implementation, rather than the current package or the 30 product programs. [Figure sources](https://github.com/Tianchen-ai/Intent/blob/main/images/README.md) record the original files and measurement scope.*
 
 ## Use with an agent
 

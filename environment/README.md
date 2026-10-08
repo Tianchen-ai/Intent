@@ -4,7 +4,21 @@
 
 The public setup uses Linux and Python 3.10–3.12. Install an Intent wheel, then use the installed `intent setup` command to add one backend's Python dependencies. The source checkout also provides a virtual-environment bootstrap. Python MLIR bindings are not needed. GPU execution requires an appropriate NVIDIA driver; CPU and MLU toolchains are selected explicitly below. Installation, successful compilation, and numerical correctness are separate checks.
 
-IntentDSL has a Python package and a wheel build route. It has not been published to PyPI, so `pip install intentdsl` is not an installation route yet. Download a wheel from the [public development preview](https://github.com/Tianchen-ai/Intent/releases/tag/preview), or build one below. A wheel installs the compiler independently of any provider runtime.
+Install IntentDSL from [PyPI](https://pypi.org/project/intentdsl/), then select the provider dependencies needed for execution. GitHub's [public development preview](https://github.com/Tianchen-ai/Intent/releases/tag/preview) and source builds are alternative routes.
+
+## Install from PyPI
+
+```bash
+python3 -m venv .venv-triton
+source .venv-triton/bin/activate
+python -m pip install 'intentdsl[manual,examples]'
+intent setup --target triton
+intent doctor --target triton
+```
+
+The base `pip install intentdsl` includes the compiler and Python API. `manual` adds both MCP servers' dependencies, and `examples` adds NumPy/BF16/FP8 input support. Complete programs live in [examples/](../examples/README.en.md) in the source checkout. Wheels support Linux x86-64 with glibc ≥ 2.35 and Python 3.10–3.12; unsupported wheel platforms need the source-build SDK below. No LLVM/MLIR SDK is needed when pip installs a matching wheel.
+
+For compiler/KIR/MCP use alone, omit `intent setup`. For cuTile, use a separate environment and `intent setup --target cutile`. Both GPU routes require an appropriate NVIDIA driver; CPU and MLU external toolchain requirements remain as listed below.
 
 ## Install an existing wheel
 
@@ -124,6 +138,8 @@ This recipe fixes the native build route to GCC, Ninja and Release mode and uses
 The [Distribution workflow](../.github/workflows/distribution.yml) invokes this same recipe for main-branch pushes and pull requests affecting the product, build inputs or documentation, and can also be started with **Run workflow** in GitHub Actions. It uses a GitHub-hosted Ubuntu 22.04 x86-64 runner, Python 3.10 and the LLVM/MLIR 20 packages. The base job installs no Torch, GPU SDK, external CPU compiler or device runner; optional Weft support is not built into this artifact.
 
 Open the chosen workflow run and download `intentdsl-ubuntu-22.04-x86_64` from its **Artifacts** section. Extract the archive and install its repaired manylinux wheel using the existing wheel instructions above, then select `intent setup --target triton` or `--target cutile` in the corresponding separate environment. The archive also contains the source distribution. These are artifacts of that reviewed run, retained for 14 days, rather than a PyPI or GitHub release. They carry the same platform policy and third-party notices as the direct distribution build.
+
+Maintainers can publish that same checked build by manually running Distribution with `publish-preview` for GitHub Release assets, `publish-pypi` for PyPI, or both. PyPI upload uses repository secret `PYPI_API_TOKEN`; credentials do not belong in source or package files. Ordinary pushes and pull requests only build and check. See the [publication guide](../doc/development/documentation.en.md#configure-pypi-publication) for the maintained release route.
 
 The `intentdsl-distribution-diagnostics` artifact retains the build transcript, ordered `commands/*.command`, `.log` and `.status` files, and the installed tools' actual JSON/IR/log outputs, including on failure. The build helper uses the same command logs locally. Hosted CI establishes packaging, installed compiler startup and the original softmax KIR/optimization path; device execution and performance use the thirty [complete examples](../examples/README.en.md). The fixed Ubuntu user space is part of the binary ABI baseline, so changing the runner to `ubuntu-latest` is not an equivalent build.
 

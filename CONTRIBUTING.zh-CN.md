@@ -93,6 +93,8 @@ git diff --check
 
 分发修改使用现有 `environment/build.py`；文档修改按[文档指南](https://tianchen-ai.github.io/Intent/development/documentation/) 构建双语站点。
 
+安装包发布由维护者单独触发 Distribution workflow：`publish-preview` 更新公开 GitHub 附件，`publish-pypi` 使用 repository secret `PYPI_API_TOKEN` 上传该轮检查通过的包。Pull request 不上传安装包，具体步骤见[发布说明](doc/development/documentation.md#配置-pypi-发布)。
+
 一个 PR 应形成连贯改动。描述具体问题、修改后的行为、涉及的编译边界与实际验证。优化改动区分编译/调优成本和完整热调用时间，解释收益对应的物理结构。遵循相邻代码风格，保留第三方 notices。
 
 IntentDSL 使用 [Apache-2.0](LICENSE)。公开实现 API 与复用位置见[编译器开发指南](doc/development/compiler-reference.md)。

@@ -1,6 +1,20 @@
 # 安装
 
-IntentDSL 可以通过 pip 从源码构建，或安装已有 Linux wheel。当前没有已发布的 PyPI 包；不要把 `pip install intentdsl` 当作已经可用的公开下载命令。
+从 [PyPI](https://pypi.org/project/intentdsl/) 安装 IntentDSL，或使用下述源码与 GitHub wheel 路线。公开 wheel 适用于 Linux x86-64、Python 3.10–3.12 和 glibc ≥ 2.35；它包含独立编译器，不需要本机 LLVM/MLIR SDK。
+
+## 从 PyPI 安装
+
+```bash
+python3 -m venv .venv-triton
+source .venv-triton/bin/activate
+python -m pip install 'intentdsl[manual,examples]'
+intent setup --target triton
+intent doctor --target triton
+```
+
+`pip install intentdsl` 安装编译器和 Python API；`manual` extra 增加两个 MCP 服务的依赖，`examples` extra 增加产品程序的输入数据支持。完整算法与 host 程序位于[源码仓库](https://github.com/Tianchen-ai/Intent/tree/main/examples)，运行方法见[编译与运行](usage.md)。
+
+只使用编译器/KIR/MCP 时省略 `intent setup`。GPU 执行需要匹配的 NVIDIA 驱动；cuTile 在独立环境使用 `intent setup --target cutile`，CPU 与 MLU 的外部工具链见下文。若平台没有匹配 wheel，pip 的源码构建需要 LLVM/MLIR 20 SDK。
 
 ## 从源码安装
 

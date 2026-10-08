@@ -1,6 +1,20 @@
 # Installation
 
-Install IntentDSL with pip from source or from an existing Linux wheel. There is no published PyPI package yet; `pip install intentdsl` is not an available public download route.
+Install IntentDSL from [PyPI](https://pypi.org/project/intentdsl/), or use the source and GitHub wheel routes below. Public wheels support Linux x86-64, Python 3.10–3.12 and glibc ≥ 2.35. They include the independent compiler without requiring a local LLVM/MLIR SDK.
+
+## Install from PyPI
+
+```bash
+python3 -m venv .venv-triton
+source .venv-triton/bin/activate
+python -m pip install 'intentdsl[manual,examples]'
+intent setup --target triton
+intent doctor --target triton
+```
+
+`pip install intentdsl` installs the compiler and Python API. The `manual` extra adds dependencies for both MCP servers; `examples` adds product-program input support. Complete algorithms and host programs live in the [source repository](https://github.com/Tianchen-ai/Intent/tree/main/examples); see [compile and run](usage.md).
+
+Omit `intent setup` for compiler/KIR/MCP tools alone. GPU execution needs a compatible NVIDIA driver. Use `intent setup --target cutile` in a separate environment for cuTile; external CPU and MLU toolchains are described below. If no wheel matches your platform, pip's source build requires the LLVM/MLIR 20 SDK.
 
 ## Install from source
 

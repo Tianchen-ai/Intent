@@ -4,7 +4,21 @@
 
 公开安装入口使用 Linux 和 Python 3.10–3.12。IntentDSL 的 Python 包包含独立编译器；选择后端后，再安装该后端的运行依赖。源码构建不需要 Python MLIR bindings，需要 LLVM/MLIR 20 的 C++ SDK。
 
-目前尚未发布到 PyPI，因此还不能通过 `pip install intentdsl` 从公共包索引安装。可从 [公开开发预览](https://github.com/Tianchen-ai/Intent/releases/tag/preview) 下载 wheel，或使用下面的源码构建入口。项目使用 [Apache-2.0](../LICENSE) 许可，wheel 中附带的外部运行库保留各自的许可和声明。
+从 [PyPI](https://pypi.org/project/intentdsl/) 安装 IntentDSL。先安装编译器包，再选择执行所需的后端依赖；[公开开发预览](https://github.com/Tianchen-ai/Intent/releases/tag/preview) 和源码构建提供另外两条安装路线。项目使用 [Apache-2.0](../LICENSE) 许可，外部运行库保留各自的许可和声明。
+
+## 从 PyPI 安装
+
+```bash
+python3 -m venv .venv-triton
+source .venv-triton/bin/activate
+python -m pip install 'intentdsl[manual,examples]'
+intent setup --target triton
+intent doctor --target triton
+```
+
+基础 `pip install intentdsl` 包含编译器与 Python API；`manual` 增加两个 MCP 服务的依赖，`examples` 增加 NumPy/BF16/FP8 输入支持。完整程序在源码 checkout 的 [examples/](../examples/README.md)。公开 wheel 支持 Linux x86-64、glibc ≥ 2.35 和 Python 3.10–3.12；安装匹配的 wheel 不需要 LLVM/MLIR SDK，没有对应 wheel 的平台需要下述源码构建依赖。
+
+只使用编译器/KIR/MCP 时省略 `intent setup`。cuTile 使用独立环境并执行 `intent setup --target cutile`。两个 GPU 路线都需要匹配的 NVIDIA 驱动，CPU 和 MLU 的外部工具链要求见下文。
 
 ## 安装已有 wheel
 
@@ -116,6 +130,8 @@ python -m pip install '.[manual]' \
 [Distribution workflow](../.github/workflows/distribution.yml) 对相关 main push、pull request 和手动运行调用同一分发脚本。打开运行页面，在 Artifacts 中下载 `intentdsl-ubuntu-22.04-x86_64`，解压并安装实际 wheel，再选择所需后端。CI 基础 wheel 不构建可选 Weft，不安装 Torch 或设备 SDK。
 
 这些是对应运行的 manylinux 构建产物，保留 14 天，不等于 PyPI 或 GitHub Release。`intentdsl-distribution-diagnostics` 保存诊断。CI 验证安装后的编译器和 KIR 工具；设备运行与性能通过既定 [30 个产品程序](../examples/README.md) 观察。
+
+维护者手动运行 Distribution 时，可选择 `publish-preview` 更新 GitHub Release 附件、`publish-pypi` 上传到 PyPI，或同时选择两项；两条渠道都使用该轮通过检查的同一份产物。PyPI 上传使用 repository secret `PYPI_API_TOKEN`，凭据不进入源码或包文件。普通 push 与 pull request 只构建和检查。维护说明见[发布指南](../doc/development/documentation.md#配置-pypi-发布)。
 
 ## 运行库声明和常用诊断
 

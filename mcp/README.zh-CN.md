@@ -16,11 +16,11 @@ IntentDSL 提供两个 stdio MCP 服务。实现集中在
 
 ## 安装
 
-从[公开 preview](https://github.com/Tianchen-ai/Intent/releases/tag/preview) 下载 Linux wheel，将 `INTENT_WHEEL` 设为实际本地 `.whl` 路径：
+在独立环境从 [PyPI](https://pypi.org/project/intentdsl/) 安装带 MCP extra 的包：
 
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install "${INTENT_WHEEL}[manual]"
+.venv/bin/python -m pip install 'intentdsl[manual]'
 .venv/bin/intent-manual --help
 .venv/bin/intent-compiler-mcp --help
 ```
@@ -33,7 +33,7 @@ python3 -m venv .venv
 python3 environment/install.py --backend triton --venv .venv-triton --examples
 ```
 
-该命令也会安装 MCP extra。GitHub preview 附件可公开下载；目前尚未发布到 PyPI，请使用上述 wheel 或源码安装路线。
+该命令也会安装 MCP extra。已有[公开 preview](https://github.com/Tianchen-ai/Intent/releases/tag/preview) wheel 时，将 `INTENT_WHEEL` 设为实际 `.whl` 路径，使用 `python -m pip install "${INTENT_WHEEL}[manual]"` 即可。
 
 ## 接入客户端
 

@@ -44,14 +44,8 @@ GitHub preview 与 PyPI 是不同发布渠道；上传 GitHub 附件不会让 `p
 
 ## 配置 PyPI 发布
 
-Distribution 的另一个手动选项 `publish-pypi` 使用 PyPI Trusted Publishing，不需要在仓库保存长期上传 token。首次发布前，PyPI 项目维护者需在 [pending publisher 页面](https://pypi.org/manage/account/publishing/) 配置：
+Distribution 的另一个手动选项 `publish-pypi` 使用 PyPI API token 认证。仓库管理员在 GitHub 的 **Settings → Secrets and variables → Actions** 中配置 repository secret `PYPI_API_TOKEN`；工作流从 secret 读取凭据，不把 token 写入源码、安装包或日志。
 
-| 字段 | 值 |
-|---|---|
-| PyPI 项目 | `intentdsl` |
-| GitHub owner | `Tianchen-ai` |
-| Repository | `Intent` |
-| Workflow | `distribution.yml` |
-| Environment | `pypi` |
+在 GitHub 的 `main` 手动运行 Distribution 并勾选 `publish-pypi`；`pypi` 发布 job 使用该轮已通过构建和隔离安装检查的 sdist 与 wheel，并上传到 PyPI 项目 `intentdsl`。发布选择与 `publish-preview` 相互独立，可以只更新一个渠道或同时更新两个渠道。
 
-配置完成后，在 GitHub 的 `main` 手动运行 Distribution 并勾选 `publish-pypi`；发布 job 使用该轮已通过检查的 sdist 和 wheel。项目首次创建与 OIDC 配置见 [PyPI 官方指南](https://docs.pypi.org/trusted-publishers/creating-a-project-through-oidc/)。只有 PyPI 实际上传成功后，才能把安装入口改为 `pip install intentdsl`。
+普通 push 和 pull request 不执行上传。检查该轮发布 job 及 PyPI 项目页面，确认上传实际成功；GitHub token 不能替代 PyPI 凭据，构建成功也不等于包索引已经可下载。
