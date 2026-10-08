@@ -110,13 +110,20 @@ Passes consume typed semantics, def-use, coordinate relations, effects, and targ
 
 Read the [language manual](https://tianchen-ai.github.io/Intent/en/), [compiler specification](https://github.com/Tianchen-ai/Intent/blob/main/doc/compiler/README.en.md), or [contribution guide](https://github.com/Tianchen-ai/Intent/blob/main/CONTRIBUTING.md) for the relevant entry point.
 
-## Optimization reuse in the paper
+## Performance across execution models
 
-The paper evaluated four optimization mechanisms on five implementation paths: H100 Triton/cuTile, x86 Mojo, RISC-V intrinsic C, and MLU BANG C. Each off/on pair keeps inputs, precision, tiles, and micro-kernels fixed; bars show disabled/enabled latency.
+The following original paper figures compare complete operators with target-written implementations. Speedup is **reference latency / generated latency**; higher is better. Median operator latency includes preparation and required layout materialization, and excludes compilation, JIT, and tuning. These are historical paper measurements, not a new evaluation of the current package or the 30 product programs.
 
-![Paper measurements of four optimization mechanisms across five implementation paths](https://raw.githubusercontent.com/Tianchen-ai/Intent/main/images/paper-eval-pass-mechanisms.png)
+![Paper GPU performance: generated Triton and cuTile against Triton references on RTX 5090D and H100](https://raw.githubusercontent.com/Tianchen-ai/Intent/main/images/paper-eval-gpu-triton-reference.png)
 
-*Historical paper measurements, reproduced unchanged ([PDF](https://github.com/Tianchen-ai/Intent/blob/main/images/paper-eval-pass-mechanisms.pdf)). These are measurements of the paper implementation, rather than the current package or the 30 product programs. [Figure sources](https://github.com/Tianchen-ai/Intent/blob/main/images/README.md) record the original files and measurement scope.*
+*GPU ([PDF](https://github.com/Tianchen-ai/Intent/blob/main/images/paper-eval-gpu-triton-reference.pdf)): eight representative workloads and the geometric mean of all 44 common workloads. For each workload, the generated Triton and cuTile targets share the authored DSL algorithm, input scale, and external dtype. Representative shapes and precisions are labeled in the original figure; the gray bars are the paper's Triton references.*
+
+| x86 CPU · 7 native comparisons | MLU370 · 6 library comparisons |
+|---|---|
+| <img src="https://raw.githubusercontent.com/Tianchen-ai/Intent/main/images/paper-eval-cpu-native.png" alt="Paper x86 Mojo performance against five MAX-based and two independent Mojo implementations" width="360"> | <img src="https://raw.githubusercontent.com/Tianchen-ai/Intent/main/images/paper-eval-mlu-libraries.png" alt="Paper MLU BANG C performance against CNNL, CNNL Extra and TMO implementations" width="360"> |
+| [Original PDF](https://github.com/Tianchen-ai/Intent/blob/main/images/paper-eval-cpu-native.pdf) | [Original PDF](https://github.com/Tianchen-ai/Intent/blob/main/images/paper-eval-mlu-libraries.pdf) |
+
+*CPU: generated Mojo programs against five Modular/MAX and two independent Mojo references, using eight physical x86 cores within one NUMA node. MLU: generated BANG C programs against CNNL/CNNL Extra/TMO, using MLU370 and CNCC/CNRT. Each comparison follows its paper workload's shapes, precision, outputs, and tolerance; these charts show per-workload ratios, not geometric means. [Figure sources](https://github.com/Tianchen-ai/Intent/blob/main/images/README.md) record the measurement scope.*
 
 ## Use with an agent
 

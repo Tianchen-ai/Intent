@@ -110,13 +110,20 @@ Pass 根据 typed semantics、def-use、坐标关系、effects 和 target 能力
 
 使用语言查阅[工具书](https://tianchen-ai.github.io/Intent/)，理解编译边界查阅[编译器规格](https://github.com/Tianchen-ai/Intent/blob/main/doc/compiler/README.md)，开发入口查阅[贡献指南](https://github.com/Tianchen-ai/Intent/blob/main/CONTRIBUTING.zh-CN.md)。
 
-## 论文中的优化复用
+## 跨执行模型的整体性能
 
-论文在五条实现路径上评估了四种优化机制：H100 Triton/cuTile、x86 Mojo、RISC-V intrinsic C 和 MLU BANG C。每组开关对比固定输入、精度、tile 与 micro-kernel，柱高表示关闭优化的耗时除以开启优化的耗时。
+以下论文原图比较完整算子与相应目标上的手写实现。加速比为 **reference 耗时 / generated 耗时**，越高越好。计时使用完整算子耗时的中位数，包含准备和必要的布局转换，排除编译、JIT 与调优。这些是论文历史成绩，并非当前安装包或 30 个产品 program 的新测量。
 
-![论文历史评测：四种优化机制在五条实现路径上的收益](https://raw.githubusercontent.com/Tianchen-ai/Intent/main/images/paper-eval-pass-mechanisms.png)
+![论文GPU整体性能：RTX 5090D和H100上的generated Triton/cuTile与Triton reference对比](https://raw.githubusercontent.com/Tianchen-ai/Intent/main/images/paper-eval-gpu-triton-reference.png)
 
-*保留原内容的论文历史成绩（[PDF](https://github.com/Tianchen-ai/Intent/blob/main/images/paper-eval-pass-mechanisms.pdf)），对应论文实现，并非当前安装包或 30 个产品 program 的测评。[图片来源](https://github.com/Tianchen-ai/Intent/blob/main/images/README.md) 记录原文件与测量范围。*
+*GPU（[PDF](https://github.com/Tianchen-ai/Intent/blob/main/images/paper-eval-gpu-triton-reference.pdf)）：八个代表性 workload，以及全部 44 个共同 workload 的几何平均。每个 workload 的 generated Triton 与 cuTile 使用同一个作者 DSL 算法、输入规模和外部 dtype；原图标注代表性 shape 与精度，灰色柱是论文中的 Triton reference。*
+
+| x86 CPU · 7 个原生实现对比 | MLU370 · 6 个库实现对比 |
+|---|---|
+| <img src="https://raw.githubusercontent.com/Tianchen-ai/Intent/main/images/paper-eval-cpu-native.png" alt="论文x86 Mojo整体性能：与5个MAX和2个独立Mojo实现对比" width="360"> | <img src="https://raw.githubusercontent.com/Tianchen-ai/Intent/main/images/paper-eval-mlu-libraries.png" alt="论文MLU BANG C整体性能：与CNNL、CNNL Extra及TMO实现对比" width="360"> |
+| [原 PDF](https://github.com/Tianchen-ai/Intent/blob/main/images/paper-eval-cpu-native.pdf) | [原 PDF](https://github.com/Tianchen-ai/Intent/blob/main/images/paper-eval-mlu-libraries.pdf) |
+
+*CPU：generated Mojo 程序与 5 个 Modular/MAX、2 个独立 Mojo reference 对比，使用同一 NUMA 节点内的 8 个物理 x86 核。MLU：generated BANG C 程序与 CNNL/CNNL Extra/TMO 对比，使用 MLU370 与 CNCC/CNRT。各组采用论文对应 workload 的 shape、精度、输出与容差；两张小图是逐 workload 比值，不是几何平均。[图片来源](https://github.com/Tianchen-ai/Intent/blob/main/images/README.md) 记录测量范围。*
 
 ## 配合 agent 使用
 
