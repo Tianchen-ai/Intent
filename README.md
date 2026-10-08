@@ -2,13 +2,13 @@
 
 **Write an operator algorithm once. Compile it for different execution models.**
 
-[English](README.md) · [简体中文](README.zh-CN.md)
+[English](https://github.com/Tianchen-ai/Intent/blob/main/README.md) · [简体中文](https://github.com/Tianchen-ai/Intent/blob/main/README.zh-CN.md)
 
-[Documentation](https://tianchen-ai.github.io/Intent/en/) · [Installation](https://tianchen-ai.github.io/Intent/en/getting-started/installation/) · [Examples](examples/README.en.md) · [MCP](mcp/README.md) · [Contributing](CONTRIBUTING.md)
+[Documentation](https://tianchen-ai.github.io/Intent/en/) · [Installation](https://tianchen-ai.github.io/Intent/en/getting-started/installation/) · [Examples](https://github.com/Tianchen-ai/Intent/blob/main/examples/README.en.md) · [MCP](https://github.com/Tianchen-ai/Intent/blob/main/mcp/README.md) · [Contributing](https://github.com/Tianchen-ai/Intent/blob/main/CONTRIBUTING.md)
 
 IntentDSL is a Python kernel language and an MLIR compiler for GPU, CPU, and accelerator programs. Authors describe tensor computations, logical domains, accesses, state, and explicit multi-kernel composition. Compiler passes form the physical program and lower it through Triton, cuTile, Mojo, Weft, or BANG C.
 
-![IntentDSL algorithm, compiler, and target workflow](images/overview.svg)
+![IntentDSL algorithm, compiler, and target workflow](https://raw.githubusercontent.com/Tianchen-ai/Intent/main/images/overview.svg)
 
 - **Programmable algorithms:** compose reductions, contractions, indexed access, control flow, and region computations inside a kernel.
 - **Reusable optimization:** shared semantic analyses and execution-family passes organize computation, reuse, and storage; provider compilers perform their own layout and instruction lowering.
@@ -16,7 +16,7 @@ IntentDSL is a Python kernel language and an MLIR compiler for GPU, CPU, and acc
 
 ## Get started
 
-The GPU setup uses **Linux, Python 3.10–3.12, and an NVIDIA GPU**. A prebuilt wheel installs the compiler without an LLVM/MLIR SDK. See the [installation guide](environment/README.md) for other backends and source-build prerequisites.
+The GPU setup uses **Linux, Python 3.10–3.12, and an NVIDIA GPU**. A prebuilt wheel installs the compiler without an LLVM/MLIR SDK. See the [installation guide](https://github.com/Tianchen-ai/Intent/blob/main/environment/README.md) for other backends and source-build prerequisites.
 
 ### Install a wheel with pip
 
@@ -43,11 +43,11 @@ intent doctor --target triton
 python -m examples.use softmax --target triton
 ```
 
-Source builds need CMake, Ninja, a C++17 compiler, and the LLVM/MLIR 20 C++ SDK. The script builds and installs the compiler and Python package, then installs the chosen backend. Build artifacts stay outside the checkout. Use `--backend cutile --venv .venv-cutile` for cuTile in a separate environment. [Installation](environment/README.md) covers SDK packages, external CPU/MLU toolchains, and `environment/build.py` for building distributable wheels.
+Source builds need CMake, Ninja, a C++17 compiler, and the LLVM/MLIR 20 C++ SDK. The script builds and installs the compiler and Python package, then installs the chosen backend. Build artifacts stay outside the checkout. Use `--backend cutile --venv .venv-cutile` for cuTile in a separate environment. [Installation](https://github.com/Tianchen-ai/Intent/blob/main/environment/README.md) covers SDK packages, external CPU/MLU toolchains, and `environment/build.py` for building distributable wheels.
 
 ## Write and call a kernel
 
-Save this as a Python file and run it in the installed Triton environment. It uses the same algorithm as the [ReLU example](examples/kernels/activation/pointwise.py).
+Save this as a Python file and run it in the installed Triton environment. It uses the same algorithm as the [ReLU example](https://github.com/Tianchen-ai/Intent/blob/main/examples/kernels/activation/pointwise.py).
 
 ```python
 import torch
@@ -76,7 +76,7 @@ The kernel describes logical rows and columns. Compiler passes choose physical o
 
 `intent.compile` returns a callable artifact. Its first invocation can trigger native JIT compilation and autotuning; subsequent calls with the same specialization reuse that work. `artifact.run(...)` allocates declared `Out` tensors, while `artifact(...)` accepts explicit outputs. Keep the artifact in your application instead of recompiling on every call.
 
-GPU and Mojo artifacts also provide `artifact.as_torch_op("your_project::name")` for opaque PyTorch custom operators and `torch.compile` integration. Authors register their own backward; the compiler preserves explicit kernel and host composition. See the [framework examples](examples/README.en.md#integrate-with-a-framework).
+GPU and Mojo artifacts also provide `artifact.as_torch_op("your_project::name")` for opaque PyTorch custom operators and `torch.compile` integration. Authors register their own backward; the compiler preserves explicit kernel and host composition. See the [framework examples](https://github.com/Tianchen-ai/Intent/blob/main/examples/README.en.md#integrate-with-a-framework).
 
 ## Explore 30 complete programs
 
@@ -96,21 +96,21 @@ python -m examples.use --all --target triton --stage source --jobs 4
 | Weft | CPU lowering; native execution through an explicitly configured Weft deployment |
 | BANG C | Cambricon MLU; external NeuWare SDK and compatible device |
 
-Generation, native compilation, and execution are separate stages. Backend coverage depends on the program's operations, types, effects, and selected hardware. The [examples guide](examples/README.en.md) describes inputs, complete calls, and target options.
+Generation, native compilation, and execution are separate stages. Backend coverage depends on the program's operations, types, effects, and selected hardware. The [examples guide](https://github.com/Tianchen-ai/Intent/blob/main/examples/README.en.md) describes inputs, complete calls, and target options.
 
 ## How the compiler is organized
 
 Passes consume typed semantics, def-use, coordinate relations, effects, and target capabilities. Execution decisions live in the current MLIR program. GPU, CPU, and DSA can reuse semantic knowledge while retaining their own execution and storage models.
 
-![One attention region algorithm, realized as GPU program ownership, a CPU task hierarchy, and DSA local storage](images/execution-models.svg)
+![One attention region algorithm, realized as GPU program ownership, a CPU task hierarchy, and DSA local storage](https://raw.githubusercontent.com/Tianchen-ai/Intent/main/images/execution-models.svg)
 
-*Adapted from the paper's region-computation diagrams for this guide. Colors distinguish data, source regions, state, and computation; see [image sources](images/README.md).*
+*Adapted from the paper's region-computation diagrams for this guide. Colors distinguish data, source regions, state, and computation; see [image sources](https://github.com/Tianchen-ai/Intent/blob/main/images/README.md).*
 
-Read the [language manual](https://tianchen-ai.github.io/Intent/en/), [compiler specification](doc/compiler/README.en.md), or [contribution guide](CONTRIBUTING.md) for the relevant entry point.
+Read the [language manual](https://tianchen-ai.github.io/Intent/en/), [compiler specification](https://github.com/Tianchen-ai/Intent/blob/main/doc/compiler/README.en.md), or [contribution guide](https://github.com/Tianchen-ai/Intent/blob/main/CONTRIBUTING.md) for the relevant entry point.
 
 ## Use with an agent
 
-MCP has a dedicated [directory and setup guide](mcp/README.md). Both stdio servers ship with the `manual` package extra:
+MCP has a dedicated [directory and setup guide](https://github.com/Tianchen-ai/Intent/blob/main/mcp/README.md). Both stdio servers ship with the `manual` package extra:
 
 | Command | Responsibility |
 |---|---|
@@ -132,6 +132,6 @@ The CLI reports the actual compilation stage and artifact paths. In Python, use 
 
 ## Contribute
 
-Start with [CONTRIBUTING.md](CONTRIBUTING.md) for setup, compiler modules, pass contributions, and focused verification. Questions and reproducible problems belong in [GitHub issues](https://github.com/Tianchen-ai/Intent/issues).
+Start with [CONTRIBUTING.md](https://github.com/Tianchen-ai/Intent/blob/main/CONTRIBUTING.md) for setup, compiler modules, pass contributions, and focused verification. Questions and reproducible problems belong in [GitHub issues](https://github.com/Tianchen-ai/Intent/issues).
 
-IntentDSL is licensed under [Apache-2.0](LICENSE). Bundled third-party components retain their own notices and licenses.
+IntentDSL is licensed under [Apache-2.0](https://github.com/Tianchen-ai/Intent/blob/main/LICENSE). Bundled third-party components retain their own notices and licenses.

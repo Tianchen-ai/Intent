@@ -52,6 +52,19 @@ plugins:
           site_description: A bilingual handbook for kernel authors and compiler developers
           theme:
             language: en
+            palette:
+              - scheme: default
+                primary: teal
+                accent: teal
+                toggle:
+                  icon: material/brightness-4
+                  name: Switch to dark mode
+              - scheme: slate
+                primary: teal
+                accent: teal
+                toggle:
+                  icon: material/brightness-7
+                  name: Switch to light mode
           nav_translations:
             首页: Home
             开始使用: Getting started

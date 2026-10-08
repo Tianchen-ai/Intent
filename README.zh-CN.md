@@ -2,13 +2,13 @@
 
 **写一次算子算法，编译到不同执行模型。**
 
-[English](README.md) · [简体中文](README.zh-CN.md)
+[English](https://github.com/Tianchen-ai/Intent/blob/main/README.md) · [简体中文](https://github.com/Tianchen-ai/Intent/blob/main/README.zh-CN.md)
 
-[工具书](https://tianchen-ai.github.io/Intent/) · [安装](https://tianchen-ai.github.io/Intent/getting-started/installation/) · [示例](examples/README.md) · [MCP](mcp/README.zh-CN.md) · [贡献指南](CONTRIBUTING.zh-CN.md)
+[工具书](https://tianchen-ai.github.io/Intent/) · [安装](https://tianchen-ai.github.io/Intent/getting-started/installation/) · [示例](https://github.com/Tianchen-ai/Intent/blob/main/examples/README.md) · [MCP](https://github.com/Tianchen-ai/Intent/blob/main/mcp/README.zh-CN.md) · [贡献指南](https://github.com/Tianchen-ai/Intent/blob/main/CONTRIBUTING.zh-CN.md)
 
 IntentDSL 是面向 GPU、CPU 和加速器的 Python kernel 语言与 MLIR 编译器。作者描述张量计算、逻辑域、访问、状态和显式多 kernel 编排；编译器通过 passes 构造物理程序，发射到 Triton、cuTile、Mojo、Weft 或 BANG C。
 
-![IntentDSL 算法、编译器与后端工作流](images/overview.zh-CN.svg)
+![IntentDSL 算法、编译器与后端工作流](https://raw.githubusercontent.com/Tianchen-ai/Intent/main/images/overview.zh-CN.svg)
 
 - **算法可编程**：在 kernel 中组合归约、收缩、索引访问、控制流与 region 计算。
 - **优化可沉淀**：共享语义分析与执行模型各自的 passes 组织计算、复用和存储；下层编译器继续完成布局与指令 lowering。
@@ -16,7 +16,7 @@ IntentDSL 是面向 GPU、CPU 和加速器的 Python kernel 语言与 MLIR 编�
 
 ## 开始使用
 
-GPU 安装路线使用 **Linux、Python 3.10–3.12 和 NVIDIA GPU**。使用预编译 wheel 安装编译器无需 LLVM/MLIR SDK；其他后端和源构建要求见[安装说明](environment/README.zh-CN.md)。
+GPU 安装路线使用 **Linux、Python 3.10–3.12 和 NVIDIA GPU**。使用预编译 wheel 安装编译器无需 LLVM/MLIR SDK；其他后端和源构建要求见[安装说明](https://github.com/Tianchen-ai/Intent/blob/main/environment/README.zh-CN.md)。
 
 ### 用 pip 安装 wheel
 
@@ -43,11 +43,11 @@ intent doctor --target triton
 python -m examples.use softmax --target triton
 ```
 
-源构建需要 CMake、Ninja、C++17 编译器与 LLVM/MLIR 20 C++ SDK。脚本构建并安装编译器和 Python 包，再安装所选后端，构建产物保存在 checkout 外。cuTile 使用独立环境：`--backend cutile --venv .venv-cutile`。[安装说明](environment/README.zh-CN.md) 提供 SDK、外部 CPU/MLU 工具链及使用 `environment/build.py` 构建分发包的步骤。
+源构建需要 CMake、Ninja、C++17 编译器与 LLVM/MLIR 20 C++ SDK。脚本构建并安装编译器和 Python 包，再安装所选后端，构建产物保存在 checkout 外。cuTile 使用独立环境：`--backend cutile --venv .venv-cutile`。[安装说明](https://github.com/Tianchen-ai/Intent/blob/main/environment/README.zh-CN.md) 提供 SDK、外部 CPU/MLU 工具链及使用 `environment/build.py` 构建分发包的步骤。
 
 ## 编写并调用 kernel
 
-将下面代码保存为 Python 文件，在已安装的 Triton 环境运行。算法与现有 [ReLU 示例](examples/kernels/activation/pointwise.py) 相同。
+将下面代码保存为 Python 文件，在已安装的 Triton 环境运行。算法与现有 [ReLU 示例](https://github.com/Tianchen-ai/Intent/blob/main/examples/kernels/activation/pointwise.py) 相同。
 
 ```python
 import torch
@@ -76,7 +76,7 @@ Kernel 描述逻辑行、列和运算；编译器选择物理 ownership、blocki
 
 `intent.compile` 返回可调用产物。首次调用可能触发原生 JIT 编译和 autotuning，相同 specialization 的后续调用复用这些工作。`artifact.run(...)` 分配声明的 `Out`；`artifact(...)` 接受显式输出。应用中应保留 artifact 并重复调用。
 
-GPU 与 Mojo 产物还提供 `artifact.as_torch_op("your_project::name")`，可接入 PyTorch custom operator 和 `torch.compile`。Backward 由作者注册，kernel 与 host 关系保持显式。见[框架调用示例](examples/README.md#框架与产物调用示范)。
+GPU 与 Mojo 产物还提供 `artifact.as_torch_op("your_project::name")`，可接入 PyTorch custom operator 和 `torch.compile`。Backward 由作者注册，kernel 与 host 关系保持显式。见[框架调用示例](https://github.com/Tianchen-ai/Intent/blob/main/examples/README.md#框架与产物调用示范)。
 
 ## 浏览 30 个完整程序
 
@@ -96,21 +96,21 @@ python -m examples.use --all --target triton --stage source --jobs 4
 | Weft | CPU lowering；原生执行使用显式配置的 Weft 部署 |
 | BANG C | 寒武纪 MLU；使用外部 NeuWare SDK 和兼容设备 |
 
-源码生成、原生编译与真实执行是不同阶段。实际支持范围取决于程序的操作、类型、effects 与所选硬件。[示例指南](examples/README.md) 介绍输入、完整调用与 target 参数。
+源码生成、原生编译与真实执行是不同阶段。实际支持范围取决于程序的操作、类型、effects 与所选硬件。[示例指南](https://github.com/Tianchen-ai/Intent/blob/main/examples/README.md) 介绍输入、完整调用与 target 参数。
 
 ## 编译器如何组织
 
 Pass 根据 typed semantics、def-use、坐标关系、effects 和 target 能力决策，执行决定保存在当前 MLIR 程序中。GPU、CPU 和 DSA 可以复用语义知识，同时保留各自的执行与存储模型。
 
-![同一 attention region 算法在 GPU program ownership、CPU task 层次与 DSA 局部存储中的物理组织](images/execution-models.zh-CN.svg)
+![同一 attention region 算法在 GPU program ownership、CPU task 层次与 DSA 局部存储中的物理组织](https://raw.githubusercontent.com/Tianchen-ai/Intent/main/images/execution-models.zh-CN.svg)
 
-*依据论文中的 region 计算图重新绘制，颜色区分数据、源 region、状态与计算。图片来源见[说明](images/README.md)。*
+*依据论文中的 region 计算图重新绘制，颜色区分数据、源 region、状态与计算。图片来源见[说明](https://github.com/Tianchen-ai/Intent/blob/main/images/README.md)。*
 
-使用语言查阅[工具书](https://tianchen-ai.github.io/Intent/)，理解编译边界查阅[编译器规格](doc/compiler/README.md)，开发入口查阅[贡献指南](CONTRIBUTING.zh-CN.md)。
+使用语言查阅[工具书](https://tianchen-ai.github.io/Intent/)，理解编译边界查阅[编译器规格](https://github.com/Tianchen-ai/Intent/blob/main/doc/compiler/README.md)，开发入口查阅[贡献指南](https://github.com/Tianchen-ai/Intent/blob/main/CONTRIBUTING.zh-CN.md)。
 
 ## 配合 agent 使用
 
-MCP 有独立的[目录与配置说明](mcp/README.zh-CN.md)。两个 stdio 服务随 `manual` dependency extra 安装：
+MCP 有独立的[目录与配置说明](https://github.com/Tianchen-ai/Intent/blob/main/mcp/README.zh-CN.md)。两个 stdio 服务随 `manual` dependency extra 安装：
 
 | 命令 | 职责 |
 |---|---|
@@ -132,6 +132,6 @@ CLI 返回真实编译阶段与产物路径。Python 中可读取 `artifact.sour
 
 ## 参与贡献
 
-[贡献指南](CONTRIBUTING.zh-CN.md) 提供环境设置、模块导航、pass 贡献方式和必要验证。问题与可复现错误请提交到 [GitHub issues](https://github.com/Tianchen-ai/Intent/issues)。
+[贡献指南](https://github.com/Tianchen-ai/Intent/blob/main/CONTRIBUTING.zh-CN.md) 提供环境设置、模块导航、pass 贡献方式和必要验证。问题与可复现错误请提交到 [GitHub issues](https://github.com/Tianchen-ai/Intent/issues)。
 
-IntentDSL 使用 [Apache-2.0](LICENSE) 许可。随包分发的第三方组件保留各自的 notices 和许可。
+IntentDSL 使用 [Apache-2.0](https://github.com/Tianchen-ai/Intent/blob/main/LICENSE) 许可。随包分发的第三方组件保留各自的 notices 和许可。
