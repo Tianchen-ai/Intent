@@ -42,7 +42,7 @@ bool positiveExtent(Value value) {
 
 bool safeScalarGuardOperation(Operation *operation) {
   if (isa<arith::ConstantOp, gpu::CompareOp, gpu::DimOp,
-          gpu::ParameterOp>(operation))
+          gpu::ParameterOp, gpu::PhysicalExprOp>(operation))
     return true;
   if (auto cast = dyn_cast<gpu::CastOp>(operation))
     return cast.getValue().getType().isIntOrIndex() &&
@@ -93,48 +93,119 @@ bool collectInvariantGuard(Value value, scf::ForOp loop,
   return true;
 }
 
+// Return invariant terms whose conjunction implies the original predicate.
+// An OR may already contain a proof for the whole mapped domain alongside its
+// per-iteration check. Preserve that proof instead of treating the entire guard
+// as variant. No complement is implied on the slow path.
+FailureOr<SmallVector<Value>> invariantSufficientGuard(Value value,
+                                                     scf::ForOp loop,
+                                                     unsigned depth = 0) {
+  if (depth > 32) return failure();
+  llvm::SmallPtrSet<Operation *, 16> visited;
+  SmallVector<Operation *> operations;
+  if (collectInvariantGuard(value, loop, visited, operations))
+    return SmallVector<Value>{value};
+  auto binary = value.getDefiningOp<gpu::BinaryOp>();
+  if (!binary || !binary.getType().isInteger(1)) return failure();
+  auto kind = binary.getOperatorKind();
+  if (kind != BinaryOperator::LogicalAnd && kind != BinaryOperator::LogicalOr)
+    return failure();
+  auto lhs = invariantSufficientGuard(binary.getLhs(), loop, depth + 1);
+  if (kind == BinaryOperator::LogicalOr && succeeded(lhs)) return lhs;
+  auto rhs = invariantSufficientGuard(binary.getRhs(), loop, depth + 1);
+  if (kind == BinaryOperator::LogicalOr) return rhs;
+  if (failed(lhs) || failed(rhs)) return failure();
+  llvm::append_range(*lhs, *rhs);
+  return lhs;
+}
+
 void unswitchNativeAccessGuard(scf::ForOp loop) {
-  scf::IfOp selected;
+  bool nestedLoops = false;
+  loop.getBody()->walk([&](Operation *operation) {
+    nestedLoops |= isa<scf::ForOp, scf::WhileOp>(operation);
+  });
+  SmallVector<Value> conditions;
+  SmallVector<Value> sufficientTerms;
   SmallVector<Operation *> guardOperations;
+  llvm::SmallPtrSet<Operation *, 32> collected;
   loop.walk([&](scf::IfOp conditional) {
-    if (selected || conditional->getParentOfType<scf::ForOp>() != loop ||
+    if ((nestedLoops && !conditions.empty()) ||
+        conditional->getParentOfType<scf::ForOp>() != loop ||
         conditional.getNumResults() == 0 ||
         isSpecializationExpression(conditional.getCondition()))
       return;
     bool tileLoad = false;
-    bool gatherLoad = false;
     conditional.getThenRegion().walk([&](TileLoadOp) { tileLoad = true; });
-    conditional.getElseRegion().walk([&](GatherLoadOp) { gatherLoad = true; });
-    if (!tileLoad || !gatherLoad)
+    if (!tileLoad || llvm::any_of(conditions, [&](Value condition) {
+          return gpu::samePhysicalScalarExpression(
+              condition, conditional.getCondition());
+        }))
       return;
-    llvm::SmallPtrSet<Operation *, 16> visited;
-    SmallVector<Operation *> operations;
-    if (!collectInvariantGuard(conditional.getCondition(), loop, visited,
-                               operations))
-      return;
-    selected = conditional;
-    guardOperations = std::move(operations);
+    // Do not multiply versions of a nested contraction traversal. Retain the
+    // existing single exact tile/gather choice there; sufficient-proof and
+    // multi-origin versioning belong to the innermost native supply loop.
+    if (nestedLoops) {
+      bool gatherLoad = false;
+      conditional.getElseRegion().walk([&](GatherLoadOp) { gatherLoad = true; });
+      llvm::SmallPtrSet<Operation *, 16> visited;
+      SmallVector<Operation *> operations;
+      if (!gatherLoad || !collectInvariantGuard(conditional.getCondition(), loop,
+                                               visited, operations))
+        return;
+    }
+    auto sufficient = invariantSufficientGuard(conditional.getCondition(), loop);
+    if (failed(sufficient)) return;
+    conditions.push_back(conditional.getCondition());
+    for (Value term : *sufficient) {
+      if (llvm::is_contained(sufficientTerms, term)) continue;
+      sufficientTerms.push_back(term);
+      llvm::SmallPtrSet<Operation *, 16> visited;
+      SmallVector<Operation *> operations;
+      bool invariant = collectInvariantGuard(term, loop, visited, operations);
+      assert(invariant && "sufficient guard terms must be invariant");
+      (void)invariant;
+      for (Operation *operation : operations)
+        if (collected.insert(operation).second)
+          guardOperations.push_back(operation);
+    }
   });
-  if (!selected)
+  if (conditions.empty())
     return;
   SmallVector<scf::IfOp> equivalentChoices;
   loop.walk<WalkOrder::PostOrder>([&](scf::IfOp conditional) {
     if (conditional->getParentOfType<scf::ForOp>() == loop &&
-        gpu::samePhysicalScalarExpression(conditional.getCondition(),
-                                          selected.getCondition()))
+        llvm::any_of(conditions, [&](Value condition) {
+          return gpu::samePhysicalScalarExpression(
+              conditional.getCondition(), condition);
+        }))
       equivalentChoices.push_back(conditional);
   });
 
-  // One program-uniform access decision, hence at most two loop versions.
-  // Specialization-only choices stay for the provider compiler to fold.
+  // Native access selection and tile-origin validity can have uniform proofs.
+  // Combine independent proofs into ONE fast-path condition: every cooperating
+  // load is straight-line there, allowing the provider to pipeline the MMA loop.
+  // The other version retains the original decisions, rather than assuming all
+  // guards false. This bounds duplication to two loops even for many accesses.
+  // Only total scalar integer expressions move; no memory reads are speculated.
   OpBuilder builder(loop);
   IRMapping guardMapping;
   for (Operation *operation : guardOperations)
     builder.clone(*operation, guardMapping);
-  Value condition = guardMapping.lookupOrDefault(selected.getCondition());
+  Value condition;
+  for (Value original : sufficientTerms) {
+    Value mapped = guardMapping.lookupOrDefault(original);
+    condition = condition
+        ? Value(builder.create<gpu::BinaryOp>(loop.getLoc(), builder.getI1Type(),
+                    condition, mapped, BinaryOperator::LogicalAnd))
+        : mapped;
+  }
   auto version = builder.create<scf::IfOp>(
       loop.getLoc(), loop.getResultTypes(), condition,
       /*withElseRegion=*/true);
+  bool exactSingleCondition = conditions.size() == 1 &&
+      sufficientTerms.size() == 1 &&
+      gpu::samePhysicalScalarExpression(conditions.front(),
+                                        sufficientTerms.front());
   for (bool takeThen : {true, false}) {
     Region &region =
         takeThen ? version.getThenRegion() : version.getElseRegion();
@@ -148,6 +219,8 @@ void unswitchNativeAccessGuard(scf::ForOp loop) {
     // expressions. Refine every occurrence, including nested ones, so a native
     // loop version does not retain another copy of the same runtime branch.
     for (scf::IfOp originalChoice : equivalentChoices) {
+      if (!takeThen && !exactSingleCondition)
+        continue;
       auto choice = cast<scf::IfOp>(
           mapping.lookup(&originalChoice.getThenRegion().front())->getParentOp());
       Region &chosen = takeThen ? choice.getThenRegion() : choice.getElseRegion();

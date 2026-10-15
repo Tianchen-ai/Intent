@@ -156,8 +156,25 @@ FailureOr<Value> materializeTileOriginGuard(
     Value axisCondition = builder.create<gpu::BinaryOp>(
         owner->getLoc(), builder.getI1Type(), nonNegative, belowExtent,
         BinaryOperator::LogicalAnd);
-    if (gpu::PhysicalExprAttr upper =
-            gpu::queryNonNegativeIndexUpperBound(origin)) {
+    if (axisPlan.modulus) {
+      Value modulus = materializeTileModulus(builder, owner->getLoc(), axisPlan);
+      Value positive = builder.create<gpu::CompareOp>(
+          owner->getLoc(), builder.getI1Type(), modulus, zero,
+          ComparePredicate::Gt);
+      Value withinView = builder.create<gpu::CompareOp>(
+          owner->getLoc(), builder.getI1Type(), modulus, extent,
+          ComparePredicate::Le);
+      // With a positive period, every Euclidean remainder is in [0, period).
+      // A shape-specialized period can discharge the bound for the whole loop,
+      // even when the original (unwrapped) coordinate depends on its IV.
+      Value allOriginsInBounds = builder.create<gpu::BinaryOp>(
+          owner->getLoc(), builder.getI1Type(), positive, withinView,
+          BinaryOperator::LogicalAnd);
+      axisCondition = builder.create<gpu::BinaryOp>(
+          owner->getLoc(), builder.getI1Type(), allOriginsInBounds, axisCondition,
+          BinaryOperator::LogicalOr);
+    } else if (gpu::PhysicalExprAttr upper =
+                   gpu::queryNonNegativeIndexUpperBound(origin)) {
       Value bound = builder.create<gpu::PhysicalExprOp>(
           owner->getLoc(), builder.getIndexType(), upper);
       Value allOriginsInBounds = builder.create<gpu::CompareOp>(
@@ -286,6 +303,7 @@ materializeTileIndices(OpBuilder &builder, Operation *owner,
             BinaryOperator::Multiply);
       }
     }
+    Value uniformPeriodicAlignment;
     if (axis.modulus) {
       if (!gpu::IndexRelations().positive(extent))
         return failure();
@@ -307,17 +325,28 @@ materializeTileIndices(OpBuilder &builder, Operation *owner,
           location, std::numeric_limits<int64_t>::max());
       require(builder.create<gpu::CompareOp>(
           location, builder.getI1Type(), modulus, zero, ComparePredicate::Gt));
-      require(builder.create<gpu::CompareOp>(
-          location, builder.getI1Type(), start, zero, ComparePredicate::Ge));
-      Value available = builder.create<gpu::BinaryOp>(
-          location, builder.getIndexType(), maximum, start,
-          BinaryOperator::Subtract);
-      Value lastOffset = builder.create<gpu::BinaryOp>(
-          location, builder.getIndexType(), extent, one,
-          BinaryOperator::Subtract);
-      require(builder.create<gpu::CompareOp>(
-          location, builder.getI1Type(), available, lastOffset,
-          ComparePredicate::Ge));
+      if (completeAlignedTileLoop(start, extent)) {
+        // Complete aligned iterations are nonnegative and cannot overflow
+        // before their last lane. If the period is also tile-aligned, *every*
+        // iteration fits one period; leave this as a specialization predicate.
+        Value remainder = builder.create<gpu::BinaryOp>(
+            location, builder.getIndexType(), modulus, extent,
+            BinaryOperator::Remainder);
+        uniformPeriodicAlignment = builder.create<gpu::CompareOp>(
+            location, builder.getI1Type(), remainder, zero, ComparePredicate::Eq);
+      } else {
+        require(builder.create<gpu::CompareOp>(
+            location, builder.getI1Type(), start, zero, ComparePredicate::Ge));
+        Value available = builder.create<gpu::BinaryOp>(
+            location, builder.getIndexType(), maximum, start,
+            BinaryOperator::Subtract);
+        Value lastOffset = builder.create<gpu::BinaryOp>(
+            location, builder.getIndexType(), extent, one,
+            BinaryOperator::Subtract);
+        require(builder.create<gpu::CompareOp>(
+            location, builder.getI1Type(), available, lastOffset,
+            ComparePredicate::Ge));
+      }
       start = builder.create<gpu::BinaryOp>(
           location, builder.getIndexType(), start, modulus,
           BinaryOperator::Remainder);
@@ -325,8 +354,13 @@ materializeTileIndices(OpBuilder &builder, Operation *owner,
           location, builder.getIndexType(), modulus, start,
           BinaryOperator::Subtract);
       // A tile that crosses the modulo boundary keeps its original gather.
-      require(builder.create<gpu::CompareOp>(
-          location, builder.getI1Type(), remaining, extent, ComparePredicate::Ge));
+      Value contained = builder.create<gpu::CompareOp>(
+          location, builder.getI1Type(), remaining, extent, ComparePredicate::Ge);
+      if (uniformPeriodicAlignment)
+        contained = builder.create<gpu::BinaryOp>(
+            location, builder.getI1Type(), uniformPeriodicAlignment, contained,
+            BinaryOperator::LogicalOr);
+      require(contained);
     }
     FailureOr<Value> index = tileIndex(builder, owner->getLoc(), start,
                                        extent);
@@ -371,6 +405,10 @@ materializeTileIndices(OpBuilder &builder, Operation *owner,
             BinaryOperator::LogicalOr);
       }
     }
+    if (uniformPeriodicAlignment)
+      aligned = builder.create<gpu::BinaryOp>(
+          owner->getLoc(), builder.getI1Type(), uniformPeriodicAlignment, aligned,
+          BinaryOperator::LogicalOr);
     require(aligned);
   }
   return result;

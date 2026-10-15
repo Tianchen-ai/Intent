@@ -160,11 +160,12 @@ LogicalResult TensorDescriptorChoiceOp::verify() {
     return emitOpError(
         "descriptor operands must enumerate every descriptor declaration exactly once");
   auto declaration = gpu::lookupParameterDeclaration(getOperation(), getConfigParameter());
-  const int64_t domain[] = {0, 1};
   if (!declaration || !declaration.getValueType().isSignlessInteger(1) ||
       declaration.getRole() != gpu::ParameterRole::ProviderAccessForm ||
       declaration.getPhase() != gpu::ConfigurationBindingPhase::Provider ||
-      declaration.getCandidates().asArrayRef() != ArrayRef<int64_t>(domain))
+      declaration.getCandidates().empty() ||
+      llvm::any_of(declaration.getCandidates().asArrayRef(),
+                   [](int64_t value) { return value != 0 && value != 1; }))
     return emitOpError("requires a declared boolean provider access-form parameter");
   if (gpu::lookupParameterDeclaration(getOperation(),
           gpu::ParameterRefAttr::get(getContext(), getEligibilityArgumentAttr())))
