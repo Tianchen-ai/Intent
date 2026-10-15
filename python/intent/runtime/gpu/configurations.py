@@ -194,6 +194,17 @@ class ConfigurationSpace:
                 if any(isinstance(reference, str) and value_types[reference] != "index"
                        for reference in expression.references):
                     raise ValueError("configuration quantity expressions require index parameters")
+        # The inspection is a pure function of a complete row and the scalar
+        # facts referenced by coverage/requirements. Retain one evaluation for
+        # repeated native dispatches, without retaining invocation tensors or
+        # suppressing validation when shape, strides, aliases or coverage change.
+        references = set(self.coverage_names)
+        for requirement in self.requirements:
+            references.update(requirement.references)
+        for binding in self.derived:
+            references.update(binding.bound.references)
+        self._inspection_references = tuple(references - self.bound_names - self.derived_names)
+        self._last_inspection = None
 
     def _order_deferred(self, deferred, names, value_types):
         """Separate invocation extents from extents depending on a selected row."""
@@ -256,11 +267,20 @@ class ConfigurationSpace:
         if any(row not in self.rows for row in selected):
             from ...compiler.toolchain import CompilationStageError
             raise CompilationStageError("candidate_binding", "candidate is absent from the generated configuration space")
+        facts = tuple(values.get(name) for name in self._inspection_references)
+        cacheable = all(type(value) is int for value in facts)
+        key = (tuple(tuple(row.items()) for row in selected), facts) if cacheable else None
+        previous = self._last_inspection
+        if key is not None and previous is not None and previous[0] == key:
+            return previous[1]
         result = []
         for row in selected:
             bound = self.bound_configuration(values, row)
             result.append(ConfigurationAssessment(bindings(bound), self.assess({**values, **bound})))
-        return tuple(result)
+        result = tuple(result)
+        if key is not None:
+            self._last_inspection = (key, result)
+        return result
 
     def select(self, assessed: tuple[ConfigurationAssessment, ...]) -> tuple[dict, ...]:
         """Select evaluated rows without reinterpreting or re-evaluating conditions."""
