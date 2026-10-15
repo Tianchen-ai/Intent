@@ -166,7 +166,8 @@ LogicalResult TaskConversion::lower(cpu::TasksOp tasks, StringRef name,
     symbols.push_back(b.getStringAttr("shape_" + std::to_string(symbol)));
   b.setInsertionPointToEnd(output.getBody());
   auto kernel = b.create<wk::KernelOp>(loc, name, b.getArrayAttr(names),
-      b.getArrayAttr(accesses), array(aliases), b.getArrayAttr(symbols), "Intent CPU task");
+      b.getArrayAttr(accesses), array(aliases), b.getArrayAttr({}),
+      b.getArrayAttr(symbols), "Intent CPU task");
   Block *body = new Block;
   kernel.getBody().push_back(body);
   for (Type type : types) body->addArgument(type, loc);
