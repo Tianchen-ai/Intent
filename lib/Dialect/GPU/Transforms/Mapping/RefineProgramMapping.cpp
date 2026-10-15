@@ -1,3 +1,4 @@
+#include "Intent/Dialect/GPU/Analysis/PhysicalParameters.h"
 #include "Intent/Dialect/GPU/Analysis/PhysicalProgram.h"
 #include "Intent/Dialect/GPU/Analysis/ValueSchema.h"
 #include "Intent/Dialect/GPU/Transforms/Passes.h"
@@ -174,15 +175,41 @@ LogicalResult refineProgramMapping(ModuleOp module) {
   for (auto [axis, role] : llvm::enumerate(roles.asArrayRef()))
     if (role == traversalWorker)
       traversalAxes.push_back(axis);
-  // Independent tiles already have a complete launch grid. Only traversal
-  // workers need to revisit logical work through a grid-stride loop.
-  if (traversalAxes.empty())
+  // Independent matrices can reuse resident workers across their batch domain.
+  // A single matrix retains its full tile grid: bounding that grid can reduce
+  // occupancy without amortizing traversal across independent matrices.
+  // Ownership and grouped order remain unchanged; provider configurations
+  // determine tile and resident granularity.
+  bool batchedMatrix = false;
+  for (auto [axis, role] : llvm::enumerate(roles.asArrayRef()))
+    if (!mapping.getCoordinates()[axis].use_empty() &&
+        (role == static_cast<int64_t>(CoordinateRole::Workset) ||
+         role == static_cast<int64_t>(CoordinateRole::TiledWorkset) ||
+         role == static_cast<int64_t>(CoordinateRole::PointwiseOwnership)))
+      batchedMatrix = true;
+  bool matrixM = false, matrixN = false;
+  for (Attribute attribute : getParameterDeclarations(kernel)) {
+    auto parameter = cast<ParameterAttr>(attribute);
+    if (parameter.getCategory() != ParameterCategory::Contraction ||
+        parameter.getElementBitWidth() == 0 ||
+        parameter.getElementBitWidth() > 16)
+      continue;
+    matrixM |= parameter.getRole() == ParameterRole::OwnershipM;
+    matrixN |= parameter.getRole() == ParameterRole::OwnershipN;
+  }
+  auto capabilities = kernel->getAttrOfType<CapabilitiesAttr>(capabilitiesAttr);
+  bool residentMatrix = batchedMatrix && matrixM && matrixN && capabilities &&
+                        capabilities.getMatrixUnits();
+  if (traversalAxes.empty() && !residentMatrix)
     return success();
 
   auto program = mapping.getLinear().getDefiningOp<ProgramIdOp>();
-  if (!program || program.getAxis() != 0)
+  if (!program || program.getAxis() != 0) {
+    if (traversalAxes.empty())
+      return success();
     return mapping.emitOpError(
         "persistent traversal requires one linear program coordinate");
+  }
   if (!program.getResult().hasOneUse())
     return success();
   for (Operation &operation : kernel.getBody().front()) {
@@ -200,9 +227,12 @@ LogicalResult refineProgramMapping(ModuleOp module) {
       !segmentLength ||
       segmentOffset.getKind() !=
           PhysicalExprKind::Constant ||
-      segmentOffset.getValue() != 0 || programSpace[0] != segmentLength)
+      segmentOffset.getValue() != 0 || programSpace[0] != segmentLength) {
+    if (traversalAxes.empty())
+      return success();
     return mapping.emitOpError(
         "persistent traversal requires one full-program execution segment");
+  }
 
   for (unsigned axis : traversalAxes) {
     auto parameter =
@@ -214,8 +244,6 @@ LogicalResult refineProgramMapping(ModuleOp module) {
           "traversal-worker coordinate lacks its physical parameter");
   }
 
-  auto capabilities =
-      kernel->getAttrOfType<CapabilitiesAttr>(capabilitiesAttr);
   if (!capabilities || capabilities.getComputeUnits() <= 0)
     return kernel.emitError(
         "persistent traversal requires a positive compute-unit capability");
