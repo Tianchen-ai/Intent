@@ -16,6 +16,7 @@
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/MemRef/Transforms/Transforms.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/Pass/PassManager.h"
@@ -136,6 +137,24 @@ struct WriteBufferization final
   }
 };
 
+// The CPU parallel region captures immutable tensors but has only index
+// formals and scalar reductions. MLIR's SCF bufferization models do not include
+// scf.parallel. Without this boundary, One-Shot may overwrite a captured tensor
+// in place across iterations. Let its native RaW analysis privatize such writes;
+// the default repetitive-region query uses SCF's RegionBranchOpInterface.
+struct ParallelBufferization final
+    : bufferization::BufferizableOpInterface::ExternalModel<
+          ParallelBufferization, scf::ParallelOp> {
+  bool isParallelRegion(Operation *, unsigned) const { return true; }
+
+  LogicalResult bufferize(
+      Operation *operation, RewriterBase &,
+      const bufferization::BufferizationOptions &) const {
+    return operation->emitError(
+        "CPU parallel bufferization does not support tensor reductions");
+  }
+};
+
 // The native ownership driver visits each helper block before its parent. It
 // initially gives memref formals ownership arguments. A CPU helper borrows all
 // inputs and destination slots, so those indicators are statically false; its
@@ -244,6 +263,9 @@ LogicalResult expandReshapes(ModuleOp module) {
 
 void registerValueBufferizationInterfaces(DialectRegistry &registry) {
   registerCollectiveBufferizationInterfaces(registry);
+  registry.addExtension(+[](MLIRContext *context, scf::SCFDialect *) {
+    scf::ParallelOp::attachInterface<ParallelBufferization>(*context);
+  });
   registry.addExtension(+[](MLIRContext *context, IntentCPUDialect *) {
     ReadOp::attachInterface<ReadBufferization>(*context);
     WriteOp::attachInterface<WriteBufferization>(*context);
