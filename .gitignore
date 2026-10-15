@@ -10,8 +10,6 @@ dist/
 /.codex/
 /autotuner.log
 /.venv-*/
-/experiments/
-/report/
 /tasks/
 /AGENTS.md
 /environment/cutile.txt

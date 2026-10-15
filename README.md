@@ -100,6 +100,20 @@ python -m examples.use --all --target triton --stage source --jobs 4
 
 Generation, native compilation, and execution are separate stages. Backend coverage depends on the program's operations, types, effects, and selected hardware. The [examples guide](https://github.com/Tianchen-ai/Intent/blob/main/examples/README.en.md) describes inputs, complete calls, and target options.
 
+### Optional operator benchmarks
+
+The independent `intentdsl_bench` checkout owns comparisons, baselines and historical
+evaluation material. With that project checked out beside IntentDSL:
+
+```bash
+python -m pip install -e ../intentdsl_bench
+intent-bench check --intent-root . --suite mainline --target triton
+intent-bench run softmax --impl triton,cutile,intent:triton,intent:cutile --intent-root . --device cuda:0
+```
+
+The default result is median latency; throughput can be requested separately.
+The compiler does not depend on the benchmark package.
+
 ## How the compiler is organized
 
 Passes consume typed semantics, def-use, coordinate relations, effects, and target capabilities. Execution decisions live in the current MLIR program. GPU, CPU, and DSA can reuse semantic knowledge while retaining their own execution and storage models.

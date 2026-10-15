@@ -100,6 +100,18 @@ python -m examples.use --all --target triton --stage source --jobs 4
 
 源码生成、原生编译与真实执行是不同阶段。实际支持范围取决于程序的操作、类型、effects 与所选硬件。[示例指南](https://github.com/Tianchen-ai/Intent/blob/main/examples/README.md) 介绍输入、完整调用与 target 参数。
 
+### 独立算子评测（可选）
+
+比较、baseline 与历史评测材料由独立的 `intentdsl_bench` 项目维护。在 IntentDSL 旁检出该项目后：
+
+```bash
+python -m pip install -e ../intentdsl_bench
+intent-bench check --intent-root . --suite mainline --target triton
+intent-bench run softmax --impl triton,cutile,intent:triton,intent:cutile --intent-root . --device cuda:0
+```
+
+默认结果为 median 延迟，需要时再开启吞吐量。编译器不依赖 bench 包。
+
 ## 编译器如何组织
 
 Pass 根据 typed semantics、def-use、坐标关系、effects 和 target 能力决策，执行决定保存在当前 MLIR 程序中。GPU、CPU 和 DSA 可以复用语义知识，同时保留各自的执行与存储模型。
