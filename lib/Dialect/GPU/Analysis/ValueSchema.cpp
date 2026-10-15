@@ -503,6 +503,26 @@ FailureOr<FragmentType> queryAccessResultSchema(
       // not expose.  Such an axis is not an access-result extent authority.
       if (!targetAxis)
         continue;
+      if (scalarCoordinate) {
+        auto from = cast<AxisMapAttr>(source.getAxisMaps()[sourceAxis]);
+        auto to = cast<AxisMapAttr>(target.getAxisMaps()[*targetAxis]);
+        // A one-lane coordinate can broadcast over any payload axis, but only
+        // its own logical axis may inherit its extent. Trailing-axis broadcast
+        // is not a proof that an unrelated matrix dimension is one element.
+        bool sameSource = sourceAxisIdentity(from) == sourceAxisIdentity(to) &&
+            llvm::count_if(target.getAxisMaps(), [&](Attribute attribute) {
+              return sourceAxisIdentity(cast<AxisMapAttr>(attribute)) ==
+                     sourceAxisIdentity(from);
+            }) == 1;
+        bool sameDimension = from.getDimensionId() > 0 &&
+            from.getDimensionId() == to.getDimensionId() &&
+            llvm::count_if(target.getAxisMaps(), [&](Attribute attribute) {
+              return cast<AxisMapAttr>(attribute).getDimensionId() ==
+                     from.getDimensionId();
+            }) == 1;
+        if (!sameSource && !sameDimension)
+          continue;
+      }
       if (refined[*targetAxis] && shape[*targetAxis] != extent) {
         emitError(coordinate.getLoc(), "access coordinate relations disagree")
             << "; payload_axis=" << *targetAxis

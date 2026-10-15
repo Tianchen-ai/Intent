@@ -408,6 +408,95 @@ void normalizeRegions(ModuleOp module) {
   }
 }
 
+bool isIndexConstant(Value value, int64_t expected) {
+  auto constant = value.getDefiningOp<ConstantOp>();
+  auto attribute = constant ? dyn_cast<IntegerAttr>(constant.getValue())
+                            : IntegerAttr();
+  return value.getType().isIndex() && attribute && attribute.getInt() == expected;
+}
+
+Value stripIndexIdentity(Value value) {
+  while (auto binary = value.getDefiningOp<BinaryOp>()) {
+    if (!value.getType().isIndex()) break;
+    auto kind = binary.getOperatorKind();
+    if (kind == BinaryOperator::Multiply) {
+      if (isIndexConstant(binary.getLhs(), 1)) value = binary.getRhs();
+      else if (isIndexConstant(binary.getRhs(), 1)) value = binary.getLhs();
+      else break;
+    } else if (kind == BinaryOperator::Add) {
+      if (isIndexConstant(binary.getLhs(), 0)) value = binary.getRhs();
+      else if (isIndexConstant(binary.getRhs(), 0)) value = binary.getLhs();
+      else break;
+    } else {
+      break;
+    }
+  }
+  return value;
+}
+
+void normalizeDomainIndices(ModuleOp module) {
+  SmallVector<BinaryOp> operations;
+  module.walk([&](BinaryOp operation) { operations.push_back(operation); });
+  for (BinaryOp operation : operations) {
+    auto kind = operation.getOperatorKind();
+    if (elementType(operation.getType()).isIndex() &&
+        (kind == BinaryOperator::Add || kind == BinaryOperator::Multiply)) {
+      int64_t identity = kind == BinaryOperator::Add ? 0 : 1;
+      Value replacement;
+      for (unsigned side = 0; side != 2; ++side)
+        if (isIndexConstant(stripScalarBroadcast(operation->getOperand(side)), identity) &&
+            operation->getOperand(1 - side).getType() == operation.getType())
+          replacement = operation->getOperand(1 - side);
+      if (replacement) {
+        operation.getResult().replaceAllUsesWith(replacement);
+        operation.erase();
+        continue;
+      }
+    }
+    if (kind != BinaryOperator::Remainder && kind != BinaryOperator::FloorDivide)
+      continue;
+    auto indices = operation.getLhs().getDefiningOp<IndicesOp>();
+    auto domain = indices ? indices.getSource().getDefiningOp<DomainOp>()
+                          : DomainOp();
+    if (!domain || domain.getBounds().size() != 2 ||
+        !isIndexConstant(domain.getBounds()[0], 0) ||
+        !indices.getResult().getType().getElementType().isIndex() ||
+        operation.getType() != indices.getResult().getType())
+      continue;
+    Value divisor = stripIndexIdentity(stripScalarBroadcast(operation.getRhs()));
+    Value end = stripIndexIdentity(domain.getBounds()[1]);
+    if (divisor != end) {
+      auto divisorDimension = divisor.getDefiningOp<DimOp>();
+      auto endDimension = end.getDefiningOp<DimOp>();
+      if (!divisorDimension || !endDimension ||
+          divisorDimension.getDimension() != endDimension.getDimension())
+        continue;
+    }
+    // Logical domain members satisfy 0 <= i < N. Thus i % N == i and
+    // i // N == 0. For N <= 0 there are no members and no division occurs.
+    // Do this before physical padding: padded lanes are not logical members.
+    // The resulting monotone coordinates also expose range proofs to every
+    // execution-model lowering, without teaching it a kernel-specific formula.
+    if (kind == BinaryOperator::Remainder) {
+      operation.getResult().replaceAllUsesWith(operation.getLhs());
+      operation.erase();
+      continue;
+    }
+    Operation *broadcast = operation.getRhs().getDefiningOp();
+    if (!broadcast || !isa<BroadcastOp, FullOp>(broadcast) ||
+        broadcast->getResult(0).getType() != operation.getType())
+      continue;
+    SmallVector<Value> operands(broadcast->getOperands());
+    operands[0] = domain.getBounds()[0];
+    OpBuilder builder(operation);
+    auto zero = builder.create<FullOp>(operation.getLoc(), operation.getType(),
+        operands, broadcast->getAttrOfType<ShapeRelationAttr>("shape"));
+    zero->setDiscardableAttrs(llvm::to_vector(operation->getDiscardableAttrs()));
+    operation.getResult().replaceAllUsesWith(zero.getResult());
+    operation.erase();
+  }
+}
+
 class NormalizeKernelIRPass
     : public PassWrapper<NormalizeKernelIRPass, OperationPass<ModuleOp>> {
 public:
@@ -426,6 +515,7 @@ public:
       signalPassFailure();
       return;
     }
+    normalizeDomainIndices(module);
     normalizeRegions(module);
     if (failed(verifyKernelModule(module)))
       signalPassFailure();
