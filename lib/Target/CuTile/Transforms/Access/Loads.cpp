@@ -124,7 +124,7 @@ LogicalResult formNativeLoads(func::FuncOp kernel,
     Value replacementResult;
     SmallVector<Operation *> createdOperations;
     Value loopLatency;
-    if (matrixCompute && load->getParentOfType<scf::ForOp>()) {
+    if (matrixCompute && !vectorInput && load->getParentOfType<scf::ForOp>()) {
       auto selected = forms.loadPolicyValue();
       if (failed(selected))
         return failure();
