@@ -399,6 +399,11 @@ LogicalResult realizeReductionBlocking(ModuleOp module) {
     changed |= hoistNestedReduction(loop, kernel);
   if (changed)
     eraseDeadPhysicalValues(kernel);
+  // Ownership, traversal and identity padding are now explicit. A complete
+  // physical scalar tree can use the provider's whole-fragment reduction;
+  // retaining the temporary per-axis tree would add native communication and
+  // extend intermediate lifetimes without preserving any output coordinate.
+  combineNestedReductions(kernel, /*fullOnly=*/true);
   return closeValueRelations(kernel);
 }
 

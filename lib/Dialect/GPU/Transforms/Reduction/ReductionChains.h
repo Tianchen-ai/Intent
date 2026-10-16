@@ -11,7 +11,9 @@ bool sameReductionContract(ReduceOp inner, ReduceOp outer,
                            mlir::Region &scalarOuterCombine);
 // Join direct ordinary reductions before choosing their physical traversal.
 // This changes only the axes of the same member/identity/callback contract.
-bool combineNestedReductions(mlir::func::FuncOp kernel);
+// After physicalization, fullOnly retains native scalar trees without
+// reintroducing partially reduced axes that would need another traversal.
+bool combineNestedReductions(mlir::func::FuncOp kernel, bool fullOnly = false);
 
 } // namespace intent::gpu::reduction
 

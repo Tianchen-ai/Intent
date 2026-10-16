@@ -11,6 +11,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
 
 using namespace mlir;
@@ -35,6 +36,147 @@ void preserveBoundedTileOrigins(func::FuncOp kernel) {
     if (relations.mappedTileOrigin(range.getStart(), range.getExtent(), *dimension))
       range->setAttr(programBoundedOriginAttr, UnitAttr::get(kernel.getContext()));
   });
+}
+
+// Query a loop bound's direction in one independently mapped coordinate. This
+// is a scheduling estimate, not a replacement for integer legality or bounds.
+class CoordinateOrder {
+public:
+  explicit CoordinateOrder(Value coordinate) : coordinate(coordinate) {}
+
+  std::optional<int> get(Value value) {
+    if (value == coordinate) return 1;
+    if (auto found = memo.find(value); found != memo.end()) return found->second;
+    auto result = infer(value);
+    memo[value] = result;
+    return result;
+  }
+
+private:
+  std::optional<int> infer(Value value) {
+    if (auto argument = dyn_cast<BlockArgument>(value)) {
+      if (argument.getOwner() == coordinate.getParentBlock() ||
+          isa<func::FuncOp>(argument.getOwner()->getParentOp())) return 0;
+      return std::nullopt;
+    }
+    Operation *producer = value.getDefiningOp();
+    if (!producer) return std::nullopt;
+    auto binary = dyn_cast<BinaryOp>(producer);
+    if (!binary) {
+      if (producer->getNumRegions()) return std::nullopt;
+      for (Value operand : producer->getOperands()) {
+        auto order = get(operand);
+        if (!order || *order) return std::nullopt;
+      }
+      return 0;
+    }
+    Value lhs = binary.getLhs(), rhs = binary.getRhs();
+    auto kind = binary.getOperatorKind();
+    bool minimum = kind == BinaryOperator::Minimum || kind == BinaryOperator::MinimumNum;
+    bool maximum = kind == BinaryOperator::Maximum || kind == BinaryOperator::MaximumNum;
+    if (minimum || maximum) {
+      if (relations.atMost(lhs, rhs)) return get(minimum ? lhs : rhs);
+      if (relations.atMost(rhs, lhs)) return get(minimum ? rhs : lhs);
+    }
+    auto a = get(lhs), b = get(rhs);
+    if (!a || !b) return std::nullopt;
+    if (!*a && !*b) return 0;
+    auto merge = [](int a, int b) -> std::optional<int> {
+      if (!a) return b;
+      if (!b || a == b) return a;
+      return std::nullopt;
+    };
+    if (minimum || maximum || kind == BinaryOperator::Add) return merge(*a, *b);
+    if (kind == BinaryOperator::Subtract) return merge(*a, -*b);
+    if (kind == BinaryOperator::Multiply) {
+      if (!*b && relations.positive(rhs)) return a;
+      if (!*a && relations.positive(lhs)) return b;
+    }
+    if (kind == BinaryOperator::FloorDivide && !*b && relations.positive(rhs)) return a;
+    return std::nullopt;
+  }
+
+  Value coordinate;
+  IndexRelations relations;
+  DenseMap<Value, std::optional<int>> memo;
+};
+
+void balanceVariableMatrixTraversals(func::FuncOp kernel, ExecutionGroupOp mapping) {
+  ArrayRef<int64_t> roles = mapping.getCoordinateRoles();
+  std::optional<unsigned> rowAxis;
+  for (auto [axis, role] : llvm::enumerate(roles)) {
+    if (role == static_cast<int64_t>(CoordinateRole::ContractionM) ||
+        role == static_cast<int64_t>(CoordinateRole::PointwiseOwnership)) {
+      if (rowAxis) return;
+      rowAxis = axis;
+    } else if (role != static_cast<int64_t>(CoordinateRole::Workset)) {
+      return;
+    }
+  }
+  if (!rowAxis || roles.size() < 2) return;
+  auto offset = mapping.getSegmentOffset();
+  auto space = kernel->getAttrOfType<ArrayAttr>(programSpaceAttr);
+  if (!offset || offset.getKind() != PhysicalExprKind::Constant || offset.getValue() ||
+      !space || space.size() != 1 || mapping.getSegmentLength() != space[0]) return;
+  Value row = mapping.getCoordinates()[*rowAxis];
+  CoordinateOrder order(row);
+  int direction = 0;
+  bool conflicting = false;
+  mapping.walk([&](scf::ForOp loop) {
+    // Rank direct traversals of this program. Nested traversal costs belong to
+    // a different iteration scope and are not estimated by this policy.
+    if (loop->getParentOfType<scf::ForOp>()) return;
+    bool matrix = false;
+    loop.walk([&](ContractOp contract) {
+      matrix |= contract->getParentOfType<scf::ForOp>() == loop;
+    });
+    if (!matrix) return;
+    auto lower = order.get(loop.getLowerBound()), upper = order.get(loop.getUpperBound());
+    auto step = order.get(loop.getStep());
+    if (!lower || !upper || !step || *step || (*lower && *upper)) return;
+    int current = *upper - *lower;
+    if (!current) return;
+    if (direction && direction != current) conflicting = true;
+    direction = current;
+  });
+  if (!direction || conflicting) return;
+
+  // Keep the same rectangular set of independent programs. Visit equal-cost
+  // rows across batches together, with the longest traversals first, instead
+  // of restarting the short-to-long sequence for every independent matrix.
+  preserveBoundedTileOrigins(kernel);
+  OpBuilder builder = OpBuilder::atBlockBegin(&mapping.getBody().front());
+  Location loc = mapping.getLoc();
+  SmallVector<unsigned> permutation{*rowAxis};
+  for (unsigned axis = 0; axis < roles.size(); ++axis)
+    if (axis != *rowAxis) permutation.push_back(axis);
+  SmallVector<Value> extents, replacements(roles.size());
+  SmallVector<Attribute> launchExtents;
+  SmallVector<int64_t> reorderedRoles;
+  for (auto [position, original] : llvm::enumerate(permutation)) {
+    extents.push_back(mapping.getExtents()[original]);
+    launchExtents.push_back(mapping.getLaunchExtents()[original]);
+    reorderedRoles.push_back(roles[original]);
+    replacements[original] = mapping.getCoordinates()[position];
+  }
+  Operation *reflection = nullptr;
+  if (direction > 0) {
+    Value one = builder.create<arith::ConstantIndexOp>(loc, 1);
+    Value last = builder.create<BinaryOp>(loc, builder.getIndexType(), extents.front(),
+                                         one, BinaryOperator::Subtract);
+    auto reversed = builder.create<BinaryOp>(loc, builder.getIndexType(), last,
+                                              replacements[*rowAxis], BinaryOperator::Subtract);
+    reflection = reversed;
+    replacements[*rowAxis] = reversed;
+  }
+  SmallVector<std::pair<OpOperand *, Value>> uses;
+  for (auto [original, replacement] : llvm::zip(mapping.getCoordinates(), replacements))
+    for (OpOperand &use : original.getUses())
+      if (use.getOwner() != reflection) uses.emplace_back(&use, replacement);
+  for (auto [use, replacement] : uses) use->set(replacement);
+  mapping.getExtentsMutable().assign(extents);
+  mapping.setLaunchExtentsAttr(builder.getArrayAttr(launchExtents));
+  mapping.setCoordinateRolesAttr(builder.getDenseI64ArrayAttr(reorderedRoles));
 }
 
 LogicalResult realizeGroupedContractionMapping(
@@ -137,6 +279,8 @@ LogicalResult refineProgramMapping(ModuleOp module) {
     return success();
   if (failed(realizeGroupedContractionMapping(module, kernel, mapping, roles)))
     return failure();
+  balanceVariableMatrixTraversals(kernel, mapping);
+  roles = mapping.getCoordinateRolesAttr();
   const int64_t traversalWorker =
       static_cast<int64_t>(CoordinateRole::TraversalWorker);
   SmallVector<unsigned> traversalAxes;
