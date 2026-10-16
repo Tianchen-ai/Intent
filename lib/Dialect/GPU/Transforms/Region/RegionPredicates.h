@@ -10,6 +10,8 @@ struct PredicatePartition {
   mlir::Value allTrueStop;
   mlir::Value effectiveStart;
   mlir::Value effectiveStop;
+  mlir::Value allFalsePrefixStop;
+  mlir::Value allFalseSuffixStart;
   llvm::SmallVector<mlir::Value> allTruePredicates;
   bool firstMemberIsActive = false;
   bool prefixSpecializable = false;

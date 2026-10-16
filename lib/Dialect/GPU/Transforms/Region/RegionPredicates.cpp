@@ -275,6 +275,8 @@ predicatePartition(OpBuilder &builder, RegionFoldOp fold,
   Value effectiveStop = masterExtent;
   Value allTrueStart = zero;
   Value allTrueStop = masterExtent;
+  Value allFalsePrefixStop;
+  Value allFalseSuffixStart;
   SmallVector<Value> allTruePredicates;
   bool firstMemberIsActive = false;
   bool hasLowerBound = false;
@@ -314,6 +316,19 @@ predicatePartition(OpBuilder &builder, RegionFoldOp fold,
           comparedSource, captureRange.getStart(), captureEnd);
       if (identityOnly)
         effectiveStop = expression(UniformKind::Minimum, effectiveStop, bounds.possibleEnd);
+      if (!identityOnly) {
+        Value adjustment = builder.create<BinaryOp>(
+            location, builder.getIndexType(), segment, one, BinaryOperator::Subtract);
+        Value roundedEnd = builder.create<BinaryOp>(
+            location, builder.getIndexType(), bounds.possibleEnd, adjustment,
+            BinaryOperator::Add);
+        Value endSegments = builder.create<BinaryOp>(
+            location, builder.getIndexType(), roundedEnd, segment,
+            BinaryOperator::FloorDivide);
+        allFalseSuffixStart = builder.create<BinaryOp>(
+            location, builder.getIndexType(), endSegments, segment,
+            BinaryOperator::Multiply);
+      }
       {
         Value wholeSegments = builder.create<BinaryOp>(
             location, builder.getIndexType(), bounds.allTrueEnd, segment,
@@ -385,6 +400,8 @@ predicatePartition(OpBuilder &builder, RegionFoldOp fold,
     Value alignedLower = builder.create<BinaryOp>(
         location, builder.getIndexType(), wholeSegments, segment,
         BinaryOperator::Multiply);
+    if (!identityOnly)
+      allFalsePrefixStop = alignedLower;
     if (identityOnly)
       effectiveStart = expression(UniformKind::Maximum, effectiveStart, alignedLower);
     Value adjustment = builder.create<BinaryOp>(
@@ -408,8 +425,15 @@ predicatePartition(OpBuilder &builder, RegionFoldOp fold,
   }
   if (!foundBound)
     return failure();
+  // A false value specializes one proven coordinate predicate. With several
+  // predicates the complement of their all-true intersection does not imply
+  // that every predicate is false, so retain the original mixed traversal.
+  if (allTruePredicates.size() != 1) {
+    allFalsePrefixStop = {};
+    allFalseSuffixStart = {};
+  }
   return PredicatePartition{allTrueStart, allTrueStop, effectiveStart,
-                            effectiveStop,
+                            effectiveStop, allFalsePrefixStop, allFalseSuffixStart,
                             std::move(allTruePredicates), firstMemberIsActive,
                             upperBoundCount == 1 && !hasLowerBound};
 }

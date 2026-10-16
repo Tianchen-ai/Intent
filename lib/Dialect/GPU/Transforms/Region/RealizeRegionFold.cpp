@@ -148,7 +148,8 @@ LogicalResult realizeFold(RegionFoldOp fold, func::FuncOp kernel,
                          bool fullSegment,
                          bool predicateIsTrue,
                          bool summaryIsNonempty,
-                         IRMapping *summaryMapping)
+                         IRMapping *summaryMapping,
+                         bool predicateIsFalse = false)
       -> FailureOr<SmallVector<Value>> {
     SmallVector<Value> slices;
     Value segmentTail;
@@ -189,7 +190,7 @@ LogicalResult realizeFold(RegionFoldOp fold, func::FuncOp kernel,
     summarizeArguments.append(captures.begin(), captures.end());
     IRMapping localSummaryMapping;
     IRMapping &mapping = summaryMapping ? *summaryMapping : localSummaryMapping;
-    if (predicateIsTrue) {
+    if (predicateIsTrue || predicateIsFalse) {
       for (Value predicate : partition->allTruePredicates) {
         auto predicateType = dyn_cast<FragmentType>(predicate.getType());
         if (!predicateType) {
@@ -197,7 +198,7 @@ LogicalResult realizeFold(RegionFoldOp fold, func::FuncOp kernel,
           return failure();
         }
         Value truth = nested.create<arith::ConstantOp>(
-            nestedLocation, nested.getI1Type(), nested.getBoolAttr(true));
+            nestedLocation, nested.getI1Type(), nested.getBoolAttr(predicateIsTrue));
         mapping.map(predicate,
                     nested.create<SplatOp>(nestedLocation, predicateType, truth));
       }
@@ -219,7 +220,8 @@ LogicalResult realizeFold(RegionFoldOp fold, func::FuncOp kernel,
                             nonemptySource, nonemptyTarget, &mapping);
   };
   auto emitLoop = [&](Value lower, Value upper, ValueRange initial,
-                      bool fullSegment, bool predicateIsTrue) {
+                      bool fullSegment, bool predicateIsTrue,
+                      bool predicateIsFalse = false) {
     Value step = !fullSegment && !memberPredicate ? scalarTailStep
                                                  : segment.getResult();
     auto buildBody = [&](OpBuilder &nested, Location nestedLocation, Value offset,
@@ -228,7 +230,7 @@ LogicalResult realizeFold(RegionFoldOp fold, func::FuncOp kernel,
         FailureOr<SmallVector<Value>> summary = emitSummary(
             nested, nestedLocation, offset, fullSegment, predicateIsTrue,
             /*summaryIsNonempty=*/false,
-            needsSummaryMapping ? &summaryMapping : nullptr);
+            needsSummaryMapping ? &summaryMapping : nullptr, predicateIsFalse);
         if (failed(summary)) {
           bodyFailed = true;
           return;
@@ -544,19 +546,49 @@ LogicalResult realizeFold(RegionFoldOp fold, func::FuncOp kernel,
   Value fullMixedStop = builder.create<BinaryOp>(
       location, builder.getIndexType(), fullMixedSegments, segment.getResult(),
       BinaryOperator::Multiply);
+  scf::ForOp allFalsePrefixLoop;
+  scf::ForOp allFalseSuffixLoop;
+  Value mixedStop = fullMixedStop;
+  if (succeeded(partition) && partition->allFalsePrefixStop) {
+    // False predicate does not imply an identity summary: zero-weight products
+    // can still propagate NaNs. Execute that summary with the predicate bound
+    // to false, so ordinary constant propagation removes only dead producers.
+    Value prefixEnd = builder.create<BinaryOp>(
+        location, builder.getIndexType(), mixedStart,
+        partition->allFalsePrefixStop, BinaryOperator::Maximum);
+    prefixEnd = builder.create<BinaryOp>(
+        location, builder.getIndexType(), fullMixedStop, prefixEnd,
+        BinaryOperator::Minimum);
+    allFalsePrefixLoop = emitLoop(mixedStart, prefixEnd, current,
+                                  /*fullSegment=*/true,
+                                  /*predicateIsTrue=*/false,
+                                  /*predicateIsFalse=*/true);
+    if (!bodyFailed)
+      current.assign(allFalsePrefixLoop.getResults().begin(),
+                     allFalsePrefixLoop.getResults().end());
+    mixedStart = prefixEnd;
+  }
+  if (succeeded(partition) && partition->allFalseSuffixStart) {
+    Value suffixBegin = builder.create<BinaryOp>(
+        location, builder.getIndexType(), mixedStart,
+        partition->allFalseSuffixStart, BinaryOperator::Maximum);
+    mixedStop = builder.create<BinaryOp>(
+        location, builder.getIndexType(), fullMixedStop, suffixBegin,
+        BinaryOperator::Minimum);
+  }
   scf::ForOp leadingMixedLoop;
   if (!specializePredicatePrefix && succeeded(partition)) {
     Value boundedStart = builder.create<BinaryOp>(
         location, builder.getIndexType(), mixedStart, partition->allTrueStart,
         BinaryOperator::Maximum);
     Value interiorStart = builder.create<BinaryOp>(
-        location, builder.getIndexType(), fullMixedStop, boundedStart,
+        location, builder.getIndexType(), mixedStop, boundedStart,
         BinaryOperator::Minimum);
     Value boundedStop = builder.create<BinaryOp>(
         location, builder.getIndexType(), interiorStart, partition->allTrueStop,
         BinaryOperator::Maximum);
     Value interiorStop = builder.create<BinaryOp>(
-        location, builder.getIndexType(), fullMixedStop, boundedStop,
+        location, builder.getIndexType(), mixedStop, boundedStop,
         BinaryOperator::Minimum);
     leadingMixedLoop = emitLoop(mixedStart, interiorStart, current,
                                 /*fullSegment=*/true,
@@ -575,18 +607,31 @@ LogicalResult realizeFold(RegionFoldOp fold, func::FuncOp kernel,
   }
   scf::ForOp fullMixedLoop;
   if (!bodyFailed)
-    fullMixedLoop = emitLoop(mixedStart, fullMixedStop, current,
+    fullMixedLoop = emitLoop(mixedStart, mixedStop, current,
                              /*fullSegment=*/true,
                              /*predicateIsTrue=*/false);
   if (!bodyFailed)
     current.assign(fullMixedLoop.getResults().begin(),
                    fullMixedLoop.getResults().end());
+  if (!bodyFailed && succeeded(partition) && partition->allFalseSuffixStart) {
+    allFalseSuffixLoop = emitLoop(mixedStop, fullMixedStop, current,
+                                  /*fullSegment=*/true,
+                                  /*predicateIsTrue=*/false,
+                                  /*predicateIsFalse=*/true);
+    if (!bodyFailed)
+      current.assign(allFalseSuffixLoop.getResults().begin(),
+                     allFalseSuffixLoop.getResults().end());
+  }
   scf::ForOp tailLoop;
   if (!bodyFailed)
     tailLoop = emitLoop(fullMixedStop, stop, current,
                         /*fullSegment=*/false,
                         /*predicateIsTrue=*/false);
   if (bodyFailed) {
+    if (allFalsePrefixLoop && allFalsePrefixLoop->getBlock())
+      allFalsePrefixLoop.erase();
+    if (allFalseSuffixLoop && allFalseSuffixLoop->getBlock())
+      allFalseSuffixLoop.erase();
     if (leadingMixedLoop && leadingMixedLoop->getBlock())
       leadingMixedLoop.erase();
     if (allTrueLoop && allTrueLoop->getBlock())
