@@ -730,7 +730,7 @@ SmallVector<ConfigurationRequirementAttr> collectPointwiseRequirements(
 
 SmallVector<ConfigurationRequirementAttr> collectReductionRequirements(
     func::FuncOp kernel, ArrayRef<Operation *> reductions,
-    ReductionRequirementScope scope) {
+    ReductionRequirementScope scope, ValueRange nativeMatrixInputs) {
   SmallVector<ConfigurationRequirementAttr> requirements;
   auto capabilities = kernel->getAttrOfType<CapabilitiesAttr>(capabilitiesAttr);
   if (!capabilities || capabilities.getRegistersPerUnit() <= 0)
@@ -740,7 +740,7 @@ SmallVector<ConfigurationRequirementAttr> collectReductionRequirements(
   auto limit = PhysicalExprAttr::get(kernel.getContext(), PhysicalExprKind::Constant,
       capabilities.getRegistersPerUnit(), builder.getStringAttr(""), builder.getArrayAttr({}));
   llvm::DenseSet<Value> matrixInputs;
-  if (capabilities.getMatrixUnits())
+  if (capabilities.getMatrixUnits()) {
     kernel.walk([&](ContractOp contract) {
       auto element = contract.getLhs().getType().getElementType();
       if ((!element.isF16() && !element.isBF16()) ||
@@ -748,6 +748,11 @@ SmallVector<ConfigurationRequirementAttr> collectReductionRequirements(
       collectPayloads(contract.getLhs(), matrixInputs);
       collectPayloads(contract.getRhs(), matrixInputs);
     });
+    for (Value value : nativeMatrixInputs) {
+      auto element = cast<FragmentType>(value.getType()).getElementType();
+      if (element.isF16() || element.isBF16()) collectPayloads(value, matrixInputs);
+    }
+  }
   auto sharedWords = wordConstant(kernel.getContext(),
       std::max<int64_t>(0, capabilities.getMaxDynamicSharedMemoryPerBlock()) / 4);
   Liveness liveness(kernel);

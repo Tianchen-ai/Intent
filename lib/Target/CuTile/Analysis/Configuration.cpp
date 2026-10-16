@@ -16,8 +16,13 @@ collectConfigurationRequirements(func::FuncOp kernel) {
   kernel.walk([&](ReduceOp reduce) {
     reductions.push_back(reduce);
   });
+  SmallVector<Value> matrixInputs;
+  kernel.walk([&](MMAOp matrix) {
+    matrixInputs.push_back(matrix.getLhs());
+    matrixInputs.push_back(matrix.getRhs());
+  });
   auto requirements = gpu::collectReductionRequirements(
-      kernel, reductions, gpu::ReductionRequirementScope::AllCandidates);
+      kernel, reductions, gpu::ReductionRequirementScope::AllCandidates, matrixInputs);
   const gpu::FragmentResourceAnalysis resources(kernel);
   llvm::append_range(requirements, gpu::collectPointwiseRequirements(kernel, resources));
   auto resident = parameters->find(gpu::ParameterRole::ResidentWorkers);

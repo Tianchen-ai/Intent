@@ -17,9 +17,11 @@ enum class ReductionRequirementScope { AllCandidates, InvocationDependent };
 bool isPointwiseTraversalParameter(ParameterAttr parameter);
 
 // Collect from current IR for candidate filtering and invocation specialization.
+// Providers pass operands of their native matrix operations after shared
+// contracts have been lowered. These are current SSA inputs, not cached plans.
 llvm::SmallVector<ConfigurationRequirementAttr> collectReductionRequirements(
     mlir::func::FuncOp kernel, llvm::ArrayRef<mlir::Operation *> reductions,
-    ReductionRequirementScope scope);
+    ReductionRequirementScope scope, mlir::ValueRange nativeMatrixInputs = {});
 
 // Verify the current condition set and rows without changing either. Conditions
 // have set semantics; candidate row order remains significant.
