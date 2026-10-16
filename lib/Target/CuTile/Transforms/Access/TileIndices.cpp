@@ -94,13 +94,19 @@ Value materializeTileOrigin(OpBuilder &builder, Location location,
   }
   Value origin;
   auto add = [&](Value value, int64_t scale) {
+    if (origin && scale == -1) {
+      origin = builder.createOrFold<gpu::BinaryOp>(
+          location, builder.getIndexType(), origin, value,
+          BinaryOperator::Subtract);
+      return;
+    }
     if (scale != 1) {
       Value coefficient = builder.create<arith::ConstantIndexOp>(location, scale);
       value = builder.create<gpu::BinaryOp>(
           location, builder.getIndexType(), value, coefficient,
           BinaryOperator::Multiply);
     }
-    origin = origin ? Value(builder.create<gpu::BinaryOp>(
+    origin = origin ? Value(builder.createOrFold<gpu::BinaryOp>(
                           location, builder.getIndexType(), origin, value,
                           BinaryOperator::Add))
                     : value;
@@ -180,6 +186,13 @@ FailureOr<Value> materializeTileOriginGuard(
     Value origin = materializeTileOrigin(builder, owner->getLoc(), axisPlan);
     if (!origin)
       return failure();
+    if (!axisPlan.modulus) {
+      auto view = cast<gpu::ViewType>(resource.getType());
+      auto dimensions = view.getLayout().getDimensionIds().asArrayRef();
+      if (scalarOriginInView(origin, view, axis, dimensions[axis],
+                             owner->getParentOfType<func::FuncOp>()))
+        continue;
+    }
     if (axisPlan.modulus)
       origin = builder.create<gpu::BinaryOp>(
           owner->getLoc(), builder.getIndexType(), origin,

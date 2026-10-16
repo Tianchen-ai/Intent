@@ -51,6 +51,16 @@ bool collectTileCoordinates(Value value, NativeTileAxisPlan &axis,
   if (binary.getOperatorKind() == BinaryOperator::Add)
     return collectTileCoordinates(binary.getLhs(), axis, scale) &&
            collectTileCoordinates(binary.getRhs(), axis, scale);
+  if (binary.getOperatorKind() == BinaryOperator::Subtract) {
+    // Translate a contiguous tile without admitting a reversed varying axis.
+    Value offset = uniformScalarFill(binary.getRhs());
+    int64_t negativeScale;
+    if (!offset || !offset.getType().isIndex() ||
+        llvm::MulOverflow(scale, int64_t{-1}, negativeScale) ||
+        !collectTileCoordinates(binary.getLhs(), axis, scale)) return false;
+    axis.offsets.emplace_back(offset, negativeScale);
+    return true;
+  }
   if (binary.getOperatorKind() == BinaryOperator::Multiply) {
     for (unsigned i = 0; i != 2; ++i) {
       Value scalar = uniformScalarFill(binary->getOperand(i));

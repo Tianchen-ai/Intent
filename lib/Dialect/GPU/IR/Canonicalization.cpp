@@ -94,6 +94,21 @@ OpFoldResult BinaryOp::fold(FoldAdaptor adaptor) {
   if (result.isIntOrIndex()) {
     auto lhs = dyn_cast_or_null<IntegerAttr>(adaptor.getLhs());
     auto rhs = dyn_cast_or_null<IntegerAttr>(adaptor.getRhs());
+    if (getLhs().getType() == result && getRhs().getType() == result) {
+      auto kind = getOperatorKind();
+      if ((kind == BinaryOperator::Add || kind == BinaryOperator::Subtract) &&
+          rhs && rhs.getValue().isZero()) return getLhs();
+      if (kind == BinaryOperator::Add && lhs && lhs.getValue().isZero())
+        return getRhs();
+      if (kind == BinaryOperator::Subtract) {
+        if (getLhs() == getRhs()) return IntegerAttr::get(result, 0);
+        if (auto sum = getLhs().getDefiningOp<BinaryOp>();
+            sum && sum.getOperatorKind() == BinaryOperator::Add) {
+          if (sum.getLhs() == getRhs()) return sum.getRhs();
+          if (sum.getRhs() == getRhs()) return sum.getLhs();
+        }
+      }
+    }
     if (!lhs || !rhs || lhs.getType() != result || rhs.getType() != result)
       return {};
     APInt left = lhs.getValue(), right = rhs.getValue(), value = left;
@@ -165,6 +180,36 @@ OpFoldResult MakeRecordOp::fold(FoldAdaptor) {
 }
 
 namespace {
+struct ScalarizeUniformIndexBinary : OpRewritePattern<BinaryOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(BinaryOp operation,
+                                PatternRewriter &rewriter) const override {
+    auto result = dyn_cast<FragmentType>(operation.getType());
+    if (!result || !result.getElementType().isIndex()) return failure();
+    auto scalar = [](Value value) -> Value {
+      while (isa<FragmentType>(value.getType())) {
+        Operation *definition = value.getDefiningOp();
+        if (!isa_and_nonnull<SplatOp, BroadcastOp, ReshapeOp, TransposeOp>(definition))
+          return {};
+        value = definition->getOperand(0);
+      }
+      return value;
+    };
+    Value lhs = scalar(operation.getLhs()), rhs = scalar(operation.getRhs());
+    if (!lhs || !rhs || lhs.getType() != result.getElementType() ||
+        rhs.getType() != result.getElementType()) return failure();
+    // Preserve the operation and its integer width; only move replication
+    // after computation so access analysis sees the uniform coordinate.
+    auto replacement = rewriter.create<BinaryOp>(
+        operation.getLoc(), result.getElementType(), lhs, rhs,
+        operation.getOperatorKind(), operation.getApproximate(),
+        operation.getFlushToZero(), operation.getStrictRounding());
+    replacement->setDiscardableAttrs(llvm::to_vector(operation->getDiscardableAttrs()));
+    rewriter.replaceOpWithNewOp<SplatOp>(operation, result, replacement.getResult());
+    return success();
+  }
+};
+
 struct DeduplicateBooleanTerms : OpRewritePattern<BinaryOp> {
   using OpRewritePattern::OpRewritePattern;
   LogicalResult matchAndRewrite(BinaryOp operation,
@@ -274,7 +319,7 @@ struct CombineSelections : OpRewritePattern<SelectOp> {
 
 void BinaryOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
                                            MLIRContext *context) {
-  patterns.add<DeduplicateBooleanTerms>(context);
+  patterns.add<DeduplicateBooleanTerms, ScalarizeUniformIndexBinary>(context);
 }
 void ReshapeOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
                                             MLIRContext *context) {
