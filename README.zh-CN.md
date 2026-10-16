@@ -8,6 +8,8 @@
 
 IntentDSL 是面向 GPU、CPU 和加速器的 Python kernel 语言与 MLIR 编译器。作者描述张量计算、逻辑域、访问、状态和显式多 kernel 编排；编译器通过 passes 构造物理程序，发射到 Triton、cuTile、Mojo、Weft 或 BANG C。
 
+IntentDSL 是东山社区[天辰 AI 软件栈](https://gitee.com/dongshan-community/TianChen_Software_Stack)的组成部分。本仓库提供语言、编译器、示例与使用文档，软件栈的整体定位和组件导航见顶层入口。开发主源位于 [GitHub](https://github.com/Tianchen-ai/Intent)，同步镜像位于 [Gitee](https://gitee.com/dongshan-community/Intent)。
+
 ![IntentDSL 论文原图：算法复用与编译器工作流](https://raw.githubusercontent.com/Tianchen-ai/Intent/main/images/paper-fig1-overview.png)
 
 *论文原总览图（[PDF](https://github.com/Tianchen-ai/Intent/blob/main/images/paper-fig1-overview.pdf)）。图中标签描述论文实现路径；当前产品的 provider 入口见下文。*
