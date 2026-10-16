@@ -57,6 +57,11 @@ private:
     if (auto argument = dyn_cast<BlockArgument>(value)) {
       if (argument.getOwner() == coordinate.getParentBlock() ||
           isa<func::FuncOp>(argument.getOwner()->getParentOp())) return 0;
+      if (auto loop = dyn_cast<scf::ForOp>(argument.getOwner()->getParentOp());
+          loop && argument == loop.getInductionVar() &&
+          get(loop.getLowerBound()) == 0 &&
+          get(loop.getUpperBound()) == 0 &&
+          get(loop.getStep()) == 0) return 0;
       return std::nullopt;
     }
     Operation *producer = value.getDefiningOp();
@@ -123,9 +128,14 @@ void balanceVariableMatrixTraversals(func::FuncOp kernel, ExecutionGroupOp mappi
   int direction = 0;
   bool conflicting = false;
   mapping.walk([&](scf::ForOp loop) {
-    // Rank direct traversals of this program. Nested traversal costs belong to
-    // a different iteration scope and are not estimated by this policy.
-    if (loop->getParentOfType<scf::ForOp>()) return;
+    // A row-independent enclosing traversal repeats the same work curve.
+    // Row-dependent nests require a separate cost model. Its bounds need not
+    // be launch expressions: they do not become part of the launch grid.
+    for (auto parent = loop->getParentOfType<scf::ForOp>(); parent;
+         parent = parent->getParentOfType<scf::ForOp>())
+      if (order.get(parent.getLowerBound()) != 0 ||
+          order.get(parent.getUpperBound()) != 0 ||
+          order.get(parent.getStep()) != 0) return;
     bool matrix = false;
     loop.walk([&](ContractOp contract) {
       matrix |= contract->getParentOfType<scf::ForOp>() == loop;
@@ -140,6 +150,8 @@ void balanceVariableMatrixTraversals(func::FuncOp kernel, ExecutionGroupOp mappi
     direction = current;
   });
   if (!direction || conflicting) return;
+  auto capabilities = kernel->getAttrOfType<CapabilitiesAttr>(capabilitiesAttr);
+  if (!capabilities || capabilities.getComputeUnits() <= 0) return;
 
   // Keep the same rectangular set of independent programs. Visit equal-cost
   // rows across batches together, with the longest traversals first, instead
@@ -159,20 +171,41 @@ void balanceVariableMatrixTraversals(func::FuncOp kernel, ExecutionGroupOp mappi
     reorderedRoles.push_back(roles[original]);
     replacements[original] = mapping.getCoordinates()[position];
   }
-  Operation *reflection = nullptr;
+  SmallVector<Operation *> coordinateOps;
   if (direction > 0) {
     Value one = builder.create<arith::ConstantIndexOp>(loc, 1);
     Value last = builder.create<BinaryOp>(loc, builder.getIndexType(), extents.front(),
                                          one, BinaryOperator::Subtract);
     auto reversed = builder.create<BinaryOp>(loc, builder.getIndexType(), last,
                                               replacements[*rowAxis], BinaryOperator::Subtract);
-    reflection = reversed;
+    coordinateOps.push_back(reversed);
     replacements[*rowAxis] = reversed;
+  }
+  // With no more programs than compute units there is no queued wave to
+  // balance. Preserve the original locality in that case. Launch extents and
+  // configuration values make this choice uniform; providers can specialize
+  // it without duplicating the compute body.
+  Value programs = builder.create<PhysicalExprOp>(
+      loc, builder.getIndexType(), mapping.getSegmentLength());
+  Value units = builder.create<arith::ConstantIndexOp>(
+      loc, capabilities.getComputeUnits());
+  Value queued = builder.create<CompareOp>(loc, builder.getI1Type(), programs,
+                                         units, ComparePredicate::Gt);
+  auto original = builder.create<DelinearizeOp>(
+      loc, SmallVector<Type>(roles.size(), builder.getIndexType()),
+      mapping.getLinear(), mapping.getExtents());
+  for (auto [replacement, coordinate] :
+       llvm::zip(replacements, original.getCoordinates())) {
+    auto selected = builder.create<SelectOp>(loc, builder.getIndexType(), queued,
+                                             replacement, coordinate);
+    coordinateOps.push_back(selected);
+    replacement = selected;
   }
   SmallVector<std::pair<OpOperand *, Value>> uses;
   for (auto [original, replacement] : llvm::zip(mapping.getCoordinates(), replacements))
     for (OpOperand &use : original.getUses())
-      if (use.getOwner() != reflection) uses.emplace_back(&use, replacement);
+      if (!llvm::is_contained(coordinateOps, use.getOwner()))
+        uses.emplace_back(&use, replacement);
   for (auto [use, replacement] : uses) use->set(replacement);
   mapping.getExtentsMutable().assign(extents);
   mapping.setLaunchExtentsAttr(builder.getArrayAttr(launchExtents));

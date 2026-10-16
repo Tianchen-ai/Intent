@@ -459,6 +459,16 @@ IndexBounds queryIndexBounds(Value value) {
         return {true, expression(PhysicalExprKind::Constant, *constant), *constant};
       return {};
     }
+    if (auto select = current.getDefiningOp<SelectOp>()) {
+      Bounds lhs = bound(select.getTrueValue(), depth + 1);
+      Bounds rhs = bound(select.getFalseValue(), depth + 1);
+      PhysicalExprAttr upper;
+      if (lhs.upper && rhs.upper)
+        upper = lhs.upper == rhs.upper ? lhs.upper :
+            expression(PhysicalExprKind::Maximum, 0, {lhs.upper, rhs.upper});
+      return {lhs.nonNegative && rhs.nonNegative, upper,
+              std::min(lhs.lower, rhs.lower)};
+    }
     auto binary = current.getDefiningOp<BinaryOp>();
     if (!binary)
       return numericBounds();
