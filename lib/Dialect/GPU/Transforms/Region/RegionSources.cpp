@@ -134,8 +134,7 @@ namespace {
 void specializePeriodicCoordinates(OpBuilder &builder, Location location,
                                    const SourcePlan &plan, PhysicalExprAttr extent,
                                    AxisMapAttr segmentMapping, IRMapping &mapping,
-                                   Value phase, Value period) {
-  if (!phase || !period) return;
+                                   const PeriodicSourceSlice &periodic) {
   auto unproject = [](Value value) {
     while (Operation *op = value.getDefiningOp()) {
       if (!isa<BroadcastOp, ReshapeOp, SplatOp>(op)) break;
@@ -145,7 +144,6 @@ void specializePeriodicCoordinates(OpBuilder &builder, Location location,
   };
   SmallVector<Value> pending{plan.source};
   llvm::SmallPtrSet<Operation *, 32> seen;
-  Value quotient;
   while (!pending.empty()) {
     Value value = pending.pop_back_val();
     Operation *op = value.getDefiningOp();
@@ -155,7 +153,7 @@ void specializePeriodicCoordinates(OpBuilder &builder, Location location,
     if (!binary || mapping.lookupOrNull(value) ||
         (binary.getOperatorKind() != BinaryOperator::FloorDivide &&
          binary.getOperatorKind() != BinaryOperator::Remainder) ||
-        !samePhysicalScalarExpression(unproject(binary.getRhs()), period)) continue;
+        !samePhysicalScalarExpression(unproject(binary.getRhs()), periodic.period)) continue;
     auto range = unproject(binary.getLhs()).getDefiningOp<MakeRangeOp>();
     auto type = dyn_cast<FragmentType>(value.getType());
     if (!range || !type || !type.getElementType().isIndex() ||
@@ -169,18 +167,11 @@ void specializePeriodicCoordinates(OpBuilder &builder, Location location,
     auto target = replaceSliceAxis(type, axis.fragmentAxis, extent, segmentMapping);
     Value replacement;
     if (binary.getOperatorKind() == BinaryOperator::FloorDivide) {
-      if (!quotient) {
-        Value one = builder.create<arith::ConstantIndexOp>(location, 1);
-        Value step = builder.create<BinaryOp>(location, builder.getIndexType(),
-                                             period, one, BinaryOperator::Maximum);
-        quotient = builder.create<BinaryOp>(location, builder.getIndexType(),
-                                            phase, step, BinaryOperator::FloorDivide);
-      }
-      replacement = builder.create<SplatOp>(location, target, quotient);
+      replacement = builder.create<SplatOp>(location, target, periodic.ordinal);
     } else {
       auto coordinates = projectPhysicalValueToSchema(builder, location, current, target);
       if (failed(coordinates)) continue;
-      Value base = builder.create<SplatOp>(location, target, phase);
+      Value base = builder.create<SplatOp>(location, target, periodic.start);
       replacement = builder.create<BinaryOp>(location, target, *coordinates, base,
                                               BinaryOperator::Subtract);
     }
@@ -200,7 +191,8 @@ LogicalResult buildSourceSlices(OpBuilder &builder, Location location,
                                 SmallVectorImpl<std::shared_ptr<IRMapping>>
                                     &sourceMappings,
                                 Operation *insertionAnchor, std::string &reason,
-                                Value traversalStop, Value periodStart, Value period) {
+                                Value traversalStop,
+                                std::optional<PeriodicSourceSlice> periodic) {
   SmallVector<Value> roots;
   for (const auto &plan : plans) roots.push_back(plan.source);
   ReplayPolicy reuse(insertionAnchor->getParentOfType<func::FuncOp>(), roots,
@@ -307,8 +299,9 @@ LogicalResult buildSourceSlices(OpBuilder &builder, Location location,
       reason = "source slice has no tail predicate";
       return failure();
     }
-    specializePeriodicCoordinates(builder, location, plan, sliceExtent,
-                                  segmentMapping, mapping, periodStart, period);
+    if (periodic)
+      specializePeriodicCoordinates(builder, location, plan, sliceExtent,
+                                    segmentMapping, mapping, *periodic);
     ReplayMaterializationOptions replayOptions;
     replayOptions.scope = PhysicalReplayScope::Coordinate;
     replayOptions.fragmentAxis = plan.sourceAxis;

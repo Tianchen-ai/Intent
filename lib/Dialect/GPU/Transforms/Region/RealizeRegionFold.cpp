@@ -209,11 +209,13 @@ LogicalResult realizeFold(RegionFoldOp fold, func::FuncOp kernel,
         scalarTail ? scalarTailExtent : sliceExtent;
     fullSegment |= scalarTail;
     Value traversalStop;
+    std::optional<PeriodicSourceSlice> sourcePeriod;
     if (periods) {
       offset = nested.create<BinaryOp>(nestedLocation, nested.getIndexType(),
           periodStart, offset, BinaryOperator::Add);
       traversalStop = nested.create<BinaryOp>(nestedLocation, nested.getIndexType(),
           periodStart, period, BinaryOperator::Add);
+      sourcePeriod = PeriodicSourceSlice{periodStart, periods.getInductionVar(), period};
     }
     if (failed(buildSourceSlices(nested, nestedLocation, plans, sliceTypes,
                                  offset,
@@ -221,7 +223,7 @@ LogicalResult realizeFold(RegionFoldOp fold, func::FuncOp kernel,
                                  fullSegment, slices,
                                  segmentTail, sliceMapping, sourceMappings,
                                  fold, failureReason, traversalStop,
-                                 periodStart, period)))
+                                 sourcePeriod)))
       return failure();
     for (AssumeInBoundsOp assumption : sourceAssumptions) {
       SmallVector<Value> assertedIndices;

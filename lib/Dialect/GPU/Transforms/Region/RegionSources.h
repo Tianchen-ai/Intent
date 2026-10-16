@@ -5,6 +5,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/IRMapping.h"
 #include <memory>
+#include <optional>
 
 namespace intent::gpu::region {
 
@@ -15,6 +16,14 @@ struct SourcePlan {
   bool hasLoads;
   llvm::SmallVector<MakeRangeOp> ranges;
   mlir::Attribute tailConstant;
+};
+
+// SSA values of the proved traversal, not a separate execution description.
+// Active members stay in [start, start + period), with start = ordinal * period.
+struct PeriodicSourceSlice {
+  mlir::Value start;
+  mlir::Value ordinal;
+  mlir::Value period;
 };
 
 PhysicalExprAttr parameterExtent(ParameterRefAttr parameter);
@@ -29,8 +38,6 @@ mlir::FailureOr<llvm::SmallVector<SourcePlan>>
 prepareRegionSources(mlir::ValueRange sources, unsigned sourceAxis,
                      mlir::Operation *insertionAnchor);
 
-// periodStart/period may be supplied only for a proved periodic traversal;
-// active members must stay within that period even in the final partial slice.
 mlir::LogicalResult buildSourceSlices(
     mlir::OpBuilder &builder, mlir::Location location,
     llvm::ArrayRef<SourcePlan> plans, llvm::ArrayRef<FragmentType> sliceTypes,
@@ -39,8 +46,8 @@ mlir::LogicalResult buildSourceSlices(
     mlir::Value &segmentTail, mlir::IRMapping &sliceMapping,
     llvm::SmallVectorImpl<std::shared_ptr<mlir::IRMapping>> &sourceMappings,
     mlir::Operation *insertionAnchor, std::string &reason,
-    mlir::Value traversalStop = {}, mlir::Value periodStart = {},
-    mlir::Value period = {});
+    mlir::Value traversalStop = {},
+    std::optional<PeriodicSourceSlice> periodic = std::nullopt);
 
 } // namespace intent::gpu::region
 

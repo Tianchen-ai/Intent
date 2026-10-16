@@ -168,6 +168,41 @@ Value materializeLoopOriginGuard(OpBuilder &builder, Location location,
                                        BinaryOperator::LogicalAnd);
 }
 
+Value materializeScaledOriginGuard(OpBuilder &builder, Location location,
+                                   Value origin, Value extent) {
+  auto add = origin.getDefiningOp<gpu::BinaryOp>();
+  if (!add || add.getOperatorKind() != BinaryOperator::Add) return {};
+  for (unsigned scaledSide : {0u, 1u}) {
+    auto multiply = add->getOperand(scaledSide).getDefiningOp<gpu::BinaryOp>();
+    if (!multiply || multiply.getOperatorKind() != BinaryOperator::Multiply)
+      continue;
+    auto inner = gpu::queryNonNegativeIndexUpperBound(add->getOperand(1 - scaledSide));
+    if (!inner || inner.getKind() != gpu::PhysicalExprKind::Constant) continue;
+    for (unsigned factorSide : {0u, 1u}) {
+      auto factor = gpu::IndexRelations().constant(multiply->getOperand(factorSide));
+      auto outer = gpu::queryNonNegativeIndexUpperBound(
+          multiply->getOperand(1 - factorSide));
+      if (!factor || *factor <= 0 || !outer) continue;
+      // For nonnegative x/y, x*p+y is in [0,E) without signed overflow
+      // whenever upper(x) <= floor((E-1-upper(y))/p). The guard's subtraction
+      // is representable even for E=0; it never evaluates an overflowing product.
+      Value one = builder.create<arith::ConstantIndexOp>(location, 1);
+      Value offset = builder.create<arith::ConstantIndexOp>(location, inner.getValue());
+      Value pitch = builder.create<arith::ConstantIndexOp>(location, *factor);
+      Value remaining = builder.create<gpu::BinaryOp>(
+          location, builder.getIndexType(), extent, one, BinaryOperator::Subtract);
+      remaining = builder.create<gpu::BinaryOp>(
+          location, builder.getIndexType(), remaining, offset, BinaryOperator::Subtract);
+      Value limit = builder.create<gpu::BinaryOp>(
+          location, builder.getIndexType(), remaining, pitch, BinaryOperator::FloorDivide);
+      Value bound = builder.create<gpu::PhysicalExprOp>(location, builder.getIndexType(), outer);
+      return builder.create<gpu::CompareOp>(
+          location, builder.getI1Type(), bound, limit, ComparePredicate::Le);
+    }
+  }
+  return {};
+}
+
 } // namespace
 
 FailureOr<Value> materializeTileOriginGuard(
@@ -246,6 +281,12 @@ FailureOr<Value> materializeTileOriginGuard(
       axisCondition = builder.create<gpu::BinaryOp>(
           owner->getLoc(), builder.getI1Type(), uniform, axisCondition,
           BinaryOperator::LogicalOr);
+    if (!axisPlan.modulus)
+      if (Value uniform = materializeScaledOriginGuard(
+              builder, owner->getLoc(), origin, extent))
+        axisCondition = builder.create<gpu::BinaryOp>(
+            owner->getLoc(), builder.getI1Type(), uniform, axisCondition,
+            BinaryOperator::LogicalOr);
     condition = condition
                     ? Value(builder.create<gpu::BinaryOp>(
                           owner->getLoc(), builder.getI1Type(), condition,
