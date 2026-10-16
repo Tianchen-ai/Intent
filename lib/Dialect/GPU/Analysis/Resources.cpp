@@ -470,13 +470,15 @@ PhysicalExprAttr sumPayloads(MLIRContext *context,
 }
 
 PhysicalExprAttr reductionRegisterFootprint(
-    Operation *reduction, const Liveness &liveness, ArrayRef<Value> orderedValues) {
+    Operation *reduction, const Liveness &liveness, ArrayRef<Value> orderedValues,
+    const llvm::DenseSet<Value> &matrixInputs, PhysicalExprAttr &matrixFootprint) {
   llvm::DenseSet<Value> payloads;
   if (!collectLivePayloads(reduction, liveness, payloads)) return {};
   PhysicalExprAttr registers;
   bool tunable = false;
   auto kernel = reduction->getParentOfType<func::FuncOp>();
-  auto append = [&](FragmentType fragment) {
+  matrixFootprint = wordConstant(reduction->getContext(), 0);
+  auto append = [&](FragmentType fragment, bool matrixInput) {
     AttrTypeWalker parameters;
     parameters.addWalk([&](PhysicalExprAttr expression) {
       if (expression.getKind() != PhysicalExprKind::Parameter) return;
@@ -491,21 +493,23 @@ PhysicalExprAttr reductionRegisterFootprint(
     });
     parameters.walk(fragment.getShape());
     auto footprint = fragmentRegisterFootprint(fragment);
+    if (matrixInput)
+      matrixFootprint = combineWords(matrixFootprint, footprint, PhysicalExprKind::Add);
     registers = !registers ? footprint : PhysicalExprAttr::get(
         reduction->getContext(), PhysicalExprKind::Add, 0,
         StringAttr::get(reduction->getContext(), ""),
         ArrayAttr::get(reduction->getContext(), {registers, footprint}));
   };
-  std::function<void(Type)> appendType = [&](Type type) {
-    if (auto fragment = dyn_cast<FragmentType>(type)) append(fragment);
+  std::function<void(Type, bool)> appendType = [&](Type type, bool matrixInput) {
+    if (auto fragment = dyn_cast<FragmentType>(type)) append(fragment, matrixInput);
     else if (auto record = dyn_cast<RecordType>(type))
       for (Attribute field : record.getFieldTypes())
-        appendType(cast<TypeAttr>(field).getValue());
+        appendType(cast<TypeAttr>(field).getValue(), matrixInput);
   };
   // Liveness sets are unordered. Preserve lexical value order in the published
   // expression, including distinct values that happen to have the same type.
   for (Value value : orderedValues) {
-    if (payloads.contains(value)) appendType(value.getType());
+    if (payloads.contains(value)) appendType(value.getType(), matrixInputs.contains(value));
   }
   // This projects existing traversal candidates. It does not reject a fixed
   // provider program on the basis of a nominal register-allocation estimate.
@@ -735,15 +739,36 @@ SmallVector<ConfigurationRequirementAttr> collectReductionRequirements(
   Builder builder(kernel.getContext());
   auto limit = PhysicalExprAttr::get(kernel.getContext(), PhysicalExprKind::Constant,
       capabilities.getRegistersPerUnit(), builder.getStringAttr(""), builder.getArrayAttr({}));
+  llvm::DenseSet<Value> matrixInputs;
+  if (capabilities.getMatrixUnits())
+    kernel.walk([&](ContractOp contract) {
+      auto element = contract.getLhs().getType().getElementType();
+      if ((!element.isF16() && !element.isBF16()) ||
+          contract.getRhs().getType().getElementType() != element) return;
+      collectPayloads(contract.getLhs(), matrixInputs);
+      collectPayloads(contract.getRhs(), matrixInputs);
+    });
+  auto sharedWords = wordConstant(kernel.getContext(),
+      std::max<int64_t>(0, capabilities.getMaxDynamicSharedMemoryPerBlock()) / 4);
   Liveness liveness(kernel);
   auto values = orderedKernelValues(kernel);
   for (Operation *reduction : reductions) {
-    auto footprint = reductionRegisterFootprint(reduction, liveness, values);
+    PhysicalExprAttr matrixFootprint;
+    auto footprint = reductionRegisterFootprint(reduction, liveness, values,
+                                               matrixInputs, matrixFootprint);
     if (!footprint) continue;
+    // Native MMA inputs can occupy shared storage. Charging every live matrix
+    // solely to registers prunes complete profiles before the provider gets to
+    // choose that storage. Only currently live native input payloads receive an
+    // allowance, bounded by this target's shared capacity. This remains a
+    // nominal pruning model; native compilation owns actual resource legality.
+    auto allowance = PhysicalExprAttr::get(kernel.getContext(), PhysicalExprKind::Minimum,
+        0, builder.getStringAttr(""), builder.getArrayAttr({matrixFootprint, sharedWords}));
+    auto available = combineWords(limit, allowance, PhysicalExprKind::Add);
     auto requirement = ConfigurationRequirementAttr::get(kernel.getContext(),
         ConfigurationRequirementKind::NominalBudget,
         ConfigurationRequirementMetric::FragmentRegisterWords,
-        ConfigurationRequirementPredicate::LessEqual, footprint, limit,
+        ConfigurationRequirementPredicate::LessEqual, footprint, available,
         ParameterRefAttr(),
         builder.getStringAttr("collective live payloads exceed the candidate register budget"));
     if (scope == ReductionRequirementScope::InvocationDependent &&
