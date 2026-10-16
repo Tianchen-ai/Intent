@@ -120,6 +120,48 @@ Value materializeTileModulus(OpBuilder &builder, Location location,
       location, cast<IntegerAttr>(cast<Attribute>(axis.modulus)).getInt());
 }
 
+Value materializeLoopOriginGuard(OpBuilder &builder, Location location,
+                                 const NativeTileAxisPlan &axis, Value extent) {
+  if (axis.scalarIndex || axis.modulus || axis.ranges.size() != 1 ||
+      axis.ranges.front().second != 1)
+    return {};
+  auto range = axis.ranges.front().first;
+  auto loop = completeAlignedTileLoop(range.getStart(), range.getExtent());
+  if (!loop || llvm::any_of(axis.offsets, [&](auto term) {
+        return !loop.isDefinedOutsideOfLoop(term.first);
+      }))
+    return {};
+  Value zero = builder.create<arith::ConstantIndexOp>(location, 0);
+  Value offset = zero;
+  for (auto [value, scale] : axis.offsets) {
+    if (scale != 1) {
+      Value coefficient = builder.create<arith::ConstantIndexOp>(location, scale);
+      value = builder.create<gpu::BinaryOp>(location, builder.getIndexType(),
+                                            value, coefficient,
+                                            BinaryOperator::Multiply);
+    }
+    offset = builder.create<gpu::BinaryOp>(location, builder.getIndexType(),
+                                          offset, value, BinaryOperator::Add);
+  }
+  // All iterations satisfy 0 <= iv < upper. Under this uniform condition,
+  // offset + iv is inside the view and cannot wrap. Clamp only the proof's
+  // subtraction operand so that evaluating the guard is safe even for negative
+  // offsets; the actual access and its original per-origin guard are unchanged.
+  Value nonnegative = builder.create<gpu::CompareOp>(
+      location, builder.getI1Type(), offset, zero, ComparePredicate::Ge);
+  Value positiveOffset = builder.create<gpu::BinaryOp>(
+      location, builder.getIndexType(), offset, zero, BinaryOperator::Maximum);
+  Value remaining = builder.create<gpu::BinaryOp>(
+      location, builder.getIndexType(), extent, positiveOffset,
+      BinaryOperator::Subtract);
+  Value contained = builder.create<gpu::CompareOp>(
+      location, builder.getI1Type(), loop.getUpperBound(), remaining,
+      ComparePredicate::Le);
+  return builder.create<gpu::BinaryOp>(location, builder.getI1Type(),
+                                       nonnegative, contained,
+                                       BinaryOperator::LogicalAnd);
+}
+
 } // namespace
 
 FailureOr<Value> materializeTileOriginGuard(
@@ -186,6 +228,11 @@ FailureOr<Value> materializeTileOriginGuard(
           owner->getLoc(), builder.getI1Type(), allOriginsInBounds, axisCondition,
           BinaryOperator::LogicalOr);
     }
+    if (Value uniform = materializeLoopOriginGuard(
+            builder, owner->getLoc(), axisPlan, extent))
+      axisCondition = builder.create<gpu::BinaryOp>(
+          owner->getLoc(), builder.getI1Type(), uniform, axisCondition,
+          BinaryOperator::LogicalOr);
     condition = condition
                     ? Value(builder.create<gpu::BinaryOp>(
                           owner->getLoc(), builder.getI1Type(), condition,

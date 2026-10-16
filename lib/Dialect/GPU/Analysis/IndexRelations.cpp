@@ -221,14 +221,41 @@ Value IndexRelations::roundedDownSource(Value value) const {
 }
 
 bool IndexRelations::powerOfTwo(Value value) const {
-  if (auto parameter = queryParameter(value)) {
+  auto parameterPowerOfTwo = [](ParameterAttr parameter) {
     if (hasLateBoundDomain(parameter))
       return false;
     auto candidates = parameter.getCandidates().asArrayRef();
     return !candidates.empty() && llvm::all_of(candidates, [](int64_t candidate) {
       return candidate > 0 && llvm::isPowerOf2_64(candidate);
     });
-  }
+  };
+  if (auto parameter = queryParameter(value))
+    return parameterPowerOfTwo(parameter);
+  // Effective tile extents are often min(configured tile, coverage capacity).
+  // Min/max selects one operand, so positive power-of-two domains stay closed
+  // under both operations. Do not replace a coverage parameter by its bound:
+  // the binding rounds that bound up to a member of the declared domain.
+  auto kernel = kernelOf(value);
+  std::function<bool(PhysicalExprAttr, unsigned)> prove =
+      [&](PhysicalExprAttr expression, unsigned depth) {
+        if (!expression || depth >= 32)
+          return false;
+        if (expression.getKind() == PhysicalExprKind::Parameter) {
+          auto declaration = queryParameterBySymbol(
+              kernel, expression.getParameterReference().getName());
+          return succeeded(declaration) && parameterPowerOfTwo(*declaration);
+        }
+        if (expression.getKind() == PhysicalExprKind::Minimum ||
+            expression.getKind() == PhysicalExprKind::Maximum)
+          return expression.getOperands().size() == 2 &&
+              llvm::all_of(expression.getOperands(), [&](Attribute operand) {
+                return prove(cast<PhysicalExprAttr>(operand), depth + 1);
+              });
+        auto literal = constant(expression, kernel);
+        return literal && *literal > 0 && llvm::isPowerOf2_64(*literal);
+      };
+  if (kernel && prove(queryLaunchExpression(value), 0))
+    return true;
   auto literal = constant(value);
   return literal && *literal > 0 && llvm::isPowerOf2_64(*literal);
 }
@@ -325,21 +352,23 @@ bool IndexRelations::multipleOf(Value value, Value divisor) const {
   if (auto literal = constant(divisor))
     return multipleOf(value, *literal);
   auto parameter = queryParameter(divisor);
-  if (!parameter || hasLateBoundDomain(parameter))
+  if (parameter && hasLateBoundDomain(parameter))
     return false;
-  auto candidates = parameter.getCandidates().asArrayRef();
-  if (candidates.empty())
+  auto candidates = parameter ? parameter.getCandidates().asArrayRef()
+                              : ArrayRef<int64_t>();
+  bool binaryModulus = powerOfTwo(divisor);
+  if (candidates.empty() && !binaryModulus)
     return false;
   std::function<bool(Value, unsigned)> prove = [&](Value current, unsigned depth) {
     if (!current || !current.getType().isIndex() || depth >= 32)
       return false;
     if (same(current, divisor) || constant(current) == 0)
       return true;
-    if (llvm::all_of(candidates, [&](int64_t candidate) {
+    if (!candidates.empty() && llvm::all_of(candidates, [&](int64_t candidate) {
           return multipleOf(current, candidate);
         }))
       return true;
-    if (!powerOfTwo(divisor))
+    if (!binaryModulus)
       return false;
     auto aligned = [&](Value operand) { return prove(operand, depth + 1); };
     if (auto coordinate = current.getDefiningOp<WorksetCoordinateOp>())

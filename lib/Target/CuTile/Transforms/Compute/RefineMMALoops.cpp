@@ -1,4 +1,5 @@
 #include "Intent/Dialect/GPU/IR/Program.h"
+#include "Intent/Dialect/GPU/Analysis/IndexRelations.h"
 #include "Intent/Dialect/GPU/Analysis/PhysicalProgram.h"
 #include "Intent/Dialect/GPU/Transforms/Value/ValueRelations.h"
 #include "Intent/Target/CuTile/Transforms/Compute/MMALoops.h"
@@ -30,6 +31,8 @@ bool isSpecializationExpression(Value value) {
 }
 
 bool positiveExtent(Value value) {
+  if (value.getType().isIndex())
+    return gpu::IndexRelations().positive(value);
   if (auto constant = value.getDefiningOp<arith::ConstantOp>()) {
     auto integer = dyn_cast<IntegerAttr>(constant.getValue());
     return integer && integer.getInt() > 0;
