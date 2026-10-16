@@ -2,6 +2,7 @@
 #define INTENT_GPU_TRANSFORMS_REGIONPREDICATES_H
 
 #include "RegionSources.h"
+#include <optional>
 
 namespace intent::gpu::region {
 
@@ -22,9 +23,13 @@ mlir::Value physicalTailMembershipPredicate(
     llvm::ArrayRef<SourcePlan> plans);
 bool scanTailIsIdentity(RegionScanOp scan, llvm::ArrayRef<SourcePlan> plans,
                         mlir::ValueRange identities);
-mlir::Value periodicPredicatePeriod(RegionFoldOp fold,
-                                   llvm::ArrayRef<SourcePlan> plans,
-                                   MakeRangeOp master);
+struct PeriodicPredicateTraversal {
+  mlir::Value period;
+  int64_t repetitions;
+};
+std::optional<PeriodicPredicateTraversal>
+periodicPredicateTraversal(RegionFoldOp fold,
+                           llvm::ArrayRef<SourcePlan> plans, MakeRangeOp master);
 mlir::FailureOr<PredicatePartition>
 predicatePartition(mlir::OpBuilder &builder, RegionFoldOp fold,
                    llvm::ArrayRef<SourcePlan> plans, MakeRangeOp master,

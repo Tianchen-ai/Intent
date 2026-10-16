@@ -108,8 +108,9 @@ LogicalResult realizeFold(RegionFoldOp fold, func::FuncOp kernel,
   std::optional<SummaryEmptinessPlan> emptiness;
   if (memberPredicate)
     emptiness = summaryEmptinessPlan(fold, identities, memberPredicate);
-  Value period = !emptiness && !segment.getDeclaration().isDeferred()
-      ? periodicPredicatePeriod(fold, plans, master) : Value();
+  auto periodic = !emptiness && !segment.getDeclaration().isDeferred()
+      ? periodicPredicateTraversal(fold, plans, master) : std::nullopt;
+  Value period = periodic ? periodic->period : Value();
   FailureOr<PredicatePartition> partition = predicatePartition(
       builder, fold, plans, master, period ? period : stop, identities,
       segment.getResult(), period);
@@ -146,15 +147,42 @@ LogicalResult realizeFold(RegionFoldOp fold, func::FuncOp kernel,
   bool needsSummaryMapping = online || !additive.empty();
 
   scf::ForOp periods;
+  Value periodStart;
   if (period) {
     // The source extent is a positive integer multiple of the modulo period.
     // Empty domains execute no iteration, including a zero-sized period.
     Value one = builder.create<arith::ConstantIndexOp>(location, 1);
     Value step = builder.create<BinaryOp>(location, builder.getIndexType(),
                                          period, one, BinaryOperator::Maximum);
-    periods = builder.create<scf::ForOp>(location, zero, stop, step, identities,
+    // Count periods rather than stepping an index by a dynamic dimension.
+    // Division plus a remainder test avoids the overflow of stop + step - 1.
+    // The resulting unit-step loop exposes constant repetitions after shape
+    // specialization while preserving empty domains and traversal order.
+    Value quotient = builder.create<BinaryOp>(location, builder.getIndexType(),
+                                              stop, step, BinaryOperator::FloorDivide);
+    Value remainder = builder.create<BinaryOp>(location, builder.getIndexType(),
+                                               stop, step, BinaryOperator::Remainder);
+    Value partial = builder.create<CompareOp>(location, builder.getI1Type(),
+                                               remainder, zero, ComparePredicate::Gt);
+    Value tail = builder.create<SelectOp>(location, builder.getIndexType(),
+                                          partial, one, zero);
+    Value count = builder.create<BinaryOp>(location, builder.getIndexType(),
+                                           quotient, tail, BinaryOperator::Add);
+    count = builder.create<BinaryOp>(location, builder.getIndexType(),
+                                      count, zero, BinaryOperator::Maximum);
+    // With a nonnegative period, even a wrapped positive logical endpoint
+    // cannot contain more periods than the source's positive multiplier.
+    // Keep this proven bound in IR for native induction-width analysis.
+    Value repetitions = builder.create<arith::ConstantIndexOp>(
+        location, periodic->repetitions);
+    count = builder.create<BinaryOp>(location, builder.getIndexType(),
+                                      count, repetitions, BinaryOperator::Minimum);
+    periods = builder.create<scf::ForOp>(location, zero, count, one, identities,
                                         [](OpBuilder &, Location, Value, ValueRange) {});
     builder.setInsertionPointToStart(periods.getBody());
+    periodStart = builder.create<BinaryOp>(location, builder.getIndexType(),
+                                           periods.getInductionVar(), step,
+                                           BinaryOperator::Multiply);
     stop = period;
   }
 
@@ -183,16 +211,17 @@ LogicalResult realizeFold(RegionFoldOp fold, func::FuncOp kernel,
     Value traversalStop;
     if (periods) {
       offset = nested.create<BinaryOp>(nestedLocation, nested.getIndexType(),
-          periods.getInductionVar(), offset, BinaryOperator::Add);
+          periodStart, offset, BinaryOperator::Add);
       traversalStop = nested.create<BinaryOp>(nestedLocation, nested.getIndexType(),
-          periods.getInductionVar(), period, BinaryOperator::Add);
+          periodStart, period, BinaryOperator::Add);
     }
     if (failed(buildSourceSlices(nested, nestedLocation, plans, sliceTypes,
                                  offset,
                                  physicalSegment, physicalExtent,
                                  fullSegment, slices,
                                  segmentTail, sliceMapping, sourceMappings,
-                                 fold, failureReason, traversalStop)))
+                                 fold, failureReason, traversalStop,
+                                 periodStart, period)))
       return failure();
     for (AssumeInBoundsOp assumption : sourceAssumptions) {
       SmallVector<Value> assertedIndices;

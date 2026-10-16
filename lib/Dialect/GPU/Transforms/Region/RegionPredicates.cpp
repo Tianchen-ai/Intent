@@ -1,6 +1,7 @@
 #include "RegionPredicates.h"
 #include "RegionSummary.h"
 #include "Intent/Analysis/RegionSemantics.h"
+#include "Intent/Dialect/GPU/Analysis/IndexRelations.h"
 #include "Intent/Dialect/GPU/Analysis/UniformValues.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/Matchers.h"
@@ -173,8 +174,9 @@ bool scanTailIsIdentity(RegionScanOp scan, ArrayRef<SourcePlan> plans,
   return true;
 }
 
-Value periodicPredicatePeriod(RegionFoldOp fold, ArrayRef<SourcePlan> plans,
-                              MakeRangeOp master) {
+std::optional<PeriodicPredicateTraversal>
+periodicPredicateTraversal(RegionFoldOp fold, ArrayRef<SourcePlan> plans,
+                           MakeRangeOp master) {
   APInt start;
   if (!isUnitStepRange(master) ||
       !samePhysicalScalarExpression(master.getStart(), master.getLogicalStart()) ||
@@ -187,6 +189,7 @@ Value periodicPredicatePeriod(RegionFoldOp fold, ArrayRef<SourcePlan> plans,
   auto sources = structured.getSummarizeSources();
   auto captures = structured.getSummarizeCaptures();
   Value period;
+  int64_t repetitionCount = 0;
   for (CompareOp compare : fold.getSummarize().front().getOps<CompareOp>()) {
     if (!uniformElementType(compare.getLhs().getType()).isIntOrIndex() ||
         !uniformElementType(compare.getRhs().getType()).isIntOrIndex()) continue;
@@ -204,18 +207,21 @@ Value periodicPredicatePeriod(RegionFoldOp fold, ArrayRef<SourcePlan> plans,
       Value divisor = stripHelperForwarding(modulo.getRhs());
       if (!range || !divisor || !divisor.getType().isIndex() ||
           !samePhysicalScalarExpression(range.getStart(), master.getStart()) ||
-          !sameLogicalRange(range, master)) continue;
+          !sameLogicalRange(range, master) ||
+          !IndexRelations().nonnegative(divisor)) continue;
       Value count;
       if (samePhysicalScalarExpression(total.getLhs(), divisor)) count = total.getRhs();
       if (samePhysicalScalarExpression(total.getRhs(), divisor)) count = total.getLhs();
       APInt repetitions;
       if (!count || !matchPattern(count, m_ConstantInt(&repetitions)) ||
-          !repetitions.isStrictlyPositive()) continue;
+          !repetitions.isStrictlyPositive() || !repetitions.isSignedIntN(64)) continue;
       if (period && !samePhysicalScalarExpression(period, divisor)) return {};
       period = divisor;
+      repetitionCount = repetitions.getSExtValue();
     }
   }
-  return period;
+  if (!period) return std::nullopt;
+  return PeriodicPredicateTraversal{period, repetitionCount};
 }
 
 FailureOr<PredicatePartition>

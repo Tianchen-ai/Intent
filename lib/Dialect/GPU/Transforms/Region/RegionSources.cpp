@@ -2,11 +2,13 @@
 #include "../Value/SourceReplay.h"
 #include "../Value/ReplayPolicy.h"
 #include "Intent/Dialect/GPU/Analysis/UniformValues.h"
+#include "Intent/Dialect/GPU/Analysis/ValueSchema.h"
 #include "Intent/Dialect/GPU/IR/Program.h"
 #include "Intent/Dialect/GPU/Transforms/Storage/Storage.h"
 #include "Intent/Dialect/GPU/Transforms/Control/Traversal.h"
 #include "Intent/Dialect/GPU/Transforms/Value/ValueMaterialization.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "llvm/ADT/SmallPtrSet.h"
 
 using namespace mlir;
 
@@ -123,6 +125,71 @@ FailureOr<SmallVector<SourcePlan>> prepareRegionSources(
   return plans;
 }
 
+namespace {
+
+// The periodic traversal proves phase <= active member < phase + period and
+// phase is a multiple of period. Specialize the source replay, not its logical
+// range: the existing slice tail still masks every inactive member and access.
+// A quotient becomes uniform, and a remainder becomes a contiguous coordinate.
+void specializePeriodicCoordinates(OpBuilder &builder, Location location,
+                                   const SourcePlan &plan, PhysicalExprAttr extent,
+                                   AxisMapAttr segmentMapping, IRMapping &mapping,
+                                   Value phase, Value period) {
+  if (!phase || !period) return;
+  auto unproject = [](Value value) {
+    while (Operation *op = value.getDefiningOp()) {
+      if (!isa<BroadcastOp, ReshapeOp, SplatOp>(op)) break;
+      value = op->getOperand(0);
+    }
+    return value;
+  };
+  SmallVector<Value> pending{plan.source};
+  llvm::SmallPtrSet<Operation *, 32> seen;
+  Value quotient;
+  while (!pending.empty()) {
+    Value value = pending.pop_back_val();
+    Operation *op = value.getDefiningOp();
+    if (!op || !seen.insert(op).second) continue;
+    llvm::append_range(pending, op->getOperands());
+    auto binary = dyn_cast<BinaryOp>(op);
+    if (!binary || mapping.lookupOrNull(value) ||
+        (binary.getOperatorKind() != BinaryOperator::FloorDivide &&
+         binary.getOperatorKind() != BinaryOperator::Remainder) ||
+        !samePhysicalScalarExpression(unproject(binary.getRhs()), period)) continue;
+    auto range = unproject(binary.getLhs()).getDefiningOp<MakeRangeOp>();
+    auto type = dyn_cast<FragmentType>(value.getType());
+    if (!range || !type || !type.getElementType().isIndex() ||
+        !llvm::is_contained(plan.ranges, range) || !isUnitStepRange(range) ||
+        !isLiteralZeroProjection(range.getStart()) ||
+        !isLiteralZeroProjection(range.getLogicalStart())) continue;
+    auto source = cast<AxisMapAttr>(range.getResult().getType().getAxisMaps()[0]);
+    auto axis = queryFragmentAxis(type, sourceAxisIdentity(range), source.getDimensionId());
+    Value current = mapping.lookupOrNull(range.getResult());
+    if (!axis.isExact() || !current) continue;
+    auto target = replaceSliceAxis(type, axis.fragmentAxis, extent, segmentMapping);
+    Value replacement;
+    if (binary.getOperatorKind() == BinaryOperator::FloorDivide) {
+      if (!quotient) {
+        Value one = builder.create<arith::ConstantIndexOp>(location, 1);
+        Value step = builder.create<BinaryOp>(location, builder.getIndexType(),
+                                             period, one, BinaryOperator::Maximum);
+        quotient = builder.create<BinaryOp>(location, builder.getIndexType(),
+                                            phase, step, BinaryOperator::FloorDivide);
+      }
+      replacement = builder.create<SplatOp>(location, target, quotient);
+    } else {
+      auto coordinates = projectPhysicalValueToSchema(builder, location, current, target);
+      if (failed(coordinates)) continue;
+      Value base = builder.create<SplatOp>(location, target, phase);
+      replacement = builder.create<BinaryOp>(location, target, *coordinates, base,
+                                              BinaryOperator::Subtract);
+    }
+    mapping.map(value, replacement);
+  }
+}
+
+} // namespace
+
 LogicalResult buildSourceSlices(OpBuilder &builder, Location location,
                                 ArrayRef<SourcePlan> plans,
                                 ArrayRef<FragmentType> sliceTypes, Value offset,
@@ -133,7 +200,7 @@ LogicalResult buildSourceSlices(OpBuilder &builder, Location location,
                                 SmallVectorImpl<std::shared_ptr<IRMapping>>
                                     &sourceMappings,
                                 Operation *insertionAnchor, std::string &reason,
-                                Value traversalStop) {
+                                Value traversalStop, Value periodStart, Value period) {
   SmallVector<Value> roots;
   for (const auto &plan : plans) roots.push_back(plan.source);
   ReplayPolicy reuse(insertionAnchor->getParentOfType<func::FuncOp>(), roots,
@@ -240,6 +307,8 @@ LogicalResult buildSourceSlices(OpBuilder &builder, Location location,
       reason = "source slice has no tail predicate";
       return failure();
     }
+    specializePeriodicCoordinates(builder, location, plan, sliceExtent,
+                                  segmentMapping, mapping, periodStart, period);
     ReplayMaterializationOptions replayOptions;
     replayOptions.scope = PhysicalReplayScope::Coordinate;
     replayOptions.fragmentAxis = plan.sourceAxis;
