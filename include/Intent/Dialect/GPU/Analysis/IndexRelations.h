@@ -33,6 +33,12 @@ public:
   bool coordinateInBounds(mlir::Value coordinate, PhysicalExprAttr extent) const;
   bool hasExactRangeEndpoint(mlir::Value coordinate, mlir::Value limit) const;
 
+  // A decoded tile coordinate times the same positive extent used in its
+  // ceil-divided mapping starts inside the logical dimension, including tails.
+  // This proves the origin only, not that every lane of the tile is in bounds.
+  bool mappedTileOrigin(mlir::Value origin, mlir::Value tile,
+                        int64_t dimension) const;
+
   // Return the dividend of a proved nonnegative round-down expression.
   mlir::Value roundedDownSource(mlir::Value value) const;
   bool powerOfTwo(mlir::Value value) const;

@@ -187,58 +187,6 @@ bool rangeStartsInsideLogicalSubregion(gpu::MakeRangeOp range) {
          check(add.getRhs(), add.getLhs());
 }
 
-bool isBlockedWorksetOrigin(Value value, Value block, int64_t dimension) {
-  auto multiply = value.getDefiningOp<gpu::BinaryOp>();
-  if (!multiply || multiply.getOperatorKind() != BinaryOperator::Multiply)
-    return false;
-  Value coordinate;
-  if (multiply.getLhs() == block)
-    coordinate = multiply.getRhs();
-  else if (multiply.getRhs() == block)
-    coordinate = multiply.getLhs();
-  else
-    return false;
-  auto mapping = gpu::queryDecodedCoordinate(coordinate);
-  if (!mapping || mapping->axis >= mapping->extents.size())
-    return false;
-  auto expression = gpu::queryLaunchExpression(mapping->extents[mapping->axis]);
-  auto parameter = block.getDefiningOp<gpu::ParameterOp>();
-  if (!expression || !parameter || expression.getOperands().size() != 2)
-    return false;
-  auto isBlock = [&](gpu::PhysicalExprAttr operand) {
-    return operand.getKind() == gpu::PhysicalExprKind::Parameter &&
-           operand.getParameterReference() == parameter.getReference();
-  };
-  auto isDimension = [&](gpu::PhysicalExprAttr operand) {
-    return operand.getKind() == gpu::PhysicalExprKind::Dimension &&
-           operand.getValue() == dimension;
-  };
-  auto numerator = cast<gpu::PhysicalExprAttr>(expression.getOperands()[0]);
-  auto denominator = cast<gpu::PhysicalExprAttr>(expression.getOperands()[1]);
-  if (!isBlock(denominator)) return false;
-  if (expression.getKind() == gpu::PhysicalExprKind::CeilDiv)
-    return isDimension(numerator);
-  // Ownership formation spells the runtime tile count as (D + (P - 1)) // P.
-  // Read that current SSA relation after execution-group lowering, rather than
-  // attaching the old launch schema to a pure coordinate calculation.
-  if (expression.getKind() != gpu::PhysicalExprKind::FloorDiv ||
-      numerator.getKind() != gpu::PhysicalExprKind::Add ||
-      numerator.getOperands().size() != 2)
-    return false;
-  auto adjusted = [&](gpu::PhysicalExprAttr logical,
-                      gpu::PhysicalExprAttr padding) {
-    return isDimension(logical) &&
-           padding.getKind() == gpu::PhysicalExprKind::Subtract &&
-           padding.getOperands().size() == 2 &&
-           isBlock(cast<gpu::PhysicalExprAttr>(padding.getOperands()[0])) &&
-           gpu::constantPhysicalExpression(
-               cast<gpu::PhysicalExprAttr>(padding.getOperands()[1])) == 1;
-  };
-  auto lhs = cast<gpu::PhysicalExprAttr>(numerator.getOperands()[0]);
-  auto rhs = cast<gpu::PhysicalExprAttr>(numerator.getOperands()[1]);
-  return adjusted(lhs, rhs) || adjusted(rhs, lhs);
-}
-
 std::optional<int64_t> constantTileOrigin(gpu::MakeRangeOp range,
                                           ArrayRef<Value> offsets) {
   std::optional<int64_t> result = gpu::IndexRelations().constant(range.getStart());
@@ -287,7 +235,7 @@ bool rangeOriginInView(gpu::MakeRangeOp range, ArrayRef<Value> offsets,
       valueIsDimension(range.getLogicalStop(), dimension, kernel)) {
     Value start = stripIndexIdentities(range.getStart());
     if (isProvably(range.getLogicalStart(), 0) &&
-        isBlockedWorksetOrigin(start, range.getExtent(), dimension))
+        gpu::IndexRelations().mappedTileOrigin(start, range.getExtent(), dimension))
       return true;
     if (auto coordinate = start.getDefiningOp<gpu::WorksetCoordinateOp>())
       if (coordinate.getDimensionId() == static_cast<uint64_t>(dimension))

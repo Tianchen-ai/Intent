@@ -9,6 +9,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "llvm/Support/MathExtras.h"
 #include "IndexBounds.h"
+#include "ScalarExpressions.h"
 
 using namespace mlir;
 
@@ -83,6 +84,54 @@ bool IndexRelations::same(Value lhs, Value rhs) const {
     return true;
   auto left = queryLaunchExpression(lhs), right = queryLaunchExpression(rhs);
   return left && right && left == right;
+}
+
+bool IndexRelations::mappedTileOrigin(Value origin, Value tile,
+                                      int64_t dimension) const {
+  if (!origin || !origin.getType().isIndex() || !tile || !positive(tile))
+    return false;
+  auto width = queryLaunchExpression(tile);
+  if (!width) return false;
+  Value coordinate = detail::stripScalarIdentity(origin);
+  if (constant(tile) != 1) {
+    auto product = coordinate.getDefiningOp<BinaryOp>();
+    if (!product || product.getOperatorKind() != BinaryOperator::Multiply)
+      return false;
+    if (same(product.getLhs(), tile)) coordinate = product.getRhs();
+    else if (same(product.getRhs(), tile)) coordinate = product.getLhs();
+    else return false;
+  }
+  auto mapping = queryDecodedCoordinate(detail::stripScalarIdentity(coordinate));
+  if (!mapping || mapping->axis >= mapping->extents.size()) return false;
+  auto count = queryLaunchExpression(mapping->extents[mapping->axis]);
+  auto isDimension = [&](PhysicalExprAttr expression) {
+    return expression.getKind() == PhysicalExprKind::Dimension &&
+           expression.getValue() == dimension;
+  };
+  if (!count) return false;
+  if (constant(tile) == 1 && isDimension(count)) return true;
+  if (count.getOperands().size() != 2 || count.getOperands()[1] != width)
+    return false;
+  auto numerator = cast<PhysicalExprAttr>(count.getOperands()[0]);
+  if (count.getKind() == PhysicalExprKind::CeilDiv)
+    return isDimension(numerator);
+  // Ownership can also spell cdiv(D, tile) as (D + (tile - 1)) // tile.
+  // Match the relation, not whether tile happens to be a ParameterOp: effective
+  // extents and constants have exactly the same origin bound.
+  if (count.getKind() != PhysicalExprKind::FloorDiv ||
+      numerator.getKind() != PhysicalExprKind::Add ||
+      numerator.getOperands().size() != 2)
+    return false;
+  auto adjusted = [&](Attribute logical, Attribute padding) {
+    auto extra = cast<PhysicalExprAttr>(padding);
+    return isDimension(cast<PhysicalExprAttr>(logical)) &&
+           extra.getKind() == PhysicalExprKind::Subtract &&
+           extra.getOperands().size() == 2 && extra.getOperands()[0] == width &&
+           constant(cast<PhysicalExprAttr>(extra.getOperands()[1]),
+                    origin.getParentRegion()->getParentOfType<func::FuncOp>()) == 1;
+  };
+  return adjusted(numerator.getOperands()[0], numerator.getOperands()[1]) ||
+         adjusted(numerator.getOperands()[1], numerator.getOperands()[0]);
 }
 
 bool IndexRelations::nonnegative(Value value) const {

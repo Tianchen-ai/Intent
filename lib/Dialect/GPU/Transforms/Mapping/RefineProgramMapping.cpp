@@ -1,4 +1,5 @@
 #include "Intent/Dialect/GPU/Analysis/PhysicalParameters.h"
+#include "Intent/Dialect/GPU/Analysis/IndexRelations.h"
 #include "Intent/Dialect/GPU/Analysis/PhysicalProgram.h"
 #include "Intent/Dialect/GPU/Analysis/ValueSchema.h"
 #include "Intent/Dialect/GPU/Transforms/Passes.h"
@@ -23,49 +24,16 @@ PhysicalExprAttr parameterExpression(ParameterRefAttr reference) {
       reference, ArrayAttr::get(reference.getContext(), {}));
 }
 
-void preserveBoundedTileOrigins(func::FuncOp kernel, ExecutionGroupOp mapping) {
+void preserveBoundedTileOrigins(func::FuncOp kernel) {
   kernel.walk([&](MakeRangeOp range) {
     if (range->hasAttr(sourceSubregionAttr) || !isUnitStepRange(range))
       return;
-    auto start = range.getLogicalStart().getDefiningOp<arith::ConstantOp>();
-    auto startValue =
-        start ? dyn_cast<IntegerAttr>(start.getValue()) : IntegerAttr();
-    auto block = range.getExtent().getDefiningOp<ParameterOp>();
     FailureOr<int64_t> dimension = queryRangeDimension(range);
-    if (!startValue || startValue.getInt() != 0 || !block || failed(dimension) ||
-        llvm::any_of(block.getDeclaration().getCandidates().asArrayRef(),
-                     [](int64_t value) { return value <= 0; }))
+    IndexRelations relations;
+    if (relations.constant(range.getLogicalStart()) != 0 || failed(dimension))
       return;
-    for (auto [axis, coordinate] : llvm::enumerate(mapping.getCoordinates())) {
-      Attribute launchExtent = mapping.getLaunchExtents()[axis];
-      FailureOr<uint64_t> mappedDimension = blockedDimension(launchExtent);
-      auto extent = dyn_cast<PhysicalExprAttr>(launchExtent);
-      if (failed(mappedDimension) ||
-          *mappedDimension != static_cast<uint64_t>(*dimension) ||
-          !extent || extent.getOperands().size() != 2)
-        continue;
-      auto divisor = dyn_cast<PhysicalExprAttr>(extent.getOperands()[1]);
-      if (!divisor || divisor.getKind() !=
-                          PhysicalExprKind::Parameter ||
-          divisor.getParameterReference().getName() != block.getDeclaration().getName())
-        continue;
-      for (Operation *user : coordinate.getUsers()) {
-        auto product = dyn_cast<BinaryOp>(user);
-        if (!product || product.getOperatorKind() != BinaryOperator::Multiply)
-          continue;
-        bool scaledCoordinate =
-            (product.getLhs() == coordinate &&
-             product.getRhs() == range.getExtent()) ||
-            (product.getRhs() == coordinate &&
-             product.getLhs() == range.getExtent());
-        if (scaledCoordinate &&
-            samePhysicalScalarExpression(range.getStart(), product.getResult())) {
-          range->setAttr(programBoundedOriginAttr,
-                         UnitAttr::get(kernel.getContext()));
-          break;
-        }
-      }
-    }
+    if (relations.mappedTileOrigin(range.getStart(), range.getExtent(), *dimension))
+      range->setAttr(programBoundedOriginAttr, UnitAttr::get(kernel.getContext()));
   });
 }
 
@@ -97,7 +65,7 @@ LogicalResult realizeGroupedContractionMapping(
 
   // The permutation preserves the rectangular tile domain, including its last
   // partial tile. Keep exact origin bounds before replacing coordinate uses.
-  preserveBoundedTileOrigins(kernel, mapping);
+  preserveBoundedTileOrigins(kernel);
 
   OpBuilder parameterBuilder(&kernel.getBody().front(),
                              kernel.getBody().front().begin());
