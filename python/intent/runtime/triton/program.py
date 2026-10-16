@@ -80,6 +80,7 @@ def _descriptor_allocator(size, alignment, stream):
 class TritonProgram:
     def __init__(self, interface, namespace: dict, facts, target: dict) -> None:
         import triton
+        from triton.testing import do_bench_cudagraph
 
         self.interface = interface
         self.configurations = interface.configuration_space
@@ -111,8 +112,11 @@ class TritonProgram:
         options = {}
         if facts.descriptor_choice is not None or self.configurations.requirements:
             options["prune_configs_by"] = {"early_config_prune": self._prune}
+        # Keep host-side validation out of configuration ranking. The existing
+        # state-restoration hooks still execute in every captured trial.
         kernel = triton.autotune(configs=configs, key=facts.autotune_key,
                                 pre_hook=self.hooks.before, post_hook=self.hooks.after,
+                                do_bench=do_bench_cudagraph,
                                 **options)(kernel)
         self.kernel = kernel
 
