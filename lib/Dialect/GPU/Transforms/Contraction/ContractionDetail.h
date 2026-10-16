@@ -69,6 +69,7 @@ bool reductionUsesOwnershipExtent(Operation *origin, Value operand,
                                   ArrayRef<int64_t> reductionAxes);
 
 void fuseContractionAdds(func::FuncOp kernel);
+LogicalResult normalizeMaskedProducts(ModuleOp module);
 
 bool hasFragmentSchema(ContractOp contract);
 

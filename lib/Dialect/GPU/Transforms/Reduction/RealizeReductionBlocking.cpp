@@ -59,7 +59,7 @@ LogicalResult realizeReduce(ReduceOp reduce, func::FuncOp kernel) {
   };
   if (reduce.getAxes().size() != 1 || reduce.getSources().size() == 0)
     return unhandled("requires one reduction axis and at least one source");
-  if (hasSelectedSegmentExtent(reduce, kernel))
+  if (hasSelectedFragmentExtent(reduce, kernel))
     return success();
   // A full-coverage fragment grows every component with the runtime axis.
   // Its padding still needs the reduction identity after physicalization.
@@ -366,7 +366,7 @@ LogicalResult realizeReductionBlocking(ModuleOp module) {
         changed = true;
         break;
       }
-      if (hasSelectedSegmentExtent(reduce, kernel))
+      if (hasSelectedFragmentExtent(reduce, kernel))
         continue;
       FailureOr<bool> padded = realizeStaticPaddingReduce(reduce, kernel);
       if (failed(padded))

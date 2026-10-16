@@ -60,28 +60,8 @@ void coRealizeAdditiveRegion(OpBuilder &builder, Location location,
     DominanceInfo dominance(contract->getParentOfType<func::FuncOp>());
     OpBuilder::InsertionGuard insertion(builder);
     builder.setInsertionPoint(contract);
-    IRMapping carryMapping;
-    std::function<FailureOr<Value>(Value)> projectCarry =
-        [&](Value value) -> FailureOr<Value> {
-      if (dominance.dominates(value, contract))
-        return value;
-      if (Value mapped = carryMapping.lookupOrNull(value))
-        return mapped;
-      Operation *definition = value.getDefiningOp();
-      if (!definition ||
-          !isa<ExtractOp, MakeRecordOp, BroadcastOp, ReshapeOp, TransposeOp,
-               SplatOp, CastOp, arith::ConstantOp>(definition))
-        return failure();
-      for (Value operand : definition->getOperands()) {
-        FailureOr<Value> mapped = projectCarry(operand);
-        if (failed(mapped))
-          return failure();
-        carryMapping.map(operand, *mapped);
-      }
-      builder.clone(*definition, carryMapping);
-      return carryMapping.lookup(value);
-    };
-    FailureOr<Value> leftCarry = projectCarry(add.getLhs());
+    FailureOr<Value> leftCarry =
+        materializeDominatingProjection(add.getLhs(), contract, dominance);
     if (failed(leftCarry))
       continue;
     FailureOr<Value> carry = projectPhysicalValueToSchema(

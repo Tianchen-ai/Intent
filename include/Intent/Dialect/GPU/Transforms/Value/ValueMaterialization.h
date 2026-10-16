@@ -6,6 +6,10 @@
 #include "Intent/Dialect/GPU/Transforms/Value/ValueRelations.h"
 #include "mlir/IR/IRMapping.h"
 
+namespace mlir {
+class DominanceInfo;
+}
+
 namespace intent::gpu {
 
 // Rewrites consume current coordinate/replay facts; they do not choose tiling.
@@ -21,6 +25,10 @@ struct ReplayMaterializationOptions {
 
 void foldExactConstantDivisions(mlir::func::FuncOp kernel);
 void foldScalarIntegerValues(mlir::func::FuncOp kernel);
+// Recreate only pure aggregate/shape projections whose leaves are available at
+// before. Validation precedes mutation; loads and arithmetic are not replayed.
+mlir::FailureOr<mlir::Value> materializeDominatingProjection(
+    mlir::Value value, mlir::Operation *before, mlir::DominanceInfo &dominance);
 mlir::FailureOr<mlir::Value>
 materializeNonOverlappingView(mlir::func::FuncOp kernel, mlir::Value resource);
 mlir::FailureOr<mlir::Value>

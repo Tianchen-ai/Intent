@@ -72,7 +72,7 @@ parameterForExtent(mlir::func::FuncOp kernel, PhysicalExprAttr extent);
 
 bool hasNonUnitFreeAxis(ReduceOp reduce);
 
-bool hasSelectedSegmentExtent(ReduceOp reduce, mlir::func::FuncOp kernel);
+bool hasSelectedFragmentExtent(ReduceOp reduce, mlir::func::FuncOp kernel);
 
 mlir::FailureOr<mlir::Value>
 dimensionArgument(mlir::func::FuncOp kernel, int64_t dimension);

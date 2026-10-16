@@ -22,11 +22,14 @@ mlir::Value physicalTailMembershipPredicate(
     llvm::ArrayRef<SourcePlan> plans);
 bool scanTailIsIdentity(RegionScanOp scan, llvm::ArrayRef<SourcePlan> plans,
                         mlir::ValueRange identities);
+mlir::Value periodicPredicatePeriod(RegionFoldOp fold,
+                                   llvm::ArrayRef<SourcePlan> plans,
+                                   MakeRangeOp master);
 mlir::FailureOr<PredicatePartition>
 predicatePartition(mlir::OpBuilder &builder, RegionFoldOp fold,
                    llvm::ArrayRef<SourcePlan> plans, MakeRangeOp master,
                    mlir::Value masterExtent, mlir::ValueRange identities,
-                   mlir::Value segment);
+                   mlir::Value segment, mlir::Value period = {});
 
 } // namespace intent::gpu::region
 #endif

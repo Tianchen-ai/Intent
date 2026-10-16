@@ -3,6 +3,7 @@
 #include "Intent/Analysis/RegionSemantics.h"
 #include "Intent/Dialect/GPU/Analysis/UniformValues.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/IR/Matchers.h"
 
 using namespace mlir;
 
@@ -172,10 +173,56 @@ bool scanTailIsIdentity(RegionScanOp scan, ArrayRef<SourcePlan> plans,
   return true;
 }
 
+Value periodicPredicatePeriod(RegionFoldOp fold, ArrayRef<SourcePlan> plans,
+                              MakeRangeOp master) {
+  APInt start;
+  if (!isUnitStepRange(master) ||
+      !samePhysicalScalarExpression(master.getStart(), master.getLogicalStart()) ||
+      !matchPattern(master.getLogicalStart(), m_ConstantInt(&start)) || !start.isZero())
+    return {};
+  Value end = stripHelperForwarding(master.getLogicalStop());
+  auto total = end ? end.getDefiningOp<BinaryOp>() : BinaryOp();
+  if (!total || total.getOperatorKind() != BinaryOperator::Multiply) return {};
+  auto structured = cast<StructuredOpInterface>(fold.getOperation());
+  auto sources = structured.getSummarizeSources();
+  auto captures = structured.getSummarizeCaptures();
+  Value period;
+  for (CompareOp compare : fold.getSummarize().front().getOps<CompareOp>()) {
+    if (!uniformElementType(compare.getLhs().getType()).isIntOrIndex() ||
+        !uniformElementType(compare.getRhs().getType()).isIntOrIndex()) continue;
+    for (unsigned side : {0u, 1u}) {
+      auto source = rootHelperArgument(compare->getOperand(side));
+      auto capture = rootHelperArgument(compare->getOperand(1 - side));
+      auto found = llvm::find(sources, source);
+      if (!source || !capture || found == sources.end() ||
+          !llvm::is_contained(captures, capture)) continue;
+      Value coordinate = stripHelperForwarding(plans[std::distance(sources.begin(), found)].source);
+      auto modulo = coordinate ? coordinate.getDefiningOp<BinaryOp>() : BinaryOp();
+      if (!modulo || modulo.getOperatorKind() != BinaryOperator::Remainder) continue;
+      Value input = stripHelperForwarding(modulo.getLhs());
+      auto range = input ? input.getDefiningOp<MakeRangeOp>() : MakeRangeOp();
+      Value divisor = stripHelperForwarding(modulo.getRhs());
+      if (!range || !divisor || !divisor.getType().isIndex() ||
+          !samePhysicalScalarExpression(range.getStart(), master.getStart()) ||
+          !sameLogicalRange(range, master)) continue;
+      Value count;
+      if (samePhysicalScalarExpression(total.getLhs(), divisor)) count = total.getRhs();
+      if (samePhysicalScalarExpression(total.getRhs(), divisor)) count = total.getLhs();
+      APInt repetitions;
+      if (!count || !matchPattern(count, m_ConstantInt(&repetitions)) ||
+          !repetitions.isStrictlyPositive()) continue;
+      if (period && !samePhysicalScalarExpression(period, divisor)) return {};
+      period = divisor;
+    }
+  }
+  return period;
+}
+
 FailureOr<PredicatePartition>
 predicatePartition(OpBuilder &builder, RegionFoldOp fold,
                    ArrayRef<SourcePlan> plans, MakeRangeOp master,
-                   Value masterExtent, ValueRange identities, Value segment) {
+                   Value masterExtent, ValueRange identities, Value segment,
+                   Value period) {
   auto yield = dyn_cast<YieldOp>(fold.getSummarize().front().getTerminator());
   if (!yield || yield.getValues().size() != identities.size())
     return failure();
@@ -205,12 +252,19 @@ predicatePartition(OpBuilder &builder, RegionFoldOp fold,
     if (sourceIndex >= plans.size()) return std::nullopt;
     Value sourceCoordinate = stripHelperForwarding(plans[sourceIndex].source);
     Value captureCoordinate = stripHelperForwarding(captures[captureIndex]);
-    if (!sourceCoordinate.getDefiningOp<MakeRangeOp>() ||
+    if (period) {
+      auto modulo = sourceCoordinate ? sourceCoordinate.getDefiningOp<BinaryOp>() : BinaryOp();
+      if (!modulo || modulo.getOperatorKind() != BinaryOperator::Remainder ||
+          !samePhysicalScalarExpression(stripHelperForwarding(modulo.getRhs()), period))
+        return std::nullopt;
+      sourceCoordinate = stripHelperForwarding(modulo.getLhs());
+    }
+    if (!sourceCoordinate || !captureCoordinate ||
+        !sourceCoordinate.getDefiningOp<MakeRangeOp>() ||
         !captureCoordinate.getDefiningOp<MakeRangeOp>())
       return std::nullopt;
     MakeRangeOp captureRange = uniqueRange(captures[captureIndex]);
-    MakeRangeOp comparedSource =
-        uniqueRange(plans[sourceIndex].source);
+    MakeRangeOp comparedSource = uniqueRange(sourceCoordinate);
     auto comparedType = comparedSource
                             ? dyn_cast<FragmentType>(
                                   comparedSource.getResult().getType())

@@ -300,6 +300,8 @@ void populateTransformations(OpPassManager &manager,
   manager.addPass(createOnlineReductionsPass());
   manager.addPass(createRegionFoldsPass());
   manager.addPass(createRegionScansPass());
+  // Predicate specialization exposes unmasked multiply-reductions.
+  manager.addPass(createNormalizeStructuredSourcesPass());
   manager.addPass(createReductionsPass());
   manager.addPass(createContractionsPass());
   manager.addPass(createAccessCompositionPass());

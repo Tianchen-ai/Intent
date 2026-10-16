@@ -467,8 +467,20 @@ bool hasNonUnitFreeAxis(ReduceOp reduce) {
   return false;
 }
 
-bool hasSelectedSegmentExtent(ReduceOp reduce, func::FuncOp kernel) {
-  ParameterAttr segment;
+bool hasSelectedFragmentExtent(ReduceOp reduce, func::FuncOp kernel) {
+  PhysicalProgramAnalysis analysis(kernel);
+  std::function<bool(PhysicalExprAttr)> selected = [&](PhysicalExprAttr extent) {
+    if (extent.getKind() == PhysicalExprKind::Minimum)
+      return llvm::any_of(extent.getOperands(), [&](Attribute child) {
+        return selected(cast<PhysicalExprAttr>(child));
+      });
+    auto parameter = parameterForExtent(kernel, extent);
+    if (failed(parameter) || parameter->isDeferred()) return false;
+    auto role = parameter->getRole();
+    return role == ParameterRole::ScanChunk ||
+           role == ParameterRole::OwnershipM || role == ParameterRole::OwnershipN;
+  };
+  PhysicalExprAttr common;
   for (Value source : reduce.getSources()) {
     auto fragment = dyn_cast<FragmentType>(source.getType());
     int64_t axis = reduce.getAxes().empty() ? -1 : reduce.getAxes().front();
@@ -476,16 +488,15 @@ bool hasSelectedSegmentExtent(ReduceOp reduce, func::FuncOp kernel) {
         axis >= static_cast<int64_t>(fragment.getShape().size()))
       return false;
     auto extent = cast<PhysicalExprAttr>(fragment.getShape()[axis]);
-    FailureOr<ParameterAttr> parameter = parameterForExtent(kernel, extent);
-    if (failed(parameter) ||
-        parameter->getRole() !=
-            ParameterRole::ScanChunk)
+    auto fact = analysis.axisRealization(source, axis);
+    if (!selected(extent) || !fact.isExact() || !fact.physicalized ||
+        fact.constructionScalarSeed)
       return false;
-    if (segment && segment != *parameter)
+    if (common && common != extent)
       return false;
-    segment = *parameter;
+    common = extent;
   }
-  return static_cast<bool>(segment);
+  return static_cast<bool>(common);
 }
 
 FailureOr<Value> dimensionArgument(func::FuncOp kernel, int64_t dimension) {

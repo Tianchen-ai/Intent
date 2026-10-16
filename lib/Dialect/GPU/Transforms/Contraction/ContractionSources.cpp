@@ -52,10 +52,12 @@ FailureOr<bool> rewriteContractionSnapshot(
 }
 
 void fuseContractionAdds(func::FuncOp kernel) {
+  DominanceInfo dominance(kernel);
   SmallVector<BinaryOp> additions;
   kernel.walk([&](BinaryOp binary) {
     if (binary.getOperatorKind() == BinaryOperator::Add &&
-        !binary.getStrictRounding())
+        !binary.getStrictRounding() && !binary.getApproximate() &&
+        !binary.getFlushToZero())
       additions.push_back(binary);
   });
   for (BinaryOp add : additions) {
@@ -75,14 +77,20 @@ void fuseContractionAdds(func::FuncOp kernel) {
         projections.push_back(projection);
         current = projection->getOperand(0);
       }
-      OpBuilder builder(add);
+      Value additive = add->getOperand(1 - operand);
+      // Keep the producer's schedule when its carry is already available.
+      // Sinking every dot to the add extends both matrix inputs across the
+      // intervening summary computation and can introduce register spills.
+      auto early = materializeDominatingProjection(additive, contract, dominance);
+      OpBuilder builder(succeeded(early) ? contract.getOperation() : add.getOperation());
+      if (succeeded(early)) additive = *early;
       FailureOr<Value> carry = projectPhysicalValueToSchema(
-          builder, add.getLoc(), add->getOperand(1 - operand),
+          builder, add.getLoc(), additive,
           contract.getResult().getType());
       if (failed(carry))
         continue;
-      // Clone only the pure contraction at its consumer. Inputs already
-      // dominate this point; memory reads and other effects are not moved.
+      // Clone only the pure contraction. Inputs dominate the selected point;
+      // memory reads and other effects are not moved.
       auto fused = cast<ContractOp>(builder.clone(*contract));
       fused.getAccumulatorMutable().assign(*carry);
       IRMapping mapping;
@@ -636,7 +644,9 @@ LogicalResult fuseMultiplyReductions(ModuleOp module) {
       continue;
     auto combine = queryBinaryCombine(reduce.getCombine());
     if (!combine || combine->kind() != BinaryOperator::Add ||
-        combine->operation.getStrictRounding())
+        combine->operation.getStrictRounding() ||
+        combine->operation.getApproximate() ||
+        combine->operation.getFlushToZero())
       continue;
 
     Value product = reduce.getSources().front();
@@ -653,6 +663,7 @@ LogicalResult fuseMultiplyReductions(ModuleOp module) {
     if (!multiply || !product.hasOneUse() || !productType ||
         multiply.getOperatorKind() != BinaryOperator::Multiply ||
         multiply.getStrictRounding() ||
+        multiply.getApproximate() || multiply.getFlushToZero() ||
         productType.getElementType() != resultType.getElementType())
       continue;
     auto unbroadcast = [&](Value value) {
@@ -715,6 +726,28 @@ LogicalResult fuseMultiplyReductions(ModuleOp module) {
       continue;
     if (!lhsProjection.isExact() || !rhsProjection.isExact())
       continue;
+    auto widenedInput = [](Value value) -> Value {
+      auto conversion = value.getDefiningOp<CastOp>();
+      if (!conversion)
+        return {};
+      auto source = dyn_cast<FragmentType>(conversion.getValue().getType());
+      auto target = dyn_cast<FragmentType>(value.getType());
+      if (!source || !target || !target.getElementType().isF32() ||
+          (!source.getElementType().isF16() && !source.getElementType().isBF16()))
+        return {};
+      return conversion.getValue();
+    };
+    Value narrowLhs = widenedInput(lhs), narrowRhs = widenedInput(rhs);
+    if (narrowLhs && narrowRhs &&
+        cast<FragmentType>(narrowLhs.getType()).getElementType() ==
+            cast<FragmentType>(narrowRhs.getType()).getElementType()) {
+      // Operand promotions are lossless; retain f32 accumulation. A cast of
+      // the product itself remains the rounding boundary checked above.
+      lhs = narrowLhs;
+      rhs = narrowRhs;
+      lhsType = cast<FragmentType>(lhs.getType());
+      rhsType = cast<FragmentType>(rhs.getType());
+    }
     PhysicalProgramAnalysis analysis(*kernel);
     auto isLogicalUnitAxis = [&](Value value, unsigned axis) {
       auto type = cast<FragmentType>(value.getType());
@@ -886,7 +919,8 @@ static LogicalResult normalizeContractionSourcesImpl(ModuleOp module) {
   FailureOr<func::FuncOp> kernel = getPhysicalKernel(module);
   if (failed(kernel))
     return failure();
-  if (failed(fuseMultiplyReductions(module)) ||
+  if (failed(normalizeMaskedProducts(module)) ||
+      failed(fuseMultiplyReductions(module)) ||
       failed(realizeAccessComposition(module)))
     return failure();
   orientContractionOutputs(*kernel);

@@ -34,6 +34,16 @@ def attention_backward_delta(
 
 
 @intent.fn
+def masked_gradient_product(weights, operands, valid):
+    # Excluded pairs do not contribute, even when their operands are non-finite.
+    products = (
+        I.cast(weights, I.f32)[:, :, None]
+        * I.cast(operands, I.f32)[None, :, :]
+    )
+    return I.reduce.sum(I.mask(products, valid=valid[:, :, None], fill=0.0), axis=1)
+
+
+@intent.fn
 def summarize_key_value_gradients(
     queries, grad_outputs, lse, delta, query_coordinates,
     keys, values, key_coordinates, scale, causal,
@@ -44,21 +54,27 @@ def summarize_key_value_gradients(
         approximate=True, flush_to_zero=True,
     )
     if causal:
+        valid = key_coordinates[:, None] <= query_coordinates[None, :]
         probability = I.mask(
             probability,
-            valid=key_coordinates[:, None] <= query_coordinates[None, :],
+            valid=valid,
             fill=0.0,
         )
-    grad_values = I.matmul(
-        I.cast(probability, I.f16), grad_outputs, acc_dtype=I.f32
-    )
+        grad_values = masked_gradient_product(
+            I.cast(probability, I.f16), grad_outputs, valid
+        )
+    else:
+        grad_values = I.matmul(
+            I.cast(probability, I.f16), grad_outputs, acc_dtype=I.f32
+        )
     grad_probability = I.matmul(
         values, grad_outputs, transpose_rhs=True, acc_dtype=I.f32
     )
     grad_scores = probability * (grad_probability - delta[None, :])
-    grad_keys = I.matmul(
-        I.cast(grad_scores, I.f16), queries, acc_dtype=I.f32
-    )
+    if causal:
+        grad_keys = masked_gradient_product(I.cast(grad_scores, I.f16), queries, valid)
+    else:
+        grad_keys = I.matmul(I.cast(grad_scores, I.f16), queries, acc_dtype=I.f32)
     return I.record(grad_k=grad_keys, grad_v=grad_values)
 
 
@@ -131,15 +147,18 @@ def summarize_query_gradients(
         approximate=True, flush_to_zero=True,
     )
     if causal:
+        valid = query_coordinates[:, None] >= key_coordinates[None, :]
         probability = I.mask(
             probability,
-            valid=query_coordinates[:, None] >= key_coordinates[None, :],
+            valid=valid,
             fill=0.0,
         )
     grad_probability = I.matmul(
         grad_outputs, values, transpose_rhs=True, acc_dtype=I.f32
     )
     grad_scores = probability * (grad_probability - delta[:, None])
+    if causal:
+        return masked_gradient_product(I.cast(grad_scores, I.f16), keys, valid)
     return I.matmul(I.cast(grad_scores, I.f16), keys, acc_dtype=I.f32)
 
 

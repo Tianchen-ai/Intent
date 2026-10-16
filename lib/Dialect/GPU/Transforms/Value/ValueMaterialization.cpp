@@ -21,6 +21,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/AttrTypeSubElements.h"
+#include "mlir/IR/Dominance.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Transforms/RegionUtils.h"
@@ -218,6 +219,29 @@ FailureOr<Value> materializeNonOverlappingView(func::FuncOp kernel,
                                       separate, BinaryOperator::LogicalAnd);
   }
   return valid;
+}
+
+FailureOr<Value> materializeDominatingProjection(Value value, Operation *before,
+                                               DominanceInfo &dominance) {
+  SmallVector<Operation *> projections;
+  llvm::SmallPtrSet<Operation *, 16> visited;
+  std::function<bool(Value)> available = [&](Value current) {
+    if (dominance.dominates(current, before)) return true;
+    Operation *op = current.getDefiningOp();
+    if (!op || !isa<ExtractOp, MakeRecordOp, BroadcastOp, ReshapeOp,
+                    TransposeOp, SplatOp, CastOp, arith::ConstantOp>(op))
+      return false;
+    if (!visited.insert(op).second) return true;
+    for (Value operand : op->getOperands())
+      if (!available(operand)) return false;
+    projections.push_back(op);
+    return true;
+  };
+  if (!available(value)) return failure();
+  OpBuilder builder(before);
+  IRMapping mapping;
+  for (Operation *op : projections) builder.clone(*op, mapping);
+  return mapping.lookupOrDefault(value);
 }
 
 FailureOr<Value> materializeScalarConstant(OpBuilder &builder,

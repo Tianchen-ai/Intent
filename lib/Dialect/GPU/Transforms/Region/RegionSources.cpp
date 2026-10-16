@@ -132,7 +132,8 @@ LogicalResult buildSourceSlices(OpBuilder &builder, Location location,
                                 Value &segmentTail, IRMapping &sliceMapping,
                                 SmallVectorImpl<std::shared_ptr<IRMapping>>
                                     &sourceMappings,
-                                Operation *insertionAnchor, std::string &reason) {
+                                Operation *insertionAnchor, std::string &reason,
+                                Value traversalStop) {
   SmallVector<Value> roots;
   for (const auto &plan : plans) roots.push_back(plan.source);
   ReplayPolicy reuse(insertionAnchor->getParentOfType<func::FuncOp>(), roots,
@@ -207,8 +208,15 @@ LogicalResult buildSourceSlices(OpBuilder &builder, Location location,
         valid = builder.create<SplatOp>(location, predicateType(blockedRange),
                                         truth);
       } else {
+        Value end = range.getLogicalStop();
+        if (traversalStop) {
+          Value selectedEnd = builder.create<BinaryOp>(location, builder.getIndexType(),
+              range.getStart(), traversalStop, BinaryOperator::Add);
+          end = builder.create<BinaryOp>(location, builder.getIndexType(),
+                                        end, selectedEnd, BinaryOperator::Minimum);
+        }
         Value stopFragment = builder.create<BroadcastOp>(
-            location, blockedRange, range.getLogicalStop());
+            location, blockedRange, end);
         auto validComparison = builder.create<CompareOp>(
             location, predicateType(blockedRange), value, stopFragment,
             ComparePredicate::Lt);

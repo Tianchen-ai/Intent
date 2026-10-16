@@ -95,10 +95,6 @@ LogicalResult realizeFold(RegionFoldOp fold, func::FuncOp kernel,
       fold.getIdentities()
           .end());
   ValueRange captures = fold.getCaptures();
-  FailureOr<PredicatePartition> partition = predicatePartition(
-      builder, fold, plans, master, stop, identities, segment.getResult());
-  bool specializePredicatePrefix =
-      succeeded(partition) && partition->prefixSpecializable;
   Value memberPredicate =
       physicalTailMembershipPredicate(fold, identities, fold.getSegment(), plans);
   Value scalarTailStep;
@@ -112,6 +108,14 @@ LogicalResult realizeFold(RegionFoldOp fold, func::FuncOp kernel,
   std::optional<SummaryEmptinessPlan> emptiness;
   if (memberPredicate)
     emptiness = summaryEmptinessPlan(fold, identities, memberPredicate);
+  Value period = !emptiness && !segment.getDeclaration().isDeferred()
+      ? periodicPredicatePeriod(fold, plans, master) : Value();
+  FailureOr<PredicatePartition> partition = predicatePartition(
+      builder, fold, plans, master, period ? period : stop, identities,
+      segment.getResult(), period);
+  if (failed(partition)) period = {};
+  bool specializePredicatePrefix =
+      succeeded(partition) && partition->prefixSpecializable;
   std::optional<OnlineRegionPlan> online = onlineRegionPlan(fold, emptiness);
   // A nonempty normalized-exponential summary contains exp(0), hence its
   // accumulated mass cannot be zero. Nonfinite scores produce NaN mass, for
@@ -141,6 +145,19 @@ LogicalResult realizeFold(RegionFoldOp fold, func::FuncOp kernel,
       additiveRegionContracts(fold, identities);
   bool needsSummaryMapping = online || !additive.empty();
 
+  scf::ForOp periods;
+  if (period) {
+    // The source extent is a positive integer multiple of the modulo period.
+    // Empty domains execute no iteration, including a zero-sized period.
+    Value one = builder.create<arith::ConstantIndexOp>(location, 1);
+    Value step = builder.create<BinaryOp>(location, builder.getIndexType(),
+                                         period, one, BinaryOperator::Maximum);
+    periods = builder.create<scf::ForOp>(location, zero, stop, step, identities,
+                                        [](OpBuilder &, Location, Value, ValueRange) {});
+    builder.setInsertionPointToStart(periods.getBody());
+    stop = period;
+  }
+
   bool bodyFailed = false;
   std::string failureReason;
   auto emitSummary = [&](OpBuilder &nested, Location nestedLocation,
@@ -163,12 +180,19 @@ LogicalResult realizeFold(RegionFoldOp fold, func::FuncOp kernel,
     PhysicalExprAttr physicalExtent =
         scalarTail ? scalarTailExtent : sliceExtent;
     fullSegment |= scalarTail;
+    Value traversalStop;
+    if (periods) {
+      offset = nested.create<BinaryOp>(nestedLocation, nested.getIndexType(),
+          periods.getInductionVar(), offset, BinaryOperator::Add);
+      traversalStop = nested.create<BinaryOp>(nestedLocation, nested.getIndexType(),
+          periods.getInductionVar(), period, BinaryOperator::Add);
+    }
     if (failed(buildSourceSlices(nested, nestedLocation, plans, sliceTypes,
                                  offset,
                                  physicalSegment, physicalExtent,
                                  fullSegment, slices,
                                  segmentTail, sliceMapping, sourceMappings,
-                                 fold, failureReason)))
+                                 fold, failureReason, traversalStop)))
       return failure();
     for (AssumeInBoundsOp assumption : sourceAssumptions) {
       SmallVector<Value> assertedIndices;
@@ -298,6 +322,11 @@ LogicalResult realizeFold(RegionFoldOp fold, func::FuncOp kernel,
   };
   auto finishResults = [&](ValueRange physicalResults) -> LogicalResult {
     SmallVector<Value> results(physicalResults.begin(), physicalResults.end());
+    if (periods) {
+      builder.create<scf::YieldOp>(location, results);
+      builder.setInsertionPointAfter(periods);
+      results.assign(periods.getResults().begin(), periods.getResults().end());
+    }
     if (massRepresentsValidity) {
       FailureOr<Value> restored = restoreOnlineRecord(
           builder, location, results.front(), *emptiness,
@@ -506,6 +535,8 @@ LogicalResult realizeFold(RegionFoldOp fold, func::FuncOp kernel,
   }
 
   SmallVector<Value> current(identities.begin(), identities.end());
+  if (periods)
+    current.assign(periods.getRegionIterArgs().begin(), periods.getRegionIterArgs().end());
   if (massRepresentsValidity) {
     FailureOr<Value> payload = stripOptionalRecord(
         builder, location, current.front(), *emptiness);

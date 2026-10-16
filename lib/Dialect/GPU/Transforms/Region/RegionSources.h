@@ -36,7 +36,8 @@ mlir::LogicalResult buildSourceSlices(
     bool fullSegment, llvm::SmallVectorImpl<mlir::Value> &slices,
     mlir::Value &segmentTail, mlir::IRMapping &sliceMapping,
     llvm::SmallVectorImpl<std::shared_ptr<mlir::IRMapping>> &sourceMappings,
-    mlir::Operation *insertionAnchor, std::string &reason);
+    mlir::Operation *insertionAnchor, std::string &reason,
+    mlir::Value traversalStop = {});
 
 } // namespace intent::gpu::region
 

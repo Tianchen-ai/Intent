@@ -72,7 +72,17 @@ FailureOr<bool> decomposeFullCoverageMultiAxisReduce(
   FailureOr<ParameterAttr> coverage =
       outerExtent ? fullCoverageParameter(kernel, outerExtent)
                   : FailureOr<ParameterAttr>(failure());
-  if (succeeded(coverage)) {
+  if (hasSelectedFragmentExtent(reduce, kernel)) {
+    // An owned tile or region slice is a complete physical reduce operand.
+    // Decompose its axes locally. Replaying the logical source range here
+    // would inspect other segments and repeat a whole-domain traversal for
+    // every slice, instead of reducing the current SSA fragment.
+    PhysicalProgramAnalysis analysis(kernel);
+    if (!llvm::all_of(reduce.getSources(), [&](Value source) {
+          auto fact = analysis.axisRealization(source, outerAxis);
+          return fact.isExact() && fact.physicalized;
+        })) return false;
+  } else if (succeeded(coverage)) {
     auto dimension = coverage->getBinding().getDimension();
     if (!dimension || failed(bindFullCoverageDimension(
             kernel, dimension.getInt(), parameterValue(kernel, *coverage))))
@@ -184,7 +194,8 @@ LogicalResult decomposeMultiAxisReduce(ReduceOp reduce, func::FuncOp kernel) {
         "multi-axis reduction decomposition requires at least one source");
 
   unsigned outerAxis = static_cast<unsigned>(reduce.getAxes().front());
-  FailureOr<bool> fullCoverage = shouldTileReductionSources(reduce, kernel)
+  FailureOr<bool> fullCoverage = !hasSelectedFragmentExtent(reduce, kernel) &&
+                                       shouldTileReductionSources(reduce, kernel)
       ? FailureOr<bool>(false)
       : decomposeFullCoverageMultiAxisReduce(reduce, kernel, outerAxis);
   if (failed(fullCoverage))
