@@ -7,6 +7,7 @@
 #include "Intent/Dialect/GPU/Transforms/Passes.h"
 #include "Intent/Target/CuTile/IR/CuTileOps.h"
 
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -309,6 +310,32 @@ void boundNativeReductionWidth(MMAOp mma) {
   mma.erase();
 }
 
+bool matrixEpilogue(Value value, scf::ForOp traversal,
+                    llvm::SmallDenseSet<Value, 16> &visited) {
+  if (!visited.insert(value).second)
+    return false;
+  auto result = dyn_cast<OpResult>(value);
+  Operation *operation = value.getDefiningOp();
+  if (!result || !traversal->isAncestor(operation))
+    return false;
+  if (isa<MMAOp, ScaledMMAOp>(operation))
+    return true;
+  if (auto loop = dyn_cast<scf::ForOp>(operation))
+    return matrixEpilogue(cast<scf::YieldOp>(loop.getBody()->getTerminator())
+                             .getOperand(result.getResultNumber()), traversal, visited);
+  if (auto conditional = dyn_cast<scf::IfOp>(operation))
+    return matrixEpilogue(conditional.thenYield().getOperand(result.getResultNumber()),
+                           traversal, visited) ||
+           matrixEpilogue(conditional.elseYield().getOperand(result.getResultNumber()),
+                           traversal, visited);
+  if (!isa<gpu::CastOp, gpu::ReshapeOp, gpu::TransposeOp, gpu::BroadcastOp,
+           gpu::UnaryOp, gpu::BinaryOp, gpu::SelectOp>(operation))
+    return false;
+  return llvm::any_of(operation->getOperands(), [&](Value operand) {
+    return matrixEpilogue(operand, traversal, visited);
+  });
+}
+
 } // namespace
 
 LogicalResult refineMMALoops(ModuleOp module) {
@@ -375,6 +402,16 @@ LogicalResult refineMMALoops(ModuleOp module) {
   physicalKernel->walk([&](MMAOp mma) { mmas.push_back(mma); });
   for (MMAOp mma : mmas)
     boundNativeReductionWidth(mma);
+  physicalKernel->walk([&](TileStoreOp store) {
+    auto traversal = store->getParentOfType<scf::ForOp>();
+    llvm::SmallDenseSet<Value, 16> visited;
+    // A recurring matrix epilogue can overlap its store with the next tile's
+    // supply. Keep this native scheduling hint in IR; cuTile owns the actual
+    // async store, shared-memory lifetime and synchronization.
+    if (traversal && matrixEpilogue(store.getValue(), traversal, visited))
+      store.setLatencyAttr(
+          IntegerAttr::get(IntegerType::get(module.getContext(), 32), 3));
+  });
   gpu::eraseDeadPhysicalValues(*physicalKernel);
   return success();
 }

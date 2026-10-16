@@ -108,7 +108,7 @@ LogicalResult formNativeStores(func::FuncOp kernel,
       }
       auto tile = nested.create<TileStoreOp>(
           store.getLoc(), access.getAccessResource(), *allowTMA, indices->values,
-          nativeValue);
+          nativeValue, IntegerAttr{});
       createdOperations.push_back(tile);
     };
     auto emitBoundedNativeStore = [&](OpBuilder &nested) {

@@ -45,7 +45,8 @@ def IntentCuTile_TileStoreOp : IntentCuTile_Op<"tile_store", [
   let arguments = (ins IntentGPU_ViewValue:$resource,
                        IntentGPU_ScalarValue:$allow_tma,
                        Variadic<AnyTypeOf<[Index, I32]>>:$tile_indices,
-                       IntentGPU_FragmentValue:$value);
+                       IntentGPU_FragmentValue:$value,
+                       OptionalAttr<I32Attr>:$latency);
   let hasVerifier = 1;
 }
 

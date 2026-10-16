@@ -509,10 +509,13 @@ private:
       }
 
   void emitTyped(TileStoreOp store) {
-      line("ct.store(" + valueString(store.getResource()) + ", index=" +
+      std::string call = "ct.store(" + valueString(store.getResource()) + ", index=" +
            tuple(store.getTileIndices()) + ", tile=" +
            valueString(store.getValue()) + ", allow_tma=" +
-           valueString(store.getAllowTma()) + ")");
+           valueString(store.getAllowTma());
+      if (auto latency = store.getLatencyAttr())
+        call += ", latency=" + std::to_string(latency.getInt());
+      line(call + ")");
       }
 
   void emitTyped(ScalarStoreOp store) {

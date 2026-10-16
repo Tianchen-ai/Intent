@@ -328,6 +328,9 @@ void TileLoadOp::getEffects(
 
 LogicalResult TileStoreOp::verify() {
   auto view = getResource().getType();
+  if (auto latency = getLatencyAttr(); latency &&
+      (latency.getInt() < 1 || latency.getInt() > 10))
+    return emitOpError("store latency must be in the native 1..10 domain");
   if (!getAllowTma().getType().isInteger(1))
     return emitOpError("allow_tma must be a compile-time i1 access decision");
   if (getResource().getDefiningOp<ArrayViewOp>())
