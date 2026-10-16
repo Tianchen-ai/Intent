@@ -175,7 +175,7 @@ LogicalResult normalize(ReduceOp reduce) {
   Value weights = b.create<SelectOp>(loc, left, *predicate, lhs, *zero);
   // Masking an operand is equivalent to masking its product only when the
   // other operand is finite. Speculate the pure MMA without moving memory
-  // effects. The finite arm returns it; the other arm overwrites every cell.
+  // effects; only the finite arm consumes its result.
   Value dot = b.create<ContractOp>(loc, result, weights, rhs, reduce.getIdentities().front(),
       ArrayRef<int64_t>{1}, ArrayRef<int64_t>{0}, ArrayRef<int64_t>{}, ArrayRef<int64_t>{});
   Value truth = b.create<arith::ConstantOp>(loc, b.getBoolAttr(true));
@@ -199,9 +199,11 @@ LogicalResult normalize(ReduceOp reduce) {
       b, loc, (*rows).getResult(), withElement(eraseFragmentAxis(result, 1), b.getIndexType()));
   if (failed(columnCoordinates) || failed(rowCoordinates))
     return reduce.emitOpError("masked product has no physical output projection");
-  // Overwrite every output cell of the speculative result. The exceptional
-  // path needs only a reduction vector, not an additional matrix of products.
-  auto loop = b.create<scf::ForOp>(loc, start, rowStop, step, ValueRange{dot},
+  // Every cell is written once; no speculative contraction result is needed.
+  // The exceptional path keeps a reduction vector instead of a product tensor.
+  auto empty = materializeZeroFragment(b, loc, result);
+  if (failed(empty)) return failure();
+  auto loop = b.create<scf::ForOp>(loc, start, rowStop, step, ValueRange{*empty},
                                   [](OpBuilder &, Location, Value, ValueRange) {});
   b.setInsertionPointToStart(loop.getBody());
   auto vectorType = eraseFragmentAxis(left, 0);

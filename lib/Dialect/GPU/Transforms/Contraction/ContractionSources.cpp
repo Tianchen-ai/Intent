@@ -51,6 +51,55 @@ FailureOr<bool> rewriteContractionSnapshot(
   return changed;
 }
 
+static bool sinkGuardedContractionAdd(BinaryOp add, DominanceInfo &dominance) {
+  for (unsigned operand : {1u, 0u}) {
+    Value projected = add->getOperand(operand);
+    if (projected.getType() != add.getType()) continue;
+    Value value = stripAdditiveProjection(projected, /*singleUse=*/true);
+    auto result = dyn_cast_or_null<OpResult>(value);
+    auto branch = result ? dyn_cast<scf::IfOp>(result.getOwner()) : scf::IfOp();
+    auto type = value ? dyn_cast<FragmentType>(value.getType()) : FragmentType();
+    if (!branch || !type || branch->getBlock() != add->getBlock() ||
+        branch.getElseRegion().empty()) continue;
+    unsigned slot = result.getResultNumber();
+    bool fusible = llvm::any_of(branch->getRegions(), [&](Region &region) {
+      auto yield = cast<scf::YieldOp>(region.front().getTerminator());
+      Value arm = stripAdditiveProjection(yield.getOperand(slot), /*singleUse=*/true);
+      auto contract = arm ? arm.getDefiningOp<ContractOp>() : ContractOp();
+      return contract && (contract->getBlock() == &region.front() ||
+                           dominance.properlyDominates(contract.getOperation(),
+                                                        branch.getOperation())) &&
+             isLiteralZeroProjection(contract.getAccumulator());
+    });
+    if (!fusible) continue;
+    auto available = materializeDominatingProjection(
+        add->getOperand(1 - operand), branch, dominance);
+    if (failed(available)) continue;
+    OpBuilder builder(branch);
+    auto carry = projectPhysicalValueToSchema(builder, add.getLoc(), *available, type);
+    if (failed(carry)) continue;
+    // Move only this pure, single-use consumer through the conditional. Both
+    // arms retain the same add and operand order; ordinary fusion below can
+    // then consume the accumulator in the arm that actually contains a dot.
+    for (Region &region : branch->getRegions()) {
+      auto yield = cast<scf::YieldOp>(region.front().getTerminator());
+      builder.setInsertionPoint(yield);
+      Value arm = yield.getOperand(slot);
+      Value lhs = operand ? *carry : arm;
+      Value rhs = operand ? arm : *carry;
+      auto combined = builder.create<BinaryOp>(
+          add.getLoc(), type, lhs, rhs, BinaryOperator::Add,
+          add.getApproximate(), add.getFlushToZero(), add.getStrictRounding());
+      combined->setDiscardableAttrs(llvm::to_vector(add->getDiscardableAttrs()));
+      yield->setOperand(slot, combined);
+    }
+    add.getResult().replaceAllUsesWith(projected);
+    add.erase();
+    return true;
+  }
+  return false;
+}
+
 void fuseContractionAdds(func::FuncOp kernel) {
   DominanceInfo dominance(kernel);
   SmallVector<BinaryOp> additions;
@@ -60,6 +109,17 @@ void fuseContractionAdds(func::FuncOp kernel) {
         !binary.getFlushToZero())
       additions.push_back(binary);
   });
+  bool sunk = false;
+  for (BinaryOp add : additions)
+    sunk |= sinkGuardedContractionAdd(add, dominance);
+  if (sunk) {
+    additions.clear();
+    kernel.walk([&](BinaryOp binary) {
+      if (binary.getOperatorKind() == BinaryOperator::Add &&
+          !binary.getStrictRounding() && !binary.getApproximate() &&
+          !binary.getFlushToZero()) additions.push_back(binary);
+    });
+  }
   for (BinaryOp add : additions) {
     for (unsigned operand : {1u, 0u}) {
       Value projected = add->getOperand(operand);
@@ -68,7 +128,8 @@ void fuseContractionAdds(func::FuncOp kernel) {
       Value value =
           stripAdditiveProjection(projected, /*singleUse=*/true);
       auto contract = value ? value.getDefiningOp<ContractOp>() : ContractOp();
-      if (!contract || contract->getBlock() != add->getBlock() ||
+      if (!contract || !dominance.properlyDominates(contract.getOperation(),
+                                                    add.getOperation()) ||
           !isLiteralZeroProjection(contract.getAccumulator()))
         continue;
       SmallVector<Operation *> projections;
@@ -82,6 +143,9 @@ void fuseContractionAdds(func::FuncOp kernel) {
       // Sinking every dot to the add extends both matrix inputs across the
       // intervening summary computation and can introduce register spills.
       auto early = materializeDominatingProjection(additive, contract, dominance);
+      // A dot already executed outside a guard may keep that schedule when
+      // its carry is available there. Do not speculate a newly late operand.
+      if (contract->getBlock() != add->getBlock() && failed(early)) continue;
       OpBuilder builder(succeeded(early) ? contract.getOperation() : add.getOperation());
       if (succeeded(early)) additive = *early;
       FailureOr<Value> carry = projectPhysicalValueToSchema(
