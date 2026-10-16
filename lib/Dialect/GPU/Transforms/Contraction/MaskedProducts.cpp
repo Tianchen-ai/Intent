@@ -5,7 +5,6 @@
 #include "Intent/Dialect/GPU/Transforms/Value/ValueMaterialization.h"
 #include "Intent/Dialect/GPU/Transforms/Value/ValueRelations.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/IR/Dominance.h"
 
 using namespace mlir;
 
@@ -103,67 +102,7 @@ Value finiteMembers(OpBuilder &b, Location loc, Value value) {
   return b.create<CompareOp>(loc, predicate, magnitude, bound, ComparePredicate::Lt);
 }
 
-struct GuardedProduct {
-  scf::IfOp branch;
-  Value checked;
-};
-
-void shareFiniteChecks(ArrayRef<GuardedProduct> products, func::FuncOp kernel) {
-  DominanceInfo dominance(kernel);
-  PhysicalProgramAnalysis analysis(kernel);
-  SmallVector<bool> joined(products.size(), false);
-  auto aligned = [&](Value lhs, Value rhs) {
-    auto left = cast<FragmentType>(lhs.getType());
-    auto right = cast<FragmentType>(rhs.getType());
-    if (left.getShape() != right.getShape() ||
-        left.getElementType() != right.getElementType() ||
-        left.getValidity() != right.getValidity()) return false;
-    auto projection = queryBroadcastProjection(right, left);
-    if (!projection.isExact() ||
-        !llvm::equal(projection.targetToSource,
-                     ArrayRef<std::optional<unsigned>>{0u, 1u})) return false;
-    for (unsigned axis : {0u, 1u}) {
-      if (!analysis.lockstepTraversal({lhs, rhs}, {axis, axis}).isExact())
-        return false;
-    }
-    return true;
-  };
-  for (unsigned i = 0; i < products.size(); ++i) {
-    if (joined[i]) continue;
-    auto first = products[i];
-    SmallVector<unsigned> group{i};
-    for (unsigned j = i + 1; j < products.size(); ++j) {
-      auto next = products[j];
-      if (!joined[j] && first.branch->getBlock() == next.branch->getBlock() &&
-          first.branch->isBeforeInBlock(next.branch) &&
-          dominance.dominates(next.checked, first.branch) &&
-          aligned(first.checked, next.checked))
-        group.push_back(j);
-    }
-    if (group.size() == 1) continue;
-    OpBuilder b(first.branch);
-    Location loc = first.branch.getLoc();
-    Value members = finiteMembers(b, loc, first.checked);
-    for (unsigned j : llvm::drop_begin(group)) {
-      Value next = finiteMembers(b, loc, products[j].checked);
-      if (next.getType() != members.getType())
-        next = b.create<BroadcastOp>(loc, members.getType(), next);
-      members = b.create<BinaryOp>(loc, members.getType(), members, next,
-                                   BinaryOperator::LogicalAnd);
-    }
-    Value truth = b.create<arith::ConstantOp>(loc, b.getBoolAttr(true));
-    Value finite = all(b, loc, members, truth, {0, 1});
-    // Each fallback computes the original masked product for every input.
-    // A stronger shared guard is therefore safe, including mixed finite/NaN
-    // operands. Keep contractions and branches in place; move no loads.
-    for (unsigned j : group) {
-      products[j].branch->setOperand(0, finite);
-      joined[j] = true;
-    }
-  }
-}
-
-LogicalResult normalize(ReduceOp reduce, SmallVectorImpl<GuardedProduct> &products) {
+LogicalResult normalize(ReduceOp reduce) {
   // Region predicate specialization must run first: all-false summaries can
   // disappear and all-true products use ordinary contraction normalization.
   if (reduce->getParentOfType<RegionFoldOp>() ||
@@ -322,7 +261,6 @@ LogicalResult normalize(ReduceOp reduce, SmallVectorImpl<GuardedProduct> &produc
   b.setInsertionPointToEnd(branch.elseBlock());
   b.create<scf::YieldOp>(loc, loop.getResults());
   reduce.getResult(0).replaceAllUsesWith(branch.getResult(0));
-  products.push_back({branch, rhs});
   reduce.erase();
   return success();
 }
@@ -333,11 +271,9 @@ LogicalResult normalizeMaskedProducts(ModuleOp module) {
   auto kernel = getPhysicalKernel(module);
   if (failed(kernel)) return failure();
   SmallVector<ReduceOp> reductions;
-  SmallVector<GuardedProduct> products;
   kernel->walk([&](ReduceOp reduce) { reductions.push_back(reduce); });
   for (ReduceOp reduce : reductions)
-    if (failed(normalize(reduce, products))) return failure();
-  shareFiniteChecks(products, *kernel);
+    if (failed(normalize(reduce))) return failure();
   eraseDeadPhysicalValues(*kernel);
   return success();
 }
