@@ -25,8 +25,29 @@ constexpr llvm::StringLiteral tensorDescriptorChoice =
     "USE_TENSOR_DESCRIPTOR";
 constexpr llvm::StringLiteral tensorDescriptorEligibility =
     "TENSOR_DESCRIPTOR_ELIGIBLE";
+struct DescriptorOffset {
+  SmallVector<std::pair<Value, bool>> terms;
+
+  void add(Value value, bool subtract = false) {
+    if (auto binary = value.getDefiningOp<gpu::BinaryOp>();
+        binary && (binary.getOperatorKind() == BinaryOperator::Add ||
+                   binary.getOperatorKind() == BinaryOperator::Subtract)) {
+      add(binary.getLhs(), subtract);
+      add(binary.getRhs(), subtract !=
+          (binary.getOperatorKind() == BinaryOperator::Subtract));
+      return;
+    }
+    auto opposite = llvm::find_if(terms, [&](auto term) {
+      return term.second != subtract &&
+             gpu::samePhysicalScalarExpression(term.first, value);
+    });
+    if (opposite != terms.end()) terms.erase(opposite);
+    else terms.emplace_back(value, subtract);
+  }
+};
+
 struct DescriptorAccessPlan {
-  SmallVector<Value> offsets;
+  SmallVector<DescriptorOffset> offsets;
   SmallVector<int64_t> blockAxes;
 };
 
@@ -75,8 +96,9 @@ planDescriptorAccess(gpu::AccessOpInterface access,
         seenViewAxes.test(viewAxis))
       return std::nullopt;
     seenViewAxes.set(viewAxis);
-    if (coordinate.getType().isIndex()) {
-      plan.offsets[viewAxis] = coordinate;
+    if (Value scalar = gpu::uniformScalarSource(coordinate);
+        scalar && scalar.getType().isIndex()) {
+      plan.offsets[viewAxis].add(scalar);
       continue;
     }
     auto coordinateType = dyn_cast<gpu::FragmentType>(coordinate.getType());
@@ -108,6 +130,28 @@ planDescriptorAccess(gpu::AccessOpInterface access,
       coordinate = broadcast.getValue();
       coordinateType = source;
     }
+    // A translated Cartesian range is still a contiguous block. Keep the
+    // origin as a read-only additive expression until descriptor materialization;
+    // cancellation also exposes loop IVs hidden by repeated-domain rebasing.
+    auto &offset = plan.offsets[viewAxis];
+    bool translated = false;
+    while (auto binary = coordinate.getDefiningOp<gpu::BinaryOp>()) {
+      auto kind = binary.getOperatorKind();
+      if (kind != BinaryOperator::Add && kind != BinaryOperator::Subtract)
+        break;
+      Value scalar = gpu::uniformScalarSource(binary.getRhs());
+      Value varying = binary.getLhs();
+      if (!scalar && kind == BinaryOperator::Add) {
+        scalar = gpu::uniformScalarSource(binary.getLhs());
+        varying = binary.getRhs();
+      }
+      if (!scalar || !scalar.getType().isIndex() ||
+          varying.getType() != coordinate.getType())
+        break;
+      offset.add(scalar, kind == BinaryOperator::Subtract);
+      coordinate = varying;
+      translated = true;
+    }
     auto range = coordinate.getDefiningOp<gpu::MakeRangeOp>();
     if (coordinateType.getShape().size() != 1 ||
         !coordinateType.getElementType().isIndex() || !range ||
@@ -130,11 +174,20 @@ planDescriptorAccess(gpu::AccessOpInterface access,
       return std::nullopt;
     seenFragmentAxes.set(*selected);
     plan.blockAxes[*selected] = viewAxis;
-    plan.offsets[viewAxis] = range.getStart();
+    offset.add(range.getStart());
+    // Descriptor bounds operate on a non-wrapping window. Fixed-width index
+    // addition is valid under rebasing, but a translated window must not cross
+    // the signed boundary. An aligned power-of-two window proves this for every
+    // represented origin, without assuming runtime tensor dimensions.
+    if (translated &&
+        (!gpu::IndexRelations().powerOfTwo(range.getExtent()) ||
+         !llvm::all_of(offset.terms, [&](auto term) {
+           return gpu::IndexRelations().multipleOf(term.first, range.getExtent());
+         })))
+      return std::nullopt;
   }
   if (seenViewAxes.count() != view.getRank() ||
-      seenFragmentAxes.count() != fragment.getShape().size() ||
-      llvm::any_of(plan.offsets, [](Value value) { return !value; }))
+      seenFragmentAxes.count() != fragment.getShape().size())
     return std::nullopt;
   if (!boundaryFact.isExact())
     return std::nullopt;
@@ -348,7 +401,7 @@ bool descriptorStrideAvailable(func::FuncOp kernel, gpu::ViewType view,
 
 
 bool descriptorAccessEligible(func::FuncOp kernel, Value viewValue,
-                              ValueRange offsets,
+                              ArrayRef<DescriptorOffset> offsets,
                               ArrayRef<int64_t> blockAxes,
                               gpu::FragmentType fragment) {
   auto view = cast<gpu::ViewType>(viewValue.getType());
@@ -421,10 +474,12 @@ bool descriptorAccessEligible(func::FuncOp kernel, Value viewValue,
     if (!collectAlignedLeaves(extent)) alignedBlockParameters.clear();
   }
   gpu::IndexRelations relations;
-  return relations.multipleOf(offsets.back(), 16 / *elementBytes,
-      [&](gpu::ParameterAttr parameter) {
-        return alignedBlockParameters.contains(parameter.getName());
-      });
+  return llvm::all_of(offsets.back().terms, [&](auto term) {
+    return relations.multipleOf(term.first, 16 / *elementBytes,
+        [&](gpu::ParameterAttr parameter) {
+          return alignedBlockParameters.contains(parameter.getName());
+        });
+  });
 }
 
 void copyOrigin(Operation *source, Operation *target) {
@@ -445,7 +500,7 @@ FailureOr<Value> descriptorStrideValue(OpBuilder &builder, func::FuncOp kernel,
 }
 
 SmallVector<Value> materializeDescriptorOffsets(
-    OpBuilder &builder, Location location, ValueRange offsets) {
+    OpBuilder &builder, Location location, ArrayRef<DescriptorOffset> offsets) {
   // Descriptor shapes are at most INT32_MAX and blocks at most 2^20
   // elements. A start outside signed i32 therefore denotes an entirely
   // padded block; preserve that fact before converting to native offsets.
@@ -454,7 +509,19 @@ SmallVector<Value> materializeDescriptorOffsets(
   Value maximum = builder.create<arith::ConstantIndexOp>(
       location, std::numeric_limits<int32_t>::max());
   SmallVector<Value> result;
-  for (Value offset : offsets) {
+  for (const DescriptorOffset &expression : offsets) {
+    Value offset;
+    for (auto [value, subtract] : expression.terms) {
+      if (!offset && !subtract) {
+        offset = value;
+        continue;
+      }
+      if (!offset) offset = builder.create<arith::ConstantIndexOp>(location, 0);
+      offset = builder.createOrFold<gpu::BinaryOp>(
+          location, builder.getIndexType(), offset, value,
+          subtract ? BinaryOperator::Subtract : BinaryOperator::Add);
+    }
+    if (!offset) offset = builder.create<arith::ConstantIndexOp>(location, 0);
     Value lower = builder.create<gpu::CompareOp>(
         location, builder.getI1Type(), offset, minimum, ComparePredicate::Ge);
     Value upper = builder.create<gpu::CompareOp>(
@@ -491,6 +558,21 @@ bool feedsIndirectAccessCoordinates(Value value) {
   return false;
 }
 
+bool feedsMatrixOperand(Value value) {
+  SmallVector<Value> pending{value};
+  llvm::SmallDenseSet<Value, 32> visited;
+  while (!pending.empty()) {
+    Value current = pending.pop_back_val();
+    if (!visited.insert(current).second) continue;
+    for (Operation *user : current.getUsers()) {
+      if (isa<gpu::ContractOp, gpu::ScaledContractOp>(user)) return true;
+      if (isa<gpu::BroadcastOp, gpu::ReshapeOp, gpu::TransposeOp, gpu::CastOp>(user))
+        llvm::append_range(pending, user->getResults());
+    }
+  }
+  return false;
+}
+
 // A stable read phase. No analysis or boundary cache survives the returned
 // candidate list: rewrites only consume the already-proved access operands.
 DescriptorAccessCandidates readDescriptorAccesses(func::FuncOp kernel) {
@@ -500,6 +582,14 @@ DescriptorAccessCandidates readDescriptorAccesses(func::FuncOp kernel) {
     auto access = dyn_cast<gpu::AccessOpInterface>(operation);
     if (!access || (access.getAccessKind() != gpu::AccessKind::Load &&
                    access.getAccessKind() != gpu::AccessKind::Store))
+      return;
+    // Auxiliary vectors use ordinary loads: a separate TMA transaction and
+    // shared-memory wait compete with the matrix pipeline for little data.
+    // A vector projected directly into a contraction remains eligible.
+    auto fragment = dyn_cast<gpu::FragmentType>(access.getAccessValueType());
+    if (access.getAccessKind() == gpu::AccessKind::Load && fragment &&
+        fragment.getShape().size() == 1 &&
+        !feedsMatrixOperand(access.getAccessResult()))
       return;
     auto plan = planDescriptorAccess(access, analysis.boundaryValidity(operation));
     if (!plan ||

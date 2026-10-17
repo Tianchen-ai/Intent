@@ -389,15 +389,6 @@ bool IndexRelations::multipleOf(Value value, Value divisor) const {
     return false;
   if (same(value, divisor) || constant(value) == 0)
     return true;
-  if (auto argument = dyn_cast<BlockArgument>(value)) {
-    auto loop = dyn_cast<scf::ForOp>(argument.getOwner()->getParentOp());
-    // Keep the correlation between an induction variable and its actual step.
-    // Enumerating each step candidate independently loses this identity.
-    if (loop && argument == loop.getInductionVar() &&
-        loop.getStep() == divisor && constant(loop.getLowerBound()) == 0 &&
-        powerOfTwo(divisor))
-      return true;
-  }
   if (auto literal = constant(divisor))
     return multipleOf(value, *literal);
   auto parameter = queryParameter(divisor);
@@ -420,6 +411,15 @@ bool IndexRelations::multipleOf(Value value, Value divisor) const {
     if (!binaryModulus)
       return false;
     auto aligned = [&](Value operand) { return prove(operand, depth + 1); };
+    if (auto argument = dyn_cast<BlockArgument>(current)) {
+      auto loop = dyn_cast<scf::ForOp>(argument.getOwner()->getParentOp());
+      // Preserve the relation to the same symbolic tile through peeled and
+      // partitioned loops, whose lower bound need not be zero.
+      return loop && argument == loop.getInductionVar() &&
+             aligned(loop.getLowerBound()) && aligned(loop.getStep());
+    }
+    if (auto select = current.getDefiningOp<SelectOp>())
+      return aligned(select.getTrueValue()) && aligned(select.getFalseValue());
     if (auto coordinate = current.getDefiningOp<WorksetCoordinateOp>())
       return aligned(coordinate.getCoordinate());
     if (auto binary = current.getDefiningOp<BinaryOp>()) {
