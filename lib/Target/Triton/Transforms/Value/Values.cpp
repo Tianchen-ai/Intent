@@ -74,7 +74,91 @@ void canonicalizeBroadcastProjections(func::FuncOp kernel) {
   }
 }
 
+static void orientWarpGroupContractions(func::FuncOp kernel) {
+  auto capabilities = kernel->getAttrOfType<gpu::CapabilitiesAttr>(gpu::capabilitiesAttr);
+  if (!capabilities || capabilities.getComputeCapabilityMajor() != 9) return;
+  auto choices = kernel.getOps<TensorDescriptorChoiceOp>();
+  if (choices.empty()) return;
+  Value descriptors = (*choices.begin()).getResult();
+  SmallVector<gpu::ContractOp> contracts;
+  kernel.walk([&](gpu::ContractOp contract) { contracts.push_back(contract); });
+  for (gpu::ContractOp contract : contracts) {
+    auto lhs = contract.getLhs().getType(), rhs = contract.getRhs().getType();
+    auto result = contract.getResult().getType();
+    if (lhs.getShape().size() != 2 || rhs.getShape().size() != 2 ||
+        result.getShape().size() != 2 ||
+        lhs.getElementType() != rhs.getElementType() ||
+        (!lhs.getElementType().isF16() && !lhs.getElementType().isBF16()) ||
+        !result.getElementType().isF32() ||
+        contract.getLhsReductionAxes() != ArrayRef<int64_t>{1} ||
+        contract.getRhsReductionAxes() != ArrayRef<int64_t>{0} ||
+        !contract.getLhsBatchAxes().empty() || !contract.getRhsBatchAxes().empty())
+      continue;
+    OpBuilder b(contract);
+    Location loc = contract.getLoc();
+    auto extent = [&](Attribute value) -> Value {
+      return b.create<gpu::PhysicalExprOp>(loc, b.getIndexType(),
+                                          cast<gpu::PhysicalExprAttr>(value));
+    };
+    auto literal = [&](int64_t value) -> Value {
+      return b.create<arith::ConstantIndexOp>(loc, value);
+    };
+    auto compare = [&](Value a, Value c, ComparePredicate predicate) -> Value {
+      return b.create<gpu::CompareOp>(loc, b.getI1Type(), a, c, predicate);
+    };
+    auto remainder = [&](Value value, Value divisor) -> Value {
+      return b.create<gpu::BinaryOp>(loc, b.getIndexType(), value, divisor,
+                                     BinaryOperator::Remainder);
+    };
+    Value m = extent(result.getShape()[0]), n = extent(result.getShape()[1]);
+    Value k = extent(lhs.getShape()[1]);
+    Value zero = literal(0), eight = literal(8), sixtyFour = literal(64);
+    Value selected = compare(remainder(m, sixtyFour), zero, ComparePredicate::Ne);
+    for (Value condition : {
+             compare(remainder(n, sixtyFour), zero, ComparePredicate::Eq),
+             compare(remainder(m, eight), zero, ComparePredicate::Eq),
+             compare(k, literal(16), ComparePredicate::Ge)})
+      selected = b.create<gpu::BinaryOp>(loc, b.getI1Type(), selected, condition,
+                                         BinaryOperator::LogicalAnd);
+    selected = b.create<gpu::BinaryOp>(loc, b.getI1Type(), selected, descriptors,
+                                      BinaryOperator::LogicalAnd);
+    // Hopper's native warp-group MMA requires M % 64 == 0 and N % 8 == 0.
+    // Transpose the algebraic contraction, not its program ownership or dtype.
+    // The provider still owns distributed layouts and instruction selection.
+    auto choice = b.create<scf::IfOp>(loc, TypeRange{result}, selected, true);
+    b.setInsertionPointToStart(choice.thenBlock());
+    auto transpose = [&](Value value) -> Value {
+      auto type = cast<gpu::FragmentType>(value.getType());
+      SmallVector<Attribute> mappings;
+      for (unsigned axis = 0; axis < 2; ++axis) {
+        auto mapping = cast<gpu::AxisMapAttr>(type.getAxisMaps()[1 - axis]);
+        mappings.push_back(gpu::AxisMapAttr::get(b.getContext(),
+            mapping.getSourceId(), mapping.getSourceAxis(), mapping.getDimensionId(),
+            axis, mapping.getDerived()));
+      }
+      auto transposed = gpu::FragmentType::get(b.getContext(), type.getElementType(),
+          b.getArrayAttr({type.getShape()[1], type.getShape()[0]}),
+          b.getArrayAttr(mappings),
+          type.getValidity(), type.getOwner());
+      return b.create<gpu::TransposeOp>(loc, transposed, value,
+                                       b.getDenseI64ArrayAttr({1, 0}));
+    };
+    Value a = transpose(contract.getRhs()), c = transpose(contract.getLhs());
+    Value accumulator = transpose(contract.getAccumulator());
+    auto dot = b.create<gpu::ContractOp>(loc, accumulator.getType(), a, c, accumulator,
+        ArrayRef<int64_t>{1}, ArrayRef<int64_t>{0}, ArrayRef<int64_t>{}, ArrayRef<int64_t>{});
+    dot->setDiscardableAttrs(llvm::to_vector(contract->getDiscardableAttrs()));
+    b.create<scf::YieldOp>(loc, transpose(dot.getResult()));
+    b.setInsertionPointToStart(choice.elseBlock());
+    auto original = cast<gpu::ContractOp>(b.clone(*contract));
+    b.create<scf::YieldOp>(loc, original.getResult());
+    contract.getResult().replaceAllUsesWith(choice.getResult(0));
+    contract.erase();
+  }
+}
+
 void selectContractForms(func::FuncOp kernel) {
+  orientWarpGroupContractions(kernel);
   SmallVector<gpu::ContractOp> contracts;
   kernel.walk([&](gpu::ContractOp contract) { contracts.push_back(contract); });
   for (gpu::ContractOp contract : contracts) {
