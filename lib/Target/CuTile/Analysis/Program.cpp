@@ -138,6 +138,10 @@ LogicalResult verifyKernel(func::FuncOp kernel,
   if (features.matrixCompute != static_cast<bool>(ctas))
     return kernel.emitError("cuTile CTA hint does not match matrix tile compute");
   auto isNativeTMACondition = [&](Value value) {
+    // A load can exclude TMA based on its own physical footprint even when
+    // matrix accesses in the same program retain the configurable form.
+    if (gpu::IndexRelations().constant(value) == 0)
+      return true;
     auto compare = value.getDefiningOp<gpu::CompareOp>();
     return accessForm && compare &&
            compare.getPredicate() == ComparePredicate::Ne &&
@@ -153,14 +157,14 @@ LogicalResult verifyKernel(func::FuncOp kernel,
     if (auto load = dyn_cast<TileLoadOp>(operation)) {
       if (!isNativeTMACondition(load.getAllowTma())) {
         load.emitOpError(
-            "allow_tma is not the typed cuTile access-form decision");
+            "allow_tma must be false or the typed cuTile access-form decision");
         return WalkResult::interrupt();
       }
     }
     if (auto store = dyn_cast<TileStoreOp>(operation)) {
       if (!isNativeTMACondition(store.getAllowTma())) {
         store.emitOpError(
-            "allow_tma is not the typed cuTile access-form decision");
+            "allow_tma must be false or the typed cuTile access-form decision");
         return WalkResult::interrupt();
       }
     }

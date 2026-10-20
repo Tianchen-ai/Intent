@@ -13,6 +13,7 @@
 #include "Intent/Target/CuTile/IR/CuTileOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "llvm/Support/MathExtras.h"
 
 using namespace mlir;
@@ -42,6 +43,15 @@ bool isZeroFill(Value value) {
     return integer.getValue().isZero();
   if (auto floating = dyn_cast<FloatAttr>(constant))
     return floating.getValue().isZero() && !floating.getValue().isNegative();
+  return false;
+}
+
+bool nestedTraversal(Operation *operation) {
+  unsigned loops = 0;
+  for (Operation *parent = operation->getParentOp(); parent;
+       parent = parent->getParentOp())
+    if (isa<scf::ForOp, scf::WhileOp>(parent) && ++loops > 1)
+      return true;
   return false;
 }
 
@@ -89,14 +99,17 @@ LogicalResult formNativeLoads(func::FuncOp kernel,
     auto result = cast<gpu::FragmentType>(access.getAccessResult().getType());
     const auto accessBounds = analysis.accessBounds(load);
     bool activeInBounds = accessBounds.isExact();
-    // Vector inputs stay register loads, not cluster TMA payloads.
+    // Single traversals can use regular tile loads for auxiliary vectors.
+    // Keep register gathers in nested traversals: tile-space vector supplies
+    // add dependencies to the nested matrix pipeline. Neither form needs TMA.
     bool vectorInput = matrixCompute && result.getShape().size() == 1;
+    bool vectorTile = !vectorInput || !nestedTraversal(load);
     gpu::PhysicalAccessBoundaryFact boundary =
         analysis.boundaryValidity(load, /*allowRangeGuards=*/true);
     FailureOr<NativeTileAccessPlan> plan = analyzeNativeTileAccess(access, kernel, accessBounds);
     FailureOr<MaterializedTileIndices> indices = failure();
     FailureOr<Value> originGuard = failure();
-    if (!vectorInput && succeeded(plan) && boundary.isExact() &&
+    if (vectorTile && succeeded(plan) && boundary.isExact() &&
         (!access.getAccessFill() || isZeroFill(access.getAccessFill())))
       indices = materializeTileIndices(builder, load, *plan,
                                        /*allowDynamicAlignment=*/true);
@@ -117,7 +130,10 @@ LogicalResult formNativeLoads(func::FuncOp kernel,
           BinaryOperator::LogicalAnd);
     FailureOr<Value> allowTMA = failure();
     if (native) {
-      allowTMA = forms.tmaCondition();
+      allowTMA = vectorInput
+          ? FailureOr<Value>(Value(builder.create<arith::ConstantIntOp>(
+                load.getLoc(), 0, 1)))
+          : forms.tmaCondition();
       if (failed(allowTMA))
         return failure();
     }
