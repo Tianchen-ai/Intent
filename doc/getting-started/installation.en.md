@@ -77,6 +77,13 @@ not merely a library generated on another machine. BANG C queries CNRT resources
 unsupported architectures are diagnosed instead of being treated as MLU370.
 Ordinary BANG C JIT derives shape/stride bindings from actual buffers.
 
+The Triton SDK selects its PTX assembler; `intent doctor --target triton`
+reports the actual path and version. To select another local CUDA assembler,
+set `TRITON_PTXAS_PATH=/path/to/ptxas` before starting Python; Blackwell uses
+`TRITON_PTXAS_BLACKWELL_PATH`. Intent does not switch global SDK settings
+during a call or retry a failed compilation/execution with another assembler.
+Validate actual kernels again after changing the toolchain.
+
 ```python
 run = intent.jit(definition, backend="mojo",
                  backend_options={"compiler": "/path/to/mojo"})

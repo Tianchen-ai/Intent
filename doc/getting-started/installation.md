@@ -71,6 +71,12 @@ Weft 使用正式 NativeTarget 与扩展目录；用户选择 CPU 集合和线�
 BANG C 查询 CNRT 的实际资源；不支持的架构会准确拒绝，不伪装成 MLU370。
 普通 JIT 的 shape/stride specialization 来自实际输入 buffer。
 
+Triton 的 PTX 汇编器由 Triton SDK 选择，`intent doctor --target triton`
+显示实际路径与版本。需要选择本机另一套 CUDA 汇编器时，在启动 Python 前设置
+`TRITON_PTXAS_PATH=/path/to/ptxas`；Blackwell 使用对应的
+`TRITON_PTXAS_BLACKWELL_PATH`。Intent 不在调用中切换全局 SDK 配置，也不在
+原生编译或执行失败后更换汇编器。工具链更新后应重新验证实际 kernel。
+
 ```python
 run = intent.jit(definition, backend="mojo",
                  backend_options={"compiler": "/path/to/mojo"})
