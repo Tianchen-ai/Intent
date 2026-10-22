@@ -88,8 +88,15 @@ FailureOr<Type> helperArgumentType(Operation *operation, BlockArgument argument,
     return Type(*buffer);
   }
   if (scalarCombine(operation)) return type;
-  if (index >= count && isa<RankedTensorType>(type))
-    return Type(slicedBufferType(cast<RankedTensorType>(type)));
+  if (index >= count) {
+    if (auto tensor = dyn_cast<RankedTensorType>(type))
+      return Type(slicedBufferType(tensor));
+    // A scalar component of a mixed scalar/shaped collective is still a
+    // member view into its source. Its rank-zero descriptor retains the slice
+    // offset, unlike the dense rank-zero scratch used for incoming state.
+    return Type(MemRefType::get({}, type,
+        StridedLayoutAttr::get(type.getContext(), ShapedType::kDynamic, {})));
+  }
   return Type(collectiveStateType(type));
 }
 
