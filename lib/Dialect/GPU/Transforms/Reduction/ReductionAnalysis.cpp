@@ -156,9 +156,14 @@ bool requiresPhysicalRealization(ReduceOp reduce) {
           analysis.axisRealization(source, static_cast<unsigned>(axis));
       if (fact.constructionScalarSeed ||
           (fact.isExact() && !fact.physicalized)) {
-        auto extent = constantPhysicalExpression(
-            cast<PhysicalExprAttr>(fragment.getShape()[axis]));
-        bool pairedComplete = extent && succeeded(scalarSource(source)) &&
+        // A uniform tuple component has no coordinate-producing operand. Its
+        // paired, already materialized component establishes the current tile,
+        // including a parameterized region segment. Requiring that segment to
+        // cover the entire logical range would replay the whole suffix inside
+        // every outer segment instead of reducing this physical fragment.
+        auto extent = cast<PhysicalExprAttr>(fragment.getShape()[axis]);
+        bool pairedComplete = isCompileTimeExtent(extent) &&
+            succeeded(scalarSource(source)) &&
             llvm::any_of(reduce.getSources(),
                          [&](Value peer) {
           auto peerType = dyn_cast<FragmentType>(peer.getType());
@@ -168,14 +173,8 @@ bool requiresPhysicalRealization(ReduceOp reduce) {
               peerType.getOwner() != fragment.getOwner())
             return false;
           auto coverage = analysis.axisRealization(peer, axis);
-          return coverage.isExact() && coverage.physicalized &&
-                 !coverage.constructionScalarSeed &&
-                 !coverage.roots.empty() &&
-                 llvm::all_of(coverage.roots, [&](MakeRangeOp range) {
-            return constantLogicalRangeCardinality(range) == extent &&
-                   samePhysicalScalarExpression(range.getStart(),
-                                                range.getLogicalStart());
-          });
+          return coverage.hasExtentAuthority() && coverage.physicalized &&
+                 !coverage.constructionScalarSeed;
         });
         if (!pairedComplete)
           return true;
