@@ -4,6 +4,35 @@
 
 using namespace mlir;
 namespace intent::bangc {
+bool lowerPowerOfTwoDivisions(func::FuncOp function) {
+  SmallVector<arith::FloorDivSIOp> divisions;
+  function.walk([&](arith::FloorDivSIOp op) { divisions.push_back(op); });
+  bool changed = false;
+  for (auto divide : divisions) {
+    APInt divisor;
+    if (!divide.getType().isIntOrIndex() ||
+        !matchPattern(divide.getRhs(), m_ConstantInt(&divisor)) ||
+        !divisor.isStrictlyPositive() || !divisor.isPowerOf2())
+      continue;
+    // Arithmetic right shift is floor division by a positive power of two,
+    // including negative dividends. Keep this exact realization in IR rather
+    // than relying on CNCC to optimize a signed division/remainder correction.
+    OpBuilder b(divide);
+    Location loc = divide.getLoc();
+    Value value = divide.getLhs();
+    bool index = value.getType().isIndex();
+    if (index) value = b.create<arith::IndexCastOp>(loc, b.getI64Type(), value);
+    Value shift = b.create<arith::ConstantOp>(loc,
+        b.getIntegerAttr(value.getType(), divisor.logBase2()));
+    Value result = b.create<arith::ShRSIOp>(loc, value, shift);
+    if (index) result = b.create<arith::IndexCastOp>(loc, b.getIndexType(), result);
+    divide.replaceAllUsesWith(result);
+    divide.erase();
+    changed = true;
+  }
+  return changed;
+}
+
 bool realizeAffineRanges(func::FuncOp function, dsa::ConfigurationAttr config) {
   SmallVector<Operation *> comparisons;
   function.walk([&](Operation *operation) {

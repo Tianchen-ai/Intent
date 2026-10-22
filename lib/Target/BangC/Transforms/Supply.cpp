@@ -609,6 +609,7 @@ LogicalResult composeLocalProgram(ModuleOp module,
   if (failed(composeLocalStorage(function, cleanup))) return failure();
   if (dsa::reuseGatherOffsets(function) && failed(cleanup())) return failure();
   if (vectorizeIndexLoops(function, config) && failed(cleanup())) return failure();
+  if (lowerPowerOfTwoDivisions(function) && failed(cleanup())) return failure();
   realizeGatherWorkspace(function, config);
   if (dsa::batchPointwiseTasks(function) && failed(cleanup())) return failure();
   if (coarsenLocalPrograms(function, config) && failed(cleanup())) return failure();

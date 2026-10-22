@@ -38,6 +38,7 @@ bool propagateLocalTransposeSupply(func::FuncOp function, dsa::ConfigurationAttr
 bool realizeAffineRanges(func::FuncOp function, dsa::ConfigurationAttr config);
 bool realizeFullWidthMasks(func::FuncOp function, dsa::ConfigurationAttr config);
 bool vectorizeIndexLoops(func::FuncOp function, dsa::ConfigurationAttr config);
+bool lowerPowerOfTwoDivisions(func::FuncOp function);
 bool batchIndependentRowPrograms(func::FuncOp function, dsa::ConfigurationAttr config);
 Value allocate(OpBuilder &b, Location loc, Type element, ArrayRef<int64_t> shape, int64_t space);
 bool reuseConsumedBinaryInputs(func::FuncOp function, dsa::ConfigurationAttr config);
