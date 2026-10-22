@@ -447,7 +447,9 @@ bool IndexRelations::alignedUnitWindow(Value start, Value extent) const {
 }
 
 Value IndexRelations::alignedBound(Value value, Value step) const {
-  if (constant(value) == 0 || same(value, step))
+  // Every integral endpoint is aligned to a unit step, including after an
+  // exact division by one has been folded out of a rounded traversal bound.
+  if (constant(step) == 1 || constant(value) == 0 || same(value, step))
     return value;
   auto operation = value.getDefiningOp<BinaryOp>();
   if (!operation)

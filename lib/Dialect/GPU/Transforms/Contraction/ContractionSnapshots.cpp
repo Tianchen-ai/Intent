@@ -48,6 +48,18 @@ bool mutuallyExclusiveRows(Operation *first, Operation *second,
 
 // Reconstruct only the write address, predicate and conditional path. Numeric
 // epilogues run in the first phase, where every original input is still intact.
+// Reads needed by publication are saved there too: routing data can alias the
+// output and must not be re-read after an earlier row has been published.
+FailureOr<Value> snapshotValidity(OpBuilder &builder, Location location,
+                                  Type type, Value valid, Value group) {
+  if (!group) return valid;
+  if (auto fragment = dyn_cast<FragmentType>(type))
+    return materializeValidityConjunction(builder, location, valid, group, fragment);
+  if (!valid) return group;
+  return builder.create<BinaryOp>(location, builder.getI1Type(), valid, group,
+                                  BinaryOperator::LogicalAnd).getResult();
+}
+
 class WritebackSlice {
 public:
   WritebackSlice(scf::ForOp loop) : loop(loop), dominance(loop->getParentOp()) {}
@@ -61,14 +73,27 @@ public:
     }
     if (accepted.contains(value)) return true;
     auto operation = value.getDefiningOp();
+    auto load = dyn_cast_or_null<LoadOp>(operation);
+    bool snapshot = load && getPublicView(load.getResource());
     if (!operation || !loop->isProperAncestor(operation) ||
-        operation->getNumRegions() || !isMemoryEffectFree(operation))
+        operation->getNumRegions() ||
+        (!isMemoryEffectFree(operation) && !snapshot))
       return false;
     if (!llvm::all_of(operation->getOperands(),
                       [&](Value operand) { return accepts(operand); }))
       return false;
     accepted.insert(value);
+    if (snapshot) reads.insert(load);
     return true;
+  }
+
+  ArrayRef<LoadOp> snapshotReads() const { return reads.getArrayRef(); }
+
+  void bindSnapshots(const DenseMap<Operation *, Value> &buffers,
+                     ValueRange groups, Value valid) {
+    snapshots = buffers;
+    groupCoordinates.assign(groups.begin(), groups.end());
+    groupValidity = valid;
   }
 
   FailureOr<Value> materialize(OpBuilder &builder, Value value,
@@ -79,15 +104,33 @@ public:
     // Do not reuse dominance facts after adding the two conditional phases.
     if (invariants.contains(value)) return value;
     Operation *operation = value.getDefiningOp();
-    if (!operation || !loop->isProperAncestor(operation) ||
-        operation->getNumRegions() || !isMemoryEffectFree(operation))
+    if (!operation || !accepted.contains(value))
       return failure();
     for (Value operand : operation->getOperands()) {
       auto replacement = materialize(builder, operand, mapping);
       if (failed(replacement)) return failure();
       mapping.map(operand, *replacement);
     }
-    builder.clone(*operation, mapping);
+    if (auto load = dyn_cast<LoadOp>(operation); load && snapshots.count(operation)) {
+      SmallVector<Value> coordinates(groupCoordinates);
+      for (Value coordinate : load.getCoordinates())
+        coordinates.push_back(mapping.lookupOrDefault(coordinate));
+      SmallVector<int64_t> axes;
+      for (unsigned axis = 0; axis < groupCoordinates.size(); ++axis)
+        axes.push_back(axis);
+      for (int64_t axis : load.getSourceAxes())
+        axes.push_back(axis + groupCoordinates.size());
+      auto valid = snapshotValidity(builder, load.getLoc(), load.getType(),
+          mapping.lookupOrDefault(load.getValid()), groupValidity);
+      if (failed(valid)) return failure();
+      auto saved = builder.create<LoadOp>(load.getLoc(), load.getType(),
+          snapshots.lookup(operation), coordinates,
+          *valid,
+          mapping.lookupOrDefault(load.getFill()), axes);
+      mapping.map(value, saved.getResult());
+    } else {
+      builder.clone(*operation, mapping);
+    }
     return mapping.lookupOrNull(value);
   }
 
@@ -95,6 +138,10 @@ private:
   scf::ForOp loop;
   DominanceInfo dominance;
   llvm::DenseSet<Value> invariants, accepted;
+  llvm::SetVector<LoadOp> reads;
+  DenseMap<Operation *, Value> snapshots;
+  SmallVector<Value> groupCoordinates;
+  Value groupValidity;
 };
 
 bool dependsOn(Value value, Value coordinate) {
@@ -239,6 +286,15 @@ LogicalResult preserveRuntimeContractionSnapshot(
         kernel, location, value.getElementType(), builder.getArrayAttr(shape),
         value.getOwner()).getResult());
   }
+  DenseMap<Operation *, Value> addressSnapshots;
+  for (LoadOp read : writeback.snapshotReads()) {
+    auto source = cast<ViewType>(read.getResource().getType());
+    SmallVector<Attribute> shape(groupShape);
+    llvm::append_range(shape, source.getLayout().getExtents());
+    addressSnapshots[read] = createInvocationBuffer(kernel, read.getLoc(),
+        source.getElementType(), builder.getArrayAttr(shape),
+        rows.getResult().getType().getOwner()).getResult();
+  }
   auto choice = builder.create<scf::IfOp>(location, overlapsOutput, true);
   // The original bounded traversal belongs to the disjoint branch unchanged.
   loop->moveBefore(choice.elseBlock()->getTerminator());
@@ -259,12 +315,16 @@ LogicalResult preserveRuntimeContractionSnapshot(
               groupValidity, bounded, BinaryOperator::LogicalAnd))
         : bounded;
   }
+  writeback.bindSnapshots(addressSnapshots, groupCoordinates, groupValidity);
   Value rowOwner = builder.create<CompareOp>(location, builder.getI1Type(),
       rowWorker, zero, ComparePredicate::Eq);
   Value columnOwner = builder.create<CompareOp>(location, builder.getI1Type(),
       columnWorker, zero, ComparePredicate::Eq);
   Value owner = builder.create<BinaryOp>(location, builder.getI1Type(),
       rowOwner, columnOwner, BinaryOperator::LogicalAnd);
+  if (groupValidity)
+    owner = builder.create<BinaryOp>(location, builder.getI1Type(),
+        owner, groupValidity, BinaryOperator::LogicalAnd);
   auto owned = builder.create<scf::IfOp>(location, owner, false);
   builder.setInsertionPoint(owned.thenBlock()->getTerminator());
 
@@ -303,6 +363,23 @@ LogicalResult preserveRuntimeContractionSnapshot(
       computation.walk([&](StoreOp store) { writes.push_back(store); });
       if (writes.size() != snapshots.size())
         return computation.emitOpError("contraction snapshot lost its output occurrences");
+      for (LoadOp original : writeback.snapshotReads()) {
+        auto read = mapping.lookup(original.getResult()).getDefiningOp<LoadOp>();
+        OpBuilder atRead(read, listener);
+        atRead.setInsertionPointAfter(read);
+        SmallVector<Value> coordinates(groupCoordinates);
+        llvm::append_range(coordinates, read.getCoordinates());
+        SmallVector<int64_t> axes;
+        for (unsigned axis = 0; axis < groupCoordinates.size(); ++axis)
+          axes.push_back(axis);
+        for (int64_t axis : read.getSourceAxes())
+          axes.push_back(axis + groupCoordinates.size());
+        auto valid = snapshotValidity(atRead, read.getLoc(), read.getType(),
+                                      read.getValid(), groupValidity);
+        if (failed(valid)) return failure();
+        atRead.create<StoreOp>(read.getLoc(), addressSnapshots.lookup(original),
+            coordinates, read.getResult(), *valid, axes);
+      }
       for (auto [store, snapshot] : llvm::zip(writes, snapshots)) {
         if (groupValidity) {
           OpBuilder atStore(store, listener);

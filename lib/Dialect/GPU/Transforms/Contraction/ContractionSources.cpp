@@ -282,8 +282,12 @@ FailureOr<bool> collapseMultiReductionContract(ContractOp contract) {
     }
     if (!analysis.lockstepRanges(paired).isExact())
       return false;
-    reductionExtents.push_back(
-        queryLaunchExpression(paired.front().getLogicalStop()));
+    auto extent = queryLaunchExpression(paired.front().getLogicalStop());
+    // This normalization materializes complete source axes before reshape.
+    // Runtime extents cannot become fragment dimensions; retain their bounded
+    // multi-axis contraction traversal instead of constructing an illegal tile.
+    if (!isCompileTimePhysicalExpr(extent)) return false;
+    reductionExtents.push_back(extent);
   }
 
   // Put a complete power-of-two tile inside a non-power-of-two outer group.
