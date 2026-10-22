@@ -189,8 +189,12 @@ std::optional<CurrentBufferWrite> findCurrentBufferWrite(
   DominanceInfo dominance(function);
   if (!dominance.dominates(buffer, before)) return std::nullopt;
   if (auto allocation = origin.getDefiningOp<memref::AllocOp>()) {
-    auto lifetime = storage.lifetime(allocation);
-    if (!lifetime || !lifetime->contains(before)) return std::nullopt;
+    // A reaching write only needs the allocation to exist at this read point.
+    // Its later release may follow a conditional alias or leave this block;
+    // a single lexical deallocation is required for moving storage, not for
+    // observing its current contents. The backward effect walk below still
+    // rejects intervening frees, unknown effects and conditional clobbers.
+    if (!dominance.dominates(allocation.getResult(), before)) return std::nullopt;
   } else if (auto allocation = origin.getDefiningOp<memref::AllocaOp>()) {
     auto owner = allocation->getParentWithTrait<OpTrait::AutomaticAllocationScope>();
     if (!owner || !owner->isAncestor(before)) return std::nullopt;
