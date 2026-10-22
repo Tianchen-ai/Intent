@@ -173,6 +173,17 @@ def ReductionsPass : IntentGPUTransformPass<
     reduction trees and communication are not reconstructed here.
   }]>;
 
+def VectorContractionsPass : IntentGPUTransformPass<
+    "intent-gpu-realize-vector-contractions",
+    "Realize remaining vector products as native reduction programs", [{
+    Runs after region realization and source normalization, which may expose
+    new matrix-vector products after initial pointwise blocking. Uses the
+    current paired axes to form broadcasts, products and reductions with the
+    original accumulator type. Matrix-matrix products remain contractions.
+    Subsequent reduction realization handles the resulting bounded programs.
+    No provider matrix primitive or algorithm-specific rule is selected here.
+  }]>;
+
 def ContractionsPass : IntentGPUTransformPass<
     "intent-gpu-realize-contractions",
     "Realize GPU contraction programs", [{

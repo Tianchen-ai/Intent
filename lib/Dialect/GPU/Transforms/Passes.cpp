@@ -30,6 +30,7 @@ namespace intent::gpu {
 #define GEN_PASS_DEF_REGIONFOLDSPASS
 #define GEN_PASS_DEF_REGIONSCANSPASS
 #define GEN_PASS_DEF_REDUCTIONSPASS
+#define GEN_PASS_DEF_VECTORCONTRACTIONSPASS
 #define GEN_PASS_DEF_CONTRACTIONSPASS
 #define GEN_PASS_DEF_ACCESSCOMPOSITIONPASS
 #define GEN_PASS_DEF_PRIVATESTORESPASS
@@ -196,6 +197,20 @@ public:
   }
 };
 
+class VectorContractionsPass : public impl::VectorContractionsPassBase<VectorContractionsPass> {
+public:
+  void runOnOperation() final {
+    auto module = getOperation();
+    auto transform = [&]() -> LogicalResult {
+      auto kernel = getPhysicalKernel(module);
+      if (failed(kernel) || failed(realizeVectorContractions(module))) return failure();
+      return closeValueRelations(*kernel);
+    };
+    if (failed(finishTransformation(module, getArgument(), transform())))
+      signalPassFailure();
+  }
+};
+
 class AccessCompositionPass : public impl::AccessCompositionPassBase<AccessCompositionPass> {
 public:
   void runOnOperation() final {
@@ -302,6 +317,7 @@ void populateTransformations(OpPassManager &manager,
   manager.addPass(createRegionScansPass());
   // Predicate specialization exposes unmasked multiply-reductions.
   manager.addPass(createNormalizeStructuredSourcesPass());
+  manager.addPass(createVectorContractionsPass());
   manager.addPass(createReductionsPass());
   manager.addPass(createContractionsPass());
   manager.addPass(createAccessCompositionPass());
