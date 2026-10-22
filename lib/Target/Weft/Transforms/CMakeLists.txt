@@ -8,6 +8,7 @@ add_mlir_library(MLIRIntentWeftTransforms
   TaskLowering.cpp
   TaskViews.cpp
   TaskStorage.cpp
+  TaskAllocations.cpp
   TaskComputations.cpp
   TaskControl.cpp
   ScalarValues.cpp

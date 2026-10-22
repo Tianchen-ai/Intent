@@ -94,6 +94,7 @@ LogicalResult legalizeProgram(ModuleOp program) {
   for (func::FuncOp function : functions) {
     for (auto [index, alignment] : llvm::enumerate(publicAlignments))
       if (alignment) function.setArgAttr(index, argumentAlignmentAttr, alignment);
+    if (failed(materializeAddressableTaskStorage(function))) return failure();
     cpu::StorageAnalysis storage(function);
     llvm::DenseMap<Value, intent::QuantFormat> formats;
     bool conflict = false;

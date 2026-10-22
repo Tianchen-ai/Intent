@@ -13,6 +13,8 @@ namespace intent::weft_provider {
 
 class TaskConversion;
 
+mlir::LogicalResult materializeAddressableTaskStorage(mlir::func::FuncOp function);
+
 // One host candidate supplies the axis identities, shape symbols and storage
 // interpretation for its task kernels. This state is consumed within conversion;
 // the resulting program's calls and typed task bindings carry the final ABI.
