@@ -131,8 +131,12 @@ void NativeSourceEmitter::declare(Value value, Value initial) {
 }
 
 void NativeSourceEmitter::alias(Value result, Value source) {
-  if (isa<MemRefType>(result.getType())) memories[result] = memories.at(source);
-  else bind(result, valueString(source));
+  if (isa<MemRefType>(result.getType())) {
+    // Inserting the result can grow DenseMap and invalidate a reference to its
+    // source entry. Copy the complete descriptor before performing insertion.
+    MemoryDescriptor descriptor = memories.at(source);
+    memories[result] = std::move(descriptor);
+  } else bind(result, valueString(source));
 }
 
 void NativeSourceEmitter::transfer(ValueRange from, ValueRange to) {
