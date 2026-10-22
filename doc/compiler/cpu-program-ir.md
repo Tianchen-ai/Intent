@@ -97,4 +97,6 @@ Analyses 从当前程序重算 coverage、axis/access、dependence、reuse、lif
 
 Runtime 只绑定已声明资源并执行任务，host-visible 调用返回前完成 join。初始化、编译、加载与普通调用分离；不执行 Python/Torch 算法替代品，也不增加隐藏 kernel invocation。
 
+本机 JIT 在执行主机查询 provider 的有效目标及允许的 CPU 集合；向量能力是硬件事实，workers 与 private storage 是构造预算。Mojo 使用其有效目标查询并核对 ISA 同质性，Weft 复用正式 NativeTarget 的 ISA/ABI/VLEN、扩展与启动合同。Prepared call 保留该执行约束，亲和性改变时不能误用原有绑定或 tuning winner。公开 native-call 接口提供 typed 函数、参数、所有权和执行校验；外部计时工具不读取 runtime 的候选或函数内部数组。
+
 生成 source/IR 与 native materialization 分开，前者不等于可调用 artifact。Native 算子计时包含该次调用所需 packing、内部 materialization、任务派发与同步，排除编译、调优、加载及外部输出分配；实现覆盖、测量结果与性能门槛不进入本规格。

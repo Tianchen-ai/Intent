@@ -54,9 +54,9 @@ intent doctor --target triton --json
 These commands use an existing complete algorithm and stop at different stages:
 
 ```bash
-python -m examples.use softmax --target triton --stage source
-python -m examples.use softmax --target triton --stage native
-python -m examples.use softmax --target triton
+python -m intent.examples softmax --backend triton --stage source
+python -m intent.examples softmax --backend triton --stage native
+python -m intent.examples softmax --backend triton
 ```
 
 The complete-program entry prepares its existing inputs and runs its existing host composition. KIR needs no target or device; shared IR needs an explicit compilation target; native compilation and execution need the corresponding toolchain and device. See [compile and run](../getting-started/usage.md) for commands selecting one definition and inspecting KIR.

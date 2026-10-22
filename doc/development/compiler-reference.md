@@ -54,9 +54,9 @@ intent doctor --target triton --json
 以下命令使用现有完整算法，停在不同阶段：
 
 ```bash
-python -m examples.use softmax --target triton --stage source
-python -m examples.use softmax --target triton --stage native
-python -m examples.use softmax --target triton
+python -m intent.examples softmax --backend triton --stage source
+python -m intent.examples softmax --backend triton --stage native
+python -m intent.examples softmax --backend triton
 ```
 
 完整程序入口准备原有输入并调用原有 host 编排。KIR 阶段不需要 target 或设备；shared 阶段需要明确编译目标；native 与运行阶段需要对应工具链和设备。选择单个定义并查看 KIR 的命令见[编译与运行](../getting-started/usage.md)。

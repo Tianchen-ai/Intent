@@ -22,7 +22,7 @@ _PLATFORM_LIBRARIES = re.compile(
     r"lib(?:c|m|mvec|pthread|dl|rt|util|resolv|anl|BrokenLocale|thread_db|"
     r"nss_[A-Za-z0-9_]+|stdc\+\+|gcc_s)\.so(?:\.[0-9]+)*)\Z"
 )
-_COMMON_LICENSE = re.compile(r"/usr/share/common-licenses/[A-Za-z0-9.+_-]+")
+_COMMON_LICENSE = re.compile(r"/usr/share/common-licenses/[A-Za-z0-9](?:[A-Za-z0-9.+_-]*[A-Za-z0-9])?")
 
 
 @dataclass(frozen=True)

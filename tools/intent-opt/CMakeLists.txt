@@ -31,4 +31,13 @@ target_link_libraries(intent-opt PRIVATE
   MLIROptLib
 )
 
+# registerAllPasses references conversions and extensions as well as dialects.
+# Shared libMLIR builds include them transitively; static SDKs need the closure.
+get_property(intent_conversion_libs GLOBAL PROPERTY MLIR_CONVERSION_LIBS)
+get_property(intent_extension_libs GLOBAL PROPERTY MLIR_EXTENSION_LIBS)
+mlir_target_link_libraries(intent-opt PRIVATE
+  ${intent_conversion_libs}
+  ${intent_extension_libs}
+)
+
 mlir_check_all_link_libraries(intent-opt)

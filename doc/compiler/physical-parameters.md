@@ -17,7 +17,7 @@ Physical parameter不进入KIR，也不成为作者DSL参数。
 
 ## 编译期候选数据输入
 
-`intent.compile(..., tuning_config=path)`与`compile_shared_gpu(..., tuning_config=path)`接受有限JSON配置覆盖；CLI对应`--tuning-config <path>`。不传时读取所选provider随compiler分发的完整配置表。表与provider配置职责相邻，编译器在配置物化前读取一次；调表不需要重编译C++，但必须重新编译kernel artifact。launch与autotune不再读取该文件。
+`intent.jit(..., backend=..., tuning_config=path)`、`intent.compile(..., tuning_config=path)`与`compile_shared_gpu(..., tuning_config=path)`接受有限JSON配置覆盖；CLI对应`--tuning-config <path>`。不传时读取所选provider随compiler分发的完整配置表。表与provider配置职责相邻，编译器在配置物化前读取一次；调表不需要重编译C++，但必须重新创建 JIT 对象或编译 kernel artifact。launch与autotune不再读取该文件。
 
 一行配置同时指定shared粒度偏好和provider选项，组织方式对应Triton的完整`Config`列表。覆盖文件使用当前所选provider的命名空间`triton`或`cutile`，包含已有结构family到完整配置行数组的映射。例如Triton配置：
 

@@ -22,6 +22,10 @@ A physical module may read an external target-capability object. It expresses ty
 
 Passes query features rather than matching device names. Feature predicates, pipeline selection and lowering patterns on the same IR express differences between SM90, SM100, SM120 and gfx families.
 
+Ordinary `intent.jit(..., backend=...)` calls select a provider explicitly and derive the local execution device from actual inputs. Local target discovery queries hardware and toolchains to form compiler targets; runtime does not substitute model-name or transient-load decisions for structural passes. Offline generation may accept explicit target facts, but generated source does not prove executability on the current machine.
+
+BANG C DSA modules carry a typed `CapabilitiesAttr` with cluster/core counts and physical NRAM, WRAM and SRAM capacities discovered through local CNRT. Provider resource rules subtract SDK reservations, while `ConfigurationAttr` retains configuration budgets. These three quantities are distinct. Current MLU370 lowering does not imply support for other architectures.
+
 ## 3. Common IR and local extensions
 
 Common GPU IR remains the sole complete executable authority. A target-local extension augments the current program without copying program mapping, value/access graphs or structured semantics.

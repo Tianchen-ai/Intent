@@ -17,7 +17,7 @@ Physical parameters do not enter KIR or become author DSL parameters.
 
 ## Compile-time candidate data
 
-`intent.compile(..., tuning_config=path)` and `compile_shared_gpu(..., tuning_config=path)` accept a finite JSON configuration override; the CLI option is `--tuning-config <path>`. Without an override, the compiler reads the selected provider's complete configuration table distributed with the compiler. The table lives alongside provider configuration responsibilities and is read once before configuration materialization. Editing the table does not require rebuilding C++, but does require recompiling the kernel artifact. Launch and autotuning do not read the file again.
+`intent.jit(..., backend=..., tuning_config=path)`, `intent.compile(..., tuning_config=path)` and `compile_shared_gpu(..., tuning_config=path)` accept a finite JSON configuration override; the CLI option is `--tuning-config <path>`. Without an override, the compiler reads the selected provider's complete configuration table distributed with the compiler. The table lives alongside provider configuration responsibilities and is read once before configuration materialization. Editing the table does not require rebuilding C++, but does require creating a new JIT object or recompiling the kernel artifact. Launch and autotuning do not read the file again.
 
 Each row specifies shared granularity preferences and provider options together, following Triton's complete `Config` list organization. An override uses the selected provider namespace, `triton` or `cutile`, and maps existing structural families to arrays of complete rows. For example:
 

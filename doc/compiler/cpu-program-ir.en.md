@@ -84,4 +84,6 @@ Analyses recompute coverage/axes-access/dependence/reuse/lifetime/eligibility an
 
 Runtime binds declared resources/executes tasks and joins before host return. Initialization/compilation/loading/calling remain separate. Python/Torch algorithm substitutes or hidden invocations are forbidden.
 
+Local JIT queries the provider's effective target and allowed CPU set on the execution host. Vector capability is a hardware fact; workers and private storage are construction budgets. Mojo queries its effective target and checks ISA homogeneity. Weft reuses its formal NativeTarget ISA/ABI/VLEN, extension and startup contracts. Prepared calls retain execution constraints; affinity changes must not reuse incompatible bindings or tuning winners. The public native-call interface provides typed functions, arguments, ownership and execution validation, so external timers do not inspect internal candidate or function arrays.
+
 Source/IR generation is not native callable materialization. Native timing includes per-call packing/materialization/task dispatch/synchronization, excluding compilation/tuning/loading/external output allocation. Coverage, measurements and performance thresholds do not define these semantics.

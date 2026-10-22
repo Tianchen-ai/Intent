@@ -1,140 +1,99 @@
-# 安装与构建
+# 安装
 
-[English](README.md) | [简体中文](README.zh-CN.md)
+[English](README.md)
 
-公开安装入口使用 Linux 和 Python 3.10–3.12。IntentDSL 的 Python 包包含独立编译器；选择后端后，再安装该后端的运行依赖。源码构建不需要 Python MLIR bindings，需要 LLVM/MLIR 20 的 C++ SDK。
-
-从 [PyPI](https://pypi.org/project/intentdsl/) 安装 IntentDSL。先安装编译器包，再选择执行所需的后端依赖；[公开开发预览](https://github.com/Tianchen-ai/Intent/releases/tag/preview) 和源码构建提供另外两条安装路线。项目使用 [Apache-2.0](../LICENSE) 许可，外部运行库保留各自的许可和声明。
-
-## 从 PyPI 安装
-
-```bash
-python3 -m venv .venv-triton
-source .venv-triton/bin/activate
-python -m pip install 'intentdsl[manual,examples]'
-intent setup --target triton
-intent doctor --target triton
-```
-
-基础 `pip install intentdsl` 包含编译器与 Python API；`manual` 增加两个 MCP 服务的依赖，`examples` 增加 NumPy/BF16/FP8 输入支持。完整程序在源码 checkout 的 [examples/](../examples/README.md)。公开 wheel 支持 Linux x86-64、glibc ≥ 2.35 和 Python 3.10–3.12；安装匹配的 wheel 不需要 LLVM/MLIR SDK，没有对应 wheel 的平台需要下述源码构建依赖。
-
-只使用编译器/KIR/MCP 时省略 `intent setup`。cuTile 使用独立环境并执行 `intent setup --target cutile`。两个 GPU 路线都需要匹配的 NVIDIA 驱动，CPU 和 MLU 的外部工具链要求见下文。
+在实际执行 kernel 的机器上安装。后端显式选择，硬件资源由本机探测。
+Python 包名是 intentdsl，导入名为 intent。
 
 ## 安装已有 wheel
 
-将 `INTENT_WHEEL` 设为实际 `.whl` 文件的完整路径，然后在独立环境安装：
-
 ```bash
-python3 -m venv .venv-triton
-source .venv-triton/bin/activate
-python -m pip install "${INTENT_WHEEL}[manual]"
+python3 -m venv /path/to/venv
+source /path/to/venv/bin/activate
+python -m pip install 'intentdsl[manual,examples]'
 intent setup --target triton
 intent doctor --target triton
+python -m intent.examples softmax --backend triton
 ```
 
-wheel 包含 `intent-compile`、`intent-opt`、经验配置、语言手册和必要的非系统 ELF 运行库。安装 wheel 不需要源码仓库、LLVM/MLIR SDK 或 C++ 构建。编译器通过相对 `$ORIGIN` 路径找到自身运行库，第三方声明位于 `intent/_bin/third-party/`。
+本地构建的 wheel 用 `pip install /path/to/intentdsl.whl` 安装。
+公开 x86-64 wheel 需要兼容 glibc；本机 wheel 必须匹配执行主机架构与系统 ABI。
+wheel 包含 intent-compile、intent-opt、配置表、手册及所需的非系统运行库，
+安装匹配的二进制包不需要 LLVM 开发 SDK。
 
-分发脚本产出 `manylinux_2_35_x86_64` wheel，适用于 glibc 2.35 或更新版本的主流 Linux x86-64 系统。[auditwheel](https://github.com/pypa/auditwheel) 检查实际编译器 executable、私有库、外部符号版本和 CPU ISA，再执行修复；不兼容的构建直接失败，不仅修改标签。后端与设备要求独立于基础 wheel。如果只使用编译器、KIR 工具或 MCP，省略 `intent setup` 即可，不需要 GPU、PyTorch 或 provider SDK。用 `intent doctor --json` 检查基础编译器。
+manual extra 安装 MCP 依赖，examples extra 安装数组与 dtype 支持。
+setup 只安装[provider 注册表](../python/intent/targets/registry.py)声明的 Python 依赖，
+不安装驱动。doctor 检查实际编译器、provider 工具链与本机目标，不代表数值验证。
 
-两个 MCP 入口 `intent-manual` 与 `intent-compiler-mcp` 共用 `manual` extra。第一个只读语言手册，第二个允许编译用户已有的 Python 源文件；连接方法见 [MCP](../mcp/README.zh-CN.md)。
+## 在执行机上从源码构建
 
-## 从源码安装一个后端
+需要 Linux、Python 3.10–3.12、CMake、Ninja、C++17 与 LLVM/MLIR 20 SDK，
+包括 headers、libraries、TableGen 与 CMake packages。Debian/Ubuntu 对应包包含
+llvm-20-dev、libmlir-20-dev、mlir-20-tools；不需要 Python MLIR bindings。
 
-先准备 CMake、Ninja、C++17 编译器、Python venv 支持，以及 LLVM/MLIR 20 的头文件、库、TableGen 工具和 CMake 配置。Debian/Ubuntu 配置 [LLVM 官方软件源](https://apt.llvm.org/) 后，SDK 包包括 `llvm-20-dev`、`libmlir-20-dev` 和 `mlir-20-tools`。
-
-Debian/Ubuntu 的 Python 3.10 需要 `python3.10-venv`。如果创建环境时出现 `ensurepip is not available`，先安装该系统包；安装脚本不自动安装系统依赖。
-
-在仓库根目录执行：
+构建 Weft provider 时需链接其 canonical IR 库，先用同一套 SDK 构建并传入下面的
+两个 Weft 参数。仅构建其他 provider 时可省略 Weft 构建与这两个参数：
 
 ```bash
-python3 environment/install.py --backend triton --venv .venv-triton
-source .venv-triton/bin/activate
-python examples/softmax.py
+cmake -S /path/to/weft -B /path/to/weft-build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DMLIR_DIR=/path/to/mlir/cmake -DLLVM_DIR=/path/to/llvm/cmake
+cmake --build /path/to/weft-build --target WeftKernelDialect
+python3 environment/install.py --backend triton --venv /path/to/venv --examples \
+  --mlir-dir /path/to/mlir/cmake --llvm-dir /path/to/llvm/cmake \
+  --weft-source-dir /path/to/weft --weft-binary-dir /path/to/weft-build \
+  --build-dir /path/to/build/intent --jobs 8
 ```
 
-cuTile 使用独立环境：
+安装器复用环境与构建目录，安装包、执行 setup，再调用 doctor。
+它不安装驱动、外部编译器或服务。默认构建目录在用户缓存中；
+开发和 Bench 使用时显式选择受控路径。SDK 必须完整，部分 LLVM 源码构建需先补齐依赖库。
+
+## 各 provider 工具链
+
+| 后端 | 执行主机与依赖 |
+|---|---|
+| triton / cutile | CUDA 主机、兼容 NVIDIA 驱动及所选 Python provider |
+| mojo | x86 主机与 Mojo，通过 INTENT_MOJO 或 backend_options 选择编译器 |
+| weft | RISC-V 主机、匹配的 Weft Python 包、原生 weft-compile 与 C 编译器 |
+| bangc | MLU370 主机与 NeuWare 的 CNRT/CNCC |
+
+源码安装保留前面的 SDK 参数；构建 Weft 时加入 canonical library 参数，再选择后端附加参数：
 
 ```bash
-python3 environment/install.py --backend cutile --venv .venv-cutile
-source .venv-cutile/bin/activate
-python examples/softmax.py --target cutile
+# install.py 的对应附加参数：
+# --backend mojo --provider-compiler /path/to/mojo
+# --backend weft --provider-compiler /path/to/native/weft-compile
+# --backend bangc --neuware /path/to/neuware
 ```
 
-脚本创建或复用 venv，用统一 Python 打包路径构建 IntentDSL，然后调用已安装的 `intent setup` 和 `intent doctor`。不会安装驱动、外部 CPU 编译器或 NeuWare SDK。重跑会复用环境和构建目录，失败保留原始诊断。
+Weft 使用正式 NativeTarget 与扩展目录；用户选择 CPU 集合和线程预算，
+不手填 ISA/VLEN。执行机应安装匹配的 Weft 包，不能仅加载其他主机生成的库来代替本机 JIT。
+BANG C 查询 CNRT 的实际资源；不支持的架构会准确拒绝，不伪装成 MLU370。
+普通 JIT 的 shape/stride specialization 来自实际输入 buffer。
 
-SDK 位于其他目录时，传入 `--mlir-dir`、`--llvm-dir`，或设置 `INTENT_MLIR_DIR`、`INTENT_LLVM_DIR`。构建缓存默认位于用户缓存目录，`--build-dir` 和 `--jobs` 控制位置与并发。已有 wheel 时添加 `--wheel "$INTENT_WHEEL"`，不再传源码构建参数。`--examples` 安装产品程序需要的 NumPy/BF16/FP8 输入支持。
+```python
+run = intent.jit(definition, backend="mojo",
+                 backend_options={"compiler": "/path/to/mojo"})
+```
 
-| 后端 | Python 依赖路线 | 外部条件与范围 |
-|---|---|---|
-| `triton` | PyTorch 2.10.0+cu130、Triton 3.6.0、NumPy 1.26.4 | NVIDIA 驱动，可调用 GPU 产物 |
-| `cutile` | PyTorch 2.10.0+cu128、cuTile 1.6.0、CUDA 13.3.1 编译组件 | 兼容的 NVIDIA 驱动，可调用 GPU 产物 |
-| `mojo` | PyTorch 2.10.0+cpu | 已安装的 Mojo，Linux x86-64 AVX2/AVX512 |
-| `weft` | 生成源码无需额外 tensor framework | Intent 编译器需构建 Weft；原生执行需对应部署和工具链 |
-| `bangc` | 原生 buffer 接口使用 Python 标准库 | 已安装的 NeuWare SDK 与兼容 MLU370 设备 |
+doctor 使用相同的本机目标解析，例如
+`intent doctor --target weft --target-option 'compiler="/path/to/weft-compile"'`。
+独立产品使用自己的 INTENT_CACHE_DIR/XDG 缓存；仅在 Bench 启动时由 Bench 重定向。
 
-依赖的唯一声明是 [backends.py](../python/intent/tools/backends.py)。cuTile 的 CUDA 13.3 编译组件与 PyTorch cu128 的 CUDA 12 运行库分开：PyTorch cu130 锁定的 CUDA 13 运行库版本会与当前编译组件冲突。PyTorch 提供 tensor 存储和 stream，cuTile 负责 TileIR 编译及 driver launch。不同 GPU 路线使用独立 venv。安装成功不代表设备可用或所有 kernel 已验证。
-
-## 选择已有 CPU 或 MLU 工具链
+## 构建分发包
 
 ```bash
-python3 environment/install.py --backend mojo --venv .venv-mojo \
-  --provider-compiler /path/to/mojo
-
-python3 environment/install.py --backend weft --venv .venv-weft \
-  --weft-source-dir /path/to/Weft --weft-binary-dir /path/to/weft-build
-
-python3 environment/install.py --backend bangc --venv .venv-bangc \
-  --neuware /path/to/neuware
+python3 environment/build.py --platform native \
+  --output-dir /path/to/dist --work-dir /path/to/package-work \
+  --mlir-dir /path/to/mlir/cmake --llvm-dir /path/to/llvm/cmake \
+  --weft-source-dir /path/to/weft --weft-binary-dir /path/to/weft-build
 ```
 
-这些路径必须指向真实存在的工具链。Weft 的源码、生成头文件和库必须匹配当前 LLVM/MLIR SDK。wheel 路线不传 Weft 源码参数，其自身必须已包含 Weft 支持。
+native 模式适用于 x86-64、RISC-V 等执行主机。脚本从 sdist 构建、打包运行库与
+第三方 notices，再在 checkout 外检查安装后的基础编译器。
+显式使用 `--platform manylinux_2_35_x86_64` 才选择 Ubuntu 22.04 x86-64 的
+auditwheel 路线；native wheel 不自动成为 manylinux wheel。
 
-后续调用仍需明确目标部署，例如：
-
-```bash
-.venv-mojo/bin/intent doctor --target mojo --target-option 'compiler="/path/to/mojo"'
-.venv-weft/bin/intent doctor --target weft --target-option vector_bits=256 --target-option workers=8
-.venv-bangc/bin/intent doctor --target bangc --target-option 'neuware="/path/to/neuware"'
-```
-
-Weft 的 `vector_bits` 和 `workers` 需替换为实际部署参数。脚本不推断私有设备配置，不安装远程部署，不把生成源码视为原生执行成功。
-
-## 构建 sdist 和 wheel
-
-Ubuntu 22.04、Linux x86-64、CPython 3.10–3.12 和 LLVM/MLIR 20 SDK 上可使用现有分发脚本：
-
-```bash
-python3 environment/build.py \
-  --output-dir /path/outside-checkout/dist \
-  --work-dir /path/outside-checkout/build \
-  --jobs 8
-```
-
-输出目录和新建工作目录都必须位于仓库外，互不嵌套；省略 `--work-dir` 会自动使用用户缓存目录。脚本先构建 sdist，再从该归档构建 wheel，执行 auditwheel 的平台检查和 `manylinux_2_35_x86_64` 修复，使用 `twine check --strict` 检查分发元数据，在仓库外干净 venv 安装修复后的 wheel，然后调用基础 doctor、API discovery、两个 MCP、原有 softmax 的 KIR 编译和标准 IR 优化。它不会执行设备 kernel。
-
-产物检查完成后，输出目录得到 `.tar.gz` 与 `.whl`；工作目录保留命令、日志、安装环境和编译产物。不会覆盖已有分发文件。`--mlir-dir`、`--llvm-dir`、`--runtime-notices` 和成对的 Weft 源码/构建目录参数用于选择现有 SDK。
-
-其他源码构建环境可直接调用标准 Python 打包入口：
-
-```bash
-python -m pip install '.[manual]' \
-  --config-settings=cmake.define.MLIR_DIR=/usr/lib/llvm-20/lib/cmake/mlir \
-  --config-settings=cmake.define.LLVM_DIR=/usr/lib/llvm-20/lib/cmake/llvm \
-  --config-settings=build-dir=/path/to/intent-build
-```
-
-将 `pip install` 换为 `pip wheel . --no-deps --wheel-dir /path/to/wheelhouse`，并保留 CMake 设置，可只构建本地平台 wheel；这一手动入口不会自动执行 auditwheel 修复。标准分发脚本采用 [PEP 600](https://peps.python.org/pep-0600/) 平台策略，自定义 SDK 也必须满足真实符号和 ISA 条件。构建隔离环境自动安装打包需要的 `patchelf`；关闭隔离时需自行提供。版本沿用现有 Git 元数据，脚本不创建发布标签，也不发布到 PyPI。
-
-## GitHub 构建产物
-
-[Distribution workflow](../.github/workflows/distribution.yml) 对相关 main push、pull request 和手动运行调用同一分发脚本。打开运行页面，在 Artifacts 中下载 `intentdsl-ubuntu-22.04-x86_64`，解压并安装实际 wheel，再选择所需后端。CI 基础 wheel 不构建可选 Weft，不安装 Torch 或设备 SDK。
-
-这些是对应运行的 manylinux 构建产物，保留 14 天，不等于 PyPI 或 GitHub Release。`intentdsl-distribution-diagnostics` 保存诊断。CI 验证安装后的编译器和 KIR 工具；设备运行与性能通过既定 [30 个产品程序](../examples/README.md) 观察。
-
-维护者手动运行 Distribution 时，可选择 `publish-preview` 更新 GitHub Release 附件、`publish-pypi` 上传到 PyPI，或同时选择两项；两条渠道都使用该轮通过检查的同一份产物。PyPI 上传使用 repository secret `PYPI_API_TOKEN`，凭据不进入源码或包文件。普通 push 与 pull request 只构建和检查。维护说明见[发布指南](../doc/development/documentation.md#配置-pypi-发布)。
-
-## 运行库声明和常用诊断
-
-打包收集实际 ELF 依赖；无法解析依赖、冲突的 SONAME 或缺少第三方声明会直接失败。Debian/Ubuntu SDK 的声明来自实际归属包和其 copyright 文件。自定义 SDK 使用 `--runtime-notices` 提供库路径到完整许可文件列表的 JSON 映射，详见 [英文说明](README.md#runtime-libraries-and-notices)。只修改打包副本的 RPATH，不修改 SDK 原文件。
-
-`intent describe --json` 列出公共 API，`intent doctor --target BACKEND --json` 检查所选环境；`intent compile path/to/program.py:kernel --stage kir --json` 无需目标设备即可构建 KIR。完整 provider 生成使用 `--target BACKEND`，`--materialize` 执行原生编译，不主动运行 kernel。编译返回源码、IR、日志和元数据路径；`intent read-artifact PATH --json` 可以分页读取。生成源码、原生编译、运行正确与性能结果分别判断。
+自定义 SDK 用 --runtime-notices 提供共享库到 license/notice 文件的 JSON 映射。
+所有产物留在 checkout 外，不自动发布或 push。
+安装/生成、原生编译、执行和数值正确分别判断。

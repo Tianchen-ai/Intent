@@ -22,6 +22,10 @@ Physical module可以读取external target-capability object。它以typed featu
 
 Passes查询features而不是匹配设备名称。SM90、SM100、SM120或gfx family通过同一IR上的feature predicates、pipeline selection与lowering patterns表达差异。
 
+普通 `intent.jit(..., backend=...)` 调用显式选择 provider，由实际输入确定本机执行设备。本机 target discovery 查询硬件与工具链，形成 compiler target；runtime 不根据型号或临时负载替 passes 作结构决定。离线生成可显式提供 target facts，但不能将离线生成当作当前机器可执行的证明。
+
+BANG C 的 DSA module 携带 typed `CapabilitiesAttr`，包含 cluster/core 数量及物理 NRAM、WRAM、SRAM 容量，由 CNRT 本机探测提供。SDK 保留空间在 provider 资源规则中扣除，配置使用预算仍由 `ConfigurationAttr` 表达；三者不能相互冒充。当前 MLU370 lowering 不代表其它架构也受到支持。
+
 ## 3. Common IR 与 local extension
 
 共同GPU IR始终是唯一完整executable authority。Target-local extension只能扩展当前program，不能复制program mapping、value/access graph或structured semantics。

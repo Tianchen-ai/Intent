@@ -95,6 +95,7 @@ jobs:
       - name: Build the sdist and wheel and inspect the installed product
         run: |
           /usr/bin/python3.10 environment/build.py \
+            --platform manylinux_2_35_x86_64 \
             --output-dir "$RUNNER_TEMP/intent-distribution" \
             --work-dir "$RUNNER_TEMP/intent-distribution-work" \
             --mlir-dir /usr/lib/llvm-20/lib/cmake/mlir \

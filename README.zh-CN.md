@@ -42,14 +42,14 @@ cd Intent
 python3 environment/install.py --backend triton --venv .venv-triton --examples
 source .venv-triton/bin/activate
 intent doctor --target triton
-python -m examples.use softmax --target triton
+python -m intent.examples softmax --backend triton
 ```
 
 源构建需要 CMake、Ninja、C++17 编译器与 LLVM/MLIR 20 C++ SDK。脚本构建并安装编译器和 Python 包，再安装所选后端，构建产物保存在 checkout 外。cuTile 使用独立环境：`--backend cutile --venv .venv-cutile`。[安装说明](https://github.com/Tianchen-ai/Intent/blob/main/environment/README.zh-CN.md) 提供 SDK、外部 CPU/MLU 工具链及使用 `environment/build.py` 构建分发包的步骤。
 
 ## 编写并调用 kernel
 
-将下面代码保存为 Python 文件，在已安装的 Triton 环境运行。算法与现有 [ReLU 示例](https://github.com/Tianchen-ai/Intent/blob/main/examples/kernels/activation/pointwise.py) 相同。
+将下面代码保存为 Python 文件，在已安装的 Triton 环境运行。算法与现有 [ReLU 示例](https://github.com/Tianchen-ai/Intent/blob/main/python/intent/examples/kernels/activation/pointwise.py) 相同。
 
 ```python
 import torch
@@ -68,7 +68,7 @@ def relu(
         output[row, columns] = I.maximum(x[row, columns], I.cast(0.0, I.f16))
 
 
-artifact = intent.compile(relu, target=intent.TritonTarget())
+artifact = intent.jit(relu, backend="triton")
 x = torch.randn((64, 1024), device="cuda", dtype=torch.float16)
 y = artifact.run(x)
 print(y.shape, y.dtype, y.device)
@@ -76,26 +76,26 @@ print(y.shape, y.dtype, y.device)
 
 Kernel 描述逻辑行、列和运算；编译器选择物理 ownership、blocking、遍历与存储。Target 在 host 调用中选择，kernel 无需判断后端。
 
-`intent.compile` 返回可调用产物。首次调用可能触发原生 JIT 编译和 autotuning，相同 specialization 的后续调用复用这些工作。`artifact.run(...)` 分配声明的 `Out`；`artifact(...)` 接受显式输出。应用中应保留 artifact 并重复调用。
+`intent.jit` 创建可复用的本机调用对象。后端始终显式选择，实际输入 buffer 决定本机设备并自动探测其能力。首次使用完成编译与必要调优，后续调用复用产物并绑定自己的 buffer。`artifact.run(...)` 分配声明的 `Out`；`artifact(...)` 接受显式输出。显式生成和导出仍通过 `intent.generate`、`intent.compile` 提供。
 
 GPU 与 Mojo 产物还提供 `artifact.as_torch_op("your_project::name")`，可接入 PyTorch custom operator 和 `torch.compile`。Backward 由作者注册，kernel 与 host 关系保持显式。见[框架调用示例](https://github.com/Tianchen-ai/Intent/blob/main/examples/README.md#框架与产物调用示范)。
 
 ## 浏览 30 个完整程序
 
-产品示例覆盖 attention、递归状态、归一化、矩阵与量化收缩、稀疏访问、scan 和可变状态更新。每个 program 复用 `examples/kernels/` 中的唯一算法，以及 `examples/programs/` 中的普通 host 编排。
+安装包中的 `intent.examples` 覆盖 attention、递归状态、归一化、矩阵与量化收缩、稀疏访问、scan 和可变状态更新，持有唯一的算法与显式 host 编排。
 
 ```bash
-python -m examples.use --list
-python -m examples.use attention --target triton
-python -m examples.use paged_decode --target cutile
-python -m examples.use --all --target triton --stage source --jobs 4
+python -m intent.examples --list
+python -m intent.examples attention --backend triton
+python -m intent.examples paged_decode --backend cutile
+intent-bench check --suite mainline --backend triton --stage source --env local-gpu
 ```
 
 | Provider | 执行路线 |
 |---|---|
 | Triton / cuTile | NVIDIA GPU；接入 PyTorch tensor 与 stream |
 | Mojo | x86 CPU；使用外部 Mojo 编译器 |
-| Weft | CPU lowering；原生执行使用显式配置的 Weft 部署 |
+| Weft | RISC-V 本机 JIT；复用 Weft 探测实际 ISA、VLEN 与 CPU 能力 |
 | BANG C | 寒武纪 MLU；使用外部 NeuWare SDK 和兼容设备 |
 
 源码生成、原生编译与真实执行是不同阶段。实际支持范围取决于程序的操作、类型、effects 与所选硬件。[示例指南](https://github.com/Tianchen-ai/Intent/blob/main/examples/README.md) 介绍输入、完整调用与 target 参数。
@@ -106,7 +106,7 @@ python -m examples.use --all --target triton --stage source --jobs 4
 
 ```bash
 python -m pip install -e ../intentdsl_bench
-intent-bench check --intent-root . --suite mainline --target triton
+intent-bench check --intent-root . --suite mainline --backend triton
 intent-bench run softmax --impl triton,cutile,intent:triton,intent:cutile --intent-root . --device cuda:0
 ```
 
@@ -151,9 +151,9 @@ MCP 有独立的[目录与配置说明](https://github.com/Tianchen-ai/Intent/bl
 ## 查看编译过程
 
 ```bash
-intent compile examples/kernels/normalization/softmax.py:stable_softmax_f16 \
+intent compile python/intent/examples/kernels/normalization/softmax.py:stable_softmax_f16 \
   --stage kir --json
-intent compile examples/kernels/normalization/softmax.py:stable_softmax_f16 \
+intent compile python/intent/examples/kernels/normalization/softmax.py:stable_softmax_f16 \
   --target triton --json
 ```
 

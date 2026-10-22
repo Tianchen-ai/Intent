@@ -1,49 +1,98 @@
 # Compile and run
 
-## Choose a complete program
+## Local JIT on the execution host
 
-The repository's 30 complete programs reuse the single algorithm definitions in `examples/kernels/`. `examples/programs/` supplies inputs, outputs and explicit host orchestration. The compiler does not select templates from program names.
+Install Intent and the chosen provider, then run on the machine that executes the kernel:
 
-```bash
-python examples/use.py --list
-python examples/use.py layer_norm --target triton
-python examples/use.py paged_decode --target cutile --prepared
-python examples/use.py group_norm_backward --target mojo
+```python
+import intent
+from intent.examples.kernels.normalization.softmax import stable_softmax_f16
+
+softmax = intent.jit(stable_softmax_f16, backend="triton")
+y = softmax.run(x)
+y2 = softmax.run(x2)
 ```
 
-`--stage source` generates source and binds complete-call shapes and dtypes. `native` compiles bound calls without execution. `run` executes the complete program and retrieves outputs. These outcomes establish generation, native compilation or execution respectively; none automatically establishes numerical correctness or performance quality.
+The required backend is one of `triton`, `cutile`, `mojo`, `weft`, or `bangc`.
+Creating the object does not probe hardware. The first binding discovers the actual
+local device and toolchain and caches generated artifacts. The first execution performs
+necessary native compilation and tuning over the declared configurations. Subsequent
+calls bind their own buffers and reuse applicable artifacts and configuration winners.
+A failing backend never causes a switch to another provider.
+
+The same code runs on H100 and 5090D using their locally discovered capabilities.
+CPU discovery respects the calling process's allowed CPU set; `workers` is a thread budget.
+Weft requires a native Weft and C toolchain on the RISC-V host. BANG C queries CNRT
+resources and specializes required geometry from actual buffers. Ordinary calls do not
+ask users to supply ISA, VLEN or on-chip storage capacity.
+
+Inputs must belong to one compatible device. Calls without device-bearing inputs can
+select a local device explicitly, for example `device="cuda:0"`. Conflicts fail without
+implicit data movement. Use existing framework tensors or provider public buffers.
+`backend_options` selects provider toolchain paths; `compiler` selects Intent's compiler.
+
+## Preparation and execution
+
+- `kernel.run(*inputs)` allocates declared Out buffers, executes and returns them.
+  Callers still supply InOut.
+- `kernel(*all_arguments)` takes every parameter, including Out, in declaration order,
+  executes and returns None.
+- `kernel.prepare(*inputs, outputs=(...))` binds inputs, explicit outputs and workspace.
+  It may generate necessary IR/source, but never executes or tunes kernels.
+  Omit outputs to allocate declared Out buffers.
+- `call.compile()` compiles applicable native candidates without executing the author call.
+- `call.launch()` executes the binding; `call.result()` retrieves output containers
+  without executing or synchronizing.
+- `kernel.close()` releases owned native artifacts. Keep argument storage alive until execution finishes.
+
+Zero Out parameters return None; one returns that object; several return a tuple.
+GPU calls retain the current stream's asynchronous submission semantics. Synchronize
+through the framework when reading host results. Complete compilation, tuning and necessary
+first execution before graph capture. Authors control multi-kernel ordering, intermediate
+storage and gradients in ordinary Python; Intent does not rewrite the model graph.
+
+## Installed author programs
+
+The single source for algorithms and host orchestration is installed as
+`intent.examples.kernels` and `intent.examples.programs`. Neither a checkout nor Bench is required:
 
 ```bash
-python examples/use.py --all --target triton --stage source --jobs 4 --json
-python examples/use.py attention --target mojo --stage native
-python examples/use.py paged_decode --target triton --measure 10 --json
+python -m intent.examples --list
+python -m intent.examples layer_norm --backend triton
+python -m intent.examples paged_decode --backend cutile --prepared
+python -m intent.examples group_norm_backward --backend mojo
+python -m intent.examples attention --backend mojo --stage native
 ```
 
-`--jobs` parallelizes source/native preparation only; device execution stays sequential. `--measure` times complete warm calls after initial compilation, tuning and execution. Multi-kernel programs include every author-defined call and necessary workspace initialization. Restoring supplied InOut values and retrieving host outputs occur outside timing. GPUs use CUDA events; CPU/MLU measurements use the wall clock of complete synchronous calls. Input preparation, compilation, tuning and `elapsed_seconds` are not kernel execution times.
-
-## Python call interface
-
-`intent.compile(kernel, target=..., constexprs=...)` returns a callable artifact. `intent.generate(...)` generates source/IR only. Hosts select targets, for example `intent.targets.TritonTarget()`; a target is not a value or branch condition inside a kernel.
-
-- `artifact(...)` receives all runtime parameters in declaration order, including `Out`, executes and returns `None`.
-- `artifact.run(...)` omits declared `Out` parameters, allocates and returns outputs. Callers still supply `InOut`.
-- `artifact.prepare(..., outputs=(...))` binds inputs, outputs and resources without executing.
-- A prepared call's `launch()` executes; `result()` retrieves output containers without execution or synchronization.
-
-Zero `Out` parameters return `None`; one returns that object; several return a tuple in declaration order. Compile each artifact in a multi-kernel program separately and use ordinary Python to organize calls and intermediate tensor lifetimes.
-
-The existing [softmax example](https://github.com/Tianchen-ai/Intent/blob/main/examples/softmax.py) demonstrates PyTorch tensors, prepared calls, native observations and `torch.compile`. The [forward/backward example](https://github.com/Tianchen-ai/Intent/blob/main/examples/softmax_forward_backward.py) demonstrates author-registered gradients. Intent neither derives backward algorithms nor adds hidden launches.
-
-## Inspect generated structure
+The source stage generates and checks call geometry; native compiles without executing;
+run executes the complete program. Independent Bench owns numerical comparisons, repeated
+measurements, suites and experimental protocols:
 
 ```bash
+intent-bench check --suite mainline --backend triton --env local-gpu
+intent-bench run softmax --env local-gpu --case 64x1024-float16 \
+  --impl intent:triton,intent:cutile,triton --baseline triton
+```
+
+The [softmax example](https://github.com/Tianchen-ai/Intent/blob/main/examples/softmax.py)
+demonstrates prepared calls and PyTorch integration. The
+[forward/backward example](https://github.com/Tianchen-ai/Intent/blob/main/examples/softmax_forward_backward.py)
+demonstrates author-registered gradients.
+
+## Advanced IR and export interfaces
+
+`intent.generate(..., target=...)`, `intent.compile(..., target=...)` and artifact export
+remain available for explicit compilation and application integration. Offline compilation
+requires complete target facts and does not establish successful local execution.
+
+```bash
+intent doctor --target triton --json
 intent describe --target triton --json
-intent compile examples/kernels/normalization/softmax.py:stable_softmax_f16 --stage kir --json
-intent compile examples/kernels/normalization/softmax.py:stable_softmax_f16 --target triton --stage shared --json
-intent compile examples/kernels/normalization/softmax.py:stable_softmax_f16 --target triton --json
-intent read-artifact /path/returned/by/compile --offset 0 --limit 16000 --json
+intent compile intent.examples.kernels.normalization.softmax:stable_softmax_f16 --stage kir --json
+intent compile intent.examples.kernels.normalization.softmax:stable_softmax_f16 --target triton --stage shared --json
+intent optimize INPUT.mlir --pipeline 'builtin.module(canonicalize,cse)'
 ```
 
-`--materialize` additionally creates a callable without launching. `--constexpr NAME=JSON` binds algorithm constexprs; `--target-option NAME=JSON` forwards public target constructor options. Run standard MLIR pipelines on existing IR with `intent optimize INPUT.mlir --pipeline 'builtin.module(canonicalize,cse)'`.
-
-Source, IR and caches live in `$XDG_CACHE_HOME/intentdsl/` or `~/.cache/intentdsl/` by default; `INTENT_CACHE_DIR` overrides the root. Failures preserve the actual stage, diagnostics and artifact paths. Missing backend support is reported explicitly rather than changing the algorithm.
+Standalone Intent uses `INTENT_CACHE_DIR`, defaulting to the XDG user cache.
+Only Bench-initiated runs redirect this into Bench's output root. Generation, compilation,
+execution and numerical checks are distinct outcomes. Compilation and tuning are not operator time.

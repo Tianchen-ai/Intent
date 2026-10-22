@@ -42,14 +42,14 @@ cd Intent
 python3 environment/install.py --backend triton --venv .venv-triton --examples
 source .venv-triton/bin/activate
 intent doctor --target triton
-python -m examples.use softmax --target triton
+python -m intent.examples softmax --backend triton
 ```
 
 Source builds need CMake, Ninja, a C++17 compiler, and the LLVM/MLIR 20 C++ SDK. The script builds and installs the compiler and Python package, then installs the chosen backend. Build artifacts stay outside the checkout. Use `--backend cutile --venv .venv-cutile` for cuTile in a separate environment. [Installation](https://github.com/Tianchen-ai/Intent/blob/main/environment/README.md) covers SDK packages, external CPU/MLU toolchains, and `environment/build.py` for building distributable wheels.
 
 ## Write and call a kernel
 
-Save this as a Python file and run it in the installed Triton environment. It uses the same algorithm as the [ReLU example](https://github.com/Tianchen-ai/Intent/blob/main/examples/kernels/activation/pointwise.py).
+Save this as a Python file and run it in the installed Triton environment. It uses the same algorithm as the [ReLU example](https://github.com/Tianchen-ai/Intent/blob/main/python/intent/examples/kernels/activation/pointwise.py).
 
 ```python
 import torch
@@ -68,7 +68,7 @@ def relu(
         output[row, columns] = I.maximum(x[row, columns], I.cast(0.0, I.f16))
 
 
-artifact = intent.compile(relu, target=intent.TritonTarget())
+artifact = intent.jit(relu, backend="triton")
 x = torch.randn((64, 1024), device="cuda", dtype=torch.float16)
 y = artifact.run(x)
 print(y.shape, y.dtype, y.device)
@@ -76,26 +76,26 @@ print(y.shape, y.dtype, y.device)
 
 The kernel describes logical rows and columns. Compiler passes choose physical ownership, blocking, traversals, and storage. The target is selected on the host; the kernel does not branch on the backend.
 
-`intent.compile` returns a callable artifact. Its first invocation can trigger native JIT compilation and autotuning; subsequent calls with the same specialization reuse that work. `artifact.run(...)` allocates declared `Out` tensors, while `artifact(...)` accepts explicit outputs. Keep the artifact in your application instead of recompiling on every call.
+`intent.jit` creates a reusable local callable. Choose the backend explicitly; actual input buffers determine the local device and its capabilities. First use performs compilation and necessary tuning; subsequent calls reuse the artifacts while binding their own buffers. `artifact.run(...)` allocates declared `Out` tensors, while `artifact(...)` accepts explicit outputs. Explicit generation and export remain available through `intent.generate` and `intent.compile`.
 
 GPU and Mojo artifacts also provide `artifact.as_torch_op("your_project::name")` for opaque PyTorch custom operators and `torch.compile` integration. Authors register their own backward; the compiler preserves explicit kernel and host composition. See the [framework examples](https://github.com/Tianchen-ai/Intent/blob/main/examples/README.en.md#integrate-with-a-framework).
 
 ## Explore 30 complete programs
 
-The product examples cover attention, recurrent state, normalization, matrix and quantized contractions, sparse access, scans, and mutable updates. Each program uses the unique algorithm in `examples/kernels/` and ordinary host composition in `examples/programs/`.
+The installed `intent.examples` package covers attention, recurrent state, normalization, matrix and quantized contractions, sparse access, scans, and mutable updates. It owns one copy of each algorithm and its explicit host composition.
 
 ```bash
-python -m examples.use --list
-python -m examples.use attention --target triton
-python -m examples.use paged_decode --target cutile
-python -m examples.use --all --target triton --stage source --jobs 4
+python -m intent.examples --list
+python -m intent.examples attention --backend triton
+python -m intent.examples paged_decode --backend cutile
+intent-bench check --suite mainline --backend triton --stage source --env local-gpu
 ```
 
 | Provider | Execution route |
 |---|---|
 | Triton / cuTile | NVIDIA GPU; PyTorch tensor and stream integration |
 | Mojo | x86 CPU; external Mojo compiler |
-| Weft | CPU lowering; native execution through an explicitly configured Weft deployment |
+| Weft | RISC-V local JIT; native ISA, VLEN and CPU capabilities discovered through Weft |
 | BANG C | Cambricon MLU; external NeuWare SDK and compatible device |
 
 Generation, native compilation, and execution are separate stages. Backend coverage depends on the program's operations, types, effects, and selected hardware. The [examples guide](https://github.com/Tianchen-ai/Intent/blob/main/examples/README.en.md) describes inputs, complete calls, and target options.
@@ -107,7 +107,7 @@ evaluation material. With that project checked out beside IntentDSL:
 
 ```bash
 python -m pip install -e ../intentdsl_bench
-intent-bench check --intent-root . --suite mainline --target triton
+intent-bench check --intent-root . --suite mainline --backend triton
 intent-bench run softmax --impl triton,cutile,intent:triton,intent:cutile --intent-root . --device cuda:0
 ```
 
@@ -153,9 +153,9 @@ Start with `read(id="doc/dsl/authoring.en.md")` and `api(name="intent.compile")`
 ## Inspect compilation
 
 ```bash
-intent compile examples/kernels/normalization/softmax.py:stable_softmax_f16 \
+intent compile python/intent/examples/kernels/normalization/softmax.py:stable_softmax_f16 \
   --stage kir --json
-intent compile examples/kernels/normalization/softmax.py:stable_softmax_f16 \
+intent compile python/intent/examples/kernels/normalization/softmax.py:stable_softmax_f16 \
   --target triton --json
 ```
 

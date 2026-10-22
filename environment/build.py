@@ -1,9 +1,9 @@
-"""Build and install-check an Ubuntu 22.04 x86-64 distribution.
+"""Build and install-check a native Linux distribution.
 
 This recipe builds a wheel from its sdist and uses the existing public tools on
 the installed package. It neither installs provider SDKs nor executes kernels.
-Auditwheel verifies and repairs the wheel for manylinux_2_35_x86_64 before
-installation. The recipe does not publish artifacts or claim reproducibility.
+An explicit manylinux_2_35_x86_64 build additionally uses auditwheel.
+The native path also supports RISC-V execution hosts with an LLVM/MLIR SDK.
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ import zipfile
 
 
 REPOSITORY = Path(__file__).resolve().parents[1]
-AUTHOR_SOURCE = PurePosixPath("examples/kernels/normalization/softmax.py")
+AUTHOR_SOURCE = PurePosixPath("python/intent/examples/kernels/normalization/softmax.py")
 COMMANDS = count(1)
 
 
@@ -155,14 +155,16 @@ def main() -> None:
     parser.add_argument("--runtime-notices", type=Path)
     parser.add_argument("--weft-source-dir", type=Path)
     parser.add_argument("--weft-binary-dir", type=Path)
+    parser.add_argument("--platform", choices=("native", "manylinux_2_35_x86_64"), default="native")
     args = parser.parse_args()
 
-    if (sys.platform != "linux" or platform.machine() != "x86_64"
+    if (sys.platform != "linux"
             or sys.implementation.name != "cpython" or not (3, 10) <= sys.version_info[:2] <= (3, 12)):
-        parser.error("this distribution recipe requires Linux x86_64 and CPython 3.10–3.12; other platforms can use a manual source build")
+        parser.error("this distribution recipe requires Linux and CPython 3.10–3.12")
     system = platform.freedesktop_os_release()
-    if system.get("ID") != "ubuntu" or system.get("VERSION_ID") != "22.04":
-        parser.error("this distribution recipe requires Ubuntu 22.04; it does not restrict manual source builds")
+    if args.platform != "native" and (platform.machine() != "x86_64" or
+            system.get("ID") != "ubuntu" or system.get("VERSION_ID") != "22.04"):
+        parser.error("the manylinux recipe requires Ubuntu 22.04 x86_64; use --platform native on this host")
     if args.jobs < 1:
         parser.error("--jobs must be positive")
     if bool(args.weft_source_dir) != bool(args.weft_binary_dir):
@@ -207,8 +209,10 @@ def main() -> None:
     run(sys.executable, "-m", "venv", build_environment, cwd=work, env=env)
     build_python = build_environment / "bin/python"
     env["PATH"] = str(build_environment / "bin") + os.pathsep + env["PATH"]
-    run(build_python, "-m", "pip", "install", "--upgrade", "pip", "build>=1.2,<2",
-        "twine>=6,<7", "auditwheel>=6.8,<7", "patchelf>=0.17", cwd=work, env=env)
+    dependencies = ["pip", "build>=1.2,<2", "twine>=6,<7", "patchelf>=0.17"]
+    if args.platform != "native":
+        dependencies.append("auditwheel>=6.8,<7")
+    run(build_python, "-m", "pip", "install", "--upgrade", *dependencies, cwd=work, env=env)
     source_output, wheel_output = work / "sdist", work / "wheel"
     run(build_python, "-m", "build", "--sdist", "--outdir", source_output,
         REPOSITORY, cwd=work, env=env)
@@ -234,13 +238,14 @@ def main() -> None:
         source_archive, cwd=work, env=env)
     wheel = one_artifact(wheel_output, "*.whl")
     check_wheel_contents(wheel, version, manual)
-    run(build_python, "-m", "auditwheel", "show", wheel, cwd=work, env=env)
-    portable_output = work / "repaired-wheel"
-    run(build_python, "-m", "auditwheel", "repair", "--plat", "manylinux_2_35_x86_64",
-        "--only-plat", "--wheel-dir", portable_output, wheel, cwd=work, env=env)
-    wheel = one_artifact(portable_output, "*.whl")
-    check_wheel_contents(wheel, version, manual)
-    run(build_python, "-m", "auditwheel", "show", wheel, cwd=work, env=env)
+    if args.platform != "native":
+        run(build_python, "-m", "auditwheel", "show", wheel, cwd=work, env=env)
+        portable_output = work / "repaired-wheel"
+        run(build_python, "-m", "auditwheel", "repair", "--plat", args.platform,
+            "--only-plat", "--wheel-dir", portable_output, wheel, cwd=work, env=env)
+        wheel = one_artifact(portable_output, "*.whl")
+        check_wheel_contents(wheel, version, manual)
+        run(build_python, "-m", "auditwheel", "show", wheel, cwd=work, env=env)
     run(build_python, "-m", "twine", "check", "--strict", source_archive, wheel,
         cwd=work, env=env)
 
@@ -283,7 +288,7 @@ def main() -> None:
         shutil.copy2(artifact, destination)
     print(json.dumps({"sdist": str(destinations[0]), "wheel": str(destinations[1]),
                       "work_directory": str(work), "installed_environment": str(installed),
-                      "platform": "manylinux_2_35_x86_64",
+                      "platform": args.platform,
                       "scope": "Installed compiler, optimizer, public declarations, manual packaging and original softmax KIR; no provider execution"}, indent=2))
 
 
