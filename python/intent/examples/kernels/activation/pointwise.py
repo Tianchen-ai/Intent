@@ -47,15 +47,21 @@ def geglu_tanh(
         output[row, columns] = I.cast(left * gelu_tanh_value(right), I.f16)
 
 
-@intent.kernel
-def relu_forward(
-    x: I.In[I.f16, ("M", "N")],
-    output: I.Out[I.f16, ("M", "N")],
-):
-    M, N = x.shape
-    columns = I.domain(0, N)
-    for row in I.parallel(I.domain(0, M)):
-        output[row, columns] = I.maximum(x[row, columns], I.cast(0.0, I.f16))
+def make_relu_forward(dtype):
+    @intent.kernel
+    def relu_forward(
+        x: I.In[dtype, ("M", "N")],
+        output: I.Out[dtype, ("M", "N")],
+    ):
+        M, N = x.shape
+        columns = I.domain(0, N)
+        for row in I.parallel(I.domain(0, M)):
+            output[row, columns] = I.maximum(x[row, columns], I.cast(0.0, dtype))
+    return relu_forward
+
+
+relu_forward = make_relu_forward(I.f16)
+relu_forward_f32 = make_relu_forward(I.f32)
 
 
 @intent.kernel
