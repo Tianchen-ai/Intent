@@ -32,10 +32,17 @@ def load_artifact(artifact: WeftArtifact | str | Path) -> CompiledArtifact:
 
 def materialize_weft_artifact(program, target):
     from .compilation import export_artifact, compile_artifact
+    from .program import NativeProgram
+    from intent.runtime.artifact import CompiledArtifact
 
     exported = export_artifact(program, compiler=target.compiler, profile=target.profile)
-    native = compile_artifact(exported, cc=target.cc, cflags=target.cflags)
-    return load_artifact(native)
+    runtime = NativeProgram(exported,
+        native_target=target.native,
+        native_builder=lambda artifact: compile_artifact(artifact, cc=target.cc, cflags=target.cflags),
+        source_directory=program.cache_directory)
+    return CompiledArtifact(source=program.source, mlir=program.ir, device=0,
+                            device_type="cpu", runtime=runtime, _backend_ir_collector=None,
+                            cache_directory=program.cache_directory)
 
 
 __all__ = ["Buffer", "TargetProfile", "WeftArtifact", "NativeProgram", "export_artifact", "compile_artifact", "load_artifact"]

@@ -73,6 +73,7 @@ mlir::FailureOr<mlir::DictionaryAttr> parseDSAParameterBindings(
     mlir::ModuleOp module, llvm::StringRef text, bool shapes);
 mlir::FailureOr<mlir::ArrayAttr> readDSAConfigurations(
     mlir::ModuleOp module, llvm::StringRef directory, llvm::StringRef overrides);
+mlir::FailureOr<mlir::Attribute> readDSACapabilities(mlir::ModuleOp module, llvm::StringRef text);
 
 } // namespace intent::compiler
 #endif

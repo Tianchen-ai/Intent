@@ -8,7 +8,7 @@ import inspect
 import io
 from pathlib import Path
 
-from .backends import BACKENDS, backend, make_target
+from intent.targets.registry import BACKENDS, backend, make_target
 from intent.targets.provider import provider as get_provider
 
 
@@ -132,7 +132,7 @@ def describe(target: str | None = None) -> dict:
         result["backends"] = {name: {**backend(name),
             "target": _declaration(get_provider(name).target)} for name in names}
         result["api"] = {name: _declaration(getattr(intent, name)) for name in (
-            "compile", "generate", "compile_ir", "generate_from_ir", "optimize_ir", "CompileOptions",
+            "jit", "JITKernel", "compile", "generate", "compile_ir", "generate_from_ir", "optimize_ir", "CompileOptions",
             "GPUCompilationTarget", "GPUCapabilities", "CPUCompilationTarget", "DSACompilationTarget",
             "NativeObservation", "NativeResource", "CandidateObservation", "InvocationArgument")}
         result["tools"] = {name: _declaration(function) for name, function in (
@@ -406,11 +406,22 @@ def doctor(target: str | None = None, *, target_options: dict | None = None, com
     resolved = None
     def resolve():
         nonlocal resolved
-        resolved = make_target(target, dict(target_options or {}), facts=target_facts).resolve()
+        if target_facts is not None:
+            resolved = make_target(target, dict(target_options or {}), facts=target_facts).resolve()
+        else:
+            from intent.targets.local import resolve_local, select_device
+            options = dict(target_options or {})
+            device = options.pop("device", "cpu" if get_provider(target).family == "cpu" else 0)
+            workers = options.pop("workers", None)
+            resolved = resolve_local(target, select_device(target, (), device),
+                                     workers=workers, backend_options=options)
         result["callable_materialization"] = isinstance(resolved, ResolvedTarget)
         compilation = resolved.compilation if isinstance(resolved, ResolvedTarget) else resolved
-        return {"compiler_options": list(compilation.compiler_options),
-                "facts": asdict(resolved) if is_dataclass(resolved) else {}}
+        facts = asdict(resolved) if is_dataclass(resolved) else {}
+        native = getattr(resolved, "native", None)
+        if native is not None:
+            facts["native"] = native.to_dict()
+        return {"compiler_options": list(compilation.compiler_options), "facts": facts}
 
     check("target", "target_resolution", resolve)
     adapter = get_provider(target)

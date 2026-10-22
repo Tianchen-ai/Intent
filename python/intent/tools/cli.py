@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import sys
 
-from .backends import BACKENDS
+from intent.targets.registry import BACKENDS
 from .compilation import (compile_request, describe, doctor, generate_ir_request,
                           materialize_request, optimize_request, read_artifact)
 

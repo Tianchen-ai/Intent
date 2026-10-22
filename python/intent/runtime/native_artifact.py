@@ -221,6 +221,18 @@ class _BoundNativeFunction:
         self.owner._require_open()
         return self.function(*arguments)
 
+    def bind_call(self, arguments, *, owner, validate):
+        from .native_call import NativeInvocation
+        def check():
+            self.owner._require_open()
+            validate()
+        check()
+        if len(arguments) != len(self.function.argtypes):
+            raise TypeError("native argument count disagrees with the loaded function ABI")
+        values = tuple(value if isinstance(value, kind) else kind(value)
+                       for kind, value in zip(self.function.argtypes, arguments, strict=True))
+        return NativeInvocation(self.function, values, (self, owner, arguments), check)
+
 
 class LoadedNativeLibrary:
     """One runtime's lease on an immutable, process-lifetime library image."""

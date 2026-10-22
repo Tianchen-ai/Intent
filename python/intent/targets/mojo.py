@@ -22,6 +22,11 @@ class ResolvedMojoTarget:
     features: str
     compilation: CPUCompilationTarget
     build_threads: int
+    cpus: tuple[int, ...]
+
+    def validate_execution(self) -> None:
+        if tuple(sorted(os.sched_getaffinity(0))) != self.cpus:
+            raise RuntimeError("Mojo execution CPU affinity changed; prepare a new local JIT call")
 
     @property
     def vector_bits(self) -> int:
@@ -58,6 +63,19 @@ class MojoTarget:
         executable = shutil.which(selected)
         if executable is None:
             raise FileNotFoundError("Mojo compiler was not found; set INTENT_MOJO or MojoTarget(compiler=...)")
+        cpus = tuple(sorted(os.sched_getaffinity(0)))
+        # LLVM's native target query describes one executing CPU. Reject a set
+        # with different ISA flags rather than applying that answer to all CPUs.
+        flags = {}
+        for record in Path("/proc/cpuinfo").read_text().split("\n\n"):
+            fields = dict(line.split(":", 1) for line in record.splitlines() if ":" in line)
+            fields = {key.strip(): value.strip() for key, value in fields.items()}
+            if "processor" in fields and "flags" in fields:
+                flags[int(fields["processor"])] = frozenset(fields["flags"].split())
+        if not set(cpus).issubset(flags):
+            raise RuntimeError("Mojo could not read ISA flags for the execution CPU set")
+        if len({flags[cpu] for cpu in cpus}) != 1:
+            raise NotImplementedError("Mojo local JIT requires an ISA-homogeneous CPU affinity set")
         result = subprocess.run([executable, "build", "--print-effective-target"],
                                 text=True, capture_output=True, check=True)
         configuration = {}
@@ -79,7 +97,7 @@ class MojoTarget:
         compilation = CPUCompilationTarget("mojo", vector_bits, self.workers,
                                             private_bytes=self.private_bytes)
         return ResolvedMojoTarget(executable, triple, configuration["--target-cpu"], features,
-                                  compilation, self.build_threads)
+                                  compilation, self.build_threads, cpus)
 
 
 def resolve_c_compiler(environment) -> str:

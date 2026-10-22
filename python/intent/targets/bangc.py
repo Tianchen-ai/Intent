@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from collections.abc import Mapping
 from pathlib import Path
 import os
@@ -44,6 +44,7 @@ class BangCTarget:
         if not isinstance(program.target, DSACompilationTarget):
             raise ValueError("a BANG C runtime requires a DSA generated program")
         fields = asdict(program.target)
+        fields.pop("capabilities")
         fields["shapes"] = dict(program.target.shapes)
         fields["strides"] = dict(program.target.strides)
         return cls(**fields, device=device, neuware=neuware, compiler=compiler)
@@ -53,12 +54,45 @@ class BangCTarget:
             raise ValueError("BANG C device must be a nonnegative integer")
         shapes = tuple(sorted((name, tuple(shape)) for name, shape in (self.shapes or {}).items()))
         strides = tuple(sorted((name, tuple(values)) for name, values in (self.strides or {}).items()))
+        from .mlu import resolve_mlu_device
+        neuware = str(Path(self.neuware).expanduser().resolve())
+        capabilities = resolve_mlu_device(self.device, neuware)
         compilation = DSACompilationTarget(
-            self.architecture, shapes, strides)
+            self.architecture, shapes, strides, capabilities)
         return ResolvedBangCTarget(
             compilation, self.device, str(Path(self.neuware).expanduser().resolve()),
             os.path.expanduser(str(self.compiler)) if self.compiler is not None else None,
         )
+
+
+def specialize_call(target, definition, arguments, outputs):
+    """Bind required DSA geometry from actual buffers, not from example helpers."""
+    from intent.language.annotations import ConstexprSpec, ViewKind, ViewSpec
+    parameters = [p for p in definition.signature.parameters.values()
+                  if not isinstance(p.annotation, ConstexprSpec)]
+    inputs = [p for p in parameters if not (isinstance(p.annotation, ViewSpec)
+                                          and p.annotation.kind is ViewKind.OUT)]
+    out_parameters = [p for p in parameters if p not in inputs]
+    if len(arguments) != len(inputs) or (outputs is not None and len(outputs) != len(out_parameters)):
+        raise TypeError("JIT arguments do not match the kernel input/output declaration")
+    supplied = list(zip(inputs, arguments, strict=True))
+    if outputs is not None:
+        supplied.extend(zip(out_parameters, outputs, strict=True))
+    shapes, strides = {}, {}
+    for parameter, value in supplied:
+        if not isinstance(parameter.annotation, ViewSpec):
+            continue
+        shapes[parameter.name] = tuple(value.shape)
+        if callable(getattr(value, "stride", None)):
+            stride = tuple(value.stride())
+        elif hasattr(value, "__array_interface__"):
+            stride = tuple(v // value.dtype.itemsize for v in value.strides)
+        else:
+            stride = tuple(value.strides)
+        strides[parameter.name] = stride
+    geometry = tuple(sorted(shapes.items())), tuple(sorted(strides.items()))
+    return replace(target, compilation=replace(target.compilation,
+                                               shapes=geometry[0], strides=geometry[1])), geometry
 
 
 def resolve_toolchain(target, environment) -> tuple[str, Path]:

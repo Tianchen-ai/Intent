@@ -43,6 +43,9 @@ FailureOr<llvm::json::Object> serializeTaskABI(wk::KernelOp kernel) {
     arguments.push_back(llvm::json::Object{
         {"name", cast<StringAttr>(kernel.getArgNames()[index]).getValue().str()},
         {"c_type", (writable ? "" : "const ") + scalar + (restricted ? " *restrict" : " *")},
+        {"kind", "view"},
+        {"dtype", encoding.getKind() == "dense" ? encoding.getFamily().str() : ""},
+        {"access", access.str()}, {"strided", false},
         {"encoding", encoding.getLayoutIdentity().str()}, {"shape", std::move(dimensions)},
         {"storage_bytes", bytes}, {"record_elements", elements}, {"alignment", alignment},
         {"interleave_rows", 0}, {"alias_set", alias}, {"writable", writable}});

@@ -30,6 +30,7 @@ struct CPUOptions {
 struct DSAOptions {
   std::string architecture = "mtp_372";
   std::string shapes = "{}", strides = "{}";
+  std::string capabilities;
 };
 
 struct CompilationOptions {

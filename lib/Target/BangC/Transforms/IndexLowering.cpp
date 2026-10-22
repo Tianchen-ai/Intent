@@ -110,7 +110,7 @@ bool realizeFullWidthMasks(func::FuncOp function, dsa::ConfigurationAttr config)
     // Preflight with both representations present. Removing the old boolean
     // producers and conversions can only reduce their storage requirements.
     int64_t nram = 0, wram = 0; measureStorage(function, nram, wram);
-    if (nram > config.getLocalBytes() || nram > 768 * 1024 || wram > 1024 * 1024) {
+    if (nram > config.getLocalBytes() || nram > capabilities(function).getNramBytes() || wram > capabilities(function).getWramBytes()) {
       for (auto replacement : replacements) replacement.erase();
       packed.erase(); mask.getDefiningOp()->erase(); continue;
     }
@@ -267,7 +267,7 @@ bool vectorizeIndexLoops(func::FuncOp function, dsa::ConfigurationAttr config) {
     b.create<dsa::StoreTileOp>(loc, interleaved, store.getMemref(), zero, zero, one, one, loop.getUpperBound());
     int64_t nram = 0, wram = 0;
     measureStorage(function, nram, wram);
-    if (nram + 512 > config.getLocalBytes() || nram + 512 > 768 * 1024 || wram > 1024 * 1024) {
+    if (nram + 512 > config.getLocalBytes() || nram + 512 > capabilities(function).getNramBytes() || wram > capabilities(function).getWramBytes()) {
       while (loop->getPrevNode() != previous) loop->getPrevNode()->erase();
       if (initialization) {
         rampLayout.erase(); initialization.erase();

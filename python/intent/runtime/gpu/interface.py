@@ -6,7 +6,7 @@ from heapq import heappop, heappush
 from ...language.dtypes import DType, dtype
 from ..interface import PublicInterface, ScalarParameter, ViewParameter, byte_spans_overlap
 from ..invocation import build_invocation_binders, invocation_result
-from ..torch import torch_dtype
+from intent.integrations.torch import torch_dtype
 from ..torch_views import allocate_output, check_abstract_relation, observe_view, view_byte_span
 from .configurations import ConfigurationSpace, CoverageBinding
 from .expressions import Expression, evaluate_shape, read_expressions

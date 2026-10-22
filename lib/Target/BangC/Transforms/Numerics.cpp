@@ -82,7 +82,7 @@ void realizeRowSumChannels(func::FuncOp function, dsa::ConfigurationAttr config)
         reduce.getCount(), reduce.getIdentity(), reduce.getKindAttr(), b.getI64IntegerAttr(0));
     int64_t nram = 0, wram = 0;
     measureStorage(function, nram, wram);
-    if (nram > config.getLocalBytes() || nram > 768 * 1024) {
+    if (nram > config.getLocalBytes() || nram > capabilities(function).getNramBytes()) {
       replacement.erase(); transpose.erase(); storage.getDefiningOp()->erase();
     } else reduce.erase();
   }
@@ -141,7 +141,7 @@ LogicalResult realizeNumericExtremaWorkspace(func::FuncOp function, dsa::Configu
       binary.getScratchMutable().assign(scratch);
       int64_t nram = 0, wram = 0;
       measureStorage(function, nram, wram);
-      if (nram <= config.getLocalBytes() && nram <= 768 * 1024) break;
+      if (nram <= config.getLocalBytes() && nram <= capabilities(function).getNramBytes()) break;
       binary.getScratchMutable().clear();
       scratch.getDefiningOp()->erase();
     }
@@ -162,7 +162,7 @@ void realizeCompareWorkspace(func::FuncOp function, dsa::ConfigurationAttr confi
       compare.getScratchMutable().assign(scratch);
       int64_t nram = 0, wram = 0;
       measureStorage(function, nram, wram);
-      if (nram <= config.getLocalBytes() && nram <= 768 * 1024) break;
+      if (nram <= config.getLocalBytes() && nram <= capabilities(function).getNramBytes()) break;
       compare.getScratchMutable().clear();
       scratch.getDefiningOp()->erase();
     }
@@ -259,7 +259,7 @@ void realizeExponentialWorkspace(func::FuncOp function, dsa::ConfigurationAttr c
       unary.getScratchMutable().assign(scratch);
       int64_t nram = 0, wram = 0;
       measureStorage(function, nram, wram);
-      if (nram <= config.getLocalBytes() && nram <= 768 * 1024 && wram <= 1024 * 1024) break;
+      if (nram <= config.getLocalBytes() && nram <= capabilities(function).getNramBytes() && wram <= capabilities(function).getWramBytes()) break;
       unary.getScratchMutable().clear();
       scratch.getDefiningOp()->erase();
     }
@@ -281,7 +281,7 @@ void realizeFlushWorkspace(func::FuncOp function, dsa::ConfigurationAttr config)
       unary.getScratchMutable().assign(scratch);
       int64_t nram = 0, wram = 0;
       measureStorage(function, nram, wram);
-      if (nram <= config.getLocalBytes() && nram <= 768 * 1024 && wram <= 1024 * 1024) break;
+      if (nram <= config.getLocalBytes() && nram <= capabilities(function).getNramBytes() && wram <= capabilities(function).getWramBytes()) break;
       unary.getScratchMutable().clear(); scratch.getDefiningOp()->erase();
     }
   }
@@ -301,7 +301,7 @@ void realizeSelections(func::FuncOp function, dsa::ConfigurationAttr config) {
       select.getScratchMutable().assign(scratch);
       int64_t nram = 0, wram = 0;
       measureStorage(function, nram, wram);
-      if (nram <= config.getLocalBytes() && nram <= 768 * 1024 && wram <= 1024 * 1024) break;
+      if (nram <= config.getLocalBytes() && nram <= capabilities(function).getNramBytes() && wram <= capabilities(function).getWramBytes()) break;
       select.getScratchMutable().clear();
       scratch.getDefiningOp()->erase();
     }
@@ -329,7 +329,7 @@ void realizeApproximateReciprocals(func::FuncOp function, dsa::ConfigurationAttr
       binary.getScratchMutable().assign(scratch);
       int64_t nram = 0, wram = 0;
       measureStorage(function, nram, wram);
-      if (nram <= config.getLocalBytes() && nram <= 768 * 1024 && wram <= 1024 * 1024) {
+      if (nram <= config.getLocalBytes() && nram <= capabilities(function).getNramBytes() && wram <= capabilities(function).getWramBytes()) {
         binary->setAttr("bangc.implementation", b.getStringAttr("reciprocal_f32_ftz"));
         break;
       }
@@ -361,7 +361,7 @@ bool retainNarrowExtremaInputs(func::FuncOp function, dsa::ConfigurationAttr con
     Value scratch = allocate(b, reduce.getLoc(), b.getF16Type(), {1, type.getDimSize(1)}, dsa::nramSpace);
     reduce.getInputMutable().assign(conversion.getInput()); reduce.getScratchMutable().assign(scratch);
     int64_t nram = 0, wram = 0; measureStorage(function, nram, wram);
-    if (nram > config.getLocalBytes() || nram > 768 * 1024 || wram > 1024 * 1024) {
+    if (nram > config.getLocalBytes() || nram > capabilities(function).getNramBytes() || wram > capabilities(function).getWramBytes()) {
       reduce.getInputMutable().assign(oldInput); reduce.getScratchMutable().assign(oldScratch);
       scratch.getDefiningOp()->erase(); continue;
     }
@@ -405,7 +405,7 @@ void realizeRoundedDivisions(func::FuncOp function, dsa::ConfigurationAttr confi
       auto replacement = builder.create<dsa::DivideRNOp>(loc, division.getLhs(), divisor, division.getOutput(), scratch, indices);
       int64_t nram = 0, wram = 0;
       measureStorage(function, nram, wram);
-      if (nram > config.getLocalBytes() || nram > 768 * 1024 || wram > 1024 * 1024) {
+      if (nram > config.getLocalBytes() || nram > capabilities(function).getNramBytes() || wram > capabilities(function).getWramBytes()) {
         replacement.erase(); scratch.getDefiningOp()->erase();
         if (initialize) { initialize.erase(); indices.getDefiningOp()->erase(); }
         continue;
@@ -489,7 +489,7 @@ void fuseNarrowDivisions(func::FuncOp function, dsa::ConfigurationAttr config) {
     // local implementation would exceed the task's storage budget.
     int64_t nram = 0, wram = 0;
     measureStorage(function, nram, wram);
-    if (nram > config.getLocalBytes() || nram > 768 * 1024 || wram > 1024 * 1024) {
+    if (nram > config.getLocalBytes() || nram > capabilities(function).getNramBytes() || wram > capabilities(function).getWramBytes()) {
       fused.erase();
       narrowBounds.getDefiningOp()->erase();
       accepted.getDefiningOp()->erase();

@@ -171,7 +171,7 @@ class CompiledArtifact:
         Backward is not inferred. Authors may register it for functional calls;
         PyTorch does not accept register_autograd on mutable custom operators.
         """
-        from .torch import register_operator
+        from intent.integrations.torch import register_operator
 
         return register_operator(self, name)
 

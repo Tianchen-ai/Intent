@@ -27,7 +27,7 @@ class Provider:
 def provider(name: str) -> Provider:
     # The installation declarations also own the fixed supported-provider list.
     # SDK imports belong inside binding or inspection, never adapter discovery.
-    from intent.tools.backends import BACKENDS
+    from .registry import BACKENDS
 
     if name not in BACKENDS:
         raise ValueError(f"Unknown backend {name!r}; choose from {', '.join(BACKENDS)}")

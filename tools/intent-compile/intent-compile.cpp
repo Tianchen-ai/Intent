@@ -72,6 +72,7 @@ int main(int argc, char **argv) {
   llvm::cl::opt<bool> cpuMatrixI8I32("cpu-matrix-i8-i32", llvm::cl::init(false));
   llvm::cl::opt<int64_t> cpuPrivateBytes("cpu-private-bytes", llvm::cl::init(256 * 1024));
   llvm::cl::opt<std::string> dsaArchitecture("dsa-architecture", llvm::cl::init("mtp_372"));
+  llvm::cl::opt<std::string> dsaCapabilities("dsa-capabilities", llvm::cl::init(""));
   llvm::cl::opt<std::string> dsaShapes("dsa-shapes", llvm::cl::init("{}"),
       llvm::cl::desc("JSON parameter shapes; -1 keeps an axis dynamic"));
   llvm::cl::opt<std::string> dsaStrides("dsa-strides", llvm::cl::init("{}"),
@@ -96,7 +97,7 @@ int main(int argc, char **argv) {
   const llvm::SmallVector<llvm::cl::Option *> cpuOptions{
       &cpuVectorBits, &cpuWorkers, &cpuMatrixI8I32, &cpuPrivateBytes};
   const llvm::SmallVector<llvm::cl::Option *> dsaOptions{
-      &dsaArchitecture, &dsaShapes, &dsaStrides};
+      &dsaArchitecture, &dsaShapes, &dsaStrides, &dsaCapabilities};
   auto rejectOptions = [&](llvm::ArrayRef<llvm::cl::Option *> options,
                            llvm::StringRef reason) {
     for (llvm::cl::Option *option : options)
@@ -186,7 +187,7 @@ int main(int argc, char **argv) {
       registersPerUnit, maxThreadsPerBlock, computeCapabilityMajor, computeCapabilityMinor,
       singleToDoublePrecisionPerfRatio, matrixUnits, dynamicVectorWidth, false, false};
   request.cpu = {cpuVectorBits, cpuWorkers, cpuMatrixI8I32, cpuPrivateBytes};
-  request.dsa = {dsaArchitecture, dsaShapes, dsaStrides};
+  request.dsa = {dsaArchitecture, dsaShapes, dsaStrides, dsaCapabilities};
   request.tuningConfig = tuningConfigFilename;
   request.profileDirectory = std::string(profileDirectory);
 

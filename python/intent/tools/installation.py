@@ -6,7 +6,7 @@ import shlex
 import subprocess
 import sys
 
-from .backends import backend
+from intent.targets.registry import backend
 
 
 def setup_backend(target: str, *, torch_index_url: str | None = None) -> dict:

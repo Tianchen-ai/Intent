@@ -41,7 +41,7 @@ void realizeGatherWorkspace(func::FuncOp function, dsa::ConfigurationAttr config
     int64_t nram = 0, wram = 0;
     measureStorage(function, nram, wram);
     if (nram > config.getLocalBytes() - workspace->internalBytes ||
-        nram > 768 * 1024 - workspace->internalBytes) {
+        nram > capabilities(function).getNramBytes() - workspace->internalBytes) {
       gather.getPlanMutable().clear();
       prepare.erase();
       scratch.getDefiningOp()->erase();
@@ -98,7 +98,7 @@ bool realizeRowBroadcasts(func::FuncOp function, dsa::ConfigurationAttr config) 
         load.getOffset(), load.getRows(), load.getColumns());
     int64_t nram = 0, wram = 0;
     measureStorage(function, nram, wram);
-    if (nram > config.getLocalBytes() || nram > 768 * 1024) {
+    if (nram > config.getLocalBytes() || nram > capabilities(function).getNramBytes()) {
       broadcast.erase(); scratch.getDefiningOp()->erase(); continue;
     }
     load.erase(); changed = true;
@@ -140,7 +140,7 @@ void coalesceTileLoads(func::FuncOp function, dsa::ConfigurationAttr config) {
     auto after = b.create<dsa::SynchronizeOp>(load.getLoc());
     int64_t nram = 0, wram = 0;
     measureStorage(function, nram, wram);
-    if (nram > config.getLocalBytes() || nram > 768 * 1024 || wram > 1024 * 1024) {
+    if (nram > config.getLocalBytes() || nram > capabilities(function).getNramBytes() || wram > capabilities(function).getWramBytes()) {
       for (auto supply : group) supply.setAsynchronous(false);
       before.erase(); after.erase();
     }
@@ -311,7 +311,7 @@ bool batchIndependentRowPrograms(func::FuncOp function, dsa::ConfigurationAttr c
         }
       }
       int64_t nram = 0, wram = 0; measureStorage(function, nram, wram);
-      if (nram + 32768 > config.getLocalBytes() || nram + 32768 > 768 * 1024 || wram > 1024 * 1024) {
+      if (nram + 32768 > config.getLocalBytes() || nram + 32768 > capabilities(function).getNramBytes() || wram > capabilities(function).getWramBytes()) {
         batch.erase(); batches.getDefiningOp()->erase(); rowCount.getDefiningOp()->erase(); continue;
       }
       loop.erase(); changed = true; break;
@@ -501,7 +501,7 @@ void pipelineMatrixLoads(func::FuncOp function, dsa::ConfigurationAttr config) {
     // well formed. The two loops are sequential and share the original slots.
     int64_t nram = 0, wram = 0;
     measureStorage(function, nram, wram);
-    if (nram > config.getLocalBytes() || nram > 768 * 1024 || wram > 1024 * 1024) {
+    if (nram > config.getLocalBytes() || nram > capabilities(function).getNramBytes() || wram > capabilities(function).getWramBytes()) {
       while (loop->getPrevNode() != previous) loop->getPrevNode()->erase();
       continue;
     }

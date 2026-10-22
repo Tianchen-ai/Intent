@@ -125,7 +125,7 @@ def _capture(definition, constexprs) -> str:
 
 def _resolve(target: SourceTarget) -> tuple[CompilationTarget, ResolvedTarget | None]:
     try:
-        resolved = target.resolve()
+        resolved = target if isinstance(target, ResolvedTarget) else target.resolve()
         if isinstance(resolved, ResolvedTarget):
             return resolved.compilation, resolved
         if isinstance(resolved, CompilationTarget):

@@ -22,7 +22,7 @@ def main() -> None:
     manual = Manual(json.loads(arguments.corpus.read_text(encoding="utf-8"))
                     if arguments.corpus is not None else installed_corpus())
     host_instructions = (
-        "Call api(name='intent.compile') or api(name='intent.generate') for the current public host interfaces, "
+        "Call api(name='intent.jit') for the local execution interface, or api(name='intent.generate') for explicit generation, "
         "and search(query='Target', kind='api') for target declarations. "
         if arguments.corpus is None else
         "Use api(name=...) for the host interface declared by this explicit corpus. "

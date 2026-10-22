@@ -177,7 +177,7 @@ LogicalResult realizeMatMul(dsa::MatMulOp matrix, dsa::ConfigurationAttr config)
     b.create<dsa::MatrixTileOp>(loc, left, packed, accumulator);
     b.create<dsa::TransposeOp>(loc, accumulator, matrix.getAccumulator(), index(n), index(64));
     int64_t nram = 0, wram = 0; measureStorage(function, nram, wram);
-    if (nram <= config.getLocalBytes() && nram <= 768 * 1024 && wram <= 1024 * 1024) {
+    if (nram <= config.getLocalBytes() && nram <= capabilities(function).getNramBytes() && wram <= capabilities(function).getWramBytes()) {
       matrix.erase(); return success();
     }
     while (matrix->getPrevNode() != previous) matrix->getPrevNode()->erase();

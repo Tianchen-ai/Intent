@@ -14,6 +14,29 @@ using namespace mlir;
 
 namespace intent::compiler {
 
+FailureOr<Attribute> readDSACapabilities(ModuleOp module, StringRef text) {
+  auto parsed = llvm::json::parse(text);
+  if (!parsed) {
+    module.emitError("DSA compilation requires explicit hardware capabilities: ")
+        << llvm::toString(parsed.takeError());
+    return failure();
+  }
+  auto object = parsed->getAsObject();
+  const StringRef names[] = {"clusters", "cores_per_cluster", "nram_bytes", "wram_bytes", "sram_bytes"};
+  if (!object || object->size() != 5)
+    return module.emitError("DSA capabilities require topology and NRAM/WRAM/SRAM capacities"), failure();
+  SmallVector<int64_t> values;
+  for (StringRef name : names) {
+    auto value = object->getInteger(name);
+    if (!value) return module.emitError("missing integer DSA capability: ") << name, failure();
+    values.push_back(*value);
+  }
+  auto attr = dsa::CapabilitiesAttr::getChecked([&] { return module.emitError(); },
+      module.getContext(), values[0], values[1], values[2], values[3], values[4]);
+  if (!attr) return failure();
+  return Attribute(attr);
+}
+
 FailureOr<ArrayAttr> readDSAConfigurations(ModuleOp module, StringRef directory,
                                          StringRef overrides) {
   auto read = [&](StringRef filename) -> FailureOr<llvm::json::Value> {
@@ -169,6 +192,7 @@ void DSABackend::buildConstruction(OpPassManager &manager, const Request &reques
   options.overrides = request.tuningConfig;
   options.shapes = request.dsa.shapes;
   options.strides = request.dsa.strides;
+  options.capabilities = request.dsa.capabilities;
   manager.addPass(createConstructDSA(options));
 }
 
@@ -177,6 +201,8 @@ void DSABackend::buildShared(OpPassManager &manager, const Request &, StringRef)
 }
 
 LogicalResult DSABackend::verifySharedInput(ModuleOp module, const Request &request, StringRef) const {
+  auto expected = readDSACapabilities(module, request.dsa.capabilities);
+  if (failed(expected)) return failure();
   if (!module->getAttrOfType<StringAttr>("intent.entry_name") ||
       module.getOps<ModuleOp>().empty())
     return module.emitError("shared DSA input requires a complete configuration portfolio");
@@ -194,6 +220,8 @@ LogicalResult DSABackend::verifySharedInput(ModuleOp module, const Request &requ
   if (failed(shapes) || failed(strides))
     return failure();
   for (ModuleOp candidate : module.getOps<ModuleOp>()) {
+    if (candidate->getAttr("intent_dsa.capabilities") != *expected)
+      return candidate.emitError("shared DSA capabilities disagree with the selected device");
     if (candidate->getAttrOfType<CompileOptionsAttr>(compileOptionsAttr) != options)
       return candidate.emitError("DSA candidate compile options disagree with the portfolio");
     if (failed(dsa::verifyRealizedProgram(candidate))) return failure();

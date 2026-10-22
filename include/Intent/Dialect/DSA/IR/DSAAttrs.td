@@ -3,6 +3,13 @@
 include "Intent/Dialect/DSA/IR/DSADialect.td"
 include "Intent/Dialect/Intent/IR/IntentAttrs.td"
 include "mlir/IR/AttrTypeBase.td"
+def IntentDSA_Capabilities : AttrDef<IntentDSA_Dialect, "Capabilities"> {
+  let mnemonic = "capabilities";
+  let parameters = (ins "int64_t":$clusters, "int64_t":$coresPerCluster,
+    "int64_t":$nramBytes, "int64_t":$wramBytes, "int64_t":$sramBytes);
+  let assemblyFormat = "`<` $clusters `,` $coresPerCluster `,` $nramBytes `,` $wramBytes `,` $sramBytes `>`";
+  let genVerifyDecl = 1;
+}
 def IntentDSA_EntryRequirements : AttrDef<IntentDSA_Dialect, "EntryRequirements"> {
   let mnemonic = "entry_requirements";
   let parameters = (ins "bool":$disjointOutputs);

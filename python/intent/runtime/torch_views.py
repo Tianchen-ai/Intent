@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from .interface import ViewParameter
 from .invocation import ViewFacts
-from .torch import torch_dtype
+from intent.integrations.torch import torch_dtype
 
 
 def _byte_span(pointer: int, shape: tuple, strides: tuple, size: int) -> tuple[int, int]:

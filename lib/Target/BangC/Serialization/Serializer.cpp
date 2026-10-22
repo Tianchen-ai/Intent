@@ -67,6 +67,8 @@ public:
     auto config = function->getAttrOfType<dsa::ConfigurationAttr>("intent_dsa.configuration");
     auto architecture = function->getParentOfType<ModuleOp>()->getAttrOfType<StringAttr>("bangc.architecture");
     if (!architecture) return function.emitError("BANG C serialization requires a bound architecture");
+    auto hardware = function->getParentOfType<ModuleOp>()->getAttrOfType<dsa::CapabilitiesAttr>("intent_dsa.capabilities");
+    if (!hardware) return function.emitError("BANG C serialization requires typed hardware capabilities");
     for (const NativeSlot &slot : nativeABI->slots) {
       std::string name = slot.name();
       Value argument = function.getArgument(slot.parameter);
@@ -94,7 +96,11 @@ public:
     metadata = llvm::json::Object{{"provider", "bangc"}, {"entry_name", function.getName()},
         {"compile_options", serializeCompileOptions(*options)},
         {"interface", std::move(*publicMetadata)}, {"entry", launchEntry},
-        {"target", llvm::json::Object{{"family", "dsa"}, {"architecture", architecture.getValue()}}},
+        {"target", llvm::json::Object{{"family", "dsa"}, {"architecture", architecture.getValue()},
+            {"capabilities", llvm::json::Object{
+                {"clusters", hardware.getClusters()}, {"cores_per_cluster", hardware.getCoresPerCluster()},
+                {"nram_bytes", hardware.getNramBytes()}, {"wram_bytes", hardware.getWramBytes()},
+                {"sram_bytes", hardware.getSramBytes()}}}}},
         {"configuration", llvm::json::Object{
             {"tile", config.getTile()}, {"tasks", config.getTasks()},
             {"tile_m", config.getTileM()}, {"tile_n", config.getTileN()}, {"tile_k", config.getTileK()},

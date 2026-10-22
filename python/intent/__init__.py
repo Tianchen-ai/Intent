@@ -15,7 +15,7 @@ from .diagnostics import IntentError
 from .diagnostics import LanguageUseError
 from .frontend import FrontendError
 from .frontend import lower_to_mlir
-from .runtime import CompiledArtifact, PreparedCall, PublicInterface, ScalarParameter, ViewParameter
+from .runtime import CompiledArtifact, PreparedCall, PublicInterface, ScalarParameter, ViewParameter, NativeInvocation
 from .runtime import NativeObservation, NativeResource, CandidateObservation, InvocationArgument
 from .runtime import CacheObservation, ConfigurationAssessment, RequirementEvaluation
 from .targets import CuTileTarget
@@ -23,7 +23,8 @@ from .targets import TritonTarget
 from .targets import MojoTarget
 from .targets import BangCTarget
 from .targets import WeftTarget
-from .targets import GPUCapabilities, GPUCompilationTarget, CPUCompilationTarget, DSACompilationTarget
+from .targets import GPUCapabilities, GPUCompilationTarget, CPUCompilationTarget, DSACapabilities, DSACompilationTarget
+from .jit import jit, JITKernel
 
 
 __all__ = [
@@ -39,6 +40,8 @@ __all__ = [
     "fn",
     "kernel",
     "compile",
+    "jit",
+    "JITKernel",
     "compile_ir",
     "compile_shared_gpu",
     "generate",
@@ -49,6 +52,7 @@ __all__ = [
     "OptimizedIR",
     "CompiledArtifact",
     "PreparedCall",
+    "NativeInvocation",
     "PublicInterface",
     "ScalarParameter",
     "ViewParameter",
@@ -68,6 +72,7 @@ __all__ = [
     "GPUCompilationTarget",
     "CPUCompilationTarget",
     "DSACompilationTarget",
+    "DSACapabilities",
     "FrontendError",
     "lower_to_mlir",
 ]

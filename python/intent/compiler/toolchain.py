@@ -30,7 +30,11 @@ def _resolve_executable(executable_path: str | Path | None, name: str,
                         environment_variable: str, stage: str, role: str) -> Path:
     selected = executable_path if executable_path is not None else os.environ.get(environment_variable)
     if selected is None:
-        bundled = Path(__file__).resolve().parents[1] / "_bin" / name
+        from importlib.metadata import PackageNotFoundError, distribution
+        try:
+            bundled = Path(distribution("intentdsl").locate_file("intent/_bin")) / name
+        except PackageNotFoundError:
+            bundled = Path(__file__).resolve().parents[1] / "_bin" / name
         selected = bundled if bundled.exists() else shutil.which(name)
     if selected is None:
         raise CompilationStageError(

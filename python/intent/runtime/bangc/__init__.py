@@ -4,6 +4,7 @@ from pathlib import Path
 
 from intent.runtime.artifact import CompiledArtifact
 from .buffer import DeviceBuffer, DeviceView
+from .queue import Queue
 
 
 def materialize_bangc_artifact(source, module_text, contract, target) -> CompiledArtifact:
@@ -26,7 +27,7 @@ def load_artifact(directory: str | Path, *, target) -> CompiledArtifact:
     return GeneratedProgram.load(directory).materialize(target=target)
 
 
-__all__ = ["DeviceBuffer", "DeviceView", "NativeProgram", "compile_library", "export_artifact", "load_artifact"]
+__all__ = ["DeviceBuffer", "DeviceView", "Queue", "NativeProgram", "compile_library", "export_artifact", "load_artifact"]
 
 
 def __getattr__(name):

@@ -222,8 +222,10 @@ def snapshot(project: Path) -> dict:
 
 def installed_corpus() -> dict:
     """Read the installed manual and the declarations from the same package."""
+    from importlib.metadata import distribution
     package = Path(__file__).resolve().parents[1]
-    return _corpus(package / "_manual/doc", package, "installed public API")
+    documents = Path(distribution("intentdsl").locate_file("intent/_manual/doc"))
+    return _corpus(documents, package, "installed public API")
 
 
 class Manual:

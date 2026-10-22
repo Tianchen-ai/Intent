@@ -22,6 +22,12 @@ LogicalResult EntryRequirementsAttr::verify(function_ref<InFlightDiagnostic()> e
                                             bool disjointOutputs) {
   return disjointOutputs ? success() : error() << "DSA entry requires disjoint writable views";
 }
+LogicalResult CapabilitiesAttr::verify(function_ref<InFlightDiagnostic()> error,
+    int64_t clusters, int64_t cores, int64_t nram, int64_t wram, int64_t sram) {
+  if (clusters <= 0 || cores <= 0 || nram <= 0 || wram <= 0 || sram <= 0)
+    return error() << "DSA hardware capabilities require positive topology and storage capacities";
+  return success();
+}
 LogicalResult ConfigurationAttr::verify(function_ref<InFlightDiagnostic()> error,
     int64_t tile, int64_t m, int64_t n, int64_t k, int64_t region, int64_t tasks, int64_t bytes) {
   if (tile <= 0 || tile % 64 || m <= 0 || n <= 0 || k <= 0 || region <= 0 || tasks <= 0 || bytes <= 0)

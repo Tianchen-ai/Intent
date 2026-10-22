@@ -59,9 +59,10 @@ public:
   void runOnOperation() final {
     auto module = getOperation();
     auto configurations = readDSAConfigurations(module, directory.getValue(), overrides.getValue());
+    auto hardware = readDSACapabilities(module, capabilities);
     auto shapeBindings = parseDSAParameterBindings(module, shapes, true);
     auto strideBindings = parseDSAParameterBindings(module, strides, false);
-    if (failed(configurations) || failed(shapeBindings) || failed(strideBindings))
+    if (failed(configurations) || failed(hardware) || failed(shapeBindings) || failed(strideBindings))
       return signalPassFailure();
     SmallVector<OwningOpRef<ModuleOp>> candidates;
     StringAttr entryName;
@@ -70,6 +71,7 @@ public:
       if (failed(lowerCanonicalKIRToDSA(*candidate, cast<dsa::ConfigurationAttr>(attribute),
                                        *shapeBindings, *strideBindings)))
         return signalPassFailure();
+      (*candidate)->setAttr("intent_dsa.capabilities", *hardware);
       func::FuncOp entry;
       for (auto function : candidate->getOps<func::FuncOp>())
         if (!function.isExternal()) { entry = function; break; }

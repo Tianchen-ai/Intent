@@ -92,6 +92,19 @@ class CPUCompilationTarget:
 
 
 @dataclass(frozen=True, slots=True)
+class DSACapabilities:
+    clusters: int
+    cores_per_cluster: int
+    nram_bytes: int
+    wram_bytes: int
+    sram_bytes: int
+
+    def __post_init__(self):
+        if any(type(value) is not int or value <= 0 for value in asdict(self).values()):
+            raise ValueError("DSA capabilities require positive integer hardware capacities")
+
+
+@dataclass(frozen=True, slots=True)
 class DSACompilationTarget:
     """BANG C hardware identity and source ABI refinements, independent of tuning."""
 
@@ -100,8 +113,11 @@ class DSACompilationTarget:
     # target metadata. They do not participate in runtime hardware matching.
     shapes: tuple[tuple[str, tuple[int, ...]], ...] = field(default=(), compare=False)
     strides: tuple[tuple[str, tuple[int, ...]], ...] = field(default=(), compare=False)
+    capabilities: DSACapabilities | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.capabilities, DSACapabilities):
+            raise TypeError("DSA compilation requires explicit DSACapabilities; local JIT discovers them")
         if self.architecture != "mtp_372":
             raise NotImplementedError("BANG C currently provides an MLU370 implementation profile")
         if any(not isinstance(name, str) or any(type(extent) is not int or extent < -1 for extent in shape)
@@ -121,9 +137,10 @@ class DSACompilationTarget:
     @property
     def compiler_options(self) -> tuple[str, ...]:
         options = tuple(f"--dsa-{name.replace('_', '-')}={value}"
-                        for name, value in asdict(self).items() if name not in {"shapes", "strides"})
+                        for name, value in asdict(self).items() if name not in {"shapes", "strides", "capabilities"})
         return ("--target=bangc", *options, f"--dsa-shapes={json.dumps(dict(self.shapes))}",
-                f"--dsa-strides={json.dumps(dict(self.strides))}")
+                f"--dsa-strides={json.dumps(dict(self.strides))}",
+                f"--dsa-capabilities={json.dumps(asdict(self.capabilities))}")
 
     @property
     def compiler_role(self) -> str:
@@ -156,6 +173,7 @@ def read_compilation_target(provider: str, facts: dict) -> CompilationTarget:
         expected = {field.name for field in fields(DSACompilationTarget)} - {"shapes", "strides"}
         if values.keys() != expected:
             raise ValueError(f"DSA target requires exactly these fields: {', '.join(sorted(expected))}")
+        values["capabilities"] = DSACapabilities(**values["capabilities"])
         return DSACompilationTarget(**values)
     raise ValueError(f"unsupported compiler target family/provider: {family}/{provider}")
 

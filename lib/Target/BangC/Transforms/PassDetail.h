@@ -1,6 +1,7 @@
 #ifndef INTENT_TARGET_BANGC_TRANSFORMS_PASSDETAIL_H
 #define INTENT_TARGET_BANGC_TRANSFORMS_PASSDETAIL_H
 #include "Intent/Target/BangC/Passes.h"
+#include "Intent/Target/BangC/Resources.h"
 #include "Intent/Dialect/DSA/Analysis/PhysicalProgram.h"
 #include "Intent/Dialect/DSA/Analysis/Storage.h"
 #include "Intent/Dialect/DSA/Analysis/UniformValues.h"

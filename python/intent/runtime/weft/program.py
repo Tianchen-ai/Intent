@@ -6,15 +6,13 @@ from dataclasses import asdict, dataclass, replace
 import math
 import os
 from pathlib import Path
-import platform
 import resource
 import statistics
-import sys
-from threading import Lock
+from threading import RLock
 
 from .buffer import Buffer
 from .compilation import WeftArtifact
-from .target import TargetProfile, matrix_capability
+from .target import TargetProfile
 from ..interface import ViewParameter
 from ..invocation import ViewFacts, invocation_result
 from ..native import NativePreparedRuntime
@@ -23,45 +21,18 @@ from ..diagnostics import CacheObservation, CandidateObservation, ObservedCall, 
 from intent.compiler.toolchain import CompilationStageError
 
 
-def _isa_extensions(isa: str) -> set[str]:
-    base, *extensions = isa.split("_")
-    if not base.startswith("rv64"):
-        raise ValueError("native CPU does not report an RV64 ISA")
-    result = set(base[4:]) | set(extensions)
-    if "g" in result:
-        result.remove("g")
-        result |= {"i", "m", "a", "f", "d", "zicsr", "zifencei"}
-    return result
-
-
-def _cpu_facts() -> dict[int, dict[str, str]]:
-    facts = {}
-    for paragraph in Path("/proc/cpuinfo").read_text().split("\n\n"):
-        fields = dict(line.split(":", 1) for line in paragraph.splitlines() if ":" in line)
-        fields = {key.strip(): value.strip() for key, value in fields.items()}
-        if "processor" in fields:
-            facts[int(fields["processor"])] = fields
-    return facts
-
-
 class _ExecutionContract:
     """Artifact-local hardware facts, with calling-thread state checked on use."""
 
-    def __init__(self, profile: TargetProfile, used_extensions: frozenset[str]) -> None:
-        if sys.platform != "linux" or platform.machine() != "riscv64" or sys.byteorder != "little":
-            raise NotImplementedError("Weft native loading requires little-endian RISC-V Linux")
-        if ctypes.sizeof(ctypes.c_void_p) != 8:
-            raise ValueError("native pointer size disagrees with RV64/lp64d")
+    def __init__(self, profile: TargetProfile, kernels, native=None) -> None:
+        from weft.runtime.driver import Toolchain
+        from weft.runtime.target import NativeTarget, Target
         self.profile = profile
-        self.required = _isa_extensions(profile.march)
-        self.capabilities = tuple((extension, matrix_capability(extension, profile.vlen_bits))
-                                  for extension in used_extensions)
-        self.facts = _cpu_facts()
-        self.validated_cpus: set[int] = set()
-        self.libc = ctypes.CDLL(None, use_errno=True)
-        self.prctl = self.libc.prctl
-        self.prctl.argtypes = [ctypes.c_int, *([ctypes.c_ulong] * 4)]
-        self.prctl.restype = ctypes.c_int
+        self.native = native or NativeTarget.discover(Toolchain(compiler=os.environ.get("INTENT_WEFT_COMPILER")))
+        target = Target(profile.march, profile.abi, profile.vlen_bits)
+        self.extensions = tuple(sorted({name for kernel in kernels for name in kernel["used_extensions"]}))
+        for kernel in kernels:
+            self.native.require(target, kernel["used_extensions"], kernel["isa_extensions"])
         self.vlen_probe = None
 
     def bind_library(self, library) -> None:
@@ -74,27 +45,7 @@ class _ExecutionContract:
         cpus = os.sched_getaffinity(0)
         if not cpus.issubset(self.profile.cpus):
             raise ValueError("current CPU affinity exceeds the artifact execution set")
-        for cpu in cpus - self.validated_cpus:
-            # ISA and vendor identity belong to the CPU. A newly online CPU may
-            # be absent from the artifact's initial /proc/cpuinfo snapshot.
-            if cpu not in self.facts:
-                self.facts = _cpu_facts()
-            facts = self.facts[cpu]
-            extensions = _isa_extensions(facts["isa"])
-            missing = self.required - extensions
-            if missing:
-                raise ValueError(f"CPU {cpu} lacks requested ISA extensions: {sorted(missing)}")
-            for extension, capability in self.capabilities:
-                if (capability.isa_feature not in extensions or
-                        int(facts["mvendorid"], 0) != capability.vendor_id or
-                        int(facts["marchid"], 0) != capability.architecture_id):
-                    raise ValueError(f"CPU {cpu} does not support the artifact's {extension} instructions")
-            self.validated_cpus.add(cpu)
-        control = self.prctl(70, 0, 0, 0, 0)
-        if control < 0:
-            raise OSError(ctypes.get_errno(), "cannot query the calling thread's RVV state")
-        if control & 3 == 1:
-            raise ValueError("RVV is disabled for the calling thread")
+        self.native.check_execution(self.extensions)
         # The calling thread may have migrated, so VLEN remains a live check.
         if self.vlen_probe is not None and self.vlen_probe() != self.profile.vlen_bits:
             raise ValueError("native VLEN disagrees with the artifact")
@@ -149,7 +100,7 @@ class NativeCall(ObservedCall):
             raise error from cause
 
     def compile(self) -> None:
-        """Validate the AOT portfolio without loading code or probing a device."""
+        """Compile or validate the native portfolio without loading or executing it."""
         with self._native_stage("provider_native_compilation"):
             self.program.compile()
         self._record_observation(observation(
@@ -157,7 +108,7 @@ class NativeCall(ObservedCall):
             tuple(CandidateObservation(configuration, "compiled", "provider_native_compilation")
                   for configuration in self.program.configuration_descriptions),
             stage="compiled", caches=self.program.compilation_cache,
-            history_unavailable="AOT artifact validation does not load or time a native candidate"))
+            history_unavailable="Native compilation does not load or time a native candidate"))
 
     def _prepare_execution(self) -> None:
         with self._native_stage("provider_invocation"):
@@ -181,6 +132,7 @@ class NativeCall(ObservedCall):
 
     def choose(self, prepare=None) -> int:
         self._prepare_execution()
+        self.key = (self.program.identity, self.key[1])
         if self.winner is not None:
             return self.winner
         observed = []
@@ -241,21 +193,30 @@ class NativeCall(ObservedCall):
     def result(self):
         return invocation_result(self.outputs)
 
+    def native_call(self):
+        """Select a configuration and export a checked local CPU invocation."""
+        selected = self.choose()
+        return self.program.functions[selected].bind_call(
+            self.native_arguments, owner=self, validate=self.program.check_execution)
+
 
 class NativeProgram(NativePreparedRuntime):
-    def __init__(self, artifact: WeftArtifact | str | Path) -> None:
+    def __init__(self, artifact: WeftArtifact | str | Path, *, native_builder=None,
+                 source_directory=None, native_target=None) -> None:
         if not isinstance(artifact, WeftArtifact):
             artifact = WeftArtifact.read(artifact, load_native=True)
-        if artifact.native is None:
+        if artifact.native is None and native_builder is None:
             raise ValueError("Weft native loading requires compile_artifact to finish first")
         self.artifact = artifact
-        self.directory = artifact.native.directory
+        self._native_builder = native_builder
+        self._native_target = native_target
+        self.directory = artifact.native.directory if artifact.native is not None else source_directory
         contract = artifact.contract
         self.profile = artifact.profile
         self.facts = contract.facts
         self.target = bindings({"family": "cpu", **{name: value for name, value in asdict(contract.target).items()
                                                   if name != "provider"}})
-        self.compilation_cache = (CacheObservation("native_compilation",
+        self.compilation_cache = () if artifact.native is None else (CacheObservation("native_compilation",
             "disk" if artifact.native_cache_observed else "external_aot",
             artifact.native.cache_hit if artifact.native_cache_observed else None,
             str(artifact.native.directory), "materialization", artifact.native.cache_reason if artifact.native_cache_observed else
@@ -281,26 +242,35 @@ class NativeProgram(NativePreparedRuntime):
             for candidate in self.candidates)
         self.used_extensions = frozenset(extension for kernel in kernels.values()
                                          for extension in kernel["used_extensions"])
-        self.identity = artifact.native.identity
+        self.identity = artifact.native.identity if artifact.native is not None else None
         self._argument_types = abi.argument_types()
         self._library = None
         self._execution = None
         self._closed = False
-        self._load_lock = Lock()
+        self._load_lock = RLock()
         self.functions, self.measurements = [], []
 
     def compile(self) -> None:
-        if self._closed:
-            raise CompilationStageError("provider_native_compilation", "native artifact is closed")
-        self.artifact.native.validate()
+        with self._load_lock:
+            if self._closed:
+                raise CompilationStageError("provider_native_compilation", "native artifact is closed")
+            if self.artifact.native is None:
+                self.artifact = self._native_builder(self.artifact)
+                self.directory = self.artifact.native.directory
+                self.identity = self.artifact.native.identity
+                self.compilation_cache = (CacheObservation("native_compilation", "disk",
+                    self.artifact.native.cache_hit, str(self.directory), "native_compilation",
+                    self.artifact.native.cache_reason),)
+            self.artifact.native.validate()
 
     def ensure_loaded(self):
         with self._load_lock:
+            self.compile()
             if self._closed:
                 raise CompilationStageError("native_loading", "native artifact is closed")
             if self._library is not None:
                 return self._library
-            execution = _ExecutionContract(self.profile, self.used_extensions)
+            execution = _ExecutionContract(self.profile, self.artifact.kernels, self._native_target)
             execution.check()
             library = load_native_library(self.artifact.native)
             try:

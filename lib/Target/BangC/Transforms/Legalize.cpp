@@ -18,6 +18,9 @@ namespace intent::bangc {
 
 namespace {
 LogicalResult checkProgram(ModuleOp module) {
+  auto hardware = module->getAttrOfType<dsa::CapabilitiesAttr>("intent_dsa.capabilities");
+  if (!hardware || hardware.getSramBytes() <= 128 * 1024)
+    return module.emitError("BANG C requires hardware capabilities and SRAM exceeding the SDK reserve");
   if (failed(dsa::verifyRealizedProgram(module))) return failure();
   auto architecture = module->getAttrOfType<StringAttr>("bangc.architecture");
   if (!architecture || architecture.getValue() != "mtp_372")
@@ -48,6 +51,7 @@ struct PrepareProgramPass : impl::BangCPrepareProgramBase<PrepareProgramPass> {
     }
     if (failed(dsa::verifyRealizedProgram(module))) return signalPassFailure();
     module->setAttr("bangc.architecture", StringAttr::get(module.getContext(), architecture.getValue()));
+    if (failed(checkProgram(module))) return signalPassFailure();
   }
 };
 

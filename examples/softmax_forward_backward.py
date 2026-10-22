@@ -4,14 +4,15 @@ import argparse
 import intent
 import torch
 
-from kernels.backward.softmax import ROWS, COLUMNS, softmax_backward
-from kernels.normalization.softmax import stable_softmax
+from intent.examples.kernels.backward.softmax import ROWS, COLUMNS, softmax_backward
+from intent.examples.kernels.normalization.softmax import stable_softmax
 
 
-def make_softmax(target):
-    # Compile once; these artifacts belong to the host wrapper's lifetime.
-    forward = intent.compile(stable_softmax, target=target)
-    backward = intent.compile(softmax_backward, target=target)
+def make_softmax(backend, x, upstream):
+    forward = intent.jit(stable_softmax, backend=backend)
+    backward = intent.jit(softmax_backward, backend=backend)
+    probabilities = forward.prepare(x).result()
+    backward.prepare(probabilities, upstream)
 
     operation = forward.as_torch_op("intent_examples::softmax_forward")
     backward_operation = backward.as_torch_op("intent_examples::softmax_backward")
@@ -29,17 +30,15 @@ def make_softmax(target):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--target", choices=("triton", "cutile", "mojo"), default="triton")
+    parser.add_argument("--backend", choices=("triton", "cutile", "mojo"), required=True)
+    parser.add_argument("--device")
     parser.add_argument("--torch-compile", action="store_true",
                         help="Capture the registered forward and authored backward with PyTorch")
     args = parser.parse_args()
-    target = {"triton": intent.TritonTarget, "cutile": intent.CuTileTarget,
-              "mojo": intent.MojoTarget}[args.target]()
-    operation, backward_operation, artifacts = make_softmax(target)
-    forward, _ = artifacts
-    device = torch.device("cuda", forward.device) if forward.device_type == "cuda" else torch.device("cpu")
+    device = args.device or ("cpu" if args.backend == "mojo" else "cuda:0")
     x = torch.randn((ROWS, COLUMNS), dtype=torch.float32, device=device, requires_grad=True)
     upstream = torch.randn_like(x)
+    operation, backward_operation, kernels = make_softmax(args.backend, x, upstream)
     if args.torch_compile:
         # First-use provider compilation and tuning stay outside graph capture.
         with torch.no_grad():
@@ -54,8 +53,9 @@ def main() -> None:
         probabilities = operation(x)
     probabilities.backward(upstream)
     print(f"probabilities: {probabilities.shape}; input gradient: {x.grad.shape}")
-    for artifact in artifacts:
-        print(f"Compiler artifacts: {artifact.cache_directory}")
+    for kernel in kernels:
+        for artifact in kernel.artifacts:
+            print(f"Compiler artifacts: {artifact.cache_directory}")
 
 
 if __name__ == "__main__":

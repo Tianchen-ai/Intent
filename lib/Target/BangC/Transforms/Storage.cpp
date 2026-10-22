@@ -112,7 +112,7 @@ bool reuseConsumedStorage(func::FuncOp function, dsa::ConfigurationAttr config,
     int64_t nram = 0, wram = 0;
     measureStorage(function, nram, wram);
     if (nram > currentNram || wram > currentWram || nram > config.getLocalBytes() ||
-        nram > 768 * 1024 || wram > 1024 * 1024) {
+        nram > capabilities(function).getNramBytes() || wram > capabilities(function).getWramBytes()) {
       OpBuilder restore(next);
       restore.insert(destination.getOperation());
       for (OpOperand *use : uses) use->set(destination);
@@ -171,8 +171,8 @@ bool storageFitsBudget(func::FuncOp function, dsa::ConfigurationAttr config,
     if (auto bytes = op->getAttrOfType<IntegerAttr>("bangc.internal_nram_bytes"))
       internalNram = std::max(internalNram, bytes.getInt());
   });
-  return usage.nram <= std::min<int64_t>(config.getLocalBytes(), 768 * 1024) - internalNram &&
-         usage.wram <= 1024 * 1024 && usage.sram <= 3968 * 1024;
+  return usage.nram <= std::min<int64_t>(config.getLocalBytes(), capabilities(function).getNramBytes()) - internalNram &&
+         usage.wram <= capabilities(function).getWramBytes() && usage.sram <= usableSramBytes(function);
 }
 
 LogicalResult bindProgramStorage(ModuleOp module) {
@@ -180,7 +180,7 @@ LogicalResult bindProgramStorage(ModuleOp module) {
   auto config = function->getAttrOfType<dsa::ConfigurationAttr>("intent_dsa.configuration");
   StorageUsage usage = bindStorage(function);
   int64_t nram = usage.nram, wram = usage.wram, shared = usage.sram;
-  if (shared > 3968 * 1024) return function.emitError("selected shared supply exceeds the MLU370 SRAM budget");
+  if (shared > usableSramBytes(function)) return function.emitError("selected shared supply exceeds the MLU370 SRAM budget");
   if (!storageFitsBudget(function, config, usage))
     return function.emitError("selected local implementation exceeds the MLU370 per-task storage budget")
         << "; NRAM=" << nram << ", WRAM=" << wram;

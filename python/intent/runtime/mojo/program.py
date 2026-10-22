@@ -14,7 +14,7 @@ from ..interface import ViewParameter
 from ..invocation import ViewFacts, build_invocation_binders, invocation_result
 from ..native import NativeABI, NativePreparedRuntime
 from ..native_artifact import load_native_library
-from ..torch import torch_dtype
+from intent.integrations.torch import torch_dtype
 from ..torch_views import allocate_output, check_abstract_relation, observe_view
 from ..diagnostics import (CacheObservation, CandidateObservation, ObservedCall,
                            bindings, invocation_arguments, observation)
@@ -119,6 +119,7 @@ class NativeCall(ObservedCall):
                                     observation=details) from error
 
     def choose(self) -> int:
+        self.program.validate_execution()
         try:
             self.program.ensure_loaded()
         except CompilationStageError as error:
@@ -175,6 +176,12 @@ class NativeCall(ObservedCall):
         self._record_execution("benchmarked")
         return elapsed
 
+    def native_call(self):
+        """Select a configuration and export this binding's public C ABI call."""
+        selected = self.choose()
+        return self.program.functions[selected].bind_call(
+            self.native_arguments, owner=self, validate=self.program.validate_execution)
+
     def result(self):
         return invocation_result(self.outputs)
 
@@ -219,6 +226,10 @@ class NativeProgram(NativePreparedRuntime):
     def _check_open(self) -> None:
         if self._closed:
             raise CompilationStageError("provider_native_loading", "Mojo program is closed")
+
+    def validate_execution(self) -> None:
+        self._check_open()
+        self._target.validate_execution()
 
     def compile(self):
         with self._lock:
@@ -304,7 +315,8 @@ class NativeProgram(NativePreparedRuntime):
         # the invocation's potentially large input/output allocations.
         description_arguments = tuple(value if facts is None else None
                                       for value, facts in zip(bound.arguments, bound.views, strict=True))
-        return NativeCall(self, bound.arguments, bound.native_arguments, bound.outputs, bound.key,
+        return NativeCall(self, bound.arguments, bound.native_arguments, bound.outputs,
+                          (self._target.cpus, bound.key),
                           description_arguments, bound.views)
 
     @staticmethod

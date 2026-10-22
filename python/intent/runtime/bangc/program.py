@@ -167,6 +167,13 @@ class NativeCall(ObservedCall):
 
     def enqueue(self, queue: ctypes.c_void_p | None = None) -> None:
         try:
+            from .queue import Queue
+            if isinstance(queue, Queue):
+                if queue.device != self.program.target.device or queue.runtime is not self.program.runtime:
+                    raise ValueError("call and queue must use the same MLU device and runtime")
+                if not queue.handle.value:
+                    raise RuntimeError("CNRT queue is closed")
+                queue = queue.handle
             self.choose(queue)
             self._validate()
             self._submit(self.program.ensure_queue() if queue is None else queue)

@@ -62,7 +62,8 @@ def ConstructDSA : Pass<"intent-construct-dsa", "mlir::ModuleOp"> {
     Option<"directory", "directory", "std::string", [{""}], "Directory of complete backend configurations">,
     Option<"overrides", "overrides", "std::string", [{""}], "Complete configuration overrides">,
     Option<"shapes", "shapes", "std::string", [{"{}"}], "JSON parameter shapes">,
-    Option<"strides", "strides", "std::string", [{"{}"}], "JSON parameter strides">
+    Option<"strides", "strides", "std::string", [{"{}"}], "JSON parameter strides">,
+    Option<"capabilities", "capabilities", "std::string", [{""}], "Explicit DSA hardware capabilities">
   ];
   let dependentDialects = ["intent::dsa::IntentDSADialect", "mlir::arith::ArithDialect", "mlir::func::FuncDialect", "mlir::math::MathDialect", "mlir::memref::MemRefDialect", "mlir::scf::SCFDialect"];
 }
