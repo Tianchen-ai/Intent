@@ -21,6 +21,9 @@ mlir::LogicalResult formComputePrimitives(
 mlir::LogicalResult formScaledMMA(mlir::func::FuncOp kernel,
     gpu::ScaledContractOp contract, NativeFormRewriter &rewriter);
 
+mlir::LogicalResult formMMA(mlir::func::FuncOp kernel,
+    gpu::ContractOp contract, NativeFormRewriter &rewriter);
+
 } // namespace intent::cutile
 
 #endif

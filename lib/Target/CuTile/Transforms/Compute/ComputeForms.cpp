@@ -312,25 +312,8 @@ LogicalResult formComputePrimitives(func::FuncOp kernel,
   }
 
   for (gpu::ContractOp contract : inputs.contracts) {
-    std::string reason;
-    auto axes = gpu::queryContractionAxes(contract, &reason);
-    if (!axes)
-      return contract.emitOpError("invalid cuTile contraction axis schema: ") << reason;
-    if (!axes->hasCanonicalMatrixAxes() || axes->lhsResultAxes.size() > 3)
-      return contract.emitOpError(
-          "cuTile native MMA requires [M,K] x [K,N] or [B,M,K] x [B,K,N] "
-          "physical axes");
-    OpBuilder builder(contract);
-    Attribute origin = contract->getAttr(gpu::originAttr);
-    auto inheritOrigin = [&](Operation *operation) {
-      if (origin)
-        operation->setAttr(gpu::originAttr, origin);
-    };
-    auto replacement = builder.create<MMAOp>(
-        contract.getLoc(), contract.getResult().getType(), contract.getLhs(),
-        contract.getRhs(), contract.getAccumulator(), IntegerAttr());
-    inheritOrigin(replacement);
-    rewriter.replace(contract, ValueRange{replacement.getResult()});
+    if (failed(formMMA(kernel, contract, rewriter)))
+      return failure();
   }
 
   for (gpu::ScaledContractOp contract : inputs.scaledContracts) {
