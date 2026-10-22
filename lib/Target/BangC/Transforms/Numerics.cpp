@@ -129,7 +129,7 @@ LogicalResult realizeNumericExtremaWorkspace(func::FuncOp function, dsa::Configu
     if (binary.getKind() == BinaryOperator::Maximum || binary.getKind() == BinaryOperator::Minimum) {
       dsa::StorageAnalysis storage(function);
       Value output = binary.getOutput(), origin = storage.uniqueOrigin(output);
-      for (Value input : ValueRange{binary.getLhs(), binary.getRhs()})
+      for (Value input : {Value(binary.getLhs()), binary.getRhs()})
         if (!storage.disjoint(input, output) && input != output &&
             !(origin && dsa::isCompleteStorageViewOf(input, origin) &&
               dsa::isCompleteStorageViewOf(output, origin)))
