@@ -39,14 +39,18 @@ template<int E, int M, int Bias, bool Finite>
 __mlu_func__ float intent_fp8_to_float(uint8_t value) {
   const unsigned fraction = value & ((1u << M) - 1);
   const unsigned exponent = (value >> M) & ((1u << E) - 1);
-  float magnitude;
+  uint32_t magnitude;
   if (exponent == ((1u << E) - 1) && (!Finite || fraction == ((1u << M) - 1)))
-    magnitude = Finite || fraction ? NAN : INFINITY;
-  else if (!exponent)
-    magnitude = ldexpf(float(fraction), 1 - Bias - M);
+    magnitude = Finite || fraction ? 0x7fc00000u : 0x7f800000u;
+  else if (!exponent) {
+    // Every FP8 subnormal is exactly representable as a normal f32. The
+    // constant power-of-two multiply avoids the SDK's unsupported ldexpf.
+    const float scale = intent_scalar_bitcast<float>(uint32_t(128 - Bias - M) << 23);
+    magnitude = intent_scalar_bitcast<uint32_t>(float(fraction) * scale);
+  }
   else
-    magnitude = ldexpf(float((1u << M) | fraction), int(exponent) - Bias - M);
-  return value & 128 ? -magnitude : magnitude;
+    magnitude = ((exponent + 127 - Bias) << 23) | (fraction << (23 - M));
+  return intent_scalar_bitcast<float>(magnitude | (uint32_t(value & 128) << 24));
 }
 template<int E, int M, int Bias, bool Finite>
 __mlu_func__ uint8_t intent_number_to_fp8(double value) {
