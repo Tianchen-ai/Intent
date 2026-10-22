@@ -7,6 +7,9 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "llvm/ADT/SmallPtrSet.h"
+#include <functional>
 #include <limits>
 
 using namespace mlir;
@@ -222,14 +225,51 @@ LogicalResult reifyTaskViewCaptures(func::FuncOp function) {
         function.getFunctionType().getNumResults())
       return function.emitError("Weft sequential entry requires one void CPU body");
     Block &body = function.front();
+    // A one-worker entry is still an ordinary host call. Preserve its
+    // invocation allocations instead of turning every intermediate into a
+    // target-private stack Value merely because there is no parallel task.
+    // Only entry-available sizes may cross the new task boundary.
+    llvm::SmallPtrSet<Operation *, 16> hostOperations;
+    std::function<bool(Value, llvm::SmallPtrSetImpl<Operation *> &)> entryValue =
+        [&](Value value, llvm::SmallPtrSetImpl<Operation *> &dependencies) {
+      if (auto argument = dyn_cast<BlockArgument>(value))
+        return argument.getOwner() == &body;
+      Operation *producer = value.getDefiningOp();
+      if (!producer || producer->getBlock() != &body || producer->getNumRegions())
+        return false;
+      if (hostOperations.contains(producer) || dependencies.contains(producer))
+        return true;
+      if (!isMemoryEffectFree(producer)) return false;
+      if (!llvm::all_of(producer->getOperands(), [&](Value input) {
+            return entryValue(input, dependencies);
+          })) return false;
+      dependencies.insert(producer);
+      return true;
+    };
+    for (auto allocation : body.getOps<memref::AllocOp>()) {
+      llvm::SmallPtrSet<Operation *, 16> dependencies;
+      if (!llvm::all_of(allocation->getOperands(), [&](Value value) {
+            return entryValue(value, dependencies);
+          })) continue;
+      hostOperations.insert(dependencies.begin(), dependencies.end());
+      hostOperations.insert(allocation);
+      for (Operation *user : allocation->getUsers())
+        if (isa<memref::DeallocOp>(user) && user->getBlock() == &body)
+          hostOperations.insert(user);
+    }
     SmallVector<Operation *> operations;
     for (Operation &operation : body.without_terminator())
-      operations.push_back(&operation);
+      if (!hostOperations.contains(&operation)) operations.push_back(&operation);
     OpBuilder builder(&body, body.begin());
     Value zero = builder.create<arith::ConstantIndexOp>(function.getLoc(), 0);
     Value one = builder.create<arith::ConstantIndexOp>(function.getLoc(), 1);
     auto sequential = builder.create<scf::ParallelOp>(function.getLoc(),
         ValueRange{zero}, ValueRange{one}, ValueRange{one});
+    // Dependencies were selected from the original SSA order. Retain that
+    // order before the task; releases follow its synchronous completion.
+    for (Operation &operation : llvm::make_early_inc_range(body))
+      if (hostOperations.contains(&operation) && !isa<memref::DeallocOp>(operation))
+        operation.moveBefore(sequential);
     for (Operation *operation : operations)
       operation->moveBefore(sequential.getBody()->getTerminator());
     if (failed(cpu::isolateTasks(function))) return failure();
