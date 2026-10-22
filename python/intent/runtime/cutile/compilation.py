@@ -98,7 +98,9 @@ class CuTileCompilation:
                             raise ct.TileError(f"{kind}: {message}")
                         return cached.result
                     try:
-                        result = super()._compile(signature, context, compute_capability)
+                        from cuda.tile._cext import TileContext
+                        result = super()._compile(
+                            signature, TileContext(config=key[5]), compute_capability)
                     except ct.TileError as error:
                         owner._compiled.append(_Compilation(key, None, (type(error).__name__, str(error))))
                         raise
@@ -137,9 +139,15 @@ class CuTileCompilation:
         from cuda.tile._compile import format_sm_arch
 
         architecture = format_sm_arch(*CuTileCompilation._capability(compute_capability))
+        config = replace(context.config)
+        # Explicit precompilation must not bypass the bounded first-candidate
+        # probe used by the SDK tuner. Preserve an explicit SDK environment
+        # setting, and keep this budget local to our compilation context.
+        if config.compiler_timeout_sec is None:
+            config.compiler_timeout_sec = 30.0
         # Dispatcher-selected symbols do not change the native signature.
         return (kernel._intent_entry, kernel._compiler_options, signature.with_symbol(None),
-                architecture, context, replace(context.config))
+                architecture, context, config)
 
     def _lookup(self, key):
         return next((entry for entry in self._compiled if entry.key == key), None)
