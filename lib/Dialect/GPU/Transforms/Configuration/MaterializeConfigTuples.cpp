@@ -1,8 +1,10 @@
 #include "Intent/Dialect/GPU/IR/ProgramInterface.h"
 #include "ConfigurationPolicy.h"
+#include "Intent/Dialect/GPU/Analysis/IndexRelations.h"
 #include "Intent/Dialect/GPU/Analysis/PhysicalParameters.h"
 #include "Intent/Dialect/GPU/Analysis/PhysicalProgram.h"
 #include "Intent/Dialect/GPU/Transforms/Configuration/PhysicalParameters.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "llvm/ADT/STLExtras.h"
 
 using namespace mlir;
@@ -89,7 +91,21 @@ LogicalResult materializeSharedConfigTuples(func::FuncOp kernel) {
   if (invalidFootprint && tuples.empty())
     return kernel.emitOpError(
         "physical traversal has no profile within the fragment register budget");
-  return writeConfigurations(kernel, tuples, ConfigurationStage::Shared);
+  if (failed(writeConfigurations(kernel, tuples, ConfigurationStage::Shared)))
+    return failure();
+  // Binding the candidate domain can prove a previously symbolic tail empty.
+  // Remove it before validating accesses: its IV has no reachable value, and
+  // must not be treated as an unconstrained address in the physical program.
+  // Prove emptiness across every retained tuple, not just a preferred candidate.
+  kernel.walk<WalkOrder::PostOrder>([&](scf::ForOp loop) {
+    IndexRelations relations;
+    if (!relations.positive(loop.getStep()) ||
+        !relations.atMost(loop.getUpperBound(), loop.getLowerBound()))
+      return;
+    loop.replaceAllUsesWith(loop.getInitArgs());
+    loop.erase();
+  });
+  return success();
 }
 
 LogicalResult verifySharedConfigTuples(func::FuncOp kernel) {
