@@ -23,6 +23,11 @@ private:
 
 mlir::Type withElementType(mlir::Type type, mlir::Type elementType);
 
+// Repeat complete tiles on an axis without reloading or changing elements.
+// requested and the original extent must be compatible power-of-two extents.
+mlir::Value repeatTileAxis(mlir::OpBuilder &builder, mlir::Location location,
+    mlir::Value value, unsigned axis, gpu::PhysicalExprAttr requested);
+
 } // namespace intent::cutile
 
 #endif

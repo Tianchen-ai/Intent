@@ -80,7 +80,22 @@ LogicalResult formMMA(func::FuncOp kernel, gpu::ContractOp contract,
     Value lhs = transposeMatrix(builder, location, contract.getRhs());
     Value rhs = transposeMatrix(builder, location, contract.getLhs());
     Value accumulator = transposeMatrix(builder, location, contract.getAccumulator());
+    auto original = cast<gpu::FragmentType>(accumulator.getType());
+    // cuTile otherwise keeps N < 8 on scalar multiply-adds. Duplicate free
+    // coordinates to fill the native tile, then retain only the original
+    // result. No K padding, memory access or new reduction term is introduced.
+    auto eight = gpu::PhysicalExprAttr::get(builder.getContext(),
+        gpu::PhysicalExprKind::Constant, 8, builder.getStringAttr(""),
+        builder.getArrayAttr({}));
+    rhs = repeatTileAxis(builder, location, rhs, rank - 1, eight);
+    accumulator = repeatTileAxis(builder, location, accumulator, rank - 1, eight);
     Value transposed = product(lhs, rhs, accumulator);
+    Value zero = builder.create<arith::ConstantIntOp>(location, 0, 32);
+    SmallVector<Value> coordinates(rank, zero);
+    SmallVector<int64_t> retained;
+    for (unsigned axis = 0; axis < rank; ++axis) retained.push_back(axis);
+    transposed = builder.create<ExtractOp>(location, original, transposed,
+        coordinates, original.getShape(), retained);
     builder.create<scf::YieldOp>(location, transposeMatrix(builder, location, transposed));
     builder.setInsertionPointToStart(choice.elseBlock());
     builder.create<scf::YieldOp>(location,

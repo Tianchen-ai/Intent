@@ -86,67 +86,6 @@ extractionTileIndex(OpBuilder &builder, Location location, Value coordinate,
       binary.getOperatorKind())), lhs->second || rhs->second};
 }
 
-Value repeatTileForExtraction(OpBuilder &builder, Location location, Value value,
-                              unsigned axis, gpu::PhysicalExprAttr requested) {
-  auto source = cast<gpu::FragmentType>(value.getType());
-  auto extent = cast<gpu::PhysicalExprAttr>(source.getShape()[axis]);
-  if (extent == requested)
-    return value;
-  auto context = builder.getContext();
-  auto expression = [&](gpu::PhysicalExprKind kind,
-                         ArrayRef<Attribute> operands) {
-    return gpu::PhysicalExprAttr::get(context, kind, 0,
-                                     builder.getStringAttr(""),
-                                     builder.getArrayAttr(operands));
-  };
-  auto unit = gpu::PhysicalExprAttr::get(
-      context, gpu::PhysicalExprKind::Constant, 1,
-      builder.getStringAttr(""), builder.getArrayAttr({}));
-  auto repeat = expression(gpu::PhysicalExprKind::FloorDiv,
-      {expression(gpu::PhysicalExprKind::Maximum, {extent, requested}), extent});
-  auto expanded = expression(gpu::PhysicalExprKind::Multiply, {repeat, extent});
-  SmallVector<Attribute> splitShape, splitMaps, splitGroups, mergeGroups;
-  auto kernel = value.getParentRegion()->getParentOfType<func::FuncOp>();
-  uint64_t repeatSource = gpu::nextPhysicalAxisIdentities(kernel).first;
-  for (unsigned original = 0; original < source.getShape().size(); ++original) {
-    SmallVector<int64_t> splitAxes;
-    if (original == axis) {
-      splitAxes.push_back(splitShape.size());
-      splitMaps.push_back(gpu::AxisMapAttr::get(
-          context, repeatSource, 0, 0, splitShape.size(), true));
-      splitShape.push_back(unit);
-    }
-    splitAxes.push_back(splitShape.size());
-    auto mapping = cast<gpu::AxisMapAttr>(source.getAxisMaps()[original]);
-    splitMaps.push_back(gpu::AxisMapAttr::get(
-        context, mapping.getSourceId(), mapping.getSourceAxis(),
-        mapping.getDimensionId(), splitShape.size(), mapping.getDerived()));
-    splitShape.push_back(source.getShape()[original]);
-    splitGroups.push_back(gpu::ReshapeGroupAttr::get(
-        context, builder.getDenseI64ArrayAttr({original}),
-        builder.getDenseI64ArrayAttr(splitAxes)));
-    mergeGroups.push_back(gpu::ReshapeGroupAttr::get(
-        context, builder.getDenseI64ArrayAttr(splitAxes),
-        builder.getDenseI64ArrayAttr({original})));
-  }
-  auto fragment = [&](ArrayRef<Attribute> shape, ArrayRef<Attribute> mappings) {
-    return gpu::FragmentType::get(context, source.getElementType(),
-        builder.getArrayAttr(shape), builder.getArrayAttr(mappings),
-        source.getValidity(), source.getOwner());
-  };
-  Value split = builder.create<gpu::ReshapeOp>(
-      location, fragment(splitShape, splitMaps), value,
-      builder.getArrayAttr(splitGroups));
-  splitShape[axis] = repeat;
-  Value repeated = builder.create<gpu::BroadcastOp>(
-      location, fragment(splitShape, splitMaps), split);
-  SmallVector<Attribute> resultShape(source.getShape().getValue());
-  resultShape[axis] = expanded;
-  return builder.create<gpu::ReshapeOp>(
-      location, fragment(resultShape, source.getAxisMaps().getValue()), repeated,
-      builder.getArrayAttr(mergeGroups));
-}
-
 struct RectangularCoordinate {
   gpu::MakeRangeOp range;
   unsigned resultAxis;
@@ -353,7 +292,7 @@ LogicalResult formFragmentExtractions(func::FuncOp kernel,
     Value tile = access.getAccessResource();
     for (unsigned axis = 0; axis < slicedAxes.size(); ++axis)
       if (slicedAxes[axis])
-        tile = repeatTileForExtraction(
+        tile = repeatTileAxis(
             builder, gather.getLoc(), tile, axis,
             cast<gpu::PhysicalExprAttr>(extractionShape[axis]));
     Type extractedType = access.getAccessResult().getType();
