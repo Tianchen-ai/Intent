@@ -55,9 +55,11 @@ LogicalResult finalizeProgram(ModuleOp module, bool hoistLoopInvariants) {
   if (failed(hoistLoopInvariants ? gpu::hoistLoopInvariantValues(module)
                                 : gpu::eliminateCommonValues(module)))
     return failure();
-  if (failed(finalizeConfigurationRequirements(*kernel)))
-    return failure();
   if (failed(gpu::projectBoundedParameterUses(*kernel)))
+    return failure();
+  // Bounded parameter projection refines the live tile footprint. Prune the
+  // resulting candidates before deriving native array-index bounds from them.
+  if (failed(finalizeConfigurationRequirements(*kernel)))
     return failure();
   if (auto bounds = arrayIndexTileBounds(*kernel)) {
     (*kernel)->setAttr(arrayIndexTileBoundsAttr, UnitAttr::get(module.getContext()));
