@@ -259,7 +259,9 @@ cpu::ImplementationRegistry implementations() {
     result.addProfile(family, {"panel"});
   result.profile = [](func::FuncOp function) -> StringRef {
     bool quantize = false, contraction = false, integer = false, region = false;
-    function.walk([&](cpu::QuantizeOp) { quantize = true; });
+    function.walk([&](Operation *op) {
+      quantize |= isa<cpu::QuantizeOp, cpu::QuantizedDotOp>(op);
+    });
     function.walk([&](linalg::GenericOp op) {
       if (!isMatrixContraction(op)) return;
       contraction = true;

@@ -9,6 +9,7 @@
 #include "Intent/Dialect/CPU/Analysis/ExtentRelations.h"
 #include "Intent/Dialect/CPU/Analysis/Storage.h"
 #include "Intent/Dialect/CPU/Transforms/Storage/Bufferization.h"
+#include "Intent/Dialect/CPU/Transforms/Storage/Storage.h"
 #include "TaskLowering.h"
 #include "Quantization.h"
 #include "Weft/Dialect/Kernel/IR/KernelDialect.h"
@@ -170,6 +171,9 @@ LogicalResult legalizeProgram(ModuleOp program) {
               return cpu::materializeStructuredComputation(operation, 1, {});
             })))
       return failure();
+    // Native task outputs can still feed ordinary host copies. Realize those
+    // with the shared storage pass before terminal C serialization.
+    if (failed(cpu::fuseIntermediateBuffers(function))) return failure();
   }
   if (failed(cpu::lowerOwnership(cpuProgram))) return failure();
   program->setAttr(taskBindingsAttr, ArrayAttr::get(program.getContext(), taskBindings));
