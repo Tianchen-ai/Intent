@@ -188,6 +188,41 @@ private:
   IRMapping mapping;
 };
 
+void captureStaticShapeViews(cpu::TasksOp task) {
+  // A contiguous host buffer may be captured through several shape views.
+  // Form those descriptors before the task; the native ABI then carries the
+  // actual view instead of asking canonical Weft to flatten numeric axes.
+  IRMapping hostValues;
+  for (auto [argument, capture] : llvm::zip_equal(
+           task.getBody().front().getArguments().drop_front(), task.getCaptures()))
+    hostValues.map(argument, capture);
+  SmallVector<Operation *> views;
+  task.walk([&](Operation *operation) {
+    if (isStaticShapeView(operation)) views.push_back(operation);
+  });
+  OpBuilder host(task);
+  for (Operation *operation : views) {
+    Value result = operation->getResult(0);
+    if (!cpu::isContiguousDescriptor(result) ||
+        !llvm::all_of(operation->getOperands(), [&](Value operand) {
+          return hostValues.contains(operand);
+        })) continue;
+    cpu::StorageAnalysis storage(task->getParentOfType<func::FuncOp>());
+    auto aliases = storage.aliases(result);
+    if (!aliases.complete || llvm::any_of(aliases.users, [](Operation *user) {
+          return isa<cpu::QuantizeOp, cpu::QuantizedDotOp>(user);
+        })) continue;
+    // Encoded records retain their original addressable view and field axes.
+    // Only dense descriptor geometry crosses this boundary unchanged in bytes.
+    Value descriptor = host.clone(*operation, hostValues)->getResult(0);
+    task.getCapturesMutable().append(descriptor);
+    Value argument = task.getBody().front().addArgument(result.getType(), result.getLoc());
+    hostValues.map(argument, descriptor);
+    result.replaceAllUsesWith(argument);
+    operation->erase();
+  }
+}
+
 } // namespace
 
 bool isAxisView(Operation *operation) {
@@ -305,6 +340,7 @@ LogicalResult reifyTaskViewCaptures(func::FuncOp function) {
   }
   for (auto task : tasks) if (failed(CaptureReifier(task).run())) return failure();
   normalizeContiguousWindows(function);
+  for (auto task : tasks) captureStaticShapeViews(task);
   return success();
 }
 
