@@ -281,6 +281,9 @@ LogicalResult materializeRegisterContractions(func::FuncOp function) {
         !cast<MemRefType>(rhs.getType()).getElementType().isInteger(8) ||
         exactChunk.getInt() <= 0 || exactChunk.getInt() > 1024))
       return operation.emitError("exact f32 integer contraction requires signed i8 operands, i32 state and at most 1024 products per chunk");
+    auto depthBound = exactChunk ? constantDimensionUpperBound(lhs, 1)
+                                 : std::optional<int64_t>{};
+    bool singleExactChunk = depthBound && *depthBound <= exactChunk.getInt();
     Type computation = exactChunk ? b.getF32Type() : accumulator;
     auto computationVector = VectorType::get({width}, computation);
     auto widen = [&](Value value, Type type) -> Value {
@@ -301,15 +304,20 @@ LogicalResult materializeRegisterContractions(func::FuncOp function) {
           : Value(b.create<vector::LoadOp>(loc, VectorType::get({width}, element), source, ValueRange{row, column}));
       return widen(value, width == 1 ? target : Type(VectorType::get({width}, target)));
     };
-    for (Value row : rows)
-      for (Value offset : offsets) {
-        if (!epilogue) accumulators.push_back(load(output, row, offset, accumulator));
-        else {
-          Value initial = epilogue->initialization.getInputs()[0];
-          accumulators.push_back(width == 1 ? initial
-              : Value(b.create<vector::BroadcastOp>(loc, vectorType, initial)));
+    auto readInitials = [&] {
+      SmallVector<Value> values;
+      for (Value row : rows)
+        for (Value offset : offsets) {
+          if (!epilogue) values.push_back(load(output, row, offset, accumulator));
+          else {
+            Value initial = epilogue->initialization.getInputs()[0];
+            values.push_back(width == 1 ? initial
+                : Value(b.create<vector::BroadcastOp>(loc, vectorType, initial)));
+          }
         }
-      }
+      return values;
+    };
+    if (!singleExactChunk) accumulators = readInitials();
     Value depth = b.create<memref::DimOp>(loc, lhs, 1);
     auto reduce = [&](Value base, Value count, ValueRange initials) {
       auto reduction = b.create<scf::ForOp>(loc, index(b, loc, 0), count, index(b, loc, 1), initials);
@@ -348,23 +356,35 @@ LogicalResult materializeRegisterContractions(func::FuncOp function) {
       // integer (magnitude <= 2^24). Keep prior i32 state out of this sum.
       Value zero = b.create<arith::ConstantOp>(loc, b.getF32FloatAttr(0));
       if (width != 1) zero = b.create<vector::BroadcastOp>(loc, computationVector, zero);
-      SmallVector<Value> initials(accumulators.size(), zero);
-      Value limit = index(b, loc, exactChunk.getInt());
-      auto chunks = b.create<scf::ForOp>(loc, index(b, loc, 0), depth, limit, accumulators);
-      {
-        OpBuilder::InsertionGuard guard(b);
-        b.setInsertionPointToStart(chunks.getBody());
-        Value base = chunks.getInductionVar();
-        Value count = b.create<arith::MinSIOp>(loc, limit, b.create<arith::SubIOp>(loc, depth, base));
-        auto partial = reduce(base, count, initials);
-        SmallVector<Value> next;
-        for (auto [value, previous] : llvm::zip(partial.getResults(), chunks.getRegionIterArgs())) {
-          Value integer = b.create<arith::FPToSIOp>(loc, previous.getType(), value);
-          next.push_back(b.create<arith::AddIOp>(loc, previous, integer));
+      SmallVector<Value> initials(rows.size() * offsets.size(), zero);
+      if (singleExactChunk) {
+        // The current view bound proves the entire tile fits one exact partial.
+        // Keep prior i32 state out of its f32 live range. The reduction only
+        // reads inputs, and every output read still precedes all output writes.
+        auto partial = reduce(index(b, loc, 0), depth, initials);
+        auto previous = readInitials();
+        for (auto [value, initial] : llvm::zip(partial.getResults(), previous)) {
+          Value integer = b.create<arith::FPToSIOp>(loc, initial.getType(), value);
+          results.push_back(b.create<arith::AddIOp>(loc, initial, integer));
         }
-        b.create<scf::YieldOp>(loc, next);
+      } else {
+        Value limit = index(b, loc, exactChunk.getInt());
+        auto chunks = b.create<scf::ForOp>(loc, index(b, loc, 0), depth, limit, accumulators);
+        {
+          OpBuilder::InsertionGuard guard(b);
+          b.setInsertionPointToStart(chunks.getBody());
+          Value base = chunks.getInductionVar();
+          Value count = b.create<arith::MinSIOp>(loc, limit, b.create<arith::SubIOp>(loc, depth, base));
+          auto partial = reduce(base, count, initials);
+          SmallVector<Value> next;
+          for (auto [value, previous] : llvm::zip(partial.getResults(), chunks.getRegionIterArgs())) {
+            Value integer = b.create<arith::FPToSIOp>(loc, previous.getType(), value);
+            next.push_back(b.create<arith::AddIOp>(loc, previous, integer));
+          }
+          b.create<scf::YieldOp>(loc, next);
+        }
+        llvm::append_range(results, chunks.getResults());
       }
-      llvm::append_range(results, chunks.getResults());
     } else {
       llvm::append_range(results, reduce(index(b, loc, 0), depth, accumulators).getResults());
     }

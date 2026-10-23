@@ -208,9 +208,11 @@ private:
     line(task + "(" + join(arguments) + ")");
     --indent;
     --indent;
-    line("external_call[\"intent_cpu_dispatch\", NoneType](" + callback + ", Pointer(to=" + context +
+    auto capabilities = dispatch->getParentOfType<ModuleOp>()->getAttrOfType<cpu::CapabilitiesAttr>(
+        "intent_cpu.capabilities");
+    line("external_call[\"intent_cpu_dispatch_team\", NoneType](" + callback + ", Pointer(to=" + context +
          ").unsafe_bitcast[NoneType](), Int64(" + name(dispatch.getCount()) + "), Int64(" +
-         name(dispatch.getWorkerCount()) + "))");
+         name(dispatch.getWorkerCount()) + "), Int64(" + std::to_string(capabilities.getWorkers()) + "))");
     --indent;
     return success();
   }

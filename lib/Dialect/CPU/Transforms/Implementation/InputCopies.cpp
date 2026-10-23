@@ -203,13 +203,52 @@ FailureOr<bool> tryMaterializeInputCopy(linalg::GenericOp operation,
     return success();
   };
 
-  if (contiguous.condition) {
-    auto choice = builder.create<scf::IfOp>(loc, contiguous.condition, true);
-    builder.setInsertionPointToStart(choice.thenBlock());
-    if (failed(transpose())) return failure();
-    builder.setInsertionPointToStart(choice.elseBlock());
-    scalar(zero, rows, zero, columns);
-  } else if (failed(transpose())) return failure();
+  auto transposedOrStrided = [&]() -> LogicalResult {
+    if (contiguous.condition) {
+      auto choice = builder.create<scf::IfOp>(loc, contiguous.condition, true);
+      builder.setInsertionPointToStart(choice.thenBlock());
+      if (failed(transpose())) return failure();
+      builder.setInsertionPointToStart(choice.elseBlock());
+      scalar(zero, rows, zero, columns);
+    } else if (failed(transpose())) return failure();
+    return success();
+  };
+  // An unknown leading stride also matches the transpose case above. Do not
+  // let that specialization turn ordinary row-contiguous input into scalar
+  // packing. Both versions consume the same copy and its declared conversion.
+  if (inputStrides[1] == 1 || ShapedType::isDynamic(inputStrides[1])) {
+    auto rowContiguous = materializeContiguousMemoryGuard(builder, loc,
+                                                        ValueRange{source, target});
+    auto copyRows = [&] {
+      IRMapping mapping;
+      rowContiguous.bind(builder, loc, mapping);
+      Value input = mapping.lookupOrDefault(source);
+      Value output = mapping.lookupOrDefault(target);
+      auto lanes = VectorType::get({width}, inputType.getElementType());
+      Value fullColumns = builder.create<arith::SubIOp>(loc, columns,
+          builder.create<arith::RemSIOp>(loc, columns, index(builder, loc, width)));
+      loop(builder, loc, zero, rows, 1, [&](Value row) {
+        loop(builder, loc, zero, fullColumns, width, [&](Value column) {
+          Value value = builder.create<vector::LoadOp>(loc, lanes, input, ValueRange{row, column});
+          value = convert(builder, loc, value, extension, width);
+          builder.create<vector::StoreOp>(loc, value, output, ValueRange{row, column});
+        });
+        // Finish each row before writing the next, including overlapping rows.
+        loop(builder, loc, fullColumns, columns, 1, [&](Value column) {
+          Value value = builder.create<memref::LoadOp>(loc, source, ValueRange{row, column});
+          value = convert(builder, loc, value, extension);
+          builder.create<memref::StoreOp>(loc, value, target, ValueRange{row, column});
+        });
+      });
+    };
+    if (rowContiguous.condition) {
+      auto choice = builder.create<scf::IfOp>(loc, rowContiguous.condition, true);
+      builder.setInsertionPointToStart(choice.thenBlock());
+      copyRows();
+      builder.setInsertionPointToStart(choice.elseBlock());
+      if (failed(transposedOrStrided())) return failure();
+    } else copyRows();
+  } else if (failed(transposedOrStrided())) return failure();
   operation.erase();
   return true;
 }

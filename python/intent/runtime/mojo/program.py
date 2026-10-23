@@ -49,8 +49,6 @@ def _measure_candidates(measurements, arguments: tuple[object, ...], failed) -> 
             failed(index, error)
             raise
 
-    for index in range(len(measurements)):
-        measure(index)
     samples = [[] for _ in measurements]
     for round_index in range(3):
         order = list(range(len(measurements)))
@@ -59,6 +57,10 @@ def _measure_candidates(measurements, arguments: tuple[object, ...], failed) -> 
         elif round_index == 2:
             order = order[1:] + order[:1]
         for candidate in order:
+            # Warm this candidate's execution resources immediately before its
+            # trial. Intervening serial candidates can otherwise put a parallel
+            # team to sleep. Both calls still evict data and restore InOut state.
+            measure(candidate)
             samples[candidate].append(measure(candidate))
     return tuple(statistics.median(values) for values in samples)
 
