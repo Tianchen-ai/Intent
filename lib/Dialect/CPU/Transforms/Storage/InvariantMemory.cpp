@@ -1,4 +1,5 @@
 #include "MemoryAccess.h"
+#include "Intent/Dialect/CPU/Analysis/ExtentRelations.h"
 #include "Intent/Dialect/CPU/Analysis/Storage.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -13,6 +14,32 @@ using namespace mlir;
 
 namespace intent::cpu::detail {
 namespace {
+
+bool foldInvariantDimensions(scf::ForOp loop) {
+  using Variable = ValueBoundsConstraintSet::Variable;
+  bool changed = false;
+  for (auto [number, carried] : llvm::enumerate(loop.getRegionIterArgs())) {
+    if (!isa<MemRefType>(carried.getType())) continue;
+    SmallVector<memref::DimOp> dimensions;
+    for (Operation *user : carried.getUsers())
+      if (auto dimension = dyn_cast<memref::DimOp>(user))
+        if (dimension.getConstantIndex()) dimensions.push_back(dimension);
+    for (auto dimension : dimensions) {
+      int64_t axis = *dimension.getConstantIndex();
+      // SCF's value-bounds model proves invariant dimensions through the
+      // backedge. Materialize that fact without changing the buffer identity.
+      if (!haveEqualExtents(Variable(carried, axis),
+                            Variable(loop.getInitArgs()[number], axis))) continue;
+      OpBuilder builder(loop);
+      Value initial = builder.create<memref::DimOp>(dimension.getLoc(),
+                                                   loop.getInitArgs()[number], axis);
+      dimension.getResult().replaceAllUsesWith(initial);
+      dimension.erase();
+      changed = true;
+    }
+  }
+  return changed;
+}
 
 size_t movePureInvariants(scf::ForOp loop) {
   auto loopLike = cast<LoopLikeOpInterface>(loop.getOperation());
@@ -87,6 +114,7 @@ bool placeInvariantMemory(func::FuncOp function) {
       [&](scf::ForOp loop) { loops.push_back(loop); });
   bool changed = false;
   for (scf::ForOp loop : loops) {
+    changed |= foldInvariantDimensions(loop);
     changed |= movePureInvariants(loop) != 0;
     LoopExecution domain = execution(loop);
     if (domain == LoopExecution::Empty)
