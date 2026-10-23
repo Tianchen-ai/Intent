@@ -30,6 +30,7 @@ _compilations: dict[tuple[object, ...], Future[NativeCompilation]] = {}
 _compilation_lock = Lock()
 _compilers = ThreadPoolExecutor(max_workers=2)
 _BUILD_OPTIONS = ("--emit", "shared-lib")
+TUNING_CACHE_BYTES = 64 * 1024 * 1024
 
 ELEMENT_TYPES = {
     "f16": "Float16", "bf16": "BFloat16", "f32": "Float32", "f64": "Float64",
@@ -58,16 +59,8 @@ def benchmark_exports(candidate: MojoCandidate, abi: NativeABI) -> str:
     entry = candidate.entry
     sections.append(
         f'\n@export("{entry}_benchmark")\n'
-        f"def {entry}_benchmark({', '.join(signature)}, repetitions: Int64) abi(\"C\") -> Float64:\n"
+        f"def {entry}_benchmark({', '.join(signature)}, eviction: Pointer[UInt8, MutUntrackedOrigin], repetitions: Int64) abi(\"C\") -> Float64:\n"
     )
-    if not mutable:
-        sections.append(
-            "    var begin = monotonic()\n"
-            "    for iteration in range(Int(repetitions)):\n"
-            f"        {entry}({', '.join(arguments)})\n"
-            "    return Float64(monotonic() - begin) * 1.0e-6 / Float64(repetitions)\n"
-        )
-        return "".join(sections)
     for region in mutable:
         index = region.pointer.parameter.position
         dimensions = " * ".join(f"Int({slot.name})" for slot in region.extents) or "1"
@@ -81,6 +74,7 @@ def benchmark_exports(candidate: MojoCandidate, abi: NativeABI) -> str:
         index = region.pointer.parameter.position
         sections.append(f'        external_call["memcpy", NoneType](a{index}, saved_a{index}.unsafe_ptr(), UInt(bytes_a{index}))\n')
     sections.append(
+        f'        external_call["memset", NoneType](eviction, Int32(0), UInt({TUNING_CACHE_BYTES}))\n'
         "        var begin = monotonic()\n"
         f"        {entry}({', '.join(arguments)})\n"
         "        elapsed += Float64(monotonic() - begin)\n"

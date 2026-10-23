@@ -8,7 +8,7 @@ from threading import RLock
 
 import torch
 
-from .compilation import compile_portfolio, runtime_inputs_current
+from .compilation import TUNING_CACHE_BYTES, compile_portfolio, runtime_inputs_current
 from .contract import MojoFacts
 from ..interface import ViewParameter
 from ..invocation import ViewFacts, build_invocation_binders, invocation_result
@@ -25,26 +25,32 @@ _winners: dict[tuple[object, ...], dict[tuple[object, ...], int]] = {}
 _candidate_timings: dict[tuple[object, ...], dict[tuple[object, ...], tuple[float, ...]]] = {}
 
 def _timing_samples(measure, arguments: tuple[object, ...], *, samples: int) -> float:
-    first = measure(*arguments, 1)
+    eviction = ctypes.create_string_buffer(TUNING_CACHE_BYTES)
+    first = measure(*arguments, eviction, 1)
     if first <= 0:
         raise RuntimeError("native monotonic timing returned a non-positive duration")
     repetitions = min(50, max(1, int(10.0 / first)))
-    return statistics.median(measure(*arguments, repetitions) for _ in range(samples))
+    return statistics.median(measure(*arguments, eviction, repetitions) for _ in range(samples))
 
 
 def _measure_candidates(measurements, arguments: tuple[object, ...], failed) -> tuple[float, ...]:
-    def measure(index, repetitions):
+    # Time individual native invocations with the cache eviction outside the
+    # interval, as provider tuners do. A tight repeated-call average can choose
+    # a worker-heavy candidate whose cost is hidden by already-active workers.
+    eviction = ctypes.create_string_buffer(TUNING_CACHE_BYTES)
+
+    def measure(index):
         try:
-            return measurements[index](*arguments, repetitions)
+            elapsed = measurements[index](*arguments, eviction, 1)
+            if elapsed <= 0:
+                raise RuntimeError("native monotonic timing returned a non-positive duration")
+            return elapsed
         except Exception as error:
             failed(index, error)
             raise
 
-    probes = [measure(index, 1) for index in range(len(measurements))]
-    for index, elapsed in enumerate(probes):
-        if elapsed <= 0:
-            failed(index, RuntimeError("native monotonic timing returned a non-positive duration"))
-    repetitions = [min(50, max(1, int(10.0 / elapsed))) for elapsed in probes]
+    for index in range(len(measurements)):
+        measure(index)
     samples = [[] for _ in measurements]
     for round_index in range(3):
         order = list(range(len(measurements)))
@@ -53,7 +59,7 @@ def _measure_candidates(measurements, arguments: tuple[object, ...], failed) -> 
         elif round_index == 2:
             order = order[1:] + order[:1]
         for candidate in order:
-            samples[candidate].append(measure(candidate, repetitions[candidate]))
+            samples[candidate].append(measure(candidate))
     return tuple(statistics.median(values) for values in samples)
 
 
@@ -265,7 +271,7 @@ class NativeProgram(NativePreparedRuntime):
                     libraries.append(library)
                     functions.append(library.bind(candidate.entry, argument_types, None))
                     measurements.append(library.bind(
-                        candidate.entry + "_benchmark", [*argument_types, ctypes.c_int64], ctypes.c_double))
+                        candidate.entry + "_benchmark", [*argument_types, ctypes.c_void_p, ctypes.c_int64], ctypes.c_double))
             except Exception as error:
                 for library in libraries:
                     library.close()
