@@ -20,6 +20,7 @@ class TuningHooks:
         self.state = None
         self.observe_trial = None
         self._observed_arguments = None
+        self._measurement = None
 
     def __enter__(self):
         return self
@@ -50,9 +51,15 @@ class TuningHooks:
             self.state = TuningState(tuple(arguments[name] for name in self.names),
                                      self.writable)
         self.state.restore(self.readable)
+        if self._measurement is not None:
+            cache, start, _ = self._measurement
+            cache.zero_()
+            start.record()
 
     def after(self, arguments: dict, exception: Exception | None) -> None:
         try:
+            if self._measurement is not None and exception is None:
+                self._measurement[2].record()
             # Triton reuses full_nargs through the warmup/measurement calls of a
             # candidate. Capture the first completed trial and any failure, not
             # one diagnostic record allocation on every timed callback.
@@ -67,6 +74,37 @@ class TuningHooks:
             else:
                 self.state.restore(self.readable)
 
+    def benchmark(self, function, quantiles):
+        import torch
+        from triton.runtime import driver
+
+        # Complete lazy initialization before capture. State restoration and
+        # cache eviction are graph nodes outside the per-call timing events.
+        function()
+        cache = driver.active.get_empty_cache_for_benchmark()
+        start = torch.cuda.Event(enable_timing=True, external=True)
+        end = torch.cuda.Event(enable_timing=True, external=True)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        try:
+            self._measurement = cache, start, end
+            with torch.cuda.stream(stream):
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph, stream=stream):
+                    function()
+                samples = []
+                for _ in range(33):
+                    graph.replay()
+                    end.synchronize()
+                    samples.append(start.elapsed_time(end))
+                stream.synchronize()
+            values = torch.tensor(samples[1:], dtype=torch.float64, device="cpu")
+            return values.quantile(torch.tensor(quantiles, dtype=torch.float64,
+                                                device="cpu")).tolist()
+        finally:
+            self._measurement = None
+            torch.cuda.current_stream().wait_stream(stream)
+
 
 def _descriptor_allocator(size, alignment, stream):
     import torch
@@ -80,7 +118,6 @@ def _descriptor_allocator(size, alignment, stream):
 class TritonProgram:
     def __init__(self, interface, namespace: dict, facts, target: dict) -> None:
         import triton
-        from triton.testing import do_bench_cudagraph
 
         self.interface = interface
         self.configurations = interface.configuration_space
@@ -116,7 +153,7 @@ class TritonProgram:
         # state-restoration hooks still execute in every captured trial.
         kernel = triton.autotune(configs=configs, key=facts.autotune_key,
                                 pre_hook=self.hooks.before, post_hook=self.hooks.after,
-                                do_bench=do_bench_cudagraph,
+                                do_bench=self.hooks.benchmark,
                                 **options)(kernel)
         self.kernel = kernel
 
