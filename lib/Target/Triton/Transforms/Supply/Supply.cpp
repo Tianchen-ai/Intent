@@ -504,6 +504,42 @@ void selectOrderedLoadUnrolling(func::FuncOp kernel) {
     return dyn_cast_or_null<IntegerAttr>(constants.evaluate(value));
   };
   kernel.walk([&](scf::ForOp loop) {
+    // Preserve each carried update, but expose reads of subsequent iterations
+    // to Triton's native unroller. Recurrences with local reductions benefit
+    // from overlapping those independent reads with their dependent compute.
+    auto recurrence = loop.walk([&](gpu::ReduceOp reduce) {
+      return dependsOnLoopCarry(reduce.getSources(), loop, true)
+                 ? WalkResult::interrupt() : WalkResult::advance();
+    });
+    if (recurrence.wasInterrupted()) {
+      bool supported = true;
+      unsigned loads = 0;
+      loop.walk([&](Operation *operation) {
+        if (operation == loop.getOperation()) return;
+        if (auto access = dyn_cast<gpu::AccessOpInterface>(operation)) {
+          if (access.getAccessKind() != gpu::AccessKind::Load &&
+              access.getAccessKind() != gpu::AccessKind::Store) {
+            supported = false;
+            return;
+          }
+          SmallVector<Value> addressing{access.getAccessResource()};
+          llvm::append_range(addressing, access.getAccessCoordinates());
+          if (access.getAccessValidity()) addressing.push_back(access.getAccessValidity());
+          if (access.getAccessFill()) addressing.push_back(access.getAccessFill());
+          supported &= !dependsOnLoopCarry(addressing, loop, false);
+          loads += access.getAccessKind() == gpu::AccessKind::Load;
+        } else if (isa<scf::IfOp, scf::YieldOp, gpu::ReduceOp, CtaBarrierOp>(operation)) {
+          // Conditional alias barriers remain in their original positions.
+        } else if (isa<gpu::ContractOp, gpu::ScaledContractOp, gpu::SparseContractOp>(operation) ||
+                   operation->getNumRegions() || !isMemoryEffectFree(operation)) {
+          supported = false;
+        }
+      });
+      if (supported && loads && loads <= 8)
+        loop->setAttr(loopUnrollFactorAttr,
+            IntegerAttr::get(IntegerType::get(kernel.getContext(), 64), 4));
+      return;
+    }
     if (loop->hasAttr(loopStagesAttr) || loop.getNumResults() != 1 ||
         !isa<FloatType>(gpu::uniformElementType(loop.getResult(0).getType())))
       return;
