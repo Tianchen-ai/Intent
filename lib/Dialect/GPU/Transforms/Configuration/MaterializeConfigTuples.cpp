@@ -77,7 +77,7 @@ LogicalResult materializeSharedConfigTuples(func::FuncOp kernel) {
   auto project = configuration::projectConfigurationProfiles(
       kernel, facts, *tables,
       [&](NamedAttrList &bindings, const configuration::TuningProfile &profile) {
-        configuration::bindContractionFreeExtents(
+        configuration::bindOwnershipExtents(
             facts.freeExtents, bindings, profile, builder);
         if (failed(configuration::bindTraversalFragmentFootprints(
                 kernel, parameters, resources, bindings, builder))) {

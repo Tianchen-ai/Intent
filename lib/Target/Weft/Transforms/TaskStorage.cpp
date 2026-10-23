@@ -102,11 +102,9 @@ LogicalResult TaskConversion::allocateLocal(Value memory) {
       return emitError(memory.getLoc(), "private allocation extent has no current SSA value");
     auto bound = dimensionExtent(memory, axis);
     if (!bound || *bound == 0) {
-      int64_t id = shapeValues.size() + 1;
-      extent = b.create<wk::LocalShapeOp>(memory.getLoc(), b.getIndexType(), extent, id);
-      shapeValues.push_back(extent);
-      localShapeBindings.emplace_back(sourceExtent, id);
-      bound = -id;
+      auto local = bindLocalShape(sourceExtent, memory.getLoc());
+      if (failed(local)) return failure();
+      bound = *local;
     }
     if (*bound < 0) extent = shapeValues[-*bound - 1];
     sizes.push_back(sourceExtent);

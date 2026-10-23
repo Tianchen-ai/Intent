@@ -69,6 +69,8 @@ private:
   bool sameBound(mlir::OpFoldResult lhs, mlir::OpFoldResult rhs);
   std::optional<int64_t> nativeExtent(const cpu::ExtentExpression &extent);
   std::optional<int64_t> nativeExtent(mlir::OpFoldResult extent);
+  mlir::FailureOr<int64_t> bindLocalShape(mlir::OpFoldResult extent,
+                                        mlir::Location location);
   std::optional<int64_t> dimensionExtent(mlir::Value memory, unsigned axis);
   std::optional<int64_t>
   shapeSymbol(const mlir::ValueBoundsConstraintSet::Variable &extent);

@@ -626,7 +626,10 @@ LogicalResult addTailValidity(func::FuncOp kernel, Operation *scope,
         auto blockedExtent =
             cast<PhysicalExprAttr>(rangeType.getShape()[0]);
         if (HistogramOp histogram = histogramSource(payload)) {
-          if (failed(retargetDimensionExtent(histogram.getResult(), *dimension,
+          // Histogram bins have their own result-axis identity. A positional
+          // output projection can rename it before the store's coordinate.
+          auto binAxis = cast<AxisMapAttr>(histogram.getResult().getType().getAxisMaps()[0]);
+          if (failed(retargetDimensionExtent(histogram.getResult(), binAxis.getDimensionId(),
                                             blockedExtent)))
             return failure();
           payload = store.getValue();

@@ -31,7 +31,7 @@ struct CorrelatedProfileParameters {
   ParameterAttr pointwise, reduction, contraction;
 };
 
-struct ContractionFreeExtent {
+struct OwnershipExtentGroup {
   llvm::SmallVector<PhysicalExprAttr> extents;
   llvm::SmallVector<ParameterAttr> parameters;
   ParameterRole role;
@@ -51,7 +51,7 @@ struct ConfigurationFacts {
   llvm::SmallVector<ParameterAttr> pointwiseRowAxes;
   llvm::MapVector<unsigned, llvm::SmallVector<ParameterAttr>> rowGroups;
   llvm::SmallVector<CorrelatedProfileParameters> correlatedProfiles;
-  llvm::SmallVector<ContractionFreeExtent> freeExtents;
+  llvm::SmallVector<OwnershipExtentGroup> freeExtents;
 };
 
 ConfigurationFacts analyzeConfigurationPolicy(
@@ -66,8 +66,8 @@ mlir::LogicalResult projectConfigurationProfiles(
 int64_t requestedValue(const TuningProfile &profile, ParameterRole role);
 int64_t selectCandidate(llvm::ArrayRef<int64_t> candidates, int64_t requested);
 
-void bindContractionFreeExtents(
-    llvm::ArrayRef<ContractionFreeExtent> groups, mlir::NamedAttrList &bindings,
+void bindOwnershipExtents(
+    llvm::ArrayRef<OwnershipExtentGroup> groups, mlir::NamedAttrList &bindings,
     const TuningProfile &profile, mlir::Builder &builder);
 mlir::LogicalResult bindTraversalFragmentFootprints(
     mlir::func::FuncOp kernel, llvm::ArrayRef<ParameterAttr> parameters,

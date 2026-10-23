@@ -11,6 +11,46 @@ from .native import empty_like, fill
 
 
 @dataclass
+class HistogramCall:
+    partials: object
+    merge: object
+
+    def compile(self):
+        self.partials.compile()
+        self.merge.compile()
+
+    def launch(self):
+        self.partials.launch()
+        self.merge.launch()
+
+    def result(self):
+        return self.merge.result()
+
+
+@dataclass
+class Histogram:
+    partials: object
+    merge: object
+    chunk: int = 8192
+
+    def prepare(self, samples, *, outputs=None):
+        from intent.examples.kernels.statistics.histogram import BINS
+        partitions = (samples.shape[0] + self.chunk - 1) // self.chunk
+        # The workspace belongs to this author program and is fully overwritten
+        # by its first kernel; no fill or hidden initialization launch is needed.
+        allocate = getattr(self.partials, "empty_like", empty_like)
+        workspace = allocate(samples, (partitions, BINS), dtype="i32")
+        first = self.partials.prepare(samples, outputs=(workspace,))
+        second = self.merge.prepare(first.result(), outputs=outputs)
+        return HistogramCall(first, second)
+
+    def run(self, samples):
+        call = self.prepare(samples)
+        call.launch()
+        return call.result()
+
+
+@dataclass
 class GroupNormBackwardCall:
     dx: object
     affine: object

@@ -99,6 +99,12 @@ LogicalResult formComputePrimitives(func::FuncOp kernel,
           "cuTile histogram requires a realized one-axis input fragment");
     OpBuilder builder(histogram);
     Location location = histogram.getLoc();
+    auto inputBounds = gpu::queryPositiveExtentBounds(
+        cast<gpu::PhysicalExprAttr>(source.getShape()[0]), kernel);
+    auto binBounds = gpu::queryPositiveExtentBounds(
+        cast<gpu::PhysicalExprAttr>(result.getShape()[0]), kernel);
+    bool packed = inputBounds && inputBounds->second < 65536 &&
+                  binBounds && binBounds->first >= 2;
     auto sourceInteger = dyn_cast<IntegerType>(source.getElementType());
     Type comparisonElement = sourceInteger && sourceInteger.isUnsigned()
                                  ? IntegerType::get(kernel.getContext(), 64,
@@ -130,10 +136,39 @@ LogicalResult formComputePrimitives(func::FuncOp kernel,
     Value input = builder.create<gpu::CastOp>(
         location, withElementType(source, comparisonElement),
         histogram.getValues());
+    auto splat = [&](Type type, int64_t value) -> Value {
+      auto element = gpu::uniformElementType(type);
+      Value scalar = *gpu::materializeScalarConstant(
+          builder, location, builder.getIntegerAttr(element, value), element);
+      return isa<gpu::FragmentType>(type)
+          ? Value(builder.create<gpu::SplatOp>(location, type, scalar)) : scalar;
+    };
+    Value encoded;
+    auto packedElement = IntegerType::get(
+        kernel.getContext(), 32, IntegerType::Unsigned);
+    if (packed) {
+      // Two independent 16-bit counters share one integer reduction. The
+      // physical input bound proves no digit can carry into its neighbour.
+      auto inputType = cast<gpu::FragmentType>(input.getType());
+      Value slot = builder.create<gpu::BinaryOp>(location, inputType, input,
+          splat(inputType, 1), BinaryOperator::BitwiseAnd);
+      slot = builder.create<gpu::CastOp>(
+          location, withElementType(inputType, packedElement), slot);
+      Value shift = builder.create<gpu::BinaryOp>(location, slot.getType(), slot,
+          splat(slot.getType(), 16), BinaryOperator::Multiply);
+      encoded = builder.create<gpu::BinaryOp>(location, slot.getType(),
+          splat(slot.getType(), 1), shift, BinaryOperator::LeftShift);
+      input = builder.create<gpu::BinaryOp>(location, inputType, input,
+          splat(inputType, 1), BinaryOperator::RightShift);
+    }
     Value values = builder.create<gpu::BroadcastOp>(
         location, relation(comparisonElement), input);
     Value selectedBins = builder.create<gpu::BroadcastOp>(
         location, relation(comparisonElement), bins);
+    if (packed)
+      selectedBins = builder.create<gpu::BinaryOp>(
+          location, selectedBins.getType(), selectedBins,
+          splat(selectedBins.getType(), 1), BinaryOperator::RightShift);
     Value members = builder.create<gpu::CompareOp>(
         location, relation(builder.getI1Type()), values, selectedBins,
         ComparePredicate::Eq);
@@ -144,14 +179,37 @@ LogicalResult formComputePrimitives(func::FuncOp kernel,
           location, relation(builder.getI1Type()), members, valid,
           BinaryOperator::LogicalAnd);
     }
-    Value counts = builder.create<gpu::CastOp>(
-        location, relation(result.getElementType()), members);
+    Value counts;
+    if (packed) {
+      encoded = builder.create<gpu::BroadcastOp>(
+          location, relation(packedElement), encoded);
+      counts = builder.create<gpu::SelectOp>(
+          location, relation(packedElement), members, encoded,
+          splat(relation(packedElement), 0));
+    } else {
+      counts = builder.create<gpu::CastOp>(
+          location, relation(result.getElementType()), members);
+    }
     auto replacement = builder.create<ReduceOp>(
         location, ValueRange{counts}, ValueRange{}, 1, false,
         BinaryOperatorAttr::get(kernel.getContext(), BinaryOperator::Add));
     if (Attribute origin = histogram->getAttr(gpu::originAttr))
       replacement->setAttr(gpu::originAttr, origin);
-    rewriter.replace(histogram, ValueRange{replacement.getResult(0)});
+    Value output = replacement.getResult(0);
+    if (packed) {
+      auto packedType = withElementType(result, packedElement);
+      Value slots = builder.create<gpu::CastOp>(location, packedType, bins);
+      slots = builder.create<gpu::BinaryOp>(location, packedType, slots,
+          splat(packedType, 1), BinaryOperator::BitwiseAnd);
+      Value shift = builder.create<gpu::BinaryOp>(location, packedType, slots,
+          splat(packedType, 16), BinaryOperator::Multiply);
+      output = builder.create<gpu::BinaryOp>(location, packedType, output, shift,
+          BinaryOperator::RightShift);
+      output = builder.create<gpu::BinaryOp>(location, packedType, output,
+          splat(packedType, 65535), BinaryOperator::BitwiseAnd);
+      output = builder.create<gpu::CastOp>(location, result, output);
+    }
+    rewriter.replace(histogram, ValueRange{output});
   }
 
   for (gpu::ReduceOp reduce : inputs.reductions) {

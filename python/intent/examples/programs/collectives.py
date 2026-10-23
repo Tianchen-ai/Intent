@@ -11,10 +11,10 @@ from intent.examples.kernels.backward.group_norm import (
 from intent.examples.kernels.normalization.batch_norm import batch_norm_training
 from intent.examples.kernels.normalization.layer_norm import weighted_layer_norm
 from intent.examples.kernels.normalization.softmax import stable_softmax_f16
-from intent.examples.kernels.statistics.histogram import histogram_256
+from intent.examples.kernels.statistics.histogram import histogram_partials, histogram_merge
 from intent.examples.kernels.streaming.attention_f32 import causal_linear_attention_f32
 from intent.examples.kernels.streaming.ordered_prefix import row_cumsum_f32
-from .composition import GroupNormBackward
+from .composition import GroupNormBackward, Histogram
 
 
 def softmax(context):
@@ -74,6 +74,8 @@ def causal_linear_attention(context):
 
 
 def histogram(context):
-    kernel = context.compile(histogram_256)
+    chunk = 8192
+    kernel = Histogram(context.compile(histogram_partials, constexprs={"CHUNK": chunk}),
+                       context.compile(histogram_merge), chunk)
     samples = inputs.array(inputs.integers(-16, 272, (65536,), "i64").data, "f32")
     return context.call(kernel, samples)

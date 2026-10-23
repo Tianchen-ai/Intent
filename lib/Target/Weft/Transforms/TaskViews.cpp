@@ -50,6 +50,17 @@ LogicalResult TaskConversion::normalizeComputations() {
     if (auto generic = dyn_cast<linalg::GenericOp>(operation)) {
       bool requiresTraversal = generic.getOutputs().size() != 1;
       auto extents = generic.getStaticLoopRanges();
+      // Weft's dense stream reduction currently closes floating-point
+      // accumulators. Integer reductions over a runtime member domain keep
+      // the CPU traversal, rather than admitting an unbounded register Value.
+      bool integerOutput = llvm::any_of(generic.getOutputs(), [](Value output) {
+        return cast<MemRefType>(output.getType()).getElementType().isIntOrIndex();
+      });
+      if (integerOutput)
+        for (auto [axis, iterator] :
+             llvm::enumerate(generic.getIteratorTypesArray()))
+          requiresTraversal |=
+              iterator == utils::IteratorType::reduction && extents[axis] < 0;
       generic.getRegion().walk([&](linalg::IndexOp index) {
         requiresTraversal |= extents[index.getDim()] <= 0;
       });
@@ -257,6 +268,23 @@ std::optional<int64_t> TaskConversion::nativeExtent(OpFoldResult extent) {
   return result;
 }
 
+FailureOr<int64_t> TaskConversion::bindLocalShape(OpFoldResult source,
+                                                Location location) {
+  if (auto bound = nativeExtent(source); bound && *bound != 0) return *bound;
+  Value extent;
+  if (auto attribute = dyn_cast<Attribute>(source))
+    extent = index(location, cast<IntegerAttr>(attribute).getInt());
+  else
+    extent = values.lookupOrNull(cast<Value>(source));
+  if (!extent)
+    return emitError(location, "task-local shape has no current SSA extent"), failure();
+  int64_t id = shapeValues.size() + 1;
+  extent = b.create<wk::LocalShapeOp>(location, b.getIndexType(), extent, id);
+  shapeValues.push_back(extent);
+  localShapeBindings.emplace_back(source, id);
+  return -id;
+}
+
 std::optional<int64_t> TaskConversion::dimensionExtent(Value memory, unsigned axis) {
   if (auto symbol = capturedShapeSymbol(ValueBoundsConstraintSet::Variable(memory, axis)))
     return -*symbol;
@@ -387,13 +415,13 @@ FailureOr<Value> TaskConversion::view(Value memory) {
   }
   append(nativeOffsets, offsets);
   for (OpFoldResult size : nativeSizes) {
-    auto extent = nativeExtent(size);
-    if (!extent) return operation.emitError("dynamic Weft subview extent has no shape binding"), failure();
+    auto extent = bindLocalShape(size, operation.getLoc());
+    if (failed(extent)) return failure();
     dimensions.push_back(*extent);
     if (*extent >= 0) extents.push_back(*extent);
     else {
       extents.push_back(-1);
-      dynamic.push_back(values.lookup(cast<Value>(size)));
+      dynamic.push_back(shapeValues[-*extent - 1]);
     }
   }
   auto format = quantizedFormat(memory);

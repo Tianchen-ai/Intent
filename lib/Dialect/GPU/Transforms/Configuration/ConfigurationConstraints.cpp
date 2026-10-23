@@ -50,10 +50,10 @@ bool fitsCollectiveFootprints(const FragmentResourceAnalysis &resources,
 
 } // namespace
 
-void bindContractionFreeExtents(
-    ArrayRef<ContractionFreeExtent> groups, NamedAttrList &bindings,
+void bindOwnershipExtents(
+    ArrayRef<OwnershipExtentGroup> groups, NamedAttrList &bindings,
     const TuningProfile &profile, Builder &builder) {
-  for (const ContractionFreeExtent &group : groups) {
+  for (const OwnershipExtentGroup &group : groups) {
     int64_t budget = requestedValue(profile, group.role);
     auto fits = [&](ParameterAttr selected, int64_t candidate) {
       std::function<std::optional<int64_t>(PhysicalExprAttr)> evaluate =

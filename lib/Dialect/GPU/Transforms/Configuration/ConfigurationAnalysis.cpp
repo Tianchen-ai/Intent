@@ -551,19 +551,19 @@ bool hasMultipleRegionMatrixAccumulators(func::FuncOp kernel) {
   return found;
 }
 
-SmallVector<ContractionFreeExtent>
+SmallVector<OwnershipExtentGroup>
 contractionFreeExtents(func::FuncOp kernel, ArrayRef<ParameterAttr> parameters) {
   // An enclosing reduction's chunk can be a free axis of its inner contract.
   llvm::StringMap<ParameterAttr> freeAxisParameters;
   for (ParameterAttr parameter : parameters)
     freeAxisParameters[parameter.getName().getValue()] = parameter;
-  SmallVector<ContractionFreeExtent> groups;
+  SmallVector<OwnershipExtentGroup> groups;
   kernel.walk([&](ContractOp contract) {
-    SmallVector<ContractionFreeExtent> contractGroups;
+    SmallVector<OwnershipExtentGroup> contractGroups;
     bool factorizedFreeAxes = false;
     auto collectSide = [&](Value value, ArrayRef<int64_t> reduction,
                            ArrayRef<int64_t> batch, ParameterRole role) {
-      ContractionFreeExtent group;
+      OwnershipExtentGroup group;
       group.role = role;
       unsigned factors = 0;
       std::function<bool(PhysicalExprAttr)> collect = [&](PhysicalExprAttr extent) {
@@ -617,6 +617,48 @@ contractionFreeExtents(func::FuncOp kernel, ArrayRef<ParameterAttr> parameters) 
         groups.push_back(std::move(group));
   });
   return groups;
+}
+
+void collectReductionFreeExtents(func::FuncOp kernel, ConfigurationFacts &facts) {
+  kernel.walk([&](ReduceOp reduce) {
+    for (Value result : reduce.getResults()) {
+      auto fragment = dyn_cast<FragmentType>(result.getType());
+      if (!fragment) continue;
+      OwnershipExtentGroup group;
+      group.role = ParameterRole::OwnershipM;
+      std::function<bool(PhysicalExprAttr)> collect = [&](PhysicalExprAttr extent) {
+        if (extent.getKind() == PhysicalExprKind::Constant)
+          return extent.getValue() > 0;
+        if (extent.getKind() == PhysicalExprKind::Parameter) {
+          auto parameter = lookupParameter(
+              kernel, extent.getParameterReference().getName());
+          auto classification = facts.classifications.find(parameter);
+          if (!parameter ||
+              parameter.getCategory() != ParameterCategory::Pointwise ||
+              classification == facts.classifications.end() ||
+              !classification->second.reductionRow)
+            return false;
+          if (!llvm::is_contained(group.parameters, parameter))
+            group.parameters.push_back(parameter);
+          return true;
+        }
+        return extent.getKind() == PhysicalExprKind::Multiply &&
+            llvm::all_of(extent.getOperands(), [&](Attribute operand) {
+              return collect(cast<PhysicalExprAttr>(operand));
+            });
+      };
+      for (Attribute attribute : fragment.getShape()) {
+        auto extent = cast<PhysicalExprAttr>(attribute);
+        if (!collect(extent)) return;
+        group.extents.push_back(extent);
+      }
+      // The retained rows of one reduction share a budget. Applying it to
+      // every Cartesian factor squares (or cubes) the requested footprint.
+      // Keep separate reductions independent, even if their axes overlap.
+      if (group.parameters.size() > 1)
+        facts.freeExtents.push_back(std::move(group));
+    }
+  });
 }
 
 bool hasSmallRegionRows(func::FuncOp kernel, ArrayRef<ParameterAttr> parameters) {
@@ -771,6 +813,7 @@ ConfigurationFacts analyzeConfigurationPolicy(
   facts.multipleRegionMatrixAccumulators =
       hasMultipleRegionMatrixAccumulators(kernel);
   facts.freeExtents = contractionFreeExtents(kernel, parameters);
+  collectReductionFreeExtents(kernel, facts);
   return facts;
 }
 
