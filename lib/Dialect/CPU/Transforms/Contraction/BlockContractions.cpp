@@ -735,10 +735,13 @@ LogicalResult exposeGroupedTiles(func::FuncOp function, const Configuration &con
       };
       Value mTiles = b.create<arith::CeilDivSIOp>(loc, size(rows), index(b, loc, config.tileM));
       Value nTiles = b.create<arith::CeilDivSIOp>(loc, size(columns), index(b, loc, config.tileN));
-      // Either tile axis alone must expose more tasks than the existing group
-      // workset. Merely having fewer groups than workers is insufficient: a
-      // single-tile matrix would otherwise serialize all independent batches.
-      Value tiles = b.create<arith::MaxSIOp>(loc, mTiles, nTiles);
+      // Tile dispatch spans both independent output axes. Input cohorts retain
+      // min(M tiles * N tiles, workers) tasks when sharing preparation, so use
+      // that same workset here. Requiring one axis alone to exceed the group
+      // count can leave workers idle even when the matrix grid fills the team.
+      // A single-tile matrix still preserves its independent outer groups.
+      Value tiles = multiply(b, loc, mTiles, nTiles);
+      tiles = b.create<arith::MinSIOp>(loc, tiles, index(b, loc, capabilities.getWorkers()));
       Value tileTasks = b.create<arith::CeilDivSIOp>(loc, tiles, index(b, loc, config.taskGrain));
       Value moreTasks = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, tileTasks, tasks);
       preferTiles = b.create<arith::AndIOp>(loc, preferTiles, moreTasks);
