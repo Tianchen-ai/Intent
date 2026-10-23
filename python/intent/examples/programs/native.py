@@ -68,6 +68,15 @@ class _Allocation:
     writable: bool = False
 
 
+def _preserve_tensor_bytes(raw):
+    if raw.device.type == "cpu":
+        contents = raw.detach().numpy()
+        saved = contents.copy()
+        return lambda: np.copyto(contents, saved)
+    saved = raw.clone()
+    return lambda: raw.copy_(saved)
+
+
 class HostBuffers:
     """One complete call's storage owners, including aliased views and InOut.
 
@@ -119,8 +128,7 @@ class HostBuffers:
         if key in self.resetters:
             return
         if self.kind == "torch":
-            saved = record.native.clone()
-            self.resetters[key] = lambda: record.native.copy_(saved)
+            self.resetters[key] = _preserve_tensor_bytes(record.native)
         else:
             saved = record.host.copy()
             if self.kind == "weft":
@@ -155,8 +163,7 @@ class HostBuffers:
             if key not in self.resetters:
                 raw = torch.empty(0, dtype=torch.uint8, device=value.device).set_(
                     storage, 0, (storage.nbytes(),), (1,))
-                saved = raw.clone()
-                self.resetters[key] = lambda: raw.copy_(saved)
+                self.resetters[key] = _preserve_tensor_bytes(raw)
 
     def input(self, value, *, element, writable=False, preserve=False):
         Buffer, DeviceBuffer, DeviceView = _native_classes()

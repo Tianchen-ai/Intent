@@ -295,24 +295,36 @@ LogicalResult finalizeNativeProgram(ModuleOp module) {
   auto capabilities = module->getAttrOfType<cpu::CapabilitiesAttr>("intent_cpu.capabilities");
   if (!capabilities)
     return module.emitError("Mojo finalization requires CPU capabilities");
-  SmallVector<arith::AddFOp> additions;
-  module.walk([&](arith::AddFOp operation) { additions.push_back(operation); });
-  for (auto addition : additions) {
-    if ((addition.getFastmath() & arith::FastMathFlags::contract) == arith::FastMathFlags::none)
+  SmallVector<Operation *> additions;
+  module.walk([&](Operation *operation) {
+    if (isa<arith::AddFOp, arith::SubFOp>(operation)) additions.push_back(operation);
+  });
+  for (Operation *addition : additions) {
+    auto add = dyn_cast<arith::AddFOp>(addition);
+    auto flags = add ? add.getFastmath() : cast<arith::SubFOp>(addition).getFastmath();
+    if ((flags & arith::FastMathFlags::contract) == arith::FastMathFlags::none)
       continue;
     for (unsigned side = 0; side != 2; ++side) {
       auto product = addition->getOperand(side).getDefiningOp<arith::MulFOp>();
-      if (!product || !product->hasOneUse() || product->getBlock() != addition->getBlock() ||
-          product.getType() != addition.getType() ||
+      if (!product || product->getBlock() != addition->getBlock() ||
+          product.getType() != addition->getResult(0).getType() ||
           (product.getFastmath() & arith::FastMathFlags::contract) == arith::FastMathFlags::none)
         continue;
       OpBuilder builder(addition);
-      auto fused = builder.create<math::FmaOp>(addition.getLoc(), product.getLhs(),
-          product.getRhs(), addition->getOperand(1 - side));
-      fused.setFastmath(addition.getFastmath() & product.getFastmath());
-      addition.replaceAllUsesWith(fused.getResult());
-      addition.erase();
-      product.erase();
+      Value left = product.getLhs(), right = product.getRhs();
+      Value accumulator = addition->getOperand(1 - side);
+      if (!add) {
+        if (side == 0)
+          accumulator = builder.create<arith::NegFOp>(addition->getLoc(), accumulator);
+        else
+          left = builder.create<arith::NegFOp>(addition->getLoc(), left);
+      }
+      auto fused = builder.create<math::FmaOp>(addition->getLoc(), left, right, accumulator);
+      fused.setFastmath(flags & product.getFastmath());
+      addition->getResult(0).replaceAllUsesWith(fused.getResult());
+      addition->erase();
+      // Other consumers retain the separately rounded product.
+      if (product->use_empty()) product.erase();
       break;
     }
   }

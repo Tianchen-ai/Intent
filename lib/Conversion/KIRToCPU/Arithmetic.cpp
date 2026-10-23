@@ -100,7 +100,20 @@ FailureOr<Value> Construction::arithmetic(Operation *operation, ValueRange argum
         !getElementTypeOrSelf(cast.getInput().getType()).isInteger(1))
       return cast.emitError("CPU numeric-to-bool cast is not implemented"), failure();
   }
-  return intent::lowerScalarOperation(operation, arguments, builder);
+  auto result = intent::lowerScalarOperation(operation, arguments, builder);
+  if (succeeded(result) && isa<BinaryOp>(operation)) {
+    // Ordinary source multiply-add/subtract permits local FMA. Carry that
+    // permission on the actual arithmetic; implementation-local R32 steps do
+    // not pass through this source-operation lowering.
+    Operation *lowered = result->getDefiningOp();
+    if (auto add = dyn_cast_or_null<arith::AddFOp>(lowered))
+      add.setFastmath(add.getFastmath() | arith::FastMathFlags::contract);
+    else if (auto sub = dyn_cast_or_null<arith::SubFOp>(lowered))
+      sub.setFastmath(sub.getFastmath() | arith::FastMathFlags::contract);
+    else if (auto mul = dyn_cast_or_null<arith::MulFOp>(lowered))
+      mul.setFastmath(mul.getFastmath() | arith::FastMathFlags::contract);
+  }
+  return result;
 }
 
 LogicalResult Construction::pointwise(Operation *operation) {
