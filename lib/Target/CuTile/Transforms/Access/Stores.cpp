@@ -40,6 +40,7 @@ LogicalResult formNativeStores(func::FuncOp kernel,
         return store.emitOpError(
             "cuTile scalar store requires scalar indices and validity");
       bool inBounds = scalarCoordinatesInView(*indices, view, kernel);
+      bool activeInBounds = inBounds || analysis.accessBounds(store).isExact();
       Value validity = access.getAccessValidity();
       gpu::PhysicalAccessBoundaryFact boundary =
           analysis.boundaryValidity(store);
@@ -47,7 +48,7 @@ LogicalResult formNativeStores(func::FuncOp kernel,
         validity = {};
       auto replacement = builder.create<ScalarStoreOp>(
           store.getLoc(), access.getAccessResource(), *indices, access.getAccessPayloads().front(),
-          validity, inBounds ? builder.getUnitAttr() : UnitAttr());
+          validity, activeInBounds ? builder.getUnitAttr() : UnitAttr());
       if (Attribute origin = store->getAttr(gpu::originAttr))
         replacement->setAttr(gpu::originAttr, origin);
       rewriter.erase(store);

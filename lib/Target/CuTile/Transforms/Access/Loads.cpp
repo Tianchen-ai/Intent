@@ -79,6 +79,7 @@ LogicalResult formNativeLoads(func::FuncOp kernel,
         return load.emitOpError(
             "cuTile scalar load requires scalar indices and validity");
       bool inBounds = scalarCoordinatesInView(*indices, view, kernel);
+      bool activeInBounds = inBounds || analysis.accessBounds(load).isExact();
       Value validity = access.getAccessValidity();
       Value padding = *fill;
       gpu::PhysicalAccessBoundaryFact boundary =
@@ -90,7 +91,7 @@ LogicalResult formNativeLoads(func::FuncOp kernel,
       auto replacement = builder.create<ScalarLoadOp>(
           load.getLoc(), access.getAccessResult().getType(), access.getAccessResource(), *indices,
           validity, padding,
-          inBounds ? builder.getUnitAttr() : UnitAttr());
+          activeInBounds ? builder.getUnitAttr() : UnitAttr());
       if (Attribute origin = load->getAttr(gpu::originAttr))
         replacement->setAttr(gpu::originAttr, origin);
       rewriter.replace(load, ValueRange{replacement.getResult()});

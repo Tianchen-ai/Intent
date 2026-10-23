@@ -68,6 +68,7 @@ def IntentCuTile_ScalarLoadOp : IntentCuTile_Op<"scalar_load", [
                        Variadic<Index>:$indices,
                        Optional<IntentGPU_ScalarValue>:$valid,
                        Optional<IntentGPU_ScalarValue>:$fill,
+                       // Proven for active coordinates; does not replace valid.
                        OptionalAttr<UnitAttr>:$in_bounds);
   let results = (outs IntentGPU_ScalarValue:$result);
   let hasVerifier = 1;
@@ -81,6 +82,7 @@ def IntentCuTile_ScalarStoreOp : IntentCuTile_Op<"scalar_store", [
                        Variadic<Index>:$indices,
                        IntentGPU_ScalarValue:$value,
                        Optional<IntentGPU_ScalarValue>:$valid,
+                       // Proven for active coordinates; does not replace valid.
                        OptionalAttr<UnitAttr>:$in_bounds);
   let hasVerifier = 1;
 }
