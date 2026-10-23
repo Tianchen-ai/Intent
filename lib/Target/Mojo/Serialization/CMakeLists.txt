@@ -6,6 +6,7 @@ add_mlir_library(MLIRIntentMojoScalarSerialization
 
 add_mlir_library(MLIRIntentMojoSerialization
   Serializer.cpp
+  Matrix.cpp
   PARTIAL_SOURCES_INTENDED
 
   LINK_LIBS PUBLIC
@@ -15,6 +16,7 @@ add_mlir_library(MLIRIntentMojoSerialization
   MLIRIntentNativeSourceSerialization
   MLIRIntentMojoScalarSerialization
   MLIRArithDialect
+  MLIRAMXDialect
   MLIRFuncDialect
   MLIRMathDialect
   MLIRMemRefDialect

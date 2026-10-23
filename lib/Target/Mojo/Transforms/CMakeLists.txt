@@ -3,6 +3,7 @@ add_mlir_library(MLIRIntentMojoTransforms
   Passes.cpp
   Implementations.cpp
   MaterializeRegisterContractions.cpp
+  Matrix.cpp
   Quantization.cpp
   DEPENDS IntentMojoTransformsIncGen
   LINK_LIBS PUBLIC
@@ -10,6 +11,7 @@ add_mlir_library(MLIRIntentMojoTransforms
   MLIRIntentMojoSerialization
   MLIRPass
   MLIRArithDialect
+  MLIRAMXDialect
   MLIRArithTransforms
   MLIRFuncDialect
   MLIRMathDialect

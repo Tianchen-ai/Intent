@@ -14,6 +14,7 @@ add_mlir_library(MLIRIntentCPUAnalysis
   MLIRIntentCPUDialect
   MLIRIntentAnalysis
   MLIRAnalysis
+  MLIRAMXDialect
   MLIRArithDialect
   MLIRDialectUtils
   MLIRBufferizationTransforms

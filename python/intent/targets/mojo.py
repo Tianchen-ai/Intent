@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import ctypes
 import os
 from pathlib import Path
 import shutil
@@ -12,6 +13,25 @@ from .specification import CPUCompilationTarget, require_matching_target
 
 if TYPE_CHECKING:
     from intent.runtime import CompiledArtifact
+
+
+def _enable_integer_matrix(feature_set, cpu_flags):
+    if not {"+amx-tile", "+amx-int8"}.issubset(feature_set):
+        return False
+    if not {"amx_tile", "amx_int8"}.issubset(cpu_flags):
+        raise RuntimeError("Mojo AMX target features disagree with the execution CPU set")
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.syscall.restype = ctypes.c_long
+    supported = ctypes.c_ulonglong()
+    if libc.syscall(ctypes.c_long(158), ctypes.c_ulong(0x1021), ctypes.byref(supported)) != 0:
+        raise OSError(ctypes.get_errno(), "cannot query Linux AMX XSTATE support")
+    if supported.value & ((1 << 17) | (1 << 18)) != ((1 << 17) | (1 << 18)):
+        return False
+    # Linux grants dynamic XSTATE permission to the process, including existing
+    # worker threads. No matrix instruction or tile allocation is issued here.
+    if libc.syscall(ctypes.c_long(158), ctypes.c_ulong(0x1023), ctypes.c_ulong(18)) != 0:
+        raise OSError(ctypes.get_errno(), "Linux denied AMX TILE_DATA permission")
+    return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,7 +115,8 @@ class MojoTarget:
         else:
             raise NotImplementedError("Mojo CPU currently requires AVX2 or AVX512")
         compilation = CPUCompilationTarget("mojo", vector_bits, self.workers,
-                                            private_bytes=self.private_bytes)
+            private_bytes=self.private_bytes,
+            matrix_i8_i32=_enable_integer_matrix(feature_set, flags[cpus[0]]))
         return ResolvedMojoTarget(executable, triple, configuration["--target-cpu"], features,
                                   compilation, self.build_threads, cpus)
 

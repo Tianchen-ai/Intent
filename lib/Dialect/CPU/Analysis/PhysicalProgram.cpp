@@ -3,6 +3,7 @@
 #include "Intent/Dialect/CPU/Analysis/Storage.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
 #include "Intent/Dialect/CPU/IR/CPUOps.h"
+#include "mlir/Dialect/AMX/AMXDialect.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -200,11 +201,19 @@ bool supportsVectorScan(ScanOp operation) {
 LogicalResult verifyCPUProgram(ModuleOp module, CPUProgramStage stage) {
   if (failed(mlir::verify(module))) return failure();
   bool invalid = false;
+  auto capabilities = module->getAttrOfType<CapabilitiesAttr>("intent_cpu.capabilities");
   module.walk([&](Operation *operation) {
     llvm::StringRef dialect = operation->getName().getDialectNamespace();
+    bool matrix = isa<amx::TileZeroOp, amx::TileLoadOp, amx::TileStoreOp,
+                      amx::TileMulIOp>(operation) && stage != CPUProgramStage::Values &&
+        capabilities && capabilities.getMatrixI8I32();
+    if (matrix)
+      for (Type type : llvm::concat<Type>(operation->getOperandTypes(), operation->getResultTypes()))
+        if (auto tile = dyn_cast<amx::TileType>(type))
+          matrix &= tile.getElementType().isInteger(8) || tile.getElementType().isInteger(32);
     if (dialect != "builtin" && dialect != "func" && dialect != "arith" &&
         dialect != "math" && dialect != "memref" && dialect != "scf" &&
-        dialect != "vector" && dialect != "linalg" && dialect != "intent_cpu" &&
+        dialect != "vector" && dialect != "linalg" && dialect != "intent_cpu" && !matrix &&
         !(stage != CPUProgramStage::Realized && dialect == "bufferization") &&
         !(stage == CPUProgramStage::Values && dialect == "tensor")) {
       operation->emitError("operation is outside the current CPU execution family");

@@ -6,6 +6,7 @@
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "Intent/Target/Mojo/Transforms/Passes.h"
+#include "Intent/Target/Mojo/Transforms/Matrix.h"
 #include "Quantization.h"
 #include "Intent/Dialect/CPU/Analysis/PhysicalProgram.h"
 #include "Intent/Dialect/CPU/Analysis/Storage.h"
@@ -181,6 +182,7 @@ LogicalResult formTile(OpBuilder &b, linalg::GenericOp operation,
 cpu::ImplementationRegistry implementations() {
   ImplementationRegistry result;
   registerQuantizedImplementations(result);
+  registerMatrixImplementations(result);
   for (StringRef family : {"mojo.region_contraction", "mojo.register_contraction"})
     result.addProfile(family, {"vector_width", "micro_m", "micro_n",
                                "register_replicas", "reduction_replicas"});

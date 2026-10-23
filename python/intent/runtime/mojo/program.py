@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, field, replace
 import os
 import statistics
 from threading import RLock
+from time import perf_counter
 
 import torch
 
@@ -57,11 +58,15 @@ def _measure_candidates(measurements, arguments: tuple[object, ...], failed) -> 
         elif round_index == 2:
             order = order[1:] + order[:1]
         for candidate in order:
-            # Warm this candidate's execution resources immediately before its
-            # trial. Intervening serial candidates can otherwise put a parallel
-            # team to sleep. Both calls still evict data and restore InOut state.
-            measure(candidate)
-            samples[candidate].append(measure(candidate))
+            # Warm each candidate for a bounded interval, not a single call.
+            # Worker activation and native matrix state must settle after a
+            # different candidate. Each invocation still restores and evicts.
+            until = perf_counter() + 0.025
+            while True:
+                measure(candidate)
+                if perf_counter() >= until:
+                    break
+            samples[candidate].extend(measure(candidate) for _ in range(5))
     return tuple(statistics.median(values) for values in samples)
 
 

@@ -654,6 +654,7 @@ FailureOr<SmallVector<InputSupply>> ImplementationInputs::Impl::prepareGroup(OpB
       begins.push_back(starts[axis]);
     }
     auto other = cast<AffineDimExpr>(map.getResult(otherAxis)).getPosition();
+    auto panelAxis = cast<AffineDimExpr>(map.getResult(requirement.panelAxis)).getPosition();
     int64_t capacity = capacities[other];
     // A valid tile window cannot exceed its current source dimension. Keep the
     // panel pitch/alignment unchanged; only remove unused rows of its storage.
@@ -661,11 +662,21 @@ FailureOr<SmallVector<InputSupply>> ImplementationInputs::Impl::prepareGroup(OpB
     // the zero-work loop guard; this optimization does not introduce zero slots.
     if (auto bound = constantDimensionUpperBound(source, otherAxis); bound && *bound > 0)
       capacity = std::min(capacity, *bound);
+    int64_t panels = (capacities[panelAxis] + requirement.panelSize - 1) / requirement.panelSize;
+    // Free axes are already grouped by their representation width. Reduction
+    // axes can require several packed panels within one existing K block.
+    if (panelAxis < 2) panels = 1;
     auto storage = b.create<memref::AllocaOp>(loc,
-        MemRefType::get({1, capacity, requirement.panelSize}, requirement.elementType));
+        MemRefType::get({panels, capacity, requirement.panelSize}, requirement.elementType));
     storage.setAlignment(requirement.alignment);
     SmallVector<OpFoldResult> strides(2, b.getIndexAttr(1));
     Value window = b.create<memref::SubViewOp>(loc, source, offsets, sizes, strides);
+    if (panels > 1) {
+      copyRepresentation(b, loc, window, storage, requirement, storage, producerCopies);
+      supplies.push_back({requirement.operand, requirement.panelAxis, requirement.panelSize,
+          storage, std::move(begins)});
+      continue;
+    }
     SmallVector<OpFoldResult> packedOffsets(3, b.getIndexAttr(0));
     SmallVector<OpFoldResult> packedSizes{b.getIndexAttr(1), sizes[otherAxis], sizes[requirement.panelAxis]};
     SmallVector<OpFoldResult> packedStrides(3, b.getIndexAttr(1));

@@ -124,9 +124,13 @@ FailureOr<bool> tryMaterializeInputCopy(linalg::GenericOp operation,
       (!ShapedType::isDynamic(inputStrides[0]) && inputStrides[0] != 1) ||
       (!ShapedType::isDynamic(outputStrides[1]) && outputStrides[1] != 1))
     return false;
+  auto columnBound = constantDimensionUpperBound(source, 1);
+  bool byteGroup = !extension && inputType.getElementType().isInteger(8) &&
+      outputType.getElementType().isInteger(8) && outputStrides[0] == 4 &&
+      outputStrides[1] == 1 && columnBound && *columnBound <= 4;
   for (unsigned axis = 0; axis < 2; ++axis)
     if (auto bound = constantDimensionUpperBound(source, axis);
-        bound && *bound < transposeWidth) return false;
+        bound && *bound < transposeWidth && !(byteGroup && axis == 1)) return false;
   // Prove reordering at the complete, attached read point, before constructing
   // any new control regions or descriptors used by this copy.
   StorageAnalysis storage(operation->getParentOfType<func::FuncOp>());
@@ -162,6 +166,50 @@ FailureOr<bool> tryMaterializeInputCopy(linalg::GenericOp operation,
       });
     });
   };
+  if (byteGroup) {
+    Value four = index(builder, loc, 4);
+    Value complete = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, columns, four);
+    if (contiguous.condition) complete = builder.create<arith::AndIOp>(loc, complete, contiguous.condition);
+    auto choice = builder.create<scf::IfOp>(loc, complete, true);
+    builder.setInsertionPointToStart(choice.thenBlock());
+    IRMapping mapping;
+    contiguous.bind(builder, loc, mapping);
+    Value input = mapping.lookupOrDefault(swapped.getResult());
+    // This branch proves four-byte rows. Flatten only their destination so a
+    // vector store spans complete rows without crossing a logical row bound.
+    auto metadata = builder.create<memref::ExtractStridedMetadataOp>(loc, target);
+    auto flatType = MemRefType::get({ShapedType::kDynamic}, outputType.getElementType(),
+        StridedLayoutAttr::get(builder.getContext(), ShapedType::kDynamic, {1}),
+        outputType.getMemorySpace());
+    Value size = builder.create<arith::MulIOp>(loc, rows, four);
+    Value flat = builder.create<memref::ReinterpretCastOp>(loc, flatType,
+        metadata.getBaseBuffer(), OpFoldResult(metadata.getOffset()),
+        ArrayRef<OpFoldResult>{size}, ArrayRef<OpFoldResult>{builder.getIndexAttr(1)});
+    Value full = builder.create<arith::SubIOp>(loc, rows,
+        builder.create<arith::RemSIOp>(loc, rows, index(builder, loc, 16)));
+    SmallVector<int64_t> pairMask, groupMask;
+    for (int64_t lane = 0; lane < 16; ++lane) {
+      pairMask.append({lane, lane + 16});
+      groupMask.append({2 * lane, 2 * lane + 1, 2 * lane + 32, 2 * lane + 33});
+    }
+    auto lanes = VectorType::get({16}, inputType.getElementType());
+    loop(builder, loc, zero, full, 16, [&](Value row) {
+      SmallVector<Value> values;
+      for (int64_t column = 0; column < 4; ++column)
+        values.push_back(builder.create<vector::LoadOp>(loc, lanes, input,
+            ValueRange{index(builder, loc, column), row}));
+      Value low = builder.create<vector::ShuffleOp>(loc, values[0], values[1], pairMask);
+      Value high = builder.create<vector::ShuffleOp>(loc, values[2], values[3], pairMask);
+      Value packed = builder.create<vector::ShuffleOp>(loc, low, high, groupMask);
+      builder.create<vector::StoreOp>(loc, packed, flat,
+          ValueRange{builder.create<arith::MulIOp>(loc, row, four)});
+    });
+    scalar(full, rows, zero, columns);
+    builder.setInsertionPointToStart(choice.elseBlock());
+    scalar(zero, rows, zero, columns);
+    operation.erase();
+    return true;
+  }
   auto transpose = [&]() -> LogicalResult {
     IRMapping mapping;
     contiguous.bind(builder, loc, mapping);

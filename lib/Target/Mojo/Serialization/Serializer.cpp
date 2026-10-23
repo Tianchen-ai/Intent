@@ -1,5 +1,7 @@
 #include "Intent/Target/Mojo/Serialization/Serializer.h"
 #include "Intent/Target/Mojo/Serialization/Scalar.h"
+#include "Intent/Target/Mojo/Serialization/Matrix.h"
+#include "mlir/Dialect/AMX/AMXDialect.h"
 #include "Intent/Dialect/CPU/Analysis/PhysicalProgram.h"
 #include "Intent/Serialization/NativeABI.h"
 #include "Intent/Serialization/NativeSource.h"
@@ -34,7 +36,9 @@ std::string memoryElement(Type type) {
   return "SIMD[DType." + dtype(type) + ", 1]";
 }
 
-std::string valueType(Type type) { return scalarValueType(type); }
+std::string valueType(Type type) {
+  return isa<amx::TileType>(type) ? "__mlir_type.`!llvm.x86_amx`" : scalarValueType(type);
+}
 
 std::string ordering(AtomicOrdering order) {
   switch (order) {
@@ -290,6 +294,10 @@ public:
       addNative<vector::FromElementsOp>(result);
       addNative<vector::StepOp>(result);
       addNative<vector::ShuffleOp>(result);
+      addNative<vector::InterleaveOp>(result, [](vector::InterleaveOp op) {
+        return op.getResultVectorType().getRank() == 1 && !op.getResultVectorType().isScalable()
+            ? success() : op.emitOpError("requires a fixed one-dimensional interleave for Mojo");
+      });
       addNative<vector::ExtractElementOp>(result);
       addNative<math::RoundEvenOp>(result);
       addNative<vector::ReductionOp>(result, [](vector::ReductionOp op) -> LogicalResult {
@@ -317,6 +325,7 @@ public:
   }
 
   LogicalResult emitNativeOperation(Operation *operation) override {
+    if (matrixEmitters().contains(operation)) return matrixEmitters().emit(operation, *this);
     if (mlir::failed(verifySourceOperation(operation))) return failure();
     if (isa<math::RoundEvenOp>(operation))
       return targetEmitters().emit(operation, *this);
@@ -448,6 +457,14 @@ private:
     assign(op.getResult(), valueType(op.getType()) + "(" + join(lanes) + ")");
     return success();
   }
+  LogicalResult emitTyped(vector::InterleaveOp op) {
+    SmallVector<std::string> lanes;
+    for (int64_t lane = 0; lane < op.getSourceVectorType().getNumElements(); ++lane)
+      for (Value value : {op.getLhs(), op.getRhs()})
+        lanes.push_back(name(value) + "[" + std::to_string(lane) + "]");
+    assign(op.getResult(), valueType(op.getType()) + "(" + join(lanes) + ")");
+    return success();
+  }
   LogicalResult emitTyped(vector::ExtractElementOp op) {
     std::string expression = name(op.getVector()) + "[" + name(op.getPosition()) + "]";
     if (op.getResult().getType().isIndex()) expression = "Int(" + expression + ")";
@@ -503,6 +520,9 @@ private:
 
 LogicalResult verifySourceOperation(Operation *operation) {
   auto verifyType = [&](Type type) -> LogicalResult {
+    if (auto tile = dyn_cast<amx::TileType>(type))
+      return tile.getElementType().isInteger(8) || tile.getElementType().isInteger(32)
+          ? success() : operation->emitOpError("Mojo AMX currently requires integer tiles");
     if (auto memory = dyn_cast<MemRefType>(type)) {
       if (failed(verifyNativeMemoryType(operation, memory))) return failure();
       auto space = dyn_cast_or_null<IntegerAttr>(memory.getMemorySpace());
@@ -526,6 +546,7 @@ LogicalResult verifySourceOperation(Operation *operation) {
     return success();
   if (isa<math::RoundEvenOp>(operation))
     return Serializer::targetEmitters().verify(operation);
+  if (matrixEmitters().contains(operation)) return matrixEmitters().verify(operation);
   if (isStandardScalarOperation(operation)) return verifyScalar(operation);
   const auto &metadata = NativeSourceEmitter::metadataEmitters();
   if (metadata.contains(operation)) return metadata.verify(operation);

@@ -299,8 +299,11 @@ LogicalResult block(linalg::GenericOp operation, const Configuration &config,
     if (requirement.reuse != InputReuse::Group) continue;
     auto map = operation.getIndexingMapsArray()[requirement.operand];
     auto axis = dyn_cast<AffineDimExpr>(map.getResult(requirement.panelAxis));
-    if (!axis || axis.getPosition() > 1)
-      return operation.emitError("input supply grouping requires a free contraction axis");
+    if (!axis || axis.getPosition() > 2)
+      return operation.emitError("input supply grouping requires a contraction axis");
+    // A reduction-panel representation belongs to the existing K block. It
+    // does not constrain either free-axis traversal to the panel's lane count.
+    if (axis.getPosition() == 2) continue;
     auto &group = axis.getPosition() == 0 ? groupM : groupN;
     group = group ? std::min(group, requirement.panelSize) : requirement.panelSize;
   }

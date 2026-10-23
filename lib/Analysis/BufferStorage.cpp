@@ -15,6 +15,17 @@ using namespace mlir;
 namespace intent {
 namespace {
 
+struct TransposeBufferFlow
+    : bufferization::BufferViewFlowOpInterface::ExternalModel<
+          TransposeBufferFlow, memref::TransposeOp> {
+  void populateDependencies(Operation *operation,
+      bufferization::RegisterDependenciesFn registerDependencies) const {
+    auto transpose = cast<memref::TransposeOp>(operation);
+    registerDependencies(transpose.getIn(), transpose.getResult());
+  }
+  bool mayBeTerminalBuffer(Operation *, Value) const { return false; }
+};
+
 struct CacheHintResource : SideEffects::Resource::Base<CacheHintResource> {
   StringRef getName() final { return "IntentCPUCacheHint"; }
 };
@@ -89,6 +100,7 @@ func::FuncOp enclosingFunction(Operation *scope) {
 void registerBufferStorageInterfaces(DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *context, memref::MemRefDialect *) {
     memref::PrefetchOp::attachInterface<PrefetchEffects>(*context);
+    memref::TransposeOp::attachInterface<TransposeBufferFlow>(*context);
   });
   registry.addExtension(+[](MLIRContext *context, bufferization::BufferizationDialect *) {
     bufferization::DeallocOp::attachInterface<DeallocationEffects>(*context);
@@ -140,7 +152,7 @@ Value BufferStorageAnalysis::uniqueOrigin(Value memory) const {
 
 bool isBufferStorageAliasOperation(Operation *operation) {
   return isa<ViewLikeOpInterface, memref::CastOp,
-             memref::ExtractStridedMetadataOp>(operation);
+             memref::ExtractStridedMetadataOp, memref::TransposeOp>(operation);
 }
 
 BufferStorageAliasFacts BufferStorageAnalysis::aliases(Value root) const {
