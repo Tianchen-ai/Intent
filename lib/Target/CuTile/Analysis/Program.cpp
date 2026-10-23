@@ -23,7 +23,8 @@ void NativeProgramFeatures::observe(Operation *operation) {
                     ScaledMMAOp>(operation);
   matrixCompute |= matrix;
   occupancySensitive |= matrix ||
-      isa<gpu::ReduceOp, gpu::HistogramOp, gpu::ScanOp, ReduceOp, ScanOp>(operation);
+      isa<gpu::ReduceOp, gpu::HistogramOp, gpu::ScanOp, ReduceOp, ScanOp,
+          gpu::AtomicRMWOp, AtomicRMWOp, TileAtomicAddOp>(operation);
 }
 
 NativeProgramFeatures queryNativeProgramFeatures(func::FuncOp kernel) {

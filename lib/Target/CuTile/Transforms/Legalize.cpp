@@ -7,6 +7,7 @@
 #include "Intent/Target/CuTile/Serialization/Serializer.h"
 #include "Configuration/Configurations.h"
 #include "Compute/StrictArithmetic.h"
+#include "Compute/ComputeForms.h"
 #include "Access/FragmentStorage.h"
 #include "Program.h"
 #include "Intent/Dialect/GPU/IR/Program.h"
@@ -33,6 +34,7 @@ LogicalResult prepareProgram(ModuleOp module) {
       failed(gpu::verifyGPUProgram(module)))
     return failure();
   if (failed(prepareLaunchConfigurations(*kernel)) ||
+      failed(materializeHistograms(*kernel)) ||
       failed(materializeFragmentStorage(*kernel)) ||
       failed(gpu::lowerWorkspaceAllocations(module)))
     return failure();

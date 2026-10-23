@@ -10,9 +10,10 @@ struct NativeComputeInputs {
   llvm::SmallVector<gpu::ContractOp> contracts;
   llvm::SmallVector<gpu::ScaledContractOp> scaledContracts;
   llvm::SmallVector<gpu::ReduceOp> reductions;
-  llvm::SmallVector<gpu::HistogramOp> histograms;
   llvm::SmallVector<gpu::ScanOp> scans;
 };
+
+mlir::LogicalResult materializeHistograms(mlir::func::FuncOp kernel);
 
 mlir::LogicalResult formComputePrimitives(
     mlir::func::FuncOp kernel, const NativeComputeInputs &inputs,

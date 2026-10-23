@@ -28,7 +28,6 @@ LogicalResult formNativeProgram(ModuleOp module) {
     else if (auto op = dyn_cast<gpu::ContractOp>(operation)) computations.contracts.push_back(op);
     else if (auto op = dyn_cast<gpu::ScaledContractOp>(operation)) computations.scaledContracts.push_back(op);
     else if (auto op = dyn_cast<gpu::ReduceOp>(operation)) computations.reductions.push_back(op);
-    else if (auto op = dyn_cast<gpu::HistogramOp>(operation)) computations.histograms.push_back(op);
     else if (auto op = dyn_cast<gpu::ScanOp>(operation)) computations.scans.push_back(op);
     else if (auto op = dyn_cast<gpu::AssumeInBoundsOp>(operation)) assumptions.push_back(op);
   });

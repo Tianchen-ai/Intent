@@ -16,6 +16,7 @@ add_mlir_library(MLIRIntentCuTileTransforms
   Access/Atomics.cpp
   Access/Stores.cpp
   Compute/ComputeForms.cpp
+  Compute/Histogram.cpp
   Compute/MatrixProducts.cpp
   Compute/StrictArithmetic.cpp
   Compute/ScaledMMA.cpp
