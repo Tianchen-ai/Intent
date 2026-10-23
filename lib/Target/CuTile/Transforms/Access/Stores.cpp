@@ -86,7 +86,7 @@ LogicalResult formNativeStores(func::FuncOp kernel,
     }
     FailureOr<Value> allowTMA = failure();
     if (native) {
-      allowTMA = forms.tmaCondition();
+      allowTMA = forms.tmaCondition(plan->resourceType);
       if (failed(allowTMA))
         return failure();
     }

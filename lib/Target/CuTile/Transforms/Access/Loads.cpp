@@ -134,7 +134,7 @@ LogicalResult formNativeLoads(func::FuncOp kernel,
       allowTMA = vectorInput
           ? FailureOr<Value>(Value(builder.create<arith::ConstantIntOp>(
                 load.getLoc(), 0, 1)))
-          : forms.tmaCondition();
+          : forms.tmaCondition(plan->resourceType);
       if (failed(allowTMA))
         return failure();
     }

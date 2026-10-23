@@ -9,6 +9,7 @@
 #include "Intent/Dialect/GPU/IR/Program.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Verifier.h"
+#include <functional>
 
 using namespace mlir;
 namespace intent::cutile {
@@ -137,11 +138,22 @@ LogicalResult verifyKernel(func::FuncOp kernel,
         "cuTile occupancy hint does not match occupancy-sensitive tile compute");
   if (features.matrixCompute != static_cast<bool>(ctas))
     return kernel.emitError("cuTile CTA hint does not match matrix tile compute");
-  auto isNativeTMACondition = [&](Value value) {
+  auto isTileSizeCondition = [](Value value) {
+    auto compare = value.getDefiningOp<gpu::CompareOp>();
+    return compare && gpu::queryLaunchExpression(compare.getLhs()) &&
+           gpu::queryLaunchExpression(compare.getRhs());
+  };
+  std::function<bool(Value)> isNativeTMACondition = [&](Value value) {
     // A load can exclude TMA based on its own physical footprint even when
     // matrix accesses in the same program retain the configurable form.
     if (gpu::IndexRelations().constant(value) == 0)
       return true;
+    if (auto both = value.getDefiningOp<gpu::BinaryOp>();
+        both && both.getOperatorKind() == BinaryOperator::LogicalAnd)
+      return (isNativeTMACondition(both.getLhs()) &&
+              isTileSizeCondition(both.getRhs())) ||
+             (isNativeTMACondition(both.getRhs()) &&
+              isTileSizeCondition(both.getLhs()));
     auto compare = value.getDefiningOp<gpu::CompareOp>();
     return accessForm && compare &&
            compare.getPredicate() == ComparePredicate::Ne &&

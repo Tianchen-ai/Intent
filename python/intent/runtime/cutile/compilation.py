@@ -140,11 +140,6 @@ class CuTileCompilation:
 
         architecture = format_sm_arch(*CuTileCompilation._capability(compute_capability))
         config = replace(context.config)
-        # Explicit precompilation must not bypass the bounded first-candidate
-        # probe used by the SDK tuner. Preserve an explicit SDK environment
-        # setting, and keep this budget local to our compilation context.
-        if config.compiler_timeout_sec is None:
-            config.compiler_timeout_sec = 30.0
         # Dispatcher-selected symbols do not change the native signature.
         return (kernel._intent_entry, kernel._compiler_options, signature.with_symbol(None),
                 architecture, context, config)
