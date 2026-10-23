@@ -1,7 +1,5 @@
 # Installation
 
-[中文](installation.md)
-
 Install on the machine that executes your kernels. Backend selection is explicit;
 device resources are discovered there. Intent's Python package imports as `intent`.
 

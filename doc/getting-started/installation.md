@@ -1,7 +1,5 @@
 # 安装
 
-[English](installation.en.md)
-
 在实际执行 kernel 的机器上安装。后端显式选择，硬件资源由本机探测。
 Python 包名是 intentdsl，导入名为 intent。
 
