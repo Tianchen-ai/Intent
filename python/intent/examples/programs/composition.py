@@ -96,9 +96,12 @@ class PagedDecode:
 
 
 def reset_moe_workspace(counts, cursors, sorted_routes):
-    fill(counts, 0)
-    fill(cursors, 0)
-    fill(sorted_routes, ROUTES)
+    for buffer, value in moe_workspace_initializations(counts, cursors, sorted_routes):
+        fill(buffer, value)
+
+
+def moe_workspace_initializations(counts, cursors, sorted_routes):
+    return ((counts, 0), (cursors, 0), (sorted_routes, ROUTES))
 
 
 @dataclass
@@ -113,6 +116,10 @@ class MoEAlignmentCall:
     counts: object
     cursors: object
 
+    @property
+    def initializations(self):
+        return moe_workspace_initializations(self.counts, self.cursors, self.sorted_routes)
+
     def compile(self):
         self.count.compile()
         self.prefix.compile()
@@ -120,7 +127,8 @@ class MoEAlignmentCall:
         self.mark.compile()
 
     def launch(self):
-        reset_moe_workspace(self.counts, self.cursors, self.sorted_routes)
+        for buffer, value in self.initializations:
+            fill(buffer, value)
         self.count.launch()
         self.prefix.launch()
         self.scatter.launch()
