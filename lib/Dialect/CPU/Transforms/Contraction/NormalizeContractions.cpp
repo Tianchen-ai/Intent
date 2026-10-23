@@ -8,6 +8,7 @@
 #include "Intent/Dialect/CPU/Transforms/Implementation/Implementation.h"
 #include "Intent/Dialect/CPU/Analysis/Contractions.h"
 #include "Contractions.h"
+#include "ContractionEpilogues.h"
 #include "Intent/Dialect/CPU/Transforms/Structure/LoopBuilders.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/IRMapping.h"
@@ -67,8 +68,10 @@ struct MatrixStorage {
 
 class Normalizer {
 public:
-  Normalizer(linalg::GenericOp operation, ContractionAxes axes)
-      : operation(operation), axes(std::move(axes)), b(operation), loc(operation.getLoc()) {}
+  Normalizer(linalg::GenericOp operation, ContractionAxes axes,
+             std::optional<ContractionEpilogue> epilogue)
+      : operation(operation), axes(std::move(axes)), epilogue(std::move(epilogue)),
+        b(operation), loc(operation.getLoc()) {}
 
   LogicalResult run() {
     SmallVector<Value> sources(operation.getInputs());
@@ -87,9 +90,30 @@ public:
       rightBatch.push_back(pair.rhs);
       outputBatch.push_back(*axes.lhsResultAxes[pair.lhs]);
     }
-    return compute(slice(sources[0], leftBatch, batches.getInductionVars()),
-                   slice(sources[1], rightBatch, batches.getInductionVars()),
-                   slice(output, outputBatch, batches.getInductionVars()));
+    Value left = slice(sources[0], leftBatch, batches.getInductionVars());
+    Value right = slice(sources[1], rightBatch, batches.getInductionVars());
+    if (!epilogue)
+      return compute(left, right, slice(output, outputBatch, batches.getInductionVars()));
+
+    // The only observation is a proved pointwise epilogue. Keep each batch's
+    // accumulator with its consumers so ordinary matrix blocking can compact
+    // it further and publish only completed values in the original dtype.
+    auto type = cast<MemRefType>(output.getType());
+    SmallVector<int64_t> sizes;
+    SmallVector<Value> dynamic;
+    for (unsigned axis = 0; axis < type.getRank(); ++axis) {
+      if (llvm::is_contained(outputBatch, axis)) continue;
+      sizes.push_back(type.getDimSize(axis));
+      if (type.isDynamicDim(axis)) dynamic.push_back(shapeValue(b, loc, output, axis));
+    }
+    auto local = b.create<memref::AllocOp>(loc, MemRefType::get(sizes,
+        type.getElementType(), MemRefLayoutAttrInterface{}, type.getMemorySpace()), dynamic);
+    if (auto alignment = output.getDefiningOp()->getAttrOfType<IntegerAttr>("alignment"))
+      local.setAlignmentAttr(alignment);
+    if (failed(compute(left, right, local))) return failure();
+    emitSlicedContractionEpilogue(b, *epilogue, outputBatch, batches.getInductionVars(), local);
+    b.create<memref::DeallocOp>(loc, local);
+    return success();
   }
 
 private:
@@ -346,6 +370,7 @@ private:
 
   linalg::GenericOp operation;
   ContractionAxes axes;
+  std::optional<ContractionEpilogue> epilogue;
   OpBuilder b;
   Location loc;
 };
@@ -372,6 +397,10 @@ LogicalResult foldContractionInputs(func::FuncOp function,
 }
 
 LogicalResult normalizeContractions(func::FuncOp function) {
+  // Forward completed outputs while their consumers still have the original
+  // descriptors. Batch slicing introduces views with different layout types;
+  // those must not conceal an already provable destination-forwarding choice.
+  forwardCPUOutputs(function);
   SmallVector<linalg::GenericOp> operations;
   function.walk([&](linalg::GenericOp operation) {
     if (!operation->hasAttr("intent_cpu.implementation") && queryContractionAxes(operation))
@@ -392,9 +421,24 @@ LogicalResult normalizeContractions(func::FuncOp function) {
     if (isMatrixContraction(operation) && !column) continue;
     auto fill = findContractionInitialization(operation);
     if (!fill) return operation.emitError("CPU contraction normalization requires a closed zero initialization");
-    if (failed(Normalizer(operation, *axes).run())) return failure();
+    std::optional<ContractionEpilogue> epilogue;
+    if (fill->erasable && !axes->batch.empty() &&
+        axes->lhsFree.size() == 1 && axes->rhsFree.size() == 1) {
+      StorageAnalysis storage(function);
+      epilogue = queryContractionEpilogue(operation, fill->operation, storage);
+      if (epilogue && !canCompactContractionAccumulator(
+              operation, fill->operation, *epilogue, storage)) epilogue.reset();
+    }
+    if (epilogue)
+      for (Operation *dependency : epilogue->dependencies) dependency->moveBefore(operation);
+    Value accumulator = operation.getOutputs()[0];
+    if (failed(Normalizer(operation, *axes, epilogue).run())) return failure();
     operation.erase();
     if (fill->erasable) fill->operation->erase();
+    if (epilogue) {
+      epilogue->consumer.erase();
+      if (failed(eraseContractionAccumulator(accumulator))) return failure();
+    }
   }
   eraseDeadPrivateBuffers(function);
   return success();

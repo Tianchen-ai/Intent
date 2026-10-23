@@ -6,7 +6,7 @@
 namespace intent::cpu {
 
 // A pointwise observation of a complete private accumulator. The proof belongs
-// to the current IR snapshot; move the recorded pure dependencies before any
+// to the current IR snapshot; move the proved dependencies before any
 // contraction rewriting, then emit only after a tile's complete K traversal.
 struct ContractionEpilogue {
   mlir::linalg::GenericOp consumer;
@@ -31,5 +31,11 @@ mlir::LogicalResult eraseContractionAccumulator(
 mlir::LogicalResult emitContractionEpilogue(mlir::OpBuilder &builder,
     ContractionEpilogue &epilogue, mlir::ValueRange offsets,
     mlir::ValueRange sizes, mlir::Value completedTile = {});
+
+// Drop fixed accumulator axes while preserving the consumer's projections,
+// scalar captures and logical linalg.index coordinates.
+void emitSlicedContractionEpilogue(mlir::OpBuilder &builder,
+    ContractionEpilogue &epilogue, llvm::ArrayRef<unsigned> selectedAxes,
+    mlir::ValueRange coordinates, mlir::Value completedSlice);
 
 } // namespace intent::cpu
