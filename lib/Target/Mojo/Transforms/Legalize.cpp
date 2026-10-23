@@ -187,6 +187,25 @@ LogicalResult expandAtomicUpdates(ModuleOp module) {
 }
 
 LogicalResult finishNativeProgram(ModuleOp module) {
+  // Bufferized carries select complete views, not their element values. Keep
+  // the pointer, offset, sizes and strides together in the native SCF transfer.
+  // Do this after canonicalization, which can fold the two yields into select.
+  SmallVector<arith::SelectOp> views;
+  module.walk([&](arith::SelectOp select) {
+    if (isa<MemRefType>(select.getType())) views.push_back(select);
+  });
+  for (auto select : views) {
+    OpBuilder builder(select);
+    auto branch = builder.create<scf::IfOp>(
+        select.getLoc(), TypeRange{select.getType()}, select.getCondition(), true);
+    for (auto [block, value] : {std::pair{branch.thenBlock(), select.getTrueValue()},
+                              std::pair{branch.elseBlock(), select.getFalseValue()}}) {
+      builder.setInsertionPointToEnd(block);
+      builder.create<scf::YieldOp>(select.getLoc(), value);
+    }
+    select.replaceAllUsesWith(branch.getResult(0));
+    select.erase();
+  }
   for (func::FuncOp function : module.getOps<func::FuncOp>())
     cpu::localizeTaskConstants(function);
   if (failed(verifySourceProgram(module))) return failure();
