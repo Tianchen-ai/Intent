@@ -8,6 +8,8 @@
 
 IntentDSL is a Python kernel language and an MLIR compiler for GPU, CPU, and accelerator programs. Authors describe tensor computations, logical domains, accesses, state, and explicit multi-kernel composition. Compiler passes form the physical program and lower it through Triton, cuTile, Mojo, Weft, or BANG C.
 
+IntentDSL is a component of the Dongshan Community's [TianChen AI Software Stack](https://gitee.com/dongshan-community/TianChen_Software_Stack). This repository provides the language, compiler, examples, and usage documentation; the top-level repository maps the stack's components. Development is maintained on [GitHub](https://github.com/Tianchen-ai/Intent), with a [Gitee mirror](https://gitee.com/dongshan-community/Intent).
+
 ![Original IntentDSL paper overview: algorithm reuse and compiler workflow](https://raw.githubusercontent.com/Tianchen-ai/Intent/main/images/paper-fig1-overview.png)
 
 *Original paper overview ([PDF](https://github.com/Tianchen-ai/Intent/blob/main/images/paper-fig1-overview.pdf)). Labels describe the paper's implementation paths; current provider entry points are listed below.*
