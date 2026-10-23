@@ -1,5 +1,6 @@
 #include "ContractionEpilogues.h"
 #include "Intent/Dialect/CPU/Analysis/ExtentRelations.h"
+#include "Intent/Dialect/CPU/Analysis/ViewRelations.h"
 #include "mlir/Conversion/AffineToStandard/AffineToStandard.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -56,8 +57,7 @@ std::optional<ContractionEpilogue> queryContractionEpilogue(
     StorageAnalysis &storage) {
   Value accumulator = contraction.getOutputs()[0];
   auto type = cast<MemRefType>(accumulator.getType());
-  if (type.getRank() != 2 || storage.uniqueOrigin(accumulator) != accumulator ||
-      !isa_and_nonnull<memref::AllocOp, memref::AllocaOp>(accumulator.getDefiningOp()) ||
+  if (type.getRank() != 2 ||
       !sameExtent(accumulator, 0, contraction.getInputs()[0], 0) ||
       !sameExtent(accumulator, 1, contraction.getInputs()[1], 1))
     return std::nullopt;
@@ -92,20 +92,33 @@ std::optional<ContractionEpilogue> queryContractionEpilogue(
   // early is legal only when none of those pending reads can observe the write.
   // In particular, an external Out direction is not itself a disjointness fact.
   Value destination = consumer.getOutputs()[0];
-  for (Value input : contraction->getOperands())
+  bool inplace = destination == accumulator;
+  auto maps = consumer.getIndexingMapsArray();
+  if (inplace && maps.back() != maps[*sourceInput]) return std::nullopt;
+  bool privateAccumulator = storage.uniqueOrigin(accumulator) == accumulator &&
+      isa_and_nonnull<memref::AllocOp, memref::AllocaOp>(accumulator.getDefiningOp());
+  // Output forwarding may already have placed C in its public destination.
+  // The same-coordinate epilogue can finish each non-overlapping rectangle
+  // there, provided no still-pending contraction read observes those writes.
+  if (!privateAccumulator && (!inplace || !isContiguousDescriptor(accumulator)))
+    return std::nullopt;
+  for (Value input : contraction->getOperands()) {
+    if (inplace && input == accumulator) continue;
     if (!storage.disjoint(destination, input)) return std::nullopt;
+  }
   auto computation = storage.effects(contraction);
   if (!computation.complete || computation.ordered) return std::nullopt;
   for (const StorageEffect &entry : computation.entries) {
     Value memory = entry.effect.getValue();
+    if (inplace && memory == accumulator) continue;
     if (!memory || (isa<BaseMemRefType>(memory.getType()) &&
                     !storage.disjoint(memory, destination)))
       return std::nullopt;
   }
-  auto maps = consumer.getIndexingMapsArray();
   for (auto [number, input] : llvm::enumerate(consumer.getInputs())) {
     if (!isa<BaseMemRefType>(input.getType())) continue;
-    if (!storage.disjoint(destination, input)) return std::nullopt;
+    if (!(inplace && input == accumulator) && !storage.disjoint(destination, input))
+      return std::nullopt;
     // Repeated accumulator inputs must read this same completed rectangle,
     // not a transpose or another tile that is still being accumulated.
     if (input == accumulator && maps[number] != maps[*sourceInput])
@@ -155,7 +168,9 @@ bool canCompactContractionAccumulator(linalg::GenericOp contraction,
     StorageAnalysis &storage) {
   Value accumulator = contraction.getOutputs()[0];
   auto type = cast<MemRefType>(accumulator.getType());
-  if (!type.getLayout().isIdentity()) return false;
+  if (!type.getLayout().isIdentity() ||
+      !isa_and_nonnull<memref::AllocOp, memref::AllocaOp>(accumulator.getDefiningOp()))
+    return false;
   for (Value input : contraction.getInputs())
     if (!storage.disjoint(input, accumulator)) return false;
   for (Operation *user : accumulator.getUsers()) {
