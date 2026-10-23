@@ -2,6 +2,7 @@
 #include "Intent/Dialect/CPU/Transforms/Contraction/Contraction.h"
 #include "Intent/Dialect/CPU/Transforms/Storage/Storage.h"
 #include "Intent/Dialect/CPU/Analysis/PhysicalProgram.h"
+#include "Intent/Dialect/CPU/Analysis/ExtentRelations.h"
 #include "Intent/Dialect/CPU/IR/CPUAttrs.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -15,6 +16,7 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/Matchers.h"
+#include "mlir/IR/Dominance.h"
 #include <limits>
 
 using namespace mlir;
@@ -704,12 +706,44 @@ LogicalResult exposeGroupedTiles(func::FuncOp function, const Configuration &con
         })) groups.push_back(loop);
   });
   for (auto group : groups) {
+    SmallVector<std::pair<OpFoldResult, OpFoldResult>> matrixExtents;
+    DominanceInfo dominance(function);
+    bool known = true;
+    for (auto contraction : group.getBody()->getOps<linalg::GenericOp>()) {
+      if (!isMatrixContraction(contraction) || contraction->hasAttr("intent_cpu.microtile")) continue;
+      auto rows = queryExtentValue(contraction.getInputs()[0], 0);
+      auto columns = queryExtentValue(contraction.getInputs()[1], 1);
+      auto available = [&](std::optional<OpFoldResult> extent) {
+        if (!extent) return false;
+        auto value = dyn_cast<Value>(*extent);
+        return !value || dominance.dominates(value, group);
+      };
+      if (!available(rows) || !available(columns)) { known = false; break; }
+      matrixExtents.emplace_back(*rows, *columns);
+    }
+    if (!known || matrixExtents.empty()) continue;
     OpBuilder b(group);
     Location loc = group.getLoc();
     Value tasks = b.create<arith::CeilDivSIOp>(loc, group.getUpperBound()[0], index(b, loc, config.taskGrain));
     Value fewGroups = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt,
         tasks, index(b, loc, capabilities.getWorkers()));
-    auto selection = b.create<scf::IfOp>(loc, fewGroups, true);
+    Value preferTiles = fewGroups;
+    for (auto [rows, columns] : matrixExtents) {
+      auto size = [&](OpFoldResult extent) -> Value {
+        if (auto value = dyn_cast<Value>(extent)) return value;
+        return index(b, loc, cast<IntegerAttr>(cast<Attribute>(extent)).getInt());
+      };
+      Value mTiles = b.create<arith::CeilDivSIOp>(loc, size(rows), index(b, loc, config.tileM));
+      Value nTiles = b.create<arith::CeilDivSIOp>(loc, size(columns), index(b, loc, config.tileN));
+      // Either tile axis alone must expose more tasks than the existing group
+      // workset. Merely having fewer groups than workers is insufficient: a
+      // single-tile matrix would otherwise serialize all independent batches.
+      Value tiles = b.create<arith::MaxSIOp>(loc, mTiles, nTiles);
+      Value tileTasks = b.create<arith::CeilDivSIOp>(loc, tiles, index(b, loc, config.taskGrain));
+      Value moreTasks = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, tileTasks, tasks);
+      preferTiles = b.create<arith::AndIOp>(loc, preferTiles, moreTasks);
+    }
+    auto selection = b.create<scf::IfOp>(loc, preferTiles, true);
     b.setInsertionPointToStart(selection.thenBlock());
     auto serial = b.create<scf::ForOp>(loc, group.getLowerBound()[0], group.getUpperBound()[0], group.getStep()[0]);
     b.setInsertionPointToStart(serial.getBody());

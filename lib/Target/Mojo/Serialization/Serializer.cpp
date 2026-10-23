@@ -124,11 +124,16 @@ private:
     for (Value value : used) {
       auto expressions = components(value);
       SmallVector<std::string> fields;
+      // Own descriptor fields and scalar facts, not a second copy of a tensor
+      // payload. Borrowed metadata otherwise stays addressable through every
+      // loop iteration and can alias the callback's native memory accesses.
+      bool metadata = isa<MemRefType>(value.getType()) ||
+                      value.getType().isIntOrIndexOrFloat();
       for (auto [type, expression] :
            llvm::zip_equal(componentTypes(value.getType()), expressions)) {
         fields.push_back(newName("capture_"));
         line("var " + fields.back() + ": " + nativeType(type) + " = " + expression);
-        captures.push_back("imm " + fields.back());
+        captures.push_back(std::string(metadata ? "var " : "imm ") + fields.back());
       }
       bindings.emplace_back(value, std::move(fields));
     }
@@ -148,6 +153,7 @@ private:
         else bind(value, fields.front());
       }
       std::string iv = fresh(body.getArgument(0));
+      line("@always_inline");
       line("def " + task + "(" + iv + ": Int) {" + join(captures) + "}:");
       ++indent;
       emitted = emitNativeBlock(body);
