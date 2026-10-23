@@ -105,7 +105,7 @@ def resolve_c_compiler(environment) -> str:
     executable = shutil.which("cc", path=environment.get("PATH"))
     if executable is None:
         raise CompilationStageError("native_toolchain_resolution",
-                                    "Mojo floating-point environment compilation requires a C compiler (cc)")
+                                    "Mojo CPU runtime compilation requires a C compiler (cc) and GNU OpenMP (libgomp.so.1)")
     return executable
 
 
@@ -125,7 +125,7 @@ def _c_compiler():
 
 
 def _environment_checks(target):
-    return (EnvironmentCheck("FP environment compiler", "provider_toolchain", _c_compiler),)
+    return (EnvironmentCheck("C/OpenMP runtime compiler", "provider_toolchain", _c_compiler),)
 
 
 PROVIDER = Provider("cpu", MojoTarget, _read_facts, _bind, _environment_checks)

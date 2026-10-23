@@ -51,7 +51,7 @@ python3 environment/install.py --backend triton --venv /path/to/venv --examples 
 | 后端 | 执行主机与依赖 |
 |---|---|
 | triton / cutile | CUDA 主机、兼容 NVIDIA 驱动及所选 Python provider |
-| mojo | x86 主机与 Mojo，通过 INTENT_MOJO 或 backend_options 选择编译器 |
+| mojo | x86 主机、Mojo、C 编译器（cc）与 GNU OpenMP 运行库（libgomp.so.1）；通过 INTENT_MOJO 或 backend_options 选择 Mojo 编译器 |
 | weft | RISC-V 主机、匹配的 Weft Python 包、原生 weft-compile 与 C 编译器 |
 | bangc | MLU370 主机与 NeuWare 的 CNRT/CNCC |
 

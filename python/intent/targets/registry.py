@@ -19,7 +19,7 @@ BACKENDS = {
         "modules": ("torch",),
         "requirements": (), "torch": "2.10.0+cpu",
         "torch_index": "https://download.pytorch.org/whl/cpu",
-        "python_max": (3, 12), "toolchain": "An explicitly installed Mojo compiler; Linux x86-64 AVX2/AVX512",
+        "python_max": (3, 12), "toolchain": "An explicitly installed Mojo compiler, C compiler and GNU OpenMP runtime (libgomp.so.1); Linux x86-64 AVX2/AVX512",
     },
     "weft": {
         "modules": ("weft",),

@@ -120,24 +120,45 @@ private:
     llvm::SetVector<Value> used;
     getUsedValuesDefinedAbove(dispatch.getBody(), dispatch.getBody(), used);
     SmallVector<std::pair<Value, SmallVector<std::string>>> bindings;
-    SmallVector<std::string> captures;
+    SmallVector<std::string> parameters;
+    SmallVector<std::string> captureTypes;
+    SmallVector<std::string> captureValues;
     for (Value value : used) {
       auto expressions = components(value);
+      SmallVector<int64_t> constants(expressions.size(), ShapedType::kDynamic);
+      if (auto memory = dyn_cast<MemRefType>(value.getType())) {
+        SmallVector<int64_t> strides;
+        int64_t offset;
+        if (mlir::failed(memory.getStridesAndOffset(strides, offset)))
+          return dispatch.emitOpError("requires strided memory captures");
+        constants[1] = offset;
+        for (int64_t axis = 0; axis < memory.getRank(); ++axis) {
+          constants[2 + axis] = memory.getDimSize(axis);
+          constants[2 + memory.getRank() + axis] = strides[axis];
+        }
+      }
       SmallVector<std::string> fields;
-      // Own descriptor fields and scalar facts, not a second copy of a tensor
-      // payload. Borrowed metadata otherwise stays addressable through every
-      // loop iteration and can alias the callback's native memory accesses.
-      bool metadata = isa<MemRefType>(value.getType()) ||
-                      value.getType().isIntOrIndexOrFloat();
-      for (auto [type, expression] :
-           llvm::zip_equal(componentTypes(value.getType()), expressions)) {
+      for (auto [type, expression, constant] :
+           llvm::zip_equal(componentTypes(value.getType()), expressions, constants)) {
+        // Type-known descriptor fields remain constants across the task ABI.
+        // Only dynamic facts are captured, as at the public native entry.
+        if (!ShapedType::isDynamic(constant)) {
+          fields.push_back(std::to_string(constant));
+          continue;
+        }
         fields.push_back(newName("capture_"));
-        line("var " + fields.back() + ": " + nativeType(type) + " = " + expression);
-        captures.push_back(std::string(metadata ? "var " : "imm ") + fields.back());
+        parameters.push_back(std::string(isa<MemRefType>(value.getType()) ||
+                                            value.getType().isIntOrIndexOrFloat()
+                                        ? "var " : "imm ") +
+                             fields.back() + ": " + nativeType(type));
+        captureTypes.push_back(nativeType(type));
+        captureValues.push_back(expression);
       }
       bindings.emplace_back(value, std::move(fields));
     }
     std::string task = newName("task_");
+    std::string context = newName("task_context_");
+    std::string contextType = "Tuple[" + join(captureTypes) + "]";
     LogicalResult emitted = success();
     {
       ScopedValues local(*this);
@@ -153,14 +174,44 @@ private:
         else bind(value, fields.front());
       }
       std::string iv = fresh(body.getArgument(0));
+      SmallVector<std::string> signature{iv + ": Int"};
+      llvm::append_range(signature, parameters);
       line("@always_inline");
-      line("def " + task + "(" + iv + ": Int) {" + join(captures) + "}:");
+      line("def " + task + "(" + join(signature) + "):");
       ++indent;
       emitted = emitNativeBlock(body);
       --indent;
     }
     if (mlir::failed(emitted)) return failure();
-    line("parallelize(" + task + ", " + name(dispatch.getCount()) + ", " + name(dispatch.getWorkerCount()) + ")");
+    line("if " + name(dispatch.getWorkerCount()) + " == 1:");
+    ++indent;
+    std::string index = newName("task_index_");
+    line("for " + index + " in range(" + name(dispatch.getCount()) + "):");
+    ++indent;
+    SmallVector<std::string> inlineArguments{index};
+    llvm::append_range(inlineArguments, captureValues);
+    line(task + "(" + join(inlineArguments) + ")");
+    --indent;
+    --indent;
+    line("else:");
+    ++indent;
+    line("var " + context + " = " + contextType + "(" + join(captureValues) + ")");
+    std::string callback = newName("task_range_");
+    line("def " + callback + "(data: OpaquePointer[MutUntrackedOrigin], begin: Int64, end: Int64) abi(\"C\"):");
+    ++indent;
+    line("var task_context = data.unsafe_bitcast[" + contextType + "]()");
+    line("for task_index in range(Int(begin), Int(end)):");
+    ++indent;
+    SmallVector<std::string> arguments{"task_index"};
+    for (size_t i = 0; i < captureValues.size(); ++i)
+      arguments.push_back("task_context[][" + std::to_string(i) + "]");
+    line(task + "(" + join(arguments) + ")");
+    --indent;
+    --indent;
+    line("external_call[\"intent_cpu_dispatch\", NoneType](" + callback + ", Pointer(to=" + context +
+         ").unsafe_bitcast[NoneType](), Int64(" + name(dispatch.getCount()) + "), Int64(" +
+         name(dispatch.getWorkerCount()) + "))");
+    --indent;
     return success();
   }
 
@@ -501,8 +552,7 @@ LogicalResult serializeProgram(ModuleOp module, std::string &source, std::string
             "from std.sys import prefetch, llvm_intrinsic\n"
             "from std.sys.intrinsics import PrefetchOptions\n"
             "from std.math import fma, sqrt, exp, exp2, log, tanh, sin, cos, floor, erf, abs, min, max\n"
-            "from std.runtime import initialize_runtime\n"
-            "from max.algorithm import parallelize\n\n";
+            "from std.runtime import initialize_runtime\n\n";
   Serializer serializer(output);
   llvm::json::Object interface;
   auto capabilities = module->getAttrOfType<cpu::CapabilitiesAttr>("intent_cpu.capabilities");
@@ -513,7 +563,7 @@ LogicalResult serializeProgram(ModuleOp module, std::string &source, std::string
       {"workers", capabilities.getWorkers()},
       {"private_bytes", capabilities.getPrivateBytes()},
       {"matrix_i8_i32", capabilities.getMatrixI8I32()}};
-  interface["native_dependencies"] = llvm::json::Array{"std", "max"};
+  interface["native_dependencies"] = llvm::json::Array{"std"};
   interface["source_prelude_end"] = static_cast<int64_t>(output.tell());
   llvm::json::Array candidates;
   bool first = true;

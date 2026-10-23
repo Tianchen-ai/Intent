@@ -16,7 +16,7 @@ def _files(directory: Path | None) -> dict[str, str]:
     if directory is None or not directory.is_dir():
         return {}
     names = {"input.mlir", "kernel.mlir", "kernel.source", "artifact.json", "request.json",
-             "compiler.log", "kernel.mojo", "fp_environment.c", "native.json", "link.d"}
+             "compiler.log", "kernel.mojo", "cpu_runtime.c", "native.json", "link.d"}
     suffixes = {".command", ".stdout", ".stderr", ".status", ".seconds"}
     return {path.name: str(path) for path in sorted(directory.iterdir())
             if path.is_file() and (path.name in names or path.suffix in suffixes)}

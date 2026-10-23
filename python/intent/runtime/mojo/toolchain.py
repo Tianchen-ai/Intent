@@ -278,8 +278,8 @@ def _startup_dependencies(launcher: Path, environment: dict[str, str]) -> list[P
 
 def _resolve_toolchain(executable: str, declared_modules: tuple[str, ...],
                        environment: dict[str, str]) -> ToolchainSnapshot:
-    if declared_modules != ("std", "max"):
-        return ToolchainSnapshot(None, "native source has no supported compiler-declared std/max dependency closure")
+    if declared_modules != ("std",):
+        return ToolchainSnapshot(None, "native source has no supported compiler-declared std dependency closure")
     environment = dict(environment)
     launcher = Path(executable).absolute()
     with launcher.open("rb") as source:

@@ -30,6 +30,7 @@ _compilations: dict[tuple[object, ...], Future[NativeCompilation]] = {}
 _compilation_lock = Lock()
 _compilers = ThreadPoolExecutor(max_workers=2)
 _BUILD_OPTIONS = ("--emit", "shared-lib")
+_LINK_OPTIONS = ("-Xlinker", "-l:libgomp.so.1")
 TUNING_CACHE_BYTES = 64 * 1024 * 1024
 
 ELEMENT_TYPES = {
@@ -89,33 +90,34 @@ def benchmark_exports(candidate: MojoCandidate, abi: NativeABI) -> str:
     return "".join(sections)
 
 
-def _compile_fp_environment(environment: dict[str, str]) -> tuple[Path, bytes]:
+def _compile_runtime(environment: dict[str, str]) -> tuple[Path, bytes]:
     from intent.targets.mojo import resolve_c_compiler
     executable = resolve_c_compiler(environment)
     compiler = file_identity(Path(executable))
-    source = Path(__file__).with_name("fp_environment.c").read_text(encoding="utf-8")
+    sources = {name: Path(__file__).with_name(name).read_text(encoding="utf-8")
+               for name in ("task_dispatch.c", "fp_environment.c")}
     options = ("-O2", "-fPIC", "-c")
-    key = json.dumps((compiler, options, source))
-    with locked_cache_entry("mojo-fp", key) as cache:
-        source_path = cache.directory / "fp_environment.c"
-        write_source(source_path, source)
+    key = json.dumps((compiler, options, sources))
+    with locked_cache_entry("mojo-runtime", key) as cache:
+        source_path = cache.directory / "cpu_runtime.c"
+        write_source(source_path, "\n".join(sources.values()))
         attempt = cache.create_attempt()
-        output = attempt / "fp_environment.o"
+        output = attempt / "cpu_runtime.o"
         # Resolve headers and the C toolchain on each materialization. The actual
-        # object is a native link input, shared by all candidates in this group.
+        # runtime is a native link input, shared by all candidates in this group.
         try:
             run_native_command(
                 [executable, *options, str(source_path), "-o", str(output)],
-                attempt, "fp_environment_compilation", environment=environment,
+                attempt, "native_runtime_compilation", environment=environment,
             )
             if file_identity(Path(executable)) != compiler:
                 raise RuntimeError("C compiler changed during compilation")
             payload = output.read_bytes()
             if not payload:
-                raise RuntimeError("C compiler produced an empty FP environment object")
+                raise RuntimeError("C compiler produced an empty CPU runtime object")
         except Exception as error:
             raise CompilationStageError(
-                "fp_environment_compilation", f"Mojo FP environment compilation failed: {error}\n"
+                "native_runtime_compilation", f"Mojo CPU runtime compilation failed: {error}\n"
                 f"Native compiler artifacts: {attempt}",
                 cache_directory=attempt, artifacts={"source": source_path},
             ) from error
@@ -172,7 +174,7 @@ def runtime_inputs_current(artifact: NativeArtifact, environment: dict[str, str]
 
 
 def _compile_unit(source: str, candidate: MojoCandidate, key: str, target,
-                  environment: dict[str, str], snapshot, fp_object: Path) -> NativeArtifact:
+                  environment: dict[str, str], snapshot, runtime_object: Path) -> NativeArtifact:
     def build(directory: Path) -> NativeBuildResult:
         # The stable source retains its mtime for Mojo's own compilation cache.
         source_path = directory.parent.parent / "kernel.mojo"
@@ -180,12 +182,12 @@ def _compile_unit(source: str, candidate: MojoCandidate, key: str, target,
         (directory / "artifact.json").write_text(
             json.dumps(candidate.metadata(), indent=2) + "\n", encoding="utf-8")
         (directory / "request.json").write_text(json.dumps({
-            "source": str(source_path), "fp_object": str(fp_object),
+            "source": str(source_path), "runtime_object": str(runtime_object),
             "cache_unavailable_reason": snapshot.reason,
         }, indent=2) + "\n", encoding="utf-8")
         library = directory / "kernel.so"
         dependencies = directory / "link.d"
-        link_options = ["-Xlinker", str(fp_object)]
+        link_options = ["-Xlinker", str(runtime_object), *_LINK_OPTIONS]
         build_environment = environment
         if snapshot.identity is not None:
             link_options += ["-Xlinker", "--dependency-file=" + str(dependencies)]
@@ -206,7 +208,7 @@ def _compile_unit(source: str, candidate: MojoCandidate, key: str, target,
         inputs = []
         if snapshot.identity is not None:
             inputs = [path for path in _link_inputs(dependencies)
-                      if path.resolve() != fp_object.resolve() and
+                      if path.resolve() != runtime_object.resolve() and
                       not path.resolve().is_relative_to(directory.parent.parent)]
         return NativeBuildResult(library, (runtime_record, *inputs, *runtime_paths))
 
@@ -227,7 +229,7 @@ def compile_portfolio(facts: MojoFacts, target, *, abi: NativeABI) -> NativeComp
     environment = dict(os.environ)
     try:
         snapshot = resolve_toolchain(target.executable, facts.native_dependencies, environment)
-        fp_object, fp_bytes = _compile_fp_environment(environment)
+        runtime_object, runtime_bytes = _compile_runtime(environment)
     except CompilationStageError:
         raise
     except Exception as error:
@@ -236,8 +238,8 @@ def compile_portfolio(facts: MojoFacts, target, *, abi: NativeABI) -> NativeComp
     for candidate in facts.candidates:
         complete_source = candidate.source + benchmark_exports(candidate, abi)
         unit_key = json.dumps((complete_source, candidate.metadata(), facts.native_dependencies, target.executable,
-                              _BUILD_OPTIONS, target.native_options, snapshot.identity,
-                              base64.b64encode(fp_bytes).decode("ascii")), sort_keys=True)
+                              _BUILD_OPTIONS, _LINK_OPTIONS, target.native_options, snapshot.identity,
+                              base64.b64encode(runtime_bytes).decode("ascii")), sort_keys=True)
         units.append((complete_source, candidate, unit_key))
     # An unclosed toolchain is always delegated to Mojo, including repeated
     # requests in this process. It must never acquire a weak native cache key.
@@ -256,7 +258,7 @@ def compile_portfolio(facts: MojoFacts, target, *, abi: NativeABI) -> NativeComp
     try:
         for unit, candidate, unit_key in units:
             futures.append(_compilers.submit(_compile_unit, unit, candidate, unit_key,
-                                             target, environment, snapshot, fp_object))
+                                             target, environment, snapshot, runtime_object))
         artifacts = tuple(future.result() for future in futures)
         result = NativeCompilation(artifacts, (key, tuple(artifact.identity for artifact in artifacts)))
         snapshot.check_unchanged()

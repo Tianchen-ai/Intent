@@ -55,7 +55,7 @@ Use a complete SDK: a partial LLVM source build must first build its required li
 | Backend | Execution host and dependencies |
 |---|---|
 | triton / cutile | CUDA host with compatible NVIDIA driver and selected Python provider |
-| mojo | x86 host with Mojo; select compiler through INTENT_MOJO or backend_options |
+| mojo | x86 host with Mojo, a C compiler (cc) and the GNU OpenMP runtime (libgomp.so.1); select Mojo through INTENT_MOJO or backend_options |
 | weft | RISC-V host with matching Weft Python package, native weft-compile and native C compiler |
 | bangc | MLU370 host with CNRT/CNCC from NeuWare |
 
