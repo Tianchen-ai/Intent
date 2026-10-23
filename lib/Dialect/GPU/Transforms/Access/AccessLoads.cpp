@@ -746,8 +746,16 @@ void sinkStableLoadChains(func::FuncOp kernel) {
   SmallVector<Operation *> pending;
   kernel.walk([&](LoadOp load) {
     auto view = dyn_cast<ViewType>(load.getResource().getType());
-    if (view && view.getAccess() == 0 && selected.insert(load).second)
-      pending.push_back(load);
+    if (!view || view.getAccess() != 0) return;
+    // Scalar/vector reads can overlap before a chain of reductions. Moving
+    // each to its last consumer serializes that latency. Matrix tiles still
+    // sink to avoid keeping multiple full tiles live across collectives.
+    auto fragment = dyn_cast<FragmentType>(load.getResult().getType());
+    if (fragment && llvm::count_if(fragment.getShape(), [](Attribute extent) {
+          return constantPhysicalExpression(cast<PhysicalExprAttr>(extent)) != 1;
+        }) > 1)
+      selected.insert(load);
+    pending.push_back(load);
   });
   while (!pending.empty()) {
     Operation *producer = pending.pop_back_val();

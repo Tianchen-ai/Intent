@@ -1,6 +1,8 @@
 #include "Intent/Dialect/GPU/IR/GPUOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/IR/IRMapping.h"
+#include "llvm/ADT/SmallBitVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include <optional>
 
@@ -315,8 +317,90 @@ struct CombineSelections : OpRewritePattern<SelectOp> {
     return failure();
   }
 };
+class PruneReductionComponents : public OpRewritePattern<ReduceOp> {
+public:
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(ReduceOp reduce,
+                                PatternRewriter &rewriter) const override {
+    unsigned count = reduce.getNumResults();
+    if (count < 2 || llvm::all_of(reduce.getResults(),
+                                [](Value value) { return !value.use_empty(); }))
+      return failure();
+    Block &body = reduce.getCombine().front();
+    auto yield = cast<YieldOp>(body.getTerminator());
+    llvm::SmallBitVector retained(count);
+    SmallVector<Value> pending;
+    auto retain = [&](unsigned index) {
+      if (retained.test(index)) return;
+      retained.set(index);
+      pending.push_back(yield.getValues()[index]);
+    };
+    for (auto [index, result] : llvm::enumerate(reduce.getResults()))
+      if (!result.use_empty()) retain(index);
+    SmallPtrSet<Operation *, 16> needed;
+    while (!pending.empty()) {
+      Value value = pending.pop_back_val();
+      if (auto argument = dyn_cast<BlockArgument>(value)) {
+        if (argument.getOwner() != &body) return failure();
+        unsigned index = argument.getArgNumber();
+        // Close over both sides of a coupled product combine. An externally
+        // unused state can still be needed by another component on the next step.
+        if (index < 2 * count) retain(index % count);
+        continue;
+      }
+      Operation *producer = value.getDefiningOp();
+      if (!producer || producer->getBlock() != &body || producer->getNumRegions())
+        return failure();
+      if (needed.insert(producer).second)
+        llvm::append_range(pending, producer->getOperands());
+    }
+    if (retained.none() || retained.all()) return failure();
+    SmallVector<Value> sources, identities;
+    SmallVector<Type> arguments;
+    for (unsigned i = 0; i < count; ++i) {
+      if (!retained.test(i)) continue;
+      sources.push_back(reduce.getSources()[i]);
+      identities.push_back(reduce.getIdentities()[i]);
+      arguments.push_back(body.getArgument(i).getType());
+    }
+    for (unsigned i = 0; i < count; ++i)
+      if (retained.test(i)) arguments.push_back(body.getArgument(count + i).getType());
+    for (BlockArgument argument : body.getArguments().drop_front(2 * count))
+      arguments.push_back(argument.getType());
+    auto replacement = rewriter.create<ReduceOp>(reduce.getLoc(), sources,
+        identities, reduce.getCaptures(), reduce.getAxes());
+    replacement->setDiscardableAttrs(llvm::to_vector(reduce->getDiscardableAttrs()));
+    OpBuilder::InsertionGuard insertion(rewriter);
+    Block *target = rewriter.createBlock(&replacement.getCombine(), {}, arguments,
+        SmallVector<Location>(arguments.size(), reduce.getLoc()));
+    IRMapping mapping;
+    unsigned next = 0;
+    for (unsigned side = 0; side < 2; ++side)
+      for (unsigned i = 0; i < count; ++i)
+        if (retained.test(i)) mapping.map(body.getArgument(side * count + i),
+                                          target->getArgument(next++));
+    for (BlockArgument argument : body.getArguments().drop_front(2 * count))
+      mapping.map(argument, target->getArgument(next++));
+    for (Operation &operation : body.without_terminator())
+      if (needed.contains(&operation)) rewriter.clone(operation, mapping);
+    SmallVector<Value> results;
+    for (unsigned i = 0; i < count; ++i)
+      if (retained.test(i)) results.push_back(mapping.lookup(yield.getValues()[i]));
+    rewriter.create<YieldOp>(reduce.getLoc(), results);
+    next = 0;
+    for (unsigned i = 0; i < count; ++i)
+      if (retained.test(i))
+        rewriter.replaceAllUsesWith(reduce.getResult(i), replacement.getResult(next++));
+    rewriter.eraseOp(reduce);
+    return success();
+  }
+};
 } // namespace
 
+void ReduceOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
+                                           MLIRContext *context) {
+  patterns.add<PruneReductionComponents>(context);
+}
 void BinaryOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
                                            MLIRContext *context) {
   patterns.add<DeduplicateBooleanTerms, ScalarizeUniformIndexBinary>(context);

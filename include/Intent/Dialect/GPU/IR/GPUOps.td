@@ -318,6 +318,7 @@ def IntentGPU_ReduceOp : IntentGPU_Op<"reduce", [Pure, IsolatedFromAbove, AttrSi
   let results = (outs Variadic<IntentGPU_DataValue>:$results);
   let regions = (region SizedRegion<1>:$combine);
   let hasVerifier = 1;
+  let hasCanonicalizer = 1;
   let assemblyFormat = [{
     `sources` `(` $sources `:` type($sources) `)`
     `identities` `(` $identities `:` type($identities) `)`
