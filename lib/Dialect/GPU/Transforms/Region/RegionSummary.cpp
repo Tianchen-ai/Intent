@@ -26,23 +26,26 @@ namespace {
 bool isMembershipReduction(Value value, Value membershipPredicate) {
   while (auto broadcast = value.getDefiningOp<BroadcastOp>())
     value = broadcast.getValue();
-  auto reduce = value.getDefiningOp<ReduceOp>();
   auto result = dyn_cast<OpResult>(value);
-  if (!reduce || !result || reduce.getSources().size() != 1 ||
-      reduce.getIdentities().size() != 1 || reduce.getCaptures().size() != 0 ||
-      reduce.getNumResults() != 1 || result.getResultNumber() != 0 ||
-      reduce.getSources().front() != membershipPredicate ||
-      !llvm::hasSingleElement(reduce.getCombine()))
+  auto reduce = result ? dyn_cast<ReduceOp>(result.getOwner()) : ReduceOp{};
+  if (!reduce || !llvm::hasSingleElement(reduce.getCombine()) ||
+      reduce.getSources().size() != reduce.getNumResults() ||
+      reduce.getIdentities().size() != reduce.getNumResults())
     return false;
-  std::optional<bool> identity =
-      booleanConstant(reduce.getIdentities().front());
-  auto yield = dyn_cast<YieldOp>(reduce.getCombine().front().getTerminator());
-  if (!identity || *identity || !yield || yield.getValues().size() != 1 ||
-      reduce.getCombine().front().getNumArguments() != 2)
+  unsigned index = result.getResultNumber();
+  if (reduce.getSources()[index] != membershipPredicate)
+    return false;
+  std::optional<bool> identity = booleanConstant(reduce.getIdentities()[index]);
+  if (!identity || *identity)
     return false;
   Block &combine = reduce.getCombine().front();
-  return isBooleanUnion(UniformValueAnalysis(describeUniformValue), yield.getValues()[0],
-                        combine.getArgument(0), combine.getArgument(1));
+  auto yield = dyn_cast<YieldOp>(combine.getTerminator());
+  if (!yield || yield.getValues().size() != reduce.getNumResults() ||
+      combine.getNumArguments() < 2 * reduce.getNumResults())
+    return false;
+  return isBooleanUnion(UniformValueAnalysis(describeUniformValue),
+                        yield.getValues()[index], combine.getArgument(index),
+                        combine.getArgument(index + reduce.getNumResults()));
 }
 
 } // namespace

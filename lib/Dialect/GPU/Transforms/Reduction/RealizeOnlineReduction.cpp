@@ -92,7 +92,7 @@ FailureOr<OnlineSummaryPattern> matchOnlineSummary(ContractOp moment,
   if (failed(summary))
     return failure();
   DominanceInfo dominance(kernel);
-  if (!llvm::all_of(summary->mass.getResult(0).getUsers(), [&](Operation *user) {
+  if (!llvm::all_of(summary->mass.value.getUsers(), [&](Operation *user) {
         return dominance.dominates(moment.getOperation(), user);
       })) {
     reason = "mass is consumed before the complete normalized summary is available";
@@ -143,15 +143,15 @@ FailureOr<OnlineSummaryPattern> matchOnlineSummary(ContractOp moment,
 std::optional<StringRef> unsupportedNumerics(OnlineSummaryPattern &pattern) {
   auto element = [](Value value) { return cast<FragmentType>(value.getType()).getElementType(); };
   if (!element(pattern.score).isF32() ||
-      !element(pattern.maximum.getResult(0)).isF32() ||
-      !element(pattern.mass.getResult(0)).isF32() ||
+      !element(pattern.maximum.value).isF32() ||
+      !element(pattern.mass.value).isF32() ||
       !element(pattern.moment.getResult()).isF32())
     return "requires f32 scores, maximum, mass and moment accumulation";
   Type weight = element(pattern.moment.getLhs());
   if ((!weight.isF16() && !weight.isBF16() && !weight.isF32()) ||
       element(pattern.values) != weight)
     return "requires matching f16, bf16 or f32 weight/value operands";
-  auto identity = scalarValue(pattern.mass.getIdentities().front()).getDefiningOp<arith::ConstantOp>();
+  auto identity = scalarValue(pattern.mass.identity()).getDefiningOp<arith::ConstantOp>();
   auto zero = identity ? dyn_cast<FloatAttr>(identity.getValue()) : FloatAttr{};
   if (!zero || !zero.getValue().isZero())
     return "requires an additive-zero mass identity";
@@ -192,12 +192,12 @@ LogicalResult realizeOnlineSummary(OnlineSummaryPattern pattern,
 
   OpBuilder builder(pattern.moment);
   Location location = pattern.moment.getLoc();
-  Value validIdentity = pattern.validity.getIdentities().front();
+  Value validIdentity = pattern.validity.identity();
   Value maximumIdentity = builder.create<SplatOp>(
-      location, pattern.maximum.getResult(0).getType(),
+      location, pattern.maximum.value.getType(),
       scalarValue(pattern.maximumOrEmpty.getFalseValue()));
-  Value maximumReductionIdentity = pattern.maximum.getIdentities().front();
-  Value massIdentity = pattern.mass.getIdentities().front();
+  Value maximumReductionIdentity = pattern.maximum.identity();
+  Value massIdentity = pattern.mass.identity();
   Value momentIdentity = pattern.moment.getAccumulator();
   SmallVector<Value> initials{validIdentity, maximumReductionIdentity,
                               massIdentity, momentIdentity};
@@ -327,7 +327,7 @@ LogicalResult realizeOnlineSummary(OnlineSummaryPattern pattern,
         Value bothValid = nested.create<BinaryOp>(
             nestedLocation, carries[0].getType(), carries[0],
             chunkValidity.getResult(0), BinaryOperator::LogicalOr);
-        auto maximumCombine = *queryBinaryCombine(pattern.maximum.getCombine());
+        auto maximumCombine = pattern.maximum.combine;
         Value arguments[] = {carries[1], currentMaximum};
         IRMapping maximumMapping;
         maximumMapping.map(maximumCombine.operation.getLhs(),
@@ -413,9 +413,9 @@ LogicalResult realizeOnlineSummary(OnlineSummaryPattern pattern,
   // when its remaining uses are only its own reductions and contraction.
   DominanceInfo dominance(kernel);
   for (auto [original, replacement] :
-       {std::pair<Value, Value>{pattern.validity.getResult(0), loop.getResult(0)},
+       {std::pair<Value, Value>{pattern.validity.value, loop.getResult(0)},
         {pattern.maximumOrEmpty.getResult(), finalMaximum},
-        {pattern.mass.getResult(0), loop.getResult(2)},
+        {pattern.mass.value, loop.getResult(2)},
         {pattern.moment.getResult(), loop.getResult(3)}})
     original.replaceUsesWithIf(replacement, [&](OpOperand &use) {
       return dominance.dominates(replacement, use.getOwner());

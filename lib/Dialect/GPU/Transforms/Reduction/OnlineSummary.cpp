@@ -8,6 +8,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/IRMapping.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include <functional>
 
 using namespace mlir;
 
@@ -73,14 +74,13 @@ bool sameExecutionSchema(Type lhs, Type rhs) {
          left.getOwner() == right.getOwner();
 }
 
-bool isSingleBinaryReduction(ReduceOp reduce, BinaryOperator kind) {
-  if (!reduce) return false;
-  auto combine = queryBinaryCombine(reduce.getCombine());
-  return reduce.getNumResults() == 1 &&
-         reduce.getAxes().size() == 1 && reduce.getSources().size() == 1 &&
-         reduce.getIdentities().size() == 1 && reduce.getCaptures().size() == 0 &&
-         combine && combine->kind() == kind &&
-         !combine->operation.getStrictRounding();
+bool isBinaryReduction(const std::optional<BinaryReduction> &component,
+                       BinaryOperator kind) {
+  if (!component) return false;
+  auto combine = component->combine.operation;
+  return component->operation().getAxes().size() == 1 &&
+         component->combine.kind() == kind &&
+         !combine.getStrictRounding();
 }
 
 bool isProjectedFrom(Value value, Value source,
@@ -193,36 +193,36 @@ bool hasReductionReference(Value reference, Value summary, unsigned axis) {
 }
 
 FailureOr<NormalizedSummaryStructure> matchSummaryComponents(
-    ReduceOp validity, SelectOp maximumOrEmpty, ReduceOp mass,
+    BinaryReduction validity, SelectOp maximumOrEmpty, BinaryReduction mass,
     ContractOp moment, SelectOp momentOrEmpty = {}) {
-  if (!isSingleBinaryReduction(validity, BinaryOperator::LogicalOr) ||
-      !isSingleBinaryReduction(mass, BinaryOperator::Add) || !maximumOrEmpty)
+  if (!isBinaryReduction(validity, BinaryOperator::LogicalOr) ||
+      !isBinaryReduction(mass, BinaryOperator::Add) || !maximumOrEmpty)
     return failure();
-  auto validityType = dyn_cast<FragmentType>(validity.getResult(0).getType());
+  auto validityType = dyn_cast<FragmentType>(validity.value.getType());
   if (!validityType || !validityType.getElementType().isInteger(1))
     return failure();
-  auto maximum = maximumOrEmpty.getTrueValue().getDefiningOp<ReduceOp>();
-  if (!isSingleBinaryReduction(maximum, BinaryOperator::Maximum) &&
-      !isSingleBinaryReduction(maximum, BinaryOperator::MaximumNum))
+  auto maximum = queryBinaryReduction(maximumOrEmpty.getTrueValue());
+  if (!isBinaryReduction(maximum, BinaryOperator::Maximum) &&
+      !isBinaryReduction(maximum, BinaryOperator::MaximumNum))
     return failure();
   if (momentOrEmpty &&
-      !isProjectedFrom(momentOrEmpty.getCondition(), validity.getResult(0)))
+      !isProjectedFrom(momentOrEmpty.getCondition(), validity.value))
     return failure();
-  Value memberValidity = validity.getSources().front();
-  if (maximumOrEmpty.getCondition() != validity.getResult(0) ||
+  Value memberValidity = validity.source();
+  if (maximumOrEmpty.getCondition() != validity.value ||
       !isZero(maximumOrEmpty.getFalseValue()) ||
-      !isBooleanConstant(validity.getIdentities().front(), false) ||
-      !isNegativeInfinity(maximum.getIdentities().front()))
+      !isBooleanConstant(validity.identity(), false) ||
+      !isNegativeInfinity(maximum->identity()))
     return failure();
 
-  auto maskedScore = maximum.getSources().front().getDefiningOp<SelectOp>();
+  auto maskedScore = maximum->source().getDefiningOp<SelectOp>();
   if (!maskedScore ||
       !sameProjectedValue(maskedScore.getCondition(), memberValidity) ||
       !isNegativeInfinity(maskedScore.getFalseValue()))
     return failure();
   Value score = maskedScore.getTrueValue();
 
-  Value probabilityValue = mass.getSources().front();
+  Value probabilityValue = mass.source();
   auto probability = probabilityValue.getDefiningOp<SelectOp>();
   if (!probability ||
       !sameProjectedValue(probability.getCondition(), memberValidity) ||
@@ -249,21 +249,19 @@ FailureOr<NormalizedSummaryStructure> matchSummaryComponents(
     return failure();
   Value values = moment.getRhs();
 
-  int64_t rawReductionAxis = validity.getAxes().front();
+  int64_t rawReductionAxis = validity.operation().getAxes().front();
   int64_t rawValueReductionAxis = moment.getRhsReductionAxes().front();
   if (rawReductionAxis < 0 || rawValueReductionAxis < 0)
     return failure();
   unsigned reductionAxis = static_cast<unsigned>(rawReductionAxis);
   if (!hasReductionReference(shift.getRhs(), maximumOrEmpty.getResult(),
                              reductionAxis) ||
-      validity.getAxes() != maximum.getAxes() ||
-      validity.getAxes() != mass.getAxes() ||
+      validity.operation().getAxes() != maximum->operation().getAxes() ||
+      validity.operation().getAxes() != mass.operation().getAxes() ||
       moment.getLhsReductionAxes().front() !=
           static_cast<int64_t>(reductionAxis) ||
-      !sameExecutionSchema(validity.getResult(0).getType(),
-                           maximum.getResult(0).getType()) ||
-      !sameExecutionSchema(maximum.getResult(0).getType(),
-                           mass.getResult(0).getType()) ||
+      !sameExecutionSchema(validity.value.getType(), maximum->value.getType()) ||
+      !sameExecutionSchema(maximum->value.getType(), mass.value.getType()) ||
       !sameExecutionSchema(memberValidity.getType(), score.getType()) ||
       !sameExecutionSchema(score.getType(), probabilityValue.getType()))
     return failure();
@@ -290,7 +288,7 @@ FailureOr<NormalizedSummaryStructure> matchSummaryComponents(
     return failure();
 
   return NormalizedSummaryStructure{
-      validity, maximum, mass, moment, maximumOrEmpty, maskedScore,
+      validity, *maximum, mass, moment, maximumOrEmpty, maskedScore,
       probability, probabilityCast, exponential, memberValidity, score, values,
       reductionAxis, valueReductionAxis, traversal, momentOrEmpty};
 }
@@ -301,22 +299,22 @@ FailureOr<OnlineSummaryStructure>
 matchOnlineSummaryStructure(MakeRecordOp record) {
   if (!record || record.getFields().size() != 4)
     return failure();
-  SmallVector<std::pair<unsigned, ReduceOp>> validityCandidates;
-  SmallVector<std::pair<unsigned, ReduceOp>> massCandidates;
+  SmallVector<std::pair<unsigned, BinaryReduction>> validityCandidates;
+  SmallVector<std::pair<unsigned, BinaryReduction>> massCandidates;
   SmallVector<std::pair<unsigned, SelectOp>> maximumCandidates;
   SmallVector<std::pair<unsigned, ContractOp>> momentCandidates;
   SmallVector<SelectOp> momentGuards;
   for (auto [index, field] : llvm::enumerate(record.getFields())) {
     field = stripProjection(field);
-    if (auto reduce = field.getDefiningOp<ReduceOp>()) {
-      if (isSingleBinaryReduction(reduce, BinaryOperator::LogicalOr))
-        validityCandidates.emplace_back(index, reduce);
-      if (isSingleBinaryReduction(reduce, BinaryOperator::Add))
-        massCandidates.emplace_back(index, reduce);
+    if (auto reduce = queryBinaryReduction(field)) {
+      if (isBinaryReduction(reduce, BinaryOperator::LogicalOr))
+        validityCandidates.emplace_back(index, *reduce);
+      if (isBinaryReduction(reduce, BinaryOperator::Add))
+        massCandidates.emplace_back(index, *reduce);
     } else if (auto select = field.getDefiningOp<SelectOp>()) {
-      auto reduce = select.getTrueValue().getDefiningOp<ReduceOp>();
-      if (isSingleBinaryReduction(reduce, BinaryOperator::Maximum) ||
-          isSingleBinaryReduction(reduce, BinaryOperator::MaximumNum))
+      auto reduce = queryBinaryReduction(select.getTrueValue());
+      if (isBinaryReduction(reduce, BinaryOperator::Maximum) ||
+          isBinaryReduction(reduce, BinaryOperator::MaximumNum))
         maximumCandidates.emplace_back(index, select);
       auto contract = stripProjection(select.getTrueValue()).getDefiningOp<ContractOp>();
       if (contract && isZero(select.getFalseValue())) {
@@ -369,17 +367,20 @@ matchNormalizedSummaryStructure(ContractOp moment) {
     reference = projected;
   }
   auto maximum = reference.getDefiningOp<SelectOp>();
-  auto validity = maximum
-      ? maximum.getCondition().getDefiningOp<ReduceOp>() : ReduceOp{};
-  SmallVector<ReduceOp> masses;
-  for (Operation *user : probability.getResult().getUsers())
-    if (auto reduce = dyn_cast<ReduceOp>(user);
-        isSingleBinaryReduction(reduce, BinaryOperator::Add) &&
-        reduce.getSources().front() == probability.getResult())
-      masses.push_back(reduce);
-  if (masses.size() != 1)
+  auto validity = maximum ? queryBinaryReduction(maximum.getCondition()) : std::nullopt;
+  SmallVector<BinaryReduction> masses;
+  SmallPtrSet<Operation *, 4> visited;
+  for (Operation *user : probability.getResult().getUsers()) {
+    if (!isa<ReduceOp>(user) || !visited.insert(user).second) continue;
+    for (Value result : user->getResults()) {
+      auto component = queryBinaryReduction(result);
+      if (isBinaryReduction(component, BinaryOperator::Add) &&
+          component->source() == probability.getResult()) masses.push_back(*component);
+    }
+  }
+  if (!validity || masses.size() != 1)
     return failure();
-  return matchSummaryComponents(validity, maximum, masses.front(), moment);
+  return matchSummaryComponents(*validity, maximum, masses.front(), moment);
 }
 
 FailureOr<OnlineSummaryMerge>
@@ -413,13 +414,11 @@ matchOnlineSummaryMerge(Region &region,
         candidates.push_back(stripProjection(operand));
   }
   // Keep the original first-match order among the mass expression's factors.
-  ReduceOp summaryMaximum = summary.maximum;
-  auto maximumCombine = queryBinaryCombine(summaryMaximum.getCombine());
-  if (!maximumCombine) return failure();
+  auto maximumCombine = summary.maximum.combine;
   auto relations = matchOnlineSummaryCombine<BinaryOp, UnaryOp, SelectOp>(
       record.getFields(), left, right,
       {summary.validityField, summary.maximumField, summary.massField, summary.momentField},
-      std::optional<BinaryOperator>(maximumCombine->kind()), summary.exponential,
+      std::optional<BinaryOperator>(maximumCombine.kind()), summary.exponential,
       candidates, stripProjection,
       [](Value value, Value source) { return isProjectedFrom(value, source); },
       isRecordField, isZero);
@@ -430,12 +429,31 @@ matchOnlineSummaryMerge(Region &region,
 }
 
 ReduceOp cloneReductionWithSource(OpBuilder &builder, Location location,
-                                  ReduceOp source, Value value) {
+                                  BinaryReduction source, Value value) {
   auto result = builder.create<ReduceOp>(location, ValueRange{value},
-      source.getIdentities(), source.getCaptures(), source.getAxes());
+      ValueRange{source.identity()}, ValueRange{}, source.operation().getAxes());
+  OpBuilder::InsertionGuard insertion(builder);
+  auto &sourceBody = source.operation().getCombine().front();
+  unsigned component = source.value.getResultNumber();
+  auto left = sourceBody.getArgument(component);
+  auto right = sourceBody.getArgument(component + source.operation().getNumResults());
+  auto *body = builder.createBlock(&result.getCombine(), {},
+      {left.getType(), right.getType()}, {location, location});
   IRMapping mapping;
-  source.getCombine().cloneInto(&result.getCombine(), mapping);
-  if (Attribute origin = source->getAttr(originAttr))
+  mapping.map(left, body->getArgument(0));
+  mapping.map(right, body->getArgument(1));
+  std::function<Value(Value)> clone = [&](Value input) -> Value {
+    if (Value known = mapping.lookupOrNull(input)) return known;
+    Operation *producer = input.getDefiningOp();
+    assert(producer && producer->getBlock() == &sourceBody &&
+           "independent reduction component must have a closed value graph");
+    for (Value operand : producer->getOperands()) clone(operand);
+    builder.clone(*producer, mapping);
+    return mapping.lookup(input);
+  };
+  Value yielded = cast<YieldOp>(sourceBody.getTerminator()).getValues()[component];
+  builder.create<YieldOp>(location, clone(yielded));
+  if (Attribute origin = source.operation()->getAttr(originAttr))
     result->setAttr(originAttr, origin);
   return result;
 }

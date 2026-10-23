@@ -2,6 +2,7 @@
 #define INTENT_DIALECT_GPU_TRANSFORMS_ONLINESUMMARY_H
 
 #include "Intent/Dialect/GPU/Analysis/PhysicalProgram.h"
+#include "Intent/Dialect/GPU/Analysis/Helpers.h"
 #include "Intent/Dialect/GPU/IR/GPUOps.h"
 
 #include "mlir/IR/Builders.h"
@@ -9,9 +10,9 @@
 namespace intent::gpu {
 
 struct NormalizedSummaryStructure {
-  ReduceOp validity;
-  ReduceOp maximum;
-  ReduceOp mass;
+  BinaryReduction validity;
+  BinaryReduction maximum;
+  BinaryReduction mass;
   ContractOp moment;
   SelectOp maximumOrEmpty;
   SelectOp maskedScore;
@@ -55,7 +56,7 @@ matchOnlineSummaryMerge(mlir::Region &region,
                         const OnlineSummaryStructure &summary);
 
 ReduceOp cloneReductionWithSource(mlir::OpBuilder &builder,
-                                  mlir::Location location, ReduceOp source,
+                                  mlir::Location location, BinaryReduction source,
                                   mlir::Value value);
 
 } // namespace intent::gpu

@@ -126,7 +126,7 @@ FailureOr<Value> coRealizeOnlineRegion(
       summaryValue(plan.summary.probability.getFalseValue());
   Value probabilityCast =
       summaryValue(plan.summary.moment.getLhs());
-  Value mass = summaryValue(plan.summary.mass.getResult(0));
+  Value mass = summaryValue(plan.summary.mass.value);
   Value moment = summaryValue(plan.summary.moment.getResult());
   Value combinedMaximum = mergeValue(plan.merge.combinedMaximum);
   Value leftMassTerm = mergeValue(plan.merge.leftMassTerm);
@@ -137,13 +137,13 @@ FailureOr<Value> coRealizeOnlineRegion(
       !leftMassTerm || !leftMomentTerm || !mergedRecord)
     return failure();
 
-  auto mappedMass = mass.getDefiningOp<ReduceOp>();
+  auto mappedMass = queryBinaryReduction(mass);
   auto mappedMoment = moment.getDefiningOp<ContractOp>();
   if (!mappedMass || !mappedMoment)
     return failure();
   if (encodedCarry) {
     auto carry = encodedCarry.getDefiningOp<MakeRecordOp>();
-    Value rawMaximum = summaryValue(plan.summary.maximum.getResult(0));
+    Value rawMaximum = summaryValue(plan.summary.maximum.value);
     if (!carry || !rawMaximum)
       return failure();
     Value oldMaximum = carry.getFields()[plan.summary.maximumField];
@@ -216,7 +216,7 @@ FailureOr<Value> coRealizeOnlineRegion(
   Value directProbability = directProbabilityOp.getResult();
 
   ReduceOp directMass = cloneReductionWithSource(
-      builder, location, mappedMass, directProbability);
+      builder, location, *mappedMass, directProbability);
   Value directProbabilityCast = directProbability;
   if (directProbability.getType() != probabilityCast.getType()) {
     auto converted = builder.create<CastOp>(
@@ -256,7 +256,7 @@ FailureOr<Value> coRealizeOnlineRegion(
     return failure();
   Value combinedMoment = *projectedMoment;
   if (plan.summary.momentOrEmpty) {
-    Value rowValidity = summaryValue(plan.summary.validity.getResult(0));
+    Value rowValidity = summaryValue(plan.summary.validity.value);
     if (!rowValidity)
       return failure();
     UniformValueAnalysis facts(describeUniformValue);

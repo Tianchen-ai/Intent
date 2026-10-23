@@ -37,5 +37,17 @@ struct BinaryCombine {
 
 std::optional<BinaryCombine> queryBinaryCombine(mlir::Region &region);
 
+// An independent component of a scalar or tuple reduction. The two combine
+// argument slots are relative to this component's left and right values.
+struct BinaryReduction {
+  mlir::OpResult value;
+  BinaryCombine combine;
+  ReduceOp operation() const { return mlir::cast<ReduceOp>(value.getOwner()); }
+  mlir::Value source() const { return operation().getSources()[value.getResultNumber()]; }
+  mlir::Value identity() const { return operation().getIdentities()[value.getResultNumber()]; }
+};
+
+std::optional<BinaryReduction> queryBinaryReduction(mlir::Value value);
+
 } // namespace intent::gpu
 #endif

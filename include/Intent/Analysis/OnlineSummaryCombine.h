@@ -38,7 +38,7 @@ std::optional<OnlineSummaryCombineRelations> matchOnlineSummaryCombine(
       !fieldPair(fields[schema.validity], BinaryOperator::BitwiseOr, schema.validity))
     return std::nullopt;
 
-  Value combinedMaximum = fields[schema.maximum];
+  Value combinedMaximum = project(fields[schema.maximum]);
   auto finalMaximum = project(combinedMaximum).template getDefiningOp<SelectOp>();
   if (!finalMaximum || !field(finalMaximum.getCondition(), right, schema.validity))
     return std::nullopt;

@@ -132,10 +132,10 @@ LogicalResult realizeFold(RegionFoldOp fold, func::FuncOp kernel,
         identity &&
         isLiteralZeroProjection(
             identity.getFields()[online->summary.massField]) &&
-        isLiteralZeroProjection(online->summary.mass.getIdentities().front());
-    auto maximumCombine = queryBinaryCombine(online->summary.maximum.getCombine());
-    encodeEmptyMaximum = massRepresentsValidity && maximumCombine &&
-        maximumCombine->kind() == BinaryOperator::MaximumNum &&
+        isLiteralZeroProjection(online->summary.mass.identity());
+    auto maximumCombine = online->summary.maximum.combine;
+    encodeEmptyMaximum = massRepresentsValidity &&
+        maximumCombine.kind() == BinaryOperator::MaximumNum &&
         isLiteralZeroProjection(identity.getFields()[online->summary.maximumField]);
     for (unsigned field : {online->summary.maximumField, online->summary.massField,
                            online->summary.momentField})

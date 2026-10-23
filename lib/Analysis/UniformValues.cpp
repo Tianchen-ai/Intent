@@ -230,11 +230,8 @@ Attribute UniformValueAnalysis::fold(const UniformExpression &expression, const 
   }
   if (expression.kind == K::Fold) {
     SmallVector<Attribute> initial, inputs;
-    for (Value value : ArrayRef(expression.operands).take_front(expression.stateCount)) {
-      Attribute constant = get(value);
-      if (!constant) return {};
-      initial.push_back(constant);
-    }
+    for (Value value : ArrayRef(expression.operands).take_front(expression.stateCount))
+      initial.push_back(get(value));
     for (Value value : ArrayRef(expression.operands).drop_front(expression.stateCount)) inputs.push_back(get(value));
     auto step = [&](ArrayRef<Attribute> state) {
       UniformBindings current = bindings;
@@ -246,16 +243,28 @@ Attribute UniformValueAnalysis::fold(const UniformExpression &expression, const 
       for (Value value : expression.yields) result.push_back(evaluate(value, current, visiting));
       return result;
     };
-    auto first = step(initial);
-    if (first.size() != initial.size() || llvm::any_of(first, [](Attribute value) { return !value; })) return {};
-    auto equal = [](ArrayRef<Attribute> a, ArrayRef<Attribute> b) {
-      return a.size() == b.size() && llvm::all_of(llvm::zip(a, b), [](auto pair) {
-        return equalUniformConstants(std::get<0>(pair), std::get<1>(pair));
-      });
-    };
-    if (!expression.nonempty && !equal(first, initial)) return {};
-    if (!equal(first, step(first))) return {};
-    return expression.result < first.size() ? first[expression.result] : Attribute();
+    auto state = step(initial);
+    if (state.size() != initial.size() || expression.result >= state.size())
+      return {};
+    // Product reductions may mix constant and varying components. Keep the
+    // constants that are inductive under the whole combine, losing facts when
+    // a coupled component varies. Each iteration only removes facts, so this
+    // reaches a fixed point in at most stateCount steps.
+    while (state[expression.result]) {
+      auto next = step(state);
+      bool changed = false;
+      for (unsigned i = 0; i < state.size(); ++i) {
+        if (state[i] && !equalUniformConstants(state[i], next[i])) {
+          state[i] = {};
+          changed = true;
+        }
+      }
+      if (!changed) break;
+    }
+    Attribute result = state[expression.result];
+    return expression.nonempty ||
+                   equalUniformConstants(result, initial[expression.result])
+               ? result : Attribute();
   }
   SmallVector<Attribute> values;
   for (Value value : expression.operands) values.push_back(get(value));

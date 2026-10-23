@@ -110,25 +110,47 @@ LogicalResult proveLaneWiseHelper(Region &region, std::string *reason) {
   return success();
 }
 
-std::optional<BinaryCombine> queryBinaryCombine(Region &region) {
+static std::optional<BinaryCombine> queryBinaryComponent(
+    Region &region, unsigned component, unsigned left, unsigned right) {
   if (failed(proveLaneWiseHelper(region))) return std::nullopt;
   Block &body = region.front();
   auto yield = cast<YieldOp>(body.getTerminator());
-  if (body.getNumArguments() != 2 || yield.getValues().size() != 1)
+  if (left >= body.getNumArguments() || right >= body.getNumArguments() ||
+      component >= yield.getValues().size())
     return std::nullopt;
   auto strip = [](Value value) {
     while (Value source = laneWiseProjectionSource(value.getDefiningOp()))
       value = source;
     return value;
   };
-  auto binary = strip(yield.getValues().front()).getDefiningOp<BinaryOp>();
+  auto binary = strip(yield.getValues()[component]).getDefiningOp<BinaryOp>();
   if (!binary) return std::nullopt;
   Value lhs = strip(binary.getLhs()), rhs = strip(binary.getRhs());
-  if (lhs == body.getArgument(0) && rhs == body.getArgument(1))
+  if (lhs == body.getArgument(left) && rhs == body.getArgument(right))
     return BinaryCombine{binary, {0, 1}};
-  if (lhs == body.getArgument(1) && rhs == body.getArgument(0))
+  if (lhs == body.getArgument(right) && rhs == body.getArgument(left))
     return BinaryCombine{binary, {1, 0}};
   return std::nullopt;
+}
+
+std::optional<BinaryCombine> queryBinaryCombine(Region &region) {
+  if (!llvm::hasSingleElement(region) || region.front().getNumArguments() != 2)
+    return std::nullopt;
+  auto yield = dyn_cast<YieldOp>(region.front().getTerminator());
+  if (!yield || yield.getValues().size() != 1) return std::nullopt;
+  return queryBinaryComponent(region, 0, 0, 1);
+}
+
+std::optional<BinaryReduction> queryBinaryReduction(Value value) {
+  auto result = dyn_cast<OpResult>(value);
+  auto reduce = result ? dyn_cast<ReduceOp>(result.getOwner()) : ReduceOp{};
+  if (!reduce || reduce.getSources().size() != reduce.getNumResults() ||
+      reduce.getIdentities().size() != reduce.getNumResults()) return std::nullopt;
+  unsigned component = result.getResultNumber();
+  auto combine = queryBinaryComponent(reduce.getCombine(), component,
+                                      component, reduce.getNumResults() + component);
+  if (!combine) return std::nullopt;
+  return BinaryReduction{result, *combine};
 }
 
 } // namespace intent::gpu
