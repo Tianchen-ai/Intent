@@ -46,6 +46,16 @@ bool dependsOnWorksetCoordinate(Value value) {
   return false;
 }
 
+bool isReadOnlyRecurrenceOperation(Operation *operation) {
+  if (isMemoryEffectFree(operation))
+    return true;
+  if (auto load = dyn_cast<LoadOp>(operation)) {
+    auto view = dyn_cast<ViewType>(load.getResource().getType());
+    return view && view.getAccess() == 0;
+  }
+  return false;
+}
+
 bool canPredicate(Block &block, bool allowStores = false,
                   bool allowProducts = false, bool allowLoops = false,
                   bool allowAssumptions = false) {
@@ -173,6 +183,57 @@ void dischargeScalarAssumptions(Block &block) {
     assumption.erase();
 }
 
+void normalizeVaryingForLoops(func::FuncOp kernel) {
+  SmallVector<scf::ForOp> loops;
+  kernel.walk([&](scf::ForOp loop) { loops.push_back(loop); });
+  for (scf::ForOp loop : loops) {
+    if ((!dependsOnWorksetCoordinate(loop.getLowerBound()) &&
+         !dependsOnWorksetCoordinate(loop.getUpperBound()) &&
+         !dependsOnWorksetCoordinate(loop.getStep())) ||
+        !llvm::all_of(loop.getResultTypes(), isScalar) ||
+        !canPredicate(*loop.getBody(), false, false, false, true) ||
+        !llvm::all_of(loop.getBody()->without_terminator(), [](Operation &op) {
+          return isa<AssumeInBoundsOp>(op) || isReadOnlyRecurrenceOperation(&op);
+        }))
+      continue;
+
+    // A lane-dependent for bound cannot remain an SCF scalar bound when
+    // independent worksets are packed. Express the same ordered recurrence
+    // as while state; ownership lifting supplies active lanes and masked reads.
+    dischargeScalarAssumptions(*loop.getBody());
+    OpBuilder builder(loop);
+    Location location = loop.getLoc();
+    SmallVector<Value> initial{loop.getLowerBound()};
+    llvm::append_range(initial, loop.getInitArgs());
+    SmallVector<Type> types;
+    for (Value value : initial) types.push_back(value.getType());
+    auto replacement = builder.create<scf::WhileOp>(location, types, initial);
+    if (Attribute origin = loop->getAttr(originAttr))
+      replacement->setAttr(originAttr, origin);
+    Block *before = builder.createBlock(&replacement.getBefore(), {}, types,
+                                       SmallVector<Location>(types.size(), location));
+    Value condition = builder.create<CompareOp>(
+        location, builder.getI1Type(), before->getArgument(0),
+        loop.getUpperBound(), ComparePredicate::Lt);
+    builder.create<scf::ConditionOp>(location, condition, before->getArguments());
+    Block *after = builder.createBlock(&replacement.getAfter(), {}, types,
+                                      SmallVector<Location>(types.size(), location));
+    IRMapping mapping;
+    mapping.map(loop.getInductionVar(), after->getArgument(0));
+    mapping.map(loop.getRegionIterArgs(), after->getArguments().drop_front());
+    for (Operation &operation : loop.getBody()->without_terminator())
+      builder.clone(operation, mapping);
+    SmallVector<Value> yielded{builder.create<BinaryOp>(
+        location, types.front(), after->getArgument(0), loop.getStep(),
+        BinaryOperator::Add)};
+    for (Value value : loop.getBody()->getTerminator()->getOperands())
+      yielded.push_back(mapping.lookupOrDefault(value));
+    builder.create<scf::YieldOp>(location, yielded);
+    loop->replaceAllUsesWith(replacement.getResults().drop_front());
+    loop.erase();
+  }
+}
+
 FailureOr<SmallVector<Value>> predicateBlock(OpBuilder &builder, Block &block,
                                             Value predicate) {
   IRMapping mapping;
@@ -204,12 +265,12 @@ bool canPredicateScalarWhile(scf::WhileOp loop) {
       after.getArgumentTypes() != loop.getResultTypes() ||
       !llvm::equal(condition.getArgs(), before.getArguments()))
     return false;
-  // Only pure per-element recurrences are coarsened here. Cross-lane effects,
+  // Read-only per-element recurrences can use masked loads. Writes, atomics,
   // nested regions and changes to the state in the condition need other proofs.
   return llvm::all_of(ArrayRef<Block *>{&before, &after}, [&](Block *block) {
     return canPredicate(*block) &&
            llvm::all_of(block->without_terminator(), [](Operation &operation) {
-             return isMemoryEffectFree(&operation);
+             return isReadOnlyRecurrenceOperation(&operation);
            });
   });
 }
@@ -281,6 +342,7 @@ LogicalResult predicateScalarControl(ModuleOp module) {
     }
     conditional.erase();
   }
+  normalizeVaryingForLoops(*kernel);
   eraseDeadPhysicalValues(*kernel);
   return success();
 }
