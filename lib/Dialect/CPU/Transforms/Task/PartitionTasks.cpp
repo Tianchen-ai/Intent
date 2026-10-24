@@ -431,6 +431,32 @@ LogicalResult partition(scf::ParallelOp root, int64_t grain, bool distributeToWo
       auto active = b.create<scf::IfOp>(loc, nonempty, false);
       OpBuilder::InsertionGuard guard(b);
       b.setInsertionPointToStart(active.thenBlock());
+      bool hasRelaxedAdd = false;
+      root.walk([&](AtomicRMWOp update) {
+        hasRelaxedAdd |= update.getOrdering() == AtomicOrdering::Relaxed &&
+                         update.getKind() == AtomicRMWKind::Add;
+      });
+      if (hasRelaxedAdd) {
+        // A complete rectangular interval needs no per-row boundary selection.
+        // Keep its original bounds visible to the provider's loop optimizer,
+        // especially after a single-worker dispatch loses its atomic updates.
+        Value startsAtZero = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, begin, zero);
+        Value endsAtSize = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, end, size);
+        auto complete = b.create<scf::IfOp>(loc,
+            b.create<arith::AndIOp>(loc, startsAtZero, endsAtSize), true);
+        b.setInsertionPointToStart(complete.thenBlock());
+        SmallVector<Value> point;
+        std::function<void(unsigned)> traverse = [&](unsigned axis) {
+          if (axis == extents.size()) { clonePoint(point); return; }
+          loop(b, loc, zero, extents[axis], 1, [&](Value coordinate) {
+            point.push_back(coordinate);
+            traverse(axis + 1);
+            point.pop_back();
+          });
+        };
+        traverse(0);
+        b.setInsertionPointToStart(complete.elseBlock());
+      }
       auto decode = [&](Value ordinal) {
         SmallVector<Value> point(extents.size());
         for (int64_t axis = extents.size() - 1; axis >= 0; --axis) {
@@ -572,7 +598,7 @@ void foldSequentialAtomicAdds(func::FuncOp function) {
   SmallVector<AtomicRMWOp> updates;
   function.walk([&](AtomicRMWOp update) {
     if (update.getOrdering() != AtomicOrdering::Relaxed || update.getKind() != AtomicRMWKind::Add ||
-        !isa<FloatType>(update.getValue().getType())) return;
+        !isa<FloatType, IntegerType>(update.getValue().getType())) return;
     // CPU task dispatches join before continuation; only sequential control
     // may enclose an update with no concurrent invocation-local participant.
     for (Operation *parent = update->getParentOp(); parent != function; parent = parent->getParentOp())
@@ -583,7 +609,9 @@ void foldSequentialAtomicAdds(func::FuncOp function) {
     OpBuilder b(update);
     Location loc = update.getLoc();
     Value old = b.create<memref::LoadOp>(loc, update.getTarget(), update.getIndices());
-    Value sum = b.create<arith::AddFOp>(loc, old, update.getValue());
+    Value sum = isa<FloatType>(old.getType())
+        ? Value(b.create<arith::AddFOp>(loc, old, update.getValue()))
+        : Value(b.create<arith::AddIOp>(loc, old, update.getValue()));
     b.create<memref::StoreOp>(loc, sum, update.getTarget(), update.getIndices());
     update.getOldValue().replaceAllUsesWith(old);
     update.erase();
@@ -681,19 +709,41 @@ LogicalResult materializeTaskDispatches(func::FuncOp function) {
     auto active = b.create<scf::IfOp>(loc, nonempty, false);
     b.setInsertionPointToStart(active.thenBlock());
     Value workers = b.create<arith::MinSIOp>(loc, tasks.getCount(), index(b, loc, capabilities.getWorkers()));
+    Block &original = tasks.getBody().front();
+    auto cloneBody = [&](Block *body, Value ordinal) {
+      OpBuilder nested(body, body->begin());
+      IRMapping mapping;
+      for (auto [argument, capture] : llvm::zip(original.getArguments().drop_front(), tasks.getCaptures()))
+        mapping.map(argument, capture);
+      mapping.map(original.getArgument(0), ordinal);
+      for (Operation &operation : original.without_terminator()) nested.clone(operation, mapping);
+    };
+    bool hasRelaxedAdd = false;
+    tasks.walk([&](AtomicRMWOp update) {
+      hasRelaxedAdd |= update.getOrdering() == AtomicOrdering::Relaxed &&
+                       update.getKind() == AtomicRMWKind::Add;
+    });
+    if (hasRelaxedAdd) {
+      // A single-worker dispatch has no concurrent invocation-local participant.
+      // Make that execution fact explicit in IR, so atomic simplification never
+      // depends on a runtime launcher's serial shortcut or on an input shape.
+      Value one = index(b, loc, 1);
+      auto serial = b.create<scf::IfOp>(loc,
+          b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, workers, one), true);
+      b.setInsertionPointToStart(serial.thenBlock());
+      auto loop = b.create<scf::ForOp>(loc, index(b, loc, 0), tasks.getCount(), one);
+      cloneBody(loop.getBody(), loop.getInductionVar());
+      b.setInsertionPointToStart(serial.elseBlock());
+    }
     auto dispatch = b.create<TaskDispatchOp>(loc, tasks.getCount(), workers);
     Block *body = &dispatch.getBody().emplaceBlock();
     body->addArgument(b.getIndexType(), loc);
-    IRMapping mapping;
-    Block &original = tasks.getBody().front();
-    for (auto [argument, capture] : llvm::zip(original.getArguments().drop_front(), tasks.getCaptures()))
-      mapping.map(argument, capture);
-    b.setInsertionPointToStart(body);
-    mapping.map(original.getArgument(0), body->getArgument(0));
-    for (Operation &operation : original.without_terminator()) b.clone(operation, mapping);
+    cloneBody(body, body->getArgument(0));
+    b.setInsertionPointToEnd(body);
     b.create<TaskYieldOp>(loc);
     tasks.erase();
   }
+  foldSequentialAtomicAdds(function);
   return success();
 }
 
