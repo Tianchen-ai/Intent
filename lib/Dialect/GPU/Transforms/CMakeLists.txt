@@ -61,6 +61,7 @@ add_mlir_library(MLIRIntentGPUTransforms
   Control/VectorizeBufferLoops.cpp
 
   Value/EliminateCommonValues.cpp
+  Value/IntegerArithmetic.cpp
   Value/ExecutionSchema.cpp
   Value/Helpers.cpp
   Value/PhysicalCloning.cpp

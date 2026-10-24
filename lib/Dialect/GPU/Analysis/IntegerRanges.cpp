@@ -1,6 +1,7 @@
 #include "Intent/Dialect/GPU/Analysis/IntegerRanges.h"
 #include "Intent/Dialect/GPU/Analysis/PhysicalExpressionBounds.h"
 #include "Intent/Dialect/GPU/IR/GPUOps.h"
+#include "Intent/Dialect/GPU/IR/Program.h"
 #include "Intent/Dialect/GPU/IR/ProgramInterface.h"
 #include "ScalarExpressions.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -41,8 +42,15 @@ std::optional<ConstantIntRanges> inferGPUFacts(Value value,
     return ConstantIntRanges::fromSigned(APInt(64, 1),
                                          APInt::getSignedMaxValue(64));
   }
-  if (value.getDefiningOp<ProgramIdOp>())
+  if (auto id = value.getDefiningOp<ProgramIdOp>()) {
+    auto space = kernel->getAttrOfType<ArrayAttr>(programSpaceAttr);
+    if (space && id.getAxis() < space.size())
+      if (auto extent = queryPhysicalExpressionRange(
+              cast<PhysicalExprAttr>(space[id.getAxis()]), kernel);
+          extent && extent->smin().isNonNegative() && extent->smax().isStrictlyPositive())
+        return ConstantIntRanges::fromSigned(APInt(64, 0), extent->smax() - 1);
     return nonNegativeIndex();
+  }
   if (auto dimension = value.getDefiningOp<DimOp>()) {
     auto expression = detail::resourceExtentExpression(dimension.getView(),
                                                        dimension.getAxis());

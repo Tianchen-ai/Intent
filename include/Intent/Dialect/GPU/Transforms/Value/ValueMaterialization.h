@@ -25,6 +25,7 @@ struct ReplayMaterializationOptions {
 
 void foldExactConstantDivisions(mlir::func::FuncOp kernel);
 void foldScalarIntegerValues(mlir::func::FuncOp kernel);
+void narrowIntegerArithmetic(mlir::func::FuncOp kernel);
 // Recreate only pure aggregate/shape projections whose leaves are available at
 // before. Validation precedes mutation; loads and arithmetic are not replayed.
 mlir::FailureOr<mlir::Value> materializeDominatingProjection(

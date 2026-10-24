@@ -74,6 +74,7 @@ LogicalResult finalizeTritonProgram(ModuleOp module, bool hoistLoopInvariants) {
   if (failed(kernel))
     return failure();
   gpu::foldExactConstantDivisions(*kernel);
+  gpu::narrowIntegerArithmetic(*kernel);
   detail::canonicalizeBroadcastProjections(*kernel);
   SmallVector<gpu::AssumeInBoundsOp> assumptions;
   kernel->walk([&](gpu::AssumeInBoundsOp assumption) {
