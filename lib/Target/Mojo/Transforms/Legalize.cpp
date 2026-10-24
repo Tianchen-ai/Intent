@@ -269,6 +269,7 @@ LogicalResult vectorizeNativeProgram(ModuleOp module, bool fuseTraversals) {
   if (failed(implementations)) return failure();
   auto capabilities = module->getAttrOfType<cpu::CapabilitiesAttr>("intent_cpu.capabilities");
   for (func::FuncOp function : module.getOps<func::FuncOp>()) {
+    materializePredicateStorage(function);
     auto programBinding = function->getAttrOfType<cpu::ImplementationAttr>("intent_cpu.implementation");
     if (!programBinding)
       return function.emitError("Mojo vectorization requires an explicit program implementation");

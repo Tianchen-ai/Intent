@@ -2,6 +2,7 @@
 #define INTENT_TARGET_MOJO_TRANSFORMS_LEGALIZE_H
 
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 
 namespace intent::mojo {
 
@@ -13,6 +14,7 @@ mlir::LogicalResult vectorizeNativeProgram(mlir::ModuleOp module,
                                          bool fuseSharedTraversals);
 mlir::LogicalResult finalizeNativeProgram(mlir::ModuleOp module);
 void isolateLargeComputations(mlir::ModuleOp module);
+void materializePredicateStorage(mlir::func::FuncOp function);
 
 } // namespace intent::mojo
 #endif
