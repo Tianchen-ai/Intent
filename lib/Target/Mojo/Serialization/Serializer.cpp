@@ -452,20 +452,32 @@ private:
     return success();
   }
   LogicalResult emitTyped(vector::ShuffleOp op) {
-    SmallVector<std::string> lanes;
-    int64_t lhsSize = cast<VectorType>(op.getV1().getType()).getNumElements();
-    for (int64_t lane : op.getMask())
-      lanes.push_back(name(lane < lhsSize ? op.getV1() : op.getV2()) + "[" +
-          std::to_string(lane < lhsSize ? lane : lane - lhsSize) + "]");
-    assign(op.getResult(), valueType(op.getType()) + "(" + join(lanes) + ")");
+    auto input = cast<VectorType>(op.getV1().getType());
+    int64_t width = input.getNumElements(), count = op.getType().getNumElements();
+    if (op.getV1().getType() != op.getV2().getType() || count > 2 * width) {
+      SmallVector<std::string> lanes;
+      for (int64_t lane : op.getMask())
+        lanes.push_back(name(lane < width ? op.getV1() : op.getV2()) + "[" +
+            std::to_string(lane < width ? lane : lane - width) + "]");
+      assign(op.getResult(), valueType(op.getType()) + "(" + join(lanes) + ")");
+      return success();
+    }
+    SmallVector<std::string> mask;
+    for (int64_t lane : op.getMask()) mask.push_back(std::to_string(lane));
+    std::string source = name(op.getV1()), other = name(op.getV2());
+    if (count > width) {
+      source += ".join(" + other + ")";
+      other.clear();
+      width *= 2;
+    }
+    mask.resize(width, "0");
+    std::string expression = source + ".shuffle[" + join(mask) + "](" + other + ")";
+    if (count < width) expression += ".slice[" + std::to_string(count) + "]()";
+    assign(op.getResult(), expression);
     return success();
   }
   LogicalResult emitTyped(vector::InterleaveOp op) {
-    SmallVector<std::string> lanes;
-    for (int64_t lane = 0; lane < op.getSourceVectorType().getNumElements(); ++lane)
-      for (Value value : {op.getLhs(), op.getRhs()})
-        lanes.push_back(name(value) + "[" + std::to_string(lane) + "]");
-    assign(op.getResult(), valueType(op.getType()) + "(" + join(lanes) + ")");
+    assign(op.getResult(), name(op.getLhs()) + ".interleave(" + name(op.getRhs()) + ")");
     return success();
   }
   LogicalResult emitTyped(vector::ExtractElementOp op) {
