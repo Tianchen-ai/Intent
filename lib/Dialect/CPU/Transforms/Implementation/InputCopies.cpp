@@ -90,10 +90,128 @@ LogicalResult lowerTranspose(scf::ForOp tiles) {
   return success();
 }
 
+Value interleaveWords(OpBuilder &b, Location loc, ArrayRef<Value> values) {
+  SmallVector<int64_t> pairs, words;
+  for (int64_t lane = 0; lane < 16; ++lane) {
+    pairs.append({lane, lane + 16});
+    words.append({2 * lane, 2 * lane + 1, 2 * lane + 32, 2 * lane + 33});
+  }
+  Value packed = b.create<vector::ShuffleOp>(loc, values[0], values[1], pairs);
+  if (values.size() == 4) {
+    Value high = b.create<vector::ShuffleOp>(loc, values[2], values[3], pairs);
+    packed = b.create<vector::ShuffleOp>(loc, packed, high, words);
+  }
+  return packed;
+}
+
+FailureOr<bool> materializeGroupedCopy(linalg::GenericOp operation,
+                                      OpBuilder::Listener *listener) {
+  if (operation.getNumLoops() != 3 || operation.getNumReductionLoops() ||
+      operation.getNumResults() || operation.getInputs().size() != 1 ||
+      operation.getOutputs().size() != 1) return false;
+  Value source = operation.getInputs()[0], target = operation.getOutputs()[0];
+  auto inputType = dyn_cast<MemRefType>(source.getType());
+  auto outputType = dyn_cast<MemRefType>(target.getType());
+  if (!inputType || !outputType || inputType.getRank() != 3 ||
+      outputType.getRank() != 3 || inputType.getElementType() != outputType.getElementType()) return false;
+  Type element = inputType.getElementType();
+  int64_t group = inputType.getDimSize(2);
+  if (!supportedElement(element) || (group != 2 && group != 4) ||
+      group * element.getIntOrFloatBitWidth() != 32 || outputType.getDimSize(2) != group) return false;
+  for (AffineMap map : operation.getIndexingMapsArray()) if (!map.isIdentity()) return false;
+  Block &body = operation.getRegion().front();
+  if (std::distance(body.begin(), body.end()) != 1 ||
+      body.getTerminator()->getOperand(0) != body.getArgument(0)) return false;
+  StorageAnalysis storage(operation->getParentOfType<func::FuncOp>());
+  if (!storage.disjoint(source, target)) return false;
+
+  OpBuilder b(operation, listener);
+  Location loc = operation.getLoc();
+  Value zero = index(b, loc, 0), one = index(b, loc, 1), word = index(b, loc, group);
+  auto input = b.create<memref::ExtractStridedMetadataOp>(loc, source);
+  auto output = b.create<memref::ExtractStridedMetadataOp>(loc, target);
+  Value groups = output.getSizes()[0], rows = output.getSizes()[1];
+  auto equal = [&](Value a, Value c) -> Value {
+    return b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, a, c);
+  };
+  Value packed = b.create<arith::AndIOp>(loc, equal(output.getStrides()[1], word),
+      equal(output.getStrides()[2], one));
+  packed = b.create<arith::AndIOp>(loc, packed, b.create<arith::CmpIOp>(loc,
+      arith::CmpIPredicate::sge, output.getStrides()[0], b.create<arith::MulIOp>(loc, rows, word)));
+  packed = b.create<arith::AndIOp>(loc, packed, b.create<arith::AndIOp>(loc,
+      equal(input.getStrides()[0], word), equal(input.getStrides()[2], one)));
+  auto scalar = [&](Value groupBegin, Value groupEnd, Value rowBegin, Value rowEnd) {
+    loop(b, loc, groupBegin, groupEnd, 1, [&](Value ordinal) {
+      loop(b, loc, rowBegin, rowEnd, 1, [&](Value row) {
+        for (int64_t member = 0; member < group; ++member) {
+          Value lane = index(b, loc, member);
+          Value value = b.create<memref::LoadOp>(loc, source, ValueRange{ordinal, row, lane});
+          b.create<memref::StoreOp>(loc, value, target, ValueRange{ordinal, row, lane});
+        }
+      });
+    });
+  };
+  auto layout = b.create<scf::IfOp>(loc, packed, true);
+  b.setInsertionPointToStart(layout.thenBlock());
+  auto flatType = MemRefType::get({ShapedType::kDynamic, ShapedType::kDynamic}, element,
+      StridedLayoutAttr::get(b.getContext(), ShapedType::kDynamic, {ShapedType::kDynamic, 1}),
+      outputType.getMemorySpace());
+  Value packedColumns = b.create<arith::MulIOp>(loc, rows, word);
+  Value flat = b.create<memref::ReinterpretCastOp>(loc, flatType, output.getBaseBuffer(),
+      OpFoldResult(output.getOffset()), ArrayRef<OpFoldResult>{groups, packedColumns},
+      ArrayRef<OpFoldResult>{output.getStrides()[0], b.getIndexAttr(1)});
+  auto sourceType = MemRefType::get({ShapedType::kDynamic, ShapedType::kDynamic}, element,
+      StridedLayoutAttr::get(b.getContext(), ShapedType::kDynamic, {ShapedType::kDynamic, 1}),
+      inputType.getMemorySpace());
+  Value sourceColumns = b.create<arith::MulIOp>(loc, groups, word);
+  Value words = b.create<memref::ReinterpretCastOp>(loc, sourceType, input.getBaseBuffer(),
+      OpFoldResult(input.getOffset()), ArrayRef<OpFoldResult>{rows, sourceColumns},
+      ArrayRef<OpFoldResult>{input.getStrides()[1], b.getIndexAttr(1)});
+  auto full = [&](Value extent) -> Value {
+    return b.create<arith::SubIOp>(loc, extent,
+        b.create<arith::RemSIOp>(loc, extent, index(b, loc, transposeWidth)));
+  };
+  Value fullGroups = full(groups), fullRows = full(rows);
+  auto valuesType = VectorType::get({transposeWidth * group}, element);
+  auto wordsType = VectorType::get({transposeWidth}, b.getI32Type());
+  auto tileType = VectorType::get({transposeWidth, transposeWidth}, b.getI32Type());
+  // Exchange complete words with the standard shuffle transpose. This changes
+  // only their physical layout: bitcasts preserve every BF16/INT8 bit pattern.
+  auto tiles = loop(b, loc, zero, fullGroups, transposeWidth, [&](Value ordinal) {
+    loop(b, loc, zero, fullRows, transposeWidth, [&](Value row) {
+      Value tile = b.create<arith::ConstantOp>(loc, tileType, b.getZeroAttr(tileType));
+      for (int64_t lane = 0; lane < transposeWidth; ++lane) {
+        Value value = b.create<vector::LoadOp>(loc, valuesType, words,
+            ValueRange{add(b, loc, row, index(b, loc, lane)), b.create<arith::MulIOp>(loc, ordinal, word)});
+        Value bits = b.create<vector::BitCastOp>(loc, wordsType, value);
+        tile = b.create<vector::InsertOp>(loc, bits, tile, ArrayRef<int64_t>{lane});
+      }
+      Value transposed = b.create<vector::TransposeOp>(loc, tile, ArrayRef<int64_t>{1, 0});
+      for (int64_t lane = 0; lane < transposeWidth; ++lane) {
+        Value bits = b.create<vector::ExtractOp>(loc, transposed, ArrayRef<int64_t>{lane});
+        Value value = b.create<vector::BitCastOp>(loc, valuesType, bits);
+        b.create<vector::StoreOp>(loc, value, flat,
+            ValueRange{add(b, loc, ordinal, index(b, loc, lane)), b.create<arith::MulIOp>(loc, row, word)});
+      }
+    });
+  });
+  if (failed(lowerTranspose(tiles))) return failure();
+  scalar(zero, fullGroups, fullRows, rows);
+  scalar(fullGroups, groups, zero, rows);
+  b.setInsertionPointToStart(layout.elseBlock());
+  scalar(zero, groups, zero, rows);
+  operation.erase();
+  return true;
+}
+
 } // namespace
 
 FailureOr<bool> tryMaterializeInputCopy(linalg::GenericOp operation,
     int64_t width, OpBuilder::Listener *listener) {
+  if (width >= transposeWidth) {
+    auto grouped = materializeGroupedCopy(operation, listener);
+    if (failed(grouped) || *grouped) return grouped;
+  }
   if (width < transposeWidth || operation.getNumResults() ||
       operation.getNumLoops() != 2 || operation.getNumReductionLoops() ||
       operation.getInputs().size() != 1 || operation.getOutputs().size() != 1)
@@ -190,22 +308,13 @@ FailureOr<bool> tryMaterializeInputCopy(linalg::GenericOp operation,
         ArrayRef<OpFoldResult>{size}, ArrayRef<OpFoldResult>{builder.getIndexAttr(1)});
     Value full = builder.create<arith::SubIOp>(loc, rows,
         builder.create<arith::RemSIOp>(loc, rows, index(builder, loc, 16)));
-    SmallVector<int64_t> pairMask, groupMask;
-    for (int64_t lane = 0; lane < 16; ++lane) {
-      pairMask.append({lane, lane + 16});
-      groupMask.append({2 * lane, 2 * lane + 1, 2 * lane + 32, 2 * lane + 33});
-    }
     auto lanes = VectorType::get({16}, inputType.getElementType());
     loop(builder, loc, zero, full, 16, [&](Value row) {
       SmallVector<Value> values;
       for (int64_t column = 0; column < groupSize; ++column)
         values.push_back(builder.create<vector::LoadOp>(loc, lanes, input,
             ValueRange{index(builder, loc, column), row}));
-      Value packed = builder.create<vector::ShuffleOp>(loc, values[0], values[1], pairMask);
-      if (groupSize == 4) {
-        Value high = builder.create<vector::ShuffleOp>(loc, values[2], values[3], pairMask);
-        packed = builder.create<vector::ShuffleOp>(loc, packed, high, groupMask);
-      }
+      Value packed = interleaveWords(builder, loc, values);
       builder.create<vector::StoreOp>(loc, packed, flat,
           ValueRange{builder.create<arith::MulIOp>(loc, row, group)});
     });

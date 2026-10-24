@@ -244,15 +244,59 @@ void copyRepresentation(OpBuilder &b, Location loc, Value source,
   };
   Value full = b.create<arith::DivSIOp>(loc, extent, panel);
   Value tail = b.create<arith::RemSIOp>(loc, extent, panel);
-  if (point->getParentOfType<scf::ForOp>() || point->getParentOfType<scf::ParallelOp>() ||
-      point->getParentOfType<TasksOp>() || point->getParentOfType<TaskDispatchOp>()) {
-    loop(b, loc, zero, full, 1, [&](Value ordinal) { copyPanel(ordinal, panel); });
-  } else {
-    auto parallel = b.create<scf::ParallelOp>(loc, ValueRange{zero}, ValueRange{full}, ValueRange{one});
+  Type element = type.getElementType();
+  bool words = type.getRank() == 2 && element == requirement.elementType &&
+      isa<FloatType, IntegerType>(element) &&
+      (requirement.panelSize == 2 || requirement.panelSize == 4) &&
+      element.getIntOrFloatBitWidth() * requirement.panelSize == 32;
+  auto copyPanels = [&](Value begin, Value count) {
+    auto metadata = b.create<memref::ExtractStridedMetadataOp>(loc, source);
+    Value groupStride = multiply(b, loc, panel, metadata.getStrides()[requirement.panelAxis]);
+    Value offset = add(b, loc, metadata.getOffset(), multiply(b, loc, begin, groupStride));
+    Value rows = metadata.getSizes()[1 - requirement.panelAxis];
+    auto groupedType = MemRefType::get(
+        {ShapedType::kDynamic, ShapedType::kDynamic, requirement.panelSize}, element,
+        StridedLayoutAttr::get(b.getContext(), ShapedType::kDynamic,
+            {ShapedType::kDynamic, ShapedType::kDynamic, ShapedType::kDynamic}), type.getMemorySpace());
+    Value input = b.create<memref::ReinterpretCastOp>(loc, groupedType,
+        metadata.getBaseBuffer(), OpFoldResult(offset),
+        ArrayRef<OpFoldResult>{count, rows, b.getIndexAttr(requirement.panelSize)},
+        ArrayRef<OpFoldResult>{groupStride, metadata.getStrides()[1 - requirement.panelAxis],
+                              metadata.getStrides()[requirement.panelAxis]});
+    Value output = b.create<memref::SubViewOp>(loc, storage,
+        ArrayRef<OpFoldResult>{begin, b.getIndexAttr(0), b.getIndexAttr(0)},
+        ArrayRef<OpFoldResult>{count, rows, b.getIndexAttr(requirement.panelSize)},
+        SmallVector<OpFoldResult>(3, b.getIndexAttr(1)));
+    producers.record(preparation, createInputCopy(b, loc, input, output, 2));
+  };
+  auto copyComplete = [&](bool grouped) {
+    if (point->getParentOfType<scf::ForOp>() || point->getParentOfType<scf::ParallelOp>() ||
+        point->getParentOfType<TasksOp>() || point->getParentOfType<TaskDispatchOp>()) {
+      if (grouped) copyPanels(zero, full);
+      else loop(b, loc, zero, full, 1, [&](Value ordinal) { copyPanel(ordinal, panel); });
+    } else {
+      Value step = grouped ? index(b, loc, 16) : one;
+      auto parallel = b.create<scf::ParallelOp>(loc, ValueRange{zero}, ValueRange{full}, ValueRange{step});
+      OpBuilder::InsertionGuard guard(b);
+      b.setInsertionPointToStart(parallel.getBody());
+      Value begin = parallel.getInductionVars()[0];
+      if (grouped) copyPanels(begin, b.create<arith::MinSIOp>(loc, step, b.create<arith::SubIOp>(loc, full, begin)));
+      else copyPanel(begin, panel);
+    }
+  };
+  if (words) {
+    // Adjacent groups are a transpose in word units only when their source
+    // members are contiguous. Keep ordinary row-wise producer copies intact.
+    auto metadata = b.create<memref::ExtractStridedMetadataOp>(loc, source);
+    auto contiguous = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+        metadata.getStrides()[requirement.panelAxis], one);
+    auto choice = b.create<scf::IfOp>(loc, contiguous, true);
     OpBuilder::InsertionGuard guard(b);
-    b.setInsertionPointToStart(parallel.getBody());
-    copyPanel(parallel.getInductionVars()[0], panel);
-  }
+    b.setInsertionPointToStart(choice.thenBlock());
+    copyComplete(true);
+    b.setInsertionPointToStart(choice.elseBlock());
+    copyComplete(false);
+  } else copyComplete(false);
   auto hasTail = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, tail, zero);
   auto remainder = b.create<scf::IfOp>(loc, hasTail, false);
   {

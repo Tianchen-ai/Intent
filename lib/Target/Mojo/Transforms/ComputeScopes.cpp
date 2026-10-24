@@ -1,9 +1,11 @@
 #include "Legalize.h"
 #include "Intent/Dialect/CPU/IR/CPUOps.h"
+#include "mlir/Dialect/AMX/AMXDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Transforms/RegionUtils.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/SmallPtrSet.h"
 
 using namespace mlir;
 
@@ -40,6 +42,37 @@ void isolateLargeComputations(ModuleOp module) {
     // This also bounds a large outer CFG instead of only cutting its leaves.
     sizes[operation] = 1;
     return WalkResult::advance();
+  });
+  llvm::SmallPtrSet<Operation *, 32> boundaries(selected.begin(), selected.end());
+  llvm::SmallPtrSet<Operation *, 32> matrixOwners, matrixScopes;
+  module.walk([&](Operation *operation) {
+    auto tile = [](Type type) { return isa<amx::TileType>(type); };
+    if (!llvm::any_of(operation->getOperandTypes(), tile) &&
+        !llvm::any_of(operation->getResultTypes(), tile)) return;
+    bool owned = false;
+    for (Operation *parent = operation->getParentOp(); parent; parent = parent->getParentOp()) {
+      bool boundary = boundaries.contains(parent);
+      bool entry = isa<cpu::TaskDispatchOp, func::FuncOp>(parent);
+      if (boundary) matrixScopes.insert(parent);
+      if (!owned && (boundary || entry)) {
+        matrixOwners.insert(parent);
+        owned = true;
+      }
+      if (entry) break;
+    }
+  });
+  // Tile configuration is caller-saved even when no tile SSA crosses a call.
+  // A function with direct AMX operations must not call an outlined AMX child:
+  // that child's release can invalidate the caller's configured tile state.
+  // Keep such nested microprograms together; independent AMX siblings and
+  // non-matrix computation scopes can still be isolated.
+  llvm::erase_if(selected, [&](Operation *operation) {
+    if (!matrixScopes.contains(operation)) return false;
+    for (Operation *parent = operation->getParentOp(); parent; parent = parent->getParentOp()) {
+      if (matrixOwners.contains(parent)) return true;
+      if (isa<cpu::TaskDispatchOp, func::FuncOp>(parent)) break;
+    }
+    return false;
   });
   for (Operation *operation : selected) {
     OpBuilder builder(operation);

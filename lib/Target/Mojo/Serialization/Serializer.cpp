@@ -342,6 +342,13 @@ public:
       addNative<vector::LoadOp>(result);
       addNative<vector::StoreOp>(result);
       addNative<vector::BroadcastOp>(result);
+      addNative<vector::BitCastOp>(result, [](vector::BitCastOp op) {
+        auto source = op.getSourceVectorType(), target = op.getResultVectorType();
+        return source.getRank() == 1 && target.getRank() == 1 &&
+                !source.isScalable() && !target.isScalable() &&
+                source.getElementTypeBitWidth() >= 8 && target.getElementTypeBitWidth() >= 8
+            ? success() : op.emitOpError("requires fixed one-dimensional byte-addressable vectors for Mojo bitcast");
+      });
       addNative<vector::FromElementsOp>(result);
       addNative<vector::StepOp>(result);
       addNative<vector::ShuffleOp>(result);
@@ -485,6 +492,12 @@ private:
   LogicalResult emitTyped(vector::BroadcastOp op) {
     assign(op.getResult(), valueType(op.getType()) + "(" +
         (op.getType().getElementType().isInteger(1) ? "fill=" : "") + name(op.getSource()) + ")");
+    return success();
+  }
+  LogicalResult emitTyped(vector::BitCastOp op) {
+    auto type = op.getResultVectorType();
+    assign(op.getResult(), "bitcast[DType." + dtype(type.getElementType()) + ", " +
+        std::to_string(type.getNumElements()) + "](" + name(op.getSource()) + ")");
     return success();
   }
   LogicalResult emitTyped(vector::FromElementsOp op) {
