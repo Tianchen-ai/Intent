@@ -1,6 +1,7 @@
 {
   "cpu": {
     "mojo.region_contraction": [
+      {"shared": [1, 128, 128, 128, 64], "local": {"vector_width": 16, "micro_m": 6, "micro_n": 4, "register_replicas": 1, "reduction_replicas": 1}, "implementations": ["mojo.vector", "mojo.scan_scalar", "mojo.register_float"]},
       {"shared": [1, 128, 128, 128, 256], "local": {"vector_width": 16, "micro_m": 32, "micro_n": 2, "register_replicas": 1, "reduction_replicas": 1}, "implementations": ["mojo.vector", "mojo.scan_scalar", "mojo.amx_bfloat_direct"]},
       {"shared": [1, 128, 128, 128, 128], "local": {"vector_width": 16, "micro_m": 32, "micro_n": 2, "register_replicas": 1, "reduction_replicas": 1}, "implementations": ["mojo.vector", "mojo.scan_scalar", "mojo.amx_bfloat_direct"]},
       {"shared": [1, 64, 64, 64, 64], "local": {"vector_width": 16, "micro_m": 16, "micro_n": 4, "register_replicas": 1, "reduction_replicas": 1}, "implementations": ["mojo.vector", "mojo.scan_scalar", "mojo.amx_bfloat_direct"]},
