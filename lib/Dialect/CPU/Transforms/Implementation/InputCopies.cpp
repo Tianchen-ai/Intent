@@ -125,12 +125,15 @@ FailureOr<bool> tryMaterializeInputCopy(linalg::GenericOp operation,
       (!ShapedType::isDynamic(outputStrides[1]) && outputStrides[1] != 1))
     return false;
   auto columnBound = constantDimensionUpperBound(source, 1);
-  bool byteGroup = !extension && inputType.getElementType().isInteger(8) &&
-      outputType.getElementType().isInteger(8) && outputStrides[0] == 4 &&
-      outputStrides[1] == 1 && columnBound && *columnBound <= 4;
+  Type element = inputType.getElementType();
+  int64_t bits = element.getIntOrFloatBitWidth();
+  int64_t groupSize = bits == 8 ? 4 : bits == 16 ? 2 : 0;
+  bool wordGroup = !extension && groupSize &&
+      outputType.getElementType() == element && outputStrides[0] == groupSize &&
+      outputStrides[1] == 1 && columnBound && *columnBound <= groupSize;
   for (unsigned axis = 0; axis < 2; ++axis)
     if (auto bound = constantDimensionUpperBound(source, axis);
-        bound && *bound < transposeWidth && !(byteGroup && axis == 1)) return false;
+        bound && *bound < transposeWidth && !(wordGroup && axis == 1)) return false;
   // Prove reordering at the complete, attached read point, before constructing
   // any new control regions or descriptors used by this copy.
   StorageAnalysis storage(operation->getParentOfType<func::FuncOp>());
@@ -166,9 +169,9 @@ FailureOr<bool> tryMaterializeInputCopy(linalg::GenericOp operation,
       });
     });
   };
-  if (byteGroup) {
-    Value four = index(builder, loc, 4);
-    Value complete = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, columns, four);
+  if (wordGroup) {
+    Value group = index(builder, loc, groupSize);
+    Value complete = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, columns, group);
     if (contiguous.condition) complete = builder.create<arith::AndIOp>(loc, complete, contiguous.condition);
     auto choice = builder.create<scf::IfOp>(loc, complete, true);
     builder.setInsertionPointToStart(choice.thenBlock());
@@ -181,7 +184,7 @@ FailureOr<bool> tryMaterializeInputCopy(linalg::GenericOp operation,
     auto flatType = MemRefType::get({ShapedType::kDynamic}, outputType.getElementType(),
         StridedLayoutAttr::get(builder.getContext(), ShapedType::kDynamic, {1}),
         outputType.getMemorySpace());
-    Value size = builder.create<arith::MulIOp>(loc, rows, four);
+    Value size = builder.create<arith::MulIOp>(loc, rows, group);
     Value flat = builder.create<memref::ReinterpretCastOp>(loc, flatType,
         metadata.getBaseBuffer(), OpFoldResult(metadata.getOffset()),
         ArrayRef<OpFoldResult>{size}, ArrayRef<OpFoldResult>{builder.getIndexAttr(1)});
@@ -195,14 +198,16 @@ FailureOr<bool> tryMaterializeInputCopy(linalg::GenericOp operation,
     auto lanes = VectorType::get({16}, inputType.getElementType());
     loop(builder, loc, zero, full, 16, [&](Value row) {
       SmallVector<Value> values;
-      for (int64_t column = 0; column < 4; ++column)
+      for (int64_t column = 0; column < groupSize; ++column)
         values.push_back(builder.create<vector::LoadOp>(loc, lanes, input,
             ValueRange{index(builder, loc, column), row}));
-      Value low = builder.create<vector::ShuffleOp>(loc, values[0], values[1], pairMask);
-      Value high = builder.create<vector::ShuffleOp>(loc, values[2], values[3], pairMask);
-      Value packed = builder.create<vector::ShuffleOp>(loc, low, high, groupMask);
+      Value packed = builder.create<vector::ShuffleOp>(loc, values[0], values[1], pairMask);
+      if (groupSize == 4) {
+        Value high = builder.create<vector::ShuffleOp>(loc, values[2], values[3], pairMask);
+        packed = builder.create<vector::ShuffleOp>(loc, packed, high, groupMask);
+      }
       builder.create<vector::StoreOp>(loc, packed, flat,
-          ValueRange{builder.create<arith::MulIOp>(loc, row, four)});
+          ValueRange{builder.create<arith::MulIOp>(loc, row, group)});
     });
     scalar(full, rows, zero, columns);
     builder.setInsertionPointToStart(choice.elseBlock());

@@ -310,9 +310,12 @@ public:
                           op.getKind() == vector::CombiningKind::MUL;
         bool extrema = op.getKind() == vector::CombiningKind::MAXIMUMF ||
                        op.getKind() == vector::CombiningKind::MINIMUMF;
-        if (vectorType.getRank() != 1 || vectorType.isScalable() || (!floating && !integer) ||
-            (!arithmetic && !(floating && extrema)))
-          return op.emitOpError("requires a fixed one-dimensional same-dtype add/mul or floating maximum/minimum reduction for Mojo");
+        bool bitwise = (integer || element.isInteger(1)) &&
+            (op.getKind() == vector::CombiningKind::AND || op.getKind() == vector::CombiningKind::OR ||
+             op.getKind() == vector::CombiningKind::XOR);
+        if (vectorType.getRank() != 1 || vectorType.isScalable() ||
+            !((arithmetic && (floating || integer)) || (floating && extrema) || bitwise))
+          return op.emitOpError("requires a supported fixed one-dimensional arithmetic or bitwise reduction for Mojo");
         if (floating && arithmetic &&
             (op.getFastmath() & arith::FastMathFlags::reassoc) == arith::FastMathFlags::none)
           return op.emitOpError("requires floating reassociation permission for Mojo SIMD reduction");
@@ -477,6 +480,18 @@ private:
     return success();
   }
   LogicalResult emitTyped(vector::ReductionOp op) {
+    if (op.getKind() == vector::CombiningKind::AND || op.getKind() == vector::CombiningKind::OR ||
+        op.getKind() == vector::CombiningKind::XOR) {
+      bool conjunction = op.getKind() == vector::CombiningKind::AND;
+      bool disjunction = op.getKind() == vector::CombiningKind::OR;
+      std::string name = conjunction ? "and" : disjunction ? "or" : "xor";
+      std::string expression = "llvm_intrinsic[\"llvm.vector.reduce." + name + "\", " +
+          valueType(op.getDest().getType()) + ", has_side_effect=False](" + this->name(op.getVector()) + ")";
+      if (op.getAcc()) expression = "(" + this->name(op.getAcc()) +
+          (conjunction ? " & " : disjunction ? " | " : " ^ ") + expression + ")";
+      assign(op.getDest(), expression);
+      return success();
+    }
     if (op.getKind() == vector::CombiningKind::MAXIMUMF ||
         op.getKind() == vector::CombiningKind::MINIMUMF) {
       bool maximum = op.getKind() == vector::CombiningKind::MAXIMUMF;
@@ -521,8 +536,9 @@ private:
 LogicalResult verifySourceOperation(Operation *operation) {
   auto verifyType = [&](Type type) -> LogicalResult {
     if (auto tile = dyn_cast<amx::TileType>(type))
-      return tile.getElementType().isInteger(8) || tile.getElementType().isInteger(32)
-          ? success() : operation->emitOpError("Mojo AMX currently requires integer tiles");
+      return tile.getElementType().isInteger(8) || tile.getElementType().isInteger(32) ||
+             tile.getElementType().isBF16() || tile.getElementType().isF32()
+          ? success() : operation->emitOpError("Mojo AMX requires i8/i32 or bf16/f32 tiles");
     if (auto memory = dyn_cast<MemRefType>(type)) {
       if (failed(verifyNativeMemoryType(operation, memory))) return failure();
       auto space = dyn_cast_or_null<IntegerAttr>(memory.getMemorySpace());
@@ -585,7 +601,8 @@ LogicalResult serializeProgram(ModuleOp module, std::string &source, std::string
       {"family", "cpu"}, {"vector_bits", capabilities.getVectorBits()},
       {"workers", capabilities.getWorkers()},
       {"private_bytes", capabilities.getPrivateBytes()},
-      {"matrix_i8_i32", capabilities.getMatrixI8I32()}};
+      {"matrix_i8_i32", capabilities.getMatrixI8I32()},
+      {"matrix_bf16_f32", capabilities.getMatrixBF16F32()}};
   interface["native_dependencies"] = llvm::json::Array{"std"};
   interface["source_prelude_end"] = static_cast<int64_t>(output.tell());
   llvm::json::Array candidates;

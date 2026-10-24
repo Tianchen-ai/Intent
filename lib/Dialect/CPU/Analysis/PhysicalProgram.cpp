@@ -205,12 +205,14 @@ LogicalResult verifyCPUProgram(ModuleOp module, CPUProgramStage stage) {
   module.walk([&](Operation *operation) {
     llvm::StringRef dialect = operation->getName().getDialectNamespace();
     bool matrix = isa<amx::TileZeroOp, amx::TileLoadOp, amx::TileStoreOp,
-                      amx::TileMulIOp>(operation) && stage != CPUProgramStage::Values &&
-        capabilities && capabilities.getMatrixI8I32();
+                      amx::TileMulIOp, amx::TileMulFOp>(operation) && stage != CPUProgramStage::Values && capabilities;
     if (matrix)
       for (Type type : llvm::concat<Type>(operation->getOperandTypes(), operation->getResultTypes()))
         if (auto tile = dyn_cast<amx::TileType>(type))
-          matrix &= tile.getElementType().isInteger(8) || tile.getElementType().isInteger(32);
+          matrix &= ((tile.getElementType().isInteger(8) || tile.getElementType().isInteger(32)) &&
+                     capabilities.getMatrixI8I32()) ||
+                    ((tile.getElementType().isBF16() || tile.getElementType().isF32()) &&
+                     capabilities.getMatrixBF16F32());
     if (dialect != "builtin" && dialect != "func" && dialect != "arith" &&
         dialect != "math" && dialect != "memref" && dialect != "scf" &&
         dialect != "vector" && dialect != "linalg" && dialect != "intent_cpu" && !matrix &&

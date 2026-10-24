@@ -61,7 +61,7 @@ LogicalResult EntryRequirementsAttr::verify(
 
 LogicalResult CapabilitiesAttr::verify(
     llvm::function_ref<InFlightDiagnostic()> error, int64_t vectorBits,
-    int64_t workers, int64_t privateBytes, bool) {
+    int64_t workers, int64_t privateBytes, bool, bool) {
   if (vectorBits < 32 || vectorBits % 32 || workers <= 0 || privateBytes <= 0)
     return error() << "CPU capabilities require positive byte-addressable vector, worker and private-storage budgets";
   return success();

@@ -27,7 +27,8 @@ def CPUConfigureTarget : CPUTransform<"intent-cpu-configure-target",
     Option<"vectorBits", "vector-bits", "int64_t", "0", "Hardware vector width in bits">,
     Option<"workers", "workers", "int64_t", "0", "Available CPU workers">,
     Option<"privateBytes", "private-bytes", "int64_t", "262144", "Private storage budget in bytes">,
-    Option<"matrixI8I32", "matrix-i8-i32", "bool", "false", "Signed i8 to i32 matrix capability">
+    Option<"matrixI8I32", "matrix-i8-i32", "bool", "false", "Signed i8 to i32 matrix capability">,
+    Option<"matrixBF16F32", "matrix-bf16-f32", "bool", "false", "Native BF16 to f32 matrix capability">
   ];
 }
 

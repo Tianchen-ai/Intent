@@ -20,7 +20,7 @@ public:
     auto capabilities = CapabilitiesAttr::getChecked(
         [&]() { return module.emitError(); }, module.getContext(),
         vectorBits.getValue(), workers.getValue(), privateBytes.getValue(),
-        matrixI8I32.getValue());
+        matrixI8I32.getValue(), matrixBF16F32.getValue());
     if (!capabilities)
       return signalPassFailure();
     module->setAttr("intent_cpu.capabilities", capabilities);

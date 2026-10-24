@@ -56,7 +56,9 @@ Value subview(OpBuilder &b, Location loc, Value source,
       SmallVector<OpFoldResult>(offsets.size(), b.getIndexAttr(1)));
 }
 
-LogicalResult formTile(OpBuilder &b, linalg::GenericOp operation,
+} // namespace
+
+LogicalResult formRegisterTile(OpBuilder &b, linalg::GenericOp operation,
     const ContractionTile &tile, ConfigurationAttr configuration, ImplementationAttr binding) {
   Location loc = operation.getLoc();
   int64_t microM = implementationParameter(binding, "micro_m");
@@ -177,8 +179,6 @@ LogicalResult formTile(OpBuilder &b, linalg::GenericOp operation,
   return success();
 }
 
-}
-
 cpu::ImplementationRegistry implementations() {
   ImplementationRegistry result;
   registerQuantizedImplementations(result);
@@ -215,7 +215,7 @@ cpu::ImplementationRegistry implementations() {
             " accumulator elements, exceeding private storage capacity " +
             std::to_string(capabilities.getPrivateBytes() / bytes);
       return std::nullopt;
-    }, std::move(contractionParameters), formTile, {}};
+    }, std::move(contractionParameters), formRegisterTile, {}};
   contraction.parameterRelations = [](DictionaryAttr values, CapabilitiesAttr) -> std::optional<std::string> {
     int64_t count = cast<IntegerAttr>(values.get("micro_m")).getInt() *
                     cast<IntegerAttr>(values.get("micro_n")).getInt();

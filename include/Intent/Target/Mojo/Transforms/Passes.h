@@ -13,5 +13,7 @@ void buildMojoPipeline(mlir::OpPassManager &manager);
 cpu::ImplementationRegistry implementations();
 int64_t registerContractionRows(mlir::linalg::GenericOp operation);
 mlir::LogicalResult materializeRegisterContractions(mlir::func::FuncOp function);
+mlir::LogicalResult formRegisterTile(mlir::OpBuilder &, mlir::linalg::GenericOp,
+    const cpu::ContractionTile &, cpu::ConfigurationAttr, cpu::ImplementationAttr);
 }
 #endif

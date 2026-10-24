@@ -25,6 +25,7 @@ struct CPUOptions {
   int64_t workers = 0;
   bool matrixI8I32 = false;
   int64_t privateBytes = 256 * 1024;
+  bool matrixBF16F32 = false;
 };
 
 struct DSAOptions {

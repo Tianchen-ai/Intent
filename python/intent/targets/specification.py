@@ -67,13 +67,16 @@ class CPUCompilationTarget:
     workers: int
     matrix_i8_i32: bool = False
     private_bytes: int = 262144
+    matrix_bf16_f32: bool = False
 
     def __post_init__(self) -> None:
         from .provider import provider
         if provider(self.provider).family != "cpu":
             raise ValueError(f"unsupported CPU source provider: {self.provider}")
-        if any(type(value) is not int for value in (self.vector_bits, self.workers, self.private_bytes)) or type(self.matrix_i8_i32) is not bool:
-            raise TypeError("CPU budgets must be integers and matrix_i8_i32 must be boolean")
+        if any(type(value) is not int for value in (self.vector_bits, self.workers, self.private_bytes)) or any(
+            type(value) is not bool for value in (self.matrix_i8_i32, self.matrix_bf16_f32)
+        ):
+            raise TypeError("CPU budgets must be integers and matrix capabilities must be boolean")
         if min(self.vector_bits, self.workers, self.private_bytes) <= 0:
             raise ValueError("CPU compilation capabilities and storage budgets must be positive")
 
@@ -84,7 +87,8 @@ class CPUCompilationTarget:
     def compiler_options(self) -> tuple[str, ...]:
         return (f"--target={self.provider}", f"--cpu-vector-bits={self.vector_bits}",
                 f"--cpu-workers={self.workers}", f"--cpu-private-bytes={self.private_bytes}",
-                f"--cpu-matrix-i8-i32={str(self.matrix_i8_i32).lower()}")
+                f"--cpu-matrix-i8-i32={str(self.matrix_i8_i32).lower()}",
+                f"--cpu-matrix-bf16-f32={str(self.matrix_bf16_f32).lower()}")
 
     @property
     def compiler_role(self) -> str:

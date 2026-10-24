@@ -33,6 +33,7 @@ void buildCPUPipeline(OpPassManager &manager,
   target.workers = options.workers;
   target.privateBytes = options.privateBytes;
   target.matrixI8I32 = options.matrixI8I32;
+  target.matrixBF16F32 = options.matrixBF16F32;
   manager.addPass(createCPUConfigureTarget(target));
   manager.addPass(createCPUBufferizeValues());
 

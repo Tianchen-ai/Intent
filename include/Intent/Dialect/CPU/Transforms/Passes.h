@@ -18,6 +18,7 @@ struct CPUCompilationOptions : mlir::PassPipelineOptions<CPUCompilationOptions> 
   Option<int64_t> workers{*this, "workers", llvm::cl::init(0)};
   Option<int64_t> privateBytes{*this, "private-bytes", llvm::cl::init(262144)};
   Option<bool> matrixI8I32{*this, "matrix-i8-i32", llvm::cl::init(false)};
+  Option<bool> matrixBF16F32{*this, "matrix-bf16-f32", llvm::cl::init(false)};
 };
 
 void buildCPUPipeline(mlir::OpPassManager &manager, const CPUCompilationOptions &options);

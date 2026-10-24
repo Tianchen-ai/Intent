@@ -25,8 +25,11 @@ std::string intrinsic(StringRef name, ArrayRef<std::string> arguments, bool resu
 LogicalResult capability(Operation *operation) {
   auto facts = operation->getParentOfType<ModuleOp>()->getAttrOfType<cpu::CapabilitiesAttr>(
       "intent_cpu.capabilities");
-  if (!facts || !facts.getMatrixI8I32())
-    return operation->emitOpError("AMX integer source requires the native matrix_i8_i32 capability");
+  bool floating = false;
+  for (Type type : llvm::concat<Type>(operation->getOperandTypes(), operation->getResultTypes()))
+    if (auto tile = dyn_cast<amx::TileType>(type)) floating |= isa<FloatType>(tile.getElementType());
+  if (!facts || (floating ? !facts.getMatrixBF16F32() : !facts.getMatrixI8I32()))
+    return operation->emitOpError("AMX source requires the matching native matrix capability");
   return success();
 }
 
@@ -37,8 +40,9 @@ template <typename Op> LogicalResult memory(Op operation) {
   int64_t offset;
   if (type.getRank() != 2 || failed(type.getStridesAndOffset(strides, offset)) || strides[1] != 1)
     return operation.emitOpError("AMX native memory requires a two-dimensional row-contiguous view");
-  if (!type.getElementType().isInteger(8) && !type.getElementType().isInteger(32))
-    return operation.emitOpError("AMX native memory currently requires integer storage");
+  if (!type.getElementType().isInteger(8) && !type.getElementType().isInteger(32) &&
+      !type.getElementType().isBF16() && !type.getElementType().isF32())
+    return operation.emitOpError("AMX native memory requires i8/i32 or bf16/f32 storage");
   return success();
 }
 
@@ -86,6 +90,13 @@ const OperationEmitters<NativeSourceEmitter> &matrixEmitters() {
           (op.getIsZextRhs() ? "u" : "s") + "d";
       assign(out, op.getRes(), intrinsic(name, {constant(output.getShape()[0]),
           constant(output.getShape()[1] * 4), constant(op.getLhsTileType().getShape()[1]),
+          out.valueString(op.getAcc()), out.valueString(op.getLhs()), out.valueString(op.getRhs())}));
+      return success();
+    });
+    result.add<amx::TileMulFOp>(capability, [](amx::TileMulFOp op, NativeSourceEmitter &out) {
+      auto output = op.getTileType();
+      assign(out, op.getRes(), intrinsic("tdpbf16ps", {constant(output.getShape()[0]),
+          constant(output.getShape()[1] * 4), constant(op.getLhsTileType().getShape()[1] * 2),
           out.valueString(op.getAcc()), out.valueString(op.getLhs()), out.valueString(op.getRhs())}));
       return success();
     });

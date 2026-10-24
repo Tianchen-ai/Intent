@@ -1,9 +1,12 @@
 #include "Intent/Target/Mojo/Transforms/Matrix.h"
+#include "Intent/Target/Mojo/Transforms/Passes.h"
 #include "Intent/Dialect/CPU/Analysis/PhysicalProgram.h"
 #include "Intent/Dialect/CPU/Transforms/Structure/LoopBuilders.h"
 #include "mlir/Dialect/AMX/AMXDialect.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Math/IR/Math.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/Matchers.h"
 
 using namespace mlir;
@@ -12,44 +15,62 @@ namespace intent::mojo {
 using namespace cpu;
 namespace {
 
-LogicalResult formIntegerTile(OpBuilder &b, linalg::GenericOp operation,
+LogicalResult formMatrixTile(OpBuilder &b, linalg::GenericOp operation,
     const ContractionTile &tile, ConfigurationAttr, ImplementationAttr binding) {
   Location loc = operation.getLoc();
   b.getContext()->getOrLoadDialect<amx::AMXDialect>();
   int64_t microM = implementationParameter(binding, "micro_m");
   int64_t columnTiles = implementationParameter(binding, "micro_n");
-  const InputSupply *right = nullptr;
+  Type element = cast<MemRefType>(tile.lhs.getType()).getElementType();
+  bool floating = element.isBF16();
+  int64_t pack = floating ? 2 : 4, depth = floating ? 32 : 64;
+  Type accumulator = floating ? Type(b.getF32Type()) : Type(b.getI32Type());
+  const InputSupply *right = nullptr, *left = nullptr;
   for (const auto &supply : tile.inputs) {
-    if (supply.operand == 1 && supply.panelAxis == 0 && supply.panelSize == 4)
+    if (supply.operand == 1 && supply.panelAxis == 0 && supply.panelSize == pack)
       right = &supply;
-    else return operation.emitError("AMX integer contraction received an incompatible input supply");
+    else if (supply.operand == 0 && supply.panelAxis == 1 && floating)
+      left = &supply;
+    else return operation.emitError("AMX contraction received an incompatible input supply");
   }
   if (!right)
-    return operation.emitError("AMX integer contraction requires its declared four-byte B panels");
+    return operation.emitError("AMX contraction requires its declared four-byte B panels");
   Value zero = index(b, loc, 0), one = index(b, loc, 1);
   auto sub = [&](Value a, Value c) -> Value { return b.create<arith::SubIOp>(loc, a, c); };
   auto full = [&](Value size, int64_t quantum) -> Value {
     return sub(size, b.create<arith::RemSIOp>(loc, size, index(b, loc, quantum)));
   };
   // Existing input supply owns the packing and its lifetime. B's representation
-  // [K/4, N, 4] is precisely the four-byte grouping consumed by TDPBSSD.
+  // [K/pack, N, pack] is the four-byte grouping consumed by the tile dot.
   Value packedB = b.create<memref::CollapseShapeOp>(loc, right->storage,
       ArrayRef<ReassociationIndices>{{0}, {1, 2}});
-  Value bRow = b.create<arith::DivSIOp>(loc, sub(tile.kBegin, right->begins[0]), index(b, loc, 4));
-  Value bColumn = multiply(b, loc, sub(tile.nBegin, right->begins[1]), index(b, loc, 4));
-  Value mFull = full(tile.mCount, 16), nFull = full(tile.nCount, 16), kFull = full(tile.depth, 64);
-  auto accumulatorType = amx::TileType::get({16, 16}, b.getI32Type());
-  auto inputType = amx::TileType::get({16, 64}, b.getI8Type());
+  Value bRow = b.create<arith::DivSIOp>(loc, sub(tile.kBegin, right->begins[0]), index(b, loc, pack));
+  Value bColumn = multiply(b, loc, sub(tile.nBegin, right->begins[1]), index(b, loc, pack));
+  Value mFull = full(tile.mCount, 16), nFull = full(tile.nCount, 16), kFull = full(tile.depth, depth);
+  auto accumulatorType = amx::TileType::get({16, 16}, accumulator);
+  auto inputType = amx::TileType::get({16, depth}, element);
   auto lhsMetadata = b.create<memref::ExtractStridedMetadataOp>(loc, tile.lhs);
   Value contiguous = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
       lhsMetadata.getStrides()[1], one);
   auto loadLeft = [&](Value row, Value column) -> Value {
+    if (left) {
+      Value packed = b.create<memref::CollapseShapeOp>(loc, left->storage,
+          ArrayRef<ReassociationIndices>{{0, 1}, {2}});
+      Value k = sub(column, left->begins[1]);
+      Value width = index(b, loc, left->panelSize);
+      Value panel = b.create<arith::DivSIOp>(loc, k, width);
+      Value rowBase = multiply(b, loc, panel,
+          b.create<memref::DimOp>(loc, left->storage, 1));
+      return b.create<amx::TileLoadOp>(loc, inputType, packed,
+          ValueRange{add(b, loc, rowBase, sub(row, left->begins[0])),
+                     b.create<arith::RemSIOp>(loc, k, width)});
+    }
     // AMX accepts the existing row pitch. Only noncontiguous K members require
     // a local tile copy; ordinary row-major inputs need no full-A preparation.
     auto choice = b.create<scf::IfOp>(loc, TypeRange{inputType}, contiguous, true);
     OpBuilder::InsertionGuard guard(b);
     b.setInsertionPointToStart(choice.thenBlock());
-    auto type = MemRefType::get({ShapedType::kDynamic, ShapedType::kDynamic}, b.getI8Type(),
+    auto type = MemRefType::get({ShapedType::kDynamic, ShapedType::kDynamic}, element,
         StridedLayoutAttr::get(b.getContext(), ShapedType::kDynamic, {ShapedType::kDynamic, 1}));
     Value view = b.create<memref::ReinterpretCastOp>(loc, type,
         lhsMetadata.getBaseBuffer(), OpFoldResult(lhsMetadata.getOffset()),
@@ -58,10 +79,10 @@ LogicalResult formIntegerTile(OpBuilder &b, linalg::GenericOp operation,
     Value direct = b.create<amx::TileLoadOp>(loc, inputType, view, ValueRange{row, column});
     b.create<scf::YieldOp>(loc, direct);
     b.setInsertionPointToStart(choice.elseBlock());
-    auto local = b.create<memref::AllocaOp>(loc, MemRefType::get({16, 64}, b.getI8Type()));
+    auto local = b.create<memref::AllocaOp>(loc, MemRefType::get({16, depth}, element));
     local.setAlignment(64);
     loop(b, loc, zero, index(b, loc, 16), 1, [&](Value m) {
-      loop(b, loc, zero, index(b, loc, 64), 1, [&](Value k) {
+      loop(b, loc, zero, index(b, loc, depth), 1, [&](Value k) {
         Value value = b.create<memref::LoadOp>(loc, tile.lhs,
             ValueRange{add(b, loc, row, m), add(b, loc, column, k)});
         b.create<memref::StoreOp>(loc, value, local, ValueRange{m, k});
@@ -88,7 +109,7 @@ LogicalResult formIntegerTile(OpBuilder &b, linalg::GenericOp operation,
             initial.push_back(zeroInitial ? Value(b.create<amx::TileZeroOp>(loc, accumulatorType))
                 : Value(b.create<amx::TileLoadOp>(loc, accumulatorType, tile.output, ValueRange{row, at})));
         }
-        auto reduction = b.create<scf::ForOp>(loc, zero, kFull, index(b, loc, 64), initial);
+        auto reduction = b.create<scf::ForOp>(loc, zero, kFull, index(b, loc, depth), initial);
         {
           OpBuilder::InsertionGuard guard(b);
           b.setInsertionPointToStart(reduction.getBody());
@@ -96,14 +117,18 @@ LogicalResult formIntegerTile(OpBuilder &b, linalg::GenericOp operation,
           SmallVector<Value> left;
           for (Value row : rows)
             left.push_back(loadLeft(add(b, loc, tile.mBegin, row), add(b, loc, tile.kBegin, k)));
-          Value row = add(b, loc, bRow, b.create<arith::DivSIOp>(loc, k, index(b, loc, 4)));
+          Value row = add(b, loc, bRow, b.create<arith::DivSIOp>(loc, k, index(b, loc, pack)));
           SmallVector<Value> next;
           for (auto [number, at] : llvm::enumerate(coordinates)) {
-            Value column = add(b, loc, bColumn, multiply(b, loc, at, index(b, loc, 4)));
+            Value column = add(b, loc, bColumn, multiply(b, loc, at, index(b, loc, pack)));
             Value rhs = b.create<amx::TileLoadOp>(loc, inputType, packedB, ValueRange{row, column});
-            for (auto [row, a] : llvm::enumerate(left))
-              next.push_back(b.create<amx::TileMulIOp>(loc, accumulatorType, a, rhs,
-                  reduction.getRegionIterArgs()[number * rowCount + row], UnitAttr{}, UnitAttr{}));
+            for (auto [row, a] : llvm::enumerate(left)) {
+              Value carry = reduction.getRegionIterArgs()[number * rowCount + row];
+              next.push_back(floating
+                  ? Value(b.create<amx::TileMulFOp>(loc, accumulatorType, a, rhs, carry))
+                  : Value(b.create<amx::TileMulIOp>(loc, accumulatorType, a, rhs, carry,
+                                                  UnitAttr{}, UnitAttr{})));
+            }
           }
           b.create<scf::YieldOp>(loc, next);
         }
@@ -123,7 +148,7 @@ LogicalResult formIntegerTile(OpBuilder &b, linalg::GenericOp operation,
   Value groupedRows = full(tile.mCount, microM);
   rows(zero, groupedRows, microM / 16);
   if (microM > 16) rows(groupedRows, mFull, 1);
-  // Boundary members use the same signed i32 arithmetic. No rounded-up source
+  // Boundary members use the original scalar arithmetic. No rounded-up source
   // reads or padded members are introduced, and every output has one owner.
   auto tail = [&](Value mBegin, Value mEnd, Value nBegin, Value nEnd, Value kBegin,
                   bool initialize) {
@@ -138,10 +163,17 @@ LogicalResult formIntegerTile(OpBuilder &b, linalg::GenericOp operation,
           Value k = add(b, loc, tile.kBegin, reduction.getInductionVar());
           Value a = b.create<memref::LoadOp>(loc, tile.lhs, ValueRange{add(b, loc, tile.mBegin, m), k});
           Value rhs = b.create<memref::LoadOp>(loc, tile.rhs, ValueRange{k, add(b, loc, tile.nBegin, n)});
-          a = b.create<arith::ExtSIOp>(loc, b.getI32Type(), a);
-          rhs = b.create<arith::ExtSIOp>(loc, b.getI32Type(), rhs);
-          Value value = b.create<arith::AddIOp>(loc, reduction.getRegionIterArgs()[0],
-              b.create<arith::MulIOp>(loc, a, rhs));
+          Value value;
+          if (floating) {
+            a = b.create<arith::ExtFOp>(loc, accumulator, a);
+            rhs = b.create<arith::ExtFOp>(loc, accumulator, rhs);
+            value = b.create<math::FmaOp>(loc, a, rhs, reduction.getRegionIterArgs()[0]);
+          } else {
+            a = b.create<arith::ExtSIOp>(loc, accumulator, a);
+            rhs = b.create<arith::ExtSIOp>(loc, accumulator, rhs);
+            value = b.create<arith::AddIOp>(loc, reduction.getRegionIterArgs()[0],
+                b.create<arith::MulIOp>(loc, a, rhs));
+          }
           b.create<scf::YieldOp>(loc, value);
         }
         b.create<memref::StoreOp>(loc, reduction.getResult(0), tile.output, ValueRange{m, n});
@@ -158,6 +190,147 @@ LogicalResult formIntegerTile(OpBuilder &b, linalg::GenericOp operation,
   tail(zero, mFull, nFull, tile.nCount, zero, true);
   tail(mFull, tile.mCount, zero, tile.nCount, zero, true);
   return success();
+}
+
+Value bfloatLattice(OpBuilder &b, Location loc, Value value) {
+  Type type = value.getType();
+  auto vector = dyn_cast<VectorType>(type);
+  Type scalar = vector ? vector.getElementType() : type;
+  bool bf16 = scalar.isBF16();
+  auto bits = IntegerType::get(b.getContext(), bf16 ? 16 : 32);
+  Type integers = vector ? Type(VectorType::get(vector.getShape(), bits)) : Type(bits);
+  auto constant = [&](int64_t number) -> Value {
+    Attribute literal = b.getIntegerAttr(bits, number);
+    if (vector) literal = DenseElementsAttr::get(cast<VectorType>(integers), literal);
+    return b.create<arith::ConstantOp>(loc, integers, cast<TypedAttr>(literal));
+  };
+  Value raw = b.create<arith::BitcastOp>(loc, integers, value);
+  Value magnitude = b.create<arith::AndIOp>(loc, raw, constant(bf16 ? 0x7fff : 0x7fffffff));
+  Value lower = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::uge,
+      magnitude, constant(bf16 ? (77 << 7) : (36 << 23)));
+  Value upper = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ule,
+      magnitude, constant(bf16 ? (177 << 7) : (227LL << 23)));
+  Value zero = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+      bf16 ? magnitude : raw, constant(0));
+  return b.create<arith::OrIOp>(loc, zero, b.create<arith::AndIOp>(loc, lower, upper));
+}
+
+Value checkBfloatRectangle(OpBuilder &b, Location loc, Value memory,
+    Value rowBegin, Value columnBegin, Value rows, Value columns, Value initial) {
+  Value zero = index(b, loc, 0);
+  Type element = cast<MemRefType>(memory.getType()).getElementType();
+  int64_t width = element.isBF16() ? 32 : 16;
+  auto predicates = VectorType::get({width}, b.getI1Type());
+  Value lanes = b.create<arith::ConstantOp>(loc, predicates,
+      DenseElementsAttr::get(predicates, b.getBoolAttr(true)));
+  auto rowLoop = b.create<scf::ForOp>(loc, zero, rows, index(b, loc, 1), ValueRange{lanes});
+  OpBuilder::InsertionGuard guard(b);
+  b.setInsertionPointToStart(rowLoop.getBody());
+  Value row = add(b, loc, rowBegin, rowLoop.getInductionVar());
+  auto columnsLoop = b.create<scf::ForOp>(loc, zero, columns, index(b, loc, width), rowLoop.getRegionIterArgs());
+  b.setInsertionPointToStart(columnsLoop.getBody());
+  Value values = b.create<vector::LoadOp>(loc, VectorType::get({width}, element), memory,
+      ValueRange{row, add(b, loc, columnBegin, columnsLoop.getInductionVar())});
+  Value valid = b.create<arith::AndIOp>(loc, columnsLoop.getRegionIterArgs()[0], bfloatLattice(b, loc, values));
+  b.create<scf::YieldOp>(loc, valid);
+  b.setInsertionPointAfter(columnsLoop);
+  b.create<scf::YieldOp>(loc, columnsLoop.getResults());
+  b.setInsertionPointAfter(rowLoop);
+  return b.create<arith::AndIOp>(loc, initial,
+      b.create<vector::ReductionOp>(loc, vector::CombiningKind::AND, rowLoop.getResult(0)));
+}
+
+LogicalResult formBfloatTile(OpBuilder &b, linalg::GenericOp operation,
+    const ContractionTile &tile, ConfigurationAttr config, ImplementationAttr binding) {
+  Location loc = operation.getLoc();
+  Value zero = index(b, loc, 0), safe = b.create<arith::ConstantIntOp>(loc, 1, 1);
+  auto full = [&](Value value, int64_t width) -> Value {
+    return b.create<arith::SubIOp>(loc, value,
+        b.create<arith::RemSIOp>(loc, value, index(b, loc, width)));
+  };
+  Value rows = full(tile.mCount, 16), columns = full(tile.nCount, 16), depth = full(tile.depth, 32);
+  // BF16 values in [2^-50,2^50] are multiples of 2^-57. Their products,
+  // every rounded partial sum and a checked f32 accumulator are multiples of
+  // 2^-114. A nonzero such value cannot be an f32 subnormal. This proves that
+  // AMX's mandatory DAZ/FTZ has no effect; other inputs use the original FMA
+  // implementation. NaN, infinity and negative-zero accumulators are excluded.
+  // The accumulator's checked [2^-91,2^100] range has the same lattice; the
+  // configuration's K <= 2^20 bound also keeps all partial sums below overflow.
+  for (const InputSupply &supply : tile.inputs) {
+    bool left = supply.operand == 0;
+    if ((left && supply.panelAxis != 1) || (!left && (supply.operand != 1 || supply.panelAxis != 0 || supply.panelSize != 2)))
+      return operation.emitError("BF16 matrix guard requires its declared packed inputs");
+    Value memory = b.create<memref::CollapseShapeOp>(loc, supply.storage,
+        left ? ArrayRef<ReassociationIndices>{{0, 1}, {2}}
+             : ArrayRef<ReassociationIndices>{{0}, {1, 2}});
+    auto relative = [&](Value value, Value begin) -> Value { return b.create<arith::SubIOp>(loc, value, begin); };
+    Value row = relative(left ? tile.mBegin : tile.kBegin, supply.begins[0]);
+    Value column = relative(left ? tile.kBegin : tile.nBegin, supply.begins[1]);
+    Value rowCount = rows, columnCount = depth;
+    if (left) {
+      Value width = index(b, loc, supply.panelSize);
+      Value panel = b.create<arith::DivSIOp>(loc, column, width);
+      row = add(b, loc, row, multiply(b, loc, panel,
+          b.create<memref::DimOp>(loc, supply.storage, 1)));
+      column = b.create<arith::RemSIOp>(loc, column, width);
+    } else {
+      row = b.create<arith::DivSIOp>(loc, row, index(b, loc, 2));
+      column = multiply(b, loc, column, index(b, loc, 2));
+      rowCount = b.create<arith::DivSIOp>(loc, depth, index(b, loc, 2));
+      columnCount = multiply(b, loc, columns, index(b, loc, 2));
+    }
+    safe = checkBfloatRectangle(b, loc, memory, row, column, rowCount, columnCount, safe);
+  }
+  if (tile.inputs.size() != 2)
+    return operation.emitError("BF16 matrix guard requires both packed inputs");
+  safe = tile.first ? Value(b.create<arith::AndIOp>(loc, safe, bfloatLattice(b, loc, tile.initial)))
+      : checkBfloatRectangle(b, loc, tile.output, zero, zero, rows, columns, safe);
+  auto choice = b.create<scf::IfOp>(loc, safe, true);
+  OpBuilder::InsertionGuard guard(b);
+  b.setInsertionPointToStart(choice.thenBlock());
+  if (failed(formMatrixTile(b, operation, tile, config, binding))) return failure();
+  b.setInsertionPointToStart(choice.elseBlock());
+  NamedAttrList parameters;
+  for (auto [name, value] : {std::pair<StringRef, int64_t>{"vector_width", implementationParameter(binding, "vector_width")},
+       {"micro_m", 4}, {"micro_n", 2}, {"register_replicas", 1}, {"reduction_replicas", 1}})
+    parameters.append(name, b.getI64IntegerAttr(value));
+  auto scalarBinding = ImplementationAttr::get(b.getContext(), b.getStringAttr("mojo.register_float_direct"),
+      parameters.getDictionary(b.getContext()));
+  ContractionTile exact = tile;
+  exact.lhs = b.create<memref::SubViewOp>(loc, tile.lhs,
+      ArrayRef<OpFoldResult>{tile.mBegin, tile.kBegin},
+      ArrayRef<OpFoldResult>{tile.mCount, tile.depth},
+      ArrayRef<OpFoldResult>{b.getIndexAttr(1), b.getIndexAttr(1)});
+  int64_t fallbackColumns = 2 * implementationParameter(binding, "vector_width");
+  auto exactRight = b.create<memref::AllocaOp>(loc,
+      MemRefType::get({config.getTileK(), fallbackColumns}, b.getBF16Type()));
+  exactRight.setAlignment(64);
+  exact.rhs = exactRight;
+  exact.mBegin = exact.nBegin = exact.kBegin = zero;
+  exact.inputs = {};
+  LogicalResult status = success();
+  loop(b, loc, zero, tile.nCount, fallbackColumns, [&](Value column) {
+    Value columns = b.create<arith::MinSIOp>(loc, index(b, loc, fallbackColumns),
+        b.create<arith::SubIOp>(loc, tile.nCount, column));
+    auto view = [&](Value memory, Value row, Value col, Value rows, Value columns) -> Value {
+      return b.create<memref::SubViewOp>(loc, memory,
+          ArrayRef<OpFoldResult>{row, col}, ArrayRef<OpFoldResult>{rows, columns},
+          ArrayRef<OpFoldResult>{b.getIndexAttr(1), b.getIndexAttr(1)});
+    };
+    Value source = view(tile.rhs, tile.kBegin, add(b, loc, tile.nBegin, column), tile.depth, columns);
+    Value destination = view(exactRight, zero, zero, tile.depth, columns);
+    auto identity = b.getMultiDimIdentityMap(2);
+    b.create<linalg::GenericOp>(loc, ValueRange{source}, ValueRange{destination},
+        ArrayRef<AffineMap>{identity, identity},
+        SmallVector<utils::IteratorType>(2, utils::IteratorType::parallel),
+        [](OpBuilder &nested, Location at, ValueRange arguments) {
+          nested.create<linalg::YieldOp>(at, arguments[0]);
+        });
+    exact.output = view(tile.output, zero, column, tile.mCount, columns);
+    exact.nCount = columns;
+    if (failed(formRegisterTile(b, operation, exact, config, scalarBinding))) status = failure();
+  });
+  return status;
 }
 
 } // namespace
@@ -195,8 +368,51 @@ void registerMatrixImplementations(ImplementationRegistry &registry) {
     return SmallVector<InputRequirement>{
         {1, element, 0, 4, 64, InputReuse::Group, 4}};
   };
-  implementation.formTile = formIntegerTile;
+  implementation.formTile = formMatrixTile;
   registry.add<linalg::GenericOp>(std::move(implementation));
+
+  Implementation bfloat;
+  bfloat.name = "mojo.amx_bfloat";
+  bfloat.applicable = [](Operation *op) {
+    auto operation = cast<linalg::GenericOp>(op);
+    auto order = operation->getAttrOfType<ReductionOrderAttr>("intent_cpu.reduction_order");
+    return isMatrixContraction(operation) && order && order.getElementPermutation() &&
+        cast<MemRefType>(operation.getOutputs()[0].getType()).getElementType().isF32() &&
+        llvm::all_of(operation.getInputs(), [](Value input) {
+          return cast<MemRefType>(input.getType()).getElementType().isBF16();
+        });
+  };
+  bfloat.parameters = {
+      ImplementationParameter::local("micro_m", {false, {}, 0, {16, 32}}),
+      ImplementationParameter::local("micro_n", {false, {}, 0, {1, 2, 4}}),
+      ImplementationParameter::local("vector_width", {true, {}, 32, {}})};
+  bfloat.parameterRelations = [](DictionaryAttr values, CapabilitiesAttr capabilities) -> std::optional<std::string> {
+    if (!capabilities.getMatrixBF16F32()) return "BF16 tile implementation requires matrix_bf16_f32";
+    int64_t rows = cast<IntegerAttr>(values.get("micro_m")).getInt() / 16;
+    int64_t columns = cast<IntegerAttr>(values.get("micro_n")).getInt();
+    if (rows * columns + rows + 2 > 8) return "BF16 tile microprogram exceeds eight tile registers";
+    return std::nullopt;
+  };
+  bfloat.check = [](Operation *, CapabilitiesAttr capabilities, const Configuration &config) -> std::optional<std::string> {
+    if (config.tileM % 16 || config.tileN % 16 || config.tileK % 32)
+      return "BF16 matrix tiles require M/N multiples of 16 and K multiples of 32";
+    if (config.tileK > (1 << 20))
+      return "BF16 guarded accumulation requires a bounded reduction tile";
+    int64_t available = capabilities.getPrivateBytes();
+    if (config.tileM > available / 4 / config.tileN)
+      return "BF16 matrix accumulator exceeds the private storage budget";
+    available -= config.tileM * config.tileN * 4;
+    if (config.tileK > available / 4 / config.parameter("vector_width"))
+      return "BF16 exact-path input block exceeds the private storage budget";
+    return std::nullopt;
+  };
+  bfloat.inputs = [](linalg::GenericOp op, ConfigurationAttr config, ImplementationAttr) {
+    Type element = cast<MemRefType>(op.getInputs()[0].getType()).getElementType();
+    return SmallVector<InputRequirement>{{0, element, 1, config.getTileK(), 64, InputReuse::Consumers, config.getTileK()},
+        {1, element, 0, 2, 64, InputReuse::Consumers, 2}};
+  };
+  bfloat.formTile = formBfloatTile;
+  registry.add<linalg::GenericOp>(std::move(bfloat));
 }
 
 } // namespace intent::mojo
