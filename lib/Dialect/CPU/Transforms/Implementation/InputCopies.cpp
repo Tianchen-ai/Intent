@@ -211,7 +211,30 @@ FailureOr<bool> tryMaterializeInputCopy(linalg::GenericOp operation,
     });
     scalar(full, rows, zero, columns);
     builder.setInsertionPointToStart(choice.elseBlock());
-    scalar(zero, rows, zero, columns);
+    // A transposed contraction operand can already have contiguous four-byte
+    // groups within each row. Preserve that representation with one word-sized
+    // vector copy instead of scalarizing its two/four members. The interleave
+    // path above handles the opposite stride orientation.
+    if (inputStrides[1] == 1 || ShapedType::isDynamic(inputStrides[1])) {
+      auto rowContiguous = materializeContiguousMemoryGuard(builder, loc,
+                                                          ValueRange{source, target});
+      Value rowComplete = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, columns, group);
+      if (rowContiguous.condition)
+        rowComplete = builder.create<arith::AndIOp>(loc, rowComplete, rowContiguous.condition);
+      auto packedRows = builder.create<scf::IfOp>(loc, rowComplete, true);
+      builder.setInsertionPointToStart(packedRows.thenBlock());
+      IRMapping rowMapping;
+      rowContiguous.bind(builder, loc, rowMapping);
+      Value input = rowMapping.lookupOrDefault(source);
+      Value output = rowMapping.lookupOrDefault(target);
+      auto word = VectorType::get({groupSize}, element);
+      loop(builder, loc, zero, rows, 1, [&](Value row) {
+        Value value = builder.create<vector::LoadOp>(loc, word, input, ValueRange{row, zero});
+        builder.create<vector::StoreOp>(loc, value, output, ValueRange{row, zero});
+      });
+      builder.setInsertionPointToStart(packedRows.elseBlock());
+      scalar(zero, rows, zero, columns);
+    } else scalar(zero, rows, zero, columns);
     operation.erase();
     return true;
   }
