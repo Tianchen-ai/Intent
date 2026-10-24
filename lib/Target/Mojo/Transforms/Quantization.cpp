@@ -227,7 +227,10 @@ void dot(RecordBuilder &p, cpu::QuantizedDotOp operation, int64_t width) {
       prefix.push_back(record);
       return prefix;
     };
-    SmallVector<Value> positive(columns, p.integer(0)), negative(columns, p.integer(0));
+    // Q4_K's exact integer bound covers the entire record. Keep its sub-group
+    // statistics in SIMD lanes until the record's declared f32 boundary instead
+    // of paying a horizontal reduction for each of its eight sub-groups.
+    SmallVector<Value> positive(columns, p.integer(0, 32, width)), negative(columns, p.integer(0));
     for (int sub = 0; sub < 8; ++sub) {
       SmallVector<Value> partials(columns, p.integer(0, 32, width));
       auto members = p.loop(p.index(0), p.index(32), width, partials);
@@ -255,11 +258,11 @@ void dot(RecordBuilder &p, cpu::QuantizedDotOp operation, int64_t width) {
       Value total = b.create<arith::AddIOp>(loc, even, odd);
       for (int64_t column = 0; column < columns; ++column) {
         auto prefix = leftPrefix(column);
-        Value sum = p.reduce(members.getResult(column), vector::CombiningKind::ADD);
+        Value sum = members.getResult(column);
         Value scale = p.field6(operation.getLhs(), prefix, 0, sub);
         Value minimum = p.field6(operation.getLhs(), prefix, 1, sub);
         positive[column] = b.create<arith::AddIOp>(loc, positive[column],
-            b.create<arith::MulIOp>(loc, sum, scale));
+            b.create<arith::MulIOp>(loc, sum, p.broadcast(scale, width)));
         negative[column] = b.create<arith::AddIOp>(loc, negative[column],
             b.create<arith::MulIOp>(loc, total, minimum));
       }
@@ -275,7 +278,8 @@ void dot(RecordBuilder &p, cpu::QuantizedDotOp operation, int64_t width) {
           p.littleEndian(operation.getLhs(), prefix, 2, 2));
       d = b.create<arith::ExtFOp>(loc, b.getF32Type(), d);
       dmin = b.create<arith::ExtFOp>(loc, b.getF32Type(), dmin);
-      Value s = b.create<arith::SIToFPOp>(loc, b.getF32Type(), positive[column]);
+      Value integerSum = p.reduce(positive[column], vector::CombiningKind::ADD);
+      Value s = b.create<arith::SIToFPOp>(loc, b.getF32Type(), integerSum);
       Value t = b.create<arith::SIToFPOp>(loc, b.getF32Type(), negative[column]);
       Value pTerm = b.create<arith::MulFOp>(loc, d, s);
       Value nTerm = b.create<arith::MulFOp>(loc, dmin, t);
