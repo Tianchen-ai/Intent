@@ -63,9 +63,11 @@ public:
 private:
   Describe describe;
   mlir::Attribute evaluate(mlir::Value value, const UniformBindings &bindings,
-                          llvm::SmallDenseSet<mlir::Value> &visiting) const;
+                          llvm::SmallDenseSet<mlir::Value> &visiting,
+                          UniformBindings &memo) const;
   mlir::Attribute fold(const UniformExpression &expression, const UniformBindings &bindings,
-                      llvm::SmallDenseSet<mlir::Value> &visiting) const;
+                      llvm::SmallDenseSet<mlir::Value> &visiting,
+                      UniformBindings &memo) const;
 };
 
 }

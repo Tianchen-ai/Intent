@@ -22,6 +22,7 @@ namespace intent::triton {
 
 LogicalResult prepareTritonMemory(ModuleOp module) {
   if (failed(gpu::verifyGPUProgram(module)) ||
+      failed(gpu::realizeShortWindowReductions(module)) ||
       failed(gpu::lowerExecutionGroups(module)))
     return failure();
   auto kernel = gpu::getPhysicalKernel(module);

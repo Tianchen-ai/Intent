@@ -24,6 +24,7 @@ namespace intent::cutile {
 
 LogicalResult prepareProgram(ModuleOp module) {
   if (failed(gpu::verifyGPUProgram(module)) ||
+      failed(gpu::realizeShortWindowReductions(module)) ||
       failed(gpu::lowerExecutionGroups(module)))
     return failure();
   FailureOr<func::FuncOp> kernel = gpu::getPhysicalKernel(module);

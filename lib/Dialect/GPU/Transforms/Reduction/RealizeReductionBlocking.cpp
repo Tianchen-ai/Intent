@@ -3,6 +3,10 @@
 #include "ReductionRealization.h"
 #include "ReductionChains.h"
 #include "ReductionValues.h"
+#include "../Value/ReplayPolicy.h"
+#include "Intent/Dialect/GPU/Analysis/Helpers.h"
+#include "Intent/Dialect/GPU/Analysis/UniformValues.h"
+#include "Intent/Dialect/GPU/IR/PhysicalExpressions.h"
 #include "Intent/Dialect/GPU/Analysis/ValueSchema.h"
 #include "Intent/Dialect/GPU/IR/Program.h"
 #include "Intent/Dialect/GPU/Transforms/Passes.h"
@@ -17,6 +21,106 @@ using namespace mlir;
 namespace intent::gpu {
 using namespace reduction;
 namespace {
+
+FailureOr<bool> realizeShortWindow(ReduceOp reduce, func::FuncOp kernel) {
+  if (reduce.getAxes().size() != 1 || !hasNonUnitFreeAxis(reduce) ||
+      failed(proveLaneWiseHelper(reduce.getCombine()))) return false;
+  unsigned axis = reduce.getAxes().front();
+  PhysicalProgramAnalysis analysis(kernel);
+  ReplayPolicy reuse(kernel, reduce.getSources(), {reduce.getOperation()});
+  SmallVector<SmallVector<MakeRangeOp>> ranges;
+  std::optional<int64_t> count;
+  bool coupledAccess = false;
+  for (Value source : reduce.getSources()) {
+    auto type = dyn_cast<FragmentType>(source.getType());
+    if (!type || axis >= type.getShape().size()) return false;
+    auto extent = cast<PhysicalExprAttr>(type.getShape()[axis]);
+    if (extent.getKind() == PhysicalExprKind::Constant && extent.getValue() <= 1)
+      return false;
+    auto mapping = cast<AxisMapAttr>(type.getAxisMaps()[axis]);
+    auto fact = analysis.axisRanges(source, axis);
+    if (!fact.blockers.empty() || !sameFullOrdinalTraversal(fact.roots) ||
+        !reuse.removesProducer(source) || reuse.duplicatesExpensiveWork(source)) return false;
+    auto size = constantLogicalRangeCardinality(fact.roots.front());
+    if (!size || *size <= 1 || *size > 16 || (count && count != size)) return false;
+    if (extent.getKind() != PhysicalExprKind::Constant || extent.getValue() < *size)
+      return false;
+    auto dimension = queryRangeDimension(fact.roots.front());
+    if (failed(dimension) || !llvm::all_of(fact.roots, [&](MakeRangeOp range) {
+          auto current = queryRangeDimension(range);
+          auto width = dyn_cast_or_null<IntegerAttr>(
+              UniformValueAnalysis(describeUniformValue).evaluate(range.getExtent()));
+          return sourceAxisIdentity(range) == sourceAxisIdentity(fact.roots.front()) &&
+                 succeeded(current) && *current == *dimension &&
+                 width && width.getInt() >= *size;
+        })) return false;
+    count = size;
+    if (!analysis.replayAt(source, sourceAxisIdentity(mapping),
+            PhysicalReplayScope::ValueGraph, true, reduce, IRMapping{},
+            mapping.getDimensionId()).isReplayable()) return false;
+    for (Operation *access : fact.accesses) {
+      auto load = dyn_cast<LoadOp>(access);
+      if (!load) continue;
+      unsigned dependent = 0;
+      for (Value coordinate : load.getCoordinates())
+        dependent += !analysis.rangeAxes(coordinate, fact.roots).fragmentAxes.empty();
+      coupledAccess |= dependent > 1;
+    }
+    ranges.emplace_back(fact.roots.begin(), fact.roots.end());
+  }
+  if (!coupledAccess || !count) return false;
+  auto unit = expression(kernel.getContext(), PhysicalExprKind::Constant, 1);
+  OpBuilder b(reduce);
+  Location loc = reduce.getLoc();
+  SmallVector<Value> accumulated(reduce.getIdentities());
+  for (int64_t ordinal = 0; ordinal < *count; ++ordinal) {
+    IRMapping mapping;
+    SmallVector<Value> sources;
+    for (auto [number, source] : llvm::enumerate(reduce.getSources())) {
+      for (MakeRangeOp range : ranges[number]) {
+        if (mapping.contains(range.getResult())) continue;
+        auto before = range.getResult().getType();
+        auto scalarType = FragmentType::get(kernel.getContext(), before.getElementType(),
+            b.getArrayAttr({unit}), before.getAxisMaps(), before.getValidity(), before.getOwner());
+        Value offset = b.create<arith::ConstantIndexOp>(loc, ordinal);
+        offset = b.create<arith::MulIOp>(loc, offset, range.getStep());
+        Value start = b.create<arith::AddIOp>(loc, range.getStart(), offset);
+        Value one = b.create<arith::ConstantIndexOp>(loc, 1);
+        auto selected = b.create<MakeRangeOp>(loc, scalarType, start, one,
+            range.getStep(), range.getLogicalStart(), range.getLogicalStop(),
+            range.getSourceId(), range.getSourceAxis(), range.getDerived());
+        inheritRangeAuthority(selected, range);
+        mapping.map(range.getResult(), selected.getResult());
+      }
+      auto value = materializeReplayedRanges(b, loc, source, unit, ranges[number],
+          mapping.lookup(ranges[number].front().getResult()), mapping, reduce);
+      if (failed(value)) return reduce.emitOpError("short window producer replay failed"), failure();
+      auto type = cast<FragmentType>((*value).getType());
+      SmallVector<Attribute> groups;
+      unsigned output = 0;
+      for (unsigned i = 0; i < type.getShape().size(); ++i) {
+        SmallVector<int64_t> result;
+        if (i != axis) result.push_back(output++);
+        groups.push_back(ReshapeGroupAttr::get(b.getContext(),
+            b.getDenseI64ArrayAttr({static_cast<int64_t>(i)}),
+            b.getDenseI64ArrayAttr(result)));
+      }
+      sources.push_back(b.create<ReshapeOp>(loc, reduce.getResult(number).getType(),
+                                           *value, b.getArrayAttr(groups)));
+    }
+    SmallVector<Value> arguments(accumulated);
+    llvm::append_range(arguments, sources);
+    llvm::append_range(arguments, reduce.getCaptures());
+    std::string reason;
+    auto combined = inlinePureRegion(b, reduce.getCombine(), arguments, reason);
+    if (failed(combined)) return reduce.emitOpError(reason), failure();
+    accumulated = std::move(*combined);
+  }
+  reduce.replaceAllUsesWith(accumulated);
+  reduce.erase();
+  eraseDeadPhysicalValues(kernel);
+  return true;
+}
 
 LogicalResult realizeReduce(ReduceOp reduce, func::FuncOp kernel) {
   if (failed(bindReductionFreeAxes(reduce, kernel)))
@@ -302,6 +406,28 @@ LogicalResult realizeReduce(ReduceOp reduce, func::FuncOp kernel) {
 }
 
 } // namespace
+
+LogicalResult realizeShortWindowReductions(ModuleOp module) {
+  auto kernel = getPhysicalKernel(module);
+  if (failed(kernel)) return failure();
+  // Providers select this traversal when independent output lanes are cheaper
+  // than a distributed collective over a short, coupled-coordinate window.
+  bool changed;
+  do {
+    changed = false;
+    SmallVector<ReduceOp> reductions;
+    kernel->walk([&](ReduceOp reduce) { reductions.push_back(reduce); });
+    for (ReduceOp reduce : reductions) {
+      auto result = realizeShortWindow(reduce, *kernel);
+      if (failed(result)) return failure();
+      if (*result) {
+        changed = true;
+        break;
+      }
+    }
+  } while (changed);
+  return closeValueRelations(*kernel);
+}
 
 LogicalResult decomposeMultiAxisReductions(ModuleOp module) {
   FailureOr<func::FuncOp> physicalKernel = getPhysicalKernel(module);

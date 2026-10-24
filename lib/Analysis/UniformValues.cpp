@@ -196,27 +196,36 @@ std::optional<bool> uniformBoolean(Attribute value) {
 
 Attribute UniformValueAnalysis::evaluate(Value value, const UniformBindings &bindings) const {
   llvm::SmallDenseSet<Value> visiting;
-  return evaluate(value, bindings, visiting);
+  UniformBindings memo;
+  return evaluate(value, bindings, visiting, memo);
 }
 Attribute UniformValueAnalysis::fold(const UniformExpression &expression, const UniformBindings &bindings) const {
   llvm::SmallDenseSet<Value> visiting;
-  return fold(expression, bindings, visiting);
+  UniformBindings memo;
+  return fold(expression, bindings, visiting, memo);
 }
 Attribute UniformValueAnalysis::evaluate(Value value, const UniformBindings &bindings,
-                                        llvm::SmallDenseSet<Value> &visiting) const {
+                                        llvm::SmallDenseSet<Value> &visiting,
+                                        UniformBindings &memo) const {
   auto found = bindings.find(value);
   if (found != bindings.end()) return found->second;
+  auto cached = memo.find(value);
+  if (cached != memo.end()) return cached->second;
   if (!visiting.insert(value).second) return {};
-  Attribute result = fold(describe(value), bindings, visiting);
+  Attribute result = fold(describe(value), bindings, visiting, memo);
   visiting.erase(value);
+  // Cache unknowns too: a shared nonuniform producer must not be traversed
+  // again for every use in a coupled combine. The cache lives for one query.
+  memo[value] = result;
   return result;
 }
 Attribute UniformValueAnalysis::fold(const UniformExpression &expression, const UniformBindings &bindings,
-                                    llvm::SmallDenseSet<Value> &visiting) const {
+                                    llvm::SmallDenseSet<Value> &visiting,
+                                    UniformBindings &memo) const {
   using K = UniformKind;
   if (expression.kind == K::Unknown) return {};
   if (expression.kind == K::Constant) return expression.literal;
-  auto get = [&](Value value) { return evaluate(value, bindings, visiting); };
+  auto get = [&](Value value) { return evaluate(value, bindings, visiting, memo); };
   if (expression.kind == K::Forward) return get(expression.operands[0]);
   if (expression.kind == K::Select) {
     auto condition = uniformBoolean(get(expression.operands[0]));
@@ -239,8 +248,11 @@ Attribute UniformValueAnalysis::fold(const UniformExpression &expression, const 
         current[parameter] = value;
       for (auto [parameter, value] : llvm::zip(ArrayRef(expression.parameters).drop_front(state.size()), inputs))
         current[parameter] = value;
+      // Each fixed-point step has different block-argument bindings. Share
+      // results between its yields, never with another step or the caller.
+      UniformBindings stepMemo;
       SmallVector<Attribute> result;
-      for (Value value : expression.yields) result.push_back(evaluate(value, current, visiting));
+      for (Value value : expression.yields) result.push_back(evaluate(value, current, visiting, stepMemo));
       return result;
     };
     auto state = step(initial);
