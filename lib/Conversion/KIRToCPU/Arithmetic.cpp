@@ -83,11 +83,18 @@ FailureOr<Value> Construction::arithmetic(Operation *operation, ValueRange argum
           (kind != UnaryOperator::Exp2 && kind != UnaryOperator::Tanh) ||
           (unary.getFlushToZero() && kind != UnaryOperator::Exp2))
         return unary.emitError("CPU non-default unary arithmetic requires the closed f32 exp2/tanh contract"), failure();
-      Value input = unary.getFlushToZero() ? flushF32(arguments[0]) : arguments[0];
       Value result = kind == UnaryOperator::Exp2
-          ? Value(builder.create<math::Exp2Op>(loc, input, arith::FastMathFlags::afn))
-          : Value(builder.create<math::TanhOp>(loc, input, arith::FastMathFlags::afn));
-      return unary.getFlushToZero() ? flushF32(result) : result;
+          ? Value(builder.create<math::Exp2Op>(loc, arguments[0], arith::FastMathFlags::afn))
+          : Value(builder.create<math::TanhOp>(loc, arguments[0], arith::FastMathFlags::afn));
+      if (!unary.getFlushToZero()) return result;
+      // exp2 of either signed zero or any f32 subnormal rounds to one, so
+      // flushing its input cannot change the required result. Its output is
+      // nonnegative: preserve NaN with an ordered comparison and flush small
+      // results directly to +0 instead of computing abs and a signed zero.
+      Value zero = builder.create<arith::ConstantOp>(loc, builder.getF32FloatAttr(0.0f));
+      Value normal = builder.create<arith::ConstantOp>(loc, builder.getF32FloatAttr(0x1.0p-126f));
+      Value subnormal = builder.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OLT, result, normal);
+      return Value(builder.create<arith::SelectOp>(loc, subnormal, zero, result));
     }
     if (unary.getOperatorKind() == UnaryOperator::Sigmoid) {
       Value one = builder.create<arith::ConstantOp>(loc, builder.getFloatAttr(arguments[0].getType(), 1.0));
