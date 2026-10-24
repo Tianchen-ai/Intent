@@ -92,7 +92,8 @@ LogicalResult formMatrixTile(OpBuilder &b, linalg::GenericOp operation,
     b.create<scf::YieldOp>(loc, copied);
     return choice.getResult(0);
   };
-  bool zeroInitial = tile.first && matchPattern(tile.initial, m_Zero());
+  bool zeroInitial = tile.first && (matchPattern(tile.initial, m_Zero()) ||
+                                    matchPattern(tile.initial, m_PosZeroFloat()));
   if (tile.first && !zeroInitial)
     b.create<linalg::FillOp>(loc, ValueRange{tile.initial}, ValueRange{tile.output});
   auto rectangle = [&](Value mBegin, Value mEnd, int64_t rowCount,
@@ -118,10 +119,15 @@ LogicalResult formMatrixTile(OpBuilder &b, linalg::GenericOp operation,
           for (Value row : rows)
             left.push_back(loadLeft(add(b, loc, tile.mBegin, row), add(b, loc, tile.kBegin, k)));
           Value row = add(b, loc, bRow, b.create<arith::DivSIOp>(loc, k, index(b, loc, pack)));
+          auto loadRight = [&](Value at) -> Value {
+            Value column = add(b, loc, bColumn, multiply(b, loc, at, index(b, loc, pack)));
+            return b.create<amx::TileLoadOp>(loc, inputType, packedB, ValueRange{row, column});
+          };
+          Value rhs = loadRight(coordinates.front());
           SmallVector<Value> next;
           for (auto [number, at] : llvm::enumerate(coordinates)) {
-            Value column = add(b, loc, bColumn, multiply(b, loc, at, index(b, loc, pack)));
-            Value rhs = b.create<amx::TileLoadOp>(loc, inputType, packedB, ValueRange{row, column});
+            Value following;
+            if (number + 1 < coordinates.size()) following = loadRight(coordinates[number + 1]);
             for (auto [row, a] : llvm::enumerate(left)) {
               Value carry = reduction.getRegionIterArgs()[number * rowCount + row];
               next.push_back(floating
@@ -129,6 +135,7 @@ LogicalResult formMatrixTile(OpBuilder &b, linalg::GenericOp operation,
                   : Value(b.create<amx::TileMulIOp>(loc, accumulatorType, a, rhs, carry,
                                                   UnitAttr{}, UnitAttr{})));
             }
+            rhs = following;
           }
           b.create<scf::YieldOp>(loc, next);
         }
@@ -456,6 +463,22 @@ void registerMatrixImplementations(ImplementationRegistry &registry) {
   };
   bfloat.formTile = formBfloatTile;
   bfloat.guardContraction = guardBfloatInputs;
+  Implementation direct = bfloat;
+  direct.name = "mojo.amx_bfloat_direct";
+  direct.inputs = [](linalg::GenericOp op, ConfigurationAttr, ImplementationAttr) {
+    Type element = cast<MemRefType>(op.getInputs()[1].getType()).getElementType();
+    return SmallVector<InputRequirement>{{1, element, 0, 2, 64, InputReuse::Consumers, 2}};
+  };
+  auto check = direct.check;
+  direct.check = [check](Operation *op, CapabilitiesAttr capabilities, const Configuration &config)
+      -> std::optional<std::string> {
+    if (auto reason = check(op, capabilities, config)) return reason;
+    int64_t available = capabilities.getPrivateBytes() - config.tileM * config.tileN * 4;
+    if (available < config.parameter("micro_m") / 16 * 1024)
+      return "BF16 direct input tiles exceed the private storage budget";
+    return std::nullopt;
+  };
+  registry.add<linalg::GenericOp>(std::move(direct));
   registry.add<linalg::GenericOp>(std::move(bfloat));
 }
 
