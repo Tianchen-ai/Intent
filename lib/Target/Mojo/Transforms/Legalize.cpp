@@ -208,6 +208,7 @@ LogicalResult finishNativeProgram(ModuleOp module) {
   }
   for (func::FuncOp function : module.getOps<func::FuncOp>())
     cpu::localizeTaskConstants(function);
+  isolateLargeComputations(module);
   if (failed(verifySourceProgram(module))) return failure();
   // Source legality closes every implementation's expansion. The executable
   // loops, vectors and resources now own the selected behavior; retained

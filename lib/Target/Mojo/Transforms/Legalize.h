@@ -12,6 +12,7 @@ mlir::LogicalResult fusePrivateComputations(mlir::ModuleOp module);
 mlir::LogicalResult vectorizeNativeProgram(mlir::ModuleOp module,
                                          bool fuseSharedTraversals);
 mlir::LogicalResult finalizeNativeProgram(mlir::ModuleOp module);
+void isolateLargeComputations(mlir::ModuleOp module);
 
 } // namespace intent::mojo
 #endif

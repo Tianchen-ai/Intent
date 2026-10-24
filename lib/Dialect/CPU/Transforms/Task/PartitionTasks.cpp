@@ -16,6 +16,7 @@
 #include "mlir/Transforms/LoopInvariantCodeMotionUtils.h"
 #include "mlir/Transforms/RegionUtils.h"
 #include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/DenseSet.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include <utility>
 
@@ -276,12 +277,55 @@ LogicalResult exposeStructuredWorksets(func::FuncOp function,
 
 namespace {
 
+void hoistInvariantWorksetBounds(scf::ParallelOp root) {
+  // Ordinary LICM cannot speculate integer division with a dynamic divisor.
+  // A nonempty guard lets invariant scalar bound expressions execute once,
+  // exactly when the original body would execute, and exposes the rectangular
+  // nest to task partitioning without assuming a nonzero trip count.
+  if (root.getNumLoops() == 0) return;
+  llvm::SetVector<Operation *> producers;
+  llvm::DenseSet<Value> unavailable;
+  std::function<bool(Value)> collect = [&](Value value) {
+    if (value.getParentRegion()->isProperAncestor(&root.getRegion())) return true;
+    if (unavailable.contains(value)) return false;
+    Operation *operation = value.getDefiningOp();
+    if (!operation || operation->getBlock() != root.getBody() ||
+        operation->getNumRegions() || !isMemoryEffectFree(operation) ||
+        !llvm::all_of(operation->getResultTypes(), [](Type type) {
+          return type.isIntOrIndex();
+        })) {
+      unavailable.insert(value);
+      return false;
+    }
+    if (producers.contains(operation)) return true;
+    if (!llvm::all_of(operation->getOperands(), collect)) {
+      unavailable.insert(value);
+      return false;
+    }
+    producers.insert(operation);
+    return true;
+  };
+  for (scf::ParallelOp child : root.getBody()->getOps<scf::ParallelOp>())
+    for (Value bound : child.getUpperBound()) collect(bound);
+  if (producers.empty()) return;
+  OpBuilder builder(root);
+  Value nonempty;
+  for (auto [begin, end] : llvm::zip(root.getLowerBound(), root.getUpperBound())) {
+    Value active = builder.create<arith::CmpIOp>(root.getLoc(), arith::CmpIPredicate::slt, begin, end);
+    nonempty = nonempty ? Value(builder.create<arith::AndIOp>(root.getLoc(), nonempty, active)) : active;
+  }
+  auto guard = builder.create<scf::IfOp>(root.getLoc(), nonempty, false);
+  root->moveBefore(guard.thenBlock()->getTerminator());
+  for (Operation *producer : producers) producer->moveBefore(root);
+}
+
 LogicalResult partition(scf::ParallelOp root, int64_t grain, bool distributeToWorkers) {
   // Rectangularity depends on invariant bounds, not where their producers were
   // first materialized. Native LICM keeps effects and zero-trip speculation safe.
   root.walk<WalkOrder::PostOrder>([](scf::ParallelOp parallel) {
     moveLoopInvariantCode(cast<LoopLikeOpInterface>(parallel.getOperation()));
   });
+  hoistInvariantWorksetBounds(root);
   auto function = root->getParentOfType<func::FuncOp>();
   DominanceInfo dominance(function);
   StorageAnalysis analysis(function);

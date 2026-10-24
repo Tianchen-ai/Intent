@@ -1,5 +1,6 @@
 add_mlir_library(MLIRIntentMojoTransforms
   Legalize.cpp
+  ComputeScopes.cpp
   Passes.cpp
   Implementations.cpp
   MaterializeRegisterContractions.cpp

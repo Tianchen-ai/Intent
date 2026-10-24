@@ -2,6 +2,7 @@
 #include "Intent/Dialect/Intent/IR/Interface.h"
 #include "mlir/Dialect/Bufferization/IR/BufferViewFlowOpInterface.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/Interfaces/CallInterfaces.h"
@@ -217,7 +218,11 @@ BufferStorageEffects BufferStorageAnalysis::effects(Operation *scope) const {
   } else pending.push_back(scope);
   while (!pending.empty()) {
     Operation *operation = pending.pop_back_val();
-    bool recursive = operation->hasTrait<OpTrait::HasRecursiveMemoryEffects>();
+    // MLIR 20's execute_region lacks the recursive-effects trait, but executes
+    // its body without adding any effects of its own. Keep its accesses visible
+    // when a provider uses it as a local function boundary.
+    bool recursive = operation->hasTrait<OpTrait::HasRecursiveMemoryEffects>() ||
+                     isa<scf::ExecuteRegionOp>(operation);
     if (recursive)
       for (Region &region : operation->getRegions())
         for (Block &block : region)

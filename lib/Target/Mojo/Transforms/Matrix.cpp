@@ -15,8 +15,11 @@ namespace intent::mojo {
 using namespace cpu;
 namespace {
 
+LogicalResult formExactBfloatTile(OpBuilder &b, linalg::GenericOp operation,
+    const ContractionTile &tile, ConfigurationAttr config, ImplementationAttr binding);
+
 LogicalResult formMatrixTile(OpBuilder &b, linalg::GenericOp operation,
-    const ContractionTile &tile, ConfigurationAttr, ImplementationAttr binding) {
+    const ContractionTile &tile, ConfigurationAttr config, ImplementationAttr binding) {
   Location loc = operation.getLoc();
   b.getContext()->getOrLoadDialect<amx::AMXDialect>();
   int64_t microM = implementationParameter(binding, "micro_m");
@@ -155,10 +158,33 @@ LogicalResult formMatrixTile(OpBuilder &b, linalg::GenericOp operation,
   Value groupedRows = full(tile.mCount, microM);
   rows(zero, groupedRows, microM / 16);
   if (microM > 16) rows(groupedRows, mFull, 1);
-  // Boundary members use the original scalar arithmetic. No rounded-up source
-  // reads or padded members are introduced, and every output has one owner.
+  // Boundary members use the original arithmetic, vectorized across independent
+  // outputs. No rounded-up source reads or padded members are introduced.
+  LogicalResult status = success();
   auto tail = [&](Value mBegin, Value mEnd, Value nBegin, Value nEnd, Value kBegin,
                   bool initialize) {
+    if (floating) {
+      Value active = b.create<arith::AndIOp>(loc,
+          b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, mBegin, mEnd),
+          b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, nBegin, nEnd));
+      auto present = b.create<scf::IfOp>(loc, active, false);
+      OpBuilder::InsertionGuard guard(b);
+      b.setInsertionPointToStart(present.thenBlock());
+      ContractionTile remainder = tile;
+      remainder.mBegin = add(b, loc, tile.mBegin, mBegin);
+      remainder.nBegin = add(b, loc, tile.nBegin, nBegin);
+      remainder.kBegin = add(b, loc, tile.kBegin, kBegin);
+      remainder.mCount = sub(mEnd, mBegin);
+      remainder.nCount = sub(nEnd, nBegin);
+      remainder.depth = sub(tile.depth, kBegin);
+      remainder.first = initialize && tile.first;
+      remainder.output = b.create<memref::SubViewOp>(loc, tile.output,
+          ArrayRef<OpFoldResult>{mBegin, nBegin},
+          ArrayRef<OpFoldResult>{remainder.mCount, remainder.nCount},
+          ArrayRef<OpFoldResult>{b.getIndexAttr(1), b.getIndexAttr(1)});
+      if (failed(formExactBfloatTile(b, operation, remainder, config, binding))) status = failure();
+      return;
+    }
     loop(b, loc, mBegin, mEnd, 1, [&](Value m) {
       loop(b, loc, nBegin, nEnd, 1, [&](Value n) {
         Value initial = initialize && tile.first ? tile.initial
@@ -196,7 +222,7 @@ LogicalResult formMatrixTile(OpBuilder &b, linalg::GenericOp operation,
   }
   tail(zero, mFull, nFull, tile.nCount, zero, true);
   tail(mFull, tile.mCount, zero, tile.nCount, zero, true);
-  return success();
+  return status;
 }
 
 Value bfloatLattice(OpBuilder &b, Location loc, Value value) {
@@ -320,31 +346,15 @@ FailureOr<Value> guardBfloatInputs(OpBuilder &b, linalg::GenericOp operation,
           depth, index(b, loc, 1 << 20))));
 }
 
-LogicalResult formBfloatTile(OpBuilder &b, linalg::GenericOp operation,
+LogicalResult formExactBfloatTile(OpBuilder &b, linalg::GenericOp operation,
     const ContractionTile &tile, ConfigurationAttr config, ImplementationAttr binding) {
   Location loc = operation.getLoc();
-  if (!tile.inputGuard)
-    return operation.emitError("BF16 tile requires its contraction input predicate");
-  Value zero = index(b, loc, 0), safe = tile.inputGuard;
-  // BF16 values in [2^-50,2^50] are multiples of 2^-57. Their products,
-  // every rounded partial sum and a checked f32 accumulator are multiples of
-  // 2^-114. A nonzero such value cannot be an f32 subnormal. This proves that
-  // AMX's mandatory DAZ/FTZ has no effect; other inputs use the original FMA
-  // implementation. NaN, infinity and negative-zero accumulators are excluded.
-  // The initial accumulator's checked [2^-91,2^100] range has this lattice.
-  // The guard bounds the WHOLE reduction by 2^20 members, so every partial
-  // (including scalar tails) stays finite and on the lattice across K blocks.
-  safe = b.create<arith::AndIOp>(loc, safe, bfloatLattice(b, loc, tile.initial));
-  auto choice = b.create<scf::IfOp>(loc, safe, true);
-  OpBuilder::InsertionGuard guard(b);
-  b.setInsertionPointToStart(choice.thenBlock());
-  if (failed(formMatrixTile(b, operation, tile, config, binding))) return failure();
-  b.setInsertionPointToStart(choice.elseBlock());
+  Value zero = index(b, loc, 0);
   NamedAttrList parameters;
   for (auto [name, value] : {std::pair<StringRef, int64_t>{"vector_width", implementationParameter(binding, "vector_width")},
-       {"micro_m", 1}, {"micro_n", 1}, {"register_replicas", 1}, {"reduction_replicas", 1}})
+       {"micro_m", 4}, {"micro_n", 1}, {"register_replicas", 1}, {"reduction_replicas", 1}})
     parameters.append(name, b.getI64IntegerAttr(value));
-  auto scalarBinding = ImplementationAttr::get(b.getContext(), b.getStringAttr("mojo.register_float_direct"),
+  auto exactBinding = ImplementationAttr::get(b.getContext(), b.getStringAttr("mojo.register_float_direct"),
       parameters.getDictionary(b.getContext()));
   ContractionTile exact = tile;
   exact.lhs = b.create<memref::SubViewOp>(loc, tile.lhs,
@@ -378,9 +388,31 @@ LogicalResult formBfloatTile(OpBuilder &b, linalg::GenericOp operation,
         });
     exact.output = view(tile.output, zero, column, tile.mCount, columns);
     exact.nCount = columns;
-    if (failed(formRegisterTile(b, operation, exact, config, scalarBinding))) status = failure();
+    if (failed(formRegisterTile(b, operation, exact, config, exactBinding))) status = failure();
   });
   return status;
+}
+
+LogicalResult formBfloatTile(OpBuilder &b, linalg::GenericOp operation,
+    const ContractionTile &tile, ConfigurationAttr config, ImplementationAttr binding) {
+  Location loc = operation.getLoc();
+  if (!tile.inputGuard)
+    return operation.emitError("BF16 tile requires its contraction input predicate");
+  // BF16 values in [2^-50,2^50] are multiples of 2^-57. Their products,
+  // every rounded partial sum and a checked f32 accumulator are multiples of
+  // 2^-114. A nonzero such value cannot be an f32 subnormal. This proves that
+  // AMX's mandatory DAZ/FTZ has no effect; other inputs use the original FMA
+  // implementation. NaN, infinity and negative-zero accumulators are excluded.
+  // The initial accumulator's checked [2^-91,2^100] range has this lattice.
+  // The guard bounds the WHOLE reduction by 2^20 members, so every partial
+  // (including vector tails) stays finite and on the lattice across K blocks.
+  Value safe = b.create<arith::AndIOp>(loc, tile.inputGuard, bfloatLattice(b, loc, tile.initial));
+  auto choice = b.create<scf::IfOp>(loc, safe, true);
+  OpBuilder::InsertionGuard guard(b);
+  b.setInsertionPointToStart(choice.thenBlock());
+  if (failed(formMatrixTile(b, operation, tile, config, binding))) return failure();
+  b.setInsertionPointToStart(choice.elseBlock());
+  return formExactBfloatTile(b, operation, tile, config, binding);
 }
 
 } // namespace

@@ -106,6 +106,77 @@ public:
   }
 
 private:
+  struct Captures {
+    SmallVector<std::pair<Value, SmallVector<std::string>>> bindings;
+    SmallVector<std::string> parameters, types, arguments;
+  };
+
+  FailureOr<Captures> captureArguments(Region &region) {
+    llvm::SetVector<Value> used;
+    getUsedValuesDefinedAbove(region, region, used);
+    Captures result;
+    for (Value value : used) {
+      auto expressions = components(value);
+      SmallVector<int64_t> constants(expressions.size(), ShapedType::kDynamic);
+      if (auto memory = dyn_cast<MemRefType>(value.getType())) {
+        SmallVector<int64_t> strides;
+        int64_t offset;
+        if (mlir::failed(memory.getStridesAndOffset(strides, offset))) {
+          region.getParentOp()->emitOpError("requires strided memory captures");
+          return failure();
+        }
+        constants[1] = offset;
+        for (int64_t axis = 0; axis < memory.getRank(); ++axis) {
+          constants[2 + axis] = memory.getDimSize(axis);
+          constants[2 + memory.getRank() + axis] = strides[axis];
+        }
+      }
+      SmallVector<std::string> fields;
+      for (auto [type, expression, constant] :
+           llvm::zip_equal(componentTypes(value.getType()), expressions, constants)) {
+        // Preserve descriptor facts at both task and local-call boundaries.
+        if (!ShapedType::isDynamic(constant)) {
+          fields.push_back(std::to_string(constant));
+          continue;
+        }
+        fields.push_back(newName("capture_"));
+        result.parameters.push_back(std::string(isa<MemRefType>(value.getType()) ||
+                                                   value.getType().isIntOrIndexOrFloat()
+                                               ? "var " : "imm ") +
+                                    fields.back() + ": " + nativeType(type));
+        result.types.push_back(nativeType(type));
+        result.arguments.push_back(expression);
+      }
+      result.bindings.emplace_back(value, std::move(fields));
+    }
+    return result;
+  }
+
+  LogicalResult computeScope(scf::ExecuteRegionOp scope) {
+    auto captures = captureArguments(scope.getRegion());
+    if (mlir::failed(captures)) return failure();
+    std::string helper = newName("compute_");
+    {
+      ScopedValues local(*this);
+      auto enclosingMemories = std::move(memories);
+      memories.clear();
+      auto restore = llvm::make_scope_exit([&] { memories = std::move(enclosingMemories); });
+      for (auto &[value, fields] : captures->bindings) {
+        for (const std::string &field : fields) reserveName(field);
+        if (auto memory = dyn_cast<MemRefType>(value.getType()))
+          memories[value] = Memory::fromComponents(memory, fields);
+        else bind(value, fields.front());
+      }
+      line("@no_inline");
+      line("def " + helper + "(" + join(captures->parameters) + "):");
+      ++indent;
+      if (mlir::failed(emitNativeBlock(scope.getRegion().front()))) return failure();
+      --indent;
+    }
+    line(helper + "(" + join(captures->arguments) + ")");
+    return success();
+  }
+
   std::string name(Value value) { return valueString(value); }
 
   std::string fresh(Value value) {
@@ -121,45 +192,12 @@ private:
 
   LogicalResult dispatch(cpu::TaskDispatchOp dispatch) {
     Block &body = dispatch.getBody().front();
-    llvm::SetVector<Value> used;
-    getUsedValuesDefinedAbove(dispatch.getBody(), dispatch.getBody(), used);
-    SmallVector<std::pair<Value, SmallVector<std::string>>> bindings;
-    SmallVector<std::string> parameters;
-    SmallVector<std::string> captureTypes;
-    SmallVector<std::string> captureValues;
-    for (Value value : used) {
-      auto expressions = components(value);
-      SmallVector<int64_t> constants(expressions.size(), ShapedType::kDynamic);
-      if (auto memory = dyn_cast<MemRefType>(value.getType())) {
-        SmallVector<int64_t> strides;
-        int64_t offset;
-        if (mlir::failed(memory.getStridesAndOffset(strides, offset)))
-          return dispatch.emitOpError("requires strided memory captures");
-        constants[1] = offset;
-        for (int64_t axis = 0; axis < memory.getRank(); ++axis) {
-          constants[2 + axis] = memory.getDimSize(axis);
-          constants[2 + memory.getRank() + axis] = strides[axis];
-        }
-      }
-      SmallVector<std::string> fields;
-      for (auto [type, expression, constant] :
-           llvm::zip_equal(componentTypes(value.getType()), expressions, constants)) {
-        // Type-known descriptor fields remain constants across the task ABI.
-        // Only dynamic facts are captured, as at the public native entry.
-        if (!ShapedType::isDynamic(constant)) {
-          fields.push_back(std::to_string(constant));
-          continue;
-        }
-        fields.push_back(newName("capture_"));
-        parameters.push_back(std::string(isa<MemRefType>(value.getType()) ||
-                                            value.getType().isIntOrIndexOrFloat()
-                                        ? "var " : "imm ") +
-                             fields.back() + ": " + nativeType(type));
-        captureTypes.push_back(nativeType(type));
-        captureValues.push_back(expression);
-      }
-      bindings.emplace_back(value, std::move(fields));
-    }
+    auto captures = captureArguments(dispatch.getBody());
+    if (mlir::failed(captures)) return failure();
+    auto &bindings = captures->bindings;
+    auto &parameters = captures->parameters;
+    auto &captureTypes = captures->types;
+    auto &captureValues = captures->arguments;
     std::string task = newName("task_");
     std::string context = newName("task_context_");
     std::string contextType = "Tuple[" + join(captureTypes) + "]";
@@ -252,6 +290,19 @@ public:
     static const auto table = [] {
       OperationEmitters<Serializer> result;
       addNative<cpu::InvokeOp>(result);
+      addNative<scf::ExecuteRegionOp>(result, [](scf::ExecuteRegionOp op) -> LogicalResult {
+        if (op.getNumResults() || !llvm::hasSingleElement(op.getRegion()) ||
+            op.getRegion().front().getNumArguments())
+          return op.emitOpError("Mojo compute scopes require one block and no escaping results");
+        llvm::SetVector<Value> captures;
+        getUsedValuesDefinedAbove(op.getRegion(), op.getRegion(), captures);
+        for (Value value : captures) {
+          Type type = value.getType();
+          if (!type.isIntOrIndexOrFloat() && !isa<MemRefType, VectorType>(type))
+            return op.emitOpError("Mojo compute scope capture has no native value representation");
+        }
+        return success();
+      });
       addNative<func::CallOp>(result, [](func::CallOp op) {
         auto callee = SymbolTable::lookupNearestSymbolFrom<func::FuncOp>(op, op.getCalleeAttr());
         bool entry = op.getCallee() == "intent_cpu_enter_ieee" &&
@@ -378,6 +429,7 @@ private:
       line("external_call[\"intent_cpu_leave_ieee\", NoneType](" + name(op.getOperand(0)) + ")");
     return success();
   }
+  LogicalResult emitTyped(scf::ExecuteRegionOp op) { return computeScope(op); }
   LogicalResult emitTyped(memref::LoadOp op) {
     std::string expression = memoryPointer(op.getMemref(), op.getIndices()) + ".unsafe_load()";
     if (op.getType().isIndex()) expression = "Int(" + expression + ")";
