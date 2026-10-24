@@ -77,6 +77,16 @@ def ReductionConsumersPass : IntentGPUTransformPass<
   let options = [ReductionResidencyPreference];
 }
 
+def StaticViewValuesPass : IntentGPUTransformPass<
+    "intent-gpu-promote-static-view-values",
+    "Forward small statically addressed GPU view state", [{
+    Expands bounded ordered control over a small view slice with independent
+    lanes. An explicit nonoverlapping-layout guard permits forwarding exact
+    cell values across distinct writes; the other arm retains original control.
+    Preserves store effects, masks, arithmetic and ordered loop-carried values.
+    Unknown control or coordinates leave the original program intact.
+  }]>;
+
 def PointwiseBlockingPass : IntentGPUTransformPass<
     "intent-gpu-form-pointwise-blocking",
     "Form pointwise GPU blocking and its dependent value graph", [{

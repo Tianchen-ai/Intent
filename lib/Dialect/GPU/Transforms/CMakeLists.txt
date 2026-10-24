@@ -85,6 +85,7 @@ add_mlir_library(MLIRIntentGPUTransforms
   Storage/MaterializeRetainedValues.cpp
   Storage/PromoteBufferValues.cpp
   Storage/SchedulePrivateStores.cpp
+  Storage/StaticViewValues.cpp
 
   Mapping/ExecutionGroups.cpp
   Mapping/ProgramInterface.cpp

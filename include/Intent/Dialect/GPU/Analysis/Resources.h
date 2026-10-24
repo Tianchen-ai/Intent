@@ -123,7 +123,8 @@ private:
 };
 
 llvm::SmallVector<ConfigurationRequirementAttr> collectPointwiseRequirements(
-    mlir::func::FuncOp kernel, const FragmentResourceAnalysis &resources);
+    mlir::func::FuncOp kernel, const FragmentResourceAnalysis &resources,
+    mlir::ValueRange nativeMatrixInputs = {});
 
 } // namespace intent::gpu
 

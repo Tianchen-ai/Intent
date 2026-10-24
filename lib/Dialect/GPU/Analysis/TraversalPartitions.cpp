@@ -267,6 +267,22 @@ bool prefixAndSuffix(Operation *first, Operation *second,
 
 bool areDisjointTraversalPartitions(Operation *first, Operation *second,
                                    PhysicalProgramAnalysis &analysis) {
+  if (isa<StoreOp>(first) && isa<StoreOp>(second)) {
+    auto a = analysis.footprint(first), b = analysis.footprint(second);
+    if (a.state == PhysicalFactState::Exact && b.state == PhysicalFactState::Exact &&
+        a.resource == b.resource && a.sourceAxes == b.sourceAxes &&
+        a.coordinates.size() == b.coordinates.size()) {
+      IndexRelations relations;
+      // Full unrolling replaces distinct ordinal iterations with distinct
+      // constant coordinates. Their logical Store domains remain disjoint;
+      // each cloned Store still carries its original bounds and validity.
+      for (auto [left, right] : llvm::zip(a.coordinates, b.coordinates)) {
+        if (!left.getType().isIndex() || !right.getType().isIndex()) continue;
+        auto x = relations.constant(left), y = relations.constant(right);
+        if (x && y && x != y) return true;
+      }
+    }
+  }
   return prefixAndSuffix(first, second, analysis) || prefixAndSuffix(second, first, analysis);
 }
 

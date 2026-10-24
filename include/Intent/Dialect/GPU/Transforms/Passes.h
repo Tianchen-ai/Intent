@@ -24,6 +24,7 @@ mlir::LogicalResult realizeReductionConsumerTraversals(
     mlir::ModuleOp module, unsigned preferredResidentPrograms);
 mlir::LogicalResult materializeRetainedValues(mlir::ModuleOp module);
 mlir::LogicalResult vectorizeBufferLoops(mlir::ModuleOp module);
+mlir::LogicalResult promoteStaticViewValues(mlir::ModuleOp module);
 mlir::LogicalResult promoteBufferValues(mlir::ModuleOp module);
 mlir::LogicalResult schedulePrivateStores(mlir::ModuleOp module);
 mlir::LogicalResult realizeContractionBlocking(mlir::ModuleOp module);

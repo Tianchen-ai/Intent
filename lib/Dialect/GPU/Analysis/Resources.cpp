@@ -7,6 +7,7 @@
 #include "mlir/Analysis/Liveness.h"
 #include "mlir/IR/AttrTypeSubElements.h"
 #include "mlir/IR/Dominance.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/Support/MathExtras.h"
 #include <functional>
@@ -489,7 +490,8 @@ PhysicalExprAttr reductionRegisterFootprint(
                  role == ParameterRole::OwnershipN ||
                  role == ParameterRole::Reduction ||
                  role == ParameterRole::ReductionOuter ||
-                 role == ParameterRole::ReductionInner;
+                 role == ParameterRole::ReductionInner ||
+                 isPointwiseTraversalParameter(parameter);
     });
     parameters.walk(fragment.getShape());
     auto footprint = fragmentRegisterFootprint(fragment);
@@ -701,7 +703,8 @@ bool isPointwiseTraversalParameter(ParameterAttr parameter) {
 }
 
 SmallVector<ConfigurationRequirementAttr> collectPointwiseRequirements(
-    func::FuncOp kernel, const FragmentResourceAnalysis &resources) {
+    func::FuncOp kernel, const FragmentResourceAnalysis &resources,
+    ValueRange nativeMatrixInputs) {
   SmallVector<ConfigurationRequirementAttr> requirements;
   auto capabilities = kernel->getAttrOfType<CapabilitiesAttr>(capabilitiesAttr);
   if (!capabilities || capabilities.getRegistersPerUnit() <= 0) return requirements;
@@ -724,6 +727,39 @@ SmallVector<ConfigurationRequirementAttr> collectPointwiseRequirements(
           !llvm::is_contained(requirements, requirement))
         requirements.push_back(requirement);
     }
+  }
+  // Distinct live values of the same fragment type occupy distinct payloads.
+  // A per-type bound misses register state exposed by loop unrolling or read
+  // forwarding. Reuse the current-SSA liveness accounting at observable stores.
+  // Matrix programs use the collective budget, including its shared-memory
+  // allowance. Do not charge the same native matrix inputs to registers here.
+  bool matrixProgram = !nativeMatrixInputs.empty();
+  kernel.walk([&](ContractOp) { matrixProgram = true; });
+  if (matrixProgram) return requirements;
+  Liveness liveness(kernel);
+  auto values = orderedKernelValues(kernel);
+  SmallVector<PhysicalExprAttr> stages;
+  kernel.walk([&](Operation *operation) {
+    auto effects = dyn_cast<MemoryEffectOpInterface>(operation);
+    if (!effects) return;
+    SmallVector<MemoryEffects::EffectInstance> entries;
+    effects.getEffects(entries);
+    if (!llvm::any_of(entries, [](const auto &effect) {
+          return isa<MemoryEffects::Write>(effect.getEffect()) &&
+                 effect.getValue() && isa<ViewType>(effect.getValue().getType());
+        })) return;
+    PhysicalExprAttr matrix;
+    auto words = reductionRegisterFootprint(operation, liveness, values, {}, matrix);
+    if (words) stages.push_back(words);
+  });
+  if (auto peak = maximumNominalWorkingSet(kernel, stages)) {
+    auto requirement = ConfigurationRequirementAttr::get(kernel.getContext(),
+        ConfigurationRequirementKind::NominalBudget,
+        ConfigurationRequirementMetric::FragmentRegisterWords,
+        ConfigurationRequirementPredicate::LessEqual, peak, limit,
+        ParameterRefAttr(), builder.getStringAttr(
+            "live pointwise payloads exceed the candidate register budget"));
+    if (!llvm::is_contained(requirements, requirement)) requirements.push_back(requirement);
   }
   return requirements;
 }

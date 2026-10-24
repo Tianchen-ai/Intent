@@ -35,6 +35,7 @@ namespace intent::gpu {
 #define GEN_PASS_DEF_ACCESSCOMPOSITIONPASS
 #define GEN_PASS_DEF_PRIVATESTORESPASS
 #define GEN_PASS_DEF_BUFFERVECTORIZATIONPASS
+#define GEN_PASS_DEF_STATICVIEWVALUESPASS
 #define GEN_PASS_DEF_BUFFERPROMOTIONPASS
 #define GEN_PASS_DEF_PROGRAMMAPPINGPASS
 #define GEN_PASS_DEF_RANGEPREDICATESPASS
@@ -229,6 +230,15 @@ public:
   }
 };
 
+class StaticViewValuesPass : public impl::StaticViewValuesPassBase<StaticViewValuesPass> {
+public:
+  void runOnOperation() final {
+    auto module = getOperation();
+    if (failed(finishTransformation(module, getArgument(), promoteStaticViewValues(module))))
+      signalPassFailure();
+  }
+};
+
 class BufferVectorizationPass : public impl::BufferVectorizationPassBase<BufferVectorizationPass> {
 public:
   void runOnOperation() final {
@@ -322,6 +332,7 @@ void populateTransformations(OpPassManager &manager,
   manager.addPass(createContractionsPass());
   manager.addPass(createAccessCompositionPass());
   manager.addPass(createPrivateStoresPass());
+  manager.addPass(createStaticViewValuesPass());
   manager.addPass(createBufferVectorizationPass());
   manager.addPass(createBufferPromotionPass());
   manager.addPass(createProgramMappingPass());

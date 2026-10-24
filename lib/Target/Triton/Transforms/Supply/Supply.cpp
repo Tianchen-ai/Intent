@@ -85,12 +85,20 @@ LogicalResult legalizeOrderedViewDependencies(func::FuncOp kernel) {
     }
     return condition;
   };
+  gpu::PhysicalProgramAnalysis coordinateAnalysis(kernel);
+  llvm::DenseMap<Operation *, bool> boundedAccesses;
+  auto bounded = [&](gpu::AccessOpInterface access) {
+    auto [found, inserted] = boundedAccesses.try_emplace(access.getOperation(), false);
+    if (inserted)
+      found->second = coordinateAnalysis.accessBounds(access.getOperation()).isExact();
+    return found->second;
+  };
+  // This phase inserts barriers and guards, without rewriting access addresses
+  // or validity. Each access's bounds proof is shared across all conflict pairs.
   auto disjointCoordinates = [&](gpu::AccessOpInterface first,
                                  gpu::AccessOpInterface second) {
     if (first.getAccessResource() != second.getAccessResource()) return false;
-    gpu::PhysicalProgramAnalysis analysis(kernel);
-    if (!analysis.accessBounds(first.getOperation()).isExact() ||
-        !analysis.accessBounds(second.getOperation()).isExact())
+    if (!bounded(first) || !bounded(second))
       return false;
     // These intervals cover every represented coordinate, including padding.
     // Access predicates can only restrict the sets. Logical separation implies

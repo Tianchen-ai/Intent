@@ -1,6 +1,8 @@
 #include "ConfigurationPolicy.h"
 #include "Intent/Dialect/GPU/Analysis/PhysicalParameters.h"
 #include "Intent/Dialect/GPU/Analysis/PhysicalProgram.h"
+#include "Intent/Dialect/GPU/IR/AccessOpInterface.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "llvm/ADT/DenseSet.h"
 #include <algorithm>
 #include <limits>
@@ -76,6 +78,20 @@ StringRef familyFor(func::FuncOp kernel, const ConfigurationFacts &facts) {
   case TuningClass::PointwiseReduction:
     return facts.hasTwoAxisPointwiseOwnership ? "pointwise_reduction_two_axis" : "pointwise_reduction";
   case TuningClass::Pointwise:
+    {
+      bool orderedState = false;
+      kernel.walk([&](scf::ForOp loop) {
+        llvm::DenseMap<Value, unsigned> modes;
+        loop.walk([&](AccessOpInterface access) {
+          Value resource = access.getAccessResource();
+          if (!isa<ViewType>(resource.getType())) return;
+          if (access.getAccessKind() == AccessKind::Load) modes[resource] |= 1;
+          if (access.getAccessKind() == AccessKind::Store) modes[resource] |= 2;
+        });
+        orderedState |= llvm::any_of(modes, [](auto item) { return item.second == 3; });
+      });
+      if (orderedState) return "pointwise_ordered";
+    }
     if (facts.hasTwoAxisPointwiseOwnership && facts.hasFixedPointwiseLocal)
       return facts.pointwiseOnlyProgram ? "pointwise_only_fixed_local" : "pointwise_fixed_local";
     if (facts.hasTwoAxisPointwiseOwnership)
