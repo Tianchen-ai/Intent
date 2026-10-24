@@ -365,6 +365,14 @@ LogicalResult block(linalg::GenericOp operation, const Configuration &config,
     if (failed(prepared)) return failure();
     supplies = std::move(*prepared);
   }
+  Value inputGuard;
+  if ((*implementation)->guardContraction) {
+    auto predicate = (*implementation)->guardContraction(b, operation, shared, binding);
+    if (failed(predicate)) return failure();
+    if (!*predicate || !(*predicate).getType().isInteger(1))
+      return operation.emitError("contraction input guard must produce an i1 predicate");
+    inputGuard = *predicate;
+  }
   // Consumers already prepared outside the future workset do not require a
   // K-outer cohort here. Preserve those snapshots and their preparation count;
   // only Group scratch remains live alongside this macro accumulator.
@@ -423,7 +431,7 @@ LogicalResult block(linalg::GenericOp operation, const Configuration &config,
   auto issue = [&](Value m, Value n, Value rows, Value columns,
                    Value destination, Value kBegin, Value depth, bool first) {
     ContractionTile tile{lhs, rhs, destination, initial, m, rows, n, columns,
-                         kBegin, depth, first, {}};
+                         kBegin, depth, first, {}, inputGuard};
     auto local = inputs.prepareGroup(b, operation, tile, shared, requirements);
     if (failed(local)) { status = failure(); return; }
     llvm::append_range(*local, supplies);

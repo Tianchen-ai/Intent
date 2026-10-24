@@ -55,6 +55,7 @@ struct ContractionTile {
   mlir::Value mBegin, mCount, nBegin, nCount, kBegin, depth;
   bool first;
   llvm::ArrayRef<InputSupply> inputs;
+  mlir::Value inputGuard;
 };
 
 struct ContractionRequirements {
@@ -134,6 +135,10 @@ struct Implementation {
   // The registered operation family is independent of per-instance legality.
   // A recognized computation with no legal candidate must still be diagnosed.
   std::function<bool(mlir::Operation *)> operationKind;
+  // Evaluate once inside the original contraction's nonempty read scope.
+  // This predicate selects equivalent microprograms, not a caller precondition.
+  std::function<mlir::FailureOr<mlir::Value>(mlir::OpBuilder &,
+      mlir::linalg::GenericOp, ConfigurationAttr, ImplementationAttr)> guardContraction;
 
   bool matches(mlir::Operation *operation) const {
     return operationKind(operation) && (!applicable || applicable(operation));

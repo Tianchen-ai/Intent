@@ -223,11 +223,13 @@ Value checkBfloatRectangle(OpBuilder &b, Location loc, Value memory,
   auto predicates = VectorType::get({width}, b.getI1Type());
   Value lanes = b.create<arith::ConstantOp>(loc, predicates,
       DenseElementsAttr::get(predicates, b.getBoolAttr(true)));
+  Value fullColumns = b.create<arith::SubIOp>(loc, columns,
+      b.create<arith::RemSIOp>(loc, columns, index(b, loc, width)));
   auto rowLoop = b.create<scf::ForOp>(loc, zero, rows, index(b, loc, 1), ValueRange{lanes});
   OpBuilder::InsertionGuard guard(b);
   b.setInsertionPointToStart(rowLoop.getBody());
   Value row = add(b, loc, rowBegin, rowLoop.getInductionVar());
-  auto columnsLoop = b.create<scf::ForOp>(loc, zero, columns, index(b, loc, width), rowLoop.getRegionIterArgs());
+  auto columnsLoop = b.create<scf::ForOp>(loc, zero, fullColumns, index(b, loc, width), rowLoop.getRegionIterArgs());
   b.setInsertionPointToStart(columnsLoop.getBody());
   Value values = b.create<vector::LoadOp>(loc, VectorType::get({width}, element), memory,
       ValueRange{row, add(b, loc, columnBegin, columnsLoop.getInductionVar())});
@@ -236,55 +238,96 @@ Value checkBfloatRectangle(OpBuilder &b, Location loc, Value memory,
   b.setInsertionPointAfter(columnsLoop);
   b.create<scf::YieldOp>(loc, columnsLoop.getResults());
   b.setInsertionPointAfter(rowLoop);
-  return b.create<arith::AndIOp>(loc, initial,
+  Value complete = b.create<arith::AndIOp>(loc, initial,
       b.create<vector::ReductionOp>(loc, vector::CombiningKind::AND, rowLoop.getResult(0)));
+  auto tails = b.create<scf::ForOp>(loc, zero, rows, index(b, loc, 1), ValueRange{complete});
+  b.setInsertionPointToStart(tails.getBody());
+  Value tailRow = add(b, loc, rowBegin, tails.getInductionVar());
+  auto tail = b.create<scf::ForOp>(loc, fullColumns, columns, index(b, loc, 1), tails.getRegionIterArgs());
+  b.setInsertionPointToStart(tail.getBody());
+  Value value = b.create<memref::LoadOp>(loc, memory,
+      ValueRange{tailRow, add(b, loc, columnBegin, tail.getInductionVar())});
+  b.create<scf::YieldOp>(loc, b.create<arith::AndIOp>(loc,
+      tail.getRegionIterArgs()[0], bfloatLattice(b, loc, value)).getResult());
+  b.setInsertionPointAfter(tail);
+  b.create<scf::YieldOp>(loc, tail.getResults());
+  return tails.getResult(0);
+}
+
+FailureOr<Value> guardBfloatInputs(OpBuilder &b, linalg::GenericOp operation,
+    ConfigurationAttr, ImplementationAttr) {
+  Location loc = operation.getLoc();
+  Value zero = index(b, loc, 0), safe = b.create<arith::ConstantIntOp>(loc, 1, 1);
+  auto scalar = [&](Value memory, Value rows, Value columns) -> Value {
+    auto outer = b.create<scf::ForOp>(loc, zero, rows, index(b, loc, 1), ValueRange{safe});
+    OpBuilder::InsertionGuard guard(b);
+    b.setInsertionPointToStart(outer.getBody());
+    auto inner = b.create<scf::ForOp>(loc, zero, columns, index(b, loc, 1), outer.getRegionIterArgs());
+    b.setInsertionPointToStart(inner.getBody());
+    Value value = b.create<memref::LoadOp>(loc, memory,
+        ValueRange{outer.getInductionVar(), inner.getInductionVar()});
+    b.create<scf::YieldOp>(loc, b.create<arith::AndIOp>(loc,
+        inner.getRegionIterArgs()[0], bfloatLattice(b, loc, value)).getResult());
+    b.setInsertionPointAfter(inner);
+    b.create<scf::YieldOp>(loc, inner.getResults());
+    return outer.getResult(0);
+  };
+  for (Value memory : operation.getInputs()) {
+    auto type = cast<MemRefType>(memory.getType());
+    auto metadata = b.create<memref::ExtractStridedMetadataOp>(loc, memory);
+    auto contiguous = [&](unsigned axis) -> Value {
+      return b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+          metadata.getStrides()[axis], index(b, loc, 1));
+    };
+    auto check = [&](unsigned inner) -> Value {
+      unsigned outer = 1 - inner;
+      auto viewType = MemRefType::get({ShapedType::kDynamic, ShapedType::kDynamic},
+          type.getElementType(), StridedLayoutAttr::get(b.getContext(),
+              ShapedType::kDynamic, {ShapedType::kDynamic, 1}), type.getMemorySpace());
+      Value view = b.create<memref::ReinterpretCastOp>(loc, viewType,
+          metadata.getBaseBuffer(), OpFoldResult(metadata.getOffset()),
+          ArrayRef<OpFoldResult>{metadata.getSizes()[outer], metadata.getSizes()[inner]},
+          ArrayRef<OpFoldResult>{metadata.getStrides()[outer], b.getIndexAttr(1)});
+      return checkBfloatRectangle(b, loc, view, zero, zero,
+          metadata.getSizes()[outer], metadata.getSizes()[inner], safe);
+    };
+    auto choice = b.create<scf::IfOp>(loc, TypeRange{b.getI1Type()}, contiguous(1), true);
+    {
+      OpBuilder::InsertionGuard guard(b);
+      b.setInsertionPointToStart(choice.thenBlock());
+      b.create<scf::YieldOp>(loc, check(1));
+      b.setInsertionPointToStart(choice.elseBlock());
+      auto transpose = b.create<scf::IfOp>(loc, TypeRange{b.getI1Type()}, contiguous(0), true);
+      b.setInsertionPointToStart(transpose.thenBlock());
+      b.create<scf::YieldOp>(loc, check(0));
+      b.setInsertionPointToStart(transpose.elseBlock());
+      b.create<scf::YieldOp>(loc, scalar(memory, metadata.getSizes()[0], metadata.getSizes()[1]));
+      b.setInsertionPointAfter(transpose);
+      b.create<scf::YieldOp>(loc, transpose.getResults());
+    }
+    safe = choice.getResult(0);
+  }
+  Value depth = b.create<memref::DimOp>(loc, operation.getInputs()[0], 1);
+  return Value(b.create<arith::AndIOp>(loc, safe,
+      b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ule,
+          depth, index(b, loc, 1 << 20))));
 }
 
 LogicalResult formBfloatTile(OpBuilder &b, linalg::GenericOp operation,
     const ContractionTile &tile, ConfigurationAttr config, ImplementationAttr binding) {
   Location loc = operation.getLoc();
-  Value zero = index(b, loc, 0), safe = b.create<arith::ConstantIntOp>(loc, 1, 1);
-  auto full = [&](Value value, int64_t width) -> Value {
-    return b.create<arith::SubIOp>(loc, value,
-        b.create<arith::RemSIOp>(loc, value, index(b, loc, width)));
-  };
-  Value rows = full(tile.mCount, 16), columns = full(tile.nCount, 16), depth = full(tile.depth, 32);
+  if (!tile.inputGuard)
+    return operation.emitError("BF16 tile requires its contraction input predicate");
+  Value zero = index(b, loc, 0), safe = tile.inputGuard;
   // BF16 values in [2^-50,2^50] are multiples of 2^-57. Their products,
   // every rounded partial sum and a checked f32 accumulator are multiples of
   // 2^-114. A nonzero such value cannot be an f32 subnormal. This proves that
   // AMX's mandatory DAZ/FTZ has no effect; other inputs use the original FMA
   // implementation. NaN, infinity and negative-zero accumulators are excluded.
-  // The accumulator's checked [2^-91,2^100] range has the same lattice; the
-  // configuration's K <= 2^20 bound also keeps all partial sums below overflow.
-  for (const InputSupply &supply : tile.inputs) {
-    bool left = supply.operand == 0;
-    if ((left && supply.panelAxis != 1) || (!left && (supply.operand != 1 || supply.panelAxis != 0 || supply.panelSize != 2)))
-      return operation.emitError("BF16 matrix guard requires its declared packed inputs");
-    Value memory = b.create<memref::CollapseShapeOp>(loc, supply.storage,
-        left ? ArrayRef<ReassociationIndices>{{0, 1}, {2}}
-             : ArrayRef<ReassociationIndices>{{0}, {1, 2}});
-    auto relative = [&](Value value, Value begin) -> Value { return b.create<arith::SubIOp>(loc, value, begin); };
-    Value row = relative(left ? tile.mBegin : tile.kBegin, supply.begins[0]);
-    Value column = relative(left ? tile.kBegin : tile.nBegin, supply.begins[1]);
-    Value rowCount = rows, columnCount = depth;
-    if (left) {
-      Value width = index(b, loc, supply.panelSize);
-      Value panel = b.create<arith::DivSIOp>(loc, column, width);
-      row = add(b, loc, row, multiply(b, loc, panel,
-          b.create<memref::DimOp>(loc, supply.storage, 1)));
-      column = b.create<arith::RemSIOp>(loc, column, width);
-    } else {
-      row = b.create<arith::DivSIOp>(loc, row, index(b, loc, 2));
-      column = multiply(b, loc, column, index(b, loc, 2));
-      rowCount = b.create<arith::DivSIOp>(loc, depth, index(b, loc, 2));
-      columnCount = multiply(b, loc, columns, index(b, loc, 2));
-    }
-    safe = checkBfloatRectangle(b, loc, memory, row, column, rowCount, columnCount, safe);
-  }
-  if (tile.inputs.size() != 2)
-    return operation.emitError("BF16 matrix guard requires both packed inputs");
-  safe = tile.first ? Value(b.create<arith::AndIOp>(loc, safe, bfloatLattice(b, loc, tile.initial)))
-      : checkBfloatRectangle(b, loc, tile.output, zero, zero, rows, columns, safe);
+  // The initial accumulator's checked [2^-91,2^100] range has this lattice.
+  // The guard bounds the WHOLE reduction by 2^20 members, so every partial
+  // (including scalar tails) stays finite and on the lattice across K blocks.
+  safe = b.create<arith::AndIOp>(loc, safe, bfloatLattice(b, loc, tile.initial));
   auto choice = b.create<scf::IfOp>(loc, safe, true);
   OpBuilder::InsertionGuard guard(b);
   b.setInsertionPointToStart(choice.thenBlock());
@@ -292,7 +335,7 @@ LogicalResult formBfloatTile(OpBuilder &b, linalg::GenericOp operation,
   b.setInsertionPointToStart(choice.elseBlock());
   NamedAttrList parameters;
   for (auto [name, value] : {std::pair<StringRef, int64_t>{"vector_width", implementationParameter(binding, "vector_width")},
-       {"micro_m", 4}, {"micro_n", 2}, {"register_replicas", 1}, {"reduction_replicas", 1}})
+       {"micro_m", 1}, {"micro_n", 1}, {"register_replicas", 1}, {"reduction_replicas", 1}})
     parameters.append(name, b.getI64IntegerAttr(value));
   auto scalarBinding = ImplementationAttr::get(b.getContext(), b.getStringAttr("mojo.register_float_direct"),
       parameters.getDictionary(b.getContext()));
@@ -301,7 +344,7 @@ LogicalResult formBfloatTile(OpBuilder &b, linalg::GenericOp operation,
       ArrayRef<OpFoldResult>{tile.mBegin, tile.kBegin},
       ArrayRef<OpFoldResult>{tile.mCount, tile.depth},
       ArrayRef<OpFoldResult>{b.getIndexAttr(1), b.getIndexAttr(1)});
-  int64_t fallbackColumns = 2 * implementationParameter(binding, "vector_width");
+  int64_t fallbackColumns = implementationParameter(binding, "vector_width");
   auto exactRight = b.create<memref::AllocaOp>(loc,
       MemRefType::get({config.getTileK(), fallbackColumns}, b.getBF16Type()));
   exactRight.setAlignment(64);
@@ -402,7 +445,7 @@ void registerMatrixImplementations(ImplementationRegistry &registry) {
     if (config.tileM > available / 4 / config.tileN)
       return "BF16 matrix accumulator exceeds the private storage budget";
     available -= config.tileM * config.tileN * 4;
-    if (config.tileK > available / 4 / config.parameter("vector_width"))
+    if (config.tileK > available / 2 / config.parameter("vector_width"))
       return "BF16 exact-path input block exceeds the private storage budget";
     return std::nullopt;
   };
@@ -412,6 +455,7 @@ void registerMatrixImplementations(ImplementationRegistry &registry) {
         {1, element, 0, 2, 64, InputReuse::Consumers, 2}};
   };
   bfloat.formTile = formBfloatTile;
+  bfloat.guardContraction = guardBfloatInputs;
   registry.add<linalg::GenericOp>(std::move(bfloat));
 }
 
