@@ -535,10 +535,27 @@ PhysicalProgramAnalysis::accessBounds(Operation *access) {
     }
   }
 
+  // If-conversion transports the lexical scope of an assumption as a lane
+  // predicate. It proves bounds only for accesses contained in that scope.
+  std::function<bool(Value, Value)> implies = [&](Value active, Value required) {
+    if (!required || integerConstant(required) == 1 || active == required)
+      return true;
+    if (!active) return false;
+    if (auto conjunction = required.getDefiningOp<BinaryOp>();
+        conjunction && conjunction.getOperatorKind() == BinaryOperator::LogicalAnd)
+      return implies(active, conjunction.getLhs()) &&
+             implies(active, conjunction.getRhs());
+    if (auto conjunction = active.getDefiningOp<BinaryOp>();
+        conjunction && conjunction.getOperatorKind() == BinaryOperator::LogicalAnd)
+      return implies(conjunction.getLhs(), required) ||
+             implies(conjunction.getRhs(), required);
+    return false;
+  };
   DominanceInfo dominance(kernel);
   kernel.walk([&](AssumeInBoundsOp assumption) {
     if (assumption.getResource() != accessFact.resource ||
         assumption.getAxis() >= rank ||
+        !implies(accessFact.validity, assumption.getValid()) ||
         !dominance.properlyDominates(assumption.getOperation(), access))
       return;
     for (auto [coordinate, sourceAxis] :

@@ -281,7 +281,12 @@ def IntentGPU_AssumeInBoundsOp : IntentGPU_Op<"assume_in_bounds", [
   ]> {
   let arguments = (ins IntentGPU_DataValue:$index,
                        IntentGPU_ResourceValue:$resource,
-                       I64Attr:$axis);
+                       I64Attr:$axis,
+                       Optional<IntentGPU_DataValue>:$valid);
+  let builders = [OpBuilder<(ins "::mlir::Value":$index,
+      "::mlir::Value":$resource, "uint64_t":$axis), [{
+    build($_builder, $_state, index, resource, axis, ::mlir::Value{});
+  }]>];
   let hasVerifier = 1;
 }
 

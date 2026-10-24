@@ -82,6 +82,39 @@ Value anyActiveLane(OpBuilder &builder, Location location, Value predicate) {
 
 using namespace predication;
 
+namespace {
+
+// The lifted recurrence masks every read and freezes every inactive carry.
+// Repeating this closed body is therefore legal even after its last lane exits.
+// Check the collective condition once per group; keep the per-lane condition
+// before every original iteration and preserve the recurrence's operation order.
+void groupPredicatedIterations(scf::WhileOp loop, unsigned factor) {
+  Block &before = loop.getBefore().front(), &after = loop.getAfter().front();
+  auto condition = cast<scf::ConditionOp>(before.getTerminator());
+  auto yield = cast<scf::YieldOp>(after.getTerminator());
+  SmallVector<Operation *> body;
+  for (Operation &operation : after.without_terminator())
+    body.push_back(&operation);
+  SmallVector<Value> state(yield.getResults());
+  OpBuilder builder(yield);
+  for (unsigned iteration = 1; iteration < factor; ++iteration) {
+    IRMapping mapping;
+    mapping.map(before.getArguments(), state);
+    for (Operation &operation : before.without_terminator())
+      builder.clone(operation, mapping);
+    for (auto [argument, value] : llvm::zip(after.getArguments(), condition.getArgs()))
+      mapping.map(argument, mapping.lookupOrDefault(value));
+    for (Operation *operation : body)
+      builder.clone(*operation, mapping);
+    state.clear();
+    for (Value value : yield.getResults())
+      state.push_back(mapping.lookupOrDefault(value));
+  }
+  yield.getResultsMutable().assign(state);
+}
+
+} // namespace
+
 LogicalResult clonePredicatedScalarOperation(
     OpBuilder &builder, Operation *operation, IRMapping &mapping,
     Value predicate, FragmentType shape, bool nonemptyIterations) {
@@ -270,6 +303,8 @@ LogicalResult clonePredicatedScalarOperation(
     }
     if (shape) yielded.push_back(active);
     builder.create<scf::YieldOp>(location, yielded);
+    if (shape && canPredicateScalarWhile(loop))
+      groupPredicatedIterations(result, 4);
     clone = result;
   } else if (auto branch = dyn_cast<scf::IfOp>(operation)) {
     // An iteration-invariant condition stays lazy. Only the selected branch's
@@ -383,6 +418,12 @@ LogicalResult clonePredicatedScalarOperation(
                                reduce->getResultTypes())))
       return failure();
     clone = result;
+  } else if (auto assumption = dyn_cast<AssumeInBoundsOp>(operation)) {
+    auto index = lift(mapped(assumption.getIndex()));
+    auto valid = maskedValidity(assumption.getValid(), assumption.getIndex().getType());
+    if (failed(index) || failed(valid)) return failure();
+    clone = builder.create<AssumeInBoundsOp>(location, *index,
+        mapped(assumption.getResource()), assumption.getAxis(), *valid);
   } else if (auto access = dyn_cast<AccessOpInterface>(operation);
              access && (access.getAccessKind() == AccessKind::Load ||
                         access.getAccessKind() == AccessKind::Gather ||

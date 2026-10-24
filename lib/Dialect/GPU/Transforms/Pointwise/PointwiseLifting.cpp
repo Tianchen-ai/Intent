@@ -172,6 +172,29 @@ LogicalResult rankLiftPointwiseValueGraph(
     operation->erase();
     return success();
   };
+  auto worksetValidity = [&](OpBuilder &builder, Location location) -> Value {
+    auto shape = predicateType(execution);
+    Value active;
+    for (MakeRangeOp range : liftedRanges) {
+      auto project = [&](Value value) -> Value {
+        return builder.create<BroadcastOp>(location, execution, value);
+      };
+      Value coordinate = project(range.getResult());
+      Value lower = builder.create<CompareOp>(
+          location, shape, coordinate, project(range.getLogicalStart()),
+          ComparePredicate::Ge);
+      auto stop = builder.create<BroadcastOp>(location, execution, range.getLogicalStop());
+      laneBounds[range.getResult()].push_back(stop);
+      Value upper = builder.create<CompareOp>(
+          location, shape, coordinate, stop, ComparePredicate::Lt);
+      Value bounded = builder.create<BinaryOp>(
+          location, shape, lower, upper, BinaryOperator::LogicalAnd);
+      active = active ? Value(builder.create<BinaryOp>(
+                            location, shape, active, bounded, BinaryOperator::LogicalAnd))
+                      : bounded;
+    }
+    return active;
+  };
   std::function<WalkResult(Operation *)> liftOperation;
   liftOperation = [&](Operation *operation) {
     if (isa<MakeRangeOp>(operation) || liftedOperations.contains(operation) ||
@@ -199,26 +222,7 @@ LogicalResult rankLiftPointwiseValueGraph(
       OpBuilder builder(loop);
       Location location = loop.getLoc();
       auto shape = predicateType(execution);
-      Value active;
-      for (MakeRangeOp range : liftedRanges) {
-        auto indexType = execution;
-        auto project = [&](Value value, Type type) -> Value {
-          return builder.create<BroadcastOp>(location, type, value);
-        };
-        Value coordinate = project(range.getResult(), indexType);
-        Value lower = builder.create<CompareOp>(
-            location, shape, coordinate, project(range.getLogicalStart(), indexType),
-            ComparePredicate::Ge);
-        auto stop = builder.create<BroadcastOp>(location, indexType, range.getLogicalStop());
-        laneBounds[range.getResult()].push_back(stop);
-        Value upper = builder.create<CompareOp>(
-            location, shape, coordinate, stop, ComparePredicate::Lt);
-        Value bounded = builder.create<BinaryOp>(
-            location, shape, lower, upper, BinaryOperator::LogicalAnd);
-        active = active ? Value(builder.create<BinaryOp>(
-                              location, shape, active, bounded, BinaryOperator::LogicalAnd))
-                        : bounded;
-      }
+      Value active = worksetValidity(builder, location);
       IRMapping mapping;
       if (failed(clonePredicatedScalarOperation(builder, loop, mapping, active, shape)))
         return WalkResult::interrupt();
@@ -254,6 +258,18 @@ LogicalResult rankLiftPointwiseValueGraph(
         });
     if (!dependsOnLiftedRange)
       return WalkResult::advance();
+    if (auto assumption = dyn_cast<AssumeInBoundsOp>(operation)) {
+      OpBuilder builder(assumption);
+      IRMapping mapping;
+      if (failed(clonePredicatedScalarOperation(
+              builder, assumption, mapping,
+              worksetValidity(builder, assumption.getLoc()), predicateType(execution))))
+        return WalkResult::interrupt();
+      originalOperands.erase(operation);
+      originalResults.erase(operation);
+      assumption.erase();
+      return WalkResult::advance();
+    }
     if (auto yield = dyn_cast<scf::YieldOp>(operation)) {
       if (auto branch = dyn_cast<scf::IfOp>(yield->getParentOp())) {
         for (auto [index, value] : llvm::enumerate(yield.getResults())) {

@@ -218,7 +218,7 @@ static bool hasSupportedOrderedBodies(
           return WalkResult::interrupt();
         return WalkResult::advance();
       }
-      return isa<scf::YieldOp, scf::ConditionOp, LoadOp>(operation) ||
+      return isa<scf::YieldOp, scf::ConditionOp, LoadOp, AssumeInBoundsOp>(operation) ||
                      isMemoryEffectFree(operation)
                  ? WalkResult::advance()
                  : WalkResult::interrupt();
@@ -254,6 +254,8 @@ static bool supportsCartesianPointwiseValueGraph(
           continue;
       }
       if (!visited.insert(user).second)
+        continue;
+      if (isa<AssumeInBoundsOp>(user))
         continue;
       if (user->getNumResults() == 0) {
         // A terminal pointwise store can consume the promoted fragment.  A
@@ -328,6 +330,8 @@ static bool supportsStructuredFreeAxisValueGraph(
       if (*propagated)
         continue;
       if (!visited.insert(user).second)
+        continue;
+      if (isa<AssumeInBoundsOp>(user))
         continue;
       operations.push_back(user);
       if (user->getNumResults() == 0) {

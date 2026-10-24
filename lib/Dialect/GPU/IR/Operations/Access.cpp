@@ -127,6 +127,16 @@ LogicalResult verifyAccessSchema(AccessOpInterface access) {
 LogicalResult AssumeInBoundsOp::verify() {
   if (!isa<IntegerType, IndexType>(elementType(getIndex().getType())))
     return emitOpError("in-bounds assumption requires an integer/index value");
+  if (Value valid = getValid()) {
+    if (!elementType(valid.getType()).isInteger(1))
+      return emitOpError("in-bounds validity must be a predicate");
+    auto predicate = dyn_cast<FragmentType>(valid.getType());
+    auto index = dyn_cast<FragmentType>(getIndex().getType());
+    if (predicate && (!index || predicate.getShape() != index.getShape() ||
+                      predicate.getAxisMaps() != index.getAxisMaps() ||
+                      predicate.getOwner() != index.getOwner()))
+      return emitOpError("in-bounds validity must use the index's lane schema");
+  }
   return getAxis() < rankOf(getResource().getType())
              ? success()
              : emitOpError("assumed source axis is outside the resource rank");

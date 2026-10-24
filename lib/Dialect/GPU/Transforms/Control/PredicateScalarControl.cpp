@@ -129,60 +129,6 @@ bool canPredicate(Block &block, bool allowStores = false,
   return true;
 }
 
-void dischargeScalarAssumptions(Block &block) {
-  SmallVector<AssumeInBoundsOp> assumptions;
-  for (Operation &operation : block.without_terminator())
-    if (auto assumption = dyn_cast<AssumeInBoundsOp>(operation))
-      assumptions.push_back(assumption);
-  if (assumptions.empty())
-    return;
-  // A fact inside a branch is not true for inactive lanes after if-conversion.
-  // Close the accesses with explicit validity before removing that lexical fact.
-  // These guards are true for every active access of a legal source program.
-  for (Operation &operation : llvm::make_early_inc_range(block.without_terminator())) {
-    auto access = dyn_cast<AccessOpInterface>(operation);
-    if (!access || (access.getAccessKind() != AccessKind::Load &&
-                    access.getAccessKind() != AccessKind::Store))
-      continue;
-    Value resource = access.getAccessResource();
-    SmallVector<Value> coordinates(access.getAccessCoordinates());
-    if (coordinates.empty())
-      continue;
-    ArrayRef<int64_t> axes = access.getAccessSourceAxes();
-    Value valid = access.getAccessValidity();
-    OpBuilder builder(&operation);
-    Location location = operation.getLoc();
-    Value zero = builder.create<arith::ConstantIndexOp>(location, 0);
-    for (unsigned position = 0; position < coordinates.size(); ++position) {
-      Value &coordinate = coordinates[position];
-      int64_t axis = axes[position];
-      if (!coordinate.getType().isIndex())
-        coordinate = builder.create<CastOp>(location, builder.getIndexType(), coordinate);
-      Value extent;
-      if (auto buffer = dyn_cast<BufferType>(resource.getType()))
-        extent = builder.create<PhysicalExprOp>(location, builder.getIndexType(),
-            cast<PhysicalExprAttr>(buffer.getShape()[axis]));
-      else
-        extent = builder.create<DimOp>(location, builder.getIndexType(), resource, axis);
-      Value lower = builder.create<CompareOp>(location, builder.getI1Type(),
-          coordinate, zero, ComparePredicate::Ge);
-      Value upper = builder.create<CompareOp>(location, builder.getI1Type(),
-          coordinate, extent, ComparePredicate::Lt);
-      Value bounded = builder.create<BinaryOp>(location, builder.getI1Type(),
-          lower, upper, BinaryOperator::LogicalAnd);
-      valid = valid ? Value(builder.create<BinaryOp>(location, builder.getI1Type(),
-          valid, bounded, BinaryOperator::LogicalAnd)) : bounded;
-    }
-    access.getAccessCoordinatesMutable().assign(coordinates);
-    access.getAccessValidityMutable().assign(valid);
-    if (auto fill = access.getAccessFillMutable(); fill && !access.getAccessFill())
-      fill->assign(builder.create<arith::ConstantOp>(
-          location, builder.getZeroAttr(access.getAccessValueType())).getResult());
-  }
-  for (AssumeInBoundsOp assumption : assumptions)
-    assumption.erase();
-}
-
 void normalizeVaryingForLoops(func::FuncOp kernel) {
   SmallVector<scf::ForOp> loops;
   kernel.walk([&](scf::ForOp loop) { loops.push_back(loop); });
@@ -200,7 +146,6 @@ void normalizeVaryingForLoops(func::FuncOp kernel) {
     // A lane-dependent for bound cannot remain an SCF scalar bound when
     // independent worksets are packed. Express the same ordered recurrence
     // as while state; ownership lifting supplies active lanes and masked reads.
-    dischargeScalarAssumptions(*loop.getBody());
     OpBuilder builder(loop);
     Location location = loop.getLoc();
     SmallVector<Value> initial{loop.getLowerBound()};
@@ -268,9 +213,10 @@ bool canPredicateScalarWhile(scf::WhileOp loop) {
   // Read-only per-element recurrences can use masked loads. Writes, atomics,
   // nested regions and changes to the state in the condition need other proofs.
   return llvm::all_of(ArrayRef<Block *>{&before, &after}, [&](Block *block) {
-    return canPredicate(*block) &&
+    return canPredicate(*block, false, false, false, true) &&
            llvm::all_of(block->without_terminator(), [](Operation &operation) {
-             return isReadOnlyRecurrenceOperation(&operation);
+             return isa<AssumeInBoundsOp>(operation) ||
+                    isReadOnlyRecurrenceOperation(&operation);
            });
   });
 }
@@ -291,7 +237,6 @@ LogicalResult predicateScalarControl(ModuleOp module) {
                         /*allowStores=*/true, /*allowProducts=*/false,
                         /*allowLoops=*/false, /*allowAssumptions=*/true))
         continue;
-      dischargeScalarAssumptions(conditional.getThenRegion().front());
       OpBuilder builder(conditional);
       if (failed(predicateBlock(builder, conditional.getThenRegion().front(),
                                 conditional.getCondition())))
@@ -318,10 +263,6 @@ LogicalResult predicateScalarControl(ModuleOp module) {
     if (isLaunchUniformScalar(conditional.getCondition(), *kernel) ||
         (hasFragment && !dependsOnWorksetCoordinate(conditional.getCondition())))
       continue;
-    if (scalarEffects) {
-      dischargeScalarAssumptions(conditional.getThenRegion().front());
-      dischargeScalarAssumptions(conditional.getElseRegion().front());
-    }
     OpBuilder builder(conditional);
     Value otherwise = builder.create<UnaryOp>(
         conditional.getLoc(), builder.getI1Type(), conditional.getCondition(),

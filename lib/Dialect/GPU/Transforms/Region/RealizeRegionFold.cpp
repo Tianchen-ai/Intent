@@ -60,7 +60,8 @@ LogicalResult realizeFold(RegionFoldOp fold, func::FuncOp kernel,
   SmallVector<AssumeInBoundsOp> sourceAssumptions;
   DominanceInfo dominance(kernel);
   kernel.walk([&](AssumeInBoundsOp assumption) {
-    if (!dominance.properlyDominates(assumption.getOperation(),
+    if (assumption.getValid() ||
+        !dominance.properlyDominates(assumption.getOperation(),
                                     fold.getOperation()))
       return;
     for (const SourcePlan &plan : plans) {

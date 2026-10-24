@@ -122,7 +122,8 @@ bool isPrivateWorkspaceProgramIndex(Value coordinate, Value buffer,
   DominanceInfo dominance(kernel);
   return llvm::any_of(buffer.getUsers(), [&](Operation *user) {
     auto assumption = dyn_cast<AssumeInBoundsOp>(user);
-    return assumption && assumption.getResource() == buffer &&
+    return assumption && !assumption.getValid() &&
+           assumption.getResource() == buffer &&
            assumption.getIndex() == coordinate &&
            assumption.getAxis() == axis &&
            dominance.properlyDominates(assumption, access);

@@ -266,7 +266,7 @@ LogicalResult realizeContract(ContractOp contract, func::FuncOp kernel,
   SmallVector<AssumeInBoundsOp> rowAssumptions;
   if (indirectRow)
     kernel.walk([&](AssumeInBoundsOp assumption) {
-      if (!containsSource(
+      if (assumption.getValid() || !containsSource(
               assumption.getIndex(),
               sourceAxisIdentity(*rowMap)))
         return;
