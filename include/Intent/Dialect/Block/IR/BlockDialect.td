@@ -6,7 +6,7 @@ include "mlir/IR/DialectBase.td"
 def IntentBlock_Dialect : Dialect {
   let name = "intent_block";
   let cppNamespace = "::intent::block";
-  let summary = "Provider-neutral executable Block block programs";
+  let summary = "Provider-neutral executable block programs";
   let description = [{
     Intent Block IR owns launch-visible program mapping, parameterized fragments,
     explicit accesses, structured control and structured compute.  It excludes

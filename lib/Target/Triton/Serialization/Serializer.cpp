@@ -557,7 +557,7 @@ private:
   std::string atomicScope(block::AtomicSharingDomain sharing) const {
     switch (sharing) {
     case block::AtomicSharingDomain::ProgramInstance: return "cta";
-    case block::AtomicSharingDomain::KernelInvocation: return "block";
+    case block::AtomicSharingDomain::KernelInvocation: return "gpu";
     }
     llvm_unreachable("unhandled atomic sharing domain");
   }
