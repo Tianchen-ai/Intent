@@ -9,7 +9,6 @@
 #include "Intent/Dialect/CPU/Transforms/Implementation/Implementation.h"
 #include "Intent/Dialect/CPU/Transforms/Passes.h"
 #include "Intent/Dialect/CPU/Transforms/Storage/Bufferization.h"
-#include "Intent/Dialect/DSA/Transforms/Passes.h"
 #include "Intent/Dialect/Block/IR/BlockDialect.h"
 #include "Intent/Dialect/Block/IR/IntegerRanges.h"
 #include "Intent/Dialect/Block/Transforms/Passes.h"
@@ -50,8 +49,7 @@ void registerDialects(DialectRegistry &registry) {
   registerBufferStorageInterfaces(registry);
   block::registerIntegerRangeInterfaces(registry);
   cpu::registerValueBufferizationInterfaces(registry);
-  registry.insert<IntentDialect, block::IntentBlockDialect, cpu::IntentCPUDialect,
-      dsa::IntentDSADialect>();
+  registry.insert<IntentDialect, block::IntentBlockDialect, cpu::IntentCPUDialect>();
   registry.addExtension(+[](MLIRContext *, cpu::IntentCPUDialect *dialect) {
     dialect->addInterfaces<CPUProviders>();
   });
@@ -67,8 +65,6 @@ void registerPasses() {
     registerCompilationPasses();
     block::registerBlockPasses();
     cpu::registerCPUPasses();
-    dsa::registerDSAPasses();
-    dsa::registerDSAPipelines();
     for (const Backend &adapter : backends())
       if (adapter.available) adapter.registerPasses();
     return true;

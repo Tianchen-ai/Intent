@@ -6,10 +6,12 @@ add_mlir_dialect_library(MLIRIntentTritonDialect
 
   DEPENDS
   IntentTritonIncGen
+  IntentNVIDIATargetIncGen
 
   LINK_LIBS PUBLIC
   MLIRIR
   MLIRIntentBlockDialect
+  MLIRIntentNVIDIATarget
   MLIRIntentBlockAnalysis
   MLIRSideEffectInterfaces
   MLIRInferTypeOpInterface

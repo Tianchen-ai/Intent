@@ -1,5 +1,5 @@
 add_subdirectory(CuTile)
-add_subdirectory(BangC)
+add_subdirectory(DSA)
 add_subdirectory(Mojo)
 add_subdirectory(NVIDIA)
 add_subdirectory(Triton)

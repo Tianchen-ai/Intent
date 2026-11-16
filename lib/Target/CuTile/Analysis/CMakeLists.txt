@@ -3,6 +3,7 @@ add_mlir_library(MLIRIntentCuTileAnalysis
   Program.cpp
   Configuration.cpp
   IndexBounds.cpp
+  DEPENDS IntentNVIDIATargetIncGen
 
   LINK_LIBS PUBLIC
   MLIRArithDialect
@@ -12,4 +13,5 @@ add_mlir_library(MLIRIntentCuTileAnalysis
   MLIRSideEffectInterfaces
   MLIRIntentCuTileDialect
   MLIRIntentBlockAnalysis
+  MLIRIntentNVIDIATarget
 )

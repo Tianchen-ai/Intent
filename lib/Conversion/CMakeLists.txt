@@ -6,4 +6,3 @@ add_mlir_library(MLIRIntentConversionSupport
 
 add_subdirectory(KIRToBlock)
 add_subdirectory(KIRToCPU)
-add_subdirectory(KIRToDSA)

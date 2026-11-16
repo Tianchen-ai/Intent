@@ -16,7 +16,7 @@ foreach(provider Triton CuTile Mojo Weft)
   list(APPEND intent_profile_files
        "${CMAKE_CURRENT_BINARY_DIR}/profiles/${provider_name}.json")
 endforeach()
-configure_file("${PROJECT_SOURCE_DIR}/lib/Target/BangC/Transforms/TuningProfiles.json"
+configure_file("${PROJECT_SOURCE_DIR}/lib/Target/DSA/BangC/Transforms/TuningProfiles.json"
                "${CMAKE_CURRENT_BINARY_DIR}/profiles/bangc.json" COPYONLY)
 list(APPEND intent_profile_files "${CMAKE_CURRENT_BINARY_DIR}/profiles/bangc.json")
 if(SKBUILD)

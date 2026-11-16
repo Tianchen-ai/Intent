@@ -39,28 +39,6 @@ def ConstructCPU : Pass<"intent-construct-cpu", "mlir::ModuleOp"> {
   let dependentDialects = ["intent::cpu::IntentCPUDialect", "mlir::arith::ArithDialect", "mlir::func::FuncDialect", "mlir::linalg::LinalgDialect", "mlir::math::MathDialect", "mlir::memref::MemRefDialect", "mlir::scf::SCFDialect", "mlir::vector::VectorDialect"];
 }
 
-def ConstructDSA : Pass<"intent-construct-dsa", "mlir::ModuleOp"> {
-  let summary = "Construct complete local-memory DSA candidates";
-  let description = [{
-    Reads complete provider configurations and constructs each supplied row
-    from the same canonical typed KIR in a separate standard module. Tile,
-    task and local-storage bindings form the checked DSA configuration;
-    shapes and strides bind parameter facts for this compilation. No parameter
-    combinations or prewritten operator implementations are invented.
-    Invalid bindings or unsupported conversion fail. Each candidate requires
-    the shared DSA pipeline and target native legalization before serialization;
-    it is not yet a BANG C program with synchronized, arena-bound storage.
-  }];
-  let options = [
-    Option<"directory", "directory", "std::string", [{""}], "Directory of complete backend configurations">,
-    Option<"overrides", "overrides", "std::string", [{""}], "Complete configuration overrides">,
-    Option<"shapes", "shapes", "std::string", [{"{}"}], "Typed parameter shape bindings">,
-    Option<"strides", "strides", "std::string", [{"{}"}], "Typed parameter stride bindings">,
-    Option<"capabilities", "capabilities", "std::string", [{""}], "Typed BANG C hardware capabilities">
-  ];
-  let dependentDialects = ["intent::dsa::IntentDSADialect", "mlir::arith::ArithDialect", "mlir::func::FuncDialect", "mlir::math::MathDialect", "mlir::memref::MemRefDialect", "mlir::scf::SCFDialect"];
-}
-
 def ResolveBlockProfiles : Pass<"intent-resolve-block-profiles", "mlir::ModuleOp"> {
   let summary = "Resolve finite profile inputs into the current Block module";
   let description = [{

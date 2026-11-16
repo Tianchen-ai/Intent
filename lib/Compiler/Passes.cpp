@@ -1,8 +1,6 @@
 #include "Intent/Compiler/Passes.h"
 #include "Intent/Compiler/Backend.h"
-#include "Intent/Target/BangC/Compilation.h"
 #include "Intent/Conversion/KIRToCPU/KIRToCPU.h"
-#include "Intent/Conversion/KIRToDSA/KIRToDSA.h"
 #include "Intent/Conversion/KIRToBlock/KIRToBlock.h"
 #include "Intent/Dialect/CPU/IR/CPUDialect.h"
 #include "Intent/Dialect/Block/IR/BlockDialect.h"
@@ -24,7 +22,6 @@ using namespace mlir;
 namespace intent::compiler {
 #define GEN_PASS_DEF_CONSTRUCTBLOCK
 #define GEN_PASS_DEF_CONSTRUCTCPU
-#define GEN_PASS_DEF_CONSTRUCTDSA
 #define GEN_PASS_DEF_RESOLVEBLOCKPROFILES
 #include "Intent/Compiler/Passes.h.inc"
 
@@ -51,46 +48,6 @@ public:
     if (failed(lowerCanonicalKIRToCPU(getOperation(), stridedInputs
             ? CPUEntryLayout::StridedInputs : CPUEntryLayout::Contiguous)))
       signalPassFailure();
-  }
-};
-
-class ConstructDSAPass : public impl::ConstructDSABase<ConstructDSAPass> {
-public:
-  using Base::Base;
-  void runOnOperation() final {
-    auto module = getOperation();
-    auto configurations = readDSAConfigurations(module, directory.getValue(), overrides.getValue());
-    auto hardware = dyn_cast_or_null<dsa::CapabilitiesAttr>(parseAttribute(capabilities, &getContext()));
-    auto shapeBindings = dyn_cast_or_null<DictionaryAttr>(parseAttribute(shapes, &getContext()));
-    auto strideBindings = dyn_cast_or_null<DictionaryAttr>(parseAttribute(strides, &getContext()));
-    if (failed(configurations) || !hardware || !shapeBindings || !strideBindings)
-      return signalPassFailure();
-    SmallVector<OwningOpRef<ModuleOp>> candidates;
-    StringAttr entryName;
-    for (auto [index, attribute] : llvm::enumerate(*configurations)) {
-      OwningOpRef<ModuleOp> candidate(cast<ModuleOp>(module->clone()));
-      if (failed(lowerCanonicalKIRToDSA(*candidate, cast<dsa::ConfigurationAttr>(attribute),
-                                       shapeBindings, strideBindings)))
-        return signalPassFailure();
-      (*candidate)->setAttr("intent_dsa.capabilities", hardware);
-      func::FuncOp entry;
-      for (auto function : candidate->getOps<func::FuncOp>())
-        if (!function.isExternal()) { entry = function; break; }
-      if (!entry) {
-        module.emitError("DSA configuration has no executable entry");
-        return signalPassFailure();
-      }
-      if (!entryName) entryName = StringAttr::get(module.getContext(), entry.getName());
-      SymbolTable symbols(*candidate);
-      if (failed(symbols.rename(entry, entryName.getValue().str() + "_config_" + std::to_string(index))))
-        return signalPassFailure();
-      (*candidate)->setAttr(SymbolTable::getSymbolAttrName(),
-                           StringAttr::get(module.getContext(), "config_" + std::to_string(index)));
-      candidates.push_back(std::move(candidate));
-    }
-    module.getBody()->clear();
-    module->setAttr("intent.entry_name", entryName);
-    for (auto &candidate : candidates) module.getBody()->push_back(candidate.release());
   }
 };
 

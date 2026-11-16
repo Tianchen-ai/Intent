@@ -20,8 +20,7 @@ add_mlir_library(MLIRIntentCompiler
   DEPENDS IntentCompilerPassIncGen
   LINK_LIBS PUBLIC
   ${dialect_libs}
-  MLIRIntentKIRToBlock MLIRIntentKIRToCPU MLIRIntentKIRToDSA
-  MLIRIntentDSATransforms
+  MLIRIntentKIRToBlock MLIRIntentKIRToCPU
   MLIRIntentCPUAnalysis MLIRIntentCPUTransforms
   MLIRIntentBlockTransforms
   ${backend_libraries}

@@ -1,0 +1,8 @@
+add_subdirectory(Physical)
+set(LLVM_TARGET_DEFINITIONS Construction.td)
+mlir_tablegen(Construction.h.inc -gen-pass-decls -name BangCConstruction)
+add_public_tablegen_target(IntentBangCConstructionIncGen)
+set(LLVM_TARGET_DEFINITIONS Passes.td)
+mlir_tablegen(Passes.h.inc -gen-pass-decls -name BangC)
+add_public_tablegen_target(IntentBangCPassesIncGen)
+intent_pass_reference(bangc)

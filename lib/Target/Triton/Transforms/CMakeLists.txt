@@ -16,6 +16,7 @@ add_mlir_library(MLIRIntentTritonTransforms
 
   DEPENDS
   IntentTritonTransformsIncGen
+  IntentNVIDIATargetIncGen
 
   LINK_LIBS PUBLIC
   MLIRArithDialect
