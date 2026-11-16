@@ -46,9 +46,9 @@ class WeftArtifact:
         tasks = tuple(directory / f"task-{i}" for i in range(len(contract.facts.tasks)))
         kernels = []
         for task, path in zip(contract.facts.tasks, tasks, strict=True):
-            metadata = json.loads((path / "kernel.native.json").read_text())
-            task.abi.verify_native(metadata["kernel_abi"])
-            kernels.append(metadata["kernel_abi"])
+            metadata = json.loads((path / "manifest.json").read_text())
+            task.abi.verify_native(metadata["kernel"])
+            kernels.append(metadata["kernel"])
         library = directory / "kernel.so"
         native = NativeArtifact(directory, library, tuple(FileDependency.capture(path)
             for path in directory.rglob("*") if path.is_file()), False,
@@ -110,6 +110,10 @@ def compile_program(program, target):
                    *(str(directory / name) for name in ("host.c", "bridge.c", "exports.c")),
                    "-L" + str(sdk / "lib"), "-Wl,-rpath," + str(sdk / "lib"),
                    "-lweft_runtime", "-lm", *toolchain["ldflags"], "-o", str(library)]
+        if target.native.arch == "riscv64":
+            command.extend((f"-march={target.native.march}", f"-mabi={target.native.abi}"))
+        if toolchain["sysroot"]:
+            command.append("--sysroot=" + toolchain["sysroot"])
         if contract.target.workers > 1:
             command.append("-fopenmp")
         run_native_command(command, directory, "provider_host_compilation")
