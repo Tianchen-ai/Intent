@@ -129,8 +129,14 @@ def describe(target: str | None = None) -> dict:
     result = {"target": target, "tool_invoked_kernel": False}
     try:
         names = (target,) if target is not None else tuple(BACKENDS)
-        result["backends"] = {name: {**backend(name),
-            "target": _declaration(get_provider(name).target)} for name in names}
+        result["backends"] = {}
+        for name in names:
+            component = get_provider(name)
+            result["backends"][name] = {**backend(name),
+                "target": _declaration(component.target),
+                "execution_model": component.execution_model,
+                "local_device": {"kind": component.local.device_kind, "indexed": component.local.indexed},
+                "local_options": sorted(component.local.options)}
         result["api"] = {name: _declaration(getattr(intent, name)) for name in (
             "jit", "JITKernel", "compile", "generate", "compile_ir", "generate_from_ir", "optimize_ir", "CompileOptions",
             "NVIDIACompilationTarget", "NVIDIACapabilities", "CPUCompilationTarget", "BangCCompilationTarget",
@@ -411,7 +417,8 @@ def doctor(target: str | None = None, *, target_options: dict | None = None, com
         else:
             from intent.targets.local import resolve_local, select_device
             options = dict(target_options or {})
-            device = options.pop("device", "cpu" if get_provider(target).family == "cpu" else 0)
+            execution = get_provider(target).local
+            device = options.pop("device", 0 if execution.indexed else execution.device_kind)
             workers = options.pop("workers", None)
             resolved = resolve_local(target, select_device(target, (), device),
                                      workers=workers, backend_options=options)
