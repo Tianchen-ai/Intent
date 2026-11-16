@@ -2,6 +2,7 @@
 #define INTENT_TARGET_TRITON_IR_CONFIGURATION_H
 
 #include "Intent/Dialect/Block/IR/BlockAttrs.h"
+#include "Intent/Target/Triton/IR/Target.h"
 #include "Intent/Dialect/Block/IR/Program.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "llvm/ADT/SmallVector.h"
@@ -10,7 +11,7 @@ namespace intent::triton {
 
 // Native compiler/device limits, independent of profile selection and row
 // correlation. The same predicate filters supplied values and verifies IR.
-bool isLegalDeviceOption(block::ParameterRole role, int64_t value,
+bool isLegalDeviceOption(LaunchOption role, int64_t value,
                          block::CapabilitiesAttr capabilities,
                          bool requiresSingleCTA);
 

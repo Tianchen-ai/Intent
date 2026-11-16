@@ -204,7 +204,7 @@ collectConfigurationRequirements(func::FuncOp kernel) {
   }
 
   if (!descriptors.empty()) {
-    auto stages = parameters->find(block::ParameterRole::ProviderStages);
+    auto stages = parameters->lookup("NUM_STAGES");
     if (!descriptorChoice || !stages)
       return kernel.emitError("Triton descriptors require their access-form and stage declarations"),
              failure();
@@ -253,7 +253,7 @@ collectConfigurationRequirements(func::FuncOp kernel) {
   }
 
   auto capabilities = kernel->getAttrOfType<block::CapabilitiesAttr>(block::capabilitiesAttr);
-  auto warps = parameters->find(block::ParameterRole::ProviderWarps);
+  auto warps = parameters->lookup("NUM_WARPS");
   auto target = capabilities ? capabilities.getTarget() : Attribute();
   auto interface = targetInterface(target);
   int64_t wordsPerWarp = interface ? interface->valueWordsPerWarp(target) : 0;

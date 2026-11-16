@@ -104,18 +104,13 @@ def IntentBlock_ParameterRole : IntentBlock_I32Enum<
       I32EnumAttrCase<"OwnershipN", 1, "ownership_n">,
       I32EnumAttrCase<"Reduction", 2, "reduction">,
       I32EnumAttrCase<"ScanChunk", 3, "scan_chunk">,
-      I32EnumAttrCase<"ProviderWarps", 4, "provider_warps">,
-      I32EnumAttrCase<"ProviderStages", 5, "provider_stages">,
-      I32EnumAttrCase<"ProviderCTAs", 6, "provider_ctas">,
+      I32EnumAttrCase<"ProviderOption", 4, "provider_option">,
       I32EnumAttrCase<"TraversalWorkers", 8, "traversal_workers">,
       I32EnumAttrCase<"TraversalGroup", 9, "traversal_group">,
       I32EnumAttrCase<"ResidentWorkers", 10, "resident_workers">,
       I32EnumAttrCase<"FullCoverage", 11, "full_coverage">,
       I32EnumAttrCase<"ReductionOuter", 12, "reduction_outer">,
-      I32EnumAttrCase<"ReductionInner", 13, "reduction_inner">,
-      I32EnumAttrCase<"ProviderAccessForm", 14, "provider_access_form">,
-      I32EnumAttrCase<"ProviderOccupancy", 15, "provider_occupancy">,
-      I32EnumAttrCase<"ProviderLoadPolicy", 16, "provider_load_policy">
+      I32EnumAttrCase<"ReductionInner", 13, "reduction_inner">
     ]>;
 
 def IntentBlock_ParameterCategory : IntentBlock_I32Enum<

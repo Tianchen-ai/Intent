@@ -115,12 +115,7 @@ int64_t requestedValue(const TuningProfile &profile, ParameterRole role) {
   case ParameterRole::TraversalGroup: return profile.traversalGroup;
   case ParameterRole::ResidentWorkers: return std::numeric_limits<int64_t>::max();
   case ParameterRole::FullCoverage:
-  case ParameterRole::ProviderWarps:
-  case ParameterRole::ProviderStages:
-  case ParameterRole::ProviderCTAs:
-  case ParameterRole::ProviderAccessForm:
-  case ParameterRole::ProviderOccupancy:
-  case ParameterRole::ProviderLoadPolicy:
+  case ParameterRole::ProviderOption:
     llvm_unreachable("non-static parameter entered shared tuning table");
   }
   llvm_unreachable("unknown physical parameter role");

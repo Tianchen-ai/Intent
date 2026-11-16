@@ -7,6 +7,7 @@
 
 namespace intent::triton {
 enum class ApproximateMath { Divide, Exp2, Tanh };
+enum class LaunchOption { Warps, Stages, CTAs };
 
 /// The Triton surface is shared by different device compilers. Device options,
 /// resource estimates and numerical intrinsics belong to the selected target.
@@ -14,7 +15,7 @@ class TargetInterface : public mlir::DialectInterface::Base<TargetInterface> {
 public:
   explicit TargetInterface(mlir::Dialect *dialect) : Base(dialect) {}
   virtual llvm::StringRef provider() const = 0;
-  virtual bool legalOption(mlir::Attribute target, block::ParameterRole role,
+  virtual bool legalOption(mlir::Attribute target, LaunchOption role,
                            int64_t value, bool singleGroup) const = 0;
   virtual int64_t valueWordsPerWarp(mlir::Attribute target) const = 0;
   virtual mlir::FailureOr<std::string> approximateMath(

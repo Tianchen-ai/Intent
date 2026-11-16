@@ -133,7 +133,7 @@ def describe(target: str | None = None) -> dict:
             "target": _declaration(get_provider(name).target)} for name in names}
         result["api"] = {name: _declaration(getattr(intent, name)) for name in (
             "jit", "JITKernel", "compile", "generate", "compile_ir", "generate_from_ir", "optimize_ir", "CompileOptions",
-            "GPUCompilationTarget", "GPUCapabilities", "CPUCompilationTarget", "BangCCompilationTarget",
+            "NVIDIACompilationTarget", "NVIDIACapabilities", "CPUCompilationTarget", "BangCCompilationTarget",
             "NativeObservation", "NativeResource", "CandidateObservation", "InvocationArgument")}
         result["tools"] = {name: _declaration(function) for name, function in (
             ("compile", compile_request), ("generate_from_ir", generate_ir_request),

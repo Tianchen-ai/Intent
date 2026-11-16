@@ -14,7 +14,6 @@ namespace intent::block {
 
 struct ProviderOption {
   llvm::StringRef name;
-  ParameterRole role;
   bool isBoolean = false;
 };
 

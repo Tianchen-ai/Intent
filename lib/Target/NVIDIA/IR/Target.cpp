@@ -43,16 +43,16 @@ class TritonTarget final : public triton::TargetInterface {
 public:
   explicit TritonTarget(Dialect *dialect) : TargetInterface(dialect) {}
   StringRef provider() const final { return "triton"; }
-  bool legalOption(Attribute target, block::ParameterRole role, int64_t value,
+  bool legalOption(Attribute target, triton::LaunchOption role, int64_t value,
                    bool singleGroup) const final {
     auto device = cast<DeviceAttr>(target);
     if (value <= 0) return false;
     switch (role) {
-    case block::ParameterRole::ProviderWarps:
+    case triton::LaunchOption::Warps:
       return llvm::isPowerOf2_64(value) && value <= device.getMaxThreadsPerBlock() / 32;
-    case block::ParameterRole::ProviderStages:
+    case triton::LaunchOption::Stages:
       return value <= std::numeric_limits<int32_t>::max();
-    case block::ParameterRole::ProviderCTAs:
+    case triton::LaunchOption::CTAs:
       return llvm::isPowerOf2_64(value) && value <= 16 && (!singleGroup || value == 1) &&
           (value == 1 || (device.getComputeCapabilityMajor() >= 9 && device.getComputeCapabilityMajor() != 12));
     default: return false;

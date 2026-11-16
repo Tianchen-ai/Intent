@@ -82,9 +82,8 @@ LogicalResult verifyKernel(func::FuncOp kernel,
   if (failed(parameters)) return failure();
   block::ParameterAttr accessForm, occupancy, ctas, workerWarps, loadPolicy;
   for (block::ParameterAttr schema : parameters->declarations()) {
-    auto role = schema.getRole();
     bool provider = schema.getPhase() == block::ConfigurationBindingPhase::Provider;
-    if (!schema.isExtent() || provider != isCuTileProviderRole(role))
+    if (!schema.isExtent() || provider != isCuTileProviderParameter(schema))
       return kernel.emitError("cuTile program contains a foreign provider parameter");
     if (!provider)
       continue;
@@ -92,13 +91,13 @@ LogicalResult verifyKernel(func::FuncOp kernel,
     block::ParameterAttr *binding = nullptr;
     StringRef name;
     bool (*legal)(int64_t) = nullptr;
-    if (role == block::ParameterRole::ProviderAccessForm) {
+    if (schema.getName().getValue() == accessFormParameter) {
       binding = &accessForm; name = accessFormParameter; legal = isLegalAccessForm;
-    } else if (role == block::ParameterRole::ProviderCTAs) {
+    } else if (schema.getName().getValue() == ctasParameter) {
       binding = &ctas; name = ctasParameter; legal = isLegalCTAs;
-    } else if (role == block::ParameterRole::ProviderWarps) {
+    } else if (schema.getName().getValue() == workerWarpsParameter) {
       binding = &workerWarps; name = workerWarpsParameter; legal = isLegalWorkerWarps;
-    } else if (role == block::ParameterRole::ProviderLoadPolicy) {
+    } else if (schema.getName().getValue() == loadPolicyParameter) {
       binding = &loadPolicy; name = loadPolicyParameter; legal = isLegalLoadPolicy;
     } else {
       binding = &occupancy; name = occupancyParameter; legal = isLegalOccupancy;
@@ -110,15 +109,13 @@ LogicalResult verifyKernel(func::FuncOp kernel,
   }
   auto parameterUses = kernel.walk([&](block::ParameterOp parameter) -> WalkResult {
     auto schema = parameter.getDeclaration();
-    auto role = schema.getRole();
-    if ((role == block::ParameterRole::ProviderCTAs ||
-         role == block::ParameterRole::ProviderWarps ||
-         role == block::ParameterRole::ProviderOccupancy) &&
+    auto name = schema.getName().getValue();
+    if ((name == ctasParameter || name == workerWarpsParameter || name == occupancyParameter) &&
         !parameter.getResult().use_empty()) {
       parameter.emitOpError("cuTile compiler hints cannot be read by the kernel body");
       return WalkResult::interrupt();
     }
-    if (role == block::ParameterRole::ProviderLoadPolicy)
+    if (name == loadPolicyParameter)
       for (OpOperand &use : parameter.getResult().getUses()) {
         auto load = dyn_cast<TileLoadOp>(use.getOwner());
         auto gather = dyn_cast<GatherLoadOp>(use.getOwner());

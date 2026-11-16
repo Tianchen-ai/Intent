@@ -1,4 +1,5 @@
 #include "Intent/Target/CuTile/Serialization/Serializer.h"
+#include "Intent/Target/CuTile/IR/Configuration.h"
 #include "Intent/Target/CuTile/Serialization/Numerical.h"
 
 #include "Intent/Dialect/Block/Analysis/PhysicalProgram.h"
@@ -32,12 +33,12 @@ namespace {
 
 
 StringRef providerHint(block::ParameterAttr parameter) {
-  auto role = parameter.getRole();
-  if (role == block::ParameterRole::ProviderOccupancy)
+  auto name = parameter.getName().getValue();
+  if (name == occupancyParameter)
     return "occupancy";
-  if (role == block::ParameterRole::ProviderCTAs)
+  if (name == ctasParameter)
     return "num_ctas";
-  if (role == block::ParameterRole::ProviderWarps)
+  if (name == workerWarpsParameter)
     return "num_worker_warps";
   return {};
 }

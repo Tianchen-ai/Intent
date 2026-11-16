@@ -11,7 +11,7 @@ using namespace mlir;
 
 namespace intent::triton {
 
-bool isLegalDeviceOption(block::ParameterRole role, int64_t value,
+bool isLegalDeviceOption(LaunchOption role, int64_t value,
                          block::CapabilitiesAttr capabilities,
                          bool requiresSingleCTA) {
   if (!capabilities || value <= 0) return false;
@@ -37,16 +37,18 @@ FailureOr<ConfigurationSchema> ConfigurationSchema::read(func::FuncOp kernel) {
   for (Attribute attribute : parameters) {
     auto definition = cast<block::ParameterAttr>(attribute);
     if (!definition.isExtent()) continue;
-    auto role = definition.getRole();
+    std::optional<LaunchOption> role;
     StringAttr *option = nullptr;
-    switch (role) {
-    case block::ParameterRole::ProviderWarps: option = &result.warps; break;
-    case block::ParameterRole::ProviderStages:
+    if (definition.getName().getValue() == "NUM_WARPS") {
+      role = LaunchOption::Warps;
+      option = &result.warps;
+    } else if (definition.getName().getValue() == "NUM_STAGES") {
+      role = LaunchOption::Stages;
       option = &result.stages;
       stageDeclaration = definition;
-      break;
-    case block::ParameterRole::ProviderCTAs: option = &result.ctas; break;
-    default: break;
+    } else if (definition.getName().getValue() == "NUM_CTAS") {
+      role = LaunchOption::CTAs;
+      option = &result.ctas;
     }
     bool provider = definition.getCategory() ==
                     block::ParameterCategory::Provider;
@@ -61,7 +63,7 @@ FailureOr<ConfigurationSchema> ConfigurationSchema::read(func::FuncOp kernel) {
     }
     if (option)
       for (int64_t candidate : definition.getCandidates().asArrayRef())
-        if (!isLegalDeviceOption(role, candidate, capabilities, requiresSingleCTA)) {
+        if (!isLegalDeviceOption(*role, candidate, capabilities, requiresSingleCTA)) {
           kernel.emitError("declares a Triton option outside the current device/launch contract")
               << "; parameter=" << definition.getName() << "; value=" << candidate;
           return failure();
@@ -80,7 +82,7 @@ FailureOr<ConfigurationSchema> ConfigurationSchema::read(func::FuncOp kernel) {
     }
     if (auto constant = dyn_cast<IntegerAttr>(stages)) {
       if (!constant.getType().isSignlessInteger(64) ||
-          !isLegalDeviceOption(block::ParameterRole::ProviderStages,
+          !isLegalDeviceOption(LaunchOption::Stages,
                                constant.getInt(), capabilities,
                                requiresSingleCTA)) {
         operation->emitOpError("constant loop stages must be a positive i64 within the Triton stage limit");

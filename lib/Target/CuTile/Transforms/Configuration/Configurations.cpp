@@ -19,20 +19,17 @@ const block::TuningProfileSchema &tuningProfileSchema() {
       workerWarpsParameter, occupancyParameter, accessFormParameter,
       loadPolicyParameter};
   static const block::ProviderOption options[] = {
-      {ctasParameter, block::ParameterRole::ProviderCTAs},
-      {workerWarpsParameter, block::ParameterRole::ProviderWarps},
-      {occupancyParameter, block::ParameterRole::ProviderOccupancy},
-      {accessFormParameter, block::ParameterRole::ProviderAccessForm},
-      {loadPolicyParameter, block::ParameterRole::ProviderLoadPolicy}};
+      {ctasParameter}, {workerWarpsParameter}, {occupancyParameter},
+      {accessFormParameter}, {loadPolicyParameter}};
   static const block::TuningProfileSchema schema{"cutile", columns, options};
   return schema;
 }
 
 FailureOr<block::ParameterRefAttr> declareProviderParameter(
-    func::FuncOp kernel, StringRef name, block::ParameterRole role,
+    func::FuncOp kernel, StringRef name,
     bool (*isLegal)(int64_t)) {
   auto declaration = block::lookupParameter(kernel, StringAttr::get(kernel.getContext(), name));
-  if (!declaration || !declaration.isExtent() || declaration.getRole() != role ||
+  if (!declaration || !declaration.isExtent() || declaration.getRole() != block::ParameterRole::ProviderOption ||
       declaration.getPhase() != block::ConfigurationBindingPhase::Provider ||
       declaration.getCategory() != block::ParameterCategory::Provider ||
       declaration.getCandidates().asArrayRef().empty() ||
@@ -43,15 +40,13 @@ FailureOr<block::ParameterRefAttr> declareProviderParameter(
 
 namespace {
 
-bool legalProviderValue(block::ParameterRole role, int64_t value) {
-  switch (role) {
-  case block::ParameterRole::ProviderCTAs: return isLegalCTAs(value);
-  case block::ParameterRole::ProviderWarps: return isLegalWorkerWarps(value);
-  case block::ParameterRole::ProviderOccupancy: return isLegalOccupancy(value);
-  case block::ParameterRole::ProviderAccessForm: return isLegalAccessForm(value);
-  case block::ParameterRole::ProviderLoadPolicy: return isLegalLoadPolicy(value);
-  default: return false;
-  }
+bool legalProviderValue(StringRef name, int64_t value) {
+  if (name == ctasParameter) return isLegalCTAs(value);
+  if (name == workerWarpsParameter) return isLegalWorkerWarps(value);
+  if (name == occupancyParameter) return isLegalOccupancy(value);
+  if (name == accessFormParameter) return isLegalAccessForm(value);
+  if (name == loadPolicyParameter) return isLegalLoadPolicy(value);
+  return false;
 }
 
 LogicalResult filterProviderConfigurations(func::FuncOp kernel) {
@@ -65,7 +60,7 @@ LogicalResult filterProviderConfigurations(func::FuncOp kernel) {
     for (block::ParameterAttr declaration : space->declarations()) {
       if (declaration.getPhase() != block::ConfigurationBindingPhase::Provider) continue;
       auto value = row.getAs<IntegerAttr>(declaration.getName());
-      legal &= value && legalProviderValue(declaration.getRole(), value.getInt());
+      legal &= value && legalProviderValue(declaration.getName().getValue(), value.getInt());
     }
     if (legal) accepted.push_back(row);
   }
@@ -115,18 +110,18 @@ LogicalResult prepareLaunchConfigurations(func::FuncOp kernel) {
       kernel->getAttrOfType<block::CapabilitiesAttr>(block::capabilitiesAttr);
   if (features.occupancySensitive &&
       failed(declareProviderParameter(
-          kernel, occupancyParameter, block::ParameterRole::ProviderOccupancy,
+          kernel, occupancyParameter,
           isLegalOccupancy)))
     return failure();
   if (features.matrixCompute &&
       failed(declareProviderParameter(
           kernel, ctasParameter,
-          block::ParameterRole::ProviderCTAs, isLegalCTAs)))
+          isLegalCTAs)))
     return failure();
   if (features.occupancySensitive &&
       failed(declareProviderParameter(
           kernel, workerWarpsParameter,
-          block::ParameterRole::ProviderWarps, isLegalWorkerWarps)))
+          isLegalWorkerWarps)))
     return failure();
 
   auto space = block::ParameterSpace::read(kernel);
@@ -134,8 +129,8 @@ LogicalResult prepareLaunchConfigurations(func::FuncOp kernel) {
   auto shared = space->configurations(block::ConfigurationStage::Shared);
   if (failed(shared)) return failure();
   auto resident = space->find(block::ParameterRole::ResidentWorkers);
-  auto ctas = space->find(block::ParameterRole::ProviderCTAs);
-  auto occupancy = space->find(block::ParameterRole::ProviderOccupancy);
+  auto ctas = space->lookup(ctasParameter);
+  auto occupancy = space->lookup(occupancyParameter);
   if (!resident) return success();
   if (!ctas || !occupancy)
     return kernel.emitError("cuTile resident binding requires CTA and occupancy columns");
@@ -176,7 +171,7 @@ LogicalResult materializeClosedConfigs(func::FuncOp kernel) {
   for (block::ParameterAttr domain : space->declarations())
     if (!domain.isExtent() ||
         (domain.getPhase() == block::ConfigurationBindingPhase::Provider) !=
-            isCuTileProviderRole(domain.getRole()))
+            isCuTileProviderParameter(domain))
       return kernel.emitError("cuTile program contains a foreign provider parameter");
   auto shared = space->configurations(block::ConfigurationStage::Shared);
   if (failed(shared))
@@ -187,15 +182,12 @@ LogicalResult materializeClosedConfigs(func::FuncOp kernel) {
   SmallVector<StringAttr> removed;
   for (block::ParameterAttr declaration : space->declarations()) {
     bool used = true;
-    switch (declaration.getRole()) {
-    case block::ParameterRole::ProviderCTAs: used = features.matrixCompute; break;
-    case block::ParameterRole::ProviderWarps:
-    case block::ParameterRole::ProviderOccupancy: used = features.occupancySensitive; break;
-    case block::ParameterRole::ProviderAccessForm:
-    case block::ParameterRole::ProviderLoadPolicy:
-      used = references.contains(declaration.getReference()); break;
-    default: break;
-    }
+    auto name = declaration.getName().getValue();
+    if (name == ctasParameter) used = features.matrixCompute;
+    else if (name == workerWarpsParameter || name == occupancyParameter)
+      used = features.occupancySensitive;
+    else if (name == accessFormParameter || name == loadPolicyParameter)
+      used = references.contains(declaration.getReference());
     if (used || references.contains(declaration.getReference())) declarations.push_back(declaration);
     else removed.push_back(declaration.getName());
   }

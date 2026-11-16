@@ -238,7 +238,7 @@ LogicalResult TuningProfiles::declareProviderParameters(
     auto binding = ParameterBindingAttr::get(kernel.getContext(), {}, {}, {}, {}, false, false);
     Type type = option.isBoolean ? Type(builder.getI1Type()) : Type(builder.getIndexType());
     auto declaration = ParameterAttr::get(kernel.getContext(), builder.getStringAttr(option.name),
-        type, option.role, ParameterCategory::Provider, 0,
+        type, ParameterRole::ProviderOption, ParameterCategory::Provider, 0,
         builder.getDenseI64ArrayAttr(values), ConfigurationBindingPhase::Provider, binding);
     if (failed(declareParameter(kernel, declaration))) return failure();
   }

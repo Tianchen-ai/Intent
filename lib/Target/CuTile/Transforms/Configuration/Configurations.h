@@ -8,7 +8,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 namespace intent::cutile {
 mlir::FailureOr<block::ParameterRefAttr> declareProviderParameter(
-    mlir::func::FuncOp kernel, llvm::StringRef name, block::ParameterRole role,
+    mlir::func::FuncOp kernel, llvm::StringRef name,
     bool (*isLegal)(int64_t));
 mlir::LogicalResult prepareLaunchConfigurations(mlir::func::FuncOp kernel);
 mlir::LogicalResult materializeClosedConfigs(mlir::func::FuncOp kernel);

@@ -1,5 +1,6 @@
 #include "Intent/Target/CuTile/Analysis/Configuration.h"
 #include "Intent/Target/CuTile/IR/CuTileOps.h"
+#include "Intent/Target/CuTile/IR/Configuration.h"
 #include "Intent/Dialect/Block/Analysis/PhysicalParameters.h"
 #include "Intent/Dialect/Block/Analysis/Resources.h"
 #include "Intent/Dialect/Block/IR/Program.h"
@@ -26,8 +27,8 @@ collectConfigurationRequirements(func::FuncOp kernel) {
   const block::FragmentResourceAnalysis resources(kernel);
   llvm::append_range(requirements, block::collectPointwiseRequirements(kernel, resources, matrixInputs));
   auto resident = parameters->find(block::ParameterRole::ResidentWorkers);
-  auto ctas = parameters->find(block::ParameterRole::ProviderCTAs);
-  auto occupancy = parameters->find(block::ParameterRole::ProviderOccupancy);
+  auto ctas = parameters->lookup(ctasParameter);
+  auto occupancy = parameters->lookup(occupancyParameter);
   if (resident && ctas && occupancy) {
     auto capabilities =
         kernel->getAttrOfType<block::CapabilitiesAttr>(block::capabilitiesAttr);

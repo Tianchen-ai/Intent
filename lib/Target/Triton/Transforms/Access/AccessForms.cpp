@@ -615,7 +615,7 @@ materializeTensorDescriptorForms(
   auto declaration = block::lookupParameter(
       kernel, StringAttr::get(kernel.getContext(), tensorDescriptorChoice));
   if (!declaration || !declaration.getValueType().isInteger(1) ||
-      declaration.getRole() != block::ParameterRole::ProviderAccessForm ||
+      declaration.getRole() != block::ParameterRole::ProviderOption ||
       declaration.getPhase() != block::ConfigurationBindingPhase::Provider)
     return kernel.emitError("Triton access forms require their declared boolean provider option"), failure();
   if (!llvm::is_contained(declaration.getCandidates().asArrayRef(), int64_t(1)))

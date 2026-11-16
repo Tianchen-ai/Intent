@@ -2,10 +2,10 @@ from dataclasses import dataclass
 from functools import partial
 from typing import ClassVar
 
-from .gpu import GPUTarget
+from .nvidia import NVIDIATarget
 from .provider import EnvironmentCheck, LocalExecution, Provider
 from .execution import indexed_key, indexed_target
-from .specification import read_gpu_target
+from .nvidia.specification import read_nvidia_target
 
 INSTALLATION = {
     "modules": ("torch", "triton"),
@@ -16,7 +16,7 @@ INSTALLATION = {
 
 
 @dataclass(frozen=True, slots=True)
-class TritonTarget(GPUTarget):
+class TritonTarget(NVIDIATarget):
     provider: ClassVar[str] = "triton"
 
 
@@ -48,4 +48,4 @@ def _environment_checks(target):
 
 PROVIDER = Provider("gpu", TritonTarget, _read_facts, _bind, _environment_checks,
     LocalExecution("cuda", True, frozenset(), partial(indexed_target, TritonTarget), indexed_key),
-    "block", read_gpu_target)
+    "block", read_nvidia_target)

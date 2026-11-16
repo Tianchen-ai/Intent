@@ -14,7 +14,7 @@ FailureOr<Value> AccessFormSelection::accessFormValue() {
     return accessForm;
   auto parameter = declareProviderParameter(
       kernel, accessFormParameter,
-      block::ParameterRole::ProviderAccessForm, isLegalAccessForm);
+      isLegalAccessForm);
   if (failed(parameter))
     return failure();
   OpBuilder entry(&kernel.front(), kernel.front().begin());
@@ -69,7 +69,7 @@ FailureOr<Value> AccessFormSelection::loadPolicyValue() {
   if (!loadPolicy) {
     auto parameter = declareProviderParameter(
         kernel, loadPolicyParameter,
-        block::ParameterRole::ProviderLoadPolicy, isLegalLoadPolicy);
+        isLegalLoadPolicy);
     if (failed(parameter))
       return failure();
     OpBuilder entry(&kernel.front(), kernel.front().begin());

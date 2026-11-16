@@ -1,4 +1,5 @@
 #include "Intent/Target/CuTile/IR/CuTileOps.h"
+#include "Intent/Target/CuTile/IR/Configuration.h"
 
 #include "Intent/Dialect/Block/Analysis/PhysicalProgram.h"
 #include "Intent/Dialect/Block/Analysis/ProgramInterface.h"
@@ -107,8 +108,8 @@ LogicalResult verifyLoadLatency(Operation *operation, Value latency) {
   if (!latency)
     return success();
   auto parameter = latency.getDefiningOp<block::ParameterOp>();
-  if (!parameter || parameter.getDeclaration().getRole() !=
-                        block::ParameterRole::ProviderLoadPolicy ||
+  if (!parameter || parameter.getDeclaration().getName().getValue() != loadPolicyParameter ||
+      parameter.getDeclaration().getRole() != block::ParameterRole::ProviderOption ||
       !llvm::all_of(parameter.getDeclaration().getCandidates().asArrayRef(),
                     isLegalLoadPolicy))
     return operation->emitOpError(

@@ -23,7 +23,8 @@ from .targets import TritonTarget
 from .targets import MojoTarget
 from .targets import BangCTarget
 from .targets import WeftTarget
-from .targets import GPUCapabilities, GPUCompilationTarget, CPUCompilationTarget, BangCCapabilities, BangCCompilationTarget
+from .targets import TritonAscendTarget, AscendCapabilities, AscendCompilationTarget
+from .targets import NVIDIACapabilities, NVIDIACompilationTarget, CPUCompilationTarget, BangCCapabilities, BangCCompilationTarget
 from .jit import jit, JITKernel
 
 
@@ -68,8 +69,9 @@ __all__ = [
     "MojoTarget",
     "BangCTarget",
     "WeftTarget",
-    "GPUCapabilities",
-    "GPUCompilationTarget",
+    "TritonAscendTarget", "AscendCapabilities", "AscendCompilationTarget",
+    "NVIDIACapabilities",
+    "NVIDIACompilationTarget",
     "CPUCompilationTarget",
     "BangCCompilationTarget",
     "BangCCapabilities",

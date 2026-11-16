@@ -19,10 +19,7 @@ const block::TuningProfileSchema &tuningProfileSchema() {
       "traversal_workers", "traversal_group", "NUM_WARPS", "NUM_STAGES",
       "NUM_CTAS", "USE_TENSOR_DESCRIPTOR"};
   static const block::ProviderOption options[] = {
-      {"NUM_WARPS", block::ParameterRole::ProviderWarps},
-      {"NUM_STAGES", block::ParameterRole::ProviderStages},
-      {"NUM_CTAS", block::ParameterRole::ProviderCTAs},
-      {"USE_TENSOR_DESCRIPTOR", block::ParameterRole::ProviderAccessForm, true}};
+      {"NUM_WARPS"}, {"NUM_STAGES"}, {"NUM_CTAS"}, {"USE_TENSOR_DESCRIPTOR", true}};
   static const block::TuningProfileSchema schema{"triton", columns, options};
   return schema;
 }
@@ -63,7 +60,7 @@ LogicalResult materializeLegalConfigs(func::FuncOp kernel,
   auto shared = space->configurations(block::ConfigurationStage::Shared);
   if (failed(shared))
     return failure();
-  auto form = space->find(block::ParameterRole::ProviderAccessForm);
+  auto form = space->lookup("USE_TENSOR_DESCRIPTOR");
   if (!form)
     return kernel.emitError("Triton configuration has no declared access form");
   SmallVector<DictionaryAttr> configs;
@@ -104,11 +101,11 @@ FailureOr<SmallVector<TritonLocalOptions>> declareProviderOptions(
   DenseMap<DictionaryAttr, int64_t> equivalentStages;
   Builder builder(kernel.getContext());
   auto isDeviceOption = [&](int64_t warps, int64_t stages, int64_t ctas) {
-    return isLegalDeviceOption(block::ParameterRole::ProviderWarps, warps,
+    return isLegalDeviceOption(LaunchOption::Warps, warps,
                                capabilities, requiresCtaSynchronization) &&
-           isLegalDeviceOption(block::ParameterRole::ProviderStages, stages,
+           isLegalDeviceOption(LaunchOption::Stages, stages,
                                capabilities, requiresCtaSynchronization) &&
-           isLegalDeviceOption(block::ParameterRole::ProviderCTAs, ctas,
+           isLegalDeviceOption(LaunchOption::CTAs, ctas,
                                capabilities, requiresCtaSynchronization);
   };
   for (DictionaryAttr row : *rows) {

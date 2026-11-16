@@ -2,10 +2,10 @@ from dataclasses import dataclass
 from functools import partial
 from typing import ClassVar
 
-from .gpu import GPUTarget
+from .nvidia import NVIDIATarget
 from .provider import EnvironmentCheck, LocalExecution, Provider
 from .execution import indexed_key, indexed_target
-from .specification import read_gpu_target
+from .nvidia.specification import read_nvidia_target
 
 INSTALLATION = {
     "modules": ("torch", "cuda.tile", "cuda.tile.tune"),
@@ -17,7 +17,7 @@ INSTALLATION = {
 
 
 @dataclass(frozen=True, slots=True)
-class CuTileTarget(GPUTarget):
+class CuTileTarget(NVIDIATarget):
     provider: ClassVar[str] = "cutile"
 
 
@@ -44,4 +44,4 @@ def _environment_checks(target):
 
 PROVIDER = Provider("gpu", CuTileTarget, _read_facts, _bind, _environment_checks,
     LocalExecution("cuda", True, frozenset(), partial(indexed_target, CuTileTarget), indexed_key),
-    "block", read_gpu_target)
+    "block", read_nvidia_target)

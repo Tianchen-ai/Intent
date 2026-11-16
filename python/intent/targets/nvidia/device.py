@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from ..specification import GPUCapabilities
+from .specification import NVIDIACapabilities
 
 
-def resolve_gpu_device(device: int) -> GPUCapabilities:
+def resolve_cuda_device(device: int) -> NVIDIACapabilities:
     from cuda.bindings import driver
     import torch
 
@@ -33,7 +33,7 @@ def resolve_gpu_device(device: int) -> GPUCapabilities:
     minor = attribute(
         driver.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR
     )
-    return GPUCapabilities(
+    return NVIDIACapabilities(
         compute_units=attribute(
             driver.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT
         ),

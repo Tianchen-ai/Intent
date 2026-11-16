@@ -21,6 +21,9 @@ public:
   llvm::ArrayRef<ParameterAttr> declarations() const { return parameters; }
   llvm::ArrayRef<ParameterAttr> extentDeclarations() const { return extents; }
   ParameterAttr lookup(mlir::StringAttr name) const;
+  ParameterAttr lookup(llvm::StringRef name) const {
+    return lookup(mlir::StringAttr::get(kernel->getContext(), name));
+  }
   ParameterAttr lookup(ParameterRefAttr reference) const;
   ParameterAttr find(ParameterRole role) const;
   mlir::LogicalResult verifyBindings(mlir::DictionaryAttr bindings,

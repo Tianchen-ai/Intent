@@ -35,12 +35,12 @@ class TritonTarget final : public triton::TargetInterface {
 public:
   explicit TritonTarget(Dialect *dialect) : TargetInterface(dialect) {}
   StringRef provider() const final { return "triton_ascend"; }
-  bool legalOption(Attribute, block::ParameterRole role, int64_t value, bool) const final {
+  bool legalOption(Attribute, triton::LaunchOption role, int64_t value, bool) const final {
     if (value <= 0) return false;
     switch (role) {
-    case block::ParameterRole::ProviderWarps: return llvm::isPowerOf2_64(value);
-    case block::ParameterRole::ProviderStages: return value <= std::numeric_limits<int32_t>::max();
-    case block::ParameterRole::ProviderCTAs: return value == 1;
+    case triton::LaunchOption::Warps: return llvm::isPowerOf2_64(value);
+    case triton::LaunchOption::Stages: return value <= std::numeric_limits<int32_t>::max();
+    case triton::LaunchOption::CTAs: return value == 1;
     default: return false;
     }
   }

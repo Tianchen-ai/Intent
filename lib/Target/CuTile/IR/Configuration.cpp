@@ -16,12 +16,11 @@ bool isLegalCTAs(int64_t value) {
   return value >= 1 && value <= 16 && llvm::isPowerOf2_64(value);
 }
 
-bool isCuTileProviderRole(block::ParameterRole role) {
-  return role == block::ParameterRole::ProviderAccessForm ||
-         role == block::ParameterRole::ProviderOccupancy ||
-         role == block::ParameterRole::ProviderLoadPolicy ||
-         role == block::ParameterRole::ProviderWarps ||
-         role == block::ParameterRole::ProviderCTAs;
+bool isCuTileProviderParameter(block::ParameterAttr parameter) {
+  auto name = parameter.getName().getValue();
+  return parameter.getRole() == block::ParameterRole::ProviderOption &&
+      (name == accessFormParameter || name == occupancyParameter ||
+       name == loadPolicyParameter || name == workerWarpsParameter || name == ctasParameter);
 }
 
 }

@@ -17,6 +17,6 @@ bool isLegalAccessForm(int64_t value);
 bool isLegalOccupancy(int64_t value);
 bool isLegalWorkerWarps(int64_t value);
 bool isLegalCTAs(int64_t value);
-bool isCuTileProviderRole(block::ParameterRole role);
+bool isCuTileProviderParameter(block::ParameterAttr parameter);
 }
 #endif

@@ -161,7 +161,7 @@ LogicalResult TensorDescriptorChoiceOp::verify() {
         "descriptor operands must enumerate every descriptor declaration exactly once");
   auto declaration = block::lookupParameterDeclaration(getOperation(), getConfigParameter());
   if (!declaration || !declaration.getValueType().isSignlessInteger(1) ||
-      declaration.getRole() != block::ParameterRole::ProviderAccessForm ||
+      declaration.getRole() != block::ParameterRole::ProviderOption ||
       declaration.getPhase() != block::ConfigurationBindingPhase::Provider ||
       declaration.getCandidates().empty() ||
       llvm::any_of(declaration.getCandidates().asArrayRef(),

@@ -633,13 +633,7 @@ LogicalResult ParameterAttr::verify(
            << "physical parameter requires a name, role, category and candidates";
   auto typedCategory = category;
   auto typedRole = role;
-  const bool providerRole =
-      typedRole == ParameterRole::ProviderWarps ||
-      typedRole == ParameterRole::ProviderStages ||
-      typedRole == ParameterRole::ProviderCTAs ||
-      typedRole == ParameterRole::ProviderAccessForm ||
-      typedRole == ParameterRole::ProviderOccupancy ||
-      typedRole == ParameterRole::ProviderLoadPolicy;
+  const bool providerRole = typedRole == ParameterRole::ProviderOption;
   if (providerRole != (typedCategory == ParameterCategory::Provider))
     return emitError()
            << "provider parameter roles require exactly the provider category";
