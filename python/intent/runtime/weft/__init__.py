@@ -1,58 +1,35 @@
-from __future__ import annotations
-
-from pathlib import Path
-from typing import TYPE_CHECKING
-
 from .buffer import Buffer
-from .target import TargetProfile
 
-if TYPE_CHECKING:
-    from intent.runtime.artifact import CompiledArtifact
+
+def load_artifact(directory):
+    """Open an explicit native export; compilation and execution are not implicit."""
+    import os
+    from types import SimpleNamespace
     from .compilation import WeftArtifact
-
-
-def load_artifact(artifact: WeftArtifact | str | Path) -> CompiledArtifact:
-    """Bind an existing native AOT artifact without compilation or execution.
-
-    Paths name an exported Weft artifact with a completed local native attempt.
-    Portable sources must first pass through compile_artifact on this host.
-    Library loading and execution checks remain deferred until invocation.
-    """
-    from intent.runtime.artifact import CompiledArtifact
     from .program import NativeProgram
-
-    runtime = NativeProgram(artifact)
-    exported = runtime.artifact
-    return CompiledArtifact(source=exported.source,
-                            mlir=exported.ir if exported.ir is not None else "",
-                            device=0, device_type="cpu", runtime=runtime,
-                            _backend_ir_collector=None,
-                            cache_directory=exported.directory or runtime.directory)
+    from intent.runtime.artifact import CompiledArtifact
+    artifact = WeftArtifact.read(directory)
+    cpus = tuple(sorted(os.sched_getaffinity(0)))
+    def validate():
+        if tuple(sorted(os.sched_getaffinity(0))) != cpus:
+            raise RuntimeError("Weft execution affinity changed; load the artifact for the new CPU set")
+    target = SimpleNamespace(compilation=artifact.contract.target, validate_execution=validate)
+    program = SimpleNamespace(source=artifact.source, ir=artifact.ir,
+                              _contract=artifact.contract, cache_directory=artifact.directory)
+    runtime = NativeProgram(program, target, artifact=artifact)
+    return CompiledArtifact(source=artifact.source, mlir=artifact.ir, device=0,
+                            device_type="cpu", runtime=runtime, _backend_ir_collector=None,
+                            cache_directory=artifact.directory)
 
 
 def materialize_weft_artifact(program, target):
-    from .compilation import export_artifact, compile_artifact
     from .program import NativeProgram
     from intent.runtime.artifact import CompiledArtifact
 
-    exported = export_artifact(program, compiler=target.compiler, profile=target.profile)
-    runtime = NativeProgram(exported,
-        native_target=target.native,
-        native_builder=lambda artifact: compile_artifact(artifact, cc=target.cc, cflags=target.cflags),
-        source_directory=program.cache_directory)
+    runtime = NativeProgram(program, target)
     return CompiledArtifact(source=program.source, mlir=program.ir, device=0,
                             device_type="cpu", runtime=runtime, _backend_ir_collector=None,
                             cache_directory=program.cache_directory)
 
 
-__all__ = ["Buffer", "TargetProfile", "WeftArtifact", "NativeProgram", "export_artifact", "compile_artifact", "load_artifact"]
-
-
-def __getattr__(name):
-    if name == "NativeProgram":
-        from .program import NativeProgram
-        return NativeProgram
-    if name in {"WeftArtifact", "export_artifact", "compile_artifact"}:
-        from . import compilation
-        return getattr(compilation, name)
-    raise AttributeError(name)
+__all__ = ["Buffer", "load_artifact"]

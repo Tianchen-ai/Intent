@@ -2,12 +2,14 @@
 import argparse
 import json
 from .registry import PROGRAMS, load_program
+from intent.targets.components import COMPONENTS
+from intent.targets.provider import provider
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("program", nargs="?", choices=PROGRAMS)
     parser.add_argument("--list", action="store_true")
-    parser.add_argument("--backend", choices=("triton", "cutile", "mojo", "weft", "bangc"))
+    parser.add_argument("--backend", choices=tuple(COMPONENTS))
     parser.add_argument("--device")
     parser.add_argument("--workers", type=int)
     parser.add_argument("--compiler")
@@ -22,8 +24,8 @@ def main():
     if args.program is None or args.backend is None:
         parser.error("a program and explicit --backend are required")
     from .programs.common import ExampleContext, describe_outputs
-    device = args.device or ("cuda:0" if args.backend in {"triton", "cutile"}
-                             else "mlu:0" if args.backend == "bangc" else "cpu")
+    execution = provider(args.backend).local
+    device = args.device or (f"{execution.device_kind}:0" if execution.indexed else execution.device_kind)
     options = {}
     for value in args.option:
         key, separator, encoded = value.partition("=")

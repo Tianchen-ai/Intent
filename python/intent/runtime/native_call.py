@@ -17,6 +17,7 @@ class NativeInvocation:
     arguments: tuple
     _owners: tuple = field(repr=False)
     _validate: Callable[[], None] = field(repr=False)
+    _complete: Callable[[], None] | None = field(default=None, repr=False)
 
     @property
     def argument_types(self):
@@ -32,3 +33,9 @@ class NativeInvocation:
     def launch(self):
         self.validate()
         self.function(*self.arguments)
+        self.complete()
+
+    def complete(self):
+        """Report native worker failures after the synchronous invocation."""
+        if self._complete is not None:
+            self._complete()

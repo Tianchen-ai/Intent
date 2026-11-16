@@ -33,7 +33,7 @@ llvm::json::Object serializeCandidate(func::FuncOp function) {
       {"implementations", std::move(implementations)}};
 }
 
-FailureOr<llvm::json::Array> serializeTasks(ModuleOp program) {
+FailureOr<llvm::json::Array> serializeTasks(ModuleOp program, std::string &source) {
   llvm::json::Array tasks;
   for (Attribute entry : program->getAttrOfType<ArrayAttr>(taskBindingsAttr)) {
     auto binding = cast<TaskBindingAttr>(entry);
@@ -41,9 +41,20 @@ FailureOr<llvm::json::Array> serializeTasks(ModuleOp program) {
     auto kernel = cast<wk::KernelOp>(SymbolTable::lookupSymbolIn(program, binding.getDeviceKernel()));
     auto abi = serializeTaskABI(kernel);
     if (failed(abi)) return failure();
+    // Triton JIT compiles one native kernel per IRSource. Split the current
+    // verified module structurally, preserving module attributes and helpers.
+    OwningOpRef<ModuleOp> taskModule(cast<ModuleOp>(kernel->getParentOfType<ModuleOp>()->clone()));
+    for (auto other : llvm::make_early_inc_range(taskModule->getOps<wk::KernelOp>()))
+      if (other.getSymName() != kernel.getSymName()) other.erase();
+    int64_t begin = source.size();
+    llvm::raw_string_ostream output(source);
+    taskModule->print(output, OpPrintingFlags().enableDebugInfo());
+    output << '\n';
+    output.flush();
     tasks.push_back(llvm::json::Object{{"cpu_entry", hostEntry.getName().str()},
         {"task_ordinal", binding.getOrdinal()}, {"weft_entry", kernel.getSymName().str()},
         {"coordinate_argument", binding.getCoordinateArgument()}, {"abi", std::move(*abi)},
+        {"source_range", llvm::json::Array{begin, static_cast<int64_t>(source.size())}},
         {"argument_count", static_cast<int64_t>(kernel.getBody().front().getNumArguments())}});
   }
   return std::move(tasks);
@@ -63,16 +74,13 @@ LogicalResult serializeProgram(ModuleOp program, std::string &source, std::strin
   auto interface = getPublicInterface(candidates.front());
   auto parameters = serializePublicInterface(candidates.front(), interface);
   auto nativeABI = queryHostABI(candidates.front());
-  auto tasks = serializeTasks(program);
+  auto tasks = serializeTasks(program, source);
   if (failed(parameters) || failed(tasks) || failed(nativeABI)) return failure();
   llvm::json::Array configurations;
   for (auto function : candidates) configurations.push_back(serializeCandidate(function));
   std::string hostSource;
   if (failed(serializeHostProgram(modules->host, hostSource))) return failure();
 
-  llvm::raw_string_ostream output(source);
-  modules->device.print(output, OpPrintingFlags().enableDebugInfo());
-  output << '\n';
   auto entry = candidates.front()->getAttrOfType<cpu::EntryRequirementsAttr>(cpu::entryRequirementsAttr);
   auto requirements = queryNativeEntryRequirements(candidates.front(), interface,
       entry.getDisjointOutputs(), [&](unsigned index, intent::ViewType view) -> FailureOr<NativeViewRequirements> {

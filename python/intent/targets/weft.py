@@ -1,129 +1,72 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
-from pathlib import Path
-import shutil
 import os
-import platform
-import shlex
-from typing import TYPE_CHECKING
 
 from .provider import EnvironmentCheck, LocalExecution, Provider
 from .execution import cpu_key, cpu_workers
-from .specification import read_cpu_target
+from .specification import CPUCompilationTarget, read_cpu_target, require_matching_target
 
 INSTALLATION = {
-    "modules": ("weft",), "requirements": (), "torch": None, "torch_index": None,
-    "python_max": (3, 12),
-    "toolchain": "RISC-V Linux with the matching Weft package, native weft-compile and C compiler; hardware facts are discovered locally",
+    "modules": ("triton", "weft_core"), "requirements": (), "torch": None,
+    "torch_index": None, "python_max": (3, 14),
+    "toolchain": "Triton–Weft with its matching weft-core native SDK and CPU toolchain; use a separate environment from other Triton distributions",
 }
-from .specification import CPUCompilationTarget, require_matching_target
-from intent.runtime.weft.target import TargetProfile
-
-if TYPE_CHECKING:
-    from intent.runtime import CompiledArtifact
 
 
 @dataclass(frozen=True, slots=True)
 class ResolvedWeftTarget:
     compilation: CPUCompilationTarget
-    profile: TargetProfile
-    compiler: str
-    cc: tuple[str, ...]
-    cflags: tuple[str, ...]
-    native: object | None = None
+    native: object
+    cpus: tuple[int, ...]
+    options: Mapping = field(repr=False)
 
-    def materialize(self, program) -> CompiledArtifact:
+    def validate_execution(self):
+        if tuple(sorted(os.sched_getaffinity(0))) != self.cpus:
+            raise RuntimeError("Weft execution CPU affinity changed; prepare a new local JIT call")
+
+    def materialize(self, program):
         require_matching_target(program.target, self.compilation)
         return _bind(program, self)
 
 
-def native_target(*, workers, compiler=None, cc=None, cflags=(), private_bytes=262144):
-    """Resolve the executing RISC-V CPU through the installed Weft native probe."""
-    if platform.system() != "Linux" or platform.machine() != "riscv64":
-        raise NotImplementedError("local Weft JIT requires a RISC-V Linux host")
-    from weft.runtime.driver import Toolchain
-    from weft.runtime.target import NativeTarget, extension_catalog
-    selected = str(compiler) if compiler is not None else (
-        os.environ.get("INTENT_WEFT_COMPILER") or os.environ.get("WEFT_COMPILER"))
-    toolchain = Toolchain(compiler=selected)
-    executable = toolchain.compiler_path()
-    native = NativeTarget.discover(toolchain)
-    facts = native.to_dict()
-    cpus = tuple(facts["cpus"])
-    if not set(os.sched_getaffinity(0)).issubset(cpus):
-        raise ValueError("Weft discovery does not cover the calling process CPU affinity")
-    catalog = extension_catalog(toolchain=toolchain) if facts["matrix_extensions"] else None
-    extensions = []
-    for name, allowed in facts["matrix_extensions"].items():
-        if not set(cpus).issubset(allowed):
-            continue
-        fragments = catalog.get(name)["fragments"]
-        if any((fragment["xlen"], fragment["vlen_bits"], fragment["lhs_element_bits"],
-                fragment["rhs_element_bits"], fragment["accumulator_element_bits"]) ==
-               (64, native.vlen_bits, 8, 8, 32) and
-               all(fragment[field] == "signed" for field in
-                   ("lhs_signedness", "rhs_signedness", "accumulator_signedness"))
-               for fragment in fragments):
-            extensions.append(name)
-    if len(extensions) > 1:
-        raise NotImplementedError("local Weft JIT has multiple supported matrix extensions")
-    extension = extensions[0] if extensions else None
-    profile = TargetProfile(facts["march"], facts["abi"], facts["vlen_bits"], cpus,
-                            matrix_extension=extension, private_stack_bytes=private_bytes)
-    command = tuple(cc) if cc is not None else tuple(shlex.split(os.environ.get("CC", "cc")))
-    if not command or shutil.which(command[0]) is None:
-        raise FileNotFoundError("local Weft JIT requires a native C compiler; set CC")
-    return replace(WeftTarget(profile.vlen_bits, workers, extension, private_bytes,
-                             profile, executable, command, tuple(cflags)).resolve(), native=native)
-
-
 @dataclass(frozen=True, slots=True)
 class WeftTarget:
-    # These are explicit CPU program construction budgets, not ISA discovery.
-    vector_bits: int
-    workers: int
-    matrix_extension: str | None = None
+    workers: int = 8
     private_bytes: int = 262144
-    profile: TargetProfile | Mapping[str, object] | None = None
-    compiler: str | Path | None = None
-    cc: tuple[str, ...] | None = None
-    cflags: tuple[str, ...] = ()
+    options: Mapping = field(default_factory=dict)
 
-    def __post_init__(self) -> None:
-        if isinstance(self.profile, Mapping):
-            object.__setattr__(self, "profile", TargetProfile(**self.profile))
-        elif self.profile is not None and not isinstance(self.profile, TargetProfile):
-            raise TypeError("Weft native profile must be a TargetProfile or its field mapping")
-        for name in ("cc", "cflags"):
-            values = getattr(self, name)
-            if values is None and name == "cc":
-                continue
-            if not isinstance(values, (tuple, list)) or any(
-                    not isinstance(value, str) or not value for value in values):
-                raise TypeError(f"Weft {name} must be a sequence of nonempty command arguments")
-            object.__setattr__(self, name, tuple(values))
-        if self.compiler is not None:
-            if not isinstance(self.compiler, (str, Path)) or not str(self.compiler):
-                raise TypeError("Weft compiler must name an executable")
-            object.__setattr__(self, "compiler", str(Path(self.compiler).expanduser())
-                               if isinstance(self.compiler, Path) or "~" in self.compiler
-                               else self.compiler)
-
-    def resolve(self) -> CPUCompilationTarget | ResolvedWeftTarget:
-        compilation = CPUCompilationTarget("weft", self.vector_bits, self.workers,
-                                           self.matrix_extension is not None, self.private_bytes)
-        if self.profile is None and self.compiler is None and self.cc is None and not self.cflags:
-            return compilation
-        if self.profile is None or self.compiler is None or not self.cc:
-            raise ValueError("Weft native binding requires an explicit profile, compiler and nonempty cc command")
-        if self.profile.matrix_extension != self.matrix_extension:
-            raise ValueError("Weft construction and native profile must name the same matrix extension")
-        # vector_bits/workers describe the constructed program. The profile owns
-        # physical VLEN and the allowed execution CPUs; they are checked at load.
-        return ResolvedWeftTarget(compilation, self.profile, self.compiler,
-                                  self.cc, self.cflags)
+    def resolve(self):
+        try:
+            from triton.backends.weft.driver import WeftDriver
+            from triton.backends.weft.compiler import WeftBackend
+            from weft_core import compiler as core
+        except ImportError as error:
+            raise ImportError("Intent Weft requires the Triton–Weft distribution and matching weft-core; install them in this execution environment") from error
+        workers = cpu_workers(self.workers)
+        if type(self.private_bytes) is not int or self.private_bytes <= 0:
+            raise ValueError("Weft private storage budget must be positive")
+        native = WeftDriver().get_current_target()
+        if native.arch == "x86_64":
+            facts = core.x86_target_capabilities(native.march, native.abi, native.vlen_bits)
+            vector_bits = facts["register_file"]["vector_bits"]
+            matrix_i8_i32 = "amx-int8" in facts["matrix_extensions"]
+        elif native.arch == "riscv64":
+            vector_bits = native.vlen_bits
+            matrix_i8_i32 = native.matrix_extension not in (None, "none")
+        else:
+            raise NotImplementedError(f"Weft CPU architecture is unsupported: {native.arch}")
+        options = dict(self.options)
+        if options.get("num_cpu_threads", 1) != 1:
+            raise ValueError("Intent owns CPU task dispatch; Weft task launchers must use one thread")
+        options["num_cpu_threads"] = 1
+        if native.arch == "riscv64":
+            options["private_stack_bytes"] = self.private_bytes
+        WeftBackend(native).parse_options(options)
+        return ResolvedWeftTarget(
+            CPUCompilationTarget("weft", vector_bits, workers, matrix_i8_i32, self.private_bytes),
+            native, tuple(sorted(os.sched_getaffinity(0))), options)
 
 
 def _read_facts(source, metadata, abi):
@@ -137,28 +80,20 @@ def _bind(program, target):
 
 
 def _environment_checks(target):
-    if not isinstance(target, ResolvedWeftTarget):
-        return ()
-
-    def toolchain():
-        paths = {}
-        for name, command in (("weft_compiler", target.compiler), ("c_compiler", target.cc[0])):
-            executable = shutil.which(command)
-            if executable is None:
-                raise FileNotFoundError(f"Weft {name} is not executable: {command}")
-            paths[name] = str(Path(executable).absolute())
-        return {**paths, "march": target.profile.march, "abi": target.profile.abi,
-                "vlen_bits": target.profile.vlen_bits,
-                "scope": "Executable discovery only; no compilation, library loading or device execution"}
-
-    return (EnvironmentCheck("Weft native toolchain", "provider_toolchain", toolchain),)
+    def check():
+        from triton.backends.weft.compiler import WeftBackend
+        options = WeftBackend(target.native).parse_options(dict(target.options))
+        return {"architecture": target.native.arch, "march": target.native.march,
+                "abi": target.native.abi, "vlen_bits": target.native.vlen_bits,
+                "cpus": target.cpus, "toolchain": options.toolchain}
+    return (EnvironmentCheck("Triton–Weft native toolchain", "provider_toolchain", check),)
 
 
 def _resolve_local(device, *, workers, **options):
-    return native_target(workers=cpu_workers(workers), **options)
+    return WeftTarget(workers=cpu_workers(workers), **options).resolve()
 
 
 PROVIDER = Provider("cpu", WeftTarget, _read_facts, _bind, _environment_checks,
-    LocalExecution("cpu", False, frozenset({"compiler", "cc", "cflags", "private_bytes"}),
+    LocalExecution("cpu", False, frozenset({"options", "private_bytes"}),
                    _resolve_local, cpu_key), "cpu", read_cpu_target,
-    "Source facts or explicit native toolchain discovery only; RISC-V execution is checked when loading native code")
+    "Triton–Weft owns native CPU discovery, canonical compilation, loading and worker validation")

@@ -120,9 +120,9 @@ const OperationEmitters<HostSourceEmitter> &HostSourceEmitter::emitters() {
     result.add<cpu::InvokeOp>(
         verifyInvocation,
         [](cpu::InvokeOp operation, HostSourceEmitter &emitter) {
-          std::string text = operation.getCallee().str() + "(";
+          std::string text = operation.getCallee().str() + "(intent_context";
           for (auto [index, argument] : llvm::enumerate(operation.getOperands())) {
-            if (index) text += ", ";
+            text += ", ";
             text += isa<MemRefType>(argument.getType())
                         ? emitter.memoryPointer(argument)
                         : emitter.valueString(argument);

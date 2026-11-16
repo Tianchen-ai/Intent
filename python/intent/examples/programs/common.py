@@ -4,6 +4,7 @@ import intent
 from intent.language.annotations import ConstexprSpec, ViewKind, ViewSpec
 from intent.runtime.invocation import ViewFacts, build_invocation_binders
 from intent.targets.local import select_device, resolve_local
+from intent.targets.provider import provider
 from .inputs import Array
 from .native import HostBuffers, element_strides, empty_like, host_result, is_tensor
 
@@ -54,9 +55,8 @@ class _ExampleKernel:
             raise RuntimeError("example context is closed")
         if self.context.stage == "source":
             target = self.context.source_target()
-            if self.context.backend == "bangc":
-                from intent.targets.bangc import specialize_call
-                target, _ = specialize_call(target, self.definition, arguments, outputs)
+            target, _ = provider(self.context.backend).local.specialize(
+                target, self.definition, arguments, outputs)
             program = intent.generate(self.definition, target=target,
                                       compiler=self.context.compiler, constexprs=self.constexprs)
             self.context.artifacts.append(program)

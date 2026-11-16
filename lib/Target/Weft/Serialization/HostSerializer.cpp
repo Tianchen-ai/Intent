@@ -30,9 +30,9 @@ public:
               "#include <stdlib.h>\n#include <math.h>\n";
     for (auto function : module.getOps<func::FuncOp>()) {
       if (!function.isExternal()) continue;
-      output << "extern void " << function.getName() << "(";
+      output << "extern void " << function.getName() << "(void *intent_context";
       for (auto [index, type] : llvm::enumerate(function.getArgumentTypes())) {
-        if (index) output << ", ";
+        output << ", ";
         output << (isa<MemRefType>(type) ? "void *" : nativeType(type));
       }
       output << ");\n";
@@ -43,8 +43,8 @@ public:
       if (mlir::failed(abi)) return failure();
       ScopedValues local(*this);
       memories.clear();
-      output << "void " << function.getName() << "(";
-      bool first = true;
+      output << "void " << function.getName() << "(void *intent_context";
+      bool first = false;
       for (auto [index, argument] : llvm::enumerate(function.getArguments())) {
         std::string name = "a" + std::to_string(index);
         if (isa<MemRefType>(argument.getType())) {

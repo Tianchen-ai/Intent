@@ -4,51 +4,18 @@ import ctypes
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 import math
-import os
-from pathlib import Path
-import resource
 import statistics
 from threading import RLock
 
 from .buffer import Buffer
-from .compilation import WeftArtifact
-from .target import TargetProfile
+from .compilation import compile_program
+from .binding import CallState, NativeEntries
 from ..interface import ViewParameter
 from ..invocation import ViewFacts, invocation_result
 from ..native import NativePreparedRuntime
 from ..native_artifact import load_native_library
 from ..diagnostics import CacheObservation, CandidateObservation, ObservedCall, bindings, observation
 from intent.compiler.toolchain import CompilationStageError
-
-
-class _ExecutionContract:
-    """Artifact-local hardware facts, with calling-thread state checked on use."""
-
-    def __init__(self, profile: TargetProfile, kernels, native=None) -> None:
-        from weft.runtime.driver import Toolchain
-        from weft.runtime.target import NativeTarget, Target
-        self.profile = profile
-        self.native = native or NativeTarget.discover(Toolchain(compiler=os.environ.get("INTENT_WEFT_COMPILER")))
-        target = Target(profile.march, profile.abi, profile.vlen_bits)
-        self.extensions = tuple(sorted({name for kernel in kernels for name in kernel["used_extensions"]}))
-        for kernel in kernels:
-            self.native.require(target, kernel["used_extensions"], kernel["isa_extensions"])
-        self.vlen_probe = None
-
-    def bind_library(self, library) -> None:
-        self.vlen_probe = library.bind("intent_weft_vlen_bits", [], ctypes.c_int64)
-
-    def check(self) -> None:
-        stack, _ = resource.getrlimit(resource.RLIMIT_STACK)
-        if stack != resource.RLIM_INFINITY and self.profile.private_stack_bytes >= stack:
-            raise ValueError("artifact private stack budget exceeds the native thread's stack limit")
-        cpus = os.sched_getaffinity(0)
-        if not cpus.issubset(self.profile.cpus):
-            raise ValueError("current CPU affinity exceeds the artifact execution set")
-        self.native.check_execution(self.extensions)
-        # The calling thread may have migrated, so VLEN remains a live check.
-        if self.vlen_probe is not None and self.vlen_probe() != self.profile.vlen_bits:
-            raise ValueError("native VLEN disagrees with the artifact")
 
 
 _winners: dict[tuple, int] = {}
@@ -70,6 +37,7 @@ class NativeCall(ObservedCall):
     key: tuple
     description: tuple
     trial_storage: tuple[memoryview, ...]
+    state: CallState
     winner: int | None = None
 
     @contextmanager
@@ -113,6 +81,8 @@ class NativeCall(ObservedCall):
     def _prepare_execution(self) -> None:
         with self._native_stage("provider_invocation"):
             self.program.check_execution()
+            self.state.check()
+            self.state.entries = self.program._entries.entries
 
     def inspect_configurations(self):
         return self.program.inspect_configurations()
@@ -152,6 +122,7 @@ class NativeCall(ObservedCall):
                             if prepare is not None:
                                 prepare()
                             samples.append(_measure(measure, self.native_arguments))
+                            self.state.check()
                     elapsed = statistics.median(samples)
                     timings.append(elapsed)
                     observed.append(CandidateObservation(configuration, "trial_completed", "provider_tuning",
@@ -173,6 +144,7 @@ class NativeCall(ObservedCall):
         selected = self.choose()
         with self._native_stage("provider_invocation", candidate=self.program.candidates[selected]):
             self.program.functions[selected](*self.native_arguments)
+            self.state.check()
         self._record_execution("launched")
 
     def benchmark(self, *, prepare=None, samples: int = 10) -> float:
@@ -186,6 +158,7 @@ class NativeCall(ObservedCall):
                     if prepare is not None:
                         prepare()
                     values.append(_measure(measure, self.native_arguments))
+                    self.state.check()
             elapsed = statistics.median(values)
         self._record_execution("benchmarked")
         return elapsed
@@ -197,30 +170,20 @@ class NativeCall(ObservedCall):
         """Select a configuration and export a checked local CPU invocation."""
         selected = self.choose()
         return self.program.functions[selected].bind_call(
-            self.native_arguments, owner=self, validate=self.program.check_execution)
+            self.native_arguments, owner=self, validate=self._prepare_execution,
+            complete=self.state.check)
 
 
 class NativeProgram(NativePreparedRuntime):
-    def __init__(self, artifact: WeftArtifact | str | Path, *, native_builder=None,
-                 source_directory=None, native_target=None) -> None:
-        if not isinstance(artifact, WeftArtifact):
-            artifact = WeftArtifact.read(artifact, load_native=True)
-        if artifact.native is None and native_builder is None:
-            raise ValueError("Weft native loading requires compile_artifact to finish first")
+    def __init__(self, program, target, *, artifact=None) -> None:
+        self.program, self.resolved_target = program, target
         self.artifact = artifact
-        self._native_builder = native_builder
-        self._native_target = native_target
-        self.directory = artifact.native.directory if artifact.native is not None else source_directory
-        contract = artifact.contract
-        self.profile = artifact.profile
+        self.directory = program.cache_directory
+        contract = program._contract
         self.facts = contract.facts
         self.target = bindings({"family": "cpu", **{name: value for name, value in asdict(contract.target).items()
                                                   if name != "provider"}})
-        self.compilation_cache = () if artifact.native is None else (CacheObservation("native_compilation",
-            "disk" if artifact.native_cache_observed else "external_aot",
-            artifact.native.cache_hit if artifact.native_cache_observed else None,
-            str(artifact.native.directory), "materialization", artifact.native.cache_reason if artifact.native_cache_observed else
-            "A saved native artifact was loaded; its compilation cache use was not observed"),)
+        self.compilation_cache = ()
         abi = contract.abi
         self.interface = abi.interface
         self.trial_regions = abi.trial_regions()
@@ -235,17 +198,10 @@ class NativeProgram(NativePreparedRuntime):
         )
         self.candidates = self.facts.candidates
         self.configuration_descriptions = tuple(bindings(candidate.metadata()) for candidate in self.candidates)
-        kernels = {kernel["symbol"]: kernel for kernel in artifact.kernels}
-        self.candidate_extensions = tuple(frozenset(
-            extension for task in self.facts.tasks if task.cpu_entry == candidate.entry
-            for extension in kernels[task.abi.symbol]["used_extensions"])
-            for candidate in self.candidates)
-        self.used_extensions = frozenset(extension for kernel in kernels.values()
-                                         for extension in kernel["used_extensions"])
-        self.identity = artifact.native.identity if artifact.native is not None else None
-        self._argument_types = abi.argument_types()
+        self.identity = artifact.native.identity if artifact is not None else None
+        self._argument_types = [ctypes.c_void_p, *abi.argument_types()]
         self._library = None
-        self._execution = None
+        self._entries = None
         self._closed = False
         self._load_lock = RLock()
         self.functions, self.measurements = [], []
@@ -254,11 +210,14 @@ class NativeProgram(NativePreparedRuntime):
         with self._load_lock:
             if self._closed:
                 raise CompilationStageError("provider_native_compilation", "native artifact is closed")
-            if self.artifact.native is None:
-                self.artifact = self._native_builder(self.artifact)
+            if self.artifact is None:
+                self.artifact = compile_program(self.program, self.resolved_target)
                 self.directory = self.artifact.native.directory
                 self.identity = self.artifact.native.identity
-                self.compilation_cache = (CacheObservation("native_compilation", "disk",
+                self.compilation_cache = (CacheObservation("native_compilation", "provider",
+                    None, "Triton–Weft JIT cache", "native_compilation",
+                    "Task compilation uses the provider cache; hit status is not exposed"),
+                    CacheObservation("native_compilation", "disk",
                     self.artifact.native.cache_hit, str(self.directory), "native_compilation",
                     self.artifact.native.cache_reason),)
             self.artifact.native.validate()
@@ -270,21 +229,24 @@ class NativeProgram(NativePreparedRuntime):
                 raise CompilationStageError("native_loading", "native artifact is closed")
             if self._library is not None:
                 return self._library
-            execution = _ExecutionContract(self.profile, self.artifact.kernels, self._native_target)
-            execution.check()
-            library = load_native_library(self.artifact.native)
+            self.resolved_target.validate_execution()
+            entries = NativeEntries(self.artifact.tasks)
             try:
-                execution.bind_library(library)
-                execution.check()
+                library = load_native_library(self.artifact.native)
+            except Exception:
+                entries.close()
+                raise
+            try:
                 functions = [library.bind(candidate.entry + "_invoke", self._argument_types, None)
                              for candidate in self.candidates]
                 measurements = [library.bind(candidate.entry + "_benchmark",
                                               [*self._argument_types, ctypes.c_int64], ctypes.c_double)
                                 for candidate in self.candidates]
             except Exception:
+                entries.close()
                 library.close()
                 raise
-            self._execution, self._library = execution, library
+            self._entries, self._library = entries, library
             self.functions, self.measurements = functions, measurements
             return library
 
@@ -292,9 +254,13 @@ class NativeProgram(NativePreparedRuntime):
     def library(self):
         return self.ensure_loaded()
 
+    def export(self, directory):
+        self.compile()
+        return self.artifact.export(directory)
+
     def check_execution(self) -> None:
         self.ensure_loaded()
-        self._execution.check()
+        self.resolved_target.validate_execution()
 
     def _view(self, parameter: ViewParameter, value) -> ViewFacts:
         if not isinstance(value, Buffer) or value.dtype != parameter.dtype.name:
@@ -324,17 +290,20 @@ class NativeProgram(NativePreparedRuntime):
             if storage.nbytes != region.byte_count(bound.views[position].shape):
                 raise ValueError("native trial byte range disagrees with the bound buffer storage")
             trial_storage.append(storage)
-        return NativeCall(self, bound.arguments, bound.native_arguments, bound.outputs,
+        state = CallState()
+        return NativeCall(self, bound.arguments,
+                          (ctypes.c_void_p(ctypes.addressof(state)), *bound.native_arguments), bound.outputs,
                           (self.identity, bound.key), self.describe_arguments(bound, "cpu"),
-                          tuple(trial_storage))
+                          tuple(trial_storage), state)
 
     def close(self) -> None:
         with self._load_lock:
             self._closed = True
             self.functions.clear()
             self.measurements.clear()
-            if self._execution is not None:
-                self._execution.vlen_probe = None
+            if self._entries is not None:
+                self._entries.close()
+                self._entries = None
             if self._library is not None:
                 self._library.close()
                 self._library = None

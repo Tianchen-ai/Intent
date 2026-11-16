@@ -57,7 +57,11 @@ class TaskABI:
                    json.dumps(arguments, sort_keys=True), parameters)
 
     def verify_native(self, kernel: dict) -> None:
-        if json.dumps(kernel["arguments"], sort_keys=True) != self.arguments:
+        expected = json.loads(self.arguments)
+        actual = kernel["arguments"]
+        if len(actual) != len(expected) or any(
+                any(right.get(key) != value for key, value in left.items())
+                for left, right in zip(expected, actual, strict=True)):
             raise ValueError(f"Weft artifact {self.symbol} arguments disagree with the CPU task ABI")
         if tuple(kernel["shape_parameters"]) != self.shape_parameters:
             raise ValueError(f"Weft artifact {self.symbol} shape_parameters disagree with the CPU task ABI")
@@ -67,6 +71,7 @@ class TaskABI:
 class WeftTask:
     cpu_entry: str
     abi: TaskABI
+    source: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +103,8 @@ class WeftFacts:
         if not candidates:
             raise ValueError("Weft generation requires at least one candidate")
         tasks, symbols = [], set()
+        encoded = source.encode("utf-8")
+        previous_end = 0
         for raw in sequence_field(metadata["tasks"], "Weft tasks"):
             task = object_field(raw, "Weft task")
             entry = name_field(task["cpu_entry"], "Weft task CPU entry")
@@ -105,5 +112,14 @@ class WeftFacts:
             if entry not in entries or task_abi.symbol in symbols:
                 raise ValueError("Weft task must bind a declared CPU candidate and distinct device symbol")
             symbols.add(task_abi.symbol)
-            tasks.append(WeftTask(entry, task_abi))
+            interval = sequence_field(task["source_range"], "Weft task source range")
+            if len(interval) != 2:
+                raise ValueError("Weft task source range requires two byte offsets")
+            begin, end = (integer_field(value, "Weft task source offset") for value in interval)
+            if begin != previous_end or not begin < end <= len(encoded):
+                raise ValueError("Weft task sources must form complete, disjoint module ranges")
+            previous_end = end
+            tasks.append(WeftTask(entry, task_abi, encoded[begin:end].decode("utf-8")))
+        if previous_end != len(encoded):
+            raise ValueError("Weft source contains text not owned by a task module")
         return cls(host, tuple(candidates), tuple(tasks))
