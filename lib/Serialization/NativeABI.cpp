@@ -30,6 +30,17 @@ llvm::json::Array NativeABI::serialize() const {
   return result;
 }
 
+llvm::json::Array NativeABI::serializeWorkspaces() const {
+  llvm::json::Array result;
+  for (auto [position, type] : workspaces) {
+    llvm::json::Array shape;
+    for (int64_t extent : type.getShape()) shape.push_back(extent);
+    result.push_back(llvm::json::Object{{"position", position},
+        {"dtype", scalarABIName(type.getElementType())}, {"shape", std::move(shape)}});
+  }
+  return result;
+}
+
 llvm::json::Object NativeEntryRequirements::serialize() const {
   llvm::json::Array viewEntries, pairs;
   for (const auto &[parameter, requirements] : views)
@@ -46,10 +57,10 @@ FailureOr<NativeEntryRequirements> queryNativeEntryRequirements(
     func::FuncOp function, InterfaceAttr interface, bool disjointWritableViews,
     function_ref<FailureOr<NativeViewRequirements>(unsigned, ViewType)> viewRequirements) {
   if (failed(verifyPublicInterface(function, interface))) return failure();
-  if (function.getNumArguments() != interface.getArguments().size())
+  if (function.getNumArguments() < interface.getArguments().size())
     return function.emitError("native entry requirements disagree with the public parameters"), failure();
   NativeEntryRequirements result;
-  for (unsigned ordinal = 0; ordinal < function.getNumArguments(); ++ordinal) {
+  for (unsigned ordinal = 0; ordinal < interface.getArguments().size(); ++ordinal) {
     auto view = getPublicView(interface, ordinal);
     if (!view) continue;
     auto requirements = viewRequirements(ordinal, view);
@@ -70,14 +81,20 @@ FailureOr<NativeABI> queryNativeABI(
     func::FuncOp function, InterfaceAttr interface,
     function_ref<FailureOr<Type>(Type)> scalarCarrier) {
   if (failed(verifyPublicInterface(function, interface))) return failure();
-  if (function.getNumArguments() != interface.getArguments().size())
+  if (function.getNumArguments() < interface.getArguments().size())
     return function.emitError("native entry arguments disagree with the public interface"), failure();
   NativeABI result;
   Type indexCarrier = IntegerType::get(function.getContext(), 64);
   for (auto [ordinal, argument] : llvm::enumerate(function.getArguments())) {
-    auto view = getPublicView(interface, ordinal);
     auto memory = dyn_cast<MemRefType>(argument.getType());
-    if (static_cast<bool>(view) != static_cast<bool>(memory))
+    bool workspace = ordinal >= interface.getArguments().size();
+    auto view = workspace ? ViewType() : getPublicView(interface, ordinal);
+    if (workspace) {
+      if (!function.getArgAttr(ordinal, nativeWorkspaceAttr) || !memory ||
+          !memory.hasStaticShape() || !memory.getLayout().isIdentity() || memory.getMemorySpaceAsInt() != 0)
+        return function.emitError("native private arguments require explicit, contiguous workspace storage with bound extents"), failure();
+      result.workspaces.emplace_back(ordinal, memory);
+    } else if (static_cast<bool>(view) != static_cast<bool>(memory))
       return function.emitError("native entry storage kind disagrees with its public parameter"), failure();
     if (memory) {
       result.slots.push_back({NativeSlotRole::Pointer, static_cast<unsigned>(ordinal),

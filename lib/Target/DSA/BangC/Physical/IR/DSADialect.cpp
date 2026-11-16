@@ -1,5 +1,6 @@
 #include "Intent/Target/DSA/BangC/Physical/IR/DSAOps.h"
 #include "Intent/Dialect/DSA/IR/Resources.h"
+#include "Intent/Dialect/Block/IR/Target.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "llvm/ADT/DenseSet.h"
@@ -24,9 +25,24 @@ public:
         {builder.getI64IntegerAttr(sharedSpace), Visibility::Group, device.getSramBytes(), 128 * 1024, 128}};
   }
 };
+class BlockResources final : public intent::block::TargetInterface {
+public:
+  explicit BlockResources(Dialect *dialect) : TargetInterface(dialect) {}
+  bool supports(Attribute target) const final { return isa<CapabilitiesAttr>(target); }
+  intent::block::Resources resources(Attribute target) const final {
+    auto device = cast<CapabilitiesAttr>(target);
+    return {device.getClusters() * device.getCoresPerCluster(), device.getNramBytes() / 4,
+            device.getNramBytes(), 0, 0};
+  }
+  llvm::json::Object serialize(Attribute target) const final {
+    auto device = cast<CapabilitiesAttr>(target);
+    return llvm::json::Object{{"clusters", device.getClusters()}, {"cores_per_cluster", device.getCoresPerCluster()},
+        {"nram_bytes", device.getNramBytes()}, {"wram_bytes", device.getWramBytes()}, {"sram_bytes", device.getSramBytes()}};
+  }
+};
 }
 void IntentBangCPhysicalDialect::initialize() {
-  addInterfaces<StorageResources>();
+  addInterfaces<StorageResources, BlockResources>();
   addAttributes<
 #define GET_ATTRDEF_LIST
 #include "Intent/Target/DSA/BangC/Physical/IR/DSAAttrs.cpp.inc"

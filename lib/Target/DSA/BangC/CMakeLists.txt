@@ -1,7 +1,7 @@
 add_subdirectory(Physical)
-add_subdirectory(Construction)
+add_subdirectory(BlockLowering)
 intent_backend(BangC SOURCE Backend.cpp SOURCES Compilation.cpp PROFILE Transforms/TuningProfiles.json PROFILE_NAME bangc.json
-  LIBRARIES MLIRIntentBangC MLIRIntentKIRToDSA)
+  LIBRARIES MLIRIntentBangC MLIRIntentBlockToBangC)
 add_mlir_library(MLIRIntentBangCResources
   NativeWorkspace.cpp
   LINK_LIBS PUBLIC MLIRIntentDialect MLIRIntentBangCPhysicalDialect MLIRIR MLIRSupport)

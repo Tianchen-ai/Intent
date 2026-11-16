@@ -1,6 +1,8 @@
-#include "Intent/Target/DSA/BangC/Construction.h"
+#include "Intent/Target/DSA/BangC/Physical/IR/DSAOps.h"
 #include "Intent/Target/DSA/BangC/ConstructionPasses.h"
 #include "Intent/Target/DSA/BangC/Compilation.h"
+#include "Intent/Target/DSA/BangC/BlockLowering.h"
+#include "Intent/Dialect/Block/IR/BlockDialect.h"
 #include "mlir/AsmParser/AsmParser.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -28,7 +30,7 @@ public:
     StringAttr entryName;
     for (auto [index, attribute] : llvm::enumerate(*configurations)) {
       OwningOpRef<ModuleOp> candidate(cast<ModuleOp>(module->clone()));
-      if (failed(lowerCanonicalKIRToDSA(*candidate, cast<physical::ConfigurationAttr>(attribute),
+      if (failed(constructBlockStorage(*candidate, cast<physical::ConfigurationAttr>(attribute), hardware,
                                        shapeBindings, strideBindings)))
         return signalPassFailure();
       (*candidate)->setAttr("intent_bangc.capabilities", hardware);

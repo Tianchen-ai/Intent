@@ -2,6 +2,7 @@
 #include "Intent/Target/DSA/BangC/Physical/IR/ExecutionRelations.h"
 #include "Intent/Target/DSA/BangC/Physical/IR/Views.h"
 #include "Intent/Analysis/BufferStorage.h"
+#include "Intent/Serialization/NativeABI.h"
 #include "Intent/Target/DSA/BangC/Physical/IR/MemoryEffects.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -593,8 +594,14 @@ LogicalResult intent::bangc::physical::verifyProgram(ModuleOp module) {
   auto requirements = function->getAttrOfType<EntryRequirementsAttr>(entryRequirementsAttr);
   if (failed(intent::verifyPublicInterface(function, interface))) return failure();
   if (!config || !requirements || !requirements.getDisjointOutputs() ||
-      interface.getArguments().size() != function.getNumArguments())
+      interface.getArguments().size() > function.getNumArguments())
     return function.emitError("DSA kernel requires a complete interface and configuration");
+  for (BlockArgument argument : function.getArguments().drop_front(interface.getArguments().size())) {
+    auto type = dyn_cast<MemRefType>(argument.getType());
+    if (!function.getArgAttr(argument.getArgNumber(), intent::nativeWorkspaceAttr) || !type ||
+        !type.hasStaticShape() || !type.getLayout().isIdentity() || type.getMemorySpaceAsInt() != 0)
+      return function.emitError("BANG C private native arguments require explicitly owned contiguous workspace");
+  }
   if (failed(queryFullExtentRequirements(function))) return failure();
   for (auto [argument, attribute] : llvm::zip(function.getArguments(), interface.getArguments())) {
     auto storageType = [&](Type logical) -> Type {

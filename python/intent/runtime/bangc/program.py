@@ -53,6 +53,7 @@ class NativeCall(ObservedCall):
     description: tuple
     key: tuple
     assessments: tuple[ConfigurationAssessment, ...]
+    workspaces: tuple[DeviceBuffer, ...] = field(default=(), repr=False)
     winner: int | None = None
     history: dict[int, CandidateObservation] = field(default_factory=dict)
     tuning_reused: bool | None = None
@@ -276,6 +277,7 @@ class NativeProgram(NativePreparedRuntime):
             scalar_key=lambda parameter, value: (parameter.dtype.name, value),
             check_view_geometry=lambda owner, parameter, facts: requirements.check_geometry(parameter, facts),
             check_view_storage=lambda owner, parameter, facts: requirements.check_storage(parameter, facts),
+            allocate_workspace=lambda owner, parameter: owner._allocate_output(parameter, parameter.shape),
         )
         parameters_by_name = {parameter.name: parameter for parameter in self.interface.parameters}
         for name, shape in target.compilation.shapes:
@@ -373,7 +375,8 @@ class NativeProgram(NativePreparedRuntime):
         if not any(assessed.status == "eligible" for assessed in assessments):
             raise CompilationStageError("candidate_binding", "No BANG C candidate covers this invocation's full extents")
         return NativeCall(self, bound.arguments, bound.native_arguments, bound.outputs,
-                          self.describe_arguments(bound, f"mlu:{self.target.device}"), bound.key, assessments)
+                          self.describe_arguments(bound, f"mlu:{self.target.device}"), bound.key, assessments,
+                          bound.workspaces)
 
     def _view(self, parameter: ViewParameter, value) -> ViewFacts:
         if not isinstance(value, (DeviceBuffer, DeviceView)) or not value.pointer:

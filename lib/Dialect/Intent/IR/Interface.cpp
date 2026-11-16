@@ -116,6 +116,7 @@ LogicalResult verifySourceInterface(func::FuncOp function) {
 }
 
 ViewType getPublicView(InterfaceAttr interface, unsigned publicOrdinal) {
+  if (publicOrdinal >= interface.getArguments().size()) return {};
   auto parameter = cast<PublicParameterAttr>(interface.getArguments()[publicOrdinal]);
   return mlir::dyn_cast<ViewType>(parameter.getType());
 }

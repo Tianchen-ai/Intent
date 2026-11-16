@@ -23,11 +23,20 @@ class BoundArguments:
     outputs: tuple[object, ...]
     key: tuple[object, ...]
     views: tuple[ViewFacts | None, ...]
+    workspaces: tuple[object, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceParameter:
+    position: int
+    name: str
+    dtype: DType
+    shape: tuple[int, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class NativeSlot:
-    parameter: ScalarParameter | ViewParameter
+    parameter: ScalarParameter | ViewParameter | WorkspaceParameter
     role: str
     carrier: str
     axis: int | None = None
@@ -57,21 +66,32 @@ class NativeABI:
     """CPU/DSA pointer, extent and stride slots over the public declaration."""
 
     def __init__(self, interface: PublicInterface, slots: tuple[NativeSlot, ...],
-                 requirements: NativeRequirements) -> None:
+                 requirements: NativeRequirements, workspaces: tuple[WorkspaceParameter, ...]) -> None:
         self.interface = interface
         self.slots = slots
         self.requirements = requirements
+        self.workspaces = workspaces
         self.pointer_slots = {slot.parameter.position: slot for slot in slots if slot.role == "pointer"}
 
     @classmethod
     def read(cls, metadata: dict) -> NativeABI:
         interface = PublicInterface.read(metadata["interface"])
+        workspaces = []
+        for entry in metadata["native"]["workspaces"]:
+            position = entry["position"]
+            if type(position) is not int or position != len(interface.parameters) + len(workspaces):
+                raise ValueError("native workspaces must follow the public arguments in declaration order")
+            shape = tuple(entry["shape"])
+            if any(type(size) is not int or size < 0 for size in shape):
+                raise ValueError("native workspace extents must be bound nonnegative integers")
+            workspaces.append(WorkspaceParameter(position, f"workspace{len(workspaces)}", dtype(entry["dtype"]), shape))
+        parameters = (*interface.parameters, *workspaces)
         slots, seen = [], set()
         for entry in metadata["native"]["slots"]:
             position = entry["parameter"]
-            if type(position) is not int or not 0 <= position < len(interface.parameters):
-                raise ValueError("native slot references an unknown public parameter")
-            parameter, role, carrier = interface.parameters[position], entry["role"], entry["carrier"]
+            if type(position) is not int or not 0 <= position < len(parameters):
+                raise ValueError("native slot references an unknown entry parameter")
+            parameter, role, carrier = parameters[position], entry["role"], entry["carrier"]
             axis, element = None, None
             if ("axis" in entry) != (role in {"extent", "stride"}) or ("element" in entry) != (role == "pointer"):
                 raise ValueError("native slot fields disagree with its role")
@@ -80,7 +100,7 @@ class NativeABI:
             if role == "scalar":
                 if not isinstance(parameter, ScalarParameter) or carrier == "ptr":
                     raise ValueError("native scalar slot requires a scalar public parameter and carrier")
-            elif isinstance(parameter, ViewParameter):
+            elif isinstance(parameter, (ViewParameter, WorkspaceParameter)):
                 if role == "pointer":
                     if carrier != "ptr":
                         raise ValueError("native pointer slot requires a pointer carrier")
@@ -98,16 +118,16 @@ class NativeABI:
                 raise ValueError("native ABI has duplicate parameter slots")
             seen.add(identity)
             slots.append(NativeSlot(parameter, role, carrier, axis, element))
-        for parameter in interface.parameters:
-            required = "pointer" if isinstance(parameter, ViewParameter) else "scalar"
+        for parameter in parameters:
+            required = "pointer" if isinstance(parameter, (ViewParameter, WorkspaceParameter)) else "scalar"
             if (parameter.position, required, None) not in seen:
                 raise ValueError("native ABI does not bind every public parameter")
-            if isinstance(parameter, ViewParameter):
+            if isinstance(parameter, (ViewParameter, WorkspaceParameter)):
                 for axis in range(len(parameter.shape)):
                     if any((parameter.position, role, axis) not in seen for role in ("extent", "stride")):
                         raise ValueError("native ABI must bind the extent and stride of every view axis")
         requirements = NativeRequirements.read(metadata, interface)
-        return cls(interface, tuple(slots), requirements)
+        return cls(interface, tuple(slots), requirements, tuple(workspaces))
 
     def argument_types(self) -> tuple[object, ...]:
         return tuple(_CARRIERS[slot.carrier] for slot in self.slots)
@@ -145,6 +165,7 @@ class NativeABI:
         check_view_geometry: Callable[[object, ViewParameter, ViewFacts], None] | None = None,
         check_view_storage: Callable[[object, ViewParameter, ViewFacts], None] | None = None,
         check_dimensions: Callable[[object, dict[int, int]], None] | None = None,
+        allocate_workspace: Callable[[object, WorkspaceParameter], tuple[object, ViewFacts]] | None = None,
     ) -> tuple[Callable[[object, tuple[object, ...]], BoundArguments], ...]:
         """Compose the common invocation binder with native slots and tuning keys.
 
@@ -155,6 +176,8 @@ class NativeABI:
         """
         if (view_key is None) != (scalar_key is None):
             raise ValueError("a native tuning key requires both view and scalar components")
+        if self.workspaces and allocate_workspace is None:
+            raise NotImplementedError("this native provider does not allocate invocation workspaces")
 
         def tuple_expression(entries: Sequence[str]) -> str:
             return "(" + ", ".join(entries) + ("," if entries else "") + ")"
@@ -168,8 +191,8 @@ class NativeABI:
         for public_bind in public_binders:
             namespace = {"_bind_public": public_bind, "_BoundArguments": BoundArguments,
                          "_view_key": view_key, "_scalar_key": scalar_key,
-                         "_scalar_argument": scalar_argument}
-            for parameter in self.interface.parameters:
+                         "_scalar_argument": scalar_argument, "_allocate_workspace": allocate_workspace}
+            for parameter in (*self.interface.parameters, *self.workspaces):
                 namespace[f"_p{parameter.position}"] = parameter
             lines = [
                 "def bind(program, arguments):",
@@ -181,6 +204,9 @@ class NativeABI:
                     lines.append(f"    f{index} = public.views[{index}]")
                 else:
                     lines.append(f"    v{index} = public.arguments[{index}]")
+            for parameter in self.workspaces:
+                index = parameter.position
+                lines.append(f"    w{index}, f{index} = _allocate_workspace(program, _p{index})")
             native, key = [], []
             if view_key is not None:
                 lines.append("    groups = {}")
@@ -203,7 +229,8 @@ class NativeABI:
                     if scalar_key is not None:
                         key.append(f"_scalar_key(_p{index}, {value})")
             lines.append(f"    return _BoundArguments(public.arguments, {tuple_expression(native)}, "
-                         f"public.outputs, {tuple_expression(key)}, public.views)")
+                         f"public.outputs, {tuple_expression(key)}, public.views, "
+                         f"{tuple_expression([f'w{p.position}' for p in self.workspaces])})")
             code = compile("\n".join(lines) + "\n", "<intent.native.abi>", "exec", dont_inherit=True)
             exec(code, namespace)
             result.append(namespace["bind"])

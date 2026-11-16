@@ -101,7 +101,7 @@ LogicalResult serializeProgram(ModuleOp program, std::string &source, std::strin
       {"host_source", hostSource}, {"tasks", std::move(*tasks)},
       {"interface", std::move(*parameters)}, {"candidates", std::move(configurations)},
       {"native", llvm::json::Object{{"requirements", requirements->serialize()},
-          {"slots", nativeABI->serialize()}}}});
+          {"slots", nativeABI->serialize()}, {"workspaces", nativeABI->serializeWorkspaces()}}}});
   return success();
 }
 

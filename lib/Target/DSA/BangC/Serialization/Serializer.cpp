@@ -75,8 +75,8 @@ public:
       reserveName(name);
       call.push_back(name);
       if (slot.role == NativeSlotRole::Pointer) {
-        auto view = getPublicView(interface, slot.parameter);
-        signature.push_back((view.getAccess() == 0 ? "const " : "") + ctype(slot.element) + " *" + name);
+        auto view = slot.parameter < interface.getArguments().size() ? getPublicView(interface, slot.parameter) : intent::ViewType();
+        signature.push_back((view && view.getAccess() == 0 ? "const " : "") + ctype(slot.element) + " *" + name);
         if (mlir::failed(bindEntryMemory(argument, name))) return failure();
       } else signature.push_back(ctype(slot.carrier) + " " + name);
       if (slot.role == NativeSlotRole::Extent) {
@@ -107,7 +107,7 @@ public:
             {"region_tile", config.getRegionTile()}, {"local_bytes", config.getLocalBytes()}}},
         {"full_extent_dimensions", std::move(fullExtents)},
         {"native", llvm::json::Object{{"requirements", requirements->serialize()},
-            {"slots", nativeABI->serialize()}}}};
+            {"slots", nativeABI->serialize()}, {"workspaces", nativeABI->serializeWorkspaces()}}}};
     output << "__mlu_global__ void " << deviceEntry << "(" << llvm::join(signature, ", ") << ") {\n";
     auto bytes = [&](StringRef name) { return function->getAttrOfType<IntegerAttr>(name).getInt(); };
     if (bytes("bangc.nram_bytes")) line("__nram__ __attribute__((aligned(128))) unsigned char local_nram[" + std::to_string(bytes("bangc.nram_bytes")) + "];", 1);
@@ -525,6 +525,7 @@ const OperationEmitters<Serializer> &Serializer::nativeEmitters() {
     };
     table.add<memref::DimOp>(metadataCheck, metadataEmit);
     table.add<memref::ReinterpretCastOp>(metadataCheck, metadataEmit);
+    table.add<memref::ExtractAlignedPointerAsIndexOp>(metadataCheck, metadataEmit);
     auto controlCheck = [](Operation *operation) -> LogicalResult {
       if (operation->getNumResults())
         return operation->emitOpError("BANG C control results require explicit state storage");

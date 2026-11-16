@@ -2,7 +2,7 @@ add_mlir_library(MLIRIntentConversionSupport
   ScalarLowering.cpp
   LogicalShape.cpp
   IndexedAccess.cpp
-  LINK_LIBS PUBLIC MLIRIntentAnalysis MLIRIntentDialect MLIRArithDialect MLIRMathDialect MLIRDialectUtils MLIRIR)
+  LINK_LIBS PUBLIC MLIRIntentAnalysis MLIRIntentDialect MLIRIntentBlockDialect MLIRArithDialect MLIRMathDialect MLIRDialectUtils MLIRIR)
 
 add_subdirectory(KIRToBlock)
 add_subdirectory(KIRToCPU)

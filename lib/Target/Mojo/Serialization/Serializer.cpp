@@ -707,7 +707,7 @@ LogicalResult serializeProgram(ModuleOp module, std::string &source, std::string
       interface["entry_name"] = function.getName();
       interface["interface"] = std::move(*abi);
       interface["native"] = llvm::json::Object{{"requirements", requirements->serialize()},
-          {"slots", nativeABI->serialize()}};
+          {"slots", nativeABI->serialize()}, {"workspaces", nativeABI->serializeWorkspaces()}};
       first = false;
     }
     auto configuration = function->getAttrOfType<cpu::ConfigurationAttr>("intent_cpu.configuration");

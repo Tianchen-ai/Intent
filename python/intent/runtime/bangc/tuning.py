@@ -35,6 +35,7 @@ class TrialState:
                                 offset=value.byte_offset // ELEMENT_BYTES[value.dtype])
                     if isinstance(value, DeviceView) else shadow)
             bound = program._binders[True](program, tuple(trial_arguments))
+            self._owners.extend(bound.workspaces)
             self.native_arguments = bound.native_arguments
         except Exception:
             self.close()

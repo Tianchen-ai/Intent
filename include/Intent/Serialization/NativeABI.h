@@ -6,6 +6,7 @@
 #include <utility>
 
 namespace intent {
+inline constexpr llvm::StringLiteral nativeWorkspaceAttr = "intent.native_workspace";
 
 enum class NativeSlotRole { Pointer, Extent, Stride, Scalar };
 
@@ -21,7 +22,9 @@ struct NativeSlot {
 
 struct NativeABI {
   llvm::SmallVector<NativeSlot> slots;
+  llvm::SmallVector<std::pair<unsigned, mlir::MemRefType>> workspaces;
   llvm::json::Array serialize() const;
+  llvm::json::Array serializeWorkspaces() const;
 };
 
 enum class NativeViewLayout { Strided, Contiguous };

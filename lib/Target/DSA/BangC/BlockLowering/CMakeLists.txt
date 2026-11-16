@@ -1,0 +1,7 @@
+add_mlir_conversion_library(MLIRIntentBlockToBangC
+  Construction.cpp Program.cpp Values.cpp Projection.cpp Access.cpp RectangularAccess.cpp Control.cpp Collectives.cpp ScaledContractions.cpp Passes.cpp
+  DEPENDS IntentBangCConstructionIncGen
+  LINK_LIBS PUBLIC MLIRIntentBlockDialect MLIRIntentBlockAnalysis
+  MLIRIntentBangCPhysicalDialect MLIRIntentConversionSupport MLIRIntentKIRToBlock MLIRIntentBlockTransforms
+  MLIRIntentBangCPhysicalAnalysis MLIRIntentBangCPhysicalTransforms MLIRIntentBangCResources
+  MLIRFuncDialect MLIRMemRefDialect MLIRArithDialect MLIRMathDialect MLIRSCFDialect)

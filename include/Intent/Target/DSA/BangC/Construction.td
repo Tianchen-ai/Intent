@@ -15,6 +15,6 @@ def ConstructBangC : Pass<"intent-construct-bangc", "mlir::ModuleOp"> {
     Option<"strides", "strides", "std::string", [{"{}"}], "Typed parameter stride bindings">,
     Option<"capabilities", "capabilities", "std::string", [{""}], "Typed BANG C hardware capabilities">
   ];
-  let dependentDialects = ["intent::bangc::physical::IntentBangCPhysicalDialect", "mlir::arith::ArithDialect", "mlir::func::FuncDialect", "mlir::math::MathDialect", "mlir::memref::MemRefDialect", "mlir::scf::SCFDialect"];
+  let dependentDialects = ["intent::block::IntentBlockDialect", "intent::bangc::physical::IntentBangCPhysicalDialect", "mlir::arith::ArithDialect", "mlir::func::FuncDialect", "mlir::math::MathDialect", "mlir::memref::MemRefDialect", "mlir::scf::SCFDialect"];
 }
 #endif

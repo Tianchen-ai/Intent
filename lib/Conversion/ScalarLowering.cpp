@@ -1,5 +1,6 @@
 #include "Intent/Conversion/ScalarLowering.h"
 #include "Intent/Dialect/Intent/IR/IntentOps.h"
+#include "Intent/Dialect/Block/IR/BlockOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/IR/TypeUtilities.h"
@@ -10,6 +11,8 @@ namespace intent {
 namespace {
 
 Type scalarType(Type type) {
+  if (auto fragment = dyn_cast<block::FragmentType>(type))
+    type = fragment.getElementType();
   type = getElementTypeOrSelf(type);
   return isa<LogicalIndexType>(type) ? IndexType::get(type.getContext()) : type;
 }
@@ -152,27 +155,29 @@ FailureOr<Value> lowerScalarOperation(Operation *operation, ValueRange operands,
                      APFloat::rmNearestTiesToEven, &losesInformation);
       return Value(builder.create<arith::ConstantOp>(loc, FloatAttr::get(type, number)));
     }
-  } else if (auto cast = dyn_cast<CastOp>(operation)) {
-    if (cast.getRounding() && *cast.getRounding() != 0)
+  } else if (isa<CastOp, block::CastOp>(operation)) {
+    if (auto cast = dyn_cast<CastOp>(operation); cast && cast.getRounding() && *cast.getRounding() != 0)
       return cast.emitError("unsupported scalar cast rounding"), failure();
     auto result = castScalarValue(builder, loc, operands[0],
-                                  cast.getResult().getType(),
-                                  cast.getInput().getType());
+                                  scalarType(operation->getResult(0).getType()),
+                                  scalarType(operation->getOperand(0).getType()));
     if (succeeded(result))
       return result;
-  } else if (isa<BitcastOp>(operation)) {
+  } else if (isa<BitcastOp, block::BitcastOp>(operation)) {
     return Value(builder.create<arith::BitcastOp>(
         loc, scalarType(operation->getResult(0).getType()), operands[0]));
-  } else if (auto binary = dyn_cast<BinaryOp>(operation)) {
-    if (binary.getApproximate() || binary.getFlushToZero())
-      return binary.emitError(
+  } else if (isa<BinaryOp, block::BinaryOp>(operation)) {
+    auto approximate = operation->getAttrOfType<BoolAttr>("approximate");
+    auto ftz = operation->getAttrOfType<BoolAttr>("flush_to_zero");
+    if ((approximate && approximate.getValue()) || (ftz && ftz.getValue()))
+      return operation->emitError(
                  "non-default math requires provider numerical lowering"),
              failure();
     Value lhs = operands[0], rhs = operands[1];
-    Type type = scalarType(binary.getLhs().getType());
+    Type type = scalarType(operation->getOperand(0).getType());
     bool fp = isa<FloatType>(type);
     bool unsignedInteger = isUnsigned(type);
-    switch (binary.getOperatorKind()) {
+    switch (operation->getAttrOfType<BinaryOperatorAttr>("operator_kind").getValue()) {
     case BinaryOperator::Add:
       return fp ? Value(builder.create<arith::AddFOp>(loc, lhs, rhs))
                 : Value(builder.createOrFold<arith::AddIOp>(loc, lhs, rhs));
@@ -206,8 +211,10 @@ FailureOr<Value> lowerScalarOperation(Operation *operation, ValueRange operands,
       return unsignedInteger ? Value(builder.create<arith::MinUIOp>(loc, lhs, rhs))
                              : Value(builder.create<arith::MinSIOp>(loc, lhs, rhs));
     case BinaryOperator::MaximumNum:
+      if (!fp) return unsignedInteger ? Value(builder.create<arith::MaxUIOp>(loc, lhs, rhs)) : Value(builder.create<arith::MaxSIOp>(loc, lhs, rhs));
       return Value(builder.create<arith::MaxNumFOp>(loc, lhs, rhs));
     case BinaryOperator::MinimumNum:
+      if (!fp) return unsignedInteger ? Value(builder.create<arith::MinUIOp>(loc, lhs, rhs)) : Value(builder.create<arith::MinSIOp>(loc, lhs, rhs));
       return Value(builder.create<arith::MinNumFOp>(loc, lhs, rhs));
     case BinaryOperator::Power:
       if (fp)
@@ -227,13 +234,15 @@ FailureOr<Value> lowerScalarOperation(Operation *operation, ValueRange operands,
       return unsignedInteger ? Value(builder.create<arith::ShRUIOp>(loc, lhs, rhs))
                              : Value(builder.create<arith::ShRSIOp>(loc, lhs, rhs));
     }
-  } else if (auto unary = dyn_cast<UnaryOp>(operation)) {
-    if (unary.getApproximate() || unary.getFlushToZero())
-      return unary.emitError(
+  } else if (isa<UnaryOp, block::UnaryOp>(operation)) {
+    auto approximate = operation->getAttrOfType<BoolAttr>("approximate");
+    auto ftz = operation->getAttrOfType<BoolAttr>("flush_to_zero");
+    if ((approximate && approximate.getValue()) || (ftz && ftz.getValue()))
+      return operation->emitError(
                  "non-default math requires provider numerical lowering"),
              failure();
     Value input = operands[0];
-    switch (unary.getOperatorKind()) {
+    switch (operation->getAttrOfType<UnaryOperatorAttr>("operator_kind").getValue()) {
     case UnaryOperator::Rsqrt:
       return Value(builder.create<math::RsqrtOp>(loc, input));
     case UnaryOperator::Sqrt:
@@ -257,7 +266,7 @@ FailureOr<Value> lowerScalarOperation(Operation *operation, ValueRange operands,
     case UnaryOperator::Abs:
       if (isa<FloatType>(input.getType()))
         return Value(builder.create<math::AbsFOp>(loc, input));
-      if (isUnsigned(scalarType(unary.getInput().getType())))
+      if (isUnsigned(scalarType(operation->getOperand(0).getType())))
         return input;
       return Value(builder.create<math::AbsIOp>(loc, input));
     case UnaryOperator::Negate:
@@ -274,7 +283,7 @@ FailureOr<Value> lowerScalarOperation(Operation *operation, ValueRange operands,
     default:
       break;
     }
-  } else if (auto compare = dyn_cast<CompareOp>(operation)) {
+  } else if (isa<CompareOp, block::CompareOp>(operation)) {
     static constexpr arith::CmpFPredicate floating[] = {
         arith::CmpFPredicate::OEQ, arith::CmpFPredicate::UNE,
         arith::CmpFPredicate::OLT, arith::CmpFPredicate::OLE,
@@ -287,8 +296,8 @@ FailureOr<Value> lowerScalarOperation(Operation *operation, ValueRange operands,
         arith::CmpIPredicate::eq, arith::CmpIPredicate::ne,
         arith::CmpIPredicate::ult, arith::CmpIPredicate::ule,
         arith::CmpIPredicate::ugt, arith::CmpIPredicate::uge};
-    Type type = scalarType(compare.getLhs().getType());
-    unsigned predicate = static_cast<unsigned>(compare.getPredicate());
+    Type type = scalarType(operation->getOperand(0).getType());
+    unsigned predicate = static_cast<unsigned>(operation->getAttrOfType<ComparePredicateAttr>("predicate").getValue());
     return isa<FloatType>(type)
         ? Value(builder.create<arith::CmpFOp>(loc, floating[predicate],
                                             operands[0], operands[1]))
@@ -296,7 +305,7 @@ FailureOr<Value> lowerScalarOperation(Operation *operation, ValueRange operands,
               loc, isUnsigned(type) ? unsignedPredicates[predicate]
                                    : signedPredicates[predicate],
               operands[0], operands[1]));
-  } else if (isa<SelectOp>(operation)) {
+  } else if (isa<SelectOp, block::SelectOp>(operation)) {
     return Value(builder.create<arith::SelectOp>(loc, operands[0], operands[1],
                                               operands[2]));
   } else if (isa<MaskOp>(operation)) {

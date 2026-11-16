@@ -96,6 +96,8 @@ BufferStoragePolicy storagePolicy() {
     auto interface = getPublicInterface(function);
     if (!requirements || !requirements.getDisjointOutputs() || !interface)
       return false;
+    if (lhs != rhs && (function.getArgAttr(lhs.getArgNumber(), "intent.native_workspace") ||
+                       function.getArgAttr(rhs.getArgNumber(), "intent.native_workspace"))) return true;
     auto source = getPublicView(interface, lhs.getArgNumber());
     auto target = getPublicView(interface, rhs.getArgNumber());
     return source && target &&
