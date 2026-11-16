@@ -5,20 +5,14 @@ add_llvm_executable(intent-compile
 llvm_update_compile_flags(intent-compile)
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/profiles")
 set(intent_profile_files)
-foreach(provider Triton CuTile Mojo Weft)
-  string(TOLOWER "${provider}" provider_name)
-  set(profile_directory "${PROJECT_SOURCE_DIR}/lib/Target/${provider}/Transforms")
-  if(provider STREQUAL "Triton" OR provider STREQUAL "CuTile")
-    string(APPEND profile_directory "/Configuration")
-  endif()
-  configure_file("${profile_directory}/TuningProfiles.json"
-                 "${CMAKE_CURRENT_BINARY_DIR}/profiles/${provider_name}.json" COPYONLY)
+get_property(profile_names GLOBAL PROPERTY INTENT_PROFILE_NAMES)
+get_property(profile_sources GLOBAL PROPERTY INTENT_PROFILE_SOURCES)
+foreach(name source IN ZIP_LISTS profile_names profile_sources)
+  configure_file("${source}"
+                 "${CMAKE_CURRENT_BINARY_DIR}/profiles/${name}" COPYONLY)
   list(APPEND intent_profile_files
-       "${CMAKE_CURRENT_BINARY_DIR}/profiles/${provider_name}.json")
+       "${CMAKE_CURRENT_BINARY_DIR}/profiles/${name}")
 endforeach()
-configure_file("${PROJECT_SOURCE_DIR}/lib/Target/DSA/BangC/Transforms/TuningProfiles.json"
-               "${CMAKE_CURRENT_BINARY_DIR}/profiles/bangc.json" COPYONLY)
-list(APPEND intent_profile_files "${CMAKE_CURRENT_BINARY_DIR}/profiles/bangc.json")
 if(SKBUILD)
   set_target_properties(intent-compile PROPERTIES
     INSTALL_RPATH "$ORIGIN/lib"

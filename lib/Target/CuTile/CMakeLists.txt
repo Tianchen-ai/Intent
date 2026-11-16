@@ -2,4 +2,5 @@ add_subdirectory(IR)
 add_subdirectory(Analysis)
 add_subdirectory(Transforms)
 add_subdirectory(Serialization)
-intent_backend(CuTile SOURCE Backend.cpp LIBRARIES MLIRIntentCuTileTransforms MLIRIntentCuTileSerialization MLIRIntentNVIDIATarget)
+intent_backend(CuTile SOURCE Backend.cpp PROFILE Transforms/Configuration/TuningProfiles.json PROFILE_NAME cutile.json
+  LIBRARIES MLIRIntentCuTileTransforms MLIRIntentCuTileSerialization MLIRIntentNVIDIATarget)

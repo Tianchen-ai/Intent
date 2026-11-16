@@ -2,4 +2,5 @@ add_subdirectory(IR)
 add_subdirectory(Analysis)
 add_subdirectory(Transforms)
 add_subdirectory(Serialization)
-intent_backend(Triton SOURCE Backend.cpp LIBRARIES MLIRIntentTritonTransforms MLIRIntentTritonSerialization MLIRIntentNVIDIATarget)
+intent_backend(Triton SOURCE Backend.cpp PROFILE Transforms/Configuration/TuningProfiles.json PROFILE_NAME triton.json
+  LIBRARIES MLIRIntentTritonTransforms MLIRIntentTritonSerialization MLIRIntentNVIDIATarget)
