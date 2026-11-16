@@ -83,8 +83,9 @@ plugins:
             量化计算: Quantized operations
             规范示例: Specification examples
             编译器: Compiler
-            KIR 到 GPU: KIR to GPU
-            GPU 程序 IR: GPU program IR
+            执行模型与组件: Execution models and components
+            KIR 到 Block: KIR to Block
+            Block 程序 IR: Block program IR
             CPU 程序 IR: CPU program IR
             Pass 与分析: Passes and analyses
             物理参数: Physical parameters
@@ -129,8 +130,9 @@ nav:
       - 规范示例: dsl/examples/README.md
   - 编译器:
       - 概述: compiler/README.md
-      - KIR 到 GPU: compiler/kir-to-block.md
-      - GPU 程序 IR: compiler/block-program-ir.md
+      - 执行模型与组件: compiler/execution-models.md
+      - KIR 到 Block: compiler/kir-to-block.md
+      - Block 程序 IR: compiler/block-program-ir.md
       - CPU 程序 IR: compiler/cpu-program-ir.md
       - Pass 与分析: compiler/passes-and-analyses.md
       - 物理参数: compiler/physical-parameters.md
