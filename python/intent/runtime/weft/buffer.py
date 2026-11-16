@@ -35,3 +35,12 @@ class Buffer:
     @classmethod
     def empty(cls, shape: tuple[int, ...], dtype: str) -> Buffer:
         return cls(bytearray(prod(shape) * ELEMENT_BYTES[dtype]), shape=shape, dtype=dtype)
+
+    def to_host(self):
+        return bytearray(self.storage)
+
+    def copy_from_host(self, storage):
+        value = memoryview(storage).cast("B")
+        if value.nbytes != self.nbytes:
+            raise ValueError("host byte count disagrees with the native buffer")
+        self.storage[:] = value

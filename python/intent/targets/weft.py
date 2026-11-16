@@ -96,7 +96,12 @@ def _resolve_local(device, *, workers, **options):
     return WeftTarget(workers=cpu_workers(workers), **options).resolve()
 
 
+def _host_storage(device, options):
+    from intent.runtime.weft.staging import HostStorage
+    return HostStorage()
+
+
 PROVIDER = Provider("cpu", WeftTarget, _read_facts, _bind, _environment_checks,
     LocalExecution("cpu", False, frozenset({"options", "private_bytes"}),
-                   _resolve_local, cpu_key), "cpu", read_cpu_target,
+                   _resolve_local, cpu_key, _host_storage), "cpu", read_cpu_target,
     "Triton–Weft owns native CPU discovery, canonical compilation, loading and worker validation")

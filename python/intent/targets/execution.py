@@ -8,6 +8,11 @@ def indexed_key(device):
     return device
 
 
+def torch_storage(device, options):
+    from intent.integrations.torch_staging import TorchStorage
+    return TorchStorage(device)
+
+
 def cpu_key(device):
     return device, tuple(sorted(os.sched_getaffinity(0)))
 

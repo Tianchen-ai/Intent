@@ -153,6 +153,11 @@ def _environment_checks(target):
             EnvironmentCheck("MLU device", "device", device))
 
 
+def _host_storage(device, options):
+    from intent.runtime.bangc.staging import HostStorage
+    return HostStorage(device.index, str(options.get("neuware", "/usr/local/neuware")))
+
+
 PROVIDER = Provider("dsa", BangCTarget, _read_facts, _bind, _environment_checks,
     LocalExecution("mlu", True, frozenset({"neuware", "compiler"}),
-                   partial(indexed_target, BangCTarget), indexed_key, specialize_call), "dsa", read_bangc_target)
+                   partial(indexed_target, BangCTarget), indexed_key, _host_storage, specialize_call), "dsa", read_bangc_target)

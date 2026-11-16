@@ -4,7 +4,7 @@ from typing import ClassVar
 
 from .nvidia import NVIDIATarget
 from .provider import EnvironmentCheck, LocalExecution, Provider
-from .execution import indexed_key, indexed_target
+from .execution import indexed_key, indexed_target, torch_storage
 from .nvidia.specification import read_nvidia_target
 
 INSTALLATION = {
@@ -47,5 +47,5 @@ def _environment_checks(target):
 
 
 PROVIDER = Provider("gpu", TritonTarget, _read_facts, _bind, _environment_checks,
-    LocalExecution("cuda", True, frozenset(), partial(indexed_target, TritonTarget), indexed_key),
+    LocalExecution("cuda", True, frozenset(), partial(indexed_target, TritonTarget), indexed_key, torch_storage),
     "block", read_nvidia_target)

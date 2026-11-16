@@ -4,7 +4,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from importlib import import_module
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from intent.runtime.host_storage import HostStorage
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +31,7 @@ class LocalExecution:
     options: frozenset[str]
     resolve: Callable[..., Any]
     execution_key: Callable[[Any], object]
+    host_storage: Callable[[Any, dict], HostStorage]
     specialize: Callable[..., tuple[Any, object]] = unspecialized_call
 
 

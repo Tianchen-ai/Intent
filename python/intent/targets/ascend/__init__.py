@@ -64,6 +64,12 @@ def _checks(target):
     return (EnvironmentCheck("Ascend native compiler", "provider_toolchain", toolchain),)
 
 
+def _host_storage(device, options):
+    import torch_npu  # Registers the real NPU device before the first transfer.
+    from ..execution import torch_storage
+    return torch_storage(device, options)
+
+
 PROVIDER = Provider("dsa", TritonAscendTarget, _read_facts, _bind, _checks,
-    LocalExecution("npu", True, frozenset(), partial(indexed_target, TritonAscendTarget), indexed_key),
+    LocalExecution("npu", True, frozenset(), partial(indexed_target, TritonAscendTarget), indexed_key, _host_storage),
     "block", _read_target)

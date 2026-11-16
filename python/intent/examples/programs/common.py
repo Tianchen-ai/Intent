@@ -79,7 +79,7 @@ class _ExampleKernel:
         for artifact in self.kernel.artifacts:
             if all(artifact is not old for old in self.context.artifacts):
                 self.context.artifacts.append(artifact)
-        self.context.buffers.retain_outputs(call.result())
+        self.context.buffers.retain_outputs(call.result(), owned=outputs is None)
         return call
 
     def run(self, *arguments):

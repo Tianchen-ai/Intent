@@ -21,12 +21,6 @@ def element_strides(value):
     return tuple(value.stride()) if is_tensor(value) else tuple(value.strides)
 
 
-def _native_classes():
-    from intent.runtime.bangc import DeviceBuffer, DeviceView
-    from intent.runtime.weft import Buffer
-    return Buffer, DeviceBuffer, DeviceView
-
-
 def empty_like(reference, shape, *, dtype):
     """The host workspace path used by compositions with ordinary artifacts."""
     if isinstance(reference, Array):
@@ -47,12 +41,7 @@ def fill(value, scalar):
     if is_tensor(value):
         value.fill_(scalar)
         return
-    Buffer, DeviceBuffer, _ = _native_classes()
-    if isinstance(value, Buffer):
-        if value.nbytes:
-            from_bytes(value.storage, value.shape, value.dtype).data.fill(scalar)
-        return
-    if isinstance(value, DeviceBuffer):
+    if callable(getattr(value, "copy_from_host", None)):
         host = empty(value.shape, value.dtype)
         host.data.fill(scalar)
         value.copy_from_host(host.data.view(np.uint8).reshape(-1))
@@ -68,15 +57,6 @@ class _Allocation:
     writable: bool = False
 
 
-def _preserve_tensor_bytes(raw):
-    if raw.device.type == "cpu":
-        contents = raw.detach().numpy()
-        saved = contents.copy()
-        return lambda: np.copyto(contents, saved)
-    saved = raw.clone()
-    return lambda: raw.copy_(saved)
-
-
 class HostBuffers:
     """One complete call's storage owners, including aliased views and InOut.
 
@@ -86,10 +66,10 @@ class HostBuffers:
     """
 
     def __init__(self, backend, device, backend_options):
-        self.device = device
-        self.neuware = str(backend_options.get("neuware", "/usr/local/neuware"))
-        self.ordinal = int(str(device).partition(":")[2]) if backend == "bangc" else None
-        self.kind = backend if backend in {"bangc", "weft"} else "torch"
+        from intent.targets.local import select_device
+        from intent.targets.provider import provider
+        selected = select_device(backend, (), device)
+        self.storage = provider(backend).local.host_storage(selected, backend_options)
         self.allocations = {}
         self.owned = []
         self.resetters = {}
@@ -101,73 +81,37 @@ class HostBuffers:
         self.produced.clear()
 
     def workspace(self, reference, shape, *, dtype):
-        Buffer, DeviceBuffer, _ = _native_classes()
-        if self.kind == "weft":
-            value = Buffer.empty(tuple(shape), dtype)
-        elif self.kind == "bangc":
-            value = DeviceBuffer(tuple(shape), dtype, device=self.ordinal, neuware=self.neuware)
-            self.owned.append(value)
-        else:
-            import torch
-            value = torch.empty(shape, dtype=torch_dtype(intent_dtype(dtype)), device=self.device)
+        value = self.storage.allocate(shape, dtype)
+        self.owned.append(value)
         self.produced.add(id(value))
         return value
 
-    def retain_outputs(self, value):
+    def retain_outputs(self, value, *, owned=True):
         if isinstance(value, (tuple, list)):
             for item in value:
-                self.retain_outputs(item)
+                self.retain_outputs(item, owned=owned)
             return
-        _, DeviceBuffer, _ = _native_classes()
         self.produced.add(id(value))
-        if isinstance(value, DeviceBuffer) and all(value is not owner for owner in self.owned):
+        if owned and self.storage.accepts(value) and all(value is not owner for owner in self.owned):
             self.owned.append(value)
 
     def _preserve_record(self, record):
         key = ("staged", id(record))
         if key in self.resetters:
             return
-        if self.kind == "torch":
-            self.resetters[key] = _preserve_tensor_bytes(record.native)
-        else:
-            saved = record.host.copy()
-            if self.kind == "weft":
-                self.resetters[key] = lambda: np.copyto(record.host, saved)
-            else:
-                self.resetters[key] = lambda: record.native.copy_from_host(saved)
+        _, restore = self.storage.snapshot(record.native)
+        self.resetters[key] = restore
 
     def _preserve_native(self, value):
         # Outputs and explicit workspace are initialized by the preceding
         # producer/reset in the same complete author call, not by old contents.
         if id(value) in self.produced:
             return
-        Buffer, DeviceBuffer, DeviceView = _native_classes()
-        if isinstance(value, Buffer):
-            key = ("weft", value.allocation, value.allocation_end)
-            if key not in self.resetters:
-                owner = memoryview(value.storage.obj).cast("B")
-                saved = bytes(owner)
-                def restore():
-                    owner[:] = saved
-                self.resetters[key] = restore
-        elif isinstance(value, (DeviceBuffer, DeviceView)):
-            owner = value.owner if isinstance(value, DeviceView) else value
-            key = ("bangc", id(owner))
-            if key not in self.resetters:
-                saved = owner.to_host()
-                self.resetters[key] = lambda: owner.copy_from_host(saved)
-        elif is_tensor(value):
-            import torch
-            storage = value.untyped_storage()
-            key = ("torch", str(value.device), storage.data_ptr(), storage.nbytes())
-            if key not in self.resetters:
-                raw = torch.empty(0, dtype=torch.uint8, device=value.device).set_(
-                    storage, 0, (storage.nbytes(),), (1,))
-                self.resetters[key] = _preserve_tensor_bytes(raw)
+        key, restore = self.storage.snapshot(value)
+        self.resetters.setdefault(("native", key), restore)
 
     def input(self, value, *, element, writable=False, preserve=False):
-        Buffer, DeviceBuffer, DeviceView = _native_classes()
-        if isinstance(value, (Buffer, DeviceBuffer, DeviceView)) or is_tensor(value):
+        if self.storage.accepts(value):
             # Provider handles retain their original ownership and are validated
             # by that provider's ordinary invocation binder.
             if preserve:
@@ -182,8 +126,8 @@ class HostBuffers:
         width = (intent_dtype(element).bits + 7) // 8
         strides = element_strides(value)
         contiguous = tuple(prod(value.shape[axis + 1:]) for axis in range(len(value.shape)))
-        if self.kind == "weft" and strides != contiguous:
-            raise NotImplementedError("the public Weft Buffer requires canonical contiguous element strides")
+        if self.storage.contiguous_views and strides != contiguous:
+            raise NotImplementedError("this provider's public buffer requires contiguous element strides")
         owner = value.data
         while isinstance(owner.base, np.ndarray):
             owner = owner.base
@@ -196,26 +140,14 @@ class HostBuffers:
         key = (host.ctypes.data, host.nbytes) if host.nbytes else ("empty", id(owner))
         record = self.allocations.get(key)
         if record is None:
-            if self.kind != "weft" and host.nbytes:
+            if self.storage.copies_host and host.nbytes:
                 begin, end = host.ctypes.data, host.ctypes.data + host.nbytes
                 for existing in self.allocations.values():
                     other = existing.host
                     if other.nbytes and begin < other.ctypes.data + other.nbytes and other.ctypes.data < end:
                         raise NotImplementedError("aliased views must share the same complete host allocation")
-            if self.kind == "bangc":
-                from intent.runtime.bangc.buffer import ELEMENT_BYTES
-                if element not in ELEMENT_BYTES:
-                    raise NotImplementedError(f"BANG C buffers do not support storage dtype {element}")
-                native = DeviceBuffer.from_host(host, shape=(host.nbytes // width,), dtype=element,
-                    device=self.ordinal, neuware=self.neuware)
-                self.owned.append(native)
-            elif self.kind == "weft":
-                native = memoryview(host)
-            else:
-                import torch
-                # The view reinterprets stored bytes, without converting BF16/FP8.
-                native = (torch.frombuffer(host, dtype=torch.uint8) if host.nbytes else
-                          torch.empty(0, dtype=torch.uint8)).to(self.device)
+            native = self.storage.upload(host, element)
+            self.owned.append(native)
             record = _Allocation(host, element, native)
             self.allocations[key] = record
         elif record.element != element:
@@ -223,26 +155,18 @@ class HostBuffers:
         record.writable |= writable
         if preserve:
             self._preserve_record(record)
-        if self.kind == "bangc":
-            return record.native.view(tuple(value.shape), strides, offset=offset // width)
-        if self.kind == "weft":
-            return Buffer(record.native[offset:offset + value.nbytes], shape=value.shape, dtype=element)
-        return record.native.view(torch_dtype(intent_dtype(element))).as_strided(
-            value.shape, strides, storage_offset=offset // width)
+        return self.storage.view(record.native, value.shape, strides, offset // width, element)
 
     def finish(self):
         for record in self.allocations.values():
-            if not record.writable or not record.host.nbytes or self.kind == "weft":
+            if not record.writable or not record.host.nbytes or not self.storage.copies_host:
                 continue
-            if self.kind == "bangc":
-                data = np.frombuffer(record.native.to_host(), dtype=np.uint8)
-            else:
-                data = record.native.detach().cpu().numpy()
+            data = self.storage.download(record.native)
             np.copyto(record.host, data)
 
     def close(self):
         for owner in self.owned:
-            owner.close()
+            self.storage.release(owner)
         self.owned.clear()
         self.allocations.clear()
         self.resetters.clear()
@@ -268,10 +192,8 @@ def host_result(value, *, contents):
             return Array.metadata(tuple(value.shape), element)
         data = value.detach().cpu().contiguous().reshape(-1).view(sys.modules["torch"].uint8).numpy()
         return from_bytes(data, tuple(value.shape), element)
-    Buffer, DeviceBuffer, DeviceView = _native_classes()
-    if not isinstance(value, (Buffer, DeviceBuffer, DeviceView)):
+    if not callable(getattr(value, "to_host", None)):
         return value
     if not contents:
         return Array.metadata(value.shape, value.dtype)
-    storage = value.storage if isinstance(value, Buffer) else value.to_host()
-    return from_bytes(storage, value.shape, value.dtype)
+    return from_bytes(value.to_host(), value.shape, value.dtype)

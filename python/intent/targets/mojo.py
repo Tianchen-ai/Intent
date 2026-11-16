@@ -9,7 +9,7 @@ import subprocess
 from typing import TYPE_CHECKING
 
 from .provider import EnvironmentCheck, LocalExecution, Provider
-from .execution import cpu_key, cpu_workers
+from .execution import cpu_key, cpu_workers, torch_storage
 from .specification import read_cpu_target
 
 INSTALLATION = {
@@ -171,4 +171,4 @@ def _resolve_local(device, *, workers, **options):
 
 PROVIDER = Provider("cpu", MojoTarget, _read_facts, _bind, _environment_checks,
     LocalExecution("cpu", False, frozenset({"compiler", "build_threads", "private_bytes"}),
-                   _resolve_local, cpu_key), "cpu", read_cpu_target)
+                   _resolve_local, cpu_key, torch_storage), "cpu", read_cpu_target)
