@@ -9,7 +9,8 @@ from .specification import AscendCapabilities, AscendCompilationTarget
 
 INSTALLATION = {
     "modules": ("torch", "torch_npu", "triton.backends.ascend"),
-    "requirements": (), "toolchain": "matching CANN, torch-npu and official Triton-Ascend",
+    "requirements": (), "torch": None, "torch_index": None, "python_max": (3, 12),
+    "toolchain": "matching CANN, torch-npu and official Triton-Ascend",
 }
 
 

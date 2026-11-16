@@ -3,20 +3,36 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 from pathlib import Path
-import runpy
 import shlex
-import shutil
 import subprocess
 import sys
 
 REPOSITORY = Path(__file__).resolve().parents[1]
-# This declaration module uses only the standard library. Loading it does not
-# import Intent or require any backend before the environment has been created.
-DECLARATIONS = runpy.run_path(str(REPOSITORY / "python/intent/targets/registry.py"))
-BACKENDS = DECLARATIONS["BACKENDS"]
+def declaration(path, name):
+    """Read the same literal catalog before Intent is installed, without imports."""
+    for node in ast.parse(path.read_text()).body:
+        if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == name
+                                                for target in node.targets):
+            return ast.literal_eval(node.value)
+    raise ValueError(f"{path} does not declare {name}")
+
+
+def installations():
+    root = REPOSITORY / "python"
+    components = declaration(root / "intent/targets/components.py", "COMPONENTS")
+    result = {}
+    for name, module in components.items():
+        path = root.joinpath(*module.split("."))
+        path = path / "__init__.py" if path.is_dir() else path.with_suffix(".py")
+        result[name] = declaration(path, "INSTALLATION")
+    return result
+
+
+BACKENDS = installations()
 
 
 def run(*command: str | Path, env: dict[str, str]) -> None:
