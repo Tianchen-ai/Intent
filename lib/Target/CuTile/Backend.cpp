@@ -1,4 +1,6 @@
 #include "Intent/Compiler/Backend.h"
+#include "Intent/Compiler/Models/Block.h"
+#include "Intent/Target/NVIDIA/Configuration.h"
 #include "Intent/Target/NVIDIA/IR/Target.h"
 #include "Intent/Target/CuTile/IR/CuTileDialect.h"
 #include "Intent/Target/CuTile/Serialization/Serializer.h"
@@ -8,10 +10,12 @@
 namespace intent::compiler {
 Backend createCuTileBackend() {
   return {"cutile", "cutile", true,
-      BlockBackend{true, true, false, 2, cutile::tuningProfileSchema(), "cutile.json"},
+      std::make_shared<BlockBackend>(2, cutile::tuningProfileSchema(), "cutile.json"),
       [](mlir::DialectRegistry &registry) { registry.insert<cutile::IntentCuTileDialect, nvidia::IntentNVIDIADialect>(); },
       cutile::registerCuTilePasses,
       [](mlir::OpPassManager &manager, const Request &) { cutile::buildCuTilePipeline(manager); },
-      cutile::serializeProgram, configureNVIDIATarget};
+      cutile::serializeProgram, [](mlir::ModuleOp module, Request &request) {
+        return configureNVIDIATarget(module, request, true, true, false);
+      }};
 }
 }

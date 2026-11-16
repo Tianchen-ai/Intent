@@ -29,8 +29,8 @@ public:
       : ImplementationProviderInterface(dialect) {
     for (const Backend &adapter : backends())
       if (adapter.available)
-        if (const auto *model = std::get_if<CPUBackend>(&adapter.model))
-          registries.try_emplace(adapter.name, model->implementations());
+        if (const auto *implementations = adapter.model->cpuImplementations())
+          registries.try_emplace(adapter.name, *implementations);
   }
 
   FailureOr<const cpu::ImplementationRegistry *> lookup(StringRef name) const final {

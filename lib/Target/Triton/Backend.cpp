@@ -1,4 +1,6 @@
 #include "Intent/Compiler/Backend.h"
+#include "Intent/Compiler/Models/Block.h"
+#include "Intent/Target/NVIDIA/Configuration.h"
 #include "Intent/Target/NVIDIA/IR/Target.h"
 #include "Intent/Target/Triton/IR/TritonDialect.h"
 #include "Intent/Target/Triton/Serialization/Serializer.h"
@@ -8,10 +10,12 @@
 namespace intent::compiler {
 Backend createTritonBackend() {
   return {"triton", "triton", true,
-      BlockBackend{true, false, true, 1, triton::tuningProfileSchema(), "triton.json"},
+      std::make_shared<BlockBackend>(1, triton::tuningProfileSchema(), "triton.json"),
       [](mlir::DialectRegistry &registry) { registry.insert<triton::IntentTritonDialect, nvidia::IntentNVIDIADialect>(); },
       triton::registerTritonPasses,
       [](mlir::OpPassManager &manager, const Request &) { triton::buildTritonPipeline(manager); },
-      triton::serializeProgram, configureNVIDIATarget};
+      triton::serializeProgram, [](mlir::ModuleOp module, Request &request) {
+        return configureNVIDIATarget(module, request, true, false, true);
+      }};
 }
 }

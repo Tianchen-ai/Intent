@@ -11,9 +11,8 @@ file(GENERATE OUTPUT "${PROJECT_BINARY_DIR}/include/Intent/Compiler/Backends.inc
 add_mlir_library(MLIRIntentCompiler
   Compiler.cpp
   Backend.cpp
-  BlockBackends.cpp
-  CPUBackends.cpp
-  DSABackends.cpp
+  Models/Block.cpp
+  Models/CPU.cpp
   Passes.cpp
   Registration.cpp
   ${backend_sources}

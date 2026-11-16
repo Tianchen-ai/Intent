@@ -1,7 +1,6 @@
 #ifndef INTENT_COMPILER_COMPILER_H
 #define INTENT_COMPILER_COMPILER_H
 
-#include "Intent/Conversion/KIRToBlock/KIRToBlock.h"
 #include "Intent/Dialect/Intent/IR/CompileOptions.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/OwningOpRef.h"
@@ -20,20 +19,6 @@ enum class Failure {
   Translation = 7, Output = 8
 };
 
-struct CPUOptions {
-  int64_t vectorBits = 0;
-  int64_t workers = 0;
-  bool matrixI8I32 = false;
-  int64_t privateBytes = 256 * 1024;
-  bool matrixBF16F32 = false;
-};
-
-struct DSAOptions {
-  std::string architecture = "mtp_372";
-  std::string shapes = "{}", strides = "{}";
-  std::string capabilities;
-};
-
 struct CompilationOptions {
   NumericsMode numerics = NumericsMode::Source;
   bool onlineReduction = true;
@@ -45,9 +30,10 @@ struct Request {
   std::optional<Provider> provider;
   InputStage inputStage = InputStage::Kernel;
   Stage stopAfter = Stage::Provider;
-  BlockCapabilities block{};
-  CPUOptions cpu;
-  DSAOptions dsa;
+  /// Validated component-owned compile inputs. Construction transfers these
+  /// facts into the executable IR; subsequent passes consume that IR only.
+  mlir::Attribute target;
+  mlir::DictionaryAttr bindings;
   std::string profileDirectory;
   std::string tuningConfig;
   std::string targetOptions;

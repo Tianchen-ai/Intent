@@ -1,5 +1,6 @@
 #include "Intent/Compiler/Passes.h"
 #include "Intent/Compiler/Backend.h"
+#include "Intent/Target/BangC/Compilation.h"
 #include "Intent/Conversion/KIRToCPU/KIRToCPU.h"
 #include "Intent/Conversion/KIRToDSA/KIRToDSA.h"
 #include "Intent/Conversion/KIRToBlock/KIRToBlock.h"
@@ -59,19 +60,19 @@ public:
   void runOnOperation() final {
     auto module = getOperation();
     auto configurations = readDSAConfigurations(module, directory.getValue(), overrides.getValue());
-    auto hardware = readDSACapabilities(module, capabilities);
-    auto shapeBindings = parseDSAParameterBindings(module, shapes, true);
-    auto strideBindings = parseDSAParameterBindings(module, strides, false);
-    if (failed(configurations) || failed(hardware) || failed(shapeBindings) || failed(strideBindings))
+    auto hardware = dyn_cast_or_null<dsa::CapabilitiesAttr>(parseAttribute(capabilities, &getContext()));
+    auto shapeBindings = dyn_cast_or_null<DictionaryAttr>(parseAttribute(shapes, &getContext()));
+    auto strideBindings = dyn_cast_or_null<DictionaryAttr>(parseAttribute(strides, &getContext()));
+    if (failed(configurations) || !hardware || !shapeBindings || !strideBindings)
       return signalPassFailure();
     SmallVector<OwningOpRef<ModuleOp>> candidates;
     StringAttr entryName;
     for (auto [index, attribute] : llvm::enumerate(*configurations)) {
       OwningOpRef<ModuleOp> candidate(cast<ModuleOp>(module->clone()));
       if (failed(lowerCanonicalKIRToDSA(*candidate, cast<dsa::ConfigurationAttr>(attribute),
-                                       *shapeBindings, *strideBindings)))
+                                       shapeBindings, strideBindings)))
         return signalPassFailure();
-      (*candidate)->setAttr("intent_dsa.capabilities", *hardware);
+      (*candidate)->setAttr("intent_dsa.capabilities", hardware);
       func::FuncOp entry;
       for (auto function : candidate->getOps<func::FuncOp>())
         if (!function.isExternal()) { entry = function; break; }

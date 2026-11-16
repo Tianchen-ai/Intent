@@ -1,4 +1,4 @@
-#include "Intent/Compiler/Backend.h"
+#include "Intent/Compiler/Models/Block.h"
 #include "Intent/Compiler/Passes.h"
 #include "Intent/Dialect/Block/Transforms/Passes.h"
 #include "Intent/Dialect/Block/Analysis/PhysicalProgram.h"
@@ -11,16 +11,17 @@ namespace intent::compiler {
 
 void BlockBackend::buildConstruction(OpPassManager &manager, const Request &request) const {
   ConstructBlockOptions options;
+  auto capabilities = cast<block::CapabilitiesAttr>(request.target);
   std::string target;
   llvm::raw_string_ostream stream(target);
-  request.block.target.print(stream);
+  capabilities.getTarget().print(stream);
   options.target = target;
-  options.matrixUnits = request.block.matrixUnits;
-  options.dynamicVectorWidth = request.block.dynamicVectorWidth;
-  options.nativeTupleReductions = nativeTupleReductions;
+  options.matrixUnits = capabilities.getMatrixUnits();
+  options.dynamicVectorWidth = capabilities.getDynamicVectorWidth();
+  options.nativeTupleReductions = capabilities.getNativeTupleReductions();
   options.nativeTupleReductionRequiresConstantIdentity =
-      nativeTupleReductionRequiresConstantIdentity;
-  options.nativeFragmentGather = nativeFragmentGather;
+      capabilities.getNativeTupleReductionRequiresConstantIdentity();
+  options.nativeFragmentGather = capabilities.getNativeFragmentGather();
   manager.addPass(createConstructBlock(options));
 }
 
@@ -37,13 +38,7 @@ LogicalResult BlockBackend::verifySharedInput(ModuleOp module, const Request &re
   if (failed(block::verifyBlockProgram(module))) return failure();
   auto kernel = block::getPhysicalKernel(module);
   if (failed(kernel) || failed(block::verifySharedConfigTuples(*kernel))) return failure();
-  const auto &device = request.block;
-  auto expected = block::CapabilitiesAttr::getChecked([&] { return module.emitError(); },
-      module.getContext(), device.target, device.matrixUnits,
-      device.dynamicVectorWidth, nativeTupleReductions,
-      nativeTupleReductionRequiresConstantIdentity,
-      nativeFragmentGather);
-  if (!expected) return failure();
+  auto expected = cast<block::CapabilitiesAttr>(request.target);
   if ((*kernel)->getAttrOfType<block::CapabilitiesAttr>(block::capabilitiesAttr) != expected)
     return module.emitError("shared Block capabilities disagree with the requested device or provider primitive contract");
   auto resolved = block::TuningProfiles::from(module);

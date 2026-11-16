@@ -1,4 +1,4 @@
-#include "Intent/Compiler/Backend.h"
+#include "Intent/Target/BangC/Compilation.h"
 #include "Intent/Compiler/Passes.h"
 #include "Intent/Dialect/DSA/IR/DSAOps.h"
 #include "Intent/Dialect/DSA/Transforms/Passes.h"
@@ -15,6 +15,7 @@ using namespace mlir;
 namespace intent::compiler {
 
 FailureOr<Attribute> readDSACapabilities(ModuleOp module, StringRef text) {
+  module.getContext()->getOrLoadDialect<dsa::IntentDSADialect>();
   auto parsed = llvm::json::parse(text);
   if (!parsed) {
     module.emitError("DSA compilation requires explicit hardware capabilities: ")
@@ -175,23 +176,28 @@ LogicalResult verifyExistingBindings(func::FuncOp function,
 
 } // namespace
 
-void DSABackend::buildConstruction(OpPassManager &manager, const Request &request) const {
+void BangCBackend::buildConstruction(OpPassManager &manager, const Request &request) const {
   ConstructDSAOptions options;
   options.directory = request.profileDirectory;
   options.overrides = request.tuningConfig;
-  options.shapes = request.dsa.shapes;
-  options.strides = request.dsa.strides;
-  options.capabilities = request.dsa.capabilities;
+  auto spelling = [](Attribute attribute) {
+    std::string text;
+    llvm::raw_string_ostream stream(text);
+    attribute.print(stream);
+    return text;
+  };
+  options.shapes = spelling(request.bindings.get("shapes"));
+  options.strides = spelling(request.bindings.get("strides"));
+  options.capabilities = spelling(request.target);
   manager.addPass(createConstructDSA(options));
 }
 
-void DSABackend::buildShared(OpPassManager &manager, const Request &, StringRef) const {
+void BangCBackend::buildShared(OpPassManager &manager, const Request &, StringRef) const {
   dsa::buildDSAPipeline(manager.nest<ModuleOp>());
 }
 
-LogicalResult DSABackend::verifySharedInput(ModuleOp module, const Request &request, StringRef) const {
-  auto expected = readDSACapabilities(module, request.dsa.capabilities);
-  if (failed(expected)) return failure();
+LogicalResult BangCBackend::verifySharedInput(ModuleOp module, const Request &request, StringRef) const {
+  auto expected = request.target;
   if (!module->getAttrOfType<StringAttr>("intent.entry_name") ||
       module.getOps<ModuleOp>().empty())
     return module.emitError("shared DSA input requires a complete configuration portfolio");
@@ -202,14 +208,10 @@ LogicalResult DSABackend::verifySharedInput(ModuleOp module, const Request &requ
   if (!options) return module.emitError("DSA portfolio requires its numerical compile options");
   if (module->hasAttr("bangc.architecture"))
     return module.emitError("provider-specific BANG C input cannot be resumed as shared DSA IR");
-  if (request.dsa.architecture != "mtp_372")
-    return module.emitError("shared DSA input requires the supported mtp_372 implementation profile");
-  auto shapes = parseDSAParameterBindings(module, request.dsa.shapes, true);
-  auto strides = parseDSAParameterBindings(module, request.dsa.strides, false);
-  if (failed(shapes) || failed(strides))
-    return failure();
+  auto shapes = request.bindings.getAs<DictionaryAttr>("shapes");
+  auto strides = request.bindings.getAs<DictionaryAttr>("strides");
   for (ModuleOp candidate : module.getOps<ModuleOp>()) {
-    if (candidate->getAttr("intent_dsa.capabilities") != *expected)
+    if (candidate->getAttr("intent_dsa.capabilities") != expected)
       return candidate.emitError("shared DSA capabilities disagree with the selected device");
     if (candidate->getAttrOfType<CompileOptionsAttr>(compileOptionsAttr) != options)
       return candidate.emitError("DSA candidate compile options disagree with the portfolio");
@@ -221,8 +223,8 @@ LogicalResult DSABackend::verifySharedInput(ModuleOp module, const Request &requ
         continue;
       if (!function->getAttrOfType<dsa::ConfigurationAttr>("intent_dsa.configuration"))
         return function.emitError("shared DSA candidate requires its complete configuration");
-      if (failed(verifyExistingBindings(function, *shapes, true)) ||
-          failed(verifyExistingBindings(function, *strides, false)))
+      if (failed(verifyExistingBindings(function, shapes, true)) ||
+          failed(verifyExistingBindings(function, strides, false)))
         return failure();
     }
   }

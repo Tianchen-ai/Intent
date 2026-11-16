@@ -5,44 +5,23 @@
 #include "Intent/Dialect/Block/Transforms/Configuration/TuningProfiles.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/Pass/PassManager.h"
-#include <variant>
+#include <memory>
 
 namespace intent::cpu { class ImplementationRegistry; }
 
 namespace intent::compiler {
 
-enum class Family { Block, CPU, DSA };
-
-struct BlockBackend {
-  static constexpr Family family = Family::Block;
-  bool nativeTupleReductions;
-  bool nativeTupleReductionRequiresConstantIdentity;
-  bool nativeFragmentGather;
-  // Native-adapter profitability preference, not a register-allocation promise.
-  unsigned preferredReductionResidentPrograms;
-  block::TuningProfileSchema profiles;
-  llvm::StringRef profileFilename;
-  void buildConstruction(mlir::OpPassManager &, const Request &) const;
-  void buildShared(mlir::OpPassManager &, const Request &, llvm::StringRef provider) const;
-  mlir::LogicalResult verifySharedInput(mlir::ModuleOp, const Request &, llvm::StringRef provider) const;
-};
-
-struct CPUBackend {
-  static constexpr Family family = Family::CPU;
-  bool stridedInputs;
-  llvm::StringRef profileFilename;
-  cpu::ImplementationRegistry (*implementations)();
-  void buildConstruction(mlir::OpPassManager &, const Request &) const;
-  void buildShared(mlir::OpPassManager &, const Request &, llvm::StringRef provider) const;
-  mlir::LogicalResult verifySharedInput(mlir::ModuleOp, const Request &, llvm::StringRef provider) const;
-};
-
-struct DSABackend {
-  static constexpr Family family = Family::DSA;
-  llvm::StringRef profileFilename;
-  void buildConstruction(mlir::OpPassManager &, const Request &) const;
-  void buildShared(mlir::OpPassManager &, const Request &, llvm::StringRef provider) const;
-  mlir::LogicalResult verifySharedInput(mlir::ModuleOp, const Request &, llvm::StringRef provider) const;
+/// Components choose a lowering boundary, independently of device identity.
+/// The driver never inspects the concrete model or its target options.
+struct ExecutionModel {
+  virtual ~ExecutionModel() = default;
+  virtual llvm::StringRef name() const = 0;
+  virtual llvm::ArrayRef<llvm::StringRef> profileFiles() const = 0;
+  virtual void buildConstruction(mlir::OpPassManager &, const Request &) const = 0;
+  virtual void buildShared(mlir::OpPassManager &, const Request &, llvm::StringRef provider) const = 0;
+  virtual mlir::LogicalResult verifySharedInput(mlir::ModuleOp, const Request &, llvm::StringRef provider) const = 0;
+  virtual std::optional<block::TuningProfileSchema> blockProfiles() const { return std::nullopt; }
+  virtual const cpu::ImplementationRegistry *cpuImplementations() const { return nullptr; }
 };
 
 /// A compiled adapter declaration. Unavailable adapters are discoverable by
@@ -53,14 +32,13 @@ struct Backend {
   Provider provider;
   llvm::StringRef name;
   bool available;
-  std::variant<BlockBackend, CPUBackend, DSABackend> model;
+  std::shared_ptr<const ExecutionModel> model;
   void (*registerDialects)(mlir::DialectRegistry &);
   void (*registerPasses)();
   void (*buildPipeline)(mlir::OpPassManager &, const Request &);
   mlir::LogicalResult (*serialize)(mlir::ModuleOp, std::string &source, std::string &metadata);
   mlir::LogicalResult (*configure)(mlir::ModuleOp, Request &);
 
-  Family family() const;
   llvm::SmallVector<std::string> profilePaths(llvm::StringRef directory) const;
   void buildConstruction(mlir::OpPassManager &, const Request &) const;
   void buildShared(mlir::OpPassManager &, const Request &) const;
@@ -71,14 +49,6 @@ llvm::ArrayRef<Backend> backends();
 const Backend &backend(Provider provider);
 llvm::SmallVector<block::TuningProfileSource> blockProfileSources(
     llvm::StringRef directory, llvm::StringRef provider);
-mlir::FailureOr<mlir::DictionaryAttr> parseDSAParameterBindings(
-    mlir::ModuleOp module, llvm::StringRef text, bool shapes);
-mlir::FailureOr<mlir::ArrayAttr> readDSAConfigurations(
-    mlir::ModuleOp module, llvm::StringRef directory, llvm::StringRef overrides);
-mlir::FailureOr<mlir::Attribute> readDSACapabilities(mlir::ModuleOp module, llvm::StringRef text);
-mlir::LogicalResult configureNVIDIATarget(mlir::ModuleOp module, Request &request);
-mlir::LogicalResult configureCPUTarget(mlir::ModuleOp module, Request &request);
-mlir::LogicalResult configureBangCTarget(mlir::ModuleOp module, Request &request);
 
 } // namespace intent::compiler
 #endif

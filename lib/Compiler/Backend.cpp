@@ -29,41 +29,28 @@ const Backend &backend(Provider provider) {
   llvm_unreachable("invalid provider");
 }
 
-Family Backend::family() const {
-  return std::visit([](const auto &model) { return model.family; }, model);
-}
-
 SmallVector<std::string> Backend::profilePaths(StringRef directory) const {
   SmallVector<std::string> result;
   if (!available)
     return result;
-  if (std::holds_alternative<BlockBackend>(model)) {
-    for (const auto &source : blockProfileSources(directory, name))
-      result.push_back(source.filename);
-  } else if (const auto *cpu = std::get_if<CPUBackend>(&model)) {
+  for (StringRef filename : model->profileFiles()) {
     llvm::SmallString<256> path(directory);
-    llvm::sys::path::append(path, cpu->profileFilename);
-    result.push_back(std::string(path));
-  } else if (const auto *dsa = std::get_if<DSABackend>(&model)) {
-    llvm::SmallString<256> path(directory);
-    llvm::sys::path::append(path, dsa->profileFilename);
+    llvm::sys::path::append(path, filename);
     result.push_back(std::string(path));
   }
   return result;
 }
 
 void Backend::buildConstruction(OpPassManager &manager, const Request &request) const {
-  std::visit([&](const auto &model) { model.buildConstruction(manager, request); }, model);
+  model->buildConstruction(manager, request);
 }
 
 void Backend::buildShared(OpPassManager &manager, const Request &request) const {
-  std::visit([&](const auto &model) { model.buildShared(manager, request, name); }, model);
+  model->buildShared(manager, request, name);
 }
 
 LogicalResult Backend::verifySharedInput(ModuleOp module, const Request &request) const {
-  return std::visit([&](const auto &model) {
-    return model.verifySharedInput(module, request, name);
-  }, model);
+  return model->verifySharedInput(module, request, name);
 }
 
 SmallVector<block::TuningProfileSource> blockProfileSources(StringRef directory,
@@ -76,8 +63,9 @@ SmallVector<block::TuningProfileSource> blockProfileSources(StringRef directory,
   };
   for (const Backend &adapter : backends())
     if (adapter.available && adapter.name == provider)
-      if (const auto *model = std::get_if<BlockBackend>(&adapter.model))
-        append(model->profiles, model->profileFilename);
+      if (auto schema = adapter.model->blockProfiles())
+        for (StringRef filename : adapter.model->profileFiles())
+          append(*schema, filename);
   return sources;
 }
 

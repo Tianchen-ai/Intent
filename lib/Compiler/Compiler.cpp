@@ -43,17 +43,11 @@ StringRef failureStage(Failure code) {
 llvm::json::Object information(StringRef profileDirectory) {
   llvm::json::Object providers;
   for (const Backend &adapter : backends()) {
-    StringRef family;
-    switch (adapter.family()) {
-    case Family::Block: family = "block"; break;
-    case Family::CPU: family = "cpu"; break;
-    case Family::DSA: family = "dsa"; break;
-    }
     llvm::json::Array profiles;
     for (const std::string &path : adapter.profilePaths(profileDirectory))
       profiles.push_back(path);
     providers[adapter.name] = llvm::json::Object{
-        {"family", family}, {"available", adapter.available},
+        {"family", adapter.model->name()}, {"available", adapter.available},
         {"profiles", std::move(profiles)}};
   }
   llvm::json::Object failureStages;

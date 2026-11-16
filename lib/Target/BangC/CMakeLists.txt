@@ -1,4 +1,4 @@
-intent_backend(BangC SOURCE Backend.cpp LIBRARIES MLIRIntentBangC)
+intent_backend(BangC SOURCE Backend.cpp SOURCES Compilation.cpp LIBRARIES MLIRIntentBangC)
 add_mlir_library(MLIRIntentBangCResources
   NativeWorkspace.cpp
   LINK_LIBS PUBLIC MLIRIntentDialect MLIRIntentDSADialect MLIRIR MLIRSupport)

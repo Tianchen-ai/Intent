@@ -1,4 +1,5 @@
 #include "Intent/Compiler/Backend.h"
+#include "Intent/Compiler/Models/CPU.h"
 #ifdef INTENT_HAS_WEFT_CANONICAL
 #include "Intent/Target/Weft/IR/WeftDialect.h"
 #include "Intent/Target/Weft/Serialization/Serializer.h"
@@ -10,14 +11,15 @@ namespace intent::compiler {
 Backend createWeftBackend() {
 #ifdef INTENT_HAS_WEFT_CANONICAL
   return {"weft", "weft", true,
-      CPUBackend{false, "weft.json", weft_provider::implementations},
+      std::make_shared<CPUBackend>(false, "weft.json", weft_provider::implementations()),
       [](mlir::DialectRegistry &registry) {
         registry.insert<weft_provider::IntentWeftDialect, ::weft::kernel::WEFTKernelDialect>();
       }, weft_provider::registerWeftPasses,
       [](mlir::OpPassManager &manager, const Request &) { weft_provider::buildWeftPipeline(manager); },
       weft_provider::serializeProgram, configureCPUTarget};
 #else
-  return {"weft", "weft", false, CPUBackend{false, "weft.json", nullptr},
+  return {"weft", "weft", false,
+      std::make_shared<CPUBackend>(false, "weft.json", cpu::ImplementationRegistry{}),
       nullptr, nullptr, nullptr, nullptr, configureCPUTarget};
 #endif
 }
