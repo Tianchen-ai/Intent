@@ -2,6 +2,9 @@
 #include "Intent/Dialect/Block/IR/BlockAttrs.h"
 #include "Intent/Dialect/Block/IR/Program.h"
 #include "Intent/Dialect/Block/IR/Target.h"
+#include "Intent/Target/Triton/IR/Target.h"
+#include "llvm/Support/MathExtras.h"
+#include <limits>
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -36,6 +39,52 @@ public:
       {"matrix_units", device.getMatrixUnits()}, {"dynamic_vector_width", device.getDynamicVectorWidth()}};
   }
 };
+class TritonTarget final : public triton::TargetInterface {
+public:
+  explicit TritonTarget(Dialect *dialect) : TargetInterface(dialect) {}
+  StringRef provider() const final { return "triton"; }
+  bool legalOption(Attribute target, block::ParameterRole role, int64_t value,
+                   bool singleGroup) const final {
+    auto device = cast<DeviceAttr>(target);
+    if (value <= 0) return false;
+    switch (role) {
+    case block::ParameterRole::ProviderWarps:
+      return llvm::isPowerOf2_64(value) && value <= device.getMaxThreadsPerBlock() / 32;
+    case block::ParameterRole::ProviderStages:
+      return value <= std::numeric_limits<int32_t>::max();
+    case block::ParameterRole::ProviderCTAs:
+      return llvm::isPowerOf2_64(value) && value <= 16 && (!singleGroup || value == 1) &&
+          (value == 1 || (device.getComputeCapabilityMajor() >= 9 && device.getComputeCapabilityMajor() != 12));
+    default: return false;
+    }
+  }
+  int64_t valueWordsPerWarp(Attribute) const final { return 32 * 255; }
+  FailureOr<std::string> approximateMath(Operation *operation, Attribute target,
+      triton::ApproximateMath kind, ArrayRef<std::string> operands, bool ftz) const final {
+    std::string instruction, constraints, arguments = operands.front();
+    switch (kind) {
+    case triton::ApproximateMath::Divide:
+      instruction = "div.approx" + std::string(ftz ? ".ftz" : "") + ".f32 $0, $1, $2;";
+      constraints = "=f,f,f";
+      arguments += ", " + operands[1];
+      break;
+    case triton::ApproximateMath::Exp2:
+      instruction = "ex2.approx" + std::string(ftz ? ".ftz" : "") + ".f32 $0, $1;";
+      constraints = "=f,f";
+      break;
+    case triton::ApproximateMath::Tanh: {
+      auto device = cast<DeviceAttr>(target);
+      if (10 * device.getComputeCapabilityMajor() + device.getComputeCapabilityMinor() < 75)
+        return operation->emitOpError("native approximate tanh requires compute capability 7.5 or newer"), failure();
+      instruction = "tanh.approx.f32 $0, $1;";
+      constraints = "=f,f";
+      break;
+    }
+    }
+    return "tl.inline_asm_elementwise(\"" + instruction + "\", constraints=\"" + constraints +
+        "\", args=[" + arguments + "], dtype=tl.float32, is_pure=True, pack=1)";
+  }
+};
 }
 
 void IntentNVIDIADialect::initialize() {
@@ -43,7 +92,7 @@ void IntentNVIDIADialect::initialize() {
 #define GET_ATTRDEF_LIST
 #include "Intent/Target/NVIDIA/IR/TargetAttrs.cpp.inc"
       >();
-  addInterfaces<Resources>();
+  addInterfaces<Resources, TritonTarget>();
 }
 
 LogicalResult DeviceAttr::verify(function_ref<InFlightDiagnostic()> error,

@@ -1,5 +1,5 @@
 #include "Intent/Target/Triton/Serialization/Numerical.h"
-#include "Intent/Target/NVIDIA/IR/Target.h"
+#include "Intent/Target/Triton/IR/Target.h"
 
 #include "Intent/Dialect/Block/IR/Program.h"
 #include "llvm/ADT/STLExtras.h"
@@ -48,6 +48,17 @@ Translation direct(std::string expression) {
 Translation library(std::string expression) {
   return {std::move(expression),
           {"from triton.language.extra import libdevice"}};
+}
+
+FailureOr<Translation> approximate(Operation *operation, ApproximateMath kind,
+                                   ArrayRef<std::string> operands, bool ftz) {
+  Attribute target = targetOf(operation);
+  auto interface = targetInterface(target);
+  if (!interface)
+    return operation->emitOpError("requires a registered Triton numerical target"), failure();
+  auto expression = interface->approximateMath(operation, target, kind, operands, ftz);
+  if (failed(expression)) return failure();
+  return library(std::move(*expression));
 }
 
 struct SignedDivision {
@@ -160,11 +171,7 @@ FailureOr<Translation> translate(block::BinaryOp operation,
     return direct(infix("*"));
   case BinaryOperator::TrueDivide:
     if (operation.getApproximate())
-      return direct(
-          "tl.inline_asm_elementwise(\"div.approx" +
-          std::string(operation.getFlushToZero() ? ".ftz" : "") +
-          ".f32 $0, $1, $2;\", constraints=\"=f,f,f\", args=[" + lhs + ", " +
-          rhs + "], dtype=tl.float32, is_pure=True, pack=1)");
+      return approximate(operation, ApproximateMath::Divide, operands, operation.getFlushToZero());
     return libraryMath(operation, "div_rn", operands);
   case BinaryOperator::FloorDivide:
   case BinaryOperator::Remainder: {
@@ -221,11 +228,7 @@ FailureOr<Translation> translate(block::UnaryOp operation,
     return libraryMath(operation, "exp", operands);
   case UnaryOperator::Exp2:
     if (operation.getApproximate())
-      return direct(
-          "tl.inline_asm_elementwise(\"ex2.approx" +
-          std::string(operation.getFlushToZero() ? ".ftz" : "") +
-          ".f32 $0, $1;\", constraints=\"=f,f\", args=[" + input +
-          "], dtype=tl.float32, is_pure=True, pack=1)");
+      return approximate(operation, ApproximateMath::Exp2, operands, operation.getFlushToZero());
     return libraryMath(operation, "exp2", operands);
   case UnaryOperator::Log:
     return libraryMath(operation, "log", operands);
@@ -252,18 +255,8 @@ FailureOr<Translation> translate(block::UnaryOp operation,
   case UnaryOperator::Sigmoid:
     return native("sigmoid");
   case UnaryOperator::Tanh:
-    if (operation.getApproximate()) {
-      auto device = nvidia::deviceOf(operation);
-      if (!device ||
-          10 * device.getComputeCapabilityMajor() + device.getComputeCapabilityMinor() < 75)
-        return operation.emitOpError(
-                   "native approximate tanh requires compute capability 7.5 or newer"),
-               failure();
-      return direct(
-          "tl.inline_asm_elementwise(\"tanh.approx.f32 $0, $1;\", "
-          "constraints=\"=f,f\", args=[" + input +
-          "], dtype=tl.float32, is_pure=True, pack=1)");
-    }
+    if (operation.getApproximate())
+      return approximate(operation, ApproximateMath::Tanh, operands, false);
     return libraryMath(operation, "tanh", operands);
   case UnaryOperator::Abs:
     return native("abs");

@@ -8,6 +8,7 @@
 #include "Intent/Dialect/Block/IR/Program.h"
 #include "Intent/Dialect/Block/IR/ProgramInterface.h"
 #include "Intent/Target/Triton/IR/TritonOps.h"
+#include "Intent/Target/Triton/IR/Target.h"
 #include "llvm/ADT/STLExtras.h"
 #include <limits>
 
@@ -253,12 +254,15 @@ collectConfigurationRequirements(func::FuncOp kernel) {
 
   auto capabilities = kernel->getAttrOfType<block::CapabilitiesAttr>(block::capabilitiesAttr);
   auto warps = parameters->find(block::ParameterRole::ProviderWarps);
-  if (capabilities && capabilities.getValueBudgetWords() > 0 && warps &&
+  auto target = capabilities ? capabilities.getTarget() : Attribute();
+  auto interface = targetInterface(target);
+  int64_t wordsPerWarp = interface ? interface->valueWordsPerWarp(target) : 0;
+  if (wordsPerWarp > 0 && capabilities.getValueBudgetWords() > 0 && warps &&
       warps.getCandidates().size() > 1) {
     auto belowMaximum = expression(block::PhysicalExprKind::Subtract, 0,
         {parameter(warps), constant(*llvm::max_element(warps.getCandidates().asArrayRef()))});
     auto nominalBudget = expression(block::PhysicalExprKind::Multiply, 0,
-                                   {parameter(warps), constant(32 * 255)});
+                                   {parameter(warps), constant(wordsPerWarp)});
     // Preserve the nominal per-fragment policy: the widest option may spill.
     auto budget = expression(block::PhysicalExprKind::Select, 0,
         {belowMaximum, nominalBudget, constant(std::numeric_limits<int64_t>::max())});

@@ -84,6 +84,9 @@ bool canVectorizeIterations(Block &block, scf::ForOp loop,
 
 LogicalResult vectorizeIterations(func::FuncOp kernel,
                                  uint64_t &source, int64_t &dimension) {
+  auto capabilities = kernel->getAttrOfType<CapabilitiesAttr>(capabilitiesAttr);
+  if (!capabilities || capabilities.getPreferredVectorElements() <= 0)
+    return success();
   SmallVector<scf::ForOp> loops;
   // Lift the inner independent axis first. Its fragment becomes the suffix
   // when an enclosing independent loop is subsequently widened.
@@ -161,7 +164,6 @@ LogicalResult vectorizeIterations(func::FuncOp kernel,
       loop->moveBefore(branch.elseBlock()->getTerminator());
       loop = selected;
     }
-    auto capabilities = kernel->getAttrOfType<CapabilitiesAttr>(capabilitiesAttr);
     int64_t maximumWidth = capabilities.getPreferredVectorElements();
     auto lower = relations.constant(loop.getLowerBound());
     auto upper = relations.constant(loop.getUpperBound());

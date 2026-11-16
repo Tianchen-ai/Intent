@@ -56,22 +56,25 @@ Use a complete SDK: a partial LLVM source build must first build its required li
 |---|---|
 | triton / cutile | CUDA host with compatible NVIDIA driver and selected Python provider |
 | mojo | x86 host with Mojo, a C compiler (cc) and the GNU OpenMP runtime (libgomp.so.1); select Mojo through INTENT_MOJO or backend_options |
-| weft | RISC-V host with matching Weft Python package, native weft-compile and native C compiler |
+| weft | x86/RISC-V host with the full Triton–Weft distribution supporting Canonical `.weftir`, matching weft-core native SDK and CPU toolchain |
 | bangc | MLU370 host with CNRT/CNCC from NeuWare |
+| triton_ascend | Ascend NPU host with matching CANN, torch-npu and official Triton–Ascend |
 
 For source installs, retain the common SDK flags, include the Weft canonical-library
 flags when building that provider, and select:
 
 ```bash
 # Additional install.py flags for the chosen backend:
-# --backend mojo --provider-compiler /path/to/mojo
-# --backend weft --provider-compiler /path/to/native/weft-compile
-# --backend bangc --neuware /path/to/neuware
+# --backend mojo --target-option 'compiler="/path/to/mojo"'
+# --backend weft
+# --backend bangc --target-option 'neuware="/path/to/neuware"'
+# --backend triton_ascend
 ```
 
-Weft local execution uses its NativeTarget and extension catalog. Users select CPU affinity
-and worker budget; they do not supply ISA/VLEN. Install the matching Weft package on that host,
-not merely a library generated on another machine. BANG C queries CNRT resources; currently
+Weft uses the complete Triton–Weft JIT: Canonical `.weftir` enters `triton.compile`, its cache
+and native task export. Intent owns task scheduling; each provider task entry is single-threaded.
+Users select affinity and worker budget, without supplying ISA/VLEN. Install a distribution
+supporting this input format; the old `weft-compile` route is not a substitute. BANG C queries CNRT resources; currently
 unsupported architectures are diagnosed instead of being treated as MLU370.
 Ordinary BANG C JIT derives shape/stride bindings from actual buffers.
 
@@ -88,9 +91,16 @@ run = intent.jit(definition, backend="mojo",
 ```
 
 Doctor uses the same local target resolver. For example:
-`intent doctor --target weft --target-option 'compiler="/path/to/weft-compile"'`.
+`intent doctor --target weft`. Explicit Weft toolchain options use
+`backend_options={"options": {...}}` and the provider's own option parser.
 Independent product calls use their own INTENT_CACHE_DIR/XDG settings; Bench redirects them
 only for Bench-owned runs.
+
+NVIDIA Triton, Triton–Weft and Triton–Ascend all provide the `triton` Python package.
+Use separate virtual environments, installing Intent and the selected provider normally.
+Do not overwrite distributions in place, change `sys.path`, or replace the global driver to switch providers.
+Triton–Ascend consumes Block directly. Discovery reads the actual architecture and Cube/Vector core counts;
+compatibility shared-memory placeholders are not physical capacity facts.
 
 ## Build a distributable package
 

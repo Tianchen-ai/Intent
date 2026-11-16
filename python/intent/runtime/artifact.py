@@ -218,20 +218,6 @@ class CompiledArtifact:
         function: Callable[..., object],
         arguments: tuple[Any, ...],
     ) -> object:
-        if self.device_type in {"cpu", "mlu"}:
-            return function(*arguments)
-        import torch
-
-        expected = torch.device(self.device_type, self.device) if self.device_type == "cuda" else torch.device(self.device_type)
-        for index, argument in enumerate(arguments):
-            if isinstance(argument, torch.Tensor) and argument.device != expected:
-                raise ValueError(
-                    f"compiled artifact is bound to {expected}, but tensor argument "
-                    f"{index} is on {argument.device}"
-                )
-        if expected.type == "cuda":
-            if torch.cuda.current_device() == self.device:
-                return function(*arguments)
-            with torch.cuda.device(self.device):
-                return function(*arguments)
-        raise NotImplementedError(f"artifact invocation for {expected.type}")
+        # The binder validates buffers; the provider's execution context owns
+        # device and stream semantics. Artifacts do not map device families.
+        return function(*arguments)

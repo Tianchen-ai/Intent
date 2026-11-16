@@ -1,0 +1,6 @@
+set(LLVM_TARGET_DEFINITIONS Target.td)
+mlir_tablegen(TargetDialect.h.inc -gen-dialect-decls -dialect=intent_ascend)
+mlir_tablegen(TargetDialect.cpp.inc -gen-dialect-defs -dialect=intent_ascend)
+mlir_tablegen(TargetAttrs.h.inc -gen-attrdef-decls)
+mlir_tablegen(TargetAttrs.cpp.inc -gen-attrdef-defs)
+add_public_tablegen_target(IntentAscendTargetIncGen)

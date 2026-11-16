@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     from intent.compiler.options import CompileOptions
     from intent.targets.specification import CompilationTarget
     from .interface import PublicInterface
-    from .gpu.interface import GPUInterface
+    from .block.interface import BlockInterface
     from .native import NativeABI
     from .triton.contract import TritonFacts
     from .cutile.contract import CuTileFacts
@@ -76,14 +76,14 @@ class ProgramContract:
     provider: str
     target: CompilationTarget
     options: CompileOptions
-    abi: GPUInterface | NativeABI
+    abi: BlockInterface | NativeABI
     facts: TritonFacts | CuTileFacts | MojoFacts | WeftFacts | BangCFacts
     _metadata: dict
 
     @property
     def interface(self) -> PublicInterface:
-        from .gpu.interface import GPUInterface
-        return self.abi.public if isinstance(self.abi, GPUInterface) else self.abi.interface
+        from .block.interface import BlockInterface
+        return self.abi.public if isinstance(self.abi, BlockInterface) else self.abi.interface
 
     @property
     def metadata(self) -> dict:
@@ -107,8 +107,8 @@ class ProgramContract:
             adapter = get_provider(provider)
             options = CompileOptions.read(data["compile_options"])
             if adapter.execution_model == "block":
-                from .gpu.interface import GPUInterface
-                abi = GPUInterface(data)
+                from .block.interface import BlockInterface
+                abi = BlockInterface(data)
             else:
                 abi = NativeABI.read(data)
             facts = adapter.read_facts(source, data, abi)

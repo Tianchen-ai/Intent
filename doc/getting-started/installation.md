@@ -52,20 +52,24 @@ python3 environment/install.py --backend triton --venv /path/to/venv --examples 
 |---|---|
 | triton / cutile | CUDA 主机、兼容 NVIDIA 驱动及所选 Python provider |
 | mojo | x86 主机、Mojo、C 编译器（cc）与 GNU OpenMP 运行库（libgomp.so.1）；通过 INTENT_MOJO 或 backend_options 选择 Mojo 编译器 |
-| weft | RISC-V 主机、匹配的 Weft Python 包、原生 weft-compile 与 C 编译器 |
+| weft | x86/RISC-V 主机、支持 Canonical `.weftir` 的完整 Triton–Weft 发行包、匹配的 weft-core 原生 SDK 及 CPU 工具链 |
 | bangc | MLU370 主机与 NeuWare 的 CNRT/CNCC |
+| triton_ascend | 昇腾 NPU 主机、匹配的 CANN、torch-npu 与正式 Triton–Ascend 发行包 |
 
 源码安装保留前面的 SDK 参数；构建 Weft 时加入 canonical library 参数，再选择后端附加参数：
 
 ```bash
 # install.py 的对应附加参数：
-# --backend mojo --provider-compiler /path/to/mojo
-# --backend weft --provider-compiler /path/to/native/weft-compile
-# --backend bangc --neuware /path/to/neuware
+# --backend mojo --target-option 'compiler="/path/to/mojo"'
+# --backend weft
+# --backend bangc --target-option 'neuware="/path/to/neuware"'
+# --backend triton_ascend
 ```
 
-Weft 使用正式 NativeTarget 与扩展目录；用户选择 CPU 集合和线程预算，
-不手填 ISA/VLEN。执行机应安装匹配的 Weft 包，不能仅加载其他主机生成的库来代替本机 JIT。
+Weft 使用完整 Triton–Weft JIT：Intent 生成 Canonical `.weftir`，交给
+`triton.compile` 编译、缓存和导出原生任务入口，再按作者任务阶段执行。用户选择
+CPU 集合和线程预算，不手填 ISA/VLEN；Intent 拥有任务调度，provider 的单任务入口不再派发另一层线程池。
+执行机必须安装支持该输入格式的发行包，旧 `weft-compile` 不替代这条路径。
 BANG C 查询 CNRT 的实际资源；不支持的架构会准确拒绝，不伪装成 MLU370。
 普通 JIT 的 shape/stride specialization 来自实际输入 buffer。
 
@@ -81,8 +85,14 @@ run = intent.jit(definition, backend="mojo",
 ```
 
 doctor 使用相同的本机目标解析，例如
-`intent doctor --target weft --target-option 'compiler="/path/to/weft-compile"'`。
+`intent doctor --target weft`。Weft 的显式工具链选项通过
+`backend_options={"options": {...}}` 传给 Triton–Weft 的正式选项解析器。
 独立产品使用自己的 INTENT_CACHE_DIR/XDG 缓存；仅在 Bench 启动时由 Bench 重定向。
+
+NVIDIA Triton、Triton–Weft 与 Triton–Ascend 都提供 `triton` Python 包。
+为这些发行包使用独立虚拟环境；不要在一个环境反复覆盖安装，或修改 `sys.path`、全局 driver 来切换。
+每个环境正常安装 Intent 与相应 provider，选择实际设备后由 `intent doctor` 检查工具链。
+Triton–Ascend 直接消费 Block 程序，硬件查询读取实际架构和 Cube/Vector 核数；不把兼容 API 的共享内存占位字段当成物理容量。
 
 ## 构建分发包
 

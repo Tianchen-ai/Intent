@@ -37,10 +37,10 @@ def main() -> None:
     parser.add_argument("--jobs", type=int, default=4)
     parser.add_argument("--examples", action="store_true", help="Install portable NumPy/BF16/FP8 inputs for the thirty public programs")
     parser.add_argument("--torch-index-url", help="Override the selected backend's PyTorch wheel index")
-    parser.add_argument("--provider-compiler", type=Path, help="Existing Mojo, Weft, or BANG C compiler")
+    parser.add_argument("--target-option", action="append", default=[], metavar="NAME=JSON",
+                        help="Provider-owned local discovery/toolchain option, passed to doctor")
     parser.add_argument("--weft-source-dir", type=Path)
     parser.add_argument("--weft-binary-dir", type=Path)
-    parser.add_argument("--neuware", type=Path, help="Existing NeuWare SDK for BANG C")
     args = parser.parse_args()
     selected = BACKENDS[args.backend]
     if sys.platform != "linux":
@@ -49,8 +49,6 @@ def main() -> None:
         parser.error("--jobs must be positive")
     if bool(args.weft_source_dir) != bool(args.weft_binary_dir):
         parser.error("provide both --weft-source-dir and --weft-binary-dir")
-    if args.neuware and args.backend != "bangc":
-        parser.error("--neuware requires --backend bangc")
     if args.torch_index_url and selected["torch"] is None:
         parser.error("this backend does not install PyTorch")
     if args.wheel is not None:
@@ -67,9 +65,15 @@ def main() -> None:
             if not (directory / filename).is_file():
                 parser.error(f"{filename} not found in {directory}; select an LLVM/MLIR 20 build SDK or --wheel")
     options = {}
+    for value in args.target_option:
+        name, separator, encoded = value.partition("=")
+        if not separator or not name or name in options:
+            parser.error("--target-option requires distinct NAME=JSON entries")
+        try:
+            options[name] = json.loads(encoded)
+        except json.JSONDecodeError as error:
+            parser.error(str(error))
     extra_cmake = []
-    if args.wheel is None and args.backend == "weft" and args.weft_source_dir is None:
-        parser.error("Weft source builds require --weft-source-dir and --weft-binary-dir for the linked canonical IR library")
     if args.wheel is None and args.weft_source_dir is not None:
         source, build = args.weft_source_dir.expanduser().resolve(), args.weft_binary_dir.expanduser().resolve()
         for path in (source / "include/Weft/Dialect/Kernel/IR/KernelDialect.h",
@@ -78,31 +82,6 @@ def main() -> None:
                 parser.error(f"Weft source/build is incomplete: {path}")
         extra_cmake = [f"--config-settings=cmake.define.INTENT_WEFT_SOURCE_DIR={source}",
                        f"--config-settings=cmake.define.INTENT_WEFT_BINARY_DIR={build}"]
-    if args.backend == "mojo":
-        compiler = args.provider_compiler or os.environ.get("INTENT_MOJO")
-        if compiler is None:
-            parser.error("Mojo must already be installed; provide --provider-compiler or INTENT_MOJO")
-        resolved = shutil.which(os.path.expanduser(str(compiler)))
-        if resolved is None:
-            parser.error(f"Mojo compiler is not executable: {compiler}")
-        options["compiler"] = str(Path(resolved).resolve())
-    elif args.backend == "weft":
-        compiler = args.provider_compiler or os.environ.get("INTENT_WEFT_COMPILER") or "weft-compile"
-        resolved = shutil.which(os.path.expanduser(str(compiler)))
-        if resolved is None:
-            parser.error("Weft local JIT needs a native weft-compile; provide --provider-compiler")
-        options["compiler"] = resolved
-    elif args.backend == "bangc":
-        if args.neuware is None:
-            parser.error("BANG C requires an existing SDK selected by --neuware")
-        sdk = args.neuware.expanduser().resolve()
-        compiler = args.provider_compiler or sdk / "bin/cncc"
-        resolved = shutil.which(os.path.expanduser(str(compiler)))
-        if resolved is None or not (sdk / "lib64/libcnrt.so").is_file():
-            parser.error("NeuWare must supply an executable cncc and lib64/libcnrt.so")
-        options.update(neuware=str(sdk), compiler=str(Path(resolved).resolve()))
-    elif args.provider_compiler or args.neuware:
-        parser.error("external compiler/SDK flags apply only to their selected CPU or MLU backend")
     destination = (args.venv or Path(f".venv-{args.backend}")).expanduser().resolve()
     if destination.exists() and not (destination / "pyvenv.cfg").is_file():
         parser.error(f"{destination} exists but is not a virtual environment")

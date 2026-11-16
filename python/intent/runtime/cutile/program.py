@@ -2,8 +2,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from ..artifact import CompiledArtifact
-from ..gpu.expressions import evaluate_shape
-from ..gpu.program import LaunchResult, materialize_gpu_program
+from ..block.expressions import evaluate_shape
+from ..block.program import LaunchResult, materialize_block_program
 from ..tuning import TuningState
 from ..diagnostics import CacheObservation, CandidateObservation, bindings, observation, unavailable_resources
 from intent.compiler.toolchain import CompilationStageError
@@ -273,12 +273,16 @@ def materialize_cutile_artifact(
     *,
     source_path: Path | None = None,
 ) -> CompiledArtifact:
-    return materialize_gpu_program(
+    import torch
+    from functools import partial
+    from ..cuda import device_context
+    selected = torch.device("cuda", device)
+    return materialize_block_program(
         provider_name="cutile", provider_type=lambda *args: CuTileProgram(*args, source=source), contract=contract,
         source=source,
         source_path=source_path,
         module_text=module_text,
         entry_name=entry_name,
-        device=device,
+        device=selected, device_context=partial(device_context, selected),
         backend_ir_collector=None,
     )

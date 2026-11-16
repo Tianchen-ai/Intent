@@ -13,6 +13,7 @@
 #include "Intent/Target/Triton/IR/Configuration.h"
 #include "Intent/Target/Triton/IR/Program.h"
 #include "Intent/Target/Triton/IR/TritonOps.h"
+#include "Intent/Target/Triton/IR/Target.h"
 #include "Intent/Target/Triton/Analysis/Program.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -299,8 +300,6 @@ private:
     for (auto [index, metadata] : llvm::enumerate(metadataArguments))
       line(metadata.name + ": tl.constexpr = " + metadataArgument + "[" +
            std::to_string(index) + "]");
-    line(configuration.warps.getValue().str() +
-         ": tl.constexpr = tl.extra.cuda.num_warps()");
     emitBlock(kernel.getBody().front());
     output << "\n";
   }
@@ -650,7 +649,7 @@ private:
 
   LogicalResult emitMetadata(std::string &metadata) {
     auto artifact = block::serializeInterface(
-        kernel, "triton", [&](Value value) { return valueString(value); });
+        kernel, targetInterface(targetOf(kernel))->provider(), [&](Value value) { return valueString(value); });
     if (mlir::failed(artifact)) return failure();
     llvm::json::Object details{{"kernel", "_intent_kernel"}};
     llvm::json::Array kernelParameters;

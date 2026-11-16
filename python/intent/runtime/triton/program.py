@@ -4,8 +4,8 @@ from math import isfinite
 from pathlib import Path
 
 from ..artifact import CompiledArtifact
-from ..gpu.expressions import evaluate_shape
-from ..gpu.program import LaunchResult, materialize_gpu_program
+from ..block.expressions import evaluate_shape
+from ..block.program import LaunchResult, materialize_block_program
 from ..tuning import TuningState
 from ..diagnostics import CacheObservation, CandidateObservation, CandidateRecorder, bindings, observation, resource, unavailable_resources
 from intent.compiler.toolchain import CompilationStageError
@@ -13,7 +13,7 @@ from intent.compiler.toolchain import CompilationStageError
 
 class TuningHooks:
     def __init__(self, names: tuple[str, ...], writable: tuple[bool, ...],
-                 readable: tuple[bool, ...]):
+                 readable: tuple[bool, ...], benchmark):
         self.names = names
         self.writable = writable
         self.readable = readable
@@ -21,6 +21,7 @@ class TuningHooks:
         self.observe_trial = None
         self._observed_arguments = None
         self._measurement = None
+        self._benchmark = benchmark
 
     def __enter__(self):
         return self
@@ -75,58 +76,22 @@ class TuningHooks:
                 self.state.restore(self.readable)
 
     def benchmark(self, function, quantiles):
-        import torch
-        from triton.runtime import driver
-
-        # Complete lazy initialization before capture. State restoration and
-        # cache eviction are graph nodes outside the per-call timing events.
-        function()
-        cache = driver.active.get_empty_cache_for_benchmark()
-        start = torch.cuda.Event(enable_timing=True, external=True)
-        end = torch.cuda.Event(enable_timing=True, external=True)
-        stream = torch.cuda.Stream()
-        stream.wait_stream(torch.cuda.current_stream())
-        try:
-            self._measurement = cache, start, end
-            with torch.cuda.stream(stream):
-                graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph, stream=stream):
-                    function()
-                samples = []
-                for _ in range(33):
-                    graph.replay()
-                    end.synchronize()
-                    samples.append(start.elapsed_time(end))
-                stream.synchronize()
-            values = torch.tensor(samples[1:], dtype=torch.float64, device="cpu")
-            return values.quantile(torch.tensor(quantiles, dtype=torch.float64,
-                                                device="cpu")).tolist()
-        finally:
-            self._measurement = None
-            torch.cuda.current_stream().wait_stream(stream)
-
-
-def _descriptor_allocator(size, alignment, stream):
-    import torch
-
-    buffer = torch.empty(size, dtype=torch.int8, device="cuda")
-    if buffer.data_ptr() % alignment:
-        raise RuntimeError("Triton descriptor allocator returned a misaligned buffer")
-    return buffer
+        return self._benchmark(self, function, quantiles)
 
 
 class TritonProgram:
-    def __init__(self, interface, namespace: dict, facts, target: dict) -> None:
+    def __init__(self, interface, namespace: dict, facts, target: dict, *, device) -> None:
         import triton
 
         self.interface = interface
         self.configurations = interface.configuration_space
         self.facts = facts
         self.target = bindings(target)
+        self.device = device
         self.descriptors = facts.descriptors
         self.hooks = TuningHooks(tuple(view.kernel_name for view in interface.public_views),
                                  tuple(view.writable for view in interface.public_views),
-                                 tuple(view.access != 1 for view in interface.public_views))
+                                 tuple(view.access != 1 for view in interface.public_views), device.benchmark)
         kernel_parameters = tuple(name for name in facts.kernel_parameters
                                   if name not in self.configurations.coverage_names)
         native_options = dict(facts.native_options)
@@ -272,8 +237,8 @@ class TritonProgram:
         last_error = None
 
         def details(stage):
-            return observation("triton", self.target, invocation.description, None,
-                unavailable_resources("triton", "Compilation did not select or load an execution winner"),
+            return observation(self.device.name, self.target, invocation.description, None,
+                unavailable_resources(self.device.name, "Compilation did not select or load an execution winner"),
                 records, stage=stage,
                 caches=(CacheObservation("native_compilation", "sdk", None, "Triton JIT warmup",
                                          "native_compilation", "The SDK does not expose this cache decision"),))
@@ -288,10 +253,10 @@ class TritonProgram:
 
                 def warmup():
                     if self.facts.allocator:
-                        triton.set_allocator(_descriptor_allocator)
+                        triton.set_allocator(self.device.allocate_descriptor)
                     return self.kernel.fn.warmup(
                         *arguments, grid=evaluate_shape(self.interface.grid, {**values, **row}),
-                        **coverage, **config.all_kwargs(), enable_fp_fusion=True, enable_reflect_ftz=False)
+                        **coverage, **config.all_kwargs(), **self.device.compile_options)
 
                 try:
                     copy_context().run(warmup) if self.facts.allocator else warmup()
@@ -338,10 +303,9 @@ class TritonProgram:
 
         def execute():
             if self.facts.allocator:
-                triton.set_allocator(_descriptor_allocator)
+                triton.set_allocator(self.device.allocate_descriptor)
             with self.hooks:
-                return self.kernel[grid](*arguments, **coverage,
-                                         enable_fp_fusion=True, enable_reflect_ftz=False)
+                return self.kernel[grid](*arguments, **coverage, **self.device.compile_options)
 
         def invoke():
             previous = self.hooks.observe_trial
@@ -353,13 +317,13 @@ class TritonProgram:
                 return copy_context().run(execute) if self.facts.allocator else execute()
             except CompilationStageError as error:
                 if error.observation is None:
-                    error.observation = observation("triton", self.target, invocation.description, None,
-                        unavailable_resources("triton", "No loaded kernel was returned by the failed invocation"),
+                    error.observation = observation(self.device.name, self.target, invocation.description, None,
+                        unavailable_resources(self.device.name, "No loaded kernel was returned by the failed invocation"),
                         candidate_history(), stage="failed")
                 raise
             except Exception as error:
-                details = observation("triton", self.target, invocation.description, None,
-                    unavailable_resources("triton", "The invocation did not return a loaded native kernel"),
+                details = observation(self.device.name, self.target, invocation.description, None,
+                    unavailable_resources(self.device.name, "The invocation did not return a loaded native kernel"),
                     candidate_history(), stage="failed")
                 raise CompilationStageError("provider_invocation", str(error), observation=details) from error
             finally:
@@ -379,8 +343,8 @@ class TritonProgram:
                 elapsed = samples[0] if isinstance(samples, (tuple, list)) else samples
                 if isinstance(elapsed, (int, float)) and isfinite(elapsed):
                     recorder.timing(self._trial_configuration(candidate.all_kwargs()), float(elapsed))
-        details = observation("triton", self.target, invocation.description,
-                              bindings(self.configurations.bound_configuration(invocation.values, config)), _native_resources(compiled),
+        details = observation(self.device.name, self.target, invocation.description,
+                              bindings(self.configurations.bound_configuration(invocation.values, config)), self.device.resources(compiled),
                               candidate_history(), history_unavailable=None if history else
                               "No tuning trial callbacks occurred in this invocation; only the selected kernel was observed",
                               caches=(CacheObservation("tuning", "provider", False if history else None,
@@ -401,7 +365,7 @@ class TritonProgram:
 
         def execute_bound():
             if self.facts.allocator:
-                triton.set_allocator(_descriptor_allocator)
+                triton.set_allocator(self.device.allocate_descriptor)
             native_launch()
 
         def replay():
@@ -441,21 +405,6 @@ def _collect_triton_ir(compiled_kernel: object) -> dict[str, str]:
     return result
 
 
-def _native_resources(kernel):
-    metadata = kernel.metadata
-    fields = (
-        ("registers_per_thread", getattr(kernel, "n_regs", None), "registers", "CompiledKernel.n_regs", "native_loading"),
-        # NVIDIA load_binary reports CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES / 4.
-        ("local_memory_words_per_thread", getattr(kernel, "n_spills", None), "32-bit words",
-         "CompiledKernel.n_spills (CUDA LOCAL_SIZE_BYTES / 4)", "native_loading"),
-        ("shared_memory_bytes", getattr(metadata, "shared", None), "bytes", "CompiledKernel.metadata.shared", "native_compilation"),
-        ("max_threads_per_block", getattr(kernel, "n_max_threads", None), "threads", "CompiledKernel.n_max_threads", "native_loading"),
-    )
-    return tuple(resource(name, value, unit, "triton." + source, stage,
-                          unavailable="The selected Triton compiled kernel does not expose this field")
-                 for name, value, unit, source, stage in fields)
-
-
 def materialize_triton_artifact(
     source: str,
     module_text: str,
@@ -465,12 +414,17 @@ def materialize_triton_artifact(
     *,
     source_path: Path | None = None,
 ) -> CompiledArtifact:
-    return materialize_gpu_program(
-        provider_name="triton", provider_type=TritonProgram, contract=contract,
+    import torch
+    from functools import partial
+    from ..cuda import device_context
+    from .cuda import CUDADevice
+    selected = torch.device("cuda", device)
+    return materialize_block_program(
+        provider_name="triton", provider_type=partial(TritonProgram, device=CUDADevice()), contract=contract,
         source=source,
         module_text=module_text,
         entry_name=entry_name,
-        device=device,
+        device=selected, device_context=partial(device_context, selected),
         backend_ir_collector=_collect_triton_ir,
         source_path=source_path,
     )

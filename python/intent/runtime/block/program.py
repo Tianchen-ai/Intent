@@ -10,7 +10,7 @@ from ..artifact import CompiledArtifact
 from ..diagnostics import ConfigurationAssessment, NativeObservation, ObservedCall, resolve_observation
 from intent.compiler.toolchain import CompilationStageError
 from ..source import load_python_source
-from .interface import BoundInvocation, GPUInterface
+from .interface import BoundInvocation, BlockInterface
 
 
 @dataclass(slots=True)
@@ -33,7 +33,7 @@ class Provider(Protocol):
 class PreparedCall(ObservedCall):
     """A call bound to these tensors and scalars, including invocation-owned workspace."""
 
-    def __init__(self, program: GPUProgram, invocation: BoundInvocation) -> None:
+    def __init__(self, program: BlockProgram, invocation: BoundInvocation) -> None:
         self.program = program
         self.invocation = invocation
         self._launch: LaunchResult | None = None
@@ -53,10 +53,8 @@ class PreparedCall(ObservedCall):
 
     def compile(self) -> None:
         """Compile this binding's eligible candidates without tuning or launching."""
-        import torch
-
         try:
-            with self.program.invocation_context(), torch.cuda.device(self.program.device):
+            with self.program.invocation_context(), self.program.device_context():
                 details = self.program.provider.compile(self.invocation)
         except CompilationStageError as error:
             self._record_observation(error.observation)
@@ -66,14 +64,8 @@ class PreparedCall(ObservedCall):
         self._record_observation(details)
 
     def launch(self) -> None:
-        import torch
-
-        with self.program.invocation_context():
-            if torch.cuda.current_device() != self.program.device:
-                with torch.cuda.device(self.program.device):
-                    self._invoke()
-            else:
-                self._invoke()
+        with self.program.invocation_context(), self.program.device_context():
+            self._invoke()
 
     def _invoke(self):
         replay = self._launch is not None and self._launch.replay is not None
@@ -92,11 +84,12 @@ class PreparedCall(ObservedCall):
     __call__ = launch
 
 
-class GPUProgram:
-    def __init__(self, interface: GPUInterface, provider: Provider, device: int) -> None:
+class BlockProgram:
+    def __init__(self, interface: BlockInterface, provider: Provider, device, device_context) -> None:
         self.interface = interface.public
         self.binding = interface
         self.device = device
+        self.device_context = device_context
         self.provider = provider
         self.artifact: CompiledArtifact | None = None
         self._observation: NativeObservation | None = None
@@ -108,7 +101,7 @@ class GPUProgram:
 
     def prepare(self, *arguments, outputs: tuple | None = None,
                 explicit_outputs: bool = False) -> PreparedCall:
-        with self.invocation_context():
+        with self.invocation_context(), self.device_context():
             invocation = self.binding.bind(arguments, device=self.device, outputs=outputs, explicit_outputs=explicit_outputs)
         return PreparedCall(self, invocation)
 
@@ -131,9 +124,9 @@ class GPUProgram:
         return self.provider.tuning_configurations(invocation)
 
 
-def materialize_gpu_program(*, provider_name: str, provider_type, source: str,
+def materialize_block_program(*, provider_name: str, provider_type, source: str,
                             module_text: str, contract, entry_name: str,
-                            device: int, backend_ir_collector=None,
+                            device, device_context, backend_ir_collector=None,
                             source_path: Path | None = None) -> CompiledArtifact:
     if contract.provider != provider_name:
         raise ValueError(f"{provider_name} runtime cannot load {contract.provider} metadata")
@@ -141,8 +134,9 @@ def materialize_gpu_program(*, provider_name: str, provider_type, source: str,
     namespace = load_python_source(target_name=provider_name, source=source, entry_name=entry_name,
                                    source_path=source_path)
     provider = provider_type(interface, namespace, contract.facts, contract.metadata["target"])
-    program = GPUProgram(interface, provider, device)
-    artifact = CompiledArtifact(source=source, mlir=module_text, device=device,
+    program = BlockProgram(interface, provider, device, device_context)
+    artifact = CompiledArtifact(source=source, mlir=module_text, device=device.index,
+                                device_type=device.type,
                                 runtime=program,
                                 _backend_ir_collector=backend_ir_collector)
     program.artifact = artifact

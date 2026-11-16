@@ -60,7 +60,7 @@ class OverlapBinding:
 
 @dataclass(slots=True)
 class BoundInvocation:
-    interface: GPUInterface
+    interface: BlockInterface
     arguments: tuple
     outputs: tuple
     values: dict[int | str, object]
@@ -78,8 +78,8 @@ class BoundInvocation:
         return invocation_result(self.outputs)
 
 
-class GPUInterface:
-    """Bind public parameters to the final GPU program's physical arguments."""
+class BlockInterface:
+    """Bind public parameters to the final Block program's physical arguments."""
 
     def __init__(self, metadata: dict) -> None:
         self.public = PublicInterface.read(metadata["interface"])
@@ -237,26 +237,22 @@ class GPUInterface:
         return values
 
     @staticmethod
-    def _observe_view(device: int, parameter: ViewParameter, value):
-        import torch
-        return observe_view(parameter, value, device=torch.device("cuda", device))
+    def _observe_view(device, parameter: ViewParameter, value):
+        return observe_view(parameter, value, device=device)
 
     @staticmethod
-    def _allocate_output(device: int, parameter: ViewParameter, shape: tuple):
-        import torch
-        return allocate_output(parameter, shape, device=torch.device("cuda", device))
+    def _allocate_output(device, parameter: ViewParameter, shape: tuple):
+        return allocate_output(parameter, shape, device=device)
 
     @staticmethod
-    def _observe_abstract_view(device: int, parameter: ViewParameter, value):
-        import torch
-        return observe_view(parameter, value, device=torch.device("cuda", device), abstract=True)
+    def _observe_abstract_view(device, parameter: ViewParameter, value):
+        return observe_view(parameter, value, device=device, abstract=True)
 
     @staticmethod
-    def _allocate_abstract_output(device: int, parameter: ViewParameter, shape: tuple):
-        import torch
-        return allocate_output(parameter, shape, device=torch.device("cuda", device), abstract=True)
+    def _allocate_abstract_output(device, parameter: ViewParameter, shape: tuple):
+        return allocate_output(parameter, shape, device=device, abstract=True)
 
-    def bind(self, arguments: tuple, *, device: int, outputs: tuple | None = None,
+    def bind(self, arguments: tuple, *, device, outputs: tuple | None = None,
              explicit_outputs: bool = False, abstract: bool = False) -> BoundInvocation:
         import torch
 
@@ -270,7 +266,7 @@ class GPUInterface:
         values = {self._public_bindings[position].id: value for position, value in enumerate(public.arguments)}
         from ..diagnostics import invocation_arguments
         description = () if abstract else invocation_arguments(
-            self.public, public.arguments, public.views, f"cuda:{device}")
+            self.public, public.arguments, public.views, str(device))
         result = BoundInvocation(self, public.arguments, public.outputs, values, description)
         if abstract:
             return result
@@ -282,7 +278,7 @@ class GPUInterface:
                 values[entry.name] = entry.select(values)
             else:
                 values[entry.id] = torch.empty(evaluate_shape(entry.shape, values), dtype=torch_dtype(entry.dtype),
-                                               device=torch.device("cuda", device))
+                                               device=device)
         spans = {}
         for overlap in self.overlaps:
             pair = []

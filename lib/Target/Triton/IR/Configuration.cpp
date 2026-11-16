@@ -1,5 +1,5 @@
 #include "Intent/Target/Triton/IR/Configuration.h"
-#include "Intent/Target/NVIDIA/IR/Target.h"
+#include "Intent/Target/Triton/IR/Target.h"
 #include "Intent/Target/Triton/IR/TritonOps.h"
 #include "Intent/Dialect/Block/IR/Program.h"
 #include "Intent/Dialect/Block/Analysis/ProgramInterface.h"
@@ -15,20 +15,9 @@ bool isLegalDeviceOption(block::ParameterRole role, int64_t value,
                          block::CapabilitiesAttr capabilities,
                          bool requiresSingleCTA) {
   if (!capabilities || value <= 0) return false;
-  auto device = dyn_cast<nvidia::DeviceAttr>(capabilities.getTarget());
-  switch (role) {
-  case block::ParameterRole::ProviderWarps:
-    return llvm::isPowerOf2_64(value) &&
-           value <= capabilities.getPreferredVectorElements() / 32;
-  case block::ParameterRole::ProviderStages:
-    return value <= std::numeric_limits<int32_t>::max();
-  case block::ParameterRole::ProviderCTAs:
-    return llvm::isPowerOf2_64(value) && value <= 16 &&
-           (!requiresSingleCTA || value == 1) &&
-           (value == 1 || (device && device.getComputeCapabilityMajor() >= 9 &&
-                          device.getComputeCapabilityMajor() != 12));
-  default: return false;
-  }
+  auto target = capabilities.getTarget();
+  auto interface = targetInterface(target);
+  return interface && interface->legalOption(target, role, value, requiresSingleCTA);
 }
 
 FailureOr<ConfigurationSchema> ConfigurationSchema::read(func::FuncOp kernel) {
@@ -124,7 +113,7 @@ FailureOr<ConfigurationSchema> ConfigurationSchema::read(func::FuncOp kernel) {
     auto parameter = cast<block::ParameterAttr>(attribute);
     if (!parameter.isExtent()) continue;
     StringAttr name = parameter.getName();
-    if (name == result.warps || name == result.ctas ||
+    if (name == result.ctas ||
         (name == result.stages && !stagesInKernel))
       continue;
     result.kernelParameters.push_back(name);

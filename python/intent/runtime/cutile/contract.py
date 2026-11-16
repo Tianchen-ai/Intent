@@ -4,9 +4,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..contract import integer_field, name_field, object_field, sequence_field
-from ..gpu.contract import optional_name, require_references, view_binding, native_names
-from ..gpu.expressions import Expression, read_expressions
-from ..gpu.interface import PublicArgument
+from ..block.contract import optional_name, require_references, view_binding, native_names
+from ..block.expressions import Expression, read_expressions
+from ..block.interface import PublicArgument
 
 
 @dataclass(frozen=True, slots=True)

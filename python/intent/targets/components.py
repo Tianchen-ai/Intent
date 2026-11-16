@@ -6,4 +6,5 @@ COMPONENTS = {
     "mojo": "intent.targets.mojo",
     "weft": "intent.targets.weft",
     "bangc": "intent.targets.bangc",
+    "triton_ascend": "intent.targets.ascend",
 }
