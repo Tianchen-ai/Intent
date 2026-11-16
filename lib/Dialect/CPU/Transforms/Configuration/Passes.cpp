@@ -1,5 +1,6 @@
 #include "../PassSupport.h"
 #include "Intent/Dialect/CPU/Transforms/Configuration/Configuration.h"
+#include "mlir/AsmParser/AsmParser.h"
 
 using namespace mlir;
 
@@ -17,10 +18,7 @@ public:
   using CPUConfigureTargetBase::CPUConfigureTargetBase;
   void runOnOperation() final {
     auto module = getOperation();
-    auto capabilities = CapabilitiesAttr::getChecked(
-        [&]() { return module.emitError(); }, module.getContext(),
-        vectorBits.getValue(), workers.getValue(), privateBytes.getValue(),
-        matrixI8I32.getValue(), matrixBF16F32.getValue());
+    auto capabilities = dyn_cast_or_null<CapabilitiesAttr>(parseAttribute(target, &getContext()));
     if (!capabilities)
       return signalPassFailure();
     module->setAttr("intent_cpu.capabilities", capabilities);

@@ -7,6 +7,7 @@ import os
 from .provider import EnvironmentCheck, LocalExecution, Provider
 from .execution import cpu_key, cpu_workers
 from .specification import CPUCompilationTarget, read_cpu_target, require_matching_target
+from .cpu import VectorCapabilities, ContractionCapability, ExecutionConfig
 
 INSTALLATION = {
     "modules": ("triton", "weft_core"), "requirements": (), "torch": None,
@@ -65,7 +66,9 @@ class WeftTarget:
             options["private_stack_bytes"] = self.private_bytes
         WeftBackend(native).parse_options(options)
         return ResolvedWeftTarget(
-            CPUCompilationTarget("weft", vector_bits, workers, matrix_i8_i32, self.private_bytes),
+            CPUCompilationTarget("weft", VectorCapabilities(vector_bits, native.arch == "riscv64"),
+                (ContractionCapability("i8", "i8", "i32", False),) if matrix_i8_i32 else (),
+                ExecutionConfig(workers, self.private_bytes)),
             native, tuple(sorted(os.sched_getaffinity(0))), options)
 
 

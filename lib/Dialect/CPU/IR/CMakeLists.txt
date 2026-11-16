@@ -5,6 +5,7 @@ add_mlir_dialect_library(MLIRIntentCPUDialect
   CollectiveHelpers.cpp
   ShapeRelations.cpp
   CPUOpInterfaces.cpp
+  Target.cpp
   DEPENDS IntentCPUIncGen
   LINK_LIBS PUBLIC
   MLIRIntentDialect

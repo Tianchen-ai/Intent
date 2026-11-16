@@ -7,6 +7,7 @@
 #include "Intent/Dialect/CPU/Transforms/Passes.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Support/Path.h"
+#include "mlir/AsmParser/AsmParser.h"
 
 using namespace mlir;
 
@@ -15,18 +16,41 @@ namespace intent::compiler {
 LogicalResult configureCPUTarget(ModuleOp module, Request &request) {
   module.getContext()->getOrLoadDialect<cpu::IntentCPUDialect>();
   auto options = readTargetOptions(module, request,
-      {"vector_bits", "workers", "private_bytes", "matrix_i8_i32", "matrix_bf16_f32"});
+      {"vector", "contractions", "execution"});
   if (failed(options)) return failure();
+  auto vector = options->getObject("vector"), execution = options->getObject("execution");
+  auto contractions = options->getArray("contractions");
+  if (!vector || vector->size() != 2 || !execution || execution->size() != 2 || !contractions)
+    return module.emitError("CPU target requires vector facts, a contraction catalog and separate execution budgets");
   int64_t vectorBits, workers, privateBytes;
-  bool matrixI8I32, matrixBF16F32;
-  if (failed(readIntegerOption(module, *options, "vector_bits", vectorBits)) ||
-      failed(readIntegerOption(module, *options, "workers", workers)) ||
-      failed(readIntegerOption(module, *options, "private_bytes", privateBytes)) ||
-      failed(readBooleanOption(module, *options, "matrix_i8_i32", matrixI8I32)) ||
-      failed(readBooleanOption(module, *options, "matrix_bf16_f32", matrixBF16F32)))
+  bool scalable;
+  if (failed(readIntegerOption(module, *vector, "minimum_bits", vectorBits)) ||
+      failed(readBooleanOption(module, *vector, "scalable", scalable)) ||
+      failed(readIntegerOption(module, *execution, "workers", workers)) ||
+      failed(readIntegerOption(module, *execution, "private_bytes", privateBytes)))
     return failure();
+  SmallVector<Attribute> catalog;
+  for (auto &item : *contractions) {
+    auto value = item.getAsObject();
+    if (!value || value->size() != 4 || !value->getString("lhs") ||
+        !value->getString("rhs") || !value->getString("accumulator") || !value->getBoolean("flush_subnormals"))
+      return module.emitError("CPU contraction capability requires exact lhs/rhs/accumulator types and subnormal behavior");
+    auto lhs = parseType(*value->getString("lhs"), module.getContext());
+    auto rhs = parseType(*value->getString("rhs"), module.getContext());
+    auto accumulator = parseType(*value->getString("accumulator"), module.getContext());
+    if (!lhs || !rhs || !accumulator) return failure();
+    auto capability = cpu::ContractionCapabilityAttr::getChecked([&] { return module.emitError(); },
+        module.getContext(), lhs, rhs, accumulator, *value->getBoolean("flush_subnormals"));
+    if (!capability) return failure();
+    catalog.push_back(capability);
+  }
+  auto vectorAttr = cpu::VectorCapabilitiesAttr::getChecked([&] { return module.emitError(); },
+      module.getContext(), vectorBits, scalable);
+  auto executionAttr = cpu::ExecutionConfigAttr::getChecked([&] { return module.emitError(); },
+      module.getContext(), workers, privateBytes);
+  if (!vectorAttr || !executionAttr) return failure();
   request.target = cpu::CapabilitiesAttr::getChecked([&] { return module.emitError(); },
-      module.getContext(), vectorBits, workers, privateBytes, matrixI8I32, matrixBF16F32);
+      module.getContext(), vectorAttr, ArrayAttr::get(module.getContext(), catalog), executionAttr);
   return success(static_cast<bool>(request.target));
 }
 
@@ -43,13 +67,12 @@ void CPUBackend::buildShared(OpPassManager &manager, const Request &request, Str
   llvm::sys::path::append(filename, files[0]);
   options.defaults = std::string(filename);
   options.overrides = request.tuningConfig;
-  auto target = cast<cpu::CapabilitiesAttr>(request.target);
-  options.vectorBits = target.getVectorBits();
-  options.workers = target.getWorkers();
-  options.matrixI8I32 = target.getMatrixI8I32();
-  options.matrixBF16F32 = target.getMatrixBF16F32();
-  options.privateBytes = target.getPrivateBytes();
-  cpu::buildCPUPipeline(manager, options);
+  std::string target;
+  llvm::raw_string_ostream stream(target);
+  request.target.print(stream);
+  options.target = target;
+  cpu::buildCPUValuePipeline(manager, options);
+  pipeline(manager, options);
 }
 
 LogicalResult CPUBackend::verifySharedInput(ModuleOp module, const Request &request, StringRef provider) const {

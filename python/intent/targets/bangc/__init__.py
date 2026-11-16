@@ -8,15 +8,16 @@ import os
 import shutil
 from typing import TYPE_CHECKING
 
-from .provider import EnvironmentCheck, LocalExecution, Provider
-from .execution import indexed_key, indexed_target
+from ..provider import EnvironmentCheck, LocalExecution, Provider
+from ..execution import indexed_key, indexed_target
 from .specification import read_bangc_target
 
 INSTALLATION = {
     "modules": (), "requirements": (), "torch": None, "torch_index": None,
     "python_max": (3, 12), "toolchain": "An explicitly installed NeuWare SDK and MLU370 runtime",
 }
-from .specification import DSACompilationTarget, require_matching_target
+from .specification import BangCCompilationTarget
+from ..specification import require_matching_target
 
 if TYPE_CHECKING:
     from intent.runtime import CompiledArtifact
@@ -24,7 +25,7 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class ResolvedBangCTarget:
-    compilation: DSACompilationTarget
+    compilation: BangCCompilationTarget
     device: int
     neuware: str
     compiler: str | None
@@ -49,7 +50,7 @@ class BangCTarget:
     def from_program(cls, program, *, device: int, neuware: str | Path,
                      compiler: str | Path | None = None) -> BangCTarget:
         """Select a local runtime while retaining this program's DSA construction bindings."""
-        if not isinstance(program.target, DSACompilationTarget):
+        if not isinstance(program.target, BangCCompilationTarget):
             raise ValueError("a BANG C runtime requires a DSA generated program")
         fields = asdict(program.target)
         fields.pop("capabilities")
@@ -62,10 +63,10 @@ class BangCTarget:
             raise ValueError("BANG C device must be a nonnegative integer")
         shapes = tuple(sorted((name, tuple(shape)) for name, shape in (self.shapes or {}).items()))
         strides = tuple(sorted((name, tuple(values)) for name, values in (self.strides or {}).items()))
-        from .mlu import resolve_mlu_device
+        from .discovery import resolve_mlu_device
         neuware = str(Path(self.neuware).expanduser().resolve())
         capabilities = resolve_mlu_device(self.device, neuware)
-        compilation = DSACompilationTarget(
+        compilation = BangCCompilationTarget(
             self.architecture, shapes, strides, capabilities)
         return ResolvedBangCTarget(
             compilation, self.device, str(Path(self.neuware).expanduser().resolve()),

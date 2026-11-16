@@ -18,6 +18,7 @@ INSTALLATION = {
     "toolchain": "An explicitly installed Mojo compiler, C compiler and GNU OpenMP runtime (libgomp.so.1); Linux x86-64 AVX2/AVX512",
 }
 from .specification import CPUCompilationTarget, require_matching_target
+from .cpu import VectorCapabilities, ContractionCapability, ExecutionConfig
 
 if TYPE_CHECKING:
     from intent.runtime import CompiledArtifact
@@ -125,9 +126,13 @@ class MojoTarget:
         else:
             raise NotImplementedError("Mojo CPU currently requires AVX2 or AVX512")
         integer_matrix, bfloat_matrix = _enable_matrices(feature_set, flags[cpus[0]])
-        compilation = CPUCompilationTarget("mojo", vector_bits, self.workers,
-            private_bytes=self.private_bytes,
-            matrix_i8_i32=integer_matrix, matrix_bf16_f32=bfloat_matrix)
+        contractions = []
+        if integer_matrix:
+            contractions.append(ContractionCapability("i8", "i8", "i32", False))
+        if bfloat_matrix:
+            contractions.append(ContractionCapability("bf16", "bf16", "f32", True))
+        compilation = CPUCompilationTarget("mojo", VectorCapabilities(vector_bits, False),
+            tuple(contractions), ExecutionConfig(self.workers, self.private_bytes))
         return ResolvedMojoTarget(executable, triple, configuration["--target-cpu"], features,
                                   compilation, self.build_threads, cpus)
 

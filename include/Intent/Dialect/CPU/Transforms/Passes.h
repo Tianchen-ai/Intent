@@ -14,14 +14,13 @@ struct CPUCompilationOptions : mlir::PassPipelineOptions<CPUCompilationOptions> 
   Option<std::string> provider{*this, "provider", llvm::cl::desc("Compiled CPU source provider")};
   Option<std::string> defaults{*this, "defaults", llvm::cl::desc("Provider default tuning profile file")};
   Option<std::string> overrides{*this, "overrides", llvm::cl::desc("Tuning profile overrides file")};
-  Option<int64_t> vectorBits{*this, "vector-bits", llvm::cl::init(0)};
-  Option<int64_t> workers{*this, "workers", llvm::cl::init(0)};
-  Option<int64_t> privateBytes{*this, "private-bytes", llvm::cl::init(262144)};
-  Option<bool> matrixI8I32{*this, "matrix-i8-i32", llvm::cl::init(false)};
-  Option<bool> matrixBF16F32{*this, "matrix-bf16-f32", llvm::cl::init(false)};
+  Option<std::string> target{*this, "target", llvm::cl::desc("Typed CPU capabilities and execution configuration")};
 };
 
-void buildCPUPipeline(mlir::OpPassManager &manager, const CPUCompilationOptions &options);
+void buildCPUValuePipeline(mlir::OpPassManager &manager, const CPUCompilationOptions &options);
+/// Requires the CPU Buffers stage. A component chooses when to materialize
+/// storage; this reusable sequence does not silently convert tensor SSA.
+void buildCPUBufferPipeline(mlir::OpPassManager &manager, const CPUCompilationOptions &options);
 
 void registerCPUPasses();
 

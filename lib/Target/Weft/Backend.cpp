@@ -11,7 +11,11 @@ namespace intent::compiler {
 Backend createWeftBackend() {
 #ifdef INTENT_HAS_WEFT_CANONICAL
   return {"weft", "weft", true,
-      std::make_shared<CPUBackend>(false, "weft.json", weft_provider::implementations()),
+      std::make_shared<CPUBackend>(false, "weft.json", weft_provider::implementations(),
+          [](mlir::OpPassManager &manager, const cpu::CPUCompilationOptions &options) {
+            manager.addPass(cpu::createCPUBufferizeValues());
+            cpu::buildCPUBufferPipeline(manager, options);
+          }),
       [](mlir::DialectRegistry &registry) {
         registry.insert<weft_provider::IntentWeftDialect, ::weft::kernel::WEFTKernelDialect>();
       }, weft_provider::registerWeftPasses,
@@ -19,7 +23,7 @@ Backend createWeftBackend() {
       weft_provider::serializeProgram, configureCPUTarget};
 #else
   return {"weft", "weft", false,
-      std::make_shared<CPUBackend>(false, "weft.json", cpu::ImplementationRegistry{}),
+      std::make_shared<CPUBackend>(false, "weft.json", cpu::ImplementationRegistry{}, nullptr),
       nullptr, nullptr, nullptr, nullptr, configureCPUTarget};
 #endif
 }

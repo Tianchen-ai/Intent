@@ -2,6 +2,7 @@
 #include "Intent/Target/Weft/IR/Program.h"
 #include "Intent/Target/Weft/IR/WeftAttrs.h"
 #include "Intent/Dialect/CPU/IR/CPUOps.h"
+#include "Intent/Dialect/CPU/IR/Target.h"
 #include "Intent/Dialect/Intent/IR/CompileOptions.h"
 #include "Intent/Serialization/NativeABI.h"
 #include "TaskABI.h"
@@ -96,12 +97,7 @@ LogicalResult serializeProgram(ModuleOp program, std::string &source, std::strin
   metadataStream << llvm::json::Value(llvm::json::Object{{"kind", "weft-generation"},
       {"provider", "weft"}, {"entry_name", candidates.front().getName()},
       {"compile_options", serializeCompileOptions(*options)},
-      {"target", llvm::json::Object{
-          {"family", "cpu"}, {"vector_bits", capabilities.getVectorBits()},
-          {"workers", capabilities.getWorkers()},
-          {"private_bytes", capabilities.getPrivateBytes()},
-          {"matrix_i8_i32", capabilities.getMatrixI8I32()},
-          {"matrix_bf16_f32", capabilities.getMatrixBF16F32()}}},
+      {"target", cpu::serializeCapabilities(capabilities)},
       {"host_source", hostSource}, {"tasks", std::move(*tasks)},
       {"interface", std::move(*parameters)}, {"candidates", std::move(configurations)},
       {"native", llvm::json::Object{{"requirements", requirements->serialize()},

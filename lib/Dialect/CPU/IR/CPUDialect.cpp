@@ -60,11 +60,50 @@ LogicalResult EntryRequirementsAttr::verify(
 }
 
 LogicalResult CapabilitiesAttr::verify(
-    llvm::function_ref<InFlightDiagnostic()> error, int64_t vectorBits,
-    int64_t workers, int64_t privateBytes, bool, bool) {
-  if (vectorBits < 32 || vectorBits % 32 || workers <= 0 || privateBytes <= 0)
-    return error() << "CPU capabilities require positive byte-addressable vector, worker and private-storage budgets";
+    llvm::function_ref<InFlightDiagnostic()> error, VectorCapabilitiesAttr vector,
+    ArrayAttr contractions, ExecutionConfigAttr execution) {
+  if (!vector || !execution || !contractions)
+    return error() << "CPU capabilities require vector facts, a contraction catalog and execution configuration";
+  for (Attribute capability : contractions)
+    if (!mlir::isa<ContractionCapabilityAttr>(capability))
+      return error() << "CPU contraction capability must preserve operand and accumulator types";
   return success();
+}
+LogicalResult VectorCapabilitiesAttr::verify(
+    llvm::function_ref<InFlightDiagnostic()> error, int64_t minimumBits, bool) {
+  if (minimumBits < 32 || minimumBits % 32)
+    return error() << "CPU vector capability requires a byte-addressable minimum width";
+  return success();
+}
+LogicalResult ExecutionConfigAttr::verify(
+    llvm::function_ref<InFlightDiagnostic()> error, int64_t workers, int64_t privateBytes) {
+  if (workers <= 0 || privateBytes <= 0)
+    return error() << "CPU execution requires positive worker and private-storage budgets";
+  return success();
+}
+LogicalResult ContractionCapabilityAttr::verify(
+    llvm::function_ref<InFlightDiagnostic()> error, Type lhs, Type rhs, Type accumulator, bool) {
+  if (!mlir::isa<IntegerType, FloatType>(lhs) || !mlir::isa<IntegerType, FloatType>(rhs) ||
+      !mlir::isa<IntegerType, FloatType>(accumulator))
+    return error() << "CPU contraction capability requires numeric element types";
+  return success();
+}
+bool CapabilitiesAttr::supportsContraction(Type lhs, Type rhs, Type accumulator) const {
+  return llvm::any_of(getContractions(), [&](Attribute attr) {
+    auto capability = mlir::cast<ContractionCapabilityAttr>(attr);
+    return capability.getLhs() == lhs && capability.getRhs() == rhs && capability.getAccumulator() == accumulator;
+  });
+}
+int64_t CapabilitiesAttr::getVectorBits() const { return getVector().getMinimumBits(); }
+int64_t CapabilitiesAttr::getWorkers() const { return getExecution().getWorkers(); }
+int64_t CapabilitiesAttr::getPrivateBytes() const { return getExecution().getPrivateBytes(); }
+bool CapabilitiesAttr::getMatrixI8I32() const {
+  auto input = IntegerType::get(getContext(), 8);
+  return supportsContraction(input, input, IntegerType::get(getContext(), 32));
+}
+bool CapabilitiesAttr::getMatrixBF16F32() const {
+  auto input = BFloat16Type::get(getContext());
+  return supportsContraction(input, input, Float32Type::get(getContext()));
 }
 
 LogicalResult ConfigurationAttr::verify(

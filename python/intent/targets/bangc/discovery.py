@@ -6,7 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 import re
 
-from .specification import DSACapabilities
+from .specification import BangCCapabilities
 
 
 @lru_cache(maxsize=None)
@@ -43,7 +43,7 @@ def resolve_mlu_device(device, neuware):
     minor = attribute("cnrtAttrComputeCapabilityMinor")
     if (major, minor) != (3, 0):
         raise NotImplementedError(f"BANG C lowering supports MLU370 (3.0), not detected capability {major}.{minor}")
-    return DSACapabilities(
+    return BangCCapabilities(
         attribute("cnrtAttrClusterCount"), attribute("cnrtAttrMcorePerCluster"),
         attribute("cnrtAttrNramSizePerMcore"), attribute("cnrtAttrWramSizePerMcore"),
         attribute("cnrtAttrSramSizePerMcore"))

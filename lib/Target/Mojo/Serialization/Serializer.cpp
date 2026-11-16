@@ -3,6 +3,7 @@
 #include "Intent/Target/Mojo/Serialization/Matrix.h"
 #include "mlir/Dialect/AMX/AMXDialect.h"
 #include "Intent/Dialect/CPU/Analysis/PhysicalProgram.h"
+#include "Intent/Dialect/CPU/IR/Target.h"
 #include "Intent/Serialization/NativeABI.h"
 #include "Intent/Serialization/NativeSource.h"
 #include "Intent/Dialect/Intent/IR/CompileOptions.h"
@@ -674,12 +675,7 @@ LogicalResult serializeProgram(ModuleOp module, std::string &source, std::string
   auto capabilities = module->getAttrOfType<cpu::CapabilitiesAttr>("intent_cpu.capabilities");
   interface["provider"] = "mojo";
   interface["compile_options"] = serializeCompileOptions(*options);
-  interface["target"] = llvm::json::Object{
-      {"family", "cpu"}, {"vector_bits", capabilities.getVectorBits()},
-      {"workers", capabilities.getWorkers()},
-      {"private_bytes", capabilities.getPrivateBytes()},
-      {"matrix_i8_i32", capabilities.getMatrixI8I32()},
-      {"matrix_bf16_f32", capabilities.getMatrixBF16F32()}};
+  interface["target"] = cpu::serializeCapabilities(capabilities);
   interface["native_dependencies"] = llvm::json::Array{"std"};
   interface["source_prelude_end"] = static_cast<int64_t>(output.tell());
   llvm::json::Array candidates;

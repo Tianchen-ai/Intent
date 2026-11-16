@@ -23,7 +23,7 @@ from .targets import TritonTarget
 from .targets import MojoTarget
 from .targets import BangCTarget
 from .targets import WeftTarget
-from .targets import GPUCapabilities, GPUCompilationTarget, CPUCompilationTarget, DSACapabilities, DSACompilationTarget
+from .targets import GPUCapabilities, GPUCompilationTarget, CPUCompilationTarget, BangCCapabilities, BangCCompilationTarget
 from .jit import jit, JITKernel
 
 
@@ -71,8 +71,8 @@ __all__ = [
     "GPUCapabilities",
     "GPUCompilationTarget",
     "CPUCompilationTarget",
-    "DSACompilationTarget",
-    "DSACapabilities",
+    "BangCCompilationTarget",
+    "BangCCapabilities",
     "FrontendError",
     "lower_to_mlir",
 ]

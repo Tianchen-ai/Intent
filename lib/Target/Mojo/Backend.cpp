@@ -5,7 +5,11 @@
 
 namespace intent::compiler {
 Backend createMojoBackend() {
-  return {"mojo", "mojo", true, std::make_shared<CPUBackend>(true, "mojo.json", mojo::implementations()),
+  return {"mojo", "mojo", true, std::make_shared<CPUBackend>(true, "mojo.json", mojo::implementations(),
+      [](mlir::OpPassManager &manager, const cpu::CPUCompilationOptions &options) {
+        manager.addPass(cpu::createCPUBufferizeValues());
+        cpu::buildCPUBufferPipeline(manager, options);
+      }),
       nullptr, mojo::registerMojoPasses,
       [](mlir::OpPassManager &manager, const Request &) { mojo::buildMojoPipeline(manager); },
       mojo::serializeProgram, configureCPUTarget};

@@ -21,22 +21,20 @@ void addNormalization(OpPassManager &manager) {
 void registerCPUPasses() {
   registerCPUTransformPasses();
   PassPipelineRegistration<CPUCompilationOptions>(
-      "intent-cpu-pipeline",
-      "Construct configured CPU tasks with the selected compiled provider",
-      buildCPUPipeline);
+      "intent-cpu-values", "Bind the target and normalize CPU SSA values", buildCPUValuePipeline);
+  PassPipelineRegistration<CPUCompilationOptions>(
+      "intent-cpu-buffers", "Optimize and configure an already materialized CPU program", buildCPUBufferPipeline);
 }
 
-void buildCPUPipeline(OpPassManager &manager,
-                      const CPUCompilationOptions &options) {
+void buildCPUValuePipeline(OpPassManager &manager,
+                          const CPUCompilationOptions &options) {
   CPUConfigureTargetOptions target;
-  target.vectorBits = options.vectorBits;
-  target.workers = options.workers;
-  target.privateBytes = options.privateBytes;
-  target.matrixI8I32 = options.matrixI8I32;
-  target.matrixBF16F32 = options.matrixBF16F32;
+  target.target = options.target;
   manager.addPass(createCPUConfigureTarget(target));
-  manager.addPass(createCPUBufferizeValues());
+}
 
+void buildCPUBufferPipeline(OpPassManager &manager,
+                           const CPUCompilationOptions &options) {
   addNormalization(manager);
   manager.addPass(createCPURealizeSliceCollectives());
   manager.addPass(createCPUNormalizeContractions());
