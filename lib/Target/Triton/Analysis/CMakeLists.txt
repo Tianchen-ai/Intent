@@ -8,7 +8,7 @@ add_mlir_library(MLIRIntentTritonAnalysis
   MLIRFuncDialect
   MLIRIR
   MLIRSCFDialect
-  MLIRIntentGPUAnalysis
-  MLIRIntentGPUDialect
+  MLIRIntentBlockAnalysis
+  MLIRIntentBlockDialect
   MLIRIntentTritonDialect
 )

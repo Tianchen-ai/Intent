@@ -106,7 +106,7 @@ class ProgramContract:
             target = read_compilation_target(provider, data["target"])
             adapter = get_provider(provider)
             options = CompileOptions.read(data["compile_options"])
-            if adapter.family == "gpu":
+            if adapter.execution_model == "block":
                 from .gpu.interface import GPUInterface
                 abi = GPUInterface(data)
             else:

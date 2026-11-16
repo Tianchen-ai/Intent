@@ -1,8 +1,8 @@
 #include "Intent/Target/Triton/Transforms/Passes.h"
 #include "Program.h"
 #include "Intent/Target/Triton/Transforms/Mapping/ProgramGrid.h"
-#include "Intent/Dialect/GPU/Transforms/Passes.h"
-#include "Intent/Dialect/GPU/IR/GPUDialect.h"
+#include "Intent/Dialect/Block/Transforms/Passes.h"
+#include "Intent/Dialect/Block/IR/BlockDialect.h"
 #include "Intent/Target/Triton/IR/TritonDialect.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -32,9 +32,9 @@ class ProgramGridPass : public impl::ProgramGridPassBase<ProgramGridPass> {
 public:
   void runOnOperation() final {
     auto module = getOperation();
-    if (failed(gpu::verifyGPUProgram(module)) ||
+    if (failed(block::verifyBlockProgram(module)) ||
         failed(finishGroup(module, getArgument(), legalizeProgramGrid(module))) ||
-        failed(gpu::verifyGPUProgram(module)))
+        failed(block::verifyBlockProgram(module)))
       signalPassFailure();
   }
 };

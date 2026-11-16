@@ -1,15 +1,15 @@
 #include "Intent/Target/CuTile/Analysis/Configuration.h"
 #include "Intent/Target/CuTile/IR/CuTileOps.h"
-#include "Intent/Dialect/GPU/Analysis/PhysicalParameters.h"
-#include "Intent/Dialect/GPU/Analysis/Resources.h"
-#include "Intent/Dialect/GPU/IR/Program.h"
+#include "Intent/Dialect/Block/Analysis/PhysicalParameters.h"
+#include "Intent/Dialect/Block/Analysis/Resources.h"
+#include "Intent/Dialect/Block/IR/Program.h"
 
 using namespace mlir;
 namespace intent::cutile {
 
-FailureOr<SmallVector<gpu::ConfigurationRequirementAttr>>
+FailureOr<SmallVector<block::ConfigurationRequirementAttr>>
 collectConfigurationRequirements(func::FuncOp kernel) {
-  auto parameters = gpu::ParameterSpace::read(kernel);
+  auto parameters = block::ParameterSpace::read(kernel);
   if (failed(parameters))
     return failure();
   SmallVector<Operation *> reductions;
@@ -21,40 +21,40 @@ collectConfigurationRequirements(func::FuncOp kernel) {
     matrixInputs.push_back(matrix.getLhs());
     matrixInputs.push_back(matrix.getRhs());
   });
-  auto requirements = gpu::collectReductionRequirements(
-      kernel, reductions, gpu::ReductionRequirementScope::AllCandidates, matrixInputs);
-  const gpu::FragmentResourceAnalysis resources(kernel);
-  llvm::append_range(requirements, gpu::collectPointwiseRequirements(kernel, resources, matrixInputs));
-  auto resident = parameters->find(gpu::ParameterRole::ResidentWorkers);
-  auto ctas = parameters->find(gpu::ParameterRole::ProviderCTAs);
-  auto occupancy = parameters->find(gpu::ParameterRole::ProviderOccupancy);
+  auto requirements = block::collectReductionRequirements(
+      kernel, reductions, block::ReductionRequirementScope::AllCandidates, matrixInputs);
+  const block::FragmentResourceAnalysis resources(kernel);
+  llvm::append_range(requirements, block::collectPointwiseRequirements(kernel, resources, matrixInputs));
+  auto resident = parameters->find(block::ParameterRole::ResidentWorkers);
+  auto ctas = parameters->find(block::ParameterRole::ProviderCTAs);
+  auto occupancy = parameters->find(block::ParameterRole::ProviderOccupancy);
   if (resident && ctas && occupancy) {
     auto capabilities =
-        kernel->getAttrOfType<gpu::CapabilitiesAttr>(gpu::capabilitiesAttr);
-    if (!capabilities || capabilities.getComputeUnits() <= 0)
+        kernel->getAttrOfType<block::CapabilitiesAttr>(block::capabilitiesAttr);
+    if (!capabilities || capabilities.getParallelUnits() <= 0)
       return kernel.emitError("cuTile resident binding requires a positive compute-unit count"),
              failure();
     Builder builder(kernel.getContext());
-    auto expression = [&](gpu::PhysicalExprKind kind, int64_t value,
+    auto expression = [&](block::PhysicalExprKind kind, int64_t value,
                           Attribute symbol, ArrayRef<Attribute> operands) {
-      return gpu::PhysicalExprAttr::get(kernel.getContext(), kind, value,
+      return block::PhysicalExprAttr::get(kernel.getContext(), kind, value,
                                        symbol, builder.getArrayAttr(operands));
     };
-    auto parameter = [&](gpu::ParameterAttr declaration) {
-      return expression(gpu::PhysicalExprKind::Parameter, 0,
+    auto parameter = [&](block::ParameterAttr declaration) {
+      return expression(block::PhysicalExprKind::Parameter, 0,
                         declaration.getReference(), {});
     };
-    auto computeUnits = expression(gpu::PhysicalExprKind::Constant,
-        capabilities.getComputeUnits(), builder.getStringAttr(""), {});
-    auto clusters = expression(gpu::PhysicalExprKind::FloorDiv, 0,
+    auto computeUnits = expression(block::PhysicalExprKind::Constant,
+        capabilities.getParallelUnits(), builder.getStringAttr(""), {});
+    auto clusters = expression(block::PhysicalExprKind::FloorDiv, 0,
         builder.getStringAttr(""), {computeUnits, parameter(ctas)});
-    auto capacity = expression(gpu::PhysicalExprKind::Multiply, 0,
+    auto capacity = expression(block::PhysicalExprKind::Multiply, 0,
         builder.getStringAttr(""), {clusters, parameter(occupancy)});
-    requirements.push_back(gpu::ConfigurationRequirementAttr::get(
-        kernel.getContext(), gpu::ConfigurationRequirementKind::Legality,
-        gpu::ConfigurationRequirementMetric::ResidentWorkers,
-        gpu::ConfigurationRequirementPredicate::Equal, parameter(resident),
-        capacity, gpu::ParameterRefAttr(),
+    requirements.push_back(block::ConfigurationRequirementAttr::get(
+        kernel.getContext(), block::ConfigurationRequirementKind::Legality,
+        block::ConfigurationRequirementMetric::ResidentWorkers,
+        block::ConfigurationRequirementPredicate::Equal, parameter(resident),
+        capacity, block::ParameterRefAttr(),
         builder.getStringAttr("cuTile resident workers must match the CTA and occupancy binding")));
   }
   return requirements;
@@ -64,7 +64,7 @@ LogicalResult verifyClosedConfigs(func::FuncOp kernel) {
   auto requirements = collectConfigurationRequirements(kernel);
   if (failed(requirements))
     return failure();
-  return gpu::verifyConfigurationRequirements(kernel, *requirements);
+  return block::verifyConfigurationRequirements(kernel, *requirements);
 }
 
 } // namespace intent::cutile

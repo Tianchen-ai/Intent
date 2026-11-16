@@ -3,12 +3,12 @@
 #include "Coordinates.h"
 #include "Bounds.h"
 #include "TileIndices.h"
-#include "Intent/Dialect/GPU/Analysis/IndexRelations.h"
-#include "Intent/Dialect/GPU/Analysis/ValueSchema.h"
-#include "Intent/Dialect/GPU/IR/Program.h"
-#include "Intent/Dialect/GPU/IR/FragmentOpInterface.h"
-#include "Intent/Dialect/GPU/Transforms/Value/ValueMaterialization.h"
-#include "Intent/Dialect/GPU/Transforms/Configuration/PhysicalParameters.h"
+#include "Intent/Dialect/Block/Analysis/IndexRelations.h"
+#include "Intent/Dialect/Block/Analysis/ValueSchema.h"
+#include "Intent/Dialect/Block/IR/Program.h"
+#include "Intent/Dialect/Block/IR/FragmentOpInterface.h"
+#include "Intent/Dialect/Block/Transforms/Value/ValueMaterialization.h"
+#include "Intent/Dialect/Block/Transforms/Configuration/PhysicalParameters.h"
 #include "Intent/Target/CuTile/Analysis/IndexBounds.h"
 #include "Intent/Target/CuTile/IR/CuTileOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -20,46 +20,46 @@ using namespace mlir;
 namespace intent::cutile {
 
 LogicalResult formNativeStores(func::FuncOp kernel,
-    ArrayRef<gpu::StoreOp> stores, AccessFormSelection &forms,
+    ArrayRef<block::StoreOp> stores, AccessFormSelection &forms,
     NativeFormRewriter &rewriter) {
-  for (gpu::StoreOp store : stores) {
-    auto access = cast<gpu::AccessOpInterface>(store.getOperation());
-    gpu::PhysicalProgramAnalysis analysis(kernel);
-    auto view = dyn_cast<gpu::ViewType>(access.getAccessResource().getType());
+  for (block::StoreOp store : stores) {
+    auto access = cast<block::AccessOpInterface>(store.getOperation());
+    block::PhysicalProgramAnalysis analysis(kernel);
+    auto view = dyn_cast<block::ViewType>(access.getAccessResource().getType());
     if (!view)
       return store.emitOpError(
           "cuTile native store requires an external unique-write view");
     OpBuilder builder(store);
-    if (!isa<gpu::FragmentType>(access.getAccessPayloads().front().getType())) {
+    if (!isa<block::FragmentType>(access.getAccessPayloads().front().getType())) {
       FailureOr<SmallVector<Value>> indices = orderedCoordinates(access);
       if (failed(indices) ||
           llvm::any_of(*indices, [](Value value) {
-            return isa<gpu::FragmentType>(value.getType());
+            return isa<block::FragmentType>(value.getType());
           }) ||
-          (access.getAccessValidity() && isa<gpu::FragmentType>(access.getAccessValidity().getType())))
+          (access.getAccessValidity() && isa<block::FragmentType>(access.getAccessValidity().getType())))
         return store.emitOpError(
             "cuTile scalar store requires scalar indices and validity");
       bool inBounds = scalarCoordinatesInView(*indices, view, kernel);
       bool activeInBounds = inBounds || analysis.accessBounds(store).isExact();
       Value validity = access.getAccessValidity();
-      gpu::PhysicalAccessBoundaryFact boundary =
+      block::PhysicalAccessBoundaryFact boundary =
           analysis.boundaryValidity(store);
       if (inBounds && boundary.isExact())
         validity = {};
       auto replacement = builder.create<ScalarStoreOp>(
           store.getLoc(), access.getAccessResource(), *indices, access.getAccessPayloads().front(),
           validity, activeInBounds ? builder.getUnitAttr() : UnitAttr());
-      if (Attribute origin = store->getAttr(gpu::originAttr))
-        replacement->setAttr(gpu::originAttr, origin);
+      if (Attribute origin = store->getAttr(block::originAttr))
+        replacement->setAttr(block::originAttr, origin);
       rewriter.erase(store);
       continue;
     }
-    gpu::PhysicalAccessBoundaryFact boundary =
+    block::PhysicalAccessBoundaryFact boundary =
         analysis.boundaryValidity(store, /*allowRangeGuards=*/true);
     const auto accessBounds = analysis.accessBounds(store);
     bool activeInBounds = accessBounds.isExact();
     auto computationType =
-        cast<gpu::FragmentType>(access.getAccessPayloads().front().getType());
+        cast<block::FragmentType>(access.getAccessPayloads().front().getType());
     FailureOr<NativeTileAccessPlan> plan = analyzeNativeTileAccess(access, kernel, accessBounds);
     FailureOr<MaterializedTileIndices> indices = failure();
     FailureOr<Value> originGuard = failure();
@@ -78,7 +78,7 @@ LogicalResult formNativeStores(func::FuncOp kernel,
                                                   boundary);
       if (rangeGuard)
         nativeCondition = nativeCondition
-                              ? Value(builder.create<gpu::BinaryOp>(
+                              ? Value(builder.create<block::BinaryOp>(
                                     store.getLoc(), builder.getI1Type(),
                                     nativeCondition, rangeGuard,
                                     BinaryOperator::LogicalAnd))
@@ -94,14 +94,14 @@ LogicalResult formNativeStores(func::FuncOp kernel,
     auto emitNativeStore = [&](OpBuilder &nested) {
       Value nativeValue = access.getAccessPayloads().front();
       if (!isIdentityPermutation(plan->toResource)) {
-        auto transpose = nested.create<gpu::TransposeOp>(
+        auto transpose = nested.create<block::TransposeOp>(
             store.getLoc(), plan->packedType, nativeValue,
             plan->toResource);
         nativeValue = transpose.getResult();
         createdOperations.push_back(transpose);
       }
       if (plan->packedToResource) {
-        auto reshape = nested.create<gpu::ReshapeOp>(
+        auto reshape = nested.create<block::ReshapeOp>(
             store.getLoc(), plan->resourceType, nativeValue,
             plan->packedToResource);
         nativeValue = reshape.getResult();
@@ -157,8 +157,8 @@ LogicalResult formNativeStores(func::FuncOp kernel,
       return failure();
     }
     for (Operation *operation : createdOperations)
-      if (Attribute origin = store->getAttr(gpu::originAttr))
-        operation->setAttr(gpu::originAttr, origin);
+      if (Attribute origin = store->getAttr(block::originAttr))
+        operation->setAttr(block::originAttr, origin);
     rewriter.erase(store);
   }
   return success();

@@ -70,7 +70,7 @@ A transformation group is a complete execution boundary. It owns the actual rewr
 
 ### 3.1 Construct an executable program
 
-KIR, canonical analyses and selected GPU capabilities produce the complete initial program defined in [KIR to GPU](kir-to-gpu.md). Conversion closes types, regions, values, accesses and origin mapping without holes awaiting emitter interpretation.
+KIR, canonical analyses and selected GPU capabilities produce the complete initial program defined in [KIR to GPU](kir-to-block.md). Conversion closes types, regions, values, accesses and origin mapping without holes awaiting emitter interpretation.
 
 Construction closes only the initial program and indexed-access composition. Structured-source normalization, ownership/blocking, online summaries, and region/reduction/contraction realization belong to subsequent explicit shared transformation groups. They are not hidden in a construction-completion function. Dependency ordering normalizes source relations before ownership changes, forms physical ranges before structured realization, and recomposes newly created accesses before provider legalization. Mapping refinement and candidate materialization consume the completed program.
 
@@ -174,7 +174,7 @@ Check semantic legality defined by the programming model and DSL, not GPU profit
 
 ### 5.2 Construction verifier
 
-Check KIR coverage, origin mapping and the first complete physical program under [construction rules](kir-to-gpu.md).
+Check KIR coverage, origin mapping and the first complete physical program under [construction rules](kir-to-block.md).
 
 ### 5.3 Shared GPU verifier
 

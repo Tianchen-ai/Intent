@@ -129,8 +129,8 @@ nav:
       - 规范示例: dsl/examples/README.md
   - 编译器:
       - 概述: compiler/README.md
-      - KIR 到 GPU: compiler/kir-to-gpu.md
-      - GPU 程序 IR: compiler/gpu-program-ir.md
+      - KIR 到 GPU: compiler/kir-to-block.md
+      - GPU 程序 IR: compiler/block-program-ir.md
       - CPU 程序 IR: compiler/cpu-program-ir.md
       - Pass 与分析: compiler/passes-and-analyses.md
       - 物理参数: compiler/physical-parameters.md

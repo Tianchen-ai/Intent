@@ -90,7 +90,7 @@ enum class CanonicalFactState { Exact, Unknown, Ambiguous };
 
 /// One canonical independent instance domain and the connected program slice
 /// executed for each instance.  This is semantic input to physical program
-/// construction, not a GPU grid decision.
+/// construction, not a Block grid decision.
 struct LogicalWorksetFact {
   CanonicalFactState state = CanonicalFactState::Unknown;
   mlir::Operation *parallel = nullptr;

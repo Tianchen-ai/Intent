@@ -40,6 +40,7 @@ class Provider:
     environment_checks: Callable[[Any], tuple[EnvironmentCheck, ...]]
     local: LocalExecution
     execution_model: str
+    read_target: Callable[[str, dict], Any]
     environment_scope: str | None = None
 
 

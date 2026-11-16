@@ -1,6 +1,6 @@
 #ifndef INTENT_TARGET_CUTILE_IR_CONFIGURATION_H
 #define INTENT_TARGET_CUTILE_IR_CONFIGURATION_H
-#include "Intent/Dialect/GPU/IR/GPUAttrs.h"
+#include "Intent/Dialect/Block/IR/BlockAttrs.h"
 #include "llvm/Support/MathExtras.h"
 namespace intent::cutile {
 inline constexpr llvm::StringLiteral accessFormParameter = "CUTILE_ACCESS_FORM";
@@ -17,6 +17,6 @@ bool isLegalAccessForm(int64_t value);
 bool isLegalOccupancy(int64_t value);
 bool isLegalWorkerWarps(int64_t value);
 bool isLegalCTAs(int64_t value);
-bool isCuTileProviderRole(gpu::ParameterRole role);
+bool isCuTileProviderRole(block::ParameterRole role);
 }
 #endif

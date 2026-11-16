@@ -3,14 +3,14 @@
 #include "Intent/Target/Triton/IR/Program.h"
 #include "Intent/Target/Triton/IR/TritonOps.h"
 #include "llvm/ADT/DenseSet.h"
-#include "Intent/Dialect/GPU/IR/Program.h"
-#include "Intent/Dialect/GPU/Analysis/PhysicalProgram.h"
-#include "Intent/Dialect/GPU/Analysis/IntegerRanges.h"
-#include "Intent/Dialect/GPU/Analysis/ResourceAlias.h"
-#include "Intent/Dialect/GPU/Analysis/ProgramInterface.h"
-#include "Intent/Dialect/GPU/Analysis/UniformValues.h"
-#include "Intent/Dialect/GPU/Analysis/ValueSchema.h"
-#include "Intent/Dialect/GPU/Transforms/Value/ValueMaterialization.h"
+#include "Intent/Dialect/Block/IR/Program.h"
+#include "Intent/Dialect/Block/Analysis/PhysicalProgram.h"
+#include "Intent/Dialect/Block/Analysis/IntegerRanges.h"
+#include "Intent/Dialect/Block/Analysis/ResourceAlias.h"
+#include "Intent/Dialect/Block/Analysis/ProgramInterface.h"
+#include "Intent/Dialect/Block/Analysis/UniformValues.h"
+#include "Intent/Dialect/Block/Analysis/ValueSchema.h"
+#include "Intent/Dialect/Block/Transforms/Value/ValueMaterialization.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include <algorithm>
@@ -26,19 +26,19 @@ using ViewAccessModes = llvm::DenseMap<Value, unsigned>;
 
 ViewAccessModes readViewAccessModes(Operation *owner) {
   ViewAccessModes modes;
-  owner->walk([&](gpu::AccessOpInterface access) {
+  owner->walk([&](block::AccessOpInterface access) {
     Value resource = access.getAccessResource();
-    if (!isa<gpu::ViewType>(resource.getType())) return;
+    if (!isa<block::ViewType>(resource.getType())) return;
     // This transformation realizes ordered ordinary loads/stores. An access
     // schema does not authorize treating an atomic or pure gather as either.
-    if (access.getAccessKind() == gpu::AccessKind::Load) modes[resource] |= 1;
-    else if (access.getAccessKind() == gpu::AccessKind::Store) modes[resource] |= 2;
+    if (access.getAccessKind() == block::AccessKind::Load) modes[resource] |= 1;
+    else if (access.getAccessKind() == block::AccessKind::Store) modes[resource] |= 2;
   });
   return modes;
 }
 
 bool hasOrderedViewDependencies(func::FuncOp kernel) {
-  gpu::ResourceAliasAnalysis aliases;
+  block::ResourceAliasAnalysis aliases;
   auto modes = readViewAccessModes(kernel);
   return llvm::any_of(modes, [&](auto read) {
     return (read.second & 1) && llvm::any_of(modes, [&](auto write) {
@@ -51,14 +51,14 @@ bool hasOrderedViewDependencies(func::FuncOp kernel) {
 LogicalResult legalizeOrderedViewDependencies(func::FuncOp kernel) {
   if (!hasOrderedViewDependencies(kernel))
     return success();
-  gpu::ResourceAliasAnalysis aliases;
-  using Accesses = SmallVector<gpu::AccessOpInterface>;
+  block::ResourceAliasAnalysis aliases;
+  using Accesses = SmallVector<block::AccessOpInterface>;
   auto accesses = [](Operation *owner) {
     Accesses result;
-    owner->walk([&](gpu::AccessOpInterface access) {
-      if (isa<gpu::ViewType>(access.getAccessResource().getType()) &&
-          (access.getAccessKind() == gpu::AccessKind::Load ||
-           access.getAccessKind() == gpu::AccessKind::Store))
+    owner->walk([&](block::AccessOpInterface access) {
+      if (isa<block::ViewType>(access.getAccessResource().getType()) &&
+          (access.getAccessKind() == block::AccessKind::Load ||
+           access.getAccessKind() == block::AccessKind::Store))
         result.push_back(access);
     });
     return result;
@@ -80,14 +80,14 @@ LogicalResult legalizeOrderedViewDependencies(func::FuncOp kernel) {
   auto nonOverlapping = [&](Value resource) -> Value {
     Value &condition = nonOverlappingViews[resource];
     if (!condition) {
-      auto proof = gpu::materializeNonOverlappingView(kernel, resource);
+      auto proof = block::materializeNonOverlappingView(kernel, resource);
       if (succeeded(proof)) condition = *proof;
     }
     return condition;
   };
-  gpu::PhysicalProgramAnalysis coordinateAnalysis(kernel);
+  block::PhysicalProgramAnalysis coordinateAnalysis(kernel);
   llvm::DenseMap<Operation *, bool> boundedAccesses;
-  auto bounded = [&](gpu::AccessOpInterface access) {
+  auto bounded = [&](block::AccessOpInterface access) {
     auto [found, inserted] = boundedAccesses.try_emplace(access.getOperation(), false);
     if (inserted)
       found->second = coordinateAnalysis.accessBounds(access.getOperation()).isExact();
@@ -95,8 +95,8 @@ LogicalResult legalizeOrderedViewDependencies(func::FuncOp kernel) {
   };
   // This phase inserts barriers and guards, without rewriting access addresses
   // or validity. Each access's bounds proof is shared across all conflict pairs.
-  auto disjointCoordinates = [&](gpu::AccessOpInterface first,
-                                 gpu::AccessOpInterface second) {
+  auto disjointCoordinates = [&](block::AccessOpInterface first,
+                                 block::AccessOpInterface second) {
     if (first.getAccessResource() != second.getAccessResource()) return false;
     if (!bounded(first) || !bounded(second))
       return false;
@@ -105,12 +105,12 @@ LogicalResult legalizeOrderedViewDependencies(func::FuncOp kernel) {
     // address separation only under the view's non-overlapping-layout proof.
     for (auto [coordinate, axis] : llvm::zip(first.getAccessCoordinates(),
                                             first.getAccessSourceAxes())) {
-      auto left = gpu::queryIntegerRange(coordinate);
+      auto left = block::queryIntegerRange(coordinate);
       if (!left) continue;
       for (auto [other, otherAxis] : llvm::zip(second.getAccessCoordinates(),
                                                second.getAccessSourceAxes())) {
         if (axis != otherAxis) continue;
-        auto right = gpu::queryIntegerRange(other);
+        auto right = block::queryIntegerRange(other);
         if (right && (left->smax().slt(right->smin()) ||
                       right->smax().slt(left->smin())))
           return true;
@@ -123,14 +123,14 @@ LogicalResult legalizeOrderedViewDependencies(func::FuncOp kernel) {
     auto loop = dyn_cast<scf::ForOp>(body.getParentOp());
     if (!loop || !loop.getUpperBound().getType().isIndex())
       return conditions;
-    auto stepBounds = gpu::queryPositiveExtentBounds(
-        gpu::queryLaunchExpression(loop.getStep()), kernel);
+    auto stepBounds = block::queryPositiveExtentBounds(
+        block::queryLaunchExpression(loop.getStep()), kernel);
     if (!stepBounds)
       return conditions;
     int64_t maximumStep = stepBounds->second;
     bool modeledEffects = true;
     body.walk([&](Operation *operation) {
-      if (!isa<gpu::LoadOp, gpu::StoreOp, scf::ForOp, scf::IfOp,
+      if (!isa<block::LoadOp, block::StoreOp, scf::ForOp, scf::IfOp,
                scf::WhileOp>(operation) && !isMemoryEffectFree(operation))
         modeledEffects = false;
     });
@@ -143,12 +143,12 @@ LogicalResult legalizeOrderedViewDependencies(func::FuncOp kernel) {
       Value resource = access.getAccessResource();
       if (!access.writesMemory() || !checked.insert(resource).second) continue;
       auto argument = dyn_cast<BlockArgument>(resource);
-      auto view = dyn_cast<gpu::ViewType>(resource.getType());
+      auto view = dyn_cast<block::ViewType>(resource.getType());
       if (!argument || argument.getOwner() != &kernel.front() || !view)
         continue;
-      gpu::StoreOp selected;
+      block::StoreOp selected;
       unsigned stores = 0;
-      body.walk([&](gpu::StoreOp store) {
+      body.walk([&](block::StoreOp store) {
         if (store.getResource() == resource) {
           selected = store;
           ++stores;
@@ -156,41 +156,41 @@ LogicalResult legalizeOrderedViewDependencies(func::FuncOp kernel) {
       });
       if (stores != 1 || selected->getBlock() != &body)
         continue;
-      auto chunkAxis = [&](gpu::AccessOpInterface access) -> std::optional<int64_t> {
+      auto chunkAxis = [&](block::AccessOpInterface access) -> std::optional<int64_t> {
         std::optional<int64_t> axis;
         for (auto [coordinate, sourceAxis] :
              llvm::zip(access.getAccessCoordinates(), access.getAccessSourceAxes())) {
           Value root = coordinate;
           while (true) {
-            if (auto broadcast = root.getDefiningOp<gpu::BroadcastOp>())
+            if (auto broadcast = root.getDefiningOp<block::BroadcastOp>())
               root = broadcast.getValue();
-            else if (auto reshape = root.getDefiningOp<gpu::ReshapeOp>())
+            else if (auto reshape = root.getDefiningOp<block::ReshapeOp>())
               root = reshape.getValue();
             else
               break;
           }
-          auto range = root.getDefiningOp<gpu::MakeRangeOp>();
-          if (gpu::samePhysicalScalarExpression(root, loop.getInductionVar()) ||
-              (range && gpu::samePhysicalScalarExpression(
+          auto range = root.getDefiningOp<block::MakeRangeOp>();
+          if (block::samePhysicalScalarExpression(root, loop.getInductionVar()) ||
+              (range && block::samePhysicalScalarExpression(
                             range.getStart(), loop.getInductionVar()) &&
-               gpu::isUnitStepRange(range) &&
-               gpu::samePhysicalScalarExpression(range.getExtent(),
+               block::isUnitStepRange(range) &&
+               block::samePhysicalScalarExpression(range.getExtent(),
                                                   loop.getStep()))) {
             if (axis)
               return std::nullopt;
             axis = sourceAxis;
-          } else if (gpu::variesWithIteration(root, loop, varying)) {
+          } else if (block::variesWithIteration(root, loop, varying)) {
             return std::nullopt;
           }
         }
         return axis;
       };
-      auto storeAxis = chunkAxis(cast<gpu::AccessOpInterface>(selected.getOperation()));
+      auto storeAxis = chunkAxis(cast<block::AccessOpInterface>(selected.getOperation()));
       if (!storeAxis)
         continue;
       bool disjoint = true;
-      body.walk([&](gpu::LoadOp load) {
-        auto access = cast<gpu::AccessOpInterface>(load.getOperation());
+      body.walk([&](block::LoadOp load) {
+        auto access = cast<block::AccessOpInterface>(load.getOperation());
         if (access.getAccessResource() == resource && chunkAxis(access) != storeAxis)
           disjoint = false;
       });
@@ -204,11 +204,11 @@ LogicalResult legalizeOrderedViewDependencies(func::FuncOp kernel) {
         // the no-wrap proof; access masks can only narrow each chunk.
         Value limit = builder.create<arith::ConstantIndexOp>(
             loop.getLoc(), std::numeric_limits<int64_t>::max() - maximumStep);
-        safeRange = builder.create<gpu::CompareOp>(
+        safeRange = builder.create<block::CompareOp>(
             loop.getLoc(), builder.getI1Type(), loop.getUpperBound(), limit,
             ComparePredicate::Le);
       }
-      conditions[resource] = builder.create<gpu::BinaryOp>(
+      conditions[resource] = builder.create<block::BinaryOp>(
           loop.getLoc(), builder.getI1Type(), layout, safeRange,
           BinaryOperator::LogicalAnd);
     }
@@ -225,16 +225,16 @@ LogicalResult legalizeOrderedViewDependencies(func::FuncOp kernel) {
       auto argument = dyn_cast<BlockArgument>(value);
       if (!argument || argument.getOwner() != &kernel.front())
         return {};
-      auto binding = gpu::getArgumentBinding(argument);
-      return binding && binding.getKind() == gpu::ArgumentKind::Public &&
-                     isa<gpu::ViewType>(argument.getType())
+      auto binding = block::getArgumentBinding(argument);
+      return binding && binding.getKind() == block::ArgumentKind::Public &&
+                     isa<block::ViewType>(argument.getType())
                  ? argument : BlockArgument();
     };
     auto requireUnless = [&](Value proof) {
       Value zero = builder.create<arith::ConstantIntOp>(location, 0, 1);
-      Value needed = builder.create<gpu::CompareOp>(
+      Value needed = builder.create<block::CompareOp>(
           location, builder.getI1Type(), proof, zero, ComparePredicate::Eq);
-      condition = condition ? Value(builder.create<gpu::BinaryOp>(
+      condition = condition ? Value(builder.create<block::BinaryOp>(
                                   location, builder.getI1Type(), condition,
                                   needed, BinaryOperator::LogicalOr))
                             : needed;
@@ -274,12 +274,12 @@ LogicalResult legalizeOrderedViewDependencies(func::FuncOp kernel) {
       Value &overlap = overlapFacts[pair];
       if (!overlap) {
         OpBuilder entry(&kernel.front(), kernel.front().begin());
-        overlap = entry.create<gpu::ViewOverlapOp>(
+        overlap = entry.create<block::ViewOverlapOp>(
             location, entry.getI1Type(), kernel.getArgument(pair.first),
             kernel.getArgument(pair.second));
       }
       condition = condition
-                      ? Value(builder.create<gpu::BinaryOp>(
+                      ? Value(builder.create<block::BinaryOp>(
                             location, builder.getI1Type(), condition, overlap,
                             BinaryOperator::LogicalOr))
                       : overlap;
@@ -292,7 +292,7 @@ LogicalResult legalizeOrderedViewDependencies(func::FuncOp kernel) {
   };
   llvm::DenseSet<Value> visiting;
   std::function<bool(Value)> uniform = [&](Value value) {
-    if (isa<gpu::FragmentType, gpu::RecordType>(value.getType()))
+    if (isa<block::FragmentType, block::RecordType>(value.getType()))
       return false;
     if (!visiting.insert(value).second)
       return true;
@@ -331,13 +331,13 @@ LogicalResult legalizeOrderedViewDependencies(func::FuncOp kernel) {
         result = uniform(branch.getCondition()) &&
                  uniform(branch.thenBlock()->getTerminator()->getOperand(index)) &&
                  uniform(branch.elseBlock()->getTerminator()->getOperand(index));
-      } else if (isa<gpu::ReduceOp, gpu::GatherOp, gpu::DimOp, gpu::ParameterOp,
-              gpu::PhysicalExprOp, gpu::ProgramIdOp, gpu::ViewOverlapOp,
+      } else if (isa<block::ReduceOp, block::GatherOp, block::DimOp, block::ParameterOp,
+              block::PhysicalExprOp, block::ProgramIdOp, block::ViewOverlapOp,
               arith::ConstantOp>(producer)) {
         result = true;
-      } else if (isa<gpu::LoadOp, gpu::UnaryOp, gpu::BinaryOp, gpu::CompareOp,
-                     gpu::SelectOp, gpu::CastOp, gpu::BitcastOp,
-                     gpu::WorksetCoordinateOp, gpu::DelinearizeOp>(producer)) {
+      } else if (isa<block::LoadOp, block::UnaryOp, block::BinaryOp, block::CompareOp,
+                     block::SelectOp, block::CastOp, block::BitcastOp,
+                     block::WorksetCoordinateOp, block::DelinearizeOp>(producer)) {
         result = llvm::all_of(producer->getOperands(), uniform);
       }
     }
@@ -425,7 +425,7 @@ bool dependsOnLoopCarry(ValueRange operands, scf::ForOp loop,
   while (!pending.empty()) {
     Value value = pending.pop_back_val();
     if (llvm::is_contained(loop.getRegionIterArgs(), value)) {
-      if (!fragmentsOnly || isa<gpu::FragmentType>(value.getType())) return true;
+      if (!fragmentsOnly || isa<block::FragmentType>(value.getType())) return true;
       continue;
     }
     if (!visited.insert(value).second)
@@ -459,7 +459,7 @@ bool dependsOnLoopCarry(ValueRange operands, scf::ForOp loop,
 
 void selectRecurrencePipelineStages(func::FuncOp kernel) {
   kernel.walk([&](scf::ForOp loop) {
-    auto recurrence = loop.walk([&](gpu::ContractOp contract) {
+    auto recurrence = loop.walk([&](block::ContractOp contract) {
       return dependsOnLoopCarry({contract.getLhs(), contract.getRhs()}, loop,
                                 /*fragmentsOnly=*/true)
                  ? WalkResult::interrupt()
@@ -479,23 +479,23 @@ SmallVector<scf::ForOp> findLoadPipelineLoops(func::FuncOp kernel) {
   kernel.walk([&](scf::ForOp loop) {
     bool vectorLoad = false;
     for (Operation &operation : loop.getBody()->without_terminator()) {
-      if (isa<gpu::ContractOp, gpu::ScaledContractOp, gpu::SparseContractOp>(
+      if (isa<block::ContractOp, block::ScaledContractOp, block::SparseContractOp>(
               operation) ||
           (operation.getNumRegions() &&
-           !isa<gpu::ReduceOp, gpu::ScanOp>(operation)))
+           !isa<block::ReduceOp, block::ScanOp>(operation)))
         return;
-      if (auto access = dyn_cast<gpu::AccessOpInterface>(&operation);
-          access && (access.getAccessKind() == gpu::AccessKind::Load ||
-                     access.getAccessKind() == gpu::AccessKind::Store)) {
-        if (!isa<gpu::ViewType>(access.getAccessResource().getType())) return;
+      if (auto access = dyn_cast<block::AccessOpInterface>(&operation);
+          access && (access.getAccessKind() == block::AccessKind::Load ||
+                     access.getAccessKind() == block::AccessKind::Store)) {
+        if (!isa<block::ViewType>(access.getAccessResource().getType())) return;
         SmallVector<Value> addressing{access.getAccessResource()};
         llvm::append_range(addressing, access.getAccessCoordinates());
         if (access.getAccessValidity()) addressing.push_back(access.getAccessValidity());
         if (access.getAccessFill()) addressing.push_back(access.getAccessFill());
         if (dependsOnLoopCarry(addressing, loop, /*fragmentsOnly=*/false))
           return;
-        vectorLoad |= access.getAccessKind() == gpu::AccessKind::Load &&
-                      isa<gpu::FragmentType>(access.getAccessValueType());
+        vectorLoad |= access.getAccessKind() == block::AccessKind::Load &&
+                      isa<block::FragmentType>(access.getAccessValueType());
       } else if (!isMemoryEffectFree(&operation)) {
         return;
       }
@@ -507,7 +507,7 @@ SmallVector<scf::ForOp> findLoadPipelineLoops(func::FuncOp kernel) {
 }
 
 void selectOrderedLoadUnrolling(func::FuncOp kernel) {
-  UniformValueAnalysis constants(gpu::describeUniformValue);
+  UniformValueAnalysis constants(block::describeUniformValue);
   auto integer = [&](Value value) {
     return dyn_cast_or_null<IntegerAttr>(constants.evaluate(value));
   };
@@ -515,7 +515,7 @@ void selectOrderedLoadUnrolling(func::FuncOp kernel) {
     // Preserve each carried update, but expose reads of subsequent iterations
     // to Triton's native unroller. Recurrences with local reductions benefit
     // from overlapping those independent reads with their dependent compute.
-    auto recurrence = loop.walk([&](gpu::ReduceOp reduce) {
+    auto recurrence = loop.walk([&](block::ReduceOp reduce) {
       return dependsOnLoopCarry(reduce.getSources(), loop, true)
                  ? WalkResult::interrupt() : WalkResult::advance();
     });
@@ -524,9 +524,9 @@ void selectOrderedLoadUnrolling(func::FuncOp kernel) {
       unsigned loads = 0;
       loop.walk([&](Operation *operation) {
         if (operation == loop.getOperation()) return;
-        if (auto access = dyn_cast<gpu::AccessOpInterface>(operation)) {
-          if (access.getAccessKind() != gpu::AccessKind::Load &&
-              access.getAccessKind() != gpu::AccessKind::Store) {
+        if (auto access = dyn_cast<block::AccessOpInterface>(operation)) {
+          if (access.getAccessKind() != block::AccessKind::Load &&
+              access.getAccessKind() != block::AccessKind::Store) {
             supported = false;
             return;
           }
@@ -535,10 +535,10 @@ void selectOrderedLoadUnrolling(func::FuncOp kernel) {
           if (access.getAccessValidity()) addressing.push_back(access.getAccessValidity());
           if (access.getAccessFill()) addressing.push_back(access.getAccessFill());
           supported &= !dependsOnLoopCarry(addressing, loop, false);
-          loads += access.getAccessKind() == gpu::AccessKind::Load;
-        } else if (isa<scf::IfOp, scf::YieldOp, gpu::ReduceOp, CtaBarrierOp>(operation)) {
+          loads += access.getAccessKind() == block::AccessKind::Load;
+        } else if (isa<scf::IfOp, scf::YieldOp, block::ReduceOp, CtaBarrierOp>(operation)) {
           // Conditional alias barriers remain in their original positions.
-        } else if (isa<gpu::ContractOp, gpu::ScaledContractOp, gpu::SparseContractOp>(operation) ||
+        } else if (isa<block::ContractOp, block::ScaledContractOp, block::SparseContractOp>(operation) ||
                    operation->getNumRegions() || !isMemoryEffectFree(operation)) {
           supported = false;
         }
@@ -549,13 +549,13 @@ void selectOrderedLoadUnrolling(func::FuncOp kernel) {
       return;
     }
     if (loop->hasAttr(loopStagesAttr) || loop.getNumResults() != 1 ||
-        !isa<FloatType>(gpu::uniformElementType(loop.getResult(0).getType())))
+        !isa<FloatType>(block::uniformElementType(loop.getResult(0).getType())))
       return;
     auto lower = integer(loop.getLowerBound());
     auto step = integer(loop.getStep());
     if (!lower || !lower.getValue().isZero() || !step ||
         !step.getValue().isOne() ||
-        !gpu::queryNonNegativeIndexUpperBound(loop.getUpperBound()))
+        !block::queryNonNegativeIndexUpperBound(loop.getUpperBound()))
       return;
     int64_t factor = 4;
     if (auto upper = integer(loop.getUpperBound())) {
@@ -568,11 +568,11 @@ void selectOrderedLoadUnrolling(func::FuncOp kernel) {
     bool product = false;
     for (Operation &operation : loop.getBody()->without_terminator()) {
       if (operation.getNumRegions() ||
-          isa<gpu::ContractOp, gpu::ScaledContractOp, gpu::SparseContractOp,
-              gpu::HistogramOp>(operation))
+          isa<block::ContractOp, block::ScaledContractOp, block::SparseContractOp,
+              block::HistogramOp>(operation))
         return;
-      if (auto access = dyn_cast<gpu::AccessOpInterface>(&operation);
-          access && access.getAccessKind() == gpu::AccessKind::Load) {
+      if (auto access = dyn_cast<block::AccessOpInterface>(&operation);
+          access && access.getAccessKind() == block::AccessKind::Load) {
         SmallVector<Value> dependencies{access.getAccessResource()};
         llvm::append_range(dependencies, access.getAccessCoordinates());
         if (access.getAccessValidity()) dependencies.push_back(access.getAccessValidity());
@@ -583,10 +583,10 @@ void selectOrderedLoadUnrolling(func::FuncOp kernel) {
       } else if (!isMemoryEffectFree(&operation)) {
         return;
       }
-      if (auto binary = dyn_cast<gpu::BinaryOp>(operation))
+      if (auto binary = dyn_cast<block::BinaryOp>(operation))
         product |= binary.getOperatorKind() == BinaryOperator::Multiply &&
                    isa<FloatType>(
-                       gpu::uniformElementType(binary.getResult().getType()));
+                       block::uniformElementType(binary.getResult().getType()));
     }
     if (loads == 0 || loads > 2 || !product)
       return;

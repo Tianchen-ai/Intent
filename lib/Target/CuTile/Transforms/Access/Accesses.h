@@ -9,27 +9,27 @@ namespace intent::cutile {
 class AccessFormSelection;
 
 struct NativeAccessInputs {
-  llvm::SmallVector<gpu::LoadOp> loads;
-  llvm::SmallVector<gpu::GatherOp> gathers;
-  llvm::SmallVector<gpu::StoreOp> stores;
-  llvm::SmallVector<gpu::AtomicRMWOp> atomics;
+  llvm::SmallVector<block::LoadOp> loads;
+  llvm::SmallVector<block::GatherOp> gathers;
+  llvm::SmallVector<block::StoreOp> stores;
+  llvm::SmallVector<block::AtomicRMWOp> atomics;
 };
 
 mlir::LogicalResult formNativeAccesses(
     mlir::func::FuncOp kernel, const NativeAccessInputs &inputs, bool matrixCompute,
     NativeFormRewriter &rewriter);
 mlir::LogicalResult formNativeLoads(
-    mlir::func::FuncOp kernel, llvm::ArrayRef<gpu::LoadOp> loads,
+    mlir::func::FuncOp kernel, llvm::ArrayRef<block::LoadOp> loads,
     bool matrixCompute, AccessFormSelection &forms, NativeFormRewriter &rewriter);
 mlir::LogicalResult formFragmentExtractions(
-    mlir::func::FuncOp kernel, llvm::ArrayRef<gpu::GatherOp> gathers,
+    mlir::func::FuncOp kernel, llvm::ArrayRef<block::GatherOp> gathers,
     NativeFormRewriter &rewriter);
-bool requiresFragmentStorage(gpu::GatherOp gather);
+bool requiresFragmentStorage(block::GatherOp gather);
 mlir::LogicalResult formNativeAtomics(
-    mlir::func::FuncOp kernel, llvm::ArrayRef<gpu::AtomicRMWOp> atomics,
+    mlir::func::FuncOp kernel, llvm::ArrayRef<block::AtomicRMWOp> atomics,
     NativeFormRewriter &rewriter);
 mlir::LogicalResult formNativeStores(
-    mlir::func::FuncOp kernel, llvm::ArrayRef<gpu::StoreOp> stores,
+    mlir::func::FuncOp kernel, llvm::ArrayRef<block::StoreOp> stores,
     AccessFormSelection &forms, NativeFormRewriter &rewriter);
 
 } // namespace intent::cutile

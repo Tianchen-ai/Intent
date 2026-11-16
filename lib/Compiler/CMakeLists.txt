@@ -11,7 +11,7 @@ file(GENERATE OUTPUT "${PROJECT_BINARY_DIR}/include/Intent/Compiler/Backends.inc
 add_mlir_library(MLIRIntentCompiler
   Compiler.cpp
   Backend.cpp
-  GPUBackends.cpp
+  BlockBackends.cpp
   CPUBackends.cpp
   DSABackends.cpp
   Passes.cpp
@@ -21,10 +21,10 @@ add_mlir_library(MLIRIntentCompiler
   DEPENDS IntentCompilerPassIncGen
   LINK_LIBS PUBLIC
   ${dialect_libs}
-  MLIRIntentKIRToGPU MLIRIntentKIRToCPU MLIRIntentKIRToDSA
+  MLIRIntentKIRToBlock MLIRIntentKIRToCPU MLIRIntentKIRToDSA
   MLIRIntentDSATransforms
   MLIRIntentCPUAnalysis MLIRIntentCPUTransforms
-  MLIRIntentGPUTransforms
+  MLIRIntentBlockTransforms
   ${backend_libraries}
   MLIRIntentTransforms MLIRFuncInlinerExtension MLIRPass MLIRTransforms MLIRIR MLIRSupport
 )

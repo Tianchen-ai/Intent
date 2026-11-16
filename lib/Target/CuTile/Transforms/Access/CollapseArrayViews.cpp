@@ -1,10 +1,10 @@
-#include "Intent/Dialect/GPU/Analysis/PhysicalProgram.h"
+#include "Intent/Dialect/Block/Analysis/PhysicalProgram.h"
 #include "Intent/Target/CuTile/Transforms/Access/ArrayViews.h"
 #include "TileIndices.h"
 #include "Intent/Target/CuTile/Analysis/IndexBounds.h"
 
-#include "Intent/Dialect/GPU/IR/Program.h"
-#include "Intent/Dialect/GPU/Transforms/Passes.h"
+#include "Intent/Dialect/Block/IR/Program.h"
+#include "Intent/Dialect/Block/Transforms/Passes.h"
 #include "Intent/Target/CuTile/IR/CuTileOps.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -26,10 +26,10 @@ DenseI64ArrayAttr collapseGroups(TileLoadOp load) {
   unsigned collapsed = 0;
   for (unsigned axis = 1; axis < view.getRank(); ++axis) {
     auto extent =
-        dyn_cast<gpu::PhysicalExprAttr>(view.getLayout().getExtents()[axis]);
+        dyn_cast<block::PhysicalExprAttr>(view.getLayout().getExtents()[axis]);
     bool fullInner = extent &&
         extent.getKind() ==
-            gpu::PhysicalExprKind::Constant &&
+            block::PhysicalExprKind::Constant &&
         extent.getValue() > 1 &&
         load.getResult().getType().getShape()[axis] == extent &&
         matchPattern(load.getTileIndices()[axis], m_Zero());
@@ -43,7 +43,7 @@ DenseI64ArrayAttr collapseGroups(TileLoadOp load) {
                    : DenseI64ArrayAttr();
 }
 
-gpu::FragmentType collapsedTile(gpu::FragmentType source,
+block::FragmentType collapsedTile(block::FragmentType source,
                                 ArrayRef<int64_t> ends) {
   MLIRContext *context = source.getContext();
   SmallVector<Attribute> shape;
@@ -52,19 +52,19 @@ gpu::FragmentType collapsedTile(gpu::FragmentType source,
   for (int64_t end : ends) {
     Attribute extent = source.getShape()[begin];
     for (unsigned axis = begin + 1; axis < static_cast<unsigned>(end); ++axis)
-      extent = gpu::PhysicalExprAttr::get(
-          context, gpu::PhysicalExprKind::Multiply, 0,
+      extent = block::PhysicalExprAttr::get(
+          context, block::PhysicalExprKind::Multiply, 0,
           StringAttr::get(context),
           ArrayAttr::get(context, {extent, source.getShape()[axis]}));
-    auto mapping = cast<gpu::AxisMapAttr>(source.getAxisMaps()[begin]);
-    mappings.push_back(gpu::AxisMapAttr::get(
+    auto mapping = cast<block::AxisMapAttr>(source.getAxisMaps()[begin]);
+    mappings.push_back(block::AxisMapAttr::get(
         context, mapping.getSourceId(), mapping.getSourceAxis(),
         end == begin + 1 ? mapping.getDimensionId() : 0, shape.size(),
         end != begin + 1 || mapping.getDerived()));
     shape.push_back(extent);
     begin = end;
   }
-  return gpu::FragmentType::get(
+  return block::FragmentType::get(
       context, source.getElementType(), ArrayAttr::get(context, shape),
       ArrayAttr::get(context, mappings), source.getValidity(), source.getOwner());
 }
@@ -72,7 +72,7 @@ gpu::FragmentType collapsedTile(gpu::FragmentType source,
 } // namespace
 
 LogicalResult collapseArrayViews(ModuleOp module) {
-  FailureOr<func::FuncOp> physicalKernel = gpu::getPhysicalKernel(module);
+  FailureOr<func::FuncOp> physicalKernel = block::getPhysicalKernel(module);
   if (failed(physicalKernel))
     return failure();
   func::FuncOp kernel = *physicalKernel;
@@ -85,7 +85,7 @@ LogicalResult collapseArrayViews(ModuleOp module) {
       continue;
     auto tile = collapsedTile(load.getResult().getType(), groups.asArrayRef());
     auto reassociation =
-        gpu::inferReshapeReassociation(tile, load.getResult().getType());
+        block::inferReshapeReassociation(tile, load.getResult().getType());
     if (failed(reassociation))
       return load.emitOpError("cannot restore a collapsed native array tile");
     ArrayViewOp array;
@@ -117,7 +117,7 @@ LogicalResult collapseArrayViews(ModuleOp module) {
     auto native = folded.create<TileLoadOp>(
         load.getLoc(), tile, array.getResult(), load.getAllowTma(), indices,
         load.getLatencyPolicy(), fullTiles);
-    auto restored = folded.create<gpu::ReshapeOp>(
+    auto restored = folded.create<block::ReshapeOp>(
         load.getLoc(), load.getResult().getType(), native.getResult(),
         *reassociation);
     folded.create<scf::YieldOp>(load.getLoc(), restored.getResult());

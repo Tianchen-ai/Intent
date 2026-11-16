@@ -45,7 +45,7 @@ llvm::json::Object information(StringRef profileDirectory) {
   for (const Backend &adapter : backends()) {
     StringRef family;
     switch (adapter.family()) {
-    case Family::GPU: family = "gpu"; break;
+    case Family::Block: family = "block"; break;
     case Family::CPU: family = "cpu"; break;
     case Family::DSA: family = "dsa"; break;
     }

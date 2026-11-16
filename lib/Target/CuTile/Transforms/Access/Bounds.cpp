@@ -1,9 +1,9 @@
 #include "Bounds.h"
-#include "Intent/Dialect/GPU/Analysis/IndexRelations.h"
-#include "Intent/Dialect/GPU/Analysis/ProgramInterface.h"
-#include "Intent/Dialect/GPU/Analysis/ValueSchema.h"
-#include "Intent/Dialect/GPU/IR/PhysicalExpressions.h"
-#include "Intent/Dialect/GPU/IR/Program.h"
+#include "Intent/Dialect/Block/Analysis/IndexRelations.h"
+#include "Intent/Dialect/Block/Analysis/ProgramInterface.h"
+#include "Intent/Dialect/Block/Analysis/ValueSchema.h"
+#include "Intent/Dialect/Block/IR/PhysicalExpressions.h"
+#include "Intent/Dialect/Block/IR/Program.h"
 #include "Intent/Target/CuTile/Analysis/IndexBounds.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -18,8 +18,8 @@ std::optional<int64_t> dimensionIdentity(BlockArgument argument) {
   auto kernel = dyn_cast<func::FuncOp>(argument.getOwner()->getParentOp());
   if (!kernel || argument.getOwner() != &kernel.getBody().front())
     return std::nullopt;
-  auto binding = gpu::getArgumentBinding(argument);
-  if (!binding || binding.getKind() != gpu::ArgumentKind::Dimension)
+  auto binding = block::getArgumentBinding(argument);
+  if (!binding || binding.getKind() != block::ArgumentKind::Dimension)
     return std::nullopt;
   return binding.getDimension().getInt();
 }
@@ -30,7 +30,7 @@ FailureOr<SmallVector<Value>> uniformAlignmentFactors(
     return failure();
   value = stripIndexIdentities(value);
   divisor = stripIndexIdentities(divisor);
-  if (gpu::IndexRelations().multipleOf(value, divisor))
+  if (block::IndexRelations().multipleOf(value, divisor))
     return SmallVector<Value>{};
   if (auto constant = value.getDefiningOp<arith::ConstantOp>()) {
     auto integer = dyn_cast<IntegerAttr>(constant.getValue());
@@ -39,9 +39,9 @@ FailureOr<SmallVector<Value>> uniformAlignmentFactors(
     return integer.getValue().isZero() ? SmallVector<Value>{}
                                        : SmallVector<Value>{value};
   }
-  if (value.getDefiningOp<gpu::ParameterOp>() ||
-      value.getDefiningOp<gpu::DimOp>() ||
-      value.getDefiningOp<gpu::PhysicalExprOp>())
+  if (value.getDefiningOp<block::ParameterOp>() ||
+      value.getDefiningOp<block::DimOp>() ||
+      value.getDefiningOp<block::PhysicalExprOp>())
     return SmallVector<Value>{value};
   auto combine = [&](Value lhs, Value rhs) -> FailureOr<SmallVector<Value>> {
     auto left = uniformAlignmentFactors(lhs, divisor, depth + 1);
@@ -58,11 +58,11 @@ FailureOr<SmallVector<Value>> uniformAlignmentFactors(
       return SmallVector<Value>{value};
     auto loop = dyn_cast<scf::ForOp>(argument.getOwner()->getParentOp());
     if (loop && argument == loop.getInductionVar() &&
-        gpu::IndexRelations().positive(loop.getStep()))
+        block::IndexRelations().positive(loop.getStep()))
       return combine(loop.getLowerBound(), loop.getStep());
     return failure();
   }
-  auto binary = value.getDefiningOp<gpu::BinaryOp>();
+  auto binary = value.getDefiningOp<block::BinaryOp>();
   if (!binary)
     return failure();
   switch (binary.getOperatorKind()) {
@@ -84,7 +84,7 @@ FailureOr<SmallVector<Value>> uniformAlignmentFactors(
 }
 
 bool isAlignedPeriodicTile(Value start, Value extent, Value period) {
-  gpu::IndexRelations relations;
+  block::IndexRelations relations;
   // Dividing the period into complete aligned windows keeps one quotient.
   return relations.alignedUnitWindow(stripIndexIdentities(start),
                                      stripIndexIdentities(extent)) &&
@@ -98,11 +98,11 @@ scf::ForOp completeAlignedTileLoop(Value start, Value extent) {
                         induction.getOwner()->getParentOp())
                   : scf::ForOp();
   if (!loop || induction != loop.getInductionVar() ||
-      !gpu::IndexRelations().powerOfTwo(extent) ||
-      !gpu::samePhysicalScalarExpression(loop.getStep(), extent) ||
-      !gpu::queryNonNegativeIndexUpperBound(loop.getLowerBound()) ||
-      !gpu::IndexRelations().multipleOf(loop.getLowerBound(), extent) ||
-      !gpu::IndexRelations().multipleOf(loop.getUpperBound(), extent))
+      !block::IndexRelations().powerOfTwo(extent) ||
+      !block::samePhysicalScalarExpression(loop.getStep(), extent) ||
+      !block::queryNonNegativeIndexUpperBound(loop.getLowerBound()) ||
+      !block::IndexRelations().multipleOf(loop.getLowerBound(), extent) ||
+      !block::IndexRelations().multipleOf(loop.getUpperBound(), extent))
     return {};
   // Both endpoints are tile aligned. Every executing iteration is nonnegative
   // and complete; the final increment reaches the representable upper bound.
@@ -117,7 +117,7 @@ bool valueIsDimension(Value value, int64_t dimension, func::FuncOp kernel) {
     std::optional<int64_t> identity = dimensionIdentity(argument);
     return identity && *identity == dimension;
   }
-  if (auto dim = value.getDefiningOp<gpu::DimOp>()) {
+  if (auto dim = value.getDefiningOp<block::DimOp>()) {
     ArrayRef<int64_t> dimensions =
         dim.getView().getType().getLayout().getDimensionIds().asArrayRef();
     return dim.getAxis() < dimensions.size() &&
@@ -139,39 +139,39 @@ Value dimensionValue(func::FuncOp kernel, int64_t dimension) {
   return result;
 }
 
-bool isLogicalSubregionDistance(Value value, gpu::MakeRangeOp range) {
+bool isLogicalSubregionDistance(Value value, block::MakeRangeOp range) {
   value = stripIndexIdentities(value);
-  auto distance = value.getDefiningOp<gpu::BinaryOp>();
+  auto distance = value.getDefiningOp<block::BinaryOp>();
   if (distance && distance.getOperatorKind() == BinaryOperator::Subtract &&
-      gpu::samePhysicalScalarExpression(distance.getLhs(),
+      block::samePhysicalScalarExpression(distance.getLhs(),
                                         range.getLogicalStop()) &&
-      gpu::samePhysicalScalarExpression(distance.getRhs(),
+      block::samePhysicalScalarExpression(distance.getRhs(),
                                         range.getLogicalStart()))
     return true;
-  auto multiply = value.getDefiningOp<gpu::BinaryOp>();
+  auto multiply = value.getDefiningOp<block::BinaryOp>();
   if (!multiply || multiply.getOperatorKind() != BinaryOperator::Multiply)
     return false;
   auto flooredDistance = [&](Value quotient, Value divisor) {
-    auto division = quotient.getDefiningOp<gpu::BinaryOp>();
+    auto division = quotient.getDefiningOp<block::BinaryOp>();
     return division &&
            division.getOperatorKind() == BinaryOperator::FloorDivide &&
-           gpu::samePhysicalScalarExpression(division.getRhs(), divisor) &&
-           gpu::IndexRelations().positive(divisor) &&
+           block::samePhysicalScalarExpression(division.getRhs(), divisor) &&
+           block::IndexRelations().positive(divisor) &&
            isLogicalSubregionDistance(division.getLhs(), range);
   };
   return flooredDistance(multiply.getLhs(), multiply.getRhs()) ||
          flooredDistance(multiply.getRhs(), multiply.getLhs());
 }
 
-bool rangeStartsInsideLogicalSubregion(gpu::MakeRangeOp range) {
+bool rangeStartsInsideLogicalSubregion(block::MakeRangeOp range) {
   Value start = stripIndexIdentities(range.getStart());
-  if (gpu::samePhysicalScalarExpression(start, range.getLogicalStart()))
+  if (block::samePhysicalScalarExpression(start, range.getLogicalStart()))
     return true;
-  auto add = start.getDefiningOp<gpu::BinaryOp>();
+  auto add = start.getDefiningOp<block::BinaryOp>();
   if (!add || add.getOperatorKind() != BinaryOperator::Add)
     return false;
   auto check = [&](Value base, Value offset) {
-    if (!gpu::samePhysicalScalarExpression(base, range.getLogicalStart()))
+    if (!block::samePhysicalScalarExpression(base, range.getLogicalStart()))
       return false;
     auto argument = dyn_cast<BlockArgument>(stripIndexIdentities(offset));
     auto loop =
@@ -179,21 +179,21 @@ bool rangeStartsInsideLogicalSubregion(gpu::MakeRangeOp range) {
             ? dyn_cast_or_null<scf::ForOp>(argument.getOwner()->getParentOp())
             : scf::ForOp();
     return loop && argument == loop.getInductionVar() &&
-           gpu::IndexRelations().nonnegative(loop.getLowerBound()) &&
-           gpu::IndexRelations().positive(loop.getStep()) &&
+           block::IndexRelations().nonnegative(loop.getLowerBound()) &&
+           block::IndexRelations().positive(loop.getStep()) &&
            isLogicalSubregionDistance(loop.getUpperBound(), range);
   };
   return check(add.getLhs(), add.getRhs()) ||
          check(add.getRhs(), add.getLhs());
 }
 
-std::optional<int64_t> constantTileOrigin(gpu::MakeRangeOp range,
+std::optional<int64_t> constantTileOrigin(block::MakeRangeOp range,
                                           ArrayRef<Value> offsets) {
-  std::optional<int64_t> result = gpu::IndexRelations().constant(range.getStart());
+  std::optional<int64_t> result = block::IndexRelations().constant(range.getStart());
   if (!result)
     return std::nullopt;
   for (Value offset : offsets) {
-    std::optional<int64_t> constant = gpu::IndexRelations().constant(offset);
+    std::optional<int64_t> constant = block::IndexRelations().constant(offset);
     if (!constant)
       return std::nullopt;
     int64_t sum;
@@ -204,30 +204,30 @@ std::optional<int64_t> constantTileOrigin(gpu::MakeRangeOp range,
   return result;
 }
 
-bool constantOriginInView(int64_t origin, gpu::ViewType view,
+bool constantOriginInView(int64_t origin, block::ViewType view,
                           unsigned resourceAxis, func::FuncOp kernel) {
   if (origin < 0 || resourceAxis >= view.getLayout().getExtents().size())
     return false;
-  auto extent = dyn_cast<gpu::PhysicalExprAttr>(
+  auto extent = dyn_cast<block::PhysicalExprAttr>(
       view.getLayout().getExtents()[resourceAxis]);
   std::optional<int64_t> constant =
-      gpu::IndexRelations().constant(extent, kernel);
+      block::IndexRelations().constant(extent, kernel);
   return constant && origin < *constant;
 }
 
-bool rangeOriginInView(gpu::MakeRangeOp range, ArrayRef<Value> offsets,
-                       gpu::ViewType view, unsigned resourceAxis,
+bool rangeOriginInView(block::MakeRangeOp range, ArrayRef<Value> offsets,
+                       block::ViewType view, unsigned resourceAxis,
                        int64_t dimension, func::FuncOp kernel) {
   bool zeroOffset = llvm::all_of(
       offsets, [](Value offset) { return isProvably(offset, 0); });
   Value logicalDimension = dimensionValue(kernel, dimension);
-  if (zeroOffset && range->hasAttr(gpu::sourceSubregionAttr) &&
-      logicalDimension && gpu::IndexRelations().nonnegative(range.getLogicalStart()) &&
-      gpu::IndexRelations().atMost(range.getLogicalStop(), logicalDimension) &&
+  if (zeroOffset && range->hasAttr(block::sourceSubregionAttr) &&
+      logicalDimension && block::IndexRelations().nonnegative(range.getLogicalStart()) &&
+      block::IndexRelations().atMost(range.getLogicalStop(), logicalDimension) &&
       rangeStartsInsideLogicalSubregion(range))
     return true;
-  if (zeroOffset && range->hasAttr(gpu::programBoundedOriginAttr) &&
-      !range->hasAttr(gpu::sourceSubregionAttr) &&
+  if (zeroOffset && range->hasAttr(block::programBoundedOriginAttr) &&
+      !range->hasAttr(block::sourceSubregionAttr) &&
       isProvably(range.getLogicalStart(), 0) &&
       valueIsDimension(range.getLogicalStop(), dimension, kernel))
     return true;
@@ -235,9 +235,9 @@ bool rangeOriginInView(gpu::MakeRangeOp range, ArrayRef<Value> offsets,
       valueIsDimension(range.getLogicalStop(), dimension, kernel)) {
     Value start = stripIndexIdentities(range.getStart());
     if (isProvably(range.getLogicalStart(), 0) &&
-        gpu::IndexRelations().mappedTileOrigin(start, range.getExtent(), dimension))
+        block::IndexRelations().mappedTileOrigin(start, range.getExtent(), dimension))
       return true;
-    if (auto coordinate = start.getDefiningOp<gpu::WorksetCoordinateOp>())
+    if (auto coordinate = start.getDefiningOp<block::WorksetCoordinateOp>())
       if (coordinate.getDimensionId() == static_cast<uint64_t>(dimension))
         return true;
     if (auto argument = dyn_cast<BlockArgument>(start)) {
@@ -245,17 +245,17 @@ bool rangeOriginInView(gpu::MakeRangeOp range, ArrayRef<Value> offsets,
           argument.getOwner()->getParentOp());
       if (loop && argument == loop.getInductionVar() &&
           isProvably(range.getLogicalStart(), 0) &&
-          gpu::IndexRelations().nonnegative(loop.getLowerBound()) &&
-          gpu::IndexRelations().atMost(loop.getUpperBound(), range.getLogicalStop()))
+          block::IndexRelations().nonnegative(loop.getLowerBound()) &&
+          block::IndexRelations().atMost(loop.getUpperBound(), range.getLogicalStop()))
         return true;
     }
-    auto parameter = range.getExtent().getDefiningOp<gpu::ParameterOp>();
+    auto parameter = range.getExtent().getDefiningOp<block::ParameterOp>();
     if (isProvably(start, 0) && isProvably(range.getLogicalStart(), 0) &&
         parameter &&
         parameter.getDeclaration().getRole() ==
-            gpu::ParameterRole::FullCoverage) {
-      gpu::PhysicalParameterBinding binding =
-          gpu::queryParameterBinding(parameter.getDeclaration());
+            block::ParameterRole::FullCoverage) {
+      block::PhysicalParameterBinding binding =
+          block::queryParameterBinding(parameter.getDeclaration());
       if (binding.isExact() && binding.dimension &&
           *binding.dimension == dimension)
         return true;
@@ -266,11 +266,11 @@ bool rangeOriginInView(gpu::MakeRangeOp range, ArrayRef<Value> offsets,
          constantOriginInView(*origin, view, resourceAxis, kernel);
 }
 
-bool scalarOriginInView(Value index, gpu::ViewType view,
+bool scalarOriginInView(Value index, block::ViewType view,
                         unsigned resourceAxis, int64_t dimension,
                         func::FuncOp kernel) {
   index = stripIndexIdentities(index);
-  if (auto coordinate = index.getDefiningOp<gpu::WorksetCoordinateOp>())
+  if (auto coordinate = index.getDefiningOp<block::WorksetCoordinateOp>())
     if (coordinate.getDimensionId() == static_cast<uint64_t>(dimension))
       return true;
   if (auto argument = dyn_cast<BlockArgument>(index)) {
@@ -278,17 +278,17 @@ bool scalarOriginInView(Value index, gpu::ViewType view,
         dyn_cast_or_null<scf::ForOp>(argument.getOwner()->getParentOp());
     Value logicalDimension = dimensionValue(kernel, dimension);
     if (loop && argument == loop.getInductionVar() && logicalDimension &&
-        gpu::IndexRelations().nonnegative(loop.getLowerBound()) &&
-        gpu::IndexRelations().positive(loop.getStep()) &&
-        gpu::IndexRelations().atMost(loop.getUpperBound(), logicalDimension))
+        block::IndexRelations().nonnegative(loop.getLowerBound()) &&
+        block::IndexRelations().positive(loop.getStep()) &&
+        block::IndexRelations().atMost(loop.getUpperBound(), logicalDimension))
       return true;
   }
-  std::optional<int64_t> origin = gpu::IndexRelations().constant(index);
+  std::optional<int64_t> origin = block::IndexRelations().constant(index);
   return origin &&
          constantOriginInView(*origin, view, resourceAxis, kernel);
 }
 
-bool scalarCoordinatesInView(ValueRange coordinates, gpu::ViewType view,
+bool scalarCoordinatesInView(ValueRange coordinates, block::ViewType view,
                              func::FuncOp kernel) {
   ArrayRef<int64_t> dimensions =
       view.getLayout().getDimensionIds().asArrayRef();

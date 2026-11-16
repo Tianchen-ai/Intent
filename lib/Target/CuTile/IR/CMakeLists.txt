@@ -10,8 +10,8 @@ add_mlir_dialect_library(MLIRIntentCuTileDialect
   MLIRIR
   MLIRFuncDialect
   MLIRSCFDialect
-  MLIRIntentGPUDialect
-  MLIRIntentGPUAnalysis
+  MLIRIntentBlockDialect
+  MLIRIntentBlockAnalysis
   MLIRSideEffectInterfaces
   MLIRInferTypeOpInterface
   MLIRViewLikeInterface

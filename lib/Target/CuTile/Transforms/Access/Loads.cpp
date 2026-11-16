@@ -3,12 +3,12 @@
 #include "Coordinates.h"
 #include "Bounds.h"
 #include "TileIndices.h"
-#include "Intent/Dialect/GPU/Analysis/IndexRelations.h"
-#include "Intent/Dialect/GPU/Analysis/ValueSchema.h"
-#include "Intent/Dialect/GPU/IR/Program.h"
-#include "Intent/Dialect/GPU/IR/FragmentOpInterface.h"
-#include "Intent/Dialect/GPU/Transforms/Value/ValueMaterialization.h"
-#include "Intent/Dialect/GPU/Transforms/Configuration/PhysicalParameters.h"
+#include "Intent/Dialect/Block/Analysis/IndexRelations.h"
+#include "Intent/Dialect/Block/Analysis/ValueSchema.h"
+#include "Intent/Dialect/Block/IR/Program.h"
+#include "Intent/Dialect/Block/IR/FragmentOpInterface.h"
+#include "Intent/Dialect/Block/Transforms/Value/ValueMaterialization.h"
+#include "Intent/Dialect/Block/Transforms/Configuration/PhysicalParameters.h"
 #include "Intent/Target/CuTile/Analysis/IndexBounds.h"
 #include "Intent/Target/CuTile/IR/CuTileOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -32,7 +32,7 @@ FailureOr<Value> scalarFill(Operation *owner, Value fill) {
 
 bool isZeroFill(Value value) {
   Value scalar = uniformScalarFill(value);
-  if (auto cast = scalar ? scalar.getDefiningOp<gpu::CastOp>() : gpu::CastOp())
+  if (auto cast = scalar ? scalar.getDefiningOp<block::CastOp>() : block::CastOp())
     if (cast.getValue().getType().isIntOrIndex() &&
         cast.getResult().getType().isIntOrIndex())
       return isZeroFill(cast.getValue());
@@ -58,31 +58,31 @@ bool nestedTraversal(Operation *operation) {
 } // namespace
 
 LogicalResult formNativeLoads(func::FuncOp kernel,
-    ArrayRef<gpu::LoadOp> loads, bool matrixCompute,
+    ArrayRef<block::LoadOp> loads, bool matrixCompute,
     AccessFormSelection &forms, NativeFormRewriter &rewriter) {
-  for (gpu::LoadOp load : loads) {
-    auto access = cast<gpu::AccessOpInterface>(load.getOperation());
-    gpu::PhysicalProgramAnalysis analysis(kernel);
-    auto view = dyn_cast<gpu::ViewType>(access.getAccessResource().getType());
+  for (block::LoadOp load : loads) {
+    auto access = cast<block::AccessOpInterface>(load.getOperation());
+    block::PhysicalProgramAnalysis analysis(kernel);
+    auto view = dyn_cast<block::ViewType>(access.getAccessResource().getType());
     if (!view)
       return load.emitOpError(
           "cuTile native load requires an external view resource");
     OpBuilder builder(load);
-    if (!isa<gpu::FragmentType>(access.getAccessResult().getType())) {
+    if (!isa<block::FragmentType>(access.getAccessResult().getType())) {
       FailureOr<SmallVector<Value>> indices = orderedCoordinates(access);
       FailureOr<Value> fill = scalarFill(load, access.getAccessFill());
       if (failed(indices) || failed(fill) ||
           llvm::any_of(*indices, [](Value value) {
-            return isa<gpu::FragmentType>(value.getType());
+            return isa<block::FragmentType>(value.getType());
           }) ||
-          (access.getAccessValidity() && isa<gpu::FragmentType>(access.getAccessValidity().getType())))
+          (access.getAccessValidity() && isa<block::FragmentType>(access.getAccessValidity().getType())))
         return load.emitOpError(
             "cuTile scalar load requires scalar indices and validity");
       bool inBounds = scalarCoordinatesInView(*indices, view, kernel);
       bool activeInBounds = inBounds || analysis.accessBounds(load).isExact();
       Value validity = access.getAccessValidity();
       Value padding = *fill;
-      gpu::PhysicalAccessBoundaryFact boundary =
+      block::PhysicalAccessBoundaryFact boundary =
           analysis.boundaryValidity(load);
       if (inBounds && boundary.isExact()) {
         validity = {};
@@ -92,12 +92,12 @@ LogicalResult formNativeLoads(func::FuncOp kernel,
           load.getLoc(), access.getAccessResult().getType(), access.getAccessResource(), *indices,
           validity, padding,
           activeInBounds ? builder.getUnitAttr() : UnitAttr());
-      if (Attribute origin = load->getAttr(gpu::originAttr))
-        replacement->setAttr(gpu::originAttr, origin);
+      if (Attribute origin = load->getAttr(block::originAttr))
+        replacement->setAttr(block::originAttr, origin);
       rewriter.replace(load, ValueRange{replacement.getResult()});
       continue;
     }
-    auto result = cast<gpu::FragmentType>(access.getAccessResult().getType());
+    auto result = cast<block::FragmentType>(access.getAccessResult().getType());
     const auto accessBounds = analysis.accessBounds(load);
     bool activeInBounds = accessBounds.isExact();
     // Single traversals can use regular tile loads for auxiliary vectors.
@@ -105,7 +105,7 @@ LogicalResult formNativeLoads(func::FuncOp kernel,
     // add dependencies to the nested matrix pipeline. Neither form needs TMA.
     bool vectorInput = matrixCompute && result.getShape().size() == 1;
     bool vectorTile = !vectorInput || !nestedTraversal(load);
-    gpu::PhysicalAccessBoundaryFact boundary =
+    block::PhysicalAccessBoundaryFact boundary =
         analysis.boundaryValidity(load, /*allowRangeGuards=*/true);
     FailureOr<NativeTileAccessPlan> plan = analyzeNativeTileAccess(access, kernel, accessBounds);
     FailureOr<MaterializedTileIndices> indices = failure();
@@ -126,7 +126,7 @@ LogicalResult formNativeLoads(func::FuncOp kernel,
                   (!guardedNative ||
                    (access.getAccessFill() && access.getAccessFill().getType() == result));
     if (rangeGuard && guardedNative)
-      rangeGuard = builder.create<gpu::BinaryOp>(
+      rangeGuard = builder.create<block::BinaryOp>(
           load.getLoc(), builder.getI1Type(), rangeGuard, *originGuard,
           BinaryOperator::LogicalAnd);
     FailureOr<Value> allowTMA = failure();
@@ -156,14 +156,14 @@ LogicalResult formNativeLoads(func::FuncOp kernel,
       Value value = tile.getResult();
       createdOperations.push_back(tile);
       if (plan->resourceToPacked) {
-        auto reshape = nested.create<gpu::ReshapeOp>(
+        auto reshape = nested.create<block::ReshapeOp>(
             load.getLoc(), plan->packedType, value,
             plan->resourceToPacked);
         value = reshape.getResult();
         createdOperations.push_back(reshape);
       }
       if (!isIdentityPermutation(plan->toComputation)) {
-        auto transpose = nested.create<gpu::TransposeOp>(
+        auto transpose = nested.create<block::TransposeOp>(
             load.getLoc(), result, value, plan->toComputation);
         value = transpose.getResult();
         createdOperations.push_back(transpose);
@@ -177,7 +177,7 @@ LogicalResult formNativeLoads(func::FuncOp kernel,
         if (!access.getAccessValidity())
           return load.emitOpError(
               "fragment padding requires an explicit access validity");
-        FailureOr<Value> zero = gpu::materializeScalarConstant(
+        FailureOr<Value> zero = block::materializeScalarConstant(
             nested, load.getLoc(), nested.getZeroAttr(view.getElementType()),
             view.getElementType());
         if (failed(zero))
@@ -194,7 +194,7 @@ LogicalResult formNativeLoads(func::FuncOp kernel,
           activeInBounds ? nested.getUnitAttr() : UnitAttr());
       createdOperations.push_back(replacement);
       if (fragmentFill) {
-        auto selected = nested.create<gpu::SelectOp>(
+        auto selected = nested.create<block::SelectOp>(
             load.getLoc(), result, access.getAccessValidity(), replacement.getResult(),
             access.getAccessFill());
         createdOperations.push_back(selected);
@@ -219,7 +219,7 @@ LogicalResult formNativeLoads(func::FuncOp kernel,
     auto emitGuardedNative = [&](OpBuilder &nested) -> FailureOr<Value> {
       Value condition = indices->alignment;
       if (rangeGuard)
-        condition = condition ? Value(nested.create<gpu::BinaryOp>(
+        condition = condition ? Value(nested.create<block::BinaryOp>(
                                     load.getLoc(), nested.getI1Type(), condition,
                                     rangeGuard, BinaryOperator::LogicalAnd))
                               : rangeGuard;
@@ -266,8 +266,8 @@ LogicalResult formNativeLoads(func::FuncOp kernel,
       replacementResult = *gathered;
     }
     for (Operation *operation : createdOperations)
-      if (Attribute origin = load->getAttr(gpu::originAttr))
-        operation->setAttr(gpu::originAttr, origin);
+      if (Attribute origin = load->getAttr(block::originAttr))
+        operation->setAttr(block::originAttr, origin);
     rewriter.replace(load, ValueRange{replacementResult});
   }
   return success();

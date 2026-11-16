@@ -1,16 +1,16 @@
 #ifndef INTENT_TARGET_TRITON_SERIALIZATION_NUMERICAL_H
 #define INTENT_TARGET_TRITON_SERIALIZATION_NUMERICAL_H
 
-#include "Intent/Dialect/GPU/Serialization/PythonEmitter.h"
+#include "Intent/Dialect/Block/Serialization/PythonEmitter.h"
 
 namespace intent::triton {
 
 // The same typed translation owns source eligibility, spelling and imports.
-void addNumericalOperations(gpu::PythonEmitter::Emitters &emitters);
+void addNumericalOperations(block::PythonEmitter::Emitters &emitters);
 mlir::LogicalResult emitNumericalConstant(mlir::arith::ConstantOp operation,
-                                        gpu::PythonEmitter &emitter);
+                                        block::PythonEmitter &emitter);
 
-std::string integerDivision(gpu::PhysicalExprKind kind, llvm::StringRef lhs,
+std::string integerDivision(block::PhysicalExprKind kind, llvm::StringRef lhs,
                             llvm::StringRef rhs);
 
 mlir::FailureOr<std::string>

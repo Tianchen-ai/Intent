@@ -1,5 +1,6 @@
 #include "Intent/Target/CuTile/Serialization/Numerical.h"
-#include "Intent/Dialect/GPU/IR/Program.h"
+#include "Intent/Target/NVIDIA/IR/Target.h"
+#include "Intent/Dialect/Block/IR/Program.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/ErrorHandling.h"
 
@@ -8,7 +9,7 @@ using namespace mlir;
 namespace intent::cutile {
 namespace {
 
-using Emitter = gpu::PythonEmitter;
+using Emitter = block::PythonEmitter;
 using Dependencies = Emitter::Emitters::Dependencies;
 
 struct Translation {
@@ -18,7 +19,7 @@ struct Translation {
 };
 
 std::string typeName(Type type) {
-  return gpu::pythonScalarType(
+  return block::pythonScalarType(
       Emitter::elementType(type),
       {"ct.", "bool_", "float64", "float8_e4m3fn", "float8_e5m2"});
 }
@@ -36,7 +37,7 @@ std::string selectExpression(ArrayRef<std::string> operands) {
          operands[2] + ")";
 }
 
-FailureOr<Translation> translate(gpu::BinaryOp operation,
+FailureOr<Translation> translate(block::BinaryOp operation,
                                  ArrayRef<std::string> operands) {
   if (operation.getStrictRounding())
     return operation.emitOpError("strict f32 arithmetic must be legalized before cuTile source emission"), failure();
@@ -100,7 +101,7 @@ FailureOr<Translation> translate(gpu::BinaryOp operation,
          failure();
 }
 
-FailureOr<Translation> translate(gpu::UnaryOp operation,
+FailureOr<Translation> translate(block::UnaryOp operation,
                                  ArrayRef<std::string> operands) {
   auto expression = [&](std::string value) -> FailureOr<Translation> {
     return Translation{std::move(value), {}};
@@ -139,13 +140,9 @@ FailureOr<Translation> translate(gpu::UnaryOp operation,
   }
   case UnaryOperator::Tanh:
     if (operation.getApproximate()) {
-      auto function = operation->getParentOfType<func::FuncOp>();
-      auto capabilities = function
-          ? function->getAttrOfType<gpu::CapabilitiesAttr>(gpu::capabilitiesAttr)
-          : gpu::CapabilitiesAttr();
-      if (!capabilities ||
-          10 * capabilities.getComputeCapabilityMajor() +
-              capabilities.getComputeCapabilityMinor() < 75)
+      auto device = nvidia::deviceOf(operation);
+      if (!device ||
+          10 * device.getComputeCapabilityMajor() + device.getComputeCapabilityMinor() < 75)
         return operation.emitOpError(
             "native approximate tanh requires compute capability 7.5 or newer"),
                failure();
@@ -165,7 +162,7 @@ FailureOr<Translation> translate(gpu::UnaryOp operation,
   return operation.emitOpError("has no cuTile unary source translation"), failure();
 }
 
-FailureOr<Translation> translate(gpu::CompareOp operation,
+FailureOr<Translation> translate(block::CompareOp operation,
                                  ArrayRef<std::string> operands) {
   StringRef token;
   switch (operation.getPredicate()) {
@@ -180,21 +177,21 @@ FailureOr<Translation> translate(gpu::CompareOp operation,
                      operands[1] + ")", {}, true};
 }
 
-FailureOr<Translation> translate(gpu::CastOp operation,
+FailureOr<Translation> translate(block::CastOp operation,
                                  ArrayRef<std::string> operands) {
   return Translation{castExpression(operands[0], operation.getValue().getType(),
                                     operation.getResult().getType(), false),
                      {}};
 }
 
-FailureOr<Translation> translate(gpu::BitcastOp operation,
+FailureOr<Translation> translate(block::BitcastOp operation,
                                  ArrayRef<std::string> operands) {
   return Translation{castExpression(operands[0], operation.getValue().getType(),
                                     operation.getResult().getType(), true),
                      {}};
 }
 
-FailureOr<Translation> translate(gpu::SelectOp,
+FailureOr<Translation> translate(block::SelectOp,
                                  ArrayRef<std::string> operands) {
   return Translation{selectExpression(operands), {}};
 }
@@ -233,24 +230,24 @@ template <typename Op> void addNumericalOperation(Emitter::Emitters &emitters) {
 
 } // namespace
 
-std::string integerDivision(gpu::PhysicalExprKind kind, StringRef lhs,
+std::string integerDivision(block::PhysicalExprKind kind, StringRef lhs,
                             StringRef rhs) {
   switch (kind) {
-  case gpu::PhysicalExprKind::FloorDiv:
+  case block::PhysicalExprKind::FloorDiv:
     return "ct.floordiv(" + lhs.str() + ", " + rhs.str() + ")";
-  case gpu::PhysicalExprKind::CeilDiv:
+  case block::PhysicalExprKind::CeilDiv:
     return "ct.cdiv(" + lhs.str() + ", " + rhs.str() + ")";
   default: llvm_unreachable("expected a physical integer division");
   }
 }
 
 void addNumericalOperations(Emitter::Emitters &emitters) {
-  addNumericalOperation<gpu::BinaryOp>(emitters);
-  addNumericalOperation<gpu::UnaryOp>(emitters);
-  addNumericalOperation<gpu::CompareOp>(emitters);
-  addNumericalOperation<gpu::CastOp>(emitters);
-  addNumericalOperation<gpu::BitcastOp>(emitters);
-  addNumericalOperation<gpu::SelectOp>(emitters);
+  addNumericalOperation<block::BinaryOp>(emitters);
+  addNumericalOperation<block::UnaryOp>(emitters);
+  addNumericalOperation<block::CompareOp>(emitters);
+  addNumericalOperation<block::CastOp>(emitters);
+  addNumericalOperation<block::BitcastOp>(emitters);
+  addNumericalOperation<block::SelectOp>(emitters);
 }
 
 std::string numericalCast(Emitter &emitter, Value value, Type result,
@@ -259,7 +256,7 @@ std::string numericalCast(Emitter &emitter, Value value, Type result,
                         bitcast);
 }
 
-std::string numericalSelect(Emitter &emitter, gpu::SelectOp operation) {
+std::string numericalSelect(Emitter &emitter, block::SelectOp operation) {
   SmallVector<std::string> operands;
   for (Value value : operation->getOperands())
     operands.push_back(emitter.valueString(value));

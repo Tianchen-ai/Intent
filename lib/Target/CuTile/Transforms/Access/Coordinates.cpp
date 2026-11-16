@@ -1,10 +1,10 @@
 #include "Coordinates.h"
-#include "Intent/Dialect/GPU/Transforms/Value/ValueMaterialization.h"
-#include "Intent/Dialect/GPU/Analysis/IndexRelations.h"
-#include "Intent/Dialect/GPU/Analysis/ProgramInterface.h"
-#include "Intent/Dialect/GPU/Analysis/ValueSchema.h"
-#include "Intent/Dialect/GPU/IR/PhysicalExpressions.h"
-#include "Intent/Dialect/GPU/IR/Program.h"
+#include "Intent/Dialect/Block/Transforms/Value/ValueMaterialization.h"
+#include "Intent/Dialect/Block/Analysis/IndexRelations.h"
+#include "Intent/Dialect/Block/Analysis/ProgramInterface.h"
+#include "Intent/Dialect/Block/Analysis/ValueSchema.h"
+#include "Intent/Dialect/Block/IR/PhysicalExpressions.h"
+#include "Intent/Dialect/Block/IR/Program.h"
 #include "Intent/Target/CuTile/Analysis/IndexBounds.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -30,24 +30,24 @@ bool sameScalarFill(Value lhs, Value rhs) {
 Value uniformScalarFill(Value fill) {
   if (!fill)
     return fill;
-  while (isa<gpu::FragmentType>(fill.getType())) {
-    if (auto splat = fill.getDefiningOp<gpu::SplatOp>()) {
+  while (isa<block::FragmentType>(fill.getType())) {
+    if (auto splat = fill.getDefiningOp<block::SplatOp>()) {
       fill = splat.getValue();
       continue;
     }
-    if (auto broadcast = fill.getDefiningOp<gpu::BroadcastOp>()) {
+    if (auto broadcast = fill.getDefiningOp<block::BroadcastOp>()) {
       fill = broadcast.getValue();
       continue;
     }
-    if (auto transpose = fill.getDefiningOp<gpu::TransposeOp>()) {
+    if (auto transpose = fill.getDefiningOp<block::TransposeOp>()) {
       fill = transpose.getValue();
       continue;
     }
-    if (auto reshape = fill.getDefiningOp<gpu::ReshapeOp>()) {
+    if (auto reshape = fill.getDefiningOp<block::ReshapeOp>()) {
       fill = reshape.getValue();
       continue;
     }
-    if (auto select = fill.getDefiningOp<gpu::SelectOp>()) {
+    if (auto select = fill.getDefiningOp<block::SelectOp>()) {
       Value trueFill = uniformScalarFill(select.getTrueValue());
       Value falseFill = uniformScalarFill(select.getFalseValue());
       return trueFill && falseFill && sameScalarFill(trueFill, falseFill)
@@ -59,9 +59,9 @@ Value uniformScalarFill(Value fill) {
   return fill;
 }
 
-FailureOr<SmallVector<Value>> orderedCoordinates(gpu::AccessOpInterface access) {
+FailureOr<SmallVector<Value>> orderedCoordinates(block::AccessOpInterface access) {
   Operation *owner = access.getOperation();
-  auto view = cast<gpu::ViewType>(access.getAccessResource().getType());
+  auto view = cast<block::ViewType>(access.getAccessResource().getType());
   auto coordinates = access.getAccessCoordinates();
   auto sourceAxes = access.getAccessSourceAxes();
   SmallVector<Value> result(view.getRank());
@@ -73,13 +73,13 @@ FailureOr<SmallVector<Value>> orderedCoordinates(gpu::AccessOpInterface access) 
 }
 
 FailureOr<SmallVector<Value>> materializeCoordinateDomains(
-    OpBuilder &builder, gpu::AccessOpInterface access) {
+    OpBuilder &builder, block::AccessOpInterface access) {
   Operation *owner = access.getOperation();
   auto sourceAxes = access.getAccessSourceAxes();
-  auto view = cast<gpu::ViewType>(access.getAccessResource().getType());
+  auto view = cast<block::ViewType>(access.getAccessResource().getType());
   SmallVector<Value> results(view.getRank());
   for (auto [slot, resourceAxis] : llvm::enumerate(sourceAxes)) {
-    auto coordinate = gpu::materializeAccessCoordinate(builder, access, slot);
+    auto coordinate = block::materializeAccessCoordinate(builder, access, slot);
     if (failed(coordinate))
       return failure();
     results[resourceAxis] = *coordinate;
@@ -112,15 +112,15 @@ SmallVector<int64_t> identityAxes(unsigned rank) {
   return result;
 }
 
-FailureOr<unsigned> nativeAccessRangeAxis(gpu::AccessOpInterface access,
+FailureOr<unsigned> nativeAccessRangeAxis(block::AccessOpInterface access,
                                          unsigned coordinateIndex,
-                                         gpu::MakeRangeOp range) {
-  auto projection = gpu::queryAccessCoordinateProjection(access, coordinateIndex);
-  auto coordinate = dyn_cast<gpu::FragmentType>(
+                                         block::MakeRangeOp range) {
+  auto projection = block::queryAccessCoordinateProjection(access, coordinateIndex);
+  auto coordinate = dyn_cast<block::FragmentType>(
       access.getAccessCoordinates()[coordinateIndex].getType());
   if (!projection.isExact() || !coordinate)
     return failure();
-  auto ranges = gpu::queryRangeProjections(coordinate, range);
+  auto ranges = block::queryRangeProjections(coordinate, range);
   if (ranges.size() != 1)
     return failure();
   std::optional<unsigned> result;

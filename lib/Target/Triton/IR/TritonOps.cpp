@@ -1,10 +1,10 @@
 #include "Intent/Target/Triton/IR/TritonOps.h"
 
-#include "Intent/Dialect/GPU/IR/Program.h"
-#include "Intent/Dialect/GPU/IR/GPUOps.h"
-#include "Intent/Dialect/GPU/IR/PhysicalExpressions.h"
-#include "Intent/Dialect/GPU/Analysis/ProgramInterface.h"
-#include "Intent/Dialect/GPU/Analysis/PhysicalProgram.h"
+#include "Intent/Dialect/Block/IR/Program.h"
+#include "Intent/Dialect/Block/IR/BlockOps.h"
+#include "Intent/Dialect/Block/IR/PhysicalExpressions.h"
+#include "Intent/Dialect/Block/Analysis/ProgramInterface.h"
+#include "Intent/Dialect/Block/Analysis/PhysicalProgram.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Diagnostics.h"
@@ -29,18 +29,18 @@ LogicalResult inferCollectiveTypes(MLIRContext *context,
   typename CollectiveOp::Adaptor operation(operands, attributes, properties, regions);
   if (failed(operation.verify(location.value_or(UnknownLoc::get(context)))))
     return failure();
-  return gpu::inferScalarCollectiveResultTypes(
+  return block::inferScalarCollectiveResultTypes(
       location, operation.getSources(), operation.getAxisAttr().getInt(), scan, results);
 }
 
 LogicalResult verifyDescriptorAccess(Operation *owner, Value descriptorValue,
-                                     gpu::FragmentType fragment,
+                                     block::FragmentType fragment,
                                      ValueRange offsets) {
   auto descriptor = descriptorValue.getDefiningOp<TensorDescriptorOp>();
   if (!descriptor)
     return owner->emitOpError(
         "requires an explicit tensor-descriptor value");
-  auto base = cast<gpu::ViewType>(descriptor.getBase().getType());
+  auto base = cast<block::ViewType>(descriptor.getBase().getType());
   if (base.getElementType() != fragment.getElementType())
     return owner->emitOpError(
         "tensor descriptor and fragment element types must match");
@@ -50,7 +50,7 @@ LogicalResult verifyDescriptorAccess(Operation *owner, Value descriptorValue,
         "descriptor offsets and fragment rank must match its declared shape");
   for (auto [extent, blockShape] :
        llvm::zip(fragment.getShape(), descriptor.getBlockShape())) {
-    auto expression = gpu::queryLaunchExpression(blockShape);
+    auto expression = block::queryLaunchExpression(blockShape);
     if (!expression || expression != extent)
       return owner->emitOpError(
           "fragment extents must equal the declared descriptor block shape");
@@ -58,34 +58,34 @@ LogicalResult verifyDescriptorAccess(Operation *owner, Value descriptorValue,
   return success();
 }
 
-bool hasStrideBinding(func::FuncOp kernel, gpu::ViewType view, unsigned axis) {
-  auto stride = cast<gpu::PhysicalExprAttr>(view.getLayout().getStrides()[axis]);
-  if (stride.getKind() == gpu::PhysicalExprKind::Constant)
+bool hasStrideBinding(func::FuncOp kernel, block::ViewType view, unsigned axis) {
+  auto stride = cast<block::PhysicalExprAttr>(view.getLayout().getStrides()[axis]);
+  if (stride.getKind() == block::PhysicalExprKind::Constant)
     return stride.getValue() > 0;
-  return bool(gpu::resolveArgument(kernel, stride.getArgumentReference()));
+  return bool(block::resolveArgument(kernel, stride.getArgumentReference()));
 }
 
-bool matchesStrideBinding(func::FuncOp kernel, gpu::ViewType view, unsigned axis,
+bool matchesStrideBinding(func::FuncOp kernel, block::ViewType view, unsigned axis,
                           Value value) {
-  return gpu::queryLaunchExpression(value) ==
-      cast<gpu::PhysicalExprAttr>(view.getLayout().getStrides()[axis]);
+  return block::queryLaunchExpression(value) ==
+      cast<block::PhysicalExprAttr>(view.getLayout().getStrides()[axis]);
 }
 
-bool hasDescriptorLayout(func::FuncOp kernel, gpu::ViewType view) {
+bool hasDescriptorLayout(func::FuncOp kernel, block::ViewType view) {
   auto layout = view.getLayout();
   for (unsigned axis = 0; axis < view.getRank(); ++axis)
     if (!hasStrideBinding(kernel, view, axis))
       return false;
 
-  auto lastStride = cast<gpu::PhysicalExprAttr>(
+  auto lastStride = cast<block::PhysicalExprAttr>(
       layout.getStrides()[layout.getStrides().size() - 1]);
-  if (lastStride.getKind() == gpu::PhysicalExprKind::Constant &&
+  if (lastStride.getKind() == block::PhysicalExprKind::Constant &&
       lastStride.getValue() != 1)
     return false;
   unsigned elementBytes = view.getElementType().getIntOrFloatBitWidth() / 8;
   for (unsigned axis = 0; axis + 1 < view.getRank(); ++axis) {
-    auto stride = cast<gpu::PhysicalExprAttr>(layout.getStrides()[axis]);
-    if (stride.getKind() == gpu::PhysicalExprKind::Constant &&
+    auto stride = cast<block::PhysicalExprAttr>(layout.getStrides()[axis]);
+    if (stride.getKind() == block::PhysicalExprKind::Constant &&
         (stride.getValue() * elementBytes) % 16 != 0)
       return false;
   }
@@ -111,19 +111,19 @@ LogicalResult ScanOp::inferReturnTypes(MLIRContext *context,
 LogicalResult ReduceOp::verify() {
   if (getReverse())
     return emitOpError("native reduction does not reverse logical order");
-  return gpu::verifyScalarCollective(getOperation(), getSources(), getIdentities(),
+  return block::verifyScalarCollective(getOperation(), getSources(), getIdentities(),
                                      getResults(), getCombine(), getAxisAttr().getInt(), false);
 }
 
 LogicalResult ScanOp::verify() {
-  return gpu::verifyScalarCollective(getOperation(), getSources(), getIdentities(),
+  return block::verifyScalarCollective(getOperation(), getSources(), getIdentities(),
                                      getResults(), getCombine(), getAxisAttr().getInt(), true);
 }
 
 LogicalResult TensorDescriptorChoiceOp::verify() {
   auto kernel = (*this)->getParentOfType<func::FuncOp>();
-  if (!kernel || !kernel->hasAttr(gpu::kernelAttr))
-    return emitOpError("must belong to a physical GPU kernel");
+  if (!kernel || !kernel->hasAttr(block::kernelAttr))
+    return emitOpError("must belong to a physical Block kernel");
   unsigned choices = 0;
   kernel.walk([&](TensorDescriptorChoiceOp) { ++choices; });
   if (choices != 1)
@@ -159,16 +159,16 @@ LogicalResult TensorDescriptorChoiceOp::verify() {
   if (!completeDescriptorSet || descriptors != declared.size())
     return emitOpError(
         "descriptor operands must enumerate every descriptor declaration exactly once");
-  auto declaration = gpu::lookupParameterDeclaration(getOperation(), getConfigParameter());
+  auto declaration = block::lookupParameterDeclaration(getOperation(), getConfigParameter());
   if (!declaration || !declaration.getValueType().isSignlessInteger(1) ||
-      declaration.getRole() != gpu::ParameterRole::ProviderAccessForm ||
-      declaration.getPhase() != gpu::ConfigurationBindingPhase::Provider ||
+      declaration.getRole() != block::ParameterRole::ProviderAccessForm ||
+      declaration.getPhase() != block::ConfigurationBindingPhase::Provider ||
       declaration.getCandidates().empty() ||
       llvm::any_of(declaration.getCandidates().asArrayRef(),
                    [](int64_t value) { return value != 0 && value != 1; }))
     return emitOpError("requires a declared boolean provider access-form parameter");
-  if (gpu::lookupParameterDeclaration(getOperation(),
-          gpu::ParameterRefAttr::get(getContext(), getEligibilityArgumentAttr())))
+  if (block::lookupParameterDeclaration(getOperation(),
+          block::ParameterRefAttr::get(getContext(), getEligibilityArgumentAttr())))
     return emitOpError(
         "descriptor eligibility name must not collide with a compile-time declaration");
   return success();
@@ -176,8 +176,8 @@ LogicalResult TensorDescriptorChoiceOp::verify() {
 
 LogicalResult TensorDescriptorAllocatorOp::verify() {
   auto kernel = (*this)->getParentOfType<func::FuncOp>();
-  if (!kernel || !kernel->hasAttr(gpu::kernelAttr))
-    return emitOpError("must belong to a physical GPU kernel");
+  if (!kernel || !kernel->hasAttr(block::kernelAttr))
+    return emitOpError("must belong to a physical Block kernel");
   unsigned allocators = 0;
   unsigned descriptors = 0;
   kernel.walk([&](TensorDescriptorAllocatorOp) { ++allocators; });
@@ -199,9 +199,9 @@ LogicalResult TensorDescriptorAllocatorOp::verify() {
 
 LogicalResult TensorDescriptorOp::verify() {
   auto kernel = (*this)->getParentOfType<func::FuncOp>();
-  if (!kernel || !kernel->hasAttr(gpu::kernelAttr))
-    return emitOpError("must belong to a physical GPU kernel");
-  auto base = cast<gpu::ViewType>(getBase().getType());
+  if (!kernel || !kernel->hasAttr(block::kernelAttr))
+    return emitOpError("must belong to a physical Block kernel");
+  auto base = cast<block::ViewType>(getBase().getType());
   auto baseArgument = dyn_cast<BlockArgument>(getBase());
   if (!baseArgument || baseArgument.getOwner() != &kernel.getBody().front() ||
       getResult().getType() != base)
@@ -262,21 +262,21 @@ LogicalResult TensorDescriptorOp::verify() {
     return emitOpError(
         "tensor descriptor element type must occupy whole bytes");
   for (unsigned axis = 0; axis < rank; ++axis) {
-    auto dimension = gpu::queryLaunchExpression(getShape()[axis]);
+    auto dimension = block::queryLaunchExpression(getShape()[axis]);
     if (!dimension || dimension != base.getLayout().getExtents()[axis] ||
         (axis + 1 < rank &&
          !matchesStrideBinding(kernel, base, axis, getStrides()[axis])))
       return emitOpError(
           "descriptor shape and strides must preserve each source axis");
-    auto extent = gpu::queryLaunchExpression(getBlockShape()[axis]);
-    if (!extent || !gpu::isCompileTimePhysicalExpr(extent))
+    auto extent = block::queryLaunchExpression(getBlockShape()[axis]);
+    if (!extent || !block::isCompileTimePhysicalExpr(extent))
       return emitOpError("descriptor block shape must use compile-time physical expressions");
     if (!blocked.test(axis) &&
-        gpu::constantPhysicalExpression(extent) != 1)
+        block::constantPhysicalExpression(extent) != 1)
       return emitOpError("scalar source axes must have descriptor block extent one");
   }
-  auto unitStride = gpu::queryLaunchExpression(getStrides().back());
-  if (!unitStride || gpu::constantPhysicalExpression(unitStride) != 1)
+  auto unitStride = block::queryLaunchExpression(getStrides().back());
+  if (!unitStride || block::constantPhysicalExpression(unitStride) != 1)
     return emitOpError("tensor descriptor final stride must be one");
   unsigned choices = 0;
   unsigned allocators = 0;
@@ -303,7 +303,7 @@ void DescriptorLoadOp::getEffects(
 }
 
 LogicalResult DescriptorStoreOp::verify() {
-  if (cast<gpu::ViewType>(getDescriptor().getType()).getAccess() == 0)
+  if (cast<block::ViewType>(getDescriptor().getType()).getAccess() == 0)
     return emitOpError("In-only external view cannot be written");
   return verifyDescriptorAccess(*this, getDescriptor(), getValue().getType(),
                                 getOffsets());
@@ -317,20 +317,20 @@ void DescriptorStoreOp::getEffects(
 Value TensorDescriptorOp::getViewSource() { return getBase(); }
 
 LogicalResult SplitOp::verify() {
-  auto source = cast<gpu::FragmentType>(getSource().getType());
-  auto low = cast<gpu::FragmentType>(getLow().getType());
-  auto high = cast<gpu::FragmentType>(getHigh().getType());
+  auto source = cast<block::FragmentType>(getSource().getType());
+  auto low = cast<block::FragmentType>(getLow().getType());
+  auto high = cast<block::FragmentType>(getHigh().getType());
   if (low != high || source.getShape().size() != low.getShape().size() + 1 ||
       source.getElementType() != low.getElementType() ||
       source.getValidity() != low.getValidity() ||
       source.getOwner() != low.getOwner())
     return emitOpError(
         "requires two equal prefix fragments from one trailing pair axis");
-  auto trailing = dyn_cast<gpu::PhysicalExprAttr>(
+  auto trailing = dyn_cast<block::PhysicalExprAttr>(
       source.getShape()[source.getShape().size() - 1]);
   if (!trailing ||
       trailing.getKind() !=
-          gpu::PhysicalExprKind::Constant ||
+          block::PhysicalExprKind::Constant ||
       trailing.getValue() != 2)
     return emitOpError("requires a constant trailing extent of two");
   if (!std::equal(low.getShape().begin(), low.getShape().end(),
@@ -345,7 +345,7 @@ LogicalResult SplitOp::verify() {
 LogicalResult MapElementwiseOp::verify() {
   auto result = getResult().getType();
   Block &body = getBody().front();
-  auto yield = dyn_cast<gpu::YieldOp>(body.getTerminator());
+  auto yield = dyn_cast<block::YieldOp>(body.getTerminator());
   if (getInputs().empty() || body.getNumArguments() != getInputs().size() ||
       !yield || yield.getValues().size() != 1 ||
       yield.getValues().front().getType() != result.getElementType())
@@ -353,7 +353,7 @@ LogicalResult MapElementwiseOp::verify() {
   bool hasFragment = false;
   for (auto [input, argument] : llvm::zip(getInputs(), body.getArguments())) {
     Type element = input.getType();
-    if (auto fragment = dyn_cast<gpu::FragmentType>(element)) {
+    if (auto fragment = dyn_cast<block::FragmentType>(element)) {
       hasFragment = true;
       if (fragment.getShape() != result.getShape() ||
           fragment.getAxisMaps() != result.getAxisMaps() ||

@@ -4,32 +4,32 @@
 #include "Intent/Target/CuTile/Analysis/Program.h"
 #include "Program.h"
 #include "mlir/IR/Verifier.h"
-#include "Intent/Dialect/GPU/IR/Program.h"
-#include "Intent/Dialect/GPU/Transforms/Value/ValueRelations.h"
+#include "Intent/Dialect/Block/IR/Program.h"
+#include "Intent/Dialect/Block/Transforms/Value/ValueRelations.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include <cassert>
 
 using namespace mlir;
 namespace intent::cutile {
 LogicalResult formNativeProgram(ModuleOp module) {
-  auto physicalKernel = gpu::getPhysicalKernel(module);
+  auto physicalKernel = block::getPhysicalKernel(module);
   if (failed(physicalKernel)) return failure();
   func::FuncOp kernel = *physicalKernel;
   NativeAccessInputs accesses;
   NativeComputeInputs computations;
-  SmallVector<gpu::AssumeInBoundsOp> assumptions;
+  SmallVector<block::AssumeInBoundsOp> assumptions;
   NativeProgramFeatures features;
   kernel.walk([&](Operation *operation) {
     features.observe(operation);
-    if (auto op = dyn_cast<gpu::LoadOp>(operation)) accesses.loads.push_back(op);
-    else if (auto op = dyn_cast<gpu::GatherOp>(operation)) accesses.gathers.push_back(op);
-    else if (auto op = dyn_cast<gpu::StoreOp>(operation)) accesses.stores.push_back(op);
-    else if (auto op = dyn_cast<gpu::AtomicRMWOp>(operation)) accesses.atomics.push_back(op);
-    else if (auto op = dyn_cast<gpu::ContractOp>(operation)) computations.contracts.push_back(op);
-    else if (auto op = dyn_cast<gpu::ScaledContractOp>(operation)) computations.scaledContracts.push_back(op);
-    else if (auto op = dyn_cast<gpu::ReduceOp>(operation)) computations.reductions.push_back(op);
-    else if (auto op = dyn_cast<gpu::ScanOp>(operation)) computations.scans.push_back(op);
-    else if (auto op = dyn_cast<gpu::AssumeInBoundsOp>(operation)) assumptions.push_back(op);
+    if (auto op = dyn_cast<block::LoadOp>(operation)) accesses.loads.push_back(op);
+    else if (auto op = dyn_cast<block::GatherOp>(operation)) accesses.gathers.push_back(op);
+    else if (auto op = dyn_cast<block::StoreOp>(operation)) accesses.stores.push_back(op);
+    else if (auto op = dyn_cast<block::AtomicRMWOp>(operation)) accesses.atomics.push_back(op);
+    else if (auto op = dyn_cast<block::ContractOp>(operation)) computations.contracts.push_back(op);
+    else if (auto op = dyn_cast<block::ScaledContractOp>(operation)) computations.scaledContracts.push_back(op);
+    else if (auto op = dyn_cast<block::ReduceOp>(operation)) computations.reductions.push_back(op);
+    else if (auto op = dyn_cast<block::ScanOp>(operation)) computations.scans.push_back(op);
+    else if (auto op = dyn_cast<block::AssumeInBoundsOp>(operation)) assumptions.push_back(op);
   });
   NativeFormRewriter rewriter;
   if (failed(formNativeAccesses(kernel, accesses, features.matrixCompute,
@@ -37,9 +37,9 @@ LogicalResult formNativeProgram(ModuleOp module) {
       failed(formComputePrimitives(kernel, computations, rewriter)))
     return failure();
   rewriter.commit();
-  for (gpu::AssumeInBoundsOp assumption : assumptions)
+  for (block::AssumeInBoundsOp assumption : assumptions)
     assumption.erase();
-  gpu::eraseDeadPhysicalValues(kernel);
+  block::eraseDeadPhysicalValues(kernel);
   return mlir::verify(module);
 }
 } // namespace intent::cutile

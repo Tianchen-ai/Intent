@@ -1,7 +1,7 @@
 #ifndef INTENT_COMPILER_COMPILER_H
 #define INTENT_COMPILER_COMPILER_H
 
-#include "Intent/Conversion/KIRToGPU/KIRToGPU.h"
+#include "Intent/Conversion/KIRToBlock/KIRToBlock.h"
 #include "Intent/Dialect/Intent/IR/CompileOptions.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/OwningOpRef.h"
@@ -45,7 +45,7 @@ struct Request {
   std::optional<Provider> provider;
   InputStage inputStage = InputStage::Kernel;
   Stage stopAfter = Stage::Provider;
-  GPUCapabilities gpu{};
+  BlockCapabilities block{};
   CPUOptions cpu;
   DSAOptions dsa;
   std::string profileDirectory;

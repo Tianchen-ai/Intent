@@ -1,0 +1,64 @@
+#ifndef INTENT_DIALECT_Block_TRANSFORMS_ONLINESUMMARY_H
+#define INTENT_DIALECT_Block_TRANSFORMS_ONLINESUMMARY_H
+
+#include "Intent/Dialect/Block/Analysis/PhysicalProgram.h"
+#include "Intent/Dialect/Block/Analysis/Helpers.h"
+#include "Intent/Dialect/Block/IR/BlockOps.h"
+
+#include "mlir/IR/Builders.h"
+
+namespace intent::block {
+
+struct NormalizedSummaryStructure {
+  BinaryReduction validity;
+  BinaryReduction maximum;
+  BinaryReduction mass;
+  ContractOp moment;
+  SelectOp maximumOrEmpty;
+  SelectOp maskedScore;
+  SelectOp probability;
+  CastOp probabilityCast;
+  UnaryOp exponential;
+  mlir::Value memberValidity;
+  mlir::Value score;
+  mlir::Value values;
+  unsigned reductionAxis;
+  unsigned valueReductionAxis;
+  PhysicalSourceAxis traversal;
+  SelectOp momentOrEmpty;
+};
+
+struct OnlineSummaryStructure : NormalizedSummaryStructure {
+  MakeRecordOp record;
+  unsigned validityField;
+  unsigned maximumField;
+  unsigned massField;
+  unsigned momentField;
+};
+
+struct OnlineSummaryMerge {
+  MakeRecordOp record;
+  mlir::Value combinedMaximum;
+  mlir::Value leftScale;
+  mlir::Value rightScale;
+  mlir::Value leftMassTerm;
+  mlir::Value leftMomentTerm;
+};
+
+mlir::FailureOr<OnlineSummaryStructure>
+matchOnlineSummaryStructure(MakeRecordOp record);
+
+mlir::FailureOr<NormalizedSummaryStructure>
+matchNormalizedSummaryStructure(ContractOp moment);
+
+mlir::FailureOr<OnlineSummaryMerge>
+matchOnlineSummaryMerge(mlir::Region &region,
+                        const OnlineSummaryStructure &summary);
+
+ReduceOp cloneReductionWithSource(mlir::OpBuilder &builder,
+                                  mlir::Location location, BinaryReduction source,
+                                  mlir::Value value);
+
+} // namespace intent::block
+
+#endif

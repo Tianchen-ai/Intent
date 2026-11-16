@@ -9,8 +9,8 @@ add_mlir_dialect_library(MLIRIntentTritonDialect
 
   LINK_LIBS PUBLIC
   MLIRIR
-  MLIRIntentGPUDialect
-  MLIRIntentGPUAnalysis
+  MLIRIntentBlockDialect
+  MLIRIntentBlockAnalysis
   MLIRSideEffectInterfaces
   MLIRInferTypeOpInterface
   MLIRViewLikeInterface

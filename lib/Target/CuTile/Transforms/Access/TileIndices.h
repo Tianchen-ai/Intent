@@ -19,14 +19,14 @@ mlir::FailureOr<MaterializedTileIndices> materializeTileIndices(
     const NativeTileAccessPlan &plan, bool allowDynamicAlignment);
 mlir::FailureOr<mlir::Value> materializeTileOriginGuard(
     mlir::OpBuilder &builder, mlir::Operation *owner, mlir::Value resource,
-    NativeTileAccessPlan &plan, const gpu::PhysicalAccessBoundaryFact &boundary);
+    NativeTileAccessPlan &plan, const block::PhysicalAccessBoundaryFact &boundary);
 mlir::Value materializeFullRangeGuard(
     mlir::OpBuilder &builder, mlir::Location location,
-    const gpu::PhysicalAccessBoundaryFact &boundary);
+    const block::PhysicalAccessBoundaryFact &boundary);
 mlir::Value materializeFullTileCondition(mlir::OpBuilder &builder,
                                         mlir::Location location,
                                         mlir::Value resource,
-                                        gpu::FragmentType tile);
+                                        block::FragmentType tile);
 
 } // namespace intent::cutile
 

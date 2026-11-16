@@ -1,8 +1,8 @@
 #ifndef INTENT_TARGET_TRITON_IR_TRITONOPS_TD
 #define INTENT_TARGET_TRITON_IR_TRITONOPS_TD
 
-include "Intent/Dialect/GPU/IR/GPUTypes.td"
-include "Intent/Dialect/GPU/IR/GPUAttrs.td"
+include "Intent/Dialect/Block/IR/BlockTypes.td"
+include "Intent/Dialect/Block/IR/BlockAttrs.td"
 include "Intent/Target/Triton/IR/TritonDialect.td"
 include "mlir/IR/OpBase.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
@@ -18,10 +18,10 @@ def IntentTriton_CtaBarrierOp : IntentTriton_Op<"cta_barrier", [
 
 def IntentTriton_TensorDescriptorChoiceOp :
     IntentTriton_Op<"tensor_descriptor_choice", [Pure]> {
-  let arguments = (ins Variadic<IntentGPU_ViewValue>:$descriptors,
+  let arguments = (ins Variadic<IntentBlock_ViewValue>:$descriptors,
                        StrAttr:$construction,
                        StrAttr:$selection,
-                       IntentGPU_ParameterRefAttr:$config_parameter,
+                       IntentBlock_ParameterRefAttr:$config_parameter,
                        StrAttr:$eligibility_argument);
   let results = (outs I1:$result);
   let hasVerifier = 1;
@@ -42,7 +42,7 @@ def IntentTriton_TensorDescriptorOp : IntentTriton_Op<"tensor_descriptor", [
     AttrSizedOperandSegments,
     DeclareOpInterfaceMethods<ViewLikeOpInterface>
   ]> {
-  let arguments = (ins IntentGPU_ViewValue:$base,
+  let arguments = (ins IntentBlock_ViewValue:$base,
                        Variadic<Index>:$shape,
                        Variadic<Index>:$strides,
                        Variadic<Index>:$block_shape,
@@ -60,40 +60,40 @@ def IntentTriton_TensorDescriptorOp : IntentTriton_Op<"tensor_descriptor", [
                        I64Attr:$pipeline_block_alignment,
                        I64Attr:$maximum_shape_extent,
                        I64Attr:$maximum_block_elements);
-  let results = (outs IntentGPU_ViewValue:$result);
+  let results = (outs IntentBlock_ViewValue:$result);
   let hasVerifier = 1;
 }
 
 def IntentTriton_DescriptorLoadOp : IntentTriton_Op<"descriptor_load", [
     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
   ]> {
-  let arguments = (ins IntentGPU_ViewValue:$descriptor,
+  let arguments = (ins IntentBlock_ViewValue:$descriptor,
                        Variadic<I32>:$offsets);
-  let results = (outs IntentGPU_FragmentValue:$result);
+  let results = (outs IntentBlock_FragmentValue:$result);
   let hasVerifier = 1;
 }
 
 def IntentTriton_DescriptorStoreOp : IntentTriton_Op<"descriptor_store", [
     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
   ]> {
-  let arguments = (ins IntentGPU_ViewValue:$descriptor,
+  let arguments = (ins IntentBlock_ViewValue:$descriptor,
                        Variadic<I32>:$offsets,
-                       IntentGPU_FragmentValue:$value);
+                       IntentBlock_FragmentValue:$value);
   let hasVerifier = 1;
 }
 
 def IntentTriton_SplitOp : IntentTriton_Op<"split", [Pure]> {
-  let arguments = (ins IntentGPU_FragmentValue:$source);
-  let results = (outs IntentGPU_FragmentValue:$low,
-                      IntentGPU_FragmentValue:$high);
+  let arguments = (ins IntentBlock_FragmentValue:$source);
+  let results = (outs IntentBlock_FragmentValue:$low,
+                      IntentBlock_FragmentValue:$high);
   let hasVerifier = 1;
 }
 
 class IntentTriton_ElementwiseCollective<string mnemonic> :
     IntentTriton_Op<mnemonic, [Pure, IsolatedFromAbove, AttrSizedOperandSegments,
         DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins Variadic<IntentGPU_DataValue>:$sources,
-                       Variadic<IntentGPU_DataValue>:$identities,
+  let arguments = (ins Variadic<IntentBlock_DataValue>:$sources,
+                       Variadic<IntentBlock_DataValue>:$identities,
                        I64Attr:$axis,
                        BoolAttr:$reverse);
   let results = (outs Variadic<AnyType>:$outputs);
@@ -121,8 +121,8 @@ def IntentTriton_ScanOp : IntentTriton_ElementwiseCollective<"scan">;
 def IntentTriton_MapElementwiseOp : IntentTriton_Op<"map_elementwise", [
     IsolatedFromAbove, RecursiveMemoryEffects
   ]> {
-  let arguments = (ins Variadic<IntentGPU_DataValue>:$inputs);
-  let results = (outs IntentGPU_FragmentValue:$result);
+  let arguments = (ins Variadic<IntentBlock_DataValue>:$inputs);
+  let results = (outs IntentBlock_FragmentValue:$result);
   let regions = (region SizedRegion<1>:$body);
   let hasVerifier = 1;
 }

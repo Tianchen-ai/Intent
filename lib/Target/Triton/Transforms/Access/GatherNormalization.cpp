@@ -2,14 +2,14 @@
 #include "Intent/Target/Triton/Analysis/Configuration.h"
 #include "Intent/Target/Triton/IR/Program.h"
 #include "llvm/ADT/DenseSet.h"
-#include "Intent/Dialect/GPU/IR/Program.h"
-#include "Intent/Dialect/GPU/Analysis/PhysicalProgram.h"
-#include "Intent/Dialect/GPU/Analysis/PhysicalParameters.h"
-#include "Intent/Dialect/GPU/Analysis/UniformValues.h"
-#include "Intent/Dialect/GPU/Analysis/ValueSchema.h"
-#include "Intent/Dialect/GPU/Transforms/Value/ValueMaterialization.h"
-#include "Intent/Dialect/GPU/Transforms/Value/ValueRelations.h"
-#include "Intent/Dialect/GPU/Transforms/Storage/Storage.h"
+#include "Intent/Dialect/Block/IR/Program.h"
+#include "Intent/Dialect/Block/Analysis/PhysicalProgram.h"
+#include "Intent/Dialect/Block/Analysis/PhysicalParameters.h"
+#include "Intent/Dialect/Block/Analysis/UniformValues.h"
+#include "Intent/Dialect/Block/Analysis/ValueSchema.h"
+#include "Intent/Dialect/Block/Transforms/Value/ValueMaterialization.h"
+#include "Intent/Dialect/Block/Transforms/Value/ValueRelations.h"
+#include "Intent/Dialect/Block/Transforms/Storage/Storage.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/Matchers.h"
@@ -27,8 +27,8 @@ namespace intent::triton::detail {
 namespace {
 
 bool samePhysicalShape(Type lhs, Type rhs) {
-  auto left = dyn_cast<gpu::FragmentType>(lhs);
-  auto right = dyn_cast<gpu::FragmentType>(rhs);
+  auto left = dyn_cast<block::FragmentType>(lhs);
+  auto right = dyn_cast<block::FragmentType>(rhs);
   if (static_cast<bool>(left) != static_cast<bool>(right))
     return false;
   return !left ||
@@ -38,7 +38,7 @@ bool samePhysicalShape(Type lhs, Type rhs) {
           left.getOwner() == right.getOwner());
 }
 
-bool sameGatherFreeAxes(gpu::FragmentType source, gpu::FragmentType result,
+bool sameGatherFreeAxes(block::FragmentType source, block::FragmentType result,
                        unsigned selectedAxis) {
   if (!source || !result || source.getOwner() != result.getOwner() ||
       source.getShape().size() != result.getShape().size() ||
@@ -53,44 +53,44 @@ bool sameGatherFreeAxes(gpu::FragmentType source, gpu::FragmentType result,
 }
 
 FailureOr<Value> projectGatherIndex(OpBuilder &builder, Location location,
-                                    Value value, gpu::FragmentType result) {
-  if (auto fragment = dyn_cast<gpu::FragmentType>(value.getType())) {
+                                    Value value, block::FragmentType result) {
+  if (auto fragment = dyn_cast<block::FragmentType>(value.getType())) {
     if (!result) return failure();
     if (!fragment.getElementType().isIndex()) {
-      auto converted = gpu::FragmentType::get(
+      auto converted = block::FragmentType::get(
           builder.getContext(), builder.getIndexType(), fragment.getShape(),
           fragment.getAxisMaps(), fragment.getValidity(), fragment.getOwner());
-      value = builder.create<gpu::CastOp>(location, converted, value);
+      value = builder.create<block::CastOp>(location, converted, value);
     }
   } else if (!value.getType().isIndex()) {
-    value = builder.create<gpu::CastOp>(location, builder.getIndexType(), value);
+    value = builder.create<block::CastOp>(location, builder.getIndexType(), value);
   }
   if (!result) return value;
-  auto indices = gpu::FragmentType::get(
+  auto indices = block::FragmentType::get(
       builder.getContext(), builder.getIndexType(), result.getShape(),
       result.getAxisMaps(), result.getValidity(), result.getOwner());
-  return gpu::projectPhysicalValueToSchema(builder, location, value, indices);
+  return block::projectPhysicalValueToSchema(builder, location, value, indices);
 }
 
 FailureOr<std::pair<Value, Value>> safeGatherIndex(
     OpBuilder &builder, Location location, Value coordinate,
-    gpu::PhysicalExprAttr elements, Value valid = {}) {
-  if (!gpu::uniformElementType(coordinate.getType()).isIndex()) {
+    block::PhysicalExprAttr elements, Value valid = {}) {
+  if (!block::uniformElementType(coordinate.getType()).isIndex()) {
     Type indexType = builder.getIndexType();
-    if (auto fragment = dyn_cast<gpu::FragmentType>(coordinate.getType()))
-      indexType = gpu::FragmentType::get(
+    if (auto fragment = dyn_cast<block::FragmentType>(coordinate.getType()))
+      indexType = block::FragmentType::get(
           fragment.getContext(), builder.getIndexType(), fragment.getShape(),
           fragment.getAxisMaps(), fragment.getValidity(), fragment.getOwner());
-    coordinate = builder.create<gpu::CastOp>(location, indexType, coordinate);
+    coordinate = builder.create<block::CastOp>(location, indexType, coordinate);
   }
   Type predicateType = builder.getI1Type();
-  Value extent = builder.create<gpu::PhysicalExprOp>(
+  Value extent = builder.create<block::PhysicalExprOp>(
       location, builder.getIndexType(), elements);
-  if (auto fragment = dyn_cast<gpu::FragmentType>(coordinate.getType())) {
-    predicateType = gpu::FragmentType::get(
+  if (auto fragment = dyn_cast<block::FragmentType>(coordinate.getType())) {
+    predicateType = block::FragmentType::get(
         fragment.getContext(), builder.getI1Type(), fragment.getShape(),
         fragment.getAxisMaps(), fragment.getValidity(), fragment.getOwner());
-    auto projected = gpu::projectPhysicalValueToSchema(
+    auto projected = block::projectPhysicalValueToSchema(
         builder, location, extent, fragment);
     if (failed(projected))
       return failure();
@@ -99,29 +99,29 @@ FailureOr<std::pair<Value, Value>> safeGatherIndex(
   auto zero = zeroLike(builder, location, coordinate.getType());
   if (failed(zero))
     return failure();
-  Value lower = builder.create<gpu::CompareOp>(
+  Value lower = builder.create<block::CompareOp>(
       location, predicateType, coordinate, *zero, ComparePredicate::Ge);
-  Value upper = builder.create<gpu::CompareOp>(
+  Value upper = builder.create<block::CompareOp>(
       location, predicateType, coordinate, extent, ComparePredicate::Lt);
-  Value bounded = builder.create<gpu::BinaryOp>(
+  Value bounded = builder.create<block::BinaryOp>(
       location, predicateType, lower, upper, BinaryOperator::LogicalAnd);
   if (valid)
-    bounded = builder.create<gpu::BinaryOp>(
+    bounded = builder.create<block::BinaryOp>(
         location, predicateType, valid, bounded, BinaryOperator::LogicalAnd);
-  Value safe = builder.create<gpu::SelectOp>(
+  Value safe = builder.create<block::SelectOp>(
       location, coordinate.getType(), bounded, coordinate, *zero);
   return std::pair<Value, Value>{safe, bounded};
 }
 
 std::optional<unsigned>
-expandedGatherAxis(gpu::FragmentType source, gpu::FragmentType result,
+expandedGatherAxis(block::FragmentType source, block::FragmentType result,
                    unsigned selectedSourceAxis) {
   if (source.getOwner() != result.getOwner() ||
       source.getShape().size() >= result.getShape().size() ||
       selectedSourceAxis >= source.getShape().size())
     return std::nullopt;
 
-  gpu::BroadcastProjection projection = gpu::queryBroadcastProjection(source, result);
+  block::BroadcastProjection projection = block::queryBroadcastProjection(source, result);
   if (!projection.isExact())
     return std::nullopt;
   std::optional<unsigned> selected;
@@ -132,10 +132,10 @@ expandedGatherAxis(gpu::FragmentType source, gpu::FragmentType result,
         selected = resultIndex;
       continue;
     }
-    auto extent = dyn_cast<gpu::PhysicalExprAttr>(result.getShape()[resultIndex]);
+    auto extent = dyn_cast<block::PhysicalExprAttr>(result.getShape()[resultIndex]);
     if (!extent ||
         extent.getKind() !=
-            gpu::PhysicalExprKind::Constant ||
+            block::PhysicalExprKind::Constant ||
         extent.getValue() != 1)
       return std::nullopt;
   }
@@ -145,23 +145,23 @@ expandedGatherAxis(gpu::FragmentType source, gpu::FragmentType result,
 } // namespace
 
 LogicalResult legalizeGatherCoordinates(func::FuncOp kernel) {
-  auto [nextSource, nextDimension] = gpu::nextPhysicalAxisIdentities(kernel);
-  SmallVector<gpu::GatherOp> gathers;
-  kernel.walk([&](gpu::GatherOp gather) { gathers.push_back(gather); });
-  for (gpu::GatherOp gather : gathers) {
+  auto [nextSource, nextDimension] = block::nextPhysicalAxisIdentities(kernel);
+  SmallVector<block::GatherOp> gathers;
+  kernel.walk([&](block::GatherOp gather) { gathers.push_back(gather); });
+  for (block::GatherOp gather : gathers) {
     if (belongsToSplitGatherPair(gather))
       continue;
     auto scalarConstant = [](Value value) -> arith::ConstantOp {
-      while (auto broadcast = value.getDefiningOp<gpu::BroadcastOp>())
+      while (auto broadcast = value.getDefiningOp<block::BroadcastOp>())
         value = broadcast.getValue();
-      while (auto splat = value.getDefiningOp<gpu::SplatOp>())
+      while (auto splat = value.getDefiningOp<block::SplatOp>())
         value = splat.getValue();
-      while (auto cast = value.getDefiningOp<gpu::CastOp>())
+      while (auto cast = value.getDefiningOp<block::CastOp>())
         value = cast.getValue();
       return value.getDefiningOp<arith::ConstantOp>();
     };
-    auto source = dyn_cast<gpu::FragmentType>(gather.getSource().getType());
-    auto result = dyn_cast<gpu::FragmentType>(gather.getResult().getType());
+    auto source = dyn_cast<block::FragmentType>(gather.getSource().getType());
+    auto result = dyn_cast<block::FragmentType>(gather.getResult().getType());
     if (!gather.getValid() && gather.getCoordinates().size() == 1 &&
         gather.getSourceAxes().size() == 1 &&
         sameGatherFreeAxes(source, result, gather.getSourceAxes().front()) &&
@@ -171,7 +171,7 @@ LogicalResult legalizeGatherCoordinates(func::FuncOp kernel) {
         gather.getCoordinates().size() == source.getShape().size() &&
         llvm::all_of(gather.getCoordinates(), [](Value coordinate) {
           Type element = coordinate.getType();
-          if (auto fragment = dyn_cast<gpu::FragmentType>(element))
+          if (auto fragment = dyn_cast<block::FragmentType>(element))
             element = fragment.getElementType();
           return isa<IndexType, IntegerType>(element);
         }) &&
@@ -181,10 +181,10 @@ LogicalResult legalizeGatherCoordinates(func::FuncOp kernel) {
       Type indexType = builder.getIndexType();
       Type predicateType = builder.getI1Type();
       if (result) {
-        indexType = gpu::FragmentType::get(
+        indexType = block::FragmentType::get(
             kernel.getContext(), builder.getIndexType(), result.getShape(),
             result.getAxisMaps(), result.getValidity(), result.getOwner());
-        predicateType = gpu::FragmentType::get(
+        predicateType = block::FragmentType::get(
             kernel.getContext(), builder.getI1Type(), result.getShape(),
             result.getAxisMaps(), result.getValidity(), result.getOwner());
       }
@@ -203,51 +203,51 @@ LogicalResult legalizeGatherCoordinates(func::FuncOp kernel) {
       Value coordinate = coordinates.front();
       Value valid = gather.getValid();
       if (valid && result && valid.getType() != predicateType) {
-        auto projected = gpu::projectPhysicalValueToSchema(
-            builder, location, valid, cast<gpu::FragmentType>(predicateType));
+        auto projected = block::projectPhysicalValueToSchema(
+            builder, location, valid, cast<block::FragmentType>(predicateType));
         if (failed(projected))
           return gather.emitOpError("gather validity has no exact result-axis projection");
         valid = *projected;
       }
       Value safeIndex;
       if (source.getShape().size() > 1) {
-        auto elements = cast<gpu::PhysicalExprAttr>(source.getShape()[0]);
+        auto elements = cast<block::PhysicalExprAttr>(source.getShape()[0]);
         auto first = projectIndex(builder.create<arith::ConstantIndexOp>(location, 0));
         if (failed(first))
           return failure();
         coordinate = *first;
         for (auto [axis, value] : llvm::enumerate(coordinates)) {
-          auto extent = cast<gpu::PhysicalExprAttr>(source.getShape()[axis]);
+          auto extent = cast<block::PhysicalExprAttr>(source.getShape()[axis]);
           if (axis)
-            elements = gpu::PhysicalExprAttr::get(
+            elements = block::PhysicalExprAttr::get(
                 kernel.getContext(),
-                gpu::PhysicalExprKind::Multiply, 0,
+                block::PhysicalExprKind::Multiply, 0,
                 builder.getStringAttr(""), builder.getArrayAttr({elements, extent}));
-          Value size = builder.create<gpu::PhysicalExprOp>(
+          Value size = builder.create<block::PhysicalExprOp>(
               location, builder.getIndexType(), extent);
           auto projectedSize = projectIndex(size);
           if (failed(projectedSize))
             return failure();
-          coordinate = builder.create<gpu::BinaryOp>(
+          coordinate = builder.create<block::BinaryOp>(
               location, indexType, coordinate, *projectedSize, BinaryOperator::Multiply);
-          coordinate = builder.create<gpu::BinaryOp>(
+          coordinate = builder.create<block::BinaryOp>(
               location, indexType, coordinate, value, BinaryOperator::Add);
         }
         if (auto count = evaluateCompileTimeExpression(elements))
-          elements = gpu::PhysicalExprAttr::get(
+          elements = block::PhysicalExprAttr::get(
               kernel.getContext(),
-              gpu::PhysicalExprKind::Constant, *count,
+              block::PhysicalExprKind::Constant, *count,
               builder.getStringAttr(""), builder.getArrayAttr({}));
-        auto mapping = gpu::AxisMapAttr::get(
+        auto mapping = block::AxisMapAttr::get(
             kernel.getContext(), nextSource++, 0, nextDimension++, 0, true);
-        auto flatType = gpu::FragmentType::get(
+        auto flatType = block::FragmentType::get(
             kernel.getContext(), source.getElementType(),
             builder.getArrayAttr({elements}), builder.getArrayAttr({mapping}),
             source.getValidity(), source.getOwner());
-        auto reassociation = gpu::inferReshapeReassociation(source, flatType);
+        auto reassociation = block::inferReshapeReassociation(source, flatType);
         if (failed(reassociation))
           return gather.emitOpError("scalar gather has no exact row-major linearization");
-        sourceValue = builder.create<gpu::ReshapeOp>(
+        sourceValue = builder.create<block::ReshapeOp>(
             location, flatType, sourceValue, *reassociation);
         auto safe = safeGatherIndex(builder, location, coordinate, elements, valid);
         if (failed(safe))
@@ -257,7 +257,7 @@ LogicalResult legalizeGatherCoordinates(func::FuncOp kernel) {
       } else {
         auto safe = safeGatherIndex(
             builder, location, coordinate,
-            cast<gpu::PhysicalExprAttr>(source.getShape()[0]), valid);
+            cast<block::PhysicalExprAttr>(source.getShape()[0]), valid);
         if (failed(safe))
           return gather.emitOpError("scalar gather coordinate has no safe physical index projection");
         safeIndex = safe->first;
@@ -265,47 +265,47 @@ LogicalResult legalizeGatherCoordinates(func::FuncOp kernel) {
       }
       Type loadedType = gather.getResult().getType();
       if (result && result.getShape().size() > 1) {
-        auto elements = cast<gpu::PhysicalExprAttr>(result.getShape()[0]);
+        auto elements = cast<block::PhysicalExprAttr>(result.getShape()[0]);
         for (Attribute extent : result.getShape().getValue().drop_front())
-          elements = gpu::PhysicalExprAttr::get(
+          elements = block::PhysicalExprAttr::get(
               kernel.getContext(),
-              gpu::PhysicalExprKind::Multiply, 0,
+              block::PhysicalExprKind::Multiply, 0,
               builder.getStringAttr(""), builder.getArrayAttr({elements, extent}));
-        auto mapping = gpu::AxisMapAttr::get(
+        auto mapping = block::AxisMapAttr::get(
             kernel.getContext(), nextSource++, 0, nextDimension++, 0, true);
-        auto flatIndex = gpu::FragmentType::get(
+        auto flatIndex = block::FragmentType::get(
             kernel.getContext(), builder.getIndexType(), builder.getArrayAttr({elements}),
             builder.getArrayAttr({mapping}), result.getValidity(), result.getOwner());
-        auto relation = gpu::inferReshapeReassociation(
-            cast<gpu::FragmentType>(safeIndex.getType()), flatIndex);
+        auto relation = block::inferReshapeReassociation(
+            cast<block::FragmentType>(safeIndex.getType()), flatIndex);
         if (failed(relation))
           return gather.emitOpError("gather result has no exact row-major linearization");
-        safeIndex = builder.create<gpu::ReshapeOp>(location, flatIndex, safeIndex, *relation);
-        loadedType = gpu::FragmentType::get(
+        safeIndex = builder.create<block::ReshapeOp>(location, flatIndex, safeIndex, *relation);
+        loadedType = block::FragmentType::get(
             kernel.getContext(), result.getElementType(), flatIndex.getShape(),
             flatIndex.getAxisMaps(), result.getValidity(), result.getOwner());
       }
-      auto loaded = builder.create<gpu::GatherOp>(
+      auto loaded = builder.create<block::GatherOp>(
           gather.getLoc(), loadedType, sourceValue,
           ValueRange{safeIndex}, Value(), Value(), ArrayRef<int64_t>{0});
       Value loadedValue = loaded.getResult();
       if (loadedType != gather.getResult().getType()) {
-        auto relation = gpu::inferReshapeReassociation(
-            cast<gpu::FragmentType>(loadedType), result);
+        auto relation = block::inferReshapeReassociation(
+            cast<block::FragmentType>(loadedType), result);
         if (failed(relation))
           return gather.emitOpError("linear gather has no exact result reassociation");
-        loadedValue = builder.create<gpu::ReshapeOp>(location, result, loadedValue, *relation);
+        loadedValue = builder.create<block::ReshapeOp>(location, result, loadedValue, *relation);
       }
       // An unmasked gather already requires active coordinates to be in bounds.
       // Its row-major linearization has no inactive fill to apply. Masked
       // gathers retain their original validity/fill after the safe native read.
       Value replacement = loadedValue;
       if (gather.getValid())
-        replacement = builder.create<gpu::SelectOp>(
+        replacement = builder.create<block::SelectOp>(
             gather.getLoc(), gather.getResult().getType(), valid,
             loadedValue, gather.getFill());
-      if (Attribute origin = gather->getAttr(gpu::originAttr))
-        replacement.getDefiningOp()->setAttr(gpu::originAttr, origin);
+      if (Attribute origin = gather->getAttr(block::originAttr))
+        replacement.getDefiningOp()->setAttr(block::originAttr, origin);
       gather.getResult().replaceAllUsesWith(replacement);
       gather.erase();
       continue;
@@ -317,42 +317,42 @@ LogicalResult legalizeGatherCoordinates(func::FuncOp kernel) {
           source, result, gather.getSourceAxes().front());
       if (selectedAxis) {
         OpBuilder builder(gather);
-        auto expandedSourceType = gpu::FragmentType::get(
+        auto expandedSourceType = block::FragmentType::get(
             gather.getContext(), source.getElementType(), result.getShape(),
             result.getAxisMaps(), result.getValidity(), result.getOwner());
-        Value expandedSource = builder.create<gpu::BroadcastOp>(
+        Value expandedSource = builder.create<block::BroadcastOp>(
             gather.getLoc(), expandedSourceType, gather.getSource());
         Value coordinate = gather.getCoordinates().front();
-        auto coordinateType = gpu::FragmentType::get(
+        auto coordinateType = block::FragmentType::get(
             gather.getContext(), coordinate.getType(), result.getShape(),
             result.getAxisMaps(), result.getValidity(), result.getOwner());
         if (auto coordinateFragment =
-                dyn_cast<gpu::FragmentType>(coordinate.getType())) {
-          coordinateType = gpu::FragmentType::get(
+                dyn_cast<block::FragmentType>(coordinate.getType())) {
+          coordinateType = block::FragmentType::get(
               gather.getContext(), coordinateFragment.getElementType(),
               result.getShape(), result.getAxisMaps(), result.getValidity(),
               result.getOwner());
         }
-        coordinate = builder.create<gpu::BroadcastOp>(
+        coordinate = builder.create<block::BroadcastOp>(
             gather.getLoc(), coordinateType, coordinate);
         FailureOr<Value> zero =
             zeroLike(builder, gather.getLoc(), coordinateType);
         if (succeeded(zero)) {
           Value safeIndex = coordinate;
           if (gather.getValid())
-            safeIndex = builder.create<gpu::SelectOp>(
+            safeIndex = builder.create<block::SelectOp>(
                 gather.getLoc(), coordinateType, gather.getValid(), coordinate,
                 *zero);
-          auto safeGather = builder.create<gpu::GatherOp>(
+          auto safeGather = builder.create<block::GatherOp>(
               gather.getLoc(), result, expandedSource, ValueRange{safeIndex},
               Value(), Value(), ArrayRef<int64_t>{static_cast<int64_t>(*selectedAxis)});
           Value selected = safeGather.getResult();
           if (gather.getValid())
-            selected = builder.create<gpu::SelectOp>(
+            selected = builder.create<block::SelectOp>(
                 gather.getLoc(), result, gather.getValid(), safeGather.getResult(),
                 gather.getFill());
-          if (Attribute origin = gather->getAttr(gpu::originAttr))
-            selected.getDefiningOp()->setAttr(gpu::originAttr, origin);
+          if (Attribute origin = gather->getAttr(block::originAttr))
+            selected.getDefiningOp()->setAttr(block::originAttr, origin);
           gather.getResult().replaceAllUsesWith(selected);
           gather.erase();
           continue;
@@ -365,12 +365,12 @@ LogicalResult legalizeGatherCoordinates(func::FuncOp kernel) {
       unsigned selectedAxis = gather.getSourceAxes().front();
       auto selectedExtent =
           selectedAxis < source.getShape().size()
-              ? dyn_cast<gpu::PhysicalExprAttr>(source.getShape()[selectedAxis])
-              : gpu::PhysicalExprAttr();
+              ? dyn_cast<block::PhysicalExprAttr>(source.getShape()[selectedAxis])
+              : block::PhysicalExprAttr();
       bool compatible = selectedExtent &&
-          ((selectedExtent.getKind() == gpu::PhysicalExprKind::Constant &&
+          ((selectedExtent.getKind() == block::PhysicalExprKind::Constant &&
             selectedExtent.getValue() > 0) ||
-           selectedExtent.getKind() == gpu::PhysicalExprKind::Parameter);
+           selectedExtent.getKind() == block::PhysicalExprKind::Parameter);
       unsigned resultAxis = 0;
       for (unsigned sourceAxis = 0;
            compatible && sourceAxis < source.getShape().size(); ++sourceAxis) {
@@ -384,54 +384,54 @@ LogicalResult legalizeGatherCoordinates(func::FuncOp kernel) {
         OpBuilder builder(gather);
         SmallVector<Attribute> selectedShape(source.getShape().begin(),
                                              source.getShape().end());
-        selectedShape[selectedAxis] = gpu::PhysicalExprAttr::get(
+        selectedShape[selectedAxis] = block::PhysicalExprAttr::get(
             gather.getContext(),
-            gpu::PhysicalExprKind::Constant, 1,
+            block::PhysicalExprKind::Constant, 1,
             builder.getStringAttr(""), builder.getArrayAttr({}));
-        auto coordinateType = gpu::FragmentType::get(
-            gather.getContext(), gpu::uniformElementType(gather.getCoordinates().front().getType()),
+        auto coordinateType = block::FragmentType::get(
+            gather.getContext(), block::uniformElementType(gather.getCoordinates().front().getType()),
             builder.getArrayAttr(selectedShape), source.getAxisMaps(),
             source.getValidity(), source.getOwner());
-        auto predicateType = gpu::FragmentType::get(
+        auto predicateType = block::FragmentType::get(
             gather.getContext(), builder.getI1Type(),
             builder.getArrayAttr(selectedShape), source.getAxisMaps(),
             source.getValidity(), source.getOwner());
-        auto selectedResultType = gpu::FragmentType::get(
+        auto selectedResultType = block::FragmentType::get(
             gather.getContext(), result.getElementType(),
             builder.getArrayAttr(selectedShape), source.getAxisMaps(),
             result.getValidity(), result.getOwner());
-        Value coordinate = builder.create<gpu::BroadcastOp>(
+        Value coordinate = builder.create<block::BroadcastOp>(
             gather.getLoc(), coordinateType, gather.getCoordinates().front());
         Value valid, fill;
         if (gather.getValid()) {
-          valid = builder.create<gpu::BroadcastOp>(
+          valid = builder.create<block::BroadcastOp>(
               gather.getLoc(), predicateType, gather.getValid());
-          fill = builder.create<gpu::BroadcastOp>(
+          fill = builder.create<block::BroadcastOp>(
               gather.getLoc(), selectedResultType, gather.getFill());
         }
         FailureOr<Value> zero = zeroLike(builder, gather.getLoc(), coordinateType);
         if (succeeded(zero)) {
           Value safeIndex = coordinate;
           if (valid)
-            safeIndex = builder.create<gpu::SelectOp>(
+            safeIndex = builder.create<block::SelectOp>(
                 gather.getLoc(), coordinateType, valid, coordinate, *zero);
-          auto safeGather = builder.create<gpu::GatherOp>(
+          auto safeGather = builder.create<block::GatherOp>(
               gather.getLoc(), selectedResultType, gather.getSource(),
               ValueRange{safeIndex}, Value(), Value(), gather.getSourceAxes());
           Value selected = safeGather.getResult();
           if (valid)
-            selected = builder.create<gpu::SelectOp>(
+            selected = builder.create<block::SelectOp>(
                 gather.getLoc(), selectedResultType, valid, safeGather.getResult(),
                 fill);
           FailureOr<ArrayAttr> reassociation =
-              gpu::inferReshapeReassociation(selectedResultType, result);
+              block::inferReshapeReassociation(selectedResultType, result);
           if (failed(reassociation))
             return gather.emitOpError(
                 "gather fallback has no exact row-major reassociation");
-          auto reshaped = builder.create<gpu::ReshapeOp>(
+          auto reshaped = builder.create<block::ReshapeOp>(
               gather.getLoc(), result, selected, *reassociation);
-          if (Attribute origin = gather->getAttr(gpu::originAttr))
-            reshaped->setAttr(gpu::originAttr, origin);
+          if (Attribute origin = gather->getAttr(block::originAttr))
+            reshaped->setAttr(block::originAttr, origin);
           gather.getResult().replaceAllUsesWith(reshaped.getResult());
           gather.erase();
           continue;
@@ -453,29 +453,29 @@ LogicalResult legalizeGatherCoordinates(func::FuncOp kernel) {
       continue;
     }
     if (gather.getCoordinates().size() == 1 &&
-        isa<gpu::FragmentType>(gather.getCoordinates().front().getType()) &&
+        isa<block::FragmentType>(gather.getCoordinates().front().getType()) &&
         gather.getSourceAxes().size() == 1 && source) {
       unsigned axis = gather.getSourceAxes().front();
       auto coordinate = scalarConstant(gather.getCoordinates().front());
       auto predicate = scalarConstant(gather.getValid());
       auto extent = axis < source.getShape().size()
-                        ? dyn_cast<gpu::PhysicalExprAttr>(source.getShape()[axis])
-                        : gpu::PhysicalExprAttr();
+                        ? dyn_cast<block::PhysicalExprAttr>(source.getShape()[axis])
+                        : block::PhysicalExprAttr();
       auto coordinateValue =
           coordinate ? dyn_cast<IntegerAttr>(coordinate.getValue()) : IntegerAttr();
       auto predicateValue = predicate ? dyn_cast<IntegerAttr>(predicate.getValue())
                                       : IntegerAttr();
       if (extent &&
-          extent.getKind() == gpu::PhysicalExprKind::Constant &&
+          extent.getKind() == block::PhysicalExprKind::Constant &&
           coordinateValue && coordinateValue.getInt() >= 0 &&
           coordinateValue.getInt() < extent.getValue() && predicateValue &&
           predicateValue.getValue().isOne()) {
         OpBuilder builder(gather);
-        auto replacement = builder.create<gpu::GatherOp>(
+        auto replacement = builder.create<block::GatherOp>(
             gather.getLoc(), gather.getResult().getType(), gather.getSource(),
             gather.getCoordinates(), Value(), Value(), gather.getSourceAxes());
-        if (Attribute origin = gather->getAttr(gpu::originAttr))
-          replacement->setAttr(gpu::originAttr, origin);
+        if (Attribute origin = gather->getAttr(block::originAttr))
+          replacement->setAttr(block::originAttr, origin);
         gather.getResult().replaceAllUsesWith(replacement.getResult());
         gather.erase();
         continue;
@@ -486,19 +486,19 @@ LogicalResult legalizeGatherCoordinates(func::FuncOp kernel) {
     OpBuilder builder(gather);
     Value coordinate = gather.getCoordinates().front();
     if (!samePhysicalShape(gather.getValid().getType(), coordinate.getType())) {
-      auto predicateType = dyn_cast<gpu::FragmentType>(gather.getValid().getType());
-      Type indexElement = gpu::uniformElementType(coordinate.getType());
+      auto predicateType = dyn_cast<block::FragmentType>(gather.getValid().getType());
+      Type indexElement = block::uniformElementType(coordinate.getType());
       if (!predicateType || !isa<IntegerType, IndexType>(indexElement))
         continue;
-      if (isa<gpu::FragmentType>(coordinate.getType()) &&
+      if (isa<block::FragmentType>(coordinate.getType()) &&
           (!source || !result || gather.getSourceAxes().size() != 1 ||
            source.getShape().size() != result.getShape().size()))
         continue;
-      auto coordinateType = gpu::FragmentType::get(
+      auto coordinateType = block::FragmentType::get(
           gather.getContext(), indexElement, predicateType.getShape(),
           predicateType.getAxisMaps(), predicateType.getValidity(),
           predicateType.getOwner());
-      auto projected = gpu::projectPhysicalValueToSchema(
+      auto projected = block::projectPhysicalValueToSchema(
           builder, gather.getLoc(), coordinate, coordinateType);
       if (failed(projected))
         continue;
@@ -513,17 +513,17 @@ LogicalResult legalizeGatherCoordinates(func::FuncOp kernel) {
     unsigned axis = gather.getSourceAxes().front();
     auto safe = safeGatherIndex(
         builder, gather.getLoc(), coordinate,
-        cast<gpu::PhysicalExprAttr>(source.getShape()[axis]), gather.getValid());
+        cast<block::PhysicalExprAttr>(source.getShape()[axis]), gather.getValid());
     if (failed(safe))
       return gather.emitOpError("gather coordinate has no safe physical index projection");
-    auto safeGather = builder.create<gpu::GatherOp>(
+    auto safeGather = builder.create<block::GatherOp>(
         gather.getLoc(), gather.getResult().getType(), gather.getSource(),
         ValueRange{safe->first}, Value(), Value(), gather.getSourceAxes());
-    auto selected = builder.create<gpu::SelectOp>(
+    auto selected = builder.create<block::SelectOp>(
         gather.getLoc(), gather.getResult().getType(), gather.getValid(),
         safeGather.getResult(), gather.getFill());
-    if (Attribute origin = gather->getAttr(gpu::originAttr))
-      selected->setAttr(gpu::originAttr, origin);
+    if (Attribute origin = gather->getAttr(block::originAttr))
+      selected->setAttr(block::originAttr, origin);
     gather.getResult().replaceAllUsesWith(selected.getResult());
     gather.erase();
   }
@@ -531,16 +531,16 @@ LogicalResult legalizeGatherCoordinates(func::FuncOp kernel) {
 }
 
 LogicalResult legalizeExpandingGathers(func::FuncOp kernel) {
-  auto [nextSource, nextDimension] = gpu::nextPhysicalAxisIdentities(kernel);
-  SmallVector<gpu::GatherOp> gathers;
-  kernel.walk([&](gpu::GatherOp gather) { gathers.push_back(gather); });
-  for (gpu::GatherOp gather : gathers) {
+  auto [nextSource, nextDimension] = block::nextPhysicalAxisIdentities(kernel);
+  SmallVector<block::GatherOp> gathers;
+  kernel.walk([&](block::GatherOp gather) { gathers.push_back(gather); });
+  for (block::GatherOp gather : gathers) {
     if (gather.getValid() || gather.getCoordinates().size() != 1 ||
         gather.getSourceAxes().size() != 1)
       continue;
-    auto source = dyn_cast<gpu::FragmentType>(gather.getSource().getType());
-    auto result = dyn_cast<gpu::FragmentType>(gather.getResult().getType());
-    auto indices = dyn_cast<gpu::FragmentType>(
+    auto source = dyn_cast<block::FragmentType>(gather.getSource().getType());
+    auto result = dyn_cast<block::FragmentType>(gather.getResult().getType());
+    auto indices = dyn_cast<block::FragmentType>(
         gather.getCoordinates().front().getType());
     if (!source || !result || !indices || source.getShape().size() < 2 ||
         source.getShape().size() != result.getShape().size() ||
@@ -553,15 +553,15 @@ LogicalResult legalizeExpandingGathers(func::FuncOp kernel) {
       compatible &= position == axis ||
                     (source.getShape()[position] == result.getShape()[position] &&
                      source.getAxisMaps()[position] == result.getAxisMaps()[position]);
-    auto sourceExtent = cast<gpu::PhysicalExprAttr>(source.getShape()[axis]);
-    auto resultExtent = cast<gpu::PhysicalExprAttr>(result.getShape()[axis]);
+    auto sourceExtent = cast<block::PhysicalExprAttr>(source.getShape()[axis]);
+    auto resultExtent = cast<block::PhysicalExprAttr>(result.getShape()[axis]);
     if (!compatible || sourceExtent == resultExtent ||
         !isTritonFragmentExtent(sourceExtent) ||
         !isTritonFragmentExtent(resultExtent))
       continue;
-    auto constantExtent = [](gpu::PhysicalExprAttr extent) {
+    auto constantExtent = [](block::PhysicalExprAttr extent) {
       return extent.getKind() ==
-             gpu::PhysicalExprKind::Constant;
+             block::PhysicalExprKind::Constant;
     };
     bool constantShape = constantExtent(sourceExtent) &&
                          constantExtent(resultExtent);
@@ -571,29 +571,29 @@ LogicalResult legalizeExpandingGathers(func::FuncOp kernel) {
     OpBuilder builder(gather);
     Location location = gather.getLoc();
     auto product = [&](ArrayRef<Attribute> shape) {
-      auto extent = gpu::PhysicalExprAttr::get(
+      auto extent = block::PhysicalExprAttr::get(
           kernel.getContext(),
-          gpu::PhysicalExprKind::Constant, 1,
+          block::PhysicalExprKind::Constant, 1,
           builder.getStringAttr(""), builder.getArrayAttr({}));
       if (shape.empty())
         return extent;
-      extent = cast<gpu::PhysicalExprAttr>(shape.front());
+      extent = cast<block::PhysicalExprAttr>(shape.front());
       for (Attribute dimension : shape.drop_front())
-        extent = gpu::PhysicalExprAttr::get(
+        extent = block::PhysicalExprAttr::get(
             kernel.getContext(),
-            gpu::PhysicalExprKind::Multiply, 0,
+            block::PhysicalExprKind::Multiply, 0,
             builder.getStringAttr(""), builder.getArrayAttr({extent, dimension}));
       return extent;
     };
-    auto flatSourceAxis = gpu::AxisMapAttr::get(
+    auto flatSourceAxis = block::AxisMapAttr::get(
         kernel.getContext(), nextSource++, 0, nextDimension++, 0, true);
-    auto flatResultAxis = gpu::AxisMapAttr::get(
+    auto flatResultAxis = block::AxisMapAttr::get(
         kernel.getContext(), nextSource++, 0, nextDimension++, 0, true);
     auto sourceElements = product(source.getShape().getValue());
     auto resultElements = product(result.getShape().getValue());
-    auto flatType = [&](gpu::FragmentType original, Type element,
-                        gpu::PhysicalExprAttr extent, gpu::AxisMapAttr mapping) {
-      return gpu::FragmentType::get(
+    auto flatType = [&](block::FragmentType original, Type element,
+                        block::PhysicalExprAttr extent, block::AxisMapAttr mapping) {
+      return block::FragmentType::get(
           kernel.getContext(), element, builder.getArrayAttr({extent}),
           builder.getArrayAttr({mapping}), original.getValidity(),
           original.getOwner());
@@ -606,12 +606,12 @@ LogicalResult legalizeExpandingGathers(func::FuncOp kernel) {
                                   resultElements, flatResultAxis);
     auto linearize = [&](OpBuilder &nested) -> FailureOr<Value> {
       auto reshape = [&](Value value,
-                         gpu::FragmentType target) -> FailureOr<Value> {
-        auto relation = gpu::inferReshapeReassociation(
-            cast<gpu::FragmentType>(value.getType()), target);
+                         block::FragmentType target) -> FailureOr<Value> {
+        auto relation = block::inferReshapeReassociation(
+            cast<block::FragmentType>(value.getType()), target);
         if (failed(relation))
           return failure();
-        return Value(nested.create<gpu::ReshapeOp>(location, target, value,
+        return Value(nested.create<block::ReshapeOp>(location, target, value,
                                                   *relation));
       };
       auto flatOriginalIndexType = flatType(
@@ -623,23 +623,23 @@ LogicalResult legalizeExpandingGathers(func::FuncOp kernel) {
         return failure();
       Value index = *flatIndices;
       if (index.getType() != flatIndexType)
-        index = nested.create<gpu::CastOp>(location, flatIndexType, index);
-      auto extentValue = [&](gpu::PhysicalExprAttr extent) -> Value {
-        return nested.create<gpu::PhysicalExprOp>(
+        index = nested.create<block::CastOp>(location, flatIndexType, index);
+      auto extentValue = [&](block::PhysicalExprAttr extent) -> Value {
+        return nested.create<block::PhysicalExprOp>(
             location, nested.getIndexType(), extent);
       };
-      auto broadcastExtent = [&](gpu::PhysicalExprAttr extent) -> Value {
-        return nested.create<gpu::BroadcastOp>(location, flatIndexType,
+      auto broadcastExtent = [&](block::PhysicalExprAttr extent) -> Value {
+        return nested.create<block::BroadcastOp>(location, flatIndexType,
                                                extentValue(extent));
       };
       auto binary = [&](Value lhs, Value rhs, BinaryOperator kind) -> Value {
-        return nested.create<gpu::BinaryOp>(location, flatIndexType, lhs, rhs,
+        return nested.create<block::BinaryOp>(location, flatIndexType, lhs, rhs,
                                             kind);
       };
       Value zero = nested.create<arith::ConstantIndexOp>(location, 0);
       Value one = nested.create<arith::ConstantIndexOp>(location, 1);
       Value count = extentValue(resultElements);
-      Value ordinal = nested.create<gpu::MakeRangeOp>(
+      Value ordinal = nested.create<block::MakeRangeOp>(
           location, flatIndexType, zero, count, one, zero, count,
           flatResultAxis.getSourceId(), flatResultAxis.getSourceAxis(), true);
       Value inner = broadcastExtent(
@@ -662,7 +662,7 @@ LogicalResult legalizeExpandingGathers(func::FuncOp kernel) {
       auto safe = safeGatherIndex(nested, location, offset, sourceElements);
       if (failed(safe))
         return failure();
-      Value selected = nested.create<gpu::GatherOp>(
+      Value selected = nested.create<block::GatherOp>(
           location, flatResultType, *flatSource, ValueRange{safe->first}, Value(),
           Value(), ArrayRef<int64_t>{0});
       return reshape(selected, result);
@@ -677,11 +677,11 @@ LogicalResult legalizeExpandingGathers(func::FuncOp kernel) {
         return gather.emitOpError("expanding gather has no exact linear reshape");
       replacement = *linear;
     } else {
-      Value sourceSize = builder.create<gpu::PhysicalExprOp>(
+      Value sourceSize = builder.create<block::PhysicalExprOp>(
           location, builder.getIndexType(), sourceExtent);
-      Value resultSize = builder.create<gpu::PhysicalExprOp>(
+      Value resultSize = builder.create<block::PhysicalExprOp>(
           location, builder.getIndexType(), resultExtent);
-      Value expanding = builder.create<gpu::CompareOp>(
+      Value expanding = builder.create<block::CompareOp>(
           location, builder.getI1Type(), resultSize, sourceSize,
           ComparePredicate::Gt);
       auto conditional = builder.create<scf::IfOp>(
@@ -696,8 +696,8 @@ LogicalResult legalizeExpandingGathers(func::FuncOp kernel) {
       originalBuilder.create<scf::YieldOp>(location, original->getResults());
       replacement = conditional.getResult(0);
     }
-    if (Attribute origin = gather->getAttr(gpu::originAttr))
-      replacement.getDefiningOp()->setAttr(gpu::originAttr, origin);
+    if (Attribute origin = gather->getAttr(block::originAttr))
+      replacement.getDefiningOp()->setAttr(block::originAttr, origin);
     gather.getResult().replaceAllUsesWith(replacement);
     gather.erase();
   }

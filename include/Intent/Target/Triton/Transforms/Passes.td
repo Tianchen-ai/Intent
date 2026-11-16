@@ -3,7 +3,7 @@ include "mlir/Pass/PassBase.td"
 class IntentTritonTransformPass<string passArgument, string summaryText>
     : Pass<passArgument, "::mlir::ModuleOp"> {
   let summary = summaryText;
-  let dependentDialects = ["::intent::gpu::IntentGPUDialect",
+  let dependentDialects = ["::intent::block::IntentBlockDialect",
       "::intent::triton::IntentTritonDialect", "::mlir::arith::ArithDialect",
       "::mlir::func::FuncDialect",
       "::mlir::scf::SCFDialect"];
@@ -13,7 +13,7 @@ def ProgramGridPass : IntentTritonTransformPass<
     "intent-triton-program-grid",
     "Legalize the Triton program grid"> {
   let description = [{
-    Consumes and preserves a verified shared GPU program before execution-group
+    Consumes and preserves a verified shared Block program before execution-group
     expansion. Uses current coordinate roles, launch extents and unambiguous
     write-coordinate order to expose an eligible workset as a native grid of
     at most three dimensions. Secondary dimensions require proved finite
@@ -30,14 +30,14 @@ def PrepareMemoryPass : IntentTritonTransformPass<
     "intent-triton-prepare-memory",
     "Prepare Triton buffers, indexed accesses and matrix shapes"> {
   let description = [{
-    Requires the realized, verified shared GPU program and its selected target
+    Requires the realized, verified shared Block program and its selected target
     capabilities. Expands execution groups, closes eligible scan tails and
     oversized/masked/expanding gather and scatter forms, and normalizes matrix
     operand shapes. Uses actual coordinates, validity, collision semantics and
     typed shapes, preserving public ABI and numerical/effect contracts.
 
     This is a preparation boundary required while such unlowered forms remain.
-    It produces verified shared GPU IR, not native Triton extensions. Resource
+    It produces verified shared Block IR, not native Triton extensions. Resource
     workspace, descriptors, native configuration legality and primitive choices
     are closed by native-forms; unsupported access forms diagnose here rather
     than leaving serializer-side reconstruction.
@@ -48,7 +48,7 @@ def NativeFormsPass : IntentTritonTransformPass<
     "intent-triton-native-forms",
     "Form native Triton accesses, supply and complete configurations"> {
   let description = [{
-    Requires prepared shared GPU IR with current-module tuning profiles and
+    Requires prepared shared Block IR with current-module tuning profiles and
     capabilities. Consumes actual ordered dependencies, buffers and supply
     loops to declare provider options, lower invocation workspace, close
     ordered accesses and form eligible descriptors/pointer accesses. Selects
@@ -84,7 +84,7 @@ def FinalizeProgramPass : IntentTritonTransformPass<
     Consumes the current native Triton program after native forms and finite
     configurations have been selected. Closes constant/shape values, collective
     callbacks and configuration resource requirements, then verifies the Triton
-    source surface. No shared-GPU verifier is applied to native extensions.
+    source surface. No shared-Block verifier is applied to native extensions.
 
     hoist-loop-invariants optionally runs the shared bounded invariant-value
     placement component between canonicalization and CSE at the existing

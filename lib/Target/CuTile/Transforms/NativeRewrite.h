@@ -1,7 +1,7 @@
 #ifndef INTENT_TARGET_CUTILE_TRANSFORMS_NATIVEREWRITE_H
 #define INTENT_TARGET_CUTILE_TRANSFORMS_NATIVEREWRITE_H
 
-#include "Intent/Dialect/GPU/IR/GPUOps.h"
+#include "Intent/Dialect/Block/IR/BlockOps.h"
 
 namespace intent::cutile {
 
@@ -26,7 +26,7 @@ mlir::Type withElementType(mlir::Type type, mlir::Type elementType);
 // Repeat complete tiles on an axis without reloading or changing elements.
 // requested and the original extent must be compatible power-of-two extents.
 mlir::Value repeatTileAxis(mlir::OpBuilder &builder, mlir::Location location,
-    mlir::Value value, unsigned axis, gpu::PhysicalExprAttr requested);
+    mlir::Value value, unsigned axis, block::PhysicalExprAttr requested);
 
 } // namespace intent::cutile
 

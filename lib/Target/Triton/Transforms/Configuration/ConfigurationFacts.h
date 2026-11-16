@@ -1,7 +1,7 @@
 #ifndef INTENT_TARGET_TRITON_TRANSFORMS_CONFIGURATIONFACTS_H
 #define INTENT_TARGET_TRITON_TRANSFORMS_CONFIGURATIONFACTS_H
 
-#include "Intent/Dialect/GPU/IR/Program.h"
+#include "Intent/Dialect/Block/IR/Program.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "llvm/ADT/SmallVector.h"
 
@@ -12,7 +12,7 @@ namespace intent::triton {
 struct ProgramConfigurationFacts {
   explicit ProgramConfigurationFacts(mlir::func::FuncOp kernel);
 
-  llvm::SmallVector<gpu::ParameterCategory> categories;
+  llvm::SmallVector<block::ParameterCategory> categories;
   bool hasContraction = false;
   bool allContractionsF32 = true;
   bool straightLinePointwise = false;

@@ -7,10 +7,10 @@
 namespace intent::cutile {
 
 struct NativeComputeInputs {
-  llvm::SmallVector<gpu::ContractOp> contracts;
-  llvm::SmallVector<gpu::ScaledContractOp> scaledContracts;
-  llvm::SmallVector<gpu::ReduceOp> reductions;
-  llvm::SmallVector<gpu::ScanOp> scans;
+  llvm::SmallVector<block::ContractOp> contracts;
+  llvm::SmallVector<block::ScaledContractOp> scaledContracts;
+  llvm::SmallVector<block::ReduceOp> reductions;
+  llvm::SmallVector<block::ScanOp> scans;
 };
 
 mlir::LogicalResult materializeHistograms(mlir::func::FuncOp kernel);
@@ -20,10 +20,10 @@ mlir::LogicalResult formComputePrimitives(
     NativeFormRewriter &rewriter);
 
 mlir::LogicalResult formScaledMMA(mlir::func::FuncOp kernel,
-    gpu::ScaledContractOp contract, NativeFormRewriter &rewriter);
+    block::ScaledContractOp contract, NativeFormRewriter &rewriter);
 
 mlir::LogicalResult formMMA(mlir::func::FuncOp kernel,
-    gpu::ContractOp contract, NativeFormRewriter &rewriter);
+    block::ContractOp contract, NativeFormRewriter &rewriter);
 
 } // namespace intent::cutile
 

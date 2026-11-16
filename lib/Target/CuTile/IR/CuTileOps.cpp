@@ -1,9 +1,9 @@
 #include "Intent/Target/CuTile/IR/CuTileOps.h"
 
-#include "Intent/Dialect/GPU/Analysis/PhysicalProgram.h"
-#include "Intent/Dialect/GPU/Analysis/ProgramInterface.h"
-#include "Intent/Dialect/GPU/Analysis/UniformValues.h"
-#include "Intent/Dialect/GPU/IR/Program.h"
+#include "Intent/Dialect/Block/Analysis/PhysicalProgram.h"
+#include "Intent/Dialect/Block/Analysis/ProgramInterface.h"
+#include "Intent/Dialect/Block/Analysis/UniformValues.h"
+#include "Intent/Dialect/Block/IR/Program.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -21,7 +21,7 @@ namespace intent::cutile {
 namespace {
 
 Type elementType(Type type) {
-  if (auto fragment = dyn_cast<gpu::FragmentType>(type))
+  if (auto fragment = dyn_cast<block::FragmentType>(type))
     return fragment.getElementType();
   return type;
 }
@@ -31,28 +31,28 @@ bool isIntegerCoordinate(Type type) {
   return element.isIntOrIndex();
 }
 
-bool samePhysicalDomain(gpu::FragmentType lhs, gpu::FragmentType rhs) {
+bool samePhysicalDomain(block::FragmentType lhs, block::FragmentType rhs) {
   return lhs.getShape() == rhs.getShape() &&
          lhs.getAxisMaps() == rhs.getAxisMaps() &&
          lhs.getValidity() == rhs.getValidity() &&
          lhs.getOwner() == rhs.getOwner();
 }
 
-bool sameLogicalAxis(gpu::FragmentType lhs, unsigned lhsAxis,
-                     gpu::FragmentType rhs, unsigned rhsAxis) {
-  auto left = dyn_cast<gpu::AxisMapAttr>(lhs.getAxisMaps()[lhsAxis]);
-  auto right = dyn_cast<gpu::AxisMapAttr>(rhs.getAxisMaps()[rhsAxis]);
+bool sameLogicalAxis(block::FragmentType lhs, unsigned lhsAxis,
+                     block::FragmentType rhs, unsigned rhsAxis) {
+  auto left = dyn_cast<block::AxisMapAttr>(lhs.getAxisMaps()[lhsAxis]);
+  auto right = dyn_cast<block::AxisMapAttr>(rhs.getAxisMaps()[rhsAxis]);
   return left && right && left.getDimensionId() > 0 &&
          left.getDimensionId() == right.getDimensionId();
 }
 
 LogicalResult verifyCoordinateDomains(Operation *owner, ValueRange coordinates,
                                       Type targetType) {
-  auto target = dyn_cast<gpu::FragmentType>(targetType);
+  auto target = dyn_cast<block::FragmentType>(targetType);
   for (Value coordinate : coordinates) {
     if (!isIntegerCoordinate(coordinate.getType()))
       return owner->emitOpError("coordinates must have integer element type");
-    auto source = dyn_cast<gpu::FragmentType>(coordinate.getType());
+    auto source = dyn_cast<block::FragmentType>(coordinate.getType());
     if (!source)
       continue;
     if (!target || !samePhysicalDomain(source, target))
@@ -77,13 +77,13 @@ LogicalResult verifySourceAxes(Operation *owner, ArrayRef<int64_t> sourceAxes,
 }
 
 LogicalResult verifyResourceOrderedTile(Operation *owner, unsigned rank,
-                                        gpu::FragmentType tile,
+                                        block::FragmentType tile,
                                         ValueRange tileIndices) {
   if (tileIndices.size() != rank || tile.getShape().size() != rank)
     return owner->emitOpError(
         "requires one resource-ordered tile axis and index per view axis");
   for (unsigned axis = 0; axis < rank; ++axis) {
-    auto mapping = dyn_cast<gpu::AxisMapAttr>(tile.getAxisMaps()[axis]);
+    auto mapping = dyn_cast<block::AxisMapAttr>(tile.getAxisMaps()[axis]);
     if (!mapping || mapping.getFragmentAxis() != axis)
       return owner->emitOpError(
           "tile relation is not indexed in resource-axis order");
@@ -106,9 +106,9 @@ LogicalResult verifySerializedCoordinateOrder(
 LogicalResult verifyLoadLatency(Operation *operation, Value latency) {
   if (!latency)
     return success();
-  auto parameter = latency.getDefiningOp<gpu::ParameterOp>();
+  auto parameter = latency.getDefiningOp<block::ParameterOp>();
   if (!parameter || parameter.getDeclaration().getRole() !=
-                        gpu::ParameterRole::ProviderLoadPolicy ||
+                        block::ParameterRole::ProviderLoadPolicy ||
       !llvm::all_of(parameter.getDeclaration().getCandidates().asArrayRef(),
                     isLegalLoadPolicy))
     return operation->emitOpError(
@@ -123,9 +123,9 @@ LogicalResult verifyFullTileCondition(TileLoadOp load) {
   auto shape = load.getResult().getType().getShape();
   llvm::SmallBitVector covered(view.getRank());
   for (auto [axis, attribute] : llvm::enumerate(shape)) {
-    auto width = cast<gpu::PhysicalExprAttr>(attribute);
-    auto size = cast<gpu::PhysicalExprAttr>(view.getLayout().getExtents()[axis]);
-    auto constant = gpu::PhysicalExprKind::Constant;
+    auto width = cast<block::PhysicalExprAttr>(attribute);
+    auto size = cast<block::PhysicalExprAttr>(view.getLayout().getExtents()[axis]);
+    auto constant = block::PhysicalExprKind::Constant;
     covered[axis] = width.getKind() == constant && width.getValue() > 0 &&
                     (width.getValue() == 1 ||
                      (size.getKind() == constant &&
@@ -138,22 +138,22 @@ LogicalResult verifyFullTileCondition(TileLoadOp load) {
       return success();
     if (matchPattern(predicate, m_One()))
       continue;
-    if (auto conjunction = predicate.getDefiningOp<gpu::BinaryOp>();
+    if (auto conjunction = predicate.getDefiningOp<block::BinaryOp>();
         conjunction &&
         conjunction.getOperatorKind() == BinaryOperator::LogicalAnd) {
       pending.push_back(conjunction.getLhs());
       pending.push_back(conjunction.getRhs());
       continue;
     }
-    auto equal = predicate.getDefiningOp<gpu::CompareOp>();
+    auto equal = predicate.getDefiningOp<block::CompareOp>();
     if (!equal || equal.getPredicate() != ComparePredicate::Eq ||
         !matchPattern(equal.getRhs(), m_Zero()))
       return load.emitOpError("full tiles require a view-size divisibility proof");
-    auto remainder = equal.getLhs().getDefiningOp<gpu::BinaryOp>();
-    auto size = remainder ? remainder.getLhs().getDefiningOp<gpu::DimOp>()
-                          : gpu::DimOp();
-    auto width = remainder ? gpu::queryLaunchExpression(remainder.getRhs())
-                           : gpu::PhysicalExprAttr();
+    auto remainder = equal.getLhs().getDefiningOp<block::BinaryOp>();
+    auto size = remainder ? remainder.getLhs().getDefiningOp<block::DimOp>()
+                          : block::DimOp();
+    auto width = remainder ? block::queryLaunchExpression(remainder.getRhs())
+                           : block::PhysicalExprAttr();
     if (!remainder || remainder.getOperatorKind() != BinaryOperator::Remainder ||
         !size || !width || size.getView() != load.getResource() ||
         size.getAxis() >= view.getRank() ||
@@ -166,7 +166,7 @@ LogicalResult verifyFullTileCondition(TileLoadOp load) {
              : load.emitOpError("full-tile proof does not cover every view axis");
 }
 
-FailureOr<gpu::ViewType> collapsedArrayType(gpu::ViewType source,
+FailureOr<block::ViewType> collapsedArrayType(block::ViewType source,
                                           DenseI64ArrayAttr groups) {
   if (!source || !groups || groups.size() < 2 ||
       groups.size() >= source.getRank() || groups.asArrayRef().back() != source.getRank())
@@ -180,11 +180,11 @@ FailureOr<gpu::ViewType> collapsedArrayType(gpu::ViewType source,
       return failure();
     Attribute extent = layout.getExtents()[begin];
     for (unsigned axis = begin + 1; axis < static_cast<unsigned>(end); ++axis) {
-      auto inner = dyn_cast<gpu::PhysicalExprAttr>(layout.getExtents()[axis]);
-      if (!inner || inner.getKind() != gpu::PhysicalExprKind::Constant || inner.getValue() <= 1)
+      auto inner = dyn_cast<block::PhysicalExprAttr>(layout.getExtents()[axis]);
+      if (!inner || inner.getKind() != block::PhysicalExprKind::Constant || inner.getValue() <= 1)
         return failure();
-      extent = gpu::PhysicalExprAttr::get(
-          source.getContext(), gpu::PhysicalExprKind::Multiply, 0,
+      extent = block::PhysicalExprAttr::get(
+          source.getContext(), block::PhysicalExprKind::Multiply, 0,
           StringAttr::get(source.getContext()),
           ArrayAttr::get(source.getContext(), {extent, inner}));
     }
@@ -193,9 +193,9 @@ FailureOr<gpu::ViewType> collapsedArrayType(gpu::ViewType source,
     dimensions.push_back(end == begin + 1 ? layout.getDimensionIds()[begin] : 0);
     begin = end;
   }
-  return gpu::ViewType::get(
+  return block::ViewType::get(
       source.getContext(), source.getElementType(), source.getAccess(), source.getSourceId(),
-      gpu::ViewLayoutAttr::get(source.getContext(), ArrayAttr::get(source.getContext(), shape),
+      block::ViewLayoutAttr::get(source.getContext(), ArrayAttr::get(source.getContext(), shape),
           DenseI64ArrayAttr::get(source.getContext(), dimensions),
           ArrayAttr::get(source.getContext(), strides)));
 }
@@ -214,43 +214,43 @@ bool guardedByArrayEligibility(Operation *operation, ArrayViewOp array) {
 
 Attribute getCompileTimeScalar(Value value) {
   if (Attribute literal =
-          UniformValueAnalysis(gpu::describeUniformValue).evaluate(value))
+          UniformValueAnalysis(block::describeUniformValue).evaluate(value))
     return literal;
   while (true) {
-    auto description = gpu::describeUniformValue(value);
+    auto description = block::describeUniformValue(value);
     if (description.kind == UniformKind::Forward &&
         description.operands.size() == 1) {
       value = description.operands.front();
       continue;
     }
-    auto cast = value.getDefiningOp<gpu::CastOp>();
+    auto cast = value.getDefiningOp<block::CastOp>();
     if (!cast)
       break;
-    Type source = gpu::uniformElementType(cast.getValue().getType());
-    Type target = gpu::uniformElementType(cast.getResult().getType());
+    Type source = block::uniformElementType(cast.getValue().getType());
+    Type target = block::uniformElementType(cast.getResult().getType());
     if (source != target &&
         !(source.isIndex() && target.isSignlessInteger(64)) &&
         !(source.isSignlessInteger(64) && target.isIndex()))
       return {};
     value = cast.getValue();
   }
-  auto expression = gpu::queryLaunchExpression(value);
+  auto expression = block::queryLaunchExpression(value);
   if (!expression)
     return {};
   auto kernel = value.getParentRegion()->getParentOfType<func::FuncOp>();
-  std::function<bool(gpu::PhysicalExprAttr)> isCompileTime =
-      [&](gpu::PhysicalExprAttr current) {
+  std::function<bool(block::PhysicalExprAttr)> isCompileTime =
+      [&](block::PhysicalExprAttr current) {
     auto kind = current.getKind();
-    if (kind == gpu::PhysicalExprKind::ScalarABI) {
+    if (kind == block::PhysicalExprKind::ScalarABI) {
       if (!kernel)
         return false;
-      auto argument = gpu::resolveArgument(kernel, current.getArgumentReference());
-      auto binding = argument ? gpu::getArgumentBinding(argument)
-                              : gpu::ArgumentBindingAttr();
-      return binding && binding.getKind() == gpu::ArgumentKind::Stride;
+      auto argument = block::resolveArgument(kernel, current.getArgumentReference());
+      auto binding = argument ? block::getArgumentBinding(argument)
+                              : block::ArgumentBindingAttr();
+      return binding && binding.getKind() == block::ArgumentKind::Stride;
     }
     return llvm::all_of(current.getOperands(), [&](Attribute operand) {
-      return isCompileTime(cast<gpu::PhysicalExprAttr>(operand));
+      return isCompileTime(cast<block::PhysicalExprAttr>(operand));
     });
   };
   return isCompileTime(expression) ? Attribute(expression) : Attribute();
@@ -268,7 +268,7 @@ LogicalResult ArrayViewOp::verify() {
   if (failed(expected) || getResult().getType() != *expected)
     return emitOpError("result must carry the collapsed source layout with positive non-unit inner extents");
   for (Operation *user : getResult().getUsers())
-    if (!isa<TileLoadOp, gpu::DimOp>(user) || !guardedByArrayEligibility(user, *this))
+    if (!isa<TileLoadOp, block::DimOp>(user) || !guardedByArrayEligibility(user, *this))
       return emitOpError(
           "conditional array aliases require loads and dimensions inside their eligible control region");
   return success();
@@ -280,7 +280,7 @@ LogicalResult ArrayViewOp::inferReturnTypes(MLIRContext *context,
   Adaptor operation(operands, attributes, properties, regions);
   if (failed(operation.verify(location.value_or(UnknownLoc::get(context)))))
     return failure();
-  auto view = collapsedArrayType(cast<gpu::ViewType>(operation.getBase().getType()),
+  auto view = collapsedArrayType(cast<block::ViewType>(operation.getBase().getType()),
                                  operation.getGroupEndsAttr());
   if (failed(view))
     return emitOptionalError(location, "invalid contiguous array collapse groups");
@@ -418,7 +418,7 @@ LogicalResult GatherLoadOp::verify() {
   if (getValid()) {
     if (!elementType(getValid().getType()).isInteger(1))
       return emitOpError("mask must be a boolean fragment");
-    auto valid = dyn_cast<gpu::FragmentType>(getValid().getType());
+    auto valid = dyn_cast<block::FragmentType>(getValid().getType());
     if (valid && !samePhysicalDomain(valid, getResult().getType()))
       return emitOpError("mask does not match the gathered physical domain");
   }
@@ -446,7 +446,7 @@ LogicalResult ScatterStoreOp::verify() {
   if (getValid()) {
     if (!elementType(getValid().getType()).isInteger(1))
       return emitOpError("mask must be a boolean fragment");
-    auto valid = dyn_cast<gpu::FragmentType>(getValid().getType());
+    auto valid = dyn_cast<block::FragmentType>(getValid().getType());
     if (valid && !samePhysicalDomain(valid, getValue().getType()))
       return emitOpError("mask does not match the scattered physical domain");
   }
@@ -499,16 +499,16 @@ LogicalResult ExtractOp::verify() {
     Value coordinate = getCoordinates()[axis];
     if (!coordinate.getType().isInteger(32))
       return emitOpError("requires i32 scalar tile coordinates");
-    auto extent = dyn_cast<gpu::PhysicalExprAttr>(getExtractionShape()[axis]);
+    auto extent = dyn_cast<block::PhysicalExprAttr>(getExtractionShape()[axis]);
     if (!extent)
       return emitOpError("extraction shape must contain physical expressions");
     if (!retained.test(axis) && (extent.getKind() !=
-                   gpu::PhysicalExprKind::Constant ||
+                   block::PhysicalExprKind::Constant ||
                extent.getValue() != 1)) {
       return emitOpError("selected axes require unit extraction extents");
     }
   }
-  auto result = dyn_cast<gpu::FragmentType>(getResult().getType());
+  auto result = dyn_cast<block::FragmentType>(getResult().getType());
   if (!result)
     return getRetainedAxes().empty()
                ? success()
@@ -535,9 +535,9 @@ LogicalResult MMAOp::verify() {
         !accumulator.getElementType().isF32())
       return emitOpError("chunked MMA requires f32 operands and a positive power-of-two reduction chunk");
     if (!lhs.getShape().empty()) {
-      auto reduction = cast<gpu::PhysicalExprAttr>(lhs.getShape().getValue().back());
+      auto reduction = cast<block::PhysicalExprAttr>(lhs.getShape().getValue().back());
       if (reduction.getKind() ==
-              gpu::PhysicalExprKind::Constant &&
+              block::PhysicalExprKind::Constant &&
           (reduction.getValue() < chunk || reduction.getValue() % chunk != 0))
         return emitOpError("MMA reduction extent must contain complete chunks");
     }
@@ -602,10 +602,10 @@ LogicalResult ScaledMMAOp::verify() {
       !sameLogicalAxis(rhs, 2, accumulator, 1) ||
       !sameLogicalAxis(rhs, 2, rhsScale, 1))
     return emitOpError("requires [M,G,S]/[M,G] x [G,S,N]/[G,N] scaled MMA operands");
-  auto inner = dyn_cast<gpu::PhysicalExprAttr>(lhs.getShape()[2]);
+  auto inner = dyn_cast<block::PhysicalExprAttr>(lhs.getShape()[2]);
   if (!inner ||
       inner.getKind() !=
-          gpu::PhysicalExprKind::Constant ||
+          block::PhysicalExprKind::Constant ||
       inner.getValue() != static_cast<int64_t>(getLhsGroupSize()) ||
       getLhsGroupSize() != getRhsGroupSize() ||
       getLhsFormat() != ScaledFormat::E4M3 ||
@@ -629,7 +629,7 @@ LogicalResult inferCollectiveTypes(MLIRContext *context,
     return failure();
   if (operation.getAxisAttr().getInt() < 0)
     return emitOptionalError(location, "cuTile collective requires an explicit source axis");
-  return gpu::inferScalarCollectiveResultTypes(
+  return block::inferScalarCollectiveResultTypes(
       location, operation.getSources(), operation.getAxisAttr().getInt(), scan, results);
 }
 
@@ -671,22 +671,22 @@ LogicalResult ReduceOp::verify() {
     if (getSources().size() > 1) {
       auto kernel = (*this)->getParentOfType<func::FuncOp>();
       auto capabilities = kernel
-          ? kernel->getAttrOfType<gpu::CapabilitiesAttr>(gpu::capabilitiesAttr)
-          : gpu::CapabilitiesAttr();
+          ? kernel->getAttrOfType<block::CapabilitiesAttr>(block::capabilitiesAttr)
+          : block::CapabilitiesAttr();
       if (!capabilities || !capabilities.getNativeTupleReductions() ||
           !capabilities.getNativeTupleReductionRequiresConstantIdentity())
         return emitOpError(
             "cuTile tuple reduction requires constant-identity provider capability");
     }
-    if (failed(gpu::verifyScalarCollective(
+    if (failed(block::verifyScalarCollective(
             getOperation(), getSources(), getIdentities(), getResults(),
             getCombine(), getAxis(), false)))
       return failure();
     return verifyLiteralIdentities(getOperation(), getIdentities());
   }
   auto source = getSources().size() == 1
-                    ? dyn_cast<gpu::FragmentType>(getSources().front().getType())
-                    : gpu::FragmentType();
+                    ? dyn_cast<block::FragmentType>(getSources().front().getType())
+                    : block::FragmentType();
   if (getSources().size() != 1 || getNumResults() != 1 || !source ||
       !getIdentities().empty() || !getCombine().empty() ||
       static_cast<size_t>(getAxis()) >= source.getShape().size())
@@ -708,14 +708,14 @@ LogicalResult ReduceOp::verify() {
 
 LogicalResult ScanOp::verify() {
   if (!getKind()) {
-    if (failed(gpu::verifyScalarCollective(getOperation(), getSources(), getIdentities(),
+    if (failed(block::verifyScalarCollective(getOperation(), getSources(), getIdentities(),
                                          getResults(), getCombine(), getAxis(), true)))
       return failure();
     return verifyLiteralIdentities(getOperation(), getIdentities());
   }
   auto source = getSources().size() == 1
-                    ? dyn_cast<gpu::FragmentType>(getSources().front().getType())
-                    : gpu::FragmentType();
+                    ? dyn_cast<block::FragmentType>(getSources().front().getType())
+                    : block::FragmentType();
   if (getSources().size() != 1 || getNumResults() != 1 || !source ||
       !getIdentities().empty() || !getCombine().empty() ||
       static_cast<size_t>(getAxis()) >= source.getShape().size() ||

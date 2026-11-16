@@ -1,9 +1,9 @@
 #include "Intent/Target/Triton/Transforms/Mapping/ProgramGrid.h"
 
-#include "Intent/Dialect/GPU/IR/GPUOps.h"
-#include "Intent/Dialect/GPU/IR/Program.h"
-#include "Intent/Dialect/GPU/Analysis/PhysicalProgram.h"
-#include "Intent/Dialect/GPU/Transforms/Passes.h"
+#include "Intent/Dialect/Block/IR/BlockOps.h"
+#include "Intent/Dialect/Block/IR/Program.h"
+#include "Intent/Dialect/Block/Analysis/PhysicalProgram.h"
+#include "Intent/Dialect/Block/Transforms/Passes.h"
 
 #include "llvm/ADT/SmallPtrSet.h"
 
@@ -28,20 +28,20 @@ bool dependsOn(Value value, Value root,
 }
 
 FailureOr<SmallVector<unsigned>>
-writeEffectProgramOrder(func::FuncOp kernel, gpu::ExecutionGroupOp mapping) {
+writeEffectProgramOrder(func::FuncOp kernel, block::ExecutionGroupOp mapping) {
   const unsigned rank = mapping.getCoordinates().size();
   SmallVector<std::optional<int64_t>> resourceAxes(rank);
   bool sawStore = false;
   bool ambiguous = false;
   bool hasOtherWrites = false;
 
-  kernel.walk([&](gpu::AccessOpInterface access) {
-    if (access.getAccessKind() != gpu::AccessKind::Store) {
+  kernel.walk([&](block::AccessOpInterface access) {
+    if (access.getAccessKind() != block::AccessKind::Store) {
       hasOtherWrites |= access.writesMemory();
       return;
     }
     sawStore = true;
-    if (!isa<gpu::ViewType>(access.getAccessResource().getType())) {
+    if (!isa<block::ViewType>(access.getAccessResource().getType())) {
       ambiguous = true;
       return;
     }
@@ -96,21 +96,21 @@ writeEffectProgramOrder(func::FuncOp kernel, gpu::ExecutionGroupOp mapping) {
 } // namespace
 
 LogicalResult legalizeProgramGrid(ModuleOp module) {
-  FailureOr<func::FuncOp> physicalKernel = gpu::getPhysicalKernel(module);
+  FailureOr<func::FuncOp> physicalKernel = block::getPhysicalKernel(module);
   if (failed(physicalKernel))
     return failure();
   func::FuncOp kernel = *physicalKernel;
-  SmallVector<gpu::ExecutionGroupOp> mappings;
+  SmallVector<block::ExecutionGroupOp> mappings;
   kernel.walk(
-      [&](gpu::ExecutionGroupOp mapping) { mappings.push_back(mapping); });
+      [&](block::ExecutionGroupOp mapping) { mappings.push_back(mapping); });
   if (mappings.size() != 1)
     return success();
 
-  gpu::ExecutionGroupOp mapping = mappings.front();
+  block::ExecutionGroupOp mapping = mappings.front();
   if (mapping.getCoordinates().empty() ||
       mapping.getCoordinates().size() > 3)
     return success();
-  auto linearProgram = mapping.getLinear().getDefiningOp<gpu::ProgramIdOp>();
+  auto linearProgram = mapping.getLinear().getDefiningOp<block::ProgramIdOp>();
   if (!linearProgram || linearProgram.getAxis() != 0)
     return success();
 
@@ -121,19 +121,19 @@ LogicalResult legalizeProgramGrid(ModuleOp module) {
     return mapping.emitOpError(
         "Triton program-grid legalization requires one role per coordinate");
   const int64_t workset =
-      static_cast<int64_t>(gpu::CoordinateRole::Workset);
+      static_cast<int64_t>(block::CoordinateRole::Workset);
   const int64_t pointwiseOwnership =
-      static_cast<int64_t>(gpu::CoordinateRole::PointwiseOwnership);
+      static_cast<int64_t>(block::CoordinateRole::PointwiseOwnership);
   const int64_t tiledWorkset =
-      static_cast<int64_t>(gpu::CoordinateRole::TiledWorkset);
+      static_cast<int64_t>(block::CoordinateRole::TiledWorkset);
   const int64_t contractionM =
-      static_cast<int64_t>(gpu::CoordinateRole::ContractionM);
+      static_cast<int64_t>(block::CoordinateRole::ContractionM);
   const int64_t contractionN =
-      static_cast<int64_t>(gpu::CoordinateRole::ContractionN);
+      static_cast<int64_t>(block::CoordinateRole::ContractionN);
   const int64_t traversalWorker =
-      static_cast<int64_t>(gpu::CoordinateRole::TraversalWorker);
+      static_cast<int64_t>(block::CoordinateRole::TraversalWorker);
   const int64_t indirectTraversal =
-      static_cast<int64_t>(gpu::CoordinateRole::IndirectTraversal);
+      static_cast<int64_t>(block::CoordinateRole::IndirectTraversal);
   const bool hasRowOwnership =
       llvm::is_contained(roles, contractionM);
   const bool hasWorkerTraversal =
@@ -203,11 +203,11 @@ LogicalResult legalizeProgramGrid(ModuleOp module) {
   // The linear shared grid avoids the stricter CUDA Y/Z launch limits. Only
   // expand it when every secondary coordinate has a proven finite bound.
   for (unsigned coordinateAxis : llvm::drop_begin(programOrder)) {
-    gpu::PhysicalExprAttr bound = gpu::queryNonNegativeIndexUpperBound(
+    block::PhysicalExprAttr bound = block::queryNonNegativeIndexUpperBound(
         mapping.getExtents()[coordinateAxis]);
     if (!bound ||
         bound.getKind() !=
-            gpu::PhysicalExprKind::Constant ||
+            block::PhysicalExprKind::Constant ||
         bound.getValue() > 65535)
       return success();
   }
@@ -219,10 +219,10 @@ LogicalResult legalizeProgramGrid(ModuleOp module) {
   SmallVector<Attribute> gridExtents;
   for (unsigned coordinateAxis : programOrder)
     gridExtents.push_back(mapping.getLaunchExtents()[coordinateAxis]);
-  kernel->setAttr(gpu::programSpaceAttr,
+  kernel->setAttr(block::programSpaceAttr,
                   ArrayAttr::get(module.getContext(), gridExtents));
   kernel->setAttr(
-      gpu::gridRankAttr,
+      block::gridRankAttr,
       IntegerAttr::get(IntegerType::get(module.getContext(), 64),
                        mapping.getCoordinates().size()));
   OpBuilder builder(mapping);
@@ -231,7 +231,7 @@ LogicalResult legalizeProgramGrid(ModuleOp module) {
     coordinateToProgram[coordinateAxis] = programAxis;
   SmallVector<Value> coordinates(rank);
   for (unsigned axis = 0; axis < rank; ++axis)
-    coordinates[axis] = builder.create<gpu::ProgramIdOp>(
+    coordinates[axis] = builder.create<block::ProgramIdOp>(
         mapping.getLoc(), builder.getIndexType(), coordinateToProgram[axis]);
 
   // The group keeps its original coordinates and execution body. Reconstruct
@@ -239,11 +239,11 @@ LogicalResult legalizeProgramGrid(ModuleOp module) {
   // later expands the group through the common coordinate lowering.
   Value linear = coordinates.front();
   for (unsigned axis = 1; axis < rank; ++axis) {
-    linear = builder.create<gpu::BinaryOp>(
+    linear = builder.create<block::BinaryOp>(
         mapping.getLoc(), builder.getIndexType(), linear,
         mapping.getExtents()[axis],
         BinaryOperator::Multiply);
-    linear = builder.create<gpu::BinaryOp>(
+    linear = builder.create<block::BinaryOp>(
         mapping.getLoc(), builder.getIndexType(), linear, coordinates[axis],
         BinaryOperator::Add);
   }

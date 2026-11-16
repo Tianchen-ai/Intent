@@ -10,55 +10,55 @@
 #include "Compute/ComputeForms.h"
 #include "Access/FragmentStorage.h"
 #include "Program.h"
-#include "Intent/Dialect/GPU/IR/Program.h"
-#include "Intent/Dialect/GPU/Transforms/Passes.h"
-#include "Intent/Dialect/GPU/Transforms/Storage/Workspace.h"
-#include "Intent/Dialect/GPU/Transforms/Mapping/ExecutionGroups.h"
-#include "Intent/Dialect/GPU/Transforms/Value/ValueMaterialization.h"
-#include "Intent/Dialect/GPU/Transforms/Value/ValueRelations.h"
-#include "Intent/Dialect/GPU/Transforms/Contraction/Contraction.h"
-#include "Intent/Dialect/GPU/Transforms/Configuration/PhysicalParameters.h"
+#include "Intent/Dialect/Block/IR/Program.h"
+#include "Intent/Dialect/Block/Transforms/Passes.h"
+#include "Intent/Dialect/Block/Transforms/Storage/Workspace.h"
+#include "Intent/Dialect/Block/Transforms/Mapping/ExecutionGroups.h"
+#include "Intent/Dialect/Block/Transforms/Value/ValueMaterialization.h"
+#include "Intent/Dialect/Block/Transforms/Value/ValueRelations.h"
+#include "Intent/Dialect/Block/Transforms/Contraction/Contraction.h"
+#include "Intent/Dialect/Block/Transforms/Configuration/PhysicalParameters.h"
 
 using namespace mlir;
 namespace intent::cutile {
 
 LogicalResult prepareProgram(ModuleOp module) {
-  if (failed(gpu::verifyGPUProgram(module)) ||
-      failed(gpu::realizeShortWindowReductions(module)) ||
-      failed(gpu::lowerExecutionGroups(module)))
+  if (failed(block::verifyBlockProgram(module)) ||
+      failed(block::realizeShortWindowReductions(module)) ||
+      failed(block::lowerExecutionGroups(module)))
     return failure();
-  FailureOr<func::FuncOp> kernel = gpu::getPhysicalKernel(module);
+  FailureOr<func::FuncOp> kernel = block::getPhysicalKernel(module);
   if (failed(kernel))
     return failure();
   legalizeStrictArithmetic(*kernel);
-  if (failed(gpu::contraction::normalizeMatrixContractShapes(*kernel)) ||
-      failed(gpu::verifyGPUProgram(module)))
+  if (failed(block::contraction::normalizeMatrixContractShapes(*kernel)) ||
+      failed(block::verifyBlockProgram(module)))
     return failure();
   if (failed(prepareLaunchConfigurations(*kernel)) ||
       failed(materializeHistograms(*kernel)) ||
       failed(materializeFragmentStorage(*kernel)) ||
-      failed(gpu::lowerWorkspaceAllocations(module)))
+      failed(block::lowerWorkspaceAllocations(module)))
     return failure();
-  gpu::foldExactConstantDivisions(*kernel);
-  return gpu::verifyGPUProgram(module);
+  block::foldExactConstantDivisions(*kernel);
+  return block::verifyBlockProgram(module);
 }
 
 LogicalResult finalizeProgram(ModuleOp module, bool hoistLoopInvariants) {
-  FailureOr<func::FuncOp> kernel = gpu::getPhysicalKernel(module);
+  FailureOr<func::FuncOp> kernel = block::getPhysicalKernel(module);
   if (failed(kernel)) return failure();
   if (failed(refineMMALoops(module)))
     return failure();
   if (failed(materializeClosedConfigs(*kernel)))
     return failure();
-  gpu::foldScalarIntegerValues(*kernel);
+  block::foldScalarIntegerValues(*kernel);
   realizeWideLoops(*kernel);
   preserveNativeIndexValues(*kernel);
   if (failed(collapseArrayViews(module)))
     return failure();
-  if (failed(hoistLoopInvariants ? gpu::hoistLoopInvariantValues(module)
-                                : gpu::eliminateCommonValues(module)))
+  if (failed(hoistLoopInvariants ? block::hoistLoopInvariantValues(module)
+                                : block::eliminateCommonValues(module)))
     return failure();
-  if (failed(gpu::projectBoundedParameterUses(*kernel)))
+  if (failed(block::projectBoundedParameterUses(*kernel)))
     return failure();
   // Bounded parameter projection refines the live tile footprint. Prune the
   // resulting candidates before deriving native array-index bounds from them.

@@ -1,10 +1,10 @@
 #include "Intent/Target/CuTile/Transforms/Control/Loops.h"
 #include "Intent/Target/CuTile/Analysis/IndexBounds.h"
 #include "Intent/Target/CuTile/IR/CuTileOps.h"
-#include "Intent/Dialect/GPU/Analysis/IndexRelations.h"
-#include "Intent/Dialect/GPU/Analysis/PhysicalParameters.h"
-#include "Intent/Dialect/GPU/Analysis/PhysicalProgram.h"
-#include "Intent/Dialect/GPU/IR/Program.h"
+#include "Intent/Dialect/Block/Analysis/IndexRelations.h"
+#include "Intent/Dialect/Block/Analysis/PhysicalParameters.h"
+#include "Intent/Dialect/Block/Analysis/PhysicalProgram.h"
+#include "Intent/Dialect/Block/IR/Program.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/IRMapping.h"
@@ -17,10 +17,10 @@ bool fitsNativeLoopBound(Value value, unsigned depth = 0) {
   if (depth >= 32)
     return false;
   value = stripIndexIdentities(value);
-  if (value.getDefiningOp<gpu::ProgramIdOp>())
+  if (value.getDefiningOp<block::ProgramIdOp>())
     return true;
-  if (auto expression = value.getDefiningOp<gpu::PhysicalExprOp>()) {
-    auto bounds = gpu::queryPositiveExtentBounds(
+  if (auto expression = value.getDefiningOp<block::PhysicalExprOp>()) {
+    auto bounds = block::queryPositiveExtentBounds(
         expression.getExpression(), expression->getParentOfType<func::FuncOp>());
     return bounds && llvm::isInt<32>(bounds->second);
   }
@@ -36,26 +36,26 @@ bool fitsNativeLoopBound(Value value, unsigned depth = 0) {
                ? attribute.getValue().getActiveBits() < 32
                : attribute.getValue().isSignedIntN(32);
   }
-  if (auto upper = gpu::queryNonNegativeIndexUpperBound(value)) {
-    auto bounds = gpu::queryPositiveExtentBounds(
+  if (auto upper = block::queryNonNegativeIndexUpperBound(value)) {
+    auto bounds = block::queryPositiveExtentBounds(
         upper, value.getParentRegion()->getParentOfType<func::FuncOp>());
     if (bounds && llvm::isInt<32>(bounds->second))
       return true;
   }
-  if (auto parameter = value.getDefiningOp<gpu::ParameterOp>())
+  if (auto parameter = value.getDefiningOp<block::ParameterOp>())
     return llvm::all_of(parameter.getDeclaration().getCandidates().asArrayRef(),
                         [](int64_t candidate) { return llvm::isInt<32>(candidate); });
-  if (auto bound = value.getDefiningOp<gpu::RangeBoundOp>())
-    if (auto range = bound.getRange().getDefiningOp<gpu::RangeOp>())
+  if (auto bound = value.getDefiningOp<block::RangeBoundOp>())
+    if (auto range = bound.getRange().getDefiningOp<block::RangeOp>())
       return fitsNativeLoopBound(bound.getBound() == 0 ? range.getStart()
                                  : bound.getBound() == 1 ? range.getStop()
                                                         : range.getStep(),
                                  depth + 1);
-  if (auto cast = value.getDefiningOp<gpu::CastOp>())
+  if (auto cast = value.getDefiningOp<block::CastOp>())
     if (value.getType().isIndex() ||
         (integer && integer.getWidth() == 64 && !integer.isUnsigned()))
       return fitsNativeLoopBound(cast.getValue(), depth + 1);
-  if (auto clamp = value.getDefiningOp<gpu::BinaryOp>()) {
+  if (auto clamp = value.getDefiningOp<block::BinaryOp>()) {
     auto kind = clamp.getOperatorKind();
     if (kind != BinaryOperator::Minimum && kind != BinaryOperator::Maximum)
       return false;
@@ -65,7 +65,7 @@ bool fitsNativeLoopBound(Value value, unsigned depth = 0) {
     for (auto [limit, nestedValue] :
          {std::pair{clamp.getLhs(), clamp.getRhs()},
           std::pair{clamp.getRhs(), clamp.getLhs()}}) {
-      auto nested = nestedValue.getDefiningOp<gpu::BinaryOp>();
+      auto nested = nestedValue.getDefiningOp<block::BinaryOp>();
       if (fitsNativeLoopBound(limit, depth + 1) && nested &&
           nested.getOperatorKind() == opposite &&
           (fitsNativeLoopBound(nested.getLhs(), depth + 1) ||
@@ -78,8 +78,8 @@ bool fitsNativeLoopBound(Value value, unsigned depth = 0) {
 
 std::optional<int64_t> maximumNativeLoopStep(Value value) {
   value = stripIndexIdentities(value);
-  if (auto expression = value.getDefiningOp<gpu::PhysicalExprOp>()) {
-    auto bounds = gpu::queryPositiveExtentBounds(
+  if (auto expression = value.getDefiningOp<block::PhysicalExprOp>()) {
+    auto bounds = block::queryPositiveExtentBounds(
         expression.getExpression(), expression->getParentOfType<func::FuncOp>());
     if (bounds && llvm::isInt<32>(bounds->second))
       return bounds->second;
@@ -90,7 +90,7 @@ std::optional<int64_t> maximumNativeLoopStep(Value value) {
         attribute.getInt() > 0)
       return attribute.getInt();
   }
-  if (auto parameter = value.getDefiningOp<gpu::ParameterOp>()) {
+  if (auto parameter = value.getDefiningOp<block::ParameterOp>()) {
     ArrayRef<int64_t> candidates =
         parameter.getDeclaration().getCandidates().asArrayRef();
     if (!candidates.empty() && llvm::all_of(candidates, [](int64_t candidate) {
@@ -115,14 +115,14 @@ void realizeWideLoops(func::FuncOp kernel) {
     Location location = loop.getLoc();
     std::optional<int64_t> maximumStep = maximumNativeLoopStep(loop.getStep());
     auto isInductionQuotient = [&](Operation &operation) {
-      auto binary = dyn_cast<gpu::BinaryOp>(operation);
+      auto binary = dyn_cast<block::BinaryOp>(operation);
       return binary && binary.getOperatorKind() == BinaryOperator::FloorDivide &&
              binary.getLhs() == loop.getInductionVar() &&
-             gpu::samePhysicalScalarExpression(binary.getRhs(), loop.getStep());
+             block::samePhysicalScalarExpression(binary.getRhs(), loop.getStep());
     };
     bool useTileCounter = maximumStep && *maximumStep > 1 &&
-                          gpu::IndexRelations().nonnegative(loop.getLowerBound()) &&
-                          gpu::IndexRelations().multipleOf(loop.getLowerBound(), loop.getStep()) &&
+                          block::IndexRelations().nonnegative(loop.getLowerBound()) &&
+                          block::IndexRelations().multipleOf(loop.getLowerBound(), loop.getStep()) &&
                           llvm::any_of(loop.getBody()->without_terminator(),
                                        isInductionQuotient);
     auto nativeLoop = [&](OpBuilder &nested) {
@@ -132,25 +132,25 @@ void realizeWideLoops(func::FuncOp kernel) {
         Type wideType = loop.getInductionVar().getType();
         Value one = nested.create<arith::ConstantOp>(
             location, wideType, nested.getIntegerAttr(wideType, 1));
-        Value positive = nested.create<gpu::CompareOp>(
+        Value positive = nested.create<block::CompareOp>(
             location, nested.getI1Type(), upperBound, loop.getLowerBound(),
             ComparePredicate::Gt);
-        Value distance = nested.create<gpu::SelectOp>(
+        Value distance = nested.create<block::SelectOp>(
             location, wideType, positive, upperBound, loop.getLowerBound());
-        Value adjustment = nested.create<gpu::BinaryOp>(
+        Value adjustment = nested.create<block::BinaryOp>(
             location, wideType, loop.getStep(), one, BinaryOperator::Subtract);
-        Value rounded = nested.create<gpu::BinaryOp>(
+        Value rounded = nested.create<block::BinaryOp>(
             location, wideType, distance, adjustment, BinaryOperator::Add);
-        upperBound = nested.create<gpu::BinaryOp>(
+        upperBound = nested.create<block::BinaryOp>(
             location, wideType, rounded, loop.getStep(), BinaryOperator::FloorDivide);
-        lowerBound = nested.create<gpu::BinaryOp>(
+        lowerBound = nested.create<block::BinaryOp>(
             location, wideType, lowerBound, loop.getStep(), BinaryOperator::FloorDivide);
       }
-      Value lower = nested.create<gpu::CastOp>(
+      Value lower = nested.create<block::CastOp>(
           location, nested.getI32Type(), lowerBound);
-      Value upper = nested.create<gpu::CastOp>(
+      Value upper = nested.create<block::CastOp>(
           location, nested.getI32Type(), upperBound);
-      Value step = nested.create<gpu::CastOp>(
+      Value step = nested.create<block::CastOp>(
           location, nested.getI32Type(), loop.getStep());
       if (useTileCounter)
         step = nested.create<arith::ConstantIntOp>(location, 1, 32);
@@ -159,11 +159,11 @@ void realizeWideLoops(func::FuncOp kernel) {
           [&](OpBuilder &body, Location bodyLoc, Value induction,
               ValueRange carried) {
             IRMapping mapping;
-            Value counter = body.create<gpu::CastOp>(
+            Value counter = body.create<block::CastOp>(
                 bodyLoc, loop.getInductionVar().getType(), induction);
             Value wide = counter;
             if (useTileCounter)
-              wide = body.create<gpu::BinaryOp>(
+              wide = body.create<block::BinaryOp>(
                   bodyLoc, wide.getType(), counter, loop.getStep(), BinaryOperator::Multiply);
             mapping.map(loop.getInductionVar(), wide);
             mapping.map(loop.getRegionIterArgs(), carried);
@@ -173,7 +173,7 @@ void realizeWideLoops(func::FuncOp kernel) {
                 Value quotient = counter;
                 Type resultType = operation.getResult(0).getType();
                 if (quotient.getType() != resultType)
-                  quotient = body.create<gpu::CastOp>(bodyLoc, resultType, quotient);
+                  quotient = body.create<block::CastOp>(bodyLoc, resultType, quotient);
                 mapping.map(operation.getResult(0), quotient);
                 continue;
               }
@@ -197,10 +197,10 @@ void realizeWideLoops(func::FuncOp kernel) {
         types.push_back(value.getType());
       SmallVector<Location> locations(types.size(), location);
       auto replacement = nested.create<scf::WhileOp>(location, types, initial);
-      if (Attribute origin = loop->getAttr(gpu::originAttr))
-        replacement->setAttr(gpu::originAttr, origin);
+      if (Attribute origin = loop->getAttr(block::originAttr))
+        replacement->setAttr(block::originAttr, origin);
       Block *before = nested.createBlock(&replacement.getBefore(), {}, types, locations);
-      Value condition = nested.create<gpu::CompareOp>(
+      Value condition = nested.create<block::CompareOp>(
           location, nested.getI1Type(), before->getArgument(0),
           loop.getUpperBound(), ComparePredicate::Lt);
       nested.create<scf::ConditionOp>(location, condition, before->getArguments());
@@ -210,7 +210,7 @@ void realizeWideLoops(func::FuncOp kernel) {
       mapping.map(loop.getRegionIterArgs(), after->getArguments().drop_front());
       for (Operation &operation : loop.getBody()->without_terminator())
         nested.clone(operation, mapping);
-      Value next = nested.create<gpu::BinaryOp>(
+      Value next = nested.create<block::BinaryOp>(
           location, types.front(), after->getArgument(0), loop.getStep(),
           BinaryOperator::Add);
       SmallVector<Value> yielded{next};
@@ -223,8 +223,8 @@ void realizeWideLoops(func::FuncOp kernel) {
     bool unitStep = maximumStep && *maximumStep == 1;
     bool boundedStep = unitStep;
     if (!boundedStep && maximumStep)
-      if (auto upper = gpu::queryNonNegativeIndexUpperBound(loop.getUpperBound())) {
-        auto bounds = gpu::queryPositiveExtentBounds(upper, kernel);
+      if (auto upper = block::queryNonNegativeIndexUpperBound(loop.getUpperBound())) {
+        auto bounds = block::queryPositiveExtentBounds(upper, kernel);
         boundedStep = bounds &&
                       bounds->second <= int64_t{INT32_MAX} - *maximumStep + 1;
       }
@@ -257,21 +257,21 @@ void realizeWideLoops(func::FuncOp kernel) {
           continue;
         Value limit = bound == loop.getUpperBound() ? maximumUpper : maximum;
         Value fits;
-        if (gpu::PhysicalExprAttr upperBound =
-                gpu::queryNonNegativeIndexUpperBound(bound)) {
-          Value symbolic = builder.create<gpu::PhysicalExprOp>(
+        if (block::PhysicalExprAttr upperBound =
+                block::queryNonNegativeIndexUpperBound(bound)) {
+          Value symbolic = builder.create<block::PhysicalExprOp>(
               location, builder.getIndexType(), upperBound);
-          fits = builder.create<gpu::CompareOp>(
+          fits = builder.create<block::CompareOp>(
               location, builder.getI1Type(), symbolic, limit, ComparePredicate::Le);
         } else {
-          Value lower = builder.create<gpu::CompareOp>(
+          Value lower = builder.create<block::CompareOp>(
               location, builder.getI1Type(), bound, minimum, ComparePredicate::Ge);
-          Value upper = builder.create<gpu::CompareOp>(
+          Value upper = builder.create<block::CompareOp>(
               location, builder.getI1Type(), bound, limit, ComparePredicate::Le);
-          fits = builder.create<gpu::BinaryOp>(
+          fits = builder.create<block::BinaryOp>(
               location, builder.getI1Type(), lower, upper, BinaryOperator::LogicalAnd);
         }
-        condition = condition ? Value(builder.create<gpu::BinaryOp>(
+        condition = condition ? Value(builder.create<block::BinaryOp>(
                                     location, builder.getI1Type(), condition, fits,
                                     BinaryOperator::LogicalAnd))
                               : fits;
@@ -302,7 +302,7 @@ void preserveNativeIndexValues(func::FuncOp kernel) {
     if (!isa<TileLoadOp, TileStoreOp, TileAtomicAddOp>(operation))
       return;
     for (OpOperand &operand : operation->getOpOperands()) {
-      auto cast = operand.get().getDefiningOp<gpu::CastOp>();
+      auto cast = operand.get().getDefiningOp<block::CastOp>();
       if (cast && cast.getResult().getType().isIndex() &&
           cast.getValue().getType().isSignlessInteger(32))
         operand.set(cast.getValue());

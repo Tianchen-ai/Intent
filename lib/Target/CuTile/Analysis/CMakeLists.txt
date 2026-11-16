@@ -11,5 +11,5 @@ add_mlir_library(MLIRIntentCuTileAnalysis
   MLIRSCFDialect
   MLIRSideEffectInterfaces
   MLIRIntentCuTileDialect
-  MLIRIntentGPUAnalysis
+  MLIRIntentBlockAnalysis
 )

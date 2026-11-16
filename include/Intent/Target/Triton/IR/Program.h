@@ -7,9 +7,9 @@
 namespace intent::triton {
 
 inline constexpr llvm::StringLiteral contractFormAttr =
-    "intent_gpu.triton.contract_form";
+    "intent_block.triton.contract_form";
 inline constexpr llvm::StringLiteral loopUnrollFactorAttr =
-    "intent_gpu.triton.loop_unroll_factor";
+    "intent_block.triton.loop_unroll_factor";
 
 mlir::LogicalResult verifyProgramAttributes(mlir::Operation *operation);
 

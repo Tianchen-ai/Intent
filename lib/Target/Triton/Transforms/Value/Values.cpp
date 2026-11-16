@@ -1,14 +1,15 @@
 #include "Values.h"
+#include "Intent/Target/NVIDIA/IR/Target.h"
 #include "Intent/Target/Triton/Analysis/Configuration.h"
 #include "Intent/Target/Triton/IR/Program.h"
 #include "Intent/Target/Triton/IR/TritonOps.h"
 #include "Intent/Target/Triton/Analysis/Contractions.h"
 #include "llvm/ADT/DenseSet.h"
-#include "Intent/Dialect/GPU/IR/Program.h"
-#include "Intent/Dialect/GPU/IR/FragmentOpInterface.h"
-#include "Intent/Dialect/GPU/Analysis/PhysicalProgram.h"
-#include "Intent/Dialect/GPU/Analysis/ValueSchema.h"
-#include "Intent/Dialect/GPU/Transforms/Value/ValueRelations.h"
+#include "Intent/Dialect/Block/IR/Program.h"
+#include "Intent/Dialect/Block/IR/FragmentOpInterface.h"
+#include "Intent/Dialect/Block/Analysis/PhysicalProgram.h"
+#include "Intent/Dialect/Block/Analysis/ValueSchema.h"
+#include "Intent/Dialect/Block/Transforms/Value/ValueRelations.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/Matchers.h"
@@ -24,12 +25,12 @@ using namespace mlir;
 namespace intent::triton::detail {
 void canonicalizeBroadcastProjections(func::FuncOp kernel) {
   SmallVector<Value> pending;
-  kernel.walk([&](gpu::ContractOp contract) {
+  kernel.walk([&](block::ContractOp contract) {
     pending.push_back(contract.getLhs());
     pending.push_back(contract.getRhs());
   });
   llvm::DenseSet<Operation *> visited;
-  SmallVector<gpu::ReshapeOp> candidates;
+  SmallVector<block::ReshapeOp> candidates;
   while (!pending.empty()) {
     Operation *producer = pending.pop_back_val().getDefiningOp();
     if (!producer || !visited.insert(producer).second)
@@ -38,35 +39,35 @@ void canonicalizeBroadcastProjections(func::FuncOp kernel) {
     for (Region &region : producer->getRegions())
       for (Block &block : region)
         llvm::append_range(pending, block.getTerminator()->getOperands());
-    if (auto reshape = dyn_cast<gpu::ReshapeOp>(producer))
+    if (auto reshape = dyn_cast<block::ReshapeOp>(producer))
       candidates.push_back(reshape);
   }
   // A load's address and predicate producers are outside this additional scope.
-  kernel.walk([&](gpu::ReshapeOp reshape) {
-    auto source = cast<gpu::FragmentType>(reshape.getValue().getType());
+  kernel.walk([&](block::ReshapeOp reshape) {
+    auto source = cast<block::FragmentType>(reshape.getValue().getType());
     Value resource;
-    if (auto load = reshape.getValue().getDefiningOp<gpu::LoadOp>())
+    if (auto load = reshape.getValue().getDefiningOp<block::LoadOp>())
       resource = load.getResource();
     else
       return;
     // A vector resource may be loaded across several execution axes.
-    auto view = dyn_cast<gpu::ViewType>(resource.getType());
+    auto view = dyn_cast<block::ViewType>(resource.getType());
     if ((source.getShape().size() == 1 || (view && view.getRank() == 1)) &&
         visited.insert(reshape).second)
       candidates.push_back(reshape);
   });
-  SmallVector<gpu::ReshapeOp> projections;
-  for (gpu::ReshapeOp reshape : candidates) {
-    auto relations = gpu::queryFragmentOperandRelations(reshape);
+  SmallVector<block::ReshapeOp> projections;
+  for (block::ReshapeOp reshape : candidates) {
+    auto relations = block::queryFragmentOperandRelations(reshape);
     if (succeeded(relations) && relations->front().isUnitAxisInsertion())
       projections.push_back(reshape);
   }
   // Expand-dims preserves dot input alignment and avoids redundant register
   // copies (and loads) when broadcasting a loaded vector. Leave unrelated
   // high-rank and reduction result layout choices free.
-  for (gpu::ReshapeOp reshape : projections) {
+  for (block::ReshapeOp reshape : projections) {
     OpBuilder builder(reshape);
-    auto broadcast = builder.create<gpu::BroadcastOp>(
+    auto broadcast = builder.create<block::BroadcastOp>(
         reshape.getLoc(), reshape.getResult().getType(), reshape.getValue());
     broadcast->setDiscardableAttrs(llvm::to_vector(reshape->getDiscardableAttrs()));
     reshape.getResult().replaceAllUsesWith(broadcast.getResult());
@@ -75,14 +76,14 @@ void canonicalizeBroadcastProjections(func::FuncOp kernel) {
 }
 
 static void orientWarpGroupContractions(func::FuncOp kernel) {
-  auto capabilities = kernel->getAttrOfType<gpu::CapabilitiesAttr>(gpu::capabilitiesAttr);
-  if (!capabilities || capabilities.getComputeCapabilityMajor() != 9) return;
+  auto device = nvidia::deviceOf(kernel);
+  if (!device || device.getComputeCapabilityMajor() != 9) return;
   auto choices = kernel.getOps<TensorDescriptorChoiceOp>();
   if (choices.empty()) return;
   Value descriptors = (*choices.begin()).getResult();
-  SmallVector<gpu::ContractOp> contracts;
-  kernel.walk([&](gpu::ContractOp contract) { contracts.push_back(contract); });
-  for (gpu::ContractOp contract : contracts) {
+  SmallVector<block::ContractOp> contracts;
+  kernel.walk([&](block::ContractOp contract) { contracts.push_back(contract); });
+  for (block::ContractOp contract : contracts) {
     auto lhs = contract.getLhs().getType(), rhs = contract.getRhs().getType();
     auto result = contract.getResult().getType();
     if (lhs.getShape().size() != 2 || rhs.getShape().size() != 2 ||
@@ -97,17 +98,17 @@ static void orientWarpGroupContractions(func::FuncOp kernel) {
     OpBuilder b(contract);
     Location loc = contract.getLoc();
     auto extent = [&](Attribute value) -> Value {
-      return b.create<gpu::PhysicalExprOp>(loc, b.getIndexType(),
-                                          cast<gpu::PhysicalExprAttr>(value));
+      return b.create<block::PhysicalExprOp>(loc, b.getIndexType(),
+                                          cast<block::PhysicalExprAttr>(value));
     };
     auto literal = [&](int64_t value) -> Value {
       return b.create<arith::ConstantIndexOp>(loc, value);
     };
     auto compare = [&](Value a, Value c, ComparePredicate predicate) -> Value {
-      return b.create<gpu::CompareOp>(loc, b.getI1Type(), a, c, predicate);
+      return b.create<block::CompareOp>(loc, b.getI1Type(), a, c, predicate);
     };
     auto remainder = [&](Value value, Value divisor) -> Value {
-      return b.create<gpu::BinaryOp>(loc, b.getIndexType(), value, divisor,
+      return b.create<block::BinaryOp>(loc, b.getIndexType(), value, divisor,
                                      BinaryOperator::Remainder);
     };
     Value m = extent(result.getShape()[0]), n = extent(result.getShape()[1]);
@@ -118,9 +119,9 @@ static void orientWarpGroupContractions(func::FuncOp kernel) {
              compare(remainder(n, sixtyFour), zero, ComparePredicate::Eq),
              compare(remainder(m, eight), zero, ComparePredicate::Eq),
              compare(k, literal(16), ComparePredicate::Ge)})
-      selected = b.create<gpu::BinaryOp>(loc, b.getI1Type(), selected, condition,
+      selected = b.create<block::BinaryOp>(loc, b.getI1Type(), selected, condition,
                                          BinaryOperator::LogicalAnd);
-    selected = b.create<gpu::BinaryOp>(loc, b.getI1Type(), selected, descriptors,
+    selected = b.create<block::BinaryOp>(loc, b.getI1Type(), selected, descriptors,
                                       BinaryOperator::LogicalAnd);
     // Hopper's native warp-group MMA requires M % 64 == 0 and N % 8 == 0.
     // Transpose the algebraic contraction, not its program ownership or dtype.
@@ -128,29 +129,29 @@ static void orientWarpGroupContractions(func::FuncOp kernel) {
     auto choice = b.create<scf::IfOp>(loc, TypeRange{result}, selected, true);
     b.setInsertionPointToStart(choice.thenBlock());
     auto transpose = [&](Value value) -> Value {
-      auto type = cast<gpu::FragmentType>(value.getType());
+      auto type = cast<block::FragmentType>(value.getType());
       SmallVector<Attribute> mappings;
       for (unsigned axis = 0; axis < 2; ++axis) {
-        auto mapping = cast<gpu::AxisMapAttr>(type.getAxisMaps()[1 - axis]);
-        mappings.push_back(gpu::AxisMapAttr::get(b.getContext(),
+        auto mapping = cast<block::AxisMapAttr>(type.getAxisMaps()[1 - axis]);
+        mappings.push_back(block::AxisMapAttr::get(b.getContext(),
             mapping.getSourceId(), mapping.getSourceAxis(), mapping.getDimensionId(),
             axis, mapping.getDerived()));
       }
-      auto transposed = gpu::FragmentType::get(b.getContext(), type.getElementType(),
+      auto transposed = block::FragmentType::get(b.getContext(), type.getElementType(),
           b.getArrayAttr({type.getShape()[1], type.getShape()[0]}),
           b.getArrayAttr(mappings),
           type.getValidity(), type.getOwner());
-      return b.create<gpu::TransposeOp>(loc, transposed, value,
+      return b.create<block::TransposeOp>(loc, transposed, value,
                                        b.getDenseI64ArrayAttr({1, 0}));
     };
     Value a = transpose(contract.getRhs()), c = transpose(contract.getLhs());
     Value accumulator = transpose(contract.getAccumulator());
-    auto dot = b.create<gpu::ContractOp>(loc, accumulator.getType(), a, c, accumulator,
+    auto dot = b.create<block::ContractOp>(loc, accumulator.getType(), a, c, accumulator,
         ArrayRef<int64_t>{1}, ArrayRef<int64_t>{0}, ArrayRef<int64_t>{}, ArrayRef<int64_t>{});
     dot->setDiscardableAttrs(llvm::to_vector(contract->getDiscardableAttrs()));
     b.create<scf::YieldOp>(loc, transpose(dot.getResult()));
     b.setInsertionPointToStart(choice.elseBlock());
-    auto original = cast<gpu::ContractOp>(b.clone(*contract));
+    auto original = cast<block::ContractOp>(b.clone(*contract));
     b.create<scf::YieldOp>(loc, original.getResult());
     contract.getResult().replaceAllUsesWith(choice.getResult(0));
     contract.erase();
@@ -159,9 +160,9 @@ static void orientWarpGroupContractions(func::FuncOp kernel) {
 
 void selectContractForms(func::FuncOp kernel) {
   orientWarpGroupContractions(kernel);
-  SmallVector<gpu::ContractOp> contracts;
-  kernel.walk([&](gpu::ContractOp contract) { contracts.push_back(contract); });
-  for (gpu::ContractOp contract : contracts) {
+  SmallVector<block::ContractOp> contracts;
+  kernel.walk([&](block::ContractOp contract) { contracts.push_back(contract); });
+  for (block::ContractOp contract : contracts) {
     auto lhs = contract.getLhs().getType();
     auto rhs = contract.getRhs().getType();
     bool ieeeFp32 = lhs.getElementType().isF32() &&
@@ -170,21 +171,21 @@ void selectContractForms(func::FuncOp kernel) {
     if (lhs.getShape().empty())
       continue;
     auto reductionExtent =
-        dyn_cast<gpu::PhysicalExprAttr>(
+        dyn_cast<block::PhysicalExprAttr>(
             lhs.getShape()[lhs.getShape().size() - 1]);
     if (!reductionExtent)
       continue;
     OpBuilder builder(contract);
     auto expandedFits = [&]() -> Value {
-      Value count = builder.create<gpu::PhysicalExprOp>(
+      Value count = builder.create<block::PhysicalExprOp>(
           contract.getLoc(), builder.getIndexType(), expandedContractionElements(contract));
       Value maximum = builder.create<arith::ConstantIndexOp>(
           contract.getLoc(), maxTritonTensorElements);
-      return builder.create<gpu::CompareOp>(contract.getLoc(), builder.getI1Type(),
+      return builder.create<block::CompareOp>(contract.getLoc(), builder.getI1Type(),
                                            count, maximum, ComparePredicate::Le);
     };
     if (reductionExtent.getKind() ==
-        gpu::PhysicalExprKind::Constant) {
+        block::PhysicalExprKind::Constant) {
       if (reductionExtent.getValue() < expansionReductionThreshold) {
         contract->setAttr(contractFormAttr,
                           StringAttr::get(kernel.getContext(), "multiply_sum"));
@@ -197,11 +198,11 @@ void selectContractForms(func::FuncOp kernel) {
     // reduction expansion there, as well as when estimated staging is too large.
     // The provider still validates the native form's actual resource usage.
     Value canExpand = expandedFits();
-    Value extent = builder.create<gpu::PhysicalExprOp>(
+    Value extent = builder.create<block::PhysicalExprOp>(
         contract.getLoc(), builder.getIndexType(), reductionExtent);
     Value minimum = builder.create<arith::ConstantIndexOp>(
         contract.getLoc(), expansionReductionThreshold);
-    Value small = builder.create<gpu::CompareOp>(
+    Value small = builder.create<block::CompareOp>(
         contract.getLoc(), builder.getI1Type(), extent, minimum,
         ComparePredicate::Lt);
     if (ieeeFp32) {
@@ -209,58 +210,58 @@ void selectContractForms(func::FuncOp kernel) {
       for (auto operand : {lhs, rhs}) {
         Value bytes = builder.create<arith::ConstantIndexOp>(contract.getLoc(), 4);
         for (Attribute dimension : operand.getShape()) {
-          Value width = builder.create<gpu::PhysicalExprOp>(
+          Value width = builder.create<block::PhysicalExprOp>(
               contract.getLoc(), builder.getIndexType(),
-              cast<gpu::PhysicalExprAttr>(dimension));
-          bytes = builder.create<gpu::BinaryOp>(contract.getLoc(),
+              cast<block::PhysicalExprAttr>(dimension));
+          bytes = builder.create<block::BinaryOp>(contract.getLoc(),
               builder.getIndexType(), bytes, width, BinaryOperator::Multiply);
         }
-        footprint = builder.create<gpu::BinaryOp>(contract.getLoc(),
+        footprint = builder.create<block::BinaryOp>(contract.getLoc(),
             builder.getIndexType(), footprint, bytes, BinaryOperator::Add);
       }
-      auto capabilities = kernel->getAttrOfType<gpu::CapabilitiesAttr>(gpu::capabilitiesAttr);
+      auto capabilities = kernel->getAttrOfType<block::CapabilitiesAttr>(block::capabilitiesAttr);
       Value capacity = builder.create<arith::ConstantIndexOp>(
-          contract.getLoc(), capabilities.getMaxDynamicSharedMemoryPerBlock());
-      Value preferExpansion = builder.create<gpu::CompareOp>(contract.getLoc(),
+          contract.getLoc(), capabilities.getLocalStorageBudgetBytes());
+      Value preferExpansion = builder.create<block::CompareOp>(contract.getLoc(),
           builder.getI1Type(), footprint, capacity, ComparePredicate::Gt);
       auto shape = contract.getAccumulator().getType().getShape().getValue();
       for (Attribute dimension : shape.take_back(std::min<size_t>(2, shape.size()))) {
-        Value width = builder.create<gpu::PhysicalExprOp>(
+        Value width = builder.create<block::PhysicalExprOp>(
             contract.getLoc(), builder.getIndexType(),
-            cast<gpu::PhysicalExprAttr>(dimension));
+            cast<block::PhysicalExprAttr>(dimension));
         Value one = builder.create<arith::ConstantIndexOp>(contract.getLoc(), 1);
-        Value unit = builder.create<gpu::CompareOp>(contract.getLoc(),
+        Value unit = builder.create<block::CompareOp>(contract.getLoc(),
             builder.getI1Type(), width, one, ComparePredicate::Eq);
-        preferExpansion = builder.create<gpu::BinaryOp>(contract.getLoc(),
+        preferExpansion = builder.create<block::BinaryOp>(contract.getLoc(),
             builder.getI1Type(), preferExpansion, unit, BinaryOperator::LogicalOr);
       }
-      preferExpansion = builder.create<gpu::BinaryOp>(contract.getLoc(),
+      preferExpansion = builder.create<block::BinaryOp>(contract.getLoc(),
           builder.getI1Type(), preferExpansion, canExpand, BinaryOperator::LogicalAnd);
-      small = builder.create<gpu::BinaryOp>(contract.getLoc(), builder.getI1Type(),
+      small = builder.create<block::BinaryOp>(contract.getLoc(), builder.getI1Type(),
           small, preferExpansion, BinaryOperator::LogicalOr);
     }
     auto choice = builder.create<scf::IfOp>(
         contract.getLoc(), TypeRange{contract.getResult().getType()}, small, true);
     builder.setInsertionPointToStart(&choice.getThenRegion().front());
-    auto expanded = cast<gpu::ContractOp>(builder.clone(*contract));
+    auto expanded = cast<block::ContractOp>(builder.clone(*contract));
     expanded->setAttr(contractFormAttr,
                       StringAttr::get(kernel.getContext(), "multiply_sum"));
     builder.create<scf::YieldOp>(contract.getLoc(), expanded.getResult());
     builder.setInsertionPointToStart(&choice.getElseRegion().front());
-    auto native = cast<gpu::ContractOp>(builder.clone(*contract));
+    auto native = cast<block::ContractOp>(builder.clone(*contract));
     builder.create<scf::YieldOp>(contract.getLoc(), native.getResult());
     contract.getResult().replaceAllUsesWith(choice.getResult(0));
     contract.erase();
   }
 
   contracts.clear();
-  kernel.walk([&](gpu::ContractOp contract) {
+  kernel.walk([&](block::ContractOp contract) {
     auto form = contract->getAttrOfType<StringAttr>(contractFormAttr);
     if (form && form.getValue() == "multiply_sum" &&
         contract.getAccumulator().getType().getElementType().isF32())
       contracts.push_back(contract);
   });
-  for (gpu::ContractOp contract : contracts) {
+  for (block::ContractOp contract : contracts) {
     OpBuilder builder(contract);
     auto shape = contract.getAccumulator().getType().getShape().getValue();
     // A unit matrix axis offers no second free axis to amortize serial K work.
@@ -269,15 +270,15 @@ void selectContractForms(func::FuncOp kernel) {
         shape.take_back(std::min<size_t>(2, shape.size()));
     if (llvm::any_of(matrixAxes, [&](Attribute dimension) {
           auto extent = evaluateCompileTimeExpression(
-              cast<gpu::PhysicalExprAttr>(dimension));
+              cast<block::PhysicalExprAttr>(dimension));
           return extent && *extent == 1;
         }))
       continue;
-    auto elements = cast<gpu::PhysicalExprAttr>(shape.front());
+    auto elements = cast<block::PhysicalExprAttr>(shape.front());
     for (Attribute extent : shape.drop_front())
-      elements = gpu::PhysicalExprAttr::get(
+      elements = block::PhysicalExprAttr::get(
           kernel.getContext(),
-          gpu::PhysicalExprKind::Multiply, 0,
+          block::PhysicalExprKind::Multiply, 0,
           builder.getStringAttr(""), builder.getArrayAttr({elements, extent}));
     auto fmaForm = builder.getStringAttr("fma");
     // Serial K accumulation needs enough independent output elements.
@@ -286,41 +287,41 @@ void selectContractForms(func::FuncOp kernel) {
         contract->setAttr(contractFormAttr, fmaForm);
       continue;
     }
-    Value count = builder.create<gpu::PhysicalExprOp>(
+    Value count = builder.create<block::PhysicalExprOp>(
         contract.getLoc(), builder.getIndexType(), elements);
     Value limit = builder.create<arith::ConstantIndexOp>(contract.getLoc(), 256);
-    Value wide = builder.create<gpu::CompareOp>(
+    Value wide = builder.create<block::CompareOp>(
         contract.getLoc(), builder.getI1Type(), count, limit,
         ComparePredicate::Ge);
     for (Attribute dimension : matrixAxes) {
-      auto extent = cast<gpu::PhysicalExprAttr>(dimension);
+      auto extent = cast<block::PhysicalExprAttr>(dimension);
       if (evaluateCompileTimeExpression(extent))
         continue;
-      Value width = builder.create<gpu::PhysicalExprOp>(
+      Value width = builder.create<block::PhysicalExprOp>(
           contract.getLoc(), builder.getIndexType(), extent);
       Value one = builder.create<arith::ConstantIndexOp>(contract.getLoc(), 1);
-      Value multiple = builder.create<gpu::CompareOp>(
+      Value multiple = builder.create<block::CompareOp>(
           contract.getLoc(), builder.getI1Type(), width, one, ComparePredicate::Gt);
-      wide = builder.create<gpu::BinaryOp>(
+      wide = builder.create<block::BinaryOp>(
           contract.getLoc(), builder.getI1Type(), wide, multiple,
           BinaryOperator::LogicalAnd);
     }
     auto choice = builder.create<scf::IfOp>(
         contract.getLoc(), TypeRange{contract.getResult().getType()}, wide, true);
     builder.setInsertionPointToStart(&choice.getThenRegion().front());
-    auto fma = cast<gpu::ContractOp>(builder.clone(*contract));
+    auto fma = cast<block::ContractOp>(builder.clone(*contract));
     fma->setAttr(contractFormAttr, fmaForm);
     builder.create<scf::YieldOp>(contract.getLoc(), fma.getResult());
     builder.setInsertionPointToStart(&choice.getElseRegion().front());
-    auto reduction = cast<gpu::ContractOp>(builder.clone(*contract));
+    auto reduction = cast<block::ContractOp>(builder.clone(*contract));
     builder.create<scf::YieldOp>(contract.getLoc(), reduction.getResult());
     contract.getResult().replaceAllUsesWith(choice.getResult(0));
     contract.erase();
   }
 }
 
-bool hasMapRelation(Type type, gpu::FragmentType result) {
-  if (auto fragment = dyn_cast<gpu::FragmentType>(type))
+bool hasMapRelation(Type type, block::FragmentType result) {
+  if (auto fragment = dyn_cast<block::FragmentType>(type))
     return fragment.getShape() == result.getShape() &&
            fragment.getAxisMaps() == result.getAxisMaps() &&
            fragment.getValidity() == result.getValidity() &&
@@ -329,7 +330,7 @@ bool hasMapRelation(Type type, gpu::FragmentType result) {
 }
 
 bool isScalarizableMapProducer(Operation *operation,
-                              gpu::FragmentType result) {
+                              block::FragmentType result) {
   if (!llvm::all_of(operation->getOperandTypes(), [&](Type type) {
         return hasMapRelation(type, result);
       }) || !llvm::all_of(operation->getResultTypes(), [&](Type type) {
@@ -354,9 +355,9 @@ bool isScalarizableMapProducer(Operation *operation,
                          return isScalarizableMapProducer(&nested, result);
                        });
   }
-  return isa<arith::ConstantOp, gpu::SplatOp, gpu::BroadcastOp,
-             gpu::UnaryOp, gpu::BinaryOp, gpu::CompareOp, gpu::SelectOp,
-             gpu::CastOp, gpu::BitcastOp>(operation);
+  return isa<arith::ConstantOp, block::SplatOp, block::BroadcastOp,
+             block::UnaryOp, block::BinaryOp, block::CompareOp, block::SelectOp,
+             block::CastOp, block::BitcastOp>(operation);
 }
 
 SmallVector<Value> mapProducerInputs(Operation *operation) {
@@ -370,10 +371,10 @@ SmallVector<Value> mapProducerInputs(Operation *operation) {
 bool hasExpensiveMapProducer(Operation *operation) {
   if (isa<scf::ForOp>(operation))
     return true;
-  if (auto binary = dyn_cast<gpu::BinaryOp>(operation))
+  if (auto binary = dyn_cast<block::BinaryOp>(operation))
     return binary.getOperatorKind() == BinaryOperator::TrueDivide ||
            binary.getOperatorKind() == BinaryOperator::Power;
-  auto unary = dyn_cast<gpu::UnaryOp>(operation);
+  auto unary = dyn_cast<block::UnaryOp>(operation);
   if (!unary)
     return false;
   switch (unary.getOperatorKind()) {
@@ -396,12 +397,12 @@ bool hasExpensiveMapProducer(Operation *operation) {
 }
 
 void sinkSelectProducers(func::FuncOp kernel) {
-  SmallVector<gpu::SelectOp> selects;
+  SmallVector<block::SelectOp> selects;
   bool changed = false;
-  kernel.walk([&](gpu::SelectOp select) { selects.push_back(select); });
+  kernel.walk([&](block::SelectOp select) { selects.push_back(select); });
   // Start at consumers so nested selects stay inside one scalar callback.
-  for (gpu::SelectOp select : llvm::reverse(selects)) {
-    auto resultType = dyn_cast<gpu::FragmentType>(select.getType());
+  for (block::SelectOp select : llvm::reverse(selects)) {
+    auto resultType = dyn_cast<block::FragmentType>(select.getType());
     if (!resultType || select->use_empty())
       continue;
     Block *block = select->getBlock();
@@ -413,7 +414,7 @@ void sinkSelectProducers(func::FuncOp kernel) {
         if (!producer || producer->getBlock() != block ||
             (!isa<arith::ConstantOp>(producer) &&
              !llvm::any_of(producer->getResultTypes(), [](Type type) {
-               return isa<gpu::FragmentType>(type);
+               return isa<block::FragmentType>(type);
              })) ||
             !isScalarizableMapProducer(producer, resultType) ||
             !slices[arm].insert(producer).second)
@@ -475,17 +476,17 @@ void sinkSelectProducers(func::FuncOp kernel) {
     if (!llvm::all_of(captures, [&](Value value) {
           return hasMapRelation(value.getType(), resultType);
         }) || !llvm::any_of(captures, [](Value value) {
-          return isa<gpu::FragmentType>(value.getType());
+          return isa<block::FragmentType>(value.getType());
         }))
       continue;
     OpBuilder builder(select);
     auto map = builder.create<MapElementwiseOp>(select.getLoc(), resultType,
                                                 captures.getArrayRef());
-    if (Attribute origin = select->getAttr(gpu::originAttr))
-      map->setAttr(gpu::originAttr, origin);
+    if (Attribute origin = select->getAttr(block::originAttr))
+      map->setAttr(block::originAttr, origin);
     SmallVector<Type> types;
     for (Value value : captures)
-      types.push_back(gpu::scalarCallbackType(value.getType()));
+      types.push_back(block::scalarCallbackType(value.getType()));
     Block *body = builder.createBlock(&map.getBody(), {}, types,
         SmallVector<Location>(types.size(), select.getLoc()));
     IRMapping mapping;
@@ -503,21 +504,21 @@ void sinkSelectProducers(func::FuncOp kernel) {
         Operation *clone = builder.clone(operation, branchMapping);
         clone->walk([&](Operation *nested) {
           for (Value result : nested->getResults())
-            result.setType(gpu::scalarCallbackType(result.getType()));
+            result.setType(block::scalarCallbackType(result.getType()));
           for (Region &region : nested->getRegions())
             for (Block &block : region)
               for (BlockArgument argument : block.getArguments())
-              argument.setType(gpu::scalarCallbackType(argument.getType()));
+              argument.setType(block::scalarCallbackType(argument.getType()));
         });
       }
       builder.create<scf::YieldOp>(select.getLoc(),
           branchMapping.lookup(select->getOperand(arm + 1)));
     }
     builder.setInsertionPointToEnd(body);
-    builder.create<gpu::YieldOp>(select.getLoc(), conditional.getResults());
+    builder.create<block::YieldOp>(select.getLoc(), conditional.getResults());
     SmallVector<Operation *> broadcasts;
     map.walk([&](Operation *operation) {
-      if (isa<gpu::SplatOp, gpu::BroadcastOp>(operation))
+      if (isa<block::SplatOp, block::BroadcastOp>(operation))
         broadcasts.push_back(operation);
     });
     for (Operation *broadcast : llvm::reverse(broadcasts)) {
@@ -529,7 +530,7 @@ void sinkSelectProducers(func::FuncOp kernel) {
     changed = true;
   }
   if (changed)
-    gpu::eraseDeadPhysicalValues(kernel);
+    block::eraseDeadPhysicalValues(kernel);
 }
 
 

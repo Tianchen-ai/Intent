@@ -1,8 +1,8 @@
 #include "AccessFormSelection.h"
 #include "Intent/Target/CuTile/IR/CuTileOps.h"
 #include "../Configuration/Configurations.h"
-#include "Intent/Dialect/GPU/Transforms/Configuration/PhysicalParameters.h"
-#include "Intent/Dialect/GPU/Analysis/Resources.h"
+#include "Intent/Dialect/Block/Transforms/Configuration/PhysicalParameters.h"
+#include "Intent/Dialect/Block/Analysis/Resources.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 
 using namespace mlir;
@@ -14,11 +14,11 @@ FailureOr<Value> AccessFormSelection::accessFormValue() {
     return accessForm;
   auto parameter = declareProviderParameter(
       kernel, accessFormParameter,
-      gpu::ParameterRole::ProviderAccessForm, isLegalAccessForm);
+      block::ParameterRole::ProviderAccessForm, isLegalAccessForm);
   if (failed(parameter))
     return failure();
   OpBuilder entry(&kernel.front(), kernel.front().begin());
-  accessForm = gpu::materializeParameter(entry, kernel.getLoc(), *parameter);
+  accessForm = block::materializeParameter(entry, kernel.getLoc(), *parameter);
   return accessForm;
 }
 
@@ -32,13 +32,13 @@ FailureOr<Value> AccessFormSelection::loadFormCondition() {
   entry.setInsertionPointAfter((*form).getDefiningOp());
   Value gather = entry.create<arith::ConstantIndexOp>(kernel.getLoc(),
                                                        gatherAccessForm);
-  preferTileLoads = entry.create<gpu::CompareOp>(
+  preferTileLoads = entry.create<block::CompareOp>(
       kernel.getLoc(), entry.getI1Type(), *form, gather,
       ComparePredicate::Ne);
   return preferTileLoads;
 }
 
-FailureOr<Value> AccessFormSelection::tmaCondition(gpu::FragmentType tile) {
+FailureOr<Value> AccessFormSelection::tmaCondition(block::FragmentType tile) {
   FailureOr<Value> form = accessFormValue();
   if (failed(form))
     return failure();
@@ -47,7 +47,7 @@ FailureOr<Value> AccessFormSelection::tmaCondition(gpu::FragmentType tile) {
   if (!allowNativeTMA) {
     Value disabled = entry.create<arith::ConstantIndexOp>(
         kernel.getLoc(), nativeNoTMAForm);
-    allowNativeTMA = entry.create<gpu::CompareOp>(
+    allowNativeTMA = entry.create<block::CompareOp>(
         kernel.getLoc(), entry.getI1Type(), *form, disabled,
         ComparePredicate::Ne);
   }
@@ -55,13 +55,13 @@ FailureOr<Value> AccessFormSelection::tmaCondition(gpu::FragmentType tile) {
   // One short vector does not amortize a bulk transfer and its completion.
   // Keep the decision on each physical tile, including auxiliary loads and
   // stores within a larger recurrent or matrix computation.
-  Value elements = entry.create<gpu::PhysicalExprOp>(
-      kernel.getLoc(), entry.getIndexType(), gpu::fragmentElementCount(tile));
+  Value elements = entry.create<block::PhysicalExprOp>(
+      kernel.getLoc(), entry.getIndexType(), block::fragmentElementCount(tile));
   int64_t minimumElements = 1024 / tile.getElementType().getIntOrFloatBitWidth();
   Value minimum = entry.create<arith::ConstantIndexOp>(kernel.getLoc(), minimumElements);
-  Value large = entry.create<gpu::CompareOp>(
+  Value large = entry.create<block::CompareOp>(
       kernel.getLoc(), entry.getI1Type(), elements, minimum, ComparePredicate::Ge);
-  return Value(entry.create<gpu::BinaryOp>(kernel.getLoc(), entry.getI1Type(),
+  return Value(entry.create<block::BinaryOp>(kernel.getLoc(), entry.getI1Type(),
       allowNativeTMA, large, BinaryOperator::LogicalAnd));
 }
 
@@ -69,11 +69,11 @@ FailureOr<Value> AccessFormSelection::loadPolicyValue() {
   if (!loadPolicy) {
     auto parameter = declareProviderParameter(
         kernel, loadPolicyParameter,
-        gpu::ParameterRole::ProviderLoadPolicy, isLegalLoadPolicy);
+        block::ParameterRole::ProviderLoadPolicy, isLegalLoadPolicy);
     if (failed(parameter))
       return failure();
     OpBuilder entry(&kernel.front(), kernel.front().begin());
-    loadPolicy = gpu::materializeParameter(entry, kernel.getLoc(), *parameter);
+    loadPolicy = block::materializeParameter(entry, kernel.getLoc(), *parameter);
   }
   return loadPolicy;
 }

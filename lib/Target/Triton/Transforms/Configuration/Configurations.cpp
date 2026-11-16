@@ -1,11 +1,11 @@
 #include "Configurations.h"
 #include "ConfigurationFacts.h"
-#include "Intent/Dialect/GPU/Analysis/PhysicalParameters.h"
-#include "Intent/Dialect/GPU/Analysis/PhysicalProgram.h"
-#include "Intent/Dialect/GPU/IR/PhysicalExpressions.h"
-#include "Intent/Dialect/GPU/IR/Program.h"
-#include "Intent/Dialect/GPU/Transforms/Configuration/PhysicalParameters.h"
-#include "Intent/Dialect/GPU/Transforms/Configuration/Resources.h"
+#include "Intent/Dialect/Block/Analysis/PhysicalParameters.h"
+#include "Intent/Dialect/Block/Analysis/PhysicalProgram.h"
+#include "Intent/Dialect/Block/IR/PhysicalExpressions.h"
+#include "Intent/Dialect/Block/IR/Program.h"
+#include "Intent/Dialect/Block/Transforms/Configuration/PhysicalParameters.h"
+#include "Intent/Dialect/Block/Transforms/Configuration/Resources.h"
 #include "Intent/Target/Triton/IR/Configuration.h"
 #include "Intent/Target/Triton/Transforms/Configuration/TuningProfiles.h"
 #include "llvm/ADT/DenseMap.h"
@@ -13,17 +13,17 @@
 
 using namespace mlir;
 namespace intent::triton {
-const gpu::TuningProfileSchema &tuningProfileSchema() {
+const block::TuningProfileSchema &tuningProfileSchema() {
   static const StringRef columns[] = {
       "ownership_m", "ownership_n", "reduction", "reduction_outer", "scan",
       "traversal_workers", "traversal_group", "NUM_WARPS", "NUM_STAGES",
       "NUM_CTAS", "USE_TENSOR_DESCRIPTOR"};
-  static const gpu::ProviderOption options[] = {
-      {"NUM_WARPS", gpu::ParameterRole::ProviderWarps},
-      {"NUM_STAGES", gpu::ParameterRole::ProviderStages},
-      {"NUM_CTAS", gpu::ParameterRole::ProviderCTAs},
-      {"USE_TENSOR_DESCRIPTOR", gpu::ParameterRole::ProviderAccessForm, true}};
-  static const gpu::TuningProfileSchema schema{"triton", columns, options};
+  static const block::ProviderOption options[] = {
+      {"NUM_WARPS", block::ParameterRole::ProviderWarps},
+      {"NUM_STAGES", block::ParameterRole::ProviderStages},
+      {"NUM_CTAS", block::ParameterRole::ProviderCTAs},
+      {"USE_TENSOR_DESCRIPTOR", block::ParameterRole::ProviderAccessForm, true}};
+  static const block::TuningProfileSchema schema{"triton", columns, options};
   return schema;
 }
 
@@ -31,8 +31,8 @@ namespace {
 LogicalResult bindProviderDomains(func::FuncOp kernel,
                                   ArrayRef<DictionaryAttr> rows) {
   Builder builder(kernel.getContext());
-  for (const gpu::ProviderOption &option : tuningProfileSchema().options) {
-    auto declaration = gpu::lookupParameter(kernel, builder.getStringAttr(option.name));
+  for (const block::ProviderOption &option : tuningProfileSchema().options) {
+    auto declaration = block::lookupParameter(kernel, builder.getStringAttr(option.name));
     if (!declaration)
       return kernel.emitError("Triton configuration has no declared provider option: ")
              << option.name;
@@ -44,11 +44,11 @@ LogicalResult bindProviderDomains(func::FuncOp kernel,
                << option.name;
       if (!llvm::is_contained(domain, value.getInt())) domain.push_back(value.getInt());
     }
-    auto selected = gpu::ParameterAttr::get(kernel.getContext(), declaration.getName(),
+    auto selected = block::ParameterAttr::get(kernel.getContext(), declaration.getName(),
         declaration.getValueType(), declaration.getRole(), declaration.getCategory(),
         declaration.getElementBitWidth(), builder.getDenseI64ArrayAttr(domain),
         declaration.getPhase(), declaration.getBinding());
-    if (failed(gpu::updateParameter(kernel, selected))) return failure();
+    if (failed(block::updateParameter(kernel, selected))) return failure();
   }
   return success();
 }
@@ -57,13 +57,13 @@ LogicalResult bindProviderDomains(func::FuncOp kernel,
 
 LogicalResult materializeLegalConfigs(func::FuncOp kernel,
                                       TensorDescriptorChoiceOp descriptorChoice) {
-  auto space = gpu::ParameterSpace::read(kernel);
+  auto space = block::ParameterSpace::read(kernel);
   if (failed(space))
     return failure();
-  auto shared = space->configurations(gpu::ConfigurationStage::Shared);
+  auto shared = space->configurations(block::ConfigurationStage::Shared);
   if (failed(shared))
     return failure();
-  auto form = space->find(gpu::ParameterRole::ProviderAccessForm);
+  auto form = space->find(block::ParameterRole::ProviderAccessForm);
   if (!form)
     return kernel.emitError("Triton configuration has no declared access form");
   SmallVector<DictionaryAttr> configs;
@@ -76,27 +76,27 @@ LogicalResult materializeLegalConfigs(func::FuncOp kernel,
   }
   if (!descriptorChoice) {
     SmallVector<Attribute> declarations;
-    for (Attribute attribute : gpu::getParameterDeclarations(kernel))
+    for (Attribute attribute : block::getParameterDeclarations(kernel))
       if (attribute != form) declarations.push_back(attribute);
-    kernel->setAttr(gpu::parametersAttr, builder.getArrayAttr(declarations));
+    kernel->setAttr(block::parametersAttr, builder.getArrayAttr(declarations));
   }
   if (failed(ConfigurationSchema::read(kernel))) return failure();
 
   auto requirements = collectConfigurationRequirements(kernel);
   if (failed(requirements)) return failure();
-  auto filtered = gpu::filterConfigurationRequirements(kernel, configs, *requirements);
+  auto filtered = block::filterConfigurationRequirements(kernel, configs, *requirements);
   if (failed(filtered)) return failure();
-  return gpu::writeConfigurations(kernel, *filtered, gpu::ConfigurationStage::Complete, *requirements);
+  return block::writeConfigurations(kernel, *filtered, block::ConfigurationStage::Complete, *requirements);
 }
 
 FailureOr<SmallVector<TritonLocalOptions>> declareProviderOptions(
     func::FuncOp kernel,
     bool requiresCtaSynchronization, ArrayRef<scf::ForOp> loadPipelineLoops) {
   const ProgramConfigurationFacts facts(kernel);
-  auto capabilities = kernel->getAttrOfType<gpu::CapabilitiesAttr>(gpu::capabilitiesAttr);
-  auto space = gpu::ParameterSpace::read(kernel);
+  auto capabilities = kernel->getAttrOfType<block::CapabilitiesAttr>(block::capabilitiesAttr);
+  auto space = block::ParameterSpace::read(kernel);
   if (failed(space)) return failure();
-  auto rows = space->configurations(gpu::ConfigurationStage::Shared);
+  auto rows = space->configurations(block::ConfigurationStage::Shared);
   if (failed(rows)) return failure();
   bool pipelineStagesAffectProgram = facts.pipelineStagesAffectProgram || !loadPipelineLoops.empty();
   SmallVector<TritonLocalOptions> localOptions;
@@ -104,11 +104,11 @@ FailureOr<SmallVector<TritonLocalOptions>> declareProviderOptions(
   DenseMap<DictionaryAttr, int64_t> equivalentStages;
   Builder builder(kernel.getContext());
   auto isDeviceOption = [&](int64_t warps, int64_t stages, int64_t ctas) {
-    return isLegalDeviceOption(gpu::ParameterRole::ProviderWarps, warps,
+    return isLegalDeviceOption(block::ParameterRole::ProviderWarps, warps,
                                capabilities, requiresCtaSynchronization) &&
-           isLegalDeviceOption(gpu::ParameterRole::ProviderStages, stages,
+           isLegalDeviceOption(block::ParameterRole::ProviderStages, stages,
                                capabilities, requiresCtaSynchronization) &&
-           isLegalDeviceOption(gpu::ParameterRole::ProviderCTAs, ctas,
+           isLegalDeviceOption(block::ParameterRole::ProviderCTAs, ctas,
                                capabilities, requiresCtaSynchronization);
   };
   for (DictionaryAttr row : *rows) {
@@ -137,11 +137,11 @@ FailureOr<SmallVector<TritonLocalOptions>> declareProviderOptions(
   if (localOptions.empty())
     return kernel.emitError("Triton tuning profile has no legal provider options");
   if (failed(bindProviderDomains(kernel, selectedRows)) ||
-      failed(gpu::writeConfigurations(kernel, selectedRows, gpu::ConfigurationStage::Shared)))
+      failed(block::writeConfigurations(kernel, selectedRows, block::ConfigurationStage::Shared)))
     return failure();
   if (!loadPipelineLoops.empty()) {
     auto stages =
-        gpu::queryParameterBySymbol(kernel, builder.getStringAttr("NUM_STAGES"));
+        block::queryParameterBySymbol(kernel, builder.getStringAttr("NUM_STAGES"));
     if (failed(stages))
       return failure();
     for (scf::ForOp loop : loadPipelineLoops)
@@ -151,18 +151,18 @@ FailureOr<SmallVector<TritonLocalOptions>> declareProviderOptions(
 }
 
 LogicalResult finalizeConfigurationRequirements(func::FuncOp kernel) {
-  auto space = gpu::ParameterSpace::read(kernel);
+  auto space = block::ParameterSpace::read(kernel);
   if (failed(space))
     return failure();
-  auto rows = space->configurations(gpu::ConfigurationStage::Complete);
+  auto rows = space->configurations(block::ConfigurationStage::Complete);
   auto requirements = collectConfigurationRequirements(kernel);
   if (failed(rows) || failed(requirements))
     return failure();
-  auto accepted = gpu::filterConfigurationRequirements(kernel, *rows, *requirements);
+  auto accepted = block::filterConfigurationRequirements(kernel, *rows, *requirements);
   if (failed(accepted))
     return failure();
-  return gpu::writeConfigurations(kernel, *accepted,
-                                 gpu::ConfigurationStage::Complete, *requirements);
+  return block::writeConfigurations(kernel, *accepted,
+                                 block::ConfigurationStage::Complete, *requirements);
 }
 
 } // namespace intent::triton

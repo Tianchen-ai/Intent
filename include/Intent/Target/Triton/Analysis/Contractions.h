@@ -1,7 +1,7 @@
 #ifndef INTENT_TARGET_TRITON_ANALYSIS_CONTRACTIONS_H
 #define INTENT_TARGET_TRITON_ANALYSIS_CONTRACTIONS_H
 
-#include "Intent/Dialect/GPU/IR/GPUOps.h"
+#include "Intent/Dialect/Block/IR/BlockOps.h"
 
 namespace intent::triton {
 
@@ -9,9 +9,9 @@ namespace intent::triton {
 // current-program resource checks; not a cross-SDK contraction capability.
 inline constexpr int64_t expansionReductionThreshold = 16;
 
-gpu::PhysicalExprAttr expandedContractionElements(gpu::ContractOp contract);
-gpu::ConfigurationRequirementAttr
-contractionExpansionRequirement(gpu::ContractOp contract);
+block::PhysicalExprAttr expandedContractionElements(block::ContractOp contract);
+block::ConfigurationRequirementAttr
+contractionExpansionRequirement(block::ContractOp contract);
 
 } // namespace intent::triton
 

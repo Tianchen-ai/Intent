@@ -3,7 +3,7 @@ include "mlir/Pass/PassBase.td"
 class IntentCuTileTransformPass<string passArgument, string summaryText>
     : Pass<passArgument, "::mlir::ModuleOp"> {
   let summary = summaryText;
-  let dependentDialects = ["::intent::gpu::IntentGPUDialect",
+  let dependentDialects = ["::intent::block::IntentBlockDialect",
       "::intent::cutile::IntentCuTileDialect", "::mlir::arith::ArithDialect",
       "::mlir::cf::ControlFlowDialect", "::mlir::func::FuncDialect",
       "::mlir::scf::SCFDialect"];
@@ -13,13 +13,13 @@ def PrepareProgramPass : IntentCuTileTransformPass<
     "intent-cutile-prepare-program",
     "Prepare cuTile matrix shapes, buffers and workspace accesses"> {
   let description = [{
-    Requires realized shared GPU IR, selected capabilities and resolved
+    Requires realized shared Block IR, selected capabilities and resolved
     current-module tuning profiles. Expands execution groups, normalizes matrix
     operand shapes, prepares launch configurations and lowers workspace to
     explicit accesses; exact scalar division folding preserves its numerical
     contract. Public views and author control/effects are unchanged.
 
-    This required preparation boundary produces another verified shared GPU
+    This required preparation boundary produces another verified shared Block
     program. Native access/collective/MMA selection follows in native-program;
     unsupported preparation or configuration diagnoses here rather than being
     delegated to the serializer. Native register/layout allocation is not part
@@ -29,9 +29,9 @@ def PrepareProgramPass : IntentCuTileTransformPass<
 
 def NativeProgramPass : IntentCuTileTransformPass<
     "intent-cutile-native-program",
-    "Form native cuTile accesses and computations from the current GPU program"> {
+    "Form native cuTile accesses and computations from the current Block program"> {
   let description = [{
-    Requires the prepared shared GPU program with original capabilities and
+    Requires the prepared shared Block program with original capabilities and
     tuning profiles. Collects current accesses and structured computations,
     checks their actual axis/shape/dtype and hardware requirements, and commits
     native accesses and collective/MMA forms together. Consumes bounds
@@ -55,7 +55,7 @@ def FinalizeProgramPass : IntentCuTileTransformPass<
     materializes closed configurations, preserves native indices and collapses
     array views. Completes value cleanup, array-bound facts and configuration
     requirements, then verifies the cuTile source surface. Native extensions
-    are checked by the provider verifier, not the shared-GPU verifier.
+    are checked by the provider verifier, not the shared-Block verifier.
 
     hoist-loop-invariants optionally runs the shared bounded invariant-value
     placement component between canonicalization and CSE at the existing

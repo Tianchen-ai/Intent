@@ -2,7 +2,7 @@
 #define INTENT_COMPILER_BACKEND_H
 
 #include "Intent/Compiler/Compiler.h"
-#include "Intent/Dialect/GPU/Transforms/Configuration/TuningProfiles.h"
+#include "Intent/Dialect/Block/Transforms/Configuration/TuningProfiles.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/Pass/PassManager.h"
 #include <variant>
@@ -11,16 +11,16 @@ namespace intent::cpu { class ImplementationRegistry; }
 
 namespace intent::compiler {
 
-enum class Family { GPU, CPU, DSA };
+enum class Family { Block, CPU, DSA };
 
-struct GPUBackend {
-  static constexpr Family family = Family::GPU;
+struct BlockBackend {
+  static constexpr Family family = Family::Block;
   bool nativeTupleReductions;
   bool nativeTupleReductionRequiresConstantIdentity;
   bool nativeFragmentGather;
   // Native-adapter profitability preference, not a register-allocation promise.
   unsigned preferredReductionResidentPrograms;
-  gpu::TuningProfileSchema profiles;
+  block::TuningProfileSchema profiles;
   llvm::StringRef profileFilename;
   void buildConstruction(mlir::OpPassManager &, const Request &) const;
   void buildShared(mlir::OpPassManager &, const Request &, llvm::StringRef provider) const;
@@ -53,7 +53,7 @@ struct Backend {
   Provider provider;
   llvm::StringRef name;
   bool available;
-  std::variant<GPUBackend, CPUBackend, DSABackend> model;
+  std::variant<BlockBackend, CPUBackend, DSABackend> model;
   void (*registerDialects)(mlir::DialectRegistry &);
   void (*registerPasses)();
   void (*buildPipeline)(mlir::OpPassManager &, const Request &);
@@ -69,7 +69,7 @@ struct Backend {
 
 llvm::ArrayRef<Backend> backends();
 const Backend &backend(Provider provider);
-llvm::SmallVector<gpu::TuningProfileSource> gpuProfileSources(
+llvm::SmallVector<block::TuningProfileSource> blockProfileSources(
     llvm::StringRef directory, llvm::StringRef provider);
 mlir::FailureOr<mlir::DictionaryAttr> parseDSAParameterBindings(
     mlir::ModuleOp module, llvm::StringRef text, bool shapes);

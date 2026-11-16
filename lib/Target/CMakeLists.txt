@@ -1,3 +1,4 @@
+add_subdirectory(NVIDIA)
 add_subdirectory(CuTile)
 add_subdirectory(Triton)
 add_subdirectory(Mojo)

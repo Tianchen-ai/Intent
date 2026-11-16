@@ -1,7 +1,7 @@
 #ifndef INTENT_TARGET_CUTILE_IR_CUTILEOPS_TD
 #define INTENT_TARGET_CUTILE_IR_CUTILEOPS_TD
 
-include "Intent/Dialect/GPU/IR/GPUTypes.td"
+include "Intent/Dialect/Block/IR/BlockTypes.td"
 include "Intent/Dialect/Intent/IR/IntentAttrs.td"
 include "Intent/Target/CuTile/IR/CuTileDialect.td"
 include "mlir/IR/OpBase.td"
@@ -16,11 +16,11 @@ def IntentCuTile_ArrayViewOp : IntentCuTile_Op<"array_view", [Pure,
     DeclareOpInterfaceMethods<InferTypeOpInterface>,
     DeclareOpInterfaceMethods<ViewLikeOpInterface>]> {
   let summary = "Conditional host alias collapsing contiguous full inner axes";
-  let arguments = (ins IntentGPU_ViewValue:$base,
+  let arguments = (ins IntentBlock_ViewValue:$base,
                        DenseI64ArrayAttr:$group_ends);
   // The result owns its collapsed layout and aliases the original resource.
   // Its accesses require the host-computed eligibility condition to hold.
-  let results = (outs IntentGPU_ViewValue:$result, I1:$eligible);
+  let results = (outs IntentBlock_ViewValue:$result, I1:$eligible);
   let hasVerifier = 1;
 }
 
@@ -28,24 +28,24 @@ def IntentCuTile_TileLoadOp : IntentCuTile_Op<"tile_load", [
     AttrSizedOperandSegments,
     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
   ]> {
-  let arguments = (ins IntentGPU_ViewValue:$resource,
-                       IntentGPU_ScalarValue:$allow_tma,
+  let arguments = (ins IntentBlock_ViewValue:$resource,
+                       IntentBlock_ScalarValue:$allow_tma,
                        Variadic<AnyTypeOf<[Index, I32]>>:$tile_indices,
                        // 1..10 select an explicit latency; 11 retains inference.
                        Optional<Index>:$latency_policy,
                        // True only when every view axis divides into full tiles.
                        Optional<I1>:$full_tiles);
-  let results = (outs IntentGPU_FragmentValue:$result);
+  let results = (outs IntentBlock_FragmentValue:$result);
   let hasVerifier = 1;
 }
 
 def IntentCuTile_TileStoreOp : IntentCuTile_Op<"tile_store", [
     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
   ]> {
-  let arguments = (ins IntentGPU_ViewValue:$resource,
-                       IntentGPU_ScalarValue:$allow_tma,
+  let arguments = (ins IntentBlock_ViewValue:$resource,
+                       IntentBlock_ScalarValue:$allow_tma,
                        Variadic<AnyTypeOf<[Index, I32]>>:$tile_indices,
-                       IntentGPU_FragmentValue:$value,
+                       IntentBlock_FragmentValue:$value,
                        OptionalAttr<I32Attr>:$latency);
   let hasVerifier = 1;
 }
@@ -54,9 +54,9 @@ def IntentCuTile_TileAtomicAddOp : IntentCuTile_Op<"tile_atomic_add", [
     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
   ]> {
   let summary = "Resource-ordered relaxed device atomic add without an old value";
-  let arguments = (ins IntentGPU_ViewValue:$resource,
+  let arguments = (ins IntentBlock_ViewValue:$resource,
                        Variadic<AnyTypeOf<[Index, I32]>>:$tile_indices,
-                       IntentGPU_FragmentValue:$value);
+                       IntentBlock_FragmentValue:$value);
   let hasVerifier = 1;
 }
 
@@ -64,13 +64,13 @@ def IntentCuTile_ScalarLoadOp : IntentCuTile_Op<"scalar_load", [
     AttrSizedOperandSegments,
     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
   ]> {
-  let arguments = (ins IntentGPU_ViewValue:$resource,
+  let arguments = (ins IntentBlock_ViewValue:$resource,
                        Variadic<Index>:$indices,
-                       Optional<IntentGPU_ScalarValue>:$valid,
-                       Optional<IntentGPU_ScalarValue>:$fill,
+                       Optional<IntentBlock_ScalarValue>:$valid,
+                       Optional<IntentBlock_ScalarValue>:$fill,
                        // Proven for active coordinates; does not replace valid.
                        OptionalAttr<UnitAttr>:$in_bounds);
-  let results = (outs IntentGPU_ScalarValue:$result);
+  let results = (outs IntentBlock_ScalarValue:$result);
   let hasVerifier = 1;
 }
 
@@ -78,10 +78,10 @@ def IntentCuTile_ScalarStoreOp : IntentCuTile_Op<"scalar_store", [
     AttrSizedOperandSegments,
     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
   ]> {
-  let arguments = (ins IntentGPU_ViewValue:$resource,
+  let arguments = (ins IntentBlock_ViewValue:$resource,
                        Variadic<Index>:$indices,
-                       IntentGPU_ScalarValue:$value,
-                       Optional<IntentGPU_ScalarValue>:$valid,
+                       IntentBlock_ScalarValue:$value,
+                       Optional<IntentBlock_ScalarValue>:$valid,
                        // Proven for active coordinates; does not replace valid.
                        OptionalAttr<UnitAttr>:$in_bounds);
   let hasVerifier = 1;
@@ -91,15 +91,15 @@ def IntentCuTile_GatherLoadOp : IntentCuTile_Op<"gather_load", [
     AttrSizedOperandSegments,
     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
   ]> {
-  let arguments = (ins IntentGPU_ViewValue:$resource,
-                       Variadic<IntentGPU_DataValue>:$coordinates,
-                       Optional<IntentGPU_DataValue>:$valid,
-                       Optional<IntentGPU_ScalarValue>:$fill,
+  let arguments = (ins IntentBlock_ViewValue:$resource,
+                       Variadic<IntentBlock_DataValue>:$coordinates,
+                       Optional<IntentBlock_DataValue>:$valid,
+                       Optional<IntentBlock_ScalarValue>:$fill,
                        Optional<Index>:$latency_policy,
                        DenseI64ArrayAttr:$source_axes,
                        // Proven for active coordinates; does not replace valid.
                        OptionalAttr<UnitAttr>:$in_bounds);
-  let results = (outs IntentGPU_FragmentValue:$result);
+  let results = (outs IntentBlock_FragmentValue:$result);
   let hasVerifier = 1;
 }
 
@@ -107,10 +107,10 @@ def IntentCuTile_ScatterStoreOp : IntentCuTile_Op<"scatter_store", [
     AttrSizedOperandSegments,
     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
   ]> {
-  let arguments = (ins IntentGPU_ViewValue:$resource,
-                       Variadic<IntentGPU_DataValue>:$coordinates,
-                       IntentGPU_FragmentValue:$value,
-                       Optional<IntentGPU_DataValue>:$valid,
+  let arguments = (ins IntentBlock_ViewValue:$resource,
+                       Variadic<IntentBlock_DataValue>:$coordinates,
+                       IntentBlock_FragmentValue:$value,
+                       Optional<IntentBlock_DataValue>:$valid,
                        DenseI64ArrayAttr:$source_axes,
                        // Proven for active coordinates; does not replace valid.
                        OptionalAttr<UnitAttr>:$in_bounds);
@@ -120,60 +120,60 @@ def IntentCuTile_ScatterStoreOp : IntentCuTile_Op<"scatter_store", [
 def IntentCuTile_AtomicRMWOp : IntentCuTile_Op<"atomic_rmw", [
     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
   ]> {
-  let arguments = (ins IntentGPU_ViewValue:$resource,
-                       Variadic<IntentGPU_DataValue>:$coordinates,
-                       IntentGPU_DataValue:$value,
+  let arguments = (ins IntentBlock_ViewValue:$resource,
+                       Variadic<IntentBlock_DataValue>:$coordinates,
+                       IntentBlock_DataValue:$value,
                        Intent_AtomicRMWKindAttr:$kind,
                        Intent_AtomicOrderingAttr:$ordering,
-                       IntentGPU_AtomicSharingDomainAttr:$sharing,
+                       IntentBlock_AtomicSharingDomainAttr:$sharing,
                        // Active coordinates are in bounds; inactive coordinates
                        // use the view-end sentinel and still need native bounds checks.
                        OptionalAttr<UnitAttr>:$in_bounds);
-  let results = (outs IntentGPU_DataValue:$result);
+  let results = (outs IntentBlock_DataValue:$result);
   let hasVerifier = 1;
 }
 
 def IntentCuTile_ExtractOp : IntentCuTile_Op<"extract", [Pure]> {
-  let arguments = (ins IntentGPU_FragmentValue:$source,
-                       Variadic<IntentGPU_ScalarValue>:$coordinates,
+  let arguments = (ins IntentBlock_FragmentValue:$source,
+                       Variadic<IntentBlock_ScalarValue>:$coordinates,
                        ArrayAttr:$extraction_shape,
                        DenseI64ArrayAttr:$retained_axes);
-  let results = (outs IntentGPU_DataValue:$result);
+  let results = (outs IntentBlock_DataValue:$result);
   let hasVerifier = 1;
 }
 
 def IntentCuTile_MMAOp : IntentCuTile_Op<"mma", [Pure]> {
-  let arguments = (ins IntentGPU_FragmentValue:$lhs,
-                       IntentGPU_FragmentValue:$rhs,
-                       IntentGPU_FragmentValue:$accumulator,
+  let arguments = (ins IntentBlock_FragmentValue:$lhs,
+                       IntentBlock_FragmentValue:$rhs,
+                       IntentBlock_FragmentValue:$accumulator,
                        OptionalAttr<I64Attr>:$reduction_chunk);
-  let results = (outs IntentGPU_FragmentValue:$result);
+  let results = (outs IntentBlock_FragmentValue:$result);
   let hasVerifier = 1;
 }
 
 def IntentCuTile_ScaledMMAOp : IntentCuTile_Op<"scaled_mma", [Pure]> {
-  let arguments = (ins IntentGPU_FragmentValue:$lhs,
-                       IntentGPU_FragmentValue:$lhs_scale,
-                       IntentGPU_FragmentValue:$rhs,
-                       IntentGPU_FragmentValue:$rhs_scale,
-                       IntentGPU_FragmentValue:$accumulator,
+  let arguments = (ins IntentBlock_FragmentValue:$lhs,
+                       IntentBlock_FragmentValue:$lhs_scale,
+                       IntentBlock_FragmentValue:$rhs,
+                       IntentBlock_FragmentValue:$rhs_scale,
+                       IntentBlock_FragmentValue:$accumulator,
                        Intent_ScaledFormatAttr:$lhs_format,
                        Intent_ScaledFormatAttr:$rhs_format,
                        I64Attr:$lhs_group_size,
                        I64Attr:$rhs_group_size);
-  let results = (outs IntentGPU_FragmentValue:$result);
+  let results = (outs IntentBlock_FragmentValue:$result);
   let hasVerifier = 1;
 }
 
 class IntentCuTile_Collective<string mnemonic> :
     IntentCuTile_Op<mnemonic, [Pure, IsolatedFromAbove, AttrSizedOperandSegments,
         DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins Variadic<IntentGPU_DataValue>:$sources,
-                       Variadic<IntentGPU_DataValue>:$identities,
+  let arguments = (ins Variadic<IntentBlock_DataValue>:$sources,
+                       Variadic<IntentBlock_DataValue>:$identities,
                        I64Attr:$axis,
                        BoolAttr:$reverse,
                        OptionalAttr<Intent_BinaryOperatorAttr>:$kind);
-  let results = (outs Variadic<IntentGPU_DataValue>:$outputs);
+  let results = (outs Variadic<IntentBlock_DataValue>:$outputs);
   let regions = (region AnyRegion:$combine);
   let assemblyFormat = [{
     `sources` `(` $sources `:` type($sources) `)`

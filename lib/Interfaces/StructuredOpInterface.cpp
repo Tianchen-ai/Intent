@@ -160,7 +160,7 @@ SmallVector<StructuredValueRelation> StructuredOpInterface::getValueRelations() 
   if (kind == StructuredOpKind::Reduce || kind == StructuredOpKind::Scan) {
     connect(getSources(), getOperation()->getResults(),
             kind == StructuredOpKind::Reduce ? K::Reduction : K::Prefix, axes);
-    // KIR identities may be scalar/slice schemas, while GPU identities have
+    // KIR identities may be scalar/slice schemas, while Block identities have
     // already been lifted to the full physical accumulator fragment.
     connect(identities, getOperation()->getResults(), K::Accumulator);
     return relations;

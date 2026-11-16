@@ -37,6 +37,6 @@ add_mlir_library(MLIRIntentCuTileTransforms
   MLIRIntentCuTileDialect
   MLIRIntentCuTileAnalysis
   MLIRIntentCuTileSerialization
-  MLIRIntentGPUDialect
-  MLIRIntentGPUTransforms
+  MLIRIntentBlockDialect
+  MLIRIntentBlockTransforms
 )

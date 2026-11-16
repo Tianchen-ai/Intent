@@ -1,12 +1,13 @@
 #include "Intent/Target/CuTile/Analysis/Program.h"
+#include "Intent/Target/NVIDIA/IR/Target.h"
 #include "Intent/Target/CuTile/Analysis/Configuration.h"
 #include "Intent/Target/CuTile/Analysis/IndexBounds.h"
 #include "Intent/Target/CuTile/IR/Configuration.h"
 #include "Intent/Target/CuTile/IR/CuTileOps.h"
-#include "Intent/Dialect/GPU/Analysis/IndexRelations.h"
-#include "Intent/Dialect/GPU/Analysis/PhysicalParameters.h"
-#include "Intent/Dialect/GPU/Analysis/PhysicalProgram.h"
-#include "Intent/Dialect/GPU/IR/Program.h"
+#include "Intent/Dialect/Block/Analysis/IndexRelations.h"
+#include "Intent/Dialect/Block/Analysis/PhysicalParameters.h"
+#include "Intent/Dialect/Block/Analysis/PhysicalProgram.h"
+#include "Intent/Dialect/Block/IR/Program.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Verifier.h"
 #include <functional>
@@ -14,17 +15,18 @@
 using namespace mlir;
 namespace intent::cutile {
 
-bool supportsE8M0ScaledMMA(gpu::CapabilitiesAttr capabilities) {
-  return capabilities && capabilities.getComputeCapabilityMajor() >= 10;
+bool supportsE8M0ScaledMMA(block::CapabilitiesAttr capabilities) {
+  auto device = capabilities ? dyn_cast<nvidia::DeviceAttr>(capabilities.getTarget()) : nvidia::DeviceAttr{};
+  return device && device.getComputeCapabilityMajor() >= 10;
 }
 
 void NativeProgramFeatures::observe(Operation *operation) {
-  bool matrix = isa<gpu::ContractOp, gpu::ScaledContractOp, MMAOp,
+  bool matrix = isa<block::ContractOp, block::ScaledContractOp, MMAOp,
                     ScaledMMAOp>(operation);
   matrixCompute |= matrix;
   occupancySensitive |= matrix ||
-      isa<gpu::ReduceOp, gpu::HistogramOp, gpu::ScanOp, ReduceOp, ScanOp,
-          gpu::AtomicRMWOp, AtomicRMWOp, TileAtomicAddOp>(operation);
+      isa<block::ReduceOp, block::HistogramOp, block::ScanOp, ReduceOp, ScanOp,
+          block::AtomicRMWOp, AtomicRMWOp, TileAtomicAddOp>(operation);
 }
 
 NativeProgramFeatures queryNativeProgramFeatures(func::FuncOp kernel) {
@@ -57,7 +59,7 @@ LogicalResult verifyKernel(func::FuncOp kernel,
   }
   for (BlockArgument argument : kernel.getArguments())
     if (kernel.getArgAttr(argument.getArgNumber(), arrayIndexTileBoundsAttr) &&
-        (!kernel->hasAttr(arrayIndexTileBoundsAttr) || !isa<gpu::ViewType>(argument.getType())))
+        (!kernel->hasAttr(arrayIndexTileBoundsAttr) || !isa<block::ViewType>(argument.getType())))
       return kernel.emitError("cuTile array-index bounds require a selected view binding");
   auto arrayBounds = kernel.walk([&](ArrayViewOp array) {
     if (array->hasAttr(arrayIndexTileBoundsAttr) && !kernel->hasAttr(arrayIndexTileBoundsAttr)) {
@@ -68,35 +70,35 @@ LogicalResult verifyKernel(func::FuncOp kernel,
   });
   if (arrayBounds.wasInterrupted())
     return failure();
-  auto space = kernel->getAttrOfType<ArrayAttr>(gpu::programSpaceAttr);
+  auto space = kernel->getAttrOfType<ArrayAttr>(block::programSpaceAttr);
   if (!space || space.size() != 1)
     return kernel.emitError(
         "cuTile provider currently requires one explicit linear program space");
   auto capabilities =
-      kernel->getAttrOfType<gpu::CapabilitiesAttr>(gpu::capabilitiesAttr);
+      kernel->getAttrOfType<block::CapabilitiesAttr>(block::capabilitiesAttr);
   if (!capabilities)
-    return kernel.emitError("cuTile provider requires selected GPU capabilities");
-  auto parameters = gpu::ParameterSpace::read(kernel);
+    return kernel.emitError("cuTile provider requires selected Block capabilities");
+  auto parameters = block::ParameterSpace::read(kernel);
   if (failed(parameters)) return failure();
-  gpu::ParameterAttr accessForm, occupancy, ctas, workerWarps, loadPolicy;
-  for (gpu::ParameterAttr schema : parameters->declarations()) {
+  block::ParameterAttr accessForm, occupancy, ctas, workerWarps, loadPolicy;
+  for (block::ParameterAttr schema : parameters->declarations()) {
     auto role = schema.getRole();
-    bool provider = schema.getPhase() == gpu::ConfigurationBindingPhase::Provider;
+    bool provider = schema.getPhase() == block::ConfigurationBindingPhase::Provider;
     if (!schema.isExtent() || provider != isCuTileProviderRole(role))
       return kernel.emitError("cuTile program contains a foreign provider parameter");
     if (!provider)
       continue;
     ArrayRef<int64_t> candidates = schema.getCandidates().asArrayRef();
-    gpu::ParameterAttr *binding = nullptr;
+    block::ParameterAttr *binding = nullptr;
     StringRef name;
     bool (*legal)(int64_t) = nullptr;
-    if (role == gpu::ParameterRole::ProviderAccessForm) {
+    if (role == block::ParameterRole::ProviderAccessForm) {
       binding = &accessForm; name = accessFormParameter; legal = isLegalAccessForm;
-    } else if (role == gpu::ParameterRole::ProviderCTAs) {
+    } else if (role == block::ParameterRole::ProviderCTAs) {
       binding = &ctas; name = ctasParameter; legal = isLegalCTAs;
-    } else if (role == gpu::ParameterRole::ProviderWarps) {
+    } else if (role == block::ParameterRole::ProviderWarps) {
       binding = &workerWarps; name = workerWarpsParameter; legal = isLegalWorkerWarps;
-    } else if (role == gpu::ParameterRole::ProviderLoadPolicy) {
+    } else if (role == block::ParameterRole::ProviderLoadPolicy) {
       binding = &loadPolicy; name = loadPolicyParameter; legal = isLegalLoadPolicy;
     } else {
       binding = &occupancy; name = occupancyParameter; legal = isLegalOccupancy;
@@ -106,17 +108,17 @@ LogicalResult verifyKernel(func::FuncOp kernel,
       return kernel.emitError("invalid or duplicate cuTile provider declaration: ") << schema.getName();
     *binding = schema;
   }
-  auto parameterUses = kernel.walk([&](gpu::ParameterOp parameter) -> WalkResult {
+  auto parameterUses = kernel.walk([&](block::ParameterOp parameter) -> WalkResult {
     auto schema = parameter.getDeclaration();
     auto role = schema.getRole();
-    if ((role == gpu::ParameterRole::ProviderCTAs ||
-         role == gpu::ParameterRole::ProviderWarps ||
-         role == gpu::ParameterRole::ProviderOccupancy) &&
+    if ((role == block::ParameterRole::ProviderCTAs ||
+         role == block::ParameterRole::ProviderWarps ||
+         role == block::ParameterRole::ProviderOccupancy) &&
         !parameter.getResult().use_empty()) {
       parameter.emitOpError("cuTile compiler hints cannot be read by the kernel body");
       return WalkResult::interrupt();
     }
-    if (role == gpu::ParameterRole::ProviderLoadPolicy)
+    if (role == block::ParameterRole::ProviderLoadPolicy)
       for (OpOperand &use : parameter.getResult().getUses()) {
         auto load = dyn_cast<TileLoadOp>(use.getOwner());
         auto gather = dyn_cast<GatherLoadOp>(use.getOwner());
@@ -140,29 +142,29 @@ LogicalResult verifyKernel(func::FuncOp kernel,
   if (features.matrixCompute != static_cast<bool>(ctas))
     return kernel.emitError("cuTile CTA hint does not match matrix tile compute");
   auto isTileSizeCondition = [](Value value) {
-    auto compare = value.getDefiningOp<gpu::CompareOp>();
-    return compare && gpu::queryLaunchExpression(compare.getLhs()) &&
-           gpu::queryLaunchExpression(compare.getRhs());
+    auto compare = value.getDefiningOp<block::CompareOp>();
+    return compare && block::queryLaunchExpression(compare.getLhs()) &&
+           block::queryLaunchExpression(compare.getRhs());
   };
   std::function<bool(Value)> isNativeTMACondition = [&](Value value) {
     // A load can exclude TMA based on its own physical footprint even when
     // matrix accesses in the same program retain the configurable form.
-    if (gpu::IndexRelations().constant(value) == 0)
+    if (block::IndexRelations().constant(value) == 0)
       return true;
-    if (auto both = value.getDefiningOp<gpu::BinaryOp>();
+    if (auto both = value.getDefiningOp<block::BinaryOp>();
         both && both.getOperatorKind() == BinaryOperator::LogicalAnd)
       return (isNativeTMACondition(both.getLhs()) &&
               isTileSizeCondition(both.getRhs())) ||
              (isNativeTMACondition(both.getRhs()) &&
               isTileSizeCondition(both.getLhs()));
-    auto compare = value.getDefiningOp<gpu::CompareOp>();
+    auto compare = value.getDefiningOp<block::CompareOp>();
     return accessForm && compare &&
            compare.getPredicate() == ComparePredicate::Ne &&
-           gpu::queryParameter(compare.getLhs()) == accessForm &&
-           gpu::IndexRelations().constant(compare.getRhs()) == nativeNoTMAForm;
+           block::queryParameter(compare.getLhs()) == accessForm &&
+           block::IndexRelations().constant(compare.getRhs()) == nativeNoTMAForm;
   };
   WalkResult result = kernel.walk([&](Operation *operation) {
-    if (isa<gpu::LoadOp, gpu::StoreOp, gpu::ContractOp>(operation)) {
+    if (isa<block::LoadOp, block::StoreOp, block::ContractOp>(operation)) {
       operation->emitOpError(
           "was not converted to an explicit cuTile tile/MMA form");
       return WalkResult::interrupt();
@@ -194,12 +196,12 @@ LogicalResult verifyKernel(func::FuncOp kernel,
         return WalkResult::interrupt();
       }
     for (Type type : operation->getResultTypes()) {
-      if (auto fragment = dyn_cast<gpu::FragmentType>(type)) {
+      if (auto fragment = dyn_cast<block::FragmentType>(type)) {
         if (!isCuTileScalarType(fragment.getElementType())) {
           operation->emitOpError("contains a fragment dtype outside cuTile");
           return WalkResult::interrupt();
         }
-      } else if (!isa<gpu::ViewType, gpu::RangeType, gpu::RecordType>(type) &&
+      } else if (!isa<block::ViewType, block::RangeType, block::RecordType>(type) &&
                  !isCuTileScalarType(type)) {
         operation->emitOpError("has a result type outside the cuTile surface");
         return WalkResult::interrupt();
@@ -216,7 +218,7 @@ LogicalResult verifyKernel(func::FuncOp kernel,
 LogicalResult verifyCuTileProgram(ModuleOp module,
     llvm::function_ref<LogicalResult(Operation *)> verifySourceOperation) {
   if (failed(mlir::verify(module))) return failure();
-  auto kernel = gpu::getPhysicalKernel(module);
+  auto kernel = block::getPhysicalKernel(module);
   return failed(kernel) ? failure() : verifyKernel(*kernel, verifySourceOperation);
 }
 

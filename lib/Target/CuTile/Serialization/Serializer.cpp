@@ -1,14 +1,14 @@
 #include "Intent/Target/CuTile/Serialization/Serializer.h"
 #include "Intent/Target/CuTile/Serialization/Numerical.h"
 
-#include "Intent/Dialect/GPU/Analysis/PhysicalProgram.h"
-#include "Intent/Dialect/GPU/Analysis/PhysicalParameters.h"
-#include "Intent/Dialect/GPU/Analysis/ProgramInterface.h"
-#include "Intent/Dialect/GPU/IR/GPUAttrs.h"
-#include "Intent/Dialect/GPU/IR/GPUOps.h"
-#include "Intent/Dialect/GPU/IR/Program.h"
-#include "Intent/Dialect/GPU/Serialization/Interface.h"
-#include "Intent/Dialect/GPU/Serialization/PythonEmitter.h"
+#include "Intent/Dialect/Block/Analysis/PhysicalProgram.h"
+#include "Intent/Dialect/Block/Analysis/PhysicalParameters.h"
+#include "Intent/Dialect/Block/Analysis/ProgramInterface.h"
+#include "Intent/Dialect/Block/IR/BlockAttrs.h"
+#include "Intent/Dialect/Block/IR/BlockOps.h"
+#include "Intent/Dialect/Block/IR/Program.h"
+#include "Intent/Dialect/Block/Serialization/Interface.h"
+#include "Intent/Dialect/Block/Serialization/PythonEmitter.h"
 #include "Intent/Target/CuTile/Analysis/Tuning.h"
 #include "Intent/Target/CuTile/Analysis/Program.h"
 #include "Intent/Target/CuTile/IR/CuTileOps.h"
@@ -31,21 +31,21 @@ namespace intent::cutile {
 namespace {
 
 
-StringRef providerHint(gpu::ParameterAttr parameter) {
+StringRef providerHint(block::ParameterAttr parameter) {
   auto role = parameter.getRole();
-  if (role == gpu::ParameterRole::ProviderOccupancy)
+  if (role == block::ParameterRole::ProviderOccupancy)
     return "occupancy";
-  if (role == gpu::ParameterRole::ProviderCTAs)
+  if (role == block::ParameterRole::ProviderCTAs)
     return "num_ctas";
-  if (role == gpu::ParameterRole::ProviderWarps)
+  if (role == block::ParameterRole::ProviderWarps)
     return "num_worker_warps";
   return {};
 }
 
-class Serializer : public gpu::PythonEmitter {
+class Serializer : public block::PythonEmitter {
 public:
   Serializer(func::FuncOp kernel, raw_ostream &output)
-      : gpu::PythonEmitter(kernel, output,
+      : block::PythonEmitter(kernel, output,
             {"ct.", "bool_", "float64", "float8_e4m3fn", "float8_e5m2"},
             {integerDivision, "min", "max", "", "_intent_next_power_of_2", false},
             "") {}
@@ -62,7 +62,7 @@ public:
   static const Emitters &sourceOperations() {
     static const Emitters emitters = [] {
       Emitters result;
-      gpu::PythonEmitter::addCommonOperations(result);
+      block::PythonEmitter::addCommonOperations(result);
       addNumericalOperations(result);
       addBinding<ArrayViewOp>(result);
       addNative<TileLoadOp>(result);
@@ -93,14 +93,14 @@ private:
   template <typename Op> static void addNative(
       Emitters &result,
       std::function<FailureOr<Emitters::Dependencies>(Op)> dependencies = {}) {
-    result.add<Op>([](Op) { return success(); }, [](Op op, gpu::PythonEmitter &emitter) {
+    result.add<Op>([](Op) { return success(); }, [](Op op, block::PythonEmitter &emitter) {
       static_cast<Serializer &>(emitter).emitTyped(op);
       return failure(emitter.hasFailed());
     }, std::move(dependencies));
   }
   template <typename Op> static void addBinding(Emitters &result) {
     result.add<Op>([](Op) { return success(); },
-                   [](Op, gpu::PythonEmitter &) { return success(); });
+                   [](Op, block::PythonEmitter &) { return success(); });
   }
 
   void emitConstant(arith::ConstantOp constant) override {
@@ -110,33 +110,33 @@ private:
       values[constant.getResult()] = value;
       }
 
-  std::string programId(gpu::ProgramIdOp op) override {
+  std::string programId(block::ProgramIdOp op) override {
     return "ct.astype(ct.bid(" + std::to_string(op.getAxis()) + "), " + pythonType(op.getResult().getType()) + ")";
   }
-  std::string makeRange(gpu::MakeRangeOp op) override {
+  std::string makeRange(block::MakeRangeOp op) override {
     return "(" + valueString(op.getStart()) + " + ct.arange(" + valueString(op.getExtent()) +
         ", dtype=" + pythonType(op.getResult().getType().getElementType()) + ") * " + valueString(op.getStep()) + ")";
   }
-  std::string splat(gpu::SplatOp op) override {
+  std::string splat(block::SplatOp op) override {
     return "ct.full(" + fragmentShape(op.getResult().getType()) + ", " + valueString(op.getValue()) +
         ", dtype=" + pythonType(op.getResult().getType().getElementType()) + ")";
   }
   std::string castValue(Value value, Type type, bool bitcast) override {
     return numericalCast(*this, value, type, bitcast);
   }
-  std::string reshape(gpu::ReshapeOp op) override {
-    return "ct.reshape(" + valueString(op.getValue()) + ", " + fragmentShape(cast<gpu::FragmentType>(op.getResult().getType())) + ")";
+  std::string reshape(block::ReshapeOp op) override {
+    return "ct.reshape(" + valueString(op.getValue()) + ", " + fragmentShape(cast<block::FragmentType>(op.getResult().getType())) + ")";
   }
-  std::string join(gpu::JoinOp op) override {
+  std::string join(block::JoinOp op) override {
     SmallVector<std::string> extents;
     for (Attribute extent : op.getLhs().getType().getShape())
-      extents.push_back(expressionString(cast<gpu::PhysicalExprAttr>(extent)));
+      extents.push_back(expressionString(cast<block::PhysicalExprAttr>(extent)));
     extents.push_back("1");
     std::string expanded = stringTuple(extents);
     return "ct.cat((ct.reshape(" + valueString(op.getLhs()) + ", " + expanded +
         "), ct.reshape(" + valueString(op.getRhs()) + ", " + expanded + ")), axis=" + std::to_string(op.getAxis()) + ")";
   }
-  std::string select(gpu::SelectOp op) override {
+  std::string select(block::SelectOp op) override {
     return numericalSelect(*this, op);
   }
   std::string permute(Value value, ArrayRef<int64_t> permutation) override {
@@ -154,9 +154,9 @@ private:
   }
   bool inlineRecords() const override { return true; }
 
-  using ViewABI = gpu::PythonArgument;
-  using ScalarABI = gpu::PythonArgument;
-  using MetadataABI = gpu::PythonArgument;
+  using ViewABI = block::PythonArgument;
+  using ScalarABI = block::PythonArgument;
+  using MetadataABI = block::PythonArgument;
   struct ArrayViewABI {
     ArrayViewOp operation;
     unsigned sourceView;
@@ -165,7 +165,7 @@ private:
   };
 
   void bindArguments() {
-    auto interface = gpu::PythonSignature::read(kernel);
+    auto interface = block::PythonSignature::read(kernel);
     if (mlir::failed(interface)) {
       failed = true;
       return;
@@ -180,10 +180,10 @@ private:
     for (const ViewABI &view : views)
       values[view.value] = view.name;
     AttrTypeWalker parameterUses;
-    parameterUses.addWalk([&](gpu::ParameterRefAttr reference) { nativeParameters.insert(reference); });
+    parameterUses.addWalk([&](block::ParameterRefAttr reference) { nativeParameters.insert(reference); });
     kernel.walk([&](Operation *operation) {
       if (operation == kernel.getOperation()) return;
-      if (auto parameter = dyn_cast<gpu::ParameterOp>(operation);
+      if (auto parameter = dyn_cast<block::ParameterOp>(operation);
           parameter && parameter.getResult().use_empty()) return;
       parameterUses.walk(operation->getAttrDictionary());
       for (Type type : operation->getResultTypes()) parameterUses.walk(type);
@@ -191,8 +191,8 @@ private:
         for (Block &block : region)
           for (BlockArgument argument : block.getArguments()) parameterUses.walk(argument.getType());
     });
-    for (Attribute attribute : gpu::getParameterDeclarations(kernel)) {
-      auto parameter = cast<gpu::ParameterAttr>(attribute);
+    for (Attribute attribute : block::getParameterDeclarations(kernel)) {
+      auto parameter = cast<block::ParameterAttr>(attribute);
       if (StringRef hint = providerHint(parameter); !hint.empty()) {
         if (!providerHintParameters.emplace(
                 hint.str(), parameter.getName().getValue().str()).second) {
@@ -205,8 +205,8 @@ private:
     llvm::StringSet<> occupied;
     for (const auto &entry : values)
       occupied.insert(entry.second);
-    for (Attribute attribute : gpu::getParameterDeclarations(kernel))
-      occupied.insert(cast<gpu::ParameterAttr>(attribute).getName().getValue());
+    for (Attribute attribute : block::getParameterDeclarations(kernel))
+      occupied.insert(cast<block::ParameterAttr>(attribute).getName().getValue());
     auto fresh = [&](StringRef stem) {
       unsigned suffix = 0;
       std::string name;
@@ -228,7 +228,7 @@ private:
         arrayViews.push_back(std::move(binding));
       }
     });
-    kernel.walk([&](gpu::ViewOverlapOp overlap) {
+    kernel.walk([&](block::ViewOverlapOp overlap) {
       values[overlap.getResult()] = fresh("_intent_overlap_");
       overlapFacts.push_back(overlap);
     });
@@ -302,10 +302,10 @@ private:
     }
     for (const MetadataABI &metadata : metadataArguments)
       argument(metadata.name + ": ConstInt");
-    for (gpu::ViewOverlapOp overlap : overlapFacts)
+    for (block::ViewOverlapOp overlap : overlapFacts)
       argument(valueString(overlap.getResult()) + ": ct.Constant[bool]");
-    for (Attribute attribute : gpu::getParameterDeclarations(kernel)) {
-      auto parameter = cast<gpu::ParameterAttr>(attribute);
+    for (Attribute attribute : block::getParameterDeclarations(kernel)) {
+      auto parameter = cast<block::ParameterAttr>(attribute);
       if (!providerHint(parameter).empty() || !nativeParameters.contains(parameter.getReference()))
         continue;
       std::string name = parameter.getName().getValue().str();
@@ -388,24 +388,24 @@ private:
       auto rhs = mma.getRhs().getType();
       std::string lhsK =
           "(" + expressionString(
-                     mlir::cast<gpu::PhysicalExprAttr>(lhs.getShape()[1])) +
+                     mlir::cast<block::PhysicalExprAttr>(lhs.getShape()[1])) +
           " * " + expressionString(
-                        mlir::cast<gpu::PhysicalExprAttr>(lhs.getShape()[2])) +
+                        mlir::cast<block::PhysicalExprAttr>(lhs.getShape()[2])) +
           ")";
       std::string rhsK =
           "(" + expressionString(
-                     mlir::cast<gpu::PhysicalExprAttr>(rhs.getShape()[0])) +
+                     mlir::cast<block::PhysicalExprAttr>(rhs.getShape()[0])) +
           " * " + expressionString(
-                        mlir::cast<gpu::PhysicalExprAttr>(rhs.getShape()[1])) +
+                        mlir::cast<block::PhysicalExprAttr>(rhs.getShape()[1])) +
           ")";
       std::string lhsShape =
           "(" + expressionString(
-                     mlir::cast<gpu::PhysicalExprAttr>(lhs.getShape()[0])) +
+                     mlir::cast<block::PhysicalExprAttr>(lhs.getShape()[0])) +
           ", " + lhsK + ")";
       std::string rhsShape =
           "(" + rhsK + ", " +
           expressionString(
-              mlir::cast<gpu::PhysicalExprAttr>(rhs.getShape()[2])) +
+              mlir::cast<block::PhysicalExprAttr>(rhs.getShape()[2])) +
           ")";
       assign(mma.getResult(),
              "ct.mma_scaled(ct.reshape(" + valueString(mma.getLhs()) + ", " +
@@ -468,10 +468,10 @@ private:
         }
         llvm_unreachable("unhandled atomic ordering");
       };
-      auto atomicScope = [](gpu::AtomicSharingDomain sharing) -> StringRef {
+      auto atomicScope = [](block::AtomicSharingDomain sharing) -> StringRef {
         switch (sharing) {
-        case gpu::AtomicSharingDomain::ProgramInstance: return "BLOCK";
-        case gpu::AtomicSharingDomain::KernelInvocation: return "DEVICE";
+        case block::AtomicSharingDomain::ProgramInstance: return "BLOCK";
+        case block::AtomicSharingDomain::KernelInvocation: return "DEVICE";
         }
         llvm_unreachable("unhandled atomic sharing domain");
       };
@@ -489,12 +489,12 @@ private:
   void emitTyped(ExtractOp extract) {
       std::string shape = "(";
       for (Attribute extent : extract.getExtractionShape())
-        shape += expressionString(mlir::cast<gpu::PhysicalExprAttr>(extent)) + ", ";
+        shape += expressionString(mlir::cast<block::PhysicalExprAttr>(extent)) + ", ";
       shape += ")";
       std::string result = "ct.extract(" + valueString(extract.getSource()) +
                            ", index=" + tuple(extract.getCoordinates()) +
                            ", shape=" + shape + ")";
-      if (auto fragment = dyn_cast<gpu::FragmentType>(extract.getResult().getType()))
+      if (auto fragment = dyn_cast<block::FragmentType>(extract.getResult().getType()))
         result += ".reshape(" + fragmentShape(fragment) + ")";
       else
         result += ".item()";
@@ -585,15 +585,15 @@ private:
       }
 
 
-  std::string broadcastValue(Value value, gpu::FragmentType target) override {
-    auto source = dyn_cast<gpu::FragmentType>(value.getType());
+  std::string broadcastValue(Value value, block::FragmentType target) override {
+    auto source = dyn_cast<block::FragmentType>(value.getType());
     if (!source)
       return "ct.full(" + fragmentShape(target) + ", " + valueString(value) +
              ", dtype=" + pythonType(target.getElementType()) + ")";
     if (source == target)
       return valueString(value);
-    gpu::BroadcastProjection projection =
-        gpu::queryBroadcastProjection(source, target);
+    block::BroadcastProjection projection =
+        block::queryBroadcastProjection(source, target);
     if (!projection.isExact()) {
       kernel.emitError("cuTile broadcast lost its shared axis projection");
       failed = true;
@@ -633,7 +633,7 @@ private:
           targetForSource[sourceOrder[orderedSource]] ==
               static_cast<int64_t>(targetAxis)) {
         reshape += expressionString(
-                       cast<gpu::PhysicalExprAttr>(
+                       cast<block::PhysicalExprAttr>(
                            source.getShape()[sourceOrder[orderedSource]])) +
                    ", ";
         ++orderedSource;
@@ -647,7 +647,7 @@ private:
   }
 
   LogicalResult emitMetadata(std::string &metadata) {
-    auto artifact = gpu::serializeInterface(kernel, "cutile", [&](Value value) {
+    auto artifact = block::serializeInterface(kernel, "cutile", [&](Value value) {
       return valueString(value);
     });
     if (mlir::failed(artifact)) return failure();
@@ -660,17 +660,17 @@ private:
       for (int64_t end : operation.getGroupEnds()) groups.push_back(end);
       arrays.push_back(llvm::json::Object{
           {"name", view.name}, {"eligible", view.eligible},
-          {"base", gpu::getArgumentReference(views[view.sourceView].value).getId()},
+          {"base", block::getArgumentReference(views[view.sourceView].value).getId()},
           {"group_ends", std::move(groups)}});
       arguments.push_back(view.name);
       arguments.push_back(view.eligible);
     }
     for (const ScalarABI &scalar : scalars) arguments.push_back(scalar.name);
     for (const MetadataABI &argument : metadataArguments) arguments.push_back(argument.name);
-    for (gpu::ViewOverlapOp overlap : overlapFacts)
+    for (block::ViewOverlapOp overlap : overlapFacts)
       arguments.push_back(valueString(overlap.getResult()));
-    for (Attribute attribute : gpu::getParameterDeclarations(kernel)) {
-      auto parameter = cast<gpu::ParameterAttr>(attribute);
+    for (Attribute attribute : block::getParameterDeclarations(kernel)) {
+      auto parameter = cast<block::ParameterAttr>(attribute);
       if (providerHint(parameter).empty() && nativeParameters.contains(parameter.getReference()))
         arguments.push_back(parameter.getName().getValue());
     }
@@ -683,7 +683,7 @@ private:
       auto encodeArray = [&](Value resource, StringRef name, StringRef eligible) {
         llvm::json::Array axes;
         for (Attribute bound : getNativeArrayIndexBounds(resource))
-          axes.push_back(gpu::serializeExpression(cast<gpu::PhysicalExprAttr>(bound)));
+          axes.push_back(block::serializeExpression(cast<block::PhysicalExprAttr>(bound)));
         encoded.push_back(llvm::json::Object{
             {"array", name.str()}, {"bounds", std::move(axes)},
             {"eligible", eligible.empty() ? llvm::json::Value(nullptr)
@@ -715,9 +715,9 @@ private:
   SmallVector<ArrayViewABI> arrayViews;
   SmallVector<ScalarABI> scalars;
   SmallVector<MetadataABI> metadataArguments;
-  SmallVector<gpu::ViewOverlapOp> overlapFacts;
+  SmallVector<block::ViewOverlapOp> overlapFacts;
   std::map<std::string, std::string> providerHintParameters;
-  llvm::DenseSet<gpu::ParameterRefAttr> nativeParameters;
+  llvm::DenseSet<block::ParameterRefAttr> nativeParameters;
 };
 
 } // namespace
@@ -730,7 +730,7 @@ LogicalResult serializeProgram(ModuleOp module, std::string &source,
                                std::string &metadata) {
   if (failed(verifyCuTileProgram(module, verifySourceOperation)))
     return failure();
-  FailureOr<func::FuncOp> kernel = gpu::getPhysicalKernel(module);
+  FailureOr<func::FuncOp> kernel = block::getPhysicalKernel(module);
   if (failed(kernel))
     return failure();
   llvm::raw_string_ostream stream(source);

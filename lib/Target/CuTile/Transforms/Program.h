@@ -5,9 +5,9 @@
 
 namespace intent::cutile {
 
-// Shared GPU input is verified and its buffers/workspaces are executable.
+// Shared Block input is verified and its buffers/workspaces are executable.
 mlir::LogicalResult prepareProgram(mlir::ModuleOp module);
-// Consume current-GPU facts before committing native replacements.
+// Consume current-Block facts before committing native replacements.
 mlir::LogicalResult formNativeProgram(mlir::ModuleOp module);
 // Finish native forms and verify the complete provider program.
 mlir::LogicalResult finalizeProgram(mlir::ModuleOp module,

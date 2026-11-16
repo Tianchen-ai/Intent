@@ -1,10 +1,10 @@
-#include "Intent/Dialect/GPU/IR/Program.h"
-#include "Intent/Dialect/GPU/Analysis/IndexRelations.h"
-#include "Intent/Dialect/GPU/Analysis/PhysicalProgram.h"
-#include "Intent/Dialect/GPU/Transforms/Value/ValueRelations.h"
+#include "Intent/Dialect/Block/IR/Program.h"
+#include "Intent/Dialect/Block/Analysis/IndexRelations.h"
+#include "Intent/Dialect/Block/Analysis/PhysicalProgram.h"
+#include "Intent/Dialect/Block/Transforms/Value/ValueRelations.h"
 #include "Intent/Target/CuTile/Transforms/Compute/MMALoops.h"
 
-#include "Intent/Dialect/GPU/Transforms/Passes.h"
+#include "Intent/Dialect/Block/Transforms/Passes.h"
 #include "Intent/Target/CuTile/IR/CuTileOps.h"
 
 #include "llvm/ADT/DenseSet.h"
@@ -23,35 +23,35 @@ bool isSpecializationExpression(Value value) {
   Operation *operation = value.getDefiningOp();
   if (!operation)
     return false;
-  if (isa<arith::ConstantOp, gpu::ParameterOp, gpu::PhysicalExprOp, gpu::DimOp>(
+  if (isa<arith::ConstantOp, block::ParameterOp, block::PhysicalExprOp, block::DimOp>(
           operation))
     return true;
-  if (!isa<gpu::BinaryOp, gpu::CompareOp, gpu::CastOp>(operation))
+  if (!isa<block::BinaryOp, block::CompareOp, block::CastOp>(operation))
     return false;
   return llvm::all_of(operation->getOperands(), isSpecializationExpression);
 }
 
 bool positiveExtent(Value value) {
   if (value.getType().isIndex())
-    return gpu::IndexRelations().positive(value);
+    return block::IndexRelations().positive(value);
   if (auto constant = value.getDefiningOp<arith::ConstantOp>()) {
     auto integer = dyn_cast<IntegerAttr>(constant.getValue());
     return integer && integer.getInt() > 0;
   }
-  auto parameter = value.getDefiningOp<gpu::ParameterOp>();
+  auto parameter = value.getDefiningOp<block::ParameterOp>();
   return parameter && !parameter.getDeclaration().getCandidates().empty() &&
          llvm::all_of(parameter.getDeclaration().getCandidates().asArrayRef(),
                       [](int64_t candidate) { return candidate > 0; });
 }
 
 bool safeScalarGuardOperation(Operation *operation) {
-  if (isa<arith::ConstantOp, gpu::CompareOp, gpu::DimOp,
-          gpu::ParameterOp, gpu::PhysicalExprOp>(operation))
+  if (isa<arith::ConstantOp, block::CompareOp, block::DimOp,
+          block::ParameterOp, block::PhysicalExprOp>(operation))
     return true;
-  if (auto cast = dyn_cast<gpu::CastOp>(operation))
+  if (auto cast = dyn_cast<block::CastOp>(operation))
     return cast.getValue().getType().isIntOrIndex() &&
            cast.getResult().getType().isIntOrIndex();
-  auto binary = dyn_cast<gpu::BinaryOp>(operation);
+  auto binary = dyn_cast<block::BinaryOp>(operation);
   if (!binary || !binary.getResult().getType().isIntOrIndex())
     return false;
   switch (binary.getOperatorKind()) {
@@ -109,7 +109,7 @@ FailureOr<SmallVector<Value>> invariantSufficientGuard(Value value,
   SmallVector<Operation *> operations;
   if (collectInvariantGuard(value, loop, visited, operations))
     return SmallVector<Value>{value};
-  auto binary = value.getDefiningOp<gpu::BinaryOp>();
+  auto binary = value.getDefiningOp<block::BinaryOp>();
   if (!binary || !binary.getType().isInteger(1)) return failure();
   auto kind = binary.getOperatorKind();
   if (kind != BinaryOperator::LogicalAnd && kind != BinaryOperator::LogicalOr)
@@ -141,7 +141,7 @@ void unswitchNativeAccessGuard(scf::ForOp loop) {
     bool tileLoad = false;
     conditional.getThenRegion().walk([&](TileLoadOp) { tileLoad = true; });
     if (!tileLoad || llvm::any_of(conditions, [&](Value condition) {
-          return gpu::samePhysicalScalarExpression(
+          return block::samePhysicalScalarExpression(
               condition, conditional.getCondition());
         }))
       return;
@@ -179,7 +179,7 @@ void unswitchNativeAccessGuard(scf::ForOp loop) {
   loop.walk<WalkOrder::PostOrder>([&](scf::IfOp conditional) {
     if (conditional->getParentOfType<scf::ForOp>() == loop &&
         llvm::any_of(conditions, [&](Value condition) {
-          return gpu::samePhysicalScalarExpression(
+          return block::samePhysicalScalarExpression(
               conditional.getCondition(), condition);
         }))
       equivalentChoices.push_back(conditional);
@@ -199,7 +199,7 @@ void unswitchNativeAccessGuard(scf::ForOp loop) {
   for (Value original : sufficientTerms) {
     Value mapped = guardMapping.lookupOrDefault(original);
     condition = condition
-        ? Value(builder.create<gpu::BinaryOp>(loop.getLoc(), builder.getI1Type(),
+        ? Value(builder.create<block::BinaryOp>(loop.getLoc(), builder.getI1Type(),
                     condition, mapped, BinaryOperator::LogicalAnd))
         : mapped;
   }
@@ -208,7 +208,7 @@ void unswitchNativeAccessGuard(scf::ForOp loop) {
       /*withElseRegion=*/true);
   bool exactSingleCondition = conditions.size() == 1 &&
       sufficientTerms.size() == 1 &&
-      gpu::samePhysicalScalarExpression(conditions.front(),
+      block::samePhysicalScalarExpression(conditions.front(),
                                         sufficientTerms.front());
   for (bool takeThen : {true, false}) {
     Region &region =
@@ -253,17 +253,17 @@ void boundNativeReductionWidth(MMAOp mma) {
       !rhs.getElementType().isF32() ||
       !mma.getResult().getType().getElementType().isF32())
     return;
-  auto reduction = cast<gpu::PhysicalExprAttr>(lhs.getShape().getValue().back());
+  auto reduction = cast<block::PhysicalExprAttr>(lhs.getShape().getValue().back());
   if (reduction.getKind() ==
-          gpu::PhysicalExprKind::Constant &&
+          block::PhysicalExprKind::Constant &&
       (reduction.getValue() <= nativeReductionLimit ||
        reduction.getValue() % reductionChunk != 0))
     return;
   OpBuilder builder(mma);
-  auto extent = [&](gpu::FragmentType type, unsigned axis) -> Value {
-    return builder.create<gpu::PhysicalExprOp>(
+  auto extent = [&](block::FragmentType type, unsigned axis) -> Value {
+    return builder.create<block::PhysicalExprOp>(
         mma.getLoc(), builder.getIndexType(),
-        cast<gpu::PhysicalExprAttr>(type.getShape()[axis]));
+        cast<block::PhysicalExprAttr>(type.getShape()[axis]));
   };
   unsigned matrixAxis = lhs.getShape().size() - 2;
   Value m = extent(lhs, matrixAxis);
@@ -275,20 +275,20 @@ void boundNativeReductionWidth(MMAOp mma) {
   Value zero = builder.create<arith::ConstantIndexOp>(mma.getLoc(), 0);
   Value minimum = builder.create<arith::ConstantIndexOp>(mma.getLoc(), 256);
   auto compare = [&](Value left, Value right, ComparePredicate predicate) -> Value {
-    return builder.create<gpu::CompareOp>(mma.getLoc(), builder.getI1Type(),
+    return builder.create<block::CompareOp>(mma.getLoc(), builder.getI1Type(),
                                          left, right, predicate);
   };
   Value split = compare(k, nativeWidth, ComparePredicate::Gt);
   auto require = [&](Value condition) {
-    split = builder.create<gpu::BinaryOp>(mma.getLoc(), builder.getI1Type(),
+    split = builder.create<block::BinaryOp>(mma.getLoc(), builder.getI1Type(),
         split, condition, BinaryOperator::LogicalAnd);
   };
   require(compare(m, one, ComparePredicate::Gt));
   require(compare(n, one, ComparePredicate::Gt));
-  Value elements = builder.create<gpu::BinaryOp>(mma.getLoc(),
+  Value elements = builder.create<block::BinaryOp>(mma.getLoc(),
       builder.getIndexType(), m, n, BinaryOperator::Multiply);
   require(compare(elements, minimum, ComparePredicate::Ge));
-  Value remainder = builder.create<gpu::BinaryOp>(mma.getLoc(),
+  Value remainder = builder.create<block::BinaryOp>(mma.getLoc(),
       builder.getIndexType(), k, chunk, BinaryOperator::Remainder);
   require(compare(remainder, zero, ComparePredicate::Eq));
 
@@ -296,8 +296,8 @@ void boundNativeReductionWidth(MMAOp mma) {
   // Unit free axes and short K fragments retain the native reduction.
   auto choice = builder.create<scf::IfOp>(
       mma.getLoc(), TypeRange{mma.getResult().getType()}, split, true);
-  if (Attribute origin = mma->getAttr(gpu::originAttr))
-    choice->setAttr(gpu::originAttr, origin);
+  if (Attribute origin = mma->getAttr(block::originAttr))
+    choice->setAttr(block::originAttr, origin);
   for (bool useChunks : {true, false}) {
     Region &region = useChunks ? choice.getThenRegion() : choice.getElseRegion();
     builder.setInsertionPointToStart(&region.front());
@@ -328,8 +328,8 @@ bool matrixEpilogue(Value value, scf::ForOp traversal,
                            traversal, visited) ||
            matrixEpilogue(conditional.elseYield().getOperand(result.getResultNumber()),
                            traversal, visited);
-  if (!isa<gpu::CastOp, gpu::ReshapeOp, gpu::TransposeOp, gpu::BroadcastOp,
-           gpu::UnaryOp, gpu::BinaryOp, gpu::SelectOp>(operation))
+  if (!isa<block::CastOp, block::ReshapeOp, block::TransposeOp, block::BroadcastOp,
+           block::UnaryOp, block::BinaryOp, block::SelectOp>(operation))
     return false;
   return llvm::any_of(operation->getOperands(), [&](Value operand) {
     return matrixEpilogue(operand, traversal, visited);
@@ -339,7 +339,7 @@ bool matrixEpilogue(Value value, scf::ForOp traversal,
 } // namespace
 
 LogicalResult refineMMALoops(ModuleOp module) {
-  auto physicalKernel = gpu::getPhysicalKernel(module);
+  auto physicalKernel = block::getPhysicalKernel(module);
   if (failed(physicalKernel))
     return failure();
   SmallVector<scf::ForOp> loops;
@@ -348,22 +348,22 @@ LogicalResult refineMMALoops(ModuleOp module) {
   for (scf::ForOp loop : loops) {
     auto yield = cast<scf::YieldOp>(loop.getBody()->getTerminator());
     for (auto [index, argument] : llvm::enumerate(loop.getRegionIterArgs())) {
-      auto original = dyn_cast<gpu::FragmentType>(argument.getType());
+      auto original = dyn_cast<block::FragmentType>(argument.getType());
       if (!original || original.getShape().size() != 3 || !argument.hasOneUse())
         continue;
-      auto unit = dyn_cast<gpu::PhysicalExprAttr>(original.getShape()[0]);
+      auto unit = dyn_cast<block::PhysicalExprAttr>(original.getShape()[0]);
       if (!unit ||
           unit.getKind() !=
-              gpu::PhysicalExprKind::Constant ||
+              block::PhysicalExprKind::Constant ||
           unit.getValue() != 1)
         continue;
-      auto incoming = dyn_cast<gpu::ReshapeOp>(*argument.getUsers().begin());
-      auto outgoing = yield.getOperand(index).getDefiningOp<gpu::ReshapeOp>();
+      auto incoming = dyn_cast<block::ReshapeOp>(*argument.getUsers().begin());
+      auto outgoing = yield.getOperand(index).getDefiningOp<block::ReshapeOp>();
       if (!incoming || !outgoing || incoming->getBlock() != loop.getBody() ||
           outgoing->getBlock() != loop.getBody() ||
           !outgoing.getResult().hasOneUse())
         continue;
-      auto matrix = dyn_cast<gpu::FragmentType>(incoming.getResult().getType());
+      auto matrix = dyn_cast<block::FragmentType>(incoming.getResult().getType());
       auto mma = outgoing.getValue().getDefiningOp<MMAOp>();
       if (!matrix || matrix.getShape().size() != 2 || !mma ||
           mma.getAccumulator() != incoming.getResult() ||
@@ -373,7 +373,7 @@ LogicalResult refineMMALoops(ModuleOp module) {
         continue;
       // Project only at the loop boundaries; the native MMA carries a matrix.
       OpBuilder before(loop);
-      auto init = before.create<gpu::ReshapeOp>(
+      auto init = before.create<block::ReshapeOp>(
           loop.getLoc(), matrix, loop.getInitArgs()[index],
           incoming.getReassociation());
       loop.getInitArgsMutable()[index].assign(init.getResult());
@@ -387,7 +387,7 @@ LogicalResult refineMMALoops(ModuleOp module) {
       result.setType(matrix);
       OpBuilder after(loop);
       after.setInsertionPointAfter(loop);
-      auto restored = after.create<gpu::ReshapeOp>(
+      auto restored = after.create<block::ReshapeOp>(
           loop.getLoc(), original, result, restoreRelation);
       result.replaceAllUsesExcept(restored.getResult(), restored.getOperation());
     }
@@ -412,7 +412,7 @@ LogicalResult refineMMALoops(ModuleOp module) {
       store.setLatencyAttr(
           IntegerAttr::get(IntegerType::get(module.getContext(), 32), 3));
   });
-  gpu::eraseDeadPhysicalValues(*physicalKernel);
+  block::eraseDeadPhysicalValues(*physicalKernel);
   return success();
 }
 

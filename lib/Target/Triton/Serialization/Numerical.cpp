@@ -1,6 +1,7 @@
 #include "Intent/Target/Triton/Serialization/Numerical.h"
+#include "Intent/Target/NVIDIA/IR/Target.h"
 
-#include "Intent/Dialect/GPU/IR/Program.h"
+#include "Intent/Dialect/Block/IR/Program.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <type_traits>
@@ -10,14 +11,14 @@ using namespace mlir;
 namespace intent::triton {
 namespace {
 
-using Dependencies = gpu::PythonEmitter::Emitters::Dependencies;
+using Dependencies = block::PythonEmitter::Emitters::Dependencies;
 
 struct Translation {
   std::string expression;
   Dependencies dependencies;
 };
 
-Type elementType(Type type) { return gpu::PythonEmitter::elementType(type); }
+Type elementType(Type type) { return block::PythonEmitter::elementType(type); }
 
 FailureOr<std::string> scalarType(Operation *operation, Type type) {
   type = elementType(type);
@@ -27,7 +28,7 @@ FailureOr<std::string> scalarType(Operation *operation, Type type) {
       return operation->emitOpError("has no Triton numerical integer type"),
              failure();
   }
-  std::string result = gpu::pythonScalarType(
+  std::string result = block::pythonScalarType(
       type, {"tl.", "int1", "float64", "float8e4nv", "float8e5"});
   if (result.empty())
     return operation->emitOpError("has no Triton numerical scalar type"),
@@ -76,12 +77,12 @@ FailureOr<Translation> translate(arith::ConstantOp operation,
   Attribute attribute = operation.getValue();
   if (!isa<IntegerAttr, FloatAttr>(attribute))
     return operation.emitOpError(
-               "Python GPU constants require a scalar integer or floating value"),
+               "Python Block constants require a scalar integer or floating value"),
            failure();
   auto type = scalarType(operation, operation.getType());
   if (failed(type))
     return failure();
-  std::string literal = gpu::pythonLiteral(attribute);
+  std::string literal = block::pythonLiteral(attribute);
   auto floating = dyn_cast<FloatAttr>(attribute);
   if (!floating)
     return direct(std::move(literal));
@@ -129,7 +130,7 @@ FailureOr<Translation> libraryMath(Operation *operation, StringRef name,
   return library(std::move(expression));
 }
 
-FailureOr<Translation> translate(gpu::BinaryOp operation,
+FailureOr<Translation> translate(block::BinaryOp operation,
                                 ArrayRef<std::string> operands,
                                 bool compileTime) {
   const std::string &lhs = operands[0];
@@ -205,7 +206,7 @@ FailureOr<Translation> translate(gpu::BinaryOp operation,
   llvm_unreachable("unhandled Intent binary operator");
 }
 
-FailureOr<Translation> translate(gpu::UnaryOp operation,
+FailureOr<Translation> translate(block::UnaryOp operation,
                                 ArrayRef<std::string> operands, bool) {
   const std::string &input = operands.front();
   auto native = [&](StringRef name) {
@@ -252,14 +253,9 @@ FailureOr<Translation> translate(gpu::UnaryOp operation,
     return native("sigmoid");
   case UnaryOperator::Tanh:
     if (operation.getApproximate()) {
-      auto kernel = operation->getParentOfType<func::FuncOp>();
-      auto capabilities =
-          kernel ? kernel->getAttrOfType<gpu::CapabilitiesAttr>(
-                       gpu::capabilitiesAttr)
-                 : gpu::CapabilitiesAttr();
-      if (!capabilities ||
-          10 * capabilities.getComputeCapabilityMajor() +
-                  capabilities.getComputeCapabilityMinor() < 75)
+      auto device = nvidia::deviceOf(operation);
+      if (!device ||
+          10 * device.getComputeCapabilityMajor() + device.getComputeCapabilityMinor() < 75)
         return operation.emitOpError(
                    "native approximate tanh requires compute capability 7.5 or newer"),
                failure();
@@ -277,7 +273,7 @@ FailureOr<Translation> translate(gpu::UnaryOp operation,
   llvm_unreachable("unhandled Intent unary operator");
 }
 
-FailureOr<Translation> translate(gpu::CastOp operation,
+FailureOr<Translation> translate(block::CastOp operation,
                                 ArrayRef<std::string> operands, bool) {
   auto expression = numericalCast(operation, operation.getValue().getType(),
                                  operation.getResult().getType(),
@@ -287,7 +283,7 @@ FailureOr<Translation> translate(gpu::CastOp operation,
   return direct(std::move(*expression));
 }
 
-FailureOr<Translation> translate(gpu::BitcastOp operation,
+FailureOr<Translation> translate(block::BitcastOp operation,
                                 ArrayRef<std::string> operands, bool) {
   auto expression = numericalCast(operation, operation.getValue().getType(),
                                  operation.getResult().getType(),
@@ -297,7 +293,7 @@ FailureOr<Translation> translate(gpu::BitcastOp operation,
   return direct(std::move(*expression));
 }
 
-FailureOr<Translation> translate(gpu::CompareOp operation,
+FailureOr<Translation> translate(block::CompareOp operation,
                                 ArrayRef<std::string> operands, bool) {
   StringRef token;
   switch (operation.getPredicate()) {
@@ -323,7 +319,7 @@ FailureOr<Translation> translate(gpu::CompareOp operation,
   return direct("(" + operands[0] + " " + token.str() + " " + operands[1] + ")");
 }
 
-FailureOr<Translation> translate(gpu::SelectOp, ArrayRef<std::string> operands,
+FailureOr<Translation> translate(block::SelectOp, ArrayRef<std::string> operands,
                                 bool) {
   return direct("tl.where(" + operands[0] + ", " + operands[1] + ", " +
                 operands[2] + ")");
@@ -334,19 +330,19 @@ template <typename Op> FailureOr<Translation> inspect(Op operation) {
   return translate(operation, operands, false);
 }
 
-template <typename Op> void addNumerical(gpu::PythonEmitter::Emitters &emitters) {
+template <typename Op> void addNumerical(block::PythonEmitter::Emitters &emitters) {
   emitters.add<Op>(
       [](Op operation) { return failure(failed(inspect(operation))); },
-      [](Op operation, gpu::PythonEmitter &emitter) -> LogicalResult {
+      [](Op operation, block::PythonEmitter &emitter) -> LogicalResult {
         SmallVector<std::string> operands;
         for (auto [index, operand] : llvm::enumerate(operation->getOperands())) {
-          bool controlValue = std::is_same_v<Op, gpu::SelectOp> && index != 0;
+          bool controlValue = std::is_same_v<Op, block::SelectOp> && index != 0;
           operands.push_back(controlValue ? emitter.controlValueString(operand)
                                           : emitter.valueString(operand));
         }
         bool compileTime = false;
-        if constexpr (std::is_same_v<Op, gpu::BinaryOp> ||
-                      std::is_same_v<Op, gpu::CompareOp>) {
+        if constexpr (std::is_same_v<Op, block::BinaryOp> ||
+                      std::is_same_v<Op, block::CompareOp>) {
           Type type = operation.getResult().getType();
           compileTime = (type.isIndex() || type.isInteger(1)) &&
                         llvm::all_of(operation->getOperands(), [&](Value value) {
@@ -370,12 +366,12 @@ template <typename Op> void addNumerical(gpu::PythonEmitter::Emitters &emitters)
 
 } // namespace
 
-std::string integerDivision(gpu::PhysicalExprKind kind, StringRef lhs,
+std::string integerDivision(block::PhysicalExprKind kind, StringRef lhs,
                             StringRef rhs) {
   SignedDivision division(lhs, rhs);
   switch (kind) {
-  case gpu::PhysicalExprKind::FloorDiv: return division.floor();
-  case gpu::PhysicalExprKind::CeilDiv: return division.ceil();
+  case block::PhysicalExprKind::FloorDiv: return division.floor();
+  case block::PhysicalExprKind::CeilDiv: return division.ceil();
   default: llvm_unreachable("expected a physical integer division");
   }
 }
@@ -430,7 +426,7 @@ FailureOr<std::string> numericalCast(Operation *diagnostic, Type source,
                    *type, true);
 }
 
-void addNumericalOperations(gpu::PythonEmitter::Emitters &emitters) {
+void addNumericalOperations(block::PythonEmitter::Emitters &emitters) {
   emitters.replace<arith::ConstantOp>(
       [](arith::ConstantOp operation) {
         return failure(failed(inspect(operation)));
@@ -442,16 +438,16 @@ void addNumericalOperations(gpu::PythonEmitter::Emitters &emitters) {
           return failure();
         return std::move(translated->dependencies);
       });
-  addNumerical<gpu::BinaryOp>(emitters);
-  addNumerical<gpu::UnaryOp>(emitters);
-  addNumerical<gpu::CastOp>(emitters);
-  addNumerical<gpu::BitcastOp>(emitters);
-  addNumerical<gpu::CompareOp>(emitters);
-  addNumerical<gpu::SelectOp>(emitters);
+  addNumerical<block::BinaryOp>(emitters);
+  addNumerical<block::UnaryOp>(emitters);
+  addNumerical<block::CastOp>(emitters);
+  addNumerical<block::BitcastOp>(emitters);
+  addNumerical<block::CompareOp>(emitters);
+  addNumerical<block::SelectOp>(emitters);
 }
 
 LogicalResult emitNumericalConstant(arith::ConstantOp operation,
-                                   gpu::PythonEmitter &emitter) {
+                                   block::PythonEmitter &emitter) {
   auto translated = inspect(operation);
   if (failed(translated))
     return failure();

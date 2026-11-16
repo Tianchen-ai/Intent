@@ -70,7 +70,7 @@ Transformation group是完整的执行边界：group负责实际rewrite及其依
 
 ### 3.1 Construct executable program
 
-从KIR、canonical analyses与selected GPU capabilities建立[`kir-to-gpu.md`](kir-to-gpu.md)定义的完整initial program。Conversion同时完成types、regions、values、accesses与origin mapping，不产生等待emitter解释的holes。
+从KIR、canonical analyses与selected GPU capabilities建立[`kir-to-block.md`](kir-to-block.md)定义的完整initial program。Conversion同时完成types、regions、values、accesses与origin mapping，不产生等待emitter解释的holes。
 
 Construction仅关闭初始program及indexed-access composition。结构化source规范化、ownership/blocking、online summary与region/reduction/contraction realization属于随后明确的shared transformation groups，不隐藏在construction完成函数中。依赖顺序保证source relation在ownership变换前正规化，physical ranges在structured realization前形成，新产生的access在provider legalization前重新组合；mapping refinement与候选物化消费完成后的program。
 
@@ -174,7 +174,7 @@ Physical IR可以与KIR op graph不同，但变化必须属于KIR semantics与�
 
 ### 5.2 Construction verifier
 
-验证KIR coverage、origin mapping与第一份完整physical program，规则见[`kir-to-gpu.md`](kir-to-gpu.md)。
+验证KIR coverage、origin mapping与第一份完整physical program，规则见[`kir-to-block.md`](kir-to-block.md)。
 
 ### 5.3 Shared GPU verifier
 

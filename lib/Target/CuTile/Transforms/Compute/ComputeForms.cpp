@@ -1,15 +1,15 @@
 #include "ComputeForms.h"
-#include "Intent/Dialect/GPU/Analysis/Helpers.h"
-#include "Intent/Dialect/GPU/Transforms/Value/Helpers.h"
+#include "Intent/Dialect/Block/Analysis/Helpers.h"
+#include "Intent/Dialect/Block/Transforms/Value/Helpers.h"
 #include "Intent/Target/CuTile/Analysis/Program.h"
 #include "Intent/Target/CuTile/Analysis/IndexBounds.h"
 #include "Intent/Target/CuTile/IR/CuTileOps.h"
-#include "Intent/Dialect/GPU/Analysis/UniformValues.h"
-#include "Intent/Dialect/GPU/Analysis/Resources.h"
-#include "Intent/Dialect/GPU/Analysis/ValueSchema.h"
-#include "Intent/Dialect/GPU/IR/PhysicalExpressions.h"
-#include "Intent/Dialect/GPU/IR/Program.h"
-#include "Intent/Dialect/GPU/Transforms/Value/ValueMaterialization.h"
+#include "Intent/Dialect/Block/Analysis/UniformValues.h"
+#include "Intent/Dialect/Block/Analysis/Resources.h"
+#include "Intent/Dialect/Block/Analysis/ValueSchema.h"
+#include "Intent/Dialect/Block/IR/PhysicalExpressions.h"
+#include "Intent/Dialect/Block/IR/Program.h"
+#include "Intent/Dialect/Block/Transforms/Value/ValueMaterialization.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "llvm/ADT/APFloat.h"
 #include <numeric>
@@ -17,7 +17,7 @@
 using namespace mlir;
 namespace intent::cutile {
 std::optional<BinaryOperator> nativeCombineKind(Region &region) {
-  auto combine = gpu::queryBinaryCombine(region);
+  auto combine = block::queryBinaryCombine(region);
   if (!combine)
     return std::nullopt;
   if (combine->operation.getStrictRounding())
@@ -29,7 +29,7 @@ std::optional<BinaryOperator> nativeCombineKind(Region &region) {
       *kind == BinaryOperator::MinimumNum)
     return kind;
   Type element = region.front().getArgument(0).getType();
-  if (auto fragment = dyn_cast<gpu::FragmentType>(element))
+  if (auto fragment = dyn_cast<block::FragmentType>(element))
     element = fragment.getElementType();
   if (element.isIntOrIndex()) {
     if (*kind == BinaryOperator::Maximum)
@@ -83,7 +83,7 @@ LogicalResult formComputePrimitives(func::FuncOp kernel,
     // Preserve a diagnostic for unsupported native schemas: the ODS inferred
     // builder assumes inference succeeds once the provider selects the form.
     SmallVector<Type> resultTypes;
-    if (failed(gpu::inferScalarCollectiveResultTypes(
+    if (failed(block::inferScalarCollectiveResultTypes(
             operation->getLoc(), sources, axis, scan, resultTypes)))
       return failure();
     if (!llvm::equal(resultTypes, operation->getResultTypes()))
@@ -91,8 +91,8 @@ LogicalResult formComputePrimitives(func::FuncOp kernel,
           "native collective cannot preserve the shared result schema");
     return success();
   };
-  for (gpu::ReduceOp reduce : inputs.reductions) {
-    auto sourceType = cast<gpu::FragmentType>(reduce.getSources().front().getType());
+  for (block::ReduceOp reduce : inputs.reductions) {
+    auto sourceType = cast<block::FragmentType>(reduce.getSources().front().getType());
     bool allAxes = sourceType.getShape().size() > 1 &&
         reduce.getAxes().size() == sourceType.getShape().size();
     if (!reduce.getCaptures().empty() || (!allAxes && reduce.getAxes().size() != 1))
@@ -106,28 +106,28 @@ LogicalResult formComputePrimitives(func::FuncOp kernel,
       // A full reduction has no retained coordinate to preserve. Flatten the
       // complete tuple in one common order, then use the existing scalar tree.
       // This is target IR construction, not a serializer layout decision.
-      auto capacity = gpu::fragmentElementCount(sourceType);
-      if (!gpu::queryPositiveExtentBounds(capacity, kernel))
+      auto capacity = block::fragmentElementCount(sourceType);
+      if (!block::queryPositiveExtentBounds(capacity, kernel))
         return reduce.emitOpError("whole reduction extent has no finite representable bound");
-      if (auto count = gpu::constantPhysicalExpression(capacity))
-        capacity = gpu::PhysicalExprAttr::get(kernel.getContext(),
-            gpu::PhysicalExprKind::Constant, *count,
+      if (auto count = block::constantPhysicalExpression(capacity))
+        capacity = block::PhysicalExprAttr::get(kernel.getContext(),
+            block::PhysicalExprKind::Constant, *count,
             StringAttr::get(kernel.getContext(), ""),
             ArrayAttr::get(kernel.getContext(), {}));
-      auto [sourceId, dimensionId] = gpu::nextPhysicalAxisIdentities(kernel);
+      auto [sourceId, dimensionId] = block::nextPhysicalAxisIdentities(kernel);
       SmallVector<int64_t> axes(sourceType.getShape().size());
       std::iota(axes.begin(), axes.end(), 0);
       OpBuilder builder(reduce);
-      auto groups = builder.getArrayAttr({gpu::ReshapeGroupAttr::get(kernel.getContext(),
+      auto groups = builder.getArrayAttr({block::ReshapeGroupAttr::get(kernel.getContext(),
           builder.getDenseI64ArrayAttr(axes), builder.getDenseI64ArrayAttr({0}))});
       auto shape = builder.getArrayAttr({capacity});
-      auto mappings = builder.getArrayAttr({gpu::AxisMapAttr::get(
+      auto mappings = builder.getArrayAttr({block::AxisMapAttr::get(
           kernel.getContext(), sourceId, 0, dimensionId, 0, true)});
       for (Value &source : sources) {
-        auto type = cast<gpu::FragmentType>(source.getType());
-        auto flat = gpu::FragmentType::get(kernel.getContext(), type.getElementType(),
+        auto type = cast<block::FragmentType>(source.getType());
+        auto flat = block::FragmentType::get(kernel.getContext(), type.getElementType(),
             shape, mappings, type.getValidity(), type.getOwner());
-        source = builder.create<gpu::ReshapeOp>(reduce.getLoc(), flat, source, groups);
+        source = builder.create<block::ReshapeOp>(reduce.getLoc(), flat, source, groups);
       }
       axis = 0;
     }
@@ -143,13 +143,13 @@ LogicalResult formComputePrimitives(func::FuncOp kernel,
       auto replacement = builder.create<ReduceOp>(
           reduce.getLoc(), sources, ValueRange{}, axis,
           false, BinaryOperatorAttr::get(kernel.getContext(), *kind));
-      if (Attribute origin = reduce->getAttr(gpu::originAttr))
-        replacement->setAttr(gpu::originAttr, origin);
+      if (Attribute origin = reduce->getAttr(block::originAttr))
+        replacement->setAttr(block::originAttr, origin);
       rewriter.replace(reduce, replacement.getResults());
       continue;
     }
 
-    auto canonicalCombine = gpu::queryBinaryCombine(reduce.getCombine());
+    auto canonicalCombine = block::queryBinaryCombine(reduce.getCombine());
     bool propagatingMaximum =
         reduce.getSources().size() == 1 && canonicalCombine &&
         canonicalCombine->kind() == BinaryOperator::Maximum &&
@@ -158,7 +158,7 @@ LogicalResult formComputePrimitives(func::FuncOp kernel,
             reduce.getIdentities().front());
     if (propagatingMaximum) {
       auto sourceType =
-          dyn_cast<gpu::FragmentType>(sources.front().getType());
+          dyn_cast<block::FragmentType>(sources.front().getType());
       if (!sourceType || !isa<FloatType>(sourceType.getElementType()))
         return reduce.emitOpError(
             "cuTile propagating maximum reduction requires a floating tile");
@@ -166,7 +166,7 @@ LogicalResult formComputePrimitives(func::FuncOp kernel,
       Location location = reduce.getLoc();
       Type sourcePredicateType =
           withElementType(sourceType, builder.getI1Type());
-      auto isNan = builder.create<gpu::CompareOp>(
+      auto isNan = builder.create<block::CompareOp>(
           location, sourcePredicateType, sources.front(),
           sources.front(), ComparePredicate::Ne);
       auto anyNan = builder.create<ReduceOp>(
@@ -185,13 +185,13 @@ LogicalResult formComputePrimitives(func::FuncOp kernel,
               llvm::APFloat::getNaN(floatType.getFloatSemantics())));
       Value nanValue = nan.getResult();
       Type resultType = numericMaximum.getResult(0).getType();
-      if (isa<gpu::FragmentType>(resultType))
-        nanValue = builder.create<gpu::SplatOp>(location, resultType, nanValue);
-      auto replacement = builder.create<gpu::SelectOp>(
+      if (isa<block::FragmentType>(resultType))
+        nanValue = builder.create<block::SplatOp>(location, resultType, nanValue);
+      auto replacement = builder.create<block::SelectOp>(
           location, resultType, anyNan.getResult(0), nanValue,
           numericMaximum.getResult(0));
-      if (Attribute origin = reduce->getAttr(gpu::originAttr))
-        replacement->setAttr(gpu::originAttr, origin);
+      if (Attribute origin = reduce->getAttr(block::originAttr))
+        replacement->setAttr(block::originAttr, origin);
       rewriter.replace(reduce, ValueRange{replacement.getResult()});
       continue;
     }
@@ -201,22 +201,22 @@ LogicalResult formComputePrimitives(func::FuncOp kernel,
         reduce.getLoc(), sources,
         reduce.getIdentities(), axis, false,
         BinaryOperatorAttr());
-    if (failed(gpu::scalarizeElementwiseCallback(reduce.getCombine(),
+    if (failed(block::scalarizeElementwiseCallback(reduce.getCombine(),
                                                  replacement.getCombine())))
       return failure();
-    if (Attribute origin = reduce->getAttr(gpu::originAttr))
-      replacement->setAttr(gpu::originAttr, origin);
+    if (Attribute origin = reduce->getAttr(block::originAttr))
+      replacement->setAttr(block::originAttr, origin);
     rewriter.replace(reduce, replacement.getResults());
   }
 
-  for (gpu::ScanOp scan : inputs.scans) {
+  for (block::ScanOp scan : inputs.scans) {
     if (!scan.getCaptures().empty())
       return scan.emitOpError("cuTile scan lowering requires no captures");
     std::optional<BinaryOperator> kind = nativeCombineKind(scan.getCombine());
     bool native = scan.getSources().size() == 1 && kind &&
                   *kind == BinaryOperator::Add &&
                   isNativeReductionIdentity(*kind, scan.getIdentities().front());
-    Type element = gpu::uniformElementType(scan.getSources().front().getType());
+    Type element = block::uniformElementType(scan.getSources().front().getType());
     bool exclusiveSum = !scan.getInclusive() && native &&
                         isa<IntegerType, IndexType>(element) &&
                         !element.isInteger(1);
@@ -233,27 +233,27 @@ LogicalResult formComputePrimitives(func::FuncOp kernel,
         native ? BinaryOperatorAttr::get(kernel.getContext(), *kind)
                : BinaryOperatorAttr());
     if (!native &&
-        failed(gpu::scalarizeElementwiseCallback(scan.getCombine(),
+        failed(block::scalarizeElementwiseCallback(scan.getCombine(),
                                                 replacement.getCombine())))
       return failure();
-    if (Attribute origin = scan->getAttr(gpu::originAttr))
-      replacement->setAttr(gpu::originAttr, origin);
+    if (Attribute origin = scan->getAttr(block::originAttr))
+      replacement->setAttr(block::originAttr, origin);
     SmallVector<Value> results(replacement.getResults());
     if (exclusiveSum)
       // Modular integer addition has an exact inverse. This also preserves
       // reverse prefixes; floating subtraction is not an equivalent rewrite.
-      results[0] = builder.create<gpu::BinaryOp>(
+      results[0] = builder.create<block::BinaryOp>(
           scan.getLoc(), results[0].getType(), results[0], scan.getSources().front(),
           BinaryOperator::Subtract);
     rewriter.replace(scan, results);
   }
 
-  for (gpu::ContractOp contract : inputs.contracts) {
+  for (block::ContractOp contract : inputs.contracts) {
     if (failed(formMMA(kernel, contract, rewriter)))
       return failure();
   }
 
-  for (gpu::ScaledContractOp contract : inputs.scaledContracts) {
+  for (block::ScaledContractOp contract : inputs.scaledContracts) {
     if (failed(formScaledMMA(kernel, contract, rewriter)))
       return failure();
   }

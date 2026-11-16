@@ -1,12 +1,12 @@
 #include "Accesses.h"
 #include "Coordinates.h"
 #include "TileIndices.h"
-#include "Intent/Dialect/GPU/Analysis/IndexRelations.h"
-#include "Intent/Dialect/GPU/Analysis/ValueSchema.h"
-#include "Intent/Dialect/GPU/IR/Program.h"
-#include "Intent/Dialect/GPU/IR/FragmentOpInterface.h"
-#include "Intent/Dialect/GPU/Transforms/Value/ValueMaterialization.h"
-#include "Intent/Dialect/GPU/Transforms/Configuration/PhysicalParameters.h"
+#include "Intent/Dialect/Block/Analysis/IndexRelations.h"
+#include "Intent/Dialect/Block/Analysis/ValueSchema.h"
+#include "Intent/Dialect/Block/IR/Program.h"
+#include "Intent/Dialect/Block/IR/FragmentOpInterface.h"
+#include "Intent/Dialect/Block/Transforms/Value/ValueMaterialization.h"
+#include "Intent/Dialect/Block/Transforms/Configuration/PhysicalParameters.h"
 #include "Intent/Target/CuTile/Analysis/IndexBounds.h"
 #include "Intent/Target/CuTile/IR/CuTileOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -18,13 +18,13 @@ using namespace mlir;
 namespace intent::cutile {
 
 LogicalResult formNativeAtomics(func::FuncOp kernel,
-    ArrayRef<gpu::AtomicRMWOp> atomics, NativeFormRewriter &rewriter) {
-  for (gpu::AtomicRMWOp atomic : atomics) {
-    auto access = cast<gpu::AccessOpInterface>(atomic.getOperation());
-    gpu::PhysicalProgramAnalysis analysis(kernel);
+    ArrayRef<block::AtomicRMWOp> atomics, NativeFormRewriter &rewriter) {
+  for (block::AtomicRMWOp atomic : atomics) {
+    auto access = cast<block::AccessOpInterface>(atomic.getOperation());
+    block::PhysicalProgramAnalysis analysis(kernel);
     const auto accessBounds = analysis.accessBounds(atomic);
     bool activeInBounds = accessBounds.isExact();
-    auto view = dyn_cast<gpu::ViewType>(access.getAccessResource().getType());
+    auto view = dyn_cast<block::ViewType>(access.getAccessResource().getType());
     if (!view)
       return atomic.emitOpError(
           "cuTile atomic RMW requires an external view resource");
@@ -32,12 +32,12 @@ LogicalResult formNativeAtomics(func::FuncOp kernel,
         (!access.getAccessResult().use_empty() || view.getRank() == 0))
       return atomic.emitOpError(
           "masked cuTile array atomic requires a ranked view and an unused old value");
-    auto tileType = dyn_cast<gpu::FragmentType>(access.getAccessPayloads().front().getType());
+    auto tileType = dyn_cast<block::FragmentType>(access.getAccessPayloads().front().getType());
     Type element = view.getElementType();
     if (tileType && (element.isF16() || element.isBF16()) &&
         atomic.getKind() == AtomicRMWKind::Add &&
         atomic.getOrdering() == AtomicOrdering::Relaxed &&
-        atomic.getSharing() == gpu::AtomicSharingDomain::KernelInvocation &&
+        atomic.getSharing() == block::AtomicSharingDomain::KernelInvocation &&
         access.getAccessResult().use_empty()) {
       auto boundary = analysis.boundaryValidity(atomic);
       auto plan = analyzeNativeTileAccess(access, kernel, accessBounds);
@@ -54,16 +54,16 @@ LogicalResult formNativeAtomics(func::FuncOp kernel,
         auto emit = [&](OpBuilder &nested) {
           Value value = access.getAccessPayloads().front();
           if (!isIdentityPermutation(plan->toResource))
-            value = nested.create<gpu::TransposeOp>(
+            value = nested.create<block::TransposeOp>(
                 atomic.getLoc(), plan->packedType, value, plan->toResource);
           if (plan->packedToResource)
-            value = nested.create<gpu::ReshapeOp>(
+            value = nested.create<block::ReshapeOp>(
                 atomic.getLoc(), plan->resourceType, value,
                 plan->packedToResource);
           auto replacement = nested.create<TileAtomicAddOp>(
               atomic.getLoc(), access.getAccessResource(), indices->values, value);
-          if (Attribute origin = atomic->getAttr(gpu::originAttr))
-            replacement->setAttr(gpu::originAttr, origin);
+          if (Attribute origin = atomic->getAttr(block::originAttr))
+            replacement->setAttr(block::originAttr, origin);
         };
         if (*originGuard) {
           auto conditional = builder.create<scf::IfOp>(
@@ -80,7 +80,7 @@ LogicalResult formNativeAtomics(func::FuncOp kernel,
       }
     }
     OpBuilder builder(atomic);
-    auto target = dyn_cast<gpu::FragmentType>(access.getAccessPayloads().front().getType());
+    auto target = dyn_cast<block::FragmentType>(access.getAccessPayloads().front().getType());
     FailureOr<SmallVector<Value>> coordinates = target
         ? materializeCoordinateDomains(builder, access)
         : orderedCoordinates(access);
@@ -93,22 +93,22 @@ LogicalResult formNativeAtomics(func::FuncOp kernel,
       Type coordinateType = withElementType(access.getAccessPayloads().front().getType(),
                                             builder.getIndexType());
       Value zero = builder.create<arith::ConstantIndexOp>(atomic.getLoc(), 0);
-      Value end = builder.create<gpu::DimOp>(
+      Value end = builder.create<block::DimOp>(
           atomic.getLoc(), builder.getIndexType(), access.getAccessResource(), 0);
       for (auto [axis, coordinate] : llvm::enumerate(*coordinates)) {
         Type indexed = withElementType(coordinate.getType(),
                                        builder.getIndexType());
         if (coordinate.getType() != indexed)
-          coordinate = builder.create<gpu::CastOp>(atomic.getLoc(), indexed,
+          coordinate = builder.create<block::CastOp>(atomic.getLoc(), indexed,
                                                    coordinate);
-        auto active = gpu::projectPhysicalValueToSchema(
+        auto active = block::projectPhysicalValueToSchema(
             builder, atomic.getLoc(), coordinate, coordinateType);
-        auto inactive = gpu::projectPhysicalValueToSchema(
+        auto inactive = block::projectPhysicalValueToSchema(
             builder, atomic.getLoc(), axis == 0 ? end : zero, coordinateType);
         if (failed(active) || failed(inactive))
           return atomic.emitOpError(
               "masked atomic coordinate cannot adopt its value domain");
-        (*coordinates)[axis] = builder.create<gpu::SelectOp>(
+        (*coordinates)[axis] = builder.create<block::SelectOp>(
             atomic.getLoc(), coordinateType, access.getAccessValidity(), *active,
             *inactive);
       }
@@ -117,8 +117,8 @@ LogicalResult formNativeAtomics(func::FuncOp kernel,
         atomic.getLoc(), access.getAccessResult().getType(), access.getAccessResource(),
         *coordinates, access.getAccessPayloads().front(), atomic.getKind(), atomic.getOrdering(),
         atomic.getSharing(), activeInBounds ? builder.getUnitAttr() : UnitAttr());
-    if (Attribute origin = atomic->getAttr(gpu::originAttr))
-      replacement->setAttr(gpu::originAttr, origin);
+    if (Attribute origin = atomic->getAttr(block::originAttr))
+      replacement->setAttr(block::originAttr, origin);
     rewriter.replace(atomic, ValueRange{replacement.getResult()});
   }
   return success();

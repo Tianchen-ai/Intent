@@ -1,11 +1,11 @@
 #include "Gathers.h"
-#include "Intent/Dialect/GPU/IR/Program.h"
-#include "Intent/Dialect/GPU/Analysis/IndexRelations.h"
-#include "Intent/Dialect/GPU/Analysis/PhysicalProgram.h"
-#include "Intent/Dialect/GPU/Analysis/ValueSchema.h"
-#include "Intent/Dialect/GPU/Transforms/Storage/FragmentSnapshot.h"
-#include "Intent/Dialect/GPU/Transforms/Storage/Workspace.h"
-#include "Intent/Dialect/GPU/Transforms/Value/ValueMaterialization.h"
+#include "Intent/Dialect/Block/IR/Program.h"
+#include "Intent/Dialect/Block/Analysis/IndexRelations.h"
+#include "Intent/Dialect/Block/Analysis/PhysicalProgram.h"
+#include "Intent/Dialect/Block/Analysis/ValueSchema.h"
+#include "Intent/Dialect/Block/Transforms/Storage/FragmentSnapshot.h"
+#include "Intent/Dialect/Block/Transforms/Storage/Workspace.h"
+#include "Intent/Dialect/Block/Transforms/Value/ValueMaterialization.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Dominance.h"
@@ -28,27 +28,27 @@ struct GatherSourceCapacity {
   bool constant = true;
 };
 
-std::optional<GatherSourceCapacity> sourceCapacity(gpu::FragmentType source,
+std::optional<GatherSourceCapacity> sourceCapacity(block::FragmentType source,
                                                   func::FuncOp kernel) {
   GatherSourceCapacity capacity;
   int64_t bytes = (source.getElementType().getIntOrFloatBitWidth() + 7) / 8;
   for (Attribute attribute : source.getShape()) {
-    auto extent = cast<gpu::PhysicalExprAttr>(attribute);
-    auto bounds = gpu::queryPositiveExtentBounds(extent, kernel);
+    auto extent = cast<block::PhysicalExprAttr>(attribute);
+    auto bounds = block::queryPositiveExtentBounds(extent, kernel);
     if (!bounds || capacity.maximumElements >
                        std::numeric_limits<int64_t>::max() / bounds->second)
       return std::nullopt;
     capacity.minimumElements *= bounds->first;
     capacity.maximumElements *= bounds->second;
-    capacity.constant &= extent.getKind() == gpu::PhysicalExprKind::Constant;
+    capacity.constant &= extent.getKind() == block::PhysicalExprKind::Constant;
   }
   if (capacity.maximumElements > std::numeric_limits<int64_t>::max() / bytes)
     return std::nullopt;
   return capacity;
 }
 
-scf::ForOp repeatedReadLoop(gpu::GatherOp gather, func::FuncOp kernel) {
-  gpu::IndexRelations relations;
+scf::ForOp repeatedReadLoop(block::GatherOp gather, func::FuncOp kernel) {
+  block::IndexRelations relations;
   for (Operation *parent = gather->getParentOp(); parent != kernel;
        parent = parent->getParentOp()) {
     auto loop = dyn_cast<scf::ForOp>(parent);
@@ -61,23 +61,23 @@ scf::ForOp repeatedReadLoop(gpu::GatherOp gather, func::FuncOp kernel) {
       continue;
     llvm::DenseMap<Value, bool> varying;
     if (llvm::any_of(gather.getCoordinates(), [&](Value coordinate) {
-          return gpu::variesWithIteration(coordinate, loop, varying);
+          return block::variesWithIteration(coordinate, loop, varying);
         }))
       return loop;
   }
   return {};
 }
 
-bool isRepeatedScalarRead(gpu::GatherOp gather, func::FuncOp kernel,
+bool isRepeatedScalarRead(block::GatherOp gather, func::FuncOp kernel,
                           const GatherSourceCapacity &capacity,
-                          gpu::PhysicalProgramAnalysis &analysis) {
-  auto source = cast<gpu::FragmentType>(gather.getSource().getType());
-  auto capabilities = kernel->getAttrOfType<gpu::CapabilitiesAttr>(gpu::capabilitiesAttr);
-  if (isa<gpu::FragmentType>(gather.getResult().getType()) ||
+                          block::PhysicalProgramAnalysis &analysis) {
+  auto source = cast<block::FragmentType>(gather.getSource().getType());
+  auto capabilities = kernel->getAttrOfType<block::CapabilitiesAttr>(block::capabilitiesAttr);
+  if (isa<block::FragmentType>(gather.getResult().getType()) ||
       gather.getSourceAxes().size() != source.getShape().size() ||
       !llvm::all_of(gather.getCoordinates(), [](Value value) {
         return value.getType().isIndex();
-      }) || capacity.maximumElements <= capabilities.getMaxThreadsPerBlock())
+      }) || capacity.maximumElements <= capabilities.getPreferredVectorElements())
     return false;
   for (unsigned axis = 0; axis < source.getShape().size(); ++axis)
     if (analysis.axisRealization(gather.getSource(), axis).constructionScalarSeed)
@@ -86,11 +86,11 @@ bool isRepeatedScalarRead(gpu::GatherOp gather, func::FuncOp kernel,
 }
 
 bool endsSourceLifetimeBeforeReads(Value source,
-                                  ArrayRef<gpu::GatherOp> readers,
+                                  ArrayRef<block::GatherOp> readers,
                                   func::FuncOp kernel) {
   SmallVector<Operation *> loops;
   llvm::SmallPtrSet<Operation *, 8> selected;
-  for (gpu::GatherOp reader : readers) {
+  for (block::GatherOp reader : readers) {
     selected.insert(reader);
     auto loop = repeatedReadLoop(reader, kernel);
     if (!loop) return false;
@@ -107,7 +107,7 @@ bool endsSourceLifetimeBeforeReads(Value source,
       // Without their component/control flow proof, preceding the loop alone
       // does not establish that the native representation has become dead.
       if (user->getNumRegions() || llvm::any_of(user->getResultTypes(), [](Type type) {
-            return isa<gpu::RecordType>(type);
+            return isa<block::RecordType>(type);
           }))
         return false;
       // A full-value consumer in, beside or after the loop retains this SSA
@@ -118,8 +118,8 @@ bool endsSourceLifetimeBeforeReads(Value source,
         return false;
       // These values may share the source's native representation. A wrapper
       // before the loop does not end its lifetime if its users are still inside.
-      if (isa<gpu::CastOp, gpu::BitcastOp, gpu::BroadcastOp,
-              gpu::ReshapeOp, gpu::TransposeOp, gpu::SelectOp>(user))
+      if (isa<block::CastOp, block::BitcastOp, block::BroadcastOp,
+              block::ReshapeOp, block::TransposeOp, block::SelectOp>(user))
         llvm::append_range(values, user->getResults());
     }
   }
@@ -127,7 +127,7 @@ bool endsSourceLifetimeBeforeReads(Value source,
 }
 
 Value largeSourceGuard(Value source, int64_t threshold) {
-  auto type = cast<gpu::FragmentType>(source.getType());
+  auto type = cast<block::FragmentType>(source.getType());
   OpBuilder builder(source.getContext());
   if (Operation *definition = source.getDefiningOp())
     builder.setInsertionPointAfter(definition);
@@ -136,27 +136,27 @@ Value largeSourceGuard(Value source, int64_t threshold) {
   Location location = source.getLoc();
   Value elements = builder.create<arith::ConstantIndexOp>(location, 1);
   for (Attribute attribute : type.getShape()) {
-    Value extent = builder.create<gpu::PhysicalExprOp>(
-        location, builder.getIndexType(), cast<gpu::PhysicalExprAttr>(attribute));
-    elements = builder.create<gpu::BinaryOp>(location, builder.getIndexType(),
+    Value extent = builder.create<block::PhysicalExprOp>(
+        location, builder.getIndexType(), cast<block::PhysicalExprAttr>(attribute));
+    elements = builder.create<block::BinaryOp>(location, builder.getIndexType(),
                                             elements, extent, BinaryOperator::Multiply);
   }
   Value limit = builder.create<arith::ConstantIndexOp>(location, threshold);
-  return builder.create<gpu::CompareOp>(location, builder.getI1Type(), elements,
+  return builder.create<block::CompareOp>(location, builder.getI1Type(), elements,
                                         limit, ComparePredicate::Gt);
 }
 
 } // namespace
 
 LogicalResult materializeGatherSources(func::FuncOp kernel) {
-  auto capabilities = kernel->getAttrOfType<gpu::CapabilitiesAttr>(gpu::capabilitiesAttr);
-  gpu::PhysicalProgramAnalysis analysis(kernel);
-  llvm::MapVector<Value, SmallVector<gpu::GatherOp>> readers;
-  kernel.walk([&](gpu::GatherOp gather) {
-    if (!gpu::isProgramAllocationContext(gather, kernel))
+  auto capabilities = kernel->getAttrOfType<block::CapabilitiesAttr>(block::capabilitiesAttr);
+  block::PhysicalProgramAnalysis analysis(kernel);
+  llvm::MapVector<Value, SmallVector<block::GatherOp>> readers;
+  kernel.walk([&](block::GatherOp gather) {
+    if (!block::isProgramAllocationContext(gather, kernel))
       return;
-    auto source = dyn_cast<gpu::FragmentType>(gather.getSource().getType());
-    auto result = dyn_cast<gpu::FragmentType>(gather.getResult().getType());
+    auto source = dyn_cast<block::FragmentType>(gather.getSource().getType());
+    auto result = dyn_cast<block::FragmentType>(gather.getResult().getType());
     if (!source || gather.getCoordinates().empty() ||
         belongsToSplitGatherPair(gather) ||
         !isa<FloatType, IntegerType>(source.getElementType()))
@@ -165,7 +165,7 @@ LogicalResult materializeGatherSources(func::FuncOp kernel) {
     if (!capacity) return;
     int64_t bytes = (source.getElementType().getIntOrFloatBitWidth() + 7) / 8;
     bool oversized = capacity->constant && capacity->maximumElements * bytes >
-                                               capabilities.getMaxDynamicSharedMemoryPerBlock();
+                                               capabilities.getLocalStorageBudgetBytes();
     if (!oversized && !isRepeatedScalarRead(gather, kernel, *capacity, analysis)) return;
     SmallVector<Value> selected(source.getShape().size());
     for (auto [coordinate, axis] :
@@ -178,27 +178,27 @@ LogicalResult materializeGatherSources(func::FuncOp kernel) {
       } else {
         if (!result)
           return;
-        auto mapping = cast<gpu::AxisMapAttr>(source.getAxisMaps()[axis]);
-        auto projection = gpu::queryFragmentAxis(result, gpu::sourceAxisIdentity(mapping));
+        auto mapping = cast<block::AxisMapAttr>(source.getAxisMaps()[axis]);
+        auto projection = block::queryFragmentAxis(result, block::sourceAxisIdentity(mapping));
         if (!projection.isExact() ||
             projection.dimensionId != mapping.getDimensionId() ||
             result.getShape()[projection.fragmentAxis] != source.getShape()[axis])
           return;
-        auto ordinal = gpu::AxisMapAttr::get(kernel.getContext(),
+        auto ordinal = block::AxisMapAttr::get(kernel.getContext(),
             mapping.getSourceId(), mapping.getSourceAxis(), mapping.getDimensionId(),
             0, mapping.getDerived());
-        coordinateType = gpu::FragmentType::get(kernel.getContext(),
+        coordinateType = block::FragmentType::get(kernel.getContext(),
             IndexType::get(kernel.getContext()), ArrayAttr::get(kernel.getContext(),
                 {source.getShape()[axis]}), ArrayAttr::get(kernel.getContext(), {ordinal}),
             source.getValidity(), source.getOwner());
       }
-      if (auto coordinate = dyn_cast<gpu::FragmentType>(coordinateType)) {
+      if (auto coordinate = dyn_cast<block::FragmentType>(coordinateType)) {
         if (!result)
           return;
-        auto projected = gpu::FragmentType::get(kernel.getContext(),
+        auto projected = block::FragmentType::get(kernel.getContext(),
             coordinate.getElementType(), result.getShape(), result.getAxisMaps(),
             result.getValidity(), result.getOwner());
-        if (!gpu::queryBroadcastProjection(coordinate, projected).isExact())
+        if (!block::queryBroadcastProjection(coordinate, projected).isExact())
           return;
       }
     }
@@ -209,20 +209,20 @@ LogicalResult materializeGatherSources(func::FuncOp kernel) {
   for (auto &readerGroup : readers) {
     auto &gathers = readerGroup.second;
     Value source = gathers.front().getSource();
-    auto payload = cast<gpu::FragmentType>(source.getType());
+    auto payload = cast<block::FragmentType>(source.getType());
     auto capacity = sourceCapacity(payload, kernel);
     if (!capacity) return gathers.front().emitOpError("gather snapshot lost its finite source capacity");
     int64_t bytes = (payload.getElementType().getIntOrFloatBitWidth() + 7) / 8;
     bool oversized = capacity->constant && capacity->maximumElements * bytes >
-                                               capabilities.getMaxDynamicSharedMemoryPerBlock();
+                                               capabilities.getLocalStorageBudgetBytes();
     if (!oversized && !endsSourceLifetimeBeforeReads(source, gathers, kernel)) continue;
     // Large-source selection is a profitability choice, not a proof about the
     // native layout. Bind unknown coverage sizes with the actual constexpr
     // extent so inexpensive small-domain gathers retain their native path.
     Value sizeEnabled;
-    if (!oversized && capacity->minimumElements <= capabilities.getMaxThreadsPerBlock())
-      sizeEnabled = largeSourceGuard(source, capabilities.getMaxThreadsPerBlock());
-    Value domainEnabled = gpu::materializeFragmentSnapshotReadDomain(source, gathers);
+    if (!oversized && capacity->minimumElements <= capabilities.getPreferredVectorElements())
+      sizeEnabled = largeSourceGuard(source, capabilities.getPreferredVectorElements());
+    Value domainEnabled = block::materializeFragmentSnapshotReadDomain(source, gathers);
     Value enabled = sizeEnabled ? sizeEnabled : domainEnabled;
     if (sizeEnabled && domainEnabled) {
       Operation *after = sizeEnabled.getDefiningOp();
@@ -232,15 +232,15 @@ LogicalResult materializeGatherSources(func::FuncOp kernel) {
         after = domain;
       OpBuilder builder(after);
       builder.setInsertionPointAfter(after);
-      enabled = builder.create<gpu::BinaryOp>(source.getLoc(), builder.getI1Type(),
+      enabled = builder.create<block::BinaryOp>(source.getLoc(), builder.getI1Type(),
           sizeEnabled, domainEnabled, BinaryOperator::LogicalAnd);
     }
-    auto storage = gpu::materializeFragmentSnapshot(source, enabled);
+    auto storage = block::materializeFragmentSnapshot(source, enabled);
     if (failed(storage)) return failure();
-    for (gpu::GatherOp gather : gathers) {
+    for (block::GatherOp gather : gathers) {
       Value replacement;
       if (!sizeEnabled) {
-        auto value = gpu::loadFragmentSnapshot(gather, *storage);
+        auto value = block::loadFragmentSnapshot(gather, *storage);
         if (failed(value)) return failure();
         replacement = *value;
       } else {
@@ -248,10 +248,10 @@ LogicalResult materializeGatherSources(func::FuncOp kernel) {
         auto branch = builder.create<scf::IfOp>(gather.getLoc(),
             TypeRange{gather.getResult().getType()}, sizeEnabled, true);
         builder.setInsertionPointToStart(branch.elseBlock());
-        auto native = cast<gpu::GatherOp>(builder.clone(*gather));
+        auto native = cast<block::GatherOp>(builder.clone(*gather));
         builder.create<scf::YieldOp>(gather.getLoc(), native.getResult());
         gather->moveBefore(branch.thenBlock(), branch.thenBlock()->end());
-        auto value = gpu::loadFragmentSnapshot(gather, *storage);
+        auto value = block::loadFragmentSnapshot(gather, *storage);
         if (failed(value)) return failure();
         builder.setInsertionPointToEnd(branch.thenBlock());
         builder.create<scf::YieldOp>(gather.getLoc(), *value);
@@ -261,7 +261,7 @@ LogicalResult materializeGatherSources(func::FuncOp kernel) {
       gather.erase();
     }
   }
-  gpu::eraseDeadPhysicalValues(kernel);
+  block::eraseDeadPhysicalValues(kernel);
   return success();
 }
 

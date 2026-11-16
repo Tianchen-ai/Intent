@@ -1,9 +1,9 @@
 #include "Intent/Target/CuTile/Analysis/Tuning.h"
 
-#include "Intent/Dialect/GPU/Analysis/ValueSchema.h"
-#include "Intent/Dialect/GPU/Analysis/ProgramInterface.h"
-#include "Intent/Dialect/GPU/IR/GPUOps.h"
-#include "Intent/Dialect/GPU/IR/Program.h"
+#include "Intent/Dialect/Block/Analysis/ValueSchema.h"
+#include "Intent/Dialect/Block/Analysis/ProgramInterface.h"
+#include "Intent/Dialect/Block/IR/BlockOps.h"
+#include "Intent/Dialect/Block/IR/Program.h"
 #include "Intent/Target/CuTile/IR/CuTileOps.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -22,9 +22,9 @@ bool isRuntimeScalar(BlockArgument argument) {
   auto kernel = dyn_cast<func::FuncOp>(argument.getOwner()->getParentOp());
   if (!kernel)
     return false;
-  auto binding = gpu::getArgumentBinding(argument);
-  return binding && binding.getKind() == gpu::ArgumentKind::Public &&
-         !isa<gpu::ViewType>(argument.getType());
+  auto binding = block::getArgumentBinding(argument);
+  return binding && binding.getKind() == block::ArgumentKind::Public &&
+         !isa<block::ViewType>(argument.getType());
 }
 
 // Payload stores may feed later loads, including through another external
@@ -37,8 +37,8 @@ struct MemoryReads {
   explicit MemoryReads(func::FuncOp kernel) {
     kernel.walk([&](Operation *operation) {
       if (isa<TileLoadOp, ScalarLoadOp, GatherLoadOp, AtomicRMWOp,
-              gpu::LoadOp, gpu::GatherOp, gpu::AtomicLoadOp,
-              gpu::AtomicRMWOp, gpu::AtomicCompareExchangeOp>(operation)) {
+              block::LoadOp, block::GatherOp, block::AtomicLoadOp,
+              block::AtomicRMWOp, block::AtomicCompareExchangeOp>(operation)) {
         llvm::append_range(values, operation->getResults());
         return;
       }
@@ -71,9 +71,9 @@ bool isStoredPayload(OpOperand &use) {
     return &use == &store.getValueMutable();
   if (auto store = dyn_cast<AtomicRMWOp>(operation))
     return &use == &store.getValueMutable();
-  if (auto store = dyn_cast<gpu::StoreOp>(operation))
+  if (auto store = dyn_cast<block::StoreOp>(operation))
     return &use == &store.getValueMutable();
-  if (auto store = dyn_cast<gpu::ScatterReduceOp>(operation))
+  if (auto store = dyn_cast<block::ScatterReduceOp>(operation))
     return &use == &store.getValueMutable();
   return false;
 }
@@ -81,9 +81,9 @@ bool isStoredPayload(OpOperand &use) {
 bool isDataOperation(Operation *operation) {
   // A whitelist is intentional: Pure also includes range/index construction,
   // so it is not sufficient to establish a data-only dependency.
-  return isa<gpu::SplatOp, gpu::BroadcastOp, gpu::UnaryOp, gpu::BinaryOp,
-             gpu::CompareOp, gpu::SelectOp, gpu::CastOp, gpu::BitcastOp,
-             gpu::ReshapeOp, gpu::TransposeOp, MMAOp, ScaledMMAOp>(operation);
+  return isa<block::SplatOp, block::BroadcastOp, block::UnaryOp, block::BinaryOp,
+             block::CompareOp, block::SelectOp, block::CastOp, block::BitcastOp,
+             block::ReshapeOp, block::TransposeOp, MMAOp, ScaledMMAOp>(operation);
 }
 
 bool hasOnlyDataUses(Value argument, const MemoryReads &reads) {
@@ -139,12 +139,12 @@ llvm::SmallBitVector getTuningKeyScalarArguments(func::FuncOp kernel) {
   // Scalar ABI dependencies can survive only in parameter, type or launch
   // attributes. Walking SSA alone would miss them after canonicalization.
   AttrTypeWalker expressions;
-  expressions.addWalk([&](gpu::PhysicalExprAttr expression) {
-    if (gpu::isShapeBound(expression) ||
+  expressions.addWalk([&](block::PhysicalExprAttr expression) {
+    if (block::isShapeBound(expression) ||
         expression.getKind() !=
-            gpu::PhysicalExprKind::ScalarABI)
+            block::PhysicalExprKind::ScalarABI)
       return;
-    auto argument = gpu::resolveArgument(kernel, expression.getArgumentReference());
+    auto argument = block::resolveArgument(kernel, expression.getArgumentReference());
     if (argument && isRuntimeScalar(argument))
       retained.set(argument.getArgNumber());
   });

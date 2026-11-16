@@ -1,6 +1,6 @@
 #include "Intent/Target/Triton/Analysis/Program.h"
-#include "Intent/Dialect/GPU/Analysis/PhysicalProgram.h"
-#include "Intent/Dialect/GPU/IR/Program.h"
+#include "Intent/Dialect/Block/Analysis/PhysicalProgram.h"
+#include "Intent/Dialect/Block/IR/Program.h"
 #include "Intent/Target/Triton/Analysis/Configuration.h"
 #include "Intent/Target/Triton/IR/Configuration.h"
 #include "Intent/Target/Triton/IR/Program.h"
@@ -29,9 +29,9 @@ bool isTritonScalarType(Type type) {
 bool isTritonDataType(Type type) {
   if (isTritonScalarType(type))
     return true;
-  if (auto fragment = dyn_cast<gpu::FragmentType>(type))
+  if (auto fragment = dyn_cast<block::FragmentType>(type))
     return isTritonScalarType(fragment.getElementType());
-  if (auto record = dyn_cast<gpu::RecordType>(type)) {
+  if (auto record = dyn_cast<block::RecordType>(type)) {
     for (Attribute field : record.getFieldTypes())
       if (!isTritonDataType(cast<TypeAttr>(field).getValue()))
         return false;
@@ -40,9 +40,9 @@ bool isTritonDataType(Type type) {
   return false;
 }
 
-LogicalResult verifyAccess(gpu::AccessOpInterface access) {
+LogicalResult verifyAccess(block::AccessOpInterface access) {
   Operation *operation = access.getOperation();
-  auto view = dyn_cast<gpu::ViewType>(access.getAccessResource().getType());
+  auto view = dyn_cast<block::ViewType>(access.getAccessResource().getType());
   auto argument = dyn_cast<BlockArgument>(access.getAccessResource());
   auto kernel = operation->getParentOfType<func::FuncOp>();
   if (!view || !argument || !kernel ||
@@ -50,7 +50,7 @@ LogicalResult verifyAccess(gpu::AccessOpInterface access) {
     return operation->emitOpError(
         "Triton pointer access requires a kernel-entry view or workspace argument");
   for (unsigned index = 0; index < access.getAccessCoordinates().size(); ++index)
-    if (!gpu::queryAccessCoordinateProjection(access, index).isExact())
+    if (!block::queryAccessCoordinateProjection(access, index).isExact())
       return operation->emitOpError(
           "Triton pointer access requires a complete coordinate projection");
   return success();
@@ -59,17 +59,17 @@ LogicalResult verifyAccess(gpu::AccessOpInterface access) {
 LogicalResult verifyKernel(
     func::FuncOp kernel,
     llvm::function_ref<LogicalResult(Operation *)> verifySource) {
-  auto space = kernel->getAttrOfType<ArrayAttr>(gpu::programSpaceAttr);
+  auto space = kernel->getAttrOfType<ArrayAttr>(block::programSpaceAttr);
   if (!space || space.empty() || space.size() > 3)
     return kernel.emitError(
         "Triton source surface requires a one-to-three dimensional grid");
   for (Attribute extent : space)
-    if (!isTritonExpression(cast<gpu::PhysicalExprAttr>(extent)))
+    if (!isTritonExpression(cast<block::PhysicalExprAttr>(extent)))
       return kernel.emitError(
           "Triton launch expression has no deterministic terminal spelling");
 
   for (Type type : kernel.getArgumentTypes()) {
-    if (auto view = dyn_cast<gpu::ViewType>(type)) {
+    if (auto view = dyn_cast<block::ViewType>(type)) {
       if (!isTritonScalarType(view.getElementType()))
         return kernel.emitError("Triton view element type is unsupported");
       continue;
@@ -84,58 +84,58 @@ LogicalResult verifyKernel(
     return failure();
 
   WalkResult result = kernel.walk([&](Operation *operation) {
-    if (isa<gpu::AtomicLoadOp>(operation)) {
+    if (isa<block::AtomicLoadOp>(operation)) {
       operation->emitOpError(
           "has no Triton atomic-load primitive with preserved memory-order semantics");
       return WalkResult::interrupt();
     }
-    if (auto scatter = dyn_cast<gpu::ScatterReduceOp>(operation)) {
+    if (auto scatter = dyn_cast<block::ScatterReduceOp>(operation)) {
       scatter.emitOpError(
           "requires an add combine and Triton-native atomic-add dtype legalization");
       return WalkResult::interrupt();
     }
-    if (isa<gpu::BufferOp>(operation)) {
+    if (isa<block::BufferOp>(operation)) {
       operation->emitOpError(
           "requires provider-local mutable-buffer realization before Triton serialization");
       return WalkResult::interrupt();
     }
-    if (isa<gpu::SparseContractOp>(operation)) {
+    if (isa<block::SparseContractOp>(operation)) {
       operation->emitOpError(
           "has no native Triton structured-sparse contraction surface");
       return WalkResult::interrupt();
     }
     for (Type type : operation->getResultTypes()) {
-      if (auto fragment = dyn_cast<gpu::FragmentType>(type)) {
+      if (auto fragment = dyn_cast<block::FragmentType>(type)) {
         if (!isTritonScalarType(fragment.getElementType()) ||
             !llvm::all_of(fragment.getShape(), isTritonFragmentExtent)) {
           operation->emitOpError(
               "has no statically blocked Triton fragment representation");
           return WalkResult::interrupt();
         }
-      } else if (isa<gpu::RecordType>(type)) {
+      } else if (isa<block::RecordType>(type)) {
         if (!isTritonDataType(type)) {
           operation->emitOpError("contains a record field outside Triton data types");
           return WalkResult::interrupt();
         }
-      } else if (!isa<gpu::ViewType, gpu::RangeType>(type) &&
+      } else if (!isa<block::ViewType, block::RangeType>(type) &&
                  !isTritonScalarType(type)) {
         operation->emitOpError("has a result type outside the Triton surface");
         return WalkResult::interrupt();
       }
     }
-    if (auto access = dyn_cast<gpu::AccessOpInterface>(operation)) {
+    if (auto access = dyn_cast<block::AccessOpInterface>(operation)) {
       switch (access.getAccessKind()) {
-      case gpu::AccessKind::AtomicCompareExchange:
+      case block::AccessKind::AtomicCompareExchange:
         if (access.getAccessValidity()) {
           operation->emitOpError(
               "Triton tl.atomic_cas has no mask and cannot preserve physical validity");
           return WalkResult::interrupt();
         }
         [[fallthrough]];
-      case gpu::AccessKind::Load:
-      case gpu::AccessKind::Store:
-      case gpu::AccessKind::AtomicStore:
-      case gpu::AccessKind::AtomicRMW:
+      case block::AccessKind::Load:
+      case block::AccessKind::Store:
+      case block::AccessKind::AtomicStore:
+      case block::AccessKind::AtomicRMW:
         if (failed(verifyAccess(access))) return WalkResult::interrupt();
         break;
       default:
@@ -144,9 +144,9 @@ LogicalResult verifyKernel(
         break;
       }
     }
-    if (auto contract = dyn_cast<gpu::ContractOp>(operation)) {
+    if (auto contract = dyn_cast<block::ContractOp>(operation)) {
       std::string reason;
-      auto axes = gpu::queryContractionAxes(contract, &reason);
+      auto axes = block::queryContractionAxes(contract, &reason);
       if (!axes) {
         contract.emitOpError("invalid Triton contraction axis schema: ") << reason;
         return WalkResult::interrupt();
@@ -169,19 +169,19 @@ LogicalResult verifyKernel(
             "Triton tl.dot does not support a bfloat16 accumulator; requires precision-preserving provider legalization");
         return WalkResult::interrupt();
       }
-    } else if (auto range = dyn_cast<gpu::MakeRangeOp>(operation)) {
-      auto fragment = dyn_cast<gpu::FragmentType>(range.getResult().getType());
+    } else if (auto range = dyn_cast<block::MakeRangeOp>(operation)) {
+      auto fragment = dyn_cast<block::FragmentType>(range.getResult().getType());
       auto physicalExtent =
           fragment && fragment.getShape().size() == 1
-              ? dyn_cast<gpu::PhysicalExprAttr>(fragment.getShape()[0])
-              : gpu::PhysicalExprAttr();
+              ? dyn_cast<block::PhysicalExprAttr>(fragment.getShape()[0])
+              : block::PhysicalExprAttr();
       if (!physicalExtent || !isTritonFragmentExtent(physicalExtent)) {
         InFlightDiagnostic diagnostic = range.emitOpError(
             "Triton tl.arange physical extent must be a compile-time physical expression");
         diagnostic << "; source_id=" << range.getSourceId();
         if (fragment && fragment.getAxisMaps().size() == 1)
           diagnostic << ", source_dimension="
-                     << cast<gpu::AxisMapAttr>(fragment.getAxisMaps()[0])
+                     << cast<block::AxisMapAttr>(fragment.getAxisMaps()[0])
                             .getDimensionId();
         unsigned loopDepth = 0;
         for (Operation *parent = range->getParentOp(); parent;
@@ -193,8 +193,8 @@ LogicalResult verifyKernel(
                                                       : " and still has live uses");
         for (Operation *user : range.getResult().getUsers()) {
           diagnostic << " " << user->getName();
-          if (auto load = dyn_cast<gpu::LoadOp>(user)) {
-            if (auto view = dyn_cast<gpu::ViewType>(load.getResource().getType()))
+          if (auto load = dyn_cast<block::LoadOp>(user)) {
+            if (auto view = dyn_cast<block::ViewType>(load.getResource().getType()))
               diagnostic << "(source=" << view.getSourceId() << ",source_axes=["
                          << load.getSourceAxes() << "])";
             for (Operation *loadUser : load.getResult().getUsers()) {
@@ -205,7 +205,7 @@ LogicalResult verifyKernel(
                   for (Value nextResult : resultUser->getResults())
                     for (Operation *nextUser : nextResult.getUsers()) {
                       diagnostic << "->" << nextUser->getName();
-                      if (auto reduction = dyn_cast<gpu::ReduceOp>(nextUser))
+                      if (auto reduction = dyn_cast<block::ReduceOp>(nextUser))
                         diagnostic << "(axes=[" << reduction.getAxes()
                                    << "],sources="
                                    << reduction.getSources().size() << ")";
@@ -216,7 +216,7 @@ LogicalResult verifyKernel(
         }
         return WalkResult::interrupt();
       }
-    } else if (auto gather = dyn_cast<gpu::GatherOp>(operation)) {
+    } else if (auto gather = dyn_cast<block::GatherOp>(operation)) {
       if (gather.getValid()) {
         gather.emitOpError(
             "requires safe-index legalization before Triton tl.gather: source=")
@@ -233,18 +233,18 @@ LogicalResult verifyKernel(
             "requires provider legalization to one-axis tl.gather");
         return WalkResult::interrupt();
       }
-      if (!isa<gpu::FragmentType>(gather.getResult().getType()) &&
-          (cast<gpu::FragmentType>(gather.getSource().getType()).getShape().size() != 1 ||
+      if (!isa<block::FragmentType>(gather.getResult().getType()) &&
+          (cast<block::FragmentType>(gather.getSource().getType()).getShape().size() != 1 ||
            gather.getSourceAxes().front() != 0 ||
            !isa<IndexType, IntegerType>(gather.getCoordinates().front().getType()))) {
         gather.emitOpError("Triton scalar gather requires one scalar index into a vector");
         return WalkResult::interrupt();
       }
-    } else if (isa<gpu::ReduceOp, gpu::ScanOp>(operation)) {
+    } else if (isa<block::ReduceOp, block::ScanOp>(operation)) {
       operation->emitOpError(
           "Triton collective requires an explicitly scalarized callback");
       return WalkResult::interrupt();
-    } else if (auto contract = dyn_cast<gpu::ScaledContractOp>(operation)) {
+    } else if (auto contract = dyn_cast<block::ScaledContractOp>(operation)) {
       unsigned lhsRank = contract.getLhs().getType().getShape().size();
       unsigned rhsRank = contract.getRhs().getType().getShape().size();
       Type lhsScaleElement =
@@ -267,9 +267,9 @@ LogicalResult verifyKernel(
             "is outside Triton tl.dot_scaled rank/format/e8m0-scale/group/axis legality");
         return WalkResult::interrupt();
       }
-    } else if (auto histogram = dyn_cast<gpu::HistogramOp>(operation)) {
+    } else if (auto histogram = dyn_cast<block::HistogramOp>(operation)) {
       if (!histogram.getBins().getDefiningOp<arith::ConstantOp>() &&
-          !histogram.getBins().getDefiningOp<gpu::ParameterOp>()) {
+          !histogram.getBins().getDefiningOp<block::ParameterOp>()) {
         histogram.emitOpError(
             "Triton histogram bin count must be compile-time bound");
         return WalkResult::interrupt();
@@ -294,7 +294,7 @@ LogicalResult verifyTritonProgram(
     if (failed(verifyProgramAttributes(operation)))
       return WalkResult::interrupt();
     if (auto function = dyn_cast<func::FuncOp>(operation);
-        function && function->hasAttr(gpu::kernelAttr))
+        function && function->hasAttr(block::kernelAttr))
       kernels.push_back(function);
     return WalkResult::advance();
   });

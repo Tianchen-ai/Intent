@@ -8,16 +8,16 @@ It constructs executable physical programs for the selected execution family:
 
 ```text
 canonical Intent KIR
-    ├─ GPU executable program
-    │    ├─ Triton legalization / serialization
-    │    ├─ cuTile legalization / serialization
-    │    └─ provider-local extensions justified by actual differences
+    ├─ Block executable program
+    │    ├─ GPU mapping → Triton / cuTile
+    │    ├─ Ascend mapping → Triton–Ascend
+    │    └─ DSA storage / engine realization → BANG C
     └─ CPU executable program
          ├─ Mojo legalization / serialization
-         └─ Weft legalization / Canonical Weft IR
+         └─ Canonical Weft IR → Triton–Weft JIT
 ```
 
-GPU/CPU reuse KIR semantics and shape/index/effect/dependence/reuse analysis methods, not a renamed GPU topology. Mojo and Weft consume the common CPU program; RVV is a CPU capability, not another Intent execution family.
+Block, CPU and DSA reuse KIR semantics and shape/index/effect/dependence/reuse analyses. Device identity, execution model and compiler provider are independent; [execution models and components](execution-models.md) defines their boundaries. Mojo and Triton–Weft consume different lowering stages of the common CPU program. RVV is a hardware capability, not another execution model.
 
 ## 2. GPU compilation boundary
 
@@ -64,8 +64,8 @@ KIR origin supports verification, diagnostics and tracing only. Physical program
 
 ## 7. Specification pages
 
-- [KIR to GPU](kir-to-gpu.md): authority, worksets and first complete physical program.
-- [GPU program IR](gpu-program-ir.md): types, operations and invariants.
+- [KIR to GPU](kir-to-block.md): authority, worksets and first complete physical program.
+- [GPU program IR](block-program-ir.md): types, operations and invariants.
 - [Passes and analyses](passes-and-analyses.md): transformations and preservation.
 - [Physical parameters](physical-parameters.md): legality and tuning.
 - [Target lowering](target-lowering.md): local extensions and external compilers.

@@ -23,9 +23,9 @@ add_mlir_library(MLIRIntentTritonTransforms
   MLIRIR
   MLIRPass
   MLIRSCFDialect
-  MLIRIntentGPUAnalysis
-  MLIRIntentGPUDialect
-  MLIRIntentGPUTransforms
+  MLIRIntentBlockAnalysis
+  MLIRIntentBlockDialect
+  MLIRIntentBlockTransforms
   MLIRIntentTritonDialect
   MLIRIntentTritonAnalysis
   MLIRIntentTritonSerialization

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, fields
 import json
+from typing import Protocol, runtime_checkable
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,7 +148,18 @@ class DSACompilationTarget:
         return "Intent DSA compiler"
 
 
-CompilationTarget = GPUCompilationTarget | CPUCompilationTarget | DSACompilationTarget
+@runtime_checkable
+class CompilationTarget(Protocol):
+    """Compiler facts supplied by a registered provider; no device SDK is required."""
+
+    @property
+    def provider(self) -> str: ...
+
+    @property
+    def compiler_options(self) -> tuple[str, ...]: ...
+
+    @property
+    def compiler_role(self) -> str: ...
 
 
 def read_compilation_target(provider: str, facts: dict) -> CompilationTarget:
@@ -157,25 +169,31 @@ def read_compilation_target(provider: str, facts: dict) -> CompilationTarget:
     values = dict(facts)
     family = values.pop("family")
     from .provider import provider as get_provider
-    if get_provider(provider).family != family:
+    if get_provider(provider).execution_model != family:
         raise ValueError(f"unsupported compiler target family/provider: {family}/{provider}")
-    if family == "gpu":
-        capabilities = GPUCapabilities(**values.pop("capabilities"))
-        if values:
-            raise ValueError(f"unknown GPU target fields: {', '.join(values)}")
-        return GPUCompilationTarget(provider, capabilities)
-    if family == "cpu":
-        expected = {field.name for field in fields(CPUCompilationTarget)} - {"provider"}
-        if values.keys() != expected:
-            raise ValueError(f"CPU target requires exactly these fields: {', '.join(sorted(expected))}")
-        return CPUCompilationTarget(provider, **values)
-    if family == "dsa":
-        expected = {field.name for field in fields(DSACompilationTarget)} - {"shapes", "strides"}
-        if values.keys() != expected:
-            raise ValueError(f"DSA target requires exactly these fields: {', '.join(sorted(expected))}")
-        values["capabilities"] = DSACapabilities(**values["capabilities"])
-        return DSACompilationTarget(**values)
-    raise ValueError(f"unsupported compiler target family/provider: {family}/{provider}")
+    return get_provider(provider).read_target(provider, values)
+
+
+def read_gpu_target(provider: str, values: dict) -> GPUCompilationTarget:
+    capabilities = GPUCapabilities(**values.pop("capabilities"))
+    if values:
+        raise ValueError(f"unknown NVIDIA target fields: {', '.join(values)}")
+    return GPUCompilationTarget(provider, capabilities)
+
+
+def read_cpu_target(provider: str, values: dict) -> CPUCompilationTarget:
+    expected = {field.name for field in fields(CPUCompilationTarget)} - {"provider"}
+    if values.keys() != expected:
+        raise ValueError(f"CPU target requires exactly these fields: {', '.join(sorted(expected))}")
+    return CPUCompilationTarget(provider, **values)
+
+
+def read_bangc_target(provider: str, values: dict) -> DSACompilationTarget:
+    expected = {field.name for field in fields(DSACompilationTarget)} - {"shapes", "strides"}
+    if values.keys() != expected:
+        raise ValueError(f"BANG C target requires exactly these fields: {', '.join(sorted(expected))}")
+    values["capabilities"] = DSACapabilities(**values["capabilities"])
+    return DSACompilationTarget(**values)
 
 
 def require_matching_target(compiled: CompilationTarget, selected: CompilationTarget) -> None:

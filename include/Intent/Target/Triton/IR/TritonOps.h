@@ -1,7 +1,7 @@
 #ifndef INTENT_TARGET_TRITON_IR_TRITONOPS_H
 #define INTENT_TARGET_TRITON_IR_TRITONOPS_H
 
-#include "Intent/Dialect/GPU/IR/GPUOps.h"
+#include "Intent/Dialect/Block/IR/BlockOps.h"
 #include "Intent/Target/Triton/IR/TritonDialect.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/OpDefinition.h"

@@ -10,9 +10,9 @@
 #include "Intent/Dialect/CPU/Transforms/Passes.h"
 #include "Intent/Dialect/CPU/Transforms/Storage/Bufferization.h"
 #include "Intent/Dialect/DSA/Transforms/Passes.h"
-#include "Intent/Dialect/GPU/IR/GPUDialect.h"
-#include "Intent/Dialect/GPU/IR/IntegerRanges.h"
-#include "Intent/Dialect/GPU/Transforms/Passes.h"
+#include "Intent/Dialect/Block/IR/BlockDialect.h"
+#include "Intent/Dialect/Block/IR/IntegerRanges.h"
+#include "Intent/Dialect/Block/Transforms/Passes.h"
 #include "Intent/Transforms/Passes.h"
 #include "mlir/Dialect/Func/Extensions/InlinerExtension.h"
 #include "mlir/InitAllDialects.h"
@@ -48,9 +48,9 @@ void registerDialects(DialectRegistry &registry) {
   func::registerInlinerExtension(registry);
   cpu::registerExtentRelations(registry);
   registerBufferStorageInterfaces(registry);
-  gpu::registerIntegerRangeInterfaces(registry);
+  block::registerIntegerRangeInterfaces(registry);
   cpu::registerValueBufferizationInterfaces(registry);
-  registry.insert<IntentDialect, gpu::IntentGPUDialect, cpu::IntentCPUDialect,
+  registry.insert<IntentDialect, block::IntentBlockDialect, cpu::IntentCPUDialect,
       dsa::IntentDSADialect>();
   registry.addExtension(+[](MLIRContext *, cpu::IntentCPUDialect *dialect) {
     dialect->addInterfaces<CPUProviders>();
@@ -65,7 +65,7 @@ void registerPasses() {
     registerTransformsPasses();
     registerIntentPasses();
     registerCompilationPasses();
-    gpu::registerGPUPasses();
+    block::registerBlockPasses();
     cpu::registerCPUPasses();
     dsa::registerDSAPasses();
     dsa::registerDSAPipelines();

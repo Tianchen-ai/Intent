@@ -1,15 +1,15 @@
 #include "Intent/Target/Triton/Serialization/Serializer.h"
 #include "Intent/Target/Triton/Serialization/Numerical.h"
 
-#include "Intent/Dialect/GPU/IR/GPUAttrs.h"
-#include "Intent/Dialect/GPU/Analysis/PhysicalParameters.h"
-#include "Intent/Dialect/GPU/Analysis/ProgramInterface.h"
-#include "Intent/Dialect/GPU/Analysis/PhysicalProgram.h"
-#include "Intent/Dialect/GPU/IR/GPUOps.h"
-#include "Intent/Dialect/GPU/IR/GPUTypes.h"
-#include "Intent/Dialect/GPU/IR/Program.h"
-#include "Intent/Dialect/GPU/Serialization/Interface.h"
-#include "Intent/Dialect/GPU/Serialization/PythonEmitter.h"
+#include "Intent/Dialect/Block/IR/BlockAttrs.h"
+#include "Intent/Dialect/Block/Analysis/PhysicalParameters.h"
+#include "Intent/Dialect/Block/Analysis/ProgramInterface.h"
+#include "Intent/Dialect/Block/Analysis/PhysicalProgram.h"
+#include "Intent/Dialect/Block/IR/BlockOps.h"
+#include "Intent/Dialect/Block/IR/BlockTypes.h"
+#include "Intent/Dialect/Block/IR/Program.h"
+#include "Intent/Dialect/Block/Serialization/Interface.h"
+#include "Intent/Dialect/Block/Serialization/PythonEmitter.h"
 #include "Intent/Target/Triton/IR/Configuration.h"
 #include "Intent/Target/Triton/IR/Program.h"
 #include "Intent/Target/Triton/IR/TritonOps.h"
@@ -32,10 +32,10 @@ namespace intent::triton {
 namespace {
 
 
-class Serializer : public gpu::PythonEmitter {
+class Serializer : public block::PythonEmitter {
 public:
   Serializer(func::FuncOp kernel, raw_ostream &output)
-      : gpu::PythonEmitter(kernel, output,
+      : block::PythonEmitter(kernel, output,
             {"tl.", "int1", "float64", "float8e4nv", "float8e5"},
             {integerDivision, "min", "max", "", "triton.next_power_of_2", true},
             ": tl.constexpr") {}
@@ -52,7 +52,7 @@ public:
   static const Emitters &sourceOperations() {
     static const Emitters emitters = [] {
       Emitters result;
-      gpu::PythonEmitter::addCommonOperations(result);
+      block::PythonEmitter::addCommonOperations(result);
       addNumericalOperations(result);
       addNative<CtaBarrierOp>(result);
       addBinding<TensorDescriptorChoiceOp>(result);
@@ -61,19 +61,19 @@ public:
       addNative<MapElementwiseOp>(result);
       addNative<SplitOp>(result);
       addNative<DescriptorLoadOp>(result);
-      addNative<gpu::LoadOp>(result);
-      addNative<gpu::GatherOp>(result);
-      addNative<gpu::ContractOp>(result);
-      addNative<gpu::ScaledContractOp>(result);
+      addNative<block::LoadOp>(result);
+      addNative<block::GatherOp>(result);
+      addNative<block::ContractOp>(result);
+      addNative<block::ScaledContractOp>(result);
       addNative<ReduceOp>(result);
       addNative<ScanOp>(result);
-      addNative<gpu::HistogramOp>(result);
-      addNative<gpu::RandomBitsOp>(result);
-      addNative<gpu::AtomicStoreOp>(result);
-      addNative<gpu::AtomicRMWOp>(result);
-      addNative<gpu::AtomicCompareExchangeOp>(result);
+      addNative<block::HistogramOp>(result);
+      addNative<block::RandomBitsOp>(result);
+      addNative<block::AtomicStoreOp>(result);
+      addNative<block::AtomicRMWOp>(result);
+      addNative<block::AtomicCompareExchangeOp>(result);
       addNative<DescriptorStoreOp>(result);
-      addNative<gpu::StoreOp>(result);
+      addNative<block::StoreOp>(result);
       return result;
     }();
     return emitters;
@@ -83,14 +83,14 @@ public:
 
 private:
   template <typename Op> static void addNative(Emitters &result) {
-    result.add<Op>([](Op) { return success(); }, [](Op op, gpu::PythonEmitter &emitter) {
+    result.add<Op>([](Op) { return success(); }, [](Op op, block::PythonEmitter &emitter) {
       static_cast<Serializer &>(emitter).emitTyped(op);
       return failure(emitter.hasFailed());
     });
   }
   template <typename Op> static void addBinding(Emitters &result) {
     result.add<Op>([](Op) { return success(); },
-                   [](Op, gpu::PythonEmitter &) { return success(); });
+                   [](Op, block::PythonEmitter &) { return success(); });
   }
 
   void emitTyped(ReduceOp op) { emitCollective(*op.getOperation()); }
@@ -101,18 +101,18 @@ private:
       failed = true;
   }
 
-  std::string programId(gpu::ProgramIdOp op) override {
+  std::string programId(block::ProgramIdOp op) override {
     return "tl.program_id(" + std::to_string(op.getAxis()) + ").to(" +
         pythonType(op.getResult().getType()) + ")";
   }
-  std::string makeRange(gpu::MakeRangeOp op) override {
-    auto type = cast<gpu::FragmentType>(op.getResult().getType());
+  std::string makeRange(block::MakeRangeOp op) override {
+    auto type = cast<block::FragmentType>(op.getResult().getType());
     return "(" + valueString(op.getStart()) + " + tl.arange(0, " +
-        expressionString(cast<gpu::PhysicalExprAttr>(type.getShape()[0])) +
+        expressionString(cast<block::PhysicalExprAttr>(type.getShape()[0])) +
         ").to(" + pythonType(type.getElementType()) + ") * " +
         valueString(op.getStep()) + ")";
   }
-  std::string splat(gpu::SplatOp op) override {
+  std::string splat(block::SplatOp op) override {
     if (emittingHelper) return valueString(op.getValue());
     return "tl.full(" + fragmentShape(op.getResult().getType()) + ", " + valueString(op.getValue()) +
         ", " + pythonType(op.getResult().getType().getElementType()) + ")";
@@ -126,17 +126,17 @@ private:
     }
     return std::move(*expression);
   }
-  std::string reshape(gpu::ReshapeOp op) override {
-    auto source = cast<gpu::FragmentType>(op.getValue().getType());
-    auto target = cast<gpu::FragmentType>(op.getResult().getType());
+  std::string reshape(block::ReshapeOp op) override {
+    auto source = cast<block::FragmentType>(op.getValue().getType());
+    auto target = cast<block::FragmentType>(op.getResult().getType());
     return (source.getShape().empty() ? "tl.broadcast_to(" : "tl.reshape(") +
         valueString(op.getValue()) + ", " + fragmentShape(target) +
         (source.getShape().empty() ? ")" : ", can_reorder=False)");
   }
-  std::string join(gpu::JoinOp op) override {
+  std::string join(block::JoinOp op) override {
     return "tl.join(" + valueString(op.getLhs()) + ", " + valueString(op.getRhs()) + ")";
   }
-  std::string select(gpu::SelectOp op) override {
+  std::string select(block::SelectOp op) override {
     return "tl.where(" + valueString(op.getCondition()) + ", " + controlValueString(op.getTrueValue()) +
         ", " + controlValueString(op.getFalseValue()) + ")";
   }
@@ -154,14 +154,14 @@ private:
       if (auto constant = dyn_cast<IntegerAttr>(stages))
         result += std::to_string(constant.getInt());
       else
-        result += cast<gpu::ParameterRefAttr>(stages).getName().getValue().str();
+        result += cast<block::ParameterRefAttr>(stages).getName().getValue().str();
     }
     return result + ")";
   }
 
-  using ViewABI = gpu::PythonArgument;
-  using ScalarABI = gpu::PythonArgument;
-  using MetadataABI = gpu::PythonArgument;
+  using ViewABI = block::PythonArgument;
+  using ScalarABI = block::PythonArgument;
+  using MetadataABI = block::PythonArgument;
   struct DescriptorABI {
     TensorDescriptorOp operation;
     std::string name;
@@ -174,7 +174,7 @@ private:
       return;
     }
     configuration = std::move(*configurationSchema);
-    auto interface = gpu::PythonSignature::read(kernel);
+    auto interface = block::PythonSignature::read(kernel);
     if (mlir::failed(interface)) {
       failed = true;
       return;
@@ -192,8 +192,8 @@ private:
     for (const auto &entry : values) argumentNames.insert(entry.second);
     for (const MetadataABI &metadata : metadataArguments)
       constexprValues.insert(metadata.value);
-    for (Attribute attribute : gpu::getParameterDeclarations(kernel)) {
-      auto schema = cast<gpu::ParameterAttr>(attribute);
+    for (Attribute attribute : block::getParameterDeclarations(kernel)) {
+      auto schema = cast<block::ParameterAttr>(attribute);
       std::string name = schema.getName().getValue().str();
       argumentNames.insert(name);
       if (schema.isDeferred())
@@ -219,7 +219,7 @@ private:
     });
     while (!argumentNames.insert(overlapArgument).second)
       overlapArgument += "_";
-    kernel.walk([&](gpu::ViewOverlapOp overlap) {
+    kernel.walk([&](block::ViewOverlapOp overlap) {
       values[overlap.getResult()] = overlapArgument + "[" +
                                    std::to_string(overlapFacts.size()) + "]";
       overlapFacts.push_back(overlap);
@@ -336,8 +336,8 @@ private:
       return;
       }
 
-  void emitTyped(gpu::LoadOp load) {
-      auto access = cast<gpu::AccessOpInterface>(load.getOperation());
+  void emitTyped(block::LoadOp load) {
+      auto access = cast<block::AccessOpInterface>(load.getOperation());
       std::string call = "tl.load(" + pointer(access);
       if (access.getAccessValidity())
         call += ", mask=" + valueString(access.getAccessValidity()) +
@@ -346,11 +346,11 @@ private:
       return;
       }
 
-  void emitTyped(gpu::GatherOp gather) {
-      auto access = cast<gpu::AccessOpInterface>(gather.getOperation());
+  void emitTyped(block::GatherOp gather) {
+      auto access = cast<block::AccessOpInterface>(gather.getOperation());
       Value coordinate = access.getAccessCoordinates().front();
       std::string indices = valueString(coordinate);
-      bool scalar = !isa<gpu::FragmentType>(access.getAccessValueType());
+      bool scalar = !isa<block::FragmentType>(access.getAccessValueType());
       if (scalar)
         indices = "tl.full((1,), " + indices + ", " +
                   pythonType(coordinate.getType()) + ")";
@@ -364,7 +364,7 @@ private:
       return;
       }
 
-  void emitTyped(gpu::ContractOp contract) {
+  void emitTyped(block::ContractOp contract) {
       auto form = contract->getAttrOfType<StringAttr>(contractFormAttr);
       if (form && form.getValue() == "fma") {
         assign(contract.getResult(),
@@ -400,7 +400,7 @@ private:
       return;
       }
 
-  void emitTyped(gpu::ScaledContractOp contract) {
+  void emitTyped(block::ScaledContractOp contract) {
       auto format = [](ScaledFormat value) -> StringRef {
         switch (value) {
         case ScaledFormat::E2M1: return "e2m1";
@@ -409,9 +409,9 @@ private:
         }
         llvm_unreachable("unhandled Intent scaled format");
       };
-      auto extent = [&](gpu::FragmentType type, unsigned axis) {
+      auto extent = [&](block::FragmentType type, unsigned axis) {
         return expressionString(
-            cast<gpu::PhysicalExprAttr>(type.getShape()[axis]));
+            cast<block::PhysicalExprAttr>(type.getShape()[axis]));
       };
       auto lhs = contract.getLhs().getType();
       auto rhs = contract.getRhs().getType();
@@ -456,7 +456,7 @@ private:
       return;
       }
 
-  void emitTyped(gpu::HistogramOp histogram) {
+  void emitTyped(block::HistogramOp histogram) {
       std::string counts = "tl.histogram(" +
                            valueString(histogram.getValues()) + ", " +
                            valueString(histogram.getBins()) + ", mask=" +
@@ -467,15 +467,15 @@ private:
       return;
       }
 
-  void emitTyped(gpu::RandomBitsOp random) {
+  void emitTyped(block::RandomBitsOp random) {
       assign(random.getResult(), "tl.randint(" + valueString(random.getSeed()) +
                                       ", " + valueString(random.getCounter()) +
                                       ").to(tl.uint32, bitcast=True)");
       return;
       }
 
-  void emitTyped(gpu::AtomicStoreOp atomic) {
-      auto access = cast<gpu::AccessOpInterface>(atomic.getOperation());
+  void emitTyped(block::AtomicStoreOp atomic) {
+      auto access = cast<block::AccessOpInterface>(atomic.getOperation());
       std::string call = "tl.atomic_xchg(" +
                          pointer(access) + ", " + valueString(access.getAccessPayloads().front());
       if (access.getAccessValidity())
@@ -486,8 +486,8 @@ private:
       return;
       }
 
-  void emitTyped(gpu::AtomicRMWOp atomic) {
-      auto access = cast<gpu::AccessOpInterface>(atomic.getOperation());
+  void emitTyped(block::AtomicRMWOp atomic) {
+      auto access = cast<block::AccessOpInterface>(atomic.getOperation());
       auto operationName = [](AtomicRMWKind kind) -> StringRef {
         switch (kind) {
         case AtomicRMWKind::Exchange: return "xchg";
@@ -511,8 +511,8 @@ private:
       return;
       }
 
-  void emitTyped(gpu::AtomicCompareExchangeOp atomic) {
-      auto access = cast<gpu::AccessOpInterface>(atomic.getOperation());
+  void emitTyped(block::AtomicCompareExchangeOp atomic) {
+      auto access = cast<block::AccessOpInterface>(atomic.getOperation());
       auto payloads = access.getAccessPayloads();
       std::string old = newName();
       line(old + " = tl.atomic_cas(" +
@@ -526,7 +526,7 @@ private:
       }
 
   void emitTyped(DescriptorStoreOp store) {
-      auto fragment = cast<gpu::FragmentType>(store.getValue().getType());
+      auto fragment = cast<block::FragmentType>(store.getValue().getType());
       line(valueString(store.getDescriptor()) + ".store(" +
            tuple(store.getOffsets()) +
            ", tl.cast(" + valueString(store.getValue()) + ", " +
@@ -534,8 +534,8 @@ private:
       return;
       }
 
-  void emitTyped(gpu::StoreOp store) {
-      auto access = cast<gpu::AccessOpInterface>(store.getOperation());
+  void emitTyped(block::StoreOp store) {
+      auto access = cast<block::AccessOpInterface>(store.getOperation());
       std::string call = "tl.store(" +
                          pointer(access) + ", " + valueString(access.getAccessPayloads().front());
       if (access.getAccessValidity())
@@ -554,17 +554,17 @@ private:
     llvm_unreachable("unhandled Intent atomic ordering");
   }
 
-  std::string atomicScope(gpu::AtomicSharingDomain sharing) const {
+  std::string atomicScope(block::AtomicSharingDomain sharing) const {
     switch (sharing) {
-    case gpu::AtomicSharingDomain::ProgramInstance: return "cta";
-    case gpu::AtomicSharingDomain::KernelInvocation: return "gpu";
+    case block::AtomicSharingDomain::ProgramInstance: return "cta";
+    case block::AtomicSharingDomain::KernelInvocation: return "block";
     }
     llvm_unreachable("unhandled atomic sharing domain");
   }
 
-  std::string projectedValue(Value value, gpu::FragmentType target,
-                             const gpu::BroadcastProjection &projection) {
-    auto source = dyn_cast<gpu::FragmentType>(value.getType());
+  std::string projectedValue(Value value, block::FragmentType target,
+                             const block::BroadcastProjection &projection) {
+    auto source = dyn_cast<block::FragmentType>(value.getType());
     if (!source)
       return "tl.full(" + fragmentShape(target) + ", " + valueString(value) +
              ", " + pythonType(elementType(value.getType())) + ")";
@@ -600,13 +600,13 @@ private:
     return "tl.broadcast_to(" + result + "], " + fragmentShape(target) + ")";
   }
 
-  std::string broadcastValue(Value value, gpu::FragmentType target) override {
-    auto source = dyn_cast<gpu::FragmentType>(value.getType());
+  std::string broadcastValue(Value value, block::FragmentType target) override {
+    auto source = dyn_cast<block::FragmentType>(value.getType());
     return projectedValue(value, target, source
-        ? gpu::queryBroadcastProjection(source, target) : gpu::BroadcastProjection());
+        ? block::queryBroadcastProjection(source, target) : block::BroadcastProjection());
   }
 
-  std::string pointer(gpu::AccessOpInterface access) {
+  std::string pointer(block::AccessOpInterface access) {
     Value resource = access.getAccessResource();
     auto coordinates = access.getAccessCoordinates();
     auto sourceAxes = access.getAccessSourceAxes();
@@ -616,16 +616,16 @@ private:
       failed = true;
       return {};
     }
-    auto view = cast<gpu::ViewType>(resource.getType());
+    auto view = cast<block::ViewType>(resource.getType());
     auto strides = view.getLayout().getStrides();
-    auto fragment = dyn_cast<gpu::FragmentType>(valueType);
+    auto fragment = dyn_cast<block::FragmentType>(valueType);
     std::string result = values.lookup(resource);
     for (auto [axis, coordinate] : llvm::enumerate(coordinates)) {
       std::string stride = expressionString(
-          cast<gpu::PhysicalExprAttr>(strides[sourceAxes[axis]]));
+          cast<block::PhysicalExprAttr>(strides[sourceAxes[axis]]));
       std::string coordinateExpression = fragment
           ? projectedValue(coordinate, fragment,
-                           gpu::queryAccessCoordinateProjection(access, axis))
+                           block::queryAccessCoordinateProjection(access, axis))
           : valueString(coordinate);
       result += " + (" + coordinateExpression + ") * " + stride;
     }
@@ -643,13 +643,13 @@ private:
   }
 
   FailureOr<llvm::json::Value> descriptorHostValue(Value value) {
-    if (auto expression = gpu::queryLaunchExpression(value))
-      return gpu::serializeExpression(expression);
+    if (auto expression = block::queryLaunchExpression(value))
+      return block::serializeExpression(expression);
     return kernel.emitError("Triton descriptor has no host-evaluable value binding");
   }
 
   LogicalResult emitMetadata(std::string &metadata) {
-    auto artifact = gpu::serializeInterface(
+    auto artifact = block::serializeInterface(
         kernel, "triton", [&](Value value) { return valueString(value); });
     if (mlir::failed(artifact)) return failure();
     llvm::json::Object details{{"kernel", "_intent_kernel"}};
@@ -690,8 +690,8 @@ private:
       TensorDescriptorOp operation = descriptor.operation;
       llvm::json::Object encoded{
           {"name", descriptor.name},
-          {"base", gpu::getArgumentReference(operation.getBase()).getId()},
-          {"rank", cast<gpu::ViewType>(operation.getBase().getType()).getRank()},
+          {"base", block::getArgumentReference(operation.getBase()).getId()},
+          {"rank", cast<block::ViewType>(operation.getBase().getType()).getRank()},
           {"require_positive_shape", operation.getRequirePositiveShape()},
           {"require_positive_strides", operation.getRequirePositiveStrides()},
           {"alignment", operation.getAlignment()},
@@ -738,7 +738,7 @@ private:
   SmallVector<ScalarABI> scalars;
   SmallVector<MetadataABI> metadataArguments;
   std::string metadataArgument = "_intent_metadata";
-  SmallVector<gpu::ViewOverlapOp> overlapFacts;
+  SmallVector<block::ViewOverlapOp> overlapFacts;
   std::string overlapArgument = "_intent_overlaps";
   std::set<std::string> coverageNames;
   ConfigurationSchema configuration;
@@ -758,7 +758,7 @@ LogicalResult serializeProgram(ModuleOp module, std::string &source,
                                std::string &metadata) {
   if (failed(verifyTritonProgram(module, verifySourceOperation)))
     return failure();
-  auto kernel = gpu::getPhysicalKernel(module);
+  auto kernel = block::getPhysicalKernel(module);
   if (failed(kernel))
     return failure();
   llvm::raw_string_ostream stream(source);

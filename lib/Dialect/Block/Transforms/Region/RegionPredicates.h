@@ -1,0 +1,40 @@
+#ifndef INTENT_Block_TRANSFORMS_REGIONPREDICATES_H
+#define INTENT_Block_TRANSFORMS_REGIONPREDICATES_H
+
+#include "RegionSources.h"
+#include <optional>
+
+namespace intent::block::region {
+
+struct PredicatePartition {
+  mlir::Value allTrueStart;
+  mlir::Value allTrueStop;
+  mlir::Value effectiveStart;
+  mlir::Value effectiveStop;
+  mlir::Value allFalsePrefixStop;
+  mlir::Value allFalseSuffixStart;
+  llvm::SmallVector<mlir::Value> allTruePredicates;
+  bool firstMemberIsActive = false;
+  bool prefixSpecializable = false;
+};
+
+mlir::Value physicalTailMembershipPredicate(
+    RegionFoldOp fold, mlir::ValueRange identities, ParameterRefAttr segment,
+    llvm::ArrayRef<SourcePlan> plans);
+bool scanTailIsIdentity(RegionScanOp scan, llvm::ArrayRef<SourcePlan> plans,
+                        mlir::ValueRange identities);
+struct PeriodicPredicateTraversal {
+  mlir::Value period;
+  int64_t repetitions;
+};
+std::optional<PeriodicPredicateTraversal>
+periodicPredicateTraversal(RegionFoldOp fold,
+                           llvm::ArrayRef<SourcePlan> plans, MakeRangeOp master);
+mlir::FailureOr<PredicatePartition>
+predicatePartition(mlir::OpBuilder &builder, RegionFoldOp fold,
+                   llvm::ArrayRef<SourcePlan> plans, MakeRangeOp master,
+                   mlir::Value masterExtent, mlir::ValueRange identities,
+                   mlir::Value segment, mlir::Value period = {});
+
+} // namespace intent::block::region
+#endif

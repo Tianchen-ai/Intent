@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from .provider import EnvironmentCheck, LocalExecution, Provider
 from .execution import indexed_key, indexed_target
+from .specification import read_bangc_target
 
 INSTALLATION = {
     "modules": (), "requirements": (), "torch": None, "torch_index": None,
@@ -153,4 +154,4 @@ def _environment_checks(target):
 
 PROVIDER = Provider("dsa", BangCTarget, _read_facts, _bind, _environment_checks,
     LocalExecution("mlu", True, frozenset({"neuware", "compiler"}),
-                   partial(indexed_target, BangCTarget), indexed_key, specialize_call), "dsa")
+                   partial(indexed_target, BangCTarget), indexed_key, specialize_call), "dsa", read_bangc_target)

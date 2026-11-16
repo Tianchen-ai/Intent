@@ -8,20 +8,20 @@ compiler 的职责是从这份算法建立所选 execution family 可执行的 p
 
 ```text
 canonical Intent KIR
-    ├─ GPU executable program
-    │    ├─ Triton legalization / serialization
-    │    ├─ cuTile legalization / serialization
-    │    └─ 被真实差异逼出的 provider-local extensions
+    ├─ Block executable program
+    │    ├─ GPU mapping → Triton / cuTile
+    │    ├─ Ascend mapping → Triton–Ascend
+    │    └─ DSA storage / engine realization → BANG C
     └─ CPU executable program
          ├─ Mojo legalization / serialization
-         └─ Weft legalization / Canonical Weft IR
+         └─ Canonical Weft IR → Triton–Weft JIT
 ```
 
-GPU 与 CPU 复用 KIR semantics 及 shape、index、effect、dependence、reuse 等分析方法，不共享一套改名后的 GPU physical topology。Mojo 与 Weft 消费共同 CPU 程序；RVV 是 CPU 硬件能力，不是另一套 Intent execution family。
+Block、CPU 与 DSA 复用 KIR semantics 及 shape、index、effect、dependence、reuse 等分析接口。设备身份、执行模型与编译 provider 独立，具体边界见[执行模型与组件](execution-models.md)。Mojo 与 Triton–Weft 消费共同 CPU 程序的不同降低阶段；RVV 是 CPU 硬件能力，不是另一套 Intent execution family。
 
-## 2. GPU 编译边界
+## 2. Block 编译边界
 
-GPU pipeline 必须产生一份共同、完整、唯一的 executable GPU program。它显式包含：
+Block pipeline 必须产生一份共同、完整、唯一的 executable block program。它显式包含：
 
 - program-instance space 与 logical workset mapping；
 - program 内 structured control、physical loops 与 loop carries；
@@ -49,7 +49,7 @@ Intent KIR
 
 ## 4. 术语
 
-- **execution family**：GPU、CPU 等具有不同执行模型、因而从 KIR 分叉建立不同 physical program 的大类；同一 CPU family 可以由不同 provider 实现 scalar、vector 与可选 matrix 计算；
+- **execution model**：Block、CPU task 与 DSA storage/engine 等具有明确执行不变量的程序表示；它不等于设备类别或 provider，同一设备可以由不同 provider 在不同降低深度接管；
 - **physical program structure**：program-space mapping、loop nesting、control、value/access graph、structured-operation skeleton 与 resource ownership 的总和；
 - **execution group**：同一个 physical kernel body 内共同拥有一组 connected computations/effects 的内部 dispatch region；它不是第二个 kernel、artifact 或 launch；
 - **logical ownership extent**：一个 physical program instance 负责的 logical instances 集合或连续范围；
@@ -75,8 +75,9 @@ KIR origin只用于语义保持验证、诊断和追踪。Physical program本身
 
 ## 7. 规格组成
 
-- [`kir-to-gpu.md`](kir-to-gpu.md)：KIR authority、logical worksets与第一份完整GPU program；
-- [`gpu-program-ir.md`](gpu-program-ir.md)：共同executable GPU IR的types、operations与invariants；
+- [`execution-models.md`](execution-models.md)：设备、模型、目标实现、资源与扩充责任；
+- [`kir-to-block.md`](kir-to-block.md)：KIR authority、logical worksets与第一份完整Block program；
+- [`block-program-ir.md`](block-program-ir.md)：共同executable Block IR的types、operations与invariants；
 - [`passes-and-analyses.md`](passes-and-analyses.md)：analysis、transformation、verification与semantic-preservation；
 - [`physical-parameters.md`](physical-parameters.md)：compile-time physical parameters、candidate legality与下层tuning；
 - [`target-lowering.md`](target-lowering.md)：provider extensions、architecture features、serialization与外部compiler边界。

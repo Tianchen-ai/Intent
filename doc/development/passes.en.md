@@ -1,6 +1,6 @@
 # Extending passes
 
-Passes are the entry point for optimization knowledge. A pass reads current typed semantics and execution relationships, rewrites real IR and hands a complete program to later consumers. Before adding an optimization, read [passes and analyses](../compiler/passes-and-analyses.md), the relevant [GPU](../compiler/gpu-program-ir.md)/[CPU](../compiler/cpu-program-ir.md) contract and [target lowering](../compiler/target-lowering.md).
+Passes are the entry point for optimization knowledge. A pass reads current typed semantics and execution relationships, rewrites real IR and hands a complete program to later consumers. Before adding an optimization, read [passes and analyses](../compiler/passes-and-analyses.md), the relevant [GPU](../compiler/block-program-ir.md)/[CPU](../compiler/cpu-program-ir.md) contract and [target lowering](../compiler/target-lowering.md).
 
 ## Locate the responsible layer
 
@@ -25,7 +25,7 @@ GPU and CPU may reuse analysis ideas without sharing a physical topology. A pass
 
 Use existing MLIR pass declaration, registration and pipeline mechanisms. Inspect `include/Intent/Dialect/<Family>/Transforms/Passes.td`, `lib/Dialect/<Family>/Transforms/` and its `Passes.cpp`; target-local transformations live in `lib/Target/<Provider>/Transforms/`. `intent-opt --help` lists actual callable passes and options.
 
-For example, GPU reduction optimizations live in `lib/Dialect/GPU/Transforms/Reduction/`, declarations in GPU `Passes.td`, and complete transformation entry points and ordering in GPU `Transforms/Passes.cpp`. CPU task partitioning and storage reuse live in CPU `Transforms/Task/` and `Transforms/Storage/`; CPU `Transforms/Passes.cpp` assembles that family's pipeline. Do not move a GPU ownership transformation there to force reuse. Provider empirical configuration tables live in the corresponding `Transforms/` or `Transforms/Configuration/`.
+For example, GPU reduction optimizations live in `lib/Dialect/Block/Transforms/Reduction/`, declarations in GPU `Passes.td`, and complete transformation entry points and ordering in GPU `Transforms/Passes.cpp`. CPU task partitioning and storage reuse live in CPU `Transforms/Task/` and `Transforms/Storage/`; CPU `Transforms/Passes.cpp` assembles that family's pipeline. Do not move a GPU ownership transformation there to force reuse. Provider empirical configuration tables live in the corresponding `Transforms/` or `Transforms/Configuration/`.
 
 Add new implementations to the adjacent CMake list. Reuse an existing transformation wrapper's registration, dependent dialects, error propagation and completed-boundary verification. Insert the pass where its input conditions hold rather than adding a bypass for one program.
 

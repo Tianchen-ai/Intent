@@ -1,6 +1,6 @@
 # 扩展 Pass
 
-Pass 是优化知识的入口。它读取当前 typed semantics 与执行关系，改写真实 IR，再把完整程序交给后续 consumer。新增优化前，先阅读[Pass 与分析](../compiler/passes-and-analyses.md)、对应 [GPU](../compiler/gpu-program-ir.md)/[CPU](../compiler/cpu-program-ir.md) 程序合同和[目标 lowering](../compiler/target-lowering.md)。
+Pass 是优化知识的入口。它读取当前 typed semantics 与执行关系，改写真实 IR，再把完整程序交给后续 consumer。新增优化前，先阅读[Pass 与分析](../compiler/passes-and-analyses.md)、对应 [GPU](../compiler/block-program-ir.md)/[CPU](../compiler/cpu-program-ir.md) 程序合同和[目标 lowering](../compiler/target-lowering.md)。
 
 ## 找到负责层
 
@@ -25,7 +25,7 @@ GPU 与 CPU 可以复用分析思想，但不要求共享一套 physical topolog
 
 Pass 声明、注册与 pipeline 使用 MLIR 的既有机制。先查看 `include/Intent/Dialect/<Family>/Transforms/Passes.td`、`lib/Dialect/<Family>/Transforms/` 和对应的 `Passes.cpp`；target-local transformations 从 `lib/Target/<Provider>/Transforms/` 进入。实际可调用 pass 及选项可通过 `intent-opt --help` 查阅。
 
-例如 GPU 归约优化放在 `lib/Dialect/GPU/Transforms/Reduction/`，声明在 GPU `Passes.td`，完整 transformation 的入口和顺序在 GPU `Transforms/Passes.cpp`。CPU 的 task 分配和 storage 复用分别位于 CPU `Transforms/Task/` 与 `Transforms/Storage/`，CPU pipeline 由其 `Transforms/Passes.cpp` 组装；不把 GPU ownership 变换挪过去共享。Provider 的经验配置表位于相应 `Transforms/` 或 `Transforms/Configuration/`。
+例如 GPU 归约优化放在 `lib/Dialect/Block/Transforms/Reduction/`，声明在 GPU `Passes.td`，完整 transformation 的入口和顺序在 GPU `Transforms/Passes.cpp`。CPU 的 task 分配和 storage 复用分别位于 CPU `Transforms/Task/` 与 `Transforms/Storage/`，CPU pipeline 由其 `Transforms/Passes.cpp` 组装；不把 GPU ownership 变换挪过去共享。Provider 的经验配置表位于相应 `Transforms/` 或 `Transforms/Configuration/`。
 
 新增 pass 时在相邻 CMake 列表加入实现；从已有 transformation wrapper 复用注册、依赖 dialect、错误传播及完成边界验证。把它插入满足输入条件的位置，而不是只为某个 program 加一条旁路。
 

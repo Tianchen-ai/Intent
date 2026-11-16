@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from .provider import EnvironmentCheck, LocalExecution, Provider
 from .execution import cpu_key, cpu_workers
+from .specification import read_cpu_target
 
 INSTALLATION = {
     "modules": ("weft",), "requirements": (), "torch": None, "torch_index": None,
@@ -159,5 +160,5 @@ def _resolve_local(device, *, workers, **options):
 
 PROVIDER = Provider("cpu", WeftTarget, _read_facts, _bind, _environment_checks,
     LocalExecution("cpu", False, frozenset({"compiler", "cc", "cflags", "private_bytes"}),
-                   _resolve_local, cpu_key), "cpu",
+                   _resolve_local, cpu_key), "cpu", read_cpu_target,
     "Source facts or explicit native toolchain discovery only; RISC-V execution is checked when loading native code")

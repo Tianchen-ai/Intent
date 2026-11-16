@@ -8,12 +8,12 @@
 #include "Value/Values.h"
 #include "Intent/Target/Triton/Analysis/Program.h"
 #include "Intent/Target/Triton/Serialization/Serializer.h"
-#include "Intent/Dialect/GPU/IR/Program.h"
-#include "Intent/Dialect/GPU/Transforms/Contraction/Contraction.h"
-#include "Intent/Dialect/GPU/Transforms/Mapping/ExecutionGroups.h"
-#include "Intent/Dialect/GPU/Transforms/Passes.h"
-#include "Intent/Dialect/GPU/Transforms/Storage/Workspace.h"
-#include "Intent/Dialect/GPU/Transforms/Value/ValueMaterialization.h"
+#include "Intent/Dialect/Block/IR/Program.h"
+#include "Intent/Dialect/Block/Transforms/Contraction/Contraction.h"
+#include "Intent/Dialect/Block/Transforms/Mapping/ExecutionGroups.h"
+#include "Intent/Dialect/Block/Transforms/Passes.h"
+#include "Intent/Dialect/Block/Transforms/Storage/Workspace.h"
+#include "Intent/Dialect/Block/Transforms/Value/ValueMaterialization.h"
 #include "mlir/IR/Verifier.h"
 
 using namespace mlir;
@@ -21,11 +21,11 @@ using namespace mlir;
 namespace intent::triton {
 
 LogicalResult prepareTritonMemory(ModuleOp module) {
-  if (failed(gpu::verifyGPUProgram(module)) ||
-      failed(gpu::realizeShortWindowReductions(module)) ||
-      failed(gpu::lowerExecutionGroups(module)))
+  if (failed(block::verifyBlockProgram(module)) ||
+      failed(block::realizeShortWindowReductions(module)) ||
+      failed(block::lowerExecutionGroups(module)))
     return failure();
-  auto kernel = gpu::getPhysicalKernel(module);
+  auto kernel = block::getPhysicalKernel(module);
   if (failed(kernel))
     return failure();
   detail::foldIntegerScanTails(*kernel);
@@ -34,22 +34,22 @@ LogicalResult prepareTritonMemory(ModuleOp module) {
       failed(detail::legalizeGatherCoordinates(*kernel)) ||
       failed(detail::legalizeExpandingGathers(*kernel)) ||
       failed(detail::legalizeScatterAdd(*kernel)) ||
-      failed(gpu::contraction::normalizeMatrixContractShapes(*kernel)))
+      failed(block::contraction::normalizeMatrixContractShapes(*kernel)))
     return failure();
-  return gpu::verifyGPUProgram(module);
+  return block::verifyBlockProgram(module);
 }
 
 LogicalResult formTritonProgram(ModuleOp module) {
-  auto kernel = gpu::getPhysicalKernel(module);
+  auto kernel = block::getPhysicalKernel(module);
   if (failed(kernel))
     return failure();
   bool requiresCtaSynchronization = detail::hasOrderedViewDependencies(*kernel);
-  kernel->walk([&](gpu::BufferOp) { requiresCtaSynchronization = true; });
+  kernel->walk([&](block::BufferOp) { requiresCtaSynchronization = true; });
   auto localOptions = declareProviderOptions(
       *kernel, requiresCtaSynchronization,
       detail::findLoadPipelineLoops(*kernel));
-  if (failed(localOptions) || failed(gpu::verifyGPUProgram(module)) ||
-      failed(gpu::lowerWorkspaceAllocations(module)))
+  if (failed(localOptions) || failed(block::verifyBlockProgram(module)) ||
+      failed(block::lowerWorkspaceAllocations(module)))
     return failure();
   if (failed(detail::legalizeOrderedViewDependencies(*kernel)) ||
       failed(detail::legalizeSplitGatherPairs(*kernel)))
@@ -71,20 +71,20 @@ LogicalResult formTritonProgram(ModuleOp module) {
 }
 
 LogicalResult finalizeTritonProgram(ModuleOp module, bool hoistLoopInvariants) {
-  auto kernel = gpu::getPhysicalKernel(module);
+  auto kernel = block::getPhysicalKernel(module);
   if (failed(kernel))
     return failure();
-  gpu::foldExactConstantDivisions(*kernel);
-  gpu::narrowIntegerArithmetic(*kernel);
+  block::foldExactConstantDivisions(*kernel);
+  block::narrowIntegerArithmetic(*kernel);
   detail::canonicalizeBroadcastProjections(*kernel);
-  SmallVector<gpu::AssumeInBoundsOp> assumptions;
-  kernel->walk([&](gpu::AssumeInBoundsOp assumption) {
+  SmallVector<block::AssumeInBoundsOp> assumptions;
+  kernel->walk([&](block::AssumeInBoundsOp assumption) {
     assumptions.push_back(assumption);
   });
-  for (gpu::AssumeInBoundsOp assumption : assumptions)
+  for (block::AssumeInBoundsOp assumption : assumptions)
     assumption.erase();
-  if (failed(hoistLoopInvariants ? gpu::hoistLoopInvariantValues(module)
-                                : gpu::eliminateCommonValues(module)) ||
+  if (failed(hoistLoopInvariants ? block::hoistLoopInvariantValues(module)
+                                : block::eliminateCommonValues(module)) ||
       failed(detail::legalizeCollectiveCallbacks(*kernel)) ||
       failed(finalizeConfigurationRequirements(*kernel)))
     return failure();

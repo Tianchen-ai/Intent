@@ -37,8 +37,8 @@ SmallVector<std::string> Backend::profilePaths(StringRef directory) const {
   SmallVector<std::string> result;
   if (!available)
     return result;
-  if (std::holds_alternative<GPUBackend>(model)) {
-    for (const auto &source : gpuProfileSources(directory, name))
+  if (std::holds_alternative<BlockBackend>(model)) {
+    for (const auto &source : blockProfileSources(directory, name))
       result.push_back(source.filename);
   } else if (const auto *cpu = std::get_if<CPUBackend>(&model)) {
     llvm::SmallString<256> path(directory);
@@ -66,17 +66,17 @@ LogicalResult Backend::verifySharedInput(ModuleOp module, const Request &request
   }, model);
 }
 
-SmallVector<gpu::TuningProfileSource> gpuProfileSources(StringRef directory,
+SmallVector<block::TuningProfileSource> blockProfileSources(StringRef directory,
                                                      StringRef provider) {
-  SmallVector<gpu::TuningProfileSource> sources;
-  auto append = [&](gpu::TuningProfileSchema schema, StringRef resource) {
+  SmallVector<block::TuningProfileSource> sources;
+  auto append = [&](block::TuningProfileSchema schema, StringRef resource) {
     llvm::SmallString<256> filename(directory);
     llvm::sys::path::append(filename, resource);
     sources.push_back({schema, std::string(filename)});
   };
   for (const Backend &adapter : backends())
     if (adapter.available && adapter.name == provider)
-      if (const auto *model = std::get_if<GPUBackend>(&adapter.model))
+      if (const auto *model = std::get_if<BlockBackend>(&adapter.model))
         append(model->profiles, model->profileFilename);
   return sources;
 }

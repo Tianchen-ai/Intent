@@ -1,6 +1,6 @@
 #ifndef INTENT_TARGET_TRITON_TRANSFORMS_CONFIGURATIONS_H
 #define INTENT_TARGET_TRITON_TRANSFORMS_CONFIGURATIONS_H
-#include "Intent/Dialect/GPU/Transforms/Configuration/TuningProfiles.h"
+#include "Intent/Dialect/Block/Transforms/Configuration/TuningProfiles.h"
 #include "Intent/Target/Triton/Analysis/Configuration.h"
 #include "Intent/Target/Triton/IR/TritonOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"

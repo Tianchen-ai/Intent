@@ -83,7 +83,7 @@ class GPUInterface:
 
     def __init__(self, metadata: dict) -> None:
         self.public = PublicInterface.read(metadata["interface"])
-        physical = metadata["gpu"]
+        physical = metadata["block"]
         arguments = []
         for entry in physical["arguments"]:
             common = entry["abi"], entry["id"], entry["kernel_name"]

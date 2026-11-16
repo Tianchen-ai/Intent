@@ -5,6 +5,7 @@ from typing import ClassVar
 from .gpu import GPUTarget
 from .provider import EnvironmentCheck, LocalExecution, Provider
 from .execution import indexed_key, indexed_target
+from .specification import read_gpu_target
 
 INSTALLATION = {
     "modules": ("torch", "cuda.tile", "cuda.tile.tune"),
@@ -43,4 +44,4 @@ def _environment_checks(target):
 
 PROVIDER = Provider("gpu", CuTileTarget, _read_facts, _bind, _environment_checks,
     LocalExecution("cuda", True, frozenset(), partial(indexed_target, CuTileTarget), indexed_key),
-    "block")
+    "block", read_gpu_target)
