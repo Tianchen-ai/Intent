@@ -11,7 +11,7 @@
 
 namespace intent::compiler {
 
-enum class Provider { Triton, CuTile, Mojo, Weft, BangC };
+using Provider = std::string;
 enum class InputStage { Kernel, Shared };
 enum class Stage { Kernel, Shared, Provider };
 enum class Failure {
@@ -50,6 +50,7 @@ struct Request {
   DSAOptions dsa;
   std::string profileDirectory;
   std::string tuningConfig;
+  std::string targetOptions;
   std::optional<CompilationOptions> options;
 };
 

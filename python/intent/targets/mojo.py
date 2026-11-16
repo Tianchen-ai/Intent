@@ -8,7 +8,14 @@ import shutil
 import subprocess
 from typing import TYPE_CHECKING
 
-from .provider import EnvironmentCheck, Provider
+from .provider import EnvironmentCheck, LocalExecution, Provider
+from .execution import cpu_key, cpu_workers
+
+INSTALLATION = {
+    "modules": ("torch",), "requirements": (), "torch": "2.10.0+cpu",
+    "torch_index": "https://download.pytorch.org/whl/cpu", "python_max": (3, 12),
+    "toolchain": "An explicitly installed Mojo compiler, C compiler and GNU OpenMP runtime (libgomp.so.1); Linux x86-64 AVX2/AVX512",
+}
 from .specification import CPUCompilationTarget, require_matching_target
 
 if TYPE_CHECKING:
@@ -152,4 +159,10 @@ def _environment_checks(target):
     return (EnvironmentCheck("C/OpenMP runtime compiler", "provider_toolchain", _c_compiler),)
 
 
-PROVIDER = Provider("cpu", MojoTarget, _read_facts, _bind, _environment_checks)
+def _resolve_local(device, *, workers, **options):
+    return MojoTarget(workers=cpu_workers(workers), **options).resolve()
+
+
+PROVIDER = Provider("cpu", MojoTarget, _read_facts, _bind, _environment_checks,
+    LocalExecution("cpu", False, frozenset({"compiler", "build_threads", "private_bytes"}),
+                   _resolve_local, cpu_key), "cpu")

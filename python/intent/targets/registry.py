@@ -1,43 +1,16 @@
 """Provider declarations shared by target resolution and installation tools."""
 
-BACKENDS = {
-    "triton": {
-        "modules": ("torch", "triton"),
-        "requirements": ("triton==3.6.0", "numpy==1.26.4"), "torch": "2.10.0+cu130",
-        "torch_index": "https://download.pytorch.org/whl/cu130",
-        "python_max": (3, 12), "toolchain": "NVIDIA driver and CUDA-capable PyTorch",
-    },
-    "cutile": {
-        "modules": ("torch", "cuda.tile", "cuda.tile.tune"),
-        "requirements": ("triton==3.6.0", "numpy==1.26.4",
-                         "cuda-toolkit[tileiras,nvvm,nvcc]==13.3.1", "cuda-tile==1.6.0"),
-        "torch": "2.10.0+cu128",
-        "torch_index": "https://download.pytorch.org/whl/cu128",
-        "python_max": (3, 12), "toolchain": "NVIDIA driver and the CUDA tile compiler",
-    },
-    "mojo": {
-        "modules": ("torch",),
-        "requirements": (), "torch": "2.10.0+cpu",
-        "torch_index": "https://download.pytorch.org/whl/cpu",
-        "python_max": (3, 12), "toolchain": "An explicitly installed Mojo compiler, C compiler and GNU OpenMP runtime (libgomp.so.1); Linux x86-64 AVX2/AVX512",
-    },
-    "weft": {
-        "modules": ("weft",),
-        "requirements": (), "torch": None, "torch_index": None,
-        "python_max": (3, 12), "toolchain": "RISC-V Linux with the matching Weft package, native weft-compile and C compiler; hardware facts are discovered locally",
-    },
-    "bangc": {
-        "modules": (),
-        "requirements": (), "torch": None, "torch_index": None,
-        "python_max": (3, 12), "toolchain": "An explicitly installed NeuWare SDK and MLU370 runtime",
-    },
-}
+from importlib import import_module
+from .components import COMPONENTS
+
+BACKENDS = {name: import_module(module).INSTALLATION for name, module in COMPONENTS.items()}
 
 
 def backend(name: str) -> dict:
     from intent.targets.provider import provider
     adapter = provider(name)
-    return {**BACKENDS[name], "target": adapter.target.__name__}
+    return {**BACKENDS[name], "target": adapter.target.__name__,
+            "execution_model": adapter.execution_model, "device_kind": adapter.local.device_kind}
 
 
 def make_target(name: str, options: dict, *, facts: dict | None = None):

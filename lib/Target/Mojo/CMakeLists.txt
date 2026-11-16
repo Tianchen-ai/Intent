@@ -1,2 +1,3 @@
 add_subdirectory(Serialization)
 add_subdirectory(Transforms)
+intent_backend(Mojo SOURCE Backend.cpp LIBRARIES MLIRIntentMojoTransforms MLIRIntentMojoSerialization)

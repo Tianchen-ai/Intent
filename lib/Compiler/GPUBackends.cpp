@@ -4,35 +4,10 @@
 #include "Intent/Dialect/GPU/Analysis/PhysicalProgram.h"
 #include "Intent/Dialect/GPU/IR/Program.h"
 #include "Intent/Dialect/GPU/Transforms/Configuration/PhysicalParameters.h"
-#include "Intent/Target/CuTile/IR/CuTileDialect.h"
-#include "Intent/Target/CuTile/Serialization/Serializer.h"
-#include "Intent/Target/CuTile/Transforms/Passes.h"
-#include "Intent/Target/CuTile/Transforms/Configuration/TuningProfiles.h"
-#include "Intent/Target/Triton/IR/TritonDialect.h"
-#include "Intent/Target/Triton/Serialization/Serializer.h"
-#include "Intent/Target/Triton/Transforms/Passes.h"
-#include "Intent/Target/Triton/Transforms/Configuration/TuningProfiles.h"
 
 using namespace mlir;
 
 namespace intent::compiler {
-
-ArrayRef<Backend> gpuBackends() {
-  static const Backend adapters[] = {
-      {Provider::Triton, "triton", true,
-       GPUBackend{true, false, true, 1, triton::tuningProfileSchema(), "triton.json"},
-       [](DialectRegistry &registry) { registry.insert<triton::IntentTritonDialect>(); },
-       triton::registerTritonPasses,
-       [](OpPassManager &manager, const Request &) { triton::buildTritonPipeline(manager); },
-       triton::serializeProgram},
-      {Provider::CuTile, "cutile", true,
-       GPUBackend{true, true, false, 2, cutile::tuningProfileSchema(), "cutile.json"},
-       [](DialectRegistry &registry) { registry.insert<cutile::IntentCuTileDialect>(); },
-       cutile::registerCuTilePasses,
-       [](OpPassManager &manager, const Request &) { cutile::buildCuTilePipeline(manager); },
-       cutile::serializeProgram}};
-  return adapters;
-}
 
 void GPUBackend::buildConstruction(OpPassManager &manager, const Request &request) const {
   ConstructGPUOptions options;

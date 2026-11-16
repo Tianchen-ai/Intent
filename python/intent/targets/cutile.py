@@ -1,8 +1,18 @@
 from dataclasses import dataclass
+from functools import partial
 from typing import ClassVar
 
 from .gpu import GPUTarget
-from .provider import EnvironmentCheck, Provider
+from .provider import EnvironmentCheck, LocalExecution, Provider
+from .execution import indexed_key, indexed_target
+
+INSTALLATION = {
+    "modules": ("torch", "cuda.tile", "cuda.tile.tune"),
+    "requirements": ("triton==3.6.0", "numpy==1.26.4",
+                     "cuda-toolkit[tileiras,nvvm,nvcc]==13.3.1", "cuda-tile==1.6.0"),
+    "torch": "2.10.0+cu128", "torch_index": "https://download.pytorch.org/whl/cu128",
+    "python_max": (3, 12), "toolchain": "NVIDIA driver and the CUDA tile compiler",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,4 +41,6 @@ def _environment_checks(target):
     return (EnvironmentCheck("cuTile native compiler", "provider_toolchain", _compiler),)
 
 
-PROVIDER = Provider("gpu", CuTileTarget, _read_facts, _bind, _environment_checks)
+PROVIDER = Provider("gpu", CuTileTarget, _read_facts, _bind, _environment_checks,
+    LocalExecution("cuda", True, frozenset(), partial(indexed_target, CuTileTarget), indexed_key),
+    "block")

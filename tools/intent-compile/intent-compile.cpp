@@ -46,16 +46,8 @@ int main(int argc, char **argv) {
   llvm::cl::opt<std::string> target("target", llvm::cl::desc("source provider"));
   llvm::cl::opt<std::string> inputStage("input-stage", llvm::cl::init("kir"),
       llvm::cl::desc("Input IR stage: kir or shared; shared input requires the original target resources"));
-  llvm::cl::opt<int64_t> computeUnits("compute-units", llvm::cl::init(0));
-  llvm::cl::opt<int64_t> sharedMemoryPerUnit("shared-memory-per-unit", llvm::cl::init(0));
-  llvm::cl::opt<int64_t> maxDynamicSharedMemoryPerBlock("max-dynamic-shared-memory-per-block", llvm::cl::init(0));
-  llvm::cl::opt<int64_t> registersPerUnit("registers-per-unit", llvm::cl::init(0));
-  llvm::cl::opt<int64_t> maxThreadsPerBlock("max-threads-per-block", llvm::cl::init(0));
-  llvm::cl::opt<int64_t> computeCapabilityMajor("compute-capability-major", llvm::cl::init(0));
-  llvm::cl::opt<int64_t> computeCapabilityMinor("compute-capability-minor", llvm::cl::init(-1));
-  llvm::cl::opt<int64_t> singleToDoublePrecisionPerfRatio("single-to-double-precision-perf-ratio", llvm::cl::init(0));
-  llvm::cl::opt<bool> matrixUnits("matrix-units", llvm::cl::init(false));
-  llvm::cl::opt<bool> dynamicVectorWidth("dynamic-vector-width", llvm::cl::init(false));
+  llvm::cl::opt<std::string> targetOptions("target-options", llvm::cl::init(""),
+      llvm::cl::desc("JSON facts and construction bindings owned by the selected provider"));
   llvm::cl::opt<std::string> irOutputFilename("ir-output", llvm::cl::init(""));
   llvm::cl::opt<std::string> sourceOutputFilename("source-output", llvm::cl::init(""));
   llvm::cl::opt<std::string> metadataOutputFilename("metadata-output", llvm::cl::init(""));
@@ -67,17 +59,6 @@ int main(int argc, char **argv) {
       llvm::cl::desc("Enable eligible online normalized reductions"));
   llvm::cl::opt<bool> optimizationRemarks("optimization-remarks", llvm::cl::init(false),
       llvm::cl::desc("Explain online reduction selection and rejection"));
-  llvm::cl::opt<int64_t> cpuVectorBits("cpu-vector-bits", llvm::cl::init(0));
-  llvm::cl::opt<int64_t> cpuWorkers("cpu-workers", llvm::cl::init(0));
-  llvm::cl::opt<bool> cpuMatrixI8I32("cpu-matrix-i8-i32", llvm::cl::init(false));
-  llvm::cl::opt<bool> cpuMatrixBF16F32("cpu-matrix-bf16-f32", llvm::cl::init(false));
-  llvm::cl::opt<int64_t> cpuPrivateBytes("cpu-private-bytes", llvm::cl::init(256 * 1024));
-  llvm::cl::opt<std::string> dsaArchitecture("dsa-architecture", llvm::cl::init("mtp_372"));
-  llvm::cl::opt<std::string> dsaCapabilities("dsa-capabilities", llvm::cl::init(""));
-  llvm::cl::opt<std::string> dsaShapes("dsa-shapes", llvm::cl::init("{}"),
-      llvm::cl::desc("JSON parameter shapes; -1 keeps an axis dynamic"));
-  llvm::cl::opt<std::string> dsaStrides("dsa-strides", llvm::cl::init("{}"),
-      llvm::cl::desc("JSON parameter element strides"));
   llvm::cl::opt<bool> stopAfterShared("stop-after-shared", llvm::cl::init(false),
       llvm::cl::desc("Stop after the selected family's complete shared pipeline"));
   llvm::cl::opt<bool> stopAfterKIR("stop-after-kir", llvm::cl::init(false),
@@ -90,15 +71,6 @@ int main(int argc, char **argv) {
       llvm::sys::fs::getMainExecutable(argv[0], reinterpret_cast<void *>(&main)));
   llvm::sys::path::remove_filename(profileDirectory);
   llvm::sys::path::append(profileDirectory, "profiles");
-  const llvm::SmallVector<llvm::cl::Option *> gpuOptions{
-      &computeUnits, &sharedMemoryPerUnit, &maxDynamicSharedMemoryPerBlock,
-      &registersPerUnit, &maxThreadsPerBlock, &computeCapabilityMajor,
-      &computeCapabilityMinor, &singleToDoublePrecisionPerfRatio,
-      &matrixUnits, &dynamicVectorWidth};
-  const llvm::SmallVector<llvm::cl::Option *> cpuOptions{
-      &cpuVectorBits, &cpuWorkers, &cpuMatrixI8I32, &cpuPrivateBytes};
-  const llvm::SmallVector<llvm::cl::Option *> dsaOptions{
-      &dsaArchitecture, &dsaShapes, &dsaStrides, &dsaCapabilities};
   auto rejectOptions = [&](llvm::ArrayRef<llvm::cl::Option *> options,
                            llvm::StringRef reason) {
     for (llvm::cl::Option *option : options)
@@ -111,10 +83,7 @@ int main(int argc, char **argv) {
     return false;
   };
   if (compilerInfo) {
-    if (rejectOptions(gpuOptions, "--compiler-info does not compile a program") ||
-        rejectOptions(cpuOptions, "--compiler-info does not compile a program") ||
-        rejectOptions(dsaOptions, "--compiler-info does not compile a program") ||
-        rejectOptions({&inputFilename, &target, &inputStage, &irOutputFilename,
+    if (rejectOptions({&inputFilename, &target, &targetOptions, &inputStage, &irOutputFilename,
                        &sourceOutputFilename, &metadataOutputFilename,
                        &tuningConfigFilename, &numerics, &onlineReduction,
                        &optimizationRemarks, &stopAfterKIR, &stopAfterShared},
@@ -159,20 +128,8 @@ int main(int argc, char **argv) {
     return exitCode(Failure::Invocation);
   }
   if (request.stopAfter == intent::compiler::Stage::Kernel) {
-    if (rejectOptions({&target, &tuningConfigFilename},
-                      "KIR output does not select a physical target or tuning profile") ||
-        rejectOptions(gpuOptions, "KIR output does not consume GPU resources") ||
-        rejectOptions(cpuOptions, "KIR output does not consume CPU resources") ||
-        rejectOptions(dsaOptions, "KIR output does not consume DSA bindings"))
-      return exitCode(Failure::Invocation);
-  } else {
-    const auto family = intent::compiler::backend(*request.provider).family();
-    if ((family != intent::compiler::Family::GPU &&
-         rejectOptions(gpuOptions, "selected provider does not consume GPU resources")) ||
-        (family != intent::compiler::Family::CPU &&
-         rejectOptions(cpuOptions, "selected provider does not consume CPU resources")) ||
-        (family != intent::compiler::Family::DSA &&
-         rejectOptions(dsaOptions, "selected provider does not consume DSA bindings")))
+    if (rejectOptions({&target, &targetOptions, &tuningConfigFilename},
+                      "KIR output does not select a physical target or tuning profile"))
       return exitCode(Failure::Invocation);
   }
   if (request.stopAfter != intent::compiler::Stage::Provider &&
@@ -184,11 +141,7 @@ int main(int argc, char **argv) {
     llvm::errs() << "--ir-output is required; provider compilation also requires --source-output\n";
     return exitCode(Failure::Output);
   }
-  request.gpu = {computeUnits, sharedMemoryPerUnit, maxDynamicSharedMemoryPerBlock,
-      registersPerUnit, maxThreadsPerBlock, computeCapabilityMajor, computeCapabilityMinor,
-      singleToDoublePrecisionPerfRatio, matrixUnits, dynamicVectorWidth, false, false};
-  request.cpu = {cpuVectorBits, cpuWorkers, cpuMatrixI8I32, cpuPrivateBytes, cpuMatrixBF16F32};
-  request.dsa = {dsaArchitecture, dsaShapes, dsaStrides, dsaCapabilities};
+  request.targetOptions = targetOptions;
   request.tuningConfig = tuningConfigFilename;
   request.profileDirectory = std::string(profileDirectory);
 

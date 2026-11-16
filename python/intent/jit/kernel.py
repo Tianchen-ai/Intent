@@ -7,7 +7,7 @@ from intent.api import KernelDefinition
 from intent.compiler.pipeline import generate
 from intent.language.annotations import ConstexprSpec, ViewKind, ViewSpec
 from intent.targets.base import ResolvedTarget
-from intent.targets.local import execution_key, resolve_local, select_device
+from intent.targets.local import resolve_local, select_device
 from intent.targets.provider import provider
 
 
@@ -19,7 +19,7 @@ class JITKernel:
                  backend_options=None):
         if not isinstance(definition, KernelDefinition):
             raise TypeError("intent.jit requires an @intent.kernel definition")
-        provider(backend)
+        self._provider = provider(backend)
         self.definition, self.backend, self.device = definition, backend, device
         self.compiler, self.tuning_config, self.options = compiler, tuning_config, options
         self.constexprs = deepcopy(dict(constexprs or {}))
@@ -46,7 +46,7 @@ class JITKernel:
 
     def _artifact(self, arguments, outputs):
         device = select_device(self.backend, (*arguments, *(outputs or ())), self.device)
-        execution = execution_key(device)
+        execution = self._provider.local.execution_key(device)
         with self._lock:
             if self._closed:
                 raise RuntimeError("JIT kernel is closed")
@@ -57,10 +57,8 @@ class JITKernel:
                     raise NotImplementedError(f"{self.backend} has no local executable target")
                 self._targets[execution] = resolved
             target = self._targets[execution]
-            specialization = ()
-            if self.backend == "bangc":
-                from intent.targets.bangc import specialize_call
-                target, specialization = specialize_call(target, self.definition, arguments, outputs)
+            target, specialization = self._provider.local.specialize(
+                target, self.definition, arguments, outputs)
             key = execution, specialization
             if key not in self._artifacts:
                 program = generate(self.definition, target=target, compiler=self.compiler,

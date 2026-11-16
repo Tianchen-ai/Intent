@@ -35,6 +35,7 @@ include(AddLLVM)
 include(AddMLIR)
 include(HandleLLVMOptions)
 include(cmake/PassReference.cmake)
+include(cmake/BackendComponents.cmake)
 
 set(CMAKE_CXX_STANDARD 17 CACHE STRING "C++ standard")
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

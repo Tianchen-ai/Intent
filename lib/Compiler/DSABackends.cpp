@@ -175,17 +175,6 @@ LogicalResult verifyExistingBindings(func::FuncOp function,
 
 } // namespace
 
-ArrayRef<Backend> dsaBackends() {
-  static const Backend adapters[] = {
-      {Provider::BangC, "bangc", true, DSABackend{}, nullptr,
-       [] { bangc::registerBangCPasses(); bangc::registerBangCPipelines(); },
-       [](OpPassManager &manager, const Request &request) {
-         bangc::buildBangCPipeline(manager.nest<ModuleOp>(), request.dsa.architecture);
-       },
-       bangc::serializeProgram}};
-  return adapters;
-}
-
 void DSABackend::buildConstruction(OpPassManager &manager, const Request &request) const {
   ConstructDSAOptions options;
   options.directory = request.profileDirectory;

@@ -9,7 +9,14 @@ import platform
 import shlex
 from typing import TYPE_CHECKING
 
-from .provider import EnvironmentCheck, Provider
+from .provider import EnvironmentCheck, LocalExecution, Provider
+from .execution import cpu_key, cpu_workers
+
+INSTALLATION = {
+    "modules": ("weft",), "requirements": (), "torch": None, "torch_index": None,
+    "python_max": (3, 12),
+    "toolchain": "RISC-V Linux with the matching Weft package, native weft-compile and C compiler; hardware facts are discovered locally",
+}
 from .specification import CPUCompilationTarget, require_matching_target
 from intent.runtime.weft.target import TargetProfile
 
@@ -146,5 +153,11 @@ def _environment_checks(target):
     return (EnvironmentCheck("Weft native toolchain", "provider_toolchain", toolchain),)
 
 
+def _resolve_local(device, *, workers, **options):
+    return native_target(workers=cpu_workers(workers), **options)
+
+
 PROVIDER = Provider("cpu", WeftTarget, _read_facts, _bind, _environment_checks,
-                    "Source facts or explicit native toolchain discovery only; RISC-V execution is checked when loading native code")
+    LocalExecution("cpu", False, frozenset({"compiler", "cc", "cflags", "private_bytes"}),
+                   _resolve_local, cpu_key), "cpu",
+    "Source facts or explicit native toolchain discovery only; RISC-V execution is checked when loading native code")

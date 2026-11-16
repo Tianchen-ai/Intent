@@ -8,17 +8,16 @@ using namespace mlir;
 
 namespace intent::compiler {
 
-// Each family declares its compiled adapters next to its construction policy.
-llvm::ArrayRef<Backend> gpuBackends();
-llvm::ArrayRef<Backend> cpuBackends();
-llvm::ArrayRef<Backend> dsaBackends();
+#define INTENT_BACKEND(Name) Backend create##Name##Backend();
+#include "Intent/Compiler/Backends.inc"
+#undef INTENT_BACKEND
 
 ArrayRef<Backend> backends() {
   static const SmallVector<Backend> catalog = [] {
     SmallVector<Backend> result;
-    llvm::append_range(result, gpuBackends());
-    llvm::append_range(result, cpuBackends());
-    llvm::append_range(result, dsaBackends());
+#define INTENT_BACKEND(Name) result.push_back(create##Name##Backend());
+#include "Intent/Compiler/Backends.inc"
+#undef INTENT_BACKEND
     return result;
   }();
   return catalog;
@@ -45,9 +44,9 @@ SmallVector<std::string> Backend::profilePaths(StringRef directory) const {
     llvm::SmallString<256> path(directory);
     llvm::sys::path::append(path, cpu->profileFilename);
     result.push_back(std::string(path));
-  } else if (std::holds_alternative<DSABackend>(model)) {
+  } else if (const auto *dsa = std::get_if<DSABackend>(&model)) {
     llvm::SmallString<256> path(directory);
-    llvm::sys::path::append(path, "bangc.json");
+    llvm::sys::path::append(path, dsa->profileFilename);
     result.push_back(std::string(path));
   }
   return result;

@@ -1,8 +1,17 @@
 from dataclasses import dataclass
+from functools import partial
 from typing import ClassVar
 
 from .gpu import GPUTarget
-from .provider import EnvironmentCheck, Provider
+from .provider import EnvironmentCheck, LocalExecution, Provider
+from .execution import indexed_key, indexed_target
+
+INSTALLATION = {
+    "modules": ("torch", "triton"),
+    "requirements": ("triton==3.6.0", "numpy==1.26.4"), "torch": "2.10.0+cu130",
+    "torch_index": "https://download.pytorch.org/whl/cu130",
+    "python_max": (3, 12), "toolchain": "NVIDIA driver and CUDA-capable PyTorch",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,4 +45,6 @@ def _environment_checks(target):
     return (EnvironmentCheck("Triton native assembler", "provider_toolchain", compiler),)
 
 
-PROVIDER = Provider("gpu", TritonTarget, _read_facts, _bind, _environment_checks)
+PROVIDER = Provider("gpu", TritonTarget, _read_facts, _bind, _environment_checks,
+    LocalExecution("cuda", True, frozenset(), partial(indexed_target, TritonTarget), indexed_key),
+    "block")

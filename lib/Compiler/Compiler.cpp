@@ -71,7 +71,8 @@ llvm::json::Object information(StringRef profileDirectory) {
           {"failure_stages", std::move(failureStages)}};
 }
 
-Result compile(OwningOpRef<ModuleOp> module, const Request &request) {
+Result compile(OwningOpRef<ModuleOp> module, const Request &inputRequest) {
+  Request request = inputRequest;
   Result result;
   result.module = std::move(module);
   bool sharedInput = request.inputStage == InputStage::Shared;
@@ -81,7 +82,7 @@ Result compile(OwningOpRef<ModuleOp> module, const Request &request) {
     return result;
   }
   if (request.stopAfter == Stage::Kernel &&
-      (request.provider || !request.tuningConfig.empty())) {
+      (request.provider || !request.tuningConfig.empty() || !request.targetOptions.empty())) {
     result.module->emitError("KIR output does not select a physical target or tuning profile");
     result.failure = Failure::Invocation;
     return result;
@@ -118,6 +119,10 @@ Result compile(OwningOpRef<ModuleOp> module, const Request &request) {
   if (request.stopAfter != Stage::Kernel && !isProviderAvailable(*request.provider)) {
     result.module->emitError() << "provider is not compiled into this compiler: " << providerName(*request.provider);
     result.failure = Failure::UnavailableProvider;
+    return result;
+  }
+  if (request.provider && failed(backend(*request.provider).configure(*result.module, request))) {
+    result.failure = Failure::Invocation;
     return result;
   }
   PassManager manager(result.module->getContext());

@@ -39,6 +39,7 @@ struct CPUBackend {
 
 struct DSABackend {
   static constexpr Family family = Family::DSA;
+  llvm::StringRef profileFilename;
   void buildConstruction(mlir::OpPassManager &, const Request &) const;
   void buildShared(mlir::OpPassManager &, const Request &, llvm::StringRef provider) const;
   mlir::LogicalResult verifySharedInput(mlir::ModuleOp, const Request &, llvm::StringRef provider) const;
@@ -57,6 +58,7 @@ struct Backend {
   void (*registerPasses)();
   void (*buildPipeline)(mlir::OpPassManager &, const Request &);
   mlir::LogicalResult (*serialize)(mlir::ModuleOp, std::string &source, std::string &metadata);
+  mlir::LogicalResult (*configure)(mlir::ModuleOp, Request &);
 
   Family family() const;
   llvm::SmallVector<std::string> profilePaths(llvm::StringRef directory) const;
@@ -74,6 +76,9 @@ mlir::FailureOr<mlir::DictionaryAttr> parseDSAParameterBindings(
 mlir::FailureOr<mlir::ArrayAttr> readDSAConfigurations(
     mlir::ModuleOp module, llvm::StringRef directory, llvm::StringRef overrides);
 mlir::FailureOr<mlir::Attribute> readDSACapabilities(mlir::ModuleOp module, llvm::StringRef text);
+mlir::LogicalResult configureNVIDIATarget(mlir::ModuleOp module, Request &request);
+mlir::LogicalResult configureCPUTarget(mlir::ModuleOp module, Request &request);
+mlir::LogicalResult configureBangCTarget(mlir::ModuleOp module, Request &request);
 
 } // namespace intent::compiler
 #endif

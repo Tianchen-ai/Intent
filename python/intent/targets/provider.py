@@ -14,6 +14,23 @@ class EnvironmentCheck:
     action: Callable[[], object]
 
 
+def unspecialized_call(target, definition, arguments, outputs):
+    """A provider whose source ABI retains runtime shapes and strides."""
+    return target, ()
+
+
+@dataclass(frozen=True, slots=True)
+class LocalExecution:
+    """The local device and binding contract owned by one source provider."""
+
+    device_kind: str
+    indexed: bool
+    options: frozenset[str]
+    resolve: Callable[..., Any]
+    execution_key: Callable[[Any], object]
+    specialize: Callable[..., tuple[Any, object]] = unspecialized_call
+
+
 @dataclass(frozen=True, slots=True)
 class Provider:
     family: str
@@ -21,14 +38,14 @@ class Provider:
     read_facts: Callable[[str, dict, Any], Any]
     bind: Callable[[Any, Any], Any] | None
     environment_checks: Callable[[Any], tuple[EnvironmentCheck, ...]]
+    local: LocalExecution
+    execution_model: str
     environment_scope: str | None = None
 
 
 def provider(name: str) -> Provider:
-    # The installation declarations also own the fixed supported-provider list.
-    # SDK imports belong inside binding or inspection, never adapter discovery.
-    from .registry import BACKENDS
+    from .components import COMPONENTS
 
-    if name not in BACKENDS:
-        raise ValueError(f"Unknown backend {name!r}; choose from {', '.join(BACKENDS)}")
-    return import_module(f"intent.targets.{name}").PROVIDER
+    if name not in COMPONENTS:
+        raise ValueError(f"Unknown backend {name!r}; choose from {', '.join(COMPONENTS)}")
+    return import_module(COMPONENTS[name]).PROVIDER

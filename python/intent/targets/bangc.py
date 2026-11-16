@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
+from functools import partial
 from collections.abc import Mapping
 from pathlib import Path
 import os
 import shutil
 from typing import TYPE_CHECKING
 
-from .provider import EnvironmentCheck, Provider
+from .provider import EnvironmentCheck, LocalExecution, Provider
+from .execution import indexed_key, indexed_target
+
+INSTALLATION = {
+    "modules": (), "requirements": (), "torch": None, "torch_index": None,
+    "python_max": (3, 12), "toolchain": "An explicitly installed NeuWare SDK and MLU370 runtime",
+}
 from .specification import DSACompilationTarget, require_matching_target
 
 if TYPE_CHECKING:
@@ -144,4 +151,6 @@ def _environment_checks(target):
             EnvironmentCheck("MLU device", "device", device))
 
 
-PROVIDER = Provider("dsa", BangCTarget, _read_facts, _bind, _environment_checks)
+PROVIDER = Provider("dsa", BangCTarget, _read_facts, _bind, _environment_checks,
+    LocalExecution("mlu", True, frozenset({"neuware", "compiler"}),
+                   partial(indexed_target, BangCTarget), indexed_key, specialize_call), "dsa")

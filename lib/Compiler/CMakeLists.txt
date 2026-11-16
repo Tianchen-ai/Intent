@@ -1,4 +1,13 @@
 get_property(dialect_libs GLOBAL PROPERTY MLIR_DIALECT_LIBS)
+get_property(backend_names GLOBAL PROPERTY INTENT_BACKEND_NAMES)
+get_property(backend_sources GLOBAL PROPERTY INTENT_BACKEND_SOURCES)
+get_property(backend_libraries GLOBAL PROPERTY INTENT_BACKEND_LIBRARIES)
+set(backend_declarations "")
+foreach(name IN LISTS backend_names)
+  string(APPEND backend_declarations "INTENT_BACKEND(${name})\n")
+endforeach()
+file(GENERATE OUTPUT "${PROJECT_BINARY_DIR}/include/Intent/Compiler/Backends.inc"
+  CONTENT "${backend_declarations}")
 add_mlir_library(MLIRIntentCompiler
   Compiler.cpp
   Backend.cpp
@@ -7,15 +16,16 @@ add_mlir_library(MLIRIntentCompiler
   DSABackends.cpp
   Passes.cpp
   Registration.cpp
+  ${backend_sources}
+  ../Target/NVIDIA/Target.cpp
   DEPENDS IntentCompilerPassIncGen
   LINK_LIBS PUBLIC
   ${dialect_libs}
   MLIRIntentKIRToGPU MLIRIntentKIRToCPU MLIRIntentKIRToDSA
-  MLIRIntentDSATransforms MLIRIntentBangC
-  MLIRIntentCPUAnalysis MLIRIntentCPUTransforms MLIRIntentMojoTransforms MLIRIntentMojoSerialization
+  MLIRIntentDSATransforms
+  MLIRIntentCPUAnalysis MLIRIntentCPUTransforms
   MLIRIntentGPUTransforms
-  MLIRIntentTritonTransforms MLIRIntentTritonSerialization
-  MLIRIntentCuTileTransforms MLIRIntentCuTileSerialization
+  ${backend_libraries}
   MLIRIntentTransforms MLIRFuncInlinerExtension MLIRPass MLIRTransforms MLIRIR MLIRSupport
 )
 if(TARGET MLIRIntentWeftTransforms)

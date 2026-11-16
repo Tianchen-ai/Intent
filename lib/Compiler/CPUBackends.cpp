@@ -1,46 +1,29 @@
 #include "Intent/Compiler/Backend.h"
 #include "Intent/Compiler/Passes.h"
+#include "Intent/Compiler/TargetOptions.h"
 #include "Intent/Dialect/CPU/Analysis/PhysicalProgram.h"
 #include "Intent/Dialect/CPU/IR/CPUAttrs.h"
 #include "Intent/Dialect/CPU/Transforms/Implementation/Implementation.h"
 #include "Intent/Dialect/CPU/Transforms/Passes.h"
-#include "Intent/Target/Mojo/Serialization/Serializer.h"
-#include "Intent/Target/Mojo/Transforms/Passes.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Support/Path.h"
-#ifdef INTENT_HAS_WEFT_CANONICAL
-#include "Intent/Target/Weft/IR/WeftDialect.h"
-#include "Intent/Target/Weft/Serialization/Serializer.h"
-#include "Intent/Target/Weft/Transforms/Passes.h"
-#include "Weft/Dialect/Kernel/IR/KernelDialect.h"
-#endif
 
 using namespace mlir;
 
 namespace intent::compiler {
 
-ArrayRef<Backend> cpuBackends() {
-  static const Backend adapters[] = {
-      {Provider::Mojo, "mojo", true, CPUBackend{true, "mojo.json", mojo::implementations},
-       nullptr, mojo::registerMojoPasses,
-       [](OpPassManager &manager, const Request &) { mojo::buildMojoPipeline(manager); },
-       mojo::serializeProgram},
-#ifdef INTENT_HAS_WEFT_CANONICAL
-      {Provider::Weft, "weft", true, CPUBackend{false, "weft.json", weft_provider::implementations},
-       [](DialectRegistry &registry) {
-         registry.insert<weft_provider::IntentWeftDialect, ::weft::kernel::WEFTKernelDialect>();
-       },
-       weft_provider::registerWeftPasses,
-       [](OpPassManager &manager, const Request &) {
-         weft_provider::buildWeftPipeline(manager);
-       },
-       weft_provider::serializeProgram}
-#else
-      {Provider::Weft, "weft", false, CPUBackend{false, "weft.json", nullptr},
-       nullptr, nullptr, nullptr, nullptr}
-#endif
-  };
-  return adapters;
+LogicalResult configureCPUTarget(ModuleOp module, Request &request) {
+  auto options = readTargetOptions(module, request,
+      {"vector_bits", "workers", "private_bytes", "matrix_i8_i32", "matrix_bf16_f32"});
+  if (failed(options)) return failure();
+  auto &target = request.cpu;
+  if (failed(readIntegerOption(module, *options, "vector_bits", target.vectorBits)) ||
+      failed(readIntegerOption(module, *options, "workers", target.workers)) ||
+      failed(readIntegerOption(module, *options, "private_bytes", target.privateBytes)) ||
+      failed(readBooleanOption(module, *options, "matrix_i8_i32", target.matrixI8I32)) ||
+      failed(readBooleanOption(module, *options, "matrix_bf16_f32", target.matrixBF16F32)))
+    return failure();
+  return success();
 }
 
 void CPUBackend::buildConstruction(OpPassManager &manager, const Request &) const {

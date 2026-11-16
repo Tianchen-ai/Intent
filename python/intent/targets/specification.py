@@ -28,8 +28,7 @@ class GPUCapabilities:
 
     @property
     def compiler_options(self) -> tuple[str, ...]:
-        return tuple(f"--{name.replace('_', '-')}={str(value).lower() if isinstance(value, bool) else value}"
-                     for name, value in asdict(self).items())
+        return (f"--target-options={json.dumps(asdict(self))}",)
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,10 +84,9 @@ class CPUCompilationTarget:
 
     @property
     def compiler_options(self) -> tuple[str, ...]:
-        return (f"--target={self.provider}", f"--cpu-vector-bits={self.vector_bits}",
-                f"--cpu-workers={self.workers}", f"--cpu-private-bytes={self.private_bytes}",
-                f"--cpu-matrix-i8-i32={str(self.matrix_i8_i32).lower()}",
-                f"--cpu-matrix-bf16-f32={str(self.matrix_bf16_f32).lower()}")
+        options = asdict(self)
+        options.pop("provider")
+        return (f"--target={self.provider}", f"--target-options={json.dumps(options)}")
 
     @property
     def compiler_role(self) -> str:
@@ -140,11 +138,9 @@ class DSACompilationTarget:
 
     @property
     def compiler_options(self) -> tuple[str, ...]:
-        options = tuple(f"--dsa-{name.replace('_', '-')}={value}"
-                        for name, value in asdict(self).items() if name not in {"shapes", "strides", "capabilities"})
-        return ("--target=bangc", *options, f"--dsa-shapes={json.dumps(dict(self.shapes))}",
-                f"--dsa-strides={json.dumps(dict(self.strides))}",
-                f"--dsa-capabilities={json.dumps(asdict(self.capabilities))}")
+        options = asdict(self)
+        options.update(shapes=dict(self.shapes), strides=dict(self.strides))
+        return ("--target=bangc", f"--target-options={json.dumps(options)}")
 
     @property
     def compiler_role(self) -> str:
