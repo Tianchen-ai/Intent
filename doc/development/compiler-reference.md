@@ -8,15 +8,15 @@
 @intent.kernel / @intent.fn
   → typed Python frontend
   → canonical KIR
-  → GPU / CPU / DSA physical IR
-  → family passes
+  → Block / CPU task program
+  → model passes / target storage realization
   → provider legalization
   → provider source + interface metadata
   → native materialization
   → explicit runtime call
 ```
 
-`intent.generate` 返回可保存的 `GeneratedProgram`，不启动 kernel；`intent.compile` 组合生成与 runtime 绑定。首次实际调用可能才触发外部 JIT 或调优。作者在 host 中显式调用多个 kernel；这条编译路径保持各 kernel 的算法与接口。
+普通调用使用 `intent.jit(definition, backend=...)`。实际输入选择执行设备，provider 查询本机事实；`prepare` 绑定并生成必要源码，`compile` 完成原生编译，`launch` 执行并完成必要的候选选择。`intent.generate` 与 `intent.compile` 保留为显式目标和产物接口。作者在 host 中显式调用多个 kernel；这条编译路径保持各 kernel 的算法与接口。
 
 | 阶段 | 当前实现入口 | 修改范围 |
 |---|---|---|
@@ -25,7 +25,7 @@
 | 公开编译 API | [compiler/pipeline.py](https://github.com/Tianchen-ai/Intent/blob/main/python/intent/compiler/pipeline.py) | `compile`、`generate`、`compile_ir`、`generate_from_ir` 与阶段诊断 |
 | Native driver | [lib/Compiler/](https://github.com/Tianchen-ai/Intent/tree/main/lib/Compiler/) | 请求、目标选择与 family/provider pipeline；CLI 解析及文件读写在 [tools/intent-compile/](https://github.com/Tianchen-ai/Intent/tree/main/tools/intent-compile/) |
 | KIR 规范化 | [lib/Transforms/](https://github.com/Tianchen-ai/Intent/tree/main/lib/Transforms/) | Canonical KIR 的跨目标规范化 |
-| 执行模型构造 | [lib/Conversion/](https://github.com/Tianchen-ai/Intent/tree/main/lib/Conversion/) | KIR 到 GPU、CPU 或 DSA 物理程序 |
+| 执行模型构造 | [lib/Conversion/](https://github.com/Tianchen-ai/Intent/tree/main/lib/Conversion/) | KIR 到 Block 或 CPU task；Block 到 BANG C 的存储兑现位于目标组件 |
 | Family 分析与变换 | [lib/Dialect/](https://github.com/Tianchen-ai/Intent/tree/main/lib/Dialect/) | 各执行模型的 typed IR、分析、变换与 verifier |
 | Provider 实现 | [lib/Target/](https://github.com/Tianchen-ai/Intent/tree/main/lib/Target/) | 目标合法化、原生构造及序列化 |
 | 产物保存与恢复 | [compiler/artifact.py](https://github.com/Tianchen-ai/Intent/blob/main/python/intent/compiler/artifact.py) | Source、IR、metadata、`save/load/materialize` |
@@ -36,9 +36,25 @@
 
 前端在 `frontend/mlir/` 建立 typed values、operations、blocks 与 regions，最终一次序列化。Helper、控制合流和 structured intrinsic 复用 `frontend/lowering/` 的作用域、product、shape 与 region 构造；不同 intrinsic 族集中在 `frontend/lowering/intrinsics/`。新增规则应消费已有上下文，不维护第二套类型或 SSA 可见性。
 
-语义分析位于 `include/Intent/Analysis/` 与 `lib/Analysis/`；family 的物理关系位于对应 dialect 的 `Analysis/`。GPU、CPU 和 DSA 有独立执行模型，复用适用的语义证明，物理变换仍在各自 `Transforms/`。目录中的 `Reduction/`、`Storage/`、`Task/` 等职责组用于放置同层、强相关的实现。
+语义分析位于 `include/Intent/Analysis/` 与 `lib/Analysis/`；模型的物理关系位于对应 dialect 的 `Analysis/`。GPU 与 Triton–Ascend 共用 Block 计算模型；BANG C 在其上兑现显式存储与引擎协作。CPU task 保持自己的任务、join 与供数责任。目录中的 `Reduction/`、`Storage/`、`Task/` 等职责组用于放置同层、强相关的实现。
 
 Provider 的 `Transforms/` 选择并合法化目标原生构造，`Serialization/` 拼写已经形成的程序。契合合同的 provider 原生归约、scan、布局和指令 lowering 由 provider 完成。公开头文件位于对应 `include/Intent/`，局部实现 helper 可留在相邻实现目录。
+
+## 新后端与 Agent 的扩充位置
+
+| 要补充的能力 | 登记或实现位置 | 保持的边界 |
+|---|---|---|
+| 设备、工具链与必要 specialization | `python/intent/targets/components.py` 与组件的 `Provider/LocalExecution` | 声明查询不加载 SDK；普通 JIT 不出现后端名称分支 |
+| 本机 buffer、原生编译与 launch | 组件对应的 `python/intent/runtime/`；框架存储适配器位于 `integrations/` | 产物与 buffer 绑定分离，prepared call 持有实际资源 |
+| 模型、pipeline 与配置资源 | 组件的 CMake 登记和 `Compilation` 实现 | 公共 driver 调阶段接口，不维护 provider 枚举或文件名表 |
+| NVIDIA 能力与 GPU 策略 | `Target/NVIDIA` 和 Block 的 GPU mapping | 公共 Block verifier 不要求 CUDA 资源字段 |
+| BANG C 存储与引擎实现 | `Target/DSA/BangC/BlockLowering`、`Physical`、`Transforms` | 消费当前 Block；NRAM、Union 与 memory core 不进入共同 DSA 合同 |
+| Ascend 实现 | `Target/DSA/Ascend` 与 Python `targets/ascend` | 从 Block 进入官方 Triton–Ascend，不经过 BANG C 存储兑现 |
+| CPU 目标实现 | `Target/Mojo` 或 `Target/Weft` | 目标组件选择物化阶段；Triton–Weft 使用正式 `.weftir` JIT 与原生 launcher |
+
+扩充时先定位当前 IR 阶段，复用已有类型、effects、坐标与生命周期分析。新增 pass 必须说明输入不变量、改写及后置条件；必需 lowering 与可选优化分开。新增目标 API 的拼写不要求新增共同 IR。只有缺少真实执行事实时才扩充模型，并同步 verifier、分析和消费者。
+
+显式 host staging 通过 `LocalExecution.host_storage` 登记分配、上传、view、快照与释放，供示例或主动搬运的应用使用。普通 JIT 仍只绑定调用方提供的设备 buffer，不借此自动跨设备搬运。编译器声明的 invocation-private workspace 由 native ABI 标记真实参数和类型，prepared call 持有；它不是作者新增参数，也不是需要运行时重新解释的优化计划。
 
 ## 查询与定位问题
 

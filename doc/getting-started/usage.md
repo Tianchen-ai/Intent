@@ -13,17 +13,20 @@ y = softmax.run(x)
 y2 = softmax.run(x2)
 ```
 
-`backend` 必填，可选 Triton、cuTile、Mojo、Weft 或 BANG C 对应的
-`triton`、`cutile`、`mojo`、`weft`、`bangc`。对象创建不执行设备探测。
+`backend` 必填，组件包括 Triton、cuTile、Mojo、Triton–Weft、BANG C 和 Triton–Ascend，
+对应 `triton`、`cutile`、`mojo`、`weft`、`bangc`、`triton_ascend`。对象创建不执行设备探测。
 首次绑定根据实际输入设备解析本机硬件及工具链，生成并缓存编译结果；
 首次执行完成必要的原生编译与已声明候选调优。后续调用重新绑定实际 buffer，
 复用适用的编译结果及已选配置。后端失败时不会切换其他后端。
 
 H100 与 5090D 使用同样的调用代码，设备能力由当前执行主机探测。
 CPU 根据当前进程允许的 CPU 集合查询有效目标；`workers` 是线程预算。
-Weft 需要在 RISC-V 执行主机安装原生 Weft 与 C 工具链。BANG C 查询本机
+Weft 在 x86/RISC-V 执行主机使用完整 Triton–Weft、匹配的原生 runtime 与 C 工具链。
+Canonical `.weftir` 通过 `triton.compile` 编译，任务使用正式原生 launcher。BANG C 查询本机
 CNRT 资源，并从实际 buffer 取得 lowering 必需的 shape/stride。
 用户不为普通调用填写 ISA、VLEN 或片上存储容量。
+Triton–Ascend 使用本机 NPU tensor、stream 和正式 Ascend 工具链；其发行包与 CUDA Triton
+的安装组合须按[安装说明](installation.md)配置，不通过替换全局 driver 混用。
 
 输入必须属于同一个兼容设备；无设备输入时用 `device="cuda:0"` 等显式选择。
 显式 device 与输入冲突会报错，不隐式搬运。模型可传入已有的 PyTorch tensor，
@@ -41,7 +44,8 @@ CNRT 资源，并从实际 buffer 取得 lowering 必需的 shape/stride。
 - `kernel.close()` 释放该对象持有的原生产物；调用方保持参数存储存活到执行完成。
 
 零个 Out 返回 None，一个返回该对象，多个按声明顺序返回 tuple。
-GPU 保持当前 stream 的异步提交语义；读取 CPU 结果时由调用者按框架语义同步。
+GPU/NPU 保持当前 stream 的异步提交语义；将加速器结果读回 CPU 时由调用者按框架语义同步。
+CPU 原生调用完成全部任务和 join 后返回。
 图捕获前先完成编译、调优与必要首次执行。作者通过普通 Python 控制多 kernel
 次序、中间存储及梯度定义，Intent 不自动改写模型图。
 

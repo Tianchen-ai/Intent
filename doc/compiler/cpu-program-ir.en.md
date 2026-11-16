@@ -9,7 +9,7 @@ canonical KIR
     → shared CPU task/block program / analyses / passes
     → implementation selection, requirement coordination and microprogram expansion
         ├─ Mojo legalization / serialization → Mojo / LLVM
-        └─ Weft legalization → Canonical Weft IR → Weft compiler
+        └─ Weft legalization → Canonical .weftir → Triton–Weft JIT
 ```
 
 CPU/GPU share semantics and reusable analyses at comparable structured abstraction, not GPU program/warp/lane/fragment ownership. Providers and hardware are separate: Mojo/Weft vs x86/RVV/optional matrix capabilities, without changing algorithms/dtypes/control/effects.
@@ -74,7 +74,7 @@ Candidates fix complete bindings and implementation for one equivalent program. 
 
 Mojo implementations form needed loops/SIMD/math/resources/native ABI, then Mojo/LLVM perform machine lowering/allocation/scheduling. Shared CPU need not start with Mojo vectors.
 
-Weft receives canonical Weft IR. Simple structured operations convert directly; experts may instantiate Weft author programs. Adapters retain host tasks/interfaces/coordinates/control/lifetime without implicit hart/grid. RVV/IME layouts/fragments/machine packing/resources/instructions remain Weft-owned, without forced Mojo SIMD expansion.
+Weft receives canonical Weft IR. Simple structured operations convert directly; experts may instantiate Weft author programs. Adapters retain host tasks/interfaces/coordinates/control/lifetime without implicit hart/grid. `.weftir` enters Triton–Weft through `triton.compile`, its cache and official native launcher. Intent owns outer task scheduling; single-instance task entries do not dispatch a second thread pool. RVV/IME layouts/fragments/machine packing/resources/instructions remain Weft-owned, without forced Mojo SIMD expansion.
 
 Providers may stop at different abstraction levels. Only structures needing independent legality/later consumers justify extensions, not symmetry.
 

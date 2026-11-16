@@ -9,7 +9,7 @@ canonical KIR
     → shared CPU task/block program / analyses / passes
     → 目标实现选择、需求协调与微程序展开
         ├─ Mojo legalization / serialization → Mojo / LLVM
-        └─ Weft legalization → Canonical Weft IR → Weft compiler
+        └─ Weft legalization → Canonical .weftir → Triton–Weft JIT
 ```
 
 CPU 与 GPU 共享作者语义及可复用分析，保持相近的 structured-program 抽象层，但不共享 GPU program id、warp/lane 或 fragment ownership。Provider 与 hardware 分开选择；Mojo/Weft 是 provider，x86/RVV 与可选 matrix extension 是硬件能力，不改变 KIR 算法、dtype、控制和 effects。
@@ -87,7 +87,7 @@ CPU经验配置每行明确保存`shared`五个外层绑定、`local`实现参�
 
 Mojo 路径由选定实现形成其需要的循环、SIMD、数学操作、资源与 native ABI；Mojo/LLVM 继续负责机器 lowering、指令选择、寄存器分配和调度。共同 CPU IR 不必事先采用 Mojo 的向量表示。
 
-Weft 的外部输入为 Canonical Weft IR。简单 structured operations 可直接转换，专业实现可由 Weft 作者程序实例化；adapter 保持宿主 task 的接口、坐标、控制和 lifetime，不引入隐式 hart/grid。RVV/IME layout、fragment、machine packing 与资源/指令实现继续归 Weft compiler，不强迫 Weft 先走 Mojo SIMD 展开。
+Weft 的外部输入为 Canonical Weft IR。简单 structured operations 可直接转换，专业实现可由 Weft 作者程序实例化；adapter 保持宿主 task 的接口、坐标、控制和 lifetime，不引入隐式 hart/grid。`.weftir` 通过 Triton–Weft 的 `triton.compile`、缓存与正式原生 launcher 执行。Intent 持有外层任务调度，任务内 single-instance 入口不再次派发线程池。RVV/IME layout、fragment、machine packing 与资源/指令实现继续归 Weft compiler，不强迫 Weft 先走 Mojo SIMD 展开。
 
 两种 provider 可停在不同抽象层。只有确需独立 legality 和后续 consumer 的目标结构才增加 local extension，不为表面对称建立重复 IR。
 

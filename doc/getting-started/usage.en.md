@@ -13,7 +13,7 @@ y = softmax.run(x)
 y2 = softmax.run(x2)
 ```
 
-The required backend is one of `triton`, `cutile`, `mojo`, `weft`, or `bangc`.
+The explicit backend selects a component: `triton`, `cutile`, `mojo`, `weft`, `bangc`, or `triton_ascend`.
 Creating the object does not probe hardware. The first binding discovers the actual
 local device and toolchain and caches generated artifacts. The first execution performs
 necessary native compilation and tuning over the declared configurations. Subsequent
@@ -22,9 +22,13 @@ A failing backend never causes a switch to another provider.
 
 The same code runs on H100 and 5090D using their locally discovered capabilities.
 CPU discovery respects the calling process's allowed CPU set; `workers` is a thread budget.
-Weft requires a native Weft and C toolchain on the RISC-V host. BANG C queries CNRT
+Weft uses full Triton–Weft, its matching native runtime and a C toolchain on the x86/RISC-V execution host.
+Canonical `.weftir` enters `triton.compile`; tasks use the official native launcher. BANG C queries CNRT
 resources and specializes required geometry from actual buffers. Ordinary calls do not
 ask users to supply ISA, VLEN or on-chip storage capacity.
+Triton–Ascend uses local NPU tensors, streams and the official Ascend toolchain. Follow
+the [installation guide](installation.md) for distribution compatibility with CUDA Triton;
+the product does not replace a process-global driver to combine incompatible installations.
 
 Inputs must belong to one compatible device. Calls without device-bearing inputs can
 select a local device explicitly, for example `device="cuda:0"`. Conflicts fail without
@@ -46,7 +50,8 @@ implicit data movement. Use existing framework tensors or provider public buffer
 - `kernel.close()` releases owned native artifacts. Keep argument storage alive until execution finishes.
 
 Zero Out parameters return None; one returns that object; several return a tuple.
-GPU calls retain the current stream's asynchronous submission semantics. Synchronize
+GPU/NPU calls retain the current stream's asynchronous submission semantics. CPU native
+calls return after all tasks and joins complete. Synchronize
 through the framework when reading host results. Complete compilation, tuning and necessary
 first execution before graph capture. Authors control multi-kernel ordering, intermediate
 storage and gradients in ordinary Python; Intent does not rewrite the model graph.
