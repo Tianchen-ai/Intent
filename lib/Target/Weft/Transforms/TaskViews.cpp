@@ -286,7 +286,7 @@ FailureOr<int64_t> TaskConversion::bindLocalShape(OpFoldResult source,
 }
 
 std::optional<int64_t> TaskConversion::dimensionExtent(Value memory, unsigned axis) {
-  if (auto symbol = capturedShapeSymbol(ValueBoundsConstraintSet::Variable(memory, axis)))
+  if (auto symbol = shapeSymbol(ValueBoundsConstraintSet::Variable(memory, axis)))
     return -*symbol;
   auto expression = cpu::queryExtent(ValueBoundsConstraintSet::Variable(memory, axis));
   auto result = succeeded(expression) ? nativeExtent(*expression) : std::nullopt;

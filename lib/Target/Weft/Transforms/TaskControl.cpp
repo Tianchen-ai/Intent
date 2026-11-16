@@ -95,14 +95,18 @@ bool TaskConversion::immutableBorrow(Value memory) {
   return true;
 }
 
-bool TaskConversion::completePrivateValue(Value memory) {
+bool TaskConversion::completePrivateValue(Value memory, std::string &reason) {
   auto origins = storage->origins(memory);
+  reason = "storage origins are incomplete";
   if (!origins.complete || origins.values.empty()) return false;
   for (Value origin : origins.values) {
     if (immutableBorrow(origin)) continue;
     Operation *allocation = origin.getDefiningOp();
     if (!isa_and_nonnull<memref::AllocOp, memref::AllocaOp>(allocation) ||
-        !currentTask->isProperAncestor(allocation)) return false;
+        !currentTask->isProperAncestor(allocation)) {
+      reason = "storage is neither task-private nor an immutable borrowed input";
+      return false;
+    }
   }
   llvm::SmallDenseSet<Value> visited;
   std::function<bool(Value)> complete = [&](Value value) {
@@ -113,11 +117,19 @@ bool TaskConversion::completePrivateValue(Value memory) {
     if (sources.complete && !sources.values.empty() &&
         llvm::all_of(sources.values, [&](Value origin) { return immutableBorrow(origin); }))
       return true;
-    if (!sameStorageShape(memory, value)) return false;
+    if (!sameStorageShape(memory, value)) {
+      reason = "control input and storage origin extents are not proven equal: ";
+      llvm::raw_string_ostream detail(reason);
+      memory.printAsOperand(detail, OpPrintingFlags());
+      detail << " and ";
+      value.printAsOperand(detail, OpPrintingFlags());
+      return false;
+    }
     if (llvm::is_contained(origins.values, value)) return true;
     if (auto cast = value.getDefiningOp<memref::CastOp>())
       return complete(cast.getSource());
     if (auto view = value.getDefiningOp<memref::SubViewOp>()) {
+      reason = "private control state is a partial storage projection";
       if (view.getDroppedDims().any()) return false;
       for (auto [axis, size] : llvm::enumerate(view.getMixedSizes()))
         if (!sameBound(view.getMixedOffsets()[axis], b.getIndexAttr(0)) ||
@@ -127,6 +139,7 @@ bool TaskConversion::completePrivateValue(Value memory) {
       return complete(view.getSource());
     }
     auto incoming = intent::queryControlFlowIncoming(value);
+    reason = "storage forwarding has no complete control-flow relation";
     return incoming.complete && !incoming.edges.empty() &&
         llvm::all_of(incoming.edges, [&](const intent::ControlFlowEdge &edge) {
           return edge.operand && complete(edge.operand->get());
@@ -137,8 +150,9 @@ bool TaskConversion::completePrivateValue(Value memory) {
 
 LogicalResult TaskConversion::isolateControlValue(Value memory, Operation *scope,
                                  ValueRange boundaries) {
-  if (!completePrivateValue(memory))
-    return scope->emitError("Weft task control requires complete private values; external runtime descriptors require host control");
+  std::string reason;
+  if (!completePrivateValue(memory, reason))
+    return scope->emitError("Weft task control cannot form a complete private value: ") << reason;
   auto origins = storage->origins(memory);
   llvm::SmallDenseSet<Value> incomingAliases, outgoingAliases;
   for (Value boundary : boundaries) {

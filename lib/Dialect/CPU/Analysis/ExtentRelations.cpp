@@ -1,6 +1,7 @@
 #include "Intent/Dialect/CPU/Analysis/ExtentRelations.h"
 #include "Intent/Dialect/CPU/IR/CPUOps.h"
 #include "Intent/Dialect/CPU/IR/ShapeRelations.h"
+#include "Intent/Analysis/ControlFlow.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -235,7 +236,7 @@ struct DescriptorBounds
   }
 };
 
-bool stopAtExtentLeaf(Value value, std::optional<int64_t> axis,
+bool stopAtExtentLeafWithoutControl(Value value, std::optional<int64_t> axis,
                       ValueBoundsConstraintSet &constraints) {
   Operation *operation = owner(value);
   if (axis) {
@@ -276,6 +277,50 @@ bool stopAtExtentLeaf(Value value, std::optional<int64_t> axis,
   return true;
 }
 
+// A loop/branch descriptor can have invariant dimensions without preserving
+// its allocation identity. Prove the dimensions over every actual incoming
+// edge, including a loop's entry and backedge; a cycle alone proves nothing.
+Value invariantControlDimension(Value value, int64_t axis) {
+  if (!isa_and_nonnull<scf::ForOp, scf::WhileOp, scf::IfOp>(owner(value))) return {};
+  SmallVector<Value> leaves;
+  llvm::SmallDenseSet<Value> visited;
+  std::function<bool(Value)> collect = [&](Value current) {
+    if (!visited.insert(current).second) return true;
+    auto type = dyn_cast<ShapedType>(current.getType());
+    if (!type || !type.hasRank() || axis >= type.getRank()) return false;
+    auto incoming = queryControlFlowIncoming(current);
+    if (!incoming.complete || incoming.edges.empty()) {
+      if (isa_and_nonnull<scf::ForOp, scf::WhileOp, scf::IfOp>(owner(current))) return false;
+      leaves.push_back(current);
+      return true;
+    }
+    return llvm::all_of(incoming.edges, [&](const ControlFlowEdge &edge) {
+      return edge.operand && collect(edge.operand->get());
+    });
+  };
+  if (!collect(value) || leaves.empty()) return {};
+  struct LeafConstraints : ValueBoundsConstraintSet {
+    explicit LeafConstraints(MLIRContext *context)
+        : ValueBoundsConstraintSet(context, stopAtExtentLeafWithoutControl) {}
+  };
+  for (Value leaf : ArrayRef<Value>(leaves).drop_front()) {
+    LeafConstraints proof(value.getContext());
+    if (!proof.populateAndCompare(Variable(leaves.front(), axis), ValueBoundsConstraintSet::EQ,
+                                  Variable(leaf, axis))) return {};
+  }
+  return leaves.front();
+}
+
+bool stopAtExtentLeaf(Value value, std::optional<int64_t> axis,
+                      ValueBoundsConstraintSet &constraints) {
+  if (axis)
+    if (Value invariant = invariantControlDimension(value, *axis)) {
+      constraints.bound(value)[*axis] == constraints.getExpr(invariant, *axis);
+      return true;
+    }
+  return stopAtExtentLeafWithoutControl(value, axis, constraints);
+}
+
 struct ExtentConstraints : ValueBoundsConstraintSet {
   explicit ExtentConstraints(MLIRContext *context)
       : ValueBoundsConstraintSet(context, stopAtExtentLeaf) {}
@@ -293,6 +338,22 @@ FailureOr<ExtentExpression> queryExtent(const Variable &extent) {
   if (failed(ValueBoundsConstraintSet::computeBound(result.expression,
           result.operands, presburger::BoundType::EQ, extent, stopAtExtentLeaf)))
     return failure();
+  // The invariant remains a stop leaf during constraint construction so the
+  // SCF interface does not recursively compare the same carry in that mutable
+  // constraint set. Export the equivalent incoming extent to consumers.
+  if (result.expression.getNumResults() == 1) {
+    AffineExpr expression = result.expression.getResult(0);
+    std::optional<unsigned> position;
+    if (auto dim = dyn_cast<AffineDimExpr>(expression)) position = dim.getPosition();
+    else if (auto symbol = dyn_cast<AffineSymbolExpr>(expression))
+      position = result.expression.getNumDims() + symbol.getPosition();
+    if (position) {
+      auto [value, axis] = result.operands[*position];
+      if (axis)
+        if (Value incoming = invariantControlDimension(value, *axis))
+          return queryExtent(Variable(incoming, *axis));
+    }
+  }
   return result;
 }
 
@@ -315,6 +376,8 @@ std::optional<int64_t> constantExtentUpperBound(const Variable &extent) {
 }
 
 std::optional<OpFoldResult> queryExtentValue(Value memory, int64_t axis) {
+  if (Value incoming = invariantControlDimension(memory, axis))
+    return queryExtentValue(incoming, axis);
   AffineMap expression;
   ValueDimList operands;
   auto stop = [](Value value, std::optional<int64_t> dimension,

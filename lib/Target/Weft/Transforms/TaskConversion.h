@@ -144,7 +144,7 @@ private:
                                  mlir::Operation *scope);
   mlir::LogicalResult bindLocalReference(mlir::Value memory, mlir::Operation *scope);
   bool immutableBorrow(mlir::Value memory);
-  bool completePrivateValue(mlir::Value memory);
+  bool completePrivateValue(mlir::Value memory, std::string &reason);
   mlir::LogicalResult isolateControlValue(mlir::Value memory, mlir::Operation *scope,
                                           mlir::ValueRange boundaries);
   mlir::LogicalResult prepareControlValues(mlir::Operation *scope,
