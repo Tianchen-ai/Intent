@@ -32,3 +32,15 @@ class HostStorage:
 
     def release(self, value):
         pass  # The borrowed host allocation is held by the buffer's memoryview.
+
+    def prepare_fill(self, value, scalar):
+        import numpy as np
+        from ..native_call import NativeMemoryFill
+        from ..sequence import PreparedInitialization
+        from ..storage_types import numpy_dtype
+        if not self.accepts(value):
+            raise TypeError("Weft initialization requires its public CPU Buffer")
+        encoded = np.asarray(scalar, dtype=numpy_dtype(value.dtype)).reshape(()).tobytes()
+        native = NativeMemoryFill(value.pointer, value.nbytes // len(encoded), encoded,
+                                  (value,), lambda: None)
+        return PreparedInitialization(native.launch, (value,), native)

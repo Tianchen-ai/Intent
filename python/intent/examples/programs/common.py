@@ -42,13 +42,21 @@ class _ExampleKernel:
         self.context, self.definition, self.constexprs = context, definition, constexprs
         self.kernel = intent.jit(definition, backend=context.backend, device=context.device,
             compiler=context.compiler, constexprs=constexprs, workers=context.workers,
-            backend_options=context.backend_options)
+            backend_options=context.backend_options, options=context.options)
         context.kernels.append(self.kernel)
 
     def empty_like(self, reference, shape, *, dtype):
         if self.context.buffers is not None:
             return self.context.buffers.workspace(reference, shape, dtype=dtype)
         return empty_like(reference, shape, dtype=dtype)
+
+    def prepare_fill(self, value, scalar):
+        if self.context.buffers is None:
+            from intent.runtime.sequence import PreparedInitialization
+            def unavailable():
+                raise RuntimeError("source inspection cannot initialize storage")
+            return PreparedInitialization(unavailable, (value,))
+        return self.context.buffers.storage.prepare_fill(value, scalar)
 
     def prepare(self, *arguments, outputs=None):
         if self.context._closed:
@@ -58,7 +66,8 @@ class _ExampleKernel:
             target, _ = provider(self.context.backend).local.specialize(
                 target, self.definition, arguments, outputs)
             program = intent.generate(self.definition, target=target,
-                                      compiler=self.context.compiler, constexprs=self.constexprs)
+                                      compiler=self.context.compiler, constexprs=self.constexprs,
+                                      options=self.context.options)
             self.context.artifacts.append(program)
             binders = build_invocation_binders(program.interface, abstract=True,
                 observe_view=lambda _, p, value: _abstract_view(p, value),
@@ -117,6 +126,7 @@ class ExampleContext:
     stage: str = "run"
     workers: int | None = None
     backend_options: dict = field(default_factory=dict)
+    options: intent.CompileOptions | None = None
     artifacts: list = field(default_factory=list, init=False)
     kernels: list = field(default_factory=list, init=False)
     invocations: list = field(default_factory=list, init=False)

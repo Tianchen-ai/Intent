@@ -5,30 +5,16 @@ change an algorithm, time a call, or load a reference implementation.
 """
 
 from dataclasses import dataclass
+from typing import ClassVar
+from intent.runtime import PreparedSequence
 
 from intent.examples.kernels.routing.moe_align import EXPERTS, PADDED_ROUTES, ROUTES, TOKENS, TOP_K
-from .native import empty_like, fill
-
-
-@dataclass
-class HistogramCall:
-    partials: object
-    merge: object
-
-    def compile(self):
-        self.partials.compile()
-        self.merge.compile()
-
-    def launch(self):
-        self.partials.launch()
-        self.merge.launch()
-
-    def result(self):
-        return self.merge.result()
+from .native import empty_like
 
 
 @dataclass
 class Histogram:
+    mutable_inputs: ClassVar[tuple[int, ...]] = ()
     partials: object
     merge: object
     chunk: int = 8192
@@ -42,7 +28,7 @@ class Histogram:
         workspace = allocate(samples, (partitions, BINS), dtype="i32")
         first = self.partials.prepare(samples, outputs=(workspace,))
         second = self.merge.prepare(first.result(), outputs=outputs)
-        return HistogramCall(first, second)
+        return PreparedSequence((first, second), outputs=second.result(), owners=(workspace,))
 
     def run(self, samples):
         call = self.prepare(samples)
@@ -51,24 +37,8 @@ class Histogram:
 
 
 @dataclass
-class GroupNormBackwardCall:
-    dx: object
-    affine: object
-
-    def compile(self):
-        self.dx.compile()
-        self.affine.compile()
-
-    def launch(self):
-        self.dx.launch()
-        self.affine.launch()
-
-    def result(self):
-        return self.dx.result(), *self.affine.result()
-
-
-@dataclass
 class GroupNormBackward:
+    mutable_inputs: ClassVar[tuple[int, ...]] = ()
     dx: object
     affine: object
 
@@ -86,28 +56,12 @@ class GroupNormBackward:
     def prepare(self, x, grad_y, weight, mean, rstd, inverse_group_elements):
         dx = self.dx.prepare(x, grad_y, weight, mean, rstd, inverse_group_elements)
         affine = self.affine.prepare(x, grad_y, mean, rstd)
-        return GroupNormBackwardCall(dx, affine)
-
-
-@dataclass
-class PagedDecodeCall:
-    partials: object
-    merge: object
-
-    def compile(self):
-        self.partials.compile()
-        self.merge.compile()
-
-    def launch(self):
-        self.partials.launch()
-        self.merge.launch()
-
-    def result(self):
-        return self.merge.result()
+        return PreparedSequence((dx, affine), outputs=(dx.result(), *affine.result()))
 
 
 @dataclass
 class PagedDecode:
+    mutable_inputs: ClassVar[tuple[int, ...]] = ()
     partials: object
     merge: object
 
@@ -132,54 +86,12 @@ class PagedDecode:
         # their contents. The merge is bound to those exact intermediate views.
         partial_lse, partial_output = partials.result()
         merge = self.merge.prepare(partial_output, partial_lse)
-        return PagedDecodeCall(partials, merge)
-
-
-def reset_moe_workspace(counts, cursors, sorted_routes):
-    for buffer, value in moe_workspace_initializations(counts, cursors, sorted_routes):
-        fill(buffer, value)
-
-
-def moe_workspace_initializations(counts, cursors, sorted_routes):
-    return ((counts, 0), (cursors, 0), (sorted_routes, ROUTES))
-
-
-@dataclass
-class MoEAlignmentCall:
-    count: object
-    prefix: object
-    scatter: object
-    mark: object
-    sorted_routes: object
-    expert_blocks: object
-    total_padded: object
-    counts: object
-    cursors: object
-
-    @property
-    def initializations(self):
-        return moe_workspace_initializations(self.counts, self.cursors, self.sorted_routes)
-
-    def compile(self):
-        self.count.compile()
-        self.prefix.compile()
-        self.scatter.compile()
-        self.mark.compile()
-
-    def launch(self):
-        for buffer, value in self.initializations:
-            fill(buffer, value)
-        self.count.launch()
-        self.prefix.launch()
-        self.scatter.launch()
-        self.mark.launch()
-
-    def result(self):
-        return self.sorted_routes, self.expert_blocks, self.total_padded
+        return PreparedSequence((partials, merge), outputs=merge.result())
 
 
 @dataclass
 class MoEAlignment:
+    mutable_inputs: ClassVar[tuple[int, ...]] = ()
     count: object
     prefix: object
     scatter: object
@@ -198,13 +110,9 @@ class MoEAlignment:
         return counts, cursors, sorted_routes
 
     def run_into(self, ids, counts, cursors, sorted_routes):
-        self._validate_ids(ids)
-        reset_moe_workspace(counts, cursors, sorted_routes)
-        self.count.run(ids, counts)
-        offsets, total_padded = self.prefix.run(counts)
-        self.scatter.run(ids, offsets, cursors, sorted_routes)
-        expert_blocks = self.mark.run(offsets)
-        return sorted_routes, expert_blocks, total_padded
+        call = self._prepare_into(ids, counts, cursors, sorted_routes)
+        call.launch()
+        return call.result()
 
     def run(self, ids):
         counts, cursors, sorted_routes = self._workspace(ids)
@@ -213,10 +121,16 @@ class MoEAlignment:
     def prepare(self, ids):
         self._validate_ids(ids)
         counts, cursors, sorted_routes = self._workspace(ids)
+        return self._prepare_into(ids, counts, cursors, sorted_routes)
+
+    def _prepare_into(self, ids, counts, cursors, sorted_routes):
+        self._validate_ids(ids)
+        initializations = tuple(self.count.prepare_fill(buffer, value)
+                               for buffer, value in ((counts, 0), (cursors, 0), (sorted_routes, ROUTES)))
         count = self.count.prepare(ids, counts)
         prefix = self.prefix.prepare(counts)
         offsets, total_padded = prefix.result()
         scatter = self.scatter.prepare(ids, offsets, cursors, sorted_routes)
         mark = self.mark.prepare(offsets)
-        return MoEAlignmentCall(count, prefix, scatter, mark,
-                                sorted_routes, mark.result(), total_padded, counts, cursors)
+        return PreparedSequence((*initializations, count, prefix, scatter, mark),
+            outputs=(sorted_routes, mark.result(), total_padded), owners=(counts, cursors))

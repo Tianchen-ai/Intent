@@ -10,6 +10,14 @@ class Queue:
         self.runtime.select(device)
         self.handle = ctypes.c_void_p()
         self.runtime.invoke("cnrtQueueCreate", ctypes.byref(self.handle))
+        self._owned = True
+
+    @classmethod
+    def borrowed(cls, runtime, device, handle):
+        queue = cls.__new__(cls)
+        queue.runtime, queue.device, queue.handle = runtime, device, handle
+        queue._owned = False
+        return queue
 
     def synchronize(self):
         if not self.handle.value:
@@ -18,7 +26,7 @@ class Queue:
         self.runtime.invoke("cnrtQueueSync", self.handle)
 
     def close(self):
-        if self.handle.value:
+        if self._owned and self.handle.value:
             self.synchronize()
             self.runtime.invoke("cnrtQueueDestroy", self.handle)
             self.handle = ctypes.c_void_p()

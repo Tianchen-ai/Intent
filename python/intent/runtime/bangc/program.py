@@ -193,6 +193,16 @@ class NativeCall(ObservedCall):
     def result(self):
         return invocation_result(self.outputs)
 
+    def launch_sequence(self, calls):
+        """Submit an author's complete sequence to this invocation's queue."""
+        from .queue import Queue
+        self.program.check_open()
+        queue = Queue.borrowed(self.program.runtime, self.program.target.device,
+                               self.program.ensure_queue())
+        for call in calls:
+            call.enqueue(queue)
+        queue.synchronize()
+
     def benchmark(self) -> float:
         return benchmark_calls((self,))
 

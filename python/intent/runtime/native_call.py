@@ -39,3 +39,36 @@ class NativeInvocation:
         """Report native worker failures after the synchronous invocation."""
         if self._complete is not None:
             self._complete()
+
+
+@dataclass(frozen=True)
+class NativeMemoryFill:
+    """Contiguous CPU storage filled with one already encoded element pattern."""
+
+    address: int
+    count: int
+    value: bytes
+    _owners: tuple = field(repr=False)
+    _validate: Callable[[], None] = field(repr=False)
+
+    def __post_init__(self):
+        if self.count < 0 or len(self.value) not in (1, 2, 4, 8):
+            raise ValueError("native fill requires a nonnegative count and a 1/2/4/8-byte pattern")
+        if self.count and not self.address:
+            raise ValueError("nonempty native fill requires allocated storage")
+
+    def validate(self):
+        self._validate()
+
+    def launch(self):
+        self.validate()
+        if not self.count:
+            return
+        import numpy as np
+        import sys
+        width = len(self.value)
+        raw = (ctypes.c_ubyte * (self.count * width)).from_address(self.address)
+        np.frombuffer(raw, dtype=f"u{width}")[:] = int.from_bytes(self.value, byteorder=sys.byteorder)
+
+    def complete(self):
+        pass

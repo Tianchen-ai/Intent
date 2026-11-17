@@ -79,6 +79,16 @@ class JITKernel:
         call.launch()
         return call.result()
 
+    def empty_like(self, reference, shape, *, dtype):
+        """Allocate explicit author workspace on this kernel's local device."""
+        device = select_device(self.backend, (reference,), self.device)
+        return self._provider.local.host_storage(device, self.backend_options).allocate(shape, dtype)
+
+    def prepare_fill(self, value, scalar):
+        """Bind an explicit author initialization without writing storage."""
+        device = select_device(self.backend, (value,), self.device)
+        return self._provider.local.host_storage(device, self.backend_options).prepare_fill(value, scalar)
+
     def as_torch_op(self, name):
         """Register the uniquely prepared local specialization with PyTorch."""
         artifacts = self.artifacts

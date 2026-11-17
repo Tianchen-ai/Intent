@@ -21,6 +21,8 @@ class Runtime:
             "cnrtMalloc": [ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t],
             "cnrtFree": [ctypes.c_void_p],
             "cnrtMemcpy": [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int],
+            "cnrtMemcpyAsync": [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_int],
+            "cnrtMemsetAsync": [ctypes.c_void_p, ctypes.c_int, ctypes.c_size_t, ctypes.c_void_p],
             "cnrtQueueCreate": [ctypes.POINTER(ctypes.c_void_p)],
             "cnrtQueueSync": [ctypes.c_void_p],
             "cnrtQueueDestroy": [ctypes.c_void_p],

@@ -49,6 +49,16 @@ CPU 原生调用完成全部任务和 join 后返回。
 图捕获前先完成编译、调优与必要首次执行。作者通过普通 Python 控制多 kernel
 次序、中间存储及梯度定义，Intent 不自动改写模型图。
 
+作者可用 `intent.PreparedSequence(calls, outputs=..., owners=...)` 保存已绑定的完整调用。
+`calls` 按执行顺序包含 prepared calls、嵌套 sequence 和显式 workspace 初始化。
+`kernel.empty_like(reference, shape, dtype=...)` 分配所选设备上的作者 workspace；
+`kernel.prepare_fill(buffer, value)` 只绑定初始化，不立即写入。将返回的初始化放在需要它的位置。
+sequence 的 `compile()` 仅编译成员，`launch()` 执行完整序列，`result()` 返回声明的输出。
+BANG C 在同一队列提交序列并在末尾同步；GPU 保持当前 stream 的提交语义。
+CPU 在首次执行完成后可用 `native_calls()` 导出有序原生调用和初始化，供外部原生调用者使用。
+导出的绑定保留所有权；调用者在执行前 `validate()`、同步执行后 `complete()`。
+该接口不包含计时协议，也不根据程序名称推断编排。
+
 ## 安装包中的完整程序
 
 唯一的作者算法和 host 编排位于 `intent.examples.kernels` 与

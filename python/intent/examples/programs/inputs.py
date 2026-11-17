@@ -9,18 +9,7 @@ from contextvars import ContextVar
 from math import prod
 
 import numpy as np
-
-
-_NUMPY_TYPES = {
-    "bool": np.bool_, "u8": np.uint8, "i8": np.int8,
-    "u16": np.uint16, "i16": np.int16,
-    "u32": np.uint32, "i32": np.int32,
-    "u64": np.uint64, "i64": np.int64,
-    "f16": np.float16, "f32": np.float32, "f64": np.float64,
-}
-_LOW_PRECISION_TYPES = {
-    "bf16": "bfloat16", "f8e4m3fn": "float8_e4m3fn", "f8e5m2": "float8_e5m2",
-}
+from intent.runtime.storage_types import numpy_dtype
 _RANDOM = ContextVar("example_random", default=None)
 
 
@@ -37,15 +26,6 @@ def _random():
     return generator
 
 
-def numpy_dtype(element):
-    if element in _NUMPY_TYPES:
-        return np.dtype(_NUMPY_TYPES[element])
-    if element in _LOW_PRECISION_TYPES:
-        import ml_dtypes
-        return np.dtype(getattr(ml_dtypes, _LOW_PRECISION_TYPES[element]))
-    raise NotImplementedError(f"example storage does not support dtype {element}")
-
-
 @dataclass(eq=False)
 class Array:
     data: np.ndarray | None
@@ -54,8 +34,7 @@ class Array:
 
     def __post_init__(self):
         self.shape = tuple(self.shape)
-        if self.dtype not in _NUMPY_TYPES and self.dtype not in _LOW_PRECISION_TYPES:
-            raise NotImplementedError(f"example storage does not support dtype {self.dtype}")
+        numpy_dtype(self.dtype)
         if any(not isinstance(size, (int, np.integer)) or size < 0 for size in self.shape):
             raise ValueError("example array dimensions must be nonnegative integers")
         if self.data is not None:

@@ -37,3 +37,16 @@ class TorchStorage:
 
     def release(self, value):
         pass  # Tensor owners retain their allocator and stream lifetimes.
+
+    def prepare_fill(self, value, scalar):
+        from intent.runtime.native_call import NativeMemoryFill
+        from intent.runtime.sequence import PreparedInitialization
+        if not self.accepts(value) or value.device != self.device:
+            raise ValueError("initialization must use the selected device's tensor")
+        native = None
+        if value.device.type == "cpu":
+            if not value.is_contiguous():
+                raise NotImplementedError("native CPU initialization requires contiguous storage")
+            encoded = bytes(self.torch.tensor([scalar], dtype=value.dtype).view(self.torch.uint8).tolist())
+            native = NativeMemoryFill(value.data_ptr(), value.numel(), encoded, (value,), lambda: None)
+        return PreparedInitialization(lambda: value.fill_(scalar), (value,), native)

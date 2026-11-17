@@ -56,6 +56,23 @@ through the framework when reading host results. Complete compilation, tuning an
 first execution before graph capture. Authors control multi-kernel ordering, intermediate
 storage and gradients in ordinary Python; Intent does not rewrite the model graph.
 
+## Ordered prepared calls
+
+`intent.PreparedSequence(calls, outputs=..., owners=...)` retains an author's
+already-bound ordered invocation. Members can be prepared calls, nested
+sequences, and explicit workspace initializations. `kernel.empty_like(reference,
+shape, dtype=...)` allocates author-owned workspace on the selected device;
+`kernel.prepare_fill(buffer, value)` binds an initialization without writing it.
+Place that initialization at its required position in the sequence.
+
+`compile()` only compiles members, `launch()` executes the entire sequence, and
+`result()` returns the declared output containers. BANG C submits members to one
+queue and synchronizes at the end; GPU members retain current-stream semantics.
+After first-use execution, CPU `native_calls()` exports ordered native bindings
+and initializations. Native consumers retain their owners, call `validate()`
+before execution and `complete()` afterward. This is an invocation interface,
+not a timing protocol or a program-name-based orchestration mechanism.
+
 ## Installed author programs
 
 The single source for algorithms and host orchestration is installed as
