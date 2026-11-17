@@ -39,6 +39,7 @@ private:
     Pointwise,
     ReductionYield,
     AccessValue,
+    Assumption,
     Reshape,
     ContractOperands,
     ContractAccumulator,
@@ -73,6 +74,8 @@ mlir::WalkResult alignAccessResult(mlir::Operation *operation,
                                    RelationWorklist &changes);
 mlir::LogicalResult alignAccessValue(mlir::Operation *operation,
                                      RelationWorklist &changes);
+mlir::LogicalResult alignAssumption(AssumeInBoundsOp operation,
+                                   RelationWorklist &changes);
 mlir::WalkResult alignContractOperands(mlir::Operation *operation,
                                        RelationWorklist &changes);
 mlir::LogicalResult alignContractAccumulator(mlir::Operation *operation,

@@ -1,5 +1,6 @@
 #include "Pointwise.h"
 #include "Intent/Dialect/Block/Analysis/ValueSchema.h"
+#include "Intent/Dialect/Block/Analysis/UniformValues.h"
 #include "Intent/Dialect/Block/Transforms/Value/ExecutionSchema.h"
 #include "Intent/Dialect/Block/Transforms/Control/Predication.h"
 #include "Intent/Dialect/Block/Transforms/Value/SchemaMutation.h"
@@ -172,18 +173,22 @@ LogicalResult rankLiftPointwiseValueGraph(
     operation->erase();
     return success();
   };
-  auto worksetValidity = [&](OpBuilder &builder, Location location) -> Value {
-    auto shape = predicateType(execution);
+  auto worksetValidity = [&](OpBuilder &builder, Location location,
+                            ArrayRef<MakeRangeOp> ranges,
+                            FragmentType domain) -> Value {
+    if (ranges.empty())
+      return builder.create<arith::ConstantOp>(location, builder.getBoolAttr(true));
+    auto shape = predicateType(domain);
     Value active;
-    for (MakeRangeOp range : liftedRanges) {
+    for (MakeRangeOp range : ranges) {
       auto project = [&](Value value) -> Value {
-        return builder.create<BroadcastOp>(location, execution, value);
+        return builder.create<BroadcastOp>(location, domain, value);
       };
       Value coordinate = project(range.getResult());
       Value lower = builder.create<CompareOp>(
           location, shape, coordinate, project(range.getLogicalStart()),
           ComparePredicate::Ge);
-      auto stop = builder.create<BroadcastOp>(location, execution, range.getLogicalStop());
+      auto stop = builder.create<BroadcastOp>(location, domain, range.getLogicalStop());
       laneBounds[range.getResult()].push_back(stop);
       Value upper = builder.create<CompareOp>(
           location, shape, coordinate, stop, ComparePredicate::Lt);
@@ -222,7 +227,7 @@ LogicalResult rankLiftPointwiseValueGraph(
       OpBuilder builder(loop);
       Location location = loop.getLoc();
       auto shape = predicateType(execution);
-      Value active = worksetValidity(builder, location);
+      Value active = worksetValidity(builder, location, liftedRanges, execution);
       IRMapping mapping;
       if (failed(clonePredicatedScalarOperation(builder, loop, mapping, active, shape)))
         return WalkResult::interrupt();
@@ -261,9 +266,36 @@ LogicalResult rankLiftPointwiseValueGraph(
     if (auto assumption = dyn_cast<AssumeInBoundsOp>(operation)) {
       OpBuilder builder(assumption);
       IRMapping mapping;
+      SmallVector<MakeRangeOp> ranges;
+      SmallVector<Attribute> extents, axes;
+      auto varies = [&](Value value, PhysicalSourceAxis source) {
+        if (!value) return false;
+        auto fragment = dyn_cast<FragmentType>(value.getType());
+        if (!fragment) return false;
+        auto uniform = uniformFragmentAxes(value);
+        return llvm::any_of(llvm::enumerate(fragment.getAxisMaps()), [&](auto entry) {
+          return sourceAxisIdentity(cast<AxisMapAttr>(entry.value())) == source &&
+                 !uniform[entry.index()];
+        });
+      };
+      for (MakeRangeOp range : llvm::reverse(liftedRanges)) {
+        auto fragment = cast<FragmentType>(range.getResult().getType());
+        auto source = sourceAxisIdentity(range);
+        if (!varies(assumption.getIndex(), source) &&
+            !varies(assumption.getValid(), source)) continue;
+        ranges.push_back(range);
+        auto axis = cast<AxisMapAttr>(fragment.getAxisMaps()[0]);
+        extents.push_back(fragment.getShape()[0]);
+        axes.push_back(AxisMapAttr::get(kernel.getContext(), axis.getSourceId(),
+            axis.getSourceAxis(), axis.getDimensionId(), axes.size(), axis.getDerived()));
+      }
+      auto domain = ranges.empty() ? FragmentType() : FragmentType::get(
+          kernel.getContext(), builder.getIndexType(), builder.getArrayAttr(extents),
+          builder.getArrayAttr(axes), 1, 1);
       if (failed(clonePredicatedScalarOperation(
               builder, assumption, mapping,
-              worksetValidity(builder, assumption.getLoc()), predicateType(execution))))
+              worksetValidity(builder, assumption.getLoc(), ranges, domain),
+              domain ? predicateType(domain) : FragmentType())))
         return WalkResult::interrupt();
       originalOperands.erase(operation);
       originalResults.erase(operation);

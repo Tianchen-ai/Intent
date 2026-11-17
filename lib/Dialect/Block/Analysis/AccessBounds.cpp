@@ -538,13 +538,51 @@ PhysicalProgramAnalysis::accessBounds(Operation *access) {
   // If-conversion transports the lexical scope of an assumption as a lane
   // predicate. It proves bounds only for accesses contained in that scope.
   std::function<bool(Value, Value)> implies = [&](Value active, Value required) {
-    if (!required || integerConstant(required) == 1 || active == required)
+    if (required) required = stripIntegerIndexCasts(required);
+    if (active) active = stripIntegerIndexCasts(active);
+    if (!required || integerConstant(required) == 1 || active == required ||
+        (active && sameScalarExpression(active, required)))
       return true;
-    if (!active) return false;
+    if (auto compare = required.getDefiningOp<CompareOp>()) {
+      auto scalarCoordinate = [](Value value) -> Value {
+        value = stripIntegerIndexCasts(value);
+        if (auto range = value.getDefiningOp<MakeRangeOp>(); range &&
+            integerConstant(range.getExtent()) == 1)
+          return range.getStart();
+        return value;
+      };
+      Value lhs = scalarCoordinate(compare.getLhs());
+      Value rhs = scalarCoordinate(compare.getRhs());
+      auto integerElement = [](Value value) {
+        Type type = value.getType();
+        if (auto fragment = dyn_cast<FragmentType>(type)) type = fragment.getElementType();
+        return type.isIntOrIndex();
+      };
+      IndexRelations relations;
+      if (integerElement(lhs) && integerElement(rhs)) switch (compare.getPredicate()) {
+      case ComparePredicate::Eq:
+        if (relations.same(lhs, rhs)) return true;
+        break;
+      case ComparePredicate::Le:
+        if (relations.atMost(lhs, rhs)) return true;
+        break;
+      case ComparePredicate::Ge:
+        if (relations.atMost(rhs, lhs)) return true;
+        break;
+      case ComparePredicate::Lt:
+        if (relations.coordinateLessThan(lhs, rhs)) return true;
+        break;
+      case ComparePredicate::Gt:
+        if (relations.coordinateLessThan(rhs, lhs)) return true;
+        break;
+      default: break;
+      }
+    }
     if (auto conjunction = required.getDefiningOp<BinaryOp>();
         conjunction && conjunction.getOperatorKind() == BinaryOperator::LogicalAnd)
       return implies(active, conjunction.getLhs()) &&
              implies(active, conjunction.getRhs());
+    if (!active) return false;
     if (auto conjunction = active.getDefiningOp<BinaryOp>();
         conjunction && conjunction.getOperatorKind() == BinaryOperator::LogicalAnd)
       return implies(conjunction.getLhs(), required) ||

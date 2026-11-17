@@ -422,6 +422,14 @@ LogicalResult clonePredicatedScalarOperation(
     auto index = lift(mapped(assumption.getIndex()));
     auto valid = maskedValidity(assumption.getValid(), assumption.getIndex().getType());
     if (failed(index) || failed(valid)) return failure();
+    if (auto mask = dyn_cast<FragmentType>((*valid).getType())) {
+      auto coordinate = dyn_cast<FragmentType>((*index).getType());
+      Type element = coordinate ? coordinate.getElementType() : (*index).getType();
+      auto target = FragmentType::get(mask.getContext(), element, mask.getShape(),
+          mask.getAxisMaps(), mask.getValidity(), mask.getOwner());
+      index = project(*index, target);
+      if (failed(index)) return failure();
+    }
     clone = builder.create<AssumeInBoundsOp>(location, *index,
         mapped(assumption.getResource()), assumption.getAxis(), *valid);
   } else if (auto access = dyn_cast<AccessOpInterface>(operation);

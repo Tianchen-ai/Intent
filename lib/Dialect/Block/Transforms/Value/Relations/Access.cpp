@@ -8,6 +8,40 @@ using namespace mlir;
 
 namespace intent::block::value_relations {
 
+LogicalResult alignAssumption(AssumeInBoundsOp operation,
+                               RelationWorklist &changes) {
+  if (!operation.getValid()) return success();
+  auto coordinate = dyn_cast<FragmentType>(operation.getIndex().getType());
+  auto validity = dyn_cast<FragmentType>(operation.getValid().getType());
+  if (!coordinate && !validity) return success();
+  OpBuilder builder(operation);
+  builder.setListener(&changes);
+  auto withElement = [](FragmentType shape, Type element) {
+    return FragmentType::get(shape.getContext(), element, shape.getShape(),
+        shape.getAxisMaps(), shape.getValidity(), shape.getOwner());
+  };
+  if (validity) {
+    auto target = withElement(validity, coordinate ? coordinate.getElementType()
+                                                  : operation.getIndex().getType());
+    if (operation.getIndex().getType() == target) return success();
+    if (!coordinate || queryAxisProjection(coordinate, target).isExact()) {
+      // Keep the explicit lane expansion: a pointwise producer may have been
+      // refined to a uniform singleton while the lexical scope still varies.
+      operation.getIndexMutable().assign(builder.create<BroadcastOp>(
+          operation.getLoc(), target, operation.getIndex()));
+      return success();
+    }
+  }
+  if (!coordinate) return operation.emitOpError("assumption has no common lane domain");
+  auto target = withElement(coordinate, builder.getI1Type());
+  if (!validity || queryAxisProjection(validity, target).isExact()) {
+    operation.getValidMutable().assign(builder.create<BroadcastOp>(
+        operation.getLoc(), target, operation.getValid()));
+    return success();
+  }
+  return operation.emitOpError("assumption index and validity have incompatible lane domains");
+}
+
 WalkResult alignAccessResult(Operation *operation, RelationWorklist &changes) {
   auto kernel = operation->getParentOfType<func::FuncOp>();
   auto access = cast<AccessOpInterface>(operation);

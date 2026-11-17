@@ -69,6 +69,7 @@ void RelationWorklist::notifyOperationModified(Operation *operation) {
 }
 
 bool RelationWorklist::enabled(Rule rule) const {
+  if (rule == Assumption) return true;
   switch (scope) {
   case ValueRelationScope::Complete:
     return true;
@@ -128,6 +129,7 @@ void RelationWorklist::enqueue(Operation *operation) {
     push(operation, ContractOperands);
   if (isa<ContractOp, ScaledContractOp, SparseContractOp>(operation))
     push(operation, ContractAccumulator);
+  if (isa<AssumeInBoundsOp>(operation)) push(operation, Assumption);
   // A yield/capture change affects its structured owner even though those
   // schema edges are not ordinary SSA result uses.
   Operation *parent = operation->getParentOp();
@@ -225,6 +227,9 @@ LogicalResult RelationWorklist::run() {
       break;
     case AccessValue:
       status = alignAccessValue(operation, *this);
+      break;
+    case Assumption:
+      status = alignAssumption(cast<AssumeInBoundsOp>(operation), *this);
       break;
     case Reshape:
       status = refreshReshapeRelation(cast<ReshapeOp>(operation), *this);
