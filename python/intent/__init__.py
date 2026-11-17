@@ -18,7 +18,7 @@ from .frontend import lower_to_mlir
 from .runtime import CompiledArtifact, PreparedCall, PublicInterface, ScalarParameter, ViewParameter, NativeInvocation
 from .runtime import NativeObservation, NativeResource, CandidateObservation, InvocationArgument
 from .runtime import CacheObservation, ConfigurationAssessment, RequirementEvaluation
-from .runtime import PreparedSequence, PreparedInitialization, NativeMemoryFill
+from .runtime import PreparedSequence, PreparedInitialization, NativeMemoryFill, HostBuffers
 from .targets import CuTileTarget
 from .targets import TritonTarget
 from .targets import MojoTarget
@@ -55,6 +55,7 @@ __all__ = [
     "CompiledArtifact",
     "PreparedCall",
     "PreparedSequence", "PreparedInitialization", "NativeMemoryFill",
+    "HostBuffers",
     "NativeInvocation",
     "PublicInterface",
     "ScalarParameter",

@@ -59,6 +59,14 @@ CPU 在首次执行完成后可用 `native_calls()` 导出有序原生调用和�
 导出的绑定保留所有权；调用者在执行前 `validate()`、同步执行后 `complete()`。
 该接口不包含计时协议，也不根据程序名称推断编排。
 
+需要从 host 数组显式准备设备输入时，可用 `intent.HostBuffers(backend, device)`
+管理一次完整调用的传输与所有权。`input(array, writable=False, preserve=False)` 接收
+NumPy 数组、CPU tensor 或已有 provider buffer，保留共享 allocation、shape、stride 和 offset；
+`preserve=True` 保存初始状态，`reset()` 恢复，`finish()` 将标记为 writable 的 staged storage
+复制回原 host allocation。中间结果用 `retain_outputs()` 保持到 scope 结束。
+调用者须在 `close()` 或离开 context manager 前完成设备操作；此显式传输接口不改变普通 JIT
+拒绝隐式搬运的规则，也不负责推断参数 ABI 或 kernel 次序。
+
 ## 安装包中的完整程序
 
 唯一的作者算法和 host 编排位于 `intent.examples.kernels` 与

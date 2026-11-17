@@ -73,6 +73,15 @@ and initializations. Native consumers retain their owners, call `validate()`
 before execution and `complete()` afterward. This is an invocation interface,
 not a timing protocol or a program-name-based orchestration mechanism.
 
+Use `intent.HostBuffers(backend, device)` for explicit host transfers and ownership
+across a complete call. `input(array, writable=False, preserve=False)` accepts a
+NumPy array, CPU tensor or existing provider buffer, preserving shared allocations,
+shape, strides and offsets. `preserve=True` saves initial state for `reset()`;
+`finish()` copies writable staged storage back to its original host allocation.
+Retain produced buffers with `retain_outputs()`. Complete device operations before
+`close()` or leaving the context manager. This explicit transfer scope neither
+changes ordinary JIT device checks nor infers an ABI or kernel sequence.
+
 ## Installed author programs
 
 The single source for algorithms and host orchestration is installed as

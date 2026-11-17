@@ -90,6 +90,23 @@ class PagedDecode:
 
 
 @dataclass
+class ChunkGatedDelta:
+    mutable_inputs: ClassVar[tuple[int, ...]] = ()
+    partition: object
+    recurrence: object
+
+    def prepare(self, query, key, value, gate, beta, scale):
+        partition = self.partition.prepare(query, key, value, gate, beta, scale)
+        recurrence = self.recurrence.prepare(*partition.result())
+        return PreparedSequence((partition, recurrence), outputs=recurrence.result())
+
+    def run(self, *arguments):
+        call = self.prepare(*arguments)
+        call.launch()
+        return call.result()
+
+
+@dataclass
 class MoEAlignment:
     mutable_inputs: ClassVar[tuple[int, ...]] = ()
     count: object
