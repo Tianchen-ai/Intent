@@ -4,6 +4,8 @@ add_mlir_library(MLIRIntentWeftTransforms
   Implementations.cpp
   Quantization.cpp
   Reductions.cpp
+  Scans.cpp
+  TaskScans.cpp
   TaskInterface.cpp
   TaskLowering.cpp
   TaskViews.cpp

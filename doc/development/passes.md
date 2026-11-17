@@ -38,6 +38,16 @@ MLIR 名称、owner、阶段、必需属性和说明。组件定义与所属 pip
 
 只改完整经验配置时不创建新 pass。Provider 已负责的 collective tree、线程通信、distributed layout 和 machine pipeline，直接提供合法的输入，不在 Intent 重建。
 
+`intent-cpu-specialize-singleton-tasks` 根据真实 task count 形成单参与者分支，
+只在该分支把 relaxed atomic add 降为保留 old value 的普通 load/add/store；
+多参与者路径保留原子操作。必需的 task dispatch lowering 消费当前 IR 的 worker count，
+Mojo 与 Weft serializer 不自行按硬件最大线程数派发。
+
+`intent-weft-tile-scans` 消费已绑定的有限 panel 参数，把 source-form prefix 划为
+有界 scan、块间 carry 和尾部；块内直接交给 Canonical Weft ScanOp，包含原 combine、
+inclusive/exclusive 与 reverse 语义。组件关闭后仍可使用完整顺序遍历。
+Weft 继续拥有块内 collective tree；Intent 不复制其 SIMD/RVV shuffle 实现。
+
 ## 使用已有程序观察
 
 选择受影响的现有完整 program，检查前后 IR 结构、生成源码和实际调用结果，再观察同算法同输入的热调用；不要复制算法或扩建测试矩阵。若另一同类 program 受益，可以说明知识的复用范围。生成、native 编译、执行、数值检查与性能改善分别陈述。

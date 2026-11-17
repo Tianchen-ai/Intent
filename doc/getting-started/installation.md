@@ -29,18 +29,23 @@ setup 只安装[provider 注册表](https://github.com/Tianchen-ai/Intent/blob/m
 包括 headers、libraries、TableGen 与 CMake packages。Debian/Ubuntu 对应包包含
 llvm-20-dev、libmlir-20-dev、mlir-20-tools；不需要 Python MLIR bindings。
 
-构建 Weft provider 时需链接其 canonical IR 库，先用同一套 SDK 构建并传入下面的
+构建 Weft provider 时需链接当前 Triton–Weft 的 Canonical IR 库，先用同一套 SDK 构建并传入下面的
 两个 Weft 参数。仅构建其他 provider 时可省略 Weft 构建与这两个参数：
 
 ```bash
-cmake -S /path/to/weft -B /path/to/weft-build -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release -DMLIR_DIR=/path/to/mlir/cmake -DLLVM_DIR=/path/to/llvm/cmake
+cmake -S /path/to/triton-weft/third_party/weft -B /path/to/weft-build -G Ninja \
+  -DWEFT_CANONICAL_ONLY=ON -DCMAKE_BUILD_TYPE=Release \
+  -DMLIR_DIR=/path/to/mlir/cmake -DLLVM_DIR=/path/to/llvm/cmake
 cmake --build /path/to/weft-build --target WeftKernelDialect
 python3 environment/install.py --backend triton --venv /path/to/venv --examples \
   --mlir-dir /path/to/mlir/cmake --llvm-dir /path/to/llvm/cmake \
-  --weft-source-dir /path/to/weft --weft-binary-dir /path/to/weft-build \
+  --weft-source-dir /path/to/triton-weft/third_party/weft --weft-binary-dir /path/to/weft-build \
   --build-dir /path/to/build/intent --jobs 8
 ```
+
+Canonical-only 构建只提供 Intent 链接的类型、操作和 verifier；执行机仍需安装完整
+Triton–Weft JIT 与匹配的原生 SDK。旧 standalone Weft dialect 缺少原生 scan 等操作，
+不能代替当前接口。Canonical 库与 Intent 使用同一套 MLIR，原生 provider 使用其自己的 SDK。
 
 安装器复用环境与构建目录，安装包、执行 setup，再调用 doctor。
 它不安装驱动、外部编译器或服务。默认构建目录在用户缓存中；
@@ -100,7 +105,7 @@ Triton–Ascend 直接消费 Block 程序，硬件查询读取实际架构和 Cu
 python3 environment/build.py --platform native \
   --output-dir /path/to/dist --work-dir /path/to/package-work \
   --mlir-dir /path/to/mlir/cmake --llvm-dir /path/to/llvm/cmake \
-  --weft-source-dir /path/to/weft --weft-binary-dir /path/to/weft-build
+  --weft-source-dir /path/to/triton-weft/third_party/weft --weft-binary-dir /path/to/weft-build
 ```
 
 native 模式适用于 x86-64、RISC-V 等执行主机。脚本从 sdist 构建、打包运行库与

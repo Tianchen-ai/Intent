@@ -1,5 +1,20 @@
 include "mlir/Pass/PassBase.td"
 
+def WeftTileScans : Pass<"intent-weft-tile-scans", "mlir::ModuleOp"> {
+  let summary = "Retain bounded native prefix tiles with ordered carries and tails";
+  let description = [{
+    Requires CPU Buffers with selected finite Weft implementation parameters.
+    Divides source-form scans into bounded prefix operations, explicit carries
+    and scalar tails. Preserves traversal order, inclusive/exclusive semantics,
+    aliases and source combine. Unsupported combines retain the legal traversal.
+    Invalidates access, storage and task capture analyses. Disabling this
+    optimization leaves scalar scan legalization available.
+  }];
+  let dependentDialects = ["intent::cpu::IntentCPUDialect",
+      "mlir::arith::ArithDialect", "mlir::memref::MemRefDialect",
+      "mlir::scf::SCFDialect"];
+}
+
 def WeftPrepareTaskViews : Pass<"intent-weft-prepare-task-views", "mlir::ModuleOp"> {
   let summary = "Reify typed task views and close the captures for Weft conversion";
   let description = [{

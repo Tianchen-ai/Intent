@@ -32,18 +32,24 @@ Source builds need Linux, Python 3.10–3.12, CMake, Ninja, C++17 and the LLVM/M
 (headers, libraries, TableGen and CMake packages). Debian/Ubuntu packages include
 llvm-20-dev, libmlir-20-dev and mlir-20-tools. Python MLIR bindings are unnecessary.
 
-To include the Weft provider, build its canonical IR library against the same SDK
+To include the Weft provider, build the current Triton–Weft Canonical IR library against the same SDK
 and pass both Weft flags below. Other providers can omit the Weft build and flags:
 
 ```bash
-cmake -S /path/to/weft -B /path/to/weft-build -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release -DMLIR_DIR=/path/to/mlir/cmake -DLLVM_DIR=/path/to/llvm/cmake
+cmake -S /path/to/triton-weft/third_party/weft -B /path/to/weft-build -G Ninja \
+  -DWEFT_CANONICAL_ONLY=ON -DCMAKE_BUILD_TYPE=Release \
+  -DMLIR_DIR=/path/to/mlir/cmake -DLLVM_DIR=/path/to/llvm/cmake
 cmake --build /path/to/weft-build --target WeftKernelDialect
 python3 environment/install.py --backend triton --venv /path/to/venv --examples \
   --mlir-dir /path/to/mlir/cmake --llvm-dir /path/to/llvm/cmake \
-  --weft-source-dir /path/to/weft --weft-binary-dir /path/to/weft-build \
+  --weft-source-dir /path/to/triton-weft/third_party/weft --weft-binary-dir /path/to/weft-build \
   --build-dir /path/to/build/intent --jobs 8
 ```
+
+The Canonical-only build provides the types, operations and verifiers linked into Intent.
+The execution host still installs full Triton–Weft JIT and its matching native SDK.
+Older standalone Weft dialects lack operations such as native scan and cannot replace
+this interface. Canonical IR and Intent use the same MLIR SDK; the native provider uses its own SDK.
 
 The installer reuses the selected environment/build directory, installs the package,
 runs setup and queries doctor. It does not install drivers, external compilers or services.
@@ -108,7 +114,7 @@ compatibility shared-memory placeholders are not physical capacity facts.
 python3 environment/build.py --platform native \
   --output-dir /path/to/dist --work-dir /path/to/package-work \
   --mlir-dir /path/to/mlir/cmake --llvm-dir /path/to/llvm/cmake \
-  --weft-source-dir /path/to/weft --weft-binary-dir /path/to/weft-build
+  --weft-source-dir /path/to/triton-weft/third_party/weft --weft-binary-dir /path/to/weft-build
 ```
 
 Native mode supports execution hosts such as x86-64 and RISC-V. The script builds from an

@@ -40,6 +40,18 @@ Add new implementations to the adjacent CMake list. Reuse an existing transforma
 
 Changing complete empirical configurations does not require a new pass. When a provider owns collective trees, thread communication, distributed layouts or machine pipelines, supply legal input instead of rebuilding that mechanism in Intent.
 
+`intent-cpu-specialize-singleton-tasks` branches on the actual task count. Only the
+single-participant branch replaces relaxed atomic add with load/add/store while
+preserving its old value. Concurrent participants retain atomics. Required task
+dispatch lowering consumes the worker count in the current IR; Mojo and Weft
+serializers do not dispatch the hardware's maximum thread count independently.
+
+`intent-weft-tile-scans` consumes the selected finite panel parameter and forms
+bounded prefixes, block carries and tails. Canonical Weft ScanOp owns the native
+collective, with the source combine, inclusive/exclusive and reverse semantics.
+Disabling this component retains the complete ordered traversal. Intent does not
+duplicate the provider's SIMD/RVV shuffle tree.
+
 ## Observe existing programs
 
 Choose affected complete programs, inspect before/after IR and generated source, verify actual calls and observe warm execution for the same algorithm and input. Do not copy algorithms or expand a test matrix. Benefits on another related program show the reuse scope. Report generation, native compilation, execution, numerical checking and performance improvement separately.

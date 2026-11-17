@@ -137,6 +137,7 @@ private:
                          mlir::IRMapping &mapping);
   mlir::LogicalResult generic(mlir::linalg::GenericOp operation);
   mlir::LogicalResult reduction(cpu::ReduceOp operation);
+  mlir::LogicalResult scan(cpu::ScanOp operation);
 
   mlir::FailureOr<llvm::SmallVector<mlir::Value>>
   writtenEnclosingLocals(mlir::Operation *scope);

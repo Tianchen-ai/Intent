@@ -73,6 +73,7 @@ void visitBufferComponents(ComponentVisitor add, llvm::function_ref<void()> norm
   optimize("storage", createCPUOptimizeMemoryAccesses());
   normalize();
   required("tasks", createCPUIsolateTasks());
+  optimize("tasks", createCPUSpecializeSingletonTasks());
 }
 
 } // namespace

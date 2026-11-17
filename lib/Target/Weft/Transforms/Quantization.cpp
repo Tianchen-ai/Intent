@@ -321,13 +321,13 @@ LogicalResult expandQuantizedDot(cpu::QuantizedDotOp operation,
           Value weights = p.convert(p.project(wq, inner, 8, "domain"), integer(b, 8, true));
           Value left = b.create<wk::ReshapeOp>(p.loc,
               p.valueType(integer(b, 8, true), {1, 8}, {mAxis, axis}), a, p.array({axis}));
-          Value term = b.create<wk::OuterContractOp>(p.loc, matrix, left, weights, p.array({axis}), TypeAttr::get(i32));
+          Value term = b.create<wk::OuterContractOp>(p.loc, matrix, left, weights, p.array({axis}), TypeAttr::get(i32), StringAttr());
           return SmallVector<Value>{p.binary(accumulator[0], term, "add")};
         });
         partial = b.create<wk::ReshapeOp>(p.loc, p.valueType(i32, {columns}, {rowAxis}),
             product[0], p.array({mAxis, rowAxis}));
       } else {
-        partial = b.create<wk::ContractOp>(p.loc, i32, wq, xq, p.array({axis}), TypeAttr::get(i32));
+        partial = b.create<wk::ContractOp>(p.loc, i32, wq, xq, p.array({axis}), TypeAttr::get(i32), StringAttr());
       }
       Value sc = p.convert(p.project(p.field(w, "sc", integer(b, 6, false), 8), point, 0, "group_index"), integer(b, 32, true));
       return SmallVector<Value>{p.binary(carried[0], p.binary(partial, sc, "mul"), "add")};

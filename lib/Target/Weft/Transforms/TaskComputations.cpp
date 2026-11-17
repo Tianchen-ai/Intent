@@ -217,7 +217,7 @@ LogicalResult TaskConversion::generic(linalg::GenericOp operation) {
     }
     int64_t reduction = loopAxes[2];
     Value term = b.create<wk::OuterContractOp>(operation.getLoc(), (*initial).getType(),
-        *lhs, *rhs, array({reduction}), TypeAttr::get(element((*initial).getType())));
+        *lhs, *rhs, array({reduction}), TypeAttr::get(element((*initial).getType())), StringAttr());
     if (!zero) {
       auto accumulated = binary(operation.getLoc(), *initial, term, "add");
       if (failed(accumulated)) return failure();

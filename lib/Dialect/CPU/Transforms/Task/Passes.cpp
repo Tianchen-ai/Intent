@@ -10,6 +10,7 @@ namespace intent::cpu {
 #define GEN_PASS_DEF_CPUBLOCKCOMPUTATIONS
 #define GEN_PASS_DEF_CPUPARTITIONTASKS
 #define GEN_PASS_DEF_CPUISOLATETASKS
+#define GEN_PASS_DEF_CPUSPECIALIZESINGLETONTASKS
 #include "Intent/Dialect/CPU/Transforms/Passes.h.inc"
 
 namespace {
@@ -70,6 +71,16 @@ public:
   void runOnOperation() final {
     if (failed(detail::transformFunctions(getOperation(), getArgument(),
                                           isolateTasks)))
+      signalPassFailure();
+  }
+};
+
+class SpecializeSingletonTasksPass
+    : public impl::CPUSpecializeSingletonTasksBase<SpecializeSingletonTasksPass> {
+public:
+  void runOnOperation() final {
+    if (failed(detail::transformFunctions(getOperation(), getArgument(),
+                                          specializeSingletonTasks)))
       signalPassFailure();
   }
 };

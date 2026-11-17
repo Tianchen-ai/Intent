@@ -594,30 +594,6 @@ void foldDisjointCompareExchange(func::FuncOp function, scf::ParallelOp root) {
     if (alias->use_empty()) alias->erase();
 }
 
-void foldSequentialAtomicAdds(func::FuncOp function) {
-  SmallVector<AtomicRMWOp> updates;
-  function.walk([&](AtomicRMWOp update) {
-    if (update.getOrdering() != AtomicOrdering::Relaxed || update.getKind() != AtomicRMWKind::Add ||
-        !isa<FloatType, IntegerType>(update.getValue().getType())) return;
-    // CPU task dispatches join before continuation; only sequential control
-    // may enclose an update with no concurrent invocation-local participant.
-    for (Operation *parent = update->getParentOp(); parent != function; parent = parent->getParentOp())
-      if (!isa<scf::ForOp, scf::IfOp>(parent)) return;
-    updates.push_back(update);
-  });
-  for (auto update : updates) {
-    OpBuilder b(update);
-    Location loc = update.getLoc();
-    Value old = b.create<memref::LoadOp>(loc, update.getTarget(), update.getIndices());
-    Value sum = isa<FloatType>(old.getType())
-        ? Value(b.create<arith::AddFOp>(loc, old, update.getValue()))
-        : Value(b.create<arith::AddIOp>(loc, old, update.getValue()));
-    b.create<memref::StoreOp>(loc, sum, update.getTarget(), update.getIndices());
-    update.getOldValue().replaceAllUsesWith(old);
-    update.erase();
-  }
-}
-
 }
 
 LogicalResult partitionWorkset(scf::ParallelOp workset, int64_t grain) {
@@ -648,7 +624,6 @@ LogicalResult partitionTasks(func::FuncOp function, int64_t grain, const Impleme
       if (failed(partition(owners, 1, false))) return failure();
     } else if (failed(partitionWorkset(root, grain))) return failure();
   }
-  foldSequentialAtomicAdds(function);
   return success();
 }
 
@@ -718,15 +693,9 @@ LogicalResult materializeTaskDispatches(func::FuncOp function) {
       mapping.map(original.getArgument(0), ordinal);
       for (Operation &operation : original.without_terminator()) nested.clone(operation, mapping);
     };
-    bool hasRelaxedAdd = false;
-    tasks.walk([&](AtomicRMWOp update) {
-      hasRelaxedAdd |= update.getOrdering() == AtomicOrdering::Relaxed &&
-                       update.getKind() == AtomicRMWKind::Add;
-    });
-    if (hasRelaxedAdd) {
-      // A single-worker dispatch has no concurrent invocation-local participant.
-      // Make that execution fact explicit in IR, so atomic simplification never
-      // depends on a runtime launcher's serial shortcut or on an input shape.
+    {
+      // A single-worker dispatch needs no thread team. Preserve this execution
+      // choice in IR rather than having each provider infer a serial shortcut.
       Value one = index(b, loc, 1);
       auto serial = b.create<scf::IfOp>(loc,
           b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, workers, one), true);
@@ -743,7 +712,6 @@ LogicalResult materializeTaskDispatches(func::FuncOp function) {
     b.create<TaskYieldOp>(loc);
     tasks.erase();
   }
-  foldSequentialAtomicAdds(function);
   return success();
 }
 

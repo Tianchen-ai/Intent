@@ -64,6 +64,7 @@ add_mlir_library(MLIRIntentCPUTransforms
   Task/AtomicTaskOwnership.cpp
   Task/GroupWorksetComputations.cpp
   Task/PartitionTasks.cpp
+  Task/SingletonTasks.cpp
   Task/Passes.cpp
 
   Vector/ContiguousMemory.cpp

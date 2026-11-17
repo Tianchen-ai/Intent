@@ -1,4 +1,5 @@
 #include "Intent/Target/Weft/Transforms/Passes.h"
+#include "Intent/Target/Weft/Transforms/Scans.h"
 #include "Views.h"
 #include "Intent/Target/Weft/IR/Program.h"
 #include "Intent/Target/Weft/IR/WeftDialect.h"
@@ -20,6 +21,7 @@ using namespace mlir;
 namespace intent::weft_provider {
 
 #define GEN_PASS_DEF_WEFTPREPARETASKVIEWS
+#define GEN_PASS_DEF_WEFTTILESCANS
 #define GEN_PASS_DEF_WEFTCONVERTPROGRAM
 #define GEN_PASS_DEF_WEFTVERIFYPROGRAM
 #include "Intent/Target/Weft/Transforms/Passes.h.inc"
@@ -28,6 +30,21 @@ namespace intent::weft_provider {
 #include "Intent/Target/Weft/Transforms/Passes.h.inc"
 
 namespace {
+
+class TileScansPass : public impl::WeftTileScansBase<TileScansPass> {
+public:
+  using WeftTileScansBase::WeftTileScansBase;
+  void runOnOperation() final {
+    auto module = getOperation();
+    if (failed(cpu::verifyCPUProgram(module, cpu::CPUProgramStage::Buffers)) ||
+        failed(cpu::verifyImplementationBindings(module, "weft")))
+      return signalPassFailure();
+    for (auto function : module.getOps<func::FuncOp>())
+      if (failed(tileScans(function))) return signalPassFailure();
+    if (failed(cpu::verifyCPUProgram(module, cpu::CPUProgramStage::Buffers)))
+      signalPassFailure();
+  }
+};
 
 class PrepareTaskViewsPass : public impl::WeftPrepareTaskViewsBase<PrepareTaskViewsPass> {
 public:
@@ -66,11 +83,13 @@ public:
 
 void registerWeftPasses() {
   registerWeftTransformPasses();
+  registerTransformation({"weft", "structured-computations", false}, createWeftTileScans());
   PassPipelineRegistration<>("intent-weft-pipeline",
       "Lower and verify the complete Weft host and device program", buildWeftPipeline);
 }
 
 void buildWeftPipeline(OpPassManager &manager) {
+  addTransformation(manager, {"weft", "structured-computations", false}, createWeftTileScans());
   manager.addPass(createWeftPrepareTaskViews());
   addTransformation(manager, {"cpu", "storage", false}, cpu::createCPUReuseScratchStorage());
   addTransformation(manager, {"cpu", "storage", false}, cpu::createCPUOptimizeMemoryAccesses());

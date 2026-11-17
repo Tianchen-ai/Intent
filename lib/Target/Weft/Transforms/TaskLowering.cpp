@@ -233,6 +233,7 @@ LogicalResult TaskConversion::lower(Operation *operation) {
   if (auto store = dyn_cast<memref::StoreOp>(operation)) return lower(store);
   if (auto genericOp = dyn_cast<linalg::GenericOp>(operation)) return generic(genericOp);
   if (auto reduce = dyn_cast<cpu::ReduceOp>(operation)) return reduction(reduce);
+  if (auto prefix = dyn_cast<cpu::ScanOp>(operation)) return scan(prefix);
   if (auto conditional = dyn_cast<scf::IfOp>(operation)) return lower(conditional);
   if (auto loop = dyn_cast<scf::ForOp>(operation)) return lower(loop);
   if (auto loop = dyn_cast<scf::WhileOp>(operation)) return lower(loop);

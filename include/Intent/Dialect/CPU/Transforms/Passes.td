@@ -281,6 +281,17 @@ def CPUPartitionTasks : CPUTransform<"intent-cpu-partition-tasks",
   let options = [CPUProviderOption];
 }
 
+def CPUSpecializeSingletonTasks : CPUTransform<"intent-cpu-specialize-singleton-tasks",
+    "Expose single-participant task branches before provider outlining"> {
+  let description = [{
+    Requires isolated CPU tasks. A runtime count-one branch retains one complete
+    task with an explicit constant count. Relaxed atomic additions in that branch
+    have no concurrent invocation-local participant and become ordinary exact
+    load/add/store while preserving their old-value results. Other branches keep
+    the original atomics and task count. No launch or algorithm is added.
+  }];
+}
+
 def CPUIsolateTasks : CPUTransform<"intent-cpu-isolate-tasks",
     "Make task captures and their region arguments explicit"> {
   let description = [{

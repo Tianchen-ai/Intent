@@ -1,6 +1,7 @@
 #include "Intent/Dialect/CPU/Transforms/Structure/Computations.h"
 #include "Intent/Dialect/CPU/IR/CPUOps.h"
 #include "Intent/Target/Weft/Transforms/Passes.h"
+#include "Intent/Target/Weft/Transforms/Scans.h"
 #include "Intent/Dialect/Intent/IR/CompileOptions.h"
 #include "Intent/Target/Weft/IR/Program.h"
 #include "Intent/Target/Weft/IR/WeftDialect.h"
@@ -10,6 +11,7 @@
 #include "Intent/Dialect/CPU/Analysis/Storage.h"
 #include "Intent/Dialect/CPU/Transforms/Storage/Bufferization.h"
 #include "Intent/Dialect/CPU/Transforms/Storage/Storage.h"
+#include "Intent/Dialect/CPU/Transforms/Task/Tasks.h"
 #include "TaskLowering.h"
 #include "Quantization.h"
 #include "Weft/Dialect/Kernel/IR/KernelDialect.h"
@@ -27,11 +29,12 @@ LogicalResult legalizeProgram(ModuleOp program) {
   auto registry = cpu::lookupImplementationProvider(program, "weft");
   if (failed(registry)) return failure();
   if (failed(cpu::verifyCPUProgram(program, cpu::CPUProgramStage::Buffers))) return failure();
-  // Canonical Weft has ordered SCF carries, but no native prefix collective.
-  // Form the existing CPU scan traversal before any task axis/storage snapshot.
+  // Bounded tiles retain their prefix collective for the provider. Other
+  // shapes/combines still have the complete ordered CPU traversal.
   SmallVector<cpu::ScanOp> scans;
   program.walk([&](cpu::ScanOp scan) { scans.push_back(scan); });
   for (cpu::ScanOp scan : scans) {
+    if (isNativeScanTile(scan)) continue;
     if (failed(cpu::materializeStructuredComputation(scan, 1, {}))) return failure();
   }
   program.getContext()->loadDialect<IntentWeftDialect, wk::WEFTKernelDialect>();
@@ -167,6 +170,10 @@ LogicalResult legalizeProgram(ModuleOp program) {
           llvm::is_contained(argumentPositions, 0u) ? 0 : -1));
       task.erase();
     }
+    // Preserve active worker counts and the serial branch in the common CPU
+    // execution IR after outlining. C serialization only spells that decision.
+    if (failed(cpu::isolateTasks(function)) ||
+        failed(cpu::materializeTaskDispatches(function))) return failure();
     if (failed(cpu::materializeStructuredComputations(
             function, [](Operation *operation) {
               return cpu::materializeStructuredComputation(operation, 1, {});

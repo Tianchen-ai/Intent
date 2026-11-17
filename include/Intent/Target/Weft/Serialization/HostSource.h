@@ -23,7 +23,7 @@ public:
 private:
   static const OperationEmitters<HostSourceEmitter> &emitters();
   mlir::LogicalResult emitAllocation(mlir::Operation *operation);
-  mlir::LogicalResult emitParallel(mlir::Operation *operation);
+  mlir::LogicalResult emitTaskDispatch(mlir::Operation *operation);
 
   mlir::ModuleOp module;
 };

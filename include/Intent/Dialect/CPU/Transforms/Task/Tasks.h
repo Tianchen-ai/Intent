@@ -24,6 +24,8 @@ mlir::LogicalResult partitionTasks(
     mlir::func::FuncOp function, int64_t grain,
     const ImplementationRegistry &implementations);
 mlir::LogicalResult isolateTasks(mlir::func::FuncOp function);
+mlir::LogicalResult specializeSingletonTasks(mlir::func::FuncOp function);
+void foldSequentialAtomicAdds(mlir::func::FuncOp function);
 mlir::LogicalResult materializeTaskDispatches(mlir::func::FuncOp function);
 // Keep constants local to outlined callbacks after the final canonicalization.
 void localizeTaskConstants(mlir::func::FuncOp function);

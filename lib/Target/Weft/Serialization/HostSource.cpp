@@ -41,17 +41,6 @@ LogicalResult verifyHostTypes(Operation *operation) {
   return success();
 }
 
-LogicalResult verifyParallel(scf::ParallelOp loop) {
-  if (loop.getNumLoops() != 1 || loop.getNumResults())
-    return loop.emitOpError("native task loop requires one linear workset");
-  auto module = loop->getParentOfType<ModuleOp>();
-  auto caps = module->getAttrOfType<cpu::CapabilitiesAttr>(
-      "intent_cpu.capabilities");
-  if (!caps || caps.getWorkers() <= 0)
-    return loop.emitOpError("native task loop requires CPU worker capabilities");
-  return success();
-}
-
 LogicalResult verifyInvocation(cpu::InvokeOp invocation) {
   auto declaration = SymbolTable::lookupNearestSymbolFrom<func::FuncOp>(
       invocation, invocation.getCalleeAttr());
@@ -130,19 +119,14 @@ const OperationEmitters<HostSourceEmitter> &HostSourceEmitter::emitters() {
           emitter.line(text + ");");
           return success();
         });
-    result.add<scf::ParallelOp>(
-        verifyParallel,
-        [](scf::ParallelOp operation, HostSourceEmitter &emitter) {
-          return emitter.emitParallel(operation);
+    result.add<cpu::TaskDispatchOp>(
+        [](cpu::TaskDispatchOp operation) { return operation.verify(); },
+        [](cpu::TaskDispatchOp operation, HostSourceEmitter &emitter) {
+          return emitter.emitTaskDispatch(operation);
         });
-    result.add<scf::ReduceOp>(
-        [](scf::ReduceOp operation) -> LogicalResult {
-          if (operation.getNumOperands() || operation.getNumRegions())
-            return operation.emitOpError(
-                "native task loop does not support parallel reductions");
-          return success();
-        },
-        [](scf::ReduceOp, HostSourceEmitter &) { return success(); });
+    result.add<cpu::TaskYieldOp>(
+        [](cpu::TaskYieldOp operation) { return operation.verify(); },
+        [](cpu::TaskYieldOp, HostSourceEmitter &) { return success(); });
     result.add<scf::YieldOp>(
         [](scf::YieldOp) { return success(); },
         [](scf::YieldOp, HostSourceEmitter &) { return success(); });
@@ -223,20 +207,16 @@ LogicalResult HostSourceEmitter::emitAllocation(Operation *operation) {
   return success();
 }
 
-LogicalResult HostSourceEmitter::emitParallel(Operation *operation) {
-  auto loop = cast<scf::ParallelOp>(operation);
-  auto caps = module->getAttrOfType<cpu::CapabilitiesAttr>(
-      "intent_cpu.capabilities");
-  if (caps.getWorkers() != 1)
-    line("#pragma omp parallel for num_threads(" +
-         std::to_string(caps.getWorkers()) + ")");
+LogicalResult HostSourceEmitter::emitTaskDispatch(Operation *operation) {
+  auto dispatch = cast<cpu::TaskDispatchOp>(operation);
+  line("#pragma omp parallel for num_threads(" +
+       valueString(dispatch.getWorkerCount()) + ")");
   std::string iv = newName();
-  bind(loop.getInductionVars()[0], iv);
-  line("for (int64_t " + iv + " = " + valueString(loop.getLowerBound()[0]) +
-       "; " + iv + " < " + valueString(loop.getUpperBound()[0]) + "; " + iv +
-       " += " + valueString(loop.getStep()[0]) + ") {");
+  bind(dispatch.getBody().front().getArgument(0), iv);
+  line("for (int64_t " + iv + " = 0; " + iv + " < " +
+       valueString(dispatch.getCount()) + "; ++" + iv + ") {");
   ++indent;
-  if (mlir::failed(emitNativeBlock(*loop.getBody()))) return failure();
+  if (mlir::failed(emitNativeBlock(dispatch.getBody().front()))) return failure();
   --indent;
   line("}");
   return success();

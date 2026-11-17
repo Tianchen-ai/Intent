@@ -26,7 +26,9 @@
     ],
     "weft.structured": [
       {"shared": [8, 1, 1, 1, 1], "local": {"panel": 16}, "implementations": ["weft.scalar_program", "weft.structured"]},
-      {"shared": [8, 1, 1, 1, 1], "local": {"panel": 64}, "implementations": ["weft.scalar_program", "weft.structured"]}
+      {"shared": [8, 1, 1, 1, 1], "local": {"panel": 64}, "implementations": ["weft.scalar_program", "weft.structured"]},
+      {"shared": [256, 1, 1, 1, 1], "local": {"panel": 64}, "implementations": ["weft.scalar_program", "weft.structured"]},
+      {"shared": [32768, 1, 1, 1, 1], "local": {"panel": 64}, "implementations": ["weft.scalar_program", "weft.structured"]}
     ]
   }
 }
