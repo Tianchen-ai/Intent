@@ -119,4 +119,5 @@ add_mlir_library(MLIRIntentBlockTransforms
   MLIRTransformUtils
   MLIRIntentBlockAnalysis
   MLIRIntentBlockDialect
+  MLIRIntentTransformComponents
 )

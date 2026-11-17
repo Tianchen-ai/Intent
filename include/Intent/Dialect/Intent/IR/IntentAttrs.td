@@ -26,8 +26,9 @@ def Intent_CompileOptionsAttr : AttrDef<Intent_Dialect, "CompileOptions"> {
   let mnemonic = "compile_options";
   let summary = "Bound numerical permissions and optional optimization controls";
   let parameters = (ins EnumParameter<Intent_NumericsMode>:$numerics,
-      "bool":$onlineReduction, "bool":$optimizationRemarks);
-  let assemblyFormat = "`<` $numerics `,` $onlineReduction `,` $optimizationRemarks `>`";
+      "::mlir::DictionaryAttr":$optimizations, "bool":$optimizationRemarks);
+  let assemblyFormat = "`<` $numerics `,` $optimizations `,` $optimizationRemarks `>`";
+  let genVerifyDecl = 1;
 }
 
 def Intent_UnaryOperator : Intent_I32Enum<"UnaryOperator",

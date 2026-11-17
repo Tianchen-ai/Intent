@@ -15,7 +15,9 @@ Pass的成立依据是它改变了当前program，并保持可验证不变量；
 
 不允许kernel-name、op-count、whole-region template或provider字符串驱动shared policy。
 
-编译调用的有效许可和可选控制由 module 的 `intent.compile_options` 保存：`numerics` 为 `source` 或 `relaxed_normalization`，`onlineReduction` 决定是否考虑普通 normalized summary 的 online 改写，`optimizationRemarks` 决定是否输出采用/拒绝原因。默认绑定为 `source/true/false`。该属性随 construction、分支克隆和 provider 容器传递；物理 IR 续编译读取已有属性，不能无声替换或补入另一套默认许可。Provider metadata 的 `compile_options` 与它一致，编译缓存消费实际选项。
+编译调用的有效许可和可选控制由 module 的 `intent.compile_options` 保存：`numerics` 为 `source` 或 `relaxed_normalization`，`optimizations` 按注册的 MLIR pass 名保存布尔开关，`optimizationRemarks` 决定是否输出采用/拒绝原因。默认绑定为 `source/{}/false`；未覆盖的可选组件使用其默认启用状态。未知组件、非布尔值及关闭必需 lowering 都拒绝。该属性随 construction、分支克隆和 provider 容器传递；物理 IR 续编译读取已有属性，不能无声替换或补入另一套默认许可。Provider metadata 的 `compile_options` 与它一致，编译缓存消费实际选项。
+
+组件的 owner、输入阶段和必需/可选属性由源码登记；调度通过正常 MLIR pass manager 执行。可选组件包装完整 transformation，并保留原有前后置验证。关闭组件不取消相关必需 lowering；例如 tensor fusion 与 CPU bufferization 分开，Block 的保留值优化与访问兑现分开。组件目录只描述编译扩展入口，不解释程序执行。`intent components` 查询已编译目录，不导入 provider SDK 或探测设备。
 
 Online transformation 先检查当前 summary/轴关系、数值许可、identity、dtype 和 replay/effect 条件，再创建执行结构；开关不跳过验证或其它必需 lowering。当前额外模式的实现域为 f32 score、maximum、mass/moment accumulation，以及同 dtype 的 f16/bf16/f32 weight/value operands；不匹配时保留普通分块路径。这是优化实现的资格，不收紧 DSL 允许的 dtype。有限值前置条件与允许的具体舍入变化由[数值规格 §5.6](../dsl/types-numerics-and-effects.md#56-编译调用的数值许可)定义。
 

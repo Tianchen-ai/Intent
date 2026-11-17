@@ -7,14 +7,14 @@ import sys
 
 from intent.targets.registry import BACKENDS
 from .compilation import (compile_request, describe, doctor, generate_ir_request,
-                          materialize_request, optimize_request, read_artifact)
+                          materialize_request, optimize_request, read_artifact, components)
 
 
-def _assignments(parser, values: list[str]) -> dict:
+def _assignments(parser, values: list[str], *, identifiers=True) -> dict:
     result = {}
     for item in values:
         name, separator, encoded = item.partition("=")
-        if not separator or not name.isidentifier() or name in result:
+        if not separator or not name or (identifiers and not name.isidentifier()) or name in result:
             parser.error(f"expected a distinct NAME=JSON assignment, got {item!r}")
         try:
             result[name] = json.loads(encoded)
@@ -42,8 +42,8 @@ def main() -> None:
     compile_parser.add_argument("--tuning-config")
     compile_parser.add_argument("--numerics", choices=("source", "relaxed_normalization"),
                                 help="Numerical permission: source retains the language contract; relaxed_normalization permits summary rescaling and requires finite valid scores and all values entering the moment contraction, including zero-weight terms")
-    compile_parser.add_argument("--online-reduction", choices=("true", "false"),
-                                help="Consider online reduction restructuring; enabling it does not grant numerical permission")
+    compile_parser.add_argument("--optimization", action="append", default=[], metavar="NAME=BOOL",
+                                help="Control a registered optional transformation; numerical permissions are separate")
     compile_parser.add_argument("--optimization-remarks", choices=("true", "false"),
                                 help="Emit optimization decision remarks into compiler diagnostics")
     compile_parser.add_argument("--stage", choices=("kir", "shared", "provider"), default="provider",
@@ -69,6 +69,9 @@ def main() -> None:
     describe_parser = commands.add_parser("describe", help="Discover installed public API and target fields without probing SDKs or devices")
     describe_parser.add_argument("--target", choices=BACKENDS)
     describe_parser.add_argument("--json", action="store_true")
+    components_parser = commands.add_parser("components", help="Query compiled transformation components without device discovery")
+    components_parser.add_argument("--compiler")
+    components_parser.add_argument("--json", action="store_true")
     setup_parser = commands.add_parser("setup", help="Install one backend's Python dependencies in this Python environment")
     setup_parser.add_argument("--target", choices=BACKENDS, required=True)
     setup_parser.add_argument("--torch-index-url", help="Override the selected route's PyTorch wheel index")
@@ -85,6 +88,8 @@ def main() -> None:
         result = setup_backend(arguments.target, torch_index_url=arguments.torch_index_url)
     elif arguments.command == "describe":
         result = describe(arguments.target)
+    elif arguments.command == "components":
+        result = components(arguments.compiler)
     elif arguments.command == "read-artifact":
         result = read_artifact(arguments.path, offset=arguments.offset, limit=arguments.limit)
     elif arguments.command == "optimize":
@@ -115,7 +120,9 @@ def main() -> None:
             compile_options = {}
             if arguments.numerics is not None:
                 compile_options["numerics"] = arguments.numerics
-            for name in ("online_reduction", "optimization_remarks"):
+            if arguments.optimization:
+                compile_options["optimizations"] = _assignments(parser, arguments.optimization, identifiers=False)
+            for name in ("optimization_remarks",):
                 value = getattr(arguments, name)
                 if value is not None:
                     compile_options[name] = value == "true"
@@ -125,7 +132,7 @@ def main() -> None:
                                      materialize=arguments.materialize, stage=arguments.stage,
                                      target_facts=facts, export_directory=arguments.export_directory,
                                      options=compile_options or None)
-    if arguments.json or arguments.command == "describe":
+    if arguments.json or arguments.command in ("describe", "components"):
         print(json.dumps(result, indent=2))
     elif arguments.command == "setup":
         print(f"{arguments.target}: {result['status']} in {result['python']}")

@@ -428,7 +428,12 @@ void registerMatrixImplementations(ImplementationRegistry &registry) {
           return cast<MemRefType>(input.getType()).getElementType().isInteger(8);
         });
   };
-  implementation.requiresMatrixI8I32 = true;
+  implementation.parameterRelations = [](DictionaryAttr, CapabilitiesAttr capabilities)
+      -> std::optional<std::string> {
+    if (!capabilities.getMatrixI8I32())
+      return "AMX integer implementation requires signed i8-to-i32 matrix operations";
+    return std::nullopt;
+  };
   implementation.parameters = {
       ImplementationParameter::local("micro_m", {false, {}, 0, {16, 32}}),
       ImplementationParameter::local("micro_n", {false, {}, 0, {1, 2, 4}})};

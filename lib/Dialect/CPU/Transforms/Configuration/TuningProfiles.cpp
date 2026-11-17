@@ -116,4 +116,62 @@ ArrayRef<Configuration> TuningProfiles::get(StringRef family) const {
   return found->second;
 }
 
+TuningProfilesAttr TuningProfiles::attribute(MLIRContext *context, StringRef provider) const {
+  Builder b(context);
+  SmallVector<NamedAttribute> entries;
+  for (const auto &family : families) {
+    SmallVector<Attribute> rows;
+    for (const auto &row : family.second)
+      rows.push_back(ProfileRowAttr::get(context,
+          ConfigurationAttr::get(context, row.taskGrain, row.tileM, row.tileN, row.tileK, row.regionSize),
+          row.local, row.implementations));
+    entries.push_back(b.getNamedAttr(family.first(), b.getArrayAttr(rows)));
+  }
+  return TuningProfilesAttr::get(context, b.getStringAttr(provider), b.getDictionaryAttr(entries));
+}
+
+TuningProfiles TuningProfiles::fromAttribute(TuningProfilesAttr profiles) {
+  TuningProfiles result;
+  for (NamedAttribute family : profiles.getFamilies())
+    for (Attribute entry : cast<ArrayAttr>(family.getValue())) {
+      auto row = cast<ProfileRowAttr>(entry);
+      auto shared = row.getShared();
+      result.families[family.getName()].push_back({shared.getTaskGrain(), shared.getTileM(),
+          shared.getTileN(), shared.getTileK(), shared.getRegionSize(), row.getLocal(), row.getImplementations()});
+    }
+  return result;
+}
+
+LogicalResult bindCPUProfiles(ModuleOp module, const ImplementationRegistry &implementations,
+    StringRef provider, StringRef defaults, StringRef overrides) {
+  if (module->hasAttr("intent_cpu.tuning_profiles"))
+    return module.emitError("CPU profiles are already bound; cannot reload compile inputs");
+  auto profiles = TuningProfiles::read(module, defaults, overrides, implementations);
+  if (failed(profiles)) return failure();
+  module->setAttr("intent_cpu.tuning_profiles", profiles->attribute(module.getContext(), provider));
+  return success();
+}
+
+LogicalResult verifyCPUProfiles(ModuleOp module, const ImplementationRegistry &implementations,
+    StringRef provider) {
+  auto profiles = module->getAttrOfType<TuningProfilesAttr>("intent_cpu.tuning_profiles");
+  if (!profiles || profiles.getProvider() != provider)
+    return module.emitError("CPU value handoff requires finite profiles bound to the selected provider");
+  for (NamedAttribute family : profiles.getFamilies()) {
+    auto parameters = implementations.profileParameters(family.getName());
+    if (!parameters) return module.emitError("unregistered CPU profile family: ") << family.getName();
+    for (Attribute entry : cast<ArrayAttr>(family.getValue())) {
+      auto row = cast<ProfileRowAttr>(entry);
+      auto declared = implementations.localParameters(row.getImplementations());
+      if (failed(declared)) return module.emitError("invalid CPU profile implementation selection");
+      if (row.getLocal().size() != parameters->size())
+        return module.emitError("CPU profile must bind every declared parameter");
+      for (StringRef parameter : *parameters)
+        if (!row.getLocal().getAs<IntegerAttr>(parameter) || !llvm::is_contained(*declared, parameter))
+          return module.emitError("unbound or unconsumed CPU profile parameter: ") << parameter;
+    }
+  }
+  return success();
+}
+
 } // namespace intent::cpu

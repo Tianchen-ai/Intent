@@ -140,7 +140,8 @@ def describe(target: str | None = None) -> dict:
         result["api"] = {name: _declaration(getattr(intent, name)) for name in (
             "jit", "JITKernel", "compile", "generate", "compile_ir", "generate_from_ir", "optimize_ir", "CompileOptions",
             "NVIDIACompilationTarget", "NVIDIACapabilities", "CPUCompilationTarget", "BangCCompilationTarget",
-            "NativeObservation", "NativeResource", "CandidateObservation", "InvocationArgument")}
+            "NativeObservation", "NativeResource", "CandidateObservation", "InvocationArgument",
+            "PreparedSequence", "PreparedInitialization", "NativeInvocation", "NativeMemoryFill")}
         result["tools"] = {name: _declaration(function) for name, function in (
             ("compile", compile_request), ("generate_from_ir", generate_ir_request),
             ("materialize", materialize_request), ("optimize", optimize_request),
@@ -148,6 +149,19 @@ def describe(target: str | None = None) -> dict:
         result.update(status="described", scope="Declarations only; compiler availability and device support are not checked")
     except Exception as error:
         _failure(result, error, "interface_discovery")
+    return result
+
+
+def components(compiler: str | None = None) -> dict:
+    """Read registered transformations without loading provider SDKs or devices."""
+    from intent.compiler.toolchain import compiler_info
+    result = {"tool_invoked_kernel": False}
+    try:
+        catalog = compiler_info(compiler)
+        result.update(status="described", compiler=catalog["executable"],
+                      components=catalog["compile_options"]["optimizations"])
+    except Exception as error:
+        _failure(result, error, "component_discovery")
     return result
 
 
@@ -208,7 +222,7 @@ def _compile_request(program: str, kernel: str, target: str | None = None, *,
             if not isinstance(options, dict):
                 raise TypeError("options must be a compile options object")
             compile_options = intent.CompileOptions(**options)
-            result["requested_compile_options"] = asdict(compile_options)
+            result["requested_compile_options"] = compile_options.metadata()
         selected_stage = CompilerStage(stage)
         if selected_stage is CompilerStage.KIR:
             if target is not None or target_options or target_facts is not None or tuning_config is not None or materialize:

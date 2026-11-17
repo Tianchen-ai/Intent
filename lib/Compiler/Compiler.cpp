@@ -2,6 +2,8 @@
 #include "Intent/Compiler/Backend.h"
 #include "Intent/Transforms/Passes.h"
 #include "Intent/Transforms/PassManager.h"
+#include "Intent/Transforms/Components.h"
+#include "mlir/IR/Builders.h"
 
 using namespace mlir;
 
@@ -61,7 +63,7 @@ llvm::json::Object information(StringRef profileDirectory) {
               {"provider", llvm::json::Array{"ir", "source", "metadata"}}}},
           {"compile_options", llvm::json::Object{
               {"numerics", llvm::json::Array{"source", "relaxed_normalization"}},
-              {"online_reduction", true}, {"optimization_remarks", false}}},
+              {"optimizations", transformationComponents()}, {"optimization_remarks", false}}},
           {"failure_stages", std::move(failureStages)}};
 }
 
@@ -90,8 +92,12 @@ Result compile(OwningOpRef<ModuleOp> module, const Request &inputRequest) {
   auto selected = existing;
   if (request.options || (!sharedInput && !existing)) {
     CompilationOptions options = request.options.value_or(CompilationOptions{});
+    Builder builder(result.module->getContext());
+    SmallVector<NamedAttribute> controls;
+    for (const auto &[name, enabled] : options.optimizations)
+      controls.push_back(builder.getNamedAttr(name, builder.getBoolAttr(enabled)));
     selected = CompileOptionsAttr::get(result.module->getContext(), options.numerics,
-                                      options.onlineReduction, options.optimizationRemarks);
+                                      builder.getDictionaryAttr(controls), options.optimizationRemarks);
   }
   if (!selected || (sharedInput && request.options && selected != existing) ||
       (existing && request.options && selected != existing)) {
@@ -100,6 +106,10 @@ Result compile(OwningOpRef<ModuleOp> module, const Request &inputRequest) {
     return result;
   }
   (*result.module)->setAttr(compileOptionsAttr, selected);
+  if (failed(verifyTransformationControls(*result.module, selected))) {
+    result.failure = Failure::Invocation;
+    return result;
+  }
   if (sharedInput && (request.stopAfter == Stage::Kernel || !request.tuningConfig.empty())) {
     result.module->emitError("shared input requires shared/provider output and cannot reload tuning profiles");
     result.failure = Failure::Invocation;

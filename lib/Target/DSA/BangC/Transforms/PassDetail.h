@@ -29,7 +29,6 @@ void measureStorage(func::FuncOp function, int64_t &nram, int64_t &wram);
 StorageUsage bindStorage(func::FuncOp function);
 bool storageFitsBudget(func::FuncOp function, bangc::physical::ConfigurationAttr config,
                        StorageUsage usage);
-LogicalResult realizeMatMul(bangc::physical::MatMulOp matrix, bangc::physical::ConfigurationAttr config);
 bool supportedScalarBinary(BinaryOperator kind);
 bool initializeMatrixStorage(func::FuncOp function);
 bool retainNarrowExtremaInputs(func::FuncOp function, bangc::physical::ConfigurationAttr config);
@@ -49,6 +48,8 @@ bool coarsenLocalPrograms(func::FuncOp function, bangc::physical::ConfigurationA
 void pipelineLocalSupply(func::FuncOp function, bangc::physical::ConfigurationAttr config);
 LogicalResult realizeNativeComputations(ModuleOp module);
 LogicalResult realizeNativeWorkspace(ModuleOp module,
+    llvm::function_ref<LogicalResult()> cleanup);
+LogicalResult finalizeNativeWorkspace(ModuleOp module,
     llvm::function_ref<LogicalResult()> cleanup);
 LogicalResult selectNativeImplementations(ModuleOp module);
 LogicalResult composeLocalStorage(func::FuncOp function,

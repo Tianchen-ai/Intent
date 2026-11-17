@@ -25,6 +25,15 @@ GPU and CPU may reuse analysis ideas without sharing a physical topology. A pass
 
 Use existing MLIR pass declaration, registration and pipeline mechanisms. Inspect `include/Intent/Dialect/<Family>/Transforms/Passes.td`, `lib/Dialect/<Family>/Transforms/` and its `Passes.cpp`; target-local transformations live in `lib/Target/<Provider>/Transforms/`. `intent-opt --help` lists actual callable passes and options.
 
+`intent components --compiler /path/to/intent-compile --json` lists compiled
+components with their MLIR name, owner, stage, required flag and description.
+Keep registration beside the owning pipeline and use `registerTransformation`
+and `addTransformation`; do not add backend-name branches to the public driver.
+`CompileOptions(optimizations={"intent-cpu-fuse-tensor-computations": False})`
+or CLI `--optimization NAME=false` disables a complete optional component without
+granting numerical permissions. New components must state their legal unoptimized
+representation; missing lowering is not an optimization-disable failure.
+
 For example, GPU reduction optimizations live in `lib/Dialect/Block/Transforms/Reduction/`, declarations in GPU `Passes.td`, and complete transformation entry points and ordering in GPU `Transforms/Passes.cpp`. CPU task partitioning and storage reuse live in CPU `Transforms/Task/` and `Transforms/Storage/`; CPU `Transforms/Passes.cpp` assembles that family's pipeline. Do not move a GPU ownership transformation there to force reuse. Provider empirical configuration tables live in the corresponding `Transforms/` or `Transforms/Configuration/`.
 
 Add new implementations to the adjacent CMake list. Reuse an existing transformation wrapper's registration, dependent dialects, error propagation and completed-boundary verification. Insert the pass where its input conditions hold rather than adding a bypass for one program.

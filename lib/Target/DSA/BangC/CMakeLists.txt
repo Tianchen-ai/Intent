@@ -8,7 +8,9 @@ add_mlir_library(MLIRIntentBangCResources
 
 add_mlir_library(MLIRIntentBangC
   Transforms/Legalize.cpp
-  Transforms/Matrix.cpp
+  Microkernels/Matrix.cpp
+  Microkernels/Collective.cpp
+  Microkernels/Passes.cpp
   Transforms/MatrixInitialization.cpp
   Transforms/Numerics.cpp
   Transforms/BroadcastOperands.cpp
@@ -25,4 +27,5 @@ add_mlir_library(MLIRIntentBangC
   Serialization/Scalar.cpp
   DEPENDS IntentBangCPassesIncGen
   LINK_LIBS PUBLIC MLIRIntentDialect MLIRIntentNativeABI MLIRIntentScalarSerialization MLIRIntentNativeSourceSerialization MLIRIntentBangCPhysicalDialect MLIRIntentBangCPhysicalAnalysis MLIRIntentBangCPhysicalTransforms MLIRArithDialect MLIRFuncDialect
-    MLIRMathDialect MLIRMemRefDialect MLIRSCFDialect MLIRTransforms MLIRPass MLIRIR MLIRSupport MLIRIntentBangCResources)
+    MLIRMathDialect MLIRMemRefDialect MLIRSCFDialect MLIRTransforms MLIRPass MLIRIR MLIRSupport MLIRIntentBangCResources
+    MLIRIntentTransformComponents)

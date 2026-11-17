@@ -115,7 +115,6 @@ LogicalResult verifyProgram(ModuleOp program) {
     if (firstEntry) publicAlignments.resize(function.getNumArguments());
     auto implementations = function->getAttrOfType<ArrayAttr>("intent_cpu.implementations");
     if (!function->getAttrOfType<cpu::ConfigurationAttr>("intent_cpu.configuration") ||
-        !function->getAttrOfType<BoolAttr>("intent_cpu.requires_matrix_i8_i32") ||
         !implementations || implementations.empty() ||
         !llvm::all_of(implementations, [](Attribute binding) { return isa<cpu::ImplementationAttr>(binding); }))
       return function.emitError("Weft candidate requires its complete typed configuration and implementations");

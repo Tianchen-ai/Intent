@@ -27,7 +27,7 @@ def BangCPrepareProgram : IntentBangCPass<"intent-bangc-prepare-program",
   }];
 }
 def BangCNativeComputations : IntentBangCPass<"intent-bangc-native-computations",
-    "Realize BANG C numerical and matrix computations"> {
+    "Realize BANG C scalar and vector numerical computations"> {
   let description = [{
     Required realization after target preparation and shared collective
     lowering. Consumes bounded local operations, actual matrix geometry and
@@ -39,6 +39,33 @@ def BangCNativeComputations : IntentBangCPass<"intent-bangc-native-computations"
     or delegating an entire algorithm. Verifies the resulting DSA program and
     invalidates affected analyses. Native workspace and implementation binding
     must still run before local optimization and target serialization.
+  }];
+}
+def BangCMatrixMicrokernels : IntentBangCPass<"intent-bangc-matrix-microkernels",
+    "Realize typed contraction blocks with native matrix microkernels"> {
+  let description = [{
+    Consumes MatMul's explicit operands, active extents, incoming accumulator,
+    local supply, numerical types and finite configuration. Materializes bounded
+    tile loops, packing, scratch and PrepareMatrix/MatrixTile operations. Reads
+    target-local NRAM/WRAM capacities; preserves author loop/launch boundaries.
+    This required lowering has no whole-operator identity or runtime recipe.
+  }];
+}
+def BangCCollectiveMicrokernels : IntentBangCPass<"intent-bangc-collective-microkernels",
+    "Select bounded row/column implementations for local collectives"> {
+  let description = [{
+    Optional complete implementation after initial workspace realization. Uses
+    current axes, combine semantics, extents and storage capacity to form an
+    explicit transpose and equivalent collective. Scratch and effects remain
+    in the typed program. Rejection retains the existing native reduction.
+  }];
+}
+def BangCFinalizeWorkspace : IntentBangCPass<"intent-bangc-finalize-workspace",
+    "Close numerical microkernel workspace and local storage dependencies"> {
+  let description = [{
+    Required completion of selection, exponential, division and extrema scratch
+    after optional collective realization. Verifies complete DSA operations
+    before native implementation and physical arena binding.
   }];
 }
 def BangCNativeWorkspace : IntentBangCPass<"intent-bangc-native-workspace",

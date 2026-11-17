@@ -3,13 +3,15 @@
 #include "Intent/Compiler/Backend.h"
 #include "Intent/Dialect/CPU/Transforms/Implementation/Implementation.h"
 #include "Intent/Dialect/CPU/Transforms/Passes.h"
+#include "Intent/Dialect/CPU/Analysis/PhysicalProgram.h"
 
 namespace intent::compiler {
 struct CPUBackend final : ExecutionModel {
   using ProgramPipeline = void (*)(mlir::OpPassManager &, const cpu::CPUCompilationOptions &);
   CPUBackend(bool strided, llvm::StringRef filename, cpu::ImplementationRegistry implementations,
-             ProgramPipeline pipeline)
-      : stridedInputs(strided), files{filename}, implementations(std::move(implementations)), pipeline(pipeline) {}
+             cpu::CPUProgramStage stage, ProgramPipeline pipeline)
+      : stridedInputs(strided), files{filename}, implementations(std::move(implementations)),
+        inputStage(stage), pipeline(pipeline) {}
   llvm::StringRef name() const final { return "cpu"; }
   llvm::ArrayRef<llvm::StringRef> profileFiles() const final { return files; }
   const cpu::ImplementationRegistry *cpuImplementations() const final { return &implementations; }
@@ -19,6 +21,7 @@ struct CPUBackend final : ExecutionModel {
   bool stridedInputs;
   llvm::StringRef files[1];
   cpu::ImplementationRegistry implementations;
+  cpu::CPUProgramStage inputStage;
   ProgramPipeline pipeline;
 };
 mlir::LogicalResult configureCPUTarget(mlir::ModuleOp, Request &);

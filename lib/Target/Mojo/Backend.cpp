@@ -6,6 +6,7 @@
 namespace intent::compiler {
 Backend createMojoBackend() {
   return {"mojo", "mojo", true, std::make_shared<CPUBackend>(true, "mojo.json", mojo::implementations(),
+      cpu::CPUProgramStage::Buffers,
       [](mlir::OpPassManager &manager, const cpu::CPUCompilationOptions &options) {
         manager.addPass(cpu::createCPUBufferizeValues());
         cpu::buildCPUBufferPipeline(manager, options);

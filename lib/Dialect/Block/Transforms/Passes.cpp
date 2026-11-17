@@ -15,6 +15,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassRegistry.h"
+#include "Intent/Transforms/Components.h"
 
 using namespace mlir;
 
@@ -65,10 +66,11 @@ LogicalResult realizeReductionGroup(ModuleOp module) {
 }
 
 LogicalResult composeRealizedAccesses(ModuleOp module) {
-  if (failed(realizeAccessComposition(module)) ||
-      failed(materializeRetainedValues(module)) ||
-      failed(realizeAccessComposition(module)))
-    return failure();
+  auto options = readCompileOptions(module);
+  if (failed(options) || failed(realizeAccessComposition(module))) return failure();
+  auto enabled = options->getOptimizations().getAs<BoolAttr>("intent-block-materialize-retained-values");
+  if ((!enabled || enabled.getValue()) && failed(materializeRetainedValues(module))) return failure();
+  if (failed(realizeAccessComposition(module))) return failure();
   return orientLoopContractions(module);
 }
 
@@ -311,33 +313,49 @@ public:
   }
 };
 
-void populateTransformations(OpPassManager &manager,
-                              unsigned preferredResidentPrograms) {
-  manager.addPass(createNormalizeStructuredSourcesPass());
-  manager.addPass(createPredicateScalarControlPass());
-  manager.addPass(createPointwiseOwnershipPass());
+using ComponentVisitor = llvm::function_ref<void(TransformationComponent, std::unique_ptr<Pass>)>;
+
+void visitBlockRealization(ComponentVisitor add, unsigned preferredResidentPrograms) {
+  const TransformationComponent source{"block", "source", true};
+  const TransformationComponent ownership{"block", "ownership", true};
+  const TransformationComponent computation{"block", "computation", true};
+  const TransformationComponent computeOptimization{"block", "computation", false};
+  const TransformationComponent storage{"block", "storage", true};
+  const TransformationComponent storageOptimization{"block", "storage", false};
+  const TransformationComponent mapping{"block", "mapping", true};
+  const TransformationComponent simplification{"block", "mapping", false};
+  add(source, createNormalizeStructuredSourcesPass());
+  add(source, createPredicateScalarControlPass());
+  add(ownership, createPointwiseOwnershipPass());
   ReductionConsumersPassOptions consumers;
   consumers.preferredResidentPrograms = preferredResidentPrograms;
-  manager.addPass(createReductionConsumersPass(consumers));
-  manager.addPass(createPointwiseBlockingPass());
-  manager.addPass(createScanConsumersPass());
-  manager.addPass(createRetainedValuesPass());
-  manager.addPass(createOnlineReductionsPass());
-  manager.addPass(createRegionFoldsPass());
-  manager.addPass(createRegionScansPass());
+  add(ownership, createReductionConsumersPass(consumers));
+  add(ownership, createPointwiseBlockingPass());
+  add(computation, createScanConsumersPass());
+  add(computeOptimization, createRetainedValuesPass());
+  add(computeOptimization, createOnlineReductionsPass());
+  add(computation, createRegionFoldsPass());
+  add(computation, createRegionScansPass());
   // Predicate specialization exposes unmasked multiply-reductions.
-  manager.addPass(createNormalizeStructuredSourcesPass());
-  manager.addPass(createVectorContractionsPass());
-  manager.addPass(createReductionsPass());
-  manager.addPass(createContractionsPass());
-  manager.addPass(createAccessCompositionPass());
-  manager.addPass(createPrivateStoresPass());
-  manager.addPass(createStaticViewValuesPass());
-  manager.addPass(createBufferVectorizationPass());
-  manager.addPass(createBufferPromotionPass());
-  manager.addPass(createProgramMappingPass());
-  manager.addPass(createRangePredicatesPass());
-  manager.addPass(createCommonValuesPass());
+  add(source, createNormalizeStructuredSourcesPass());
+  add(computation, createVectorContractionsPass());
+  add(computation, createReductionsPass());
+  add(computation, createContractionsPass());
+  add(storage, createAccessCompositionPass());
+  add(storage, createPrivateStoresPass());
+  add(storageOptimization, createStaticViewValuesPass());
+  add(storageOptimization, createBufferVectorizationPass());
+  add(storageOptimization, createBufferPromotionPass());
+  add(mapping, createProgramMappingPass());
+  add(simplification, createRangePredicatesPass());
+  add(simplification, createCommonValuesPass());
+}
+
+void visitConfiguredBlock(ComponentVisitor add) {
+  add({"block", "configuration", true}, createMaterializeConfigurationsPass());
+  add({"block", "configured", false}, createFuseIndependentTraversalsPass());
+  add({"block", "configured", false}, createNormalizeCompletedReductionsPass());
+  add({"block", "configured", false}, createPeelTraversalTailsPass());
 }
 
 class RealizeSharedProgramPass
@@ -351,7 +369,9 @@ public:
       auto kernel = getPhysicalKernel(module);
       if (failed(kernel)) return failure();
       OpPassManager pipeline(ModuleOp::getOperationName());
-      populateTransformations(pipeline, preferredResidentPrograms);
+      visitBlockRealization([&](TransformationComponent component, std::unique_ptr<Pass> pass) {
+        addTransformation(pipeline, component, std::move(pass));
+      }, preferredResidentPrograms);
       if (scf::IfOp conditional = independentUniformBranches(*kernel)) {
         auto realized = realizeUniformBranches(module, *kernel, conditional,
             [&](ModuleOp branch) { return runPipeline(pipeline, branch); });
@@ -447,6 +467,8 @@ public:
 
 void registerBlockPasses() {
   registerIntentBlockTransformPasses();
+  visitBlockRealization(registerTransformation, 1);
+  visitConfiguredBlock(registerTransformation);
   PassPipelineRegistration<>("intent-block-shared",
       "Realize and close the shared executable Block program",
       [](OpPassManager &manager) { buildSharedBlockPipeline(manager); });
@@ -465,10 +487,9 @@ void buildSharedBlockPipeline(OpPassManager &manager,
   RealizeSharedProgramPassOptions options;
   options.preferredResidentPrograms = preferredResidentPrograms;
   manager.addPass(createRealizeSharedProgramPass(options));
-  manager.addPass(createMaterializeConfigurationsPass());
-  manager.addPass(createFuseIndependentTraversalsPass());
-  manager.addPass(createNormalizeCompletedReductionsPass());
-  manager.addPass(createPeelTraversalTailsPass());
+  visitConfiguredBlock([&](TransformationComponent component, std::unique_ptr<Pass> pass) {
+    addTransformation(manager, component, std::move(pass));
+  });
 }
 
 } // namespace intent::block

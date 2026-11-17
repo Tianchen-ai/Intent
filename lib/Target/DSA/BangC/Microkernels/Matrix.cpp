@@ -1,4 +1,5 @@
-#include "PassDetail.h"
+#include "../Transforms/PassDetail.h"
+#include "Intent/Target/DSA/BangC/Microkernels.h"
 #include "Intent/Target/DSA/BangC/Physical/Transforms/LocalSupplyRelations.h"
 #include "Intent/Target/DSA/BangC/Physical/Transforms/MatrixPanels.h"
 

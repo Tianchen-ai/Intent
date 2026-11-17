@@ -7,6 +7,7 @@
 #include "llvm/Support/JSON.h"
 #include <optional>
 #include <string>
+#include <map>
 
 namespace intent::compiler {
 
@@ -21,7 +22,7 @@ enum class Failure {
 
 struct CompilationOptions {
   NumericsMode numerics = NumericsMode::Source;
-  bool onlineReduction = true;
+  std::map<std::string, bool> optimizations;
   bool optimizationRemarks = false;
 };
 

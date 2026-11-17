@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Literal
 
 
@@ -18,35 +20,45 @@ class CompileOptions:
     Masked accesses retain their declared fill semantics. Restructuring can change rounding, underflow and
     overflow, while empty/all-inactive inputs retain their identity. This is not
     global fast math: input precision, FTZ, effects and the ABI are unchanged.
-    ``online_reduction`` independently enables consideration of that optimization;
-    enabling it never grants additional numerical permission. Remarks report
+    ``optimizations`` selects registered optional transformations by MLIR name;
+    enabling one never grants additional numerical permission. Remarks report
     compiler decisions and do not select an algorithm or a tuning configuration.
     """
 
     numerics: Literal["source", "relaxed_normalization"] = "source"
-    online_reduction: bool = True
+    optimizations: Mapping[str, bool] = field(default_factory=dict)
     optimization_remarks: bool = False
 
     def __post_init__(self) -> None:
         if self.numerics not in ("source", "relaxed_normalization"):
             raise ValueError("numerics must be 'source' or 'relaxed_normalization'")
-        if type(self.online_reduction) is not bool or type(self.optimization_remarks) is not bool:
-            raise TypeError("online_reduction and optimization_remarks must be booleans")
+        if not isinstance(self.optimizations, Mapping) or any(
+            not isinstance(name, str) or not name or type(enabled) is not bool
+            for name, enabled in self.optimizations.items()
+        ):
+            raise TypeError("optimizations must map registered component names to booleans")
+        if type(self.optimization_remarks) is not bool:
+            raise TypeError("optimization_remarks must be a boolean")
+        object.__setattr__(self, "optimizations", MappingProxyType(dict(sorted(self.optimizations.items()))))
 
     @classmethod
     def read(cls, metadata: dict) -> CompileOptions:
         """Read the complete policy emitted by the compiler, without defaults."""
         if not isinstance(metadata, dict) or set(metadata) != {
-            "numerics", "online_reduction", "optimization_remarks"
+            "numerics", "optimizations", "optimization_remarks"
         }:
-            raise ValueError("compiler options require numerics, online_reduction and optimization_remarks")
+            raise ValueError("compiler options require numerics, optimizations and optimization_remarks")
         return cls(**metadata)
 
     @property
     def compiler_arguments(self) -> tuple[str, ...]:
         return (f"--numerics={self.numerics}",
-                f"--online-reduction={str(self.online_reduction).lower()}",
-                f"--optimization-remarks={str(self.optimization_remarks).lower()}")
+                f"--optimization-remarks={str(self.optimization_remarks).lower()}",
+                *(f"--optimization={name}={str(enabled).lower()}" for name, enabled in self.optimizations.items()))
+
+    def metadata(self) -> dict:
+        return {"numerics": self.numerics, "optimizations": dict(self.optimizations),
+                "optimization_remarks": self.optimization_remarks}
 
 
 def compilation_arguments(options: CompileOptions | None) -> tuple[str, ...]:

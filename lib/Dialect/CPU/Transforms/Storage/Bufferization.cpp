@@ -1,7 +1,6 @@
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "Intent/Dialect/CPU/Transforms/Storage/Bufferization.h"
 #include "CollectiveBufferization.h"
-#include "../Structure/ProducerReuse.h"
 #include "Intent/Dialect/CPU/Analysis/Storage.h"
 #include "Intent/Dialect/CPU/IR/CPUOps.h"
 #include "mlir/Conversion/BufferizationToMemRef/BufferizationToMemRef.h"
@@ -284,46 +283,7 @@ void registerValueBufferizationInterfaces(DialectRegistry &registry) {
 
 LogicalResult bufferizeValues(ModuleOp module) {
   PassManager normalize(module.getContext());
-  normalize.addPass(createCanonicalizerPass());
-  normalize.addPass(createCSEPass());
-  if (failed(normalize.run(module))) return failure();
-  RewritePatternSet fusion(module.getContext());
-  linalg::populateElementwiseOpsFusionPatterns(fusion, [](OpOperand *operand) {
-    auto producer = operand->get().getDefiningOp<linalg::GenericOp>();
-    auto consumer = dyn_cast<linalg::GenericOp>(operand->getOwner());
-    if (!producer || !consumer || consumer.getOutputs().size() != 1 ||
-        consumer.getNumReductionLoops()) return false;
-    // Snapshot reads remain at their original execution point. The standard
-    // tensor fusion legality checks indexing, but does not protect captured
-    // mutable memref reads in a generic operation's payload.
-    if (producer.getRegion().walk([](Operation *nested) {
-      return isMemoryEffectFree(nested) ? WalkResult::advance()
-                                       : WalkResult::interrupt();
-    }).wasInterrupted()) return false;
-    // Preserving producer results would create a new multi-output generic.
-    // That representation is not supported by every CPU implementation.
-    if (!linalg::getPreservedProducerResults(producer, consumer, operand).empty())
-      return false;
-    auto result = cast<OpResult>(operand->get());
-    unsigned resultNumber = result.getResultNumber();
-    AffineMap outputMap = producer.getMatchingIndexingMap(
-        producer.getDpsInitOperand(resultNumber));
-    if (!outputMap.isPermutation()) return false;
-    AffineMap coordinates = inversePermutation(outputMap).compose(
-        consumer.getMatchingIndexingMap(operand));
-    StorageAnalysis storage(producer->getParentOfType<func::FuncOp>());
-    auto payload = analyzeProducerResult(producer, storage, resultNumber);
-    if (failed(payload)) return false;
-    bool removesProducer = llvm::all_of(producer->getResults(), [&](Value value) {
-      return llvm::all_of(value.getUses(), [&](OpOperand &use) { return &use == operand; });
-    });
-    Value yielded = producer.getRegion().front().getTerminator()->getOperand(resultNumber);
-    return shouldFuseProducerResult(*payload, yielded, coordinates,
-                                    consumer.getStaticLoopRanges(), removesProducer);
-  });
-  if (failed(applyPatternsGreedily(module, std::move(fusion)))) return failure();
   classifyReadStorage(module);
-  normalize.clear();
   normalize.addPass(bufferization::createEmptyTensorEliminationPass());
   normalize.addPass(bufferization::createEmptyTensorToAllocTensorPass());
   if (failed(normalize.run(module))) return failure();

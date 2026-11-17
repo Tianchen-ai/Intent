@@ -27,8 +27,12 @@ struct Configuration {
 };
 
 mlir::LogicalResult materializeCPUConfigurations(
-    mlir::ModuleOp module, const ImplementationRegistry &implementations,
+    mlir::ModuleOp module, const ImplementationRegistry &implementations);
+mlir::LogicalResult bindCPUProfiles(mlir::ModuleOp module,
+    const ImplementationRegistry &implementations, llvm::StringRef provider,
     llvm::StringRef defaults, llvm::StringRef overrides);
+mlir::LogicalResult verifyCPUProfiles(mlir::ModuleOp module,
+    const ImplementationRegistry &implementations, llvm::StringRef provider);
 
 } // namespace intent::cpu
 #endif

@@ -55,6 +55,18 @@ def IntentCPU_ImplementationAttr : IntentCPU_Attr<"Implementation", "implementat
   let assemblyFormat = "`<` $name `,` $parameters `>`";
 }
 
+def IntentCPU_ProfileRowAttr : IntentCPU_Attr<"ProfileRow", "profile_row"> {
+  let parameters = (ins "::intent::cpu::ConfigurationAttr":$shared,
+      "::mlir::DictionaryAttr":$local, "::mlir::ArrayAttr":$implementations);
+  let assemblyFormat = "`<` $shared `,` $local `,` $implementations `>`";
+}
+
+def IntentCPU_TuningProfilesAttr : IntentCPU_Attr<"TuningProfiles", "tuning_profiles"> {
+  let summary = "Finite compile-input rows, consumed when executable candidates are formed";
+  let parameters = (ins "::mlir::StringAttr":$provider, "::mlir::DictionaryAttr":$families);
+  let assemblyFormat = "`<` $provider `,` $families `>`";
+}
+
 def IntentCPU_ReductionOrderAttr : IntentCPU_Attr<"ReductionOrder", "reduction_order"> {
   let parameters = (ins "bool":$adjacentReassociation, "bool":$elementPermutation);
   let assemblyFormat = "`<` $adjacentReassociation `,` $elementPermutation `>`";

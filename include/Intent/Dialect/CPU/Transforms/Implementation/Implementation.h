@@ -125,7 +125,6 @@ struct Implementation {
   std::function<mlir::LogicalResult(mlir::Operation *, ImplementationExpansion &)> expand;
   ContractionRequirements contraction;
   std::function<int64_t(ImplementationAttr)> parallelWindow;
-  bool requiresMatrixI8I32 = false;
   std::function<llvm::SmallVector<InputRequirement>(mlir::linalg::GenericOp,
       ConfigurationAttr, ImplementationAttr)> inputs;
   std::function<WorksetRows(mlir::linalg::GenericOp, ImplementationAttr)> worksetRows;

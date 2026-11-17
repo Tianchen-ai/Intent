@@ -13,6 +13,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "Weft/Dialect/Kernel/IR/KernelDialect.h"
 #include "mlir/Pass/PassRegistry.h"
+#include "Intent/Transforms/Components.h"
 
 using namespace mlir;
 
@@ -71,8 +72,8 @@ void registerWeftPasses() {
 
 void buildWeftPipeline(OpPassManager &manager) {
   manager.addPass(createWeftPrepareTaskViews());
-  manager.addPass(cpu::createCPUReuseScratchStorage());
-  manager.addPass(cpu::createCPUOptimizeMemoryAccesses());
+  addTransformation(manager, {"cpu", "storage", false}, cpu::createCPUReuseScratchStorage());
+  addTransformation(manager, {"cpu", "storage", false}, cpu::createCPUOptimizeMemoryAccesses());
   manager.addPass(createWeftConvertProgram());
   manager.addPass(createWeftVerifyProgram());
 }

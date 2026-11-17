@@ -12,12 +12,10 @@ from ..native import NativeABI
 class WeftCandidate:
     entry: str
     values: tuple[int, ...]
-    requires_matrix_i8_i32: bool
     implementations: tuple[CPUImplementation, ...]
 
     def metadata(self) -> dict:
         return {"entry": self.entry, "values": list(self.values),
-                "requires_matrix_i8_i32": self.requires_matrix_i8_i32,
                 "implementations": [value.metadata() for value in self.implementations]}
 
 
@@ -94,12 +92,9 @@ class WeftFacts:
             entries.add(entry)
             values = tuple(integer_field(value, "CPU configuration value", minimum=-(1 << 63))
                            for value in sequence_field(candidate["values"], "CPU configuration values"))
-            required = candidate["requires_matrix_i8_i32"]
-            if type(required) is not bool:
-                raise TypeError("Weft matrix requirement must be a boolean")
             implementations = tuple(CPUImplementation.read(value) for value in
                                     sequence_field(candidate["implementations"], "CPU implementations"))
-            candidates.append(WeftCandidate(entry, values, required, implementations))
+            candidates.append(WeftCandidate(entry, values, implementations))
         if not candidates:
             raise ValueError("Weft generation requires at least one candidate")
         tasks, symbols = [], set()

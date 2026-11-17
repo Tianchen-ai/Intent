@@ -55,10 +55,10 @@ int main(int argc, char **argv) {
       llvm::cl::desc("JSON overrides of declared shared/provider profile families"));
   llvm::cl::opt<std::string> numerics("numerics", llvm::cl::init("source"),
       llvm::cl::desc("Numerical permissions: source or relaxed_normalization (finite active score/value precondition)"));
-  llvm::cl::opt<bool> onlineReduction("online-reduction", llvm::cl::init(true),
-      llvm::cl::desc("Enable eligible online normalized reductions"));
+  llvm::cl::list<std::string> optimizations("optimization",
+      llvm::cl::desc("Registered optional transformation NAME=true|false (repeatable)"));
   llvm::cl::opt<bool> optimizationRemarks("optimization-remarks", llvm::cl::init(false),
-      llvm::cl::desc("Explain online reduction selection and rejection"));
+      llvm::cl::desc("Explain transformation selection and rejection"));
   llvm::cl::opt<bool> stopAfterShared("stop-after-shared", llvm::cl::init(false),
       llvm::cl::desc("Stop after the selected family's complete shared pipeline"));
   llvm::cl::opt<bool> stopAfterKIR("stop-after-kir", llvm::cl::init(false),
@@ -85,7 +85,7 @@ int main(int argc, char **argv) {
   if (compilerInfo) {
     if (rejectOptions({&inputFilename, &target, &targetOptions, &inputStage, &irOutputFilename,
                        &sourceOutputFilename, &metadataOutputFilename,
-                       &tuningConfigFilename, &numerics, &onlineReduction,
+                       &tuningConfigFilename, &numerics, std::addressof(optimizations),
                        &optimizationRemarks, &stopAfterKIR, &stopAfterShared},
                       "--compiler-info does not compile a program"))
       return exitCode(Failure::Invocation);
@@ -97,14 +97,25 @@ int main(int argc, char **argv) {
     return exitCode(Failure::Invocation);
   }
   intent::compiler::Request request;
-  if (numerics.getNumOccurrences() || onlineReduction.getNumOccurrences() ||
+  if (numerics.getNumOccurrences() || optimizations.getNumOccurrences() ||
       optimizationRemarks.getNumOccurrences()) {
     auto mode = intent::symbolizeNumericsMode(numerics);
     if (!mode) {
       llvm::errs() << "--numerics must be source or relaxed_normalization\n";
       return exitCode(Failure::Invocation);
     }
-    request.options = intent::compiler::CompilationOptions{*mode, onlineReduction, optimizationRemarks};
+    intent::compiler::CompilationOptions options;
+    options.numerics = *mode;
+    options.optimizationRemarks = optimizationRemarks;
+    for (const std::string &control : optimizations) {
+      auto [name, enabled] = llvm::StringRef(control).split('=');
+      if (name.empty() || (enabled != "true" && enabled != "false") ||
+          !options.optimizations.emplace(name.str(), enabled == "true").second) {
+        llvm::errs() << "--optimization requires a unique NAME=true|false: " << control << "\n";
+        return exitCode(Failure::Invocation);
+      }
+    }
+    request.options = std::move(options);
   }
   if (inputStage == "shared") request.inputStage = intent::compiler::InputStage::Shared;
   else if (inputStage != "kir") {

@@ -127,6 +127,37 @@ LogicalResult ImplementationAttr::verify(
   return success();
 }
 
+LogicalResult ProfileRowAttr::verify(llvm::function_ref<InFlightDiagnostic()> error,
+    ConfigurationAttr shared, DictionaryAttr local, ArrayAttr implementations) {
+  if (!shared || !local || !implementations || implementations.empty())
+    return error() << "CPU profile rows require complete shared/local parameters and implementations";
+  for (NamedAttribute parameter : local) {
+    auto integer = mlir::dyn_cast<IntegerAttr>(parameter.getValue());
+    if (!integer || !integer.getValue().isSignedIntN(64) || integer.getInt() <= 0)
+      return error() << "CPU profile parameters must be positive i64 values";
+  }
+  llvm::DenseSet<Attribute> names;
+  for (Attribute item : implementations) {
+    auto name = mlir::dyn_cast<StringAttr>(item);
+    if (!name || name.empty() || !names.insert(name).second)
+      return error() << "CPU profile implementations require distinct nonempty names";
+  }
+  return success();
+}
+
+LogicalResult TuningProfilesAttr::verify(llvm::function_ref<InFlightDiagnostic()> error,
+    StringAttr provider, DictionaryAttr families) {
+  if (!provider || provider.empty() || !families || families.empty())
+    return error() << "CPU profiles require a provider and finite families";
+  for (NamedAttribute family : families) {
+    auto rows = mlir::dyn_cast<ArrayAttr>(family.getValue());
+    if (family.getName().empty() || !rows || rows.empty() ||
+        !llvm::all_of(rows, [](Attribute row) { return mlir::isa<ProfileRowAttr>(row); }))
+      return error() << "CPU profile families require nonempty typed row arrays";
+  }
+  return success();
+}
+
 LogicalResult ReductionOrderAttr::verify(
     llvm::function_ref<InFlightDiagnostic()> error, bool adjacentReassociation, bool elementPermutation) {
   if (elementPermutation && !adjacentReassociation)

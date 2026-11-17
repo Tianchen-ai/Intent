@@ -1,3 +1,5 @@
+add_subdirectory(Components)
+
 add_mlir_library(MLIRIntentTransforms
   VerifyKernelIR.cpp
   NormalizeKernelIR.cpp

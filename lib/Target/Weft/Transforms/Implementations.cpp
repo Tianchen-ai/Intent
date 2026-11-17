@@ -295,7 +295,7 @@ cpu::ImplementationRegistry implementations() {
       check, {ImplementationParameter::constant("columns", 4)},
       {}, quantizedDot, {}, [](ImplementationAttr binding) {
         return implementationParameter(binding, "columns");
-      }, true};
+      }};
   matrixDot.parameterRelations = checkMatrix;
   result.add<cpu::QuantizedDotOp>(std::move(matrixDot));
   result.add<cpu::QuantizedDotOp>({"weft.q4_k_q8_k", {},
@@ -322,7 +322,7 @@ cpu::ImplementationRegistry implementations() {
         ImplementationParameter::local("micro_k", {false, {}, 0, {8}}),
         ImplementationParameter::local("rhs_supply", {false, {}, 0,
             {directRhsSupply, invocationRhsSupply}})},
-    formIntegerTile, {}, {true, true, true}, {}, true};
+    formIntegerTile, {}, {true, true, true}, {}};
   integer.parameterRelations = checkMatrix;
   integer.inputs = [](linalg::GenericOp operation, ConfigurationAttr,
                       ImplementationAttr binding) -> SmallVector<InputRequirement> {
@@ -335,7 +335,6 @@ cpu::ImplementationRegistry implementations() {
   };
   Implementation vectorInteger = integer;
   vectorInteger.name = "weft.vector_i8_i32";
-  vectorInteger.requiresMatrixI8I32 = false;
   vectorInteger.parameterRelations = {};
   result.add<linalg::GenericOp>(std::move(integer));
   result.add<linalg::GenericOp>(std::move(vectorInteger));

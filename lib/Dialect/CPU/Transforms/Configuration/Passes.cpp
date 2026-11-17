@@ -7,6 +7,7 @@ using namespace mlir;
 namespace intent::cpu {
 
 #define GEN_PASS_DEF_CPUCONFIGURETARGET
+#define GEN_PASS_DEF_CPUBINDPROFILES
 #define GEN_PASS_DEF_CPUMATERIALIZECONFIGURATIONS
 #include "Intent/Dialect/CPU/Transforms/Passes.h.inc"
 
@@ -39,13 +40,24 @@ public:
       return signalPassFailure();
     auto implementations =
         lookupImplementationProvider(module, provider.getValue());
-    if (failed(implementations))
+    if (failed(implementations) || failed(verifyCPUProfiles(module, **implementations, provider)))
       return signalPassFailure();
     if (failed(detail::finishTransform(
             module, getArgument(),
-            materializeCPUConfigurations(module, **implementations,
-                                         defaults.getValue(),
-                                         overrides.getValue()))))
+            materializeCPUConfigurations(module, **implementations))))
+      signalPassFailure();
+  }
+};
+
+class BindProfilesPass : public impl::CPUBindProfilesBase<BindProfilesPass> {
+public:
+  using CPUBindProfilesBase::CPUBindProfilesBase;
+  void runOnOperation() final {
+    auto module = getOperation();
+    auto implementations = lookupImplementationProvider(module, provider);
+    if (failed(implementations) || failed(detail::verifyPassInput(module, getArgument(), CPUProgramStage::Values)) ||
+        failed(detail::finishTransform(module, getArgument(),
+            bindCPUProfiles(module, **implementations, provider, defaults, overrides), CPUProgramStage::Values)))
       signalPassFailure();
   }
 };

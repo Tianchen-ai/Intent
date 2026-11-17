@@ -3,6 +3,7 @@
 
 #include "Intent/Dialect/CPU/Transforms/Configuration/Configuration.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "Intent/Dialect/CPU/IR/CPUAttrs.h"
 #include "llvm/ADT/StringMap.h"
 
 namespace intent::cpu {
@@ -16,6 +17,8 @@ public:
       mlir::ModuleOp module, llvm::StringRef defaults, llvm::StringRef overrides,
       const ImplementationRegistry &implementations);
   llvm::ArrayRef<Configuration> get(llvm::StringRef family) const;
+  TuningProfilesAttr attribute(mlir::MLIRContext *, llvm::StringRef provider) const;
+  static TuningProfiles fromAttribute(TuningProfilesAttr);
 
 private:
   mlir::LogicalResult readFile(mlir::ModuleOp module, llvm::StringRef path,

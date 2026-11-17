@@ -2,6 +2,7 @@
 import argparse
 from pathlib import Path
 from ..tools.compilation import describe as describe_interface, read_artifact as read_artifact_file
+from ..tools.compilation import components as describe_components
 from ..tools.requests import request_async
 
 
@@ -26,6 +27,12 @@ def main() -> None:
         "Use the separate intent_manual server for language contracts."
     ))
 
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False))
+    async def components(compiler: str | None = None) -> dict:
+        """List registered stages and mandatory/optional transformations without SDK or device probes."""
+        import asyncio
+        return await asyncio.to_thread(describe_components, compiler)
+
     @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=True))
     async def compile(program_path: str, kernel: str, target: str | None = None,
                       target_options: dict | None = None, constexprs: dict | None = None,
@@ -42,14 +49,15 @@ def main() -> None:
         later host; target_options select the local runtime if materializing.
         The file's ordinary top-level Python host code executes normally.
         options accepts numerics ('source' or 'relaxed_normalization'),
-        online_reduction (bool), and optimization_remarks (bool). Source includes
+        optimizations (registered pass names mapped to bool), and
+        optimization_remarks (bool). Source includes
         the language's FMA/reduction permissions, not bitwise reproducibility.
         Relaxed normalization permits normalized-summary rescaling and movement
         of low-precision weight casts. Valid-member scores and all values entering
         the moment contraction must be finite, including zero-weight terms;
         zero times infinity is not an inactive access. Masked accesses keep fills.
         It can change rounding/underflow/overflow but does not enable global fast
-        math or FTZ. The online switch controls optimization, not permission.
+        math or FTZ. Component switches control optimization, not permission.
         """
         return await request_async("compile", dict(
             program=str(Path(program_path).expanduser().absolute()), kernel=kernel,

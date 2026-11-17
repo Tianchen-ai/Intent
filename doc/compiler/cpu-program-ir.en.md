@@ -82,6 +82,18 @@ Analyses recompute coverage/axes-access/dependence/reuse/lifetime/eligibility an
 
 ## 8. Artifacts and calls
 
+Providers declare a Values, Buffers or Realized handoff and the common entry verifies
+that stage. Values preserves tensor SSA and structured computations. Tensor fusion
+is independently optional; bufferization handles materialization and ownership.
+Mojo currently consumes Buffers; Weft consumes Values and forms its required
+buffers, tasks and Canonical Weft program in its own provider pipeline.
+Finite profiles are bound before handoff as typed `TuningProfilesAttr` and
+`ProfileRowAttr` compile inputs, containing the existing shared/local parameters
+and explicit implementation selections, never a computation graph or execution
+plan. Candidate formation consumes and removes those inputs. Executable choices
+remain in actual candidates and operation bindings. Resuming Values IR never
+reloads profile files.
+
 Runtime binds declared resources/executes tasks and joins before host return. Initialization/compilation/loading/calling remain separate. Python/Torch algorithm substitutes or hidden invocations are forbidden.
 
 Local JIT queries the provider's effective target and allowed CPU set on the execution host. Vector capability is a hardware fact; workers and private storage are construction budgets. Mojo queries its effective target and checks ISA homogeneity. Weft reuses its formal NativeTarget ISA/ABI/VLEN, extension and startup contracts. Prepared calls retain execution constraints; affinity changes must not reuse incompatible bindings or tuning winners. The public native-call interface provides typed functions, arguments, ownership and execution validation, so external timers do not inspect internal candidate or function arrays.

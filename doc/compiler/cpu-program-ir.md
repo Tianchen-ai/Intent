@@ -91,6 +91,15 @@ Weft 的外部输入为 Canonical Weft IR。简单 structured operations 可直�
 
 两种 provider 可停在不同抽象层。只有确需独立 legality 和后续 consumer 的目标结构才增加 local extension，不为表面对称建立重复 IR。
 
+Provider 显式声明 Values、Buffers 或 Realized 交接阶段，公共入口按该阶段验证。
+Values 保留 tensor SSA 与 structured computations；tensor fusion 是独立可选组件，
+bufferization 只负责物化与 ownership。Mojo 的交接当前为 Buffers；Weft 的交接为 Values，
+由其 provider pipeline 继续形成所需 buffers、tasks 与 Canonical Weft 程序。
+有限配置在交接前以 `TuningProfilesAttr` / `ProfileRowAttr` 绑定为 typed 编译输入，
+包含原有共享参数、局部参数与明确实现集合，不包含计算图或执行计划。
+候选形成阶段消费并删除这些输入，执行选择仅保留在实际候选和 operation bindings 中。
+从 Values IR 续编译不重新读取配置文件。
+
 Analyses 从当前程序重算 coverage、axis/access、dependence、reuse、lifetime 和 eligibility，相关改写后失效。每个完整 transformation group 声明输入条件、IR 改写、语义保持和 analysis 失效，并验证后置条件。Verifier 只检查，不修程序；serializer 只拼写已合法化的程序，不选择实现或临时创建 loop、scratch、packing 与参数。
 
 ## 8. Artifact 与调用边界

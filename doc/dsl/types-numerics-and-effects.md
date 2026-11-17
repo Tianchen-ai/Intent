@@ -156,7 +156,7 @@ Operation显式规定的独立舍入边界优先于本节，例如[量化计算]
 
 在此前提下，允许上述具体重组产生的舍入、下溢及中间溢出差异；不承诺与全域归一化后的低精度权重逐元素相同。空成员域和全 inactive 域仍产生原 summary identity，member 集合、结果坐标、外部 effects、ABI 和声明的 accumulator/result dtype 必须保持。该模式不授权其它普通表达式的任意重结合，不引入 TF32、FTZ 或未声明的近似数学，也不跨越量化格式独立规定的舍入边界。
 
-数值许可与优化选择分开：`online_reduction=False` 只禁用这项可选改写，不改变 source 操作的定义；启用也不保证一定采用。作者显式提供 `region_fold/region_scan` 的 summarize/combine 仍按第 6 节合同实现，不依赖此额外模式。
+数值许可与优化选择分开：`CompileOptions(optimizations={"intent-block-co-realize-online-reductions": False})` 只禁用这项可选改写，不改变 source 操作的定义；启用也不保证一定采用。作者显式提供 `region_fold/region_scan` 的 summarize/combine 仍按第 6 节合同实现，不依赖此额外模式。
 
 ## 6. Reduce 与 scan 数值语义
 

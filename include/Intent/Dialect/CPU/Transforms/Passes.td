@@ -29,12 +29,30 @@ def CPUConfigureTarget : CPUTransform<"intent-cpu-configure-target",
 }
 
 def CPUBufferizeValues : CPUTransform<"intent-cpu-bufferize-values",
-    "Optimize CPU tensor SSA and materialize owned storage with native bufferization"> {
+    "Materialize owned CPU storage with native bufferization"> {
   let description = [{
     Converts a valid CPU Values-stage program to the Buffers stage using native
     bufferization and ownership. Tensor values become explicit storage while
     structured computations and logical effects remain in the current IR.
   }];
+}
+
+def CPUFuseTensorComputations : CPUTransform<"intent-cpu-fuse-tensor-computations",
+    "Fuse eligible CPU SSA tensor producers before storage realization"> {
+  let description = [{
+    Preserves the Values stage. Standard Linalg tensor fusion is restricted by
+    current access relations, snapshot effects and bounded producer replay cost.
+    No storage or provider-local implementation is selected. Disabling this
+    optional transformation leaves a legal value program for bufferization.
+  }];
+}
+
+def CPUBindProfiles : CPUTransform<"intent-cpu-bind-profiles",
+    "Bind finite provider configuration inputs before the model handoff"> {
+  let options = [CPUProviderOption,
+    Option<"defaults", "defaults", "std::string", "\"\"", "Provider default tuning profile file">,
+    Option<"overrides", "overrides", "std::string", "\"\"", "Optional tuning profile overrides file">
+  ];
 }
 
 def CPURealizeSliceCollectives : CPUTransform<"intent-cpu-realize-slice-collectives",
@@ -129,10 +147,7 @@ def CPUMaterializeConfigurations : CPUTransform<"intent-cpu-materialize-configur
     configurations and implementations on the current IR. No candidate state
     is retained outside those functions.
   }];
-  let options = [CPUProviderOption,
-    Option<"defaults", "defaults", "std::string", "\"\"", "Provider default tuning profile file">,
-    Option<"overrides", "overrides", "std::string", "\"\"", "Optional tuning profile overrides file">
-  ];
+  let options = [CPUProviderOption];
 }
 
 def CPUGroupRegions : CPUTransform<"intent-cpu-group-regions",

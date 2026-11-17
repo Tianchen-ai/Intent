@@ -429,7 +429,8 @@ LogicalResult realizeOnlineSummary(OnlineSummaryPattern pattern,
 static LogicalResult realizeOnlineReductionsImpl(ModuleOp module) {
   auto options = readCompileOptions(module);
   if (failed(options)) return failure();
-  if (!options->getOnlineReduction()) {
+  auto control = options->getOptimizations().getAs<BoolAttr>("intent-block-co-realize-online-reductions");
+  if (control && !control.getValue()) {
     if (options->getOptimizationRemarks())
       emitRemark(module.getLoc(), "online-reduction: disabled by compile options");
     return success();

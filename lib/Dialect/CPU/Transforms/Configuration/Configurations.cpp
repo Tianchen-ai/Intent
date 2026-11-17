@@ -11,11 +11,10 @@ using namespace mlir;
 namespace intent::cpu {
 
 LogicalResult materializeCPUConfigurations(
-    ModuleOp module, const ImplementationRegistry &implementations,
-    StringRef defaults, StringRef overrides) {
-  auto profiles = TuningProfiles::read(module, defaults, overrides, implementations);
-  if (failed(profiles))
-    return failure();
+    ModuleOp module, const ImplementationRegistry &implementations) {
+  auto boundProfiles = module->getAttrOfType<TuningProfilesAttr>("intent_cpu.tuning_profiles");
+  if (!boundProfiles) return module.emitError("CPU candidate formation requires bound profile rows");
+  auto profiles = TuningProfiles::fromAttribute(boundProfiles);
   auto capabilities = module->getAttrOfType<CapabilitiesAttr>("intent_cpu.capabilities");
   if (!capabilities)
     return module.emitError("CPU candidate formation requires declared target capabilities");
@@ -26,7 +25,7 @@ LogicalResult materializeCPUConfigurations(
   if (original.isExternal())
     return original.emitError("CPU candidate formation requires an executable source function");
   StringRef family = implementations.profile(original);
-  auto rows = profiles->get(family);
+  auto rows = profiles.get(family);
   if (rows.empty())
     return original.emitError("CPU candidate family is empty or missing: ") << family;
 
@@ -102,6 +101,7 @@ LogicalResult materializeCPUConfigurations(
       return failure();
   }
   original.erase();
+  module->removeAttr("intent_cpu.tuning_profiles");
   return verifyCPUProgram(module, CPUProgramStage::Buffers);
 }
 

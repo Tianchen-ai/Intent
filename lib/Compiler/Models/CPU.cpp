@@ -1,4 +1,5 @@
 #include "Intent/Compiler/Models/CPU.h"
+#include "Intent/Dialect/CPU/Transforms/Configuration/Configuration.h"
 #include "Intent/Compiler/Passes.h"
 #include "Intent/Compiler/TargetOptions.h"
 #include "Intent/Dialect/CPU/Analysis/PhysicalProgram.h"
@@ -72,27 +73,28 @@ void CPUBackend::buildShared(OpPassManager &manager, const Request &request, Str
   request.target.print(stream);
   options.target = target;
   cpu::buildCPUValuePipeline(manager, options);
-  pipeline(manager, options);
+  if (pipeline) pipeline(manager, options);
 }
 
 LogicalResult CPUBackend::verifySharedInput(ModuleOp module, const Request &request, StringRef provider) const {
-  if (failed(cpu::verifyCPUProgram(module, cpu::CPUProgramStage::Buffers))) return failure();
+  if (failed(cpu::verifyCPUProgram(module, inputStage))) return failure();
   auto expected = cast<cpu::CapabilitiesAttr>(request.target);
   if (module->getAttrOfType<cpu::CapabilitiesAttr>("intent_cpu.capabilities") != expected)
     return module.emitError("shared CPU capabilities disagree with the requested CPU resources");
+  for (auto function : module.getOps<func::FuncOp>()) {
+    auto requirements = function->getAttrOfType<cpu::EntryRequirementsAttr>(cpu::entryRequirementsAttr);
+    if (!requirements || requirements.getContiguousViews() != !stridedInputs)
+      return function.emitError("shared CPU entry layout disagrees with the selected provider");
+  }
   auto registry = cpu::lookupImplementationProvider(module, provider);
   if (failed(registry)) return failure();
+  if (inputStage == cpu::CPUProgramStage::Values)
+    return cpu::verifyCPUProfiles(module, **registry, provider);
   if (failed((**registry).verifyBindings(module))) return failure();
   bool hasCandidate = false;
   for (auto function : module.getOps<func::FuncOp>()) {
-    auto requirements = function->getAttrOfType<cpu::EntryRequirementsAttr>(cpu::entryRequirementsAttr);
-    auto summary = function->getAttrOfType<ArrayAttr>("intent_cpu.implementations");
-    if (function.isExternal() || !summary || summary.empty() ||
-        !function->getAttrOfType<cpu::ConfigurationAttr>("intent_cpu.configuration") ||
-        !function->getAttrOfType<BoolAttr>("intent_cpu.requires_matrix_i8_i32"))
-      return function.emitError("shared CPU input requires executable candidates with complete bound configuration and implementation summaries");
-    if (requirements.getContiguousViews() != !stridedInputs)
-      return function.emitError("shared CPU entry layout disagrees with the selected provider");
+    if (function.isExternal() || !function->getAttrOfType<cpu::ConfigurationAttr>("intent_cpu.configuration"))
+      return function.emitError("shared CPU input requires executable candidates with bound configuration");
     hasCandidate = true;
     auto status = function.walk([&](Operation *operation) -> WalkResult {
       if (!operation->hasAttr("intent_cpu.implementation")) return WalkResult::advance();

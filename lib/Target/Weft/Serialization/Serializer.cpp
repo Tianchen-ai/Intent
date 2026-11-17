@@ -30,7 +30,6 @@ llvm::json::Object serializeCandidate(func::FuncOp function) {
   return llvm::json::Object{{"entry", function.getName().str()},
       {"values", llvm::json::Array{config.getTaskGrain(), config.getTileM(), config.getTileN(),
                                    config.getTileK(), config.getRegionSize()}},
-      {"requires_matrix_i8_i32", function->getAttrOfType<BoolAttr>("intent_cpu.requires_matrix_i8_i32").getValue()},
       {"implementations", std::move(implementations)}};
 }
 

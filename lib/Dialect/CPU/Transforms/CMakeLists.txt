@@ -58,6 +58,7 @@ add_mlir_library(MLIRIntentCPUTransforms
   Structure/ReductionSupply.cpp
   Structure/MaterializeStructuredComputations.cpp
   Structure/Passes.cpp
+  Structure/TensorFusion.cpp
 
   Task/BlockStructuredComputations.cpp
   Task/AtomicTaskOwnership.cpp
@@ -78,6 +79,7 @@ add_mlir_library(MLIRIntentCPUTransforms
   MLIRIntentCPUAnalysis
   MLIRIntentAnalysis
   MLIRIntentCPUDialect
+  MLIRIntentTransformComponents
   MLIRAnalysis
   MLIRAffineDialect
   MLIRAffineToStandard

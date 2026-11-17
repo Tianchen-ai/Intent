@@ -2,6 +2,7 @@
 #include "Intent/Dialect/Intent/IR/IntentDialect.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
+#include "Intent/Transforms/Components.h"
 
 using namespace mlir;
 namespace intent::bangc {
@@ -9,6 +10,7 @@ namespace intent::bangc {
 #define GEN_PASS_DEF_BANGCPREPAREPROGRAM
 #define GEN_PASS_DEF_BANGCNATIVECOMPUTATIONS
 #define GEN_PASS_DEF_BANGCNATIVEWORKSPACE
+#define GEN_PASS_DEF_BANGCFINALIZEWORKSPACE
 #define GEN_PASS_DEF_BANGCNATIVEIMPLEMENTATIONS
 #define GEN_PASS_DEF_BANGCLOCALCOMPOSITION
 #define GEN_PASS_DEF_BANGCSTORAGEREUSE
@@ -92,6 +94,17 @@ struct NativeImplementationsPass : impl::BangCNativeImplementationsBase<NativeIm
   }
 };
 
+struct FinalizeWorkspacePass : impl::BangCFinalizeWorkspaceBase<FinalizeWorkspacePass> {
+  void runOnOperation() final {
+    auto module = getOperation();
+    if (failed(checkProgram(module))) return signalPassFailure();
+    auto cleanup = cleanupPipeline();
+    if (failed(finishGroup(module, getArgument(),
+            finalizeNativeWorkspace(module, [&] { return runPipeline(cleanup, module); }))))
+      signalPassFailure();
+  }
+};
+
 struct LocalCompositionPass : impl::BangCLocalCompositionBase<LocalCompositionPass> {
   void runOnOperation() final {
     auto module = getOperation();
@@ -147,20 +160,32 @@ struct StorageBindingPass : impl::BangCStorageBindingBase<StorageBindingPass> {
 
 } // namespace
 
-void buildBangCPipeline(OpPassManager &manager, StringRef architecture) {
+void visitBangCComponents(
+    llvm::function_ref<void(TransformationComponent, std::unique_ptr<Pass>)> add,
+    StringRef architecture) {
   BangCPrepareProgramOptions options;
   options.architecture = architecture.str();
-  manager.addPass(createBangCPrepareProgram(options));
-  manager.addPass(createBangCNativeComputations());
-  manager.addPass(createBangCNativeWorkspace());
-  manager.addPass(createBangCNativeImplementations());
-  manager.addPass(createBangCLocalComposition());
-  manager.addPass(createBangCStorageReuse());
-  manager.addPass(createBangCSupplySynchronization());
-  manager.addPass(createBangCStorageBinding());
+  add({"bangc", "physical", true}, createBangCPrepareProgram(options));
+  add({"bangc", "microkernels", true}, createBangCMatrixMicrokernels());
+  add({"bangc", "microkernels", true}, createBangCNativeComputations());
+  add({"bangc", "workspace", true}, createBangCNativeWorkspace());
+  add({"bangc", "workspace", false}, createBangCCollectiveMicrokernels());
+  add({"bangc", "workspace", true}, createBangCFinalizeWorkspace());
+  add({"bangc", "native", true}, createBangCNativeImplementations());
+  add({"bangc", "native", false}, createBangCLocalComposition());
+  add({"bangc", "native", false}, createBangCStorageReuse());
+  add({"bangc", "synchronization", true}, createBangCSupplySynchronization());
+  add({"bangc", "storage", true}, createBangCStorageBinding());
+}
+
+void buildBangCPipeline(OpPassManager &manager, StringRef architecture) {
+  visitBangCComponents([&](TransformationComponent component, std::unique_ptr<Pass> pass) {
+    addTransformation(manager, component, std::move(pass));
+  }, architecture);
 }
 
 void registerBangCPipelines() {
+  visitBangCComponents(registerTransformation, "mtp_372");
   struct Options : PassPipelineOptions<Options> {
     Option<std::string> architecture{*this, "architecture",
         llvm::cl::desc("Explicit BANG C implementation architecture"), llvm::cl::init("")};

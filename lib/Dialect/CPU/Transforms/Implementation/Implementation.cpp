@@ -287,8 +287,6 @@ FailureOr<const Implementation *> ImplementationRegistry::verifyBinding(
     if (implementation.name != binding.getName().getValue()) continue;
     if (auto reason = checkParameters(implementation, binding.getParameters(), capabilities, configuration))
       return diagnostic->emitError("invalid CPU implementation '") << implementation.name << "': " << *reason, failure();
-    if (implementation.requiresMatrixI8I32 && !capabilities.getMatrixI8I32())
-      return diagnostic->emitError("CPU implementation requires the matrix_i8_i32 capability"), failure();
     return &implementation;
   }
   return diagnostic->emitError("CPU binding names an implementation outside the selected provider: ") << binding.getName(), failure();
@@ -299,18 +297,8 @@ LogicalResult ImplementationRegistry::verifyBindings(ModuleOp module) const {
   for (auto function : module.getOps<func::FuncOp>()) {
     if (function.isExternal() && function->hasAttr("cpu.external_runtime")) continue;
     auto configuration = function->getAttrOfType<ConfigurationAttr>("intent_cpu.configuration");
-    auto summary = function->getAttrOfType<ArrayAttr>("intent_cpu.implementations");
-    auto requiresMatrix = function->getAttrOfType<BoolAttr>("intent_cpu.requires_matrix_i8_i32");
-    if (!capabilities || !configuration || !summary || summary.empty() || !requiresMatrix)
-      return function.emitError("CPU provider requires complete retained implementation bindings");
-    bool matrix = false;
-    for (Attribute attribute : summary) {
-      auto implementation = verifyBinding(dyn_cast<ImplementationAttr>(attribute), capabilities, configuration, function);
-      if (failed(implementation)) return failure();
-      matrix |= (*implementation)->requiresMatrixI8I32;
-    }
-    if (matrix != requiresMatrix.getValue())
-      return function.emitError("CPU matrix requirement disagrees with retained implementation bindings");
+    if (!capabilities || !configuration)
+      return function.emitError("CPU provider requires bound target capabilities and configuration");
     auto status = function.walk([&](Operation *operation) -> WalkResult {
       if (!operation->hasAttr("intent_cpu.implementation")) return WalkResult::advance();
       auto binding = operation->getAttrOfType<ImplementationAttr>("intent_cpu.implementation");
@@ -400,7 +388,6 @@ LogicalResult ImplementationRegistry::bind(func::FuncOp function, CapabilitiesAt
                                             ArrayRef<ImplementationAttr> bindings) const {
   Builder builder(function.getContext());
   unsigned ordinal = 0;
-  bool matrix = false;
   SmallVector<std::pair<Operation *, ImplementationAttr>> selected;
   SmallVector<Attribute> distinctBindings;
   auto status = function.walk([&](Operation *operation) -> WalkResult {
@@ -429,7 +416,6 @@ LogicalResult ImplementationRegistry::bind(func::FuncOp function, CapabilitiesAt
     selected.emplace_back(operation, binding);
     if (!llvm::is_contained(distinctBindings, Attribute(binding)))
       distinctBindings.push_back(binding);
-    matrix |= implementation->requiresMatrixI8I32;
     return WalkResult::advance();
   });
   if (status.wasInterrupted()) return failure();
@@ -441,7 +427,6 @@ LogicalResult ImplementationRegistry::bind(func::FuncOp function, CapabilitiesAt
   // This summary records selected implementations for artifact inspection.
   // Execution consumers use bindings on the current operation or lexical owner.
   function->setAttr("intent_cpu.implementations", builder.getArrayAttr(distinctBindings));
-  function->setAttr("intent_cpu.requires_matrix_i8_i32", builder.getBoolAttr(matrix));
   return success();
 }
 

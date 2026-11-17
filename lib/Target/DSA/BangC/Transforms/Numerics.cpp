@@ -63,31 +63,6 @@ LogicalResult realizeSigmoid(bangc::physical::UnaryOp sigmoid) {
   return success();
 }
 
-void realizeRowSumChannels(func::FuncOp function, bangc::physical::ConfigurationAttr config) {
-  SmallVector<bangc::physical::ReduceOp> operations;
-  function.walk([&](bangc::physical::ReduceOp reduce) {
-    auto input = cast<MemRefType>(reduce.getInput().getType());
-    if (reduce.getKind() == BinaryOperator::Add && reduce.getAxis() == 1 &&
-        input.getDimSize(0) >= 32 && input.getDimSize(0) % 32 == 0 && input.getDimSize(1) >= 32)
-      operations.push_back(reduce);
-  });
-  for (auto reduce : operations) {
-    auto input = cast<MemRefType>(reduce.getInput().getType());
-    OpBuilder b(reduce);
-    Location loc = reduce.getLoc();
-    Value storage = allocate(b, loc, input.getElementType(), {input.getDimSize(1), input.getDimSize(0)}, bangc::physical::nramSpace);
-    Value rows = b.create<arith::ConstantIndexOp>(loc, input.getDimSize(0));
-    auto transpose = b.create<bangc::physical::TransposeOp>(loc, reduce.getInput(), storage, rows, reduce.getCount());
-    auto replacement = b.create<bangc::physical::ReduceOp>(loc, storage, reduce.getOutput(), reduce.getScratch(),
-        reduce.getCount(), reduce.getIdentity(), reduce.getKindAttr(), b.getI64IntegerAttr(0));
-    int64_t nram = 0, wram = 0;
-    measureStorage(function, nram, wram);
-    if (nram > config.getLocalBytes() || nram > capabilities(function).getNramBytes()) {
-      replacement.erase(); transpose.erase(); storage.getDefiningOp()->erase();
-    } else reduce.erase();
-  }
-}
-
 static StringRef directExtremaCallee(bangc::physical::BinaryOp binary) {
   auto kind = binary.getKind();
   if ((kind != BinaryOperator::Maximum && kind != BinaryOperator::Minimum) ||
@@ -508,10 +483,6 @@ void fuseNarrowDivisions(func::FuncOp function, bangc::physical::ConfigurationAt
 
 LogicalResult realizeNativeComputations(ModuleOp module) {
   auto function = *module.getOps<func::FuncOp>().begin();
-  auto config = function->getAttrOfType<bangc::physical::ConfigurationAttr>("intent_bangc.configuration");
-  SmallVector<bangc::physical::MatMulOp> matrices;
-  function.walk([&](bangc::physical::MatMulOp op) { matrices.push_back(op); });
-  for (auto matrix : matrices) if (failed(realizeMatMul(matrix, config))) return failure();
   // Operations without a full-domain native storage-dtype implementation use
   // f32 local arithmetic and an explicit cast back to the declared dtype.
   SmallVector<Operation *> promotedPointwise;
@@ -616,7 +587,13 @@ LogicalResult realizeNativeWorkspace(ModuleOp module,
   realizeApproximateReciprocals(function, config);
   bangc::physical::bindUniformOperands(function);
   realizeSelections(function, config);
-  realizeRowSumChannels(function, config);
+  return success();
+}
+
+LogicalResult finalizeNativeWorkspace(ModuleOp module,
+    llvm::function_ref<LogicalResult()> cleanup) {
+  auto function = *module.getOps<func::FuncOp>().begin();
+  auto config = function->getAttrOfType<bangc::physical::ConfigurationAttr>("intent_bangc.configuration");
   if (failed(realizeNumericExtremaWorkspace(function, config))) return failure();
   realizeCompareWorkspace(function, config);
   realizeExponentialWorkspace(function, config);
