@@ -9,7 +9,7 @@ from .nvidia.specification import read_nvidia_target
 
 INSTALLATION = {
     "modules": ("torch", "triton"),
-    "requirements": ("triton==3.6.0", "numpy==1.26.4"), "torch": "2.10.0+cu130",
+    "requirements": ("triton==3.8.0", "numpy==1.26.4"), "torch": "2.14.1+cu130",
     "torch_index": "https://download.pytorch.org/whl/cu130",
     "python_max": (3, 12), "toolchain": "NVIDIA driver and CUDA-capable PyTorch",
 }

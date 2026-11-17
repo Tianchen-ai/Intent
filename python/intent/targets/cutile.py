@@ -9,9 +9,13 @@ from .nvidia.specification import read_nvidia_target
 
 INSTALLATION = {
     "modules": ("torch", "cuda.tile", "cuda.tile.tune"),
-    "requirements": ("triton==3.6.0", "numpy==1.26.4",
-                     "cuda-toolkit[tileiras,nvvm,nvcc]==13.3.1", "cuda-tile==1.6.0"),
-    "torch": "2.10.0+cu128", "torch_index": "https://download.pytorch.org/whl/cu128",
+    # Compiler components may be newer than PyTorch's CUDA runtime. Installing
+    # a second cuda-toolkit metapackage would conflict with Torch's runtime pin.
+    "requirements": ("numpy==1.26.4", "cuda-tile==1.6.0",
+                     "nvidia-cuda-tileiras==13.3.36", "nvidia-cuda-nvcc==13.3.73",
+                     "nvidia-cuda-crt==13.3.73", "nvidia-nvvm==13.3.73",
+                     "nvidia-nvjitlink>=13.3.33,<14"),
+    "torch": "2.14.1+cu130", "torch_index": "https://download.pytorch.org/whl/cu130",
     "python_max": (3, 12), "toolchain": "NVIDIA driver and the CUDA tile compiler",
 }
 

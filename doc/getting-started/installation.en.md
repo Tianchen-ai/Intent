@@ -91,6 +91,12 @@ set `TRITON_PTXAS_PATH=/path/to/ptxas` before starting Python; Blackwell uses
 during a call or retry a failed compilation/execution with another assembler.
 Validate actual kernels again after changing the toolchain.
 
+The NVIDIA `setup` environment uses Triton 3.8 and matching PyTorch 2.14 CUDA 13.0
+packages. cuTile installs the NVIDIA compiler packages individually, without
+replacing PyTorch's CUDA runtime requirements with a different `cuda-toolkit`
+metapackage. For a custom toolchain, check both dependency resolution and actual
+device execution; importing a Python module does not establish generated-code correctness.
+
 ```python
 run = intent.jit(definition, backend="mojo",
                  backend_options={"compiler": "/path/to/mojo"})

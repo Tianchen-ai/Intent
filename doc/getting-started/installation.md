@@ -84,6 +84,11 @@ Triton 的 PTX 汇编器由 Triton SDK 选择，`intent doctor --target triton`
 `TRITON_PTXAS_BLACKWELL_PATH`。Intent 不在调用中切换全局 SDK 配置，也不在
 原生编译或执行失败后更换汇编器。工具链更新后应重新验证实际 kernel。
 
+`setup` 的 NVIDIA 环境使用 Triton 3.8 与匹配的 PyTorch 2.14 CUDA 13.0 包。
+cuTile 编译器按独立的 NVIDIA compiler packages 安装，不用另一版本的
+`cuda-toolkit` 元包覆盖 PyTorch 声明的 CUDA runtime 依赖。自行管理工具链时，
+同时核对依赖解析和实际设备执行；可导入 Python 模块不代表其生成代码正确。
+
 ```python
 run = intent.jit(definition, backend="mojo",
                  backend_options={"compiler": "/path/to/mojo"})
