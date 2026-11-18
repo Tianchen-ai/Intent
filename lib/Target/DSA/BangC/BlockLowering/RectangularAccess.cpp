@@ -79,9 +79,17 @@ std::optional<Lowering::AffineCoordinate> Lowering::affineCoordinate(Value value
     return AffineCoordinate{base, steps};
   }
   if (binary.getOperatorKind() == BinaryOperator::Multiply) {
-    auto factor = uniform(left->steps) ? block::IndexRelations().constant(binary.getLhs()) : std::nullopt;
+    if (uniform(left->steps) && uniform(right->steps))
+      return AffineCoordinate{b.createOrFold<arith::MulIOp>(loc, left->base, right->base), steps};
+    auto constantBase = [](const AffineCoordinate &coordinate) -> std::optional<int64_t> {
+      APInt value;
+      if (uniform(coordinate.steps) && matchPattern(coordinate.base, m_ConstantInt(&value)) &&
+          value.isSignedIntN(64)) return value.getSExtValue();
+      return std::nullopt;
+    };
+    auto factor = constantBase(*left);
     if (!factor && uniform(right->steps)) {
-      factor = block::IndexRelations().constant(binary.getRhs());
+      factor = constantBase(*right);
       std::swap(left, right);
     }
     if (!factor) return std::nullopt;
