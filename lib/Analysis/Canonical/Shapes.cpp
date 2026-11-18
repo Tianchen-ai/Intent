@@ -272,7 +272,17 @@ private:
 TensorExtentFact CanonicalKernelAnalysis::tensorExtent(
     Value value, unsigned axis, ArrayRef<unsigned> path,
     function_ref<bool(Value, ArrayRef<unsigned>, unsigned)> stop) {
-  return ExtentQuery(*this, stop).query(value, axis, path);
+  // Equality checks in nested branches revisit the same immutable SSA graph.
+  // Cache only unrestricted facts: a lowering's stop callback depends on the
+  // currently available bindings and must retain its own query boundary.
+  if (stop) return ExtentQuery(*this, stop).query(value, axis, path);
+  auto key = std::make_pair(value, axis);
+  if (auto found = extentCache.find(key); found != extentCache.end())
+    for (const auto &[fields, fact] : found->second)
+      if (ArrayRef<unsigned>(fields) == path) return fact;
+  auto result = ExtentQuery(*this).query(value, axis, path);
+  extentCache[key].push_back({{path.begin(), path.end()}, result});
+  return result;
 }
 
 bool CanonicalKernelAnalysis::equalTensorExtents(

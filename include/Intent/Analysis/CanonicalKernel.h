@@ -167,6 +167,8 @@ private:
   llvm::DenseMap<mlir::Value, bool> coordinateActive;
   llvm::DenseMap<std::pair<mlir::Value, unsigned>, CoordinateProvenance> axisCache;
   llvm::DenseMap<std::pair<mlir::Value, unsigned>, bool> axisActive;
+  llvm::DenseMap<std::pair<mlir::Value, unsigned>,
+      llvm::SmallVector<std::pair<llvm::SmallVector<unsigned, 2>, TensorExtentFact>, 2>> extentCache;
 };
 
 } // namespace intent
