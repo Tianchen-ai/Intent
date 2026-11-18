@@ -65,6 +65,30 @@ def DSAMatrixSupply : IntentBangCPhysicalPass<"intent-dsa-matrix-supply",
     and the target's actual arena check remain later obligations.
   }];
 }
+def DSAComposePrivateVersions : IntentBangCPhysicalPass<"intent-bangc-compose-private-versions",
+    "Reuse unobserved private versions across local updates and publication"> {
+  let description = [{
+    Coalesces a complete private copy, bounded local updates and copy-back when
+    the original version is unobserved throughout and the temporary cannot
+    escape. Preserves exact storage shape/alignment, effects and value order;
+    asynchronous or unknown effects retain their original storage. The result
+    is ordinary in-place physical computation, not an emitter recipe. Optional
+    before shared supply; disabling it preserves the legal copy-based path.
+  }];
+}
+
+def DSASimplifyWorksetBounds : IntentBangCPhysicalPass<"intent-bangc-simplify-workset-bounds",
+    "Expose bounded worksets through exact scalar index and predicate proofs"> {
+  let description = [{
+    Uses current loop, configuration and physical participant ranges to fold
+    proven constant integer expressions and redundant signed remainders.
+    Canonicalization removes only proved control branches, exposing existing
+    complete worksets to supply passes. No shape, task ownership, memory effect
+    or numerical contract changes. Unknown bounds retain their original IR.
+    Optional; the unchanged program remains a legal native lowering input.
+  }];
+}
+
 def DSANormalizeIndices : IntentBangCPhysicalPass<"intent-dsa-normalize-indices",
     "Normalize exact DSA index programs and canonicalize the result"> {
   let description = [{

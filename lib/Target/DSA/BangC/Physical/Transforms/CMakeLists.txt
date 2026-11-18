@@ -5,6 +5,8 @@ add_mlir_library(MLIRIntentBangCPhysicalTransforms
   MatrixPanels.cpp
   CollectiveGather.cpp
   IndexPrograms.cpp
+  WorksetBounds.cpp
+  PrivateVersions.cpp
   LocalSupplyRelations.cpp
   LocalValues.cpp
   LocalCopies.cpp

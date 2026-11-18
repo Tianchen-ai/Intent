@@ -107,10 +107,19 @@ FailureOr<bool> Lowering::rectangularAccess(Operation *operation, Value resource
   bool store = access.getAccessKind() == block::AccessKind::Store;
   if (!store && access.getAccessKind() != block::AccessKind::Load) return false;
   auto fragment = dyn_cast<block::FragmentType>(access.getAccessValueType());
-  if (!fragment || fragment.getShape().empty() || fragment.getShape().size() > 2 ||
+  if (!fragment || fragment.getShape().empty() ||
       cast<MemRefType>(resource.getType()).getMemorySpaceAsInt() != 0) return false;
   auto dimensions = shape(fragment);
   if (failed(dimensions)) return failure();
+  // Local storage flattens all leading fragment dimensions into rows. Unit
+  // batch/owner axes do not make that rectangle irregular; keep their bounds
+  // below, but do not force otherwise two-dimensional copies into scalar lanes.
+  std::optional<unsigned> rowAxis;
+  for (unsigned axis = 0; axis + 1 < dimensions->size(); ++axis) {
+    if ((*dimensions)[axis] == 1) continue;
+    if (rowAxis) return reject("multiple nonunit row axes require a separate rectangular projection");
+    rowAxis = axis;
+  }
   auto boundary = block::PhysicalProgramAnalysis(source).boundaryValidity(operation, true);
   if (!boundary.isExact()) return reject("validity is not an exact rectangular boundary");
   SmallVector<AffineCoordinate> coordinates;
@@ -191,9 +200,15 @@ FailureOr<bool> Lowering::rectangularAccess(Operation *operation, Value resource
       steps[lane] = b.createOrFold<arith::AddIOp>(loc, steps[lane],
           b.createOrFold<arith::MulIOp>(loc, stride, index(coordinate.steps[lane])));
   }
-  Value rows = dimensions->size() == 2 ? counts[0] : index(1);
+  Value rows = rowAxis ? counts[*rowAxis] : index(1);
+  for (unsigned axis = 0; axis + 1 < dimensions->size(); ++axis) {
+    if (rowAxis && axis == *rowAxis) continue;
+    Value active = b.createOrFold<arith::CmpIOp>(loc, arith::CmpIPredicate::ne,
+                                               counts[axis], index(0));
+    rows = b.createOrFold<arith::SelectOp>(loc, active, rows, index(0));
+  }
   Value columns = counts.back();
-  Value rowStride = dimensions->size() == 2 ? steps[0] : index(0);
+  Value rowStride = rowAxis ? steps[*rowAxis] : index(0);
   if (store) {
     Value payload = get(access.getAccessPayloads().front());
     b.create<physical::StoreTileOp>(loc, payload, resource, offset, rowStride, steps.back(), rows, columns);
