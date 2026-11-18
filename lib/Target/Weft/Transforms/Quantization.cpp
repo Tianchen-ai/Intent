@@ -279,7 +279,8 @@ LogicalResult expandQuantize(cpu::QuantizeOp operation,
   if (!binding)
     return operation.emitError("Q8_K expansion requires its selected Weft implementation");
   int64_t chunk = cpu::implementationParameter(binding, "chunk");
-  if (chunk != 32 && chunk != 64) return operation.emitError("Q8_K chunk must be 32 or 64");
+  if (chunk != 32 && chunk != 64 && chunk != 256)
+    return operation.emitError("Q8_K chunk must be 32, 64 or one full record (256)");
   Microprogram p{b, operation.getLoc(), nextAxis};
   Value groups = b.create<wk::ExtentOp>(p.loc, b.getIndexType(), input, 0);
   auto records = b.create<scf::ForOp>(p.loc, p.index(0), groups, p.index(1));
@@ -309,18 +310,40 @@ LogicalResult expandQuantize(cpu::QuantizeOp operation,
     Value zero = p.fp(0); b.create<scf::YieldOp>(p.loc, ValueRange{zero, zero});
   }
   int64_t axis = cast<wk::SliceType>(source.getType()).getAxisIds()[0];
-  p.level(p.rootDomain(), axis, 256, chunk, {}, [&](Value domain, Value point, ValueRange) {
-    Value current = p.load(p.project(source, point, chunk, "domain"), b.getF32Type());
+  Value codes = p.field(destination, "q", integer(b, 8, true), 256);
+  Type sumType = integer(b, 16, true);
+  Value sums = p.field(destination, "bsum", sumType, 16);
+  auto encode = [&](Value current, Value output) -> Value {
     Value scaled = p.binary(current, scale.getResult(0), "mul");
-    Value q = b.create<wk::NarrowOp>(p.loc, p.converted(scaled.getType(), integer(b, 8, true)), scaled, "rne", true);
-    b.create<wk::CommitOp>(p.loc, q, p.project(p.field(destination, "q", integer(b, 8, true), 256), point, chunk, "domain"));
-    p.level(domain, axis, chunk, 16, {}, [&](Value, Value group, ValueRange) {
-      Value sum = p.reduce(p.convert(p.project(q, group, 16, "domain"), integer(b, 16, true)), "add", 0);
-      b.create<wk::CommitOp>(p.loc, sum, p.project(p.field(destination, "bsum", integer(b, 16, true), 16), group, 0, "group_index"));
+    // Every finite input is bounded by the selected absolute extreme. The
+    // inverse of a nonzero block is normal on the defined Q8_K domain, so the
+    // two f32 roundings give |scaled| <= 127*(1+2^-24)^2 < 127.5.
+    // Nearest-even conversion therefore needs no saturation.
+    Value q = b.create<wk::NarrowOp>(p.loc,
+        p.converted(scaled.getType(), integer(b, 8, true)), scaled, "rne", false);
+    b.create<wk::CommitOp>(p.loc, q, output);
+    return q;
+  };
+  if (chunk == 256) {
+    Value q = encode(values, codes);
+    // The stored sums are 16 independent reductions of 16 signed codes.
+    Type grouped = p.valueType(integer(b, 8, true), {16, 16}, {axis, nextAxis++});
+    Value rows = b.create<wk::ReshapeOp>(p.loc, grouped, q, p.array({axis}));
+    Value totals = p.reduce(p.convert(rows, sumType), "add", 1);
+    b.create<wk::CommitOp>(p.loc, totals, sums);
+  } else {
+    p.level(p.rootDomain(), axis, 256, chunk, {}, [&](Value domain, Value point, ValueRange) {
+      Value current = p.load(p.project(source, point, chunk, "domain"), b.getF32Type());
+      Value q = encode(current, p.project(codes, point, chunk, "domain"));
+      p.level(domain, axis, chunk, 16, {}, [&](Value, Value group, ValueRange) {
+        Value groupCodes = p.project(q, group, 16, "domain");
+        Value sum = p.reduce(p.convert(groupCodes, sumType), "add", 0);
+        b.create<wk::CommitOp>(p.loc, sum, p.project(sums, group, 0, "group_index"));
+        return SmallVector<Value>{};
+      });
       return SmallVector<Value>{};
     });
-    return SmallVector<Value>{};
-  });
+  }
   b.create<wk::CommitOp>(p.loc, scale.getResult(1), p.field(destination, "ds", b.getF32Type(), 0));
   return success();
 }

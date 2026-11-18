@@ -15,7 +15,8 @@
     ],
     "weft.q8_k": [
       {"shared": [8, 1, 1, 1, 1], "local": {"chunk": 32, "panel": 16}, "implementations": ["weft.scalar_program", "weft.structured", "weft.q8_k", "weft.q4_k_q8_k_matrix"]},
-      {"shared": [8, 1, 1, 1, 1], "local": {"chunk": 64, "panel": 64}, "implementations": ["weft.scalar_program", "weft.structured", "weft.q8_k", "weft.q4_k_q8_k"]}
+      {"shared": [8, 1, 1, 1, 1], "local": {"chunk": 64, "panel": 64}, "implementations": ["weft.scalar_program", "weft.structured", "weft.q8_k", "weft.q4_k_q8_k"]},
+      {"shared": [8, 1, 1, 1, 1], "local": {"chunk": 256, "panel": 64}, "implementations": ["weft.scalar_program", "weft.structured", "weft.q8_k", "weft.q4_k_q8_k"]}
     ],
     "weft.contract_f32": [
       {"shared": [1, 4, 64, 128, 1], "local": {"lhs_supply": 1, "lhs_window": 16, "rhs_supply": 1, "panel": 32}, "implementations": ["weft.scalar_program", "weft.structured", "weft.contract_f32"]},

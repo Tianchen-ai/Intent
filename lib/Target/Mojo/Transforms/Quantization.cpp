@@ -193,8 +193,6 @@ void quantize(RecordBuilder &p, cpu::QuantizeOp operation, int64_t width) {
       Value values = p.read(operation.getInput(), {record}, offset, width);
       Value scaled = b.create<arith::MulFOp>(loc, values, inverse);
       Value rounded = b.create<math::RoundEvenOp>(loc, scaled);
-      rounded = b.create<arith::MaximumFOp>(loc, rounded, p.fp(-128, width));
-      rounded = b.create<arith::MinimumFOp>(loc, rounded, p.fp(127, width));
       Value integer = b.create<arith::FPToSIOp>(loc, p.lanes(b.getI32Type(), width), rounded);
       Value bytes = b.create<arith::TruncIOp>(loc, p.lanes(b.getI8Type(), width), integer);
       p.write(bytes, operation.getOutput(), {record}, p.addIndex(offset, 4));

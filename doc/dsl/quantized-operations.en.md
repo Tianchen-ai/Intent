@@ -67,4 +67,6 @@ bsum[j] = exact_sum(q[16*j:16*j+16])
 
 Inputs must be finite f32; inverse/ds/scaled values of nonzero blocks must remain finite and representable. Out-of-domain inputs are invalid, not converted from NaN/overflow to zero. Saturation is [-128,127]; exact bsum is i16. This is not truncation-toward-zero cast.
 
+On this domain, the inverse of a nonzero block is a normal f32. Each input magnitude is at most the magnitude of the selected extreme. After both f32 roundings, the scaled magnitude is at most `127 * (1 + 2^-24)^2 < 127.5`. Rounding to the nearest even integer therefore produces a value that fits in i8.
+
 Invocation-local SSA/buffers may share quantization across dots. Compiler forms legal fusion/materialization/lifetime; expert implementations encapsulate local statistics/conversion/packing. Do not repeat shared preparation per consumer or silently add lossy quantization to ordinary f32 matmul.

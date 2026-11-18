@@ -289,7 +289,7 @@ cpu::ImplementationRegistry implementations() {
   };
   result.add<func::FuncOp>({"weft.scalar_program", {}, check, {}, {}, {}});
   result.add<cpu::QuantizeOp>({"weft.q8_k", {},
-      check, {ImplementationParameter::local("chunk", {false, {}, 0, {32, 64}})},
+      check, {ImplementationParameter::local("chunk", {false, {}, 0, {32, 64, 256}})},
       {}, [](Operation *operation, ImplementationExpansion &expansion) {
         return expandQuantize(cast<cpu::QuantizeOp>(operation), expansion);
       }});

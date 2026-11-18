@@ -187,20 +187,13 @@ public:
         builder.getArrayAttr(shape), builder.getArrayAttr(maps), source.getValidity(), source.getOwner());
     return builder.create<block::ReshapeOp>(location, result, input, builder.getArrayAttr(groups));
   }
-  // RNE for the declared finite domain. Clamp before conversion: saturation
-  // commutes with rounding here, and every floor/parity intermediate is exact.
-  Value quantizedIntegers(Value input) {
-    Value bounded = binary(binary(input, floating(-128), BinaryOperator::Maximum),
-                           floating(127), BinaryOperator::Minimum);
-    Value floor = unary(bounded, UnaryOperator::Floor);
-    Value fraction = binary(bounded, floor, BinaryOperator::Subtract, true);
-    Value integerFloor = castTo(floor, builder.getI32Type());
-    Value odd = compare(binary(integerFloor, 1, BinaryOperator::BitwiseAnd),
-                        integer(0, builder.getI32Type()), ComparePredicate::Ne);
-    Value tie = compare(fraction, floating(0.5), ComparePredicate::Eq);
-    Value greater = compare(fraction, floating(0.5), ComparePredicate::Gt);
-    Value up = binary(greater, binary(tie, odd, BinaryOperator::LogicalAnd), BinaryOperator::LogicalOr);
-    return binary(integerFloor, castTo(up, builder.getI32Type()), BinaryOperator::Add);
+  Value quantizedIntegers(Value scaled) {
+    // In Q8_K, |scaled| < 127.5. Around 1.5 * 2^23 adjacent f32 values
+    // are one integer apart. The even bias preserves ties; subtracting its
+    // encoding yields the signed rounded integer, including for negative input.
+    Value biased = binary(scaled, floating(12582912.0), BinaryOperator::Add, true);
+    return binary(bits(biased, builder.getI32Type()), 0x4b400000,
+                  BinaryOperator::Subtract);
   }
   Value littleEndian(Value source, Value group, int64_t offset, unsigned bytes) {
     auto fragment = mlir::cast<block::FragmentType>(source.getType());

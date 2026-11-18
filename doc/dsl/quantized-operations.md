@@ -85,6 +85,10 @@ bsum[j] = exact_sum(q[16*j:16*j+16])
 有限结果。域外输入非法，不默默将 NaN/overflow 变为零。饱和范围为 `[-128,127]`，
 bsum 精确保存为 i16；这不是普通 float→integer 向零截断 cast。
 
+在这个定义域内，非零 block 的 inverse 是正规 f32。每个输入的绝对值至多等于
+所选 extreme 的绝对值，因此两次 f32 舍入后，scaled 的绝对值至多为
+`127 * (1 + 2^-24)^2 < 127.5`。舍入到最近偶整数的结果已经落在 i8 范围内。
+
 量化结果可以是 invocation-local SSA/buffer，被多个点积共享；compiler 决定合法的
 融合、物化和 lifetime，专业实现封装局部统计、转换与 packing。不能在每个消费者
 重复整个共享准备，也不能给普通 f32 matmul 隐式添加有损量化。
