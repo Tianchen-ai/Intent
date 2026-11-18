@@ -175,6 +175,7 @@ bool batchPointwiseTasks(func::FuncOp function) {
     bangc::physical::StoreTileOp store;
     int64_t capacity = 0;
     bool eligible = true;
+    bool taskIndependent = execution.hasUniformControl(loop);
     for (Operation &operation : *body) {
       if (auto allocation = dyn_cast<memref::AllocaOp>(operation)) {
         auto type = allocation.getType();
@@ -199,8 +200,11 @@ bool batchPointwiseTasks(func::FuncOp function) {
           if (isa<MemRefType>(operand.getType())) {
             auto allocation = operand.getDefiningOp<memref::AllocaOp>();
             if (!allocation || allocation->getBlock() != body) eligible = false;
-          } else if (execution.coordinateDependency(operand, induction) !=
-                     CoordinateDependency::Independent) eligible = false;
+          } else {
+            if (execution.coordinateDependency(operand, induction) !=
+                CoordinateDependency::Independent) eligible = false;
+            taskIndependent &= execution.isUniform(operand);
+          }
         }
         if (!eligible) break;
       } else if (auto stride = dyn_cast<bangc::physical::StrideOp>(operation)) {
@@ -256,10 +260,38 @@ bool batchPointwiseTasks(func::FuncOp function) {
     Location loc = loop.getLoc();
     Value factor = builder.create<arith::ConstantIndexOp>(loc, rows);
     Value oldStep = loop.getStep();
-    loop.getStepMutable().assign(builder.create<arith::MulIOp>(loc, oldStep, factor));
+    Value rowStep = oldStep;
+    SmallVector<int64_t> inputStrides;
+    int64_t inputOffset;
+    auto sourceType = cast<MemRefType>(load.getSource().getType());
+    bool contiguousInput = succeeded(sourceType.getStridesAndOffset(inputStrides, inputOffset)) &&
+        inputStrides[0] == columns && inputStrides[1] == 1;
+    if (!function->hasAttr("intent_bangc.group_width") && taskIndependent &&
+        contiguousInput && rows * tasks <= upper) {
+      // Adjacent dense rows fit the same private tile in a single transfer.
+      // For other output layouts retain the original task's cyclic ownership.
+      // rowCoefficient matched each pitch to a public stride or a constant,
+      // both of which can be evaluated before dispatch.
+      auto beforeLoop = [&](Value stride) -> Value {
+        if (loop.isDefinedOutsideOfLoop(stride)) return stride;
+        return builder.clone(*stride.getDefiningOp())->getResult(0);
+      };
+      Value one = builder.create<arith::ConstantIndexOp>(loc, 1);
+      Value width = builder.create<arith::ConstantIndexOp>(loc, columns);
+      Value pitch = beforeLoop(outputPitch);
+      Value columnStride = beforeLoop(store.getColumnStride());
+      Value dense = builder.createOrFold<arith::AndIOp>(loc,
+          builder.createOrFold<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, pitch, width),
+          builder.createOrFold<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, columnStride, one));
+      Value task = loop.getLowerBound();
+      Value first = builder.createOrFold<arith::MulIOp>(loc, task, factor);
+      loop.getLowerBoundMutable().assign(builder.createOrFold<arith::SelectOp>(loc, dense, first, task));
+      rowStep = builder.createOrFold<arith::SelectOp>(loc, dense, one, oldStep);
+    }
+    loop.getStepMutable().assign(builder.createOrFold<arith::MulIOp>(loc, oldStep, factor));
     builder.setInsertionPointToStart(body);
     Value remaining = builder.create<arith::SubIOp>(loc, loop.getUpperBound(), induction);
-    Value count = builder.create<arith::CeilDivSIOp>(loc, remaining, oldStep);
+    Value count = builder.create<arith::CeilDivSIOp>(loc, remaining, rowStep);
     count = builder.create<arith::MinSIOp>(loc, count, factor);
     for (auto allocation : allocations) {
       auto type = allocation.getType();
@@ -267,10 +299,10 @@ bool batchPointwiseTasks(func::FuncOp function) {
           MemRefLayoutAttrInterface{}, type.getMemorySpace()));
     }
     builder.setInsertionPoint(load);
-    load.getRowStrideMutable().assign(builder.create<arith::MulIOp>(loc, inputPitch, oldStep));
+    load.getRowStrideMutable().assign(builder.createOrFold<arith::MulIOp>(loc, inputPitch, rowStep));
     load.getRowsMutable().assign(count);
     builder.setInsertionPoint(store);
-    store.getRowStrideMutable().assign(builder.create<arith::MulIOp>(loc, outputPitch, oldStep));
+    store.getRowStrideMutable().assign(builder.createOrFold<arith::MulIOp>(loc, outputPitch, rowStep));
     store.getRowsMutable().assign(count);
     changed = true;
   }
