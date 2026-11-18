@@ -73,6 +73,23 @@ and initializations. Native consumers retain their owners, call `validate()`
 before execution and `complete()` afterward. This is an invocation interface,
 not a timing protocol or a program-name-based orchestration mechanism.
 
+The installed `AttentionBackward` program binds three kernels. It takes the saved forward output and natural-log LSE and returns dQ, dK and dV in that order. This example uses four query heads per KV head.
+
+```python
+from functools import partial
+import intent
+from intent.examples.programs.attention_backward import AttentionBackward
+
+backward = AttentionBackward.from_jit(partial(intent.jit, backend="triton"),
+                                      head_group=4, causal=True)
+call = backward.prepare(q, k, v, output, grad_output, lse, scale)
+call.compile()
+call.launch()
+dq, dk, dv = call.result()
+```
+
+`intent.examples.programs.structured.VarlenCausalConvolution` uses the same JIT binding for its two kernels. It returns the output for all tokens and the final state of each sequence.
+
 Use `intent.HostBuffers(backend, device)` for explicit host transfers and ownership
 across a complete call. `input(array, writable=False, preserve=False)` accepts a
 NumPy array, CPU tensor or existing provider buffer, preserving shared allocations,

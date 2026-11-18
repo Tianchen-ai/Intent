@@ -59,6 +59,23 @@ CPU 在首次执行完成后可用 `native_calls()` 导出有序原生调用和�
 导出的绑定保留所有权；调用者在执行前 `validate()`、同步执行后 `complete()`。
 该接口不包含计时协议，也不根据程序名称推断编排。
 
+安装包中的 `AttentionBackward` 提供三个 kernel 的完整调用。传入前向输出和自然对数 LSE，返回顺序为 dQ、dK、dV。下面以四个 query heads 共享一个 KV head 为例。
+
+```python
+from functools import partial
+import intent
+from intent.examples.programs.attention_backward import AttentionBackward
+
+backward = AttentionBackward.from_jit(partial(intent.jit, backend="triton"),
+                                      head_group=4, causal=True)
+call = backward.prepare(q, k, v, output, grad_output, lse, scale)
+call.compile()
+call.launch()
+dq, dk, dv = call.result()
+```
+
+变长因果卷积的双 kernel 编排见 `intent.examples.programs.structured.VarlenCausalConvolution`。它以相同方式绑定 JIT，返回所有 token 的输出和各段的最终状态。
+
 需要从 host 数组显式准备设备输入时，可用 `intent.HostBuffers(backend, device)`
 管理一次完整调用的传输与所有权。`input(array, writable=False, preserve=False)` 接收
 NumPy 数组、CPU tensor 或已有 provider buffer，保留共享 allocation、shape、stride 和 offset；
