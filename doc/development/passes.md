@@ -32,7 +32,7 @@ MLIR 名称、owner、阶段、必需属性和说明。组件定义与所属 pip
 关闭完整可选组件，或用 CLI 的 `--optimization NAME=false`。这不授权数值变化。
 新增组件需要说明未采用时的合法表示，不能把缺失 lowering 包装成优化关闭失败。
 
-例如 GPU 归约优化放在 `lib/Dialect/Block/Transforms/Reduction/`，声明在 GPU `Passes.td`，完整 transformation 的入口和顺序在 GPU `Transforms/Passes.cpp`。CPU 的 task 分配和 storage 复用分别位于 CPU `Transforms/Task/` 与 `Transforms/Storage/`，CPU pipeline 由其 `Transforms/Passes.cpp` 组装；不把 GPU ownership 变换挪过去共享。Provider 的经验配置表位于相应 `Transforms/` 或 `Transforms/Configuration/`。
+例如块程序归约优化放在 `lib/Dialect/Block/Transforms/Reduction/`，声明在 Block `Passes.td`，完整 transformation 的入口和顺序在 Block `Transforms/Passes.cpp`。CPU 的 task 分配和 storage 复用分别位于 CPU `Transforms/Task/` 与 `Transforms/Storage/`，CPU pipeline 由其 `Transforms/Passes.cpp` 组装；不把 GPU ownership 变换挪过去共享。Provider 的经验配置表位于相应 `Transforms/` 或 `Transforms/Configuration/`。
 
 新增 pass 时在相邻 CMake 列表加入实现；从已有 transformation wrapper 复用注册、依赖 dialect、错误传播及完成边界验证。把它插入满足输入条件的位置，而不是只为某个 program 加一条旁路。
 
@@ -47,6 +47,15 @@ Mojo 与 Weft serializer 不自行按硬件最大线程数派发。
 有界 scan、块间 carry 和尾部；块内直接交给 Canonical Weft ScanOp，包含原 combine、
 inclusive/exclusive 与 reverse 语义。组件关闭后仍可使用完整顺序遍历。
 Weft 继续拥有块内 collective tree；Intent 不复制其 SIMD/RVV shuffle 实现。
+
+`intent-bangc-compose-private-versions` 在 BANG C 物理程序中合并不可观察的
+私有 copy/update/copy-back，并前推完整初始化。它依赖 storage alias、effects、
+dominance 和完成关系；遇到未知或异步 effects 时保留副本。随后 matrix supply
+可消费原本被副本隔开的计算。关闭组件时原有显式存储程序仍然合法。
+
+`intent-cutile-select-cluster-configurations` 从当前矩阵输入的 def-use 判断供数形式，
+为计算得到的 operand 选择已经声明的单 CTA 完整行；普通 load-fed 矩阵保留 cluster
+候选。它不生成新配置。仅精简某个配置族的经验行时，修改该 provider 的配置表即可。
 
 ## 使用已有程序观察
 

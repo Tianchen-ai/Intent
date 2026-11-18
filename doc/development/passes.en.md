@@ -34,7 +34,7 @@ or CLI `--optimization NAME=false` disables a complete optional component withou
 granting numerical permissions. New components must state their legal unoptimized
 representation; missing lowering is not an optimization-disable failure.
 
-For example, GPU reduction optimizations live in `lib/Dialect/Block/Transforms/Reduction/`, declarations in GPU `Passes.td`, and complete transformation entry points and ordering in GPU `Transforms/Passes.cpp`. CPU task partitioning and storage reuse live in CPU `Transforms/Task/` and `Transforms/Storage/`; CPU `Transforms/Passes.cpp` assembles that family's pipeline. Do not move a GPU ownership transformation there to force reuse. Provider empirical configuration tables live in the corresponding `Transforms/` or `Transforms/Configuration/`.
+For example, block-program reduction optimizations live in `lib/Dialect/Block/Transforms/Reduction/`, declarations in Block `Passes.td`, and complete transformation entry points and ordering in Block `Transforms/Passes.cpp`. CPU task partitioning and storage reuse live in CPU `Transforms/Task/` and `Transforms/Storage/`; CPU `Transforms/Passes.cpp` assembles that family's pipeline. Do not move a GPU ownership transformation there to force reuse. Provider empirical configuration tables live in the corresponding `Transforms/` or `Transforms/Configuration/`.
 
 Add new implementations to the adjacent CMake list. Reuse an existing transformation wrapper's registration, dependent dialects, error propagation and completed-boundary verification. Insert the pass where its input conditions hold rather than adding a bypass for one program.
 
@@ -51,6 +51,19 @@ bounded prefixes, block carries and tails. Canonical Weft ScanOp owns the native
 collective, with the source combine, inclusive/exclusive and reverse semantics.
 Disabling this component retains the complete ordered traversal. Intent does not
 duplicate the provider's SIMD/RVV shuffle tree.
+
+`intent-bangc-compose-private-versions` coalesces unobserved private
+copy/update/copy-back sequences and forwards complete initialization in the
+BANG C physical program. Its proofs use storage aliasing, effects, dominance
+and completion; unknown or asynchronous effects retain the copies. Matrix supply
+can then consume computations previously separated by those copies. Disabling
+the component leaves a legal explicit storage program.
+
+`intent-cutile-select-cluster-configurations` follows matrix operand def-use to
+select already declared complete single-CTA rows for computed operands. Ordinary
+load-fed matrix computations retain cluster candidates. It invents no new
+configuration. Pruning empirical rows for a configuration family only requires
+changing the provider's configuration table.
 
 ## Observe existing programs
 
