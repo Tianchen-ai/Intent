@@ -105,7 +105,7 @@ FailureOr<ParameterAttr> selectReductionTraversalChunk(
     name += ("_F" + Twine(axis)).str();
   if (role == ParameterRole::ReductionInner) name += "_INNER";
   else if (role == ParameterRole::ReductionOuter) name += "_OUTER";
-  SmallVector<int64_t> candidates{4, 8, 16, 32, 64, 128, 256,
+  SmallVector<int64_t> candidates{1, 2, 4, 8, 16, 32, 64, 128, 256,
                                   512, 1024, 2048, 4096, 8192};
   if (auto capacity = queryLogicalRangeCapacity(range))
     if (auto constant = constantPhysicalExpression(capacity)) {
