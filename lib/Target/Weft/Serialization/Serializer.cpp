@@ -84,19 +84,28 @@ LogicalResult serializeProgram(ModuleOp program, std::string &source, std::strin
   auto entry = candidates.front()->getAttrOfType<cpu::EntryRequirementsAttr>(cpu::entryRequirementsAttr);
   auto requirements = queryNativeEntryRequirements(candidates.front(), interface,
       entry.getDisjointOutputs(), [&](unsigned index, intent::ViewType view) -> FailureOr<NativeViewRequirements> {
-        auto layout = entry.getContiguousViews() || view.getAccess() != 0
-            ? NativeViewLayout::Contiguous : NativeViewLayout::Strided;
+        auto type = cast<MemRefType>(candidates.front().getArgument(index).getType());
+        auto layout = isa<StridedLayoutAttr>(type.getLayout())
+            ? NativeViewLayout::Strided : NativeViewLayout::Contiguous;
         auto alignment = candidates.front().getArgAttrOfType<ArgumentAlignmentAttr>(
             index, argumentAlignmentAttr);
         return NativeViewRequirements{layout, alignment.getBytes()};
       });
   if (failed(requirements)) return failure();
   auto capabilities = modules->host->getAttrOfType<cpu::CapabilitiesAttr>("intent_cpu.capabilities");
+  auto target = cpu::serializeCapabilities(capabilities);
+  llvm::json::Array stridedInputs;
+  for (auto [index, field] : llvm::enumerate(interface.getArguments())) {
+    auto memory = dyn_cast<MemRefType>(candidates.front().getArgument(index).getType());
+    if (memory && isa<StridedLayoutAttr>(memory.getLayout()))
+      stridedInputs.push_back(cast<PublicParameterAttr>(field).getName().getValue().str());
+  }
+  if (!stridedInputs.empty()) target["strided_inputs"] = std::move(stridedInputs);
   llvm::raw_string_ostream metadataStream(metadata);
   metadataStream << llvm::json::Value(llvm::json::Object{{"kind", "weft-generation"},
       {"provider", "weft"}, {"entry_name", candidates.front().getName()},
       {"compile_options", serializeCompileOptions(*options)},
-      {"target", cpu::serializeCapabilities(capabilities)},
+      {"target", std::move(target)},
       {"host_source", hostSource}, {"tasks", std::move(*tasks)},
       {"interface", std::move(*parameters)}, {"candidates", std::move(configurations)},
       {"native", llvm::json::Object{{"requirements", requirements->serialize()},

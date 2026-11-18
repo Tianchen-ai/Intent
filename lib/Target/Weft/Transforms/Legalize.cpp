@@ -131,6 +131,14 @@ LogicalResult legalizeProgram(ModuleOp program) {
       host.setInsertionPoint(task);
       auto shapeArguments = lowering.shapeArguments(task, host);
       auto loc = task.getLoc();
+      auto deviceTask = cast<wk::KernelOp>(SymbolTable::lookupSymbolIn(output, name));
+      SmallVector<Value> strideArguments;
+      for (auto [index, position] : llvm::enumerate(argumentPositions)) {
+        if (!taskArgumentHasStrides(deviceTask, index)) continue;
+        auto metadata = host.create<memref::ExtractStridedMetadataOp>(
+            loc, task.getCaptures()[position - 1]);
+        llvm::append_range(strideArguments, metadata.getStrides());
+      }
       auto zero = host.create<arith::ConstantIndexOp>(loc, 0);
       auto one = host.create<arith::ConstantIndexOp>(loc, 1);
       auto loop = host.create<scf::ParallelOp>(loc, ValueRange{zero}, ValueRange{task.getCount()}, ValueRange{one});
@@ -151,6 +159,7 @@ LogicalResult legalizeProgram(ModuleOp program) {
         }
       }
       llvm::append_range(arguments, shapeArguments);
+      llvm::append_range(arguments, strideArguments);
       {
         OpBuilder::InsertionGuard guard(host);
         host.setInsertionPointToStart(cpuProgram.getBody());
@@ -159,7 +168,6 @@ LogicalResult legalizeProgram(ModuleOp program) {
         declaration.setPrivate();
         declaration->setAttr("cpu.external_runtime", host.getUnitAttr());
       }
-      auto deviceTask = cast<wk::KernelOp>(SymbolTable::lookupSymbolIn(output, name));
       auto accessModes = taskCallAccesses(deviceTask);
       if (failed(accessModes)) return failure();
       host.create<cpu::InvokeOp>(loc, FlatSymbolRefAttr::get(program.getContext(), name),

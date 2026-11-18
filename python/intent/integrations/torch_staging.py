@@ -5,7 +5,6 @@ from .torch import torch_dtype
 
 class TorchStorage:
     copies_host = True
-    contiguous_views = False
 
     def __init__(self, device):
         import torch

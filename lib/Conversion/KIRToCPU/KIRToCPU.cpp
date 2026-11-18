@@ -8,7 +8,8 @@ using namespace mlir;
 
 namespace intent {
 
-LogicalResult lowerCanonicalKIRToCPU(ModuleOp module, CPUEntryLayout entryLayout) {
+LogicalResult lowerCanonicalKIRToCPU(ModuleOp module, CPUEntryLayout entryLayout,
+                                    ArrayRef<std::string> stridedParameters) {
   CanonicalKernelAnalysis analysis(module);
   if (failed(analysis.verify())) return failure();
   auto physical = OwningOpRef<ModuleOp>(ModuleOp::create(module.getLoc()));
@@ -20,7 +21,7 @@ LogicalResult lowerCanonicalKIRToCPU(ModuleOp module, CPUEntryLayout entryLayout
   for (func::FuncOp function : module.getOps<func::FuncOp>()) {
     if (++count != 1)
       return function.emitError("CPU construction requires an inlined single kernel");
-    if (failed(construction.lower(function))) return failure();
+    if (failed(construction.lower(function, stridedParameters))) return failure();
   }
   if (count == 0) return module.emitError("CPU construction found no kernel");
   realizeIntegerStorage(*physical);

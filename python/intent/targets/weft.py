@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from collections.abc import Mapping
 import os
 
@@ -14,6 +14,42 @@ INSTALLATION = {
     "torch_index": None, "python_max": (3, 14),
     "toolchain": "Triton–Weft with its matching weft-core native SDK and CPU toolchain; use a separate environment from other Triton distributions",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class StridedWeftTarget(CPUCompilationTarget):
+    """The same native CPU target with a strided ABI for the named inputs."""
+    strided_inputs: tuple[str, ...]
+
+
+def _read_target(provider, values):
+    if "strided_inputs" not in values:
+        return read_cpu_target(provider, values)
+    values = dict(values)
+    names = values.pop("strided_inputs")
+    if (not isinstance(names, list) or not names or
+            any(not isinstance(n, str) or not n for n in names) or len(set(names)) != len(names)):
+        raise ValueError("Weft strided_inputs requires distinct input names")
+    cpu = read_cpu_target(provider, values)
+    return StridedWeftTarget(cpu.provider, cpu.vector, cpu.contractions, cpu.execution, tuple(names))
+
+
+def _specialize(target, definition, arguments, outputs):
+    from intent.language.annotations import ConstexprSpec, ViewKind, ViewSpec
+    from intent.runtime.weft.buffer import Buffer
+    if not any(isinstance(value, Buffer) and not value.canonical for value in arguments):
+        return target, ()
+    inputs = (p for p in definition.signature.parameters.values()
+              if not isinstance(p.annotation, ConstexprSpec) and
+              not (isinstance(p.annotation, ViewSpec) and p.annotation.kind is ViewKind.OUT))
+    names = tuple(p.name for p, value in zip(inputs, arguments, strict=True)
+                  if isinstance(value, Buffer) and not value.canonical and
+                  isinstance(p.annotation, ViewSpec) and p.annotation.kind is ViewKind.IN)
+    if not names:
+        return target, ()
+    cpu = target.compilation
+    return replace(target, compilation=StridedWeftTarget(
+        cpu.provider, cpu.vector, cpu.contractions, cpu.execution, names)), names
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,5 +139,5 @@ def _host_storage(device, options):
 
 PROVIDER = Provider("cpu", WeftTarget, _read_facts, _bind, _environment_checks,
     LocalExecution("cpu", False, frozenset({"options", "private_bytes"}),
-                   _resolve_local, cpu_key, _host_storage), "cpu", read_cpu_target,
+                   _resolve_local, cpu_key, _host_storage, _specialize), "cpu", _read_target,
     "Triton–Weft owns native CPU discovery, canonical compilation, loading and worker validation")

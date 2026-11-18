@@ -13,11 +13,12 @@ Construction::Construction(CanonicalKernelAnalysis &analysis, ModuleOp physical,
     : analysis(analysis), module(physical), builder(physical.getContext()),
       entryLayout(entryLayout) {}
 
-LogicalResult Construction::lower(func::FuncOp source) {
+LogicalResult Construction::lower(func::FuncOp source, ArrayRef<std::string> stridedParameters) {
   SmallVector<Type> types;
   auto interface = buildPublicInterface(source);
   if (failed(interface)) return failure();
   SmallVector<Value> runtimeArguments;
+  size_t matched = 0;
   for (BlockArgument argument : source.getArguments()) {
     if (isa<ConstexprType>(argument.getType())) {
       if (!argument.use_empty())
@@ -40,7 +41,10 @@ LogicalResult Construction::lower(func::FuncOp source) {
           return source.emitError("CPU declared stride constraints must cover the view rank");
         constraints.assign(view.getConstraints().getStrides().begin(), view.getConstraints().getStrides().end());
       }
-      if (entryLayout == CPUEntryLayout::StridedInputs && view.getAccess() == 0) {
+      auto field = cast<PublicParameterAttr>((*interface).getArguments()[types.size()]);
+      bool selected = llvm::is_contained(stridedParameters, field.getName().getValue());
+      if (selected && view.getAccess() == 0) ++matched;
+      if ((entryLayout == CPUEntryLayout::StridedInputs || selected) && view.getAccess() == 0) {
         SmallVector<int64_t> strides;
         for (Attribute constraint : constraints) {
           auto fixed = dyn_cast<IntegerAttr>(constraint);
@@ -72,12 +76,14 @@ LogicalResult Construction::lower(func::FuncOp source) {
       return source.emitError("CPU construction does not implement this parameter type");
     }
   }
+  if (matched != stridedParameters.size())
+    return source.emitError("strided parameters must name distinct read-only public views");
   builder.setInsertionPointToEnd(module.getBody());
   function = builder.create<func::FuncOp>(source.getLoc(), source.getName(),
                                          builder.getFunctionType(types, {}));
   function->setAttr(interfaceAttr, *interface);
   function->setAttr(cpu::entryRequirementsAttr, cpu::EntryRequirementsAttr::get(
-      builder.getContext(), entryLayout == CPUEntryLayout::Contiguous, true));
+      builder.getContext(), entryLayout == CPUEntryLayout::Contiguous && stridedParameters.empty(), true));
   function.addEntryBlock();
   builder.setInsertionPointToStart(&function.front());
   for (auto [oldValue, newValue] : llvm::zip(runtimeArguments, function.getArguments()))

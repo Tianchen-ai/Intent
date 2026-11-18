@@ -84,6 +84,10 @@ NumPy 数组、CPU tensor 或已有 provider buffer，保留共享 allocation、
 调用者须在 `close()` 或离开 context manager 前完成设备操作；此显式传输接口不改变普通 JIT
 拒绝隐式搬运的规则，也不负责推断参数 ABI 或 kernel 次序。
 
+Weft 的稠密只读输入支持非负元素 stride，可使用转置、带 padding 的切片和 stride 为零的广播。
+JIT 按需要传递 stride 的输入参数集合保留编译产物。行距变化时可复用同一产物，
+每次调用向原生任务传入当前视图的实际 stride。打包记录、可写输出和 InOut 状态要求连续存储。
+
 ## 安装包中的完整程序
 
 唯一的作者算法和 host 编排位于 `intent.examples.kernels` 与

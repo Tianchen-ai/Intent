@@ -1,4 +1,5 @@
 #include "TaskInterface.h"
+#include "Intent/Target/Weft/IR/Program.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Verifier.h"
@@ -31,12 +32,14 @@ LogicalResult finalizeTaskInterface(
     wk::KernelOp kernel, SmallVectorImpl<unsigned> &argumentPositions) {
   removeDeadValues(kernel);
   Block &body = kernel.getBody().front();
-  SmallVector<Attribute> names, accesses;
+  SmallVector<Attribute> names, accesses, strided;
   SmallVector<int64_t> aliases;
   SmallVector<unsigned> positions;
   for (auto [index, argument] : llvm::enumerate(body.getArguments())) {
     if (argument.use_empty()) continue;
     names.push_back(kernel.getArgNames()[index]);
+    if (taskArgumentHasStrides(kernel, index))
+      strided.push_back(names.back());
     accesses.push_back(kernel.getArgAccess()[index]);
     aliases.push_back(kernel.getArgAliasSets()[index]);
     positions.push_back(argumentPositions[index]);
@@ -45,6 +48,7 @@ LogicalResult finalizeTaskInterface(
   Builder builder(kernel.getContext());
   kernel.setArgNamesAttr(builder.getArrayAttr(names));
   kernel.setArgAccessAttr(builder.getArrayAttr(accesses));
+  kernel.setStridedArgsAttr(builder.getArrayAttr(strided));
   kernel.setArgAliasSetsAttr(builder.getDenseI64ArrayAttr(aliases));
   argumentPositions.assign(positions.begin(), positions.end());
   return verify(kernel);

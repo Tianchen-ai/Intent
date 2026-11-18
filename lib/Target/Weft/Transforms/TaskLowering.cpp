@@ -84,7 +84,7 @@ LogicalResult TaskConversion::lower(cpu::TasksOp tasks, StringRef name,
   localShapeBindings.clear();
   values.clear(); locals.clear(); localReferences.clear(); controlOwners.clear(); shapeValues.clear(); readOnlySupplies.clear(); viewAxes.clear();
   Location loc = tasks.getLoc();
-  SmallVector<Attribute> names, accesses, symbols;
+  SmallVector<Attribute> names, accesses, symbols, strided;
   SmallVector<int64_t> aliases;
   SmallVector<Type> types;
   auto memoryEffects = storage->effects(tasks);
@@ -117,8 +117,6 @@ LogicalResult TaskConversion::lower(cpu::TasksOp tasks, StringRef name,
     Value capture = position == 0 ? tasks.getBody().front().getArgument(0) : tasks.getCaptures()[position - 1];
     names.push_back(b.getStringAttr(position == 0 ? "coordinate" : "capture_" + std::to_string(position - 1)));
     if (auto memory = dyn_cast<MemRefType>(capture.getType())) {
-      if (!cpu::isContiguousDescriptor(capture))
-        return tasks.emitError("native task capture requires a proved contiguous descriptor");
       auto ids = memoryAxes(capture);
       llvm::SmallSet<int64_t, 8> unique(ids.begin(), ids.end());
       if (unique.size() != ids.size())
@@ -135,6 +133,11 @@ LogicalResult TaskConversion::lower(cpu::TasksOp tasks, StringRef name,
         } else dimensions.push_back(extent);
       }
       auto format = quantizedFormat(capture);
+      if (!cpu::isContiguousDescriptor(capture)) {
+        if (format)
+          return tasks.emitError("packed Weft records require contiguous storage");
+        strided.push_back(names.back());
+      }
       if (format) {
         int64_t bytes = *format == intent::QuantFormat::Q4K ? 144 : 292;
         if (memory.getShape().back() != bytes)
@@ -166,7 +169,7 @@ LogicalResult TaskConversion::lower(cpu::TasksOp tasks, StringRef name,
     symbols.push_back(b.getStringAttr("shape_" + std::to_string(symbol)));
   b.setInsertionPointToEnd(output.getBody());
   auto kernel = b.create<wk::KernelOp>(loc, name, b.getArrayAttr(names),
-      b.getArrayAttr(accesses), array(aliases), b.getArrayAttr({}),
+      b.getArrayAttr(accesses), array(aliases), b.getArrayAttr(strided),
       b.getArrayAttr(symbols), "Intent CPU task");
   Block *body = new Block;
   kernel.getBody().push_back(body);

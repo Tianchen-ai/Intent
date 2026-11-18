@@ -272,15 +272,12 @@ class NativeProgram(NativePreparedRuntime):
         if len(value.shape) != len(parameter.shape):
             raise ValueError("native view rank disagrees with the compiler ABI")
         return ViewFacts(value.shape, value.strides, value.pointer, value.allocation, value.allocation_end,
-                         value.pointer - value.allocation, value.dtype,
-                         value.pointer, value.pointer + value.nbytes, value.allocation)
+                         value.offset, value.dtype, value.pointer,
+                         value.pointer + value.storage_span.nbytes, value.allocation_identity)
 
     def _allocate_output(self, parameter: ViewParameter, shape: tuple[int, ...]) -> tuple[Buffer, ViewFacts]:
         value = Buffer.empty(shape, parameter.dtype.name)
-        facts = ViewFacts(value.shape, value.strides, value.pointer, value.allocation, value.allocation_end,
-                          value.pointer - value.allocation, value.dtype,
-                          value.pointer, value.pointer + value.nbytes, value.allocation)
-        return value, facts
+        return value, self._view(parameter, value)
 
     def prepare(self, arguments: tuple, *, explicit_outputs: bool = False) -> NativeCall:
         if self._closed:

@@ -6,14 +6,18 @@
 
 namespace intent::compiler {
 inline mlir::FailureOr<llvm::json::Object> readTargetOptions(
-    mlir::ModuleOp module, const Request &request, llvm::ArrayRef<llvm::StringRef> fields) {
+    mlir::ModuleOp module, const Request &request, llvm::ArrayRef<llvm::StringRef> fields,
+    llvm::ArrayRef<llvm::StringRef> optional = {}) {
   auto parsed = llvm::json::parse(request.targetOptions);
   if (!parsed) {
     module.emitError("invalid target options: ") << llvm::toString(parsed.takeError());
     return mlir::failure();
   }
   auto object = parsed->getAsObject();
-  if (!object || object->size() != fields.size())
+  if (!object || llvm::any_of(*object, [&](const auto &entry) {
+        return !llvm::is_contained(fields, entry.first.str()) &&
+               !llvm::is_contained(optional, entry.first.str());
+      }))
     return module.emitError("target options do not match the selected provider's fields"), mlir::failure();
   for (auto field : fields)
     if (!object->get(field))

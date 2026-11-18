@@ -1,10 +1,9 @@
 """Explicit host transfers and ownership for an authored invocation sequence."""
 from dataclasses import dataclass
-from math import prod
 import sys
 
 from intent.language.dtypes import DTYPES
-from .storage_types import numpy_dtype
+from .storage_types import numpy_dtype, numpy_element
 
 
 def _host_view(value, element):
@@ -25,7 +24,7 @@ def _host_view(value, element):
     if not isinstance(value, np.ndarray):
         raise TypeError("host staging requires a NumPy array or a CPU tensor")
     if element is None:
-        element = next((name for name in DTYPES if name != "index" and numpy_dtype(name) == value.dtype), None)
+        element = numpy_element(value.dtype)
     if element is None or value.dtype != numpy_dtype(element):
         raise TypeError("host array storage dtype disagrees with the requested element type")
     owner = value
@@ -105,9 +104,6 @@ class HostBuffers:
                 self._preserve_native(value)
             return value
         host, element, shape, strides, offset = _host_view(value, element)
-        contiguous = tuple(prod(shape[axis + 1:]) for axis in range(len(shape)))
-        if self.storage.contiguous_views and strides != contiguous:
-            raise NotImplementedError("this provider's public buffer requires contiguous element strides")
         key = (host.ctypes.data, host.nbytes) if host.nbytes else ("empty", id(value))
         record = self.allocations.get(key)
         if record is None:

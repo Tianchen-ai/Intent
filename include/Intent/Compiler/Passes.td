@@ -35,7 +35,10 @@ def ConstructCPU : Pass<"intent-construct-cpu", "mlir::ModuleOp"> {
     bufferization, implementation selection and provider legalization remain
     separate stages. Unsupported source constructs fail conversion.
   }];
-  let options = [Option<"stridedInputs", "strided-inputs", "bool", "false", "Preserve external input strides">];
+  let options = [
+    Option<"stridedInputs", "strided-inputs", "bool", "false", "Preserve all external input strides">,
+    ListOption<"stridedParameters", "strided-parameters", "std::string", "Read-only inputs requiring strided descriptors">
+  ];
   let dependentDialects = ["intent::cpu::IntentCPUDialect", "mlir::arith::ArithDialect", "mlir::func::FuncDialect", "mlir::linalg::LinalgDialect", "mlir::math::MathDialect", "mlir::memref::MemRefDialect", "mlir::scf::SCFDialect", "mlir::vector::VectorDialect"];
 }
 

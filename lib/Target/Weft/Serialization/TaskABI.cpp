@@ -1,4 +1,5 @@
 #include "TaskABI.h"
+#include "Intent/Target/Weft/IR/Program.h"
 #include "Intent/Target/Weft/Serialization/HostScalar.h"
 #include "mlir/IR/BuiltinOps.h"
 
@@ -45,7 +46,7 @@ FailureOr<llvm::json::Object> serializeTaskABI(wk::KernelOp kernel) {
         {"c_type", (writable ? "" : "const ") + scalar + (restricted ? " *restrict" : " *")},
         {"kind", "view"},
         {"dtype", encoding.getKind() == "dense" ? encoding.getFamily().str() : ""},
-        {"access", access.str()}, {"strided", false},
+        {"access", access.str()}, {"strided", taskArgumentHasStrides(kernel, index)},
         {"encoding", encoding.getLayoutIdentity().str()}, {"shape", std::move(dimensions)},
         {"storage_bytes", bytes}, {"record_elements", elements}, {"alignment", alignment},
         {"interleave_rows", 0}, {"alias_set", alias}, {"writable", writable}});

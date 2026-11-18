@@ -23,12 +23,12 @@ Backend createWeftBackend() {
         cpu::buildCPUBufferPipeline(manager, options);
         weft_provider::buildWeftPipeline(manager);
       },
-      weft_provider::serializeProgram, configureCPUTarget};
+      weft_provider::serializeProgram, configureCPUWithLayoutBinding};
 #else
   return {"weft", "weft", false,
       std::make_shared<CPUBackend>(false, "weft.json", cpu::ImplementationRegistry{},
                                   cpu::CPUProgramStage::Values, nullptr),
-      nullptr, nullptr, nullptr, nullptr, configureCPUTarget};
+      nullptr, nullptr, nullptr, nullptr, configureCPUWithLayoutBinding};
 #endif
 }
 }

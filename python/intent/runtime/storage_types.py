@@ -8,6 +8,11 @@ _NUMPY_TYPES = {
 _LOW_PRECISION_TYPES = {
     "bf16": "bfloat16", "f8e4m3fn": "float8_e4m3fn", "f8e5m2": "float8_e5m2",
 }
+_ELEMENTS = {name: element for element, name in (_NUMPY_TYPES | _LOW_PRECISION_TYPES).items()}
+
+
+def numpy_element(dtype):
+    return _ELEMENTS.get(dtype.name)
 
 
 def numpy_dtype(element):

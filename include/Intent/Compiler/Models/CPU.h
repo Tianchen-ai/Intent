@@ -25,5 +25,6 @@ struct CPUBackend final : ExecutionModel {
   ProgramPipeline pipeline;
 };
 mlir::LogicalResult configureCPUTarget(mlir::ModuleOp, Request &);
+mlir::LogicalResult configureCPUWithLayoutBinding(mlir::ModuleOp, Request &);
 } // namespace intent::compiler
 #endif

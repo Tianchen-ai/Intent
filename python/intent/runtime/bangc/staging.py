@@ -4,7 +4,6 @@ from .buffer import DeviceBuffer, DeviceView, ELEMENT_BYTES
 
 class HostStorage:
     copies_host = True
-    contiguous_views = False
 
     def __init__(self, device, neuware):
         self.device, self.neuware = device, neuware

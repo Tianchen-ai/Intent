@@ -19,6 +19,7 @@ struct ProgramModules {
 };
 
 mlir::FailureOr<ProgramModules> getProgramModules(mlir::ModuleOp program);
+bool taskArgumentHasStrides(::weft::kernel::KernelOp kernel, unsigned index);
 mlir::FailureOr<mlir::DenseI32ArrayAttr>
 taskCallAccesses(::weft::kernel::KernelOp kernel);
 mlir::LogicalResult verifyProgram(mlir::ModuleOp program);

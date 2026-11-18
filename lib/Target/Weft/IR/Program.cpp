@@ -22,9 +22,11 @@ bool matchesDenseStorage(Type element, StringRef family) {
 
 LogicalResult verifyTaskSignature(func::FuncOp declaration, wk::KernelOp kernel) {
   Block &body = kernel.getBody().front();
-  if (!declaration.getResultTypes().empty() || declaration.getNumArguments() !=
-      body.getNumArguments() + kernel.getShapeSymbols().size())
-    return declaration.emitError("host task signature disagrees with its Weft arguments and shape parameters");
+  auto accesses = taskCallAccesses(kernel);
+  if (failed(accesses)) return failure();
+  if (!declaration.getResultTypes().empty() ||
+      declaration.getNumArguments() != static_cast<unsigned>(accesses->size()))
+    return declaration.emitError("host task signature disagrees with its Weft views, shapes and strides");
   for (auto [index, argument] : llvm::enumerate(body.getArguments())) {
     auto view = dyn_cast<wk::ViewType>(argument.getType());
     auto memory = dyn_cast<MemRefType>(declaration.getArgumentTypes()[index]);
@@ -54,11 +56,16 @@ LogicalResult verifyTaskSignature(func::FuncOp declaration, wk::KernelOp kernel)
   }
   for (Type type : declaration.getArgumentTypes().drop_front(body.getNumArguments()))
     if (!type.isIndex())
-      return declaration.emitError("Weft shape parameters require host index arguments");
+      return declaration.emitError("Weft shapes and strides require host index arguments");
   return success();
 }
 
 } // namespace
+
+bool taskArgumentHasStrides(wk::KernelOp kernel, unsigned index) {
+  auto declared = kernel.getStridedArgsAttr();
+  return declared && llvm::is_contained(declared, kernel.getArgNames()[index]);
+}
 
 FailureOr<DenseI32ArrayAttr> taskCallAccesses(wk::KernelOp kernel) {
   SmallVector<int32_t> modes;
@@ -73,6 +80,9 @@ FailureOr<DenseI32ArrayAttr> taskCallAccesses(wk::KernelOp kernel) {
   if (modes.size() != kernel.getBody().front().getNumArguments())
     return kernel.emitError("task access modes do not match its actual arguments"), failure();
   modes.append(kernel.getShapeSymbols().size(), 0);
+  for (auto [index, argument] : llvm::enumerate(kernel.getBody().front().getArguments()))
+    if (taskArgumentHasStrides(kernel, index))
+      modes.append(cast<wk::ViewType>(argument.getType()).getShape().size(), 0);
   return DenseI32ArrayAttr::get(kernel.getContext(), modes);
 }
 
@@ -168,10 +178,10 @@ LogicalResult verifyProgram(ModuleOp program) {
       called = true;
       wrongEntry |= call->getParentOfType<func::FuncOp>() != entry;
       wrongAccess |= call.getAccessesAttr() != *accesses;
-      for (Value argument : call.getArguments()) {
-        if (!isa<MemRefType>(argument.getType()) ||
-            cpu::isContiguousDescriptor(argument)) continue;
-        call.emitError("native task argument requires a proved contiguous descriptor; its Weft view ABI does not carry strides");
+      for (auto [index, argument] : llvm::enumerate(call.getArguments().take_front(
+               kernel.getBody().front().getNumArguments()))) {
+        if (taskArgumentHasStrides(kernel, index) || cpu::isContiguousDescriptor(argument)) continue;
+        call.emitError("dense task argument without a stride ABI requires contiguous storage");
         wrongLayout = true;
       }
     });

@@ -21,7 +21,7 @@ class Construction {
 public:
   Construction(CanonicalKernelAnalysis &analysis, ModuleOp physical,
                CPUEntryLayout entryLayout);
-  LogicalResult lower(func::FuncOp source);
+  LogicalResult lower(func::FuncOp source, ArrayRef<std::string> stridedParameters);
 
 private:
   // Construction.cpp

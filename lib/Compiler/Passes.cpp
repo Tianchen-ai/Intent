@@ -46,7 +46,7 @@ public:
   using Base::Base;
   void runOnOperation() final {
     if (failed(lowerCanonicalKIRToCPU(getOperation(), stridedInputs
-            ? CPUEntryLayout::StridedInputs : CPUEntryLayout::Contiguous)))
+            ? CPUEntryLayout::StridedInputs : CPUEntryLayout::Contiguous, stridedParameters)))
       signalPassFailure();
   }
 };

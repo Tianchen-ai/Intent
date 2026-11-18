@@ -1,10 +1,9 @@
 """Host storage adapter; ordinary JIT still accepts existing native buffers."""
-from .buffer import Buffer, ELEMENT_BYTES
+from .buffer import Buffer
 
 
 class HostStorage:
     copies_host = False
-    contiguous_views = True
 
     def accepts(self, value):
         return isinstance(value, Buffer)
@@ -19,12 +18,10 @@ class HostStorage:
         return allocation
 
     def view(self, allocation, shape, strides, offset, element):
-        from math import prod
-        width = ELEMENT_BYTES[element]
-        return Buffer(allocation[offset * width:(offset + prod(shape)) * width], shape=shape, dtype=element)
+        return Buffer(allocation, shape=shape, dtype=element, strides=strides, offset=offset)
 
     def snapshot(self, value):
-        owner = memoryview(value.storage.obj).cast("B") if isinstance(value, Buffer) else memoryview(value.obj).cast("B")
+        owner = memoryview(value.storage_span.obj if isinstance(value, Buffer) else value.obj).cast("B")
         saved = bytes(owner)
         def restore():
             owner[:] = saved
@@ -40,6 +37,8 @@ class HostStorage:
         from ..storage_types import numpy_dtype
         if not self.accepts(value):
             raise TypeError("Weft initialization requires its public CPU Buffer")
+        if not value.canonical:
+            raise NotImplementedError("native Weft initialization requires a contiguous destination")
         encoded = np.asarray(scalar, dtype=numpy_dtype(value.dtype)).reshape(()).tobytes()
         native = NativeMemoryFill(value.pointer, value.nbytes // len(encoded), encoded,
                                   (value,), lambda: None)

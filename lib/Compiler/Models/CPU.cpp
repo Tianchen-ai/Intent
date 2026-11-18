@@ -6,6 +6,7 @@
 #include "Intent/Dialect/CPU/IR/CPUAttrs.h"
 #include "Intent/Dialect/CPU/Transforms/Implementation/Implementation.h"
 #include "Intent/Dialect/CPU/Transforms/Passes.h"
+#include "Intent/Dialect/Intent/IR/Interface.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Support/Path.h"
 #include "mlir/AsmParser/AsmParser.h"
@@ -14,11 +15,27 @@ using namespace mlir;
 
 namespace intent::compiler {
 
-LogicalResult configureCPUTarget(ModuleOp module, Request &request) {
+static LogicalResult configureCPU(ModuleOp module, Request &request,
+                                  ArrayRef<StringRef> optionalFields) {
   module.getContext()->getOrLoadDialect<cpu::IntentCPUDialect>();
   auto options = readTargetOptions(module, request,
-      {"vector", "contractions", "execution"});
+      {"vector", "contractions", "execution"}, optionalFields);
   if (failed(options)) return failure();
+  if (options->get("strided_inputs")) {
+    auto strided = options->getArray("strided_inputs");
+    if (!strided || strided->empty())
+      return module.emitError("strided_inputs requires the names of the strided input views");
+    Builder builder(module.getContext());
+    SmallVector<Attribute> names;
+    for (auto &item : *strided) {
+      auto name = item.getAsString();
+      if (!name || name->empty() || llvm::is_contained(names, builder.getStringAttr(*name)))
+        return module.emitError("strided_inputs requires distinct nonempty parameter names");
+      names.push_back(builder.getStringAttr(*name));
+    }
+    request.bindings = builder.getDictionaryAttr(
+        {builder.getNamedAttr("strided_inputs", builder.getArrayAttr(names))});
+  }
   auto vector = options->getObject("vector"), execution = options->getObject("execution");
   auto contractions = options->getArray("contractions");
   if (!vector || vector->size() != 2 || !execution || execution->size() != 2 || !contractions)
@@ -55,9 +72,19 @@ LogicalResult configureCPUTarget(ModuleOp module, Request &request) {
   return success(static_cast<bool>(request.target));
 }
 
-void CPUBackend::buildConstruction(OpPassManager &manager, const Request &) const {
+LogicalResult configureCPUTarget(ModuleOp module, Request &request) {
+  return configureCPU(module, request, {});
+}
+
+LogicalResult configureCPUWithLayoutBinding(ModuleOp module, Request &request) {
+  return configureCPU(module, request, {"strided_inputs"});
+}
+
+void CPUBackend::buildConstruction(OpPassManager &manager, const Request &request) const {
   ConstructCPUOptions options;
   options.stridedInputs = stridedInputs;
+  if (auto names = request.bindings ? request.bindings.getAs<ArrayAttr>("strided_inputs") : ArrayAttr{})
+    for (auto name : names) options.stridedParameters.push_back(cast<StringAttr>(name).getValue().str());
   manager.addPass(createConstructCPU(options));
 }
 
@@ -83,8 +110,25 @@ LogicalResult CPUBackend::verifySharedInput(ModuleOp module, const Request &requ
     return module.emitError("shared CPU capabilities disagree with the requested CPU resources");
   for (auto function : module.getOps<func::FuncOp>()) {
     auto requirements = function->getAttrOfType<cpu::EntryRequirementsAttr>(cpu::entryRequirementsAttr);
-    if (!requirements || requirements.getContiguousViews() != !stridedInputs)
+    auto names = request.bindings ? request.bindings.getAs<ArrayAttr>("strided_inputs") : ArrayAttr{};
+    if (!requirements || requirements.getContiguousViews() != (!stridedInputs && !names))
       return function.emitError("shared CPU entry layout disagrees with the selected provider");
+    if (names) {
+      auto interface = getPublicInterface(function);
+      size_t matched = 0;
+      for (auto [index, field] : llvm::enumerate(interface.getArguments())) {
+        auto view = getPublicView(interface, index);
+        auto parameter = cast<PublicParameterAttr>(field);
+        bool expected = llvm::is_contained(names, parameter.getName());
+        bool strided = view && view.getAccess() == 0 &&
+            isa<StridedLayoutAttr>(cast<MemRefType>(function.getArgument(index).getType()).getLayout());
+        if (strided != expected)
+          return function.emitError("shared CPU parameter layout differs from its requested binding");
+        matched += expected;
+      }
+      if (matched != names.size())
+        return function.emitError("requested strided parameter is missing from the shared CPU entry");
+    }
   }
   auto registry = cpu::lookupImplementationProvider(module, provider);
   if (failed(registry)) return failure();

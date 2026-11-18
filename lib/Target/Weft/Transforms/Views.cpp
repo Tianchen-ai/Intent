@@ -172,8 +172,6 @@ private:
         auto origins = storage.origins(value);
         if (!origins.complete || origins.values.empty())
           return emitError(value.getLoc(), "Weft task capture has unresolved storage origins"), failure();
-        if (!cpu::isContiguousDescriptor(value))
-          return emitError(value.getLoc(), "Weft task capture requires a proved contiguous descriptor; its native view ABI does not carry strides"), failure();
       }
       return capture(value);
     }

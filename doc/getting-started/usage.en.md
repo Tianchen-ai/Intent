@@ -99,6 +99,12 @@ Retain produced buffers with `retain_outputs()`. Complete device operations befo
 `close()` or leaving the context manager. This explicit transfer scope neither
 changes ordinary JIT device checks nor infers an ABI or kernel sequence.
 
+For Weft, a dense read-only input can use nonnegative element strides, including
+a transposed or padded slice and a broadcast stride of zero. The JIT retains a
+specialization for the set of strided input parameters. Calls with different
+pitches reuse that specialization and pass their actual strides to the native
+task. Packed records, writable outputs and InOut state require contiguous storage.
+
 ## Installed author programs
 
 Pass `--tuning-config /path/to/config.json` to use the same complete configuration

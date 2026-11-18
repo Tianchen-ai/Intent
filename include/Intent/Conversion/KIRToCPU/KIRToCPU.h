@@ -7,7 +7,8 @@ namespace intent {
 enum class CPUEntryLayout { Contiguous, StridedInputs };
 
 mlir::LogicalResult lowerCanonicalKIRToCPU(mlir::ModuleOp module,
-                                         CPUEntryLayout entryLayout);
+                                         CPUEntryLayout entryLayout,
+                                         llvm::ArrayRef<std::string> stridedParameters);
 }
 
 #endif

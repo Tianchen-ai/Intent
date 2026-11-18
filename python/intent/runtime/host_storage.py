@@ -9,7 +9,6 @@ from typing import Protocol
 
 class HostStorage(Protocol):
     copies_host: bool
-    contiguous_views: bool
 
     def accepts(self, value: object) -> bool: ...
     def allocate(self, shape: tuple[int, ...], element: str) -> object: ...
