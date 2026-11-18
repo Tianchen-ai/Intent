@@ -158,6 +158,60 @@ struct Microprogram {
   }
 };
 
+// Each of the eight scale groups has its own exact i32 dot. Keep the group
+// and member axes visible together so the CPU backend can map either to
+// vector lanes. Floats still enter only after the record's integer reduction.
+Value vectorScaledDot(Microprogram &p, Value weight, Value activation) {
+  auto &b = p.b;
+  Type u8 = integer(b, 8, false), i32 = integer(b, 32, true);
+  int64_t group = p.nextAxis++, member = p.nextAxis++;
+  auto axes = [&](ArrayRef<int64_t> shape, ArrayRef<int64_t> ids) {
+    return cast<wk::ValueType>(p.valueType(u8, shape, ids));
+  };
+  Value groups = b.create<wk::IotaOp>(p.loc, axes({8}, {group}), 0, 8);
+  Value lanes = b.create<wk::IotaOp>(p.loc, axes({32}, {member}), 0, 32);
+  Value begin = p.binary(groups, p.integerConstant(8, false, 32), "mul");
+  Value coordinates = b.create<wk::BinaryOp>(p.loc, axes({8, 32}, {group, member}),
+                                              begin, lanes, "add");
+  Value lhs = p.gather(p.field(weight, "q", integer(b, 4, false), 256), coordinates);
+  Value rhs = p.gather(p.field(activation, "q", integer(b, 8, true), 256), coordinates);
+  Value partial = b.create<wk::ContractOp>(p.loc, p.valueType(i32, {8}, {group}),
+      lhs, rhs, p.array({member}), TypeAttr::get(i32), StringAttr());
+  Value scales = p.convert(p.gather(p.field(weight, "sc", integer(b, 6, false), 8),
+                                    groups), i32);
+  return p.reduce(p.binary(partial, scales, "mul"), "add", 0);
+}
+
+Value matrixScaledDot(Microprogram &p, Value weight, Value activation, int64_t columns,
+                      int64_t rowAxis, int64_t member, int64_t depth) {
+  auto &b = p.b;
+  Type i32 = integer(b, 32, true);
+  Type output = p.valueType(i32, {columns}, {rowAxis});
+  Value initial = b.create<wk::NewOp>(p.loc, output, p.integerConstant(32, true, 0), true);
+  return p.level(p.rootDomain(), member, 256, 32, ValueRange{initial},
+      [&](Value domain, Value point, ValueRange carried) {
+        Value wq = p.project(p.field(weight, "q", integer(b, 4, false), 256), point, 32, "domain");
+        Value xq = p.project(p.field(activation, "q", integer(b, 8, true), 256), point, 32, "domain");
+        int64_t mAxis = p.nextAxis++;
+        Type matrix = p.valueType(i32, {1, columns}, {mAxis, rowAxis});
+        Value zero = b.create<wk::NewOp>(p.loc, matrix, p.integerConstant(32, true, 0), true);
+        auto product = p.level(domain, member, 32, depth, ValueRange{zero},
+            [&](Value, Value inner, ValueRange accumulator) {
+              Value a = p.project(xq, inner, depth, "domain");
+              Value weights = p.convert(p.project(wq, inner, depth, "domain"), integer(b, 8, true));
+              Value left = b.create<wk::ReshapeOp>(p.loc,
+                  p.valueType(integer(b, 8, true), {1, depth}, {mAxis, member}), a, p.array({member}));
+              Value term = b.create<wk::OuterContractOp>(p.loc, matrix, left, weights,
+                  p.array({member}), TypeAttr::get(i32), b.getStringAttr("matrix"));
+              return SmallVector<Value>{p.binary(accumulator[0], term, "add")};
+            });
+        Value partial = b.create<wk::ReshapeOp>(p.loc, output, product[0], p.array({mAxis, rowAxis}));
+        Value sc = p.convert(p.project(p.field(weight, "sc", integer(b, 6, false), 8),
+                                        point, 0, "group_index"), i32);
+        return SmallVector<Value>{p.binary(carried[0], p.binary(partial, sc, "mul"), "add")};
+      })[0];
+}
+
 }
 
 wk::EncodingType quantEncoding(OpBuilder &b, intent::QuantFormat format) {
@@ -309,35 +363,8 @@ LogicalResult expandQuantizedDot(cpu::QuantizedDotOp operation,
     Value w = p.load(p.record(lhs, records.getInductionVar()), quantEncoding(b, intent::QuantFormat::Q4K));
     Value x = p.load(p.record(rhs, records.getInductionVar()), quantEncoding(b, intent::QuantFormat::Q8K));
     int64_t axis = cast<wk::ValueType>(w.getType()).getAxisIds().asArrayRef().back();
-    Type i32 = integer(b, 32, true);
-    auto partials = p.level(p.rootDomain(), axis, 256, 32,
-        ValueRange{state(i32, p.integerConstant(32, true, 0))},
-        [&](Value domain, Value point, ValueRange carried) {
-      Value wq = p.project(p.field(w, "q", integer(b, 4, false), 256), point, 32, "domain");
-      Value xq = p.project(p.field(x, "q", integer(b, 8, true), 256), point, 32, "domain");
-      Value partial;
-      if (grouped) {
-        int64_t mAxis = nextAxis++;
-        Type matrix = p.valueType(i32, {1, columns}, {mAxis, rowAxis});
-        Value zero = b.create<wk::NewOp>(p.loc, matrix, p.integerConstant(32, true, 0), true);
-        auto product = p.level(domain, axis, 32, microDepth, ValueRange{zero},
-            [&](Value, Value inner, ValueRange accumulator) {
-          Value a = p.project(xq, inner, microDepth, "domain");
-          Value weights = p.convert(p.project(wq, inner, microDepth, "domain"), integer(b, 8, true));
-          Value left = b.create<wk::ReshapeOp>(p.loc,
-              p.valueType(integer(b, 8, true), {1, microDepth}, {mAxis, axis}), a, p.array({axis}));
-          Value term = b.create<wk::OuterContractOp>(p.loc, matrix, left, weights, p.array({axis}), TypeAttr::get(i32), b.getStringAttr("matrix"));
-          return SmallVector<Value>{p.binary(accumulator[0], term, "add")};
-        });
-        partial = b.create<wk::ReshapeOp>(p.loc, p.valueType(i32, {columns}, {rowAxis}),
-            product[0], p.array({mAxis, rowAxis}));
-      } else {
-        partial = b.create<wk::ContractOp>(p.loc, i32, wq, xq, p.array({axis}), TypeAttr::get(i32), StringAttr());
-      }
-      Value sc = p.convert(p.project(p.field(w, "sc", integer(b, 6, false), 8), point, 0, "group_index"), integer(b, 32, true));
-      return SmallVector<Value>{p.binary(carried[0], p.binary(partial, sc, "mul"), "add")};
-    });
-    Value scaled = partials[0];
+    Value scaled = grouped ? matrixScaledDot(p, w, x, columns, rowAxis, axis, microDepth)
+                           : vectorScaledDot(p, w, x);
     Value groups = b.create<wk::IotaOp>(p.loc,
         cast<wk::ValueType>(p.valueType(integer(b, 32, false), {8}, {nextAxis++})), 0, 8);
     Value m = p.convert(p.gather(p.field(w, "m", integer(b, 6, false), 8), groups), integer(b, 32, true));
