@@ -1,4 +1,5 @@
 #include "Intent/Target/Mojo/Transforms/Passes.h"
+#include "Intent/Transforms/Components.h"
 #include "Legalize.h"
 #include "Intent/Dialect/CPU/IR/CPUDialect.h"
 #include "Intent/Dialect/CPU/Analysis/PhysicalProgram.h"
@@ -101,6 +102,10 @@ public:
 
 void registerMojoPasses() {
   registerMojoTransformPasses();
+  registerTransformation({"mojo", "buffers", true}, createMojoMaterializeProgram());
+  registerTransformation({"mojo", "buffers", false}, createMojoFusePrivateComputations());
+  registerTransformation({"mojo", "buffers", true}, createMojoVectorizeProgram());
+  registerTransformation({"mojo", "native", true}, createMojoFinalizeProgram());
   PassPipelineRegistration<>("intent-mojo-pipeline", "Legalize a configured CPU program for Mojo",
       buildMojoPipeline);
 }
@@ -110,13 +115,13 @@ void buildMojoPipeline(OpPassManager &manager) {
     manager.addPass(createCanonicalizerPass());
     manager.addPass(createCSEPass());
   };
-  manager.addPass(createMojoMaterializeProgram());
+  addTransformation(manager, {"mojo", "buffers", true}, createMojoMaterializeProgram());
   normalize();
-  manager.addPass(createMojoFusePrivateComputations());
+  addTransformation(manager, {"mojo", "buffers", false}, createMojoFusePrivateComputations());
   normalize();
-  manager.addPass(createMojoVectorizeProgram());
+  addTransformation(manager, {"mojo", "buffers", true}, createMojoVectorizeProgram());
   normalize();
-  manager.addPass(createMojoFinalizeProgram());
+  addTransformation(manager, {"mojo", "native", true}, createMojoFinalizeProgram());
 }
 
 } // namespace intent::mojo
