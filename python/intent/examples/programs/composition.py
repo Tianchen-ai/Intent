@@ -37,6 +37,39 @@ class Histogram:
 
 
 @dataclass
+class LinearCrossEntropy:
+    """Chunk logits and probabilities with one reusable author workspace."""
+    mutable_inputs: ClassVar[tuple[int, ...]] = ()
+    linear: object
+    probability: object
+    mean: object
+    chunk: int = 1024
+
+    def prepare(self, hidden, weight, labels):
+        if self.chunk <= 0:
+            raise ValueError("LinearCrossEntropy requires a positive chunk size")
+        rows, vocabulary = hidden.shape[0], weight.shape[0]
+        chunk = min(rows, self.chunk)
+        allocate = getattr(self.linear, "empty_like", empty_like)
+        scratch = allocate(hidden, (chunk, vocabulary), dtype="bf16")
+        losses = allocate(hidden, (rows,), dtype="f32")
+        mean = allocate(hidden, (1,), dtype="f32")
+        calls = []
+        for begin in range(0, rows, self.chunk):
+            end = min(begin + self.chunk, rows)
+            piece = scratch[:end - begin]
+            calls.append(self.linear.prepare(hidden[begin:end], weight, outputs=(piece,)))
+            calls.append(self.probability.prepare(piece, labels[begin:end], outputs=(losses[begin:end],)))
+        calls.append(self.mean.prepare(losses, outputs=(mean,)))
+        return PreparedSequence(calls, outputs=(losses, mean, scratch), owners=(scratch,))
+
+    def run(self, hidden, weight, labels):
+        call = self.prepare(hidden, weight, labels)
+        call.launch()
+        return call.result()
+
+
+@dataclass
 class GroupNormBackward:
     mutable_inputs: ClassVar[tuple[int, ...]] = ()
     dx: object
