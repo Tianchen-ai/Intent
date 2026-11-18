@@ -43,6 +43,10 @@ MLIR 名称、owner、阶段、必需属性和说明。组件定义与所属 pip
 多参与者路径保留原子操作。必需的 task dispatch lowering 消费当前 IR 的 worker count，
 Mojo 与 Weft serializer 不自行按硬件最大线程数派发。
 
+`intent-mojo-vectorize-reduction-panels` 沿连续输出轴把多个独立结果保存在向量寄存器中，
+遍历归约成员时，每个 lane 保留原标量 combine 和 predicate。变换检查输出归属和 stride，
+使用已选配置中的 `vector_width` 和 `register_replicas`。关闭后由 Mojo 的通用路径降低原归约。
+
 `intent-weft-tile-scans` 消费已绑定的有限 panel 参数，把 source-form prefix 划为
 有界 scan、块间 carry 和尾部；块内直接交给 Canonical Weft ScanOp，包含原 combine、
 inclusive/exclusive 与 reverse 语义。组件关闭后仍可使用完整顺序遍历。

@@ -3,6 +3,7 @@
 #include "Legalize.h"
 #include "Intent/Dialect/CPU/IR/CPUDialect.h"
 #include "Intent/Dialect/CPU/Analysis/PhysicalProgram.h"
+#include "Intent/Dialect/CPU/Transforms/Structure/ParallelReductions.h"
 #include "Intent/Dialect/CPU/Transforms/Configuration/FinalizedCandidates.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -21,6 +22,7 @@ using namespace mlir;
 namespace intent::mojo {
 
 #define GEN_PASS_DEF_MOJOMATERIALIZEPROGRAM
+#define GEN_PASS_DEF_MOJOVECTORIZEREDUCTIONPANELS
 #define GEN_PASS_DEF_MOJOFUSEPRIVATECOMPUTATIONS
 #define GEN_PASS_DEF_MOJOVECTORIZEPROGRAM
 #define GEN_PASS_DEF_MOJOFINALIZEPROGRAM
@@ -47,6 +49,23 @@ LogicalResult finishGroup(ModuleOp module, StringRef name, LogicalResult result,
     return module.emitError() << "Mojo postcondition failed: " << name;
   return success();
 }
+
+class VectorizeReductionPanelsPass : public impl::MojoVectorizeReductionPanelsBase<VectorizeReductionPanelsPass> {
+  void runOnOperation() final {
+    auto module = getOperation();
+    if (failed(verifyGroupInput(module, getArgument()))) return signalPassFailure();
+    auto result = module.walk([&](linalg::GenericOp op) {
+      auto binding = op->getAttrOfType<cpu::ImplementationAttr>("intent_cpu.implementation");
+      if (!binding || binding.getName().getValue() != "mojo.vector" ||
+          !op.getNumReductionLoops() || op.getNumParallelLoops() < 2)
+        return WalkResult::advance();
+      return failed(cpu::materializeReductionPanel(op, binding)) ? WalkResult::interrupt()
+                                                                : WalkResult::advance();
+    });
+    if (failed(finishGroup(module, getArgument(), failure(result.wasInterrupted()))))
+      signalPassFailure();
+  }
+};
 
 class MaterializeProgramPass : public impl::MojoMaterializeProgramBase<MaterializeProgramPass> {
 public:
@@ -102,6 +121,7 @@ public:
 
 void registerMojoPasses() {
   registerMojoTransformPasses();
+  registerTransformation({"mojo", "buffers", false}, createMojoVectorizeReductionPanels());
   registerTransformation({"mojo", "buffers", true}, createMojoMaterializeProgram());
   registerTransformation({"mojo", "buffers", false}, createMojoFusePrivateComputations());
   registerTransformation({"mojo", "buffers", true}, createMojoVectorizeProgram());
@@ -115,6 +135,7 @@ void buildMojoPipeline(OpPassManager &manager) {
     manager.addPass(createCanonicalizerPass());
     manager.addPass(createCSEPass());
   };
+  addTransformation(manager, {"mojo", "buffers", false}, createMojoVectorizeReductionPanels());
   addTransformation(manager, {"mojo", "buffers", true}, createMojoMaterializeProgram());
   normalize();
   addTransformation(manager, {"mojo", "buffers", false}, createMojoFusePrivateComputations());

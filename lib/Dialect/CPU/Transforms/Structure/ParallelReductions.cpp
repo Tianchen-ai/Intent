@@ -4,6 +4,7 @@
 #include "../Vector/ProducerVectorization.h"
 #include "Intent/Dialect/CPU/Analysis/ExtentRelations.h"
 #include "Intent/Dialect/CPU/Analysis/Storage.h"
+#include "Intent/Dialect/CPU/Analysis/ViewRelations.h"
 #include "Intent/Dialect/CPU/IR/CPUAttrs.h"
 #include "Intent/Dialect/CPU/Transforms/Implementation/Implementation.h"
 #include "Intent/Dialect/CPU/Transforms/Structure/LoopBuilders.h"
@@ -59,15 +60,15 @@ queryParallelReduction(linalg::GenericOp operation) {
       result.reductionAxes.push_back(axis);
     else return std::nullopt;
   }
-  if (free.size() != 1 || result.reductionAxes.empty()) return std::nullopt;
-  result.freeAxis = free.front();
+  if (free.empty() || result.reductionAxes.empty()) return std::nullopt;
+  result.freeAxis = free.back();
+  llvm::append_range(result.outerAxes, ArrayRef(free).drop_back());
   auto maps = operation.getIndexingMapsArray();
   if (llvm::any_of(maps, [](AffineMap map) {
         return map.getNumSymbols() || !map.isProjectedPermutation(true);
       })) return std::nullopt;
   auto dimensions = loopDimensions(operation);
   if (dimensions.size() != operation.getNumLoops()) return std::nullopt;
-  auto [bound, boundAxis] = dimensions[result.freeAxis];
   Block &body = operation.getRegion().front();
   unsigned inputs = operation.getNumDpsInputs();
   for (auto [number, output] : llvm::enumerate(operation.getOutputs())) {
@@ -75,15 +76,19 @@ queryParallelReduction(linalg::GenericOp operation) {
     SmallVector<int64_t> strides;
     int64_t offset;
     AffineMap map = maps[inputs + number];
-    if (!type || type.getRank() != 1 || !numeric(type.getElementType()) ||
+    if (!type || type.getRank() != static_cast<int64_t>(free.size()) || !numeric(type.getElementType()) ||
         type.getElementType().isInteger(1) ||
-        failed(type.getStridesAndOffset(strides, offset)) || strides[0] != 1 ||
-        map.getNumResults() != 1 ||
-        map.getResult(0) != getAffineDimExpr(result.freeAxis, operation.getContext()) ||
-        body.getArgument(inputs + number).use_empty() ||
-        !haveEqualExtents(ValueBoundsConstraintSet::Variable(bound, boundAxis),
-                          ValueBoundsConstraintSet::Variable(output, 0)))
+        failed(type.getStridesAndOffset(strides, offset)) || strides.back() != 1 ||
+        (!result.outerAxes.empty() && !isContiguousDescriptor(output)) ||
+        map.getNumResults() != free.size() || body.getArgument(inputs + number).use_empty())
       return std::nullopt;
+    for (auto [axis, loop] : llvm::enumerate(free)) {
+      auto [bound, boundAxis] = dimensions[loop];
+      if (map.getResult(axis) != getAffineDimExpr(loop, operation.getContext()) ||
+          !haveEqualExtents(ValueBoundsConstraintSet::Variable(bound, boundAxis),
+                            ValueBoundsConstraintSet::Variable(output, axis)))
+        return std::nullopt;
+    }
   }
   for (auto [number, input] : llvm::enumerate(operation.getInputs())) {
     auto type = dyn_cast<MemRefType>(input.getType());
@@ -128,7 +133,7 @@ LogicalResult orientParallelReductions(func::FuncOp function) {
   function.walk([&](linalg::GenericOp operation) { operations.push_back(operation); });
   for (auto operation : operations) {
     auto reduction = queryParallelReduction(operation);
-    if (!reduction || reduction->freeAxis == 0) continue;
+    if (!reduction || !reduction->outerAxes.empty() || reduction->freeAxis == 0) continue;
     SmallVector<unsigned> permutation{reduction->freeAxis};
     llvm::append_range(permutation, reduction->reductionAxes);
     IRRewriter rewriter(operation.getContext());
@@ -158,17 +163,18 @@ WorksetRows parallelReductionWorkset(linalg::GenericOp operation,
   replicas = std::min(replicas,
       std::max<int64_t>(1, capabilities.getPrivateBytes() / stateBytes));
   if (auto extent = constantExtentUpperBound(
-          ValueBoundsConstraintSet::Variable(operation.getOutputs().front(), 0)))
+          ValueBoundsConstraintSet::Variable(operation.getOutputs().front(),
+              cast<MemRefType>(operation.getOutputs().front().getType()).getRank() - 1)))
     replicas = std::min(replicas, std::max<int64_t>(1, *extent / width));
   return {width, replicas};
 }
 
 FailureOr<bool> materializeParallelReduction(linalg::GenericOp operation,
     int64_t width, int64_t replicas, OpBuilder::Listener *listener,
-    Value completedSupply, ArrayRef<Operation *> supplyReaders) {
+    Value completedSupply, ArrayRef<Operation *> supplyReaders, bool outputPanels) {
   if (width <= 1) return false;
   auto reduction = queryParallelReduction(operation);
-  if (!reduction) return false;
+  if (!reduction || outputPanels != !reduction->outerAxes.empty()) return false;
   auto workset = parallelReductionWorkset(operation, width, replicas);
   if (!workset.unit)
     return operation.emitError("independent reduction grouping requires a representable positive width"), failure();
@@ -269,12 +275,18 @@ FailureOr<bool> materializeParallelReduction(linalg::GenericOp operation,
         groupCoordinates.push_back(group ? add(b, loc, coordinate, index(b, loc, group * lanes))
                                          : coordinate);
       SmallVector<Value> initial;
+      auto outputIndices = [&](Value selected) {
+        SmallVector<Value> indices;
+        for (unsigned axis : reduction->outerAxes) indices.push_back(position[axis]);
+        indices.push_back(selected);
+        return indices;
+      };
       for (Value selected : groupCoordinates)
         for (Value output : operation.getOutputs()) {
           auto type = cast<MemRefType>(output.getType());
           Value value = lanes ? Value(b.create<vector::LoadOp>(loc,
-              VectorType::get({lanes}, type.getElementType()), output, ValueRange{selected}))
-              : Value(b.create<memref::LoadOp>(loc, output, ValueRange{selected}));
+              VectorType::get({lanes}, type.getElementType()), output, outputIndices(selected)))
+              : Value(b.create<memref::LoadOp>(loc, output, outputIndices(selected)));
           initial.push_back(value);
         }
       unsigned components = operation.getOutputs().size();
@@ -307,11 +319,17 @@ FailureOr<bool> materializeParallelReduction(linalg::GenericOp operation,
       for (auto [group, selected] : llvm::enumerate(groupCoordinates))
         for (auto [component, output] : llvm::enumerate(operation.getOutputs())) {
           Value value = (*final)[group * components + component];
-          if (lanes) b.create<vector::StoreOp>(loc, value, output, ValueRange{selected});
-          else b.create<memref::StoreOp>(loc, value, output, ValueRange{selected});
+          if (lanes) b.create<vector::StoreOp>(loc, value, output, outputIndices(selected));
+          else b.create<memref::StoreOp>(loc, value, output, outputIndices(selected));
         }
       return success();
     };
+    OpBuilder::InsertionGuard outerScope(b);
+    for (unsigned axis : reduction->outerAxes) {
+      auto outer = b.create<scf::ForOp>(loc, zero, sizes[axis], one);
+      position[axis] = outer.getInductionVar();
+      b.setInsertionPointToStart(outer.getBody());
+    }
     Value extent = sizes[reduction->freeAxis], step = index(b, loc, width);
     Value end = b.create<arith::SubIOp>(loc, extent, b.create<arith::RemSIOp>(loc, extent, step));
     LogicalResult status = success();

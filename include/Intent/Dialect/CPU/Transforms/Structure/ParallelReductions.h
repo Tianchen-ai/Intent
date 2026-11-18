@@ -9,12 +9,14 @@
 namespace intent::cpu {
 
 struct WorksetRows;
+class ImplementationAttr;
 
 // A contiguous output coordinate selects independent states. Reduction axes
 // keep their original relative order; lanes never participate in a horizontal
 // reduction. The proof includes the current buffer aliases and scalar payload.
 struct ParallelReduction {
   unsigned freeAxis;
+  llvm::SmallVector<unsigned> outerAxes;
   llvm::SmallVector<unsigned> reductionAxes;
   llvm::SmallVector<mlir::Value> guardedMemories;
 };
@@ -34,7 +36,11 @@ WorksetRows parallelReductionWorkset(mlir::linalg::GenericOp operation,
 mlir::FailureOr<bool> materializeParallelReduction(
     mlir::linalg::GenericOp operation, int64_t width, int64_t replicas,
     mlir::OpBuilder::Listener *listener, mlir::Value completedSupply = {},
-    llvm::ArrayRef<mlir::Operation *> supplyReaders = {});
+    llvm::ArrayRef<mlir::Operation *> supplyReaders = {}, bool outputPanels = false);
+
+// Used by a provider's optional panel transformation after implementation binding.
+mlir::LogicalResult materializeReductionPanel(mlir::linalg::GenericOp operation,
+                                             ImplementationAttr implementation);
 
 } // namespace intent::cpu
 

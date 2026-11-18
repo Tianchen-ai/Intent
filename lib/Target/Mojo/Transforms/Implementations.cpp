@@ -363,7 +363,7 @@ cpu::ImplementationRegistry implementations() {
       return true;
     }, check, vectorParameters(), {}, {}};
   vector.worksetRows = [](linalg::GenericOp operation, ImplementationAttr binding) {
-    if (queryParallelReduction(operation))
+    if (auto reduction = queryParallelReduction(operation); reduction && reduction->outerAxes.empty())
       return parallelReductionWorkset(operation,
           implementationParameter(binding, "vector_width"),
           implementationParameter(binding, "register_replicas"));

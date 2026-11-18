@@ -46,6 +46,12 @@ preserving its old value. Concurrent participants retain atomics. Required task
 dispatch lowering consumes the worker count in the current IR; Mojo and Weft
 serializers do not dispatch the hardware's maximum thread count independently.
 
+`intent-mojo-vectorize-reduction-panels` keeps a contiguous group of independent
+outputs in vector registers while traversing their reduction members. Each lane
+uses the original scalar combine and predicate. It checks output ownership and
+strides, and uses the selected `vector_width` and `register_replicas`. Disabling
+it leaves the structured reduction for ordinary Mojo lowering.
+
 `intent-weft-tile-scans` consumes the selected finite panel parameter and forms
 bounded prefixes, block carries and tails. Canonical Weft ScanOp owns the native
 collective, with the source combine, inclusive/exclusive and reverse semantics.

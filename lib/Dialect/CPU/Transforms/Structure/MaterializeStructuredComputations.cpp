@@ -706,6 +706,14 @@ LogicalResult materialize(ScanOp operation, int64_t width,
 
 } // namespace
 
+LogicalResult materializeReductionPanel(linalg::GenericOp operation, ImplementationAttr binding) {
+  LoopImplementationListener listener(binding);
+  int64_t width = implementationParameter(binding, "vector_width");
+  int64_t replicas = implementationParameter(binding, "register_replicas");
+  return failure(failed(materializeParallelReduction(operation, width, replicas, &listener,
+                                                     {}, {}, /*outputPanels=*/true)));
+}
+
 LogicalResult materializeStructuredComputation(Operation *operation,
                                               int64_t width,
                                               ImplementationAttr loopBinding) {

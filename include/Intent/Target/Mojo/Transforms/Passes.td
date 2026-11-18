@@ -12,6 +12,16 @@ class MojoTransform<string argument, string summaryText> : Pass<argument, "mlir:
   ];
 }
 
+def MojoVectorizeReductionPanels : MojoTransform<"intent-mojo-vectorize-reduction-panels",
+    "Carry independent output columns in SIMD registers across a reduction"> {
+  let description = [{
+    Consumes bound vector computations with multiple free axes. The contiguous
+    last output axis supplies independent lanes, each retaining the original
+    scalar combine, masks and reduction order. Unmatched operations and the
+    disabled component retain the ordinary structured lowering.
+  }];
+}
+
 def MojoMaterializeProgram : MojoTransform<"intent-mojo-materialize-program",
     "Expand selected CPU implementations and materialize native task dispatch"> {
   let description = [{
