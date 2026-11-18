@@ -1,5 +1,7 @@
 #include "Intent/Target/Weft/Serialization/HostSource.h"
 #include "Intent/Dialect/CPU/IR/CPUOps.h"
+#include "Intent/Dialect/CPU/Analysis/Storage.h"
+#include "Intent/Dialect/CPU/Analysis/ViewRelations.h"
 #include "Intent/Target/Weft/Serialization/HostScalar.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -53,6 +55,15 @@ LogicalResult verifyInvocation(cpu::InvokeOp invocation) {
 
 } // namespace
 
+bool supportsHostCopy(memref::CopyOp copy) {
+  auto function = copy->getParentOfType<func::FuncOp>();
+  if (!function || copy->getParentOfType<cpu::TasksOp>() ||
+      !cpu::isContiguousDescriptor(copy.getSource()) ||
+      !cpu::isContiguousDescriptor(copy.getTarget()))
+    return false;
+  return cpu::StorageAnalysis(function).disjoint(copy.getSource(), copy.getTarget());
+}
+
 HostSourceEmitter::HostSourceEmitter(ModuleOp module, llvm::raw_ostream &output)
     : NativeSourceEmitter(output, NativeSourceSyntax::C), module(module) {}
 
@@ -82,6 +93,23 @@ const OperationEmitters<HostSourceEmitter> &HostSourceEmitter::emitters() {
     };
     result.add<memref::AllocOp>(checkAllocation, allocate);
     result.add<memref::AllocaOp>(checkAllocation, allocate);
+    result.add<memref::CopyOp>(
+        [](memref::CopyOp copy) -> LogicalResult {
+          if (!supportsHostCopy(copy))
+            return copy.emitOpError("native bulk copy requires disjoint, contiguous host views");
+          return success();
+        },
+        [](memref::CopyOp copy, HostSourceEmitter &emitter) {
+          std::string source = emitter.memoryPointer(copy.getSource());
+          std::string target = emitter.memoryPointer(copy.getTarget());
+          std::string bytes = "sizeof(*" + source + ")";
+          for (const auto &size : emitter.memories.at(copy.getSource()).sizes)
+            bytes += " * (size_t)(" + size + ")";
+          // Empty views may have a null base; never form an offset pointer there.
+          emitter.line("if ((" + bytes + ") != 0) memcpy(" + target + ", " +
+                       source + ", " + bytes + ");");
+          return success();
+        });
     result.add<memref::DeallocOp>(
         [](memref::DeallocOp) { return success(); },
         [](memref::DeallocOp operation, HostSourceEmitter &emitter) {

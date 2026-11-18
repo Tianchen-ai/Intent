@@ -2,6 +2,7 @@
 #include "Quantization.h"
 #include "ScalarValues.h"
 #include "Views.h"
+#include "Intent/Target/Weft/Serialization/HostSource.h"
 #include "Intent/Dialect/Intent/IR/Interface.h"
 #include "Intent/Dialect/CPU/Transforms/Structure/Computations.h"
 #include "Intent/Dialect/CPU/Transforms/Storage/Storage.h"
@@ -111,7 +112,7 @@ LogicalResult TaskConversion::normalizeComputations() {
   if (failed(applyPatternsGreedily(sourceFunction, std::move(patterns))))
     return sourceFunction.emitError("Weft scalar descriptor normalization did not converge");
   if (failed(cpu::fuseStructuredComputations(sourceFunction)) ||
-      failed(cpu::fuseIntermediateBuffers(sourceFunction))) return failure();
+      failed(cpu::fuseIntermediateBuffers(sourceFunction, supportsHostCopy))) return failure();
   cpu::reuseMemoryValues(sourceFunction);
   initializeAxes();
   }

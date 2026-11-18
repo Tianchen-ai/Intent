@@ -6,6 +6,7 @@
 #include "Intent/Target/Weft/IR/Program.h"
 #include "Intent/Target/Weft/IR/WeftDialect.h"
 #include "Intent/Target/Weft/Serialization/HostScalar.h"
+#include "Intent/Target/Weft/Serialization/HostSource.h"
 #include "Intent/Dialect/CPU/Analysis/PhysicalProgram.h"
 #include "Intent/Dialect/CPU/Analysis/ExtentRelations.h"
 #include "Intent/Dialect/CPU/Analysis/Storage.h"
@@ -189,7 +190,7 @@ LogicalResult legalizeProgram(ModuleOp program) {
       return failure();
     // Native task outputs can still feed ordinary host copies. Realize those
     // with the shared storage pass before terminal C serialization.
-    if (failed(cpu::fuseIntermediateBuffers(function))) return failure();
+    if (failed(cpu::fuseIntermediateBuffers(function, supportsHostCopy))) return failure();
   }
   if (failed(cpu::lowerOwnership(cpuProgram))) return failure();
   program->setAttr(taskBindingsAttr, ArrayAttr::get(program.getContext(), taskBindings));

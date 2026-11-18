@@ -4,7 +4,11 @@
 #include "Intent/Serialization/NativeSource.h"
 #include "mlir/IR/BuiltinOps.h"
 
+namespace mlir::memref { class CopyOp; }
+
 namespace intent::weft_provider {
+
+bool supportsHostCopy(mlir::memref::CopyOp copy);
 
 // The host surface owns C spelling and its matching legality checks. It borrows
 // ranked-memory metadata and structured control from the common native emitter.

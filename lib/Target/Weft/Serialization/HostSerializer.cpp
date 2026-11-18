@@ -27,7 +27,7 @@ public:
 
   LogicalResult run() {
     output << "#include <stdint.h>\n#include <stddef.h>\n"
-              "#include <stdlib.h>\n#include <math.h>\n";
+              "#include <stdlib.h>\n#include <math.h>\n#include <string.h>\n";
     for (auto function : module.getOps<func::FuncOp>()) {
       if (!function.isExternal()) continue;
       output << "extern void " << function.getName() << "(void *intent_context";

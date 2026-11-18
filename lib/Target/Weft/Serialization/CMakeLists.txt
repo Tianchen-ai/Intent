@@ -2,7 +2,7 @@ add_mlir_library(MLIRIntentWeftHostSource
   HostScalar.cpp
   HostSource.cpp
   PARTIAL_SOURCES_INTENDED
-  LINK_LIBS PUBLIC MLIRIntentCPUDialect MLIRIntentScalarSerialization
+  LINK_LIBS PUBLIC MLIRIntentCPUDialect MLIRIntentCPUAnalysis MLIRIntentScalarSerialization
   MLIRIntentNativeSourceSerialization MLIRFuncDialect MLIRMemRefDialect
   MLIRSCFDialect MLIRIR
 )

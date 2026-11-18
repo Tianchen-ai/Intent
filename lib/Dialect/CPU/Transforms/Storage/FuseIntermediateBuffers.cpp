@@ -353,7 +353,8 @@ bool fuse(memref::AllocOp allocation) {
 
 }
 
-LogicalResult fuseIntermediateBuffers(func::FuncOp function) {
+LogicalResult fuseIntermediateBuffers(func::FuncOp function,
+                                      llvm::function_ref<bool(memref::CopyOp)> retainCopy) {
   auto interface = function->getAttrOfType<EntryRequirementsAttr>(entryRequirementsAttr);
   if (!interface || !interface.getDisjointOutputs())
     return function.emitError("CPU buffer fusion requires established external alias legality");
@@ -361,6 +362,7 @@ LogicalResult fuseIntermediateBuffers(func::FuncOp function) {
   SmallVector<memref::CopyOp> copies;
   function.walk([&](memref::CopyOp copy) { copies.push_back(copy); });
   for (memref::CopyOp copy : copies) {
+    if (retainCopy && retainCopy(copy)) continue;
     OpBuilder builder(copy);
     Location loc = copy.getLoc();
     SmallVector<Value> indices;
