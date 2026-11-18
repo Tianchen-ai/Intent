@@ -1,5 +1,6 @@
 #include "Intent/Dialect/CPU/Transforms/Structure/Computations.h"
 #include "Intent/Dialect/CPU/Transforms/Structure/ParallelReductions.h"
+#include "Intent/Dialect/CPU/Transforms/Structure/ProducerVersions.h"
 #include "Intent/Dialect/CPU/Transforms/Vector/Vectorization.h"
 #include "Intent/Dialect/CPU/IR/CPUOps.h"
 #include "Intent/Dialect/CPU/IR/CPUAttrs.h"
@@ -13,6 +14,7 @@
 #include "Intent/Dialect/CPU/Transforms/Structure/LoopBuilders.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "llvm/ADT/DenseSet.h"
 #include <optional>
 #include <string>
 
@@ -54,6 +56,38 @@ Value subview(OpBuilder &b, Location loc, Value source,
               ArrayRef<OpFoldResult> offsets, ArrayRef<OpFoldResult> sizes) {
   return b.create<memref::SubViewOp>(loc, source, offsets, sizes,
       SmallVector<OpFoldResult>(offsets.size(), b.getIndexAttr(1)));
+}
+
+bool consumesContraction(linalg::GenericOp operation) {
+  StorageAnalysis storage(operation->getParentOfType<func::FuncOp>());
+  SmallVector<std::pair<Value, Operation *>> pending;
+  for (Value input : operation.getInputs()) pending.emplace_back(input, operation);
+  llvm::DenseSet<std::pair<Value, Operation *>> visited;
+  while (!pending.empty()) {
+    auto item = pending.pop_back_val();
+    auto [value, before] = item;
+    if (!visited.insert(item).second) continue;
+    Operation *producer = nullptr;
+    if (isa<MemRefType>(value.getType())) {
+      auto write = findCurrentBufferWrite(value, before, storage);
+      if (!write) continue;
+      producer = write->operation;
+    } else if (isa<RankedTensorType>(value.getType())) producer = value.getDefiningOp();
+    if (!producer) continue;
+    if (auto contraction = dyn_cast<linalg::GenericOp>(producer);
+        contraction && isMatrixContraction(contraction)) return true;
+    // Follow current value/storage dataflow, not operation counts or author names.
+    // A nonlinear epilogue between contractions still shares the surrounding
+    // task and preparation scope; an independent pair of GEMMs does not.
+    if (auto generic = dyn_cast<linalg::GenericOp>(producer)) {
+      for (Value input : generic.getInputs()) pending.emplace_back(input, producer);
+    } else if (auto copy = dyn_cast<memref::CopyOp>(producer)) {
+      pending.emplace_back(copy.getSource(), producer);
+    } else if (isa<RankedTensorType>(value.getType())) {
+      for (Value input : producer->getOperands()) pending.emplace_back(input, producer);
+    }
+  }
+  return false;
 }
 
 } // namespace
@@ -183,19 +217,21 @@ cpu::ImplementationRegistry implementations() {
   ImplementationRegistry result;
   registerQuantizedImplementations(result);
   registerMatrixImplementations(result);
-  for (StringRef family : {"mojo.region_contraction", "mojo.register_contraction"})
+  for (StringRef family : {"mojo.region_contraction", "mojo.register_contraction", "mojo.composed_contraction"})
     result.addProfile(family, {"vector_width", "micro_m", "micro_n",
                                "register_replicas", "reduction_replicas"});
   for (StringRef family : {"mojo.region_vector", "mojo.vector", "mojo.indexed_contraction"})
     result.addProfile(family, {"vector_width", "register_replicas", "reduction_replicas"});
   result.profile = [](func::FuncOp function) -> StringRef {
-    bool contraction = false, indexed = false, region = false;
+    bool contraction = false, indexed = false, region = false, composed = false;
     function.walk([&](linalg::GenericOp op) {
       contraction |= isMatrixContraction(op);
       indexed |= hasIndexedContractionDomain(op);
+      if (isMatrixContraction(op)) composed |= consumesContraction(op);
     });
     function.walk([&](Operation *op) { region |= isa<cpu::RegionFoldOp, cpu::RegionScanOp>(op); });
     if (region) return contraction ? "mojo.region_contraction" : "mojo.region_vector";
+    if (composed) return "mojo.composed_contraction";
     if (!contraction && indexed) return "mojo.indexed_contraction";
     return contraction ? "mojo.register_contraction" : "mojo.vector";
   };
