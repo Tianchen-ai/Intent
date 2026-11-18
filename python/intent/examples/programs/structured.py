@@ -1,11 +1,38 @@
 """Host input preparation for ordered and neighborhood computations."""
 
+from dataclasses import dataclass
+
 import numpy as np
 
 from . import inputs
 
 from intent.examples.kernels.convolution.direct import causal_depthwise_conv1d
+from intent.examples.kernels.convolution.varlen import (
+    varlen_aligned_causal_depthwise_conv1d, varlen_causal_conv1d_final_state,
+)
 from intent.examples.kernels.factorization.cholesky import SIZE, batched_cholesky_lower
+from intent.runtime import PreparedSequence
+
+
+@dataclass
+class VarlenCausalConvolution:
+    forward: object
+    final_state: object
+
+    @classmethod
+    def from_jit(cls, jit):
+        return cls(jit(varlen_aligned_causal_depthwise_conv1d),
+                   jit(varlen_causal_conv1d_final_state))
+
+    def prepare(self, x, offsets, chunks, weight, bias):
+        forward = self.forward.prepare(x, offsets, chunks, weight, bias)
+        state = self.final_state.prepare(x, offsets)
+        return PreparedSequence((forward, state), outputs=(forward.result(), state.result()))
+
+    def run(self, *arguments):
+        call = self.prepare(*arguments)
+        call.launch()
+        return call.result()
 
 
 def causal_convolution(context):
