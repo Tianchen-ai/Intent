@@ -62,13 +62,7 @@ public:
                << " " << name;
         first = false;
         reserveName(name);
-        if (slot.axis) {
-          auto &memory =
-              memories.find(function.getArgument(slot.parameter))->second;
-          auto &entries = slot.role == NativeSlotRole::Extent ? memory.sizes
-                                                            : memory.strides;
-          entries[*slot.axis] = name;
-        }
+        if (slot.axis) bindEntryMetadata(function.getArgument(slot.parameter), slot, name);
       }
       output << ") {\n";
       indent = 1;

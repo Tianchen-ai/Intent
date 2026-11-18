@@ -90,9 +90,7 @@ public:
         signature.push_back(name + ": " + valueType(slot.carrier));
       } else {
         signature.push_back(name + ": Int64");
-        auto &memory = memories.find(argument)->second;
-        auto &entry = slot.role == NativeSlotRole::Extent ? memory.sizes[*slot.axis] : memory.strides[*slot.axis];
-        if (entry.empty()) entry = "Int(" + name + ")";
+        bindEntryMetadata(argument, slot, "Int(" + name + ")");
       }
     }
     line("@export(\"" + function.getName().str() + "\")");

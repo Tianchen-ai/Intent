@@ -46,6 +46,14 @@ LogicalResult NativeSourceEmitter::bindEntryMemory(Value value,
   return success();
 }
 
+void NativeSourceEmitter::bindEntryMetadata(Value argument, const NativeSlot &slot,
+                                           llvm::StringRef spelling) {
+  auto &view = memories.find(argument)->second;
+  auto &entries = slot.role == NativeSlotRole::Extent ? view.sizes : view.strides;
+  auto &entry = entries[*slot.axis];
+  if (entry.empty()) entry = spelling.str();
+}
+
 MemoryDescriptor NativeSourceEmitter::allocationDescriptor(
     MemRefType type, llvm::StringRef base, ValueRange dynamicSizes) {
   MemoryDescriptor descriptor{base.str(), "0", {}, {}};

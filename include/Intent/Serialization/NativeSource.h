@@ -2,6 +2,7 @@
 #define INTENT_SERIALIZATION_NATIVESOURCE_H
 
 #include "Intent/Serialization/MemoryDescriptor.h"
+#include "Intent/Serialization/NativeABI.h"
 #include "Intent/Serialization/Source.h"
 #include "mlir/IR/Builders.h"
 #include <optional>
@@ -26,6 +27,7 @@ public:
   // Entry pointers already point at the public view's origin. Dynamic extents
   // and strides are filled from the existing native ABI slots by the provider.
   mlir::LogicalResult bindEntryMemory(mlir::Value value, llvm::StringRef base);
+  void bindEntryMetadata(mlir::Value argument, const NativeSlot &slot, llvm::StringRef spelling);
   MemoryDescriptor allocationDescriptor(mlir::MemRefType type,
                                         llvm::StringRef base,
                                         mlir::ValueRange dynamicSizes);

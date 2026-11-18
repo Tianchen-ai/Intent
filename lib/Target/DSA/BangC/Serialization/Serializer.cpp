@@ -79,13 +79,8 @@ public:
         signature.push_back((view && view.getAccess() == 0 ? "const " : "") + ctype(slot.element) + " *" + name);
         if (mlir::failed(bindEntryMemory(argument, name))) return failure();
       } else signature.push_back(ctype(slot.carrier) + " " + name);
-      if (slot.role == NativeSlotRole::Extent) {
-        auto &size = memories.find(argument)->second.sizes[*slot.axis];
-        if (size.empty()) size = name;
-      } else if (slot.role == NativeSlotRole::Stride) {
-        auto &stride = memories.find(argument)->second.strides[*slot.axis];
-        if (stride.empty()) stride = name;
-      } else if (slot.role == NativeSlotRole::Scalar)
+      if (slot.axis) bindEntryMetadata(argument, slot, name);
+      else if (slot.role == NativeSlotRole::Scalar)
         SourceEmitter::bind(argument, name);
     }
     auto fullExtentRequirements = bangc::physical::queryFullExtentRequirements(function);
