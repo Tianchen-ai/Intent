@@ -57,6 +57,7 @@ public:
   explicit Lowering(SliceReduceOp operation);
   explicit Lowering(ScanOp operation);
   mlir::LogicalResult run();
+  bool nativeIndependentReduction();
 
 private:
   void initialize(mlir::ValueRange sources, mlir::ValueRange initials,

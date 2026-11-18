@@ -9,6 +9,7 @@ using namespace mlir;
 namespace intent::bangc::physical {
 
 void buildDSAPipeline(OpPassManager &manager) {
+  addTransformation(manager, {"bangc", "physical", false}, createDSANativeIndependentReductions());
   addTransformation(manager, {"bangc", "physical", true}, createDSARealizeCollectives());
   manager.addPass(createCanonicalizerPass());
   manager.addPass(createCSEPass());
@@ -20,6 +21,7 @@ void buildDSAPipeline(OpPassManager &manager) {
 }
 
 void registerDSAPipelines() {
+  registerTransformation({"bangc", "physical", false}, createDSANativeIndependentReductions());
   registerTransformation({"bangc", "physical", true}, createDSARealizeCollectives());
   registerTransformation({"bangc", "physical", false}, createDSASimplifyWorksetBounds());
   registerTransformation({"bangc", "physical", false}, createDSAComposePrivateVersions());

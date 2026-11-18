@@ -1,5 +1,6 @@
 #include "CollectiveLowering.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/IR/Matchers.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/MathExtras.h"
@@ -7,6 +8,82 @@
 using namespace mlir;
 
 namespace intent::bangc::physical::collective {
+
+bool Lowering::nativeIndependentReduction() {
+  if (!scalar || !captures.empty() ||
+      std::distance(body.begin(), std::prev(body.end())) != fields.size()) return false;
+  bool flatten = true;
+  SmallVector<Operation *> expressions;
+  for (auto [ordinal, field] : llvm::enumerate(fields)) {
+    auto type = cast<MemRefType>(field.source.getType());
+    if (!type.getElementType().isF32() || type.getNumElements() <= 0) return false;
+    flatten &= field.freeShape.empty() && axes.size() == unsigned(type.getRank());
+    for (auto [axis, count] : llvm::enumerate(field.counts)) {
+      APInt value;
+      flatten &= matchPattern(count, m_ConstantInt(&value)) &&
+          value.getSExtValue() == type.getDimSize(axis);
+    }
+    Operation *expression = body.getTerminator()->getOperand(ordinal).getDefiningOp();
+    auto kind = expression ? binaryKind(expression) : std::nullopt;
+    if (!kind || expression->getBlock() != &body || expression->getNumOperands() != 2 ||
+        expression->getOperand(0) != body.getArgument(ordinal) ||
+        expression->getOperand(1) != body.getArgument(fields.size() + ordinal)) return false;
+    switch (*kind) {
+    case BinaryOperator::Add: case BinaryOperator::Maximum: case BinaryOperator::Minimum:
+    case BinaryOperator::MaximumNum: case BinaryOperator::MinimumNum: break;
+    default: return false;
+    }
+    expressions.push_back(expression);
+  }
+  if (fields.size() == 1 && (!flatten || axes.size() == 1)) return false;
+  // A product of independent monoids does not require a coupled tree. Preserve
+  // every field's dtype, seed and NaN rule, and let the native collective own
+  // its reduction tree. A complete contiguous domain can also be flattened;
+  // partial domains retain their exact original axes and active counts.
+  SmallVector<Value> results;
+  for (auto [field, expression] : llvm::zip(fields, expressions)) {
+    Value source = field.source;
+    SmallVector<Value> counts(field.counts);
+    SmallVector<int64_t> reducedAxes(axes);
+    if (flatten) {
+      int64_t count = cast<MemRefType>(source.getType()).getNumElements();
+      source = view(builder, location, source, {count});
+      counts = {index(builder, location, count)};
+      reducedAxes = {0};
+    }
+    Value output = allocate(builder, location, builder.getF32Type(), field.freeShape);
+    auto reduction = builder.create<SliceReduceOp>(location, ValueRange{source},
+        ValueRange{field.initial}, ValueRange{}, ValueRange{output}, counts, reducedAxes);
+    {
+      OpBuilder::InsertionGuard guard(builder);
+      Block *combine = new Block();
+      reduction.getCombine().push_back(combine);
+      Value lhs = combine->addArgument(builder.getF32Type(), location);
+      Value rhs = combine->addArgument(builder.getF32Type(), location);
+      builder.setInsertionPointToStart(combine);
+      IRMapping mapping;
+      mapping.map(expression->getOperand(0), lhs);
+      mapping.map(expression->getOperand(1), rhs);
+      Operation *copied = builder.clone(*expression, mapping);
+      builder.create<CollectiveYieldOp>(location, copied->getResults());
+    }
+    results.push_back(output);
+  }
+  // Publish only after all source reads, including any aliases of other fields.
+  for (auto [field, result] : llvm::zip(fields, results)) {
+    bool full = llvm::all_of(llvm::enumerate(field.freeCounts), [&](auto entry) {
+      APInt count;
+      return matchPattern(entry.value(), m_ConstantInt(&count)) &&
+          count.getSExtValue() == field.freeShape[entry.index()];
+    });
+    if (full) copy(builder, location, result, field.output);
+    else (void)forEach(builder, location, field.freeCounts, [&](ValueRange coordinates) {
+      store(builder, location, load(builder, location, result, coordinates), field.output, coordinates);
+      return success();
+    });
+  }
+  return true;
+}
 
 bool Lowering::nativeReduction() {
   if (!scalar || fields.size() != 1 || axes.size() != 1 ||

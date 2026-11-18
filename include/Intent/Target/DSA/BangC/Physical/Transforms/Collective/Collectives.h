@@ -6,6 +6,7 @@
 namespace intent::bangc::physical {
 
 mlir::LogicalResult realizeCollectives(mlir::func::FuncOp function);
+void realizeIndependentReductions(mlir::func::FuncOp function);
 
 } // namespace intent::bangc::physical
 

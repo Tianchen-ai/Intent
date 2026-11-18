@@ -240,6 +240,13 @@ LogicalResult Lowering::run() {
 
 namespace intent::bangc::physical {
 
+void realizeIndependentReductions(func::FuncOp function) {
+  SmallVector<SliceReduceOp> reductions;
+  function.walk([&](SliceReduceOp operation) { reductions.push_back(operation); });
+  for (SliceReduceOp operation : reductions)
+    if (collective::Lowering(operation).nativeIndependentReduction()) operation.erase();
+}
+
 LogicalResult realizeCollectives(func::FuncOp function) {
   while (true) {
     Operation *next = nullptr;

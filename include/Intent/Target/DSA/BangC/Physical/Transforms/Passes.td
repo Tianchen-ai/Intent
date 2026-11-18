@@ -13,6 +13,19 @@ class IntentBangCPhysicalPass<string passArgument, string summaryText>
   ];
 }
 
+def DSANativeIndependentReductions : IntentBangCPhysicalPass<"intent-bangc-native-independent-reductions",
+    "Expose independent reduction fields to native collective realization"> {
+  let description = [{
+    Consumes verified local reduction sources, explicit active domains and
+    scalar combine regions. Each result must depend only on the corresponding
+    left and right fields through a supported native binary operation. Forms
+    separate collective operations and temporary outputs for the existing native
+    realization. All fields finish reading before tuple publication; inactive
+    output coordinates remain unchanged. Dtype, seed and NaN rules are preserved.
+    Optional before required realization; coupled helpers retain the generic tree.
+  }];
+}
+
 def DSARealizeCollectives : IntentBangCPhysicalPass<"intent-dsa-realize-collectives",
     "Realize current DSA reduction and scan combine regions"> {
   let description = [{
