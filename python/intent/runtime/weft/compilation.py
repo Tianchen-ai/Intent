@@ -1,5 +1,4 @@
 """Canonical task modules through Triton–Weft JIT, plus author-owned host code."""
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -7,7 +6,7 @@ import shutil
 
 from intent.compiler.cache import file_identity, locked_cache_entry
 from intent.compiler.toolchain import CompilationStageError
-from ..native_artifact import NativeArtifact, NativeBuildResult, FileDependency, build_native_artifact, run_native_command, write_source
+from ..native_artifact import NativeArtifact, NativeBuildResult, FileDependency, build_native_artifact, compile_independent, run_native_command, write_source
 from .binding import bridge_source
 from .exports import native_exports
 
@@ -88,12 +87,8 @@ def compile_program(program, target):
 
         # Independent source modules can compile together. Keep their ABIs
         # in author order for bridge generation and respect the local CPU set.
-        workers = min(4, len(target.cpus), contract.target.workers, len(tasks))
-        if workers > 1:
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                compiled = list(executor.map(compile_task, range(len(tasks))))
-        else:
-            compiled = [compile_task(index) for index in range(len(tasks))]
+        compiled = compile_independent(range(len(tasks)), compile_task,
+                                       workers=min(len(target.cpus), contract.target.workers))
         entry.publish(directory)
     abis = [kernel.metadata.kernel_abi for kernel in compiled]
     bridge = bridge_source(contract.facts.tasks, abis)

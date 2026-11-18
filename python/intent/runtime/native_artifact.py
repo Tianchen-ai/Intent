@@ -6,9 +6,11 @@ publication, file identity checks and library handles, never tuning or devices.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 import ctypes
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import shlex
 import subprocess
@@ -17,6 +19,18 @@ import time
 
 from ..compiler.cache import file_identity, locked_cache_entry
 from ..compiler.toolchain import CompilationStageError
+
+
+def compile_independent(items, compile_one, *, workers=None):
+    """Build independent native units in input order, within the host CPU budget."""
+    budget = len(os.sched_getaffinity(0))
+    if workers is not None:
+        budget = min(budget, workers)
+    count = min(4, budget, len(items))
+    if count <= 1:
+        return tuple(compile_one(item) for item in items)
+    with ThreadPoolExecutor(max_workers=count) as executor:
+        return tuple(executor.map(compile_one, items))
 
 
 @dataclass(frozen=True, slots=True)

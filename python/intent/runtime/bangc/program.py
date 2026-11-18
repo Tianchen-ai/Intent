@@ -12,7 +12,7 @@ from .tuning import TrialState
 from ..interface import ViewParameter
 from ..invocation import ViewFacts, invocation_result
 from ..native import NativePreparedRuntime
-from ..native_artifact import load_native_library
+from ..native_artifact import compile_independent, load_native_library
 from ..diagnostics import (CacheObservation, CandidateObservation, ConfigurationAssessment,
                            ObservedCall, RequirementEvaluation, bindings, observation)
 from intent.compiler.toolchain import CompilationStageError
@@ -313,16 +313,23 @@ class NativeProgram(NativePreparedRuntime):
         with self._state_lock:
             self.check_open()
             indices = tuple(range(len(self.candidates))) if indices is None else tuple(indices)
-            for index in indices:
-                if self.compilations[index] is not None or index in self.compilation_errors:
-                    continue
+            pending = [index for index in dict.fromkeys(indices)
+                       if self.compilations[index] is None and index not in self.compilation_errors]
+
+            def compile_candidate(index):
                 try:
-                    self.compilations[index] = compile_library(self.candidates[index].source, self.target)
+                    return compile_library(self.candidates[index].source, self.target)
                 except CompilationStageError as error:
                     error.candidate = self.candidates[index].entry
                     if error.stage != "native_compilation":
                         raise
-                    self.compilation_errors[index] = error
+                    return error
+
+            for index, result in zip(pending, compile_independent(pending, compile_candidate), strict=True):
+                if isinstance(result, CompilationStageError):
+                    self.compilation_errors[index] = result
+                else:
+                    self.compilations[index] = result
             ready = tuple(index for index in indices if self.compilations[index] is not None)
             if not ready:
                 reasons = "\n".join(f"{self.candidates[index].entry}: {self.compilation_errors[index]}"
