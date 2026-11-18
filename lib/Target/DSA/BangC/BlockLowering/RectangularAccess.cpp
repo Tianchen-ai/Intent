@@ -4,6 +4,8 @@
 #include "Intent/Dialect/Block/Analysis/UniformValues.h"
 #include "Intent/Dialect/Block/IR/AccessOpInterface.h"
 #include "Intent/Dialect/Block/IR/FragmentOpInterface.h"
+#include "Intent/Dialect/Intent/IR/CompileOptions.h"
+#include "Intent/Target/DSA/BangC/Physical/Analysis/PhysicalProgram.h"
 #include "mlir/IR/Matchers.h"
 
 namespace intent::bangc::block_lowering {
@@ -92,6 +94,15 @@ std::optional<Lowering::AffineCoordinate> Lowering::affineCoordinate(Value value
 }
 
 FailureOr<bool> Lowering::rectangularAccess(Operation *operation, Value resource, Value result) {
+  auto reject = [&](StringRef reason) -> FailureOr<bool> {
+    if (auto options = readCompileOptions(source); succeeded(options) && options->getOptimizationRemarks())
+      operation->emitRemark("rectangular-supply: ") << reason;
+    return false;
+  };
+  auto nonnegative = [&](Value value) {
+    auto range = physical::integerInterval(value, entry);
+    return range && range->first >= 0;
+  };
   auto access = cast<block::AccessOpInterface>(operation);
   bool store = access.getAccessKind() == block::AccessKind::Store;
   if (!store && access.getAccessKind() != block::AccessKind::Load) return false;
@@ -101,20 +112,12 @@ FailureOr<bool> Lowering::rectangularAccess(Operation *operation, Value resource
   auto dimensions = shape(fragment);
   if (failed(dimensions)) return failure();
   auto boundary = block::PhysicalProgramAnalysis(source).boundaryValidity(operation, true);
-  if (!boundary.isExact()) return false;
-  for (auto [range, bound] : boundary.rangeBounds) {
-    APInt start, end, capacity;
-    if (!matchPattern(get(range.getStart()), m_ConstantInt(&start)) ||
-        !matchPattern(get(bound), m_ConstantInt(&end)) ||
-        !matchPattern(get(range.getExtent()), m_ConstantInt(&capacity)) ||
-        start.isNegative() || end.isNegative() || capacity.isNegative() ||
-        end.slt(start) || (end - start).slt(capacity)) return false;
-  }
+  if (!boundary.isExact()) return reject("validity is not an exact rectangular boundary");
   SmallVector<AffineCoordinate> coordinates;
   for (auto [slot, coordinate] : llvm::enumerate(access.getAccessCoordinates())) {
     auto affine = affineCoordinate(coordinate);
     auto projection = block::queryAccessCoordinateAxes(access, slot);
-    if (!affine || !projection.isExact()) return false;
+    if (!affine || !projection.isExact()) return reject("coordinate has no exact affine lane projection");
     SmallVector<int64_t> steps(dimensions->size(), 0);
     auto from = shape(coordinate.getType());
     if (failed(from)) return failure();
@@ -126,6 +129,30 @@ FailureOr<bool> Lowering::rectangularAccess(Operation *operation, Value resource
   // uses the exact common boundary proof, never the resource shape alone.
   SmallVector<Value> counts;
   for (int64_t size : *dimensions) counts.push_back(index(size));
+  // A tiled loop's start is normally an induction variable, not a constant.
+  // An exact range mask clips a rectangular prefix at the current iteration;
+  // it need not describe a full compile-time tile. Preserve that clip in IR.
+  for (auto [range, bound] : boundary.rangeBounds) {
+    auto step = block::IndexRelations().constant(range.getStep());
+    auto projection = block::queryAxisProjection(range.getResult().getType(), fragment);
+    Value begin = get(range.getStart()), end = get(bound);
+    if (!step || *step != 1 || !projection.isExact() || !begin || !end ||
+        !nonnegative(begin) || !nonnegative(end))
+      return reject("range mask is not a nonnegative unit-step prefix");
+    std::optional<unsigned> axis;
+    for (auto [lane, sourceAxis] : llvm::enumerate(projection.targetToSource)) {
+      if (!sourceAxis) continue;
+      if (axis) return reject("range mask maps to more than one tile axis");
+      axis = lane;
+    }
+    Value remaining = b.createOrFold<arith::SubIOp>(loc, end, begin);
+    remaining = b.createOrFold<arith::MaxSIOp>(loc, remaining, index(0));
+    if (axis) counts[*axis] = b.createOrFold<arith::MinSIOp>(loc, counts[*axis], remaining);
+    else {
+      Value active = b.createOrFold<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, begin, end);
+      for (Value &count : counts) count = b.createOrFold<arith::SelectOp>(loc, active, count, index(0));
+    }
+  }
   for (int64_t axis : boundary.boundaryAxes) {
     auto found = llvm::find(access.getAccessSourceAxes(), axis);
     if (found == access.getAccessSourceAxes().end()) return false;
@@ -145,7 +172,10 @@ FailureOr<bool> Lowering::rectangularAccess(Operation *operation, Value resource
       for (Value &count : counts) count = b.createOrFold<arith::SelectOp>(loc, valid, count, index(0));
       continue;
     }
-    if (!block::IndexRelations().nonnegative(original)) return false;
+    if (!block::IndexRelations().nonnegative(original) &&
+        !nonnegative(coordinate.base)) {
+      return reject("resource boundary has no nonnegative tile origin proof");
+    }
     // The separate lower-bound proof closes the native prefix form. Retain
     // the exact upper-bound mask as a clipped native transfer extent.
     Value available = b.createOrFold<arith::SubIOp>(loc, extent, coordinate.base);
@@ -172,7 +202,7 @@ FailureOr<bool> Lowering::rectangularAccess(Operation *operation, Value resource
     Value fill = access.getAccessFill();
     Value uniformFill = fill ? block::uniformScalarSource(fill) : Value();
     bool zero = uniformFill && (matchPattern(uniformFill, m_Zero()) || matchPattern(uniformFill, m_AnyZeroFloat()));
-    if (fill && !zero && !boundary.boundaryAxes.empty()) {
+    if (fill && !zero && (!boundary.boundaryAxes.empty() || !boundary.rangeBounds.empty())) {
       // Native transfers define zero padding. Restore the author's fill only
       // for lanes excluded by the exact boundary mask.
       if (failed(each(*dimensions, [&](ValueRange lane) -> LogicalResult {

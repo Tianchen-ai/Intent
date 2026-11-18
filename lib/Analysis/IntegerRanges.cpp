@@ -207,6 +207,31 @@ std::optional<ConstantIntRanges> IntegerRangeAnalysis::infer(Value value) {
 
   Operation *operation = value.getDefiningOp();
   if (!operation) return std::nullopt;
+  if (auto subtract = dyn_cast<arith::SubIOp>(operation)) {
+    if (subtract.getLhs() == subtract.getRhs())
+      return ConstantIntRanges::constant(APInt(width, 0));
+    if (auto quotient = subtract.getRhs().getDefiningOp<arith::FloorDivSIOp>();
+        quotient && quotient.getLhs() == subtract.getLhs()) {
+      auto divisor = range(quotient.getRhs());
+      if (divisor && divisor->getConstantValue() && divisor->getConstantValue()->isOne())
+        return ConstantIntRanges::constant(APInt(width, 0));
+    }
+    // Scalar lowering expresses floor remainder as x - floor(x / d) * d.
+    // Independent intervals lose the correlation and may invent negative tile
+    // origins. Match the actual SSA relation, including the commuted product.
+    if (auto product = subtract.getRhs().getDefiningOp<arith::MulIOp>()) {
+      for (unsigned slot : {0u, 1u}) {
+        auto quotient = product->getOperand(slot).getDefiningOp<arith::FloorDivSIOp>();
+        if (!quotient || quotient.getLhs() != subtract.getLhs() ||
+            quotient.getRhs() != product->getOperand(1 - slot)) continue;
+        auto dividend = range(quotient.getLhs()), divisor = range(quotient.getRhs());
+        // With a positive divisor the floor remainder is representable. The
+        // identity also holds for wrapping intermediate multiply/subtract.
+        if (dividend && divisor && divisor->smin().isStrictlyPositive())
+          return floorRemainder(*dividend, *divisor);
+      }
+    }
+  }
   if (auto dim = dyn_cast<memref::DimOp>(operation)) {
     auto axis = dim.getConstantIndex();
     return axis ? dimension(dim.getSource(), *axis) : nonNegativeDimension();
