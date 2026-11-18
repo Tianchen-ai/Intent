@@ -49,6 +49,7 @@ struct ConfigurationFacts {
   bool multipleRegionMatrixAccumulators = false;
   llvm::DenseMap<ParameterAttr, int64_t> pointwiseLocalMultiplicity;
   llvm::SmallVector<ParameterAttr> pointwiseRowAxes;
+  llvm::SmallVector<ParameterAttr> twoAxisReductionRows;
   llvm::MapVector<unsigned, llvm::SmallVector<ParameterAttr>> rowGroups;
   llvm::SmallVector<CorrelatedProfileParameters> correlatedProfiles;
   llvm::SmallVector<OwnershipExtentGroup> freeExtents;

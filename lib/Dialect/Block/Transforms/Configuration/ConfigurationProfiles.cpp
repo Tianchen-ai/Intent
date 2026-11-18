@@ -71,7 +71,8 @@ StringRef familyFor(func::FuncOp kernel, const ConfigurationFacts &facts) {
   case TuningClass::Scan: return "scan";
   case TuningClass::MultiAxisReduction: return "multi_axis_reduction";
   case TuningClass::Histogram: return "histogram";
-  case TuningClass::Reduction: return "reduction";
+  case TuningClass::Reduction:
+    return facts.twoAxisReductionRows.empty() ? "reduction" : "pointwise_reduction_two_axis";
   case TuningClass::StatefulReduction: return "stateful_reduction";
   case TuningClass::Execution: return "execution";
   case TuningClass::OnlineMoment: return "online_moment";
@@ -153,7 +154,8 @@ LogicalResult projectConfigurationProfiles(
       // Independent rows retained by a reduction use the row budget. Keep
       // contraction M/N roles and a separate pointwise traversal unchanged.
       if (parameter.getCategory() == ParameterCategory::Pointwise &&
-          classification.reductionRow)
+          classification.reductionRow &&
+          !llvm::is_contained(facts.twoAxisReductionRows, parameter))
         requested = profile.ownershipM;
       for (const CorrelatedProfileParameters &relation : facts.correlatedProfiles) {
         if (parameter == relation.pointwise) requested = profile.ownershipM;

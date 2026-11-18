@@ -652,6 +652,42 @@ void collectReductionFreeExtents(func::FuncOp kernel, ConfigurationFacts &facts)
         if (!collect(extent)) return;
         group.extents.push_back(extent);
       }
+      // Independent M and N axes have separate columns in a complete profile.
+      // They are not Cartesian factors of one row budget. In particular a
+      // short reduction with transposed input/output access needs both axes
+      // resident; collapsing one to one destroys coalescing on one side.
+      OwnershipExtentGroup rows, columns;
+      rows.role = ParameterRole::OwnershipM;
+      columns.role = ParameterRole::OwnershipN;
+      bool separable = true;
+      for (PhysicalExprAttr extent : group.extents) {
+        std::optional<ParameterRole> role;
+        std::function<void(PhysicalExprAttr)> visit = [&](PhysicalExprAttr expression) {
+          if (expression.getKind() == PhysicalExprKind::Parameter) {
+            auto parameter = lookupParameter(kernel, expression.getParameterReference().getName());
+            auto current = parameter.getRole();
+            if (role && *role != current) separable = false;
+            role = current;
+          }
+          for (Attribute operand : expression.getOperands())
+            visit(cast<PhysicalExprAttr>(operand));
+        };
+        visit(extent);
+        (role == ParameterRole::OwnershipN ? columns : rows).extents.push_back(extent);
+      }
+      for (ParameterAttr parameter : group.parameters) {
+        if (parameter.getRole() == ParameterRole::OwnershipM) rows.parameters.push_back(parameter);
+        else if (parameter.getRole() == ParameterRole::OwnershipN) columns.parameters.push_back(parameter);
+        else separable = false;
+      }
+      if (separable && !rows.parameters.empty() && !columns.parameters.empty()) {
+        for (ParameterAttr parameter : group.parameters)
+          if (!llvm::is_contained(facts.twoAxisReductionRows, parameter))
+            facts.twoAxisReductionRows.push_back(parameter);
+        facts.freeExtents.push_back(std::move(rows));
+        facts.freeExtents.push_back(std::move(columns));
+        continue;
+      }
       // The retained rows of one reduction share a budget. Applying it to
       // every Cartesian factor squares (or cubes) the requested footprint.
       // Keep separate reductions independent, even if their axes overlap.
