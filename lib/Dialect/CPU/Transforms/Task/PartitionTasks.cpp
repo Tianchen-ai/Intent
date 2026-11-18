@@ -305,8 +305,11 @@ void hoistInvariantWorksetBounds(scf::ParallelOp root) {
     producers.insert(operation);
     return true;
   };
-  for (scf::ParallelOp child : root.getBody()->getOps<scf::ParallelOp>())
+  for (scf::ParallelOp child : root.getBody()->getOps<scf::ParallelOp>()) {
+    for (Value bound : child.getLowerBound()) collect(bound);
     for (Value bound : child.getUpperBound()) collect(bound);
+    for (Value step : child.getStep()) collect(step);
+  }
   if (producers.empty()) return;
   OpBuilder builder(root);
   Value nonempty;
@@ -332,7 +335,8 @@ LogicalResult partition(scf::ParallelOp root, int64_t grain, bool distributeToWo
   auto interface = function->getAttrOfType<EntryRequirementsAttr>(entryRequirementsAttr);
   auto rectangular = [&](scf::ParallelOp parallel) {
     for (auto [begin, end, step] : llvm::zip(parallel.getLowerBound(), parallel.getUpperBound(), parallel.getStep()))
-      if (!matchPattern(begin, m_Zero()) || !matchPattern(step, m_One()) || !dominance.dominates(end, root))
+      if (!dominance.dominates(begin, root) ||
+          !dominance.dominates(end, root) || !dominance.dominates(step, root))
         return false;
     return true;
   };
@@ -364,20 +368,28 @@ LogicalResult partition(scf::ParallelOp root, int64_t grain, bool distributeToWo
     }
     current = child && flatten && rectangular(child) ? child : scf::ParallelOp();
   }
-  SmallVector<Value> extents, coordinates;
-  for (scf::ParallelOp parallel : nest) {
-    for (auto [begin, end, step, iv] : llvm::zip(parallel.getLowerBound(), parallel.getUpperBound(),
-                                               parallel.getStep(), parallel.getInductionVars())) {
-      if (!matchPattern(begin, m_Zero()) || !matchPattern(step, m_One()) ||
-          !dominance.dominates(end, root))
-        return parallel.emitError("CPU tasks require a rectangular zero-based unit-step workset");
-      extents.push_back(end);
-      coordinates.push_back(iv);
-    }
-  }
   OpBuilder b(root);
   Location loc = root.getLoc();
   Value zero = index(b, loc, 0), one = index(b, loc, 1);
+  SmallVector<Value> extents, coordinates, origins, strides;
+  for (scf::ParallelOp parallel : nest) {
+    for (auto [begin, end, step, iv] : llvm::zip(parallel.getLowerBound(), parallel.getUpperBound(),
+                                               parallel.getStep(), parallel.getInductionVars())) {
+      if (!dominance.dominates(begin, root) ||
+          !dominance.dominates(end, root) || !dominance.dominates(step, root))
+        return parallel.emitError("CPU tasks require invariant rectangular workset bounds and steps");
+      // Tasks own iteration ordinals, not storage coordinates. SCF parallel
+      // steps are positive; empty ranges contribute zero work. Preserve the
+      // original affine coordinate when cloning each point, including packing
+      // loops whose step is a block size rather than one.
+      Value extent = b.createOrFold<arith::SubIOp>(loc, end, begin);
+      extent = b.createOrFold<arith::CeilDivSIOp>(loc, extent, step);
+      extents.push_back(b.createOrFold<arith::MaxSIOp>(loc, extent, zero));
+      coordinates.push_back(iv);
+      origins.push_back(begin);
+      strides.push_back(step);
+    }
+  }
   Value size = one;
   for (Value extent : extents) size = multiply(b, loc, size, extent);
   Value chunk = index(b, loc, grain);
@@ -415,7 +427,11 @@ LogicalResult partition(scf::ParallelOp root, int64_t grain, bool distributeToWo
     }
     auto clonePoint = [&](ValueRange point) {
       IRMapping mapping;
-      mapping.map(ValueRange(coordinates), point);
+      for (auto [coordinate, ordinal, origin, stride] :
+           llvm::zip(coordinates, point, origins, strides)) {
+        Value offset = b.createOrFold<arith::MulIOp>(loc, ordinal, stride);
+        mapping.map(coordinate, b.createOrFold<arith::AddIOp>(loc, origin, offset));
+      }
       std::function<void(scf::ParallelOp)> cloneBody = [&](scf::ParallelOp parallel) {
         for (Operation &operation : parallel.getBody()->without_terminator()) {
           if (auto child = dyn_cast<scf::ParallelOp>(&operation); child && llvm::is_contained(nest, child)) cloneBody(child);
