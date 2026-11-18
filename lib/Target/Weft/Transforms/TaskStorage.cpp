@@ -413,16 +413,16 @@ Value TaskConversion::fillLocal(Value owner, Value scalar, Location loc,
                 const LocalProjection *projection) {
   if (!isa<wk::ValueType>(owner.getType())) return scalar;
   auto dimensions = shape(projection ? projection->type : owner.getType());
-  // Fill a complete fixed owner with one broadcast. Keep the owner's domain
-  // and origins across loop carries; only the payload and validity change.
+  // A complete fill defines every member of this fixed private workspace.
+  // Its projections are relative to the local allocation, with extents and
+  // axes retained in the result type. Make the new definition independent of
+  // the overwritten SSA version, including across host task loop carries.
   if ((!projection || (projection->type == owner.getType() &&
                        llvm::all_of(projection->selectors, [](Attribute selector) {
                          return cast<StringAttr>(selector).getValue() == "all";
                        }))) &&
       llvm::all_of(dimensions, [](int64_t extent) { return extent > 0; })) {
-    auto filled = b.create<wk::NewOp>(loc, owner.getType(), scalar, true);
-    return b.create<wk::UpdateOp>(loc, owner.getType(), owner, filled, ValueRange{},
-        b.getArrayAttr(SmallVector<Attribute>(dimensions.size(), b.getStringAttr("all"))));
+    return b.create<wk::NewOp>(loc, owner.getType(), scalar, true);
   }
   SmallVector<Value> coordinates;
   SmallVector<Attribute> selectors(shape(owner.getType()).size(), b.getStringAttr("index"));
