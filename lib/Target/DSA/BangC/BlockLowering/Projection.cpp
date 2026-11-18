@@ -2,6 +2,28 @@
 #include "Intent/Dialect/Block/IR/FragmentOpInterface.h"
 
 namespace intent::bangc::block_lowering {
+FailureOr<SmallVector<int64_t>> Lowering::projectStrides(
+    Operation *operation, ArrayRef<int64_t> sourceStrides) {
+  auto relations = block::queryFragmentOperandRelations(operation);
+  auto input = shape(operation->getOperand(0).getType());
+  auto output = shape(operation->getResult(0).getType());
+  if (failed(relations) || relations->size() != 1 || failed(input) ||
+      failed(output) || input->size() != sourceStrides.size()) return failure();
+  SmallVector<int64_t> strides(output->size(), 0);
+  for (const auto &group : relations->front().groups) {
+    if (group.kind == block::FragmentAxisRelationKind::Broadcast) continue;
+    SmallVector<unsigned> from, to;
+    for (unsigned axis : group.sourceAxes) if ((*input)[axis] != 1) from.push_back(axis);
+    for (unsigned axis : group.resultAxes) if ((*output)[axis] != 1) to.push_back(axis);
+    if (from.size() != to.size()) return failure();
+    for (auto [sourceAxis, axis] : llvm::zip(from, to)) {
+      if ((*input)[sourceAxis] != (*output)[axis]) return failure();
+      strides[axis] = sourceStrides[sourceAxis];
+    }
+  }
+  return strides;
+}
+
 LogicalResult Lowering::projection(Operation *operation) {
   Value original = operation->getResult(0);
   if (auto reshape = dyn_cast<block::ReshapeOp>(operation)) {
@@ -74,24 +96,15 @@ LogicalResult Lowering::projection(Operation *operation) {
       // physical broadcast, even when its symbolic expression differs from 1.
       // Prove the projection on these bound extents before choosing a transfer.
       {
-        SmallVector<int64_t> steps(extents[result].size(), 0);
-        bool rectangular = true;
-        for (const auto &group : relation.groups) {
-          if (group.kind == block::FragmentAxisRelationKind::Broadcast) continue;
-          SmallVector<unsigned> from, to;
-          for (unsigned axis : group.sourceAxes) if (extents[input][axis] != 1) from.push_back(axis);
-          for (unsigned axis : group.resultAxes) if (extents[result][axis] != 1) to.push_back(axis);
-          if (from.size() != to.size()) { rectangular = false; break; }
-          for (auto [sourceAxis, axis] : llvm::zip(from, to)) {
-            if (extents[input][sourceAxis] != extents[result][axis]) {
-              rectangular = false;
-              break;
-            }
-            int64_t stride = 1;
-            for (unsigned next = sourceAxis + 1; next < extents[input].size(); ++next) stride *= extents[input][next];
-            steps[axis] = stride;
-          }
+        SmallVector<int64_t> sourceStrides(extents[input].size());
+        int64_t stride = 1;
+        for (unsigned axis = sourceStrides.size(); axis-- > 0;) {
+          sourceStrides[axis] = stride;
+          stride *= extents[input][axis];
         }
+        auto projected = projectStrides(operation, sourceStrides);
+        bool rectangular = succeeded(projected);
+        SmallVector<int64_t> steps = rectangular ? *projected : SmallVector<int64_t>();
         // Local storage collapses all leading logical axes into one row.
         // They must therefore describe one affine row stride; a mixed
         // broadcast/repetition still requires the general projection below.

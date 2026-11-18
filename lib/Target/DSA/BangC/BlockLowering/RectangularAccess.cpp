@@ -45,13 +45,12 @@ std::optional<Lowering::AffineCoordinate> Lowering::affineCoordinate(Value value
     return AffineCoordinate{input.base, steps};
   };
   if (isa<block::SplatOp, block::BroadcastOp, block::ReshapeOp>(producer)) {
-    if (isa<block::ReshapeOp>(producer)) {
-      auto relation = block::queryFragmentOperandRelations(producer);
-      if (failed(relation) || !relation->front().preservesNonUnitAxes()) return std::nullopt;
-    }
     Value input = producer->getOperand(0);
     auto affine = affineCoordinate(input);
-    return affine ? project(*affine, input.getType()) : std::nullopt;
+    if (!affine) return std::nullopt;
+    auto steps = projectStrides(producer, affine->steps);
+    if (failed(steps)) return std::nullopt;
+    return AffineCoordinate{affine->base, std::move(*steps)};
   }
   if (auto transpose = dyn_cast<block::TransposeOp>(producer)) {
     auto input = affineCoordinate(transpose.getValue());

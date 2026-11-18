@@ -42,6 +42,8 @@ private:
   LogicalResult operation(Operation *operation);
   LogicalResult elementwise(Operation *operation);
   LogicalResult projection(Operation *operation);
+  FailureOr<SmallVector<int64_t>> projectStrides(Operation *operation,
+                                                ArrayRef<int64_t> sourceStrides);
   LogicalResult access(Operation *operation);
   FailureOr<bool> rectangularAccess(Operation *operation, Value resource, Value result);
   struct AffineCoordinate {
