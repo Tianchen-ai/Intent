@@ -42,13 +42,14 @@ def PrepareProgramPass : IntentCuTileTransformPass<
 
 def SelectIndexedMatrixConfigurationsPass : IntentCuTileTransformPass<
     "intent-cutile-select-indexed-matrix-configurations",
-    "Select complete non-TMA configurations for data-indexed matrix supply"> {
+    "Prefer non-TMA configurations when matrix indices are read inside a carried loop"> {
   let description = [{
     Consumes realized Block accesses, matrix operands and complete configuration
     rows. Follows the operand supply and index def-use to identify matrix reads
-    whose coordinates depend on another memory read. Selects declared non-TMA
-    forms to bound native scheduling work, preserving all logical accesses and
-    arithmetic. Ordinary load-fed matrix programs retain their TMA candidates.
+    whose coordinates depend on a memory read inside a surrounding carried
+    loop. Prefers declared non-TMA forms to bound native scheduling work.
+    Loop-invariant row selections retain TMA for their dense operands.
+    An explicit portfolio containing only TMA choices is preserved.
     Disabling this optional selection leaves the original native input forms.
   }];
 }

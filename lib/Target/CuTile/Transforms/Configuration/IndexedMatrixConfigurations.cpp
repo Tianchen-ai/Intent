@@ -24,7 +24,7 @@ public:
   void runOnOperation() final {
     auto kernel = block::getPhysicalKernel(getOperation());
     if (failed(kernel)) return signalPassFailure();
-    if (!hasDataIndexedMatrixSupply(*kernel)) return;
+    if (!hasLoopVariantIndexedMatrixSupply(*kernel)) return;
     auto space = block::ParameterSpace::read(*kernel);
     if (failed(space)) return signalPassFailure();
     auto rows = space->configurations(block::ConfigurationStage::Shared);
@@ -41,8 +41,9 @@ public:
     // compiler's scheduling work excessive in otherwise small kernels. Keep
     // the declared register/tile-load forms; no parameter columns are patched.
     if (selected.empty()) {
-      kernel->emitError("data-indexed cuTile matrix supplies require a declared non-TMA configuration when indexed supply selection is enabled");
-      return signalPassFailure();
+      if (options->getOptimizationRemarks())
+        kernel->emitRemark("retained declared cuTile configurations; the indexed-supply preference has no matching row");
+      return;
     }
     if (options->getOptimizationRemarks())
       kernel->emitRemark("selected complete non-TMA configurations for data-indexed matrix supply");

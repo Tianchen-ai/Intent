@@ -11,7 +11,7 @@ struct NativeProgramFeatures {
   void observe(mlir::Operation *operation);
 };
 NativeProgramFeatures queryNativeProgramFeatures(mlir::func::FuncOp kernel);
-bool hasDataIndexedMatrixSupply(mlir::func::FuncOp kernel);
+bool hasLoopVariantIndexedMatrixSupply(mlir::func::FuncOp kernel);
 bool supportsE8M0ScaledMMA(block::CapabilitiesAttr capabilities);
 // Validate current executable facts with the terminal operation registry. The
 // callback selects no forms and this analysis does not depend on serialization.

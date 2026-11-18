@@ -37,15 +37,20 @@ NativeProgramFeatures queryNativeProgramFeatures(func::FuncOp kernel) {
   return features;
 }
 
-bool hasDataIndexedMatrixSupply(func::FuncOp kernel) {
-  auto dependsOnRead = [](ValueRange roots) {
+bool hasLoopVariantIndexedMatrixSupply(func::FuncOp kernel) {
+  auto dependsOnLoopRead = [](ValueRange roots, ArrayRef<scf::ForOp> loops) {
     SmallVector<Value> pending(roots);
     llvm::DenseSet<Value> visited;
     while (!pending.empty()) {
       Value value = pending.pop_back_val();
       if (!visited.insert(value).second) continue;
       auto *producer = value.getDefiningOp();
-      if (isa_and_nonnull<block::LoadOp>(producer)) return true;
+      if (isa_and_nonnull<block::LoadOp>(producer)) {
+        if (llvm::any_of(loops, [&](scf::ForOp loop) {
+              return !loop.isDefinedOutsideOfLoop(value);
+            })) return true;
+        continue;
+      }
       auto incoming = queryControlFlowIncoming(value);
       if (incoming.complete && !incoming.edges.empty()) {
         for (const auto &edge : incoming.edges)
@@ -57,6 +62,11 @@ bool hasDataIndexedMatrixSupply(func::FuncOp kernel) {
     return false;
   };
   return kernel.walk([&](block::ContractOp matrix) {
+    SmallVector<scf::ForOp> loops;
+    for (Operation *parent = matrix->getParentOp(); parent; parent = parent->getParentOp())
+      if (auto loop = dyn_cast<scf::ForOp>(parent); loop && loop.getNumRegionIterArgs())
+        loops.push_back(loop);
+    if (loops.empty()) return WalkResult::advance();
     SmallVector<Value> pending{matrix.getLhs(), matrix.getRhs()};
     llvm::DenseSet<Value> visited;
     while (!pending.empty()) {
@@ -64,7 +74,7 @@ bool hasDataIndexedMatrixSupply(func::FuncOp kernel) {
       if (!visited.insert(value).second) continue;
       auto *producer = value.getDefiningOp();
       if (auto load = dyn_cast_or_null<block::LoadOp>(producer)) {
-        if (dependsOnRead(load.getCoordinates())) return WalkResult::interrupt();
+        if (dependsOnLoopRead(load.getCoordinates(), loops)) return WalkResult::interrupt();
         continue;
       }
       auto incoming = queryControlFlowIncoming(value);
