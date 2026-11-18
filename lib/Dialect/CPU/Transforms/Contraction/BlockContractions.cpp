@@ -783,13 +783,17 @@ LogicalResult exposeGroupedTiles(func::FuncOp function, const Configuration &con
 
 LogicalResult blockContractions(func::FuncOp function, const Configuration &configuration,
                                 const ImplementationRegistry &implementations) {
+  // Capture source contractions while the function still contains only the
+  // original worksets. Group selection clones and blocks its tile-dispatch
+  // arm itself. A provider may leave a perfectly valid linalg contraction as
+  // its leaf; traversing that arm again would tile its finished panels twice.
   SmallVector<linalg::GenericOp> contractions;
-  ImplementationInputs inputs(function);
-  if (failed(exposeGroupedTiles(function, configuration, implementations, inputs))) return failure();
   function.walk([&](linalg::GenericOp operation) {
     if (isMatrixContraction(operation) && !operation->hasAttr("intent_cpu.microtile"))
       contractions.push_back(operation);
   });
+  ImplementationInputs inputs(function);
+  if (failed(exposeGroupedTiles(function, configuration, implementations, inputs))) return failure();
   for (linalg::GenericOp operation : contractions)
     if (failed(block(operation, configuration, implementations, inputs))) return failure();
   if (failed(inputs.fuseProducerCopies())) return failure();
