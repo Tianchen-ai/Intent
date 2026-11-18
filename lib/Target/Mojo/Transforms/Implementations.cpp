@@ -186,13 +186,17 @@ cpu::ImplementationRegistry implementations() {
   for (StringRef family : {"mojo.region_contraction", "mojo.register_contraction"})
     result.addProfile(family, {"vector_width", "micro_m", "micro_n",
                                "register_replicas", "reduction_replicas"});
-  for (StringRef family : {"mojo.region_vector", "mojo.vector"})
+  for (StringRef family : {"mojo.region_vector", "mojo.vector", "mojo.indexed_contraction"})
     result.addProfile(family, {"vector_width", "register_replicas", "reduction_replicas"});
   result.profile = [](func::FuncOp function) -> StringRef {
-    bool contraction = false, region = false;
-    function.walk([&](linalg::GenericOp op) { contraction |= isMatrixContraction(op); });
+    bool contraction = false, indexed = false, region = false;
+    function.walk([&](linalg::GenericOp op) {
+      contraction |= isMatrixContraction(op);
+      indexed |= hasIndexedContractionDomain(op);
+    });
     function.walk([&](Operation *op) { region |= isa<cpu::RegionFoldOp, cpu::RegionScanOp>(op); });
     if (region) return contraction ? "mojo.region_contraction" : "mojo.region_vector";
+    if (!contraction && indexed) return "mojo.indexed_contraction";
     return contraction ? "mojo.register_contraction" : "mojo.vector";
   };
   auto contractionParameters = vectorParameters();

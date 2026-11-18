@@ -65,15 +65,7 @@ struct IndexedContraction {
 };
 
 std::optional<IndexedContraction> indexedContraction(linalg::GenericOp operation) {
-  if (operation.getNumDpsInputs() != 1 || operation.getNumDpsInits() != 1 || operation.getNumResults())
-    return std::nullopt;
-  AffineExpr m, k, n;
-  bindDims(operation.getContext(), m, k, n);
-  if (operation.getIndexingMapsArray() != SmallVector<AffineMap>{
-          AffineMap::get(3, 0, {m, k}, operation.getContext()),
-          AffineMap::get(3, 0, {m, n}, operation.getContext())} ||
-      operation.getIteratorTypesArray() != SmallVector<utils::IteratorType>{
-          utils::IteratorType::parallel, utils::IteratorType::reduction, utils::IteratorType::parallel})
+  if (!hasIndexedContractionDomain(operation) || operation.getNumResults())
     return std::nullopt;
   Value lhs = operation.getInputs()[0], output = operation.getOutputs()[0];
   auto lhsType = dyn_cast<MemRefType>(lhs.getType()), outputType = dyn_cast<MemRefType>(output.getType());
@@ -246,6 +238,25 @@ FailureOr<bool> materializeIndexedContraction(linalg::GenericOp operation, Imple
 
 int64_t registerContractionRows(linalg::GenericOp operation) {
   return indexedContraction(operation) ? indexedRowWindow : 1;
+}
+
+bool hasIndexedContractionDomain(linalg::GenericOp operation) {
+  if (operation.getNumDpsInputs() != 1 || operation.getNumDpsInits() != 1)
+    return false;
+  AffineExpr m, k, n;
+  bindDims(operation.getContext(), m, k, n);
+  if (operation.getIndexingMapsArray() != SmallVector<AffineMap>{
+          AffineMap::get(3, 0, {m, k}, operation.getContext()),
+          AffineMap::get(3, 0, {m, n}, operation.getContext())} ||
+      operation.getIteratorTypesArray() != SmallVector<utils::IteratorType>{
+          utils::IteratorType::parallel, utils::IteratorType::reduction,
+          utils::IteratorType::parallel}) return false;
+  Block &body = operation.getRegion().front();
+  auto fma = body.getTerminator()->getOperand(0).getDefiningOp<math::FmaOp>();
+  if (!fma || fma.getC() != body.getArgument(1)) return false;
+  Value left = fma.getA();
+  if (auto widen = left.getDefiningOp<arith::ExtFOp>()) left = widen.getIn();
+  return left == body.getArgument(0);
 }
 
 LogicalResult materializeRegisterContractions(func::FuncOp function) {

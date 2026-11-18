@@ -3,16 +3,16 @@
     "mojo.region_contraction": [
       {"shared": [1, 128, 128, 128, 64], "local": {"vector_width": 16, "micro_m": 6, "micro_n": 4, "register_replicas": 1, "reduction_replicas": 1}, "implementations": ["mojo.vector", "mojo.scan_scalar", "mojo.register_float"]},
       {"shared": [1, 128, 128, 128, 256], "local": {"vector_width": 16, "micro_m": 32, "micro_n": 2, "register_replicas": 1, "reduction_replicas": 1}, "implementations": ["mojo.vector", "mojo.scan_scalar", "mojo.amx_bfloat_direct"]},
-      {"shared": [1, 128, 128, 128, 128], "local": {"vector_width": 16, "micro_m": 32, "micro_n": 2, "register_replicas": 1, "reduction_replicas": 1}, "implementations": ["mojo.vector", "mojo.scan_scalar", "mojo.amx_bfloat_direct"]},
-      {"shared": [1, 64, 64, 64, 64], "local": {"vector_width": 16, "micro_m": 16, "micro_n": 4, "register_replicas": 1, "reduction_replicas": 1}, "implementations": ["mojo.vector", "mojo.scan_scalar", "mojo.amx_bfloat_direct"]},
-      {"shared": [1, 64, 64, 64, 64], "local": {"vector_width": 4, "micro_m": 4, "micro_n": 2, "register_replicas": 1, "reduction_replicas": 1}, "implementations": ["mojo.vector", "mojo.scan_scalar", "mojo.register_float", "mojo.register_integer"]},
       {"shared": [1, 64, 64, 64, 64], "local": {"vector_width": 8, "micro_m": 4, "micro_n": 2, "register_replicas": 1, "reduction_replicas": 1}, "implementations": ["mojo.vector", "mojo.scan_scalar", "mojo.register_float", "mojo.register_integer"]},
-      {"shared": [1, 64, 128, 128, 128], "local": {"vector_width": 16, "micro_m": 4, "micro_n": 2, "register_replicas": 1, "reduction_replicas": 1}, "implementations": ["mojo.vector", "mojo.scan_scalar", "mojo.register_float_shared", "mojo.register_integer_shared"]},
-      {"shared": [1, 256, 128, 128, 128], "local": {"vector_width": 16, "micro_m": 4, "micro_n": 2, "register_replicas": 1, "reduction_replicas": 1}, "implementations": ["mojo.vector", "mojo.scan_scalar", "mojo.register_float", "mojo.register_integer"]}
+      {"shared": [1, 64, 128, 128, 128], "local": {"vector_width": 16, "micro_m": 4, "micro_n": 2, "register_replicas": 1, "reduction_replicas": 1}, "implementations": ["mojo.vector", "mojo.scan_scalar", "mojo.register_float_shared", "mojo.register_integer_shared"]}
     ],
     "mojo.region_vector": [
       {"shared": [1, 1, 1, 1, 64], "local": {"vector_width": 8, "register_replicas": 1, "reduction_replicas": 4}, "implementations": ["mojo.vector", "mojo.scan_vector", "mojo.q8_k", "mojo.q4_k_q8_k"]},
       {"shared": [1, 1, 1, 1, 128], "local": {"vector_width": 16, "register_replicas": 1, "reduction_replicas": 4}, "implementations": ["mojo.vector", "mojo.scan_scalar", "mojo.q8_k", "mojo.q4_k_q8_k"]}
+    ],
+    "mojo.indexed_contraction": [
+      {"shared": [8, 1, 1, 1, 1], "local": {"vector_width": 8, "register_replicas": 4, "reduction_replicas": 4}, "implementations": ["mojo.vector", "mojo.scan_scalar", "mojo.q8_k", "mojo.q4_k_q8_k"]},
+      {"shared": [8, 1, 1, 1, 1], "local": {"vector_width": 16, "register_replicas": 4, "reduction_replicas": 4}, "implementations": ["mojo.vector", "mojo.scan_scalar", "mojo.q8_k", "mojo.q4_k_q8_k"]}
     ],
     "mojo.vector": [
       {"shared": [8, 1, 1, 1, 1], "local": {"vector_width": 8, "register_replicas": 1, "reduction_replicas": 4}, "implementations": ["mojo.vector", "mojo.scan_vector", "mojo.q8_k", "mojo.q4_k_q8_k"]},
