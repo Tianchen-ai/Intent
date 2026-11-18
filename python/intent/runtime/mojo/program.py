@@ -51,6 +51,7 @@ def _measure_candidates(measurements, arguments: tuple[object, ...], failed) -> 
             raise
 
     samples = [[] for _ in measurements]
+    spent = [0.0 for _ in measurements]
     for round_index in range(3):
         order = list(range(len(measurements)))
         if round_index == 1:
@@ -58,14 +59,24 @@ def _measure_candidates(measurements, arguments: tuple[object, ...], failed) -> 
         elif round_index == 2:
             order = order[1:] + order[:1]
         for candidate in order:
+            if samples[candidate] and spent[candidate] >= 0.125:
+                continue
+            started = perf_counter()
             # Warm each candidate for a bounded interval, not a single call.
             # Worker activation and native matrix state must settle after a
             # different candidate. Each invocation still restores and evicts.
             until = perf_counter() + 0.025 / 3
             while True:
-                measure(candidate)
+                elapsed = measure(candidate)
                 if perf_counter() >= until:
                     break
+            if not samples[candidate] and perf_counter() - started >= 0.125:
+                # A single long native interval already consumed the complete
+                # candidate budget. Keep it instead of discarding it as warmup
+                # and repeating the same expensive computation for a sample.
+                samples[candidate].append(elapsed)
+                spent[candidate] += perf_counter() - started
+                continue
             # Large contractions need not run fifteen times per candidate.
             # Budget time while retaining interleaved rounds and at least one
             # native interval per round. Reset/eviction stay outside it.
@@ -74,6 +85,7 @@ def _measure_candidates(measurements, arguments: tuple[object, ...], failed) -> 
                 samples[candidate].append(measure(candidate))
                 if perf_counter() >= until:
                     break
+            spent[candidate] += perf_counter() - started
     return tuple(statistics.median(values) for values in samples)
 
 
