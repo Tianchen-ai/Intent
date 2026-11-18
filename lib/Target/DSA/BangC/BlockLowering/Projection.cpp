@@ -69,7 +69,11 @@ LogicalResult Lowering::projection(Operation *operation) {
       auto relations = block::queryFragmentOperandRelations(operation);
       if (failed(relations) || relations->size() != 1) return failure();
       auto relation = relations->front();
-      if (extents[result].size() <= 2 && relation.preservesNonUnitAxes()) {
+      // Block extents may be symbolic until this complete target configuration
+      // is bound. A logical ownership axis that resolves to one is not a
+      // physical broadcast, even when its symbolic expression differs from 1.
+      // Prove the projection on these bound extents before choosing a transfer.
+      {
         SmallVector<int64_t> steps(extents[result].size(), 0);
         bool rectangular = true;
         for (const auto &group : relation.groups) {
@@ -79,15 +83,34 @@ LogicalResult Lowering::projection(Operation *operation) {
           for (unsigned axis : group.resultAxes) if (extents[result][axis] != 1) to.push_back(axis);
           if (from.size() != to.size()) { rectangular = false; break; }
           for (auto [sourceAxis, axis] : llvm::zip(from, to)) {
+            if (extents[input][sourceAxis] != extents[result][axis]) {
+              rectangular = false;
+              break;
+            }
             int64_t stride = 1;
             for (unsigned next = sourceAxis + 1; next < extents[input].size(); ++next) stride *= extents[input][next];
             steps[axis] = stride;
           }
         }
+        // Local storage collapses all leading logical axes into one row.
+        // They must therefore describe one affine row stride; a mixed
+        // broadcast/repetition still requires the general projection below.
+        int64_t rowStride = 0, rowExtent = 1;
+        bool haveRowStride = false;
+        for (unsigned axis = steps.empty() ? 0 : steps.size() - 1; axis-- > 0;) {
+          if (extents[result][axis] == 1) continue;
+          if (!haveRowStride) {
+            rowStride = steps[axis];
+            haveRowStride = true;
+          } else if (steps[axis] != rowStride * rowExtent) {
+            rectangular = false;
+          }
+          rowExtent *= extents[result][axis];
+        }
         if (rectangular) {
           auto sizes = cast<MemRefType>(result.getType()).getShape();
           b.create<physical::LoadTileOp>(loc, input, result, index(0),
-              index(steps.size() == 2 ? steps[0] : 0), index(steps.empty() ? 0 : steps.back()),
+              index(rowStride), index(steps.empty() ? 0 : steps.back()),
               index(sizes[0]), index(sizes[1]));
           values.map(original, result);
           return success();
