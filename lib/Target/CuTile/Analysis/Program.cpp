@@ -8,6 +8,8 @@
 #include "Intent/Dialect/Block/Analysis/PhysicalParameters.h"
 #include "Intent/Dialect/Block/Analysis/PhysicalProgram.h"
 #include "Intent/Dialect/Block/IR/Program.h"
+#include "Intent/Analysis/ControlFlow.h"
+#include "llvm/ADT/DenseSet.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Verifier.h"
 #include <functional>
@@ -33,6 +35,48 @@ NativeProgramFeatures queryNativeProgramFeatures(func::FuncOp kernel) {
   NativeProgramFeatures features;
   kernel.walk([&](Operation *operation) { features.observe(operation); });
   return features;
+}
+
+bool hasDataIndexedMatrixSupply(func::FuncOp kernel) {
+  auto dependsOnRead = [](ValueRange roots) {
+    SmallVector<Value> pending(roots);
+    llvm::DenseSet<Value> visited;
+    while (!pending.empty()) {
+      Value value = pending.pop_back_val();
+      if (!visited.insert(value).second) continue;
+      auto *producer = value.getDefiningOp();
+      if (isa_and_nonnull<block::LoadOp>(producer)) return true;
+      auto incoming = queryControlFlowIncoming(value);
+      if (incoming.complete && !incoming.edges.empty()) {
+        for (const auto &edge : incoming.edges)
+          if (edge.operand) pending.push_back(edge.operand->get());
+      } else if (producer && !producer->getNumRegions()) {
+        llvm::append_range(pending, producer->getOperands());
+      }
+    }
+    return false;
+  };
+  return kernel.walk([&](block::ContractOp matrix) {
+    SmallVector<Value> pending{matrix.getLhs(), matrix.getRhs()};
+    llvm::DenseSet<Value> visited;
+    while (!pending.empty()) {
+      Value value = pending.pop_back_val();
+      if (!visited.insert(value).second) continue;
+      auto *producer = value.getDefiningOp();
+      if (auto load = dyn_cast_or_null<block::LoadOp>(producer)) {
+        if (dependsOnRead(load.getCoordinates())) return WalkResult::interrupt();
+        continue;
+      }
+      auto incoming = queryControlFlowIncoming(value);
+      if (incoming.complete && !incoming.edges.empty()) {
+        for (const auto &edge : incoming.edges)
+          if (edge.operand) pending.push_back(edge.operand->get());
+      } else if (producer && !producer->getNumRegions()) {
+        llvm::append_range(pending, producer->getOperands());
+      }
+    }
+    return WalkResult::advance();
+  }).wasInterrupted();
 }
 
 namespace {

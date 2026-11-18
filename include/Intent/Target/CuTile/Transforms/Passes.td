@@ -40,6 +40,19 @@ def PrepareProgramPass : IntentCuTileTransformPass<
   }];
 }
 
+def SelectIndexedMatrixConfigurationsPass : IntentCuTileTransformPass<
+    "intent-cutile-select-indexed-matrix-configurations",
+    "Select complete non-TMA configurations for data-indexed matrix supply"> {
+  let description = [{
+    Consumes realized Block accesses, matrix operands and complete configuration
+    rows. Follows the operand supply and index def-use to identify matrix reads
+    whose coordinates depend on another memory read. Selects declared non-TMA
+    forms to bound native scheduling work, preserving all logical accesses and
+    arithmetic. Ordinary load-fed matrix programs retain their TMA candidates.
+    Disabling this optional selection leaves the original native input forms.
+  }];
+}
+
 def NativeProgramPass : IntentCuTileTransformPass<
     "intent-cutile-native-program",
     "Form native cuTile accesses and computations from the current Block program"> {

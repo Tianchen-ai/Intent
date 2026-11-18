@@ -65,12 +65,14 @@ public:
 void registerCuTilePasses() {
   registerIntentCuTileTransformPasses();
   registerTransformation({"cutile", "realized", false}, createSelectClusterConfigurationsPass());
+  registerTransformation({"cutile", "realized", false}, createSelectIndexedMatrixConfigurationsPass());
   PassPipelineRegistration<>("intent-cutile-lower",
       "Legalize the complete CuTile provider program", buildCuTilePipeline);
 }
 
 void buildCuTilePipeline(OpPassManager &manager) {
   addTransformation(manager, {"cutile", "realized", false}, createSelectClusterConfigurationsPass());
+  addTransformation(manager, {"cutile", "realized", false}, createSelectIndexedMatrixConfigurationsPass());
   manager.addPass(createPrepareProgramPass());
   manager.addPass(createNativeProgramPass());
   manager.addPass(createFinalizeProgramPass());
