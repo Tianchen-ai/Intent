@@ -1,4 +1,5 @@
 """Canonical task modules through Triton–Weft JIT, plus author-owned host code."""
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -68,11 +69,13 @@ def compile_program(program, target):
     selected = WeftBackend(target.native).parse_options(options)
     toolchain = selected.toolchain
     sdk = Path(sdk_path())
-    compiled, abis = [], []
     key = json.dumps((program.source, str(target.native), options, target.cpus), sort_keys=True)
     with locked_cache_entry("weft-jit-sources", key) as entry:
         directory = entry.ready_attempt() or entry.create_attempt()
-        for index, task in enumerate(contract.facts.tasks):
+        tasks = contract.facts.tasks
+
+        def compile_task(index):
+            task = tasks[index]
             path = directory / f"task-{index}.weftir"
             write_source(path, task.source)
             try:
@@ -81,9 +84,18 @@ def compile_program(program, target):
                 raise CompilationStageError("provider_native_compilation", str(error),
                     cache_directory=directory, artifacts={"canonical": path}) from error
             task.abi.verify_native(kernel.metadata.kernel_abi)
-            compiled.append(kernel)
-            abis.append(kernel.metadata.kernel_abi)
+            return kernel
+
+        # Independent source modules can compile together. Keep their ABIs
+        # in author order for bridge generation and respect the local CPU set.
+        workers = min(4, len(target.cpus), contract.target.workers, len(tasks))
+        if workers > 1:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                compiled = list(executor.map(compile_task, range(len(tasks))))
+        else:
+            compiled = [compile_task(index) for index in range(len(tasks))]
         entry.publish(directory)
+    abis = [kernel.metadata.kernel_abi for kernel in compiled]
     bridge = bridge_source(contract.facts.tasks, abis)
     wrappers = native_exports(contract)
     dependencies = tuple(Path(path) for kernel in compiled for path in kernel.metadata.runtime_files.values())
