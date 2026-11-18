@@ -203,6 +203,7 @@ private:
     kernel.walk([&](TensorDescriptorChoiceOp choice) {
       descriptorChoice = choice;
       values[choice.getResult()] = choice.getConfigParameter().getName().getValue().str();
+      constexprValues.insert(choice.getResult());
       argumentNames.insert(choice.getConfigParameter().getName().getValue());
       argumentNames.insert(choice.getEligibilityArgument());
     });

@@ -1,5 +1,6 @@
 #include "Intent/Dialect/Block/Transforms/Value/ValueMaterialization.h"
 #include "Intent/Dialect/Block/Analysis/IntegerRanges.h"
+#include "Intent/Dialect/Block/Analysis/PhysicalProgram.h"
 #include "Intent/Dialect/Block/Analysis/UniformValues.h"
 #include "mlir/IR/IRMapping.h"
 #include <limits>
@@ -43,8 +44,17 @@ void narrowIntegerArithmetic(func::FuncOp kernel) {
                           rhs->smin().sle(-1) && rhs->smax().sge(-1))) return;
     }
     // No operation may wrap differently at the two bit widths.
-    if (fits(binary.getLhs()) && fits(binary.getRhs()) && fits(binary.getResult()))
-      candidates.push_back(binary);
+    if (!fits(binary.getLhs()) || !fits(binary.getRhs()) || !fits(binary.getResult()))
+      return;
+    // Configuration arithmetic is evaluated before launch. Narrowing it
+    // introduces device casts into decisions such as tile and dot legality.
+    if (binary.getType().isIndex() &&
+        llvm::all_of(binary->getOperands(), [](Value operand) {
+          auto expr = queryLaunchExpression(operand);
+          return expr && isCompileTimePhysicalExpr(expr);
+        }))
+      return;
+    candidates.push_back(binary);
   });
   for (BinaryOp binary : candidates) {
     OpBuilder builder(binary);
