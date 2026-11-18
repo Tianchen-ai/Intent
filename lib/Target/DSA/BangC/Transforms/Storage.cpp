@@ -111,8 +111,10 @@ bool reuseConsumedStorage(func::FuncOp function, bangc::physical::ConfigurationA
     destination->remove();
     int64_t nram = 0, wram = 0;
     measureStorage(function, nram, wram);
-    if (nram > currentNram || wram > currentWram || nram > config.getLocalBytes() ||
-        nram > capabilities(function).getNramBytes() || wram > capabilities(function).getWramBytes()) {
+    // Several dead input versions may have to be coalesced before the program
+    // fits. Each rewrite must reduce (or preserve) the current footprint;
+    // final storage binding checks the complete hardware and candidate budget.
+    if (nram > currentNram || wram > currentWram) {
       OpBuilder restore(next);
       restore.insert(destination.getOperation());
       for (OpOperand *use : uses) use->set(destination);

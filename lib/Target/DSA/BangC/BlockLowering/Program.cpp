@@ -87,6 +87,8 @@ FailureOr<Value> Lowering::expression(block::PhysicalExprAttr expr) {
 }
 
 LogicalResult Lowering::run() {
+  if (auto options = readCompileOptions(source); succeeded(options) && options->getOptimizationRemarks())
+    source.emitRemark("BANG C Block configuration: ") << parameters;
   DenseMap<int64_t, int64_t> dimensions;
   for (Attribute attribute : interface.getPublicInterface().getArguments()) {
     auto parameter = cast<PublicParameterAttr>(attribute);

@@ -28,8 +28,11 @@ LogicalResult constructBlockStorage(ModuleOp module, physical::ConfigurationAttr
       "pointwise_two_axis_narrow", "pointwise_two_axis", "pointwise_narrow", "pointwise"}) {
     bool matrix = name.contains("contraction");
     bool stateful = name == "pointwise_ordered" || name == "pointwise_only_fixed_local" || name == "pointwise_fixed_local";
+    // Two free reduction axes are independent row budgets. The streaming
+    // vector tile belongs to their reduced payload, not to either row count.
+    bool reductionRows = name == "pointwise_reduction_two_axis";
     auto row = builder.getDenseI64ArrayAttr({matrix ? config.getTileM() : 1,
-        matrix ? config.getTileN() : stateful ? config.getRegionTile() : config.getTile(),
+        matrix ? config.getTileN() : reductionRows ? 1 : stateful ? config.getRegionTile() : config.getTile(),
         matrix ? config.getTileK() : config.getTile(), 1, config.getRegionTile(), 1, 1});
     families.append(name, builder.getArrayAttr({row}));
   }
