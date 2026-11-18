@@ -1,4 +1,5 @@
 #include "Intent/Target/DSA/BangC/Physical/Transforms/MatrixPanels.h"
+#include "Intent/Target/DSA/BangC/Resources.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "llvm/ADT/STLExtras.h"
 #include <algorithm>
@@ -63,12 +64,14 @@ std::optional<AvailableStorage> availableStorage(func::FuncOp function,
                               : space == sharedSpace ? &sram : nullptr;
     if (!total || !add(*total, *size)) complete = false;
   });
-  int64_t nramLimit = std::min<int64_t>(config.getLocalBytes(), 768 * 1024);
+  int64_t nramLimit = std::min(config.getLocalBytes(), storageResource(function, nramSpace).usableBytes());
+  int64_t wramLimit = storageResource(function, matrixSpace).usableBytes();
+  int64_t sramLimit = usableSramBytes(function);
   if (!complete || internalNram < 0 || internalNram > nramLimit ||
-      nram > nramLimit - internalNram || wram > 1024 * 1024 || sram > 3968 * 1024)
+      nram > nramLimit - internalNram || wram > wramLimit || sram > sramLimit)
     return std::nullopt;
   return AvailableStorage{nramLimit - internalNram - nram,
-                          1024 * 1024 - wram, 3968 * 1024 - sram};
+                          wramLimit - wram, sramLimit - sram};
 }
 } // namespace
 
@@ -106,7 +109,7 @@ bool matrixPanelsFitStorage(func::FuncOp function, ConfigurationAttr config,
 }
 
 llvm::SmallVector<MatrixPanelShape> largerMatrixPanels(
-    ConfigurationAttr config, Type element, int64_t rows, int64_t columns,
+    func::FuncOp function, ConfigurationAttr config, Type element, int64_t rows, int64_t columns,
     int64_t depth, MatrixPanelShape baseline) {
   llvm::SmallVector<MatrixPanelShape> result;
   if (rows <= 0 || columns <= 0 || baseline.rows <= 0 || baseline.columns <= 0 ||
@@ -130,13 +133,15 @@ llvm::SmallVector<MatrixPanelShape> largerMatrixPanels(
   };
   struct Candidate { MatrixPanelShape shape; int64_t bytes; };
   llvm::SmallVector<Candidate> candidates;
+  auto nram = storageResource(function, nramSpace);
+  auto wram = storageResource(function, matrixSpace);
   for (int64_t m : steps(baseline.rows, rows))
     for (int64_t n : steps(baseline.columns, paddedColumns)) {
       MatrixPanelShape shape{m, n};
       if (rectangles(shape) >= rectangles(baseline)) continue;
       auto storage = matrixPanelStorage(element, m, n, depth);
-      if (!storage || storage->nram > std::min<int64_t>(config.getLocalBytes(), 768 * 1024) ||
-          storage->wram > 1024 * 1024) continue;
+      if (!storage || !nram.fits(storage->nram, config.getLocalBytes()) ||
+          storage->wram > wram.usableBytes()) continue;
       candidates.push_back({shape, storage->nram});
     }
   llvm::stable_sort(candidates, [&](const Candidate &a, const Candidate &b) {
@@ -145,6 +150,14 @@ llvm::SmallVector<MatrixPanelShape> largerMatrixPanels(
   });
   for (const Candidate &candidate : candidates) result.push_back(candidate.shape);
   return result;
+}
+
+int64_t sharedRhsStageCount(func::FuncOp function, ConfigurationAttr config,
+                            Type element, int64_t depth, int64_t columns) {
+  auto available = availableStorage(function, config);
+  auto panel = bytes(depth, columns, element.getIntOrFloatBitWidth() / 8, 128);
+  if (!available || !panel) return 0;
+  return std::min<int64_t>(8, available->sram / 2 / *panel);
 }
 
 int64_t selectMatrixPanelDepth(func::FuncOp function, ConfigurationAttr config,

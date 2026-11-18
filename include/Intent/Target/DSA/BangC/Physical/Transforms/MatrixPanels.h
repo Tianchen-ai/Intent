@@ -30,8 +30,12 @@ struct MatrixPanelShape { int64_t rows, columns; };
 // reduce the number of rectangles and pass a standalone storage bound; callers
 // must still measure the actual program before accepting one.
 llvm::SmallVector<MatrixPanelShape> largerMatrixPanels(
-    ConfigurationAttr config, mlir::Type element, int64_t rows, int64_t columns,
+    mlir::func::FuncOp function, ConfigurationAttr config, mlir::Type element, int64_t rows, int64_t columns,
     int64_t depth, MatrixPanelShape baseline);
+
+// Number of RHS panels per slot when the group alternates two SRAM slots.
+int64_t sharedRhsStageCount(mlir::func::FuncOp function, ConfigurationAttr config,
+                            mlir::Type element, int64_t depth, int64_t columns);
 
 // Call only while forming one ordinary contraction. availableDepth is a
 // complete source panel; selection never authorizes merging ordered updates.

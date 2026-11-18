@@ -1,6 +1,7 @@
 #include "Intent/Target/DSA/BangC/Physical/IR/DSAOps.h"
 #include "Intent/Target/DSA/BangC/Physical/IR/ExecutionRelations.h"
 #include "Intent/Target/DSA/BangC/Physical/IR/Views.h"
+#include "Intent/Target/DSA/BangC/Resources.h"
 #include "Intent/Analysis/BufferStorage.h"
 #include "Intent/Serialization/NativeABI.h"
 #include "Intent/Target/DSA/BangC/Physical/IR/MemoryEffects.h"
@@ -586,6 +587,9 @@ intent::bangc::physical::queryFullExtentRequirements(func::FuncOp function) {
 
 LogicalResult intent::bangc::physical::verifyProgram(ModuleOp module) {
   if (failed(mlir::verify(module))) return failure();
+  auto device = module->getAttrOfType<CapabilitiesAttr>("intent_bangc.capabilities");
+  if (!device) return module.emitError("BANG C execution requires the selected device capabilities");
+  if (failed(dsa::verifyResources(device, [&] { return module.emitError(); }))) return failure();
   auto functions = llvm::to_vector(module.getOps<func::FuncOp>());
   if (functions.size() != 1) return module.emitError("DSA artifact requires one physical kernel");
   auto function = functions.front();
@@ -639,7 +643,8 @@ LogicalResult intent::bangc::physical::verifyProgram(ModuleOp module) {
     }
   }
   auto groupWidth = function->getAttrOfType<IntegerAttr>("intent_bangc.group_width");
-  if (groupWidth && (groupWidth.getInt() != 4 || config.getTasks() < 4 || config.getTasks() % 4))
+  if (groupWidth && (groupWidth.getInt() != 4 || device.getCoresPerCluster() != 4 ||
+                     config.getTasks() < 4 || config.getTasks() % 4))
     return function.emitError("MLU370 cooperative execution requires four compute participants per group");
   ExecutionRelations execution(function);
   auto walk = function.walk([&](Operation *op) {

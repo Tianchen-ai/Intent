@@ -268,7 +268,7 @@ LogicalResult realizeMatMul(bangc::physical::MatMulOp matrix, bangc::physical::C
     bangc::physical::StorageAnalysis storage(function);
     if (storage.disjoint(matrix.getAccumulator(), matrix.getLhs()) &&
         storage.disjoint(matrix.getAccumulator(), matrix.getRhs()))
-      candidates = bangc::physical::largerMatrixPanels(config, element,
+      candidates = bangc::physical::largerMatrixPanels(function, config, element,
           lhsType.getDimSize(0), rhsType.getDimSize(rhsTransposed ? 0 : 1),
           bk, {bm, bn});
   }

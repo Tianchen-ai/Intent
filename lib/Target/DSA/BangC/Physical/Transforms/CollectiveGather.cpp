@@ -1,4 +1,5 @@
 #include "PassSupport.h"
+#include "Intent/Target/DSA/BangC/Resources.h"
 #include "Intent/Target/DSA/BangC/Physical/Transforms/StoragePatterns.h"
 #include "Intent/Target/DSA/BangC/Physical/Transforms/Passes.h"
 #include "Intent/Target/DSA/BangC/Physical/Analysis/PhysicalProgram.h"
@@ -44,7 +45,7 @@ bool adjacentIntervals(GatherRowsOp gather, ExecutionRelations &relations,
       integer(gather.getColumnStride()) != std::optional<int64_t>(1) ||
       integer(gather.getColumns()) != std::optional<int64_t>(columns)) return false;
   int64_t elementBytes = llvm::divideCeil(source.getElementType().getIntOrFloatBitWidth(), 8u);
-  if (columns > ((3968 * 1024) / rows - 32) / (4 * elementBytes)) return false;
+  if (columns > (usableSramBytes(gather) / rows - 32) / (4 * elementBytes)) return false;
 
   // Require one complete, current offset snapshot immediately before the read.
   // No other writer or alias can substitute older lane-dependent row addresses.
@@ -128,7 +129,8 @@ void realizeGroup(scf::ForOp work, ArrayRef<GatherRowsOp> gathers, ExecutionRela
 
 LogicalResult realizeCollectiveGatherSupply(func::FuncOp function) {
   auto config = function->getAttrOfType<ConfigurationAttr>("intent_bangc.configuration");
-  if (function->hasAttr("intent_bangc.group_width") || config.getTasks() < 4 || config.getTasks() % 4) return success();
+  if (function->hasAttr("intent_bangc.group_width") || capabilities(function).getCoresPerCluster() != 4 ||
+      config.getTasks() < 4 || config.getTasks() % 4) return success();
   SmallVector<scf::ForOp> worksets;
   function.walk([&](scf::ForOp loop) {
     if (loop.getLowerBound().getDefiningOp<TaskIdOp>()) worksets.push_back(loop);

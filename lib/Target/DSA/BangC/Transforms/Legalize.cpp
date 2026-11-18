@@ -20,11 +20,6 @@ namespace intent::bangc {
 
 namespace {
 LogicalResult checkProgram(ModuleOp module) {
-  auto hardware = module->getAttrOfType<bangc::physical::CapabilitiesAttr>("intent_bangc.capabilities");
-  if (!hardware || failed(dsa::verifyResources(hardware, [&] { return module.emitError(); })))
-    return failure();
-  if (usableSramBytes(module) <= 0)
-    return module.emitError("BANG C requires SRAM exceeding the SDK reserve");
   if (failed(bangc::physical::verifyRealizedProgram(module))) return failure();
   auto architecture = module->getAttrOfType<StringAttr>("bangc.architecture");
   if (!architecture || architecture.getValue() != "mtp_372")

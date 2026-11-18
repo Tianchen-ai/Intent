@@ -1,6 +1,7 @@
 #include "PassSupport.h"
 #include "Intent/Target/DSA/BangC/Physical/Transforms/StoragePatterns.h"
 #include "Intent/Target/DSA/BangC/Physical/Transforms/MatrixPanels.h"
+#include "Intent/Target/DSA/BangC/Resources.h"
 #include "MatrixSupplyRelations.h"
 #include "Intent/Target/DSA/BangC/Physical/Transforms/Passes.h"
 #include "Intent/Target/DSA/BangC/Physical/Analysis/PhysicalProgram.h"
@@ -189,7 +190,7 @@ class MatrixSupplyRewrite {
 public:
   explicit MatrixSupplyRewrite(MatrixSupplyMatch match, ConfigurationAttr config)
       : match(match), config(config), function(match.work->getParentOfType<func::FuncOp>()), b(match.work) {}
-  LogicalResult run(std::optional<StreamedMatrixPanel> resident) {
+  LogicalResult run(std::optional<StreamedMatrixPanel> resident, int64_t stageTiles) {
     auto matrix = match.matrix;
     Location loc = matrix.getLoc();
     Value lhsSource = match.lhs.getSource(), rhsSource = match.rhs.getSource();
@@ -354,9 +355,6 @@ public:
       Value computeCore = b.create<arith::XOrIOp>(loc, memoryCore, b.create<arith::ConstantIntOp>(loc, 1, 1));
       Value groupsM = b.create<arith::CeilDivSIOp>(loc, gridM, index(loc, 4));
       Type element = aType.getElementType();
-      int64_t panelBytes = match.geometry.depth * columns * (element.getIntOrFloatBitWidth() / 8);
-      int64_t stageTiles = std::min<int64_t>(8, (3968 * 1024) / (2 * panelBytes));
-      if (!stageTiles) return matrix.emitError("matrix panel exceeds execution-group shared storage");
       int64_t stageRows = stageTiles * match.geometry.depth;
       auto sharedType = MemRefType::get({stageRows, columns}, element,
           MemRefLayoutAttrInterface{}, b.getI64IntegerAttr(bangc::physical::sharedSpace));
@@ -471,6 +469,8 @@ private:
 
 LogicalResult realizeMatrixSupply(func::FuncOp function) {
   auto config = function->getAttrOfType<ConfigurationAttr>("intent_bangc.configuration");
+  if (capabilities(function).getCoresPerCluster() != 4 ||
+      config.getTasks() < 4 || config.getTasks() % 4) return success();
   SmallVector<scf::ForOp> worksets;
   function.walk([&](scf::ForOp loop) {
     if (loop.getLowerBound().getDefiningOp<TaskIdOp>()) worksets.push_back(loop);
@@ -483,14 +483,15 @@ LogicalResult realizeMatrixSupply(func::FuncOp function) {
     Type element = a.getElementType();
     std::optional<StreamedMatrixPanel> resident;
     if (a.hasStaticShape() && c.hasStaticShape() &&
-        config.getTasks() >= 4 && config.getTasks() % 4 == 0 &&
         c.getDimSize(1) / match->geometry.columns >= config.getTasks())
       resident = selectStreamedMatrixPanel(function, config, element,
           match->geometry.rows, match->geometry.columns, a.getDimSize(1), 0);
-    bool shared = config.getTasks() >= 4 && config.getTasks() % 4 == 0 &&
-        a.getDimSize(0) / match->geometry.rows >= 4;
-    if (!resident && !shared) continue;
-    if (failed(MatrixSupplyRewrite(*match, config).run(resident))) return failure();
+    int64_t stages = 0;
+    if (!resident && a.getDimSize(0) / match->geometry.rows >= 4)
+      stages = sharedRhsStageCount(function, config, element, match->geometry.depth,
+                                   match->geometry.columns);
+    if (!resident && !stages) continue;
+    if (failed(MatrixSupplyRewrite(*match, config).run(resident, stages))) return failure();
     work.erase();
   }
   return success();
