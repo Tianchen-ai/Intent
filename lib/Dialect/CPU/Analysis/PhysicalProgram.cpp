@@ -104,6 +104,7 @@ LogicalResult PhysicalProgramAnalysis::verify(CPUProgramStage stage) {
   if (interface.getArguments().empty() || interface.getArguments().size() != function.getNumArguments() ||
       !requirements || !requirements.getDisjointOutputs())
     return function.emitError("CPU function requires its complete typed native interface");
+  llvm::DenseMap<StringAttr, int64_t> knownStrides;
   for (auto [argument, field] : llvm::zip(function.getArguments(), interface.getArguments())) {
     auto storageType = [&](Type logical) -> Type {
       if (auto integer = dyn_cast<IntegerType>(logical)) return IntegerType::get(function.getContext(), integer.getWidth());
@@ -126,11 +127,15 @@ LogicalResult PhysicalProgramAnalysis::verify(CPUProgramStage stage) {
         return function.emitError("CPU view layout disagrees with its physical ABI");
       if (view.getConstraints().getHasStrides())
         for (auto [constraint, stride] : llvm::zip(view.getConstraints().getStrides(), strides)) {
-          if (!isa<UnitAttr, IntegerAttr>(constraint))
-            return function.emitError("CPU stride constraint must be an integer or unconstrained");
-          if (auto fixed = dyn_cast<IntegerAttr>(constraint);
-              fixed && !ShapedType::isDynamic(stride) && fixed.getInt() != stride)
+          if (ShapedType::isDynamic(stride)) continue;
+          if (auto fixed = dyn_cast<IntegerAttr>(constraint); fixed && fixed.getInt() != stride)
             return function.emitError("CPU view layout contradicts its declared stride constraint");
+          if (auto symbol = dyn_cast<StringAttr>(constraint)) {
+            auto [found, inserted] = knownStrides.try_emplace(symbol, stride);
+            if (!inserted && found->second != stride)
+              return function.emitError("CPU view layouts give different static strides to ")
+                     << symbol;
+          }
         }
     } else {
       if (!logical.isF32() && !logical.isF64() && !logical.isIndex() && !isa<IntegerType>(logical))

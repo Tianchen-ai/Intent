@@ -40,9 +40,6 @@ LogicalResult Construction::lower(func::FuncOp source) {
           return source.emitError("CPU declared stride constraints must cover the view rank");
         constraints.assign(view.getConstraints().getStrides().begin(), view.getConstraints().getStrides().end());
       }
-      for (Attribute constraint : constraints)
-        if (!isa<UnitAttr, IntegerAttr>(constraint))
-          return source.emitError("CPU symbolic stride constraints are not implemented");
       if (entryLayout == CPUEntryLayout::StridedInputs && view.getAccess() == 0) {
         SmallVector<int64_t> strides;
         for (Attribute constraint : constraints) {
@@ -57,9 +54,8 @@ LogicalResult Construction::lower(func::FuncOp source) {
         if (failed(memory.getStridesAndOffset(strides, offset)))
           return source.emitError("CPU contiguous view has no derived strides");
         for (auto [constraint, stride] : llvm::zip(constraints, strides)) {
-          if (isa<UnitAttr>(constraint)) continue;
           auto fixed = dyn_cast<IntegerAttr>(constraint);
-          if (!fixed || (!ShapedType::isDynamic(stride) && fixed.getInt() != stride))
+          if (fixed && !ShapedType::isDynamic(stride) && fixed.getInt() != stride)
             return source.emitError("CPU contiguous ABI cannot discharge this declared stride constraint");
         }
       }
