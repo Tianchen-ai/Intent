@@ -350,25 +350,15 @@ LogicalResult formExactBfloatTile(OpBuilder &b, linalg::GenericOp operation,
     const ContractionTile &tile, ConfigurationAttr config, ImplementationAttr binding) {
   Location loc = operation.getLoc();
   Value zero = index(b, loc, 0);
-  NamedAttrList parameters;
-  for (auto [name, value] : {std::pair<StringRef, int64_t>{"vector_width", implementationParameter(binding, "vector_width")},
-       {"micro_m", 4}, {"micro_n", 1}, {"register_replicas", 1}, {"reduction_replicas", 1}})
-    parameters.append(name, b.getI64IntegerAttr(value));
-  auto exactBinding = ImplementationAttr::get(b.getContext(), b.getStringAttr("mojo.register_float_direct"),
-      parameters.getDictionary(b.getContext()));
-  ContractionTile exact = tile;
-  exact.lhs = b.create<memref::SubViewOp>(loc, tile.lhs,
-      ArrayRef<OpFoldResult>{tile.mBegin, tile.kBegin},
-      ArrayRef<OpFoldResult>{tile.mCount, tile.depth},
-      ArrayRef<OpFoldResult>{b.getIndexAttr(1), b.getIndexAttr(1)});
   int64_t fallbackColumns = implementationParameter(binding, "vector_width");
   auto exactRight = b.create<memref::AllocaOp>(loc,
       MemRefType::get({config.getTileK(), fallbackColumns}, b.getBF16Type()));
   exactRight.setAlignment(64);
-  exact.rhs = exactRight;
-  exact.mBegin = exact.nBegin = exact.kBegin = zero;
-  exact.inputs = {};
-  LogicalResult status = success();
+  // This is the bounded exact arithmetic path for a guarded matrix block and
+  // its edges. Reusing the full register-contraction expander here multiplied
+  // every matrix edge by all of its register M/N edge variants. Keep one
+  // vector output interval and its scalar tail; K remains an ascending FMA
+  // chain and the original BF16 inputs are widened without DAZ/FTZ.
   loop(b, loc, zero, tile.nCount, fallbackColumns, [&](Value column) {
     Value columns = b.create<arith::MinSIOp>(loc, index(b, loc, fallbackColumns),
         b.create<arith::SubIOp>(loc, tile.nCount, column));
@@ -386,11 +376,60 @@ LogicalResult formExactBfloatTile(OpBuilder &b, linalg::GenericOp operation,
         [](OpBuilder &nested, Location at, ValueRange arguments) {
           nested.create<linalg::YieldOp>(at, arguments[0]);
         });
-    exact.output = view(tile.output, zero, column, tile.mCount, columns);
-    exact.nCount = columns;
-    if (failed(formRegisterTile(b, operation, exact, config, exactBinding))) status = failure();
+    auto compute = [&](Value n, int64_t width) {
+      Type accumulator = width == 1 ? Type(b.getF32Type())
+          : Type(VectorType::get({width}, b.getF32Type()));
+      loop(b, loc, zero, tile.mCount, 1, [&](Value row) {
+        Value outputColumn = add(b, loc, column, n);
+        Value initial;
+        if (tile.first) {
+          initial = width == 1 ? tile.initial
+              : Value(b.create<vector::BroadcastOp>(loc, accumulator, tile.initial));
+        } else {
+          initial = width == 1
+              ? Value(b.create<memref::LoadOp>(loc, tile.output, ValueRange{row, outputColumn}))
+              : Value(b.create<vector::LoadOp>(loc, cast<VectorType>(accumulator),
+                    tile.output, ValueRange{row, outputColumn}));
+        }
+        auto reduction = b.create<scf::ForOp>(loc, zero, tile.depth,
+            index(b, loc, 1), ValueRange{initial});
+        {
+          OpBuilder::InsertionGuard guard(b);
+          b.setInsertionPointToStart(reduction.getBody());
+          Value k = reduction.getInductionVar();
+          Value a = b.create<memref::LoadOp>(loc, tile.lhs,
+              ValueRange{add(b, loc, tile.mBegin, row), add(b, loc, tile.kBegin, k)});
+          a = b.create<arith::ExtFOp>(loc, b.getF32Type(), a);
+          Value rhs;
+          if (width == 1) {
+            rhs = b.create<memref::LoadOp>(loc, exactRight, ValueRange{k, n});
+          } else {
+            a = b.create<vector::BroadcastOp>(loc, accumulator, a);
+            rhs = b.create<vector::LoadOp>(loc, VectorType::get({width}, b.getBF16Type()),
+                                          exactRight, ValueRange{k, n});
+          }
+          rhs = b.create<arith::ExtFOp>(loc, accumulator, rhs);
+          Value next = b.create<math::FmaOp>(loc, a, rhs, reduction.getRegionIterArgs()[0]);
+          b.create<scf::YieldOp>(loc, next);
+        }
+        if (width == 1)
+          b.create<memref::StoreOp>(loc, reduction.getResult(0), tile.output,
+                                  ValueRange{row, outputColumn});
+        else
+          b.create<vector::StoreOp>(loc, reduction.getResult(0), tile.output,
+                                   ValueRange{row, outputColumn});
+      });
+    };
+    auto full = b.create<scf::IfOp>(loc,
+        b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                               columns, index(b, loc, fallbackColumns)), true);
+    OpBuilder::InsertionGuard guard(b);
+    b.setInsertionPointToStart(full.thenBlock());
+    compute(zero, fallbackColumns);
+    b.setInsertionPointToStart(full.elseBlock());
+    loop(b, loc, zero, columns, 1, [&](Value n) { compute(n, 1); });
   });
-  return status;
+  return success();
 }
 
 LogicalResult formBfloatTile(OpBuilder &b, linalg::GenericOp operation,
