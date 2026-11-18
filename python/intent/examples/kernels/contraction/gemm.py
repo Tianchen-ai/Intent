@@ -27,6 +27,18 @@ def gemm_f32(
 
 
 @intent.kernel
+def linear_f32(
+    x: I.In[I.f32, ("M", "K")],
+    weight: I.In[I.f32, ("N", "K")],
+    output: I.Out[I.f32, ("M", "N")],
+):
+    m = I.domain(0, x.shape[0])
+    n = I.domain(0, weight.shape[0])
+    k = I.domain(0, x.shape[1])
+    output[m, n] = I.matmul(x[m, k], weight[n, k], transpose_rhs=True, acc_dtype=I.f32)
+
+
+@intent.kernel
 def gemm_i8(
     a: I.In[I.i8, ("M", "K")],
     b: I.In[I.i8, ("K", "N")],
