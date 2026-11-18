@@ -83,6 +83,9 @@ python -m intent.examples attention --backend mojo --stage native
 `source` 生成并检查调用几何，`native` 编译而不执行，
 `run` 执行完整程序。数值对照、重复计时、批量 suite 和实验协议由独立 Bench 提供：
 
+`--tuning-config /path/to/config.json` 将同一份完整配置表传给该程序的所有 kernel，
+在 source 检查与原生 JIT 中使用同一路径。配置格式与普通 `intent.jit` 的参数相同。
+
 ```bash
 intent-bench check --suite mainline --backend triton --env local-gpu
 intent-bench run softmax --env local-gpu --case 64x1024-float16 \

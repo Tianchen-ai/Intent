@@ -1,5 +1,6 @@
 """Author host orchestration using the product local JIT."""
 from dataclasses import dataclass, field
+from pathlib import Path
 import intent
 from intent.language.annotations import ConstexprSpec, ViewKind, ViewSpec
 from intent.runtime.invocation import ViewFacts, build_invocation_binders
@@ -42,7 +43,8 @@ class _ExampleKernel:
         self.context, self.definition, self.constexprs = context, definition, constexprs
         self.kernel = intent.jit(definition, backend=context.backend, device=context.device,
             compiler=context.compiler, constexprs=constexprs, workers=context.workers,
-            backend_options=context.backend_options, options=context.options)
+            backend_options=context.backend_options, options=context.options,
+            tuning_config=context.tuning_config)
         context.kernels.append(self.kernel)
 
     def empty_like(self, reference, shape, *, dtype):
@@ -67,7 +69,7 @@ class _ExampleKernel:
                 target, self.definition, arguments, outputs)
             program = intent.generate(self.definition, target=target,
                                       compiler=self.context.compiler, constexprs=self.constexprs,
-                                      options=self.context.options)
+                                      options=self.context.options, tuning_config=self.context.tuning_config)
             self.context.artifacts.append(program)
             binders = build_invocation_binders(program.interface, abstract=True,
                 observe_view=lambda _, p, value: _abstract_view(p, value),
@@ -127,6 +129,7 @@ class ExampleContext:
     workers: int | None = None
     backend_options: dict = field(default_factory=dict)
     options: intent.CompileOptions | None = None
+    tuning_config: str | Path | None = None
     artifacts: list = field(default_factory=list, init=False)
     kernels: list = field(default_factory=list, init=False)
     invocations: list = field(default_factory=list, init=False)

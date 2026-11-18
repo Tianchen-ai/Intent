@@ -13,6 +13,7 @@ def main():
     parser.add_argument("--device")
     parser.add_argument("--workers", type=int)
     parser.add_argument("--compiler")
+    parser.add_argument("--tuning-config")
     parser.add_argument("--stage", choices=("source", "native", "run"), default="run")
     parser.add_argument("--prepared", action="store_true")
     parser.add_argument("--option", action="append", default=[], metavar="NAME=JSON")
@@ -33,7 +34,8 @@ def main():
             parser.error("--option requires distinct NAME=JSON entries")
         options[key] = json.loads(encoded)
     context = ExampleContext(args.backend, device, compiler=args.compiler, workers=args.workers,
-                             prepared=args.prepared, stage=args.stage, backend_options=options)
+                             prepared=args.prepared, stage=args.stage, backend_options=options,
+                             tuning_config=args.tuning_config)
     try:
         describe_outputs(load_program(args.program)(context))
     finally:

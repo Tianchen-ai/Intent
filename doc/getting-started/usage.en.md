@@ -84,6 +84,10 @@ changes ordinary JIT device checks nor infers an ABI or kernel sequence.
 
 ## Installed author programs
 
+Pass `--tuning-config /path/to/config.json` to use the same complete configuration
+table for all kernels of a program, both during source inspection and native JIT.
+Its format is the same as the ordinary `intent.jit` option.
+
 The single source for algorithms and host orchestration is installed as
 `intent.examples.kernels` and `intent.examples.programs`. Neither a checkout nor Bench is required:
 
