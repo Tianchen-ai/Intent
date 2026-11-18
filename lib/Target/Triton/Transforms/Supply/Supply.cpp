@@ -416,16 +416,21 @@ LogicalResult legalizeOrderedViewDependencies(func::FuncOp kernel) {
   return synchronize(kernel.front(), false, true, pending);
 }
 
+enum class CarryKind { Any, Fragment, Matrix };
+
 // Follow actual control forwarding slots as well as ordinary value operands.
 // IV variation alone is not a loop-carried dependency.
 bool dependsOnLoopCarry(ValueRange operands, scf::ForOp loop,
-                        bool fragmentsOnly) {
+                        CarryKind kind) {
   SmallVector<Value> pending(operands);
   llvm::DenseSet<Value> visited;
   while (!pending.empty()) {
     Value value = pending.pop_back_val();
     if (llvm::is_contained(loop.getRegionIterArgs(), value)) {
-      if (!fragmentsOnly || isa<block::FragmentType>(value.getType())) return true;
+      auto type = dyn_cast<block::FragmentType>(value.getType());
+      if (kind == CarryKind::Any ||
+          (type && (kind == CarryKind::Fragment || type.getShape().size() >= 2)))
+        return true;
       continue;
     }
     if (!visited.insert(value).second)
@@ -461,14 +466,14 @@ void selectRecurrencePipelineStages(func::FuncOp kernel) {
   kernel.walk([&](scf::ForOp loop) {
     auto recurrence = loop.walk([&](block::ContractOp contract) {
       return dependsOnLoopCarry({contract.getLhs(), contract.getRhs()}, loop,
-                                /*fragmentsOnly=*/true)
+                                CarryKind::Matrix)
                  ? WalkResult::interrupt()
                  : WalkResult::advance();
     });
     if (!recurrence.wasInterrupted()) return;
-    // A carried fragment used as a matrix operand keeps state and its supply
-    // live together across iterations. Select the native single-stage form;
-    // ordinary GEMM accumulator recurrence alone does not enter this policy.
+    // Matrix-sized state feeding a multiplicand stays live with its supply
+    // across iterations. Independent per-row statistics and ordinary GEMM
+    // accumulators permit the provider's pipelined operand loads.
     loop->setAttr(loopStagesAttr,
                   IntegerAttr::get(IntegerType::get(kernel.getContext(), 64), 1));
   });
@@ -492,7 +497,7 @@ SmallVector<scf::ForOp> findLoadPipelineLoops(func::FuncOp kernel) {
         llvm::append_range(addressing, access.getAccessCoordinates());
         if (access.getAccessValidity()) addressing.push_back(access.getAccessValidity());
         if (access.getAccessFill()) addressing.push_back(access.getAccessFill());
-        if (dependsOnLoopCarry(addressing, loop, /*fragmentsOnly=*/false))
+        if (dependsOnLoopCarry(addressing, loop, CarryKind::Any))
           return;
         vectorLoad |= access.getAccessKind() == block::AccessKind::Load &&
                       isa<block::FragmentType>(access.getAccessValueType());
@@ -516,7 +521,7 @@ void selectOrderedLoadUnrolling(func::FuncOp kernel) {
     // to Triton's native unroller. Recurrences with local reductions benefit
     // from overlapping those independent reads with their dependent compute.
     auto recurrence = loop.walk([&](block::ReduceOp reduce) {
-      return dependsOnLoopCarry(reduce.getSources(), loop, true)
+      return dependsOnLoopCarry(reduce.getSources(), loop, CarryKind::Fragment)
                  ? WalkResult::interrupt() : WalkResult::advance();
     });
     if (recurrence.wasInterrupted()) {
@@ -534,7 +539,7 @@ void selectOrderedLoadUnrolling(func::FuncOp kernel) {
           llvm::append_range(addressing, access.getAccessCoordinates());
           if (access.getAccessValidity()) addressing.push_back(access.getAccessValidity());
           if (access.getAccessFill()) addressing.push_back(access.getAccessFill());
-          supported &= !dependsOnLoopCarry(addressing, loop, false);
+          supported &= !dependsOnLoopCarry(addressing, loop, CarryKind::Any);
           loads += access.getAccessKind() == block::AccessKind::Load;
         } else if (isa<scf::IfOp, scf::YieldOp, block::ReduceOp, CtaBarrierOp>(operation)) {
           // Conditional alias barriers remain in their original positions.
@@ -577,7 +582,7 @@ void selectOrderedLoadUnrolling(func::FuncOp kernel) {
         llvm::append_range(dependencies, access.getAccessCoordinates());
         if (access.getAccessValidity()) dependencies.push_back(access.getAccessValidity());
         if (access.getAccessFill()) dependencies.push_back(access.getAccessFill());
-        if (dependsOnLoopCarry(dependencies, loop, /*fragmentsOnly=*/false))
+        if (dependsOnLoopCarry(dependencies, loop, CarryKind::Any))
           return;
         ++loads;
       } else if (!isMemoryEffectFree(&operation)) {

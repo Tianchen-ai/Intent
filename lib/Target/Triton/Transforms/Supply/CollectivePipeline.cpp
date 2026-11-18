@@ -29,6 +29,10 @@ llvm::DenseSet<Value> inputLoads(ValueRange roots, scf::ForOp loop) {
       loads.insert(value);
       continue;
     }
+    // A collective or MMA result has its own representation. A reduction of
+    // Q*K does not consume the shared storage which supplied K to the MMA.
+    if (isa<block::ContractOp, block::SparseContractOp, block::ScaledContractOp,
+            block::ReduceOp, block::ScanOp>(producer)) continue;
     auto incoming = queryControlFlowIncoming(value);
     if (incoming.complete && !incoming.edges.empty()) {
       for (const auto &edge : incoming.edges)
