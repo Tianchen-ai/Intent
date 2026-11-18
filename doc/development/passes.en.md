@@ -65,6 +65,13 @@ load-fed matrix computations retain cluster candidates. It invents no new
 configuration. Pruning empirical rows for a configuration family only requires
 changing the provider's configuration table.
 
+`intent-cutile-select-carried-reduction-configurations` recognizes a reduction
+over a full axis fed by a rank-two loop carry. The other axis's fragment width
+controls both live state and the number of independent outputs. The component
+prefers declared rows with narrow fragments and keeps the original portfolio
+when every row is wide. Disabling it compiles all rows under the same numerical
+contract.
+
 ## Observe existing programs
 
 Choose affected complete programs, inspect before/after IR and generated source, verify actual calls and observe warm execution for the same algorithm and input. Do not copy algorithms or expand a test matrix. Benefits on another related program show the reuse scope. Report generation, native compilation, execution, numerical checking and performance improvement separately.

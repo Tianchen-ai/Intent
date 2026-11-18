@@ -40,6 +40,16 @@ def PrepareProgramPass : IntentCuTileTransformPass<
   }];
 }
 
+def SelectCarriedReductionConfigurationsPass : IntentCuTileTransformPass<
+    "intent-cutile-select-carried-reduction-configurations",
+    "Bound output fragments for reductions of loop-carried tiles"> {
+  let description = [{
+    Prefer complete declared rows with up to 32 independent outputs when a
+    carried matrix feeds a reduction over its full second or first axis.
+    The optional selection preserves the original rows when none match.
+  }];
+}
+
 def SelectIndexedMatrixConfigurationsPass : IntentCuTileTransformPass<
     "intent-cutile-select-indexed-matrix-configurations",
     "Prefer non-TMA configurations when matrix indices are read inside a carried loop"> {
