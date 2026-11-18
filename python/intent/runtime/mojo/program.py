@@ -61,12 +61,19 @@ def _measure_candidates(measurements, arguments: tuple[object, ...], failed) -> 
             # Warm each candidate for a bounded interval, not a single call.
             # Worker activation and native matrix state must settle after a
             # different candidate. Each invocation still restores and evicts.
-            until = perf_counter() + 0.025
+            until = perf_counter() + 0.025 / 3
             while True:
                 measure(candidate)
                 if perf_counter() >= until:
                     break
-            samples[candidate].extend(measure(candidate) for _ in range(5))
+            # Large contractions need not run fifteen times per candidate.
+            # Budget time while retaining interleaved rounds and at least one
+            # native interval per round. Reset/eviction stay outside it.
+            until = perf_counter() + 0.100 / 3
+            for _ in range(5):
+                samples[candidate].append(measure(candidate))
+                if perf_counter() >= until:
+                    break
     return tuple(statistics.median(values) for values in samples)
 
 
@@ -142,7 +149,10 @@ class NativeCall(ObservedCall):
             return self.winner
         reused = self.key in self.program.winners
         observed = ()
-        if not reused:
+        singleton = len(self.program.measurements) == 1
+        if not reused and singleton:
+            self.program.winners[self.key] = 0
+        elif not reused:
             timings = _measure_candidates(self.program.measurements, self.native_arguments, self._failed_candidate)
             self.program.winners[self.key] = min(range(len(timings)), key=timings.__getitem__)
             self.program.timings[self.key] = timings
@@ -169,7 +179,8 @@ class NativeCall(ObservedCall):
             self._record_observation(observation("mojo", self.program.target, self.description,
                 self.program.configuration_descriptions[self.winner], (), observed, stage="selected",
                 caches=(*self.program.compilation_cache,
-                        CacheObservation("tuning", "process", False, "Mojo NativeProgram.winners", "selection"))))
+                        CacheObservation("tuning", "process", False, "Mojo NativeProgram.winners", "selection")),
+                history_unavailable="The only applicable configuration was selected without timing" if singleton else None))
         return self.winner
 
     def launch(self) -> None:
