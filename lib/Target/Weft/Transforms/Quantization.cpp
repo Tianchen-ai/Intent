@@ -286,11 +286,16 @@ LogicalResult expandQuantizedDot(cpu::QuantizedDotOp operation,
   auto lhsAxes = isa<wk::ViewType>(lhs.getType()) ? cast<wk::ViewType>(lhs.getType()).getAxisIds()
                                                : cast<wk::SliceType>(lhs.getType()).getAxisIds();
   int64_t rowAxis = grouped ? lhsAxes[0] : 0;
+  int64_t microDepth = 0;
   if (grouped) {
     auto binding = operation->getAttrOfType<cpu::ImplementationAttr>("intent_cpu.implementation");
-    if (columns != 4 || !binding || !binding.getParameters().get("columns") ||
+    if (!binding || !binding.getParameters().get("columns") ||
+        !binding.getParameters().get("micro_k") ||
         cpu::implementationParameter(binding, "columns") != columns)
-      return operation.emitError("grouped quantized dots require the selected four-column matrix implementation");
+      return operation.emitError("grouped quantized dots require their selected matrix geometry");
+    microDepth = cpu::implementationParameter(binding, "micro_k");
+    if (columns <= 0 || microDepth <= 0 || 32 % microDepth)
+      return operation.emitError("quantized matrix depth must partition one scale group");
   }
   auto state = [&](Type element, Value initial) -> Value {
     return grouped ? Value(b.create<wk::NewOp>(p.loc, p.valueType(element, {columns}, {rowAxis}), initial, true)) : initial;
@@ -315,13 +320,13 @@ LogicalResult expandQuantizedDot(cpu::QuantizedDotOp operation,
         int64_t mAxis = nextAxis++;
         Type matrix = p.valueType(i32, {1, columns}, {mAxis, rowAxis});
         Value zero = b.create<wk::NewOp>(p.loc, matrix, p.integerConstant(32, true, 0), true);
-        auto product = p.level(domain, axis, 32, 8, ValueRange{zero},
+        auto product = p.level(domain, axis, 32, microDepth, ValueRange{zero},
             [&](Value, Value inner, ValueRange accumulator) {
-          Value a = p.project(xq, inner, 8, "domain");
-          Value weights = p.convert(p.project(wq, inner, 8, "domain"), integer(b, 8, true));
+          Value a = p.project(xq, inner, microDepth, "domain");
+          Value weights = p.convert(p.project(wq, inner, microDepth, "domain"), integer(b, 8, true));
           Value left = b.create<wk::ReshapeOp>(p.loc,
-              p.valueType(integer(b, 8, true), {1, 8}, {mAxis, axis}), a, p.array({axis}));
-          Value term = b.create<wk::OuterContractOp>(p.loc, matrix, left, weights, p.array({axis}), TypeAttr::get(i32), StringAttr());
+              p.valueType(integer(b, 8, true), {1, microDepth}, {mAxis, axis}), a, p.array({axis}));
+          Value term = b.create<wk::OuterContractOp>(p.loc, matrix, left, weights, p.array({axis}), TypeAttr::get(i32), b.getStringAttr("matrix"));
           return SmallVector<Value>{p.binary(accumulator[0], term, "add")};
         });
         partial = b.create<wk::ReshapeOp>(p.loc, p.valueType(i32, {columns}, {rowAxis}),

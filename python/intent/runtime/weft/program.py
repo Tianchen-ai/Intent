@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, replace
 import math
 import statistics
 from threading import RLock
+from time import perf_counter
 
 from .buffer import Buffer
 from .compilation import compile_program
@@ -117,12 +118,15 @@ class NativeCall(ObservedCall):
                                                              self.program.configuration_descriptions, strict=True):
                     samples = []
                     with self._native_stage("provider_tuning", candidate=candidate, observed=observed):
+                        deadline = perf_counter() + 0.100
                         for _ in range(3):
                             restore()
                             if prepare is not None:
                                 prepare()
                             samples.append(_measure(measure, self.native_arguments))
                             self.state.check()
+                            if perf_counter() >= deadline:
+                                break
                     elapsed = statistics.median(samples)
                     timings.append(elapsed)
                     observed.append(CandidateObservation(configuration, "trial_completed", "provider_tuning",

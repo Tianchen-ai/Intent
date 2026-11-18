@@ -216,8 +216,24 @@ LogicalResult TaskConversion::generic(linalg::GenericOp operation) {
       rhs = promote(*rhs);
     }
     int64_t reduction = loopAxes[2];
+    StringAttr engine;
+    if (integer) {
+      auto binding = operation->getAttrOfType<cpu::ImplementationAttr>("intent_cpu.implementation");
+      if (!binding || !binding.getParameters().get("engine"))
+        return operation.emitError("Weft integer contraction requires a bound native execution engine");
+      int64_t selected = cpu::implementationParameter(binding, "engine");
+      if (selected != 1 && selected != 2)
+        return operation.emitError("unknown bound Weft contraction engine");
+      // A matrix microprogram retains an explicit vector boundary region. Only
+      // complete N/K panels require the native matrix engine; scalar column or
+      // reduction tails are formed by the same author-preserving tiling pass.
+      auto extents = operation.getStaticLoopRanges();
+      bool complete = extents[1] == cpu::implementationParameter(binding, "micro_n") &&
+                      extents[2] == cpu::implementationParameter(binding, "micro_k");
+      engine = b.getStringAttr(selected == 1 && complete ? "matrix" : "vector");
+    }
     Value term = b.create<wk::OuterContractOp>(operation.getLoc(), (*initial).getType(),
-        *lhs, *rhs, array({reduction}), TypeAttr::get(element((*initial).getType())), StringAttr());
+        *lhs, *rhs, array({reduction}), TypeAttr::get(element((*initial).getType())), engine);
     if (!zero) {
       auto accumulated = binary(operation.getLoc(), *initial, term, "add");
       if (failed(accumulated)) return failure();
