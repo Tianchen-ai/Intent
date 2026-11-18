@@ -44,7 +44,7 @@ Provider 的 `Transforms/` 选择并合法化目标原生构造，`Serialization
 
 | 要补充的能力 | 登记或实现位置 | 保持的边界 |
 |---|---|---|
-| 设备、工具链与必要 specialization | `python/intent/targets/components.py` 与组件的 `Provider/LocalExecution` | 声明查询不加载 SDK；普通 JIT 不出现后端名称分支 |
+| 设备、工具链与必要 specialization | `python/intent/targets/components.json` 与组件的 `Provider/LocalExecution` | 工具可直接读取安装包的后端名称与模块路径。具体探测由所选组件执行。 |
 | 本机 buffer、原生编译与 launch | 组件对应的 `python/intent/runtime/`；框架存储适配器位于 `integrations/` | 产物与 buffer 绑定分离，prepared call 持有实际资源 |
 | 模型、pipeline 与配置资源 | 组件的 CMake 登记和 `Compilation` 实现 | 公共 driver 调阶段接口，不维护 provider 枚举或文件名表 |
 | NVIDIA 能力与 GPU 策略 | `Target/NVIDIA` 和 Block 的 GPU mapping | 公共 Block verifier 不要求 CUDA 资源字段 |

@@ -1,0 +1,8 @@
+{
+  "triton": "intent.targets.triton",
+  "cutile": "intent.targets.cutile",
+  "mojo": "intent.targets.mojo",
+  "weft": "intent.targets.weft",
+  "bangc": "intent.targets.bangc",
+  "triton_ascend": "intent.targets.ascend"
+}

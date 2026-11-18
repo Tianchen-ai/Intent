@@ -1,10 +1,5 @@
-"""Source component registration; importing this catalog never imports an SDK."""
+"""The installed provider catalog can be read without importing a runtime."""
+from importlib.resources import files
+import json
 
-COMPONENTS = {
-    "triton": "intent.targets.triton",
-    "cutile": "intent.targets.cutile",
-    "mojo": "intent.targets.mojo",
-    "weft": "intent.targets.weft",
-    "bangc": "intent.targets.bangc",
-    "triton_ascend": "intent.targets.ascend",
-}
+COMPONENTS = json.loads(files(__package__).joinpath("components.json").read_text(encoding="utf-8"))

@@ -44,7 +44,7 @@ A provider's `Transforms/` selects and legalizes native forms; `Serialization/` 
 
 | Capability | Component entry point | Boundary |
 |---|---|---|
-| Devices, toolchains and necessary specialization | `python/intent/targets/components.py` and component `Provider/LocalExecution` | Declaration queries do not import SDKs; ordinary JIT does not branch on provider names |
+| Devices, toolchains and necessary specialization | `python/intent/targets/components.json` and component `Provider/LocalExecution` | Tools can read provider names and module paths directly from the installed package. The selected component performs discovery. |
 | Buffers, native compilation and launch | Component `python/intent/runtime/`; framework storage adapters in `integrations/` | Artifacts and buffer bindings remain separate; prepared calls retain actual resources |
 | Models, pipelines and configuration resources | Component CMake registration and `Compilation` implementation | The common driver invokes stages rather than maintaining provider enums or filename tables |
 | NVIDIA capabilities and GPU policy | `Target/NVIDIA` and Block GPU mapping | Common Block verification does not require CUDA resource fields |
