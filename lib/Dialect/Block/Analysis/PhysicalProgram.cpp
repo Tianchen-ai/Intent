@@ -5,6 +5,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Dominance.h"
 #include "llvm/ADT/STLExtras.h"
+#include <algorithm>
 #include <functional>
 
 
@@ -130,6 +131,16 @@ bool isPrivateWorkspaceProgramIndex(Value coordinate, Value buffer,
   });
 }
 
+void collectProductFactors(PhysicalExprAttr expression,
+                           SmallVectorImpl<PhysicalExprAttr> &factors) {
+  if (expression.getKind() != PhysicalExprKind::Multiply) {
+    factors.push_back(expression);
+    return;
+  }
+  for (Attribute operand : expression.getOperands())
+    collectProductFactors(cast<PhysicalExprAttr>(operand), factors);
+}
+
 // An execution group's decoded coordinates identify its physical program.
 // A compact workspace may omit coordinates fixed by the actual access guard:
 // the remaining coordinates still distinguish every program that can use it.
@@ -137,6 +148,8 @@ bool guardedProgramSlices(ArrayRef<AccessOpInterface> accesses,
                           func::FuncOp kernel) {
   auto space = kernel->getAttrOfType<ArrayAttr>(programSpaceAttr);
   if (!space || space.size() != 1) return false;
+  SmallVector<PhysicalExprAttr> launchFactors;
+  collectProductFactors(cast<PhysicalExprAttr>(space[0]), launchFactors);
   std::optional<DecodedCoordinate> reference;
   SmallVector<std::optional<int64_t>> referenceAxes, referenceFixed;
   auto sameDecode = [](const DecodedCoordinate &lhs,
@@ -186,17 +199,14 @@ bool guardedProgramSlices(ArrayRef<AccessOpInterface> accesses,
           return !queryLaunchExpression(extent);
         }) || (reference && !sameDecode(*reference, decoded)))
       return false;
-    PhysicalExprAttr capacity;
-    for (Value extent : decoded.extents) {
-      auto expression = queryLaunchExpression(extent);
-      capacity = !capacity ? expression : PhysicalExprAttr::get(
-          kernel.getContext(), PhysicalExprKind::Multiply, 0,
-          StringAttr::get(kernel.getContext(), ""),
-          ArrayAttr::get(kernel.getContext(), {capacity, expression}));
-    }
     // Decoding is modulo the Cartesian capacity. Its complete tuple is an
-    // injective program identity only within this exact launch domain.
-    if (capacity != space[0]) return false;
+    // injective identity within that launch domain, in any axis order.
+    SmallVector<PhysicalExprAttr> decodedFactors;
+    for (Value extent : decoded.extents)
+      collectProductFactors(queryLaunchExpression(extent), decodedFactors);
+    if (!std::is_permutation(launchFactors.begin(), launchFactors.end(),
+                             decodedFactors.begin(), decodedFactors.end()))
+      return false;
     SmallVector<std::optional<int64_t>> axes(decoded.extents.size());
     SmallVector<std::optional<int64_t>> values(decoded.extents.size());
     for (auto [selected, axis] : coordinates) {

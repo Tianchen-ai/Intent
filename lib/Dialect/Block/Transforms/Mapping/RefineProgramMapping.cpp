@@ -221,7 +221,16 @@ LogicalResult realizeGroupedContractionMapping(
       static_cast<int64_t>(CoordinateRole::ContractionN);
   std::optional<unsigned> rowAxis;
   std::optional<unsigned> columnAxis;
+  SmallVector<unsigned, 1> rowWorkerAxes;
   for (auto [axis, role] : llvm::enumerate(roles.asArrayRef())) {
+    if (role == static_cast<int64_t>(CoordinateRole::IndirectTraversal) ||
+        role == static_cast<int64_t>(CoordinateRole::TraversalWorker)) {
+      auto extent = mapping.getExtents()[axis].getDefiningOp<ParameterOp>();
+      if (extent &&
+          extent.getDeclaration().getCategory() == ParameterCategory::Contraction &&
+          extent.getDeclaration().getRole() == ParameterRole::TraversalWorkers)
+        rowWorkerAxes.push_back(axis);
+    }
     if (role == contractionM) {
       if (rowAxis)
         return mapping.emitOpError(
@@ -234,6 +243,31 @@ LogicalResult realizeGroupedContractionMapping(
             "grouped contraction mapping requires one N coordinate");
       columnAxis = axis;
     }
+  }
+  if (!rowAxis && columnAxis && rowWorkerAxes.size() == 1 &&
+      rowWorkerAxes.front() < *columnAxis) {
+    // Put workers inside columns so adjacent row tiles share the RHS. Keep
+    // both coordinates as group arguments: guards and compact workspaces
+    // can still identify the exact program that owns a slice.
+    unsigned worker = rowWorkerAxes.front(), column = *columnAxis;
+    SmallVector<Value> extents(mapping.getExtents());
+    SmallVector<Attribute> launch(mapping.getLaunchExtents().getValue());
+    SmallVector<int64_t> newRoles(roles.asArrayRef());
+    std::swap(extents[worker], extents[column]);
+    std::swap(launch[worker], launch[column]);
+    std::swap(newRoles[worker], newRoles[column]);
+    Value workerId = mapping.getCoordinates()[worker];
+    Value columnId = mapping.getCoordinates()[column];
+    SmallVector<OpOperand *> workerUses;
+    for (OpOperand &use : workerId.getUses())
+      workerUses.push_back(&use);
+    columnId.replaceAllUsesWith(workerId);
+    for (OpOperand *use : workerUses)
+      use->set(columnId);
+    Builder builder(mapping.getContext());
+    mapping.getExtentsMutable().assign(extents);
+    mapping.setLaunchExtentsAttr(builder.getArrayAttr(launch));
+    mapping.setCoordinateRolesAttr(builder.getDenseI64ArrayAttr(newRoles));
   }
   if (!rowAxis || !columnAxis)
     return success();
