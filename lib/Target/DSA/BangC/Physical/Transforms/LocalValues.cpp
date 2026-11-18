@@ -34,10 +34,16 @@ void bindUniformOperands(func::FuncOp function) {
         binary.getApproximate() || binary.getFlushToZero()) continue;
     Type element = cast<MemRefType>(binary.getLhs().getType()).getElementType();
     if (!element.isF16() && !element.isF32()) continue;
-    Value previous = binary.getRhs();
+    Value rhs = binary.getRhs();
+    if (!isa<MemRefType>(rhs.getType())) continue;
     StorageAnalysis storage(function);
     UniformMemoryAnalysis uniforms(function, storage);
-    Value scalar = uniforms.read(previous, binary);
+    Value scalar = uniforms.read(rhs, binary);
+    if (!scalar && rhs.getType() == binary.getLhs().getType() &&
+        (binary.getKind() == BinaryOperator::Add || binary.getKind() == BinaryOperator::Multiply)) {
+      scalar = uniforms.read(binary.getLhs(), binary);
+      if (scalar) binary.getLhsMutable().assign(rhs);
+    }
     if (!scalar) continue;
     binary.getRhsMutable().assign(scalar);
     changed = true;
