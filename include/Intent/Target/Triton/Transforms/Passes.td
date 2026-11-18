@@ -77,6 +77,20 @@ def NativeFormsPass : IntentTritonTransformPass<
   }];
 }
 
+def MixedCollectivePipelinePass : IntentTritonTransformPass<
+    "intent-triton-legalize-mixed-collective-pipeline",
+    "Legalize native Hopper loops sharing operands between matrix and collective consumers"> {
+  let description = [{
+    Consumes the native Triton program and traces actual load def-use through
+    pointwise operations and control forwarding. On Hopper, a loop sharing a
+    loaded f16/bf16 matrix operand with a reduction uses the existing typed
+    single-stage loop option. This prevents the supported native compiler's
+    shared-operand lifetime hazard without changing numerical semantics, launch
+    topology or other loops' configurations. Layout and instruction scheduling
+    remain with Triton. This is required provider legalization.
+  }];
+}
+
 def FinalizeProgramPass : IntentTritonTransformPass<
     "intent-triton-finalize-program",
     "Close Triton callbacks and resource constraints and verify the surface"> {

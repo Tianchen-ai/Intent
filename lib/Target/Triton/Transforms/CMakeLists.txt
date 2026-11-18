@@ -9,6 +9,7 @@ add_mlir_library(MLIRIntentTritonTransforms
   Collective/Callbacks.cpp
   Collective/ScanTails.cpp
   Supply/Supply.cpp
+  Supply/CollectivePipeline.cpp
   Value/Values.cpp
   Configuration/Configurations.cpp
   Configuration/ConfigurationFacts.cpp
@@ -30,4 +31,5 @@ add_mlir_library(MLIRIntentTritonTransforms
   MLIRIntentTritonDialect
   MLIRIntentTritonAnalysis
   MLIRIntentTritonSerialization
+  MLIRIntentTransformComponents
 )

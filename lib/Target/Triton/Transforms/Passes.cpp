@@ -1,4 +1,5 @@
 #include "Intent/Target/Triton/Transforms/Passes.h"
+#include "Intent/Transforms/Components.h"
 #include "Program.h"
 #include "Intent/Target/Triton/Transforms/Mapping/ProgramGrid.h"
 #include "Intent/Dialect/Block/Transforms/Passes.h"
@@ -75,6 +76,7 @@ public:
 
 void registerTritonPasses() {
   registerIntentTritonTransformPasses();
+  registerTransformation({"triton", "native", true}, createMixedCollectivePipelinePass());
   PassPipelineRegistration<>("intent-triton-lower",
       "Legalize the complete Triton provider program", buildTritonPipeline);
 }
@@ -83,6 +85,7 @@ void buildTritonPipeline(OpPassManager &manager) {
   manager.addPass(createProgramGridPass());
   manager.addPass(createPrepareMemoryPass());
   manager.addPass(createNativeFormsPass());
+  addTransformation(manager, {"triton", "native", true}, createMixedCollectivePipelinePass());
   manager.addPass(createFinalizeProgramPass());
 }
 
