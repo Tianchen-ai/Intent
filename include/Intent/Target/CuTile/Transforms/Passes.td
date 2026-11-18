@@ -9,6 +9,19 @@ class IntentCuTileTransformPass<string passArgument, string summaryText>
       "::mlir::scf::SCFDialect"];
 }
 
+def SelectClusterConfigurationsPass : IntentCuTileTransformPass<
+    "intent-cutile-select-cluster-configurations",
+    "Select complete cluster configurations from current matrix operand supply"> {
+  let description = [{
+    Consumes realized Block computations and complete correlated configuration
+    rows. Computed matrix operands use single-CTA candidates to bound native
+    compilation; ordinary load-fed matrices retain their cluster choices.
+    Follows typed def-use and control forwarding, without matching kernel names
+    or changing data, ownership, launches or numerical rules. Disabling this
+    optional selection leaves the original legal native compilation path.
+  }];
+}
+
 def PrepareProgramPass : IntentCuTileTransformPass<
     "intent-cutile-prepare-program",
     "Prepare cuTile matrix shapes, buffers and workspace accesses"> {

@@ -1,4 +1,5 @@
 #include "Intent/Target/CuTile/Transforms/Passes.h"
+#include "Intent/Transforms/Components.h"
 #include "Program.h"
 #include "Intent/Dialect/Block/Transforms/Passes.h"
 #include "Intent/Dialect/Block/IR/BlockDialect.h"
@@ -63,11 +64,13 @@ public:
 
 void registerCuTilePasses() {
   registerIntentCuTileTransformPasses();
+  registerTransformation({"cutile", "realized", false}, createSelectClusterConfigurationsPass());
   PassPipelineRegistration<>("intent-cutile-lower",
       "Legalize the complete CuTile provider program", buildCuTilePipeline);
 }
 
 void buildCuTilePipeline(OpPassManager &manager) {
+  addTransformation(manager, {"cutile", "realized", false}, createSelectClusterConfigurationsPass());
   manager.addPass(createPrepareProgramPass());
   manager.addPass(createNativeProgramPass());
   manager.addPass(createFinalizeProgramPass());

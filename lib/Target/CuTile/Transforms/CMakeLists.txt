@@ -21,6 +21,7 @@ add_mlir_library(MLIRIntentCuTileTransforms
   Compute/StrictArithmetic.cpp
   Compute/ScaledMMA.cpp
   Configuration/Configurations.cpp
+  Configuration/ClusterConfigurations.cpp
   Access/CollapseArrayViews.cpp
   Compute/RefineMMALoops.cpp
 
