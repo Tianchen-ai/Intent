@@ -709,6 +709,15 @@ LogicalResult materializeTaskDispatches(func::FuncOp function) {
       mapping.map(original.getArgument(0), ordinal);
       for (Operation &operation : original.without_terminator()) nested.clone(operation, mapping);
     };
+    if (capabilities.getWorkers() == 1) {
+      // A one-worker execution budget is already an exact scheduling fact.
+      // Do not duplicate a complete task body into a parallel branch whose
+      // min(dynamic_count, 1) condition may survive generic canonicalization.
+      auto loop = b.create<scf::ForOp>(loc, index(b, loc, 0), tasks.getCount(), index(b, loc, 1));
+      cloneBody(loop.getBody(), loop.getInductionVar());
+      tasks.erase();
+      continue;
+    }
     {
       // A single-worker dispatch needs no thread team. Preserve this execution
       // choice in IR rather than having each provider infer a serial shortcut.
