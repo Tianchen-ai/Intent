@@ -31,9 +31,13 @@ FailureOr<SmallVector<DictionaryAttr>> filterConfigurationRequirements(
             << ", " << stringifyConfigurationRequirementPredicate(requirement.getPredicate())
             << "; " << requirement.getMessage().getValue() << "; bindings=" << row;
       }
-      if (evaluation.status != RequirementStatus::Violated &&
-          evaluation.status != RequirementStatus::Invalid)
+      if (!evaluation.rejectsCandidate(requirement)) {
+        if (evaluation.status == RequirementStatus::Violated &&
+            options->getOptimizationRemarks())
+          kernel.emitRemark("candidate exceeds the estimated working set: ")
+              << requirement.getMessage().getValue() << "; bindings=" << row;
         continue;
+      }
       valid = false;
       rejected.push_back({row, requirement, evaluation});
       if (options->getOptimizationRemarks()) {

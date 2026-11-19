@@ -76,6 +76,8 @@ Intent删除确定非法的候选，但不复制下层完整resource allocator�
 
 ## 5. Provider autotuner
 
+GPU lowering 可以用工作集估算选择分块。Triton 矩阵候选选用 tensor descriptor 时，布局、存储放置和寄存器溢出由原生编译器决定。这样的候选即使超过寄存器估算也可以进入原生编译。编译器和 JIT 保留估算值供诊断。指针访存候选和 cuTile 继续使用工作集预算限制编译成本。两种情况下都检查合法性约束和维度的有效性。
+
 Provider autotuner对剩余candidates分别编译、benchmark并选择winner。Winner是runtime/tuning artifact，不写回canonical KIR或shared GPU IR，也不变成设备型号分支。
 
 调优试跑不属于作者的一次可观察invocation。Runtime依据external view的读写方向和实际allocation alias关系维护trial state；需要原始内容的`InOut`、读写alias和atomic状态在每次试跑前保持同一初始内容，不能只在候选之间恢复。Trial参数保留shape、dtype、strides、offset与alias关系，不把每个view独立clone成互不alias的输入。Winner只对调用者参数执行一次；调优失败也不把试跑效果留在调用者状态中。

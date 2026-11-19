@@ -543,9 +543,11 @@ LogicalResult ConfigurationRequirementAttr::verify(
     function_ref<InFlightDiagnostic()> emitError,
     ConfigurationRequirementKind kind, ConfigurationRequirementMetric metric,
     ConfigurationRequirementPredicate predicate, PhysicalExprAttr usage,
-    PhysicalExprAttr limit, ParameterRefAttr activation, StringAttr message) {
+    PhysicalExprAttr limit, ParameterRefAttr activation, StringAttr message,
+    bool activeWhen) {
   if ((kind != ConfigurationRequirementKind::Legality &&
-       kind != ConfigurationRequirementKind::NominalBudget) ||
+       kind != ConfigurationRequirementKind::NominalBudget &&
+       kind != ConfigurationRequirementKind::WorkingSetEstimate) ||
       (metric != ConfigurationRequirementMetric::FragmentElements &&
        metric != ConfigurationRequirementMetric::FragmentRegisterWords &&
        metric != ConfigurationRequirementMetric::FragmentBytes &&
@@ -562,9 +564,14 @@ LogicalResult ConfigurationRequirementAttr::verify(
   if (binary != static_cast<bool>(limit))
     return emitError()
            << "only less-equal, multiple-of and equal requirements take a limit";
-  if (kind == ConfigurationRequirementKind::NominalBudget &&
+  if (kind == ConfigurationRequirementKind::WorkingSetEstimate &&
+      metric != ConfigurationRequirementMetric::FragmentRegisterWords)
+    return emitError() << "a working-set estimate measures fragment register words";
+  if (kind != ConfigurationRequirementKind::Legality &&
       predicate != ConfigurationRequirementPredicate::LessEqual)
-    return emitError() << "nominal budgets require a less-equal quantity test";
+    return emitError() << "working-set budgets and estimates require a less-equal quantity test";
+  if (!activation && !activeWhen)
+    return emitError() << "a false activation condition requires a boolean parameter";
   if (activation &&
       failed(ParameterRefAttr::verify(emitError, activation.getName())))
     return failure();
@@ -612,7 +619,7 @@ LogicalResult ConfigurationSetAttr::verify(
             emitError, requirement.getKind(), requirement.getMetric(),
             requirement.getPredicate(), requirement.getUsage(),
             requirement.getLimit(), requirement.getActivation(),
-            requirement.getMessage())))
+            requirement.getMessage(), requirement.getActiveWhen())))
       return failure();
   }
   return success();

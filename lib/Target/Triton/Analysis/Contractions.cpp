@@ -138,7 +138,7 @@ contractionExpansionRequirement(block::ContractOp contract) {
       block::ConfigurationRequirementMetric::FragmentElements,
       block::ConfigurationRequirementPredicate::LessEqual, usage,
       constant(context, maxTritonTensorElements), block::ParameterRefAttr(),
-      StringAttr::get(context, "Triton expanded contraction exceeds the maximum element count"));
+      StringAttr::get(context, "Triton expanded contraction exceeds the maximum element count"), true);
 }
 
 } // namespace intent::triton

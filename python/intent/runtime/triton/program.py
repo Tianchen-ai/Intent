@@ -254,9 +254,13 @@ class TritonProgram:
                 def warmup():
                     if self.facts.allocator:
                         triton.set_allocator(self.device.allocate_descriptor)
-                    return self.kernel.fn.warmup(
-                        *arguments, grid=evaluate_shape(self.interface.grid, {**values, **row}),
+                    grid = tuple(evaluate_shape(self.interface.grid, {**values, **row}))
+                    native = self.kernel.fn.warmup(
+                        *arguments, grid=grid,
                         **coverage, **config.all_kwargs(), **self.device.compile_options)
+                    # Binding a native launcher loads the binary and checks its
+                    # actual shared-memory requirement. Only calling it submits work.
+                    return native[grid + (1,) * (3 - len(grid))]
 
                 try:
                     copy_context().run(warmup) if self.facts.allocator else warmup()

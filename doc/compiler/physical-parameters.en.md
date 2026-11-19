@@ -76,6 +76,8 @@ Intent removes definitely illegal candidates without duplicating the lower compi
 
 ## 5. Provider autotuners
 
+GPU working-set estimates guide the lowering passes. When a Triton matrix candidate selects tensor descriptors, the native compiler chooses layouts, placement and spills. The candidate can exceed the register estimate and still compile. The compiler and JIT retain the estimate for diagnostics. Pointer-access candidates and cuTile use working-set budgets to bound compilation cost. Legality constraints and positive extent requirements apply in both cases.
+
 The provider autotuner compiles and benchmarks the remaining candidates and selects a winner. The winner is a runtime/tuning artifact: it is not written into canonical KIR or shared GPU IR and does not become a device-model branch.
 
 Tuning trials are not an author-observable invocation. The runtime maintains trial state according to external-view read/write directions and actual allocation alias relationships. `InOut` contents needed by the program, read/write aliases and atomic state have the same initial contents before every trial, not merely between candidates. Trial arguments preserve shape, dtype, strides, offsets and aliases; views must not be cloned independently into non-aliasing inputs. The winner executes exactly once on caller arguments. Tuning failure must not leave trial effects in caller state.

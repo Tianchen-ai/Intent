@@ -193,6 +193,7 @@ FailureOr<llvm::json::Object> serializeInterface(
         {"activation", requirement.getActivation()
                            ? llvm::json::Value(requirement.getActivation().getName().getValue())
                            : llvm::json::Value(nullptr)},
+        {"active_when", requirement.getActiveWhen()},
         {"message", requirement.getMessage().getValue()}});
   auto configs = configurations(*configurationSpace);
   if (failed(configs))

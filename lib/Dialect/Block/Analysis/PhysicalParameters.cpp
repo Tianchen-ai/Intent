@@ -111,7 +111,7 @@ LogicalResult ParameterSpace::verifyRequirements(
             requirement.getKind(), requirement.getMetric(),
             requirement.getPredicate(), requirement.getUsage(),
             requirement.getLimit(), requirement.getActivation(),
-            requirement.getMessage())))
+            requirement.getMessage(), requirement.getActiveWhen())))
       return failure();
     if (ParameterRefAttr activation = requirement.getActivation()) {
       auto parameter = lookup(activation);

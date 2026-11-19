@@ -83,6 +83,14 @@ struct RequirementEvaluation {
   RequirementStatus status;
   std::optional<int64_t> usage;
   std::optional<int64_t> limit;
+
+  // Shared tiling may use a working-set estimate to choose a tile. Once a row
+  // is complete, the provider can also place values in shared memory or spill.
+  bool rejectsCandidate(ConfigurationRequirementAttr requirement) const {
+    return status == RequirementStatus::Invalid ||
+           (status == RequirementStatus::Violated &&
+            requirement.getKind() != ConfigurationRequirementKind::WorkingSetEstimate);
+  }
 };
 
 RequirementEvaluation evaluateConfigurationRequirement(

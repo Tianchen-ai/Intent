@@ -97,10 +97,10 @@ RequirementEvaluation evaluateConfigurationRequirement(
         resolveActivation ? resolveActivation(reference) : std::nullopt;
     if (!activation)
       return {Status::Unknown, std::nullopt, std::nullopt};
-    if (*activation == 0)
-      return {Status::Inactive, std::nullopt, std::nullopt};
-    if (*activation != 1)
+    if (*activation != 0 && *activation != 1)
       return {Status::Invalid, std::nullopt, std::nullopt};
+    if (static_cast<bool>(*activation) != requirement.getActiveWhen())
+      return {Status::Inactive, std::nullopt, std::nullopt};
   }
   auto usage = evaluatePhysicalExpression(requirement.getUsage(), resolveLeaf);
   auto limit = requirement.getLimit()
@@ -722,7 +722,7 @@ SmallVector<ConfigurationRequirementAttr> collectPointwiseRequirements(
           ConfigurationRequirementMetric::FragmentRegisterWords,
           ConfigurationRequirementPredicate::LessEqual,
           fragmentRegisterFootprint(fragment), limit, ParameterRefAttr(),
-          builder.getStringAttr("pointwise payload exceeds the candidate register budget"));
+          builder.getStringAttr("pointwise payload exceeds the candidate register budget"), true);
       if (dependsOnInvocation(requirement, kernel) &&
           !llvm::is_contained(requirements, requirement))
         requirements.push_back(requirement);
@@ -758,7 +758,7 @@ SmallVector<ConfigurationRequirementAttr> collectPointwiseRequirements(
         ConfigurationRequirementMetric::FragmentRegisterWords,
         ConfigurationRequirementPredicate::LessEqual, peak, limit,
         ParameterRefAttr(), builder.getStringAttr(
-            "live pointwise payloads exceed the candidate register budget"));
+            "live pointwise payloads exceed the candidate register budget"), true);
     if (!llvm::is_contained(requirements, requirement)) requirements.push_back(requirement);
   }
   return requirements;
@@ -811,7 +811,7 @@ SmallVector<ConfigurationRequirementAttr> collectReductionRequirements(
         ConfigurationRequirementMetric::FragmentRegisterWords,
         ConfigurationRequirementPredicate::LessEqual, footprint, available,
         ParameterRefAttr(),
-        builder.getStringAttr("collective live payloads exceed the candidate register budget"));
+        builder.getStringAttr("collective live payloads exceed the candidate register budget"), true);
     if (scope == ReductionRequirementScope::InvocationDependent &&
         !dependsOnInvocation(requirement, kernel)) continue;
     if (!llvm::is_contained(requirements, requirement)) requirements.push_back(requirement);
@@ -845,8 +845,7 @@ LogicalResult verifyConfigurationRequirements(
   for (DictionaryAttr row : *rows)
     for (ConfigurationRequirementAttr requirement : *requirements) {
       auto evaluation = evaluateConfigurationRequirement(requirement, row, kernel);
-      if (evaluation.status != RequirementStatus::Violated &&
-          evaluation.status != RequirementStatus::Invalid)
+      if (!evaluation.rejectsCandidate(requirement))
         continue;
       auto diagnostic = kernel.emitError(
           "candidate violates a current program requirement: ");

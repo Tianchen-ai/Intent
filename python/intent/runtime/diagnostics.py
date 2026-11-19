@@ -84,8 +84,14 @@ class RequirementEvaluation:
         return f"{self.kind}/{self.metric}/{self.predicate}: {self.message} ({self.status}{suffix})"
 
     @property
+    def rejects_candidate(self) -> bool:
+        return self.status == "invalid" or (
+            self.status == "violated" and self.kind != "working_set_estimate")
+
+    @property
     def accepted(self) -> bool:
-        return self.status in {"satisfied", "inactive"}
+        return self.status in {"satisfied", "inactive"} or (
+            self.kind == "working_set_estimate" and self.status in {"violated", "unknown"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,10 +104,9 @@ class ConfigurationAssessment:
 
     @property
     def status(self) -> str:
-        if self.provider_reason is not None or any(
-                item.status in {"violated", "invalid"} for item in self.requirements):
+        if self.provider_reason is not None or any(item.rejects_candidate for item in self.requirements):
             return "rejected"
-        if any(item.status == "unknown" for item in self.requirements):
+        if any(item.status == "unknown" and not item.accepted for item in self.requirements):
             return "unknown"
         return "eligible"
 

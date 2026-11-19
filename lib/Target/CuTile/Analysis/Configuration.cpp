@@ -56,7 +56,7 @@ collectConfigurationRequirements(func::FuncOp kernel) {
         block::ConfigurationRequirementMetric::ResidentWorkers,
         block::ConfigurationRequirementPredicate::Equal, parameter(resident),
         capacity, block::ParameterRefAttr(),
-        builder.getStringAttr("cuTile resident workers must match the CTA and occupancy binding")));
+        builder.getStringAttr("cuTile resident workers must match the CTA and occupancy binding"), true));
   }
   return requirements;
 }

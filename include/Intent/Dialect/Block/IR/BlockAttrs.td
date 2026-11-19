@@ -211,7 +211,8 @@ def IntentBlock_ConfigurationStage : IntentBlock_I32Enum<
 def IntentBlock_ConfigurationRequirementKind : IntentBlock_I32Enum<
     "ConfigurationRequirementKind", "What a candidate requirement establishes", [
       I32EnumAttrCase<"Legality", 0, "legality">,
-      I32EnumAttrCase<"NominalBudget", 1, "nominal_budget">
+      I32EnumAttrCase<"NominalBudget", 1, "nominal_budget">,
+      I32EnumAttrCase<"WorkingSetEstimate", 2, "working_set_estimate">
     ]>;
 
 def IntentBlock_ConfigurationRequirementMetric : IntentBlock_I32Enum<
@@ -241,7 +242,8 @@ def IntentBlock_ConfigurationRequirementAttr : AttrDef<IntentBlock_Dialect, "Con
     "::intent::block::PhysicalExprAttr":$usage,
     OptionalParameter<"::intent::block::PhysicalExprAttr">:$limit,
     OptionalParameter<"::intent::block::ParameterRefAttr">:$activation,
-    "::mlir::StringAttr":$message
+    "::mlir::StringAttr":$message,
+    DefaultValuedParameter<"bool", "true">:$activeWhen
   );
   let assemblyFormat = "`<` struct(params) `>`";
   let genVerifyDecl = 1;

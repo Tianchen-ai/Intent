@@ -164,7 +164,7 @@ collectConfigurationRequirements(func::FuncOp kernel) {
                     block::ParameterRefAttr activation, StringRef message) {
     auto requirement = block::ConfigurationRequirementAttr::get(kernel.getContext(),
         kind, metric, predicate, usage, limit, activation,
-        builder.getStringAttr(message));
+        builder.getStringAttr(message), true);
     if (!llvm::is_contained(requirements, requirement))
       requirements.push_back(requirement);
   };
@@ -270,6 +270,26 @@ collectConfigurationRequirements(func::FuncOp kernel) {
       append(Kind::NominalBudget, Metric::FragmentRegisterWords,
           Predicate::LessEqual, block::fragmentRegisterFootprint(fragment), budget,
           {}, "Triton collective fragment exceeds the nominal per-thread register budget");
+  }
+  if (descriptorChoice && !contracts.empty()) {
+    // The descriptor variant can move live matrix tiles to shared memory.
+    // Its actual register use is determined after native layout selection.
+    // Pointer variants retain the ordinary compilation budget.
+    SmallVector<block::ConfigurationRequirementAttr> byForm;
+    auto activation = descriptorChoice.getConfigParameter();
+    for (auto rule : requirements) {
+      if (rule.getKind() != Kind::NominalBudget ||
+          rule.getMetric() != Metric::FragmentRegisterWords || rule.getActivation()) {
+        byForm.push_back(rule);
+        continue;
+      }
+      for (bool descriptor : {false, true})
+        byForm.push_back(block::ConfigurationRequirementAttr::get(kernel.getContext(),
+            descriptor ? Kind::WorkingSetEstimate : Kind::NominalBudget,
+            rule.getMetric(), rule.getPredicate(), rule.getUsage(), rule.getLimit(),
+            activation, rule.getMessage(), descriptor));
+    }
+    return byForm;
   }
   return requirements;
 }

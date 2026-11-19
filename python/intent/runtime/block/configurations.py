@@ -17,6 +17,7 @@ class ConfigurationRequirement:
     limit: Expression | None
     activation: str | None
     message: str
+    active_when: bool = True
     _reference_keys: tuple[int | str, ...] = field(init=False, repr=False, compare=False)
     _last_evaluation: tuple[tuple[int, ...], RequirementEvaluation] | None = field(
         init=False, default=None, repr=False, compare=False)
@@ -27,25 +28,31 @@ class ConfigurationRequirement:
     @classmethod
     def read(cls, entry: dict) -> ConfigurationRequirement:
         kind, metric, message = entry["kind"], entry["metric"], entry["message"]
-        if kind not in {"legality", "nominal_budget"}:
+        if kind not in {"legality", "nominal_budget", "working_set_estimate"}:
             raise ValueError("unknown configuration requirement kind")
         if metric not in {"fragment_elements", "fragment_register_words", "fragment_bytes", "resident_workers"}:
             raise ValueError("unknown configuration requirement metric")
         predicate = entry["predicate"]
         if predicate not in {"less_equal", "equal", "positive", "power_of_two", "multiple_of"}:
             raise ValueError("unknown configuration requirement predicate")
-        if kind == "nominal_budget" and predicate != "less_equal":
-            raise ValueError("nominal budget requires an upper bound")
+        if kind == "working_set_estimate" and metric != "fragment_register_words":
+            raise ValueError("a working-set estimate measures fragment register words")
+        if kind != "legality" and predicate != "less_equal":
+            raise ValueError("working-set budgets and estimates require an upper bound")
         limit = entry["limit"]
         if (limit is not None) != (predicate in {"less_equal", "equal", "multiple_of"}):
             raise ValueError("configuration requirement limit disagrees with its predicate")
         activation = entry["activation"]
         if activation is not None and (not isinstance(activation, str) or not activation):
             raise ValueError("configuration activation must name a boolean provider parameter")
+        active_when = entry.get("active_when", True)
+        if type(active_when) is not bool or (not active_when and activation is None):
+            raise ValueError("activation polarity requires a boolean condition on a provider parameter")
         if not isinstance(message, str) or not message:
             raise ValueError("configuration requirement must carry its diagnostic message")
         return cls(kind, metric, predicate, Expression.read(entry["usage"], checked=True),
-                   Expression.read(limit, checked=True) if limit is not None else None, activation, message)
+                   Expression.read(limit, checked=True) if limit is not None else None,
+                   activation, message, active_when)
 
     @property
     def expressions(self) -> tuple[Expression, ...]:
@@ -61,8 +68,8 @@ class ConfigurationRequirement:
         # most recent evaluation: tuning repeatedly launches one candidate, but
         # another invocation may have different dimensions, aliases or coverage.
         active = values.get(self.activation) if self.activation is not None else None
-        if type(active) is int and active == 0:
-            key = (0,)
+        if type(active) is int and active == int(not self.active_when):
+            key = (active,)
         else:
             facts = tuple(values.get(name) for name in self._reference_keys)
             if any(type(value) is not int for value in facts):
@@ -90,8 +97,8 @@ class ConfigurationRequirement:
             active = values[self.activation]
             if type(active) is not int or active not in (0, 1):
                 return result("invalid", detail=f"activation {self.activation!r} must be 0 or 1")
-            if not active:
-                return result("inactive", detail=f"{self.activation}=0")
+            if bool(active) != self.active_when:
+                return result("inactive", detail=f"{self.activation}={active}")
         errors = []
 
         def quantity(expression):
@@ -239,9 +246,10 @@ class ConfigurationSpace:
 
     @staticmethod
     def _within(evaluations: tuple[RequirementEvaluation, ...]) -> bool:
-        if any(entry.status in {"violated", "invalid"} for entry in evaluations):
+        if any(entry.rejects_candidate for entry in evaluations):
             return False
-        unresolved = tuple(entry for entry in evaluations if entry.status == "unknown")
+        unresolved = tuple(entry for entry in evaluations
+                           if entry.status == "unknown" and not entry.accepted)
         if unresolved:
             from ...compiler.toolchain import CompilationStageError
             raise CompilationStageError("candidate_binding", "; ".join(entry.describe() for entry in unresolved))
