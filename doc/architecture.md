@@ -1,6 +1,6 @@
 # IntentDSL V2 产品架构
 
-**状态**　Python → KIR → Block → Triton 以及 CPU → Weft / Mojo 已贯通。Weft 已在 x86、SG2044 与 RVV V100 完成本机验证，K3 两类核心仍待验证。下图也包含规划中的出口。[CPU 边界](design/cpu.md) · [V2-4 cuTile 出口设计，待裁决](design/cutile.md)
+**状态**　Block 的 Triton 与 cuTile，以及 CPU 的 Weft、Mojo，已贯通行归约程序。DSA 与 BANG C 为待实施设计。K3 两类核心仍待验证。[CPU](design/cpu.md) · [cuTile](design/cutile.md) · [DSA 与 BANG C](design/dsa.md)
 
 **设计依据**　CompilerInfra `3ddeef2` 的 `lib/Assembly.cpp`、`include/compilerinfra/Decision.h` 和安装包的 Python 绑定决定了本设计可用的阶段顺序、策略接口和候选加载行为。语义对照为原版 IntentDSL `b0a19990` 的 `doc/dsl/types-numerics-and-effects.md`、`doc/dsl/quantized-operations.md` 与 `python/intent/examples/registry.py`。V1 的 Triton 经验行见 `lib/Target/Triton/Transforms/Configuration/TuningProfiles.json`；V2 建议的行值须在 V2 的产物上重新判断。
 
@@ -100,7 +100,7 @@ frontend/python
 | runtime/mojo | kir 参数帧与 mojo 的 CPU ABI → 函数、affinity 和 scratch | 遵循该入口声明的任务执行方式，持有资源至完成 |
 | runtime/bangc | kir/block 合同、DSA 供数 ABI 及 bangc 的 launch/地址槽 → CNRT queue 调用 | 核对机器架构与容量，管理全局 workspace 和在途对象；片上地址在出口确定 |
 
-树上只设上述七个 runtime。CPU/DSA 可发布仅含数据或类型的 ABI 头供后代读取。运行时之间可沿祖先共享辅助代码，各 runtime 不链接编译单元或 Core。
+CPU 行组参数帧、同步返回和选优归 runtime/cpu，由 Weft、Mojo 复用；runtime/kir 保有通用容器绑定。CPU/DSA 可发布仅含数据或类型的 ABI 头供后代读取。运行时之间可沿祖先共享辅助代码，各 runtime 不链接编译单元或 Core。
 
 1. **定义与捕获**　`intent.kernel/fn/program` 记录定义、源码位置与闭包常量。安装包的薄 Python 入口持有 SDK Compiler；候选安装内的前端生成根 KIR 字节。捕获不查询设备。
 2. **prepare**　给定定义、显式出口和本机 buffers，检查 shape/dtype/device/alias，绑定 constexpr 和输出，分配作者声明的 workspace。获取 device/CPU 集及工具链事实；由出口将快照绑定到 typed services。可做必要 Intent lowering；不执行、调优或同步设备。
