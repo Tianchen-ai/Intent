@@ -8,6 +8,29 @@ struct CallFacts {
   llvm::json::Array arguments;
   std::string localEstimator;
   int64_t participants;
+  llvm::Expected<double> axisStride(mlir::Operation *op, unsigned slot, unsigned axis) const {
+    auto fn=op->getParentOfType<mlir::func::FuncOp>();
+    auto map=fn.getArgAttrOfType<mlir::AffineMapAttr>(slot,"kir.indexing");
+    if(auto src=fn.getArgAttrOfType<mlir::IntegerAttr>(slot,"kir.source"))slot=src.getInt();
+    if(slot>=arguments.size())return llvm::createStringError("missing bound input for access estimate");
+    auto *record=arguments[slot].getAsObject();
+    auto *strides=record?record->getArray("strides"):nullptr;
+    if(!strides)return llvm::createStringError("missing physical strides");
+    if(!map){
+      if(axis>=strides->size() || !(*strides)[axis].getAsInteger())return llvm::createStringError("invalid inner stride");
+      return double(*(*strides)[axis].getAsInteger());
+    }
+    auto affine=map.getValue();
+    if(axis>=affine.getNumDims() || strides->size()!=affine.getNumResults())return llvm::createStringError("invalid projected rank");
+    double stride=0;
+    for(auto [i,expr]:llvm::enumerate(affine.getResults())){
+      llvm::SmallVector<int64_t> terms(affine.getNumDims()+1,0);
+      auto physical=(*strides)[i].getAsInteger();
+      if(!physical || !coefficients(expr,terms))return llvm::createStringError("invalid affine access estimate");
+      stride+=double(terms[axis])* *physical;
+    }
+    return stride;
+  }
   std::pair<double, double> geometry(mlir::Operation *op) const {
     auto fn = mlir::dyn_cast<mlir::func::FuncOp>(op);
     if (!fn)

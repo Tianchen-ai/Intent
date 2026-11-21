@@ -19,6 +19,8 @@ capabilities(const llvm::json::Object &options) {
   auto indices = std::make_shared<intentdsl::cutile::ArrayIndices>();
   indices->bits = *bits;
   indices->permitTma = options.getBoolean("allow_tma").value_or(false);
+  if(auto registers=options.getInteger("registers"))
+    if(auto err=profile.services.facts.query("register_file",{*registers,"reg32","CUDA",llvm::json::Object{{"source","device properties"}}}))return err;
   if(auto err=intentdsl::bindPerformance(profile,options,"",options.getString("calibration").value_or("").str(),options.getInteger("sm_count").value_or(1)))return std::move(err);
   if (auto e =
           profile.services.provide<intentdsl::cutile::ArrayIndices>(indices))

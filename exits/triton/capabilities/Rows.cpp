@@ -34,6 +34,8 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
     for(unsigned width=1; width<=8192; width*=2)
       caps->rows.push_back({width*2+r.id, r.rows, width, payload});
   }
+  if(auto registers=options.getInteger("registers"))
+    if(auto err=profile.services.facts.query("register_file",{*registers,"reg32","CUDA",llvm::json::Object{{"source","device properties"}}}))return err;
   if(auto err=intentdsl::bindPerformance(profile,options,"",options.getString("calibration").value_or("").str(),options.getInteger("sm_count").value_or(1)))return std::move(err);
   if (auto e = profile.services.provide<intentdsl::RowCapacity>(caps))
     return e;

@@ -1,4 +1,5 @@
 #include "intentdsl/levels/algorithm/kir/ir/Performance.h"
+#include "llvm/ADT/DenseSet.h"
 namespace CI_UNIT_NAMESPACE {
 using namespace compilerinfra;
 using namespace mlir;
@@ -40,6 +41,16 @@ void registerCost(Unit &u) {
               w += bytes;
           });
           r *= stream ? 1 + reductions : 1;
+          double live=0, peak=0;
+          for(auto &i:op->getRegion(0).front()){
+            for(auto v:i.getResults()) if(isa<RankedTensorType>(v.getType()) && !v.use_empty())live++;
+            peak=std::max(peak,live);
+            llvm::SmallDenseSet<Value> consumed;
+            for(auto v:i.getOperands())
+              if(v.getDefiningOp() && isa<RankedTensorType>(v.getType()) && consumed.insert(v).second &&
+                 llvm::none_of(v.getUsers(),[&](Operation *u){return u->getBlock()==i.getBlock() && i.isBeforeInBlock(u);}))live--;
+          }
+          auto regFile=ctx.target.services.facts.find("register_file")?intentdsl::quantity(ctx,"register_file","reg32"):std::nullopt;
           for (auto value : choice.getAs<ArrayAttr>("rows")) {
             auto row = cast<DictionaryAttr>(value);
             double rows = row.getAs<IntegerAttr>("rows").getInt(),
@@ -55,12 +66,18 @@ void registerCost(Unit &u) {
                 {"strided_store", {ws, "B"}},
                 {"waves", {waves, "count"}},
                 {"tail", {instances * rows * tiles * width - m * n, "lane"}}};
+            double regs=peak*rows*width;
+            double resident=regFile && regs>0?std::max(1.,std::floor(*regFile/regs)):1.;
+            v.terms["fragment_register_estimate"]={regs,"reg32"};
+            v.terms["resident_instance_upper_estimate"]={resident,"instance"};
+            v.terms["active_instances"]={std::min(instances,resident*f->participants),"count"};
+            double occupancyPenalty=regFile?2./std::min(2.,resident):1.;
             if (read && write && strided && stridedRead && launch) {
               v.timeNs =
                   *launch +
                   (r / (swapped ? *stridedRead : *read) + w / *write +
                    ws / *strided) *
-                      (instances ? waves * f->participants / instances : 0.);
+                      (instances ? waves * f->participants / instances : 0.) * occupancyPenalty;
               if (!e.timeNs || *v.timeNs < *e.timeNs) {
                 e.timeNs = v.timeNs;
                 e.terms = v.terms;

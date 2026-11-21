@@ -30,7 +30,9 @@ void registerCost(Unit &u) {
             auto launch = intentdsl::quantity(ctx, "launch", "ns"),
                  sync = intentdsl::quantity(ctx, "sync", "ns");
             double read = 0, write = 0, readNs = 0, writeNs = 0, lines = 0;
+            llvm::Error strideError=llvm::Error::success();
             op->walk([&](Operation *item) {
+              if(strideError)return;
               auto k = item->getName().stripDialect();
               if (k != "read" && k != "write")
                 return;
@@ -39,13 +41,11 @@ void registerCost(Unit &u) {
                 return;
               auto v = cast<MemRefType>(arg.getType());
               auto bytes = v.getElementTypeBitWidth() / 8;
-              auto *strides =
-                  facts->arguments[arg.getArgNumber()].getAsObject()->getArray(
-                      "strides");
               bool reversed = item->hasAttr("axes") != (walk == "destination");
               auto axis = v.getRank() == 2 && reversed ? 0 : v.getRank() - 1;
-              double step =
-                  std::abs((*strides)[axis].getAsInteger().value_or(1));
+              auto stride=facts->axisStride(item,arg.getArgNumber(),axis);
+              if(!stride){strideError=stride.takeError();return;}
+              double step=std::abs(*stride);
               double mix = std::clamp((step - 1) / 15., 0., 1.);
               if (walk == "tile")
                 mix *=
@@ -63,6 +63,7 @@ void registerCost(Unit &u) {
                   writeNs += traffic * ((1 - mix) / *wr + mix / *ws);
               }
             });
+            if(strideError)return std::move(strideError);
             e.terms["read"] = {read, "B"};
             e.terms["write"] = {write, "B"};
             e.terms["line_touches"] = {lines, "line"};
