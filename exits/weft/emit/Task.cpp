@@ -9,8 +9,10 @@ std::string printType(Type t) {
   out << t;
   return s;
 }
-std::string regionType(StringRef kind, StringRef element, int rank) {
-  std::string shape = rank == 2 ? "[-1,-2],[1,2]" : "[-2],[2]";
+std::string regionType(StringRef kind, StringRef element, int rank,
+                       int columnDim = -2) {
+  std::string shape =
+      rank == 2 ? "[-1,-2],[1,2]" : "[" + std::to_string(columnDim) + "],[2]";
   if (kind == "value")
     return "!weft_kernel.value<" + element.str() + "," + shape + ">";
   return "!weft_kernel." + kind.str() + "<!weft_kernel.encoding<\"" +
@@ -40,7 +42,8 @@ class CanonicalTask {
     return {id, type};
   }
 
-  llvm::Error writeBody(Block &body, StringRef start, Term active) {
+  llvm::Error writeBody(Block &body, StringRef start, Term active,
+                        int dim = -2) {
     for (auto &op : body.without_terminator()) {
       auto code = op.getName().stripDialect();
       SmallVector<Term> args;
@@ -58,16 +61,21 @@ class CanonicalTask {
         auto window =
             start.empty()
                 ? slice
-                : inst("subview", {slice, {start.str(), "index"}, active},
-                       slice.type,
-                       "offsets=array<i64:-1>,extents=array<i64:-1>");
+                : (dim == 1
+                       ? inst("subview", {slice, {start.str(), "index"}},
+                              regionType("slice", e, 1, 1),
+                              "offsets=array<i64:-1>,extents=array<i64:1>")
+                       : inst("subview",
+                              {slice, {start.str(), "index"}, active},
+                              regionType("slice", e, 1, dim),
+                              "offsets=array<i64:-1>,extents=array<i64:-1>"));
         if (code == "write_panel" || code == "write")
           inst("commit",
                {terms.lookup(op.getOperand(op.getNumOperands() - 1)), window},
                "()");
         else
           terms[op.getResult(0)] =
-              inst("admit", {window}, regionType("value", e, 1));
+              inst("admit", {window}, regionType("value", e, 1, dim));
         continue;
       }
       for (auto operand : op.getOperands())
@@ -78,7 +86,8 @@ class CanonicalTask {
           isa<RankedTensorType>(t)
               ? regionType(
                     "value",
-                    printType(cast<RankedTensorType>(t).getElementType()), 1)
+                    printType(cast<RankedTensorType>(t).getElementType()), 1,
+                    dim)
               : printType(t);
       std::string kind = code.str(), operation;
       if (code == "max_num" || code == "sum") {
@@ -142,16 +151,12 @@ public:
     bool whole = cast<DictionaryAttr>(task->getAttrOfType<ArrayAttr>("rows")[0])
                      .getAs<IntegerAttr>("columns")
                      .getInt() == 0;
-    Term panelCount;
+    Term panelCount, tailStart;
     if (!whole) {
-      // The host dispatches nonempty rows. A unit-step induction also
-      // gives RVV the compile-time loop direction its lowering requires.
-      auto last = inst("binary", {columns, {"%step", "index"}}, "index",
-                       "kind=\"sub\"");
-      auto lastPanel =
-          inst("binary", {last, panelWidth}, "index", "kind=\"div\"");
-      panelCount = inst("binary", {lastPanel, {"%step", "index"}}, "index",
-                        "kind=\"add\"");
+      panelCount =
+          inst("binary", {columns, panelWidth}, "index", "kind=\"div\"");
+      tailStart =
+          inst("binary", {panelCount, panelWidth}, "index", "kind=\"mul\"");
     }
     s << "scf.for %r = %lo to " << extent.id << " step %step {\n";
     if (whole) {
@@ -161,37 +166,41 @@ public:
       for (auto &sweep : bb.without_terminator()) {
         auto combine = sweep.getAttrOfType<StringAttr>("combine");
         bool store = combine == "store";
-        auto id = std::to_string(serial++);
-        std::string start = "%off" + id, acc = "%acc" + id,
-                    summary = "%summary" + id;
+        std::string previous;
         if (!store) {
-          s << "%identity" << id << "=arith.constant "
+          previous = "%neutral" + std::to_string(serial++);
+          s << previous << "=arith.constant "
             << (combine == "sum" ? "0.0" : "0xFF800000") << " : f32\n";
-          s << summary << "=";
         }
-        s << "scf.for %panel" << id << " = %lo to " << panelCount.id
-          << " step %step";
-        if (!store)
-          s << " iter_args(" << acc << "=%identity" << id << ") -> (f32)";
-        s << " {\n";
-        auto offset = inst("binary", {{"%panel" + id, "index"}, panelWidth},
-                           "index", "kind=\"mul\"");
-        start = offset.id;
-        auto rem = inst("binary", {columns, {start, "index"}}, "index",
-                        "kind=\"sub\"");
-        auto active =
-            inst("binary", {rem, panelWidth}, "index", "kind=\"min\"");
         auto &body = sweep.getRegion(0).front();
-        if (auto e = writeBody(body, start, active))
-          return e;
-        if (!store) {
-          auto partial = terms.lookup(body.back().getOperand(0));
-          auto next = inst("binary", {{acc, "f32"}, partial}, "f32",
-                           combine == "sum" ? "kind=\"add\"" : "kind=\"max\"");
-          s << "scf.yield " << next.id << " : f32\n";
-          terms[sweep.getResult(0)] = {summary, "f32"};
+        for (bool tail : {false, true}) {
+          auto id = std::to_string(serial++), induction = "%index" + id,
+               acc = "%acc" + id, summary = "%summary" + id;
+          if (!store)
+            s << summary << " = ";
+          s << "scf.for " << induction << " = " << (tail ? tailStart.id : "%lo")
+            << " to " << (tail ? columns.id : panelCount.id) << " step %step";
+          if (!store)
+            s << " iter_args(" << acc << "=" << previous << ") -> (f32)";
+          s << " {\n";
+          auto offset = tail
+                            ? Term{induction, "index"}
+                            : inst("binary", {{induction, "index"}, panelWidth},
+                                   "index", "kind=\"mul\"");
+          if (auto e = writeBody(body, offset.id, panelWidth, tail ? 1 : -3))
+            return e;
+          if (!store) {
+            auto partial = terms.lookup(body.back().getOperand(0));
+            auto next =
+                inst("binary", {{acc, "f32"}, partial}, "f32",
+                     combine == "sum" ? "kind=\"add\"" : "kind=\"max\"");
+            s << "scf.yield " << next.id << " : f32\n";
+            previous = summary;
+          }
+          s << "}\n";
         }
-        s << "}\n";
+        if (!store)
+          terms[sweep.getResult(0)] = {previous, "f32"};
       }
     s << "}\n\"weft_kernel.return\"():()->()\n}):()->()\n}\n";
     return llvm::Error::success();

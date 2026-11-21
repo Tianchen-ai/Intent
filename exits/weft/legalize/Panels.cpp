@@ -49,6 +49,7 @@ public:
         continue;
       b.setInsertionPoint(&task.back());
       OperationState s(op->getLoc(), "weft_host.sweep");
+      s.addAttribute("tail", b.getStringAttr("scalar"));
       s.addAttribute("combine", b.getStringAttr(store ? "store" : name));
       if (!store)
         s.addTypes(b.getF32Type());
@@ -84,6 +85,8 @@ LogicalResult verifyPanels(Operation *dispatch) {
   for (auto &s : body.without_terminator()) {
     if (s.getName().getStringRef() != "weft_host.sweep")
       return s.emitError("expected a column panel sweep");
+    if (s.getAttrOfType<StringAttr>("tail") != "scalar")
+      return s.emitError("expected scalar remainder after full column blocks");
     auto kind = s.getAttrOfType<StringAttr>("combine");
     bool store = kind == "store";
     if ((!store && kind != "max_num" && kind != "sum") ||

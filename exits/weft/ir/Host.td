@@ -15,7 +15,7 @@ def DispatchRows : Op<WeftHost_Dialect, "dispatch_rows", [IsolatedFromAbove, Sin
 }
 
 def PanelSweep : Op<WeftHost_Dialect, "sweep", [SingleBlock]> {
-  let arguments=(ins StrAttr:$combine);
+  let arguments=(ins StrAttr:$combine, StrAttr:$tail);
   let results=(outs Variadic<F32>:$summary);
   let regions=(region AnyRegion:$panels);
 }
