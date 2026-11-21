@@ -7,10 +7,20 @@ namespace CI_UNIT_NAMESPACE {
 // receives its exact row range and never dispatches additional workers.
 std::string hostSource(func::FuncOp entry) {
   SmallVector<std::string> slots, names;
+  unsigned projectedRank=0;
+  if(entry->hasAttr("kir.iteration")){
+    auto t=dyn_cast<MemRefType>(entry.getArgument(0).getType());
+    if(t && t.getRank()>2) projectedRank=t.getRank();
+  }
   for (auto [i, type] : llvm::enumerate(entry.getArgumentTypes())) {
     std::string n = "a" + std::to_string(i);
     auto view = dyn_cast<MemRefType>(type);
-    names.push_back(n);
+    if(projectedRank && view && view.getRank()==projectedRank){
+      std::string offset="0";
+      for(unsigned axis=0;axis+1<projectedRank;++axis)
+        offset+="+c"+std::to_string(axis)+"*"+n+"s"+std::to_string(axis);
+      names.push_back("(char*)"+n+"+("+offset+")*"+std::to_string(view.getElementTypeBitWidth()/8));
+    }else names.push_back(n);
     slots.push_back(std::string(view                         ? "void *"
                                 : type.isUnsignedInteger(64) ? "uint64_t "
                                 : type.isInteger(32)         ? "int32_t "
@@ -30,7 +40,7 @@ std::string hostSource(func::FuncOp entry) {
   auto params = llvm::join(slots, ",");
   std::string out;
   llvm::raw_string_ostream c(out);
-  c << "#include <stdint.h>\nextern void intent_row_interval(" << params
+  c << "#include <stdint.h>\n#include <omp.h>\nextern void intent_row_interval(" << params
     << ",int64_t,int64_t,int64_t,int64_t);\n"
     << "void " << entry->getAttrOfType<StringAttr>("mojo_row.entry").getValue()
     << "(" << params
@@ -52,12 +62,20 @@ std::string hostSource(func::FuncOp entry) {
   c << "const int64_t "
        "groups=(rows-1)/grain+1;\n"
     << "const int64_t threads=groups<workers?groups:workers;\n"
-    << "#pragma omp parallel for num_threads(threads) if(threads>1) "
-       "schedule(static)\n"
-    << "for(int64_t g=0;g<groups;++g){int64_t start=g*grain;int64_t "
-       "stop=rows-start<grain?rows:start+grain;\n"
-    << "intent_row_interval(" << llvm::join(names, ",")
-    << ",start,stop,cols,columns);}\n}\n";
+    << "#pragma omp parallel num_threads(threads) if(threads>1)\n"
+    << "{int64_t b=omp_get_thread_num(), nt=omp_get_num_threads();"
+       "int64_t q=groups/nt, rem=groups%nt;"
+       "int64_t start=(q*b+(b<rem?b:rem))*grain;"
+       "int64_t stop=b+1==nt?rows:start+(q+(b<rem))*grain;\n";
+  if(projectedRank) {
+    c<<"while(start<stop){int64_t outer=start;\n";
+    for(int axis=projectedRank-2;axis>=0;--axis)
+      c<<"int64_t c"<<axis<<"=outer%a0d"<<axis<<";outer/=a0d"<<axis<<";\n";
+    c<<"int64_t span=a0d"<<projectedRank-2<<"-c"<<projectedRank-2
+     <<";int64_t end=stop-start<span?stop:start+span;\n"
+     <<"intent_row_interval("<<llvm::join(names,",")<<",start,end,cols,columns);start=end;}\n";
+  } else c<<"intent_row_interval("<<llvm::join(names,",")<<",start,stop,cols,columns);\n";
+  c<<"}\n}\n";
   return out;
 }
 } // namespace CI_UNIT_NAMESPACE

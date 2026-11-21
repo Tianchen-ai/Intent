@@ -348,6 +348,510 @@
         "benchmark": "intent_bench.calibration/write_16",
         "error": "range [2.8604, 3.51781], n=8"
       }
+    },
+    "panel_gather_32_bw": {
+      "value": 7.01716666,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/panel_gather_32_bw",
+        "error": "range [6.53093, 7.3683], n=8"
+      }
+    },
+    "panel_scatter_32_bw": {
+      "value": 1.439664095,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/panel_scatter_32_bw",
+        "error": "range [0.520965, 1.77776], n=8"
+      }
+    },
+    "panel_gather_128_bw": {
+      "value": 4.657344495,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/panel_gather_128_bw",
+        "error": "range [4.53107, 4.89309], n=8"
+      }
+    },
+    "panel_scatter_128_bw": {
+      "value": 0.663788174,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/panel_scatter_128_bw",
+        "error": "range [0.569738, 0.697403], n=8"
+      }
+    },
+    "panel_gather_512_bw": {
+      "value": 5.956834075,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/panel_gather_512_bw",
+        "error": "range [4.52491, 6.58089], n=8"
+      }
+    },
+    "panel_scatter_512_bw": {
+      "value": 2.330976965,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/panel_scatter_512_bw",
+        "error": "range [1.95469, 2.52646], n=8"
+      }
+    },
+    "span_gather_31_32_bw": {
+      "value": 25.50084885,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_31_32_bw",
+        "error": "range [19.0448, 28.8929], n=8"
+      }
+    },
+    "span_scatter_31_32_bw": {
+      "value": 22.9663168,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_31_32_bw",
+        "error": "range [16.0396, 26.1806], n=8"
+      }
+    },
+    "span_gather_31_256_bw": {
+      "value": 36.0206967,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_31_256_bw",
+        "error": "range [32.9359, 37.6205], n=8"
+      }
+    },
+    "span_scatter_31_256_bw": {
+      "value": 27.0397748,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_31_256_bw",
+        "error": "range [22.4784, 30.7674], n=8"
+      }
+    },
+    "span_gather_31_1024_bw": {
+      "value": 22.4145432,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_31_1024_bw",
+        "error": "range [20.7583, 24.1096], n=8"
+      }
+    },
+    "span_scatter_31_1024_bw": {
+      "value": 8.16145372,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_31_1024_bw",
+        "error": "range [7.98129, 8.28594], n=8"
+      }
+    },
+    "span_gather_32_32_bw": {
+      "value": 26.32203445,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_32_32_bw",
+        "error": "range [24.5327, 27.2101], n=8"
+      }
+    },
+    "span_scatter_32_32_bw": {
+      "value": 24.077818,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_32_32_bw",
+        "error": "range [22.6345, 26.0396], n=8"
+      }
+    },
+    "span_gather_32_256_bw": {
+      "value": 34.85480495,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_32_256_bw",
+        "error": "range [32.8931, 36.3666], n=8"
+      }
+    },
+    "span_scatter_32_256_bw": {
+      "value": 27.36446875,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_32_256_bw",
+        "error": "range [23.5005, 29.9298], n=8"
+      }
+    },
+    "span_gather_32_1024_bw": {
+      "value": 22.2510933,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_32_1024_bw",
+        "error": "range [20.6153, 24.5442], n=8"
+      }
+    },
+    "span_scatter_32_1024_bw": {
+      "value": 7.96131231,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_32_1024_bw",
+        "error": "range [7.52257, 8.15987], n=8"
+      }
+    },
+    "span_gather_127_32_bw": {
+      "value": 27.4378686,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_127_32_bw",
+        "error": "range [25.7967, 28.7466], n=8"
+      }
+    },
+    "span_scatter_127_32_bw": {
+      "value": 19.89503405,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_127_32_bw",
+        "error": "range [18.485, 21.6141], n=8"
+      }
+    },
+    "span_gather_127_256_bw": {
+      "value": 35.97006505,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_127_256_bw",
+        "error": "range [33.1668, 38.4871], n=8"
+      }
+    },
+    "span_scatter_127_256_bw": {
+      "value": 20.8074134,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_127_256_bw",
+        "error": "range [18.8961, 23.1591], n=8"
+      }
+    },
+    "span_gather_127_1024_bw": {
+      "value": 21.99009485,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_127_1024_bw",
+        "error": "range [19.7072, 23.547], n=8"
+      }
+    },
+    "span_scatter_127_1024_bw": {
+      "value": 7.448108075,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_127_1024_bw",
+        "error": "range [7.00959, 7.68841], n=8"
+      }
+    },
+    "span_gather_128_32_bw": {
+      "value": 25.66945525,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_128_32_bw",
+        "error": "range [24.7921, 26.769], n=8"
+      }
+    },
+    "span_scatter_128_32_bw": {
+      "value": 22.7020262,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_128_32_bw",
+        "error": "range [20.4755, 25.0175], n=8"
+      }
+    },
+    "span_gather_128_256_bw": {
+      "value": 14.483337800000001,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_128_256_bw",
+        "error": "range [13.8295, 15.6616], n=8"
+      }
+    },
+    "span_scatter_128_256_bw": {
+      "value": 5.125168820000001,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_128_256_bw",
+        "error": "range [4.80969, 5.27697], n=8"
+      }
+    },
+    "span_gather_128_1024_bw": {
+      "value": 14.133848449999999,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_128_1024_bw",
+        "error": "range [12.2938, 15.3091], n=8"
+      }
+    },
+    "span_scatter_128_1024_bw": {
+      "value": 5.0322330399999995,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_128_1024_bw",
+        "error": "range [4.99129, 5.1929], n=8"
+      }
+    },
+    "span_gather_511_32_bw": {
+      "value": 28.299742199999997,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_511_32_bw",
+        "error": "range [27.4172, 29.1001], n=8"
+      }
+    },
+    "span_scatter_511_32_bw": {
+      "value": 18.9661275,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_511_32_bw",
+        "error": "range [16.6872, 20.5964], n=8"
+      }
+    },
+    "span_gather_511_256_bw": {
+      "value": 36.6780312,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_511_256_bw",
+        "error": "range [34.7237, 38.8917], n=8"
+      }
+    },
+    "span_scatter_511_256_bw": {
+      "value": 18.9324967,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_511_256_bw",
+        "error": "range [16.9081, 20.7338], n=8"
+      }
+    },
+    "span_gather_511_1024_bw": {
+      "value": 21.151776400000003,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_511_1024_bw",
+        "error": "range [20.2068, 21.6026], n=8"
+      }
+    },
+    "span_scatter_511_1024_bw": {
+      "value": 6.010029235,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_511_1024_bw",
+        "error": "range [5.82407, 6.13337], n=8"
+      }
+    },
+    "span_gather_512_32_bw": {
+      "value": 23.36061945,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_512_32_bw",
+        "error": "range [19.6334, 26.7363], n=8"
+      }
+    },
+    "span_scatter_512_32_bw": {
+      "value": 20.8862524,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_512_32_bw",
+        "error": "range [17.3232, 24.4356], n=8"
+      }
+    },
+    "span_gather_512_256_bw": {
+      "value": 13.583859749999998,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_512_256_bw",
+        "error": "range [12.659, 14.7694], n=8"
+      }
+    },
+    "span_scatter_512_256_bw": {
+      "value": 3.5807012900000004,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_512_256_bw",
+        "error": "range [3.54279, 3.60217], n=8"
+      }
+    },
+    "span_gather_512_1024_bw": {
+      "value": 11.6998239,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_512_1024_bw",
+        "error": "range [11.2324, 11.9593], n=8"
+      }
+    },
+    "span_scatter_512_1024_bw": {
+      "value": 3.170648925,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, FP32; private 128 KiB, mid 4096 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_512_1024_bw",
+        "error": "range [3.06956, 3.18022], n=8"
+      }
     }
   }
 }

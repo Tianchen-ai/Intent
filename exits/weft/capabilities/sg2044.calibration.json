@@ -348,6 +348,510 @@
         "benchmark": "intent_bench.calibration/write_16",
         "error": "range [0.141922, 0.146249], n=8"
       }
+    },
+    "panel_gather_32_bw": {
+      "value": 0.17995581900000002,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/panel_gather_32_bw",
+        "error": "range [0.143778, 0.22112], n=8"
+      }
+    },
+    "panel_scatter_32_bw": {
+      "value": 0.1826474515,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/panel_scatter_32_bw",
+        "error": "range [0.154999, 0.205313], n=8"
+      }
+    },
+    "panel_gather_128_bw": {
+      "value": 0.1650306025,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/panel_gather_128_bw",
+        "error": "range [0.16061, 0.16597], n=8"
+      }
+    },
+    "panel_scatter_128_bw": {
+      "value": 0.1714570395,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/panel_scatter_128_bw",
+        "error": "range [0.15922, 0.180597], n=8"
+      }
+    },
+    "panel_gather_512_bw": {
+      "value": 0.17076479300000003,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/panel_gather_512_bw",
+        "error": "range [0.16954, 0.17241], n=8"
+      }
+    },
+    "panel_scatter_512_bw": {
+      "value": 0.148881601,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/panel_scatter_512_bw",
+        "error": "range [0.144573, 0.153262], n=8"
+      }
+    },
+    "span_gather_31_32_bw": {
+      "value": 1.4327751000000002,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_31_32_bw",
+        "error": "range [1.36794, 1.51037], n=8"
+      }
+    },
+    "span_scatter_31_32_bw": {
+      "value": 0.8830643735,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_31_32_bw",
+        "error": "range [0.875563, 0.889018], n=8"
+      }
+    },
+    "span_gather_31_256_bw": {
+      "value": 1.5425236999999998,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_31_256_bw",
+        "error": "range [1.51589, 1.55126], n=8"
+      }
+    },
+    "span_scatter_31_256_bw": {
+      "value": 0.960669471,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_31_256_bw",
+        "error": "range [0.955652, 0.966341], n=8"
+      }
+    },
+    "span_gather_31_1024_bw": {
+      "value": 0.752616034,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_31_1024_bw",
+        "error": "range [0.716786, 0.762512], n=8"
+      }
+    },
+    "span_scatter_31_1024_bw": {
+      "value": 0.5857479945,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_31_1024_bw",
+        "error": "range [0.581871, 0.586373], n=8"
+      }
+    },
+    "span_gather_32_32_bw": {
+      "value": 1.479996015,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_32_32_bw",
+        "error": "range [1.36886, 1.49884], n=8"
+      }
+    },
+    "span_scatter_32_32_bw": {
+      "value": 1.019703855,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_32_32_bw",
+        "error": "range [1.01682, 1.02528], n=8"
+      }
+    },
+    "span_gather_32_256_bw": {
+      "value": 1.542260255,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_32_256_bw",
+        "error": "range [1.52085, 1.54933], n=8"
+      }
+    },
+    "span_scatter_32_256_bw": {
+      "value": 0.9753700635,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_32_256_bw",
+        "error": "range [0.958637, 0.978496], n=8"
+      }
+    },
+    "span_gather_32_1024_bw": {
+      "value": 0.7402520319999999,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_32_1024_bw",
+        "error": "range [0.728822, 0.752957], n=8"
+      }
+    },
+    "span_scatter_32_1024_bw": {
+      "value": 0.5756368430000001,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_32_1024_bw",
+        "error": "range [0.560996, 0.577587], n=8"
+      }
+    },
+    "span_gather_127_32_bw": {
+      "value": 0.924935836,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_127_32_bw",
+        "error": "range [0.923181, 0.928252], n=8"
+      }
+    },
+    "span_scatter_127_32_bw": {
+      "value": 0.6553221709999999,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_127_32_bw",
+        "error": "range [0.649124, 0.657472], n=8"
+      }
+    },
+    "span_gather_127_256_bw": {
+      "value": 0.8256920105000001,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_127_256_bw",
+        "error": "range [0.819119, 0.829262], n=8"
+      }
+    },
+    "span_scatter_127_256_bw": {
+      "value": 0.6232139395,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_127_256_bw",
+        "error": "range [0.61112, 0.625382], n=8"
+      }
+    },
+    "span_gather_127_1024_bw": {
+      "value": 0.5673599775,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_127_1024_bw",
+        "error": "range [0.552135, 0.577179], n=8"
+      }
+    },
+    "span_scatter_127_1024_bw": {
+      "value": 0.472220667,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_127_1024_bw",
+        "error": "range [0.470981, 0.473937], n=8"
+      }
+    },
+    "span_gather_128_32_bw": {
+      "value": 1.2912171350000001,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_128_32_bw",
+        "error": "range [1.27152, 1.29903], n=8"
+      }
+    },
+    "span_scatter_128_32_bw": {
+      "value": 0.9985258495,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_128_32_bw",
+        "error": "range [0.986649, 1.00251], n=8"
+      }
+    },
+    "span_gather_128_256_bw": {
+      "value": 0.5102290265,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_128_256_bw",
+        "error": "range [0.505263, 0.513858], n=8"
+      }
+    },
+    "span_scatter_128_256_bw": {
+      "value": 0.485406907,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_128_256_bw",
+        "error": "range [0.478118, 0.491558], n=8"
+      }
+    },
+    "span_gather_128_1024_bw": {
+      "value": 0.3326671025,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_128_1024_bw",
+        "error": "range [0.330772, 0.335868], n=8"
+      }
+    },
+    "span_scatter_128_1024_bw": {
+      "value": 0.32410241,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_128_1024_bw",
+        "error": "range [0.322934, 0.328655], n=8"
+      }
+    },
+    "span_gather_511_32_bw": {
+      "value": 0.820439363,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_511_32_bw",
+        "error": "range [0.814875, 0.827226], n=8"
+      }
+    },
+    "span_scatter_511_32_bw": {
+      "value": 0.533379204,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_511_32_bw",
+        "error": "range [0.52453, 0.537569], n=8"
+      }
+    },
+    "span_gather_511_256_bw": {
+      "value": 0.7062897945,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_511_256_bw",
+        "error": "range [0.704056, 0.708688], n=8"
+      }
+    },
+    "span_scatter_511_256_bw": {
+      "value": 0.4864823465,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_511_256_bw",
+        "error": "range [0.483995, 0.487861], n=8"
+      }
+    },
+    "span_gather_511_1024_bw": {
+      "value": 0.6000432305000001,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_511_1024_bw",
+        "error": "range [0.5871, 0.605876], n=8"
+      }
+    },
+    "span_scatter_511_1024_bw": {
+      "value": 0.3801661575,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_511_1024_bw",
+        "error": "range [0.379582, 0.380543], n=8"
+      }
+    },
+    "span_gather_512_32_bw": {
+      "value": 1.107200315,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_512_32_bw",
+        "error": "range [1.09321, 1.12171], n=8"
+      }
+    },
+    "span_scatter_512_32_bw": {
+      "value": 0.766007113,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_512_32_bw",
+        "error": "range [0.76214, 0.768012], n=8"
+      }
+    },
+    "span_gather_512_256_bw": {
+      "value": 0.352540035,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_512_256_bw",
+        "error": "range [0.352327, 0.355374], n=8"
+      }
+    },
+    "span_scatter_512_256_bw": {
+      "value": 0.313477303,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_512_256_bw",
+        "error": "range [0.306912, 0.317532], n=8"
+      }
+    },
+    "span_gather_512_1024_bw": {
+      "value": 0.35814375600000004,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_gather_512_1024_bw",
+        "error": "range [0.354794, 0.359428], n=8"
+      }
+    },
+    "span_scatter_512_1024_bw": {
+      "value": 0.3142511335,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; binary16 paired adjacent spans over 4 MiB, pitch and span in elements in benchmark name",
+        "benchmark": "intent_bench.calibration/span_scatter_512_1024_bw",
+        "error": "range [0.310134, 0.318177], n=8"
+      }
     }
   }
 }

@@ -25,7 +25,7 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
   auto caps = std::make_shared<intentdsl::cpu::RowMachine>();
   caps->vectorBits = *bits;
   caps->workers = *workers;
-  caps->rows = {{1, 64}, {4, *bits == 512 ? 128 : 64}};
+  caps->rows = {{1, 64}, {4, *bits == 512 ? 128 : 64}, {32, 256}, {64, 128}};
   if (auto e = p.services.provide<intentdsl::cpu::RowMachine>(caps))
     return e;
   return p;
@@ -66,7 +66,7 @@ void bind(Unit &u) {
             if (phase == "realized") {
               auto *caps = p.services.get<intentdsl::cpu::RowMachine>();
               if (caps)
-                realize(pm, caps->vectorBits / 32);
+                realize(pm, caps->vectorBits);
             }
             return llvm::Error::success();
           },

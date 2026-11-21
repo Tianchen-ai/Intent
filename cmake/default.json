@@ -30,8 +30,7 @@
           "strategies": [
             "levels/execution/cpu::rectangular-copy"
           ],
-          "realizer": "levels/execution/cpu::permute-rows",
-          "candidate": "destination"
+          "realizer": "levels/execution/cpu::permute-rows"
         }
       }
     },

@@ -3,6 +3,7 @@
 #include "llvm/ADT/StringSwitch.h"
 using namespace compilerinfra;
 using namespace mlir;
+#include "Lanes.h"
 namespace CI_UNIT_NAMESPACE {
 namespace {
 struct Publish : PassWrapper<Publish, OperationPass<ModuleOp>> {
@@ -27,7 +28,7 @@ LogicalResult verifyLoops(ModuleOp m, const TargetProfile &p, bool callable) {
   auto lanes = task.getAttrOfType<IntegerAttr>("mojo_row.lanes");
   if (!lanes ||
       lanes.getInt() !=
-          p.services.get<intentdsl::cpu::RowMachine>()->vectorBits / 32)
+          laneCount(&task,p.services.get<intentdsl::cpu::RowMachine>()->vectorBits))
     return task.emitError(
         "sweep width differs from the effective vector target");
   if (callable &&
@@ -41,9 +42,12 @@ LogicalResult verifyLoops(ModuleOp m, const TargetProfile &p, bool callable) {
     bool store = alg == "store";
     auto w = s.getAttrOfType<IntegerAttr>("width").getInt();
     bool tail = full != nullptr;
+    bool copy = s.getAttrOfType<StringAttr>("range")=="copy";
+    if(copy && (!store || !llvm::hasSingleElement(task.getRegion(0).front().without_terminator())))
+      return s.emitError("a linear copy must cover the whole task");
     if ((!store && alg != "max_num" && alg != "sum") ||
-        s.getAttrOfType<StringAttr>("range") != (tail ? "tail" : "full") ||
-        w != (tail ? 1 : lanes.getInt()) ||
+        (!copy && s.getAttrOfType<StringAttr>("range") != (tail ? "tail" : "full")) ||
+        w != (copy || tail ? 1 : lanes.getInt()) ||
         s.getNumResults() != unsigned(!store) ||
         s.getNumOperands() != unsigned(tail && !store) ||
         (!store && !s.getResult(0).getType().isF32()) ||
@@ -101,7 +105,17 @@ LogicalResult verifyLoops(ModuleOp m, const TargetProfile &p, bool callable) {
     }
     if (store ? !writes : bool(writes))
       return s.emitError("sweep write count differs from its algebra");
-    full = tail ? nullptr : &s;
+    if(copy){
+      auto &read=bb.front();
+      auto *write=read.getNextNode();
+      if(bb.getOperations().size()!=3 || read.getName().getStringRef()!="mojo_row.read" ||
+         !write || write->getName().getStringRef()!="mojo_row.write" ||
+         write->getOperand(3)!=read.getResult(0) ||
+         cast<MemRefType>(read.getOperand(0).getType()).getRank()!=2 ||
+         cast<MemRefType>(write->getOperand(0).getType()).getRank()!=2)
+        return s.emitError("expected a typed matrix read followed by its matching write");
+    }
+    full = tail || copy ? nullptr : &s;
   }
   if (full)
     return full->emitError("missing matching tail sweep");

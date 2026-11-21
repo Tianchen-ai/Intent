@@ -39,7 +39,7 @@ public:
         params.push_back(n + ": Pointer[Scalar[DType." +
                          dtype(m.getElementType()) + "], MutUntrackedOrigin]");
         if(m.getRank()>2)for(int j=0;j<m.getRank()-1;++j)params.push_back(n+"d"+std::to_string(j)+": Int64");
-        for (int j = 0; j < m.getRank(); ++j)
+      for (int j = 0; j < m.getRank(); ++j)
           params.push_back(n + "s" + std::to_string(j) + ": Int64");
       } else
         params.push_back(n + (v.getType().isUnsignedInteger(64) ? ": UInt64"
@@ -61,12 +61,26 @@ public:
         << ", first: Int64, stop: Int64, cols: Int64, columns_per_block: "
            "Int64) abi(\"C\"):\n";
     line(1, "for r in range(Int(first),Int(stop)):");
+    auto fn = task->getParentOfType<func::FuncOp>();
+    const bool projected = fn->hasAttr("kir.iteration");
+    // For projected views the host supplies each interval's physical base.
     auto fullWidth =
         task->getAttrOfType<IntegerAttr>("mojo_row.lanes").getInt();
     for (auto &loop : body.without_terminator()) {
       if (loop.getName().getStringRef() != "mojo_row.sweep")
         return llvm::createStringError("Mojo requires realized sweeps");
       bool tail = loop.getAttrOfType<StringAttr>("range") == "tail";
+      if(loop.getAttrOfType<StringAttr>("range")=="copy"){
+        auto &read=loop.getRegion(0).front().front();auto &write=*read.getNextNode();
+        auto address=[&](Operation &access){
+          auto view=var(access.getOperand(0));bool swapped=access.hasAttr("axes");
+          return view+"[unsafe_offset=r*Int("+view+(swapped?"s1)":"s0)")+
+                 "+j*Int("+view+(swapped?"s0)]":"s1)]");
+        };
+        line(2,"for j in range(Int(cols)):");
+        line(3,address(write)+" = "+address(read));
+        continue;
+      }
       auto kind = loop.getAttrOfType<StringAttr>("algebra");
       bool sum = kind == "sum", reduction = kind != "store";
       auto lanes =
@@ -111,6 +125,10 @@ public:
             offset="j*"+stride;
             std::string row="r";
             for(int i=view.getRank()-2;i>=0;--i){
+              if(projected) {
+                offset+="+(r-Int(first))*Int("+a+"s"+std::to_string(i)+")";
+                break;
+              }
               auto size="Int("+a+"d"+std::to_string(i)+")";offset+="+("+row+"%"+size+")*Int("+a+"s"+std::to_string(i)+")";
               row="("+row+"//"+size+")";
             }
@@ -122,7 +140,7 @@ public:
             line(4, lhs + " = " + a + ".unsafe_offset(" + offset +
                         ").unsafe_load[width=" + lanes + "]()");
             line(3, "else:");
-            line(4, "for lane in range(" + lanes + "):");
+            line(4, "comptime for lane in range(" + lanes + "):");
             line(5, lhs + "[lane] = " + a + "[unsafe_offset=" + offset +
                         "+lane*" + stride + "]");
           } else {
@@ -130,7 +148,7 @@ public:
             line(4, a + ".unsafe_offset(" + offset + ").unsafe_store(" +
                         arg(3) + ")");
             line(3, "else:");
-            line(4, "for lane in range(" + lanes + "):");
+            line(4, "comptime for lane in range(" + lanes + "):");
             line(5, a + "[unsafe_offset=" + offset + "+lane*" + stride +
                         "] = " + arg(3) + "[lane]");
           }

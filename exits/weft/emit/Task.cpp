@@ -343,9 +343,14 @@ std::string hostSource(Operation *dispatch, const llvm::json::Array &abi) {
          "if(!rows || !cols) return 0;\n";
   if(walk=="tile")return prefix+intentdsl::cpu::tileLoop(dispatch->getAttrOfType<IntegerAttr>("cpu.tile").getInt())+symbol+"_instance(a0+r*a0s0+c*a0s1,a1+c*a1s0+r*a1s1,nr,nc,panel?panel:nc,a0s0,a0s1,a1s1,a1s0);}return 0;}\n";
   if(walk=="destination")prefix+="int64_t t=rows;rows=cols;cols=t;t=a0s0;a0s0=a0s1;a0s1=t;t=a1s0;a1s0=a1s1;a1s1=t;\n";
-  return prefix+"#pragma omp parallel for num_threads(workers) "
+  // A worker owns a contiguous range of complete grains. Give its native
+  // kernel the full interval, splitting only at a projected view boundary.
+  prefix += "int64_t groups=1+(rows-1)/grain; int64_t bins=groups<workers?groups:workers;\n";
+  return prefix+"#pragma omp parallel for num_threads(bins) "
          "schedule(static) if(workers>1)\n"
-         "for(int64_t group=0;group<rows;group+=grain){int64_t end=rows-group<grain?rows:group+grain; for(int64_t start=group;start<end;){int64_t remaining=" + chunk + "-start%" + chunk + ";int64_t count=end-start<remaining?end-start:remaining; " +
+         "for(int64_t b=0;b<bins;++b){int64_t group=(groups/bins*b+(groups%bins*b)/bins)*grain;"
+         "int64_t end=b+1==bins?rows:(groups/bins*(b+1)+(groups%bins*(b+1))/bins)*grain;"
+         "for(int64_t start=group;start<end;){int64_t remaining=" + chunk + "-start%" + chunk + ";int64_t count=end-start<remaining?end-start:remaining; " +
          symbol + "_instance(" + llvm::join(args, ",") + "); start+=count;}}\nreturn 0;\n}\n";
 }
 } // namespace CI_UNIT_NAMESPACE

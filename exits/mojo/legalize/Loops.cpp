@@ -4,6 +4,7 @@
 #include "mlir/IR/IRMapping.h"
 #include "Dialect.h.inc"
 using namespace mlir;
+#include "Lanes.h"
 namespace CI_UNIT_NAMESPACE {
 void dialect(DialectRegistry &r) {
   r.insert<intentdsl::rowmojo::RowMojoDialect>();
@@ -97,6 +98,14 @@ class Columns {
   }
 
 public:
+  static bool storeInterval(ArrayRef<Operation *> body, Operation *write) {
+    if(body.size()!=2 || body[1]!=write || body[0]->getName().stripDialect()!="read" ||
+       write->getName().stripDialect()!="write" || write->getOperand(2)!=body[0]->getResult(0))
+      return false;
+    auto src=cast<MemRefType>(body[0]->getOperand(0).getType());
+    auto dst=cast<MemRefType>(write->getOperand(0).getType());
+    return src.getRank()==2 && dst.getRank()==2 && src.getElementType()==dst.getElementType();
+  }
   Columns(Operation *op) : b(op), task(op), loc(op->getLoc()) {}
   void run(int64_t lanes) {
     auto &bb = task->getRegion(0).front();
@@ -117,6 +126,10 @@ public:
         continue;
       if (n != "sum" && n != "max_num" && n != "write")
         continue;
+      if (storeInterval(original,op)) {
+        sweep(op,"copy",{},1);
+        continue;
+      }
       auto full = sweep(op, "full", {}, lanes);
       auto done = sweep(op, "tail", full, 1);
       if (done)
@@ -136,7 +149,7 @@ struct Realize : PassWrapper<Realize, OperationPass<ModuleOp>> {
     getContext().getOrLoadDialect<intentdsl::rowmojo::RowMojoDialect>();
     getOperation().walk([&](Operation *op) {
       if (op->getName().getStringRef() == "cpu.task")
-        Columns(op).run(lanes);
+        Columns(op).run(laneCount(op,lanes));
     });
   }
 };
