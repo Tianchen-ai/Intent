@@ -65,6 +65,11 @@ class Capture:
     def expr(self, n):
         if isinstance(n, ast.Name):
             return self.values[n.id]
+        if isinstance(n, ast.Attribute) and n.attr in ("count", "mean", "m2"):
+            state = self.expr(n.value)
+            if state[1] != "tuple<i32, f32, f32>":
+                raise ValueError("expected a Welford summary")
+            return self.field(state, ("count", "mean", "m2").index(n.attr))
         if isinstance(n, ast.Subscript):
             args, ty = self.access(n)
             return self.emit("read", args, ty)
@@ -96,6 +101,11 @@ class Capture:
             return self.emit(op, args, ty)
         if isinstance(n, ast.Call):
             fn = spelling(n.func, self.namespace)
+            if fn == "welford" and len(n.args) == 1 and not n.keywords:
+                samples = self.expr(n.args[0])
+                if samples[1] != "tensor<?xf32>":
+                    raise ValueError("welford requires one f32 member vector")
+                return self.emit("welford", [samples], "tuple<i32, f32, f32>")
             if (
                 fn in ("linear_index", "member_counter")
                 and len(n.args) == 2
@@ -177,6 +187,10 @@ class Capture:
             f"unsupported author expression at line {n.lineno}: {ast.unparse(n)}"
         )
 
+    def field(self, state, position):
+        return self.emit("field", [state], "i32" if position == 0 else "f32",
+                         f"{{position={position} : i64}}")
+
     def capture(self):
         (loop,) = self.fn.body
         if (
@@ -210,6 +224,12 @@ class Capture:
             v = self.expr(stmt.value)
             if isinstance(target, ast.Name):
                 self.values[target.id] = v
+            elif isinstance(target, ast.Tuple):
+                if (v[1] != "tuple<i32, f32, f32>" or len(target.elts) != 3
+                        or not all(isinstance(part, ast.Name) for part in target.elts)):
+                    raise ValueError("tuple assignment requires one name per summary field")
+                for position, part in enumerate(target.elts):
+                    self.values[part.id] = self.field(v, position)
             else:
                 transposed = isinstance(target.slice, ast.Tuple) and [
                     ast.unparse(x) for x in target.slice.elts

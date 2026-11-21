@@ -40,6 +40,34 @@ def relu(x: I.In[I.f16, ("M", "N")], out: I.Out[I.f16, ("M", "N")]):
 
 
 @I.kernel
+def layer_norm(x: I.In[I.f32, ("R", "C")], gain: I.In[I.f32, ("C",)],
+               offset: I.In[I.f32, ("C",)], out: I.Out[I.f32, ("R", "C")],
+               inv_width: I.f32, epsilon: I.f32):
+    for row in I.parallel(x.dim(0)):
+        v = x[row, :]
+        mean = I.sum(v, axis=0, acc=I.f32) * inv_width
+        second = I.sum(v * v, axis=0, acc=I.f32) * inv_width
+        variance = second - mean * mean
+        out[row, :] = (v - mean) * I.rsqrt(variance + epsilon) * gain[:] + offset[:]
+
+
+@I.kernel
+def fused_add_rms_norm(x: I.In[I.bf16, ("R", "C")],
+                       residual: I.In[I.bf16, ("R", "C")],
+                       weight: I.In[I.bf16, ("C",)],
+                       out: I.Out[I.bf16, ("R", "C")],
+                       residual_out: I.Out[I.bf16, ("R", "C")],
+                       inv_width: I.f32, epsilon: I.f32, offset: I.f32):
+    for row in I.parallel(x.dim(0)):
+        rounded = I.cast(I.cast(x[row, :], I.f32) + I.cast(residual[row, :], I.f32), I.bf16)
+        v = I.cast(rounded, I.f32)
+        scale = I.rsqrt(I.sum(v * v, axis=0, acc=I.f32) * inv_width + epsilon)
+        gain = I.cast(weight[:], I.f32) + offset
+        out[row, :] = I.cast(v * scale * gain, I.bf16)
+        residual_out[row, :] = rounded
+
+
+@I.kernel
 def transpose(x: I.In[I.f16, ("M", "N")], out: I.Out[I.f16, ("N", "M")]):
     for row in I.parallel(x.dim(0)):
         out[:, row] = x[row, :]
@@ -164,6 +192,17 @@ def dropout_norm_backward(
         dz = wdy * inv - z * (inv * inv * inv) * dot + I.cast(carry[row, :], I.f32)
         dx[row, :] = I.cast(dz * active * scale, I.bf16)
         dr[row, :] = I.cast(dz, I.bf16)
+
+
+@I.program
+def dropout_residual_rms_norm(x, residual, gain, dy, carry, seed, keep, scale, inv_n, eps, bias):
+    y = I.output(I.bf16, (x.dim(0), x.dim(1)))
+    summed = I.output(I.bf16, (x.dim(0), x.dim(1)))
+    dx = I.output(I.bf16, (x.dim(0), x.dim(1)))
+    dr = I.output(I.bf16, (x.dim(0), x.dim(1)))
+    dropout_norm_forward(x, residual, gain, y, summed, seed, keep, scale, inv_n, eps, bias)
+    dropout_norm_backward(x, residual, gain, dy, carry, dx, dr, seed, keep, scale, inv_n, eps, bias)
+    return y, summed, dx, dr
 
 
 @I.kernel

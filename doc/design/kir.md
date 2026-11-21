@@ -210,6 +210,13 @@ order 是操作属性，拒绝表外组合；一个逻辑原子地址上存在�
 
 ## program 的静态调用合同
 
+行摘要 `I.welford(samples)` 消费一维 f32 有效成员。返回的 SSA 元组依次为
+`(count: i32, mean: f32, m2: f32)`，要求有效成员数可用 i32 表示。
+空域返回三个零。合并相邻的非空摘要时，令 `delta = mean_b - mean_a`，
+`n = count_a + count_b`，`d = delta * float(count_b) / float(n)`；
+输出为 `(n, mean_a + d, m2_a + m2_b + delta * float(count_a) * d)`。
+空摘要合并时保留另一项。支持按顺序解包或以 `.count/.mean/.m2` 取字段。
+
 捕获结果按顺序保存 `workspace/output` 声明、显式 `I.fill(view, value)`、kernel 调用及返回的输出结构。kernel 符号、调用结构和输出个数在捕获完成时确定；地址、维度以及由维度求出的工作区尺寸可延迟到 prepare 求值。例如 MoE 可在四次调用前记录三次有序 fill，多输出可返回原有视图的 tuple。fill 要求目标可写、值符合目标元素类型，覆盖指定视图的逻辑域，是作者调用序列中的可见写入。
 
 验证每个使用者的输入由调用实参、初始化或此前写入供给，依赖顺序覆盖读写冲突。新 workspace 未承诺初值；prepare 只绑定和分配，compile 只构建，fill 随 launch 执行。workspace 从分配到最后一次相关读写完成前保持有效；异步出口按队列依赖延迟释放，多输出的所有权随返回对象保留。根据设备计数选择下一次 host 调用或在捕获时读取 tensor 内容均超出此合同；数据相关的算法循环、分支和提前终止在 kernel IR 中表达。

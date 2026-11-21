@@ -60,6 +60,8 @@ LogicalResult verifyRowComputation(func::FuncOp fn, Block &row, ValueRange captu
     auto name = op.getName().stripDialect();
     if (op.getName().getDialectNamespace() != dialect)
       return op.emitError("unexpected row operation");
+    if (dialect == "kir" && (name == "welford" || name == "field"))
+      continue; // The registered tuple operations verify their own type contracts.
     if (name == "constant") {
       auto v = op.getAttrOfType<TypedAttr>("value");
       if (!v || v.getType() != op.getResult(0).getType())

@@ -60,6 +60,19 @@ def Kir_max_num : Inst<"max_num"> {
   let results = (outs AnyType:$result);
 }
 
+// The empty summary is (0, 0, 0). The mean and centered second moment
+// describe the same population as the integer count.
+def Kir_welford : Inst<"welford", [Pure]> {
+  let arguments = (ins AnyRankedTensor:$samples);
+  let results = (outs AnyType:$state);
+  let hasVerifier = 1;
+}
+def Kir_field : Inst<"field", [Pure]> {
+  let arguments = (ins AnyType:$record, I64Attr:$position);
+  let results = (outs AnyType:$field);
+  let hasVerifier = 1;
+}
+
 def Kir_constant : Inst<"constant"> {let arguments=(ins AnyAttr:$value);let results=(outs AnyType:$result);}
 def Kir_maximum : Inst<"maximum"> {let arguments=(ins AnyType:$lhs,AnyType:$rhs);let results=(outs AnyType:$result);}
 

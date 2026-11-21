@@ -50,6 +50,10 @@ def allocate(shape, dtype, device):
     )
 
 
+def fill(value, scalar):
+    value.fill(scalar)
+
+
 def storage_bounds(a):
     import numpy as np
 

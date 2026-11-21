@@ -39,6 +39,13 @@ def allocate(shape, dtype, device):
     )
 
 
+def fill(value, scalar):
+    value.fill_(scalar)
+    if value.device.type != "cpu":
+        import torch
+        value.record_stream(getattr(torch, value.device.type).current_stream(value.device))
+
+
 def shadow_group(views, start, end):
     import torch
 

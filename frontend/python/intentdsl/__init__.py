@@ -38,6 +38,12 @@ class Definition:
 def kernel(fn):
     return Definition(fn.__name__, dedent(getsource(fn)).encode())
 
+def program(fn):
+    """Capture the author's ordered host operations without running their Python."""
+    from .composition import capture_program
+
+    return capture_program(fn)
+
 
 def jit(definition, *, backend, library=None, configuration=None):
     import os
@@ -60,4 +66,7 @@ def jit(definition, *, backend, library=None, configuration=None):
     compiler = Compiler(path, configuration)
     if backend not in compiler.describe()["exits"]:
         raise ValueError(f"unknown exit: {backend}")
+    from .composition import Program, ProgramKernel
+    if isinstance(definition, Program):
+        return ProgramKernel(compiler, definition, backend)
     return Kernel(compiler, definition, backend)
