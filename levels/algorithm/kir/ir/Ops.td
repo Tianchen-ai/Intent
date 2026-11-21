@@ -19,6 +19,12 @@ def Kir_read : Inst<"read"> {
   let arguments = (ins AnyMemRef:$view, Variadic<Index>:$indices);
   let results = (outs AnyType:$result);
 }
+def Kir_OwnerReadOp : Inst<"read_owner"> {
+  let arguments = (ins AnyMemRef:$source,Index:$owner); let results = (outs AnyType:$scalar);
+}
+def Kir_OwnerWriteOp : Inst<"write_owner"> {
+  let arguments = (ins AnyMemRef:$destination,Index:$owner,AnyType:$scalar);
+}
 def Kir_write : Inst<"write"> {
   let arguments = (ins AnyMemRef:$view, Index:$row, AnyTensor:$value);
   let results = (outs);
@@ -69,7 +75,7 @@ def Kir_welford : Inst<"welford", [Pure]> {
 }
 def Kir_field : Inst<"field", [Pure]> {
   let arguments = (ins AnyType:$record, I64Attr:$position);
-  let results = (outs AnyType:$field);
+  let results = (outs AnyType:$element);
   let hasVerifier = 1;
 }
 

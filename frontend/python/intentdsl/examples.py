@@ -68,6 +68,39 @@ def fused_add_rms_norm(x: I.In[I.bf16, ("R", "C")],
 
 
 @I.kernel
+def batch_norm_training(x: I.In[I.f16, ("B","C","S")], weight: I.In[I.f32, ("C",)],
+               bias: I.In[I.f32, ("C",)], moving_mean: I.InOut[I.f32, ("C",)],
+               moving_var: I.InOut[I.f32, ("C",)], y: I.Out[I.f16, ("B","C","S")],
+               mean: I.Out[I.f32, ("C",)], inv_std: I.Out[I.f32, ("C",)],
+               epsilon: I.f32, momentum: I.f32):
+    for ch in I.parallel(x.dim(1)):
+        samples = I.cast(x[:,ch,:], I.f32)
+        count, center, spread = I.welford(samples)
+        n = I.cast(count,I.f32)
+        variance = spread / n
+        inv = I.rsqrt(variance + epsilon)
+        previous_mean = moving_mean[ch]
+        previous_var = moving_var[ch]
+        gain = weight[ch]
+        offset = bias[ch]
+        one = I.cast(1.,I.f32)
+        moving_mean[ch] = (one-momentum)*previous_mean + momentum*center
+        moving_var[ch] = (one-momentum)*previous_var + momentum*variance*n/(n-one)
+        y[:,ch,:] = I.cast((samples-center)*inv*gain+offset,I.f16)
+        mean[ch] = center
+        inv_std[ch] = inv
+
+
+@I.program
+def batch_norm(x, weight, bias, moving_mean, moving_var, epsilon, momentum):
+    y = I.output(I.f16,(x.dim(0),x.dim(1),x.dim(2)))
+    mean = I.output(I.f32,(x.dim(1),))
+    inv = I.output(I.f32,(x.dim(1),))
+    batch_norm_training(x,weight,bias,moving_mean,moving_var,y,mean,inv,epsilon,momentum)
+    return y,mean,inv,moving_mean,moving_var
+
+
+@I.kernel
 def transpose(x: I.In[I.f16, ("M", "N")], out: I.Out[I.f16, ("N", "M")]):
     for row in I.parallel(x.dim(0)):
         out[:, row] = x[row, :]

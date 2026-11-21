@@ -29,6 +29,18 @@ class Capture:
     def access(self, node, store=False):
         view = next(a for a in self.args if a["name"] == node.value.id)
         indices = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
+        if self.owner_axis is not None:
+            owner = self.axes[self.owner_axis]
+            scalar = view["dims"] == [owner] and len(indices)==1 and ast.unparse(indices[0])==self.row
+            slab = view["dims"] == self.axes and len(indices)==len(self.axes) and all(
+                ast.unparse(index)==(self.row if i==self.owner_axis else ":")
+                for i,index in enumerate(indices))
+            if not (scalar or slab):
+                raise ValueError("access must project the owning axis or its complete member domain")
+            if view["direction"] not in (("Out","InOut") if store else ("In","InOut")):
+                raise ValueError("access violates view direction")
+            element=view["dtype"]
+            return [self.values[view["name"]],("%row","index")], element if scalar else f"tensor<?x{element}>"
         if len(self.axes) == 1:
             if (
                 view["dims"] != self.axes
@@ -72,7 +84,7 @@ class Capture:
             return self.field(state, ("count", "mean", "m2").index(n.attr))
         if isinstance(n, ast.Subscript):
             args, ty = self.access(n)
-            return self.emit("read", args, ty)
+            return self.emit("read" if ty.startswith("tensor") else "read_owner", args, ty)
         if (
             isinstance(n, ast.Compare)
             and len(n.ops) == 1
@@ -206,14 +218,16 @@ class Capture:
         if (
             not isinstance(dim, ast.Call)
             or dim.func.attr != "dim"
-            or ast.literal_eval(dim.args[0]) != 0
+            or not isinstance(dim.args[0],ast.Constant)
         ):
             raise ValueError("expected a logical leading dimension")
         owner = next(a for a in self.args if a["name"] == dim.func.value.id)
         self.owner = owner["name"]
         self.axes = owner["dims"]
-        if len(self.axes) not in (1, 2):
-            raise ValueError("expected matrix for parallel row domain")
+        axis = ast.literal_eval(dim.args[0])
+        if type(axis) is not int or not 0 <= axis < len(self.axes) <= 4:
+            raise ValueError("owner axis outside the declared view")
+        self.owner_axis = axis if len(self.axes)>2 or axis != 0 else None
         self.row = loop.target.id
         outputs = set()
         for stmt in loop.body:
@@ -231,7 +245,7 @@ class Capture:
                 for position, part in enumerate(target.elts):
                     self.values[part.id] = self.field(v, position)
             else:
-                transposed = isinstance(target.slice, ast.Tuple) and [
+                transposed = self.owner_axis is None and isinstance(target.slice, ast.Tuple) and [
                     ast.unparse(x) for x in target.slice.elts
                 ] == [":", self.row]
                 if transposed:
@@ -248,7 +262,7 @@ class Capture:
                     raise ValueError("output type or ownership differs from row")
                 outputs.add(target.value.id)
                 self.emit(
-                    "write",
+                    "write" if ty.startswith("tensor") else "write_owner",
                     [*args, v],
                     attrs="{axes=array<i64:1,0>}" if transposed else "",
                 )
@@ -259,7 +273,9 @@ class Capture:
         sig = ", ".join("%" + a["name"] + ": " + argument_type(a) for a in self.args)
         abi = json.dumps(json.dumps(self.args, separators=(",", ":")))
         return (
-            f"module {{ func.func @{self.fn.name}({sig}) attributes {{kir.abi = {abi}}} {{\n"
+            f"module {{ func.func @{self.fn.name}({sig}) attributes {{kir.abi = {abi}"
+            + (f", kir.owner_axis = {axis} : i64" if self.owner_axis is not None else "")
+            + "} {\n"
             + f'"kir.parallel"(%{owner["name"]}) ({{^bb0(%row: index):\n'
             + "\n".join(self.ops)
             + '\n"kir.end"() : () -> ()\n}) : ('

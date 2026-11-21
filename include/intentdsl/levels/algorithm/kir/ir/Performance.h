@@ -63,6 +63,11 @@ struct CallFacts {
     }
     if (shape.empty())
       return {0, 0};
+    if(auto a=fn->getAttrOfType<mlir::IntegerAttr>("kir.owner_axis")){
+      double n=1;
+      for(auto [i,v]:llvm::enumerate(shape))if(int64_t(i)!=a.getInt())n*=v;
+      return {shape[a.getInt()],n};
+    }
     double outer = 1;
     for (unsigned i = 0; i + 1 < shape.size(); ++i)
       outer *= shape[i];

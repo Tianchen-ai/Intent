@@ -53,8 +53,15 @@ inline mlir::LogicalResult verifyDomain(mlir::func::FuncOp fn) {
   if (!fn->hasAttr("kir.iteration")) {
     if (fn->hasAttr("kir.public_abi"))
       return fn.emitError("indexed signature without an iteration domain");
+    if (fn->hasAttr("kir.owner_axis")) {
+      auto axis=fn->getAttrOfType<IntegerAttr>("kir.owner_axis");
+      auto view=cast<MemRefType>(fn.getArgument(slot).getType());
+      if(!axis || axis.getInt()<0 || axis.getInt()>=view.getRank() || view.getRank()<2)
+        return fn.emitError("owner axis must select one axis of a ranked member domain");
+    }
     return success();
   }
+  if(fn->hasAttr("kir.owner_axis"))return fn.emitError("ambiguous indexed and reduction domain");
   auto abi = fn->getAttrOfType<StringAttr>("kir.abi");
   if (!abi)
     return fn.emitError("missing projected signature");
@@ -131,6 +138,12 @@ inline llvm::json::Object publishDomain(mlir::func::FuncOp fn) {
     outer.push_back(axis);
   llvm::json::Object domain{
       {"slot", slot}, {"outer", std::move(outer)}, {"inner", rank - 1}};
+  if (auto axis=fn->getAttrOfType<mlir::IntegerAttr>("kir.owner_axis")) {
+    llvm::json::Array members;
+    for(int i=0; i<rank; ++i) if(i!=axis.getInt()) members.push_back(i);
+    domain["outer"]=llvm::json::Array{axis.getInt()};
+    domain["inner"]=std::move(members);
+  }
   if (auto bounds =
           fn->getAttrOfType<mlir::DenseI64ArrayAttr>("kir.iteration")) {
     llvm::json::Array extents, views;

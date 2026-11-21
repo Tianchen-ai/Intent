@@ -159,6 +159,7 @@ class ProgramKernel:
             raise ValueError("program inputs span devices")
         allocator = self.views.adapter(inputs[0])
         calls = []
+        labels = []
         for step in self.definition.steps:
             if step[0] == "allocate":
                 _, name, dtype, extents = step
@@ -168,6 +169,7 @@ class ProgramKernel:
                 values[name] = allocator.allocate(shape, dtype, device)
             elif step[0] == "fill":
                 calls.append(self.sequence.Fill(values[step[1]], step[2](values)))
+                labels.append(step[1])
             else:
                 kernel = self.kernels[step[1]]
                 inputs, outputs = [], []
@@ -175,8 +177,9 @@ class ProgramKernel:
                     value = values[operand] if isinstance(operand, str) else operand(values)
                     (outputs if spec["direction"] == "Out" else inputs).append(value)
                 calls.append(kernel.prepare(*inputs, outputs=outputs))
+                labels.append(step[1].name)
         result = tuple(values[n] for n in self.definition.returns)
-        return self.sequence.PreparedSequence(calls, result if self.definition.multiple else result[0])
+        return self.sequence.PreparedSequence(calls, labels, result if self.definition.multiple else result[0])
 
     def run(self, *args, **kwargs):
         prepared = self.prepare(*args, **kwargs)

@@ -31,7 +31,7 @@ mlir::LogicalResult intentdsl::kir::welford::verify() {
 mlir::LogicalResult intentdsl::kir::field::verify() {
   auto state = mlir::dyn_cast<mlir::TupleType>(getRecord().getType());
   if (!state || getPosition() >= state.size() ||
-      getField().getType() != state.getType(getPosition()))
+      getElement().getType() != state.getType(getPosition()))
     return emitOpError("field does not match the declared tuple");
   return mlir::success();
 }

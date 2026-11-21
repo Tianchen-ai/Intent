@@ -57,8 +57,9 @@ class Fill:
 
 
 class PreparedSequence:
-    def __init__(self, steps, outputs):
+    def __init__(self, steps, labels, outputs):
         self.steps = tuple(steps)
+        self.labels = tuple(labels)
         self.outputs = outputs
 
     def compile(self):
@@ -77,8 +78,11 @@ class PreparedSequence:
                      (step.native_calls() if isinstance(step, Fill) else (step.native_call(),)))
 
     def tuning_report(self):
-        return {"steps": [{"op":"fill"} if isinstance(step, Fill) else
-                          {"op":"call", **step.tuning_report()} for step in self.steps]}
+        return {"steps": [
+            {"op": "fill", "slot": name, "value": step.value, "dtype": step.desc.dtype,
+             "shape": tuple(step.desc.shape), "strides": tuple(step.desc.strides)}
+            if isinstance(step, Fill) else {"op": "call", "kernel": name, **step.tuning_report()}
+            for name, step in zip(self.labels, self.steps, strict=True)]}
 
     def compilation_report(self):
         return {"steps": [{"op":"fill"} if isinstance(step, Fill) else

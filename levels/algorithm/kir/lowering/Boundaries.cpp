@@ -50,7 +50,9 @@ LogicalResult verifyRowComputation(func::FuncOp fn, Block &row, ValueRange captu
   bool indexed=fn->hasAttr("kir.iteration");
   if(failed(verifyDomain(fn)) || domainSlot(fn)!=domainIndex)return fn.emitError("logical domain slot differs from ownership");
   auto domainType=dyn_cast<MemRefType>(captures[domainIndex].getType());
-  if (!domainType || (!indexed && domainType.getRank() != 2 && domainType.getRank() != 1))
+  auto ownerAxis=fn->getAttrOfType<IntegerAttr>("kir.owner_axis");
+  if (!domainType || (ownerAxis && (indexed || ownerAxis.getInt()<0 || ownerAxis.getInt()>=domainType.getRank())) ||
+      (!ownerAxis && !indexed && domainType.getRank() != 2 && domainType.getRank() != 1))
     return fn.emitError("expected a matrix row domain");
   auto &axes =
       *(*args)[domainIndex].getAsObject()->getArray("dims");
@@ -60,8 +62,24 @@ LogicalResult verifyRowComputation(func::FuncOp fn, Block &row, ValueRange captu
     auto name = op.getName().stripDialect();
     if (op.getName().getDialectNamespace() != dialect)
       return op.emitError("unexpected row operation");
-    if (dialect == "kir" && (name == "welford" || name == "field"))
-      continue; // The registered tuple operations verify their own type contracts.
+    if (name == "welford" || name == "field") {
+      auto operand = op.getOperand(0).getType();
+      auto result = op.getResult(0).getType();
+      auto state = dyn_cast<TupleType>(name=="field" ? operand : result);
+      if (!state || state.size()!=3 || !state.getType(0).isInteger(32) ||
+          !state.getType(1).isF32() || !state.getType(2).isF32())
+        return op.emitError("requires (i32 count, f32 mean, f32 M2)");
+      if (name=="field") {
+        auto pos=op.getAttrOfType<IntegerAttr>("position");
+        if (!pos || pos.getInt()<0 || pos.getInt()>=3 || result!=state.getType(pos.getInt()))
+          return op.emitError("invalid logical tuple projection");
+      } else {
+        auto samples=dyn_cast<RankedTensorType>(operand);
+        if (!samples || samples.getRank()!=1 || !samples.getElementType().isF32())
+          return op.emitError("expected row of f32 samples");
+      }
+      continue;
+    }
     if (name == "constant") {
       auto v = op.getAttrOfType<TypedAttr>("value");
       if (!v || v.getType() != op.getResult(0).getType())
@@ -93,20 +111,21 @@ LogicalResult verifyRowComputation(func::FuncOp fn, Block &row, ValueRange captu
             "ordinal must enumerate the declared row in the owning domain");
       continue;
     }
-    if (name != "sqrt" && name != "and" && name != "xor" && name != "shl" &&
+    if (name != "read_owner" && name != "write_owner" && name != "sqrt" && name != "and" && name != "xor" && name != "shl" &&
         name != "shr" && name != "gt" && name != "select" &&
         name != "maximum" && name != "read" && name != "write" &&
         name != "end" && name != "sum" && name != "max_num" && name != "add" &&
         name != "sub" && name != "mul" && name != "div" && name != "cast" &&
         name != "exp" && name != "rsqrt")
       return op.emitError("operation outside logical row representation");
-    if (name == "read" || name == "write") {
+    if (name == "read" || name == "write" || name=="read_owner" || name=="write_owner") {
       auto view = cast<MemRefType>(op.getOperand(0).getType());
       auto arg = dyn_cast<BlockArgument>(op.getOperand(0));
       auto slot = llvm::find(captures, op.getOperand(0));
       if (!arg || slot == captures.end())
         return op.emitError("expected an external view");
-      bool write = name == "write";
+      bool write = name == "write" || name=="write_owner";
+      bool projected=name.ends_with("_owner");
       if (!indexed && !write && sawWrite &&
           llvm::any_of(*args, [](const llvm::json::Value &v) {
             return v.getAsObject()->getString("direction") == "InOut";
@@ -118,6 +137,20 @@ LogicalResult verifyRowComputation(func::FuncOp fn, Block &row, ValueRange captu
       if (indexed && !write && written.contains(index))
         return op.emitError("indexed read after a write to the same projection requires ordered control");
       auto *info = (*args)[index].getAsObject();
+      if (ownerAxis) {
+        const auto &dims=*info->getArray("dims");
+        if (info->getString("direction")!=(write?"Out":"In") && info->getString("direction")!="InOut")
+          return op.emitError("invalid direction in owner domain");
+        if (op.getNumOperands()!=unsigned(2+write) || op.getOperand(1)!=row.getArgument(0) ||
+            (projected ? (dims.size()!=1 || dims[0]!=axes[ownerAxis.getInt()]) : dims!=axes))
+          return op.emitError("access does not share the declared owner domain");
+        Type value=write?op.getOperand(2).getType():op.getResult(0).getType();
+        if(value!=(projected?view.getElementType():Type(RankedTensorType::get({ShapedType::kDynamic},view.getElementType()))))
+          return op.emitError("owner access value has wrong shape or type");
+        if(write)written.insert(index);
+        continue;
+      }
+      if(projected)return op.emitError("owner projection requires an owning axis");
       if ((info->getString("direction") != (write ? "Out" : "In") &&
            info->getString("direction") != "InOut") ||
           view.getRank() < 1 || view.getRank() > (indexed ? 4 : 2) ||
@@ -208,7 +241,7 @@ LogicalResult verifyLogicalRows(ModuleOp module,StringRef dialect,bool canonical
     return fn.emitError("expected a parallel row domain and return");
   auto &loop = body.front();
   auto domain = dyn_cast<MemRefType>(loop.getOperand(0).getType());
-  if (!domain || (!fn->hasAttr("kir.iteration") && domain.getRank() != 2 && domain.getRank() != 1) ||
+  if (!domain || (!fn->hasAttr("kir.iteration") && !fn->hasAttr("kir.owner_axis") && domain.getRank() != 2 && domain.getRank() != 1) ||
       !llvm::hasSingleElement(loop.getRegion(0)))
     return loop.emitError("expected a rank-two domain");
   auto &row = loop.getRegion(0).front();

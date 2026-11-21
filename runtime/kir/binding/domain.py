@@ -38,7 +38,9 @@ def extents(descriptor, facts):
 
 def evaluate(descriptor, facts):
     dims = extents(descriptor, facts)
-    return prod(dims[axis] for axis in descriptor["outer"]), dims[descriptor["inner"]]
+    inner = descriptor["inner"]
+    columns = prod(dims[i] for i in inner) if isinstance(inner,list) else dims[inner]
+    return prod(dims[axis] for axis in descriptor["outer"]), columns
 
 
 def bind_views(descriptor, facts, values):
