@@ -1,3 +1,4 @@
+from runtime.cpu.binding.profile import calibration
 import os
 from functools import lru_cache
 from pathlib import Path
@@ -51,7 +52,8 @@ class Target:
         scope, self.workers = key
         self.info, core, bits = discover(scope)
         return dict(
-            vector_bits=bits, workers=self.workers, core=core, arch=self.info.arch
+            vector_bits=bits, workers=self.workers, core=core, arch=self.info.arch,
+            calibration=calibration(scope,self.workers,bits)
         )
 
     def materialize(self, data):

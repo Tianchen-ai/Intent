@@ -7,7 +7,7 @@ namespace intentdsl::dsa {
 namespace {
 // Each slot has one producer and one consuming interval per iteration.
 // A lookahead copy targets the other slot only after the current slot is ready.
-bool legalSchedule(Block &schedule, int64_t depth, StringRef source) {
+bool legalSchedule(Block &schedule, int64_t depth, StringRef source,bool persistent) {
   auto it = schedule.begin();
   auto take = [](Block &block, Block::iterator &pos,
                  StringRef code) -> Operation * {
@@ -24,6 +24,7 @@ bool legalSchedule(Block &schedule, int64_t depth, StringRef source) {
   auto accepts = [](Operation *op, ValueRange values) {
     return op && llvm::equal(op->getOperands(), values);
   };
+  if(persistent && !accepts(take(schedule,it,"dsa.load_shared"),{r->getResult(0),limit}))return false;
   if (depth == 2 && !accepts(take(schedule, it, "dsa.issue_if_in_bounds"),
                              {r->getResult(0), limit, initial}))
     return false;
@@ -122,7 +123,7 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
       d.getAs<ArrayAttr>("rows").empty() || !d.getAs<IntegerAttr>("depth"))
     return fn.emitError("missing supply rows or depth");
   auto verifyLayout = [&]() -> LogicalResult {
-    auto expected = plan(fn, *caps, d.getAs<IntegerAttr>("depth").getInt());
+    auto expected = plan(fn, *caps, d.getAs<IntegerAttr>("depth").getInt(), d.getAs<IntegerAttr>("participants")?d.getAs<IntegerAttr>("participants").getInt():0,d.getAs<BoolAttr>("persistent") && d.getAs<BoolAttr>("persistent").getValue());
     if (!expected) {
       return fn.emitError() << llvm::toString(expected.takeError());
     }
@@ -189,6 +190,7 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
       return fn.emitError("stream group loop must consume start, bound and "
                           "stride of the participant range");
   }
+  bool persistent=d.getAs<BoolAttr>("persistent") && d.getAs<BoolAttr>("persistent").getValue();
   unsigned count = 0;
   auto walk = fn.walk([&](Operation *o) {
     if (o->getName().getStringRef() != "dsa.phase")
@@ -210,7 +212,7 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
                      : "columns"))
       return WalkResult::interrupt();
     if (!legalSchedule(o->getRegion(2).front(), depth,
-                       resident ? "participant_stride" : "tile_extent"))
+                       resident ? "participant_stride" : "tile_extent",persistent))
       return WalkResult::interrupt();
     for (auto *window : {&fetch.front(), &body.front()})
       if (window->getName().getStringRef() != "dsa.window" ||
@@ -270,6 +272,7 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
           arg.getType() != in.getType() || !in.hasOneUse() ||
           in.use_begin()->getOwner()->getName().getStringRef() != "dsa.await")
         return WalkResult::interrupt();
+      if (def->hasAttr("dsa.shared")!=(persistent && cast<MemRefType>(def->getOperand(0).getType()).getRank()==1))return WalkResult::interrupt();
       if (!access(def, 1, fetch.front(), fn, *abi))
         return WalkResult::interrupt();
     }

@@ -35,7 +35,7 @@ class Target:
         return device
 
     def options(self, device):
-        return facts(device.index)
+        return dict(facts(device.index),calibration="mlu370")
 
     def materialize(self, data):
         return Artifact(data)

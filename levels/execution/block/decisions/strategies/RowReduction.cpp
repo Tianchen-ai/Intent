@@ -10,8 +10,8 @@ void registerRowReduction(Unit &unit) {
   Strategy strategy;
   strategy.name = mode.str();
   strategy.family = unit.qualify("structure");
-  strategy.propose = [mode](Operation *op, const TargetProfile &target,
-                        AnalysisManager &) -> llvm::Expected<Attribute> {
+  auto propose = [](Operation *op, const TargetProfile &target,
+                        StringRef mode) -> llvm::Expected<Attribute> {
     bool reduces = false;
     op->walk([&](Operation *v) {
       auto n = v->getName().getStringRef();
@@ -54,6 +54,18 @@ void registerRowReduction(Unit &unit) {
                         b.getStringAttr(resident ? "resident" : "stream")),
          b.getNamedAttr("rows", b.getArrayAttr(rows))}));
   };
+  strategy.enumerate=[propose,mode](Operation *op,const TargetProfile &p,AnalysisManager &)->llvm::Expected<std::vector<StructuralCandidate>>{
+    std::vector<StructuralCandidate> candidates;
+    for(StringRef m:{"resident-row","stream-row"}){
+      if(mode!="row-reduction" && mode!=m)continue;
+      auto v=propose(op,p,m);if(!v)return v.takeError();if(!*v)continue;
+      auto d=cast<DictionaryAttr>(*v);auto topology=d.getAs<StringAttr>("topology").str();
+      std::map<int64_t,SmallVector<Attribute>> groups;
+      for(auto r:d.getAs<ArrayAttr>("rows"))groups[cast<DictionaryAttr>(r).getAs<IntegerAttr>("rows").getInt()].push_back(r);
+      for(auto &[n,rs]:groups){NamedAttrList attrs(d);attrs.set("rows",ArrayAttr::get(op->getContext(),rs));
+        candidates.push_back({topology+"-"+std::to_string(n),topology,attrs.getDictionary(op->getContext()),{"legal-width-group"}});}
+    }
+    return candidates;};
   unit.strategies.push_back({std::move(strategy), COMPILERINFRA_SOURCE});
   }
 }

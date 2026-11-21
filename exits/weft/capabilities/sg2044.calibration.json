@@ -1,0 +1,89 @@
+{
+  "version": "1",
+  "facts": {
+    "read_1": {
+      "value": 3.45114001,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, 64 MiB working set, FP32 strides 1 and 16, unmanaged clocks",
+        "benchmark": "intent_bench.calibration/read_1",
+        "error": "range [3.43677, 3.45589], n=8"
+      }
+    },
+    "write_1": {
+      "value": 2.94306741,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, 64 MiB working set, FP32 strides 1 and 16, unmanaged clocks",
+        "benchmark": "intent_bench.calibration/write_1",
+        "error": "range [2.91992, 2.94632], n=8"
+      }
+    },
+    "read_16": {
+      "value": 0.254724513,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, 64 MiB working set, FP32 strides 1 and 16, unmanaged clocks",
+        "benchmark": "intent_bench.calibration/read_16",
+        "error": "range [0.253915, 0.258632], n=8"
+      }
+    },
+    "write_16": {
+      "value": 0.149397533,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, 64 MiB working set, FP32 strides 1 and 16, unmanaged clocks",
+        "benchmark": "intent_bench.calibration/write_16",
+        "error": "range [0.148704, 0.149756], n=8"
+      }
+    },
+    "launch": {
+      "value": 5780,
+      "unit": "ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, 64 MiB working set, FP32 strides 1 and 16, unmanaged clocks",
+        "benchmark": "intent_bench.calibration/launch",
+        "error": "range [4640, 7880], n=8"
+      }
+    },
+    "sync": {
+      "value": 385.38,
+      "unit": "ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, 64 MiB working set, FP32 strides 1 and 16, unmanaged clocks",
+        "benchmark": "intent_bench.calibration/sync",
+        "error": "range [384.78, 390.54], n=8"
+      }
+    },
+    "vector": {
+      "value": 8.85565527,
+      "unit": "FLOP/ns",
+      "source": {
+        "device": "0x5b7/0x80000000090c0d00",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "gcc (GCC) 15.2.0",
+        "conditions": "affinity=[48], threads=1, 64 MiB working set, FP32 strides 1 and 16, unmanaged clocks",
+        "benchmark": "intent_bench.calibration/vector",
+        "error": "range [8.72541, 8.85696], n=8"
+      }
+    }
+  }
+}

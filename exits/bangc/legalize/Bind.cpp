@@ -48,7 +48,7 @@ StringRef primitive(Operation *op, int64_t depth) {
     return "quotient_for_narrow";
   if (n == "block.cast" && narrowedQuotient(op->getOperand(0).getDefiningOp()))
     return "certified_half_quotient";
-  if (n == "dsa.member_axis" || n == "dsa.window" || n == "dsa.task_groups" || n == "dsa.range" ||
+  if (n == "dsa.load_shared" || n == "dsa.member_axis" || n == "dsa.window" || n == "dsa.task_groups" || n == "dsa.range" ||
       n == "dsa.slot_zero" || n == "dsa.next" || n == "dsa.other_slot" ||
       n == "dsa.issue_if_in_bounds" || n == "dsa.wait_slot" ||
       n == "dsa.compute_members" || n == "dsa.iterate" || n == "dsa.advance" ||
@@ -279,7 +279,9 @@ LogicalResult verify(ModuleOp m, const TargetProfile &p, unsigned stage) {
   return success();
 }
 } // namespace
+void dmaCost(Unit &);
 void bind(Unit &u) {
+  dmaCost(u);
   unsigned stage = 0;
   for (StringRef name : {"bound", "legal", "callable"}) {
     u.boundaries.push_back({{name.str(),

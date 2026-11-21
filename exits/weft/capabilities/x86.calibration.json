@@ -1,0 +1,89 @@
+{
+  "version": "1",
+  "facts": {
+    "read_1": {
+      "value": 32.55839005,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, 64 MiB working set, FP32 strides 1 and 16, unmanaged clocks",
+        "benchmark": "intent_bench.calibration/read_1",
+        "error": "range [31.6011, 32.7175], n=8"
+      }
+    },
+    "write_1": {
+      "value": 96.264375,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, 64 MiB working set, FP32 strides 1 and 16, unmanaged clocks",
+        "benchmark": "intent_bench.calibration/write_1",
+        "error": "range [71.5459, 99.0714], n=8"
+      }
+    },
+    "read_16": {
+      "value": 10.460513500000001,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, 64 MiB working set, FP32 strides 1 and 16, unmanaged clocks",
+        "benchmark": "intent_bench.calibration/read_16",
+        "error": "range [9.43117, 10.5165], n=8"
+      }
+    },
+    "write_16": {
+      "value": 8.544745044999999,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, 64 MiB working set, FP32 strides 1 and 16, unmanaged clocks",
+        "benchmark": "intent_bench.calibration/write_16",
+        "error": "range [7.49442, 8.664], n=8"
+      }
+    },
+    "launch": {
+      "value": 3158,
+      "unit": "ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, 64 MiB working set, FP32 strides 1 and 16, unmanaged clocks",
+        "benchmark": "intent_bench.calibration/launch",
+        "error": "range [3033, 3556], n=8"
+      }
+    },
+    "sync": {
+      "value": 1138.9270000000001,
+      "unit": "ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, 64 MiB working set, FP32 strides 1 and 16, unmanaged clocks",
+        "benchmark": "intent_bench.calibration/sync",
+        "error": "range [1127.72, 1185.34], n=8"
+      }
+    },
+    "vector": {
+      "value": 301.4755005,
+      "unit": "FLOP/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[0, 1, 2, 3, 4, 5, 6, 7], threads=8, 64 MiB working set, FP32 strides 1 and 16, unmanaged clocks",
+        "benchmark": "intent_bench.calibration/vector",
+        "error": "range [267.502, 309.189], n=8"
+      }
+    }
+  }
+}

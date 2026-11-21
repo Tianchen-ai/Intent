@@ -127,7 +127,7 @@ class Prepared:
         from runtime.kir.binding.selection import selection
 
         return selection(
-            self.artifact.data, self.row["id"] if self.row else None, self.timings
+            self.artifact, self.row["id"] if self.row else None, self.timings
         )
 
     def result(self):

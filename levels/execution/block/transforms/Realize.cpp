@@ -14,6 +14,20 @@ public:
         domain(anchor->getOperand(0)),
         resident(choice.getAs<StringAttr>("topology") == "resident") {
     auto fn = anchor->getParentOfType<func::FuncOp>();
+    if((choice.get("walk") && choice.getAs<StringAttr>("walk")=="destination")){
+      auto json=llvm::json::parse(fn->getAttrOfType<StringAttr>("kir.abi").getValue());
+      fn->setAttr("kir.public_abi",fn->getAttr("kir.abi"));
+      fn->setAttr("kir.iteration",rw.getDenseI64ArrayAttr({0,1,1,0,0,0,1,0}));
+      auto i=rw.getAffineDimExpr(0),j=rw.getAffineDimExpr(1);
+      for(unsigned k=0;k<2;++k){
+        (*(*json->getAsArray())[k].getAsObject())["dims"]=llvm::json::Array{"outer","inner"};
+        fn.setArgAttr(k,"kir.source",rw.getI64IntegerAttr(k));
+        fn.setArgAttr(k,"kir.indexing",AffineMapAttr::get(AffineMap::get(2,0,k?ArrayRef<AffineExpr>({i,j}):ArrayRef<AffineExpr>({j,i}),rw.getContext())));
+      }
+      std::string abi;llvm::raw_string_ostream(abi)<<*json;
+      fn->setAttr("kir.abi",rw.getStringAttr(abi));
+      anchor->walk([](Operation *op){if(op->getName().stripDialect()=="write")op->removeAttr("axes");});
+    }
     fn->setAttr("block.guard",choice.get("guard"));
     fn->setAttr("block.grid", rw.getStrArrayAttr({"ceildiv", "M", "rows"}));
     fn->setAttr("block.configs", choice.get("rows"));

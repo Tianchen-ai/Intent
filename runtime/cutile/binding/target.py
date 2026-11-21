@@ -25,6 +25,7 @@ class Target:
         device, bits, tensor_map = key
         arch = torch.cuda.get_device_capability(device)
         return dict(
+            calibration={"NVIDIA H100 80GB HBM3":"sm90","NVIDIA GeForce RTX 5090 D":"sm120"}.get(torch.cuda.get_device_name(device),""), sm_count=torch.cuda.get_device_properties(device).multi_processor_count,
             sm=10 * arch[0] + arch[1],
             index_bits=bits,
             allow_tma=tensor_map,

@@ -1,0 +1,89 @@
+{
+  "version": "1",
+  "facts": {
+    "read_1": {
+      "value": 3.1831097799999997,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x710/0x8000000058000002",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
+        "conditions": "affinity=[0], threads=1, 64 MiB working set, FP32 strides 1 and 16, unmanaged clocks",
+        "benchmark": "intent_bench.calibration/read_1",
+        "error": "range [3.13651, 3.18486], n=8"
+      }
+    },
+    "write_1": {
+      "value": 2.941307165,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x710/0x8000000058000002",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
+        "conditions": "affinity=[0], threads=1, 64 MiB working set, FP32 strides 1 and 16, unmanaged clocks",
+        "benchmark": "intent_bench.calibration/write_1",
+        "error": "range [2.90535, 2.94792], n=8"
+      }
+    },
+    "read_16": {
+      "value": 0.38764363150000003,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x710/0x8000000058000002",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
+        "conditions": "affinity=[0], threads=1, 64 MiB working set, FP32 strides 1 and 16, unmanaged clocks",
+        "benchmark": "intent_bench.calibration/read_16",
+        "error": "range [0.385534, 0.388592], n=8"
+      }
+    },
+    "write_16": {
+      "value": 0.47550780000000004,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x710/0x8000000058000002",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
+        "conditions": "affinity=[0], threads=1, 64 MiB working set, FP32 strides 1 and 16, unmanaged clocks",
+        "benchmark": "intent_bench.calibration/write_16",
+        "error": "range [0.449801, 0.481484], n=8"
+      }
+    },
+    "launch": {
+      "value": 4400,
+      "unit": "ns",
+      "source": {
+        "device": "0x710/0x8000000058000002",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
+        "conditions": "affinity=[0], threads=1, 64 MiB working set, FP32 strides 1 and 16, unmanaged clocks",
+        "benchmark": "intent_bench.calibration/launch",
+        "error": "range [3200, 5600], n=8"
+      }
+    },
+    "sync": {
+      "value": 375.2,
+      "unit": "ns",
+      "source": {
+        "device": "0x710/0x8000000058000002",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
+        "conditions": "affinity=[0], threads=1, 64 MiB working set, FP32 strides 1 and 16, unmanaged clocks",
+        "benchmark": "intent_bench.calibration/sync",
+        "error": "range [374.4, 401.6], n=8"
+      }
+    },
+    "vector": {
+      "value": 5.066196475,
+      "unit": "FLOP/ns",
+      "source": {
+        "device": "0x710/0x8000000058000002",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
+        "conditions": "affinity=[0], threads=1, 64 MiB working set, FP32 strides 1 and 16, unmanaged clocks",
+        "benchmark": "intent_bench.calibration/vector",
+        "error": "range [5.04973, 5.10753], n=8"
+      }
+    }
+  }
+}

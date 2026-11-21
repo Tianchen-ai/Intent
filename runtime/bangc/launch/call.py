@@ -129,11 +129,19 @@ class Call:
                 if isinstance(v, torch.Tensor):
                     v.record_stream(stream)
 
+    def bind_row(self, row_id):
+        from copy import copy
+        self.compile()
+        row=copy(self)
+        row.selected=next((r for r in row.artifact.data["rows"] if r["id"]==row_id),None)
+        if row.selected is None:raise ValueError("unknown BANG C row")
+        return row
+
     def tuning_report(self):
         from runtime.kir.binding.selection import selection
 
         return selection(
-            self.artifact.data,
+            self.artifact,
             self.selected["id"] if self.selected else None,
             self.timings,
         )

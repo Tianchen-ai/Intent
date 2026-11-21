@@ -10,7 +10,7 @@ foreach(strategy IN LISTS strategies)
 endforeach()
 file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/Strategies.inc"
      CONTENT "@declarations@\nstatic void registerStrategies(compilerinfra::Unit &unit) {\n@calls@}\n" @ONLY)
-compilerinfra_unit(SOURCES ir/Dialect.cpp analysis/Verify.cpp lowering/Boundaries.cpp ${strategies} transforms/Realize.cpp transforms/Normalize.cpp
+compilerinfra_unit(SOURCES cost/Tiles.cpp ir/Dialect.cpp analysis/Verify.cpp lowering/Boundaries.cpp ${strategies} transforms/Realize.cpp transforms/Normalize.cpp
   LINK_LIBRARIES ${parent}
   TABLEGEN
     "ir/Ops.td Dialect.h.inc -gen-dialect-decls -dialect=block"

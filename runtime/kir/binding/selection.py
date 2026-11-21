@@ -1,10 +1,9 @@
 """Describe the actual published program and its selected parameter row on request."""
 import hashlib
-import json
 
 
-def selection(data, winner, trials_us):
-    encoded = json.dumps(data, sort_keys=True, separators=(",", ":")).encode()
+def selection(artifact, winner, trials_us):
+    encoded = artifact.emitted
     return {
         "winner_row_id": winner,
         "artifact_sha256": hashlib.sha256(encoded).hexdigest(),

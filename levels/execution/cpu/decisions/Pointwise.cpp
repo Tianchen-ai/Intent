@@ -1,12 +1,13 @@
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
+#include "intentdsl/levels/execution/cpu/ir/Traversal.h"
 namespace CI_UNIT_NAMESPACE {
 using namespace mlir;
 using namespace compilerinfra;
-void registerPointwise(Unit &u) {
+void registerPointwise(Unit &u,StringRef family) {
   Strategy strategy;
-  strategy.name = "pointwise";
-  strategy.family = u.qualify("partition");
-  strategy.propose = [](Operation *op, const TargetProfile &p,
+  strategy.name = family=="permutation"?"rectangular-copy":"pointwise";
+  strategy.family = u.qualify(family);
+  auto propose = [](Operation *op, const TargetProfile &p,
                         AnalysisManager &) -> llvm::Expected<Attribute> {
     bool hasWrite = false, hasSummary = false;
     op->walk([&](Operation *o) {
@@ -35,6 +36,16 @@ void registerPointwise(Unit &u) {
         m->wideningPanel)
       return Attribute(m->wideningConfigurations(op->getContext()));
     return Attribute(m->configurations(op->getContext(), m->structuredRows));
+  };
+  strategy.enumerate=[propose](Operation *op,const TargetProfile &p,AnalysisManager &a)->llvm::Expected<std::vector<StructuralCandidate>>{
+    auto rows=propose(op,p,a);if(!rows)return rows.takeError();
+    std::vector<StructuralCandidate> cs;if(!*rows)return cs;
+    Builder b(op->getContext());
+    for(auto walk:{"source","destination","tile"}){
+      if(StringRef(walk)!="source" && !intentdsl::cpu::rectangularCopy(op))continue;
+      cs.push_back({walk,walk,intentdsl::cpu::partition(b,walk,cast<ArrayAttr>(*rows)),{StringRef(walk)=="source"?"row-independent":"bijective-rectangular-copy"}});
+    }
+    return cs;
   };
   u.strategies.push_back({std::move(strategy), COMPILERINFRA_SOURCE});
 }

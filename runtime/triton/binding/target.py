@@ -16,6 +16,7 @@ class Target:
             self.devices[device] = torch.cuda.get_device_properties(device)
         p = self.devices[device]
         return dict(
+            calibration={"NVIDIA H100 80GB HBM3":"sm90","NVIDIA GeForce RTX 5090 D":"sm120"}.get(torch.cuda.get_device_name(device),""), sm_count=p.multi_processor_count,
             sm=p.major * 10 + p.minor,
             warp_size=p.warp_size,
             max_threads=p.max_threads_per_block,

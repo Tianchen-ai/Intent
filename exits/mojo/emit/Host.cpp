@@ -1,3 +1,4 @@
+#include "intentdsl/levels/execution/cpu/ir/Traversal.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "llvm/ADT/StringExtras.h"
 using namespace mlir;
@@ -35,7 +36,20 @@ std::string hostSource(func::FuncOp entry) {
     << "(" << params
     << ",int64_t rows,int64_t cols,int64_t grain,int64_t columns,int64_t "
        "workers){\n"
-    << "if (rows == 0 || cols == 0) return;\nconst int64_t "
+    << "if (rows == 0 || cols == 0) return;\n";
+  auto &task=entry.front().front();
+  auto walk=task.getAttrOfType<StringAttr>("cpu.walk");
+  if(walk=="destination"){
+    c<<"int64_t t=rows;rows=cols;cols=t;\n";
+    for(int i=0;i<2;++i)c<<"t=a"<<i<<"s0;a"<<i<<"s0=a"<<i<<"s1;a"<<i<<"s1=t;\n";
+  }
+  if(walk=="tile"){
+    c<<intentdsl::cpu::tileLoop(task.getAttrOfType<IntegerAttr>("cpu.tile").getInt());
+    auto bytes=cast<MemRefType>(entry.getArgument(0).getType()).getElementTypeBitWidth()/8;
+    c<<"intent_row_interval((char*)a0+(r*a0s0+c*a0s1)*"<<bytes<<",a0s0,a0s1,(char*)a1+(c*a1s0+r*a1s1)*"<<bytes<<",a1s0,a1s1,0,nr,nc,columns);}}\n";
+    return out;
+  }
+  c << "const int64_t "
        "groups=(rows-1)/grain+1;\n"
     << "const int64_t threads=groups<workers?groups:workers;\n"
     << "#pragma omp parallel for num_threads(threads) if(threads>1) "

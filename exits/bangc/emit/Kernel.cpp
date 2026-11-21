@@ -79,6 +79,7 @@ class Source {
     for (auto &op : fetch.without_terminator()) {
       if (op.getName().getStringRef() == "dsa.window" || op.getName().getStringRef()=="dsa.member_axis")
         continue;
+      if(op.hasAttr("dsa.shared"))continue;
       auto src = op.getOperand(0);
       auto n = name(src), dst = name(op.getResult(0)),
            type = ctype(src.getType());
@@ -112,7 +113,7 @@ class Source {
       auto n = fresh();
       auto t = ctype(copy.getResult(0).getType());
       names[copy.getResult(0)] = n;
-      names[body.getArgument(index++)] = n + "+(slot*R+j)*P";
+      names[body.getArgument(index++)] = copy.hasAttr("dsa.shared") ? n : n + "+(slot*R+j)*P";
       line("auto *" + n + "=(" + t + "*)" + address(copy) + ";");
     }
     if (!carry.empty())
@@ -133,6 +134,13 @@ class Source {
                  tasks ? "taskId" : "0", tasks ? "grid" : "((N+W-1)/W)",
                  tasks ? "taskDim" : "1"}))
           names[op.getResult(i)] = expr;
+      } else if(n=="load_shared"){
+        line("if("+arg(0)+"<"+arg(1)+"){");
+        for(auto &copy:fetch)if(copy.hasAttr("dsa.shared")){
+          auto src=name(copy.getOperand(0)),dst=name(copy.getResult(0)),type=ctype(copy.getResult(0).getType());
+          line("if("+src+"s0==1)__memcpy("+dst+","+src+",N*sizeof("+type+"),GDRAM2NRAM);else for(long long k=0;k<N;++k)"+dst+"[k]="+src+"[k*"+src+"s0];");
+        }
+        line("}");
       } else if (n == "slot_zero")
         names[op.getResult(0)] = "0";
       else if (n == "iterate") {
@@ -418,7 +426,7 @@ llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
           {"width", row.getAs<IntegerAttr>("width").getInt()},
           {"bytes", allocation.getAs<IntegerAttr>("bytes").getInt()},
           {"pitch", allocation.getAs<IntegerAttr>("pitch").getInt()},
-          {"tasks", tasks}});
+          {"tasks", layout.getAs<IntegerAttr>("participants").getInt()}});
     }
   }
   auto abi =

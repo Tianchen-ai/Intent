@@ -25,6 +25,13 @@
             "levels/execution/cpu::private-values"
           ],
           "realizer": "levels/execution/cpu::allocate"
+        },
+        "levels/execution/cpu::permutation": {
+          "strategies": [
+            "levels/execution/cpu::rectangular-copy"
+          ],
+          "realizer": "levels/execution/cpu::permute-rows",
+          "candidate": "destination"
         }
       }
     },
@@ -32,7 +39,8 @@
       "decisions": {
         "levels/storage/dsa::supply": {
           "strategies": [
-            "levels/storage/dsa::double-buffer"
+            "levels/storage/dsa::double-buffer",
+            "levels/storage/dsa::direct"
           ],
           "realizer": "levels/storage/dsa::stage-transfers"
         }

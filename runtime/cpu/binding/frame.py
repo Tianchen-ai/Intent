@@ -134,10 +134,21 @@ class HostVariants:
                 self.selected = self.entries[self.winner]
         self.selected.launch()
 
+    def bind_row(self, row_id):
+        """Bind a declared native row to the same complete author invocation."""
+        from copy import copy
+        self.compile()
+        if not 0 <= row_id < len(self.entries):
+            raise ValueError("unknown CPU row")
+        row=copy(self)
+        row.selected=row.entries[row_id]
+        row.winner=row_id
+        return row
+
     def tuning_report(self):
         from runtime.kir.binding.selection import selection
 
-        return selection(self.artifact.data, self.winner, self.timings)
+        return selection(self.artifact, self.winner, self.timings)
 
     def compilation_report(self):
         self.compile()

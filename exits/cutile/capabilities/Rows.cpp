@@ -1,3 +1,4 @@
+#include "intentdsl/levels/algorithm/kir/ir/Performance.h"
 #include "Index.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
@@ -18,6 +19,7 @@ capabilities(const llvm::json::Object &options) {
   auto indices = std::make_shared<intentdsl::cutile::ArrayIndices>();
   indices->bits = *bits;
   indices->permitTma = options.getBoolean("allow_tma").value_or(false);
+  if(auto err=intentdsl::bindPerformance(profile,options,"",options.getString("calibration").value_or("").str(),options.getInteger("sm_count").value_or(1)))return std::move(err);
   if (auto e =
           profile.services.provide<intentdsl::cutile::ArrayIndices>(indices))
     return e;

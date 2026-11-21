@@ -1,3 +1,4 @@
+from runtime.cpu.binding.profile import calibration
 import os
 from functools import lru_cache
 import shutil
@@ -66,7 +67,7 @@ class Target:
     def options(self, key):
         scope, self.workers = key
         self.info, bits = discover(scope)
-        return dict(vector_bits=bits, workers=self.workers)
+        return dict(vector_bits=bits, workers=self.workers, calibration=calibration(scope,self.workers,bits))
 
     def materialize(self, data):
         return Artifact(data, self.info, self.workers)

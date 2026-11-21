@@ -1,3 +1,4 @@
+#include "intentdsl/levels/algorithm/kir/ir/Performance.h"
 #include "intentdsl/levels/storage/dsa/ir/Supply.h"
 #include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
 
@@ -25,6 +26,7 @@ capabilities(const llvm::json::Object &opts) {
   auto resource =
       std::make_shared<intentdsl::dsa::LocalSupply>(intentdsl::dsa::LocalSupply{
           *nram, 128 * 1024, 128, (*clusters) * (*cores), sizeof(float), true});
+  if(auto err=intentdsl::bindPerformance(profile,opts,"exits/bangc::dma",opts.getString("calibration").value_or("").str(),*clusters * *cores))return std::move(err);
   if (auto e = profile.services.provide<intentdsl::RowCapacity>(caps))
     return e;
   if (auto e = profile.services.provide<intentdsl::dsa::LocalSupply>(resource))

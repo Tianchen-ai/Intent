@@ -1,5 +1,6 @@
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
 #include "llvm/ADT/DenseSet.h"
+#include "intentdsl/levels/execution/cpu/ir/Traversal.h"
 using namespace mlir;
 using namespace compilerinfra;
 namespace intentdsl::cpu {
@@ -47,45 +48,54 @@ bool RowMachine::accepts(ArrayAttr values) const {
 namespace CI_UNIT_NAMESPACE {
 void registerRowReduction(Unit &);
 void registerPanelReduction(Unit &);
-void registerPointwise(Unit &);
+void registerPointwise(Unit &,StringRef);
 llvm::Expected<Attribute> proposeRows(Operation *op,const TargetProfile &profile,bool structured){
   auto *machine=profile.services.get<intentdsl::cpu::RowMachine>();
   if(!machine)return llvm::createStringError("missing CPU capacity");
   bool reduces=false;
   op->walk([&](Operation *v){auto n=v->getName().getStringRef();reduces |= n=="cpu.sum" || n=="cpu.max_num";});
   if(!reduces)return Attribute{};
-  return Attribute(machine->configurations(op->getContext(),structured && machine->structuredRows));
+  Builder b(op->getContext());
+  return Attribute(intentdsl::cpu::partition(b,"source",machine->configurations(op->getContext(),structured && machine->structuredRows)));
 }
-void rowTasks(Unit &u) {
+void registerPartition(Unit &u,bool permuted) {
   DecisionFamily partition;
-  partition.name = "partition";
-  partition.applies = [](Operation *op) {
-    return op->getName().getStringRef() == "cpu.parallel";
+  partition.name = permuted?"permutation":"partition";
+  std::string carrier="cpu."+partition.name;
+  partition.applies = [permuted](Operation *op) {
+    return op->getName().getStringRef() == "cpu.parallel" && permuted==intentdsl::cpu::rectangularCopy(op);
   };
-  partition.read = [](Operation *op) { return op->getAttr("cpu.partition"); };
-  partition.write = [](Operation *op, Attribute a) {
-    op->setAttr("cpu.partition", a);
+  partition.read = [carrier](Operation *op) { return op->getAttr(carrier); };
+  partition.write = [carrier](Operation *op, Attribute a) {
+    op->setAttr(carrier, a);
     return llvm::Error::success();
   };
-  partition.verify = [](Operation *, Attribute a,
+  partition.verify = [](Operation *op, Attribute a,
                         const TargetProfile &p) -> llvm::Error {
     auto *machine = p.services.get<intentdsl::cpu::RowMachine>();
-    if (!machine || !machine->accepts(dyn_cast<ArrayAttr>(a)))
+    auto d=dyn_cast<DictionaryAttr>(a);auto walk=d?d.getAs<StringAttr>("walk"):StringAttr();
+    if (!walk || (walk!="source" && ( (walk!="destination" && walk!="tile") || !intentdsl::cpu::rectangularCopy(op))) || !d.getAs<IntegerAttr>("tile") || d.getAs<IntegerAttr>("tile").getInt()!=(walk=="tile"?32:1) || !machine || !machine->accepts(d.getAs<ArrayAttr>("rows")))
       return llvm::createStringError("illegal CPU work partition");
     return llvm::Error::success();
   };
+  partition.verifyCandidate=[](Operation*,const StructuralCandidate &c,const TargetProfile &)->llvm::Error{
+    auto walk=cast<DictionaryAttr>(c.value).getAs<StringAttr>("walk");
+    if(c.id==c.topology && c.topology==walk.getValue() && c.preconditions==std::vector<std::string>{walk=="source"?"row-independent":"bijective-rectangular-copy"})return llvm::Error::success();
+    if(c.id==c.topology && c.id.find("reduction")!=std::string::npos && walk=="source" && c.preconditions.empty())return llvm::Error::success();
+    return llvm::createStringError("CPU topology disagrees with its parameter domain");};
   u.families.push_back(
       {{partition, "cpu@formed", "cpu@formed"}, COMPILERINFRA_SOURCE});
-  registerRowReduction(u);
-  registerPanelReduction(u);
-  registerPointwise(u);
+  if(!permuted){registerRowReduction(u);registerPanelReduction(u);}
+  auto family=permuted?"permutation":"partition";registerPointwise(u,family);
   u.realizers.push_back(
-      {{"group-rows", u.qualify("partition"),
-        [](Operation *op, Attribute a, const TargetProfile &, RewriterBase &) {
-          op->setAttr("cpu.row_groups", a);
-          op->removeAttr("cpu.partition");
+      {{permuted?"permute-rows":"group-rows", u.qualify(family),
+        [carrier](Operation *op, Attribute a, const TargetProfile &, RewriterBase &) {
+          auto d=cast<DictionaryAttr>(a);
+          op->setAttr("cpu.row_groups",d.get("rows"));op->setAttr("cpu.walk",d.get("walk"));op->setAttr("cpu.tile",d.get("tile"));
+          op->removeAttr(carrier);
           return llvm::Error::success();
         }},
        COMPILERINFRA_SOURCE});
 }
+void rowTasks(Unit &u){registerPartition(u,false);registerPartition(u,true);}
 } // namespace CI_UNIT_NAMESPACE

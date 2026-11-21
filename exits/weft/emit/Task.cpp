@@ -1,3 +1,4 @@
+#include "intentdsl/levels/execution/cpu/ir/Traversal.h"
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
 #include "llvm/ADT/StringExtras.h"
 using namespace mlir;
@@ -334,11 +335,15 @@ std::string hostSource(Operation *dispatch, const llvm::json::Array &abi) {
   args.append(strides);
   auto domain=dispatch->getAttrOfType<IntegerAttr>("domain_arg").getInt();
   std::string chunk=projected?"a"+std::to_string(domain)+"d"+std::to_string(slots[domain]-2):"rows";
-  return "#include <stdint.h>\n#include \"task_bridge.h\"\nint32_t intent_entry(" +
+  auto walk=dispatch->getAttrOfType<StringAttr>("cpu.walk");
+  std::string prefix=std::string("#include <stdint.h>\n#include \"task_bridge.h\"\nint32_t intent_entry(") +
          llvm::join(params, ",") +
          ", int64_t rows, int64_t cols, int64_t grain, int64_t panel, int64_t "
          "workers){\nif(rows<0 || cols<0 || grain<=0 || panel<0 || workers<=0) return 1;\n"
-         "if(!rows || !cols) return 0;\n#pragma omp parallel for num_threads(workers) "
+         "if(!rows || !cols) return 0;\n";
+  if(walk=="tile")return prefix+intentdsl::cpu::tileLoop(dispatch->getAttrOfType<IntegerAttr>("cpu.tile").getInt())+symbol+"_instance(a0+r*a0s0+c*a0s1,a1+c*a1s0+r*a1s1,nr,nc,panel?panel:nc,a0s0,a0s1,a1s1,a1s0);}return 0;}\n";
+  if(walk=="destination")prefix+="int64_t t=rows;rows=cols;cols=t;t=a0s0;a0s0=a0s1;a0s1=t;t=a1s0;a1s0=a1s1;a1s1=t;\n";
+  return prefix+"#pragma omp parallel for num_threads(workers) "
          "schedule(static) if(workers>1)\n"
          "for(int64_t group=0;group<rows;group+=grain){int64_t end=rows-group<grain?rows:group+grain; for(int64_t start=group;start<end;){int64_t remaining=" + chunk + "-start%" + chunk + ";int64_t count=end-start<remaining?end-start:remaining; " +
          symbol + "_instance(" + llvm::join(args, ",") + "); start+=count;}}\nreturn 0;\n}\n";

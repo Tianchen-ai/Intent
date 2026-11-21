@@ -1,5 +1,6 @@
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/execution/cpu/ir/Dialect.h"
+#include "intentdsl/levels/algorithm/kir/ir/Permutation.h"
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
 #include "intentdsl/levels/algorithm/kir/ir/RowSemantics.h"
 #include "mlir/Pass/Pass.h"
@@ -30,6 +31,27 @@ LogicalResult verifyTask(ModuleOp m, const TargetProfile &profile,
   if (!llvm::hasSingleElement(task.getRegion(0)))
     return task.emitError("expected one task body");
   auto &body = task.getRegion(0).front();
+  auto walk=task.getAttrOfType<StringAttr>("cpu.walk");
+  auto tile=task.getAttrOfType<IntegerAttr>("cpu.tile");
+  if(!walk || !tile || (walk!="source" && walk!="destination" && walk!="tile") ||
+     tile.getInt()!=(walk=="tile"?32:1))
+    return task.emitError("invalid task traversal");
+  if(walk!="source"){
+    if(fn.getNumArguments()!=2 || body.getNumArguments()!=3 ||
+       llvm::any_of(fn.getArgumentTypes(),[](Type t){auto m=dyn_cast<MemRefType>(t);return !m || m.getRank()!=2;}))
+      return task.emitError("permuted tasks require two matrix views");
+    unsigned writes=0;
+    auto accesses=task.walk([&](Operation *o){
+      auto n=o->getName().stripDialect();
+      if(n!="write" && n!="write_panel")return WalkResult::advance();
+      ++writes;auto *read=o->getOperands().back().getDefiningOp();
+      auto axes=o->getAttrOfType<DenseI64ArrayAttr>("axes");
+      return (!axes || axes.asArrayRef()!=ArrayRef<int64_t>({1,0}) ||
+        o->getOperand(0)!=body.getArgument(2) || !read || (read->getName().stripDialect()!="read" && read->getName().stripDialect()!="read_panel") ||
+        read->getOperand(0)!=body.getArgument(1)) ? WalkResult::interrupt() : WalkResult::advance();
+    });
+    if(accesses.wasInterrupted() || !writes)return task.emitError("permutation must copy input members to reversed output coordinates");
+  }
   auto domain = task.getAttrOfType<IntegerAttr>("domain_arg").getInt();
   if (domain < 0 || domain >= int64_t(fn.getNumArguments()) ||
       task.getOperands() != fn.getArguments() ||
@@ -90,6 +112,8 @@ struct Construct : PassWrapper<Construct, OperationPass<ModuleOp>> {
     OperationState s(loc, "cpu.task");
     s.addOperands(fn.getArguments());
     s.addTypes(b.getIndexType());
+    s.addAttribute("cpu.walk",loop->getAttr("cpu.walk"));
+    s.addAttribute("cpu.tile",loop->getAttr("cpu.tile"));
     s.addAttribute("rows", loop->getAttr("cpu.row_groups"));
     s.addAttribute(
         "domain_arg",
@@ -113,7 +137,9 @@ struct Construct : PassWrapper<Construct, OperationPass<ModuleOp>> {
     loop->erase();
   }
 };
+void registerCost(Unit &);
 void bind(Unit &u) {
+  registerCost(u);
   u.dialects = [](DialectRegistry &r) {
     r.insert<intentdsl::cpu::CpuDialect>();
   };

@@ -1,0 +1,77 @@
+{
+  "version": "1",
+  "facts": {
+    "read_1": {
+      "value": 1675.713967863193,
+      "unit": "B/ns",
+      "source": {
+        "device": "NVIDIA GeForce RTX 5090 D",
+        "isa": "sm120",
+        "toolchain": "triton 3.7.1 CUDA 13.0",
+        "conditions": "one CUDA stream, 256 MiB storage, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/read_1",
+        "error": "range [1669.37, 1684.12], n=8"
+      }
+    },
+    "write_1": {
+      "value": 1709.3555635434593,
+      "unit": "B/ns",
+      "source": {
+        "device": "NVIDIA GeForce RTX 5090 D",
+        "isa": "sm120",
+        "toolchain": "triton 3.7.1 CUDA 13.0",
+        "conditions": "one CUDA stream, 256 MiB storage, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/write_1",
+        "error": "range [1502.8, 1737.49], n=8"
+      }
+    },
+    "read_16": {
+      "value": 204.96016282357567,
+      "unit": "B/ns",
+      "source": {
+        "device": "NVIDIA GeForce RTX 5090 D",
+        "isa": "sm120",
+        "toolchain": "triton 3.7.1 CUDA 13.0",
+        "conditions": "one CUDA stream, 256 MiB storage, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/read_16",
+        "error": "range [203.055, 207.474], n=8"
+      }
+    },
+    "write_16": {
+      "value": 53.28671515286241,
+      "unit": "B/ns",
+      "source": {
+        "device": "NVIDIA GeForce RTX 5090 D",
+        "isa": "sm120",
+        "toolchain": "triton 3.7.1 CUDA 13.0",
+        "conditions": "one CUDA stream, 256 MiB storage, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/write_16",
+        "error": "range [53.0495, 53.4388], n=8"
+      }
+    },
+    "launch": {
+      "value": 2416.0000029951334,
+      "unit": "ns",
+      "source": {
+        "device": "NVIDIA GeForce RTX 5090 D",
+        "isa": "sm120",
+        "toolchain": "triton 3.7.1 CUDA 13.0",
+        "conditions": "one CUDA stream, 256 MiB storage, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/launch",
+        "error": "range [1792, 3424], n=8"
+      }
+    },
+    "sync": {
+      "value": 5810.5,
+      "unit": "ns",
+      "source": {
+        "device": "NVIDIA GeForce RTX 5090 D",
+        "isa": "sm120",
+        "toolchain": "triton 3.7.1 CUDA 13.0",
+        "conditions": "one CUDA stream, 256 MiB storage, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/sync",
+        "error": "range [5558, 6020], n=8"
+      }
+    }
+  }
+}

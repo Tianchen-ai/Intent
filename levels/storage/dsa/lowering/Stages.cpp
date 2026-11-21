@@ -14,7 +14,7 @@ Operation *inst(OpBuilder &b, Location l, StringRef name, ValueRange args = {},
   s.addAttributes(attrs);
   return b.create(s);
 }
-void schedule(Block *entry, bool stream, int64_t depth, OpBuilder &b,
+void schedule(Block *entry, bool stream, int64_t depth,bool persistent, OpBuilder &b,
               Location loc) {
   b.setInsertionPointToEnd(entry);
   auto idx = b.getIndexType();
@@ -25,6 +25,7 @@ void schedule(Block *entry, bool stream, int64_t depth, OpBuilder &b,
   auto init = inst(b, loc, "dsa.slot_zero", {}, idx)->getResult(0);
   auto lo = range->getResult(0), end = range->getResult(1),
        step = range->getResult(2);
+  if(persistent)inst(b,loc,"dsa.load_shared",{lo,end});
   if (depth == 2)
     inst(b, loc, "dsa.issue_if_in_bounds", {lo, end, init});
   OperationState loop(loc, "dsa.iterate");
@@ -65,7 +66,9 @@ LogicalResult phase(Operation *anchor, Block &source, bool stream,
   auto *p = b.create(ps);
   auto *fetch = b.createBlock(&p->getRegion(0));
   auto *calc = b.createBlock(&p->getRegion(1));
-  schedule(b.createBlock(&p->getRegion(2)), stream, depth, b, loc);
+  auto fn=anchor->getParentOfType<func::FuncOp>();
+  bool persistent=fn->getAttrOfType<DictionaryAttr>("dsa.pending").getAs<BoolAttr>("persistent").getValue();
+  schedule(b.createBlock(&p->getRegion(2)), stream, depth,persistent, b, loc);
   Operation *active = nullptr;
   for (auto &op : source)
     if (op.getName().getStringRef() == "block.active")
@@ -120,6 +123,7 @@ LogicalResult phase(Operation *anchor, Block &source, bool stream,
     SmallVector<Value> address{view, readWindow->getResult(2)};
     address.append(axes);
     auto *copy = inst(b, loc, "dsa.copy_in", address, op->getResultTypes());
+    if(persistent && cast<MemRefType>(view.getType()).getRank()==1)copy->setAttr("dsa.shared",b.getUnitAttr());
     reads.push_back(copy->getResult(0));
     b.setInsertionPointToEnd(calc);
     auto pending = calc->addArgument(copy->getResult(0).getType(), loc);
@@ -233,7 +237,9 @@ namespace CI_UNIT_NAMESPACE {
 using namespace compilerinfra;
 void dialect(DialectRegistry &);
 void supply(Unit &);
+void supplyCost(Unit &);
 void bind(Unit &u) {
+  supplyCost(u);
   u.dialects = dialect;
   supply(u);
   for (bool ready : {false, true})

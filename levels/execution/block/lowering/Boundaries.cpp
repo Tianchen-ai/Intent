@@ -1,3 +1,4 @@
+#include "intentdsl/levels/algorithm/kir/ir/Permutation.h"
 #include "intentdsl/levels/execution/block/ir/Access.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/RowSemantics.h"
@@ -37,7 +38,9 @@ struct Form : PassWrapper<Form, OperationPass<ModuleOp>> {
   }
 };
 } // namespace
+void registerCost(Unit &);
 void bind(Unit &unit) {
+  registerCost(unit);
   unit.dialects = [](DialectRegistry &r) {
     r.insert<intentdsl::iblock::IblockDialect>();
   };
@@ -58,6 +61,20 @@ void bind(Unit &unit) {
     if(!d)return llvm::createStringError("missing block decision");
     return intentdsl::verifyRows(op,d.getAs<ArrayAttr>("rows"),d.getAs<StringAttr>("topology"),d.getAs<DenseI64ArrayAttr>("guard"),profile);
   };
+  f.verifyCandidate=[](Operation *op,const StructuralCandidate &c,const TargetProfile &)->llvm::Error{
+    auto d=cast<DictionaryAttr>(c.value);auto topology=d.getAs<StringAttr>("topology").str();
+    auto rows=d.getAs<ArrayAttr>("rows");auto group=cast<DictionaryAttr>(rows[0]).getAs<IntegerAttr>("rows");
+    if(auto walk=d.getAs<StringAttr>("walk")){
+      if(c.topology!=walk.str() || c.id!=walk.str() || c.preconditions!=std::vector<std::string>{walk=="source"?"independent-members":"bijective-rectangular-copy"} ||
+         (walk!="source" && (!intentdsl::rectangularCopy(op) || (walk!="destination" && walk!="tile") || topology!="stream")))
+        return llvm::createStringError("invalid traversal for the access domain");
+      return llvm::Error::success();
+    }
+    if(c.preconditions.empty() && c.id==c.topology && c.id.find("pointwise")!=std::string::npos)return llvm::Error::success();
+    if(c.topology!=topology || c.id!=topology+"-"+std::to_string(group.getInt()) ||
+       c.preconditions!=std::vector<std::string>{"legal-width-group"} ||
+       !llvm::all_of(rows,[&](Attribute a){return cast<DictionaryAttr>(a).get("rows")==group;}))return llvm::createStringError("block topology and row domain disagree");
+    return llvm::Error::success();};
   unit.families.push_back({{std::move(f), "block@decided", "block@realized"},
                            COMPILERINFRA_SOURCE});
   registerStrategies(unit);

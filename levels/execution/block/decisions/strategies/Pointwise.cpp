@@ -1,3 +1,4 @@
+#include "intentdsl/levels/algorithm/kir/ir/Permutation.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
 #include "mlir/IR/Builders.h"
@@ -8,7 +9,7 @@ void registerPointwise(Unit &u) {
   Strategy s;
   s.name = "pointwise";
   s.family = u.qualify("structure");
-  s.propose = [](Operation *op, const TargetProfile &p,
+  auto original = [](Operation *op, const TargetProfile &p,
                  AnalysisManager &) -> llvm::Expected<Attribute> {
     bool writes = false, collective = false;
     op->walk([&](Operation *o) {
@@ -60,6 +61,22 @@ void registerPointwise(Unit &u) {
                         b.getStringAttr(fits ? "resident" : "stream")),
          b.getNamedAttr("rows", b.getArrayAttr(rows))}));
   };
+  s.enumerate=[original](Operation *op,const TargetProfile &p,AnalysisManager &a)->llvm::Expected<std::vector<StructuralCandidate>>{
+    std::vector<StructuralCandidate> cs;auto v=original(op,p,a);if(!v)return v.takeError();
+    if(!*v)return cs;
+    Builder b(op->getContext());auto caps=p.services.get<intentdsl::RowCapacity>();
+    for(StringRef walk:{"source","destination","tile"}){
+      if(walk!="source" && !intentdsl::rectangularCopy(op))continue;
+      NamedAttrList d(cast<DictionaryAttr>(*v));d.set("walk",b.getStringAttr(walk));
+      if(walk!="source"){
+        SmallVector<Attribute> rows;
+        for(auto &r:caps->rows)if(r.width==32 && (walk=="tile"?r.rows>1:r.rows==1))
+          rows.push_back(b.getDictionaryAttr({b.getNamedAttr("width",b.getI32IntegerAttr(r.width)),b.getNamedAttr("rows",b.getI32IntegerAttr(r.rows)),b.getNamedAttr("id",b.getI32IntegerAttr(r.id)),b.getNamedAttr("payload",b.getStringAttr(r.payload))}));
+        if(rows.empty())continue;
+        d.set("guard",b.getDenseI64ArrayAttr({0,-1}));d.set("rows",b.getArrayAttr(rows));d.set("topology",b.getStringAttr("stream"));
+      }
+      cs.push_back({walk.str(),walk.str(),d.getDictionary(op->getContext()),{walk=="source"?"independent-members":"bijective-rectangular-copy"}});
+    }return cs;};
   u.strategies.push_back({std::move(s), COMPILERINFRA_SOURCE});
 }
 } // namespace CI_UNIT_NAMESPACE

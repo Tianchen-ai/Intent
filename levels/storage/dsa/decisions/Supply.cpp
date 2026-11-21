@@ -36,8 +36,20 @@ struct Footprint {
   }
 };
 
+bool reusableInput(func::FuncOp fn){
+  if(fn->getAttrOfType<StringAttr>("block.topology")!="resident")return false;
+  auto abi=llvm::json::parse(fn->getAttrOfType<StringAttr>("kir.abi").getValue());
+  if(!abi){llvm::consumeError(abi.takeError());return false;}
+  for(auto &v:*abi->getAsArray())if(v.getAsObject()->getString("direction")=="InOut")return false;
+  bool found=false;
+  fn.walk([&](Operation *op){auto n=op->getName().getStringRef();
+    if(n=="block.load" || n=="dsa.copy_in")found|=cast<MemRefType>(op->getOperand(0).getType()).getRank()==1;
+  });return found;
+}
 llvm::Expected<DictionaryAttr> plan(func::FuncOp fn, const LocalSupply &c,
-                                    int64_t depth) {
+                                    int64_t depth,int64_t participants,bool persistent) {
+  if(persistent && !reusableInput(fn))return llvm::createStringError("persistent panel requires an immutable row-invariant input");
+  if(participants<=0 || participants>c.consumers)return llvm::createStringError("invalid supply work partition");
   Builder b(fn.getContext());
   SmallVector<Footprint> phases;
   fn.walk([&](Operation *op) {
@@ -92,10 +104,9 @@ llvm::Expected<DictionaryAttr> plan(func::FuncOp fn, const LocalSupply &c,
     } else
       accepted.push_back(attrs.getDictionary(fn.getContext()));
   }
-  if (accepted.empty())
-    return llvm::createStringError(
-        "all parameter rows exceed the supply budget or lack local completion");
   NamedAttrList out;
+  out.set("persistent",b.getBoolAttr(persistent));
+  out.set("participants",b.getI64IntegerAttr(participants));
   out.set("budget", b.getI64IntegerAttr(std::min(c.budget, c.capacity)));
   out.set("depth", b.getI32IntegerAttr(depth));
   out.set("rows", b.getArrayAttr(accepted));
@@ -119,33 +130,43 @@ void supply(Unit &u) {
                      const TargetProfile &p) -> llvm::Error {
     auto facts = p.services.get<intentdsl::dsa::LocalSupply>();
     auto d = dyn_cast<DictionaryAttr>(a);
-    if (!d || !facts || !d.getAs<IntegerAttr>("depth"))
+    if (!d || !facts || !d.getAs<IntegerAttr>("depth") || !d.getAs<IntegerAttr>("participants") || !d.getAs<BoolAttr>("persistent"))
       return llvm::createStringError("missing private supply facts");
     auto check = intentdsl::dsa::plan(cast<func::FuncOp>(op), *facts,
-                                      d.getAs<IntegerAttr>("depth").getInt());
+                                      d.getAs<IntegerAttr>("depth").getInt(),d.getAs<IntegerAttr>("participants").getInt(),d.getAs<BoolAttr>("persistent") && d.getAs<BoolAttr>("persistent").getValue());
     if (!check)
       return check.takeError();
+    if(!d.getAs<ArrayAttr>("rows") || d.getAs<ArrayAttr>("rows").empty())return llvm::createStringError("no legal private storage row or DMA completion");
     if (*check != d)
       return llvm::createStringError(
           "supply row costs, exclusion reasons or wait capability changed");
     return llvm::Error::success();
   };
+  family.verifyCandidate=[](Operation*,const StructuralCandidate &c,const TargetProfile &)->llvm::Error{
+    auto d=cast<DictionaryAttr>(c.value);auto depth=d.getAs<IntegerAttr>("depth").getInt(),count=d.getAs<IntegerAttr>("participants").getInt();
+    std::string topology=depth==1?"direct":"double-buffer";
+    if(d.getAs<BoolAttr>("persistent").getValue())topology+="-shared";
+    if(c.topology!=topology || c.id!=topology+"-"+std::to_string(count) || c.preconditions!=std::vector<std::string>{"legal-private-supply"})return llvm::createStringError("supply topology or participants mismatch");
+    return llvm::Error::success();};
   u.families.push_back({{std::move(family), "dsa@formed", "dsa@supplied"},
                         COMPILERINFRA_SOURCE});
   for (int depth : {1, 2}) {
     Strategy s;
     s.name = depth == 1 ? "direct" : "double-buffer";
     s.family = u.qualify("supply");
-    s.propose = [depth](Operation *op, const TargetProfile &p,
-                        AnalysisManager &) -> llvm::Expected<Attribute> {
+    s.enumerate = [depth](Operation *op, const TargetProfile &p,
+                        AnalysisManager &) -> llvm::Expected<std::vector<StructuralCandidate>> {
       auto facts = p.services.get<intentdsl::dsa::LocalSupply>();
       if (!facts)
         return llvm::createStringError(
             "target has no private transfer resources");
-      auto d = intentdsl::dsa::plan(cast<func::FuncOp>(op), *facts, depth);
-      if (!d)
-        return d.takeError();
-      return Attribute(*d);
+      std::vector<StructuralCandidate> cs;
+      for(bool persistent:{false,true})for(int64_t n=facts->consumers;n>=1;n/=2){
+        if(persistent && !intentdsl::dsa::reusableInput(cast<func::FuncOp>(op)))continue;
+        auto d=intentdsl::dsa::plan(cast<func::FuncOp>(op),*facts,depth,n,persistent);
+        if(!d)return d.takeError();std::string topology=depth==1?"direct":"double-buffer";if(persistent)topology+="-shared";
+        cs.push_back({topology+"-"+std::to_string(n),topology,*d,{"legal-private-supply"}});
+      }return cs;
     };
     u.strategies.push_back({std::move(s), COMPILERINFRA_SOURCE});
   }
