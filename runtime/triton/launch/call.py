@@ -15,7 +15,7 @@ class Artifact:
         self.lock = RLock()
 
     def accepts(self, shape):
-        return accepts(self.data['guard'], shape)
+        return accepts(self.data["guard"], shape)
 
     def bind(self, values, outputs, device, m, n):
         return Prepared(self, values, outputs, device, m, n)
@@ -59,7 +59,9 @@ class Prepared:
                     enable_fp_fusion=False,
                     **r["native"],
                 )
-                self.launchers[r["id"]] = native[grid(self.artifact.data["grid"], (self.m, self.n), r)]
+                self.launchers[r["id"]] = native[
+                    grid(self.artifact.data["grid"], (self.m, self.n), r)
+                ]
         self.ready = True
 
     def _invoke(self, row, args):
@@ -85,21 +87,32 @@ class Prepared:
                     if key not in self.artifact.winners:
                         if torch.cuda.is_current_stream_capturing():
                             raise RuntimeError("select a row before graph capture")
-                        shadow = [
-                            (
-                                torch.empty_strided(
-                                    v.shape, v.stride(), dtype=v.dtype, device=v.device
+                        from runtime.kir.binding.trials import (
+                            TrialBindings,
+                            cuda_trials,
+                        )
+                        from statistics import median
+
+                        shadow = TrialBindings(self.values, self.artifact.data["abi"])
+                        trial = self.flatten(shadow.values)
+                        times = {}
+                        for r in self.rows:
+
+                            def invoke():
+                                self._invoke(r, trial)
+
+                            if shadow.restores:
+                                times[r["id"]] = cuda_trials(
+                                    shadow,
+                                    torch.cuda.current_stream(self.device),
+                                    invoke,
                                 )
-                                if any(v is y for y in self.outputs)
-                                else v
-                            )
-                            for v in self.values
-                        ]
-                        trial = self.flatten(shadow)
-                        times = {r["id"]: [1000 * triton.testing.do_bench(
-                            lambda: self._invoke(r, trial), warmup=3, rep=10
-                        )] for r in self.rows}
-                        best = min(self.rows, key=lambda r: times[r["id"]][0])
+                            else:
+                                times[r["id"]] = [
+                                    1000
+                                    * triton.testing.do_bench(invoke, warmup=3, rep=10)
+                                ]
+                        best = min(self.rows, key=lambda r: median(times[r["id"]]))
                         self.artifact.winners[key] = best, times
                     self.row, self.timings = self.artifact.winners[key]
             self._invoke(self.row, self.flat)
@@ -110,7 +123,10 @@ class Prepared:
 
     def tuning_report(self):
         from runtime.kir.binding.selection import selection
-        return selection(self.artifact.data, self.row["id"] if self.row else None, self.timings)
+
+        return selection(
+            self.artifact.data, self.row["id"] if self.row else None, self.timings
+        )
 
     def result(self):
         return self.outputs[0] if len(self.outputs) == 1 else tuple(self.outputs)

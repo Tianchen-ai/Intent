@@ -9,6 +9,10 @@ using Text = std::string;
 Text ctype(Type t) {
   if (auto s = dyn_cast<ShapedType>(t))
     t = s.getElementType();
+  if (t.isBF16())
+    return "unsigned short";
+  if (t.isInteger(32))
+    return "int";
   return t.isF16() ? "half" : "float";
 }
 bool tile(Value v) {
@@ -34,6 +38,9 @@ class Source {
       s += (decl ? ctype(a.getType()) + (t ? " *" : " ") : "") + n + ", ";
       if (t)
         for (int j = 0; j < t.getRank(); ++j)
+          s += (decl ? "long long " : "") + n + "d" + std::to_string(j) + ", ";
+      if (t)
+        for (int j = 0; j < t.getRank(); ++j)
           s += (decl ? "long long " : "") + n + "s" + std::to_string(j) + ", ";
     }
     s += decl ? "long long M,long long N,long long grid" : "M,N,grid";
@@ -41,10 +48,18 @@ class Source {
   }
   // A submitted group owns complete, pitched slots, even for partial edge
   // groups.
-  Text address(Operation &op) {
-    auto parts = op.getAttrOfType<DenseI64ArrayAttr>("bangc.offset");
+  Text address(Operation &op, StringRef key = "bangc.offset") {
+    auto parts = op.getAttrOfType<DenseI64ArrayAttr>(key);
     return "(storage+P*(" + std::to_string(parts[0] * depth) + "*R+" +
            std::to_string(parts[1]) + "))";
+  }
+  std::pair<Text, Text> strides(Operation &op, unsigned start,
+                                const Text &view) {
+    Text steps[2] = {"0", "0"};
+    for (auto [i, c] : llvm::enumerate(op.getOperands().drop_front(start)))
+      steps[cast<OpResult>(c).getResultNumber()] =
+          view + "s" + std::to_string(i);
+    return {steps[0], steps[1]};
   }
   void issue(Block &fetch, const Text &iteration, const Text &slot) {
     line("{ long long incoming=" + iteration + ";");
@@ -52,17 +67,20 @@ class Source {
                   : "long long row0=group*R, col=incoming*W;");
     line("int live=(int)((N-col)<W?(N-col):W);");
     for (auto &op : fetch.without_terminator()) {
+      if (op.getName().getStringRef() == "dsa.window")
+        continue;
       auto src = op.getOperand(0);
       auto n = name(src), dst = name(op.getResult(0)),
            type = ctype(src.getType());
-      bool matrix = op.getAttrOfType<BoolAttr>("matrix").getValue();
-      Text stride = n + (matrix ? "s1" : "s0");
+      auto [rowStride, stride] = strides(op, 2, n);
       line("for(int j=0;j<R && row0+j<M;++j){");
-      line("auto *src=" + n + "+" + (matrix ? "(row0+j)*" + n + "s0+" : "") +
-           "col*" + stride + ";");
+      line("auto *src=" + n + "+" + "(row0+j)*" + rowStride + "+" + "col*" +
+           stride + ";");
       line("auto *dst=" + dst + "+((" + slot + ")*R+j)*P;");
       line("if(" + stride + "==1){" +
-           Text(depth == 2 ? "__memcpy_async" : "__memcpy") +
+           Text(op.getAttrOfType<StringAttr>("bangc.primitive") == "dma_async"
+                    ? "__memcpy_async"
+                    : "__memcpy") +
            "(dst,src,live*sizeof(" + type +
            "),GDRAM2NRAM);}else{for(int k=0;k<live;++k) dst[k]=src[k*" +
            stride + "];}}");
@@ -79,6 +97,8 @@ class Source {
     line("{");
     unsigned index = 0;
     for (auto &copy : fetch.without_terminator()) {
+      if (copy.getName().getStringRef() == "dsa.window")
+        continue;
       auto n = fresh();
       auto t = ctype(copy.getResult(0).getType());
       names[copy.getResult(0)] = n;
@@ -87,18 +107,54 @@ class Source {
     }
     if (!carry.empty())
       names[body.getArgument(index)] = carry + "[j]";
-    line(resident ? "long long begin=taskId, end=grid, step=taskDim;"
-                  : "long long begin=0,end=(N+W-1)/W,step=1;");
-    if (depth == 2) {
-      line("if(begin<end)");
-      issue(fetch, "begin", "0");
+    auto status = emitSchedule(op.getRegion(2).front(), fetch, body, carry);
+    line("}");
+    return status;
+  }
+  llvm::Error emitSchedule(Block &steps, Block &fetch, Block &body,
+                           const Text &carry) {
+    for (auto &op : steps) {
+      auto n = op.getName().stripDialect();
+      auto arg = [&](unsigned i) { return name(op.getOperand(i)); };
+      if (n == "range") {
+        bool tasks =
+            op.getAttrOfType<StringAttr>("source") == "participant_stride";
+        for (auto [i, expr] : llvm::enumerate(SmallVector<Text>{
+                 tasks ? "taskId" : "0", tasks ? "grid" : "((N+W-1)/W)",
+                 tasks ? "taskDim" : "1"}))
+          names[op.getResult(i)] = expr;
+      } else if (n == "slot_zero")
+        names[op.getResult(0)] = "0";
+      else if (n == "iterate") {
+        auto &bb = op.getRegion(0).front();
+        names[bb.getArgument(0)] = "pos";
+        names[bb.getArgument(1)] = "slot";
+        line("int slot=" + arg(3) + ";for(long long pos=" + arg(0) + ";pos<" +
+             arg(1) + ";pos+=" + arg(2) + "){");
+        if (auto e = emitSchedule(bb, fetch, body, carry))
+          return e;
+        line("}");
+      } else if (n == "issue_if_in_bounds") {
+        line("if(" + arg(0) + "<" + arg(1) + ")");
+        issue(fetch, arg(0), arg(2));
+      } else if (n == "next")
+        names[op.getResult(0)] = "(" + arg(0) + "+" + arg(1) + ")";
+      else if (n == "other_slot")
+        names[op.getResult(0)] = "(1-" + arg(0) + ")";
+      else if (n == "wait_slot")
+        line("__sync();");
+      else if (n == "advance")
+        line("slot=" + arg(0) + ";");
+      else if (n == "compute_members") {
+        if (auto e = compute(body, carry))
+          return e;
+      } else if (n != "end")
+        return llvm::createStringError("unlowered supply schedule operation " +
+                                       n);
     }
-    line("int slot=0;for(long long pos=begin;pos<end;pos+=step){");
-    if (depth == 2) {
-      line("__sync();if(pos+step<end)");
-      issue(fetch, "pos+step", "1-slot");
-    } else
-      issue(fetch, "pos", "0");
+    return llvm::Error::success();
+  }
+  llvm::Error compute(Block &body, const Text &carry) {
     line(resident ? "long long row0=pos*R,col=0;"
                   : "long long row0=group*R,col=pos*W;");
     line("int live=(int)((N-col)<W?(N-col):W), lanes=(live+63)/64*64;");
@@ -111,20 +167,33 @@ class Source {
         names[inst.getResult(0)] = "(" + in(0) + ")";
         continue;
       }
-      if (n == "yield") {
-        if (inst.getNumOperands())
-          line(carry + "[j]=" + in(0) + ";");
+      if (n == "window")
+        continue;
+      if (n == "complete") {
+        if (inst.getNumOperands() > 1)
+          line(carry + "[j]=" + in(1) + ";");
         continue;
       }
-      if (n == "drain")
-        continue; // store_extent uses completing, blocking copies
+      if (n == "drain") {
+        if (llvm::any_of(inst.getOperands(), [](Value v) {
+              return v.getDefiningOp()
+                  ->getAttrOfType<BoolAttr>("async")
+                  .getValue();
+            }))
+          line("__sync();");
+        continue;
+      }
       if (n == "write_back") {
         auto ptr = in(0), src = in(1), t = ctype(inst.getOperand(0).getType());
-        line("{auto *out=" + ptr + "+(row0+j)*" + ptr + "s0+col*" + ptr +
-             "s1;");
-        line("if(" + ptr + "s1==1)__memcpy(out," + src + ",live*sizeof(" + t +
-             "),NRAM2GDRAM);else for(int k=0;k<live;++k)out[k*" + ptr +
-             "s1]=" + src + "[k];}");
+        auto [rowStride, columnStride] = strides(inst, 3, ptr);
+        line("{auto *out=" + ptr + "+(row0+j)*" + rowStride + "+col*" +
+             columnStride + ";");
+        Text move =
+            prim == "async_store_extent" ? "__memcpy_async" : "__memcpy";
+        line("if(" + columnStride + "==1)" + move + "(out," + src +
+             ",live*sizeof(" + t +
+             "),NRAM2GDRAM);else for(int k=0;k<live;++k)out[k*" + columnStride +
+             "]=" + src + "[k];}");
         continue;
       }
       auto val = inst.getResult(0);
@@ -140,6 +209,15 @@ class Source {
       auto type = ctype(val.getType());
       if (vec)
         line("auto *" + id + "=(" + type + "*)" + address(inst) + ";");
+      if (prim == "quotient_for_narrow")
+        continue;
+      if (prim == "certified_half_quotient") {
+        auto *div = inst.getOperand(0).getDefiningOp();
+        line("row_narrow_quotient(" + id + "," + in(0) + ",(float*)" +
+             address(inst, "bangc.scratch") + "," + name(div->getOperand(0)) +
+             "," + name(div->getOperand(1)) + ",live,lanes);");
+        continue;
+      }
       auto operand = [&](unsigned i) {
         return in(i) + (tile(inst.getOperand(i)) ? "[k]" : "");
       };
@@ -182,7 +260,7 @@ class Source {
         line((vec ? "for(int k=0;k<live;++k)" + id + "[k]" : type + " " + id) +
              "=" + expr + ";");
     }
-    line("}slot=" + Text(depth == 2 ? "1-slot" : "0") + ";}}");
+    line("}");
     return llvm::Error::success();
   }
 
@@ -201,11 +279,17 @@ public:
     line("__mlu_global__ void tile(" + args(true) +
          "){ __nram__ unsigned char storage[BYTES] "
          "__attribute__((aligned(128)));");
-    if (!resident)
-      line("for(long long group=taskId;group<grid;group+=taskDim){");
-    for (auto &op : fn.front()) {
+    return emitKernel();
+  }
+  llvm::Error outer(Block &block) {
+    for (auto &op : block) {
       auto code = op.getName().stripDialect();
-      if (code == "phase") {
+      if (code == "task_groups") {
+        line("for(long long group=taskId;group<grid;group+=taskDim){");
+        if (auto e = outer(op.getRegion(0).front()))
+          return e;
+        line("}");
+      } else if (code == "phase") {
         if (auto e = phase(op))
           return e;
       } else if (code == "identity") {
@@ -215,11 +299,14 @@ public:
              (op.getAttrOfType<StringAttr>("algebra") == "sum" ? "0.0f"
                                                                : "-INFINITY") +
              ";");
-      } else if (code != "return")
+      } else if (code != "return" && code != "end")
         return llvm::createStringError("unexpected native outer op " + code);
     }
-    if (!resident)
-      line("}");
+    return llvm::Error::success();
+  }
+  llvm::Error emitKernel() {
+    if (auto e = outer(fn.front()))
+      return e;
     line("}");
     line("extern \"C\" int intent_enqueue(" + args(true) +
          ",int cores,void *queue){");
@@ -268,7 +355,7 @@ llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
   for (auto a : fn->getAttrOfType<ArrayAttr>("block.grid"))
     axes.push_back(cast<StringAttr>(a).str());
   out << llvm::json::Value(llvm::json::Object{
-      {"version", 1},
+      {"version", 2},
       {"source", program},
       {"abi", std::move(*abi)},
       {"rows", std::move(rows)},

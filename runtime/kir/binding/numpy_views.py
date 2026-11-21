@@ -8,14 +8,18 @@ def accepts(value):
 def describe(a):
     import numpy as np
 
-    dtype = {np.dtype("float16"): "f16", np.dtype("float32"): "f32"}.get(a.dtype)
+    dtype = {
+        np.dtype("float16"): "f16",
+        np.dtype("float32"): "f32",
+        np.dtype("int32"): "i32",
+    }.get(a.dtype)
     if any(s % a.itemsize for s in a.strides):
         raise ValueError("nonintegral element stride")
     owner = a
     while getattr(owner, "base", None) is not None:
         owner = owner.base
     return (
-        dtype,
+        "bf16" if a.dtype.name == "bfloat16" else dtype,
         a.shape,
         tuple(s // a.itemsize for s in a.strides),
         "cpu",
@@ -38,15 +42,33 @@ def overlaps(a, b):
 def allocate(shape, dtype, device):
     import numpy as np
 
-    return np.empty(shape, dtype={"f32": "float32", "f16": "float16"}[dtype])
+    return np.empty(
+        shape,
+        dtype={"f32": "float32", "f16": "float16", "bf16": "bfloat16", "i32": "int32"}[
+            dtype
+        ],
+    )
 
 
-def trial(a):
+def storage_bounds(a):
     import numpy as np
 
-    size = (
-        a.itemsize + sum((n - 1) * s for n, s in zip(a.shape, a.strides))
-        if a.size
-        else 0
+    owner = describe(a)[4]
+    raw = (
+        np.ndarray((owner.nbytes,), dtype=np.uint8, buffer=owner)
+        if isinstance(owner, np.ndarray)
+        else np.frombuffer(owner, dtype=np.uint8)
     )
-    return np.ndarray(a.shape, a.dtype, buffer=bytearray(size), strides=a.strides)
+    return raw.ctypes.data, raw.size
+
+
+def host_shadow(v, backing, start):
+    import numpy as np
+
+    return np.ndarray(
+        v.shape,
+        dtype=v.dtype,
+        buffer=backing,
+        offset=v.ctypes.data - start,
+        strides=v.strides,
+    )

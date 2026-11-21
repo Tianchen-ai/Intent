@@ -18,6 +18,12 @@ class Out(_Direction):
     pass
 
 
+class InOut(_Direction):
+    pass
+
+
+bf16 = "bf16"
+i32 = "i32"
 f16 = "f16"
 f32 = "f32"
 

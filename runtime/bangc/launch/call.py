@@ -7,7 +7,7 @@ from runtime.bangc.cache.native import Native
 
 class Artifact:
     def __init__(self, data):
-        if data["version"] != 1 or not data["rows"]:
+        if data["version"] != 2 or not data["rows"]:
             raise ValueError("unsupported BANG C artifact")
         self.data = data
         self.variants = {}
@@ -61,7 +61,7 @@ class Call:
         args = []
         for v in values:
             if isinstance(v, torch.Tensor):
-                args.extend((v.data_ptr(), *v.stride()))
+                args.extend((v.data_ptr(), *v.shape, *v.stride()))
             else:
                 args.append(v)
         return args
@@ -98,28 +98,19 @@ class Call:
                         rows = a.data["rows"]
                         durations = {row["id"]: [] for row in rows}
                         if len(rows) > 1:
-                            # Current callable ABI exposes disjoint Out and read-only In.
-                            shadow = tuple(
-                                (
-                                    torch.empty_strided(
-                                        v.shape,
-                                        v.stride(),
-                                        dtype=v.dtype,
-                                        device=v.device,
-                                    )
-                                    if any(v is out for out in self.outputs)
-                                    else v
-                                )
-                                for v in self.values
-                            )
-                            args = self._args(shadow)
+                            from runtime.kir.binding.trials import TrialBindings
+
+                            trials = TrialBindings(self.values, a.data["abi"])
+                            args = self._args(trials.values)
                             for row in rows:
+                                trials.reset()
                                 self._enqueue(row, args, stream)
                             for _ in range(3):
                                 for row in rows:
                                     before, after = torch.mlu.Event(
                                         enable_timing=True
                                     ), torch.mlu.Event(enable_timing=True)
+                                    trials.reset()
                                     before.record(stream)
                                     self._enqueue(row, args, stream)
                                     after.record(stream)
@@ -127,9 +118,7 @@ class Call:
                                     durations[row["id"]].append(
                                         before.hardware_time(after)
                                     )
-                            winner = min(
-                                rows, key=lambda r: median(durations[r["id"]])
-                            )
+                            winner = min(rows, key=lambda r: median(durations[r["id"]]))
                         else:
                             winner = rows[0]
                         a.winners[key] = winner, durations
@@ -141,7 +130,12 @@ class Call:
 
     def tuning_report(self):
         from runtime.kir.binding.selection import selection
-        return selection(self.artifact.data, self.selected["id"] if self.selected else None, self.timings)
+
+        return selection(
+            self.artifact.data,
+            self.selected["id"] if self.selected else None,
+            self.timings,
+        )
 
     def result(self):
         return self.outputs[0] if len(self.outputs) == 1 else self.outputs

@@ -3,6 +3,87 @@
 #include "intentdsl/levels/execution/block/decisions/Verify.h"
 using namespace mlir;
 namespace intentdsl::dsa {
+namespace {
+// Each slot has one producer and one consuming interval per iteration.
+// A lookahead copy targets the other slot only after the current slot is ready.
+bool legalSchedule(Block &schedule, int64_t depth, StringRef source) {
+  auto it = schedule.begin();
+  auto take = [](Block &block, Block::iterator &pos,
+                 StringRef code) -> Operation * {
+    if (pos == block.end() || pos->getName().getStringRef() != code)
+      return nullptr;
+    return &*pos++;
+  };
+  auto *r = take(schedule, it, "dsa.range"),
+       *z = take(schedule, it, "dsa.slot_zero");
+  if (!r || !z || r->getAttrOfType<StringAttr>("source") != source)
+    return false;
+  auto initial = z->getResult(0), limit = r->getResult(1),
+       step = r->getResult(2);
+  auto accepts = [](Operation *op, ValueRange values) {
+    return op && llvm::equal(op->getOperands(), values);
+  };
+  if (depth == 2 && !accepts(take(schedule, it, "dsa.issue_if_in_bounds"),
+                             {r->getResult(0), limit, initial}))
+    return false;
+  auto *loop = take(schedule, it, "dsa.iterate");
+  if (!accepts(loop, {r->getResult(0), limit, step, initial}) ||
+      !take(schedule, it, "dsa.end") || it != schedule.end() ||
+      !llvm::hasSingleElement(loop->getRegion(0)))
+    return false;
+  auto &body = loop->getRegion(0).front();
+  if (body.getNumArguments() != 2)
+    return false;
+  auto pos = body.getArgument(0), slot = body.getArgument(1);
+  Value nextSlot = slot;
+  auto cursor = body.begin();
+  if (depth == 2) {
+    if (!accepts(take(body, cursor, "dsa.wait_slot"), slot))
+      return false;
+    auto *next = take(body, cursor, "dsa.next"),
+         *flip = take(body, cursor, "dsa.other_slot");
+    if (!accepts(next, {pos, step}) || !accepts(flip, slot))
+      return false;
+    nextSlot = flip->getResult(0);
+    if (!accepts(take(body, cursor, "dsa.issue_if_in_bounds"),
+                 {next->getResult(0), limit, nextSlot}))
+      return false;
+  } else if (!accepts(take(body, cursor, "dsa.issue_if_in_bounds"),
+                      {pos, limit, slot}))
+    return false;
+  return accepts(take(body, cursor, "dsa.compute_members"), {pos, slot}) &&
+         accepts(take(body, cursor, "dsa.advance"), nextSlot) &&
+         cursor == body.end();
+}
+bool access(Operation *op, unsigned mask, Operation &window, func::FuncOp fn,
+            const llvm::json::Array &abi) {
+  if (op->getOperand(mask) != window.getResult(2))
+    return false;
+  auto coords = op->getOperands().drop_front(mask + 1);
+  auto view = dyn_cast<BlockArgument>(op->getOperand(0));
+  auto domain = dyn_cast<BlockArgument>(window.getOperand(0));
+  if (!view || !domain || view.getOwner() != &fn.front() ||
+      domain.getOwner() != &fn.front())
+    return false;
+  auto dims = [&](BlockArgument a) -> const llvm::json::Array * {
+    auto *s = abi[a.getArgNumber()].getAsObject();
+    return s ? s->getArray("dims") : nullptr;
+  };
+  auto *actual = dims(view), *logical = dims(domain);
+  if (!actual || !logical || logical->size() != 2 ||
+      actual->size() != coords.size())
+    return false;
+  llvm::SmallDenseSet<unsigned> seen;
+  for (auto [i, v] : llvm::enumerate(coords)) {
+    auto axis = dyn_cast<OpResult>(v);
+    if (!axis || axis.getOwner() != &window || axis.getResultNumber() > 1 ||
+        !seen.insert(axis.getResultNumber()).second ||
+        (*actual)[i] != (*logical)[axis.getResultNumber()])
+      return false;
+  }
+  return true;
+}
+} // namespace
 LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
                             bool supplied) {
   auto fs = m.getOps<func::FuncOp>();
@@ -40,6 +121,25 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
   };
   if (!supplied)
     return verifyLayout();
+  auto sig = fn->getAttrOfType<StringAttr>("kir.abi");
+  if (!sig)
+    return fn.emitError("missing access contract");
+  auto parsed = llvm::json::parse(sig.getValue());
+  if (!parsed) {
+    llvm::consumeError(parsed.takeError());
+    return failure();
+  }
+  auto *abi = parsed->getAsArray();
+  if (!abi || abi->size() != fn.getNumArguments())
+    return failure();
+  auto idx = fn->getAttrOfType<IntegerAttr>("block.domain_arg");
+  if (!idx || idx.getInt() < 0 || idx.getInt() >= fn.getNumArguments())
+    return fn.emitError("missing member domain");
+  bool resident = fn->getAttrOfType<StringAttr>("block.topology") == "resident";
+  if (!resident &&
+      (fn.front().getOperations().size() != 2 ||
+       fn.front().front().getName().getStringRef() != "dsa.task_groups"))
+    return fn.emitError("stream phases require strided task ownership");
   unsigned count = 0;
   auto walk = fn.walk([&](Operation *o) {
     if (o->getName().getStringRef() != "dsa.phase")
@@ -60,19 +160,49 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
                      ? "instances"
                      : "columns"))
       return WalkResult::interrupt();
+    if (!legalSchedule(o->getRegion(2).front(), depth,
+                       resident ? "participant_stride" : "tile_extent"))
+      return WalkResult::interrupt();
+    for (auto *window : {&fetch.front(), &body.front()})
+      if (window->getName().getStringRef() != "dsa.window" ||
+          window->getOperand(0) != fn.getArgument(idx.getInt()))
+        return WalkResult::interrupt();
+    auto windowType =
+        cast<RankedTensorType>(body.front().getResult(2).getType());
+    if (windowType.getRank() != 2 ||
+        body.front().getResultTypes() != fetch.front().getResultTypes())
+      return WalkResult::interrupt();
+    SmallVector<Value> writes;
+    for (auto &item : body) {
+      auto name = item.getName().getStringRef();
+      if (name == "dsa.write_back") {
+        if (!access(&item, 2, body.front(), fn, *abi))
+          return WalkResult::interrupt();
+        writes.push_back(item.getResult(0));
+      }
+      if (name == "dsa.reduce" &&
+          (item.getOperand(1) != body.front().getResult(2) ||
+           !isa<RankedTensorType>(item.getOperand(0).getType()) ||
+           cast<RankedTensorType>(item.getOperand(0).getType()).getShape() !=
+               windowType.getShape()))
+        return WalkResult::interrupt();
+    }
     auto &issued = fetch.back();
     if (issued.getName().getStringRef() != "dsa.issued" ||
-        body.back().getName().getStringRef() != "dsa.yield" ||
+        body.back().getName().getStringRef() != "dsa.complete" ||
         !body.back().getPrevNode() ||
         body.back().getPrevNode()->getName().getStringRef() != "dsa.drain" ||
+        !llvm::equal(body.back().getPrevNode()->getOperands(), writes) ||
+        body.back().getOperand(0) != body.back().getPrevNode()->getResult(0) ||
         body.getNumArguments() != issued.getNumOperands() + o->getNumResults())
       return WalkResult::interrupt();
     if (std::distance(fetch.begin(), fetch.end()) !=
-            issued.getNumOperands() + 1 ||
+            issued.getNumOperands() + 2 ||
         o->getNumOperands() != o->getNumResults() ||
-        !llvm::equal(o->getResultTypes(), body.back().getOperandTypes()))
+        !llvm::equal(o->getResultTypes(),
+                     body.back().getOperands().drop_front().getTypes()))
       return WalkResult::interrupt();
-    auto transfer = fetch.begin();
+    auto transfer = std::next(fetch.begin());
     for (auto [i, arg] : llvm::enumerate(issued.getOperands())) {
       auto *def = arg.getDefiningOp();
       auto in = body.getArgument(i);
@@ -81,12 +211,7 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
           arg.getType() != in.getType() || !in.hasOneUse() ||
           in.use_begin()->getOwner()->getName().getStringRef() != "dsa.await")
         return WalkResult::interrupt();
-      auto projection =
-          intentdsl::block::projection(def->getOperand(0).getType());
-      if (failed(projection) ||
-          def->getAttr("matrix") !=
-              b.getBoolAttr(*projection ==
-                            intentdsl::block::RowProjection::Matrix))
+      if (!access(def, 1, fetch.front(), fn, *abi))
         return WalkResult::interrupt();
     }
     return WalkResult::advance();

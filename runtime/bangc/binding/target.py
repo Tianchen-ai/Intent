@@ -1,5 +1,6 @@
 """Local CNRT device facts for the BANG C exit."""
 
+from math import prod
 import ctypes as C
 from functools import lru_cache
 import torch
@@ -31,8 +32,10 @@ class Target:
     def specialize(self, device, values):
         if device.type != "mlu":
             raise ValueError("BANG C requires inputs on a local MLU")
-        x = next(v for v in values if isinstance(v, torch.Tensor) and v.ndim == 2)
-        return device, tuple(x.shape)
+        x = next(v for v in values if isinstance(v, torch.Tensor))
+        if not 1 <= x.ndim <= 4:
+            raise ValueError("MLU member domain supports ranks one through four")
+        return device, (prod(x.shape[:-1]), x.shape[-1])
 
     def options(self, device, shape):
         return dict(**facts(device.index), observed_width=shape[1])

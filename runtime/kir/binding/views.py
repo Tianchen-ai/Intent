@@ -45,7 +45,9 @@ class Signature:
             if view.dtype != arg["dtype"] or len(view.shape) != len(arg["dims"]):
                 raise ValueError(f"invalid view for {arg['name']}")
             for axis, n in zip(arg["dims"], view.shape):
-                if shapes.setdefault(axis, n) != n:
+                if (isinstance(axis, int) and n != axis) or shapes.setdefault(
+                    axis, n
+                ) != n:
                     raise ValueError(f"inconsistent dimension {axis}")
             return view
 
@@ -53,11 +55,19 @@ class Signature:
             if arg["direction"] == "Scalar":
                 if not isinstance(value, (int, float)):
                     raise TypeError("expected a host scalar")
-                value = float(value)
+                if arg["dtype"] == "i32":
+                    if not isinstance(value, int) or not -(1 << 31) <= value < (
+                        1 << 31
+                    ):
+                        raise ValueError("scalar outside i32")
+                else:
+                    value = float(value)
             else:
                 view = check(arg, value)
                 if device is not None and device != view.device:
                     raise ValueError("arguments span devices")
+                if arg["direction"] == "InOut":
+                    self.require_writable(view)
                 allocator = allocator or adapter(value)
                 device = view.device
             bound[arg["name"]] = value
@@ -77,21 +87,34 @@ class Signature:
             view = check(arg, y)
             if view.device != device or not view.writable:
                 raise ValueError("output device or write permissions differ")
-            dims = [(n, abs(s)) for n, s in zip(view.shape, view.strides) if n > 1]
-            conflict = any(s == 0 for _, s in dims)
-            if len(dims) == 2 and not conflict:
-                (m, a), (n, b) = dims
-                g = gcd(a, b)
-                conflict = m > b // g and n > a // g
-            if prod(view.shape) and (
-                conflict
-                or any(
-                    adapter(y).overlaps(y, bound[a["name"]])
-                    for a in self.args
-                    if a["name"] in bound and a["direction"] != "Scalar"
-                )
+            self.require_writable(view)
+            if prod(view.shape) and any(
+                adapter(y).overlaps(y, bound[a["name"]])
+                for a in self.args
+                if a["name"] in bound and a["direction"] != "Scalar"
             ):
-                raise ValueError("row kernel needs nonoverlapping writable storage")
-            result.append(y)
+                raise ValueError("independent Out overlaps a bound argument")
             bound[arg["name"]] = y
+        result = [
+            bound[a["name"]] for a in self.args if a["direction"] in ("Out", "InOut")
+        ]
         return tuple(bound[a["name"]] for a in self.args), result, device
+
+    @staticmethod
+    def require_writable(view):
+        dims = [(n, abs(s)) for n, s in zip(view.shape, view.strides) if n > 1]
+        conflict = any(s == 0 for _, s in dims)
+        if len(dims) == 2 and not conflict:
+            (m, a), (n, b) = dims
+            g = gcd(a, b)
+            conflict = m > b // g and n > a // g
+        if len(dims) > 2:
+            span = 1
+            for n, s in sorted(dims, key=lambda t: t[1]):
+                if s < span:
+                    conflict = True
+                span += (n - 1) * s
+        if prod(view.shape) and (conflict or not view.writable):
+            raise ValueError(
+                "parallel writable view has overlapping or unverified members"
+            )

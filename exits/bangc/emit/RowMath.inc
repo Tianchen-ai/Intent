@@ -46,4 +46,62 @@ __mlu_func__ void row_exp(float *out, const float *in, int live, int lanes) {
     }
   }
 }
+
+__mlu_func__ unsigned short round_half_bits(float numerator,float divisor) {
+  union {float f; unsigned u;} quotient, left, right;
+  left.f=numerator; right.f=divisor;
+  quotient.f=__cn_scalar_div_f32_rn(numerator,divisor);
+  unsigned mag=quotient.u & 0x7fffffff,sign=((left.u^right.u)>>16)&0x8000;
+  if(mag>=0x7f800000)return sign|(mag==0x7f800000?0x7c00:0x7e00);
+  if(mag>=0x477ff000)return sign|0x7c00;
+  if(mag<0x33000000)return sign;
+  unsigned exp=mag>>23;
+  unsigned shift=exp<113?126-exp:13;
+  unsigned mant=exp<113?((mag&0x7fffff)|0x800000):mag-0x38000000;
+  unsigned base=mant>>shift, remainder=mant&((1u<<shift)-1);
+  unsigned halfWay=1u<<(shift-1);
+  return sign|(base+(remainder>halfWay || (remainder==halfWay && (base&1))));
+}
+__mlu_func__ void row_exact_half(half *out, float *tmp,const float *x,float d,int live,int lanes) {
+  for(int k=0;k<live;++k)tmp[k]=__cn_scalar_div_f32_rn(x[k],d);
+  __bang_float2half_rn(out,tmp,lanes);
+  __sync_compute();
+  union {float f; unsigned bits;} den;den.f=d;
+  for(int k=0;k<live;++k){
+    if((((volatile unsigned short*)out)[k]&0x7fff)==0){
+      union {float f; unsigned bits;} num;num.bits=((const volatile unsigned*)x)[k];
+      ((volatile unsigned short*)out)[k]=(num.bits^den.bits)>>16 & 0x8000;
+    }
+  }
+}
+// For 1 <= d <= 2^20 the reciprocal is normal. Two FP32 RN operations
+// (reciprocal and multiply) differ from RN(x/d) by at most four adjacent
+// float representations, including binade transitions. Underflow in this
+// domain rounds to signed half zero. Compare the endpoint encodings as bits:
+// equal endpoints certify the final half rounding; ambiguous lanes use x/d.
+__mlu_func__ void row_narrow_quotient(half *out,float *q,float *tmp,
+                                      const float *x,float d,int live,int lanes) {
+  if (!(d >= 1.0f && d <= 1048576.0f)) {
+    row_exact_half(out,tmp,x,d,live,lanes);
+    return;
+  }
+  __bang_mul_scalar(q,x,__cn_scalar_div_f32_rn(1.f,d),lanes);
+  __bang_add_scalar((int*)tmp,(const int*)q,-4,lanes);
+  __bang_float2half_rn(out,tmp,lanes);
+  __bang_add_scalar((int*)q,(const int*)q,4,lanes);
+  half *upper=(half*)tmp;
+  __bang_float2half_rn(upper,q,lanes);
+  __bang_bxor((short*)upper,(short*)upper,(short*)out,lanes);
+  __bang_int162float(q,(const short*)upper,lanes,0);
+  unsigned ambiguous=__bang_count(q,live);
+  if(ambiguous>16) {
+    row_exact_half(out,tmp,x,d,live,lanes);
+    return;
+  }
+  for(unsigned k=0;k<ambiguous;++k) {
+    unsigned i=__bang_findfirst1(q,live);
+    ((volatile unsigned short*)out)[i]=round_half_bits(x[i],d);
+    ((volatile float*)q)[i]=0;
+  }
+}
 )mlu"

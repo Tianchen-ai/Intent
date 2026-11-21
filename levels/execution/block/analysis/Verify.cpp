@@ -74,8 +74,26 @@ LogicalResult verifyMapping(ModuleOp m,const compilerinfra::TargetProfile &p,Str
       auto v=op->getOperand(0);
       ok=topology=="resident"?def(v,"zero"):isa<BlockArgument>(v) && cast<BlockArgument>(v).getArgNumber()==0 && v.getParentBlock()->getParentOp()->getName().stripDialect()=="tiles";
     }
-    if(n=="active" || (dialect=="block" && (n=="load" || n=="store")))
+    if(n=="active")
       ok=def(op->getOperand(1),"rows") && def(op->getOperand(2),"columns");
+    if(dialect=="block" && (n=="load" || n=="store")){
+      auto mask=op->getOperand(3).getDefiningOp();
+      if(!mask || !def(op->getOperand(3),"active") || mask->getBlock()!=op->getBlock())return op->emitError("access requires local validity domain"),WalkResult::interrupt();
+      auto r=mask->getOperand(1),c=mask->getOperand(2);
+      bool reversed=op->getOperand(1)==c && op->getOperand(2)==r;
+      ok=(op->getOperand(1)==r && op->getOperand(2)==c) || reversed;
+      auto slot=dyn_cast<BlockArgument>(op->getOperand(0));
+      if(!slot || slot.getOwner()!=&f.front())return WalkResult::interrupt();
+      auto sig=f->getAttrOfType<StringAttr>("kir.abi");if(!sig)return WalkResult::interrupt();
+      auto abi=llvm::json::parse(sig.getValue());
+      if(!abi){llvm::consumeError(abi.takeError());return WalkResult::interrupt();}
+      auto *entries=abi->getAsArray();if(!entries || entries->size()!=f.getNumArguments())return WalkResult::interrupt();
+      auto dims=[&](unsigned i){auto *d=(*entries)[i].getAsObject();return d?d->getArray("dims"):nullptr;};
+      auto *a=dims(slot.getArgNumber()),*d=dims(domainIndex.getInt());
+      if(!a || !d || d->size()!=2 || (a->size()!=1 && a->size()!=2))return WalkResult::interrupt();
+      if(a->size()==2)ok &= ((*a)[0]==(*d)[reversed?1:0] && (*a)[1]==(*d)[reversed?0:1]);
+      else ok &= !reversed && (*a)[0]==(*d)[1];
+    }
     if(n=="active" || n=="tiles"){
       if (op->getOperand(0)!=domain) return op->emitError("expected the bound matrix domain"), WalkResult::interrupt();
     }

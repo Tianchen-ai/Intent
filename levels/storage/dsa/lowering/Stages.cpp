@@ -14,6 +14,37 @@ Operation *inst(OpBuilder &b, Location l, StringRef name, ValueRange args = {},
   s.addAttributes(attrs);
   return b.create(s);
 }
+void schedule(Block *entry, bool stream, int64_t depth, OpBuilder &b,
+              Location loc) {
+  b.setInsertionPointToEnd(entry);
+  auto idx = b.getIndexType();
+  auto range = inst(
+      b, loc, "dsa.range", {}, {idx, idx, idx},
+      b.getNamedAttr("source", b.getStringAttr(stream ? "tile_extent"
+                                                      : "participant_stride")));
+  auto init = inst(b, loc, "dsa.slot_zero", {}, idx)->getResult(0);
+  auto lo = range->getResult(0), end = range->getResult(1),
+       step = range->getResult(2);
+  if (depth == 2)
+    inst(b, loc, "dsa.issue_if_in_bounds", {lo, end, init});
+  OperationState loop(loc, "dsa.iterate");
+  loop.addOperands({lo, end, step, init});
+  loop.addRegion();
+  auto *body = b.createBlock(&b.create(loop)->getRegion(0));
+  Value pos = body->addArgument(idx, loc), slot = body->addArgument(idx, loc),
+        nextSlot = slot;
+  if (depth == 2) {
+    inst(b, loc, "dsa.wait_slot", slot);
+    auto next = inst(b, loc, "dsa.next", {pos, step}, idx)->getResult(0);
+    nextSlot = inst(b, loc, "dsa.other_slot", slot, idx)->getResult(0);
+    inst(b, loc, "dsa.issue_if_in_bounds", {next, end, nextSlot});
+  } else
+    inst(b, loc, "dsa.issue_if_in_bounds", {pos, end, slot});
+  inst(b, loc, "dsa.compute_members", {pos, slot});
+  inst(b, loc, "dsa.advance", nextSlot);
+  b.setInsertionPointToEnd(entry);
+  inst(b, loc, "dsa.end");
+}
 LogicalResult phase(Operation *anchor, Block &source, bool stream,
                     int64_t depth, RewriterBase &b) {
   b.setInsertionPoint(anchor);
@@ -30,9 +61,35 @@ LogicalResult phase(Operation *anchor, Block &source, bool stream,
   }
   ps.addRegion();
   ps.addRegion();
+  ps.addRegion();
   auto *p = b.create(ps);
   auto *fetch = b.createBlock(&p->getRegion(0));
   auto *calc = b.createBlock(&p->getRegion(1));
+  schedule(b.createBlock(&p->getRegion(2)), stream, depth, b, loc);
+  Operation *active = nullptr;
+  for (auto &op : source)
+    if (op.getName().getStringRef() == "block.active")
+      active = &op;
+  if (!active)
+    return p->emitError("missing block validity domain");
+  auto window = [&](Block *where) {
+    b.setInsertionPointToEnd(where);
+    return inst(b, loc, "dsa.window", active->getOperand(0),
+                {active->getOperand(1).getType(),
+                 active->getOperand(2).getType(),
+                 active->getResult(0).getType()});
+  };
+  auto *readWindow = window(fetch), *writeWindow = window(calc);
+  auto coords = [&](Operation *op, Operation *w) {
+    SmallVector<Value> axes;
+    for (auto v : op->getOperands().slice(1, 2)) {
+      if (v == active->getOperand(1))
+        axes.push_back(w->getResult(0));
+      else if (v == active->getOperand(2))
+        axes.push_back(w->getResult(1));
+    }
+    return axes;
+  };
   SmallVector<Value> reads;
   IRMapping map;
   SmallVector<Operation *> old;
@@ -47,11 +104,14 @@ LogicalResult phase(Operation *anchor, Block &source, bool stream,
     if (failed(projection))
       return op->emitError("cannot stage unprojected view");
     b.setInsertionPointToEnd(fetch);
-    auto *copy = inst(
-        b, loc, "dsa.copy_in", view, op->getResultTypes(),
-        b.getNamedAttr("matrix",
-                       b.getBoolAttr(*projection ==
-                                     intentdsl::block::RowProjection::Matrix)));
+    auto axes = coords(op, readWindow);
+    if (axes.size() != 2 || op->getOperand(3) != active->getResult(0))
+      return op->emitError("mismatched access domain");
+    SmallVector<Value> address{view, readWindow->getResult(2)};
+    if (*projection == intentdsl::block::RowProjection::Matrix)
+      address.push_back(axes[0]);
+    address.push_back(axes[1]);
+    auto *copy = inst(b, loc, "dsa.copy_in", address, op->getResultTypes());
     reads.push_back(copy->getResult(0));
     b.setInsertionPointToEnd(calc);
     auto pending = calc->addArgument(copy->getResult(0).getType(), loc);
@@ -65,7 +125,7 @@ LogicalResult phase(Operation *anchor, Block &source, bool stream,
   if (stream && p->getNumResults())
     map.map(source.getArgument(1),
             calc->addArgument(p->getResult(0).getType(), loc));
-  SmallVector<Value> yields;
+  SmallVector<Value> yields, completions;
   for (auto *op : old) {
     auto code = op->getName().stripDialect();
     if (code == "pid" || code == "rows" || code == "columns" ||
@@ -76,19 +136,28 @@ LogicalResult phase(Operation *anchor, Block &source, bool stream,
       return map.lookupOrDefault(op->getOperand(i));
     };
     if (code == "reduce") {
-      auto r = inst(b, loc, "dsa.reduce", val(0), op->getResultTypes(),
-                    op->getAttrs());
+      auto r = inst(b, loc, "dsa.reduce", {val(0), writeWindow->getResult(2)},
+                    op->getResultTypes(), op->getAttrs());
       map.map(op->getResult(0), r->getResult(0));
-    } else if (code == "store")
-      inst(b, loc, "dsa.write_back", {val(0), val(4)});
-    else if (code == "yield") {
+    } else if (code == "store") {
+      auto axes = coords(op, writeWindow);
+      if (axes.size() != 2 || op->getOperand(3) != active->getResult(0))
+        return op->emitError("inconsistent write domain");
+      auto *store =
+          inst(b, loc, "dsa.write_back",
+               {val(0), val(4), writeWindow->getResult(2), axes[0], axes[1]},
+               b.getI1Type(), b.getNamedAttr("async", b.getBoolAttr(false)));
+      completions.push_back(store->getResult(0));
+    } else if (code == "yield") {
       for (auto v : op->getOperands())
         yields.push_back(map.lookupOrDefault(v));
     } else
       b.clone(*op, map);
   }
-  inst(b, loc, "dsa.drain");
-  inst(b, loc, "dsa.yield", yields);
+  auto done =
+      inst(b, loc, "dsa.drain", completions, b.getI1Type())->getResult(0);
+  yields.insert(yields.begin(), done);
+  inst(b, loc, "dsa.complete", yields);
   if (stream)
     b.replaceOp(anchor, p->getResults());
   else
@@ -123,6 +192,16 @@ llvm::Error stageTransfers(Operation *op, Attribute a,
       if (item.use_empty() && (item.getName().getStringRef() == "block.rows" ||
                                item.getName().getStringRef() == "block.pid"))
         b.eraseOp(&item);
+    b.setInsertionPointToStart(&fn.front());
+    OperationState gs(fn.getLoc(), "dsa.task_groups");
+    gs.addRegion();
+    auto *groups = b.create(gs);
+    auto *group = b.createBlock(&groups->getRegion(0));
+    for (auto &op : llvm::make_early_inc_range(fn.front().without_terminator()))
+      if (&op != groups)
+        op.moveBefore(group, group->end());
+    b.setInsertionPointToEnd(group);
+    inst(b, fn.getLoc(), "dsa.end");
   }
   fn->setAttr("dsa.layout", decision);
   fn->removeAttr("dsa.pending");

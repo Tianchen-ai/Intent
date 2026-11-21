@@ -57,9 +57,9 @@ class Native:
         types = []
         for arg in abi:
             if arg["dims"]:
-                types += [C.c_void_p, *([C.c_int64] * len(arg["dims"]))]
+                types += [C.c_void_p, *([C.c_int64] * (2 * len(arg["dims"])))]
             else:
-                types.append(C.c_float)
+                types.append(C.c_int32 if arg["dtype"] == "i32" else C.c_float)
         self.launch.argtypes = [
             *types,
             C.c_int64,

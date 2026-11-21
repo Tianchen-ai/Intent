@@ -8,15 +8,6 @@ from runtime.cutile.launch.dispatcher import BoundKernel
 from runtime.block.binding.grid import accepts, grid
 
 
-def trial_output(view):
-    # Preserve alignment specialization even for a sliced user's Out.
-    item = view.element_size()
-    span = 1 + sum((n - 1) * s for n, s in zip(view.shape, view.stride()))
-    storage = torch.empty(span + 256 // item, dtype=view.dtype, device=view.device)
-    offset = ((view.data_ptr() - storage.data_ptr()) % 256) // item
-    return storage.as_strided(view.shape, view.stride(), offset)
-
-
 class Artifact:
     def __init__(self, data):
         if version("cuda-tile").split(".")[:2] != ["1", "6"]:
@@ -102,28 +93,47 @@ class Call:
                         if len(self.candidates) == 1:
                             winner = next(iter(self.candidates))
                         else:
-                            # Both supported programs only write disjoint Out buffers.
-                            trials = tuple(
-                                (
-                                    trial_output(v)
-                                    if any(v is o for o in self.outputs)
-                                    else v
+                            from runtime.kir.binding.trials import (
+                                TrialBindings,
+                                cuda_trials,
+                            )
+                            from statistics import median
+
+                            trials = TrialBindings(self.values, a.data["abi"])
+                            if trials.restores:
+                                for i, (row, kernel) in self.candidates.items():
+                                    self.timings[i] = cuda_trials(
+                                        trials,
+                                        stream,
+                                        lambda: ct.launch(
+                                            stream,
+                                            self.grid(row),
+                                            kernel,
+                                            self.args(row, trials.values),
+                                        ),
+                                    )
+                                winner = min(
+                                    self.candidates,
+                                    key=lambda i: median(self.timings[i]),
                                 )
-                                for v in self.values
-                            )
-                            result = exhaustive_search(
-                                tuple(self.candidates),
-                                stream,
-                                lambda i: self.grid(self.candidates[i][0]),
-                                lambda i: self.candidates[i][1],
-                                lambda i: self.args(self.candidates[i][0], trials),
-                                quiet=True,
-                            )
-                            self.failures.update(
-                                (i, msg) for i, _, msg in result.failures
-                            )
-                            winner = result.best.config
-                            self.timings = {m.config: [m.mean_us] for m in result.successes}
+                            else:
+                                result = exhaustive_search(
+                                    tuple(self.candidates),
+                                    stream,
+                                    lambda i: self.grid(self.candidates[i][0]),
+                                    lambda i: self.candidates[i][1],
+                                    lambda i: self.args(
+                                        self.candidates[i][0], trials.values
+                                    ),
+                                    quiet=True,
+                                )
+                                self.failures.update(
+                                    (i, msg) for i, _, msg in result.failures
+                                )
+                                winner = result.best.config
+                                self.timings = {
+                                    m.config: [m.mean_us] for m in result.successes
+                                }
                         a.winners[key] = winner, self.timings
                     winner, self.timings = a.winners[key]
                     self.selected = self.candidates[winner]
@@ -135,8 +145,13 @@ class Call:
 
     def tuning_report(self):
         from runtime.kir.binding.selection import selection
-        times = {r["id"]: self.timings.get(r["id"], []) for r in self.artifact.data["rows"]}
-        return selection(self.artifact.data, self.selected[0]["id"] if self.selected else None, times)
+
+        times = {
+            r["id"]: self.timings.get(r["id"], []) for r in self.artifact.data["rows"]
+        }
+        return selection(
+            self.artifact.data, self.selected[0]["id"] if self.selected else None, times
+        )
 
     def result(self):
         return self.outputs[0] if len(self.outputs) == 1 else self.outputs

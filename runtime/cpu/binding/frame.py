@@ -54,9 +54,11 @@ class NativeBinding:
     def check_status(self, status, arguments=None):
         if status:
             actual = self.arguments if arguments is None else arguments
-            geometry = tuple(x.value for x in actual[self.geometry_offset:])
-            raise RuntimeError(f"{self.function.__name__} failed with native status {status}, "
-                               f"shape, grain, columns and workers={geometry}")
+            geometry = tuple(x.value for x in actual[self.geometry_offset :])
+            raise RuntimeError(
+                f"{self.function.__name__} failed with native status {status}, "
+                f"shape, grain, columns and workers={geometry}"
+            )
 
 
 class HostVariants:
@@ -104,26 +106,27 @@ class HostVariants:
             )
             with self.artifact.lock:
                 if key not in self.artifact.winners:
-                    from runtime.kir.binding.views import adapter
+                    from runtime.kir.binding.trials import TrialBindings
 
-                    shadow = [
-                        adapter(x).trial(x) if any(x is y for y in self.outputs) else x
-                        for x in self.bound.owners
-                    ]
+                    shadow = TrialBindings(self.bound.owners, self.artifact.data["abi"])
                     trials = self.bind_rows(
                         self.entries[0].function,
-                        frame(shadow, self.artifact.data["abi"]),
+                        frame(shadow.values, self.artifact.data["abi"]),
                     )
                     timings = []
                     for call in trials:
+                        shadow.reset()
                         call.launch()
                         samples = []
                         for _ in range(3):
+                            shadow.reset()
                             start = perf_counter_ns()
                             call.launch()
                             samples.append(perf_counter_ns() - start)
                         timings.append([ns / 1000 for ns in samples])
-                    winner = min(range(len(timings)), key=lambda i: sorted(timings[i])[1])
+                    winner = min(
+                        range(len(timings)), key=lambda i: sorted(timings[i])[1]
+                    )
                     self.artifact.winners[key] = winner, dict(enumerate(timings))
                 self.winner, self.timings = self.artifact.winners[key]
                 self.selected = self.entries[self.winner]
@@ -131,6 +134,7 @@ class HostVariants:
 
     def tuning_report(self):
         from runtime.kir.binding.selection import selection
+
         return selection(self.artifact.data, self.winner, self.timings)
 
     def compilation_report(self):

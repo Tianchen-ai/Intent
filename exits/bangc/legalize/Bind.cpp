@@ -6,8 +6,43 @@ using namespace compilerinfra;
 llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &);
 llvm::Error emit(ModuleOp, llvm::raw_pwrite_stream &);
 namespace {
+// A preceding collective releases its scratch before the division. A second
+// consumer of the FP32 quotient would require a separately rounded FP32 value.
+Operation *availableCollective(Operation *op) {
+  for (auto *prev = op->getPrevNode(); prev; prev = prev->getPrevNode())
+    if (prev->getName().getStringRef() == "dsa.reduce")
+      return prev;
+  return nullptr;
+}
+bool narrowedQuotient(Operation *div) {
+  if (!div || div->getName().getStringRef() != "block.div" ||
+      !div->hasOneUse() || !availableCollective(div))
+    return false;
+  auto *castOp = *div->getUsers().begin();
+  if (castOp->getName().getStringRef() != "block.cast" ||
+      castOp->getBlock() != div->getBlock())
+    return false;
+  auto lhs = dyn_cast<RankedTensorType>(div->getOperand(0).getType());
+  auto rhs = div->getOperand(1).getType();
+  auto scalar = dyn_cast<RankedTensorType>(rhs);
+  auto out = dyn_cast<RankedTensorType>(castOp->getResult(0).getType());
+  return lhs && lhs.getRank() == 2 && lhs.getElementType().isF32() &&
+         (rhs.isF32() || (scalar && scalar.getRank() == 1 &&
+                          scalar.getElementType().isF32())) &&
+         out && out.getElementType().isF16();
+}
 StringRef primitive(Operation *op, int64_t depth) {
   auto n = op->getName().getStringRef();
+  if (n == "block.div" && narrowedQuotient(op))
+    return "quotient_for_narrow";
+  if (n == "block.cast" && narrowedQuotient(op->getOperand(0).getDefiningOp()))
+    return "certified_half_quotient";
+  if (n == "dsa.window" || n == "dsa.task_groups" || n == "dsa.range" ||
+      n == "dsa.slot_zero" || n == "dsa.next" || n == "dsa.other_slot" ||
+      n == "dsa.issue_if_in_bounds" || n == "dsa.wait_slot" ||
+      n == "dsa.compute_members" || n == "dsa.iterate" || n == "dsa.advance" ||
+      n == "dsa.end" || n == "dsa.complete")
+    return op->getName().stripDialect();
   if (n == "dsa.phase")
     return "block_tasks";
   if (n == "dsa.copy_in")
@@ -15,7 +50,9 @@ StringRef primitive(Operation *op, int64_t depth) {
   if (n == "dsa.await")
     return depth == 2 ? "wait_slot" : "ready";
   if (n == "dsa.write_back")
-    return "store_extent";
+    return op->getAttrOfType<BoolAttr>("async").getValue()
+               ? "async_store_extent"
+               : "store_extent";
   if (n == "dsa.drain")
     return "drain_writes";
   if (n == "dsa.issued" || n == "dsa.yield")
@@ -49,6 +86,8 @@ LogicalResult offsets(func::FuncOp f, bool install) {
       return o.getAttr("bangc.offset") == address;
     };
     for (auto &o : p->getRegion(0).front().without_terminator()) {
+      if (o.getName().getStringRef() == "dsa.window")
+        continue;
       if (o.getName().getStringRef() != "dsa.copy_in" || !attach(o, grouped, 0))
         return WalkResult::interrupt();
       grouped +=
@@ -108,6 +147,10 @@ struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
         return;
       }
       o->setAttr("bangc.primitive", b.getStringAttr(p));
+      if (p == "certified_half_quotient")
+        o->setAttr("bangc.scratch",
+                   availableCollective(o->getOperand(0).getDefiningOp())
+                       ->getAttr("bangc.offset"));
     });
   }
 };
@@ -129,12 +172,17 @@ LogicalResult callable(func::FuncOp fn) {
     auto t = view ? view.getElementType() : value.getType();
     int rank = view ? view.getRank() : 0;
     if (!slot || !slot->getArray("dims") ||
-        slot->getArray("dims")->size() != unsigned(rank) || rank > 2 ||
-        (!t.isF32() && !t.isF16()) ||
-        slot->getString("dtype") != (t.isF16() ? "f16" : "f32") ||
+        slot->getArray("dims")->size() != unsigned(rank) || rank > 4 ||
+        (!t.isF32() && !t.isF16() && !t.isBF16() && !t.isInteger(32)) ||
+        slot->getString("dtype") != (t.isF16()         ? "f16"
+                                     : t.isBF16()      ? "bf16"
+                                     : t.isInteger(32) ? "i32"
+                                                       : "f32") ||
         (view ? (slot->getString("direction") != "In" &&
-                 slot->getString("direction") != "Out")
-              : (slot->getString("direction") != "Scalar" || !t.isF32())))
+                 slot->getString("direction") != "Out" &&
+                 slot->getString("direction") != "InOut")
+              : (slot->getString("direction") != "Scalar" ||
+                 (!t.isF32() && !t.isInteger(32)))))
       return fn.emitError(
           "row ABI dtype, extent or direction inconsistent with function");
   }
@@ -144,8 +192,10 @@ LogicalResult callable(func::FuncOp fn) {
       return WalkResult::advance();
     auto v = dyn_cast<BlockArgument>(o->getOperand(0));
     if (!v || v.getOwner() != &fn.front() ||
-        (*args)[v.getArgNumber()].getAsObject()->getString("direction") !=
-            (read ? "In" : "Out")) {
+        ((*args)[v.getArgNumber()].getAsObject()->getString("direction") !=
+             "InOut" &&
+         (*args)[v.getArgNumber()].getAsObject()->getString("direction") !=
+             (read ? "In" : "Out"))) {
       o->emitError("native transfer conflicts with public slot direction");
       return WalkResult::interrupt();
     }
@@ -181,6 +231,11 @@ LogicalResult verify(ModuleOp m, const TargetProfile &p, unsigned stage) {
           if (o->getName().getDialectNamespace() == "func")
             return WalkResult::advance();
           auto k = primitive(o, depth);
+          if (k == "certified_half_quotient" &&
+              o->getAttr("bangc.scratch") !=
+                  availableCollective(o->getOperand(0).getDefiningOp())
+                      ->getAttr("bangc.offset"))
+            return WalkResult::interrupt();
           if (k.empty() ||
               o->getAttrOfType<StringAttr>("bangc.primitive") != k) {
             o->emitError(

@@ -32,15 +32,15 @@ def signature(fn):
             direction = spelling(ann.value, owner)
             dims = list(ast.literal_eval(shape))
             if (
-                direction not in ("In", "Out")
+                direction not in ("In", "Out", "InOut")
                 or not dims
-                or not all(isinstance(x, str) for x in dims)
+                or not all(isinstance(x,str) or type(x) is int and x>=0 for x in dims)
             ):
                 raise ValueError(f"unsupported view annotation: {ast.unparse(ann)}")
         else:
             dtype, dims, direction = ann, [], "Scalar"
         dtype = spelling(dtype, owner)
-        if dtype not in ("f16", "f32"):
+        if dtype not in ("f16", "bf16", "f32", "i32"):
             raise ValueError(f"unsupported element type: {dtype}")
         args.append(dict(name=param.arg, dtype=dtype, dims=dims, direction=direction))
     return args
