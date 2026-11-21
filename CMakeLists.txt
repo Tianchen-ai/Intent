@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.22)
+find_package(CompilerInfra 0.2.0 EXACT REQUIRED CONFIG COMPONENTS Project)
+compilerinfra_project_name(product_name)
+project(${product_name} LANGUAGES C CXX)
+find_package(CompilerInfra 0.2.0 EXACT REQUIRED CONFIG)
+compilerinfra_product()
