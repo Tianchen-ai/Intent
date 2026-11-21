@@ -4,7 +4,7 @@
 
 namespace intentdsl {
 struct RowCapacity {
-  uint64_t upperBound;
+  int64_t observedWidth;
   struct Row {
     unsigned id, rows, width;
     std::string payload;

@@ -1,4 +1,5 @@
 #include "compilerinfra/Assembly.h"
+#include "intentdsl/levels/execution/block/decisions/Verify.h"
 #include "intentdsl/exits/triton/ir/Dialect.h"
 #include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -13,20 +14,12 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &);
 namespace {
 struct BindCallable : PassWrapper<BindCallable, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(BindCallable)
-  std::optional<uint64_t> width;
-  explicit BindCallable(std::optional<uint64_t> width) : width(width) {}
   void runOnOperation() final {
-    if (!width) {
-      getOperation().emitError("callable requires bound device resources");
-      return signalPassFailure();
-    }
-    auto bound = *width;
     auto fn = *getOperation().getOps<func::FuncOp>().begin();
+    auto guard=fn->getAttrOfType<DenseI64ArrayAttr>("block.guard");
     Builder b(&getContext());
-    fn->setAttr("triton_src.min_width",
-                b.getI64IntegerAttr(
-                    bound == 0 ? 8193 : (bound == 1 ? 0 : bound / 2 + 1)));
-    fn->setAttr("triton_src.max_width", b.getI64IntegerAttr(bound));
+    fn->setAttr("triton_src.min_width", b.getI64IntegerAttr(guard[0]));
+    fn->setAttr("triton_src.max_width", b.getI64IntegerAttr(guard[1]));
   }
 };
 class Writer {
@@ -63,6 +56,8 @@ public:
         return llvm::createStringError("unexpected operation at emit");
       auto arg = [&](unsigned i) { return name(op.getOperand(i)); };
       auto alg = op.getAttrOfType<StringAttr>("algebra");
+      if ((n=="reduce" || n=="identity" || n=="combine" || n=="neutralize") && (!alg || (alg!="sum" && alg!="max_num")))
+        return llvm::createStringError("unrecognized Triton reduction algebra");
       bool sum = alg && alg == "sum";
       if (n == "tiles") {
         auto &loop = op.getRegion(0).front();
@@ -163,7 +158,10 @@ llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
   if (auto err = Writer(stream).write(fn))
     return err;
   out << llvm::json::Value(llvm::json::Object{
-      {"version", 1},
+      {"version", 2},{"grid", llvm::json::Array{llvm::json::Array{
+      cast<StringAttr>(fn->getAttrOfType<ArrayAttr>("block.grid")[0]).str(),
+      cast<StringAttr>(fn->getAttrOfType<ArrayAttr>("block.grid")[1]).str(),
+      cast<StringAttr>(fn->getAttrOfType<ArrayAttr>("block.grid")[2]).str()},1,1}},
       {"entry", "kernel"},
       {"source", src},
       {"abi", std::move(*args)},
@@ -174,7 +172,7 @@ llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
            {"min_width",
             fn->getAttrOfType<IntegerAttr>("triton_src.min_width").getInt()},
            {"max_width",
-            fn->getAttrOfType<IntegerAttr>("triton_src.max_width").getInt()
+            fn->getAttrOfType<IntegerAttr>("triton_src.max_width").getInt()>=0
                 ? llvm::json::Value(
                       fn->getAttrOfType<IntegerAttr>("triton_src.max_width")
                           .getInt())
@@ -194,13 +192,11 @@ void bind(Unit &unit) {
             if (phase == "legal")
               legalize(pm);
             else {
-              auto *caps = profile.services.get<intentdsl::RowCapacity>();
-              pm.addPass(std::make_unique<BindCallable>(
-                  caps ? std::optional<uint64_t>{caps->upperBound} : std::nullopt));
+              pm.addPass(std::make_unique<BindCallable>());
             }
             return llvm::Error::success();
           },
-          [phase](ModuleOp m, const TargetProfile &) {
+          [phase](ModuleOp m, const TargetProfile &profile) {
             auto funcs = m.getOps<func::FuncOp>();
             if (!llvm::hasSingleElement(funcs))
               return failure();
@@ -213,6 +209,20 @@ void bind(Unit &unit) {
                 (!fn->getAttrOfType<IntegerAttr>("triton_src.min_width") ||
                  !fn->getAttrOfType<IntegerAttr>("triton_src.max_width")))
               return failure();
+            if(failed(intentdsl::verifyMapping(m,profile,"triton_src")))return failure();
+            if(phase=="callable"){
+              auto g=fn->getAttrOfType<DenseI64ArrayAttr>("block.guard");
+              if(g[0]!=fn->getAttrOfType<IntegerAttr>("triton_src.min_width").getInt() ||
+                 g[1]!=fn->getAttrOfType<IntegerAttr>("triton_src.max_width").getInt())
+                return fn.emitError("call guard differs from verified block class"),failure();
+              for(auto a:fn->getAttrOfType<ArrayAttr>("block.configs")){
+                auto payload=llvm::json::parse(cast<DictionaryAttr>(a).getAs<StringAttr>("payload").getValue());
+                if(!payload){llvm::consumeError(payload.takeError());return failure();}
+                auto *opts=payload->getAsObject();
+                if(!opts || opts->size()!=2 || opts->getInteger("num_warps").value_or(0)<=0 ||
+                    opts->getInteger("num_stages").value_or(0)<=0)return fn.emitError("illegal native configuration"),failure();
+              }
+            }
             bool valid = true;
             m.walk([&](Operation *op) {
               auto ns = op->getName().getDialectNamespace();

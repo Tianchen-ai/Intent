@@ -11,13 +11,10 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
     return profile; // Static layout has no device binding.
   if (*arch != 90 && *arch != 120)
     return llvm::createStringError("unsupported Triton GPU architecture");
-  auto upper = options.getInteger("width_bound");
-  if (!upper || *upper < 0 || *upper > 8192 ||
-      (*upper && !llvm::isPowerOf2_64(*upper)))
-    return llvm::createStringError("invalid row width class");
+  auto width = options.getInteger("observed_width");
+  if (!width || *width < 0) return llvm::createStringError("expected a bound nonnegative column count");
   auto caps = std::make_shared<intentdsl::RowCapacity>();
-  caps->upperBound = *upper;
-  unsigned width = *upper ? *upper : 8192;
+  caps->observedWidth=*width;
   struct NativeRow {
     unsigned id, rows, warps, stages;
   };
@@ -35,7 +32,8 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
     llvm::raw_string_ostream os(payload);
     os << llvm::json::Value(llvm::json::Object{
         {"num_warps", int64_t(r.warps)}, {"num_stages", int64_t(r.stages)}});
-    caps->rows.push_back({r.id, r.rows, width, std::move(payload)});
+    for(unsigned width=1; width<=8192; width*=2)
+      caps->rows.push_back({width*2+r.id, r.rows, width, payload});
   }
   if (auto e = profile.services.provide<intentdsl::RowCapacity>(caps))
     return e;

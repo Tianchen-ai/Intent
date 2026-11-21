@@ -1,18 +1,21 @@
 from threading import RLock
 import torch
 import triton
-from runtime.block.binding.grid import grid
+from runtime.block.binding.grid import accepts, grid
 from runtime.triton.cache.source import load
 
 
 class Artifact:
     def __init__(self, data):
-        if data["version"] != 1:
+        if data["version"] != 2:
             raise ValueError("unsupported Intent Triton ABI version")
         self.data = data
         self.kernel = load(data["source"], data["entry"])
         self.winners = {}
         self.lock = RLock()
+
+    def accepts(self, shape):
+        return accepts(self.data['guard'], shape)
 
     def bind(self, values, outputs, device, m, n):
         return Prepared(self, values, outputs, device, m, n)
@@ -23,8 +26,7 @@ class Prepared:
         self.artifact, self.values, self.outputs = artifact, values, outputs
         self.device, self.m, self.n = device, m, n
         self.flat = self.flatten(values)
-        g = artifact.data["guard"]
-        if n < g["min_width"] or (g["max_width"] is not None and n > g["max_width"]):
+        if not artifact.accepts((m, n)):
             raise ValueError("width lies outside the compiled shape class")
         self.rows = artifact.data["rows"]
         if not self.rows:
@@ -52,11 +54,11 @@ class Prepared:
                     *self.flat,
                     ROWS=r["rows"],
                     WIDTH=r["width"],
-                    grid=grid(self.m, r),
+                    grid=grid(self.artifact.data["grid"], (self.m, self.n), r),
                     enable_fp_fusion=False,
                     **r["native"],
                 )
-                self.launchers[r["id"]] = native[grid(self.m, r)]
+                self.launchers[r["id"]] = native[grid(self.artifact.data["grid"], (self.m, self.n), r)]
         self.ready = True
 
     def _invoke(self, row, args):

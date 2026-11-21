@@ -7,8 +7,8 @@
 
 using namespace compilerinfra;
 using namespace mlir;
-namespace {
-LogicalResult check(ModuleOp module, bool canonical) {
+namespace intentdsl {
+LogicalResult verifyLogicalRows(ModuleOp module,StringRef dialect,bool canonical) {
   auto funcs = module.getOps<func::FuncOp>();
   if (!llvm::hasSingleElement(funcs))
     return module.emitError("expected one author kernel");
@@ -44,7 +44,7 @@ LogicalResult check(ModuleOp module, bool canonical) {
   }
   auto &body = fn.front();
   if (body.getOperations().size() != 2 ||
-      body.front().getName().getStringRef() != "kir.parallel")
+      body.front().getName().getStringRef() != (dialect+".parallel").str())
     return fn.emitError("expected a parallel row domain and return");
   auto &loop = body.front();
   auto domain = dyn_cast<MemRefType>(loop.getOperand(0).getType());
@@ -53,7 +53,7 @@ LogicalResult check(ModuleOp module, bool canonical) {
     return loop.emitError("expected a rank-two domain");
   auto &row = loop.getRegion(0).front();
   if (row.getNumArguments() != 1 || !row.getArgument(0).getType().isIndex() ||
-      row.empty() || row.back().getName().getStringRef() != "kir.end")
+      row.empty() || row.back().getName().getStringRef() != (dialect+".end").str())
     return loop.emitError("invalid row region");
   auto domainArg = dyn_cast<BlockArgument>(loop.getOperand(0));
   if (!domainArg || domainArg.getOwner() != &body)
@@ -63,8 +63,11 @@ LogicalResult check(ModuleOp module, bool canonical) {
   llvm::SmallDenseSet<unsigned> written;
   for (auto &op : row) {
     auto name = op.getName().stripDialect();
-    if (op.getName().getDialectNamespace() != "kir")
+    if (op.getName().getDialectNamespace() != dialect)
       return op.emitError("unexpected row operation");
+    if(name!="read" && name!="write" && name!="end" && name!="sum" && name!="max_num" &&
+       name!="add" && name!="sub" && name!="mul" && name!="div" && name!="cast" && name!="exp" && name!="rsqrt")
+      return op.emitError("operation outside logical row representation");
     if (name == "read" || name == "write") {
       auto view = cast<MemRefType>(op.getOperand(0).getType());
       auto arg = dyn_cast<BlockArgument>(op.getOperand(0));
@@ -127,6 +130,8 @@ LogicalResult check(ModuleOp module, bool canonical) {
   return success();
 }
 
+} // namespace intentdsl
+namespace {
 struct Canonicalize : PassWrapper<Canonicalize, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(Canonicalize)
   void runOnOperation() final {
@@ -154,7 +159,7 @@ void bind(Unit &unit) {
             return llvm::Error::success();
           },
           [canonical](ModuleOp m, const TargetProfile &) {
-            return check(m, canonical);
+            return intentdsl::verifyLogicalRows(m,"kir",canonical);
           }},
          COMPILERINFRA_SOURCE});
 }

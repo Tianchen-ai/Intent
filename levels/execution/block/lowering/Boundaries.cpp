@@ -1,4 +1,6 @@
 #include "compilerinfra/Assembly.h"
+#include "intentdsl/levels/algorithm/kir/ir/RowSemantics.h"
+#include "intentdsl/levels/execution/block/decisions/Verify.h"
 #include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
 #include "intentdsl/levels/execution/block/ir/Dialect.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -51,34 +53,8 @@ void bind(Unit &unit) {
   f.verify = [](Operation *, Attribute value,
                 const TargetProfile &profile) -> llvm::Error {
     auto d = dyn_cast<DictionaryAttr>(value);
-    if (!d || !d.getAs<StringAttr>("topology") || !d.getAs<ArrayAttr>("rows") ||
-        d.getAs<ArrayAttr>("rows").empty())
-      return llvm::createStringError("invalid joint row decision");
-    auto *caps = profile.services.get<intentdsl::RowCapacity>();
-    auto topology = d.getAs<StringAttr>("topology");
-    if (!caps || (topology != "resident" && topology != "stream"))
-      return llvm::createStringError("unbound topology or target");
-    llvm::DenseSet<unsigned> ids;
-    for (auto item : d.getAs<ArrayAttr>("rows")) {
-      auto row = dyn_cast<DictionaryAttr>(item);
-      if (!row || !row.getAs<IntegerAttr>("id") ||
-          !row.getAs<IntegerAttr>("rows") || !row.getAs<IntegerAttr>("width") ||
-          !row.getAs<StringAttr>("payload"))
-        return llvm::createStringError("incomplete row");
-      auto id = row.getAs<IntegerAttr>("id").getInt();
-      auto width = row.getAs<IntegerAttr>("width").getInt();
-      if (!ids.insert(id).second ||
-          (topology == "resident" &&
-           (!caps->upperBound || uint64_t(width) < caps->upperBound)) ||
-          !llvm::any_of(caps->rows, [&](const auto &r) {
-            return id == r.id && width == r.width &&
-                   row.getAs<IntegerAttr>("rows").getInt() == r.rows &&
-                   row.getAs<StringAttr>("payload") == r.payload;
-          }))
-        return llvm::createStringError(
-            "row does not match its target capability or width guard");
-    }
-    return llvm::Error::success();
+    if(!d)return llvm::createStringError("missing block decision");
+    return intentdsl::verifyRows(d.getAs<ArrayAttr>("rows"),d.getAs<StringAttr>("topology"),d.getAs<DenseI64ArrayAttr>("guard"),profile);
   };
   unit.families.push_back({{std::move(f), "block@decided", "block@realized"},
                            COMPILERINFRA_SOURCE});
@@ -94,7 +70,7 @@ void bind(Unit &unit) {
               pm.addPass(std::make_unique<Form>());
             return llvm::Error::success();
           },
-          [phase](ModuleOp m, const TargetProfile &) {
+          [phase](ModuleOp m, const TargetProfile &profile) {
             unsigned loops = 0, pids = 0, pending = 0;
             m.walk([&](Operation *op) {
               loops += op->getName().getStringRef() == "block.parallel";
@@ -113,6 +89,8 @@ void bind(Unit &unit) {
             if (ready && (!fn->getAttrOfType<ArrayAttr>("block.configs") ||
                           !fn->getAttrOfType<StringAttr>("block.topology")))
               return failure();
+            if(!ready && failed(intentdsl::verifyLogicalRows(m,"block",true))) return failure();
+            if(ready && failed(intentdsl::verifyMapping(m,profile,"block"))) return failure();
             auto checked = m.walk([&](Operation *op) {
               if (op->getName().getDialectNamespace() == "func" ||
                   op == m.getOperation())

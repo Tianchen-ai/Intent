@@ -22,9 +22,10 @@ class Kernel:
         values, result, device = self.binding.bind(inputs, outputs)
         with self.lock:
             key, shape = self.target.specialize(device, values)
-            artifact = self.artifacts.get(key)
+            group = self.artifacts.setdefault(key, [])
+            artifact = next((a for a in group if a.accepts(shape)), None)
             if artifact is None:
-                options = self.target.options(key)
+                options = self.target.options(key, shape)
                 if self.root is None:
                     self.root = self.compiler.root_ir(self.source)
                 with self.compiler.derive(
@@ -34,7 +35,7 @@ class Kernel:
                 if data["abi"] != self.args:
                     raise ValueError("compiled ABI differs from author signature")
                 artifact = self.target.materialize(data)
-                self.artifacts[key] = artifact
+                group.append(artifact)
         return artifact.bind(values, result, device, *shape)
 
     def run(self, *inputs):

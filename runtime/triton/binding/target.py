@@ -11,11 +11,9 @@ class Target:
             raise ValueError("Triton requires local CUDA buffers")
         matrix = next(v for v in values if isinstance(v, torch.Tensor) and v.ndim == 2)
         m, n = matrix.shape
-        limit = (1 << max(0, n - 1).bit_length()) if n <= 8192 else 0
-        return (device, limit), (m, n)
+        return device, (m, n)
 
-    def options(self, key):
-        device, width = key
+    def options(self, device, shape):
         if device not in self.devices:
             self.devices[device] = torch.cuda.get_device_properties(device)
         p = self.devices[device]
@@ -23,7 +21,7 @@ class Target:
             sm=p.major * 10 + p.minor,
             warp_size=p.warp_size,
             max_threads=p.max_threads_per_block,
-            width_bound=width,
+            observed_width=shape[1],
         )
 
     @staticmethod

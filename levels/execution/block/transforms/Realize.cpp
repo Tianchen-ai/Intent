@@ -14,13 +14,15 @@ public:
         domain(anchor->getOperand(0)),
         resident(choice.getAs<StringAttr>("topology") == "resident") {
     auto fn = anchor->getParentOfType<func::FuncOp>();
+    fn->setAttr("block.guard",choice.get("guard"));
+    fn->setAttr("block.grid", rw.getStrArrayAttr({"ceildiv", "M", "rows"}));
     fn->setAttr("block.configs", choice.get("rows"));
     fn->setAttr("block.topology", choice.get("topology"));
   }
   void build() {
     rw.setInsertionPoint(anchor);
-    auto pid = make("pid", {}, rw.getIndexType())->getResult(0);
-    rows = make("rows", pid, vector(rw.getIndexType(), 1))->getResult(0);
+    auto pid = make("pid", {}, rw.getIndexType(), rw.getNamedAttr("axis",rw.getI32IntegerAttr(0)))->getResult(0);
+    rows = make("rows", pid, vector(rw.getIndexType(), 1), rw.getNamedAttr("step",rw.getStringAttr("rows")))->getResult(0);
     auto &body = anchor->getRegion(0).front();
     if (resident) {
       tile(make("zero", {}, rw.getIndexType())->getResult(0));
