@@ -13,9 +13,14 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &);
 namespace {
 struct BindCallable : PassWrapper<BindCallable, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(BindCallable)
-  uint64_t bound;
-  explicit BindCallable(uint64_t bound) : bound(bound) {}
+  std::optional<uint64_t> width;
+  explicit BindCallable(std::optional<uint64_t> width) : width(width) {}
   void runOnOperation() final {
+    if (!width) {
+      getOperation().emitError("callable requires bound device resources");
+      return signalPassFailure();
+    }
+    auto bound = *width;
     auto fn = *getOperation().getOps<func::FuncOp>().begin();
     Builder b(&getContext());
     fn->setAttr("triton_src.min_width",
@@ -190,10 +195,8 @@ void bind(Unit &unit) {
               legalize(pm);
             else {
               auto *caps = profile.services.get<intentdsl::RowCapacity>();
-              if (!caps)
-                return llvm::createStringError(
-                    "callable requires bound device resources");
-              pm.addPass(std::make_unique<BindCallable>(caps->upperBound));
+              pm.addPass(std::make_unique<BindCallable>(
+                  caps ? std::optional<uint64_t>{caps->upperBound} : std::nullopt));
             }
             return llvm::Error::success();
           },
