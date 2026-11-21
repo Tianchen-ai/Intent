@@ -83,3 +83,7 @@ def Cpu_ordinal : Op<Cpu_Dialect,"ordinal"> {
 }
 
 def Cpu_sqrt : Inst<"sqrt"> { let arguments=(ins AnyType:$input); let results=(outs AnyType:$result); }
+
+def Cpu_uniform : Inst<"uniform"> {
+  let arguments=(ins UI64:$seed,AnyTensor:$counter);let results=(outs AnyTensor:$result);
+}

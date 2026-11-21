@@ -85,6 +85,11 @@ class CanonicalTask {
         continue;
       }
       if (code == "ordinal") {
+        if (!cast<RankedTensorType>(op.getResult(0).getType())
+                 .getElementType()
+                 .isInteger(32))
+          return llvm::createStringError(
+              "Weft requires a u64 ordinal lowering for this program");
         if (dim <= 0 || start.empty())
           return llvm::createStringError(
               "absolute lane coordinates require static panels");

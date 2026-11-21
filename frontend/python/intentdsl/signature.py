@@ -40,7 +40,7 @@ def signature(fn):
         else:
             dtype, dims, direction = ann, [], "Scalar"
         dtype = spelling(dtype, owner)
-        if dtype not in ("f16", "bf16", "f32", "i32"):
+        if dtype not in ("f16", "bf16", "f32", "i32", "u64"):
             raise ValueError(f"unsupported element type: {dtype}")
         args.append(dict(name=param.arg, dtype=dtype, dims=dims, direction=direction))
     return args
@@ -48,7 +48,8 @@ def signature(fn):
 
 def argument_type(arg):
     rank = len(arg["dims"])
+    element = "ui64" if arg["dtype"] == "u64" else arg["dtype"]
     if not rank:
-        return arg["dtype"]
+        return element
     strides = ", ".join(["?"] * rank)
-    return f'memref<{"?x"*rank}{arg["dtype"]}, strided<[{strides}], offset: ?>>'
+    return f'memref<{"?x"*rank}{element}, strided<[{strides}], offset: ?>>'

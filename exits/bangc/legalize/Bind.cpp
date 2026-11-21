@@ -85,6 +85,11 @@ StringRef primitive(Operation *op, int64_t depth) {
         zero.getType().isF16() && zero.getValue().isPosZero())
       return "positive_half_or_nan";
   }
+  if (n == "block.linear_index" &&
+      !cast<RankedTensorType>(op->getResult(0).getType())
+           .getElementType()
+           .isInteger(32))
+    return {};
   if (n == "block.sqrt" || n == "block.linear_index" || n == "block.xor" ||
       n == "block.and" || n == "block.shl" || n == "block.shr" ||
       n == "block.gt" || n == "block.select")

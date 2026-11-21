@@ -104,3 +104,63 @@ def adamw(
         m[i] = mean
         v[i] = square
         p[i] = updated
+
+
+@I.kernel
+def dropout_norm_forward(
+    x: I.In[I.bf16, ("M", "N")],
+    residual: I.In[I.bf16, ("M", "N")],
+    gain: I.In[I.bf16, ("N",)],
+    normalized: I.Out[I.bf16, ("M", "N")],
+    summed: I.Out[I.bf16, ("M", "N")],
+    seed: I.u64,
+    keep: I.f32,
+    scale: I.f32,
+    inv_n: I.f32,
+    eps: I.f32,
+    bias: I.f32,
+):
+    for row in I.parallel(x.dim(0)):
+        uniform = I.uniform(seed, I.member_counter(x, row))
+        active = I.cast(keep > uniform, I.f32)
+        value = I.cast(
+            I.cast(x[row, :], I.f32) * active * scale + I.cast(residual[row, :], I.f32),
+            I.bf16,
+        )
+        z = I.cast(value, I.f32)
+        inv = I.rsqrt(I.sum(z * z, axis=0, acc=I.f32) * inv_n + eps)
+        y = I.cast(z * inv * (I.cast(gain[:], I.f32) + bias), I.bf16)
+        normalized[row, :] = y
+        summed[row, :] = value
+
+
+@I.kernel
+def dropout_norm_backward(
+    x: I.In[I.bf16, ("M", "N")],
+    residual: I.In[I.bf16, ("M", "N")],
+    gain: I.In[I.bf16, ("N",)],
+    dy: I.In[I.bf16, ("M", "N")],
+    carry: I.In[I.bf16, ("M", "N")],
+    dx: I.Out[I.bf16, ("M", "N")],
+    dr: I.Out[I.bf16, ("M", "N")],
+    seed: I.u64,
+    keep: I.f32,
+    scale: I.f32,
+    inv_n: I.f32,
+    eps: I.f32,
+    bias: I.f32,
+):
+    for row in I.parallel(x.dim(0)):
+        uniform = I.uniform(seed, I.member_counter(x, row))
+        active = I.cast(keep > uniform, I.f32)
+        rounded = I.cast(
+            I.cast(x[row, :], I.f32) * active * scale + I.cast(residual[row, :], I.f32),
+            I.bf16,
+        )
+        z = I.cast(rounded, I.f32)
+        wdy = I.cast(dy[row, :], I.f32) * (I.cast(gain[:], I.f32) + bias)
+        inv = I.rsqrt(I.sum(z * z, axis=0, acc=I.f32) * inv_n + eps)
+        dot = I.sum(wdy * z, axis=0, acc=I.f32) * inv_n
+        dz = wdy * inv - z * (inv * inv * inv) * dot + I.cast(carry[row, :], I.f32)
+        dx[row, :] = I.cast(dz * active * scale, I.bf16)
+        dr[row, :] = I.cast(dz, I.bf16)

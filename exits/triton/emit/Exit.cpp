@@ -81,9 +81,14 @@ public:
         continue;
       }
       std::string e;
-      if (n == "linear_index")
-        e = "(" + arg(1) + "[:,None]*N+" + arg(2) + "[None,:]).to(tl.int32)";
-      else if (n == "select")
+      if (n == "linear_index") {
+        bool wide = cast<RankedTensorType>(op.getResult(0).getType())
+                        .getElementType()
+                        .isUnsignedInteger(64);
+        e = "(" + arg(1) + (wide ? "[:,None].to(tl.uint64)" : "[:,None]") +
+            "*N+" + arg(2) + "[None,:]).to(" +
+            (wide ? "tl.uint64)" : "tl.int32)");
+      } else if (n == "select")
         e = "tl.where(" + arg(0) + "," + arg(1) + "," + arg(2) + ")";
       else if (n == "xor" || n == "and" || n == "shr" || n == "shl" ||
                n == "gt") {

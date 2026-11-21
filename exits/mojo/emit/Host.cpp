@@ -10,9 +10,10 @@ std::string hostSource(func::FuncOp entry) {
     std::string n = "a" + std::to_string(i);
     auto view = dyn_cast<MemRefType>(type);
     names.push_back(n);
-    slots.push_back(std::string(view                 ? "void *"
-                                : type.isInteger(32) ? "int32_t "
-                                                     : "float ") +
+    slots.push_back(std::string(view                         ? "void *"
+                                : type.isUnsignedInteger(64) ? "uint64_t "
+                                : type.isInteger(32)         ? "int32_t "
+                                                             : "float ") +
                     n);
     if (!view)
       continue;

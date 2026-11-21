@@ -19,6 +19,8 @@ class Source {
       t = v.getElementType();
     if (t.isInteger(1))
       return "bool";
+    if (t.isUnsignedInteger(64))
+      return "uint64";
     if (t.isInteger(32))
       return "int32";
     return t.isBF16() ? "bfloat16" : t.isF16() ? "float16" : "float32";
@@ -39,9 +41,19 @@ public:
         for (int j = 0; j < m.getRank(); ++j)
           params.push_back(n + "s" + std::to_string(j) + ": Int64");
       } else
-        params.push_back(n +
-                         (v.getType().isInteger(32) ? ": Int32" : ": Float32"));
+        params.push_back(n + (v.getType().isUnsignedInteger(64) ? ": UInt64"
+                              : v.getType().isInteger(32)       ? ": Int32"
+                                                                : ": Float32"));
     }
+    bool usesRandom = false;
+    task->walk([&](Operation *op) {
+      if (auto k = op->getAttrOfType<StringAttr>("kind"))
+        usesRandom |= k.getValue() == "uniform";
+    });
+    if (usesRandom)
+      out <<
+#include "Philox.inc"
+          ;
     out << "from std.math import exp, sqrt, rsqrt, max, "
            "inf\n@export(\"intent_row_interval\")\ndef intent_row_interval("
         << llvm::join(params, ",")
@@ -116,13 +128,19 @@ public:
           auto opKind = op.getAttrOfType<StringAttr>("kind").getValue();
           std::string expr;
           if (opKind == "ordinal") {
-            line(3, "var " + lhs + " = SIMD[DType.int32," + lanes + "](0)");
+            line(3, "var " + lhs + " = SIMD[DType." +
+                        dtype(op.getResult(0).getType()) + "," + lanes +
+                        "](0)");
             line(3, "for lane in range(" + lanes + "):");
-            line(4, lhs + "[lane] = Int32(r*Int(cols)+j+lane)");
+            line(4, lhs + "[lane] = Scalar[DType." +
+                        dtype(op.getResult(0).getType()) +
+                        "](r*Int(cols)+j+lane)");
             vars[op.getResult(0)] = lhs;
             continue;
           }
-          if (opKind == "select") {
+          if (opKind == "uniform")
+            expr = "uniform_at[" + lanes + "](" + arg(0) + "," + arg(1) + ")";
+          else if (opKind == "select") {
             auto t = "SIMD[DType." + dtype(op.getResult(0).getType()) + "," +
                      lanes + "]";
             expr = arg(0) + ".select(" + arg(1) + "," +

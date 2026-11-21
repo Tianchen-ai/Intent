@@ -42,10 +42,15 @@ class Kernel {
         continue;
       }
       std::string expr;
-      if (code == "linear_index")
-        expr = "ct.astype(ct.expand_dims(" + arg(1) + ",1)*" + arg(0) +
-               ".shape[1]+ct.expand_dims(" + arg(2) + ",0),ct.int32)";
-      else if (code == "select")
+      if (code == "linear_index") {
+        bool wide = cast<RankedTensorType>(op.getResult(0).getType())
+                        .getElementType()
+                        .isUnsignedInteger(64);
+        std::string row = wide ? "ct.astype(" + arg(1) + ",ct.uint64)" : arg(1);
+        expr = "ct.astype(ct.expand_dims(" + row + ",1)*" + arg(0) +
+               ".shape[1]+ct.expand_dims(" + arg(2) + ",0)," +
+               (wide ? "ct.uint64)" : "ct.int32)");
+      } else if (code == "select")
         expr = "ct.where(" + arg(0) + "," + arg(1) + "," + arg(2) + ")";
       else if (code == "xor" || code == "and" || code == "shr" ||
                code == "shl" || code == "gt") {

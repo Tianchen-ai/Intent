@@ -90,7 +90,8 @@ private:
     auto n = op->getName().stripDialect();
     if (n == "ordinal") {
       auto ordinal =
-          make("linear_index", {domain, rows, cols}, vector(rw.getI32Type(), 2))
+          make("linear_index", {domain, rows, cols},
+               vector(cast<RankedTensorType>(v.getType()).getElementType(), 2))
               ->getResult(0);
       local.map(v, ordinal);
       return ordinal;

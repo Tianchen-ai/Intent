@@ -18,7 +18,9 @@ def frame(values, abi):
     for value, arg in zip(values, abi):
         if arg["direction"] == "Scalar":
             slots.append(
-                ct.c_int32(value) if arg["dtype"] == "i32" else ct.c_float(value)
+                ct.c_uint64(value)
+                if arg["dtype"] == "u64"
+                else ct.c_int32(value) if arg["dtype"] == "i32" else ct.c_float(value)
             )
             continue
         v = inspect(value)

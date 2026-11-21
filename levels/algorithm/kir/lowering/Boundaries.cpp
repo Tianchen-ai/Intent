@@ -37,11 +37,13 @@ LogicalResult verifyRowComputation(func::FuncOp fn, Block &row, ValueRange captu
         (!rank && direction != "Scalar"))
       return fn.emitError("direction disagrees with the scalar or view type");
     if (rank != desc->getArray("dims")->size() ||
-        (!elt.isF16() && !elt.isF32() && !elt.isBF16() && !elt.isInteger(32)) ||
-        desc->getString("dtype") != (elt.isF16()         ? "f16"
-                                     : elt.isBF16()      ? "bf16"
-                                     : elt.isInteger(32) ? "i32"
-                                                         : "f32"))
+        (!elt.isF16() && !elt.isF32() && !elt.isBF16() && !elt.isInteger(32) &&
+         !(rank == 0 && elt.isUnsignedInteger(64))) ||
+        desc->getString("dtype") != (elt.isF16()                 ? "f16"
+                                     : elt.isBF16()              ? "bf16"
+                                     : elt.isUnsignedInteger(64) ? "u64"
+                                     : elt.isInteger(32)         ? "i32"
+                                                                 : "f32"))
       return fn.emitError("parameter descriptor does not match its IR type");
   }
   auto domainType=dyn_cast<MemRefType>(captures[domainIndex].getType());
@@ -61,12 +63,27 @@ LogicalResult verifyRowComputation(func::FuncOp fn, Block &row, ValueRange captu
         return op.emitError("typed literal mismatch");
       continue;
     }
+    if (name == "uniform") {
+      auto counter = dyn_cast<RankedTensorType>(op.getOperand(1).getType());
+      auto result = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+      if (!counter || !result || counter.getRank() != 1 ||
+          !counter.getElementType().isUnsignedInteger(64) ||
+          result.getShape() != counter.getShape() ||
+          !result.getElementType().isF32())
+        return op.emitError(
+            "uniform requires one unsigned logical counter per f32 sample");
+      continue;
+    }
     if (name == "ordinal") {
       if (op.getOperand(0) != captures[domainIndex] ||
           op.getOperand(1) != row.getArgument(0) ||
-          op.getResult(0).getType() !=
-              RankedTensorType::get({ShapedType::kDynamic},
-                                    IntegerType::get(fn.getContext(), 32)))
+          (op.getResult(0).getType() !=
+               RankedTensorType::get({ShapedType::kDynamic},
+                                     IntegerType::get(fn.getContext(), 64,
+                                                      IntegerType::Unsigned)) &&
+           op.getResult(0).getType() !=
+               RankedTensorType::get({ShapedType::kDynamic},
+                                     IntegerType::get(fn.getContext(), 32))))
         return op.emitError(
             "ordinal must enumerate the declared row in the owning domain");
       continue;
@@ -137,7 +154,8 @@ LogicalResult verifyRowComputation(func::FuncOp fn, Block &row, ValueRange captu
       auto allowed = [](Type t) {
         return t.isF32() || t.isF16() || t.isBF16() || t.isInteger(32);
       };
-      if (!allowed(valueType) ||
+      if ((!allowed(valueType) &&
+           !(name == "cast" && valueType.isInteger(1))) ||
           (name == "gt" ? !element(result).isInteger(1)
                         : !allowed(element(result))) ||
           ((name == "xor" || name == "and" || name == "shr" || name == "shl") &&

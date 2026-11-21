@@ -77,12 +77,22 @@ LogicalResult verifyLoops(ModuleOp m, const TargetProfile &p, bool callable) {
                          .Cases("add", "sub", "mul", "div", 2)
                          .Cases("exp", "rsqrt", "cast", 1)
                          .Cases("and", "xor", "shl", "shr", "gt", 2)
-                         .Case("ordinal", 2)
+                         .Cases("uniform", "ordinal", 2)
                          .Case("select", 3)
                          .Case("sqrt", 1)
                          .Case("maximum", 2)
                          .Case("constant", 0)
                          .Default(-1);
+        if (k == "uniform" && op.getNumOperands() == 2) {
+          auto position = dyn_cast<VectorType>(op.getOperand(1).getType());
+          auto samples = dyn_cast<VectorType>(op.getResult(0).getType());
+          if (!op.getOperand(0).getType().isUnsignedInteger(64) || !position ||
+              !samples || !position.getElementType().isUnsignedInteger(64) ||
+              !samples.getElementType().isF32() ||
+              position.getShape() != samples.getShape())
+            return op.emitError(
+                "invalid Philox seed, member counters or sample lanes");
+        }
         if (op.getNumOperands() != nargs ||
             (k == "constant" && !op.getAttrOfType<TypedAttr>("value")))
           return op.emitError("unknown or ill-formed lane expression");

@@ -134,3 +134,7 @@ def Iblock_linear_index : Op<Iblock_Dialect,"linear_index"> {
 }
 
 def Iblock_sqrt : Inst<"sqrt"> { let arguments=(ins AnyType:$input); let results=(outs AnyType:$result); }
+
+def Iblock_uniform : Inst<"uniform"> {
+  let arguments=(ins UI64:$seed,AnyTensor:$counter);let results=(outs AnyTensor:$result);
+}

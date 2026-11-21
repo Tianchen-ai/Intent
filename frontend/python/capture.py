@@ -97,7 +97,7 @@ class Capture:
         if isinstance(n, ast.Call):
             fn = spelling(n.func, self.namespace)
             if (
-                fn == "linear_index"
+                fn in ("linear_index", "member_counter")
                 and len(n.args) == 2
                 and isinstance(n.args[0], ast.Name)
                 and n.args[0].id == self.owner
@@ -107,7 +107,11 @@ class Capture:
                 return self.emit(
                     "ordinal",
                     [self.values[self.owner], ("%row", "index")],
-                    "tensor<?xi32>",
+                    "tensor<?xi32>" if fn == "linear_index" else "tensor<?xui64>",
+                )
+            if fn == "uniform" and len(n.args) == 2:
+                return self.emit(
+                    "uniform", [self.expr(a) for a in n.args], "tensor<?xf32>"
                 )
             if fn == "where" and len(n.args) == 3:
                 mask, a, b = (self.expr(v) for v in n.args)

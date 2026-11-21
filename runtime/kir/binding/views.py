@@ -106,7 +106,10 @@ class Signature:
             if arg["direction"] == "Scalar":
                 if not isinstance(value, (int, float)):
                     raise TypeError("expected a host scalar")
-                if arg["dtype"] == "i32":
+                if arg["dtype"] == "u64":
+                    if type(value) is not int or not 0 <= value < (1 << 64):
+                        raise ValueError("scalar outside u64")
+                elif arg["dtype"] == "i32":
                     if not isinstance(value, int) or not -(1 << 31) <= value < (
                         1 << 31
                     ):
