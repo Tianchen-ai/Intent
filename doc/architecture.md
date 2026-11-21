@@ -1,6 +1,6 @@
 # IntentDSL V2 产品架构
 
-**状态**　V2-2 已实现 Python → KIR → Block → Triton 及三个关联 runtime。下图同时给出已定的后续分支；CPU、Weft 与 Mojo 的边界细化见 [V2-3 CPU 设计](design/cpu.md)，目前处于设计评审阶段。
+**状态**　Python → KIR → Block → Triton 以及 CPU → Weft / Mojo 已贯通。Weft 已在 x86、SG2044 与 RVV V100 完成本机验证，K3 两类核心仍待验证。下图也包含规划中的出口。[CPU 边界](design/cpu.md) · [V2-4 cuTile 出口设计，待裁决](design/cutile.md)
 
 **设计依据**　CompilerInfra `3ddeef2` 的 `lib/Assembly.cpp`、`include/compilerinfra/Decision.h` 和安装包的 Python 绑定决定了本设计可用的阶段顺序、策略接口和候选加载行为。语义对照为原版 IntentDSL `b0a19990` 的 `doc/dsl/types-numerics-and-effects.md`、`doc/dsl/quantized-operations.md` 与 `python/intent/examples/registry.py`。V1 的 Triton 经验行见 `lib/Target/Triton/Transforms/Configuration/TuningProfiles.json`；V2 建议的行值须在 V2 的产物上重新判断。
 
