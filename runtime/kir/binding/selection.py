@@ -7,7 +7,9 @@ def selection(artifact, winner, trials_us):
     identity = {}
     if artifact.receipt is not None:
         header = artifact.receipt
-        identity = {key: header[key] for key in ("compilation_id", "compiler_candidate", "package_sha256")}
+        identity = {key: header[key] for key in ("compilation_id", "compiler_candidate")}
+        if "package_sha256" in header:
+            identity["package_sha256"] = header["package_sha256"]
         identity["structures"] = {d["family"]: d["structure"] for d in header["decisions"]}
         identity["row_id"] = winner
     return {

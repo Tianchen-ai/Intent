@@ -39,7 +39,7 @@ class Kernel:
                 ) as target:
                     receipt = None
                     if artifact_file is None:
-                        emitted = target.compile(self.root, exit=self.backend)
+                        emitted, receipt = target.compile_runtime(self.root, exit=self.backend)
                     else:
                         import hashlib
                         from pathlib import Path
