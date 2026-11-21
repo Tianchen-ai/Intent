@@ -154,7 +154,7 @@ void bind(Unit &u) {
               pm.addPass(std::make_unique<Construct>(phase == "tasked"));
             return llvm::Error::success();
           },
-          [phase](ModuleOp m, const TargetProfile &p) {
+          [phase](ModuleOp m, const TargetProfile &p) -> LogicalResult {
             if (phase != "formed")
               return intentdsl::cpu::verifyTask(
                   m, p, phase == "tasked" ? "pending" : "private-values");
