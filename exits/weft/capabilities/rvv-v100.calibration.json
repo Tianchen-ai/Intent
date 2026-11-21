@@ -1,88 +1,352 @@
 {
-  "version": "1",
+  "version": "3",
   "facts": {
-    "read_1": {
-      "value": 3.1831097799999997,
+    "write_1_private_bw": {
+      "value": 2.9289050650000004,
       "unit": "B/ns",
       "source": {
         "device": "0x710/0x8000000058000002",
         "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
         "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
-        "conditions": "affinity=[0], threads=1, 64 MiB working set, FP32 strides 1 and 16, unmanaged clocks",
-        "benchmark": "intent_bench.calibration/read_1",
-        "error": "range [3.13651, 3.18486], n=8"
+        "conditions": "affinity=[0], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/write_1_private_bw",
+        "error": "range [2.83698, 2.94536], n=8"
       }
     },
-    "write_1": {
-      "value": 2.941307165,
+    "read_1_private_bw": {
+      "value": 40.337821899999994,
       "unit": "B/ns",
       "source": {
         "device": "0x710/0x8000000058000002",
         "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
         "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
-        "conditions": "affinity=[0], threads=1, 64 MiB working set, FP32 strides 1 and 16, unmanaged clocks",
-        "benchmark": "intent_bench.calibration/write_1",
-        "error": "range [2.90535, 2.94792], n=8"
+        "conditions": "affinity=[0], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/read_1_private_bw",
+        "error": "range [22.9946, 43.6907], n=8"
       }
     },
-    "read_16": {
-      "value": 0.38764363150000003,
+    "write_16_private_bw": {
+      "value": 2.730667395,
       "unit": "B/ns",
       "source": {
         "device": "0x710/0x8000000058000002",
         "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
         "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
-        "conditions": "affinity=[0], threads=1, 64 MiB working set, FP32 strides 1 and 16, unmanaged clocks",
-        "benchmark": "intent_bench.calibration/read_16",
-        "error": "range [0.385534, 0.388592], n=8"
+        "conditions": "affinity=[0], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/write_16_private_bw",
+        "error": "range [2.5599, 2.92559], n=8"
       }
     },
-    "write_16": {
-      "value": 0.47550780000000004,
+    "read_16_private_bw": {
+      "value": 7.8191369900000005,
       "unit": "B/ns",
       "source": {
         "device": "0x710/0x8000000058000002",
         "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
         "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
-        "conditions": "affinity=[0], threads=1, 64 MiB working set, FP32 strides 1 and 16, unmanaged clocks",
-        "benchmark": "intent_bench.calibration/write_16",
-        "error": "range [0.449801, 0.481484], n=8"
+        "conditions": "affinity=[0], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/read_16_private_bw",
+        "error": "range [5.12, 9.10223], n=8"
+      }
+    },
+    "write_1_mid_bw": {
+      "value": 2.94412043,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x710/0x8000000058000002",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
+        "conditions": "affinity=[0], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/write_1_mid_bw",
+        "error": "range [2.93629, 2.94826], n=8"
+      }
+    },
+    "read_1_mid_bw": {
+      "value": 21.2434826,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x710/0x8000000058000002",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
+        "conditions": "affinity=[0], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/read_1_mid_bw",
+        "error": "range [20.6712, 21.8448], n=8"
+      }
+    },
+    "write_16_mid_bw": {
+      "value": 2.119148375,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x710/0x8000000058000002",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
+        "conditions": "affinity=[0], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/write_16_mid_bw",
+        "error": "range [2.08542, 2.12774], n=8"
+      }
+    },
+    "read_16_mid_bw": {
+      "value": 1.828650575,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x710/0x8000000058000002",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
+        "conditions": "affinity=[0], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/read_16_mid_bw",
+        "error": "range [1.81034, 1.83185], n=8"
+      }
+    },
+    "write_1_shared_bw": {
+      "value": 2.94081789,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x710/0x8000000058000002",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
+        "conditions": "affinity=[0], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/write_1_shared_bw",
+        "error": "range [2.81754, 2.94743], n=8"
+      }
+    },
+    "read_1_shared_bw": {
+      "value": 5.04717123,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x710/0x8000000058000002",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
+        "conditions": "affinity=[0], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/read_1_shared_bw",
+        "error": "range [4.01743, 6.58636], n=8"
+      }
+    },
+    "write_16_shared_bw": {
+      "value": 0.5042067275,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x710/0x8000000058000002",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
+        "conditions": "affinity=[0], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/write_16_shared_bw",
+        "error": "range [0.490159, 0.512387], n=8"
+      }
+    },
+    "read_16_shared_bw": {
+      "value": 0.45844480499999996,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x710/0x8000000058000002",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
+        "conditions": "affinity=[0], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/read_16_shared_bw",
+        "error": "range [0.3076, 0.611042], n=8"
+      }
+    },
+    "write_1_dram_bw": {
+      "value": 2.944654855,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x710/0x8000000058000002",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
+        "conditions": "affinity=[0], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/write_1_dram_bw",
+        "error": "range [2.93031, 2.94948], n=8"
+      }
+    },
+    "read_1_dram_bw": {
+      "value": 4.1945812,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x710/0x8000000058000002",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
+        "conditions": "affinity=[0], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/read_1_dram_bw",
+        "error": "range [4.12992, 4.68566], n=8"
+      }
+    },
+    "write_16_dram_bw": {
+      "value": 0.4268074185,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x710/0x8000000058000002",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
+        "conditions": "affinity=[0], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/write_16_dram_bw",
+        "error": "range [0.423476, 0.429522], n=8"
+      }
+    },
+    "read_16_dram_bw": {
+      "value": 0.31072347499999997,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x710/0x8000000058000002",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
+        "conditions": "affinity=[0], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/read_16_dram_bw",
+        "error": "range [0.292205, 0.329385], n=8"
+      }
+    },
+    "copy_gather_1_bw": {
+      "value": 1.350605125,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x710/0x8000000058000002",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
+        "conditions": "affinity=[0], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/copy_gather_1_bw",
+        "error": "range [1.3402, 1.35213], n=8"
+      }
+    },
+    "copy_scatter_1_bw": {
+      "value": 1.259626435,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x710/0x8000000058000002",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
+        "conditions": "affinity=[0], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/copy_scatter_1_bw",
+        "error": "range [1.24608, 1.26031], n=8"
+      }
+    },
+    "copy_gather_16_bw": {
+      "value": 0.4866187635,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x710/0x8000000058000002",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
+        "conditions": "affinity=[0], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/copy_gather_16_bw",
+        "error": "range [0.299662, 0.635347], n=8"
+      }
+    },
+    "copy_scatter_16_bw": {
+      "value": 0.3855346995,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x710/0x8000000058000002",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
+        "conditions": "affinity=[0], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/copy_scatter_16_bw",
+        "error": "range [0.372047, 0.388765], n=8"
+      }
+    },
+    "copy_gather_256_bw": {
+      "value": 0.15260967749999998,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x710/0x8000000058000002",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
+        "conditions": "affinity=[0], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/copy_gather_256_bw",
+        "error": "range [0.131072, 0.179452], n=8"
+      }
+    },
+    "copy_scatter_256_bw": {
+      "value": 0.168559671,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x710/0x8000000058000002",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
+        "conditions": "affinity=[0], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/copy_scatter_256_bw",
+        "error": "range [0.167526, 0.169607], n=8"
       }
     },
     "launch": {
-      "value": 4400,
+      "value": 2800.0,
       "unit": "ns",
       "source": {
         "device": "0x710/0x8000000058000002",
         "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
         "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
-        "conditions": "affinity=[0], threads=1, 64 MiB working set, FP32 strides 1 and 16, unmanaged clocks",
+        "conditions": "affinity=[0], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
         "benchmark": "intent_bench.calibration/launch",
-        "error": "range [3200, 5600], n=8"
+        "error": "range [1600, 4800], n=8"
       }
     },
     "sync": {
-      "value": 375.2,
+      "value": 376.8,
       "unit": "ns",
       "source": {
         "device": "0x710/0x8000000058000002",
         "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
         "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
-        "conditions": "affinity=[0], threads=1, 64 MiB working set, FP32 strides 1 and 16, unmanaged clocks",
+        "conditions": "affinity=[0], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
         "benchmark": "intent_bench.calibration/sync",
-        "error": "range [374.4, 401.6], n=8"
+        "error": "range [375.2, 438.4], n=8"
       }
     },
     "vector": {
-      "value": 5.066196475,
+      "value": 5.053383009999999,
       "unit": "FLOP/ns",
       "source": {
         "device": "0x710/0x8000000058000002",
         "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
         "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
-        "conditions": "affinity=[0], threads=1, 64 MiB working set, FP32 strides 1 and 16, unmanaged clocks",
+        "conditions": "affinity=[0], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
         "benchmark": "intent_bench.calibration/vector",
-        "error": "range [5.04973, 5.10753], n=8"
+        "error": "range [4.70213, 5.09388], n=8"
+      }
+    },
+    "read_1": {
+      "value": 4.1945812,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x710/0x8000000058000002",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
+        "conditions": "affinity=[0], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/read_1",
+        "error": "range [4.12992, 4.68566], n=8"
+      }
+    },
+    "read_16": {
+      "value": 0.31072347499999997,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x710/0x8000000058000002",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
+        "conditions": "affinity=[0], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/read_16",
+        "error": "range [0.292205, 0.329385], n=8"
+      }
+    },
+    "write_1": {
+      "value": 2.944654855,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x710/0x8000000058000002",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
+        "conditions": "affinity=[0], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/write_1",
+        "error": "range [2.93031, 2.94948], n=8"
+      }
+    },
+    "write_16": {
+      "value": 0.4268074185,
+      "unit": "B/ns",
+      "source": {
+        "device": "0x710/0x8000000058000002",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (GCC) 14.3.1 20250523 (openEuler 14.3.1-10.oe2403sp3)",
+        "conditions": "affinity=[0], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/write_16",
+        "error": "range [0.423476, 0.429522], n=8"
       }
     }
   }
