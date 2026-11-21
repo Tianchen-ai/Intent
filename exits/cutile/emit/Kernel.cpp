@@ -89,6 +89,9 @@ class Kernel {
                ".shape[1])";
       else if (code == "tile_load" || code == "tile_store") {
         int rank=cast<MemRefType>(op.getOperand(0).getType()).getRank();
+        std::string hint = op.getAttrOfType<BoolAttr>("allow_tma").getValue()
+                               ? ""
+                               : ", allow_tma=False";
         if(rank>2){
           auto array=arg(0), row=arg(1);
           SmallVector<std::string> indices(rank),shape(rank,"1");
@@ -98,17 +101,14 @@ class Kernel {
             row="("+row+" // "+array+".shape["+std::to_string(j)+"])";
           }
           auto coord="("+llvm::join(indices,",")+")", tile="("+llvm::join(shape,",")+")";
-          if(code=="tile_store")line(depth,"ct.store("+array+","+coord+",ct.reshape("+arg(3)+","+tile+"),allow_tma=False)");
+          if(code=="tile_store")line(depth,"ct.store("+array+","+coord+",ct.reshape("+arg(3)+","+tile+")"+hint+")");
           else {
             auto id=local();names[op.getResult(0)]=id;
-            line(depth,id+" = ct.reshape(ct.load("+array+","+coord+",shape="+tile+",padding_mode=ct.PaddingMode.ZERO,allow_tma=False),(1,W))");
+            line(depth,id+" = ct.reshape(ct.load("+array+","+coord+",shape="+tile+",padding_mode=ct.PaddingMode.ZERO"+hint+"),(1,W))");
           }
           continue;
         }
         bool matrix = op.getAttrOfType<BoolAttr>("matrix").getValue();
-        std::string hint = op.getAttrOfType<BoolAttr>("allow_tma").getValue()
-                               ? ""
-                               : ", allow_tma=False";
         std::string index =
             matrix ? "(" + arg(1) + ", " + arg(2) + ")" : "(" + arg(2) + ",)";
         if (code == "tile_store") {

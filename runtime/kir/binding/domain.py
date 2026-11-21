@@ -16,8 +16,6 @@ def arguments(signature, values):
                 {
                     "shape": list(v.shape),
                     "strides": list(v.strides),
-                    "aligned16": v.address % 16 == 0,
-                    "element_bytes": {"f32": 4, "f16": 2, "bf16": 2, "i32": 4}[v.dtype],
                 }
             )
     return result
@@ -48,7 +46,7 @@ def bind_views(descriptor, facts, values):
         return values
     from math import gcd
     import functools
-    from .views import adapter, touches, Signature
+    from .views import adapter, Signature
 
     shape = extents(descriptor, facts)
     active = all(shape)

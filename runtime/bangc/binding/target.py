@@ -29,7 +29,7 @@ def facts(index):
 
 
 class Target:
-    def profile(self, device, facts):
+    def profile(self, device, buffers):
         if device.type != "mlu":
             raise ValueError("BANG C requires inputs on a local MLU")
         return device

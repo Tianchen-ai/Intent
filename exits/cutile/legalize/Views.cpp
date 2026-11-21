@@ -35,7 +35,7 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
              *c = op->getOperand(2).getDefiningOp();
         // normalized verified a rectangular active domain and both coordinates.
         s.addOperands({view, r->getOperand(0), c->getOperand(0)});
-        s.addAttribute("allow_tma", b.getBoolAttr(tma));
+        s.addAttribute("allow_tma", b.getBoolAttr(tma && cast<MemRefType>(view.getType()).getRank() <= 2));
         s.addAttribute(
             "matrix",
             b.getBoolAttr(*axes == intentdsl::block::RowProjection::Matrix));
@@ -141,7 +141,7 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
            *col = op->getOperand(2).getDefiningOp();
       auto ind = dyn_cast<BlockArgument>(op->getOperand(2));
       ok = op->getAttrOfType<BoolAttr>("allow_tma").getValue() ==
-               indices->permitTma &&
+               (indices->permitTma && cast<MemRefType>(arg.getType()).getRank() <= 2) &&
            succeeded(axes) &&
            op->getAttrOfType<BoolAttr>("matrix").getValue() ==
                (*axes == intentdsl::block::RowProjection::Matrix) &&

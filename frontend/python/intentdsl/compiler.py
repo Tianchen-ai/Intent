@@ -23,7 +23,7 @@ class Kernel:
         values, result, device = self.binding.bind(inputs, outputs)
         with self.lock:
             facts = self.domain.arguments(self.args, values)
-            key = self.target.profile(device, facts)
+            key = self.target.profile(device, values)
             group = self.artifacts.setdefault(key, [])
             artifact = next((a for a in group if a.accepts(self.domain.evaluate(a.data["domain"],facts))), None)
             if artifact is None:

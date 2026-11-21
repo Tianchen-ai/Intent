@@ -6,7 +6,7 @@ class Target:
     def __init__(self):
         self.devices = {}
 
-    def profile(self, device, facts):
+    def profile(self, device, buffers):
         if getattr(device, "type", None) != "cuda":
             raise ValueError("Triton requires local CUDA buffers")
         return device

@@ -54,7 +54,7 @@ def discover(scope):
 
 
 class Target:
-    def profile(self, device, facts):
+    def profile(self, device, buffers):
         if str(device) != "cpu":
             raise ValueError("CPU backend requires CPU views")
         scope = tuple(sorted(os.sched_getaffinity(0)))

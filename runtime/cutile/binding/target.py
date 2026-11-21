@@ -4,16 +4,18 @@ from runtime.cutile.launch.call import Artifact
 
 
 class Target:
-    def profile(self, device, facts):
+    def profile(self, device, buffers):
         if getattr(device, "type", None) != "cuda":
             raise ValueError("cuTile requires local CUDA arrays")
         limit = (1 << 31) - 1
         narrow = True
         tensor_map = True
-        for view in filter(None, facts):
-            shape, strides = view["shape"],view["strides"]
-            tensor_map &= view["aligned16"] and strides[-1]==1 and all(
-                s*view["element_bytes"] % 16 == 0 for s in strides[:-1])
+        for view in buffers:
+            if not isinstance(view, torch.Tensor):
+                continue
+            shape, strides = view.shape, view.stride()
+            tensor_map &= view.data_ptr() % 16 == 0 and strides[-1] == 1 and all(
+                stride * view.element_size() % 16 == 0 for stride in strides[:-1])
             narrow &= (prod(shape[:-1])+1<=limit and shape[-1]+4095<=limit
                        and all(0<=s<=limit for s in strides)
                        and sum(max(0,n-1)*s for n,s in zip(shape,strides))<=limit)
