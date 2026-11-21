@@ -104,6 +104,12 @@ LogicalResult verifyMapping(ModuleOp m,const compilerinfra::TargetProfile &p,Str
       if(a->size()==2)ok &= ((*a)[0]==(*d)[reversed?1:0] && (*a)[1]==(*d)[reversed?0:1]);
       else ok &= !reversed && (*a)[0]==(*d)[1];
     }
+    if (n == "linear_index" &&
+        (op->getOperand(0) != domain || !def(op->getOperand(1), "rows") ||
+         !def(op->getOperand(2), "columns")))
+      return op->emitError(
+                 "member ordinal requires its own domain and coordinates"),
+             WalkResult::interrupt();
     if(n=="active" || n=="tiles"){
       if (op->getOperand(0)!=domain) return op->emitError("expected the bound matrix domain"), WalkResult::interrupt();
     }
@@ -137,7 +143,13 @@ mlir::LogicalResult intentdsl::block::verifyRowAccess(mlir::Operation *op){
   auto axes=projection(view.getType());
   if(failed(axes))return op->emitError("expected a column or matrix row view");
   auto store=op->getName().stripDialect()=="store";
-  if(store && *axes!=RowProjection::Matrix)return op->emitError("unique row writes require both axes");
+  auto *active = op->getOperand(3).getDefiningOp();
+  if (!active || active->getName().getStringRef() != "block.active")
+    return op->emitError("missing member validity domain");
+  auto domainRank =
+      mlir::cast<mlir::MemRefType>(active->getOperand(0).getType()).getRank();
+  if (store && domainRank != 1 && *axes != RowProjection::Matrix)
+    return op->emitError("unique row writes require both axes");
   auto tile=mlir::dyn_cast<mlir::RankedTensorType>(store?op->getOperand(4).getType():op->getResult(0).getType());
   auto mask=op->getOperand(3).getDefiningOp();
   if(!tile || tile.getRank()!=2 || tile.getElementType()!=mlir::cast<mlir::MemRefType>(view.getType()).getElementType() ||

@@ -87,10 +87,15 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
     if (!record || !record->getString("name") || !record->getArray("dims") ||
         record->getArray("dims")->size() !=
             unsigned(view ? view.getRank() : 0) ||
-        (!scalar.isF16() && !scalar.isF32()) ||
-        record->getString("dtype") != (scalar.isF16() ? "f16" : "f32") ||
+        (!scalar.isF16() && !scalar.isF32() && !scalar.isBF16() &&
+         !scalar.isInteger(32)) ||
+        record->getString("dtype") != (scalar.isF16()         ? "f16"
+                                       : scalar.isBF16()      ? "bf16"
+                                       : scalar.isInteger(32) ? "i32"
+                                                              : "f32") ||
         (view ? (record->getString("direction") != "In" &&
-                 record->getString("direction") != "Out")
+                 record->getString("direction") != "Out" &&
+                 record->getString("direction") != "InOut")
               : record->getString("direction") != "Scalar"))
       return fn.emitError(
           "cuTile array or scalar slot does not match function type");
@@ -124,8 +129,10 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
     if (ok && (n == "tile_store" || n == "tile_load")) {
       auto arg = dyn_cast<BlockArgument>(op->getOperand(0));
       if (!arg || arg.getOwner() != &fn.front() ||
-          (*slots)[arg.getArgNumber()].getAsObject()->getString("direction") !=
-              (n == "tile_load" ? "In" : "Out")) {
+          ((*slots)[arg.getArgNumber()].getAsObject()->getString("direction") !=
+               "InOut" &&
+           (*slots)[arg.getArgNumber()].getAsObject()->getString("direction") !=
+               (n == "tile_load" ? "In" : "Out"))) {
         op->emitError("tile access conflicts with public buffer direction");
         return WalkResult::interrupt();
       }
@@ -139,7 +146,14 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
            op->getAttrOfType<BoolAttr>("matrix").getValue() ==
                (*axes == intentdsl::block::RowProjection::Matrix) &&
            (n != "tile_store" ||
-            *axes == intentdsl::block::RowProjection::Matrix) &&
+            *axes == intentdsl::block::RowProjection::Matrix ||
+            (cast<MemRefType>(fn.getArgument(fn->getAttrOfType<IntegerAttr>(
+                                                   "block.domain_arg")
+                                                 .getInt())
+                                  .getType())
+                     .getRank() == 1 &&
+             op->getAttrOfType<DenseI64ArrayAttr>("block.member_axes") ==
+                 DenseI64ArrayAttr::get(fn.getContext(), {0}))) &&
            pid && pid->getName().getStringRef() == "ct_src.pid" &&
            ((col && col->getName().getStringRef() == "ct_src.zero") ||
             (ind && ind.getArgNumber() == 0 &&

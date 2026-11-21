@@ -25,21 +25,26 @@ public:
     auto pid = make("pid", {}, rw.getIndexType(), rw.getNamedAttr("axis",rw.getI32IntegerAttr(0)))->getResult(0);
     rows = make("rows", pid, vector(rw.getIndexType(), 1), rw.getNamedAttr("step",rw.getStringAttr("rows")))->getResult(0);
     auto &body = anchor->getRegion(0).front();
-    if (resident) {
+    if (resident)
       tile(make("zero", {}, rw.getIndexType())->getResult(0));
-      for (auto &op : body.without_terminator()) {
-        if (isReduction(&op))
-          fixed.map(op.getResult(0), reduce(&op));
-        else if (op.getName().stripDialect() == "write")
-          store(&op);
+    for (auto &operation : body.without_terminator()) {
+      if (operation.getName().stripDialect() == "write")
+        writes.push_back(&operation);
+      else if (isReduction(&operation)) {
+        if (resident)
+          fixed.map(operation.getResult(0), reduce(&operation));
+        else
+          sweep(&operation);
       }
-    } else {
-      for (auto &op : body.without_terminator()) {
-        if (isReduction(&op))
-          sweep(&op);
-        else if (op.getName().stripDialect() == "write")
-          sweep(&op);
-      }
+    }
+    if (!writes.empty()) {
+      if (resident) {
+        for (auto *write : writes)
+          expr(write->getOperand(2));
+        for (auto *write : writes)
+          store(write);
+      } else
+        sweep(writes.front());
     }
     rw.eraseOp(anchor);
   }
@@ -50,6 +55,7 @@ private:
   Location loc;
   Value domain, rows, cols, active;
   bool resident;
+  SmallVector<Operation *> writes;
   IRMapping fixed, local;
   Type vector(Type element, unsigned rank) {
     return RankedTensorType::get(
@@ -82,11 +88,21 @@ private:
     if (!op)
       return v;
     auto n = op->getName().stripDialect();
+    if (n == "ordinal") {
+      auto ordinal =
+          make("linear_index", {domain, rows, cols}, vector(rw.getI32Type(), 2))
+              ->getResult(0);
+      local.map(v, ordinal);
+      return ordinal;
+    }
     if (n == "read") {
       auto view = op->getOperand(0);
       auto elem = cast<MemRefType>(view.getType()).getElementType();
       auto x = make("load", {view, rows, cols, active}, vector(elem, 2))
                    ->getResult(0);
+      if (cast<MemRefType>(domain.getType()).getRank() == 1)
+        x.getDefiningOp()->setAttr("block.member_axes",
+                                   rw.getDenseI64ArrayAttr({0}));
       local.map(v, x);
       return x;
     }
@@ -102,7 +118,8 @@ private:
     if (auto shaped = dyn_cast<RankedTensorType>(element))
       element = shaped.getElementType();
     auto x =
-        make(n, args, rank ? vector(element, rank) : element)->getResult(0);
+        make(n, args, rank ? vector(element, rank) : element, op->getAttrs())
+            ->getResult(0);
     local.map(v, x);
     return x;
   }
@@ -116,8 +133,13 @@ private:
         ->getResult(0);
   }
   void store(Operation *op) {
-    make("store",
-         {op->getOperand(0), rows, cols, active, expr(op->getOperand(2))}, {});
+    auto *store = make(
+        "store",
+        {op->getOperand(0), rows, cols, active, expr(op->getOperand(2))}, {});
+    if (auto axes = op->getAttr("axes"))
+      store->setAttr("block.member_axes", axes);
+    else if (cast<MemRefType>(domain.getType()).getRank() == 1)
+      store->setAttr("block.member_axes", rw.getDenseI64ArrayAttr({0}));
   }
   void sweep(Operation *op) {
     bool accum = isReduction(op);
@@ -140,7 +162,10 @@ private:
             make("combine", {prev, reduce(op)}, prev.getType(), algebra(op));
         make("yield", combined->getResults(), {});
       } else {
-        store(op);
+        for (auto *w : writes)
+          expr(w->getOperand(2));
+        for (auto *w : writes)
+          store(w);
         make("yield", {}, {});
       }
     }

@@ -10,5 +10,6 @@ struct RowCapacity {
     std::string payload;
   };
   llvm::SmallVector<Row> rows;
+  llvm::SmallVector<unsigned> streamingWidths;
 };
 } // namespace intentdsl

@@ -4,7 +4,8 @@
       "decisions": {
         "levels/execution/block::structure": {
           "strategies": [
-            "levels/execution/block::row-reduction"
+            "levels/execution/block::row-reduction",
+            "levels/execution/block::pointwise"
           ],
           "realizer": "levels/execution/block::tile-rows"
         }
@@ -14,7 +15,8 @@
       "decisions": {
         "levels/execution/cpu::partition": {
           "strategies": [
-            "levels/execution/cpu::row-reduction"
+            "levels/execution/cpu::row-reduction",
+            "levels/execution/cpu::pointwise"
           ],
           "realizer": "levels/execution/cpu::group-rows"
         },

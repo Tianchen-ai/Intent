@@ -33,6 +33,17 @@ bool narrowedQuotient(Operation *div) {
 }
 StringRef primitive(Operation *op, int64_t depth) {
   auto n = op->getName().getStringRef();
+  if (n == "block.mul" || n == "block.cast") {
+    auto elem = [](Type t) {
+      if (auto s = dyn_cast<ShapedType>(t))
+        return s.getElementType();
+      return t;
+    };
+    if (elem(op->getResult(0).getType()).isBF16())
+      return n == "block.mul" ? "bf16_product" : "bf16_round";
+    if (n == "block.cast" && elem(op->getOperand(0).getType()).isBF16())
+      return "bf16_widen";
+  }
   if (n == "block.div" && narrowedQuotient(op))
     return "quotient_for_narrow";
   if (n == "block.cast" && narrowedQuotient(op->getOperand(0).getDefiningOp()))
@@ -65,6 +76,21 @@ StringRef primitive(Operation *op, int64_t depth) {
       return alg == "sum" ? "row_sum" : alg == "max_num" ? "row_max_num" : "";
     return alg == "sum" ? "sum" : alg == "max_num" ? "max_num" : "";
   }
+  if (n == "block.maximum") {
+    auto *constant = op->getOperand(1).getDefiningOp();
+    auto zero =
+        constant ? constant->getAttrOfType<FloatAttr>("value") : FloatAttr{};
+    auto tile = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
+    if (tile && tile.getRank() == 2 && tile.getElementType().isF16() && zero &&
+        zero.getType().isF16() && zero.getValue().isPosZero())
+      return "positive_half_or_nan";
+  }
+  if (n == "block.sqrt" || n == "block.linear_index" || n == "block.xor" ||
+      n == "block.and" || n == "block.shl" || n == "block.shr" ||
+      n == "block.gt" || n == "block.select")
+    return op->getName().stripDialect();
+  if (n == "block.constant" || n == "block.maximum")
+    return op->getName().stripDialect();
   if (n == "block.add" || n == "block.sub" || n == "block.mul" ||
       n == "block.div" || n == "block.rsqrt" || n == "block.exp" ||
       n == "block.cast")
@@ -103,7 +129,7 @@ LogicalResult offsets(func::FuncOp f, bool install) {
         continue;
       if (!attach(o, grouped, local))
         return WalkResult::interrupt();
-      local += t.getElementTypeBitWidth() / 8;
+      local += (t.getElementTypeBitWidth() + 7) / 8;
     }
     for (auto &o : compute)
       if (o.getName().getStringRef() == "dsa.reduce" &&

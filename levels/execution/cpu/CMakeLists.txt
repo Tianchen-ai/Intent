@@ -1,5 +1,5 @@
 compilerinfra_target(kir levels/algorithm/kir)
-compilerinfra_unit(SOURCES decisions/RowTasks.cpp decisions/RowReduction.cpp decisions/PanelReduction.cpp ir/Dialect.cpp lowering/Boundaries.cpp
+compilerinfra_unit(SOURCES decisions/Pointwise.cpp decisions/RowTasks.cpp decisions/RowReduction.cpp decisions/PanelReduction.cpp ir/Dialect.cpp lowering/Boundaries.cpp
   LINK_LIBRARIES ${kir}
   TABLEGEN
     "ir/Ops.td Dialect.h.inc -gen-dialect-decls -dialect=cpu"

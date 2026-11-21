@@ -68,16 +68,20 @@ class Artifact:
         source.write_text(self.data["task"])
         native = triton.compile(str(source), target=self.info)
         abi = native.metadata.single_instance_abi
-        if abi["symbol"] != "row_task_instance" or abi["shape_parameters"] != [
-            "T",
-            "N",
-            "C",
-        ]:
+        if (
+            abi["symbol"] != "row_task_instance"
+            or abi["shape_parameters"] != self.data["shape_parameters"]
+        ):
             raise ValueError("compiled task shape or entry ABI mismatch")
         actual = abi["arguments"]
         if len(actual) != len(self.data["abi"]):
             raise ValueError("task parameter count differs")
-        ctypes = {"f16": "_Float16", "f32": "float"}
+        ctypes = {
+            "f16": "_Float16",
+            "f32": "float",
+            "bf16": "uint16_t",
+            "i32": "int32_t",
+        }
         for i, (arg, item) in enumerate(zip(actual, self.data["abi"])):
             rank = len(item["dims"])
             wanted = (

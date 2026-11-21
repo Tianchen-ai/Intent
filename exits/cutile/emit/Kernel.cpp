@@ -1,3 +1,4 @@
+#include "intentdsl/levels/algorithm/kir/ir/Literal.h"
 #include "compilerinfra/Assembly.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 namespace CI_UNIT_NAMESPACE {
@@ -35,13 +36,30 @@ class Kernel {
           line(depth, carry + " = " + arg(1));
         }
         line(depth,
-             "for " + i + " in range(ct.cdiv(" + arg(0) + ".shape[1], W)):");
+             "for " + i + " in range(ct.cdiv(" + arg(0) + ".shape[-1], W)):");
         if (auto err = body(inner, depth + 1))
           return err;
         continue;
       }
       std::string expr;
-      if (code == "pid")
+      if (code == "linear_index")
+        expr = "ct.astype(ct.expand_dims(" + arg(1) + ",1)*" + arg(0) +
+               ".shape[1]+ct.expand_dims(" + arg(2) + ",0),ct.int32)";
+      else if (code == "select")
+        expr = "ct.where(" + arg(0) + "," + arg(1) + "," + arg(2) + ")";
+      else if (code == "xor" || code == "and" || code == "shr" ||
+               code == "shl" || code == "gt") {
+        auto token = code == "xor"   ? " ^ "
+                     : code == "and" ? " & "
+                     : code == "shl" ? " << "
+                     : code == "shr" ? " >> "
+                                     : " > ";
+        expr = arg(0) + token + arg(1);
+      } else if (code == "constant")
+        expr = intentdsl::kir::literal(op.getAttrOfType<TypedAttr>("value"));
+      else if (code == "maximum")
+        expr = "ct.maximum(" + arg(0) + "," + arg(1) + ",propagate_nan=True)";
+      else if (code == "pid")
         expr = "ct.astype(ct.bid(0), " + indexType + ")";
       else if (code == "zero")
         expr = "0";
@@ -50,6 +68,10 @@ class Kernel {
       else if (code == "columns")
         expr = "ct.astype(" + arg(0) + ", " + indexType +
                ") * W + ct.arange(W, dtype=" + indexType + ")";
+      else if (code == "active" &&
+               cast<MemRefType>(op.getOperand(0).getType()).getRank() == 1)
+        expr = "(ct.expand_dims(" + arg(1) + ",1)<1) & (ct.expand_dims(" +
+               arg(2) + ",0)<" + arg(0) + ".shape[0])";
       else if (code == "active")
         expr = "(ct.expand_dims(" + arg(1) + ", 1) < " + arg(0) +
                ".shape[0]) & (ct.expand_dims(" + arg(2) + ", 0) < " + arg(0) +
@@ -62,7 +84,14 @@ class Kernel {
         std::string index =
             matrix ? "(" + arg(1) + ", " + arg(2) + ")" : "(" + arg(2) + ",)";
         if (code == "tile_store") {
-          line(depth, "ct.store(" + arg(0) + ", " + index + ", " + arg(3) +
+          auto axes = op.getAttrOfType<DenseI64ArrayAttr>("block.member_axes");
+          bool swap = axes && axes.size() == 2 && axes[0] == 1;
+          if (swap)
+            index = "(" + arg(2) + "," + arg(1) + ")";
+          line(depth, "ct.store(" + arg(0) + ", " + index + ", " +
+                          (swap      ? "ct.transpose(" + arg(3) + ")"
+                           : !matrix ? "ct.reshape(" + arg(3) + ",(W,))"
+                                     : arg(3)) +
                           hint + ")");
           continue;
         }
@@ -92,16 +121,20 @@ class Kernel {
       else if (code == "div")
         expr = "ct.truediv(" + arg(0) + ", " + arg(1) +
                ", rounding_mode=ct.RoundingMode.RN)";
-      else if (code == "exp" || code == "rsqrt")
+      else if (code == "sqrt" || code == "exp" || code == "rsqrt")
         expr = "ct." + code.str() + "(" + arg(0) + ")";
       else if (code == "cast") {
         auto t = op.getResult(0).getType();
         if (auto f = dyn_cast<ShapedType>(t))
           t = f.getElementType();
-        if (!t.isF32() && !t.isF16())
+        if (!t.isF32() && !t.isF16() && !t.isBF16() && !t.isInteger(32))
           return llvm::createStringError("unsupported cuTile conversion");
         expr = "ct.astype(" + arg(0) + ", ct." +
-               std::string(t.isF16() ? "float16" : "float32") + ")";
+               std::string(t.isInteger(32) ? "int32"
+                           : t.isBF16()    ? "bfloat16"
+                           : t.isF16()     ? "float16"
+                                           : "float32") +
+               ")";
       } else
         return llvm::createStringError("unexpected cuTile operation " + code);
       auto id = local();

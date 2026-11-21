@@ -1,3 +1,4 @@
+#include "intentdsl/levels/algorithm/kir/ir/Literal.h"
 #include "compilerinfra/Assembly.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "llvm/ADT/DenseMap.h"
@@ -11,6 +12,8 @@ Text ctype(Type t) {
     t = s.getElementType();
   if (t.isBF16())
     return "unsigned short";
+  if (t.isInteger(1))
+    return "unsigned char";
   if (t.isInteger(32))
     return "int";
   return t.isF16() ? "half" : "float";
@@ -215,6 +218,16 @@ class Source {
       auto type = ctype(val.getType());
       if (vec)
         line("auto *" + id + "=(" + type + "*)" + address(inst) + ";");
+      if (prim == "positive_half_or_nan") {
+        // Signed binary16 encodings -1023..-1 are negative NaNs. Preserve
+        // those and every positive encoding; all other negative values map to
+        // +0.
+        line("__bang_ge_scalar((short*)" + id + ",(const short*)" + in(0) +
+             ",(short)-1023,lanes);");
+        line("__bang_mul((short*)" + id + ",(const short*)" + in(0) +
+             ",(const short*)" + id + ",lanes);");
+        continue;
+      }
       if (prim == "quotient_for_narrow")
         continue;
       if (prim == "certified_half_quotient") {
@@ -227,14 +240,59 @@ class Source {
       auto operand = [&](unsigned i) {
         return in(i) + (tile(inst.getOperand(i)) ? "[k]" : "");
       };
+      if (prim == "bf16_product" || prim == "bf16_round" ||
+          prim == "bf16_widen") {
+        auto a = operand(0);
+        auto value = prim == "bf16_product"
+                         ? "round_bf16(widen_bf16(" + a + ")*widen_bf16(" +
+                               operand(1) + "))"
+                     : prim == "bf16_round" ? "round_bf16(" + a + ")"
+                                            : "widen_bf16(" + a + ")";
+        line((vec ? "for(int k=0;k<live;++k)" + id + "[k]" : type + " " + id) +
+             "=" + value + ";");
+        continue;
+      }
+      if (n == "linear_index") {
+        line("for(int k=0;k<live;++k)" + id +
+             "[k]=(int)((unsigned)(row0+j)*(unsigned)N+(unsigned)col+k);");
+        continue;
+      }
+      if (n == "constant") {
+        auto literal = inst.getAttrOfType<TypedAttr>("value");
+        line(type + " " + id + "=(" + type + ")" +
+             intentdsl::kir::literal(literal) + ";");
+        continue;
+      }
       auto a = operand(0);
       Text expr;
       if (n == "cast")
         expr = "(" + type + ")" + a;
+      else if (n == "sqrt")
+        expr = "sqrtf(" + a + ")";
       else if (n == "rsqrt")
         expr = "(1.0f/sqrtf(" + a + "))";
       else if (n == "exp")
         expr = "expf(" + a + ")";
+      else if (n == "select")
+        expr = "(" + a + "?" + operand(1) + ":" + operand(2) + ")";
+      else if (n == "gt" || n == "and" || n == "xor" || n == "shr" ||
+               n == "shl") {
+        auto token = n == "gt"    ? ">"
+                     : n == "and" ? "&"
+                     : n == "xor" ? "^"
+                     : n == "shr" ? ">>"
+                                  : "<<";
+        expr = (n == "shl" ? "(unsigned)" : "") + a + token + operand(1);
+      } else if (ctype(val.getType()) == "int" &&
+                 (n == "mul" || n == "add" || n == "sub"))
+        expr = "(unsigned)" + a +
+               (n == "mul"   ? "*"
+                : n == "add" ? "+"
+                             : "-") +
+               "(unsigned)" + operand(1);
+      else if (n == "maximum")
+        expr = "(isnan((float)" + a + ") || isnan((float)" + operand(1) +
+               ") ? NAN : fmaxf(" + a + "," + operand(1) + "))";
       else if (n == "combine")
         expr = prim == "sum" ? a + "+" + operand(1)
                              : "fmaxf(" + a + "," + operand(1) + ")";
@@ -247,7 +305,11 @@ class Source {
                operand(1);
       else
         return llvm::createStringError("unsupported BANG row instruction " + n);
-      if (vec && n == "cast" && ctype(inst.getOperand(0).getType()) != type)
+      if (vec && n == "cast" &&
+          ((type == "half" && ctype(inst.getOperand(0).getType()) == "float") ||
+           (type == "float" &&
+            ctype(inst.getOperand(0).getType()) == "half")) &&
+          tile(inst.getOperand(0)))
         line(Text(type == "half" ? "__bang_float2half_rn"
                                  : "__bang_half2float") +
              "(" + id + "," + in(0) + ",lanes);");
@@ -290,8 +352,14 @@ public:
   llvm::Error outer(Block &block) {
     for (auto &op : block) {
       auto code = op.getName().stripDialect();
-      if (code == "task_groups") {
-        line("for(long long group=taskId;group<grid;group+=taskDim){");
+      if (code == "range") {
+        names[op.getResult(0)] = "taskId";
+        names[op.getResult(1)] = "grid";
+        names[op.getResult(2)] = "taskDim";
+      } else if (code == "task_groups") {
+        line("for(long long group=" + name(op.getOperand(0)) + ";group<" +
+             name(op.getOperand(1)) + ";group+=" + name(op.getOperand(2)) +
+             "){");
         if (auto e = outer(op.getRegion(0).front()))
           return e;
         line("}");

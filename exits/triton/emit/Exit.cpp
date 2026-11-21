@@ -1,3 +1,4 @@
+#include "intentdsl/levels/algorithm/kir/ir/Literal.h"
 #include "intentdsl/levels/execution/block/ir/Access.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/execution/block/decisions/Verify.h"
@@ -80,7 +81,24 @@ public:
         continue;
       }
       std::string e;
-      if (n == "pid")
+      if (n == "linear_index")
+        e = "(" + arg(1) + "[:,None]*N+" + arg(2) + "[None,:]).to(tl.int32)";
+      else if (n == "select")
+        e = "tl.where(" + arg(0) + "," + arg(1) + "," + arg(2) + ")";
+      else if (n == "xor" || n == "and" || n == "shr" || n == "shl" ||
+               n == "gt") {
+        auto token = n == "xor"   ? " ^ "
+                     : n == "and" ? " & "
+                     : n == "shl" ? " << "
+                     : n == "shr" ? " >> "
+                                  : " > ";
+        e = arg(0) + token + arg(1);
+      } else if (n == "constant")
+        e = intentdsl::kir::literal(op.getAttrOfType<TypedAttr>("value"));
+      else if (n == "maximum")
+        e = "tl.maximum(" + arg(0) + "," + arg(1) +
+            ",propagate_nan=tl.PropagateNan.ALL)";
+      else if (n == "pid")
         e = "tl.program_id(0).to(tl.int64)";
       else if (n == "rows")
         e = arg(0) + " * ROWS + tl.arange(0, ROWS)";
@@ -92,10 +110,13 @@ public:
         e = "(" + arg(1) + "[:, None] < M) & (" + arg(2) + "[None, :] < N)";
       else if (n == "offsets") {
         auto rank = op.getAttrOfType<BoolAttr>("matrix").getValue() ? 2 : 1;
-        auto base = rank == 2 ? arg(1) + "[:, None] * " + arg(0) + "_s0"
+        bool swap = op.getAttrOfType<BoolAttr>("permuted") &&
+                    op.getAttrOfType<BoolAttr>("permuted").getValue();
+        auto base = rank == 2 ? arg(1) + "[:, None] * " + arg(0) +
+                                    (swap ? "_s1" : "_s0")
                               : "tl.full((ROWS, 1), 0, tl.int64)";
         e = base + " + " + arg(2) + "[None, :] * " + arg(0) + "_s" +
-            std::to_string(rank - 1);
+            std::to_string(swap ? 0 : rank - 1);
       } else if (n == "load")
         e = "tl.load(" + arg(0) + " + " + arg(1) + ", mask=" + arg(2) +
             ", other=0)";
@@ -120,14 +141,18 @@ public:
         e = arg(0) + (n == "add" ? " + " : n == "sub" ? " - " : " * ") + arg(1);
       else if (n == "div")
         e = "tl.div_rn(" + arg(0) + ", " + arg(1) + ")";
-      else if (n == "exp" || n == "rsqrt")
+      else if (n == "sqrt" || n == "exp" || n == "rsqrt")
         e = "tl." + n.str() + "(" + arg(0) + ")";
       else if (n == "cast") {
         auto t = op.getResult(0).getType();
         if (auto shaped = dyn_cast<ShapedType>(t))
           t = shaped.getElementType();
         e = arg(0) + ".to(tl." +
-            std::string(t.isF16() ? "float16" : "float32") + ")";
+            std::string(t.isInteger(32) ? "int32"
+                        : t.isBF16()    ? "bfloat16"
+                        : t.isF16()     ? "float16"
+                                        : "float32") +
+            ")";
       } else
         return llvm::createStringError("unhandled legal operation " + n.str());
       auto id = "v" + std::to_string(next++);

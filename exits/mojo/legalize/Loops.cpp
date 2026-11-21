@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "compilerinfra/Assembly.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/IR/IRMapping.h"
@@ -15,6 +16,7 @@ class Columns {
   IRMapping reduced, tile;
   Value col;
   int64_t width;
+  SmallVector<Operation *> stores;
   Operation *make(StringRef name, ValueRange args, TypeRange types,
                   ArrayRef<NamedAttribute> attrs = {}) {
     OperationState s(loc, ("mojo_row." + name).str());
@@ -36,7 +38,11 @@ class Columns {
     if (auto ranked = dyn_cast<RankedTensorType>(t))
       t = VectorType::get({width}, ranked.getElementType());
     Value result;
-    if (n == "read")
+    if (n == "ordinal") {
+      result = make("apply", {task->getRegion(0).front().getArgument(0), col},
+                    t, b.getNamedAttr("kind", b.getStringAttr("ordinal")))
+                   ->getResult(0);
+    } else if (n == "read")
       result = make("read",
                     {op->getOperand(0),
                      task->getRegion(0).front().getArgument(0), col},
@@ -50,6 +56,8 @@ class Columns {
           make("apply", args, t, b.getNamedAttr("kind", b.getStringAttr(n)))
               ->getResult(0);
     }
+    if (auto c = op->getAttr("value"))
+      result.getDefiningOp()->setAttr("value", c);
     tile.map(v, result);
     return result;
   }
@@ -74,10 +82,13 @@ class Columns {
     col = bb.addArgument(b.getIndexType(), loc);
     b.setInsertionPointToEnd(&bb);
     if (store) {
-      make("write",
-           {op->getOperand(0), op->getOperand(1), col,
-            expression(op->getOperand(2))},
-           {});
+      for (auto *w : stores)
+        expression(w->getOperand(2));
+      for (auto *w : stores)
+        make("write",
+             {w->getOperand(0), w->getOperand(1), col,
+              expression(w->getOperand(2))},
+             {}, w->getAttrs());
       make("yield", {}, {});
       return {};
     }
@@ -92,9 +103,18 @@ public:
     SmallVector<Operation *> original;
     for (auto &op : bb.without_terminator())
       original.push_back(&op);
+    for (auto *op : original)
+      if (op->getName().stripDialect() == "write")
+        stores.push_back(op);
     b.setInsertionPoint(&bb.back());
-    for (auto *op : original) {
+    auto ordered = original;
+    std::stable_partition(ordered.begin(), ordered.end(), [](Operation *op) {
+      return op->getName().stripDialect() != "write";
+    });
+    for (auto *op : ordered) {
       auto n = op->getName().stripDialect();
+      if (n == "write" && op != stores.front())
+        continue;
       if (n != "sum" && n != "max_num" && n != "write")
         continue;
       auto full = sweep(op, "full", {}, lanes);

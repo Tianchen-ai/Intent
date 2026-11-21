@@ -1,3 +1,4 @@
+#include "intentdsl/levels/algorithm/kir/ir/Literal.h"
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
 #include "llvm/ADT/StringExtras.h"
 using namespace mlir;
@@ -16,7 +17,11 @@ class Source {
   std::string dtype(Type t) {
     if (auto v = dyn_cast<VectorType>(t))
       t = v.getElementType();
-    return t.isF16() ? "float16" : "float32";
+    if (t.isInteger(1))
+      return "bool";
+    if (t.isInteger(32))
+      return "int32";
+    return t.isBF16() ? "bfloat16" : t.isF16() ? "float16" : "float32";
   }
 
 public:
@@ -34,9 +39,10 @@ public:
         for (int j = 0; j < m.getRank(); ++j)
           params.push_back(n + "s" + std::to_string(j) + ": Int64");
       } else
-        params.push_back(n + ": Float32");
+        params.push_back(n +
+                         (v.getType().isInteger(32) ? ": Int32" : ": Float32"));
     }
-    out << "from std.math import exp, rsqrt, "
+    out << "from std.math import exp, sqrt, rsqrt, max, "
            "inf\n@export(\"intent_row_interval\")\ndef intent_row_interval("
         << llvm::join(params, ",")
         << ", first: Int64, stop: Int64, cols: Int64, columns_per_block: "
@@ -81,10 +87,12 @@ public:
         } else if (code == "read" || code == "write") {
           auto view = cast<MemRefType>(op.getOperand(0).getType());
           bool matrix = view.getRank() == 2;
+          bool swap = bool(op.getAttr("axes"));
           auto a = arg(0),
-               stride = "Int(" + a + "s" + (matrix ? "1" : "0") + ")";
-          auto offset = (matrix ? "r*Int(" + a + "s0)+" : "") +
-                        std::string("j*") + stride;
+               stride = "Int(" + a + "s" + (matrix && !swap ? "1" : "0") + ")";
+          auto offset =
+              (matrix ? "r*Int(" + a + (swap ? "s1)+" : "s0)+") : "") +
+              std::string("j*") + stride;
           if (code == "read") {
             line(3, "var " + lhs + " = SIMD[DType." +
                         dtype(view.getElementType()) + "," + lanes + "](0)");
@@ -107,10 +115,41 @@ public:
         } else if (code == "apply") {
           auto opKind = op.getAttrOfType<StringAttr>("kind").getValue();
           std::string expr;
-          if (opKind == "cast")
+          if (opKind == "ordinal") {
+            line(3, "var " + lhs + " = SIMD[DType.int32," + lanes + "](0)");
+            line(3, "for lane in range(" + lanes + "):");
+            line(4, lhs + "[lane] = Int32(r*Int(cols)+j+lane)");
+            vars[op.getResult(0)] = lhs;
+            continue;
+          }
+          if (opKind == "select") {
+            auto t = "SIMD[DType." + dtype(op.getResult(0).getType()) + "," +
+                     lanes + "]";
+            expr = arg(0) + ".select(" + arg(1) + "," +
+                   (isa<VectorType>(op.getOperand(2).getType())
+                        ? arg(2)
+                        : t + "(" + arg(2) + ")") +
+                   ")";
+          } else if (opKind == "constant")
+            expr =
+                "Scalar[DType." + dtype(op.getResult(0).getType()) + "](" +
+                intentdsl::kir::literal(op.getAttrOfType<TypedAttr>("value")) +
+                ")";
+          else if (opKind == "maximum") {
+            auto expanded = [&](unsigned i) {
+              return isa<VectorType>(op.getResult(0).getType()) &&
+                             !isa<VectorType>(op.getOperand(i).getType())
+                         ? "SIMD[DType." + dtype(op.getResult(0).getType()) +
+                               "," + lanes + "](" + arg(i) + ")"
+                         : arg(i);
+            };
+            auto a = expanded(0), b = expanded(1);
+            expr = a + ".ne(" + a + ").select(" + a + "," + b + ".ne(" + b +
+                   ").select(" + b + ",max(" + a + "," + b + ")))";
+          } else if (opKind == "cast")
             expr = arg(0) + ".cast[DType." + dtype(op.getResult(0).getType()) +
                    "]()";
-          else if (opKind == "exp" || opKind == "rsqrt")
+          else if (opKind == "sqrt" || opKind == "exp" || opKind == "rsqrt")
             expr = opKind.str() + "(" + arg(0) + ")";
           else {
             auto token = llvm::StringSwitch<StringRef>(opKind)
@@ -118,6 +157,11 @@ public:
                              .Case("sub", "-")
                              .Case("mul", "*")
                              .Case("div", "/")
+                             .Case("xor", "^")
+                             .Case("and", "&")
+                             .Case("shl", "<<")
+                             .Case("shr", ">>")
+                             .Case("gt", ">")
                              .Default("");
             if (token.empty())
               return llvm::createStringError("unsupported Mojo expression");
@@ -128,7 +172,9 @@ public:
                                "," + lanes + "](" + arg(i) + ")"
                          : arg(i);
             };
-            expr = expand(0) + " " + token.str() + " " + expand(1);
+            expr = opKind == "gt"
+                       ? expand(0) + ".gt(" + expand(1) + ")"
+                       : expand(0) + " " + token.str() + " " + expand(1);
           }
           line(3, "var " + lhs + " = " + expr);
         } else

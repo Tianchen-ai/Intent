@@ -4,8 +4,12 @@ from threading import RLock
 from time import perf_counter
 import cuda.tile as ct
 from cuda.tile._cext import default_tile_context
-from cuda.tile.compilation import CallingConvention, KernelSignature, mangle_kernel_name
-
+from cuda.tile.compilation import (
+    ArrayConstraint,
+    CallingConvention,
+    KernelSignature,
+    mangle_kernel_name,
+)
 
 class BoundKernel(ct.kernel):
     def __init__(self, fn, hints, arch):
@@ -23,9 +27,19 @@ class BoundKernel(ct.kernel):
         return self
 
     def prepare_native(self, args):
+        # The launcher uses the v2 convention when it specializes a unit extent.
+        # Ask the SDK for the actual constraints, including strides and alignment.
         sig = KernelSignature.from_kernel_args(
-            self, args, CallingConvention.cutile_python_v1()
+            self, args, CallingConvention.cutile_python_v2()
         )
+        if not any(
+            isinstance(p, ArrayConstraint)
+            and any(n is not None for n in p.shape_constant)
+            for p in sig.parameters
+        ):
+            sig = KernelSignature.from_kernel_args(
+                self, args, CallingConvention.cutile_python_v1()
+            )
         key = (default_tile_context, mangle_kernel_name("kernel", sig))
         with self.lock:
             hit = key in self.native

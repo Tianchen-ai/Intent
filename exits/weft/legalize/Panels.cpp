@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
 #include "mlir/IR/IRMapping.h"
 using namespace mlir;
@@ -42,9 +43,19 @@ public:
     SmallVector<Operation *> old;
     for (auto &op : task.without_terminator())
       old.push_back(&op);
-    for (auto *op : old) {
+    SmallVector<Operation *> writes;
+    for (auto *op : old)
+      if (op->getName().stripDialect() == "write")
+        writes.push_back(op);
+    auto ordered = old;
+    std::stable_partition(ordered.begin(), ordered.end(), [](Operation *op) {
+      return op->getName().stripDialect() != "write";
+    });
+    for (auto *op : ordered) {
       auto name = op->getName().stripDialect();
       bool store = name == "write";
+      if (store && op != writes.front())
+        continue;
       if (!store && name != "sum" && name != "max_num")
         continue;
       b.setInsertionPoint(&task.back());
@@ -61,10 +72,16 @@ public:
       b.setInsertionPointToEnd(&body);
       panel.clear();
       if (store) {
-        make("weft_host.write_panel",
-             {op->getOperand(0), task.getArgument(0), offset, extent,
-              local(op->getOperand(2))},
-             {});
+        for (auto *w : writes)
+          local(w->getOperand(2));
+        for (auto *w : writes) {
+          auto *dst = make("weft_host.write_panel",
+                           {w->getOperand(0), task.getArgument(0), offset,
+                            extent, local(w->getOperand(2))},
+                           {});
+          if (auto axes = w->getAttr("axes"))
+            dst->setAttr("axes", axes);
+        }
         make("weft_host.yield", {}, {});
       } else {
         auto partial = local(op->getResult(0));
@@ -116,7 +133,7 @@ LogicalResult verifyPanels(Operation *dispatch) {
                  n == "write" || n == "parallel" || n == "task" || n == "join")
         return op.emitError("unexpected instruction inside Weft panel");
     }
-    if (writes != unsigned(store))
+    if (store ? !writes : bool(writes))
       return s.emitError("wrong panel write count");
     if (!store) {
       auto *local = bb.back().getOperand(0).getDefiningOp();

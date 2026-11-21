@@ -9,6 +9,10 @@ struct RowMachine {
   int64_t vectorBits, workers;
   llvm::SmallVector<RowConfig> rows;
   bool structuredRows = false;
+  bool boundWidening = false;
+  int64_t wideningPanel =
+      0; // Fixed-width panels supported for mixed-width live values.
+  mlir::ArrayAttr wideningConfigurations(mlir::MLIRContext *ctx) const;
   mlir::ArrayAttr configurations(mlir::MLIRContext *, bool whole) const;
   bool accepts(mlir::ArrayAttr) const;
 };

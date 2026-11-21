@@ -22,6 +22,8 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
   caps->vectorBits = *bits;
   caps->structuredRows = true;
   caps->workers = *workers;
+  caps->wideningPanel = *bits / 32;
+  caps->boundWidening = options.getString("arch") == "riscv64";
   // Locally reported mvendorid/marchid for the V100 core.
   bool v100 = options.getString("core") == "0x710/0x8000000058000002";
   int64_t columns = *bits == 128 ? 32 : *bits == 1024 ? 128 : 64;
@@ -50,6 +52,10 @@ llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
     return program.takeError();
   llvm::json::Object fields{{"task", *program},
                             {"host", hostSource(&task, *abi->getAsArray())}};
+  fields["shape_parameters"] =
+      task.getAttrOfType<BoolAttr>("weft_host.absolute_origin").getValue()
+          ? llvm::json::Array{"T", "N", "C", "O"}
+          : llvm::json::Array{"T", "N", "C"};
   fields["version"] = 3;
   fields["abi"] = std::move(*abi);
   fields["rows"] = std::move(rows);

@@ -96,3 +96,21 @@ def Itsrc_rsqrt : Inst<"rsqrt"> {
   let arguments = (ins AnyType:$input);
   let results = (outs AnyType:$result);
 }
+
+def Itsrc_constant : Inst<"constant"> {let arguments=(ins AnyAttr:$value);let results=(outs AnyType:$result);}
+def Itsrc_maximum : Inst<"maximum"> {let arguments=(ins AnyType:$lhs,AnyType:$rhs);let results=(outs AnyType:$result);}
+
+foreach mnemonic=["xor","and","shl","shr","gt"] in {
+  def Itsrc_#mnemonic#Op : Op<Itsrc_Dialect,mnemonic> {
+    let arguments=(ins AnyType:$lhs,AnyType:$rhs); let results=(outs AnyType:$result);
+  }
+}
+def Itsrc_select : Op<Itsrc_Dialect,"select"> {
+  let arguments=(ins AnyType:$predicate,AnyType:$onTrue,AnyType:$onFalse); let results=(outs AnyType:$result);
+}
+
+def Itsrc_linear_index : Op<Itsrc_Dialect,"linear_index"> {
+  let arguments=(ins AnyMemRef:$domain,AnyTensor:$rows,AnyTensor:$columns); let results=(outs AnyType:$result);
+}
+
+def Itsrc_sqrt : Inst<"sqrt"> { let arguments=(ins AnyType:$input); let results=(outs AnyType:$result); }

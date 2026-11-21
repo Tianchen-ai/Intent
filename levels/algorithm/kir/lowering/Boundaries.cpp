@@ -32,24 +32,51 @@ LogicalResult verifyRowComputation(func::FuncOp fn, Block &row, ValueRange captu
       elt = view.getElementType();
     }
     auto direction = *desc->getString("direction");
-    if ((rank && direction!="In" && direction!="Out") || (!rank && direction!="Scalar"))
+    if ((rank && direction != "In" && direction != "Out" &&
+         direction != "InOut") ||
+        (!rank && direction != "Scalar"))
       return fn.emitError("direction disagrees with the scalar or view type");
     if (rank != desc->getArray("dims")->size() ||
-        (!elt.isF16() && !elt.isF32()) ||
-        desc->getString("dtype") != (elt.isF16() ? "f16" : "f32"))
+        (!elt.isF16() && !elt.isF32() && !elt.isBF16() && !elt.isInteger(32)) ||
+        desc->getString("dtype") != (elt.isF16()         ? "f16"
+                                     : elt.isBF16()      ? "bf16"
+                                     : elt.isInteger(32) ? "i32"
+                                                         : "f32"))
       return fn.emitError("parameter descriptor does not match its IR type");
   }
   auto domainType=dyn_cast<MemRefType>(captures[domainIndex].getType());
-  if(!domainType || domainType.getRank()!=2)return fn.emitError("expected a matrix row domain");
+  if (!domainType || (domainType.getRank() != 2 && domainType.getRank() != 1))
+    return fn.emitError("expected a matrix row domain");
   auto &axes =
       *(*args)[domainIndex].getAsObject()->getArray("dims");
   llvm::SmallDenseSet<unsigned> written;
+  bool sawWrite = false;
   for (auto &op : row) {
     auto name = op.getName().stripDialect();
     if (op.getName().getDialectNamespace() != dialect)
       return op.emitError("unexpected row operation");
-    if(name!="read" && name!="write" && name!="end" && name!="sum" && name!="max_num" &&
-       name!="add" && name!="sub" && name!="mul" && name!="div" && name!="cast" && name!="exp" && name!="rsqrt")
+    if (name == "constant") {
+      auto v = op.getAttrOfType<TypedAttr>("value");
+      if (!v || v.getType() != op.getResult(0).getType())
+        return op.emitError("typed literal mismatch");
+      continue;
+    }
+    if (name == "ordinal") {
+      if (op.getOperand(0) != captures[domainIndex] ||
+          op.getOperand(1) != row.getArgument(0) ||
+          op.getResult(0).getType() !=
+              RankedTensorType::get({ShapedType::kDynamic},
+                                    IntegerType::get(fn.getContext(), 32)))
+        return op.emitError(
+            "ordinal must enumerate the declared row in the owning domain");
+      continue;
+    }
+    if (name != "sqrt" && name != "and" && name != "xor" && name != "shl" &&
+        name != "shr" && name != "gt" && name != "select" &&
+        name != "maximum" && name != "read" && name != "write" &&
+        name != "end" && name != "sum" && name != "max_num" && name != "add" &&
+        name != "sub" && name != "mul" && name != "div" && name != "cast" &&
+        name != "exp" && name != "rsqrt")
       return op.emitError("operation outside logical row representation");
     if (name == "read" || name == "write") {
       auto view = cast<MemRefType>(op.getOperand(0).getType());
@@ -58,16 +85,32 @@ LogicalResult verifyRowComputation(func::FuncOp fn, Block &row, ValueRange captu
       if (!arg || slot == captures.end())
         return op.emitError("expected an external view");
       bool write = name == "write";
+      if (!write && sawWrite &&
+          llvm::any_of(*args, [](const llvm::json::Value &v) {
+            return v.getAsObject()->getString("direction") == "InOut";
+          }))
+        return op.emitError(
+            "dependent read after a write requires an ordered region");
+      sawWrite |= write;
       size_t index = slot - captures.begin();
       auto *info = (*args)[index].getAsObject();
-      if (info->getString("direction") != (write ? "Out" : "In") ||
+      if ((info->getString("direction") != (write ? "Out" : "In") &&
+           info->getString("direction") != "InOut") ||
           view.getRank() < 1 || view.getRank() > 2 ||
-          op.getNumOperands() != unsigned(view.getRank() + write) ||
-          (view.getRank() == 2 && op.getOperand(1) != row.getArgument(0)))
+          op.getNumOperands() !=
+              unsigned((domainType.getRank() == 1 ? 2 : view.getRank()) +
+                       write) ||
+          ((view.getRank() == 2 || domainType.getRank() == 1) &&
+           op.getOperand(1) != row.getArgument(0)))
         return op.emitError("invalid row access");
       const auto &dims = *info->getArray("dims");
-      if (dims.back() != axes.back() ||
-          (view.getRank() == 2 && dims.front() != axes.front()))
+      if (auto perm = op.getAttrOfType<DenseI64ArrayAttr>("axes")) {
+        if (!write || view.getRank() != 2 ||
+            perm.asArrayRef() != ArrayRef<int64_t>({1, 0}) ||
+            dims[0] != axes[1] || dims[1] != axes[0])
+          return op.emitError("invalid transposed member access");
+      } else if (dims.back() != axes.back() ||
+                 (view.getRank() == 2 && dims.front() != axes.front()))
         return op.emitError("view does not share the row domain");
       if (write)
         written.insert(index);
@@ -89,15 +132,28 @@ LogicalResult verifyRowComputation(func::FuncOp fn, Block &row, ValueRange captu
         auto r = dyn_cast<RankedTensorType>(t);
         return r ? r.getElementType() : t;
       };
-      if (!element(result).isF32() && !element(result).isF16())
-        return op.emitError("expected floating point result");
+      auto valueType = element(name == "select" ? op.getOperand(1).getType()
+                                                : op.getOperand(0).getType());
+      auto allowed = [](Type t) {
+        return t.isF32() || t.isF16() || t.isBF16() || t.isInteger(32);
+      };
+      if (!allowed(valueType) ||
+          (name == "gt" ? !element(result).isInteger(1)
+                        : !allowed(element(result))) ||
+          ((name == "xor" || name == "and" || name == "shr" || name == "shl") &&
+           !valueType.isInteger(32)) ||
+          (name != "gt" && name != "cast" && element(result) != valueType) ||
+          ((name == "sqrt" || name == "rsqrt" || name == "exp" ||
+            name == "div") &&
+           !isa<FloatType>(valueType)))
+        return op.emitError("invalid scalar algebra or result dtype");
       bool vector = false;
-      for (Value x : op.getOperands()) {
+      for (auto [i, x] : llvm::enumerate(op.getOperands())) {
         auto tensor = dyn_cast<RankedTensorType>(x.getType());
         vector |= bool(tensor);
         if ((tensor && tensor.getRank() != 1) ||
-            (!element(x.getType()).isF32() && !element(x.getType()).isF16()) ||
-            (name != "cast" && element(x.getType()) != element(result)))
+            (name == "select" && !i ? !element(x.getType()).isInteger(1)
+                                    : element(x.getType()) != valueType))
           return op.emitError("incompatible operand dtype or rank");
       }
       if (vector != (isa<RankedTensorType>(result)) ||
@@ -127,7 +183,7 @@ LogicalResult verifyLogicalRows(ModuleOp module,StringRef dialect,bool canonical
     return fn.emitError("expected a parallel row domain and return");
   auto &loop = body.front();
   auto domain = dyn_cast<MemRefType>(loop.getOperand(0).getType());
-  if (!domain || domain.getRank() != 2 ||
+  if (!domain || (domain.getRank() != 2 && domain.getRank() != 1) ||
       !llvm::hasSingleElement(loop.getRegion(0)))
     return loop.emitError("expected a rank-two domain");
   auto &row = loop.getRegion(0).front();

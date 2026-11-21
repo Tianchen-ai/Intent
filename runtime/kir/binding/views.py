@@ -29,6 +29,56 @@ def inspect(value):
     return View(*adapter(value).describe(value))
 
 
+def touches(a, first, b, second):
+    if not prod(first.shape) or not prod(second.shape):
+        return False
+    if first.dtype is None or second.dtype is None:
+        raise ValueError("unsupported view element type")
+    if str(first.device) != str(second.device):
+        return False
+
+    def span(v):
+        width = {"f32": 4, "i32": 4, "bf16": 2, "f16": 2}[v.dtype]
+        delta = [width * (n - 1) * s for n, s in zip(v.shape, v.strides)]
+        return v.address + sum(min(d, 0) for d in delta), v.address + width + sum(
+            max(d, 0) for d in delta
+        )
+
+    x, y = span(first)
+    u, v = span(second)
+    if y <= u or v <= x:
+        return False
+    if str(first.device) == "cpu":
+        import numpy as np
+
+        def raw_view(value, descriptor):
+            if adapter(value) is numpy_views:
+                return value
+            # Dtype-independent strided bytes at each logical element.
+            import ctypes
+
+            begin, end = span(descriptor)
+            width = value.element_size()
+            storage = np.ctypeslib.as_array(
+                (ctypes.c_ubyte * (end - begin)).from_address(begin)
+            )
+            return np.ndarray(
+                (*descriptor.shape, width),
+                dtype=np.uint8,
+                buffer=storage,
+                offset=descriptor.address - begin,
+                strides=(*(s * width for s in descriptor.strides), 1),
+            )
+
+        try:
+            return np.shares_memory(
+                raw_view(a, first), raw_view(b, second), max_work=1000
+            )
+        except getattr(np, "exceptions", np).TooHardError:
+            return True
+    return adapter(a).overlaps(a, b)
+
+
 class Signature:
     def __init__(self, arguments):
         self.args = arguments
@@ -51,6 +101,7 @@ class Signature:
                     raise ValueError(f"inconsistent dimension {axis}")
             return view
 
+        views = []
         for arg, value in zip(arguments, inputs):
             if arg["direction"] == "Scalar":
                 if not isinstance(value, (int, float)):
@@ -68,6 +119,21 @@ class Signature:
                     raise ValueError("arguments span devices")
                 if arg["direction"] == "InOut":
                     self.require_writable(view)
+                for other, slot, peer in views:
+                    if "InOut" not in (arg["direction"], slot["direction"]):
+                        continue
+                    if (
+                        view.address == peer.address
+                        and view.dtype == peer.dtype
+                        and view.shape == peer.shape
+                        and view.strides == peer.strides
+                    ):
+                        continue
+                    if touches(value, view, other, peer):
+                        raise ValueError(
+                            f"parallel members of {arg['name']} and {slot['name']} may overlap"
+                        )
+                views.append((value, arg, view))
                 allocator = allocator or adapter(value)
                 device = view.device
             bound[arg["name"]] = value
@@ -89,7 +155,7 @@ class Signature:
                 raise ValueError("output device or write permissions differ")
             self.require_writable(view)
             if prod(view.shape) and any(
-                adapter(y).overlaps(y, bound[a["name"]])
+                touches(y, view, bound[a["name"]], inspect(bound[a["name"]]))
                 for a in self.args
                 if a["name"] in bound and a["direction"] != "Scalar"
             ):

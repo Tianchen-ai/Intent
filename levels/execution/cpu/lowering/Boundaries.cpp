@@ -73,6 +73,7 @@ struct Construct : PassWrapper<Construct, OperationPass<ModuleOp>> {
                          ("cpu." + op->getName().stripDialect()).str());
         s.addOperands(op->getOperands());
         s.addTypes(op->getResultTypes());
+        s.addAttributes(op->getAttrs());
         for (auto &r : op->getRegions())
           s.addRegion()->takeBody(r);
         op->replaceAllUsesWith(b.create(s));

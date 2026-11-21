@@ -17,15 +17,17 @@ def frame(values, abi):
     matrix = None
     for value, arg in zip(values, abi):
         if arg["direction"] == "Scalar":
-            slots.append(ct.c_float(value))
+            slots.append(
+                ct.c_int32(value) if arg["dtype"] == "i32" else ct.c_float(value)
+            )
             continue
         v = inspect(value)
         if str(v.device) != "cpu" or any(s < 0 for s in v.strides):
             raise ValueError(
                 "native CPU row ABI requires host memory and representable positive strides"
             )
-        if len(v.shape) == 2 and matrix is None:
-            matrix = v.shape
+        if matrix is None:
+            matrix = (1, v.shape[0]) if len(v.shape) == 1 else v.shape
         slots.append(ct.c_void_p(v.address))
         slots.extend(ct.c_int64(s) for s in v.strides)
     return Frame(tuple(values), tuple(slots), matrix)

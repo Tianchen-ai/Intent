@@ -154,7 +154,7 @@ class Call:
         )
 
     def result(self):
-        return self.outputs[0] if len(self.outputs) == 1 else self.outputs
+        return self.outputs[0] if len(self.outputs) == 1 else tuple(self.outputs)
 
     def compilation_report(self):
         return dict(

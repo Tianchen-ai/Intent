@@ -20,6 +20,10 @@ struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
       if (code == "load" || code == "store") {
         OperationState offset(op->getLoc(), "triton_src.offsets");
         auto axes=*intentdsl::block::projection(args.front().getType());
+        if (auto axes =
+                op->getAttrOfType<DenseI64ArrayAttr>("block.member_axes"))
+          offset.addAttribute("permuted",
+                              b.getBoolAttr(axes.size() == 2 && axes[0] == 1));
         offset.addAttribute("matrix",b.getBoolAttr(axes==intentdsl::block::RowProjection::Matrix));
         offset.addOperands(args.take_front(3));
         offset.addTypes(RankedTensorType::get(

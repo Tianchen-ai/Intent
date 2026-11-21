@@ -66,3 +66,20 @@ def Cpu_task : Inst<"task", [IsolatedFromAbove, SingleBlock]> {
   let regions = (region AnyRegion:$body);
 }
 def Cpu_join : Inst<"join"> { let arguments=(ins Index:$completion); }
+
+def Cpu_constant : Inst<"constant"> {let arguments=(ins AnyAttr:$value);let results=(outs AnyType:$result);}
+def Cpu_maximum : Inst<"maximum"> {let arguments=(ins AnyType:$lhs,AnyType:$rhs);let results=(outs AnyType:$result);}
+
+foreach mnemonic=["xor","and","shl","shr","gt"] in {
+  def Cpu_#mnemonic#Op : Op<Cpu_Dialect,mnemonic> {
+    let arguments=(ins AnyType:$lhs,AnyType:$rhs); let results=(outs AnyType:$result);
+  }
+}
+def Cpu_select : Op<Cpu_Dialect,"select"> {
+  let arguments=(ins AnyType:$predicate,AnyType:$onTrue,AnyType:$onFalse); let results=(outs AnyType:$result);
+}
+def Cpu_ordinal : Op<Cpu_Dialect,"ordinal"> {
+  let arguments=(ins AnyMemRef:$domain,Index:$row); let results=(outs AnyType:$result);
+}
+
+def Cpu_sqrt : Inst<"sqrt"> { let arguments=(ins AnyType:$input); let results=(outs AnyType:$result); }

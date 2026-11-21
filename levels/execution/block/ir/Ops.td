@@ -114,3 +114,23 @@ def Iblock_max_num : Inst<"max_num"> {
   let arguments = (ins AnyTensor:$input);
   let results = (outs AnyType:$result);
 }
+
+def Iblock_constant : Inst<"constant"> {let arguments=(ins AnyAttr:$value);let results=(outs AnyType:$result);}
+def Iblock_maximum : Inst<"maximum"> {let arguments=(ins AnyType:$lhs,AnyType:$rhs);let results=(outs AnyType:$result);}
+
+foreach mnemonic=["xor","and","shl","shr","gt"] in {
+  def Iblock_#mnemonic#Op : Op<Iblock_Dialect,mnemonic> {
+    let arguments=(ins AnyType:$lhs,AnyType:$rhs); let results=(outs AnyType:$result);
+  }
+}
+def Iblock_select : Op<Iblock_Dialect,"select"> {
+  let arguments=(ins AnyType:$predicate,AnyType:$onTrue,AnyType:$onFalse); let results=(outs AnyType:$result);
+}
+def Iblock_ordinal : Op<Iblock_Dialect,"ordinal"> {
+  let arguments=(ins AnyMemRef:$domain,Index:$row); let results=(outs AnyType:$result);
+}
+def Iblock_linear_index : Op<Iblock_Dialect,"linear_index"> {
+  let arguments=(ins AnyMemRef:$domain,AnyTensor:$rows,AnyTensor:$columns); let results=(outs AnyType:$result);
+}
+
+def Iblock_sqrt : Inst<"sqrt"> { let arguments=(ins AnyType:$input); let results=(outs AnyType:$result); }

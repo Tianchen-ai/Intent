@@ -76,13 +76,20 @@ LogicalResult verifyLoops(ModuleOp m, const TargetProfile &p, bool callable) {
         auto nargs = llvm::StringSwitch<unsigned>(k)
                          .Cases("add", "sub", "mul", "div", 2)
                          .Cases("exp", "rsqrt", "cast", 1)
-                         .Default(0);
-        if (!nargs || op.getNumOperands() != nargs)
+                         .Cases("and", "xor", "shl", "shr", "gt", 2)
+                         .Case("ordinal", 2)
+                         .Case("select", 3)
+                         .Case("sqrt", 1)
+                         .Case("maximum", 2)
+                         .Case("constant", 0)
+                         .Default(-1);
+        if (op.getNumOperands() != nargs ||
+            (k == "constant" && !op.getAttrOfType<TypedAttr>("value")))
           return op.emitError("unknown or ill-formed lane expression");
       } else
         return op.emitError("unexpected sweep instruction");
     }
-    if (writes != unsigned(store))
+    if (store ? !writes : bool(writes))
       return s.emitError("sweep write count differs from its algebra");
     full = tail ? nullptr : &s;
   }

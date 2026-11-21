@@ -80,8 +80,13 @@ bool access(Operation *op, unsigned mask, Operation &window, func::FuncOp fn,
     int64_t dim=-1;
     if(v==window.getResult(1))dim=logical->size()-1;
     else if(logical->size()==2 && v==window.getResult(0))dim=0;
-    else if(axis.getOwner()->getName().getStringRef()=="dsa.member_axis" && axis.getOwner()->getOperand(0)==window.getResult(0) && axis.getOwner()->getOperand(1)==domain)
+    else if (axis.getOwner()->getName().getStringRef() == "dsa.member_axis" &&
+             axis.getOwner()->getOperand(0) == window.getResult(0) &&
+             axis.getOwner()->getOperand(1) == domain) {
       dim=axis.getOwner()->getAttrOfType<IntegerAttr>("axis").getInt();
+      if (dim < 0 || size_t(dim) + 1 >= logical->size())
+        return false;
+    }
     if(dim<0 || size_t(dim)>=logical->size() || !seen.insert(dim).second || (*actual)[i]!=(*logical)[dim])return false;
   }
   return true;
@@ -139,10 +144,17 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
   if (!idx || idx.getInt() < 0 || idx.getInt() >= fn.getNumArguments())
     return fn.emitError("missing member domain");
   bool resident = fn->getAttrOfType<StringAttr>("block.topology") == "resident";
-  if (!resident &&
-      (fn.front().getOperations().size() != 2 ||
-       fn.front().front().getName().getStringRef() != "dsa.task_groups"))
-    return fn.emitError("stream phases require strided task ownership");
+  if (!resident) {
+    auto &start = fn.front().front();
+    auto *groups = start.getNextNode();
+    if (fn.front().getOperations().size() != 3 ||
+        start.getName().getStringRef() != "dsa.range" ||
+        start.getAttrOfType<StringAttr>("source") != "participant_stride" ||
+        !groups || groups->getName().getStringRef() != "dsa.task_groups" ||
+        groups->getOperands() != start.getResults())
+      return fn.emitError("stream group loop must consume start, bound and "
+                          "stride of the participant range");
+  }
   unsigned count = 0;
   auto walk = fn.walk([&](Operation *o) {
     if (o->getName().getStringRef() != "dsa.phase")
@@ -170,6 +182,13 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
       if (window->getName().getStringRef() != "dsa.window" ||
           window->getOperand(0) != fn.getArgument(idx.getInt()))
         return WalkResult::interrupt();
+    for (auto &op : body)
+      if (op.getName().getStringRef() == "block.linear_index" &&
+          (op.getOperand(0) != body.front().getOperand(0) ||
+           op.getOperand(1) != body.front().getResult(0) ||
+           op.getOperand(2) != body.front().getResult(1)))
+        return op.emitError("ordinal detached from phase coordinates"),
+               WalkResult::interrupt();
     auto windowType =
         cast<RankedTensorType>(body.front().getResult(2).getType());
     if (windowType.getRank() != 2 ||

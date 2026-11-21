@@ -143,7 +143,13 @@ LogicalResult phase(Operation *anchor, Block &source, bool stream,
     auto val = [&](unsigned i) {
       return map.lookupOrDefault(op->getOperand(i));
     };
-    if (code == "reduce") {
+    if (code == "linear_index") {
+      auto *index = inst(b, loc, "block.linear_index",
+                         {active->getOperand(0), writeWindow->getResult(0),
+                          writeWindow->getResult(1)},
+                         op->getResultTypes());
+      map.map(op->getResult(0), index->getResult(0));
+    } else if (code == "reduce") {
       auto r = inst(b, loc, "dsa.reduce", {val(0), writeWindow->getResult(2)},
                     op->getResultTypes(), op->getAttrs());
       map.map(op->getResult(0), r->getResult(0));
@@ -203,12 +209,17 @@ llvm::Error stageTransfers(Operation *op, Attribute a,
                                item.getName().getStringRef() == "block.pid"))
         b.eraseOp(&item);
     b.setInsertionPointToStart(&fn.front());
+    auto index = b.getIndexType();
+    auto *range =
+        inst(b, fn.getLoc(), "dsa.range", {}, {index, index, index},
+             b.getNamedAttr("source", b.getStringAttr("participant_stride")));
     OperationState gs(fn.getLoc(), "dsa.task_groups");
+    gs.addOperands(range->getResults());
     gs.addRegion();
     auto *groups = b.create(gs);
     auto *group = b.createBlock(&groups->getRegion(0));
     for (auto &op : llvm::make_early_inc_range(fn.front().without_terminator()))
-      if (&op != groups)
+      if (&op != groups && &op != range)
         op.moveBefore(group, group->end());
     b.setInsertionPointToEnd(group);
     inst(b, fn.getLoc(), "dsa.end");

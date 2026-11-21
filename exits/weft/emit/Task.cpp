@@ -26,6 +26,11 @@ class CanonicalTask {
   llvm::raw_ostream &s;
   llvm::DenseMap<Value, Term> terms;
   unsigned serial = 0;
+  Term origin, columns;
+  std::string spelling(Type t) {
+    return t.isInteger(32) ? "si32" : printType(t);
+  }
+
   Term inst(StringRef op, ArrayRef<Term> args, std::string type,
             std::string props = "") {
     std::string id = "%v" + std::to_string(serial++);
@@ -61,10 +66,11 @@ class CanonicalTask {
         auto window =
             start.empty()
                 ? slice
-                : (dim == 1
+                : (dim > 0
                        ? inst("subview", {slice, {start.str(), "index"}},
-                              regionType("slice", e, 1, 1),
-                              "offsets=array<i64:-1>,extents=array<i64:1>")
+                              regionType("slice", e, 1, dim),
+                              "offsets=array<i64:-1>,extents=array<i64:" +
+                                  std::to_string(dim) + ">")
                        : inst("subview",
                               {slice, {start.str(), "index"}, active},
                               regionType("slice", e, 1, dim),
@@ -78,31 +84,73 @@ class CanonicalTask {
               inst("admit", {window}, regionType("value", e, 1, dim));
         continue;
       }
+      if (code == "ordinal") {
+        if (dim <= 0 || start.empty())
+          return llvm::createStringError(
+              "absolute lane coordinates require static panels");
+        auto row =
+            inst("binary", {{"%r", "index"}, origin}, "index", "kind=\"add\"");
+        auto offset = inst("binary", {row, columns}, "index", "kind=\"mul\"");
+        offset = inst("binary", {offset, {start.str(), "index"}}, "index",
+                      "kind=\"add\"");
+        auto ix = regionType("value", "ui32", 1, dim);
+        offset = inst("cast", {offset}, "ui32");
+        auto lanes = inst("iota", {}, ix,
+                          "start=0:i64,end=" + std::to_string(dim) + ":i64");
+        auto idx = inst("binary", {lanes, offset}, ix, "kind=\"add\"");
+        terms[op.getResult(0)] =
+            inst("cast", {idx}, regionType("value", "si32", 1, dim));
+        continue;
+      }
+      if (code == "constant") {
+        if (auto integer = op.getAttrOfType<IntegerAttr>("value")) {
+          auto t = spelling(integer.getType());
+          terms[op.getResult(0)] =
+              inst("constant", {}, t,
+                   "value=" + std::to_string(integer.getInt()) + " : " + t);
+          continue;
+        }
+        auto val = op.getAttrOfType<FloatAttr>("value");
+        auto t = printType(val.getType());
+        std::string str;
+        llvm::raw_string_ostream stream(str);
+        stream << val;
+        terms[op.getResult(0)] = inst("constant", {}, t, "value=" + str);
+        continue;
+      }
       for (auto operand : op.getOperands())
         args.push_back(terms.lookup(operand));
       auto v = op.getResult(0);
       auto t = v.getType();
       std::string result =
           isa<RankedTensorType>(t)
-              ? regionType(
-                    "value",
-                    printType(cast<RankedTensorType>(t).getElementType()), 1,
-                    dim)
-              : printType(t);
+              ? regionType("value",
+                           spelling(cast<RankedTensorType>(t).getElementType()),
+                           1, dim)
+              : spelling(t);
       std::string kind = code.str(), operation;
       if (code == "max_num" || code == "sum") {
         operation = "reduce";
         kind = code == "max_num" ? "max" : "add";
       } else if (code == "cast")
         operation = "cast";
-      else if (code == "rsqrt" || code == "exp")
+      else if (code == "sqrt" || code == "rsqrt" || code == "exp")
         operation = "unary";
-      else if (code == "mul" || code == "add" || code == "div" || code == "sub")
+      else if (code == "select")
+        operation = "select";
+      else if (code == "gt")
+        operation = "compare";
+      else if (code == "xor" || code == "and" || code == "shl" ||
+               code == "shr" || code == "maximum" || code == "mul" ||
+               code == "add" || code == "div" || code == "sub")
         operation = "binary";
       else
         return llvm::createStringError("unsupported Weft task operation " +
                                        kind);
-      auto p = operation == "cast" ? "" : "kind=\"" + kind + "\"";
+      auto p = operation == "compare" ? std::string("predicate=\"gt\"")
+               : (operation == "cast" || operation == "select")
+                   ? ""
+                   : "kind=\"" + kind + "\"";
       if (operation == "reduce")
         p += ",axis=0:i64";
       terms[v] = inst(operation, args, result, p);
@@ -120,37 +168,56 @@ public:
       auto n = "a" + std::to_string(i);
       auto elem = a->getString("dtype")->str();
       int rank = a->getArray("dims")->size();
+      if (elem == "i32")
+        elem = "si32";
       auto t = rank ? regionType("view", elem, rank) : elem;
       terms[arg] = {"%" + n, t};
       names.push_back("\"" + n + "\"");
       params.push_back("%" + n + ": " + t);
-      effects.push_back(
-          rank ? (a->getString("direction") == "Out" ? "\"write\"" : "\"read\"")
-               : "\"none\"");
+      effects.push_back(rank ? (a->getString("direction") == "Out" ? "\"write\""
+                                : a->getString("direction") == "InOut"
+                                    ? "\"readwrite\""
+                                    : "\"read\"")
+                             : "\"none\"");
       aliases.push_back(rank ? "0" : "-1");
       if (rank)
         strided.push_back(names.back());
     }
+    bool absolute =
+        task->getAttrOfType<BoolAttr>("weft_host.absolute_origin").getValue();
     s << "module {\n\"weft_kernel.kernel\"() <{sym_name=\""
       << task->getAttrOfType<StringAttr>("task_symbol").getValue()
       << "\",source=\"CPU row interval\",arg_names=[" << llvm::join(names, ",")
       << "],arg_access=[" << llvm::join(effects, ",")
       << "],arg_alias_sets=array<i64:" << llvm::join(aliases, ",")
-      << ">,shape_symbols=[\"T\",\"N\",\"C\"],strided_args=["
-      << llvm::join(strided, ",") << "]}> ({\n^bb0(" << llvm::join(params, ",")
-      << "):\n";
+      << ">,shape_symbols=[\"T\",\"N\",\"C\"" << (absolute ? ",\"O\"" : "")
+      << "],strided_args=[" << llvm::join(strided, ",") << "]}> ({\n^bb0("
+      << llvm::join(params, ",") << "):\n";
     auto extent = inst("symbol", {}, "index",
                        "choices=array<i64>,kind=\"shape\",name=\"T\"");
-    auto columns = inst("symbol", {}, "index",
-                        "choices=array<i64>,kind=\"shape\",name=\"N\"");
+    columns = inst("symbol", {}, "index",
+                   "choices=array<i64>,kind=\"shape\",name=\"N\"");
     auto panelWidth = inst("symbol", {}, "index",
                            "choices=array<i64>,kind=\"shape\",name=\"C\"");
+    if (absolute)
+      origin = inst("symbol", {}, "index",
+                    "choices=array<i64>,kind=\"shape\",name=\"O\"");
     inst("root_domain", {},
          "!weft_kernel.domain<\"root\",0,-1,0,\"root\",\"exact\">");
     s << "%lo=arith.constant 0 : index\n%step=arith.constant 1 : index\n";
     bool whole = cast<DictionaryAttr>(task->getAttrOfType<ArrayAttr>("rows")[0])
                      .getAs<IntegerAttr>("columns")
                      .getInt() == 0;
+    auto configurations = task->getAttrOfType<ArrayAttr>("rows");
+    int64_t fixed = cast<DictionaryAttr>(configurations[0])
+                        .getAs<IntegerAttr>("columns")
+                        .getInt();
+    if (!llvm::all_of(configurations, [&](Attribute row) {
+          return cast<DictionaryAttr>(row)
+                     .getAs<IntegerAttr>("columns")
+                     .getInt() == fixed;
+        }))
+      fixed = 0;
     Term panelCount, tailStart;
     if (!whole) {
       panelCount =
@@ -187,7 +254,10 @@ public:
                             ? Term{induction, "index"}
                             : inst("binary", {{induction, "index"}, panelWidth},
                                    "index", "kind=\"mul\"");
-          if (auto e = writeBody(body, offset.id, panelWidth, tail ? 1 : -3))
+          if (auto e = writeBody(body, offset.id, panelWidth,
+                                 tail    ? 1
+                                 : fixed ? fixed
+                                         : -3))
             return e;
           if (!store) {
             auto partial = terms.lookup(body.back().getOperand(0));
@@ -225,18 +295,31 @@ std::string hostSource(Operation *dispatch, const llvm::json::Array &abi) {
     auto a = entry.getAsObject();
     auto n = "a" + std::to_string(i);
     auto rank = slots[i];
-    auto type = a->getString("dtype") == "f16" ? "_Float16" : "float";
+    auto type = a->getString("dtype") == "f16"    ? "_Float16"
+                : a->getString("dtype") == "bf16" ? "uint16_t"
+                : a->getString("dtype") == "i32"  ? "int32_t"
+                                                  : "float";
     params.push_back(std::string(type) + (rank ? " *" : " ") + n);
+    bool swap = false;
+    dispatch->walk([&](Operation *op) {
+      if (op->hasAttr("axes") &&
+          op->getOperand(0) ==
+              dispatch->getRegion(0).front().getArgument(i + 1))
+        swap = true;
+    });
     for (size_t axis = 0; axis < rank; ++axis) {
       auto stride = n + "s" + std::to_string(axis);
       params.push_back("int64_t " + stride);
-      strides.push_back(stride);
+      strides.push_back(swap ? n + "s" + std::to_string(1 - axis) : stride);
     }
-    args.push_back(n + (rank == 2 ? " + start*" + n + "s0" : ""));
+    args.push_back(n +
+                   (rank == 2 ? " + start*" + n + (swap ? "s1" : "s0") : ""));
   }
   args.push_back("count");
   args.push_back("cols");
   args.push_back("panel ? panel : cols");
+  if (dispatch->getAttrOfType<BoolAttr>("weft_host.absolute_origin").getValue())
+    args.push_back("start");
   args.append(strides);
   return "#include <stdint.h>\n#include \"task_bridge.h\"\nint32_t intent_entry(" +
          llvm::join(params, ",") +

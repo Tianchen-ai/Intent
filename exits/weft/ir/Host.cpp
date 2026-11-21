@@ -38,6 +38,11 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
         auto view = dyn_cast<MemRefType>(t);
         ranks.push_back(view ? view.getRank() : 0);
       }
+      bool absolute = false;
+      task.walk([&](Operation *o) {
+        absolute |= o->getName().getStringRef() == "cpu.ordinal";
+      });
+      task.setAttr("weft_host.absolute_origin", b.getBoolAttr(absolute));
       task.setAttr("weft_host.slot_ranks", b.getDenseI64ArrayAttr(ranks));
       return;
     }
@@ -79,6 +84,14 @@ LogicalResult verifyHost(ModuleOp m, const compilerinfra::TargetProfile &p,
     return task.emitError("unbound native row task");
   if (callable) {
     auto slots = task.getAttrOfType<DenseI64ArrayAttr>("weft_host.slot_ranks");
+    bool absolute = false;
+    task.walk([&](Operation *o) {
+      absolute |= o->getName().getStringRef() == "cpu.ordinal";
+    });
+    if (task.getAttrOfType<BoolAttr>("weft_host.absolute_origin") !=
+        BoolAttr::get(m.getContext(), absolute))
+      return task.emitError(
+          "task absolute index requires its logical interval origin");
     if (!slots || slots.size() != int64_t(task.getNumOperands()))
       return task.emitError("incomplete bridge slots");
     for (auto [rank, t] :

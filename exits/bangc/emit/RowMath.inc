@@ -1,4 +1,16 @@
 R"mlu(
+__mlu_func__ float widen_bf16(unsigned short bits) {
+  union {unsigned u; float f;} x;
+  x.u=(unsigned)bits<<16;
+  return x.f;
+}
+__mlu_func__ unsigned short round_bf16(float x) {
+  union {unsigned u; float f;} word;
+  word.f=x;
+  if ((word.u & 0x7fffffffU)>0x7f800000U)
+    return (word.u>>16)|0x40U;
+  return (word.u+0x7fffU+((word.u>>16)&1U))>>16;
+}
 __mlu_func__ float row_sum(float *scratch, const float *input, int count) {
   int full = count / 32 * 32;
   float value = 0.0f;

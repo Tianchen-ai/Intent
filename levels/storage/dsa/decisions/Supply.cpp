@@ -13,7 +13,7 @@ struct Footprint {
     for (auto &op : body) {
       auto code = op.getName().stripDialect();
       if (code == "await" || code == "active" || code == "window" ||
-          code == "rows" || code == "columns")
+          code == "member_axis" || code == "rows" || code == "columns")
         continue;
       if (code == "reduce") {
         f.collectiveBytes = reductionScratch;
@@ -21,12 +21,10 @@ struct Footprint {
         auto t = dyn_cast<RankedTensorType>(op.getResult(0).getType());
         if (!t || t.getRank() < 1 || !t.getElementType().isIntOrFloat())
           continue;
-        if (t.getRank() == 1 && (code == "combine" || code == "identity" ||
-                                 llvm::all_of(op.getOperands(), [](Value v) {
-                                   auto type =
-                                       dyn_cast<RankedTensorType>(v.getType());
-                                   return !type || type.getRank() == 1;
-                                 })))
+        // Rank-one calculation results in the block contract are per-row
+        // summaries. Projected coordinates have no local storage; copied
+        // fragments do.
+        if (t.getRank() == 1 && code != "load" && code != "copy_in")
           continue;
         if (code == "load" || code == "copy_in")
           f.inputBytes += llvm::divideCeil(t.getElementTypeBitWidth(), 8u);

@@ -59,3 +59,20 @@ def Kir_max_num : Inst<"max_num"> {
   let arguments = (ins AnyTensor:$input);
   let results = (outs AnyType:$result);
 }
+
+def Kir_constant : Inst<"constant"> {let arguments=(ins AnyAttr:$value);let results=(outs AnyType:$result);}
+def Kir_maximum : Inst<"maximum"> {let arguments=(ins AnyType:$lhs,AnyType:$rhs);let results=(outs AnyType:$result);}
+
+foreach mnemonic=["xor","and","shl","shr","gt"] in {
+  def Kir_#mnemonic#Op : Op<Kir_Dialect,mnemonic> {
+    let arguments=(ins AnyType:$lhs,AnyType:$rhs); let results=(outs AnyType:$result);
+  }
+}
+def Kir_select : Op<Kir_Dialect,"select"> {
+  let arguments=(ins AnyType:$predicate,AnyType:$onTrue,AnyType:$onFalse); let results=(outs AnyType:$result);
+}
+def Kir_ordinal : Op<Kir_Dialect,"ordinal"> {
+  let arguments=(ins AnyMemRef:$domain,Index:$row); let results=(outs AnyType:$result);
+}
+
+def Kir_sqrt : Inst<"sqrt"> { let arguments=(ins AnyType:$input); let results=(outs AnyType:$result); }

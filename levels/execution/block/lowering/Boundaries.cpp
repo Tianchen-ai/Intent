@@ -27,6 +27,7 @@ struct Form : PassWrapper<Form, OperationPass<ModuleOp>> {
                            ("block." + op->getName().stripDialect()).str());
       state.addOperands(op->getOperands());
       state.addTypes(op->getResultTypes());
+      state.addAttributes(op->getAttrs());
       for (auto &region : op->getRegions())
         state.addRegion()->takeBody(region);
       auto *next = b.create(state);

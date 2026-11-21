@@ -50,7 +50,9 @@ class Target:
     def options(self, key, shape):
         scope, self.workers = key
         self.info, core, bits = discover(scope)
-        return dict(vector_bits=bits, workers=self.workers, core=core)
+        return dict(
+            vector_bits=bits, workers=self.workers, core=core, arch=self.info.arch
+        )
 
     def materialize(self, data):
         return Artifact(data, self.info, self.workers)
