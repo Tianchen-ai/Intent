@@ -19,13 +19,15 @@ capabilities(const llvm::json::Object &opts) {
   if(auto error=caps->bind(opts))return error;
   caps->streamingWidths = {128, 512, 4096};
   for (unsigned w = 1; w <= 4096; w *= 2)
-    for (unsigned r : {1u, 2u, 16u}) {
+    for (unsigned r : {1u, 2u, 16u, 32u, 64u}) {
+      if(r>16 && w>128)continue;
       auto tasks = (*clusters) * (*cores);
-      caps->rows.push_back({w * 32 + r, r, w, std::to_string(tasks)});
+      auto id=r>16 ? 1048576u+128*w+r : w*32+r;
+      caps->rows.push_back({id, r, w, std::to_string(tasks)});
     }
   auto resource =
       std::make_shared<intentdsl::dsa::LocalSupply>(intentdsl::dsa::LocalSupply{
-          *nram, 128 * 1024, 128, (*clusters) * (*cores), sizeof(float), true});
+          *nram, std::min<int64_t>(*nram/3*2,512*1024), 128, (*clusters) * (*cores), sizeof(float), true});
   if(auto err=intentdsl::bindPerformance(profile,opts,"exits/bangc::dma",opts.getString("calibration").value_or("").str(),*clusters * *cores))return std::move(err);
   if (auto e = profile.services.provide<intentdsl::RowCapacity>(caps))
     return e;

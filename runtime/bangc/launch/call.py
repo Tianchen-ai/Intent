@@ -31,6 +31,8 @@ class Call:
             device,
             shape,
         )
+        self.arguments = self._args(self.values)
+        self.grid_sizes = {r["id"]:grid(artifact.data["grid"],shape,r)[0] for r in artifact.data["rows"]}
         self.records = []
         self.timings = {}
         self.selected = None
@@ -69,7 +71,7 @@ class Call:
 
     def _enqueue(self, row, args, stream):
         a = self.artifact
-        groups = grid(a.data["grid"], self.shape, row)[0]
+        groups = self.grid_sizes[row["id"]]
         status = a.variants[row["id"]].launch(
             *args, *self.shape, groups, row["tasks"], stream.mlu_stream
         )
@@ -124,7 +126,7 @@ class Call:
                             winner = rows[0]
                         a.winners[key] = winner, durations
                     self.selected, self.timings = a.winners[key]
-            self._enqueue(self.selected, self._args(self.values), stream)
+            self._enqueue(self.selected, self.arguments, stream)
             for v in self.values:
                 if isinstance(v, torch.Tensor):
                     v.record_stream(stream)

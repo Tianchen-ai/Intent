@@ -360,6 +360,150 @@
         "benchmark": "intent_bench.calibration/write_16",
         "error": "range [1.50549, 1.54771], n=8"
       }
+    },
+    "compute_max_64": {
+      "value": 53.57142857142857,
+      "unit": "ns",
+      "source": {
+        "device": "MLU370",
+        "isa": "mtp_372",
+        "toolchain": "cncc v4.7.2 clang version 11.1.0",
+        "conditions": "16 block tasks; CNRT notifier; 64 KiB, 1 MiB, 8 MiB and 256 MiB footprints; six-size DMA fit at 256..8192 bytes, 256 copies; sync_io barrier; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/compute_max_64",
+        "error": "range [53.5714, 62.5], n=8"
+      }
+    },
+    "compute_max_512": {
+      "value": 71.42857142857143,
+      "unit": "ns",
+      "source": {
+        "device": "MLU370",
+        "isa": "mtp_372",
+        "toolchain": "cncc v4.7.2 clang version 11.1.0",
+        "conditions": "16 block tasks; CNRT notifier; 64 KiB, 1 MiB, 8 MiB and 256 MiB footprints; six-size DMA fit at 256..8192 bytes, 256 copies; sync_io barrier; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/compute_max_512",
+        "error": "range [62.5, 71.4286], n=8"
+      }
+    },
+    "compute_max_2048": {
+      "value": 116.07142857142857,
+      "unit": "ns",
+      "source": {
+        "device": "MLU370",
+        "isa": "mtp_372",
+        "toolchain": "cncc v4.7.2 clang version 11.1.0",
+        "conditions": "16 block tasks; CNRT notifier; 64 KiB, 1 MiB, 8 MiB and 256 MiB footprints; six-size DMA fit at 256..8192 bytes, 256 copies; sync_io barrier; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/compute_max_2048",
+        "error": "range [107.143, 125], n=8"
+      }
+    },
+    "compute_sum_64": {
+      "value": 89.28571428571429,
+      "unit": "ns",
+      "source": {
+        "device": "MLU370",
+        "isa": "mtp_372",
+        "toolchain": "cncc v4.7.2 clang version 11.1.0",
+        "conditions": "16 block tasks; CNRT notifier; 64 KiB, 1 MiB, 8 MiB and 256 MiB footprints; six-size DMA fit at 256..8192 bytes, 256 copies; sync_io barrier; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/compute_sum_64",
+        "error": "range [89.2857, 89.2857], n=8"
+      }
+    },
+    "compute_sum_512": {
+      "value": 98.21428571428571,
+      "unit": "ns",
+      "source": {
+        "device": "MLU370",
+        "isa": "mtp_372",
+        "toolchain": "cncc v4.7.2 clang version 11.1.0",
+        "conditions": "16 block tasks; CNRT notifier; 64 KiB, 1 MiB, 8 MiB and 256 MiB footprints; six-size DMA fit at 256..8192 bytes, 256 copies; sync_io barrier; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/compute_sum_512",
+        "error": "range [98.2143, 116.071], n=8"
+      }
+    },
+    "compute_sum_2048": {
+      "value": 151.78571428571428,
+      "unit": "ns",
+      "source": {
+        "device": "MLU370",
+        "isa": "mtp_372",
+        "toolchain": "cncc v4.7.2 clang version 11.1.0",
+        "conditions": "16 block tasks; CNRT notifier; 64 KiB, 1 MiB, 8 MiB and 256 MiB footprints; six-size DMA fit at 256..8192 bytes, 256 copies; sync_io barrier; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/compute_sum_2048",
+        "error": "range [151.786, 151.786], n=8"
+      }
+    },
+    "compute_exp_64": {
+      "value": 955.3572109767368,
+      "unit": "ns",
+      "source": {
+        "device": "MLU370",
+        "isa": "mtp_372",
+        "toolchain": "cncc v4.7.2 clang version 11.1.0",
+        "conditions": "16 block tasks; CNRT notifier; 64 KiB, 1 MiB, 8 MiB and 256 MiB footprints; six-size DMA fit at 256..8192 bytes, 256 copies; sync_io barrier; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/compute_exp_64",
+        "error": "range [955.357, 964.286], n=8"
+      }
+    },
+    "compute_exp_512": {
+      "value": 1406.25,
+      "unit": "ns",
+      "source": {
+        "device": "MLU370",
+        "isa": "mtp_372",
+        "toolchain": "cncc v4.7.2 clang version 11.1.0",
+        "conditions": "16 block tasks; CNRT notifier; 64 KiB, 1 MiB, 8 MiB and 256 MiB footprints; six-size DMA fit at 256..8192 bytes, 256 copies; sync_io barrier; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/compute_exp_512",
+        "error": "range [1401.79, 1419.64], n=8"
+      }
+    },
+    "compute_exp_2048": {
+      "value": 2946.4285714285716,
+      "unit": "ns",
+      "source": {
+        "device": "MLU370",
+        "isa": "mtp_372",
+        "toolchain": "cncc v4.7.2 clang version 11.1.0",
+        "conditions": "16 block tasks; CNRT notifier; 64 KiB, 1 MiB, 8 MiB and 256 MiB footprints; six-size DMA fit at 256..8192 bytes, 256 copies; sync_io barrier; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/compute_exp_2048",
+        "error": "range [2937.5, 2946.43], n=8"
+      }
+    },
+    "compute_quotient_64": {
+      "value": 392.85714285714283,
+      "unit": "ns",
+      "source": {
+        "device": "MLU370",
+        "isa": "mtp_372",
+        "toolchain": "cncc v4.7.2 clang version 11.1.0",
+        "conditions": "16 block tasks; CNRT notifier; 64 KiB, 1 MiB, 8 MiB and 256 MiB footprints; six-size DMA fit at 256..8192 bytes, 256 copies; sync_io barrier; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/compute_quotient_64",
+        "error": "range [383.929, 401.786], n=8"
+      }
+    },
+    "compute_quotient_512": {
+      "value": 562.5,
+      "unit": "ns",
+      "source": {
+        "device": "MLU370",
+        "isa": "mtp_372",
+        "toolchain": "cncc v4.7.2 clang version 11.1.0",
+        "conditions": "16 block tasks; CNRT notifier; 64 KiB, 1 MiB, 8 MiB and 256 MiB footprints; six-size DMA fit at 256..8192 bytes, 256 copies; sync_io barrier; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/compute_quotient_512",
+        "error": "range [562.5, 571.429], n=8"
+      }
+    },
+    "compute_quotient_2048": {
+      "value": 1160.7142857142858,
+      "unit": "ns",
+      "source": {
+        "device": "MLU370",
+        "isa": "mtp_372",
+        "toolchain": "cncc v4.7.2 clang version 11.1.0",
+        "conditions": "16 block tasks; CNRT notifier; 64 KiB, 1 MiB, 8 MiB and 256 MiB footprints; six-size DMA fit at 256..8192 bytes, 256 copies; sync_io barrier; unmanaged clocks",
+        "benchmark": "intent_bench.calibration/compute_quotient_2048",
+        "error": "range [1160.71, 1169.64], n=8"
+      }
     }
   }
 }

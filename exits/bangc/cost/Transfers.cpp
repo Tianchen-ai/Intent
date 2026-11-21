@@ -51,6 +51,34 @@ void dmaCost(Unit &u) {
           e.terms = {{"incoming", {in, "B"}},
                      {"outgoing", {out, "B"}},
                      {"requests", {r + w, "count"}}};
+          double specialized=0, count=0;
+          op->walk([&](Operation *i) {
+            auto code=i->getName().stripDialect();
+            std::string primitive;
+            if(code=="reduce"){
+              auto algebra=i->getAttrOfType<StringAttr>("algebra");
+              if(algebra=="max_num")primitive="max";
+              if(algebra=="sum")primitive="sum";
+            } else if (code=="exp") primitive="exp";
+            else if (code=="div" && i->hasOneUse()){
+              Operation *consumer=*i->getUsers().begin();
+              auto ty=consumer->getNumResults()==1?dyn_cast<ShapedType>(consumer->getResult(0).getType()):ShapedType{};
+              if(consumer->getName().stripDialect()=="cast" && ty && ty.getElementType().isF16())
+                primitive="quotient";
+            }
+            if(primitive.empty())return;
+            int low=n<=512?64:512, high=n<=512?512:2048;
+            auto prefix="compute_"+primitive+"_";
+            auto a=intentdsl::quantity(ctx,prefix+std::to_string(low),"ns");
+            auto b=intentdsl::quantity(ctx,prefix+std::to_string(high),"ns");
+            if(a && b){
+              double t=std::clamp((n-low)/(high-low),0.,1.);
+              specialized+=((*a)*(1-t)+(*b)*t)*std::max(1.,n/high);
+              ++count;
+            }
+          });
+          e.terms["native_compute"]={specialized,"ns"};
+          e.terms["native_operations"]={count,"count"};
           if (bi && bo && li && lo && bw) {
             double fetch = in / *bi + r * *li,
                    drain = (out - scatter) / *bo + scatter / *bw + w * *lo;

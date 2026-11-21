@@ -18,6 +18,7 @@ void supplyCost(Unit &u) {
           auto sync = intentdsl::quantity(ctx, "sync", "ns"),
                launch = intentdsl::quantity(ctx, "launch", "ns"),
                vector = intentdsl::quantity(ctx, "compute", "lane/ns");
+          auto startup = intentdsl::quantity(ctx, "first_io", "ns");
           auto d = cast<DictionaryAttr>(c.value);
           auto depth = d.getAs<IntegerAttr>("depth").getInt();
           double participants = d.getAs<IntegerAttr>("participants").getInt();
@@ -43,9 +44,9 @@ void supplyCost(Unit &u) {
             pred.terms["steps"] = {steps, "count"};
             pred.terms["working_set"] = {
                 double(row.getAs<IntegerAttr>("bytes").getInt()), "B"};
-            if (dma->timeNs && launch && sync && vector) {
+            if (dma->timeNs && launch && sync && vector && startup) {
               double fetch = group * e.terms.at("fetch").value,
-                     compute = group * n * ops / *vector,
+                     compute = group * (n * std::max(0.,ops-e.terms.at("native_operations").value) / *vector + e.terms.at("native_compute").value),
                      write = group * e.terms.at("writeback").value;
               double overlap = depth == 2 ? std::max(0., steps - 1) *
                                                 std::min(fetch, compute)
@@ -53,7 +54,10 @@ void supplyCost(Unit &u) {
               pred.terms["overlapped"] = {overlap, "ns"};
               pred.terms["fill"] = {fetch, "ns"};
               pred.terms["drain"] = {compute + write, "ns"};
-              pred.timeNs = *launch + steps * (fetch + compute + write) -
+              pred.terms["launch"] = {*launch, "ns"};
+              pred.terms["first_io_excess"] = {*startup, "ns"};
+              pred.terms["wait"] = {depth == 2 ? steps * *sync : 0., "ns"};
+              pred.timeNs = *launch + (steps ? *startup : 0.) + steps * (fetch + compute + write) -
                             overlap + (depth == 2 ? steps * *sync : 0.);
               if (!e.timeNs || *pred.timeNs < *e.timeNs)
                 e.timeNs = pred.timeNs;

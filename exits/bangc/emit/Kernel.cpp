@@ -55,7 +55,7 @@ class Source {
   Text address(Operation &op, StringRef key = "bangc.offset") {
     auto parts = op.getAttrOfType<DenseI64ArrayAttr>(key);
     return "(storage+P*(" + std::to_string(parts[0] * depth) + "*R+" +
-           std::to_string(parts[1]) + "))";
+           std::to_string(parts[1]) + (fn->getAttrOfType<DictionaryAttr>("dsa.layout").getAs<BoolAttr>("group_temporaries").getValue() ? "*R" : "") + "))";
   }
   std::pair<Text, Text> strides(Operation &op, unsigned start,
                                 const Text &view) {
@@ -84,17 +84,27 @@ class Source {
       auto n = name(src), dst = name(op.getResult(0)),
            type = ctype(src.getType());
       auto [rowStride, stride] = strides(op, 2, n);
+      auto primitive=op.getAttrOfType<StringAttr>("bangc.primitive").getValue();
+      bool grouped=primitive.starts_with("group_dma");
+      Text move=primitive.ends_with("_async") ? "__memcpy_async" : "__memcpy";
+      if(grouped) {
+        int axis=cast<MemRefType>(src.getType()).getRank()-2;
+        auto dim=n+"d"+std::to_string(axis), outer=n+"s"+std::to_string(axis);
+        line("{int j=0, count=(int)((M-row0)<R?(M-row0):R);");
+        line("if(count>1 && "+stride+"==1 && "+outer+">=live && "+outer+"<=2147483647/sizeof("+type+") && row0%"+dim+"+count<="+dim+"){");
+        line(move+"("+dst+"+("+slot+")*R*P,"+n+"+"+rowStride+"+col,live*sizeof("+type+"),GDRAM2NRAM,P*sizeof("+type+"),"+outer+"*sizeof("+type+"),count-1);");
+        line("}else");
+      }
       line("for(int j=0;j<R && row0+j<M;++j){");
       line("auto *src=" + n + "+" + rowStride + "+" + "col*" +
            stride + ";");
       line("auto *dst=" + dst + "+((" + slot + ")*R+j)*P;");
       line("if(" + stride + "==1){" +
-           Text(op.getAttrOfType<StringAttr>("bangc.primitive") == "dma_async"
-                    ? "__memcpy_async"
-                    : "__memcpy") +
+           move +
            "(dst,src,live*sizeof(" + type +
            "),GDRAM2NRAM);}else{for(int k=0;k<live;++k) dst[k]=src[k*" +
            stride + "];}}");
+      if(grouped) line("}");
     }
     line("}");
   }
@@ -164,7 +174,7 @@ class Source {
       else if (n == "advance")
         line("slot=" + arg(0) + ";");
       else if (n == "compute_members") {
-        if (auto e = compute(body, carry))
+        if (auto e = compute(body, carry, op.getAttrOfType<StringAttr>("bangc.primitive")=="packed_pointwise"))
           return e;
       } else if (n != "end")
         return llvm::createStringError("unlowered supply schedule operation " +
@@ -172,11 +182,14 @@ class Source {
     }
     return llvm::Error::success();
   }
-  llvm::Error compute(Block &body, const Text &carry) {
+  llvm::Error compute(Block &body, const Text &carry, bool packed) {
     line(resident ? "long long row0=pos*R,col=0;"
                   : "long long row0=group*R,col=pos*W;");
-    line("int live=(int)((N-col)<W?(N-col):W), lanes=(live+63)/64*64;");
-    line("for(int j=0;j<R && row0+j<M;++j){");
+    line("int live=(int)((N-col)<W?(N-col):W);");
+    if(packed) {
+      line("int members=live==P?(int)((M-row0)<R?(M-row0):R):1;");
+      line("for(int j=0;j<R && row0+j<M;j+=members){int lanes=members*((live+63)/64*64);");
+    } else line("int lanes=(live+63)/64*64;for(int j=0;j<R && row0+j<M;++j){");
     for (auto &inst : body) {
       auto n = inst.getName().stripDialect();
       auto prim = inst.getAttrOfType<StringAttr>("bangc.primitive").getValue();
@@ -204,6 +217,16 @@ class Source {
       if (n == "write_back") {
         auto ptr = in(0), src = in(1), t = ctype(inst.getOperand(0).getType());
         auto [rowStride, columnStride] = strides(inst, 3, ptr);
+        if(packed) {
+          auto axis=std::to_string(cast<MemRefType>(inst.getOperand(0).getType()).getRank()-2);
+          auto stride=ptr+"s"+axis, dim=ptr+"d"+axis;
+          Text write=inst.getAttrOfType<BoolAttr>("async").getValue()?"__memcpy_async":"__memcpy";
+          line("{int first=j;if(members>1 && "+columnStride+"==1 && "+stride+">=live && "+stride+"<=2147483647/sizeof("+t+") && (row0+j)%"+dim+"+members<="+dim+"){");
+          line(write+"("+ptr+"+"+rowStride+"+col,"+src+",live*sizeof("+t+"),NRAM2GDRAM,"+stride+"*sizeof("+t+"),P*sizeof("+t+"),members-1);");
+          line("}else for(int h=0;h<members;++h){int j=first+h;auto *out="+ptr+"+"+rowStride+"+col*"+columnStride+";auto *v="+src+"+h*P;");
+          line("if("+columnStride+"==1)"+write+"(out,v,live*sizeof("+t+"),NRAM2GDRAM);else for(int k=0;k<live;++k)out[k*"+columnStride+"]=v[k];}}");
+          continue;
+        }
         line("{auto *out=" + ptr + "+" + rowStride + "+col*" +
              columnStride + ";");
         Text move =

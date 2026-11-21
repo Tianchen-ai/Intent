@@ -33,6 +33,10 @@ bool narrowedQuotient(Operation *div) {
 }
 StringRef primitive(Operation *op, int64_t depth) {
   auto n = op->getName().getStringRef();
+  if(n=="dsa.compute_members"){
+    auto layout=op->getParentOfType<func::FuncOp>()->getAttrOfType<DictionaryAttr>("dsa.layout");
+    if(layout.getAs<BoolAttr>("group_temporaries").getValue())return "packed_pointwise";
+  }
   if (n == "block.mul" || n == "block.cast") {
     auto elem = [](Type t) {
       if (auto s = dyn_cast<ShapedType>(t))
@@ -56,8 +60,13 @@ StringRef primitive(Operation *op, int64_t depth) {
     return op->getName().stripDialect();
   if (n == "dsa.phase")
     return "block_tasks";
-  if (n == "dsa.copy_in")
+  if (n == "dsa.copy_in") {
+    auto rank=cast<MemRefType>(op->getOperand(0).getType()).getRank();
+    if(rank>2 && op->getNumOperands()==rank+2 &&
+       op->getOperand(rank).getDefiningOp()->getName().getStringRef()=="dsa.member_axis")
+      return depth==2 ? "group_dma_async" : "group_dma";
     return depth == 2 ? "dma_async" : "dma";
+  }
   if (n == "dsa.await")
     return depth == 2 ? "wait_slot" : "ready";
   if (n == "dsa.write_back")
@@ -76,6 +85,7 @@ StringRef primitive(Operation *op, int64_t depth) {
       return alg == "sum" ? "row_sum" : alg == "max_num" ? "row_max_num" : "";
     return alg == "sum" ? "sum" : alg == "max_num" ? "max_num" : "";
   }
+
   if (n == "block.maximum") {
     auto *constant = op->getOperand(1).getDefiningOp();
     auto zero =

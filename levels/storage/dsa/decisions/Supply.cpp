@@ -51,6 +51,23 @@ llvm::Expected<DictionaryAttr> plan(func::FuncOp fn, const LocalSupply &c,
   if(persistent && !reusableInput(fn))return llvm::createStringError("persistent panel requires an immutable row-invariant input");
   if(participants<=0 || participants>c.consumers)return llvm::createStringError("invalid supply work partition");
   Builder b(fn.getContext());
+  // A group of equally shaped lane-wise expressions can keep all member
+  // results in private storage until the final rectangular transfer.
+  bool wide = fn->hasAttr("kir.iteration") &&
+              fn->getAttrOfType<StringAttr>("block.topology")=="resident";
+  for (auto t:fn.getArgumentTypes()) {
+    auto view=dyn_cast<MemRefType>(t);
+    wide &= view && view.getRank()>2 && view.getElementType().isF16();
+  }
+  unsigned arithmetic=0;
+  fn.walk([&](Operation *op){
+    auto code=op->getName().stripDialect();
+    if(code=="add" || code=="sub" || code=="mul") {++arithmetic;return;}
+    if(code=="reduce" || (op->getName().getDialectNamespace()=="block" &&
+       code!="rows" && code!="columns" && code!="pid" && code!="active" &&
+       code!="load" && code!="store" && code!="zero")) wide=false;
+  });
+  wide &= arithmetic!=0;
   SmallVector<Footprint> phases;
   fn.walk([&](Operation *op) {
     if (op->getName().getStringRef() == "dsa.phase") {
@@ -88,7 +105,7 @@ llvm::Expected<DictionaryAttr> plan(func::FuncOp fn, const LocalSupply &c,
     for (auto p : phases)
       bytes =
           std::max<int64_t>(bytes, pitch * (depth * r * p.inputBytes +
-                                            p.vectorBytes + p.collectiveBytes));
+                                            (wide ? r : 1)*p.vectorBytes + p.collectiveBytes));
     auto reason = (depth == 2 && !c.asynchronous)
                       ? "no participant-local DMA completion"
                   : bytes > std::min(c.budget, c.capacity)
@@ -105,6 +122,7 @@ llvm::Expected<DictionaryAttr> plan(func::FuncOp fn, const LocalSupply &c,
       accepted.push_back(attrs.getDictionary(fn.getContext()));
   }
   NamedAttrList out;
+  out.set("group_temporaries",b.getBoolAttr(wide));
   out.set("persistent",b.getBoolAttr(persistent));
   out.set("participants",b.getI64IntegerAttr(participants));
   out.set("budget", b.getI64IntegerAttr(std::min(c.budget, c.capacity)));
