@@ -4,7 +4,6 @@
 using namespace compilerinfra;
 using namespace mlir;
 namespace CI_UNIT_NAMESPACE {
-void vectorCost(compilerinfra::Unit&);
 llvm::Expected<std::string> taskSource(Operation *, const llvm::json::Array &);
 std::string hostSource(Operation *, const llvm::json::Array &);
 void dialect(DialectRegistry &);
@@ -21,7 +20,7 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
       (*bits != 128 && *bits != 256 && *bits != 512 && *bits != 1024))
     return llvm::createStringError(
         "invalid execution group or vector capabilities");
-  if(auto err=intentdsl::bindPerformance(p,options,"exits/weft::vector",options.getString("calibration").value_or("").str(),*workers))return std::move(err);
+  if(auto err=intentdsl::bindPerformance(p,options,"",options.getString("calibration").value_or("").str(),*workers))return std::move(err);
   auto caps = std::make_shared<intentdsl::cpu::RowMachine>();
   caps->vectorBits = *bits;
   caps->structuredRows = true;
@@ -69,7 +68,6 @@ llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
 }
 } // namespace
 void bind(Unit &u) {
-  vectorCost(u);
   u.dialects = dialect;
   u.realizers.push_back(
       {{"task-values", "levels/execution/cpu::storage",

@@ -3,6 +3,7 @@
 namespace CI_UNIT_NAMESPACE {
 using namespace compilerinfra;
 using namespace mlir;
+CostEstimate vectorCost(Operation *, const StructuralCandidate &, CostContext &);
 void registerCost(Unit &u) {
   for (bool permuted : {false, true})
     u.costModels.push_back(
@@ -15,12 +16,7 @@ void registerCost(Unit &u) {
             auto d = cast<DictionaryAttr>(c.value);
             auto walk = d.getAs<StringAttr>("walk");
             auto rows = d.getAs<ArrayAttr>("rows");
-            auto local = ctx.local(
-                facts->localEstimator +
-                (intentdsl::rectangularCopy(op) ? "-permutation" : ""));
-            if (!local)
-              return local.takeError();
-            CostEstimate e = *local;
+            CostEstimate e = vectorCost(op, c, ctx);
             e.scope = "full_call";
             e.bottleneck = "memory traffic";
             auto rd = intentdsl::quantity(ctx, "read_1", "B/ns"),
