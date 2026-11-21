@@ -2,10 +2,56 @@
   "name": "intentdsl",
   "version": "2.0.0.dev0",
   "compilerinfra": "0.2.0",
-  "levels": [],
-  "nodes": [],
-  "exits": [],
-  "runtimes": [],
+  "levels": [
+    {
+      "name": "algorithm",
+      "responsibility": "Author semantics and numerical contracts"
+    },
+    {
+      "name": "execution",
+      "responsibility": "Program instances, member coverage and traversal"
+    }
+  ],
+  "nodes": [
+    {
+      "name": "kir",
+      "level": "algorithm",
+      "parent": "entry",
+      "contract": "Typed logical member computation",
+      "boundaries": [
+        "imported",
+        "canonical"
+      ]
+    },
+    {
+      "name": "block",
+      "level": "execution",
+      "parent": "kir@canonical",
+      "contract": "Parameterized block program",
+      "boundaries": [
+        "formed",
+        "decided",
+        "realized",
+        "normalized"
+      ]
+    }
+  ],
+  "exits": [
+    {
+      "name": "triton",
+      "at": "block@normalized",
+      "description": "Local GPU Triton compiler",
+      "boundaries": [
+        "legal",
+        "callable"
+      ]
+    }
+  ],
+  "runtimes": [
+    "kir",
+    "block",
+    "triton"
+  ],
   "frontend": {
     "language": "python",
     "entry": "author:root_ir"
@@ -14,7 +60,8 @@
   "build": {
     "configure_args": []
   },
+  "bench": {"package": "intent_bench.compilerinfra_adapter"},
   "install": {
-    "python": "/opt/compiler-sdk/compilerinfra-0.2/venv/bin/python"
+    "python": "python3"
   }
 }

@@ -1,0 +1,147 @@
+#include "compilerinfra/Assembly.h"
+#include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
+#include "intentdsl/levels/execution/block/ir/Dialect.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Pass/Pass.h"
+#include "llvm/ADT/DenseSet.h"
+
+using namespace mlir;
+using namespace compilerinfra;
+namespace CI_UNIT_NAMESPACE {
+#include "Strategies.inc"
+void normalize(OpPassManager &);
+void registerRealizer(Unit &);
+namespace {
+struct Form : PassWrapper<Form, OperationPass<ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(Form)
+  void runOnOperation() final {
+    getContext().getOrLoadDialect<intentdsl::iblock::IblockDialect>();
+    getOperation().walk<WalkOrder::PostOrder>([](Operation *op) {
+      if (op->getName().getDialectNamespace() != "kir")
+        return;
+      OpBuilder b(op);
+      OperationState state(op->getLoc(),
+                           ("block." + op->getName().stripDialect()).str());
+      state.addOperands(op->getOperands());
+      state.addTypes(op->getResultTypes());
+      for (auto &region : op->getRegions())
+        state.addRegion()->takeBody(region);
+      auto *next = b.create(state);
+      op->replaceAllUsesWith(next);
+      op->erase();
+    });
+  }
+};
+} // namespace
+void bind(Unit &unit) {
+  unit.dialects = [](DialectRegistry &r) {
+    r.insert<intentdsl::iblock::IblockDialect>();
+  };
+  auto family = unit.qualify("structure");
+  DecisionFamily f;
+  f.name = "structure";
+  f.applies = [](Operation *op) {
+    return op->getName().getStringRef() == "block.parallel";
+  };
+  f.read = [](Operation *op) { return op->getAttr("block.structure"); };
+  f.write = [](Operation *op, Attribute v) {
+    op->setAttr("block.structure", v);
+    return llvm::Error::success();
+  };
+  f.verify = [](Operation *, Attribute value,
+                const TargetProfile &profile) -> llvm::Error {
+    auto d = dyn_cast<DictionaryAttr>(value);
+    if (!d || !d.getAs<StringAttr>("topology") || !d.getAs<ArrayAttr>("rows") ||
+        d.getAs<ArrayAttr>("rows").empty())
+      return llvm::createStringError("invalid joint row decision");
+    auto *caps = profile.services.get<intentdsl::RowCapacity>();
+    auto topology = d.getAs<StringAttr>("topology");
+    if (!caps || (topology != "resident" && topology != "stream"))
+      return llvm::createStringError("unbound topology or target");
+    llvm::DenseSet<unsigned> ids;
+    for (auto item : d.getAs<ArrayAttr>("rows")) {
+      auto row = dyn_cast<DictionaryAttr>(item);
+      if (!row || !row.getAs<IntegerAttr>("id") ||
+          !row.getAs<IntegerAttr>("rows") || !row.getAs<IntegerAttr>("width") ||
+          !row.getAs<StringAttr>("payload"))
+        return llvm::createStringError("incomplete row");
+      auto id = row.getAs<IntegerAttr>("id").getInt();
+      auto width = row.getAs<IntegerAttr>("width").getInt();
+      if (!ids.insert(id).second ||
+          (topology == "resident" &&
+           (!caps->upperBound || uint64_t(width) < caps->upperBound)) ||
+          !llvm::any_of(caps->rows, [&](const auto &r) {
+            return id == r.id && width == r.width &&
+                   row.getAs<IntegerAttr>("rows").getInt() == r.rows &&
+                   row.getAs<StringAttr>("payload") == r.payload;
+          }))
+        return llvm::createStringError(
+            "row does not match its target capability or width guard");
+    }
+    return llvm::Error::success();
+  };
+  unit.families.push_back({{std::move(f), "block@decided", "block@realized"},
+                           COMPILERINFRA_SOURCE});
+  registerStrategies(unit);
+  registerRealizer(unit);
+  for (StringRef phase : {"formed", "decided", "realized", "normalized"}) {
+    unit.boundaries.push_back(
+        {{phase.str(),
+          [phase](OpPassManager &pm, const TargetProfile &) {
+            if (phase == "normalized")
+              normalize(pm);
+            if (phase == "formed")
+              pm.addPass(std::make_unique<Form>());
+            return llvm::Error::success();
+          },
+          [phase](ModuleOp m, const TargetProfile &) {
+            unsigned loops = 0, pids = 0, pending = 0;
+            m.walk([&](Operation *op) {
+              loops += op->getName().getStringRef() == "block.parallel";
+              pids += op->getName().getStringRef() == "block.pid";
+              pending += op->hasAttr("block.structure");
+            });
+            bool ready = phase == "realized" || phase == "normalized";
+            if (loops != unsigned(!ready) || pids != unsigned(ready) ||
+                pending != unsigned(phase == "decided"))
+              return m.emitError("invalid row structure at ") << phase,
+                     failure();
+            auto funcs = m.getOps<func::FuncOp>();
+            if (!llvm::hasSingleElement(funcs))
+              return failure();
+            auto fn = *funcs.begin();
+            if (ready && (!fn->getAttrOfType<ArrayAttr>("block.configs") ||
+                          !fn->getAttrOfType<StringAttr>("block.topology")))
+              return failure();
+            auto checked = m.walk([&](Operation *op) {
+              if (op->getName().getDialectNamespace() == "func" ||
+                  op == m.getOperation())
+                return WalkResult::advance();
+              if (op->getName().getDialectNamespace() != "block")
+                return WalkResult::interrupt();
+              auto n = op->getName().stripDialect();
+              bool logical = n == "parallel" || n == "end" || n == "read" ||
+                             n == "write" || n == "sum" || n == "max_num";
+              if (ready && logical)
+                return WalkResult::interrupt();
+              if (phase == "normalized" && op->getNumOperands() == 2 &&
+                  (n == "add" || n == "sub" || n == "mul" || n == "div")) {
+                auto ty =
+                    dyn_cast<RankedTensorType>(op->getResult(0).getType());
+                for (auto val : op->getOperands()) {
+                  auto t = dyn_cast<RankedTensorType>(val.getType());
+                  if (ty && ty.getRank() == 2 && t && t.getRank() == 1)
+                    return WalkResult::interrupt();
+                }
+              }
+              return WalkResult::advance();
+            });
+            if (checked.wasInterrupted())
+              return m.emitError("invalid operation or broadcast at ") << phase,
+                     failure();
+            return success();
+          }},
+         COMPILERINFRA_SOURCE});
+  }
+}
+} // namespace CI_UNIT_NAMESPACE

@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "intentdsl-v2"
+version = "2.0.0.dev0"
+requires-python = ">=3.10"
+dependencies = ["compilerinfra==0.2.0"]
+
+[tool.setuptools]
+package-dir = {"" = "frontend/python"}
+packages = ["intentdsl"]

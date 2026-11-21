@@ -1,4 +1,15 @@
 {
-  "nodes": {},
+  "nodes": {
+    "block": {
+      "decisions": {
+        "levels/execution/block::structure": {
+          "strategies": [
+            "levels/execution/block::row-reduction"
+          ],
+          "realizer": "levels/execution/block::tile-rows"
+        }
+      }
+    }
+  },
   "exits": {}
 }
