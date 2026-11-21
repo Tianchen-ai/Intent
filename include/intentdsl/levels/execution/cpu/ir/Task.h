@@ -8,7 +8,8 @@ struct RowConfig {
 struct RowMachine {
   int64_t vectorBits, workers;
   llvm::SmallVector<RowConfig> rows;
-  mlir::ArrayAttr configurations(mlir::MLIRContext *) const;
+  bool structuredRows = false;
+  mlir::ArrayAttr configurations(mlir::MLIRContext *, bool whole) const;
   bool accepts(mlir::ArrayAttr) const;
 };
 mlir::LogicalResult verifyTask(mlir::ModuleOp,

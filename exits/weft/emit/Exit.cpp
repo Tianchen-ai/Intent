@@ -20,6 +20,7 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
         "invalid execution group or vector capabilities");
   auto caps = std::make_shared<intentdsl::cpu::RowMachine>();
   caps->vectorBits = *bits;
+  caps->structuredRows = true;
   caps->workers = *workers;
   // Locally reported mvendorid/marchid for the V100 core.
   bool v100 = options.getString("core") == "0x710/0x8000000058000002";
@@ -49,7 +50,7 @@ llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
     return program.takeError();
   llvm::json::Object fields{{"task", *program},
                             {"host", hostSource(&task, *abi->getAsArray())}};
-  fields["version"] = 1;
+  fields["version"] = 2;
   fields["abi"] = std::move(*abi);
   fields["rows"] = std::move(rows);
   out << llvm::json::Value(std::move(fields));

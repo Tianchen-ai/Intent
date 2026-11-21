@@ -43,7 +43,7 @@ llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
   if (!program)
     return program.takeError();
   llvm::json::Object fields{{"source", *program}};
-  fields["version"] = 1;
+  fields["version"] = 2;
   fields["abi"] = std::move(*abi);
   fields["rows"] = std::move(rows);
   out << llvm::json::Value(std::move(fields));

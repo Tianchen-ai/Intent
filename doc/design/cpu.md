@@ -123,3 +123,26 @@ Triton–Weft 的导出物同时描述了单实例和 grid 接口。本路线校
 4. **Weft host 绑定时机。** native build 读取 task 单实例导出声明再编译并链接 typed host bridge；或 loader 在加载时核验并填充有类型的函数表，由 host 间接调用。倾向前者，让签名错误止于 compile，热路径可直接调用。两案均由 host 唯一调度，task 均经 `triton.compile`。
 
 **依据与证据边界。** 框架阶段次序和接出规则取自 CompilerInfra `3ddeef2` 的 `lib/Assembly.cpp`。V1 `b0a19990` 对照位置为 `include/Intent/Dialect/CPU/Transforms/Implementation/Implementation.h`、`lib/Dialect/CPU/Analysis/PhysicalProgram.cpp`、`lib/Target/Mojo/Transforms/Passes.cpp`、`lib/Target/Mojo/Serialization/Serializer.cpp` 与 `python/intent/runtime/weft/compilation.py`。Triton–Weft `c4fa4a9bc` 的 `python/triton/backends/weft/compiler.py`、`third_party/weft/python/weft_core/launcher.py`、`python/triton/runtime/weft/artifact.py` 分别定义单任务编译、单实例声明和导出物。本轮读取这些实现与目标查询结果；经验行、两出口的 V2 ABI、性能及数值仍待实施验证。
+
+## 8. 首条 CPU 路线的实际调用与边界
+
+在装有产品、CompilerInfra 绑定及相应原生工具链的 Python 环境中，可直接使用两个出口。
+
+```python
+import numpy as np
+import intentdsl
+from intentdsl.examples import softmax
+
+x = np.ones((7, 127), dtype=np.float16)
+kernel = intentdsl.jit(softmax, backend="weft")
+call = kernel.prepare(x)
+call.compile()
+call.launch()
+probabilities = call.result()
+```
+
+选择 `backend="mojo"` 时使用 Mojo 本机安装。容器可以是 NumPy 数组或 Torch 张量，输出随输入容器分配。显式输出允许独立、可写的 strided view。初次绑定解析当前 CPU 集和线程预算，改变二者后应重新 prepare。
+
+`cpu::partition` 形成单一拓扑的一组 `{grain, columns}`。第一个量是每个任务实例拥有的行数。正的 `columns` 表示有上界的列块，零表示完整有效列域。两个值一起验证和消费。同一组内全为完整列域或全为列块。Weft 的默认行策略保留结构化整行归约，独立的 `levels/execution/cpu::panel-reduction` 策略形成逐块子视图、局部归约和跨块累加，供派生编译器使用。Mojo 在自己的出口中把列块变成 SIMD 扫描及标量尾部。两条路线均以 task captures 和 join 为依据。完整行域和有界列块的比较使用派生配置。
+
+CPU 产物格式 v2 的行表允许多个候选共享同一份原生程序。每个 native call 持有已绑定作者参数、行列 extent、选中的 grain 与列块、线程预算及其所有权。Weft 的 host 从导出的声明生成编译时 bridge，并向同步 task 传递实际区间大小、列数、列块宽度和元素 stride。首次调优使用临时输出；`compilation_report()` 将行映射到实际构建，共享编译耗时只记一次。

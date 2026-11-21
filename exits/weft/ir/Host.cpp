@@ -50,7 +50,10 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
     s.addRegion()->takeBody(task.getRegion(0));
     auto *dispatch = b.create(s);
     task.replaceAllUsesWith(dispatch);
-    buildPanels(dispatch);
+    if (cast<DictionaryAttr>(dispatch->getAttrOfType<ArrayAttr>("rows")[0])
+            .getAs<IntegerAttr>("columns")
+            .getInt() != 0)
+      buildPanels(dispatch);
     task.erase();
   }
 };
@@ -64,7 +67,13 @@ LogicalResult verifyHost(ModuleOp m, const compilerinfra::TargetProfile &p,
                                         "weft_host.dispatch_rows", false)))
     return failure();
   auto &task = (*m.getOps<func::FuncOp>().begin()).front().front();
-  if (failed(verifyPanels(&task)))
+  bool whole = cast<DictionaryAttr>(task.getAttrOfType<ArrayAttr>("rows")[0])
+                   .getAs<IntegerAttr>("columns")
+                   .getInt() == 0;
+  if (whole && failed(intentdsl::cpu::verifyTask(
+                   m, p, "weft-task-ssa", "weft_host.dispatch_rows", true)))
+    return failure();
+  if (!whole && failed(verifyPanels(&task)))
     return failure();
   if (task.getAttrOfType<StringAttr>("task_symbol") != "row_task")
     return task.emitError("unbound native row task");
