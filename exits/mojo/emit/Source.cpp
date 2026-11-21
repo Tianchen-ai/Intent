@@ -36,26 +36,12 @@ public:
       } else
         params.push_back(n + ": Float32");
     }
-    out << "from std.math import exp, rsqrt, inf\nfrom std.runtime import "
-           "initialize_runtime\n"
-        << "from max.algorithm.backend.cpu.parallelize import "
-           "sync_parallelize\n\n"
-        << "@export(\"intent_initialize\")\ndef intent_initialize() "
-           "abi(\"C\"):\n    initialize_runtime()\n\n"
-        << "@export(\""
-        << task->getParentOfType<func::FuncOp>()
-               ->getAttrOfType<StringAttr>("mojo_row.entry")
-               .getValue()
-        << "\")\ndef intent_entry(" << llvm::join(params, ",")
-        << ", rows: Int64, cols: Int64, grain: Int64, columns_per_block: "
-           "Int64, workers: Int64) "
-           "abi(\"C\"):\n";
-    line(1, "var groups = (Int(rows)+Int(grain)-1)//Int(grain)");
-    line(1, "var threads = min(Int(workers),groups)");
-    line(1, "if rows == 0 or cols == 0: return");
-    line(1, "def partition(w: Int) {imm}:");
-    line(2, "for g in range(w,groups,threads):");
-    line(3, "for r in range(g*Int(grain),min((g+1)*Int(grain),Int(rows))):");
+    out << "from std.math import exp, rsqrt, "
+           "inf\n@export(\"intent_row_interval\")\ndef intent_row_interval("
+        << llvm::join(params, ",")
+        << ", first: Int64, stop: Int64, cols: Int64, columns_per_block: "
+           "Int64) abi(\"C\"):\n";
+    line(1, "for r in range(Int(first),Int(stop)):");
     auto fullWidth =
         task->getAttrOfType<IntegerAttr>("mojo_row.lanes").getInt();
     for (auto &loop : body.without_terminator()) {
@@ -68,15 +54,15 @@ public:
           std::to_string(loop.getAttrOfType<IntegerAttr>("width").getInt());
       std::string result = temp(), acc = result + "_acc";
       if (reduction)
-        line(4, "var " + acc + " = SIMD[DType.float32, " + lanes + "](" +
+        line(2, "var " + acc + " = SIMD[DType.float32, " + lanes + "](" +
                     (sum ? "0.0" : "-inf[DType.float32]()") + ")");
       std::string stop = "Int(cols)//" + std::to_string(fullWidth) + "*" +
                          std::to_string(fullWidth);
       if (!tail) {
-        line(4, "for base in range(0, " + stop + ", Int(columns_per_block)):");
+        line(2, "for base in range(0, " + stop + ", Int(columns_per_block)):");
         depth = 1;
       }
-      line(4, "for j in range(" +
+      line(2, "for j in range(" +
                   (tail ? stop + ", Int(cols), 1"
                         : "base, min(base + Int(columns_per_block), " + stop +
                               "), " + lanes) +
@@ -89,7 +75,7 @@ public:
         auto lhs = temp();
         if (code == "yield") {
           if (reduction)
-            line(5, acc + " = " +
+            line(3, acc + " = " +
                         (sum ? acc + " + " + arg(0)
                              : "max(" + acc + "," + arg(0) + ")"));
         } else if (code == "read" || code == "write") {
@@ -100,22 +86,22 @@ public:
           auto offset = (matrix ? "r*Int(" + a + "s0)+" : "") +
                         std::string("j*") + stride;
           if (code == "read") {
-            line(5, "var " + lhs + " = SIMD[DType." +
+            line(3, "var " + lhs + " = SIMD[DType." +
                         dtype(view.getElementType()) + "," + lanes + "](0)");
-            line(5, "if " + stride + " == 1:");
-            line(6, lhs + " = " + a + ".unsafe_offset(" + offset +
+            line(3, "if " + stride + " == 1:");
+            line(4, lhs + " = " + a + ".unsafe_offset(" + offset +
                         ").unsafe_load[width=" + lanes + "]()");
-            line(5, "else:");
-            line(6, "for lane in range(" + lanes + "):");
-            line(7, lhs + "[lane] = " + a + "[unsafe_offset=" + offset +
+            line(3, "else:");
+            line(4, "for lane in range(" + lanes + "):");
+            line(5, lhs + "[lane] = " + a + "[unsafe_offset=" + offset +
                         "+lane*" + stride + "]");
           } else {
-            line(5, "if " + stride + " == 1:");
-            line(6, a + ".unsafe_offset(" + offset + ").unsafe_store(" +
+            line(3, "if " + stride + " == 1:");
+            line(4, a + ".unsafe_offset(" + offset + ").unsafe_store(" +
                         arg(3) + ")");
-            line(5, "else:");
-            line(6, "for lane in range(" + lanes + "):");
-            line(7, a + "[unsafe_offset=" + offset + "+lane*" + stride +
+            line(3, "else:");
+            line(4, "for lane in range(" + lanes + "):");
+            line(5, a + "[unsafe_offset=" + offset + "+lane*" + stride +
                         "] = " + arg(3) + "[lane]");
           }
         } else if (code == "apply") {
@@ -144,7 +130,7 @@ public:
             };
             expr = expand(0) + " " + token.str() + " " + expand(1);
           }
-          line(5, "var " + lhs + " = " + expr);
+          line(3, "var " + lhs + " = " + expr);
         } else
           return llvm::createStringError("unrecognized Mojo sweep instruction");
         if (op.getNumResults())
@@ -156,14 +142,11 @@ public:
         if (loop.getNumOperands())
           value = sum ? var(loop.getOperand(0)) + " + " + value
                       : "max(" + var(loop.getOperand(0)) + "," + value + ")";
-        line(4, "var " + result + " = " + value);
+        line(2, "var " + result + " = " + value);
         vars[loop.getResult(0)] = result;
       }
     }
-    line(1, "if threads == 1:");
-    line(2, "partition(0)");
-    line(1, "else:");
-    line(2, "sync_parallelize(partition,threads)");
+
     return llvm::Error::success();
   }
 };

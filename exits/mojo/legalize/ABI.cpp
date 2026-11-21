@@ -21,6 +21,9 @@ LogicalResult verifyLoops(ModuleOp m, const TargetProfile &p, bool callable) {
     return failure();
   auto fn = *m.getOps<func::FuncOp>().begin();
   auto &task = fn.front().front();
+  if (task.getAttrOfType<StringAttr>("mojo_row.schedule") !=
+      "static-row-groups")
+    return task.emitError("unbound synchronous Mojo row schedule");
   auto lanes = task.getAttrOfType<IntegerAttr>("mojo_row.lanes");
   if (!lanes ||
       lanes.getInt() !=

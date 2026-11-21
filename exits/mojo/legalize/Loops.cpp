@@ -104,6 +104,7 @@ public:
     }
     for (auto *op : llvm::reverse(original))
       op->erase();
+    task->setAttr("mojo_row.schedule", b.getStringAttr("static-row-groups"));
     task->setAttr("mojo_row.lanes", b.getI64IntegerAttr(lanes));
   }
 };

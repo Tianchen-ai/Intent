@@ -146,3 +146,5 @@ probabilities = call.result()
 `cpu::partition` 形成单一拓扑的一组 `{grain, columns}`。第一个量是每个任务实例拥有的行数。正的 `columns` 表示有上界的列块，零表示完整有效列域。两个值一起验证和消费。同一组内全为完整列域或全为列块。Weft 的默认行策略保留结构化整行归约，独立的 `levels/execution/cpu::panel-reduction` 策略形成逐块子视图、局部归约和跨块累加，供派生编译器使用。Mojo 在自己的出口中把列块变成 SIMD 扫描及标量尾部。两条路线均以 task captures 和 join 为依据。完整行域和有界列块的比较使用派生配置。
 
 CPU 产物格式 v2 的行表允许多个候选共享同一份原生程序。每个 native call 持有已绑定作者参数、行列 extent、选中的 grain 与列块、线程预算及其所有权。Weft 的 host 从导出的声明生成编译时 bridge，并向同步 task 传递实际区间大小、列数、列块宽度和元素 stride。首次调优使用临时输出；`compilation_report()` 将行映射到实际构建，共享编译耗时只记一次。
+
+Mojo 的同步入口用静态 OpenMP 行组派发，计算区间由 Mojo 编译；C 调度对象与 Mojo 计算体链接成同一共享库。安装在 x86 上的该出口需要本机 GCC 和 libgomp。入口返回前所有分组已 join。Mojo 区间函数只执行传入的行范围，并使用 IR 中的 SIMD 与尾部扫描。

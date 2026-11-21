@@ -34,7 +34,23 @@ def discover(scope):
             cpu_flags[int(info["processor"])] = set(info.get("flags", "").split())
     if not all(("avx512f" if bits == 512 else "avx2") in cpu_flags[c] for c in scope):
         raise ValueError("effective Mojo ISA exceeds CPU set")
-    return (binary, fields["--target-cpu"], os.stat(binary).st_mtime_ns), bits
+    cc = shutil.which("gcc")
+    if not cc:
+        raise FileNotFoundError("Mojo row host requires a C compiler with GNU OpenMP")
+    gomp = subprocess.check_output(
+        [cc, "-print-file-name=libgomp.so"], text=True
+    ).strip()
+    if not os.path.isabs(gomp) or not os.path.isfile(gomp):
+        raise FileNotFoundError("GNU OpenMP runtime for Mojo host")
+    return (
+        binary,
+        fields["--target-cpu"],
+        os.stat(binary).st_mtime_ns,
+        cc,
+        gomp,
+        os.stat(cc).st_mtime_ns,
+        os.stat(gomp).st_mtime_ns,
+    ), bits
 
 
 class Target:

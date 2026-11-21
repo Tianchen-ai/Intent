@@ -3,6 +3,7 @@ using namespace compilerinfra;
 using namespace mlir;
 namespace CI_UNIT_NAMESPACE {
 void dialect(DialectRegistry &);
+std::string hostSource(func::FuncOp);
 void publishABI(OpPassManager &);
 LogicalResult verifyLoops(ModuleOp, const TargetProfile &, bool callable);
 void realize(OpPassManager &, int64_t);
@@ -42,7 +43,7 @@ llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
   auto program = mojoSource(&task);
   if (!program)
     return program.takeError();
-  llvm::json::Object fields{{"source", *program}};
+  llvm::json::Object fields{{"source", *program}, {"host", hostSource(fn)}};
   fields["version"] = 2;
   fields["abi"] = std::move(*abi);
   fields["rows"] = std::move(rows);

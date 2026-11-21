@@ -47,15 +47,19 @@ class Artifact:
                     )
                 ]
                 library = ct.CDLL(str(path / "host.so"))
-                library.intent_initialize.argtypes = []
-                library.intent_initialize.restype = None
-                library.intent_initialize()
                 self.library = library
             return self.library.intent_entry
 
     def build(self, path):
         source = path / "row.mojo"
         source.write_text(self.data["source"])
+        host = path / "entry.c"
+        host.write_text(self.data["host"])
+        obj = path / "entry.o"
+        subprocess.run(
+            [self.info[3], "-O3", "-fopenmp", "-fPIC", "-c", str(host), "-o", str(obj)],
+            check=True,
+        )
         subprocess.run(
             [
                 self.info[0],
@@ -63,6 +67,10 @@ class Artifact:
                 "--emit",
                 "shared-lib",
                 str(source),
+                "-Xlinker",
+                str(obj),
+                "-Xlinker",
+                self.info[4],
                 "-o",
                 str(path / "host.so"),
             ],
