@@ -1,268 +1,268 @@
 {
-  "version": "3",
+  "version": "4",
   "facts": {
     "read_1_private_bw": {
-      "value": 11.441697725100845,
+      "value": 24.140351098261885,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA GeForce RTX 5090 D",
         "isa": "sm120",
         "toolchain": "triton 3.7.1 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 100663296 bytes",
         "benchmark": "intent_bench.calibration/read_1_private_bw",
-        "error": "range [10.5567, 16.9256], n=8"
+        "error": "range [15.1704, 35.3103], n=8"
       }
     },
     "write_1_private_bw": {
-      "value": 12.22958985578438,
+      "value": 28.054793411715927,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA GeForce RTX 5090 D",
         "isa": "sm120",
         "toolchain": "triton 3.7.1 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 100663296 bytes",
         "benchmark": "intent_bench.calibration/write_1_private_bw",
-        "error": "range [8.56904, 12.8], n=8"
+        "error": "range [15.1704, 29.6812], n=8"
       }
     },
     "read_16_private_bw": {
-      "value": 0.6918919025676108,
+      "value": 1.5422799642776281,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA GeForce RTX 5090 D",
         "isa": "sm120",
         "toolchain": "triton 3.7.1 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 100663296 bytes",
         "benchmark": "intent_bench.calibration/read_16_private_bw",
-        "error": "range [0.312195, 1.04918], n=8"
+        "error": "range [1.06667, 1.85507], n=8"
       }
     },
     "write_16_private_bw": {
-      "value": 0.6923976445890812,
+      "value": 1.4871794919806836,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA GeForce RTX 5090 D",
         "isa": "sm120",
         "toolchain": "triton 3.7.1 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 100663296 bytes",
         "benchmark": "intent_bench.calibration/write_16_private_bw",
-        "error": "range [0.621359, 0.775758], n=8"
+        "error": "range [1.12281, 2.09836], n=8"
       }
     },
     "read_1_mid_bw": {
-      "value": 172.4631523449337,
+      "value": 465.0048176000947,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA GeForce RTX 5090 D",
         "isa": "sm120",
         "toolchain": "triton 3.7.1 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 100663296 bytes",
         "benchmark": "intent_bench.calibration/read_1_mid_bw",
-        "error": "range [84.6718, 217.007], n=8"
+        "error": "range [235.741, 520.127], n=8"
       }
     },
     "write_1_mid_bw": {
-      "value": 196.22260667423618,
+      "value": 455.4625323657003,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA GeForce RTX 5090 D",
         "isa": "sm120",
         "toolchain": "triton 3.7.1 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 100663296 bytes",
         "benchmark": "intent_bench.calibration/write_1_mid_bw",
-        "error": "range [174.298, 212.779], n=8"
+        "error": "range [191.626, 489.075], n=8"
       }
     },
     "read_16_mid_bw": {
-      "value": 11.770504161235905,
+      "value": 30.143722431828735,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA GeForce RTX 5090 D",
         "isa": "sm120",
         "toolchain": "triton 3.7.1 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 100663296 bytes",
         "benchmark": "intent_bench.calibration/read_16_mid_bw",
-        "error": "range [10.449, 13.2987], n=8"
+        "error": "range [25.9241, 33.5738], n=8"
       }
     },
     "write_16_mid_bw": {
-      "value": 11.58874670284252,
+      "value": 28.46640827285627,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA GeForce RTX 5090 D",
         "isa": "sm120",
         "toolchain": "triton 3.7.1 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 100663296 bytes",
         "benchmark": "intent_bench.calibration/write_16_mid_bw",
-        "error": "range [9.66038, 15.876], n=8"
+        "error": "range [15.876, 32.5079], n=8"
       }
     },
     "read_1_shared_bw": {
-      "value": 1472.905033649351,
+      "value": 2914.1501543815366,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA GeForce RTX 5090 D",
         "isa": "sm120",
         "toolchain": "triton 3.7.1 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 100663296 bytes",
         "benchmark": "intent_bench.calibration/read_1_shared_bw",
-        "error": "range [1040.25, 1971.01], n=8"
+        "error": "range [2340.57, 3196.88], n=8"
       }
     },
     "write_1_shared_bw": {
-      "value": 1469.1586945477081,
+      "value": 1943.513723670335,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA GeForce RTX 5090 D",
         "isa": "sm120",
         "toolchain": "triton 3.7.1 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 100663296 bytes",
         "benchmark": "intent_bench.calibration/write_1_shared_bw",
-        "error": "range [660.312, 1985.94], n=8"
+        "error": "range [1515.28, 2383.13], n=8"
       }
     },
     "read_16_shared_bw": {
-      "value": 90.02469774696377,
+      "value": 166.37361340060187,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA GeForce RTX 5090 D",
         "isa": "sm120",
         "toolchain": "triton 3.7.1 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 100663296 bytes",
         "benchmark": "intent_bench.calibration/read_16_shared_bw",
-        "error": "range [80.3137, 99.9024], n=8"
+        "error": "range [109.96, 215.579], n=8"
       }
     },
     "write_16_shared_bw": {
-      "value": 96.9501406292297,
+      "value": 166.37361340060187,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA GeForce RTX 5090 D",
         "isa": "sm120",
         "toolchain": "triton 3.7.1 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 100663296 bytes",
         "benchmark": "intent_bench.calibration/write_16_shared_bw",
-        "error": "range [92.565, 108.503], n=8"
+        "error": "range [132.129, 227.556], n=8"
       }
     },
     "read_1_dram_bw": {
-      "value": 1696.2534808593057,
+      "value": 1701.8885500250713,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA GeForce RTX 5090 D",
         "isa": "sm120",
         "toolchain": "triton 3.7.1 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 100663296 bytes",
         "benchmark": "intent_bench.calibration/read_1_dram_bw",
-        "error": "range [1674.62, 1701.28], n=8"
+        "error": "range [1694.75, 1703.01], n=8"
       }
     },
     "write_1_dram_bw": {
-      "value": 1693.855548550759,
+      "value": 1700.9833402043841,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA GeForce RTX 5090 D",
         "isa": "sm120",
         "toolchain": "triton 3.7.1 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 100663296 bytes",
         "benchmark": "intent_bench.calibration/write_1_dram_bw",
-        "error": "range [1690.48, 1702.67], n=8"
+        "error": "range [1696.98, 1705.87], n=8"
       }
     },
     "read_16_dram_bw": {
-      "value": 209.1088414069986,
+      "value": 210.2726565688002,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA GeForce RTX 5090 D",
         "isa": "sm120",
         "toolchain": "triton 3.7.1 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 100663296 bytes",
         "benchmark": "intent_bench.calibration/read_16_dram_bw",
-        "error": "range [203.173, 210.093], n=8"
+        "error": "range [202.623, 211.13], n=8"
       }
     },
     "write_16_dram_bw": {
-      "value": 53.20292808852659,
+      "value": 53.57280313041089,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA GeForce RTX 5090 D",
         "isa": "sm120",
         "toolchain": "triton 3.7.1 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 100663296 bytes",
         "benchmark": "intent_bench.calibration/write_16_dram_bw",
-        "error": "range [53.0522, 54.8748], n=8"
+        "error": "range [53.1921, 55.6687], n=8"
       }
     },
     "launch": {
-      "value": 6111.999973654747,
+      "value": 2559.9999353289604,
       "unit": "ns",
       "source": {
         "device": "NVIDIA GeForce RTX 5090 D",
         "isa": "sm120",
         "toolchain": "triton 3.7.1 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 100663296 bytes",
         "benchmark": "intent_bench.calibration/launch",
-        "error": "range [4256, 7232], n=8"
+        "error": "range [2080, 4512], n=8"
       }
     },
     "sync": {
-      "value": 9822.0,
+      "value": 5440.5,
       "unit": "ns",
       "source": {
         "device": "NVIDIA GeForce RTX 5090 D",
         "isa": "sm120",
         "toolchain": "triton 3.7.1 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 100663296 bytes",
         "benchmark": "intent_bench.calibration/sync",
-        "error": "range [9615, 10268], n=8"
+        "error": "range [5344, 5600], n=8"
       }
     },
     "read_1": {
-      "value": 1696.2534808593057,
+      "value": 1701.8885500250713,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA GeForce RTX 5090 D",
         "isa": "sm120",
         "toolchain": "triton 3.7.1 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 100663296 bytes",
         "benchmark": "intent_bench.calibration/read_1",
-        "error": "range [1674.62, 1701.28], n=8"
+        "error": "range [1694.75, 1703.01], n=8"
       }
     },
     "read_16": {
-      "value": 209.1088414069986,
+      "value": 210.2726565688002,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA GeForce RTX 5090 D",
         "isa": "sm120",
         "toolchain": "triton 3.7.1 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 100663296 bytes",
         "benchmark": "intent_bench.calibration/read_16",
-        "error": "range [203.173, 210.093], n=8"
+        "error": "range [202.623, 211.13], n=8"
       }
     },
     "write_1": {
-      "value": 1693.855548550759,
+      "value": 1700.9833402043841,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA GeForce RTX 5090 D",
         "isa": "sm120",
         "toolchain": "triton 3.7.1 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 100663296 bytes",
         "benchmark": "intent_bench.calibration/write_1",
-        "error": "range [1690.48, 1702.67], n=8"
+        "error": "range [1696.98, 1705.87], n=8"
       }
     },
     "write_16": {
-      "value": 53.20292808852659,
+      "value": 53.57280313041089,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA GeForce RTX 5090 D",
         "isa": "sm120",
         "toolchain": "triton 3.7.1 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 100663296 bytes",
         "benchmark": "intent_bench.calibration/write_16",
-        "error": "range [53.0522, 54.8748], n=8"
+        "error": "range [53.1921, 55.6687], n=8"
       }
     }
   }

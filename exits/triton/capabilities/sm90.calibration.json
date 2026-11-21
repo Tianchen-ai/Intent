@@ -1,268 +1,268 @@
 {
-  "version": "3",
+  "version": "4",
   "facts": {
     "read_1_private_bw": {
-      "value": 15.816794306167646,
+      "value": 15.6937173414491,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA H100 80GB HBM3",
         "isa": "sm90",
         "toolchain": "triton 3.8.0 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 52428800 bytes",
         "benchmark": "intent_bench.calibration/read_1_private_bw",
-        "error": "range [13.8378, 16.5161], n=8"
+        "error": "range [14.8406, 16.7869], n=8"
       }
     },
     "write_1_private_bw": {
-      "value": 15.576171517699127,
+      "value": 15.585185499203902,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA H100 80GB HBM3",
         "isa": "sm90",
         "toolchain": "triton 3.8.0 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 52428800 bytes",
         "benchmark": "intent_bench.calibration/write_1_private_bw",
-        "error": "range [12.642, 16.254], n=8"
+        "error": "range [14.6286, 16.7869], n=8"
       }
     },
     "read_16_private_bw": {
-      "value": 0.9481481848757304,
+      "value": 0.9737359931419995,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA H100 80GB HBM3",
         "isa": "sm90",
         "toolchain": "triton 3.8.0 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 52428800 bytes",
         "benchmark": "intent_bench.calibration/read_16_private_bw",
-        "error": "range [0.842105, 1.01587], n=8"
+        "error": "range [0.847682, 1.01587], n=8"
       }
     },
     "write_16_private_bw": {
-      "value": 0.9209109505841486,
+      "value": 0.8983451482392982,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA H100 80GB HBM3",
         "isa": "sm90",
         "toolchain": "triton 3.8.0 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 52428800 bytes",
         "benchmark": "intent_bench.calibration/write_16_private_bw",
-        "error": "range [0.870748, 1.01587], n=8"
+        "error": "range [0.766467, 0.927536], n=8"
       }
     },
     "read_1_mid_bw": {
-      "value": 250.1374171510268,
+      "value": 251.1289702382193,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA H100 80GB HBM3",
         "isa": "sm90",
         "toolchain": "triton 3.8.0 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 52428800 bytes",
         "benchmark": "intent_bench.calibration/read_1_mid_bw",
-        "error": "range [239.182, 262.144], n=8"
+        "error": "range [239.182, 256], n=8"
       }
     },
     "write_1_mid_bw": {
-      "value": 254.0765758724373,
+      "value": 265.33228038140294,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA H100 80GB HBM3",
         "isa": "sm90",
         "toolchain": "triton 3.8.0 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 52428800 bytes",
         "benchmark": "intent_bench.calibration/write_1_mid_bw",
-        "error": "range [95.5335, 266.406], n=8"
+        "error": "range [234.057, 268.59], n=8"
       }
     },
     "read_16_mid_bw": {
-      "value": 15.226976426375042,
+      "value": 15.456824159205528,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA H100 80GB HBM3",
         "isa": "sm90",
         "toolchain": "triton 3.8.0 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 52428800 bytes",
         "benchmark": "intent_bench.calibration/read_16_mid_bw",
-        "error": "range [14.9489, 15.5152], n=8"
+        "error": "range [15.2836, 16], n=8"
       }
     },
     "write_16_mid_bw": {
-      "value": 14.524823024487468,
+      "value": 14.62857103785691,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA H100 80GB HBM3",
         "isa": "sm90",
         "toolchain": "triton 3.8.0 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 52428800 bytes",
         "benchmark": "intent_bench.calibration/write_16_mid_bw",
-        "error": "range [14.2222, 14.8406], n=8"
+        "error": "range [14.1241, 16], n=8"
       }
     },
     "read_1_shared_bw": {
-      "value": 1569.7808533938894,
+      "value": 1565.052731496612,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA H100 80GB HBM3",
         "isa": "sm90",
         "toolchain": "triton 3.8.0 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 52428800 bytes",
         "benchmark": "intent_bench.calibration/read_1_shared_bw",
-        "error": "range [1497.97, 1702.23], n=8"
+        "error": "range [1551.15, 1608.25], n=8"
       }
     },
     "write_1_shared_bw": {
-      "value": 1452.3324797094842,
+      "value": 1468.6053721163657,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA H100 80GB HBM3",
         "isa": "sm90",
         "toolchain": "triton 3.8.0 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 52428800 bytes",
         "benchmark": "intent_bench.calibration/write_1_shared_bw",
-        "error": "range [1432.48, 1481.04], n=8"
+        "error": "range [1416.99, 1489.45], n=8"
       }
     },
     "read_16_shared_bw": {
-      "value": 111.45578319770758,
+      "value": 114.97685334753176,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA H100 80GB HBM3",
         "isa": "sm90",
         "toolchain": "triton 3.8.0 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 52428800 bytes",
         "benchmark": "intent_bench.calibration/read_16_shared_bw",
-        "error": "range [109.227, 115.38], n=8"
+        "error": "range [109.96, 116.199], n=8"
       }
     },
     "write_16_shared_bw": {
-      "value": 95.81286159849498,
+      "value": 97.81579571853825,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA H100 80GB HBM3",
         "isa": "sm90",
         "toolchain": "triton 3.8.0 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 52428800 bytes",
         "benchmark": "intent_bench.calibration/write_16_shared_bw",
-        "error": "range [91.5307, 99.297], n=8"
+        "error": "range [96.9467, 100.515], n=8"
       }
     },
     "read_1_dram_bw": {
-      "value": 3202.369870067612,
+      "value": 3200.995412905101,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA H100 80GB HBM3",
         "isa": "sm90",
         "toolchain": "triton 3.8.0 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 52428800 bytes",
         "benchmark": "intent_bench.calibration/read_1_dram_bw",
-        "error": "range [3185.35, 3208.49], n=8"
+        "error": "range [3188.07, 3204.82], n=8"
       }
     },
     "write_1_dram_bw": {
-      "value": 3274.881317202951,
+      "value": 3271.0501770881456,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA H100 80GB HBM3",
         "isa": "sm90",
         "toolchain": "triton 3.8.0 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 52428800 bytes",
         "benchmark": "intent_bench.calibration/write_1_dram_bw",
-        "error": "range [3261.51, 3278.4], n=8"
+        "error": "range [3259.61, 3276.48], n=8"
       }
     },
     "read_16_dram_bw": {
-      "value": 199.7763463137319,
+      "value": 199.8049266700779,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA H100 80GB HBM3",
         "isa": "sm90",
         "toolchain": "triton 3.8.0 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 52428800 bytes",
         "benchmark": "intent_bench.calibration/read_16_dram_bw",
-        "error": "range [199.235, 199.995], n=8"
+        "error": "range [199.122, 200.186], n=8"
       }
     },
     "write_16_dram_bw": {
-      "value": 143.94619459138778,
+      "value": 143.99593347570863,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA H100 80GB HBM3",
         "isa": "sm90",
         "toolchain": "triton 3.8.0 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 52428800 bytes",
         "benchmark": "intent_bench.calibration/write_16_dram_bw",
-        "error": "range [143.444, 144.581], n=8"
+        "error": "range [143.16, 144.591], n=8"
       }
     },
     "launch": {
-      "value": 4144.000122323632,
+      "value": 3999.9999571591616,
       "unit": "ns",
       "source": {
         "device": "NVIDIA H100 80GB HBM3",
         "isa": "sm90",
         "toolchain": "triton 3.8.0 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 52428800 bytes",
         "benchmark": "intent_bench.calibration/launch",
-        "error": "range [3904, 4864], n=8"
+        "error": "range [3808, 4736], n=8"
       }
     },
     "sync": {
-      "value": 5419.5,
+      "value": 5102.5,
       "unit": "ns",
       "source": {
         "device": "NVIDIA H100 80GB HBM3",
         "isa": "sm90",
         "toolchain": "triton 3.8.0 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 52428800 bytes",
         "benchmark": "intent_bench.calibration/sync",
-        "error": "range [5257, 5644], n=8"
+        "error": "range [4835, 10341], n=8"
       }
     },
     "read_1": {
-      "value": 3202.369870067612,
+      "value": 3200.995412905101,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA H100 80GB HBM3",
         "isa": "sm90",
         "toolchain": "triton 3.8.0 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 52428800 bytes",
         "benchmark": "intent_bench.calibration/read_1",
-        "error": "range [3185.35, 3208.49], n=8"
+        "error": "range [3188.07, 3204.82], n=8"
       }
     },
     "read_16": {
-      "value": 199.7763463137319,
+      "value": 199.8049266700779,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA H100 80GB HBM3",
         "isa": "sm90",
         "toolchain": "triton 3.8.0 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 52428800 bytes",
         "benchmark": "intent_bench.calibration/read_16",
-        "error": "range [199.235, 199.995], n=8"
+        "error": "range [199.122, 200.186], n=8"
       }
     },
     "write_1": {
-      "value": 3274.881317202951,
+      "value": 3271.0501770881456,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA H100 80GB HBM3",
         "isa": "sm90",
         "toolchain": "triton 3.8.0 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 52428800 bytes",
         "benchmark": "intent_bench.calibration/write_1",
-        "error": "range [3261.51, 3278.4], n=8"
+        "error": "range [3259.61, 3276.48], n=8"
       }
     },
     "write_16": {
-      "value": 143.94619459138778,
+      "value": 143.99593347570863,
       "unit": "B/ns",
       "source": {
         "device": "NVIDIA H100 80GB HBM3",
         "isa": "sm90",
         "toolchain": "triton 3.8.0 CUDA 13.0",
-        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks",
+        "conditions": "one CUDA stream, 64 KiB, 1 MiB, 8 MiB, 1 GiB footprints, FP32 strides 1/16, graph events, idle stream for host sync; unmanaged clocks; last level cache 52428800 bytes",
         "benchmark": "intent_bench.calibration/write_16",
-        "error": "range [143.444, 144.581], n=8"
+        "error": "range [143.16, 144.591], n=8"
       }
     }
   }
