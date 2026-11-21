@@ -182,7 +182,14 @@ order 是操作属性，拒绝表外组合；一个逻辑原子地址上存在�
 | summarize(sources 切片…, C…) → S；combine(S,S) → S | 参数数量、顺序和类型匹配，identity 同 S；相邻段的摘要可按源顺序组合，identity 双侧中立。空 fold 返回 identity |
 | apply(S,state) → state；emit(sources 切片…,incoming,C…) → 结果切片 | state schema 稳定，identity 对状态无作用，先后 apply 与依序 combine 后 apply 等价；右段的 incoming 为左段摘要作用后的状态。拼合 emit 的结果必须保留原轴成员，终态等于完整摘要作用于初态。空 scan 返回空输出与初态 |
 
-代数等式是作者使用这些原语的前提，verifier 检查签名、纯度和成员关系。分页 attention 将 K、V、key 的逻辑 token 坐标及有效位作为 source；query、query 的坐标和 scale 是 captures。partial 写 f32 输出片段与 f32 log₂-sum-exp；空 split 分别写零和 −∞。merge 在前一调用完成后读回**同一对** workspace，凭有效性跳过空 split，避免对空项计算 −∞−(−∞)。
+代数等式是作者使用这些原语的前提，verifier 检查签名、纯度和成员关系。分页 attention 将 K、V、key 的逻辑 token 坐标及有效位作为 source；query、query 的坐标和 scale 是 captures。partial 写 f32 输出片段与 f32 log₂-sum-exp；空 split 分别写零和 −∞。merge 在前一调用完成后读回同一对 workspace，执行作者写出的成员选择与运算。
+
+| 作者的 merge | 部分 split 为空 | 某输出行全部 split 为空 |
+|---|---|---|
+| 沿用 V1 的 `splitk_attention_f32_to_f16_reduce` | 按原式对所有 split 求最大值、`exp(lse−maximum)`、分母与加权和，保留原有指数和窄化。若最大值有限，空 split 的权重为零 | 有 split 且 LSE 全为 −∞ 时，减法得到 NaN，结果各分量为 f16 NaN。lowering 保留这一行为 |
+| 作者显式选择跳过空 split，并定义空结果为零 | 作者从成员域或显式传递的有效位构造 mask，最大值、权重和加权和只使用有效成员。在归一化前按是否存在有效成员分支 | 作者分支直接写出各分量 +0，不对空域执行除法。额外传递有效位时，由作者同步声明 partial 与 merge 的接口 |
+
+第二种写法是另一份作者程序的合同。split 轴长度本身为零时，显式的“无有效成员”分支同样写 +0；沿用原式时，空求和为零、空收缩分子为零，最后仍执行零乘零分母的倒数，输出 NaN。有效成员也可能产生非有限值；只有作者的数据合同保证标记无歧义时，才能用 LSE 的值判空。编译器不能根据算子名、零 partial 或 −∞ 哨兵给第一种写法加跳过逻辑。
 
 ## 量化记录与块缩放
 

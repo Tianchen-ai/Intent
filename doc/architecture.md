@@ -1,6 +1,6 @@
 # IntentDSL V2 产品架构
 
-**状态**　V2-1b 设计裁决。树形及挂接点已定；下表规定产品应实现的 IR 合同、出口边界和 ABI。仓库中的 `product.json` 目前只登记脚手架前端。本文的图描述目标产品，不代表已有可执行后端。
+**状态**　V2-2 已实现 Python → KIR → Block → Triton 及三个关联 runtime。下图同时给出已定的后续分支；CPU、Weft 与 Mojo 的边界细化见 [V2-3 CPU 设计](design/cpu.md)，目前处于设计评审阶段。
 
 **设计依据**　CompilerInfra `3ddeef2` 的 `lib/Assembly.cpp`、`include/compilerinfra/Decision.h` 和安装包的 Python 绑定决定了本设计可用的阶段顺序、策略接口和候选加载行为。语义对照为原版 IntentDSL `b0a19990` 的 `doc/dsl/types-numerics-and-effects.md`、`doc/dsl/quantized-operations.md` 与 `python/intent/examples/registry.py`。V1 的 Triton 经验行见 `lib/Target/Triton/Transforms/Configuration/TuningProfiles.json`；V2 建议的行值须在 V2 的产物上重新判断。
 
@@ -55,7 +55,7 @@ frontend/python
 | triton ← block@normalized | @legal：Triton 可表达的 grid、指针/值类型、掩码、原生归约等已选定；@callable：constexpr、Config 行与调用签名闭合 | 参数化 Triton Python JIT kernel → 本机 Triton GPU 编译器 |
 | cutile ← block@normalized | @legal：已选择 cuTile 的 tile load/store、tile 计算和边界机制；@callable：原生签名、tile 常量和启动映射闭合 | CUDA Tile Python kernel → 本机 cuTile 工具链 |
 | weft ← cpu@tasked | 进入首边界前，私有 realizer 在值程序中消费 CPU 存储需求；@legal：task 计算与 host 调用、join 分开；@callable：两侧签名、入口、完成点闭合 | 每个静态 task 定义一份 `.weftir`，各交给 `triton.compile`；另发射一份 host 程序，与这些 native kernel 绑定 |
-| mojo ← cpu@buffers | @legal：循环、SIMD 或实际矩阵实现、scratch 与任务 ABI 对应；@callable：导出函数符号和实参顺序固定 | Mojo 模块源 → 本机 Mojo 编译器与原生库加载器 |
+| mojo ← cpu@buffers | @legal：选择目标循环、SIMD 或矩阵实现；@realized：终验展开后的计算、尾部、存储与线程完成点；@callable：固定已终验实现的导出函数与实参顺序 | Mojo 模块源 → 本机 Mojo 编译器与原生库加载器 |
 | bangc ← dsa@supplied | @bound：选定微核合同、实际存储类和 scratch 需求，核对物理容量、SDK 保留量及行预算；@legal：兑现地址、packing、搬运、同步与 BANG C primitive；@callable：CNCC 入口和队列 ABI 完整 | BANG C 源 → 本机 CNCC、CNRT。微核承接有类型的计算区域，外层仍负责跨区域遍历与复用 |
 
 下游的合法性受安装版本约束。缺少目标操作、工具链或有效行，诊断给出出口、位置和失败阶段；不得改变 dtype、成员集合或出口来绕过错误。
@@ -72,7 +72,7 @@ frontend/python
 | cpu：共享准备与物化 | tasked → buffers | 值的寿命、实现输入表示、别名、工作集和 scratch 预算 → 必需的存储与供数。weft 在中途接出，必须自己兑现 |
 | dsa：供数、搬运与复用 | formed → supplied | block 中已有的访问、参与者、可见性、目标容量及并发约束 → 存储寿命、事件与等待 |
 | bangc：物理空间与微核 | bound → legal | MLU 资源事实、ABI、格式、scratch/尾部及指令支持 → 目标微核、地址和原生 primitive |
-| 各语言出口：原生映射 | legal → callable，必要合法化也可用普通 pass | 已兑现的执行结构、下游版本和设备能力 → 目标指令级 DSL 操作、签名、行的原生参数 |
+| 语言出口：原生映射 | Weft/Triton/cuTile：legal → callable；Mojo：legal → realized，之后在 callable 绑定 ABI。必要合法化可用普通 pass | 已兑现的执行结构、下游版本和设备能力 → 目标 DSL 操作、签名、行的原生参数 |
 
 接出点早于决定时，家族尚未运行。接出点位于决定与兑现之间时，接收方须有私有 realizer，在首边界前兑现；缺失导致该分支及后代无效。等于兑现点时，接收方直接消费已兑现的程序。本树只有 weft 位于决定区间内：`cpu@tasked` 已作存储决定，`cpu@buffers` 才兑现。dsa 从 `block@realized` 接出，此时所有 Block 结构决定已经兑现；DSA 直接接收参数化的实例、片段和循环。它在 `dsa@formed → @supplied` 作出的供数决定有自己的 realizer，无需为接出 Block 登记私有 realizer。
 
