@@ -1,6 +1,6 @@
 # cuTile 出口与本机 JIT
 
-**V2-4 设计，待裁决。** 首批作者程序为 stable softmax 和 weighted RMSNorm。本文中的行表是建议的发行配置；V2 cuTile 尚无编译、数值或性能成绩。本机和 H100 环境均查到 cuTile Python 1.6.0、tileiras 13.3.36。出口的目标是实际输入所在的 CUDA 设备。
+**V2-4 行程序已实现。** 首批作者程序为 stable softmax 和 weighted RMSNorm。下表记录发行配置。两个行程序已经在 SM90 和 SM120 通过本机编译、数值检查与 Bench 图重放测量。本机和 H100 环境均查到 cuTile Python 1.6.0、tileiras 13.3.36。出口的目标是实际输入所在的 CUDA 设备。
 
 ## 1. 入口、边界与产物
 
@@ -15,7 +15,7 @@
 
 ## 2. 设备能力与候选行
 
-由 `exits/cutile` 登记 Block 已有的 `RowCapacity` 服务，输入为架构、绑定宽度及本机工具链能力。每项经验行是整体。W 取有限序列 1、2、4、…、4096，每个宽度精确登记下列两项；存储 ID 在同一设备表及版本内唯一。Block 选择一个宽度类和一种拓扑，并把所选行写进 IR。以下配置对两个作者程序通用。
+由 `exits/cutile` 登记 Block 已有的 `RowCapacity` 服务，输入为架构、绑定宽度及本机工具链能力。每项经验行是整体。W 取有限序列 1、2、4、…、4096，对于基址或外轴字节 stride 未满足 tensor-map 对齐类、或内轴非连续的绑定，上限收至 256，避免宽静态片段在原生编译器中膨胀。每个允许宽度精确登记下列两项；存储 ID 在同一设备表及版本内唯一。Block 选择一个宽度类和一种拓扑，并把所选行写进 IR。以下配置对两个作者程序通用。
 
 | 表与行 | 公共列 (R,W) | 不透明载荷（建议起点） | 用意 |
 |---|---|---|---|
@@ -34,7 +34,7 @@
 | CTA / occupancy | 首批两行均用单 CTA | 首批两行均用单 CTA | SDK 1.6 的 num_ctas 取 1/2/4/8/16，occupancy 取 1…32，均须通过目标核验。它们是下游资源提示；程序中的工作归属和 grid 由 Block 决定。多 CTA/cluster 要有独立能力与合法实例同期执行的依据才扩充。 |
 | 索引 | 经范围证明可用 i32，否则 i64 | 同规则，按本设备的签名编译 | 分别验证 shape、stride、tile 坐标、乘加中间量、末端地址和 grid。使用 i64 时同步升级标量算术与数组 index dtype（`ArrayAnnotation`）；地址计算保持合法的指针宽度。无法表示的绑定在 prepare 拒绝。 |
 
-GPU 型号只提供能力查询的起点。上述行没有实测 winner；`allow_tma=True` 也不证明生成了 TMA 指令。[NVIDIA Tile IR 架构支持](https://docs.nvidia.com/cuda/tile-ir/latest/sections/stability.html) · [cuTile 性能提示](https://docs.nvidia.com/cuda/cutile-python/performance.html)
+GPU 型号只提供能力查询的起点。winner 随设备与绑定选择；`allow_tma=True` 也不证明生成了 TMA 指令。[NVIDIA Tile IR 架构支持](https://docs.nvidia.com/cuda/tile-ir/latest/sections/stability.html) · [cuTile 性能提示](https://docs.nvidia.com/cuda/cutile-python/performance.html)
 
 R、W 在编译单行时作为静态 tile 常量，两轴都是正的 2 的幂；动态的是绑定时的 M、N。对于 i64 路径，先将 block ID 和索引操作数提升，再进行乘法。CTA hint 不参与 grid 求值。SM120 的经验表独立于 SM100；不能把 Blackwell 数据中心型号的矩阵指令或集群配置直接套在 5090D 上。
 
@@ -83,7 +83,7 @@ V1 两份 `lib/Target/{Triton,CuTile}/Transforms/Legalize.cpp` 都调用短窗�
 
 例如当前 `block.reduce(value, active, algebra)` 已携带中和尾部所需的三个量。Triton 可显式生成 neutralize，cuTile 可用相同有效域生成 select 后接原生 collective。若某种变换会改变 active 的来源或重排共同的归约遍历，须在 Block 规范化并验证；单个出口只选择目标语言的等价拼写。
 
-## 6. 实施前的三项裁决
+## 6. 已采纳的三项设计选择
 
 1. **rank-one 访问投影**可将现有行方言的 rank→轴合同写成公共查询并在 normalized 校验，或现在就新增通用轴映射属性。首选前者，覆盖 gain 的列投影；新增真正多义的访问时再引入显式映射。
 2. **原生编译交接**可采用版本化 SDK dispatcher adapter，或采用公开 cubin 导出加独立 Driver launcher。首选前者，沿用 SDK 调用约定与当前 stream，并把对版本的依赖集中在一处。

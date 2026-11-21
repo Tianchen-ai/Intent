@@ -25,7 +25,10 @@ capabilities(const llvm::json::Object &options) {
     return e;
   auto table = std::make_shared<intentdsl::RowCapacity>();
   table->observedWidth = *cols;
-  for (unsigned width = 1; width <= 4096; width *= 2) {
+  // Wide rectangular transfers amortize a large resident tile. For generic
+  // strided loads a smaller table also bounds native compile-time expansion.
+  const unsigned maxWidth = indices->permitTma ? 4096 : 256;
+  for (unsigned width = 1; width <= maxWidth; width *= 2) {
     for (unsigned rows : {1u, 2u}) {
       unsigned occupancy = *architecture == 90 ? 3 - rows : rows;
       std::string options;
