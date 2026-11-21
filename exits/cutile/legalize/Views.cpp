@@ -67,6 +67,34 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
   if (failed(intentdsl::verifyMapping(module, profile, "ct_src")))
     return failure();
   auto fn = *module.getOps<func::FuncOp>().begin();
+  if (fn.empty() || !llvm::hasSingleElement(fn.getBody()) || fn.getNumResults())
+    return fn.emitError("expected a defined output-buffer kernel");
+  auto abi = fn->getAttrOfType<StringAttr>("kir.abi");
+  if (!abi)
+    return fn.emitError("missing cuTile argument slots");
+  auto signature = llvm::json::parse(abi.getValue());
+  if (!signature) {
+    llvm::consumeError(signature.takeError());
+    return fn.emitError("malformed cuTile argument slots");
+  }
+  auto *slots = signature->getAsArray();
+  if (!slots || slots->size() != fn.getNumArguments())
+    return fn.emitError("cuTile argument count mismatch");
+  for (auto [arg, slot] : llvm::zip(fn.getArguments(), *slots)) {
+    auto *record = slot.getAsObject();
+    auto view = dyn_cast<MemRefType>(arg.getType());
+    Type scalar = view ? view.getElementType() : arg.getType();
+    if (!record || !record->getString("name") || !record->getArray("dims") ||
+        record->getArray("dims")->size() !=
+            unsigned(view ? view.getRank() : 0) ||
+        (!scalar.isF16() && !scalar.isF32()) ||
+        record->getString("dtype") != (scalar.isF16() ? "f16" : "f32") ||
+        (view ? (record->getString("direction") != "In" &&
+                 record->getString("direction") != "Out")
+              : record->getString("direction") != "Scalar"))
+      return fn.emitError(
+          "cuTile array or scalar slot does not match function type");
+  }
   auto indices = profile.services.get<intentdsl::cutile::ArrayIndices>();
   if (!indices)
     return fn.emitError("missing cuTile array index profile");
@@ -94,6 +122,13 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
     auto n = op->getName().stripDialect();
     bool ok = op->getName().getDialectNamespace() == "ct_src";
     if (ok && (n == "tile_store" || n == "tile_load")) {
+      auto arg = dyn_cast<BlockArgument>(op->getOperand(0));
+      if (!arg || arg.getOwner() != &fn.front() ||
+          (*slots)[arg.getArgNumber()].getAsObject()->getString("direction") !=
+              (n == "tile_load" ? "In" : "Out")) {
+        op->emitError("tile access conflicts with public buffer direction");
+        return WalkResult::interrupt();
+      }
       auto axes = intentdsl::block::projection(op->getOperand(0).getType());
       auto *pid = op->getOperand(1).getDefiningOp(),
            *col = op->getOperand(2).getDefiningOp();
