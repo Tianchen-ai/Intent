@@ -76,7 +76,9 @@ def touches(a, first, b, second):
             )
         except getattr(np, "exceptions", np).TooHardError:
             return True
-    return adapter(a).overlaps(a, b)
+    # On accelerators, overlapping byte spans may alias even when DLPack or
+    # another framework constructed a new storage wrapper.
+    return True
 
 
 class Signature:

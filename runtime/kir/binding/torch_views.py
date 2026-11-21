@@ -24,13 +24,6 @@ def describe(a):
     )
 
 
-def overlaps(a, b):
-    return (
-        not accepts(b)
-        or a.untyped_storage().data_ptr() == b.untyped_storage().data_ptr()
-    )
-
-
 def allocate(shape, dtype, device):
     import torch
 
@@ -46,26 +39,32 @@ def allocate(shape, dtype, device):
     )
 
 
-def storage_key(value):
-    return value.device, value.untyped_storage()._cdata
-
-
-def shadow_group(views):
+def shadow_group(views, start, end):
     import torch
 
-    v = views[0]
-    store = v.untyped_storage()
-    raw = torch.empty(0, dtype=torch.uint8, device=v.device).set_(
-        store, 0, (store.nbytes(),), (1,)
-    )
-    shadow = torch.empty_like(raw)
-    clone = [
-        torch.empty(0, device=a.device, dtype=a.dtype).set_(
-            shadow.untyped_storage(), a.storage_offset(), a.shape, a.stride()
-        )
-        for a in views
-    ]
-    return clone, lambda: shadow.copy_(raw)
+    device = views[0].device
+    backing = torch.empty(end - start + 256, dtype=torch.uint8, device=device)
+    pad = (start - backing.data_ptr()) % 256
+    clones, slices = [], []
+    cursor = start
+    for a in views:  # sorted by storage start by storage_groups
+        base, size = storage_bounds(a)
+        if base + size > cursor:
+            count = base + size - cursor
+            raw = torch.empty(0, dtype=torch.uint8, device=device).set_(
+                a.untyped_storage(), cursor - base, (count,), (1,))
+            slices.append((backing.narrow(0, pad + cursor - start, count), raw))
+            cursor += count
+        offset = pad + a.data_ptr() - start if a.numel() else pad
+        if offset % a.element_size():
+            raise ValueError("unaligned alias cannot participate in tuning")
+        clones.append(torch.empty(0, dtype=a.dtype, device=device).set_(
+            backing.untyped_storage(), offset // a.element_size(), a.shape, a.stride()))
+
+    def restore():
+        for destination, source in slices:
+            destination.copy_(source)
+    return clones, restore
 
 
 def storage_bounds(v):

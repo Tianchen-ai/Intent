@@ -90,7 +90,9 @@ bool access(Operation *op, unsigned mask, Operation &window, func::FuncOp fn,
     }
     if(dim<0 || size_t(dim)>=logical->size() || !seen.insert(dim).second || (*actual)[i]!=(*logical)[dim])return false;
   }
-  return true;
+  // A read may broadcast an axis. A write must cover a permutation of
+  // the entire logical domain, including dynamic axes of unknown extent.
+  return mask != 2 || seen.size() == logical->size();
 }
 } // namespace
 LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
@@ -129,8 +131,6 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
                           "with live stages");
     return success();
   };
-  if (!supplied)
-    return verifyLayout();
   auto sig = fn->getAttrOfType<StringAttr>("kir.abi");
   if (!sig)
     return fn.emitError("missing access contract");
@@ -142,6 +142,38 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
   auto *abi = parsed->getAsArray();
   if (!abi || abi->size() != fn.getNumArguments())
     return failure();
+  llvm::SmallDenseSet<unsigned> written;
+  auto coverage = fn.walk([&](Operation *op) {
+    if (op->getName().getStringRef() !=
+        (supplied ? "dsa.write_back" : "block.store"))
+      return WalkResult::advance();
+    auto arg = dyn_cast<BlockArgument>(op->getOperand(0));
+    auto view = dyn_cast<MemRefType>(op->getOperand(0).getType());
+    auto value = dyn_cast<RankedTensorType>(
+        op->getOperand(supplied ? 1 : 4).getType());
+    if (!arg || arg.getOwner() != &fn.front() || !view || !value ||
+        value.getElementType() != view.getElementType()) {
+      op->emitError("write value and destination must have the same element type");
+      return WalkResult::interrupt();
+    }
+    auto *slot = (*abi)[arg.getArgNumber()].getAsObject();
+    auto direction = slot ? slot->getString("direction") : std::nullopt;
+    if ((direction != "Out" && direction != "InOut") ||
+        !written.insert(arg.getArgNumber()).second) {
+      op->emitError("destination requires one full-domain writer");
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+  if (coverage.wasInterrupted())
+    return failure();
+  for (auto [i, entry] : llvm::enumerate(*abi)) {
+    auto *slot = entry.getAsObject();
+    if (!slot || (slot->getString("direction") == "Out" && !written.contains(i)))
+      return fn.emitError("declared output lacks a full-domain writer");
+  }
+  if (!supplied)
+    return verifyLayout();
   auto idx = fn->getAttrOfType<IntegerAttr>("kir.domain_arg");
   if (!idx || idx.getInt() < 0 || idx.getInt() >= fn.getNumArguments())
     return fn.emitError("missing member domain");
@@ -200,8 +232,11 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
     for (auto &item : body) {
       auto name = item.getName().getStringRef();
       if (name == "dsa.write_back") {
-        if (!access(&item, 2, body.front(), fn, *abi))
+        if (!access(&item, 2, body.front(), fn, *abi) ||
+            cast<RankedTensorType>(item.getOperand(1).getType()).getShape() != windowType.getShape()) {
+          item.emitError("write must cover every active logical axis exactly once");
           return WalkResult::interrupt();
+        }
         writes.push_back(item.getResult(0));
       }
       if (name == "dsa.reduce" &&

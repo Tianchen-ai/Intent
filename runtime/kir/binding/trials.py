@@ -3,8 +3,8 @@
 from .views import adapter
 
 
-def host_groups(items):
-    """Unify overlapping CPU allocations, including NumPy / Torch interop views."""
+def storage_groups(items):
+    """Connected components of overlapping storage intervals on one device."""
     groups = []
     for start, end, i in sorted(items):
         if groups and start < groups[-1][1]:
@@ -26,12 +26,13 @@ class TrialBindings:
             if slot["direction"] == "Scalar":
                 continue
             impl = adapter(value)
-            if str(impl.describe(value)[3]) == "cpu":
-                start, size = impl.storage_bounds(value)
+            device = impl.describe(value)[3]
+            start, size = impl.storage_bounds(value)
+            if str(device) == "cpu":
                 host.append((start, start + size, i))
                 continue
-            groups.setdefault((impl, impl.storage_key(value)), []).append(i)
-        for start, end, indices in host_groups(host):
+            groups.setdefault((impl, device), []).append((start, start + size, i))
+        for start, end, indices in storage_groups(host):
             if all(abi[i]["direction"] == "In" for i in indices):
                 continue
             import ctypes
@@ -49,14 +50,15 @@ class TrialBindings:
                 )
             if any(abi[i]["direction"] != "Out" for i in indices):
                 self.restores.append(lambda dst=shadow, src=raw: np.copyto(dst, src))
-        for (impl, _), indices in groups.items():
-            if all(abi[i]["direction"] == "In" for i in indices):
-                continue
-            shadow, restore = impl.shadow_group([values[i] for i in indices])
-            for i, view in zip(indices, shadow):
-                self.values[i] = view
-            if any(abi[i]["direction"] != "Out" for i in indices):
-                self.restores.append(restore)
+        for (impl, device), items in groups.items():
+            for start, end, indices in storage_groups(items):
+                if all(abi[i]["direction"] == "In" for i in indices):
+                    continue
+                shadow, restore = impl.shadow_group([values[i] for i in indices], start, end)
+                for i, view in zip(indices, shadow):
+                    self.values[i] = view
+                if any(abi[i]["direction"] != "Out" for i in indices):
+                    self.restores.append(restore)
         self.values = tuple(self.values)
 
     def reset(self):
