@@ -14,7 +14,6 @@ public:
         domain(anchor->getOperand(0)),
         resident(choice.getAs<StringAttr>("topology") == "resident") {
     auto fn = anchor->getParentOfType<func::FuncOp>();
-    fn->setAttr("block.domain_arg", rw.getI64IntegerAttr(cast<BlockArgument>(domain).getArgNumber()));
     fn->setAttr("block.guard",choice.get("guard"));
     fn->setAttr("block.grid", rw.getStrArrayAttr({"ceildiv", "M", "rows"}));
     fn->setAttr("block.configs", choice.get("rows"));
@@ -101,7 +100,11 @@ private:
       auto elem = cast<MemRefType>(view.getType()).getElementType();
       auto x = make("load", {view, rows, cols, active}, vector(elem, 2))
                    ->getResult(0);
-      if (cast<MemRefType>(domain.getType()).getRank() == 1)
+      if(anchor->getParentOfType<func::FuncOp>()->hasAttr("kir.iteration")){
+        SmallVector<int64_t> axes;
+        for(int i=0;i<cast<MemRefType>(domain.getType()).getRank();++i)axes.push_back(i);
+        x.getDefiningOp()->setAttr("block.member_axes",rw.getDenseI64ArrayAttr(axes));
+      } else if (cast<MemRefType>(domain.getType()).getRank() == 1)
         x.getDefiningOp()->setAttr("block.member_axes",
                                    rw.getDenseI64ArrayAttr({0}));
       local.map(v, x);
@@ -139,7 +142,11 @@ private:
         {op->getOperand(0), rows, cols, active, expr(op->getOperand(2))}, {});
     if (auto axes = op->getAttr("axes"))
       store->setAttr("block.member_axes", axes);
-    else if (cast<MemRefType>(domain.getType()).getRank() == 1)
+    else if(anchor->getParentOfType<func::FuncOp>()->hasAttr("kir.iteration")){
+        SmallVector<int64_t> axes;
+        for(int i=0;i<cast<MemRefType>(domain.getType()).getRank();++i)axes.push_back(i);
+        store->setAttr("block.member_axes",rw.getDenseI64ArrayAttr(axes));
+      } else if (cast<MemRefType>(domain.getType()).getRank() == 1)
       store->setAttr("block.member_axes", rw.getDenseI64ArrayAttr({0}));
   }
   void sweep(Operation *op) {

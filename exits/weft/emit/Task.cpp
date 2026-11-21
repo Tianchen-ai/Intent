@@ -58,10 +58,10 @@ class CanonicalTask {
         auto vt = cast<MemRefType>(view.getType());
         std::string e = printType(vt.getElementType());
         args.push_back(terms.lookup(view));
-        if (vt.getRank() == 2)
+        if (vt.getRank() >= 2)
           args.push_back({"%r", "index"});
         auto slice = inst("slice", args, regionType("slice", e, 1),
-                          vt.getRank() == 2 ? "selectors=[\"index\",\"all\"]"
+                          vt.getRank() >= 2 ? "selectors=[\"index\",\"all\"]"
                                             : "selectors=[\"all\"]");
         auto window =
             start.empty()
@@ -172,7 +172,7 @@ public:
       auto a = abi[i].getAsObject();
       auto n = "a" + std::to_string(i);
       auto elem = a->getString("dtype")->str();
-      int rank = a->getArray("dims")->size();
+      int rank = std::min<size_t>(2,a->getArray("dims")->size());
       if (elem == "i32")
         elem = "si32";
       auto t = rank ? regionType("view", elem, rank) : elem;
@@ -296,6 +296,7 @@ std::string hostSource(Operation *dispatch, const llvm::json::Array &abi) {
       dispatch->getAttrOfType<DenseI64ArrayAttr>("weft_host.slot_ranks");
   auto symbol = dispatch->getAttrOfType<StringAttr>("task_symbol").str();
   SmallVector<std::string> params, args, strides;
+  bool projected=llvm::any_of(slots.asArrayRef(),[](auto n){return n>2;});
   for (auto [i, entry] : llvm::enumerate(abi)) {
     auto a = entry.getAsObject();
     auto n = "a" + std::to_string(i);
@@ -312,12 +313,17 @@ std::string hostSource(Operation *dispatch, const llvm::json::Array &abi) {
               dispatch->getRegion(0).front().getArgument(i + 1))
         swap = true;
     });
+    if(rank>2)for(int j=0;j<rank-1;++j)params.push_back("int64_t "+n+"d"+std::to_string(j));
     for (size_t axis = 0; axis < rank; ++axis) {
       auto stride = n + "s" + std::to_string(axis);
       params.push_back("int64_t " + stride);
-      strides.push_back(swap ? n + "s" + std::to_string(1 - axis) : stride);
+      if(rank<=2 || axis>=rank-2)strides.push_back(swap ? n + "s" + std::to_string(1 - axis) : stride);
     }
-    args.push_back(n +
+    if(rank>2){
+      std::string row="start",offset=n;
+      for(int j=rank-2;j>=0;--j){auto dim=n+"d"+std::to_string(j);offset+="+(("+row+")%"+dim+")*"+n+"s"+std::to_string(j);row="("+row+"/"+dim+")";}
+      args.push_back(offset);
+    }else args.push_back(n +
                    (rank == 2 ? " + start*" + n + (swap ? "s1" : "s0") : ""));
   }
   args.push_back("count");
@@ -326,14 +332,15 @@ std::string hostSource(Operation *dispatch, const llvm::json::Array &abi) {
   if (dispatch->getAttrOfType<BoolAttr>("weft_host.absolute_origin").getValue())
     args.push_back("start");
   args.append(strides);
+  auto domain=dispatch->getAttrOfType<IntegerAttr>("domain_arg").getInt();
+  std::string chunk=projected?"a"+std::to_string(domain)+"d"+std::to_string(slots[domain]-2):"rows";
   return "#include <stdint.h>\n#include \"task_bridge.h\"\nint32_t intent_entry(" +
          llvm::join(params, ",") +
          ", int64_t rows, int64_t cols, int64_t grain, int64_t panel, int64_t "
          "workers){\nif(rows<0 || cols<0 || grain<=0 || panel<0 || workers<=0) return 1;\n"
          "if(!rows || !cols) return 0;\n#pragma omp parallel for num_threads(workers) "
          "schedule(static) if(workers>1)\n"
-         "for(int64_t start=0;start<rows;start+=grain){int64_t "
-         "count=rows-start<grain?rows-start:grain; " +
-         symbol + "_instance(" + llvm::join(args, ",") + ");}\nreturn 0;\n}\n";
+         "for(int64_t group=0;group<rows;group+=grain){int64_t end=rows-group<grain?rows:group+grain; for(int64_t start=group;start<end;){int64_t remaining=" + chunk + "-start%" + chunk + ";int64_t count=end-start<remaining?end-start:remaining; " +
+         symbol + "_instance(" + llvm::join(args, ",") + "); start+=count;}}\nreturn 0;\n}\n";
 }
 } // namespace CI_UNIT_NAMESPACE

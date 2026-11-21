@@ -17,7 +17,8 @@ class Artifact:
     def accepts(self, shape):
         return accepts(self.data["guard"], shape)
 
-    def bind(self, values, outputs, device, m, n):
+    def bind(self, values, outputs, device, shape, key):
+        m, n = shape
         return Call(self, values, outputs, device, (m, n))
 
 

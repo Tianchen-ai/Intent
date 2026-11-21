@@ -38,16 +38,16 @@ def discover(scope):
 
 
 class Target:
-    def specialize(self, device, values):
+    def profile(self, device, facts):
         if str(device) != "cpu":
             raise ValueError("CPU backend requires CPU views")
         scope = tuple(sorted(os.sched_getaffinity(0)))
         workers = min(len(scope), int(os.environ.get("INTENT_CPU_THREADS", len(scope))))
         if workers < 1:
             raise ValueError("worker budget must be positive")
-        return (scope, workers), (scope,)
+        return scope, workers
 
-    def options(self, key, shape):
+    def options(self, key):
         scope, self.workers = key
         self.info, core, bits = discover(scope)
         return dict(

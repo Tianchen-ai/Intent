@@ -1,3 +1,4 @@
+#include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/execution/cpu/ir/Dialect.h"
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
 #include "intentdsl/levels/algorithm/kir/ir/RowSemantics.h"
@@ -15,6 +16,7 @@ LogicalResult verifyTask(ModuleOp m, const TargetProfile &profile,
   auto fn = *funcs.begin();
   if (fn.empty() || fn.front().getOperations().size() != 3)
     return fn.emitError("expected task, join, return");
+  if(failed(intentdsl::verifyDomain(fn)))return failure();
   auto &task = fn.front().front();
   auto *join = task.getNextNode();
   if (task.getName().getStringRef() != taskOp ||

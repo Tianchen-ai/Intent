@@ -12,9 +12,8 @@ class Frame:
     shape: tuple
 
 
-def frame(values, abi):
+def frame(values, abi, shape):
     slots = []
-    matrix = None
     for value, arg in zip(values, abi):
         if arg["direction"] == "Scalar":
             slots.append(
@@ -28,11 +27,10 @@ def frame(values, abi):
             raise ValueError(
                 "native CPU row ABI requires host memory and representable positive strides"
             )
-        if matrix is None:
-            matrix = (1, v.shape[0]) if len(v.shape) == 1 else v.shape
         slots.append(ct.c_void_p(v.address))
+        if len(v.shape)>2:slots.extend(ct.c_int64(n) for n in v.shape[:-1])
         slots.extend(ct.c_int64(s) for s in v.strides)
-    return Frame(tuple(values), tuple(slots), matrix)
+    return Frame(tuple(values), tuple(slots), shape)
 
 
 class NativeBinding:
@@ -68,9 +66,9 @@ class NativeBinding:
 class HostVariants:
     """Bind synchronous host entries with distinct parameters to the same author ABI."""
 
-    def __init__(self, artifact, values, outputs, scope):
+    def __init__(self, artifact, values, outputs, scope, shape):
         self.artifact = artifact
-        self.bound = frame(values, artifact.data["abi"])
+        self.bound = frame(values, artifact.data["abi"], shape)
         self.outputs = tuple(outputs)
         self.scope = scope
         self.timings = {}
@@ -115,7 +113,7 @@ class HostVariants:
                     shadow = TrialBindings(self.bound.owners, self.artifact.data["abi"])
                     trials = self.bind_rows(
                         self.entries[0].function,
-                        frame(shadow.values, self.artifact.data["abi"]),
+                        frame(shadow.values, self.artifact.data["abi"], shape),
                     )
                     timings = []
                     for call in trials:

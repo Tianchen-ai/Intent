@@ -164,3 +164,32 @@ def dropout_norm_backward(
         dz = wdy * inv - z * (inv * inv * inv) * dot + I.cast(carry[row, :], I.f32)
         dx[row, :] = I.cast(dz * active * scale, I.bf16)
         dr[row, :] = I.cast(dz, I.bf16)
+
+
+@I.kernel
+def rope(q: I.InOut[I.f16, ("B",32,"S",128)], k: I.InOut[I.f16, ("B",8,"S",128)],
+         cosine: I.In[I.f16,(1,"S",128)], sine: I.In[I.f16,(1,"S",128)]):
+    for b,g,t,j in I.parallel((q.dim(0),8,q.dim(2),64)):
+        c = cosine[0,t,j]
+        s = sine[0,t,j]
+        for h in I.static_range(4):
+            lo = q[b,g*4+h,t,j]
+            hi = q[b,g*4+h,t,j+64]
+            q[b,g*4+h,t,j] = lo*c-hi*s
+            q[b,g*4+h,t,j+64] = hi*c+lo*s
+        a = k[b,g,t,j]
+        z = k[b,g,t,j+64]
+        k[b,g,t,j] = a*c-z*s
+        k[b,g,t,j+64] = z*c+a*s
+
+
+@I.kernel
+def rotary_embedding_equivalent_index(x: I.In[I.f16,("R",128)], c: I.In[I.f16,("U",64)],
+                                      s: I.In[I.f16,("U",64)], y:I.Out[I.f16,("R",2,64)]):
+    for u,h,j in I.parallel((x.dim(0)//32,32,64)):
+        left = x[u*32+h,j]
+        right = x[u*32+h,j+64]
+        cosine = c[u,j]
+        sine = s[u,j]
+        y[u*32+h,0,j] = left*cosine-right*sine
+        y[u*32+h,1,j] = right*cosine+left*sine

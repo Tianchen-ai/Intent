@@ -24,10 +24,12 @@ void registerRowReduction(Unit &unit) {
       return llvm::createStringError(
           "row reduction requires a bound GPU capability table");
     Builder b(op->getContext());
+    auto extent=caps->width(op);
+    if(!extent)return extent.takeError();
     unsigned width=0, limit=0, previous=0;
     for(auto &r:caps->rows) {
       limit=std::max(limit,r.width);
-      if(r.width>=caps->observedWidth && (!width || r.width<width)) width=r.width;
+      if(r.width>=*extent && (!width || r.width<width)) width=r.width;
     }
     bool resident = width && mode!="stream-row";
     if(!resident && mode=="resident-row") return Attribute{};

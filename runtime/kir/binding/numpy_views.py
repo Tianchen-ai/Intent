@@ -72,3 +72,12 @@ def host_shadow(v, backing, start):
         offset=v.ctypes.data - start,
         strides=v.strides,
     )
+
+def project(value,shape,strides,offset):
+    # Slicing once retains the source owner, including for non-contiguous inputs.
+    # Construct against its original allocation with the source's byte offset.
+    base=value
+    while isinstance(getattr(base,"base",None),type(value)):base=base.base
+    import numpy as np
+    return np.ndarray(shape,dtype=value.dtype,buffer=base,offset=value.ctypes.data-base.ctypes.data+offset*value.itemsize,
+                      strides=tuple(x*value.itemsize for x in strides))

@@ -1,3 +1,4 @@
+#include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/algorithm/kir/ir/Literal.h"
 #include "compilerinfra/Assembly.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -431,6 +432,7 @@ llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
   out << llvm::json::Value(llvm::json::Object{
       {"version", 2},
       {"source", program},
+      {"domain",intentdsl::publishDomain(fn)},
       {"abi", std::move(*abi)},
       {"rows", std::move(rows)},
       {"depth", depth},

@@ -150,7 +150,7 @@ class Signature:
                 supplied[i]
                 if outputs is not None
                 else allocator.allocate(
-                    tuple(shapes[n] for n in arg["dims"]), arg["dtype"], device
+                    tuple(n if isinstance(n, int) else shapes[n] for n in arg["dims"]), arg["dtype"], device
                 )
             )
             view = check(arg, y)

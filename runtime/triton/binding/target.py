@@ -6,14 +6,12 @@ class Target:
     def __init__(self):
         self.devices = {}
 
-    def specialize(self, device, values):
+    def profile(self, device, facts):
         if getattr(device, "type", None) != "cuda":
             raise ValueError("Triton requires local CUDA buffers")
-        matrix = next(v for v in values if isinstance(v, torch.Tensor))
-        m, n = (1, matrix.numel()) if matrix.ndim == 1 else matrix.shape
-        return device, (m, n)
+        return device
 
-    def options(self, device, shape):
+    def options(self, device):
         if device not in self.devices:
             self.devices[device] = torch.cuda.get_device_properties(device)
         p = self.devices[device]
@@ -21,7 +19,6 @@ class Target:
             sm=p.major * 10 + p.minor,
             warp_size=p.warp_size,
             max_threads=p.max_threads_per_block,
-            observed_width=shape[1],
         )
 
     @staticmethod

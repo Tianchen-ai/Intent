@@ -13,6 +13,7 @@ class Kernel:
         self.root = None
         self.args = signature(ast.parse(self.source).body[0])
         self.binding = compiler.runtime("kir", "binding.views").Signature(self.args)
+        self.domain = compiler.runtime("kir", "binding.domain")
         self.target = compiler.runtime(backend, "binding.target").Target()
         self.backend = backend
         self.artifacts = {}
@@ -21,22 +22,25 @@ class Kernel:
     def prepare(self, *inputs, outputs=None):
         values, result, device = self.binding.bind(inputs, outputs)
         with self.lock:
-            key, shape = self.target.specialize(device, values)
+            facts = self.domain.arguments(self.args, values)
+            key = self.target.profile(device, facts)
             group = self.artifacts.setdefault(key, [])
-            artifact = next((a for a in group if a.accepts(shape)), None)
+            artifact = next((a for a in group if a.accepts(self.domain.evaluate(a.data["domain"],facts))), None)
             if artifact is None:
-                options = self.target.options(key, shape)
+                options = dict(self.target.options(key), arguments=facts)
                 if self.root is None:
                     self.root = self.compiler.root_ir(self.source)
                 with self.compiler.derive(
                     {"exits": {self.backend: {"options": options}}}
                 ) as target:
                     data = json.loads(target.compile(self.root, exit=self.backend))
-                if data["abi"] != self.args:
+                if data["domain"].get("public_abi", data["abi"]) != self.args:
                     raise ValueError("compiled ABI differs from author signature")
                 artifact = self.target.materialize(data)
                 group.append(artifact)
-        call = artifact.bind(values, result, device, *shape)
+        shape = self.domain.evaluate(artifact.data["domain"],facts)
+        views = self.domain.bind_views(artifact.data["domain"], facts, values)
+        call = artifact.bind(views, result, device, shape, key)
         # A prepared call may outlive its JIT object. Pin its installed module namespace.
         call.compiler_owner = self.compiler
         return call

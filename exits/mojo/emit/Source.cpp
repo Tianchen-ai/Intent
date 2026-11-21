@@ -38,6 +38,7 @@ public:
       if (auto m = dyn_cast<MemRefType>(v.getType())) {
         params.push_back(n + ": Pointer[Scalar[DType." +
                          dtype(m.getElementType()) + "], MutUntrackedOrigin]");
+        if(m.getRank()>2)for(int j=0;j<m.getRank()-1;++j)params.push_back(n+"d"+std::to_string(j)+": Int64");
         for (int j = 0; j < m.getRank(); ++j)
           params.push_back(n + "s" + std::to_string(j) + ": Int64");
       } else
@@ -105,6 +106,15 @@ public:
           auto offset =
               (matrix ? "r*Int(" + a + (swap ? "s1)+" : "s0)+") : "") +
               std::string("j*") + stride;
+          if(view.getRank()>2){
+            stride="Int("+a+"s"+std::to_string(view.getRank()-1)+")";
+            offset="j*"+stride;
+            std::string row="r";
+            for(int i=view.getRank()-2;i>=0;--i){
+              auto size="Int("+a+"d"+std::to_string(i)+")";offset+="+("+row+"%"+size+")*Int("+a+"s"+std::to_string(i)+")";
+              row="("+row+"//"+size+")";
+            }
+          }
           if (code == "read") {
             line(3, "var " + lhs + " = SIMD[DType." +
                         dtype(view.getElementType()) + "," + lanes + "](0)");

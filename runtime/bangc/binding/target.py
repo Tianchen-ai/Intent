@@ -29,16 +29,13 @@ def facts(index):
 
 
 class Target:
-    def specialize(self, device, values):
+    def profile(self, device, facts):
         if device.type != "mlu":
             raise ValueError("BANG C requires inputs on a local MLU")
-        x = next(v for v in values if isinstance(v, torch.Tensor))
-        if not 1 <= x.ndim <= 4:
-            raise ValueError("MLU member domain supports ranks one through four")
-        return device, (prod(x.shape[:-1]), x.shape[-1])
+        return device
 
-    def options(self, device, shape):
-        return dict(**facts(device.index), observed_width=shape[1])
+    def options(self, device):
+        return facts(device.index)
 
     def materialize(self, data):
         return Artifact(data)

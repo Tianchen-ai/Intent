@@ -148,7 +148,7 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
            (n != "tile_store" ||
             *axes == intentdsl::block::RowProjection::Matrix ||
             (cast<MemRefType>(fn.getArgument(fn->getAttrOfType<IntegerAttr>(
-                                                   "block.domain_arg")
+                                                   "kir.domain_arg")
                                                  .getInt())
                                   .getType())
                      .getRank() == 1 &&

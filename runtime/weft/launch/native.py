@@ -21,8 +21,9 @@ class Artifact:
     def accepts(self, shape):
         return True
 
-    def bind(self, values, outputs, device, scope):
-        return HostVariants(self, values, outputs, scope)
+    def bind(self, values, outputs, device, shape, key):
+        scope, _ = key
+        return HostVariants(self, values, outputs, scope, shape)
 
     def validate(self, scope):
         if tuple(sorted(os.sched_getaffinity(0))) != scope:
@@ -83,7 +84,7 @@ class Artifact:
             "i32": "int32_t",
         }
         for i, (arg, item) in enumerate(zip(actual, self.data["abi"])):
-            rank = len(item["dims"])
+            rank = min(2,len(item["dims"]))
             wanted = (
                 (
                     ("const " if item["direction"] == "In" else "")

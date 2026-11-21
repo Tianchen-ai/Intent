@@ -17,7 +17,8 @@ class Artifact:
     def accepts(self, shape):
         return accepts(self.data["guard"], shape)
 
-    def bind(self, values, outputs, device, m, n):
+    def bind(self, values, outputs, device, shape, key):
+        m, n = shape
         return Prepared(self, values, outputs, device, m, n)
 
 
@@ -41,6 +42,7 @@ class Prepared:
         for value in values:
             args.append(value)
             if isinstance(value, torch.Tensor):
+                if value.ndim>2: args.extend(value.shape[:-1])
                 args.extend(value.stride())
         return (*args, self.m, self.n)
 

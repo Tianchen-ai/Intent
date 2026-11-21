@@ -8,7 +8,7 @@ inline mlir::FailureOr<RowProjection> projection(mlir::Type type) {
   auto view = mlir::dyn_cast<mlir::MemRefType>(type);
   if (view && view.getRank() == 1)
     return RowProjection::Columns;
-  if (view && view.getRank() == 2)
+  if (view && view.getRank() >= 2 && view.getRank() <= 4)
     return RowProjection::Matrix;
   return mlir::failure();
 }

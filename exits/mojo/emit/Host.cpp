@@ -17,6 +17,9 @@ std::string hostSource(func::FuncOp entry) {
                     n);
     if (!view)
       continue;
+    if(view.getRank()>2)for(int j=0;j<view.getRank()-1;++j){
+      auto d=n+"d"+std::to_string(j);slots.push_back("int64_t "+d);names.push_back(d);
+    }
     for (int64_t j = 0; j < view.getRank(); ++j) {
       auto s = n + "s" + std::to_string(j);
       slots.push_back("int64_t " + s);

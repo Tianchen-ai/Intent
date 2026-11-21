@@ -1,3 +1,4 @@
+#include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "../decisions/Plan.h"
 #include "intentdsl/levels/execution/block/ir/Access.h"
 #include "intentdsl/levels/execution/block/decisions/Verify.h"
@@ -98,12 +99,13 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
   if (!llvm::hasSingleElement(fs))
     return m.emitError("requires one tile function");
   auto fn = *fs.begin();
+  if(failed(intentdsl::verifyDomain(fn)))return failure();
   auto d = fn->getAttrOfType<DictionaryAttr>(supplied ? "dsa.layout"
                                                       : "dsa.pending");
   auto caps = p.services.get<LocalSupply>();
   if (fn.empty() || !llvm::hasSingleElement(fn.getBody()))
     return fn.emitError("expected one defined tile region");
-  if (auto err = intentdsl::verifyRows(
+  if (auto err = intentdsl::verifyRows(fn,
           fn->getAttrOfType<ArrayAttr>("block.configs"),
           fn->getAttrOfType<StringAttr>("block.topology"),
           fn->getAttrOfType<DenseI64ArrayAttr>("block.guard"), p))
@@ -140,7 +142,7 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
   auto *abi = parsed->getAsArray();
   if (!abi || abi->size() != fn.getNumArguments())
     return failure();
-  auto idx = fn->getAttrOfType<IntegerAttr>("block.domain_arg");
+  auto idx = fn->getAttrOfType<IntegerAttr>("kir.domain_arg");
   if (!idx || idx.getInt() < 0 || idx.getInt() >= fn.getNumArguments())
     return fn.emitError("missing member domain");
   bool resident = fn->getAttrOfType<StringAttr>("block.topology") == "resident";

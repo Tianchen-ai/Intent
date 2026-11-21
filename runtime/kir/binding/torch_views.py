@@ -85,3 +85,6 @@ def host_shadow(v, backing, start):
     return torch.empty(0, dtype=v.dtype).set_(
         byte_tensor.untyped_storage(), offset // v.element_size(), v.shape, v.stride()
     )
+
+def project(value,shape,strides,offset):
+    return value.as_strided(shape,strides,value.storage_offset()+offset)

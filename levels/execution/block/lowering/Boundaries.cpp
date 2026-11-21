@@ -52,11 +52,11 @@ void bind(Unit &unit) {
     op->setAttr("block.structure", v);
     return llvm::Error::success();
   };
-  f.verify = [](Operation *, Attribute value,
+  f.verify = [](Operation *op, Attribute value,
                 const TargetProfile &profile) -> llvm::Error {
     auto d = dyn_cast<DictionaryAttr>(value);
     if(!d)return llvm::createStringError("missing block decision");
-    return intentdsl::verifyRows(d.getAs<ArrayAttr>("rows"),d.getAs<StringAttr>("topology"),d.getAs<DenseI64ArrayAttr>("guard"),profile);
+    return intentdsl::verifyRows(op,d.getAs<ArrayAttr>("rows"),d.getAs<StringAttr>("topology"),d.getAs<DenseI64ArrayAttr>("guard"),profile);
   };
   unit.families.push_back({{std::move(f), "block@decided", "block@realized"},
                            COMPILERINFRA_SOURCE});

@@ -1,3 +1,4 @@
+#include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/execution/block/ir/Access.h"
 #include "intentdsl/levels/execution/block/decisions/Verify.h"
 #include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
@@ -5,12 +6,14 @@
 #include "llvm/ADT/DenseSet.h"
 namespace intentdsl {
 using namespace mlir;
-llvm::Error verifyRows(ArrayAttr rows,StringAttr topology,DenseI64ArrayAttr guard,const compilerinfra::TargetProfile &p){
+llvm::Error verifyRows(Operation *anchor,ArrayAttr rows,StringAttr topology,DenseI64ArrayAttr guard,const compilerinfra::TargetProfile &p){
   auto *caps=p.services.get<RowCapacity>();
   if(!caps || !rows || rows.empty() || !topology || (topology!="resident" && topology!="stream")
       || !guard || guard.size()!=2) return llvm::createStringError("incomplete row domain");
   auto lo=guard[0],hi=guard[1];
-  if(lo<0 || hi < -1 || (hi!=-1 && hi<lo) || lo>caps->observedWidth || (hi!=-1 && hi<caps->observedWidth))
+  auto extent=caps->width(anchor);
+  if(!extent)return extent.takeError();
+  if(lo<0 || hi < -1 || (hi!=-1 && hi<lo) || lo>*extent || (hi!=-1 && hi<*extent))
     return llvm::createStringError("width guard excludes bound shape");
   llvm::DenseSet<int64_t> seen;
   for(Attribute a:rows){
@@ -36,12 +39,13 @@ llvm::Error verifyRows(ArrayAttr rows,StringAttr topology,DenseI64ArrayAttr guar
 LogicalResult verifyMapping(ModuleOp m,const compilerinfra::TargetProfile &p,StringRef dialect){
   auto funcs=m.getOps<func::FuncOp>(); if(!llvm::hasSingleElement(funcs))return m.emitError("expected one row program");
   auto f=*funcs.begin();Builder b(m.getContext());
+  if(failed(intentdsl::verifyDomain(f)))return failure();
   auto topology=f->getAttrOfType<StringAttr>("block.topology");
-  if(auto e=verifyRows(f->getAttrOfType<ArrayAttr>("block.configs"),topology,f->getAttrOfType<DenseI64ArrayAttr>("block.guard"),p))
+  if(auto e=verifyRows(f,f->getAttrOfType<ArrayAttr>("block.configs"),topology,f->getAttrOfType<DenseI64ArrayAttr>("block.guard"),p))
     return f.emitError()<<llvm::toString(std::move(e));
   if(f->getAttr("block.grid")!=b.getStrArrayAttr({"ceildiv","M","rows"}))
     return f.emitError("grid must cover the M domain at the instance row step");
-  auto domainIndex = f->getAttrOfType<IntegerAttr>("block.domain_arg");
+  auto domainIndex = f->getAttrOfType<IntegerAttr>("kir.domain_arg");
   if (!domainIndex || domainIndex.getInt()<0 || domainIndex.getInt()>=f.getNumArguments())
     return f.emitError("missing bound row domain argument");
   auto domain=f.getArgument(domainIndex.getInt());

@@ -11,10 +11,8 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
     return profile; // Static layout has no device binding.
   if (*arch != 90 && *arch != 120)
     return llvm::createStringError("unsupported Triton GPU architecture");
-  auto width = options.getInteger("observed_width");
-  if (!width || *width < 0) return llvm::createStringError("expected a bound nonnegative column count");
   auto caps = std::make_shared<intentdsl::RowCapacity>();
-  caps->observedWidth=*width;
+  if(auto error=caps->bind(options))return error;
   struct NativeRow {
     unsigned id, rows, warps, stages;
   };

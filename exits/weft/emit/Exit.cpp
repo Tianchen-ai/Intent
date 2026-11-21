@@ -1,3 +1,4 @@
+#include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
 using namespace compilerinfra;
 using namespace mlir;
@@ -57,6 +58,7 @@ llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
           ? llvm::json::Array{"T", "N", "C", "O"}
           : llvm::json::Array{"T", "N", "C"};
   fields["version"] = 3;
+  fields["domain"]=intentdsl::publishDomain(fn);
   fields["abi"] = std::move(*abi);
   fields["rows"] = std::move(rows);
   out << llvm::json::Value(std::move(fields));

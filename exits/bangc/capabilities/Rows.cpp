@@ -7,15 +7,15 @@ capabilities(const llvm::json::Object &opts) {
   compilerinfra::TargetProfile profile;
   if (opts.empty())
     return profile;
-  auto isa = opts.getInteger("isa"), n = opts.getInteger("observed_width"),
+  auto isa = opts.getInteger("isa"),
        nram = opts.getInteger("nram_bytes"),
        clusters = opts.getInteger("clusters"), cores = opts.getInteger("cores");
-  if (!isa || *isa != 372 || !n || *n < 0 || !nram || *nram <= 0 || !clusters ||
+  if (!isa || *isa != 372 || !nram || *nram <= 0 || !clusters ||
       !cores || *clusters <= 0 || *cores <= 0)
     return llvm::createStringError(
         "BANG C requires the MLU370 CNRT ISA, local capacity and core counts");
   auto caps = std::make_shared<intentdsl::RowCapacity>();
-  caps->observedWidth = *n;
+  if(auto error=caps->bind(opts))return error;
   caps->streamingWidths = {128, 512, 4096};
   for (unsigned w = 1; w <= 4096; w *= 2)
     for (unsigned r : {1u, 2u, 16u}) {

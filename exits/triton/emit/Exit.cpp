@@ -1,3 +1,4 @@
+#include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/algorithm/kir/ir/Literal.h"
 #include "intentdsl/levels/execution/block/ir/Access.h"
 #include "compilerinfra/Assembly.h"
@@ -42,6 +43,8 @@ public:
       auto id = "a" + std::to_string(arg.getArgNumber());
       values[arg] = id;
       out << id << ", ";
+      if (auto v=dyn_cast<MemRefType>(arg.getType()); v && v.getRank()>2)
+        for(int i=0;i<v.getRank()-1;++i)out<<id<<"_d"<<i<<", ";
       if (auto v = dyn_cast<MemRefType>(arg.getType()))
         for (int i = 0; i < v.getRank(); ++i)
           out << id << "_s" << i << ", ";
@@ -114,6 +117,17 @@ public:
       else if (n == "active")
         e = "(" + arg(1) + "[:, None] < M) & (" + arg(2) + "[None, :] < N)";
       else if (n == "offsets") {
+        int dims=cast<MemRefType>(op.getOperand(0).getType()).getRank();
+        if(dims>2){
+          auto a=arg(0),row=arg(1);
+          e=arg(2)+"[None,:]*"+a+"_s"+std::to_string(dims-1);
+          for(int i=dims-2;i>=0;--i){
+            auto size=a+"_d"+std::to_string(i);
+            e+="+(("+row+")%"+size+")[:,None]*"+a+"_s"+std::to_string(i);
+            row="(("+row+")//"+size+")";
+          }
+          auto id="v"+std::to_string(next++);values[op.getResult(0)]=id;line(depth,id+" = "+e);continue;
+        }
         auto rank = op.getAttrOfType<BoolAttr>("matrix").getValue() ? 2 : 1;
         bool swap = op.getAttrOfType<BoolAttr>("permuted") &&
                     op.getAttrOfType<BoolAttr>("permuted").getValue();
@@ -195,6 +209,7 @@ llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
       cast<StringAttr>(fn->getAttrOfType<ArrayAttr>("block.grid")[2]).str()},1,1}},
       {"entry", "kernel"},
       {"source", src},
+      {"domain",intentdsl::publishDomain(fn)},
       {"abi", std::move(*args)},
       {"rows", std::move(configs)},
       {"topology", fn->getAttrOfType<StringAttr>("block.topology").str()},

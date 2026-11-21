@@ -7,10 +7,8 @@ capabilities(const llvm::json::Object &options) {
   compilerinfra::TargetProfile profile;
   if (options.empty())
     return profile;
-  auto architecture = options.getInteger("sm"),
-       cols = options.getInteger("observed_width");
-  if (!architecture || (*architecture != 90 && *architecture != 120) || !cols ||
-      *cols < 0)
+  auto architecture = options.getInteger("sm");
+  if (!architecture || (*architecture != 90 && *architecture != 120))
     return llvm::createStringError(
         "cuTile requires SM90 or SM120 and a nonnegative bound width");
   auto bits = options.getInteger("index_bits");
@@ -24,7 +22,7 @@ capabilities(const llvm::json::Object &options) {
           profile.services.provide<intentdsl::cutile::ArrayIndices>(indices))
     return e;
   auto table = std::make_shared<intentdsl::RowCapacity>();
-  table->observedWidth = *cols;
+  if(auto error=table->bind(options))return error;
   // Wide rectangular transfers amortize a large resident tile. For generic
   // strided loads a smaller table also bounds native compile-time expansion.
   const unsigned maxWidth = indices->permitTma ? 4096 : 256;

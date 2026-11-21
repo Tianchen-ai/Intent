@@ -65,7 +65,7 @@ LogicalResult verifyLoops(ModuleOp m, const TargetProfile &p, bool callable) {
         bool write = code == "mojo_row.write";
         writes += write;
         auto view = cast<MemRefType>(op.getOperand(0).getType());
-        if ((view.getRank() != 1 && view.getRank() != 2) ||
+        if ((view.getRank()<1 || view.getRank()>4) ||
             op.getOperand(1) != task.getRegion(0).front().getArgument(0) ||
             op.getOperand(2) != bb.getArgument(0) ||
             (write ? op.getOperand(3) : op.getResult(0)).getType() !=

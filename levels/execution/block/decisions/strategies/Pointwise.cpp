@@ -24,10 +24,12 @@ void registerPointwise(Unit &u) {
           "pointwise mapping needs registered tile rows");
     // Independent lanes require no cross-tile carry. Tile the inner extent,
     // including short tails, and use the same traversal for all widths.
+    auto extent=capacity->width(op);
+    if(!extent)return extent.takeError();
     unsigned limit = 0, width = 0, previous = 0;
     for (auto &r : capacity->rows) {
       limit = std::max(limit, r.width);
-      if (r.width >= capacity->observedWidth && (!width || r.width < width))
+      if (r.width >= *extent && (!width || r.width < width))
         width = r.width;
     }
     bool fits = bool(width);
@@ -41,7 +43,7 @@ void registerPointwise(Unit &u) {
     for (auto &r : capacity->rows)
       if ((r.width == width ||
            (!fits && llvm::is_contained(capacity->streamingWidths, r.width))) &&
-          (cast<MemRefType>(op->getOperand(0).getType()).getRank() != 1 ||
+          (cast<MemRefType>(op->getOperand(0).getType()).getRank() == 2 ||
            r.rows == 1))
         rows.push_back(b.getDictionaryAttr(
             {b.getNamedAttr("id", b.getI32IntegerAttr(r.id)),

@@ -1,3 +1,5 @@
+#include "llvm/ADT/StringExtras.h"
+#include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/algorithm/kir/ir/Literal.h"
 #include "compilerinfra/Assembly.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -77,11 +79,32 @@ class Kernel {
                cast<MemRefType>(op.getOperand(0).getType()).getRank() == 1)
         expr = "(ct.expand_dims(" + arg(1) + ",1)<1) & (ct.expand_dims(" +
                arg(2) + ",0)<" + arg(0) + ".shape[0])";
-      else if (code == "active")
+      else if (code=="active" && cast<MemRefType>(op.getOperand(0).getType()).getRank()>2){
+        auto a=arg(0);auto rank=cast<MemRefType>(op.getOperand(0).getType()).getRank();
+        std::string count="1";for(int i=0;i<rank-1;++i)count+="*"+a+".shape["+std::to_string(i)+"]";
+        expr="(ct.expand_dims("+arg(1)+",1)<"+count+") & (ct.expand_dims("+arg(2)+",0)<"+a+".shape[-1])";
+      } else if (code == "active")
         expr = "(ct.expand_dims(" + arg(1) + ", 1) < " + arg(0) +
                ".shape[0]) & (ct.expand_dims(" + arg(2) + ", 0) < " + arg(0) +
                ".shape[1])";
       else if (code == "tile_load" || code == "tile_store") {
+        int rank=cast<MemRefType>(op.getOperand(0).getType()).getRank();
+        if(rank>2){
+          auto array=arg(0), row=arg(1);
+          SmallVector<std::string> indices(rank),shape(rank,"1");
+          indices.back()=arg(2);shape.back()="W";
+          for(int j=rank-2;j>=0;--j){
+            indices[j]="("+row+" % "+array+".shape["+std::to_string(j)+"])";
+            row="("+row+" // "+array+".shape["+std::to_string(j)+"])";
+          }
+          auto coord="("+llvm::join(indices,",")+")", tile="("+llvm::join(shape,",")+")";
+          if(code=="tile_store")line(depth,"ct.store("+array+","+coord+",ct.reshape("+arg(3)+","+tile+"),allow_tma=False)");
+          else {
+            auto id=local();names[op.getResult(0)]=id;
+            line(depth,id+" = ct.reshape(ct.load("+array+","+coord+",shape="+tile+",padding_mode=ct.PaddingMode.ZERO,allow_tma=False),(1,W))");
+          }
+          continue;
+        }
         bool matrix = op.getAttrOfType<BoolAttr>("matrix").getValue();
         std::string hint = op.getAttrOfType<BoolAttr>("allow_tma").getValue()
                                ? ""
@@ -195,6 +218,7 @@ llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
   if (auto err = Kernel(stream).write(fn))
     return err;
   out << llvm::json::Value(llvm::json::Object{
+      {"domain",intentdsl::publishDomain(fn)},
       {"abi", std::move(*abi)},
       {"version", 1},
       {"source", src},

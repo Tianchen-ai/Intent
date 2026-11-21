@@ -1,3 +1,4 @@
+#include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/Dialect.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -46,8 +47,10 @@ LogicalResult verifyRowComputation(func::FuncOp fn, Block &row, ValueRange captu
                                                                  : "f32"))
       return fn.emitError("parameter descriptor does not match its IR type");
   }
+  bool indexed=fn->hasAttr("kir.iteration");
+  if(failed(verifyDomain(fn)) || domainSlot(fn)!=domainIndex)return fn.emitError("logical domain slot differs from ownership");
   auto domainType=dyn_cast<MemRefType>(captures[domainIndex].getType());
-  if (!domainType || (domainType.getRank() != 2 && domainType.getRank() != 1))
+  if (!domainType || (!indexed && domainType.getRank() != 2 && domainType.getRank() != 1))
     return fn.emitError("expected a matrix row domain");
   auto &axes =
       *(*args)[domainIndex].getAsObject()->getArray("dims");
@@ -102,7 +105,7 @@ LogicalResult verifyRowComputation(func::FuncOp fn, Block &row, ValueRange captu
       if (!arg || slot == captures.end())
         return op.emitError("expected an external view");
       bool write = name == "write";
-      if (!write && sawWrite &&
+      if (!indexed && !write && sawWrite &&
           llvm::any_of(*args, [](const llvm::json::Value &v) {
             return v.getAsObject()->getString("direction") == "InOut";
           }))
@@ -110,14 +113,16 @@ LogicalResult verifyRowComputation(func::FuncOp fn, Block &row, ValueRange captu
             "dependent read after a write requires an ordered region");
       sawWrite |= write;
       size_t index = slot - captures.begin();
+      if (indexed && !write && written.contains(index))
+        return op.emitError("indexed read after a write to the same projection requires ordered control");
       auto *info = (*args)[index].getAsObject();
       if ((info->getString("direction") != (write ? "Out" : "In") &&
            info->getString("direction") != "InOut") ||
-          view.getRank() < 1 || view.getRank() > 2 ||
+          view.getRank() < 1 || view.getRank() > (indexed ? 4 : 2) ||
           op.getNumOperands() !=
-              unsigned((domainType.getRank() == 1 ? 2 : view.getRank()) +
+              unsigned((indexed || domainType.getRank() == 1 ? 2 : view.getRank()) +
                        write) ||
-          ((view.getRank() == 2 || domainType.getRank() == 1) &&
+          ((indexed || view.getRank() == 2 || domainType.getRank() == 1) &&
            op.getOperand(1) != row.getArgument(0)))
         return op.emitError("invalid row access");
       const auto &dims = *info->getArray("dims");
@@ -201,7 +206,7 @@ LogicalResult verifyLogicalRows(ModuleOp module,StringRef dialect,bool canonical
     return fn.emitError("expected a parallel row domain and return");
   auto &loop = body.front();
   auto domain = dyn_cast<MemRefType>(loop.getOperand(0).getType());
-  if (!domain || (domain.getRank() != 2 && domain.getRank() != 1) ||
+  if (!domain || (!fn->hasAttr("kir.iteration") && domain.getRank() != 2 && domain.getRank() != 1) ||
       !llvm::hasSingleElement(loop.getRegion(0)))
     return loop.emitError("expected a rank-two domain");
   auto &row = loop.getRegion(0).front();
@@ -219,6 +224,10 @@ namespace {
 struct Canonicalize : PassWrapper<Canonicalize, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(Canonicalize)
   void runOnOperation() final {
+    for(auto fn:getOperation().getOps<func::FuncOp>()) {
+      auto owner=cast<BlockArgument>(fn.front().front().getOperand(0)).getArgNumber();
+      fn->setAttr("kir.domain_arg", IntegerAttr::get(IntegerType::get(&getContext(),64),owner));
+    }
     getOperation().walk([](Operation *op) {
       if (op->getName().getStringRef() == "kir.cast" &&
           op->getOperand(0).getType() == op->getResult(0).getType()) {
