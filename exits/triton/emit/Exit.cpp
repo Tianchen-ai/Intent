@@ -226,6 +226,13 @@ void bind(Unit &unit) {
             bool valid = true;
             m.walk([&](Operation *op) {
               auto ns = op->getName().getDialectNamespace();
+              if (ns=="triton_src") {
+                auto name=op->getName().stripDialect();
+                auto matches=[&](unsigned i,StringRef opName){auto *v=op->getOperand(i).getDefiningOp();return v && v->getName().getStringRef()==opName;};
+                if(name=="offsets") valid &= matches(1,"triton_src.rows") && matches(2,"triton_src.columns");
+                if(name=="neutralize"){auto a=op->getAttrOfType<StringAttr>("algebra"); valid &= a=="sum" || a=="max_num";}
+                if(name=="reduce") valid &= matches(0,"triton_src.neutralize") && op->getOperand(0).getDefiningOp()->getAttr("algebra")==op->getAttr("algebra");
+              }
               valid &= ns == "builtin" || ns == "func" || ns == "triton_src";
             });
             return success(valid);

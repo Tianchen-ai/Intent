@@ -3,13 +3,14 @@ import os
 import subprocess
 import threading
 from time import perf_counter
-from runtime.kir.binding.frame import HostVariants
-from runtime.kir.cache.files import build_directory
+from runtime.cpu.binding.frame import HostVariants
+from runtime.cpu.cache.files import build_directory
 
 
 class Artifact:
+    status_type = ct.c_int32
     def __init__(self, data, info, workers):
-        if data["version"] != 2 or not data["rows"]:
+        if data["version"] != 3 or not data["rows"]:
             raise ValueError("invalid CPU row artifact")
         self.data, self.info, self.workers = data, info, workers
         self.winners = {}

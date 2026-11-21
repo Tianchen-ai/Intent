@@ -2,7 +2,7 @@
 
 import ctypes as ct
 from dataclasses import dataclass
-from .views import inspect
+from runtime.kir.binding.views import inspect
 
 
 @dataclass
@@ -32,13 +32,15 @@ def frame(values, abi):
 
 
 class NativeBinding:
-    def __init__(self, function, frame, extra, validate):
+    def __init__(self, function, frame, extra, validate, status_type):
         self.function = function
         self.owners = frame.owners
         self.arguments = (*frame.slots, *(ct.c_int64(x) for x in extra))
         self.argument_types = tuple(type(x) for x in self.arguments)
         self.function.argtypes = self.argument_types
-        self.function.restype = None
+        self.function.restype = status_type
+        self.return_type = status_type
+        self.geometry = extra
         self.validate = validate
 
     def complete(self):
@@ -46,7 +48,12 @@ class NativeBinding:
 
     def launch(self):
         self.validate()
-        self.function(*self.arguments)
+        self.check_status(self.function(*self.arguments))
+
+    def check_status(self, status):
+        if status:
+            raise RuntimeError(f"{self.function.__name__} failed with native status {status}, "
+                               f"shape, grain, columns and workers={self.geometry}")
 
 
 class HostVariants:
@@ -74,6 +81,7 @@ class HostVariants:
                 bound,
                 (*bound.shape, r["grain"], r["columns"], self.artifact.workers),
                 lambda: self.artifact.validate(self.scope),
+                self.artifact.status_type,
             )
             for r in self.artifact.data["rows"]
         ]
@@ -91,7 +99,7 @@ class HostVariants:
             )
             with self.artifact.lock:
                 if key not in self.artifact.winners:
-                    from .views import adapter
+                    from runtime.kir.binding.views import adapter
 
                     shadow = [
                         adapter(x).trial(x) if any(x is y for y in self.outputs) else x

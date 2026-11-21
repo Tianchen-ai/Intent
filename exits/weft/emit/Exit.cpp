@@ -50,7 +50,7 @@ llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
     return program.takeError();
   llvm::json::Object fields{{"task", *program},
                             {"host", hostSource(&task, *abi->getAsArray())}};
-  fields["version"] = 2;
+  fields["version"] = 3;
   fields["abi"] = std::move(*abi);
   fields["rows"] = std::move(rows);
   out << llvm::json::Value(std::move(fields));

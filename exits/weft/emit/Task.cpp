@@ -238,14 +238,14 @@ std::string hostSource(Operation *dispatch, const llvm::json::Array &abi) {
   args.push_back("cols");
   args.push_back("panel ? panel : cols");
   args.append(strides);
-  return "#include <stdint.h>\n#include \"task_bridge.h\"\nvoid intent_entry(" +
+  return "#include <stdint.h>\n#include \"task_bridge.h\"\nint32_t intent_entry(" +
          llvm::join(params, ",") +
          ", int64_t rows, int64_t cols, int64_t grain, int64_t panel, int64_t "
-         "workers){\nif "
-         "(!cols) return;\n#pragma omp parallel for num_threads(workers) "
+         "workers){\nif(rows<0 || cols<0 || grain<=0 || panel<0 || workers<=0) return 1;\n"
+         "if(!rows || !cols) return 0;\n#pragma omp parallel for num_threads(workers) "
          "schedule(static) if(workers>1)\n"
          "for(int64_t start=0;start<rows;start+=grain){int64_t "
          "count=rows-start<grain?rows-start:grain; " +
-         symbol + "_instance(" + llvm::join(args, ",") + ");}\n}\n";
+         symbol + "_instance(" + llvm::join(args, ",") + ");}\nreturn 0;\n}\n";
 }
 } // namespace CI_UNIT_NAMESPACE

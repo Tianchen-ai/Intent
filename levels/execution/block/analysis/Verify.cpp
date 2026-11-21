@@ -67,12 +67,10 @@ LogicalResult verifyMapping(ModuleOp m,const compilerinfra::TargetProfile &p,Str
       auto v=op->getOperand(0);
       ok=topology=="resident"?def(v,"zero"):isa<BlockArgument>(v) && cast<BlockArgument>(v).getArgNumber()==0 && v.getParentBlock()->getParentOp()->getName().stripDialect()=="tiles";
     }
-    if(n=="active" || n=="offsets" || (dialect=="block" && (n=="load" || n=="store")))
+    if(n=="active" || (dialect=="block" && (n=="load" || n=="store")))
       ok=def(op->getOperand(1),"rows") && def(op->getOperand(2),"columns");
-    if(n=="reduce" || n=="neutralize" || n=="combine" || n=="identity"){
+    if(n=="reduce" || n=="combine" || n=="identity"){
       auto alg=op->getAttrOfType<StringAttr>("algebra");ok=alg && (alg=="max_num" || alg=="sum");
-      if(n=="reduce" && dialect=="triton_src")
-        ok &= def(op->getOperand(0),"neutralize") && op->getOperand(0).getDefiningOp()->getAttr("algebra")==alg;
       if(n=="combine")ok &= def(op->getOperand(1),"reduce") && op->getOperand(1).getDefiningOp()->getAttr("algebra")==alg;
     }
     if(!ok){op->emitError("invalid row coordinates, instance mapping or reduction algebra");return WalkResult::interrupt();}

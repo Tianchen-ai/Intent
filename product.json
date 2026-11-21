@@ -78,6 +78,7 @@
     }
   ],
   "runtimes": [
+    "cpu",
     "kir",
     "block",
     "triton",

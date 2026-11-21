@@ -30,6 +30,16 @@ bool RowMachine::accepts(ArrayAttr values) const {
 }
 } // namespace intentdsl::cpu
 namespace CI_UNIT_NAMESPACE {
+void registerRowReduction(Unit &);
+void registerPanelReduction(Unit &);
+llvm::Expected<Attribute> proposeRows(Operation *op,const TargetProfile &profile,bool structured){
+  auto *machine=profile.services.get<intentdsl::cpu::RowMachine>();
+  if(!machine)return llvm::createStringError("missing CPU capacity");
+  bool reduces=false;
+  op->walk([&](Operation *v){auto n=v->getName().getStringRef();reduces |= n=="cpu.sum" || n=="cpu.max_num";});
+  if(!reduces)return Attribute{};
+  return Attribute(machine->configurations(op->getContext(),structured && machine->structuredRows));
+}
 void rowTasks(Unit &u) {
   DecisionFamily partition;
   partition.name = "partition";
@@ -50,27 +60,8 @@ void rowTasks(Unit &u) {
   };
   u.families.push_back(
       {{partition, "cpu@formed", "cpu@formed"}, COMPILERINFRA_SOURCE});
-  for (StringRef mode : {"row-reduction", "panel-reduction"}) {
-    Strategy select{mode.str(), u.qualify("partition"),
-                    [mode](Operation *op, const TargetProfile &p,
-                           AnalysisManager &) -> llvm::Expected<Attribute> {
-                      auto *machine =
-                          p.services.get<intentdsl::cpu::RowMachine>();
-                      if (!machine)
-                        return llvm::createStringError("missing CPU capacity");
-                      bool reduction = false;
-                      op->walk([&](Operation *i) {
-                        reduction |= i->getName().stripDialect() == "sum" ||
-                                     i->getName().stripDialect() == "max_num";
-                      });
-                      if (!reduction)
-                        return Attribute{};
-                      return Attribute(machine->configurations(
-                          op->getContext(),
-                          machine->structuredRows && mode == "row-reduction"));
-                    }};
-    u.strategies.push_back({select, COMPILERINFRA_SOURCE});
-  }
+  registerRowReduction(u);
+  registerPanelReduction(u);
   u.realizers.push_back(
       {{"group-rows", u.qualify("partition"),
         [](Operation *op, Attribute a, const TargetProfile &, RewriterBase &) {
