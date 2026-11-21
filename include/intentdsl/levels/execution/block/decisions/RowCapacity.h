@@ -31,6 +31,14 @@ struct RowCapacity {
     auto *dims=view?view->getArray("shape"):nullptr;
     if(!dims || dims->empty() || !dims->back().getAsInteger() || *dims->back().getAsInteger()<0)
       return llvm::createStringError("logical inner axis has no bound extent");
+    if(auto axis=fn->getAttrOfType<mlir::IntegerAttr>("kir.owner_axis")){
+      int64_t width=1;
+      for(auto [i,d]:llvm::enumerate(*dims)) if(int64_t(i)!=axis.getInt()){
+        auto v=d.getAsInteger();
+        if(!v || *v<0 || __builtin_mul_overflow(width,*v,&width))return llvm::createStringError("invalid member extent");
+      }
+      return width;
+    }
     return *dims->back().getAsInteger();
   }
   // Rectangular tile consumers cannot span a carry between two projected

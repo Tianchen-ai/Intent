@@ -24,11 +24,12 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
       OpBuilder b(op);
       auto code = op->getName().stripDialect();
       bool access = code == "load" || code == "store";
+      bool slab = access && op->getParentOfType<func::FuncOp>()->hasAttr("kir.owner_axis");
       OperationState s(op->getLoc(),
                        "ct_src." +
-                           (access ? ("tile_" + code).str() : code.str()));
+                           (slab ? (code=="load"?"gather_slab":"scatter_slab") : access ? ("tile_" + code).str() : code.str()));
       s.addAttributes(op->getAttrs());
-      if (access) {
+      if (access && !slab) {
         auto view = op->getOperand(0);
         auto axes = intentdsl::block::projection(view.getType());
         auto *r = op->getOperand(1).getDefiningOp(),
@@ -88,10 +89,11 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
         record->getArray("dims")->size() !=
             unsigned(view ? view.getRank() : 0) ||
         (!scalar.isF16() && !scalar.isF32() && !scalar.isBF16() &&
-         !scalar.isInteger(32)) ||
+         !scalar.isInteger(32) && (view || !scalar.isUnsignedInteger(64))) ||
         record->getString("dtype") != (scalar.isF16()         ? "f16"
                                        : scalar.isBF16()      ? "bf16"
                                        : scalar.isInteger(32) ? "i32"
+                                       : scalar.isUnsignedInteger(64) ? "u64"
                                                               : "f32") ||
         (view ? (record->getString("direction") != "In" &&
                  record->getString("direction") != "Out" &&

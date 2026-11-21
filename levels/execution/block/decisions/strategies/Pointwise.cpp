@@ -15,7 +15,7 @@ void registerPointwise(Unit &u) {
     op->walk([&](Operation *o) {
       auto n = o->getName().stripDialect();
       writes |= n == "write";
-      collective |= n == "sum" || n == "max_num";
+      collective |= n == "sum" || n == "max_num" || n == "welford";
     });
     if (!writes || collective)
       return Attribute{};

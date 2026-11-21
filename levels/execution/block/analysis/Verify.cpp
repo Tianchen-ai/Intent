@@ -73,7 +73,8 @@ LogicalResult verifyMapping(ModuleOp m,const compilerinfra::TargetProfile &p,Str
          body.getArgument(0).getType().isIndex() && body.back().getName().stripDialect()=="yield" && body.back().getNumOperands()==count;
       if(ok && count){
         auto init=op->getOperand(1),result=body.back().getOperand(0);
-        ok=def(init,"identity") && def(result,"combine") &&
+        bool tuple=isa<TupleType>(init.getType());
+        ok=def(init,tuple?"summary_identity":"identity") && def(result,tuple?"summary_merge":"combine") &&
            result.getDefiningOp()->getOperand(0)==body.getArgument(1) &&
            init.getDefiningOp()->getAttr("algebra")==result.getDefiningOp()->getAttr("algebra") &&
            init.getType()==result.getType() && init.getType()==op->getResult(0).getType();
@@ -101,6 +102,8 @@ LogicalResult verifyMapping(ModuleOp m,const compilerinfra::TargetProfile &p,Str
       auto dims=[&](unsigned i){auto *d=(*entries)[i].getAsObject();return d?d->getArray("dims"):nullptr;};
       auto *a=dims(slot.getArgNumber()),*d=dims(domainIndex.getInt());
       if(!a || !d || d->size()!=size_t(view.getRank()))return WalkResult::interrupt();
+      if (f->hasAttr("kir.owner_axis"))
+        return ok && !reversed && *a==*d ? WalkResult::advance() : WalkResult::interrupt();
       if(auto projection=op->getAttrOfType<DenseI64ArrayAttr>("block.member_axes")){
         if(!ok || reversed || size_t(projection.size())!=a->size())return WalkResult::interrupt();
         llvm::SmallDenseSet<int64_t> seen;
@@ -122,11 +125,30 @@ LogicalResult verifyMapping(ModuleOp m,const compilerinfra::TargetProfile &p,Str
     if(n=="active" || n=="tiles"){
       if (op->getOperand(0)!=domain) return op->emitError("expected the bound matrix domain"), WalkResult::interrupt();
     }
+    if(n=="owner_store" || n=="owner_load"){
+      auto axis=f->getAttrOfType<IntegerAttr>("kir.owner_axis");
+      auto slot=dyn_cast<BlockArgument>(op->getOperand(0));
+      auto val=n=="owner_store"?op->getOperand(2):op->getResult(0);
+      auto tile=dyn_cast<RankedTensorType>(val.getType());
+      if(!axis || !slot || slot.getOwner()!=&f.front() || !def(op->getOperand(1),"rows") ||
+         !tile || tile.getRank()!=1) return WalkResult::interrupt();
+      auto source=cast<MemRefType>(slot.getType());
+      auto signature=llvm::json::parse(f->getAttrOfType<StringAttr>("kir.abi").getValue());
+      if(!signature){llvm::consumeError(signature.takeError());return WalkResult::interrupt();}
+      auto array=signature->getAsArray(); if(!array || array->size()!=f.getNumArguments())return WalkResult::interrupt();
+      auto param=(*array)[slot.getArgNumber()].getAsObject(), dom=(*array)[domainIndex.getInt()].getAsObject();
+      if(!param || !dom || !dom->getArray("dims") || !param->getArray("dims") ||
+         axis.getInt()<0 || size_t(axis.getInt())>=dom->getArray("dims")->size() ||
+         param->getArray("dims")->size()!=1 || (*param->getArray("dims"))[0]!=(*dom->getArray("dims"))[axis.getInt()] ||
+         source.getRank()!=1 || source.getElementType()!=tile.getElementType() ||
+         (param->getString("direction")!="InOut" && param->getString("direction")!=(n=="owner_store"?"Out":"In")))
+        return op->emitError("invalid row-owner access"),WalkResult::interrupt();
+    }
     if(n=="active"){
       auto mask=dyn_cast<RankedTensorType>(op->getResult(0).getType());
       ok &= mask && mask.getRank()==2 && mask.getElementType().isInteger(1);
     }
-    if(n=="reduce" && op->getNumOperands()==2){
+    if((n=="reduce" || n=="summary_reduce") && op->getNumOperands()==2){
       Value mask=op->getOperand(1);
       auto type=dyn_cast<RankedTensorType>(mask.getType());
       auto data=dyn_cast<RankedTensorType>(op->getOperand(0).getType());
@@ -135,6 +157,22 @@ LogicalResult verifyMapping(ModuleOp m,const compilerinfra::TargetProfile &p,Str
         return op->emitError("reduction requires its tile's boolean active mask"), WalkResult::interrupt();
     }
     if(tiles && (n=="reduce" || n=="combine" || n=="identity"))return op->emitError("column tile cannot split a row collective"),WalkResult::interrupt();
+    if (n.starts_with("summary_")) {
+      auto t=dyn_cast<TupleType>(n=="summary_field"?op->getOperand(0).getType():op->getResult(0).getType());
+      if (!t || t.size()!=3 || tiles) return WalkResult::interrupt();
+      for (unsigned i=0;i<3;++i) {
+        auto v=dyn_cast<RankedTensorType>(t.getType(i));
+        if (!v || v.getRank()!=1 || (i?!v.getElementType().isF32():!v.getElementType().isInteger(32)))
+          return WalkResult::interrupt();
+      }
+      if (n=="summary_field") {
+        auto i=op->getAttrOfType<IntegerAttr>("position").getInt();
+        ok=i>=0 && i<3 && t.getType(i)==op->getResult(0).getType();
+      } else if (n=="summary_merge")
+        ok=op->getOperand(0).getType()==t && op->getOperand(1).getType()==t &&
+           def(op->getOperand(1),"summary_reduce");
+      else if(n=="summary_reduce") ok=cast<RankedTensorType>(op->getOperand(0).getType()).getElementType().isF32();
+    }
     if(n=="reduce" || n=="combine" || n=="identity"){
       auto alg=op->getAttrOfType<StringAttr>("algebra");ok=alg && (alg=="max_num" || alg=="sum");
       if(n=="combine")ok &= def(op->getOperand(1),"reduce") && op->getOperand(1).getDefiningOp()->getAttr("algebra")==alg;

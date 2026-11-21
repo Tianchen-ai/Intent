@@ -1,4 +1,5 @@
 include "mlir/IR/OpBase.td"
+// welford is registered below the dialect declaration.
 include "mlir/Interfaces/SideEffectInterfaces.td"
 def Iblock_Dialect : Dialect {
   let name = "block";
@@ -18,6 +19,12 @@ def Iblock_end : Inst<"end", [Terminator]> {
 def Iblock_read : Inst<"read"> {
   let arguments = (ins AnyMemRef:$view, Variadic<Index>:$indices);
   let results = (outs AnyType:$result);
+}
+def Iblock_OwnerReadOp : Inst<"read_owner"> {
+  let arguments = (ins AnyMemRef:$source,Index:$owner); let results = (outs AnyType:$scalar);
+}
+def Iblock_OwnerWriteOp : Inst<"write_owner"> {
+  let arguments = (ins AnyMemRef:$destination,Index:$owner,AnyType:$scalar);
 }
 def Iblock_write : Inst<"write"> {
   let arguments = (ins AnyMemRef:$view, Index:$row, AnyTensor:$value);
@@ -48,6 +55,12 @@ def Iblock_store : Inst<"store"> {
   let arguments = (ins AnyMemRef:$view, AnyTensor:$rows, AnyTensor:$columns,
       AnyTensor:$mask, AnyTensor:$value);
   let results = (outs);
+}
+def Iblock_Dialect_OwnerLoadOp : Op<Iblock_Dialect,"owner_load"> {
+  let arguments = (ins AnyMemRef:$view,AnyTensor:$rows); let results = (outs AnyTensor:$values);
+}
+def Iblock_Dialect_OwnerStoreOp : Op<Iblock_Dialect,"owner_store"> {
+  let arguments = (ins AnyMemRef:$view,AnyTensor:$rows,AnyTensor:$values);
 }
 def Iblock_reduce : Inst<"reduce"> {
   let arguments = (ins AnyTensor:$value, AnyTensor:$mask, StrAttr:$algebra);
@@ -137,4 +150,22 @@ def Iblock_sqrt : Inst<"sqrt"> { let arguments=(ins AnyType:$input); let results
 
 def Iblock_uniform : Inst<"uniform"> {
   let arguments=(ins UI64:$seed,AnyTensor:$counter);let results=(outs AnyTensor:$result);
+}
+def Iblock_Dialect_welfordOp : Op<Iblock_Dialect,"welford"> {
+  let arguments = (ins AnyRankedTensor:$samples); let results = (outs AnyTuple:$summary);
+}
+def Iblock_Dialect_fieldOp : Op<Iblock_Dialect,"field"> {
+  let arguments = (ins AnyTuple:$state, I64Attr:$position); let results = (outs AnyType:$element);
+}
+def Iblock_Dialect_summary_fieldOp : Op<Iblock_Dialect,"summary_field"> {
+  let arguments = (ins AnyTuple:$state, I64Attr:$position); let results = (outs AnyRankedTensor:$element);
+}
+def Iblock_Dialect_summary_reduceOp : Op<Iblock_Dialect,"summary_reduce"> {
+  let arguments = (ins AnyRankedTensor:$samples, I1Tensor:$mask); let results = (outs AnyTuple:$summary);
+}
+def Iblock_Dialect_summary_identityOp : Op<Iblock_Dialect,"summary_identity"> {
+  let arguments = (ins StrAttr:$algebra); let results = (outs AnyTuple:$summary);
+}
+def Iblock_Dialect_summary_mergeOp : Op<Iblock_Dialect,"summary_merge"> {
+  let arguments = (ins AnyTuple:$left, AnyTuple:$right, StrAttr:$algebra); let results = (outs AnyTuple:$summary);
 }

@@ -44,7 +44,15 @@ public:
       tile(make("pid", {}, rw.getIndexType(),rw.getNamedAttr("axis",rw.getI32IntegerAttr(1)))->getResult(0));
     else if (resident)
       tile(make("zero", {}, rw.getIndexType())->getResult(0));
+    SmallVector<Operation*> ownerStores;
     for (auto &operation : body.without_terminator()) {
+      auto code=operation.getName().stripDialect();
+      if(code=="read_owner") {
+        auto v=operation.getResult(0);
+        fixed.map(v,make("owner_load",{operation.getOperand(0),rows},vector(v.getType(),1))->getResult(0));
+        continue;
+      }
+      if(code=="write_owner"){ownerStores.push_back(&operation);continue;}
       if (operation.getName().stripDialect() == "write")
         writes.push_back(&operation);
       else if (isReduction(&operation)) {
@@ -63,6 +71,9 @@ public:
       } else
         sweep(writes.front());
     }
+    local.clear();
+    for(auto *w:ownerStores)
+      make("owner_store",{w->getOperand(0),rows,expr(w->getOperand(2))},{});
     rw.eraseOp(anchor);
   }
 
@@ -88,7 +99,7 @@ private:
   }
   bool isReduction(Operation *op) {
     auto n = op->getName().stripDialect();
-    return n == "sum" || n == "max_num";
+    return n == "sum" || n == "max_num" || n == "welford";
   }
   void tile(Value i) {
     cols = make("columns", i, vector(rw.getIndexType(), 1))->getResult(0);
@@ -105,6 +116,12 @@ private:
     if (!op)
       return v;
     auto n = op->getName().stripDialect();
+    if (n == "field") {
+      auto state=expr(op->getOperand(0));
+      auto result=make("summary_field",state,vector(v.getType(),1),op->getAttrs())->getResult(0);
+      local.map(v,result);
+      return result;
+    }
     if (n == "ordinal") {
       auto ordinal =
           make("linear_index", {domain, rows, cols},
@@ -150,9 +167,14 @@ private:
                            rw.getStringAttr(op->getName().stripDialect()));
   }
   Value reduce(Operation *op) {
+    if (op->getName().stripDialect()=="welford")
+      return make("summary_reduce",{expr(op->getOperand(0)),active},summaryType())->getResult(0);
     return make("reduce", {expr(op->getOperand(0)), active},
                 vector(op->getResult(0).getType(), 1), algebra(op))
         ->getResult(0);
+  }
+  Type summaryType() {
+    return TupleType::get(rw.getContext(),{vector(rw.getI32Type(),1),vector(rw.getF32Type(),1),vector(rw.getF32Type(),1)});
   }
   void store(Operation *op) {
     auto *store = make(
@@ -172,8 +194,9 @@ private:
     OperationState state(loc, "block.tiles");
     state.addOperands(domain);
     if (accum) {
-      auto t = vector(op->getResult(0).getType(), 1);
-      state.addOperands(make("identity", {}, t, algebra(op))->getResult(0));
+      bool tuple=op->getName().stripDialect()=="welford";
+      auto t = tuple?summaryType():vector(op->getResult(0).getType(), 1);
+      state.addOperands(make(tuple?"summary_identity":"identity", {}, t, algebra(op))->getResult(0));
       state.addTypes(t);
     }
     state.addRegion();
@@ -185,7 +208,7 @@ private:
       if (accum) {
         auto prev = bb->addArgument(loop->getResult(0).getType(), loc);
         auto combined =
-            make("combine", {prev, reduce(op)}, prev.getType(), algebra(op));
+            make(op->getName().stripDialect()=="welford"?"summary_merge":"combine", {prev, reduce(op)}, prev.getType(), algebra(op));
         make("yield", combined->getResults(), {});
       } else {
         for (auto *w : writes)

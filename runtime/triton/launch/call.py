@@ -1,4 +1,5 @@
 from threading import RLock
+from time import perf_counter
 import torch
 import triton
 from runtime.block.binding.grid import accepts, grid
@@ -33,6 +34,7 @@ class Prepared:
         if not self.rows:
             raise ValueError("no row satisfies the bound width")
         self.launchers = {}
+        self.builds = []
         self.timings = {r["id"]: [] for r in self.rows}
         self.ready = False
         self.row = self.rows[0] if len(self.rows) == 1 else None
@@ -42,7 +44,9 @@ class Prepared:
         for value in values:
             args.append(value)
             if isinstance(value, torch.Tensor):
-                if value.ndim>2: args.extend(value.shape[:-1])
+                if isinstance(self.artifact.data["domain"]["inner"],list):
+                    if value.ndim>1: args.extend(value.shape)
+                elif value.ndim>2: args.extend(value.shape[:-1])
                 args.extend(value.stride())
         return (*args, self.m, self.n)
 
@@ -53,6 +57,7 @@ class Prepared:
             raise RuntimeError("compile before graph capture")
         with torch.cuda.device(self.device):
             for r in self.rows:
+                start = perf_counter()
                 native = self.artifact.kernel.warmup(
                     *self.flat,
                     ROWS=r["rows"],
@@ -64,7 +69,13 @@ class Prepared:
                 self.launchers[r["id"]] = native[
                     grid(self.artifact.data["grid"], (self.m, self.n), r)
                 ]
+                self.builds.append({"id": r["id"], "milliseconds": (perf_counter() - start) * 1000,
+                                    "native_hash": native.hash})
         self.ready = True
+
+    def compilation_report(self):
+        self.compile()
+        return {"candidate_count": len(self.rows), "rows": list(self.builds)}
 
     def _invoke(self, row, args):
         self.launchers[row["id"]](*args, row["rows"], row["width"])

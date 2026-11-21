@@ -35,9 +35,19 @@ def Itsrc_store : Inst<"store"> {
       AnyTensor:$value);
   let results = (outs);
 }
+def Itsrc_Dialect_OwnerLoadOp : Op<Itsrc_Dialect,"owner_load"> {
+  let arguments = (ins AnyMemRef:$view,AnyTensor:$rows); let results = (outs AnyTensor:$values);
+}
+def Itsrc_Dialect_OwnerStoreOp : Op<Itsrc_Dialect,"owner_store"> {
+  let arguments = (ins AnyMemRef:$view,AnyTensor:$rows,AnyTensor:$values);
+}
 def Itsrc_neutralize : Inst<"neutralize"> {
   let arguments = (ins AnyTensor:$value, AnyTensor:$mask, StrAttr:$algebra);
   let results = (outs AnyTensor:$result);
+}
+def Itsrc_uniform : Inst<"uniform"> {
+  let arguments = (ins UI64:$key, RankedTensorOf<[UI64]>:$position);
+  let results = (outs RankedTensorOf<[F32]>:$value);
 }
 def Itsrc_reduce : Inst<"reduce"> {
   let arguments = (ins AnyTensor:$value, StrAttr:$algebra);
@@ -114,3 +124,15 @@ def Itsrc_linear_index : Op<Itsrc_Dialect,"linear_index"> {
 }
 
 def Itsrc_sqrt : Inst<"sqrt"> { let arguments=(ins AnyType:$input); let results=(outs AnyType:$result); }
+def Itsrc_Dialect_summary_fieldOp : Op<Itsrc_Dialect,"summary_field"> {
+  let arguments = (ins AnyTuple:$state, I64Attr:$position); let results = (outs AnyRankedTensor:$element);
+}
+def Itsrc_Dialect_summary_reduceOp : Op<Itsrc_Dialect,"summary_reduce"> {
+  let arguments = (ins AnyRankedTensor:$samples, I1Tensor:$mask); let results = (outs AnyTuple:$summary);
+}
+def Itsrc_Dialect_summary_identityOp : Op<Itsrc_Dialect,"summary_identity"> {
+  let arguments = (ins StrAttr:$algebra); let results = (outs AnyTuple:$summary);
+}
+def Itsrc_Dialect_summary_mergeOp : Op<Itsrc_Dialect,"summary_merge"> {
+  let arguments = (ins AnyTuple:$left, AnyTuple:$right, StrAttr:$algebra); let results = (outs AnyTuple:$summary);
+}

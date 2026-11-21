@@ -21,6 +21,13 @@ class Kernel {
       auto code = op.getName().stripDialect();
       auto arg = [&](unsigned n) { return names.lookup(op.getOperand(n)); };
       auto algebra = op.getAttrOfType<StringAttr>("algebra");
+      auto owner=op.getParentOfType<func::FuncOp>()->getAttrOfType<IntegerAttr>("kir.owner_axis");
+      auto memberCount=[&](Value view,const std::string &name){
+        std::string span="1";
+        for(int i=0;i<cast<MemRefType>(view.getType()).getRank();++i)
+          if(i!=owner.getInt())span+="*"+name+".shape["+std::to_string(i)+"]";
+        return span;
+      };
       bool sum = algebra && algebra == "sum";
       if (code == "return")
         continue;
@@ -39,20 +46,51 @@ class Kernel {
           line(depth, carry + " = " + arg(1));
         }
         line(depth,
-             "for " + i + " in range(ct.cdiv(" + arg(0) + ".shape[-1], W)):");
+             "for " + i + " in range(ct.cdiv(" + (owner?memberCount(op.getOperand(0),arg(0)):arg(0)+".shape[-1]") + ", W)):");
         if (auto err = body(inner, depth + 1))
           return err;
         continue;
       }
       std::string expr;
-      if (code == "linear_index") {
+      if(code=="owner_load") expr="ct.gather("+arg(0)+","+arg(1)+")";
+      else if(code=="owner_store"){
+        line(depth,"ct.scatter("+arg(0)+","+arg(1)+","+arg(2)+")");
+        continue;
+      } else if(code=="gather_slab" || code=="scatter_slab"){
+        auto base=arg(0), col="ct.expand_dims("+arg(2)+",0)";
+        int rank=cast<MemRefType>(op.getOperand(0).getType()).getRank();
+        SmallVector<std::string> coords(rank);
+        for(int i=rank-1;i>=0;--i){
+          auto size=base+".shape["+std::to_string(i)+"]";
+          if(i==owner.getInt()) coords[i]="ct.expand_dims("+arg(1)+",1)";
+          else {coords[i]="("+col+")%"+size;col="(("+col+")//"+size+")";}
+        }
+        auto address=base+",("+llvm::join(coords,",")+")";
+        if(code=="scatter_slab"){line(depth,"ct.scatter("+address+","+arg(4)+",mask="+arg(3)+")");continue;}
+        expr="ct.gather("+address+",mask="+arg(3)+")";
+      } else if(code=="active" && owner){
+        expr="(ct.expand_dims("+arg(1)+",1)<"+arg(0)+".shape["+std::to_string(owner.getInt())+"]) & (ct.expand_dims("+arg(2)+",0)<"+memberCount(op.getOperand(0),arg(0))+")";
+      } else if (code=="summary_reduce")
+        expr="ct.reduce((ct.astype("+arg(1)+",ct.int32),ct.where("+arg(1)+","+arg(0)+",0.),ct.full((R,W),0.,ct.float32)),1,merge_moments,(0,0.,0.))";
+      else if (code=="summary_identity")
+        expr="(ct.full((R,),0,ct.int32),ct.full((R,),0.,ct.float32),ct.full((R,),0.,ct.float32))";
+      else if (code=="summary_merge")
+        expr="merge_moments("+arg(0)+"[0],"+arg(0)+"[1],"+arg(0)+"[2],"+arg(1)+"[0],"+arg(1)+"[1],"+arg(1)+"[2])";
+      else if (code=="summary_field") expr=arg(0)+"["+std::to_string(op.getAttrOfType<IntegerAttr>("position").getInt())+"]";
+      else if (code == "uniform")
+        expr = "uniform_at("+arg(0)+","+arg(1)+")";
+      else if (code == "linear_index") {
         bool wide = cast<RankedTensorType>(op.getResult(0).getType())
                         .getElementType()
                         .isUnsignedInteger(64);
         std::string row = wide ? "ct.astype(" + arg(1) + ",ct.uint64)" : arg(1);
-        expr = "ct.astype(ct.expand_dims(" + row + ",1)*" + arg(0) +
-               ".shape[1]+ct.expand_dims(" + arg(2) + ",0)," +
-               (wide ? "ct.uint64)" : "ct.int32)");
+        auto width=arg(0)+".shape[1]", column=arg(2);
+        if (wide) {
+          width="ct.astype("+width+",ct.uint64)";
+          column="ct.astype("+column+",ct.uint64)";
+        }
+        expr = "ct.astype(ct.expand_dims(" + row + ",1)*" + width +
+               "+ct.expand_dims(" + column + ",0)," + (wide ? "ct.uint64)" : "ct.int32)");
       } else if (code == "select")
         expr = "ct.where(" + arg(0) + "," + arg(1) + "," + arg(2) + ")";
       else if (code == "xor" || code == "and" || code == "shr" ||
@@ -186,7 +224,18 @@ public:
     bool wide =
         fn->getAttrOfType<IntegerAttr>("ct_src.index_bits").getInt() == 64;
     indexType = wide ? "ct.int64" : "ct.int32";
-    out << "import cuda.tile as ct\n\n@ct.kernel\ndef kernel(";
+    out << "import cuda.tile as ct\n";
+    bool moments=false;
+    fn.walk([&](Operation *op){moments |= op->getName().stripDialect()=="summary_reduce";});
+    if (moments) out <<
+#include "Moments.inc"
+    ;
+    bool random = false;
+    fn.walk([&](Operation *op){random |= op->getName().getStringRef()=="ct_src.uniform";});
+    if (random) out <<
+#include "Philox.inc"
+    ;
+    out << "\n@ct.kernel\ndef kernel(";
     for (auto a : fn.getArguments()) {
       auto n = "a" + std::to_string(a.getArgNumber());
       names[a] = n;

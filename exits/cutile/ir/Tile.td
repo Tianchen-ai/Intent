@@ -9,9 +9,18 @@ foreach i=["rows","columns"] in {
  def Tile_#i : Inst<i,(ins Index:$origin),(outs AnyTensor:$members)>;
 }
 def Active : Inst<"active",(ins MemRefRankOf<[AnyType],[1,2,3,4]>:$domain,AnyTensor:$rows,AnyTensor:$columns),(outs I1Tensor:$mask)>;
+def TileSource_OwnerLoadOp : Op<TileSource,"owner_load"> {
+  let arguments = (ins AnyMemRef:$view,AnyTensor:$rows); let results = (outs AnyTensor:$values);
+}
+def TileSource_OwnerStoreOp : Op<TileSource,"owner_store"> {
+  let arguments = (ins AnyMemRef:$view,AnyTensor:$rows,AnyTensor:$values);
+}
 def Load : Inst<"tile_load",(ins AnyMemRef:$array,Index:$rowBlock,Index:$columnBlock,BoolAttr:$matrix,BoolAttr:$allow_tma),(outs AnyTensor:$values)>;
 def Store : Inst<"tile_store",(ins AnyMemRef:$array,Index:$rowBlock,Index:$columnBlock,AnyTensor:$values,BoolAttr:$matrix,BoolAttr:$allow_tma),(outs)>;
+def SlabRead : Inst<"gather_slab",(ins AnyMemRef:$array,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active),(outs AnyTensor:$values)>;
+def SlabWrite : Inst<"scatter_slab",(ins AnyMemRef:$array,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active,AnyTensor:$values),(outs)>;
 def Reduce : Inst<"reduce",(ins AnyTensor:$values,I1Tensor:$mask,StrAttr:$algebra),(outs AnyTensor:$summary)>;
+def Uniform : Inst<"uniform",(ins UI64:$key,RankedTensorOf<[UI64]>:$position),(outs RankedTensorOf<[F32]>:$value)>;
 def Identity : Inst<"identity",(ins StrAttr:$algebra),(outs AnyType:$result)>;
 def Combine : Inst<"combine",(ins AnyType:$lhs,AnyType:$rhs,StrAttr:$algebra),(outs AnyType:$result)>;
 def Sweep : Inst<"tiles",(ins MemRefRankOf<[AnyType],[1,2,3,4]>:$domain,Variadic<AnyType>:$initial),(outs Variadic<AnyType>:$summary)> {let regions=(region AnyRegion:$body);}
@@ -33,4 +42,16 @@ def Tile_select : Op<TileSource,"select"> {
 
 def Tile_linear_index : Op<TileSource,"linear_index"> {
   let arguments=(ins AnyMemRef:$domain,AnyTensor:$rows,AnyTensor:$columns); let results=(outs AnyType:$result);
+}
+def TileSource_summary_fieldOp : Op<TileSource,"summary_field"> {
+  let arguments = (ins AnyTuple:$state, I64Attr:$position); let results = (outs AnyRankedTensor:$element);
+}
+def TileSource_summary_reduceOp : Op<TileSource,"summary_reduce"> {
+  let arguments = (ins AnyRankedTensor:$samples, I1Tensor:$mask); let results = (outs AnyTuple:$summary);
+}
+def TileSource_summary_identityOp : Op<TileSource,"summary_identity"> {
+  let arguments = (ins StrAttr:$algebra); let results = (outs AnyTuple:$summary);
+}
+def TileSource_summary_mergeOp : Op<TileSource,"summary_merge"> {
+  let arguments = (ins AnyTuple:$left, AnyTuple:$right, StrAttr:$algebra); let results = (outs AnyTuple:$summary);
 }

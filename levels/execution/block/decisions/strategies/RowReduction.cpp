@@ -5,19 +5,19 @@
 namespace CI_UNIT_NAMESPACE {
 using namespace compilerinfra;
 using namespace mlir;
-void registerRowReduction(Unit &unit) {
-  for (StringRef mode : {"row-reduction", "resident-row", "stream-row"}) {
+void registerRowStrategy(Unit &unit, StringRef mode, bool tuple) {
   Strategy strategy;
   strategy.name = mode.str();
   strategy.family = unit.qualify("structure");
-  auto propose = [](Operation *op, const TargetProfile &target,
+  auto propose = [tuple](Operation *op, const TargetProfile &target,
                         StringRef mode) -> llvm::Expected<Attribute> {
-    bool reduces = false;
+    bool reduces = false, hasTuple=false;
     op->walk([&](Operation *v) {
       auto n = v->getName().getStringRef();
       reduces |= n == "block.sum" || n == "block.max_num";
+      hasTuple |= n == "block.welford";
     });
-    if (!reduces)
+    if (tuple != hasTuple || (!reduces && !hasTuple))
       return Attribute{};
     auto *caps = target.services.get<intentdsl::RowCapacity>();
     if (!caps || caps->rows.empty())
@@ -57,7 +57,7 @@ void registerRowReduction(Unit &unit) {
   strategy.enumerate=[propose,mode](Operation *op,const TargetProfile &p,AnalysisManager &)->llvm::Expected<std::vector<StructuralCandidate>>{
     std::vector<StructuralCandidate> candidates;
     for(StringRef m:{"resident-row","stream-row"}){
-      if(mode!="row-reduction" && mode!=m)continue;
+      if((mode=="resident-row" || mode=="stream-row") && mode!=m)continue;
       auto v=propose(op,p,m);if(!v)return v.takeError();if(!*v)continue;
       auto d=cast<DictionaryAttr>(*v);auto topology=d.getAs<StringAttr>("topology").str();
       std::map<int64_t,SmallVector<Attribute>> groups;
@@ -67,6 +67,9 @@ void registerRowReduction(Unit &unit) {
     }
     return candidates;};
   unit.strategies.push_back({std::move(strategy), COMPILERINFRA_SOURCE});
-  }
+}
+void registerRowReduction(Unit &unit) {
+  for (StringRef mode : {"row-reduction", "resident-row", "stream-row"})
+    registerRowStrategy(unit,mode,false);
 }
 } // namespace CI_UNIT_NAMESPACE

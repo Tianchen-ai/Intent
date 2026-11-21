@@ -38,14 +38,20 @@ class Writer {
 public:
   explicit Writer(llvm::raw_ostream &out) : out(out) {}
   llvm::Error write(func::FuncOp fn) {
-    out << "import triton\nimport triton.language as tl\n\n@triton.jit\ndef "
+    out << "import triton\nimport triton.language as tl\n";
+    bool moments=false;
+    fn.walk([&](Operation *op){moments |= op->getName().stripDialect()=="summary_reduce";});
+    if (moments) out <<
+#include "Moments.inc"
+    ;
+    out << "\n@triton.jit\ndef "
            "kernel(";
     for (auto arg : fn.getArguments()) {
       auto id = "a" + std::to_string(arg.getArgNumber());
       values[arg] = id;
       out << id << ", ";
-      if (auto v=dyn_cast<MemRefType>(arg.getType()); v && v.getRank()>2)
-        for(int i=0;i<v.getRank()-1;++i)out<<id<<"_d"<<i<<": tl.constexpr, ";
+      if (auto v=dyn_cast<MemRefType>(arg.getType()); v && (v.getRank()>2 || (fn->hasAttr("kir.owner_axis") && v.getRank()>1)))
+        for(int i=0;i<v.getRank()-(fn->hasAttr("kir.owner_axis")?0:1);++i)out<<id<<"_d"<<i<<": tl.constexpr, ";
       if (auto v = dyn_cast<MemRefType>(arg.getType()))
         for (int i = 0; i < v.getRank(); ++i)
           out << id << "_s" << i << (v.getRank()>2 ? ": tl.constexpr, " : ", ");
@@ -85,7 +91,24 @@ public:
         continue;
       }
       std::string e;
-      if (n == "linear_index") {
+      auto ownerAxis=op.getParentOfType<func::FuncOp>()->getAttrOfType<IntegerAttr>("kir.owner_axis");
+      if(n=="owner_load") e="tl.load("+arg(0)+"+"+arg(1)+"*"+arg(0)+"_s0,mask="+arg(1)+"<M,other=0)";
+      else if(n=="owner_store"){
+        line(depth,"tl.store("+arg(0)+"+"+arg(1)+"*"+arg(0)+"_s0,"+arg(2)+",mask="+arg(1)+"<M)");
+        continue;
+      } else if (n=="summary_reduce")
+        e="tl.reduce(("+arg(1)+".to(tl.int32),tl.where("+arg(1)+","+arg(0)+",0.),tl.full((ROWS,WIDTH),0.,tl.float32)),1,merge_moments)";
+      else if (n=="summary_identity")
+        e="(tl.full((ROWS,),0,tl.int32),tl.full((ROWS,),0.,tl.float32),tl.full((ROWS,),0.,tl.float32))";
+      else if (n=="summary_merge")
+        e="merge_moments("+arg(0)+"[0],"+arg(0)+"[1],"+arg(0)+"[2],"+arg(1)+"[0],"+arg(1)+"[1],"+arg(1)+"[2])";
+      else if (n=="summary_field") e=arg(0)+"["+std::to_string(op.getAttrOfType<IntegerAttr>("position").getInt())+"]";
+      else if (n == "uniform") {
+        auto prefix = "rng"+std::to_string(next++);
+        auto lane = "("+arg(1)+" & 3)";
+        line(depth,prefix+"a, "+prefix+"b, "+prefix+"c, "+prefix+"d = tl.randint4x("+arg(0)+", "+arg(1)+" >> 2)");
+        e = "(tl.where("+lane+" == 0,"+prefix+"a,tl.where("+lane+" == 1,"+prefix+"b,tl.where("+lane+" == 2,"+prefix+"c,"+prefix+"d))).to(tl.uint32) >> 8).to(tl.float32) * 0.000000059604644775390625";
+      } else if (n == "linear_index") {
         bool wide = cast<RankedTensorType>(op.getResult(0).getType())
                         .getElementType()
                         .isUnsignedInteger(64);
@@ -124,7 +147,15 @@ public:
         e = "(" + arg(1) + "[:, None] < M) & (" + arg(2) + "[None, :] < N)";
       else if (n == "offsets") {
         int dims=cast<MemRefType>(op.getOperand(0).getType()).getRank();
-        if(dims>2){
+        if(ownerAxis){
+          auto base=arg(0), col=arg(2)+"[None,:]";
+          e=arg(1)+"[:,None]*"+base+"_s"+std::to_string(ownerAxis.getInt());
+          for(int i=dims-1;i>=0;--i)if(i!=ownerAxis.getInt()){
+            auto size=base+"_d"+std::to_string(i);
+            e+="+(("+col+")%"+size+")*"+base+"_s"+std::to_string(i);
+            col="(("+col+")//"+size+")";
+          }
+        } else if(dims>2){
           auto a=arg(0),row=arg(1);
           e=arg(2)+"[None,:]*"+a+"_s"+std::to_string(dims-1);
           for(int i=dims-2;i>=0;--i){
@@ -134,6 +165,7 @@ public:
           }
           auto id="v"+std::to_string(next++);values[op.getResult(0)]=id;line(depth,id+" = "+e);continue;
         }
+        if(!ownerAxis){
         auto rank = op.getAttrOfType<BoolAttr>("matrix").getValue() ? 2 : 1;
         bool swap = op.getAttrOfType<BoolAttr>("permuted") &&
                     op.getAttrOfType<BoolAttr>("permuted").getValue();
@@ -142,6 +174,7 @@ public:
                               : "tl.full((ROWS, 1), 0, tl.int64)";
         e = base + " + " + arg(2) + "[None, :] * " + arg(0) + "_s" +
             std::to_string(swap ? 0 : rank - 1);
+        }
       } else if (n == "load")
         e = "tl.load(" + arg(0) + " + " + arg(1) + ", mask=" + arg(2) +
             ", other=0)";

@@ -4,6 +4,7 @@
       "decisions": {
         "levels/execution/block::structure": {
           "strategies": [
+            "levels/execution/block::tuple-reduction",
             "levels/execution/block::row-reduction",
             "levels/execution/block::pointwise"
           ],

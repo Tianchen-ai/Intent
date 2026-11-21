@@ -25,10 +25,11 @@ void registerCost(Unit &u) {
             std::swap(m, n);
           auto stridedRead = intentdsl::quantity(ctx, "read_16", "B/ns");
           double r = 0, w = 0, ws = 0;
-          unsigned reductions = 0;
+          unsigned reductions = 0, summaryFields=0;
           op->walk([&](Operation *i) {
             auto k = i->getName().stripDialect();
-            reductions += k == "sum" || k == "max_num";
+            reductions += k == "sum" || k == "max_num" || k=="welford";
+            summaryFields += k=="welford" ? 3 : 0;
             if (k != "read" && k != "write")
               return;
             auto ty = cast<MemRefType>(i->getOperand(0).getType());
@@ -72,7 +73,8 @@ void registerCost(Unit &u) {
             double scheduled=gridTiles ? instances*tiles : instances;
             double serial=gridTiles ? 1 : tiles;
             v.terms["serial_tiles"]={serial,"count"};
-            double regs=peak*rows*width;
+            double regs=(peak+summaryFields)*rows*width;
+            if (summaryFields) v.terms["summary_live_words"]={double(summaryFields*rows*width),"reg32"};
             double resident=regFile && regs>0?std::max(1.,std::floor(*regFile/regs)):1.;
             v.terms["fragment_register_estimate"]={regs,"reg32"};
             v.terms["resident_instance_upper_estimate"]={resident,"instance"};
