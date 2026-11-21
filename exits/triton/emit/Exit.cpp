@@ -231,7 +231,7 @@ void bind(Unit &unit) {
                 auto name=op->getName().stripDialect();
                 auto matches=[&](unsigned i,StringRef opName){auto *v=op->getOperand(i).getDefiningOp();return v && v->getName().getStringRef()==opName;};
                 if(name=="offsets"){auto axes=intentdsl::block::projection(op->getOperand(0).getType());valid &= succeeded(axes) && op->getAttrOfType<BoolAttr>("matrix").getValue()==(*axes==intentdsl::block::RowProjection::Matrix) && matches(1,"triton_src.rows") && matches(2,"triton_src.columns");}
-                if(name=="neutralize"){auto a=op->getAttrOfType<StringAttr>("algebra"); valid &= a=="sum" || a=="max_num";}
+                if(name=="neutralize"){auto a=op->getAttrOfType<StringAttr>("algebra"); valid &= (a=="sum" || a=="max_num") && matches(1,"triton_src.active") && op->getOperand(1).getParentBlock()==op->getBlock();}
                 if(name=="reduce") valid &= matches(0,"triton_src.neutralize") && op->getOperand(0).getDefiningOp()->getAttr("algebra")==op->getAttr("algebra");
               }
               valid &= ns == "builtin" || ns == "func" || ns == "triton_src";

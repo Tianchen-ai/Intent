@@ -14,6 +14,7 @@ public:
         domain(anchor->getOperand(0)),
         resident(choice.getAs<StringAttr>("topology") == "resident") {
     auto fn = anchor->getParentOfType<func::FuncOp>();
+    fn->setAttr("block.domain_arg", rw.getI64IntegerAttr(cast<BlockArgument>(domain).getArgNumber()));
     fn->setAttr("block.guard",choice.get("guard"));
     fn->setAttr("block.grid", rw.getStrArrayAttr({"ceildiv", "M", "rows"}));
     fn->setAttr("block.configs", choice.get("rows"));

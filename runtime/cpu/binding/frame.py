@@ -40,7 +40,7 @@ class NativeBinding:
         self.function.argtypes = self.argument_types
         self.function.restype = status_type
         self.return_type = status_type
-        self.geometry = extra
+        self.geometry_offset = len(frame.slots)
         self.validate = validate
 
     def complete(self):
@@ -48,12 +48,15 @@ class NativeBinding:
 
     def launch(self):
         self.validate()
-        self.check_status(self.function(*self.arguments))
+        arguments = self.arguments
+        self.check_status(self.function(*arguments), arguments)
 
-    def check_status(self, status):
+    def check_status(self, status, arguments=None):
         if status:
+            actual = self.arguments if arguments is None else arguments
+            geometry = tuple(x.value for x in actual[self.geometry_offset:])
             raise RuntimeError(f"{self.function.__name__} failed with native status {status}, "
-                               f"shape, grain, columns and workers={self.geometry}")
+                               f"shape, grain, columns and workers={geometry}")
 
 
 class HostVariants:
@@ -64,6 +67,8 @@ class HostVariants:
         self.bound = frame(values, artifact.data["abi"])
         self.outputs = tuple(outputs)
         self.scope = scope
+        self.timings = {}
+        self.winner = None
         self.entries = []
         self.selected = None
 
@@ -117,12 +122,16 @@ class HostVariants:
                             start = perf_counter_ns()
                             call.launch()
                             samples.append(perf_counter_ns() - start)
-                        timings.append(sorted(samples)[1])
-                    self.artifact.winners[key] = min(
-                        range(len(timings)), key=timings.__getitem__
-                    )
-                self.selected = self.entries[self.artifact.winners[key]]
+                        timings.append([ns / 1000 for ns in samples])
+                    winner = min(range(len(timings)), key=lambda i: sorted(timings[i])[1])
+                    self.artifact.winners[key] = winner, dict(enumerate(timings))
+                self.winner, self.timings = self.artifact.winners[key]
+                self.selected = self.entries[self.winner]
         self.selected.launch()
+
+    def tuning_report(self):
+        from runtime.kir.binding.selection import selection
+        return selection(self.artifact.data, self.winner, self.timings)
 
     def compilation_report(self):
         self.compile()

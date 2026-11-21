@@ -32,6 +32,7 @@ class Prepared:
         if not self.rows:
             raise ValueError("no row satisfies the bound width")
         self.launchers = {}
+        self.timings = {r["id"]: [] for r in self.rows}
         self.ready = False
         self.row = self.rows[0] if len(self.rows) == 1 else None
 
@@ -95,18 +96,21 @@ class Prepared:
                             for v in self.values
                         ]
                         trial = self.flatten(shadow)
-                        self.artifact.winners[key] = min(
-                            self.rows,
-                            key=lambda r: triton.testing.do_bench(
-                                lambda: self._invoke(r, trial), warmup=3, rep=10
-                            ),
-                        )
-                    self.row = self.artifact.winners[key]
+                        times = {r["id"]: [1000 * triton.testing.do_bench(
+                            lambda: self._invoke(r, trial), warmup=3, rep=10
+                        )] for r in self.rows}
+                        best = min(self.rows, key=lambda r: times[r["id"]][0])
+                        self.artifact.winners[key] = best, times
+                    self.row, self.timings = self.artifact.winners[key]
             self._invoke(self.row, self.flat)
             stream = torch.cuda.current_stream(self.device)
             for value in self.values:
                 if isinstance(value, torch.Tensor):
                     value.record_stream(stream)
+
+    def tuning_report(self):
+        from runtime.kir.binding.selection import selection
+        return selection(self.artifact.data, self.row["id"] if self.row else None, self.timings)
 
     def result(self):
         return self.outputs[0] if len(self.outputs) == 1 else tuple(self.outputs)

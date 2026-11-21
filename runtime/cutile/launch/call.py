@@ -44,6 +44,7 @@ class Call:
         self.compilation = []
         self.selected = None
         self.failures = {}
+        self.timings = {}
 
     def args(self, row, values):
         return (*values, row["rows"], row["width"])
@@ -122,13 +123,20 @@ class Call:
                                 (i, msg) for i, _, msg in result.failures
                             )
                             winner = result.best.config
-                        a.winners[key] = winner
+                            self.timings = {m.config: [m.mean_us] for m in result.successes}
+                        a.winners[key] = winner, self.timings
+                    winner, self.timings = a.winners[key]
                     self.selected = self.candidates[winner]
             r, k = self.selected
             ct.launch(stream, self.grid(r), k, self.args(r, self.values))
             for v in self.values:
                 if isinstance(v, torch.Tensor):
                     v.record_stream(stream)
+
+    def tuning_report(self):
+        from runtime.kir.binding.selection import selection
+        times = {r["id"]: self.timings.get(r["id"], []) for r in self.artifact.data["rows"]}
+        return selection(self.artifact.data, self.selected[0]["id"] if self.selected else None, times)
 
     def result(self):
         return self.outputs[0] if len(self.outputs) == 1 else self.outputs

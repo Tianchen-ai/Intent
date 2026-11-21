@@ -41,6 +41,12 @@ LogicalResult verifyMapping(ModuleOp m,const compilerinfra::TargetProfile &p,Str
     return f.emitError()<<llvm::toString(std::move(e));
   if(f->getAttr("block.grid")!=b.getStrArrayAttr({"ceildiv","M","rows"}))
     return f.emitError("grid must cover the M domain at the instance row step");
+  auto domainIndex = f->getAttrOfType<IntegerAttr>("block.domain_arg");
+  if (!domainIndex || domainIndex.getInt()<0 || domainIndex.getInt()>=f.getNumArguments())
+    return f.emitError("missing bound row domain argument");
+  auto domain=f.getArgument(domainIndex.getInt());
+  auto view=dyn_cast<MemRefType>(domain.getType());
+  if (!view || view.getRank()!=2) return f.emitError("row domain must be a matrix argument");
   unsigned pids=0,rowMaps=0,sweeps=0;
   auto result=f.walk([&](Operation *op){
     if(op->getName().getDialectNamespace()!=dialect)return WalkResult::advance();
@@ -70,6 +76,21 @@ LogicalResult verifyMapping(ModuleOp m,const compilerinfra::TargetProfile &p,Str
     }
     if(n=="active" || (dialect=="block" && (n=="load" || n=="store")))
       ok=def(op->getOperand(1),"rows") && def(op->getOperand(2),"columns");
+    if(n=="active" || n=="tiles"){
+      if (op->getOperand(0)!=domain) return op->emitError("expected the bound matrix domain"), WalkResult::interrupt();
+    }
+    if(n=="active"){
+      auto mask=dyn_cast<RankedTensorType>(op->getResult(0).getType());
+      ok &= mask && mask.getRank()==2 && mask.getElementType().isInteger(1);
+    }
+    if(n=="reduce" && op->getNumOperands()==2){
+      Value mask=op->getOperand(1);
+      auto type=dyn_cast<RankedTensorType>(mask.getType());
+      auto data=dyn_cast<RankedTensorType>(op->getOperand(0).getType());
+      if(!def(mask,"active") || !type || !data || !type.getElementType().isInteger(1) ||
+          type.getShape()!=data.getShape() || mask.getParentBlock()!=op->getBlock())
+        return op->emitError("reduction requires its tile's boolean active mask"), WalkResult::interrupt();
+    }
     if(n=="reduce" || n=="combine" || n=="identity"){
       auto alg=op->getAttrOfType<StringAttr>("algebra");ok=alg && (alg=="max_num" || alg=="sum");
       if(n=="combine")ok &= def(op->getOperand(1),"reduce") && op->getOperand(1).getDefiningOp()->getAttr("algebra")==alg;

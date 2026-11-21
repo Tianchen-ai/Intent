@@ -31,6 +31,7 @@ class Call:
             shape,
         )
         self.records = []
+        self.timings = {}
         self.selected = None
 
     def compile(self):
@@ -95,6 +96,7 @@ class Call:
                 with a.lock:
                     if key not in a.winners:
                         rows = a.data["rows"]
+                        durations = {row["id"]: [] for row in rows}
                         if len(rows) > 1:
                             # Current callable ABI exposes disjoint Out and read-only In.
                             shadow = tuple(
@@ -111,9 +113,7 @@ class Call:
                                 for v in self.values
                             )
                             args = self._args(shadow)
-                            durations = {}
                             for row in rows:
-                                durations[row["id"]] = []
                                 self._enqueue(row, args, stream)
                             for _ in range(3):
                                 for row in rows:
@@ -127,16 +127,21 @@ class Call:
                                     durations[row["id"]].append(
                                         before.hardware_time(after)
                                     )
-                            a.winners[key] = min(
+                            winner = min(
                                 rows, key=lambda r: median(durations[r["id"]])
                             )
                         else:
-                            a.winners[key] = rows[0]
-                    self.selected = a.winners[key]
+                            winner = rows[0]
+                        a.winners[key] = winner, durations
+                    self.selected, self.timings = a.winners[key]
             self._enqueue(self.selected, self._args(self.values), stream)
             for v in self.values:
                 if isinstance(v, torch.Tensor):
                     v.record_stream(stream)
+
+    def tuning_report(self):
+        from runtime.kir.binding.selection import selection
+        return selection(self.artifact.data, self.selected["id"] if self.selected else None, self.timings)
 
     def result(self):
         return self.outputs[0] if len(self.outputs) == 1 else self.outputs
