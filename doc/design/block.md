@@ -1,84 +1,87 @@
 # Block 表示、Triton 出口与首次调用
 
-**状态**　V2-1 待审设计。第一条路径是 `kir@canonical → block@formed → @decided → @realized → @normalized → triton@legal → @callable → emit`。本文件给出不变量和实现责任。表中的配置值是设计示例，尚无本版真机成绩。
+**状态**　V2-1b 设计裁决。第一条路径是 `kir@canonical → block@formed → @decided → @realized → @normalized → triton@legal → @callable → emit`。本文件给出不变量和实现责任。表中的配置值是设计示例，尚无本版真机成绩。
 
 ## 表示合同
 
 | 对象 | 谁生产 → 谁消费 | 在 IR 中可检查的性质 |
 |---|---|---|
-| program / instance domain | 父到子 lowering 建立逻辑工作域；工作归属 realizer 建立具体 grid → 出口及 runtime/block | grid 是 shape、constexpr 和选中行的纯整数函数；同一实例标识在程序和 launch 中含义相同。对唯一写，活跃实例输出构成不交叠覆盖；原子/合并写以对应 effects 证明合法 |
+| program / instance domain | 父到子 lowering 建立逻辑工作域；联合结构 realizer 按归属建立具体 grid → 出口及 runtime/block | grid 是 shape、constexpr 和选中行的纯整数函数；同一实例标识在程序和 launch 中含义相同。对唯一写，活跃实例输出构成不交叠覆盖；原子/合并写以对应 effects 证明合法 |
 | coordinate / relation | KIR 的域、slice、间接索引 → block 访问与遍历 | 清楚区分源坐标、实例原点、片段内坐标、线性地址；slice 保留原轴偏移。访问组合 stride/offset 只出现一次；有证明才收窄地址算术 |
 | fragment | 结构化运算/访问 realizer → 算术、collective、store | SSA 值具有元素类型、逻辑轴及片段范围；标量归约结果可按显式轴广播。相同元素数量不意味着相同成员关系。warp/lane 分配由下游决定 |
-| bounded access | relation + active domain → load/store/gather/atomic legalize | tail mask 与作者 predicate 取交；inactive read 的 fill 对应实际消费者（sum 与 max 不同），inactive write 不发出；masked-off 地址无需解引用。NaN、Inf 不能靠乘零掩盖 |
+| bounded access | relation + active domain → load/store/gather/atomic legalize | 实际访存限于逻辑成员与作者 predicate 的交集。逻辑成员上 predicate 为假时，各消费者读同一个作者 fill。超出逻辑域的物理 lane 不贡献，可在各自 collective 入口分别用 identity 表示；两种屏蔽都不解引用无效地址 |
 | buffer / accumulator / loop | KIR 局部状态或 block 复用决定 → 后续 block/dsa lowering | 有作用域、所有者、初始化、更新次序及结束点。普通 SSA 值可以一直是值。loop 的 carry/yield 与 dtype 固定；存储到寄存器、共享空间还是本地 scratch 属具体兑现责任 |
-| config domain / parameter | 出口提供有类型的完整经验行，block 选择适用域 → block program 和出口 | 行的身份是相关选择的最小单位。实际遍历、坐标、片段和传输必须用到它的参数；检查点仅凭当前模块及声明的入口 ABI 即可继续降低 |
+| config domain / parameter | 出口提供整行的公共投影，block 联合选择拓扑与行组 → block program 和出口 | 行的身份是相关选择的最小单位。实际遍历、坐标、片段和传输必须用到它的参数；检查点仅凭当前模块及声明的入口 ABI 即可继续降低 |
 
 ### 四个边界
 
-1. **formed**　必需 lowering 消费 canonical KIR，建立 `block.program`、逻辑输出域、坐标关系与结构化 reduce/scan/contract。作者的 ordered loop、mask、state 和 effects 仍在程序中。模型可在消费 KIR 前选择调用 KIR 的受许可模式；没有许可则使用源结构。到此边界时，配置域家族已经选择并兑现一个行集合，工作归属仍是逻辑的。
-2. **decided**　策略在待调度的有类型 op/region 上写入决定，包含选择的方法、参数引用及适用条件。行域、轴和 guard 必须一致，不能先固定 tile，再用另一行的 warp 数“修好”资源预算。联合合法性覆盖所有剩余行；报告空集或明确不支持的技术条件。
-3. **realized**　决定变为实例映射、具体遍历/循环、片段类型、valid access、累加与供数。编译期参数仍可来自有限行域；不得残留待读取的 DecisionFamily carrier。可用此检查点直接建立 DSA 表示；无需先转 GPU 语言。
-4. **normalized**　完成两个 GPU 语言出口共同需要的规范化：显式尾部有效域和 fill、仿射坐标与 stride 组合、标量/片段广播、静态轴顺序、循环携带状态和结果投影、可证明安全的冗余 load 消除。保持 dtype/NaN/effects。这里只定共同形态；Triton 的 power-of-two 片段、cuTile 专有 tile 和厂商指令在各自出口处理。
+1. **formed**　必需 lowering 建立逻辑实例域、访问关系、结构化计算、状态与 effects。分析可推导连续性、有效成员、驻留所需空间、可容纳的宽度和合法参数域；这些事实允许多种拓扑同时可行。此处没有选中的拓扑、参数行或配置家族。
+2. **decided**　结构策略针对同一程序的相关区域一次选出控制拓扑及该拓扑的完整行组。整份 kernel 程序有一个联合决定锚点，涵盖相关的有类型区域。各区域可有不同计算结构，但行 ID 在整份程序中取同一赋值；共享坐标、状态和资源的操作须共同满足这份决定。每行覆盖全部关联参数，守卫可求值，行组非空。
+3. **realized**　联合 realizer 把决定变为实例映射、循环、片段、有效访问、累加和依赖。参数引用已进入相应操作；保留参数域、行 ID 与守卫，待兑现的结构决定为零。DSA 在这里接收当前程序。
+4. **normalized**　两个 GPU 语言出口共用的规范形式包括尾部有效域、坐标与 stride 的组合、标量广播、循环 carry 和结果投影。消除冗余读须满足 alias/effect 条件，保留作者 fill、dtype 和 NaN 语义。各出口负责其原生 tile 和指令约束。
 
-## 可登记的决策家族
+## 联合决策家族
 
-节点内普通等价清理使用 MLIR pass。下面的家族才需要 Strategy 选择与 Realizer。决定通过领域 op 上的单个结构化属性读写；实现策略名和行 ID 不可成为匹配某个作者程序的依据。
-
-| 家族／承载对象 | 决定 → 兑现 | 输入事实 | 实际变换与复用 |
+| 登记家族 | 决定 → 物化 | 读取的事实 | 写入的 IR |
 |---|---|---|---|
-| 有限配置域／program | formed → formed | 输出域类别、访问和规约/收缩签名、数值许可、shape 类、出口能力及经验表 | 选一组合法完整行及一个共享的参数 schema，建立 typed config-domain。无可调参数时为合法单行。它是为后续家族绑定参数的前置条件 |
-| 工作归属／结果域 | decided → realized | 唯一写或合并 effects、行间独立性、工作量及行内 rows_per_instance | 形成 grid、实例原点和每实例输出行数，多行末实例按真实 extent 裁剪。适用 softmax、norm、逐行投影 |
-| 访问分块／成员 relation | decided → realized | 共用坐标、stride、连续性、间接映射、tail、行的访问宽度 | 兑现每次读取的成员、掩码及普通遍历步长；负责地址计算，计算域的专有归约/收缩轴由其家族负责 |
-| 归约驻留或流式／reduce 区域 | decided → realized | axis 长度类、归约代数、消费者数量、活跃字节、可用 collective 及完整行预算 | 可保留一行片段做多次运算；或沿约简轴多次遍历，以局部摘要更新状态。softmax、RMSNorm 无须同一个 pass 对整个函数做名称匹配 |
-| fold/scan 分段／region op | decided → realized | 有序源轴、summarize/combine/apply/emit 合同、identity、状态大小、有限段宽 | 生成连续段、summary carry、前缀与 emit，必要时保留串行段循环；不跨独立实例假设全局 barrier。适用线性 attention、显式 summary 的 recurrence |
-| 收缩分块／contract op | decided → realized | M/N/K 与 batch 关系、稀疏/量化格式、acc 类型、packing 及目标 primitive 要求 | 形成自由轴分块、K 遍历、累加与最终 epilogue。与输出归属共同引用同一行，不能再有第二组 M/N/K 参数 |
+| Block 结构拓扑与完整参数行 | `block@decided → block@realized` | 输出所有权与 effects、轴/stride/有效域、归约代数、fold/scan 的摘要与顺序、收缩轴与累加精度、活跃值、shape guard、出口能力和经验行的公共列 | 决定时写一种控制拓扑和一组相关参数赋值。物化为实例/grid 及每实例行数、访问分块和掩码、驻留或流式循环、分段和 carry、M/N/K 分块及 epilogue，保留有类型的行参数引用 |
 
-同一 op 同时涉及多个约束时，联合候选包含整个相关向量。例如某行给出 M/N/K、供数粒度、原生选项，需要同时满足工作集及 primitive 的要求。归属、访问、计算各写自己的结构；共享的是同一行引用与同一坐标分析。会互相废掉决定的改写必须合为同一 realizer，或用独立锚点并保留其他 carrier。不得依赖同一边界各家族恰好按某个名字先后运行。
+工作归属、访问、归约、分段和收缩是同一决定的组成部分。比如 attention 的 K 遍历同时约束打分收缩、在线状态和权重乘 V，策略须为三个消费者选出相容的分段和尺寸。realizer 可分工构造这些操作；任何一步都不能重新选行或改拓扑。
 
-**与 SDK 的次序吻合。** 同一边界先运行必需 lowering、贡献，再做选择和物化，最后验 IR。配置域在 formed 就完成物化，decided 的策略可读到它。realized 的结构改写消费上一边界已完成的决定。出口接收时只剩普通、可继续编译的产品 IR。
+**同一 op 上的多个决定。** 各家族用 SDK 的 `DecisionFamily::read/write/verify` 在锚点上读写和检查自己的有类型属性，以登记的 family ID 区分。策略只提出值；校验后由框架调用该家族的 write。verifier 检查每个 ID 至多一项、锚点的 operand/result 与适用区域匹配、共享行 ID 有定义，联合约束对每行成立。物化者只消费自己的项。若替换锚点，必须将其他仍有效的项连同 SSA/区域引用映射到语义对应的新锚点并重新验证；丢失、重复或无法映射即在该边界报错。两个决定若要求共同选择、共同改写或依赖隐含的执行先后，应并入同一家族，或先在确实独立的锚点上分开。独立贡献不能用覆盖整个属性字典来更新自己的决定。
 
-## 配置不是六个调参循环
+## 参数行、守卫与调优
 
-**答复评审问题：允许 IR 保留多个 tuning 行；每个决策家族仍只做一次结构选择。** 提议用一份参数化程序配一个有界参数域。配置行与结构策略分两步工作。
+| 阶段 | 交付的内容及校验 |
+|---|---|
+| 出口声明 | 出口拥有按架构和计算/访存结构登记的经验表，逐行同时提供两类列。公共列有 block schema，如每实例行数、宽度、M/N/K 尺寸、段长；原生列由该出口定义。每条完整行在本表版本内有唯一 ID。 |
+| block 查询与选择 | 借助框架的目标能力服务取得公共投影及约束；出口可据本机事实检查私有选项。formed 只推导事实。decided 策略一次选择一个拓扑与匹配的整组行，整行过滤并记录不符合的约束。禁止跨行拼列。 |
+| 检查点与出口 | realized 内的 `row.rows`、`row.width` 等直接决定 grid、坐标与循环。检查点按表身份、版本及行 ID 携带选中行的不透明原生载荷，供出口恢复；恢复时核对 schema 版本，不重新读取经验表或按位置配对。只有对应出口解释载荷，按 ID 核对一对一关联。过滤或重排行时保留其 ID；核验该载荷能实现此行承诺的公共参数与拓扑。 |
+| 编译与执行 | 出口发射一份参数化程序、完整行、守卫与 ABI，可按行原生特化；prepare 过滤绑定不适用的行，compile 原生编译，首次 launch 只在剩余完整行中调优。赢家标识绑定整组候选、设备及实际依赖的性能类；每次新绑定重验守卫。 |
 
-| 时刻 | 生产者 → 消费者 | 唯一事实来源与拒绝条件 |
-|---|---|---|
-| 声明 | 出口组件 → typed capability service | 经验表按架构、计算/访问结构、dtype、适用范围登记。每一行由共同的结构列和一个有类型的原生选项元组组成；列名、单位、合法取值由 schema 定义 |
-| 选择域 | formed 的 config 策略 → config-domain realizer | 先选适用于当前执行结构的表组，再作整行过滤和完全等价的去重。已知不合法的行删除；依赖运行时值的条件保留为纯 guard。不同拓扑分到不同组，一次编译选一组 |
-| 形成程序 | block 策略/realizer → realized 检查点 | 参数用 SSA 或可折叠的有类型参数 op 表达。例如 `row0 = instance_x * row.rows`、`col = pass_index * row.width + offset`。每个合法行代入后产生闭合程序，原生选项也来自该行。IR 仅保存表的选中子集，不在旁边维护第二份计划 |
-| 发射 | triton/cutile 等出口 → native builder | 一次输出参数化源码、row id→constexpr/原生选项的投影、ABI、grid 表达式和 guard。不同候选的外部实参、计算结果及作者调用数相同。原生编译可按行特化同一份源码 |
-| 选择 winner | 出口 runtime → 热 launch | prepare 依据真实绑定筛除不适用行；compile 生成适用原生版本。首次 launch 试跑已声明的行，按原调用语义恢复副作用，仅提交一次 winner。缓存以硬件、工具链、数值合同、实参性能类及**完整候选集合**区分 |
+一次编译内，所有行的控制拓扑、供数拓扑、effect 次序、ABI 相同，循环界限和资源尺寸可以随行变化。比较驻留和流式、单缓冲和双缓冲等拓扑，用派生编译器编译同一输入，各自独立测量。runtime 不在拓扑间试跑。
 
-**行间差异的限度。** 可改变每实例行数、片段宽度、循环步长及原生 launch 选项；所有行共享控制拓扑、effect 次序和 ABI。例如，单片段驻留组要求对每个有效行满足 `N <= width`；流式组的所有行允许有界循环。第一版不在一张表中放“额外一次 launch”“换算法”或任意多份完整 IR。需要另一种拓扑时，由 typed 策略按当前上下文选择另一组；agent 可派生编译器比较两种策略。不会为每个行组合重走一遍 KIR → block → dsa。DSA 直接将参数化 Block 转为参数化供数结构，目标原生特化仍归下游。
+**动态宽度。** 例如驻留实现依赖 `512 < N <= 1024`、内轴 stride 为 1，编译缓存键记录这个上界类和该 stride 类。N=600 和 1000 可共享编译结果，仍按各自 N 裁边；N=1025 或 stride 改变必须重新分类。开放宽度保留合法的流式实现，它的键只记录实际依赖的条件。N=0 时屏蔽所有列访问；输出也是空域可免启动，有非空的归约输出则写 identity 并执行作者 epilogue。guard 失败不会给已有产物传入越界实参；若目标没有适用行，诊断包含被拒行与条件。
 
-**形状与失败。** 实参的逻辑维度仍是动态 SSA。若选择驻留路径必须知道 N 的上界，prepare 可产生可验证的 shape 类（如 N 在 513–1024）；该约束进入编译输入或显式 specialization 及缓存键。未绑定上界时选择合法的流式组。守卫失败的配置不得发射用户调用；合法行皆为空时给出失败事实与范围。用户替换整组候选仍过相同的合法性检查。不得进行无界 sweep 或自由拼列。
-
-**检查点切片（语义示意，尚非解析器语法）。** 下列是驻留组的一份程序。行参数在原生特化时是常量，R、N、offset 和 strides 仍取本次绑定。第二阶段的 max 和 sum 各有自己的有效域，不能把用于 max 的填充值直接计入 sum。
+**驻留行归约的检查点示意。** 下面只列共享表示的列。对同一组行，Triton 自己持有的原生载荷可分别为四个 warp 和八个 warp；另一个出口只需提供自己的整行及公共投影。
 
 ```text
-config domain C     r0=(rows:1,width:1024,warps:4,stages:1)
-                    r1=(rows:2,width:1024,warps:8,stages:1)
-instance domain     [0, ceildiv(R, C.rows))
-row, col            pid * C.rows + range(C.rows), range(C.width)
-active              (row < R) and (col < N)                 // outer product
-v                   read(x, offset + row*s0 + col*s1, active) → f32 fragment
-peak                reduce.max_num(v, over=col, valid=active, identity=-inf)
-w                   exp(v - broadcast_col(peak)) on active members
-total               reduce.add(w, over=col, valid=active, identity=0)
-write               y[row,col] = narrow_f16(w / broadcast_col(total)) on active
+public rows     r0=(rows:1,width:1024), r1=(rows:2,width:1024)
+grid            ceildiv(R, row.rows)
+coordinates     i = pid * row.rows + range(row.rows), j = range(row.width)
+members         (i < R) & (j < N)
+v               read_f32(x, offset + i*s0 + j*s1, members)
+peak            max_num(v, axis=j, valid=members, identity=-inf)
+w               exp(v - broadcast(peak)) on members
+total           sum(w, axis=j, valid=members, identity=0)
+output          write_f16(y, i, j, w / broadcast(total), valid=members)
 ```
 
-例如选择 r1 且 R=3、N=1000，grid 为 2，最后一实例只有一行可写。将相同 row id 投影为两组分离的调用参数：编译器消费 `ROWS=2, WIDTH=1024`，Triton 消费 `num_warps=8, num_stages=1`。artifact 对同一 row id 引用这两组值；不允许单独覆盖某个投影然后沿用旧 grid 或旧 winner。
+## 两行从 Block 到 DSA 与 BANG C
 
-### 两个首路线 kernel 如何消费同一份知识
+以独立输入/输出的 f32 逐元素 `y=x+c` 为例，M=3、N=1100，内轴连续。block 选择按行组归属、沿列流式的同一循环。已兑现的片段为 `f32[R,W]`，grid 为 `ceildiv(M,R)`，每次活跃域为该片段与实际行列域的交集。A、B 是贯穿三层的两行；另列 C 说明剔除位置。没有为行复制 KIR 或重新规划实例归属。
 
-稳定 softmax 的驻留路径：实例覆盖 r 行 → masked read 并升到 f32 → 沿列求 max_num → 同一片段计算 exp、sum → masked write 并窄化。一条流式路径可以重读输入，按原式分别求最大值、分母、输出；填充成员必须从 sum/max 的成员集中消失或使用相应 identity。它不能仅凭“适用流式”改成需要额外数值许可的在线合并。RMSNorm 复用同一行映射、tail 和驻留/重读分析，但计算是 sum-of-squares，再乘运行时 inv_c、加 eps、rsqrt、乘权并写回。两者均由结构识别；gain 的列广播和别名约束是 RMSNorm 的额外输入事实。
+`dsa@formed` 选择一种供数拓扑：两个交替的输入槽和一个输出槽，每槽容量 `F=align_up(4*R*W,128)` 字节。为便于核算，假定本例抽象存储映射到一类物理空间，容量 24 KiB，SDK 保留 4 KiB，本次供数预算 16 KiB，有效上限为 min(20,16) KiB。这些数是设计示例。表中区间单位为 KiB，均相对本实例的私有基址。
+
+| 行与 Block 覆盖 | DSA 分配及结果 | BANG C 物化 |
+|---|---|---|
+| A：R=1、W=512；3 个实例，各遍历 3 块 | F=2；输入 [0,2)、[2,4)，输出 [4,6)，峰值 6 | 在 bound 核对真实空间、对齐和 primitive 需求，legal 绑定为 NRAM 对应区间；原生按 A 的尺寸发射搬运、计算与等待 |
+| B：R=2、W=512；2 个实例，各遍历 3 块；末实例 1 行有效 | F=4；输入 [0,4)、[4,8)，输出 [8,12)，峰值 12 | 同一供数程序按 B 的尺寸绑定，末块按源及目标行距逐行搬运/写回 76 列，末实例只访问一行 |
+| C（剔除示例）：R=2、W=1024；Block 流式遍历合法 | F=8，三槽需 24，超过 16。单输入槽加一输出槽虽只需 16，却会改变供数与等待拓扑。DSA 在 formed 拒绝整行，记录行 ID、所需容量、预算与原因 | supplied 及 bangc 都只收到 A、B |
+
+**两行的等待证明。** 在 `dsa@supplied`，每个实例、每个有效块 k 都执行相同的事件图。覆盖输入槽 `k%2` 之前，若 k≥2，等 `compute_done(k−2)`；计算 k 前等 `read_done(k)`，若 k>0，还等 `write_done(k−1)` 释放唯一的输出槽；写回 k 前等 `compute_done(k)`。因此读下一块可与当前计算重叠。尾声等最后一次写回再复用或释放空间，零块不发事件；序言不等尚未产生的事件。A、B 的 k 均为 0、1、2，最后一次预取和写回都裁到 76 列。bangc 将每条依赖映射到相应的原生完成点；若目标不支持已选搬运或等待，记录能力缺失，不能私自切换为另一供数拓扑。
+
+**剔除归属。** 控制拓扑不符归 block@decided，供数拓扑或其预算不符归 dsa@formed。仅到 bangc@bound 才知道的物理对齐、原生 scratch 等不满足时，由出口剔除该行并记录实际约束。任何一级过滤到零行都在该处报告失败；runtime 只接收全部检查通过的行。
+
+## 两个首路线 kernel 如何消费同一份知识
+
+稳定 softmax 的驻留路径：实例覆盖 r 行 → masked read 并升到 f32 → 沿列求 max_num → 同一片段计算 exp、sum → masked write 并窄化。一条流式路径可以重读输入，按原式分别求最大值、分母、输出；物理尾部的伪成员必须从 sum/max 中排除或使用各自的 identity；作者逻辑域内的 fill 继续参与计算。它不能仅凭“适用流式”改成需要额外数值许可的在线合并。RMSNorm 复用同一行映射、tail 和驻留/重读分析，但计算是 sum-of-squares，再乘运行时 inv_c、加 eps、rsqrt、乘权并写回。两者均由结构识别；gain 的列广播和别名约束是 RMSNorm 的额外输入事实。
 
 ## Triton 出口
 
 **能力合同。** 本机调用解析设备 ordinal、架构、warp 事实、每块资源上限、工具链版本和所需特性。未探测到的可选能力为 unknown；不得填入另一代 GPU 的数值。上限、调用预算和 pass 的估算分别记录。经验表不以实时 SM 空闲率、可用显存或历史赢家作为硬件事实。链接时无设备的声明查询与真实调用时绑定快照应可区分。
 
-**表的形式。** 下表演示两项独立登记如何服务同一个“列连续、f32 累加、最多 1024 列、行内驻留”的结构；元组顺序为 (rows_per_instance, width, num_warps, num_stages)。这些是待评审的初始行，未声称达到目标性能。
+**表的形式。** 下表演示两项独立登记如何服务同一个“列连续、f32 累加、最多 1024 列、行内驻留”的结构；元组顺序为 (rows_per_instance, width, num_warps, num_stages)。这些行只用于说明公共投影与私有载荷的对应。
 
 | 目标键 | 完整候选（示意） | 共同核验 |
 |---|---|---|
