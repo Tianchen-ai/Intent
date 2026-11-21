@@ -151,6 +151,7 @@ class Call:
         from copy import copy
         self.compile()
         row = copy(self)
+        row._forced = True
         row.selected=self.candidates[row_id]
         return row
 
@@ -161,7 +162,7 @@ class Call:
             r["id"]: self.timings.get(r["id"], []) for r in self.artifact.data["rows"]
         }
         return selection(
-            self.artifact, self.selected[0]["id"] if self.selected else None, times
+            self, self.selected[0]["id"] if self.selected else None, times
         )
 
     def result(self):

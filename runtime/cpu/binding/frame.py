@@ -141,6 +141,7 @@ class HostVariants:
         if not 0 <= row_id < len(self.entries):
             raise ValueError("unknown CPU row")
         row=copy(self)
+        row._forced = True
         row.selected=row.entries[row_id]
         row.winner=row_id
         return row
@@ -148,7 +149,7 @@ class HostVariants:
     def tuning_report(self):
         from runtime.kir.binding.selection import selection
 
-        return selection(self.artifact, self.winner, self.timings)
+        return selection(self, self.winner, self.timings)
 
     def compilation_report(self):
         self.compile()

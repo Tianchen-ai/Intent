@@ -2,7 +2,8 @@
 import hashlib
 
 
-def selection(artifact, winner, trials_us):
+def selection(call, winner, trials_us):
+    artifact = call.artifact
     encoded = artifact.emitted
     identity = {}
     if artifact.receipt is not None:
@@ -12,6 +13,7 @@ def selection(artifact, winner, trials_us):
             identity["package_sha256"] = header["package_sha256"]
         identity["structures"] = {d["family"]: d["structure"] for d in header["decisions"]}
         identity["row_id"] = winner
+        identity["row_selection"] = "forced" if getattr(call, "_forced", False) else "automatic"
     return {
         "runtime_identity": identity,
         "winner_row_id": winner,

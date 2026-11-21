@@ -127,6 +127,7 @@ class Prepared:
         from copy import copy
         self.compile()
         row = copy(self)
+        row._forced = True
         row.row=next((r for r in self.rows if r["id"]==row_id), None)
         if row.row is None:
             raise ValueError("unknown Triton row")
@@ -136,7 +137,7 @@ class Prepared:
         from runtime.kir.binding.selection import selection
 
         return selection(
-            self.artifact, self.row["id"] if self.row else None, self.timings
+            self, self.row["id"] if self.row else None, self.timings
         )
 
     def result(self):

@@ -135,6 +135,7 @@ class Call:
         from copy import copy
         self.compile()
         row=copy(self)
+        row._forced = True
         row.selected=next((r for r in row.artifact.data["rows"] if r["id"]==row_id),None)
         if row.selected is None:raise ValueError("unknown BANG C row")
         return row
@@ -143,7 +144,7 @@ class Call:
         from runtime.kir.binding.selection import selection
 
         return selection(
-            self.artifact,
+            self,
             self.selected["id"] if self.selected else None,
             self.timings,
         )
