@@ -1,3 +1,4 @@
+#include "intentdsl/levels/execution/block/ir/Access.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/exits/triton/ir/Dialect.h"
 #include "mlir/Pass/Pass.h"
@@ -18,6 +19,8 @@ struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
       auto args = op->getOperands();
       if (code == "load" || code == "store") {
         OperationState offset(op->getLoc(), "triton_src.offsets");
+        auto axes=*intentdsl::block::projection(args.front().getType());
+        offset.addAttribute("matrix",b.getBoolAttr(axes==intentdsl::block::RowProjection::Matrix));
         offset.addOperands(args.take_front(3));
         offset.addTypes(RankedTensorType::get(
             {ShapedType::kDynamic, ShapedType::kDynamic}, b.getIndexType()));

@@ -75,6 +75,15 @@
         "realized",
         "callable"
       ]
+    },
+    {
+      "name": "cutile",
+      "at": "block@normalized",
+      "description": "CUDA Tile Python array programs",
+      "boundaries": [
+        "legal",
+        "callable"
+      ]
     }
   ],
   "runtimes": [
@@ -83,7 +92,8 @@
     "block",
     "triton",
     "weft",
-    "mojo"
+    "mojo",
+    "cutile"
   ],
   "frontend": {
     "language": "python",

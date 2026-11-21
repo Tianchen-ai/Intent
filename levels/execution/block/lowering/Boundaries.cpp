@@ -1,3 +1,4 @@
+#include "intentdsl/levels/execution/block/ir/Access.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/RowSemantics.h"
 #include "intentdsl/levels/execution/block/decisions/Verify.h"
@@ -98,6 +99,7 @@ void bind(Unit &unit) {
               if (op->getName().getDialectNamespace() != "block")
                 return WalkResult::interrupt();
               auto n = op->getName().stripDialect();
+              if (phase=="normalized" && (n=="load" || n=="store") && failed(intentdsl::block::verifyRowAccess(op)))return WalkResult::interrupt();
               bool logical = n == "parallel" || n == "end" || n == "read" ||
                              n == "write" || n == "sum" || n == "max_num";
               if (ready && logical)

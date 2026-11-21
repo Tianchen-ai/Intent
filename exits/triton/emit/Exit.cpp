@@ -1,3 +1,4 @@
+#include "intentdsl/levels/execution/block/ir/Access.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/execution/block/decisions/Verify.h"
 #include "intentdsl/exits/triton/ir/Dialect.h"
@@ -90,7 +91,7 @@ public:
       else if (n == "active")
         e = "(" + arg(1) + "[:, None] < M) & (" + arg(2) + "[None, :] < N)";
       else if (n == "offsets") {
-        auto rank = cast<MemRefType>(op.getOperand(0).getType()).getRank();
+        auto rank = op.getAttrOfType<BoolAttr>("matrix").getValue() ? 2 : 1;
         auto base = rank == 2 ? arg(1) + "[:, None] * " + arg(0) + "_s0"
                               : "tl.full((ROWS, 1), 0, tl.int64)";
         e = base + " + " + arg(2) + "[None, :] * " + arg(0) + "_s" +
@@ -229,7 +230,7 @@ void bind(Unit &unit) {
               if (ns=="triton_src") {
                 auto name=op->getName().stripDialect();
                 auto matches=[&](unsigned i,StringRef opName){auto *v=op->getOperand(i).getDefiningOp();return v && v->getName().getStringRef()==opName;};
-                if(name=="offsets") valid &= matches(1,"triton_src.rows") && matches(2,"triton_src.columns");
+                if(name=="offsets"){auto axes=intentdsl::block::projection(op->getOperand(0).getType());valid &= succeeded(axes) && op->getAttrOfType<BoolAttr>("matrix").getValue()==(*axes==intentdsl::block::RowProjection::Matrix) && matches(1,"triton_src.rows") && matches(2,"triton_src.columns");}
                 if(name=="neutralize"){auto a=op->getAttrOfType<StringAttr>("algebra"); valid &= a=="sum" || a=="max_num";}
                 if(name=="reduce") valid &= matches(0,"triton_src.neutralize") && op->getOperand(0).getDefiningOp()->getAttr("algebra")==op->getAttr("algebra");
               }

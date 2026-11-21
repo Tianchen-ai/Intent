@@ -23,7 +23,7 @@ def Itsrc_active : Inst<"active"> {
   let results = (outs AnyType:$result);
 }
 def Itsrc_offsets : Inst<"offsets"> {
-  let arguments = (ins AnyMemRef:$view, AnyTensor:$rows, AnyTensor:$columns);
+  let arguments = (ins AnyMemRef:$view, AnyTensor:$rows, AnyTensor:$columns, BoolAttr:$matrix);
   let results = (outs AnyTensor:$result);
 }
 def Itsrc_load : Inst<"load"> {

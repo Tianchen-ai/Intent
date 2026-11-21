@@ -1,3 +1,4 @@
+#include "intentdsl/levels/execution/block/ir/Access.h"
 #include "intentdsl/levels/execution/block/decisions/Verify.h"
 #include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -80,4 +81,18 @@ LogicalResult verifyMapping(ModuleOp m,const compilerinfra::TargetProfile &p,Str
   if(pids!=1 || rowMaps!=1 || ((topology=="stream")!=(sweeps!=0)))return f.emitError("instance mapping does not match topology");
   return success();
 }
+}
+
+mlir::LogicalResult intentdsl::block::verifyRowAccess(mlir::Operation *op){
+  auto view=op->getOperand(0);
+  auto axes=projection(view.getType());
+  if(failed(axes))return op->emitError("expected a column or matrix row view");
+  auto store=op->getName().stripDialect()=="store";
+  if(store && *axes!=RowProjection::Matrix)return op->emitError("unique row writes require both axes");
+  auto tile=mlir::dyn_cast<mlir::RankedTensorType>(store?op->getOperand(4).getType():op->getResult(0).getType());
+  auto mask=op->getOperand(3).getDefiningOp();
+  if(!tile || tile.getRank()!=2 || tile.getElementType()!=mlir::cast<mlir::MemRefType>(view.getType()).getElementType() ||
+      !mask || mask->getName().getStringRef()!="block.active" || mask->getOperand(1)!=op->getOperand(1) || mask->getOperand(2)!=op->getOperand(2))
+    return op->emitError("projected view, fragment or row validity domain differs");
+  return mlir::success();
 }
