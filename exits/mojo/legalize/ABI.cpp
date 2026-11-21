@@ -43,14 +43,16 @@ LogicalResult verifyLoops(ModuleOp m, const TargetProfile &p, bool callable) {
     auto w = s.getAttrOfType<IntegerAttr>("width").getInt();
     bool tail = full != nullptr;
     bool copy = s.getAttrOfType<StringAttr>("range")=="copy";
+    bool owners = s.getAttrOfType<StringAttr>("range")=="owners";
+    if(owners && (!store || full || w!=1 || !fn->hasAttr("kir.owner_axis")))return s.emitError("invalid owner publication");
     if(copy && (!store || !llvm::hasSingleElement(task.getRegion(0).front().without_terminator())))
       return s.emitError("a linear copy must cover the whole task");
-    if ((!store && alg != "max_num" && alg != "sum") ||
-        (!copy && s.getAttrOfType<StringAttr>("range") != (tail ? "tail" : "full")) ||
-        w != (copy || tail ? 1 : lanes.getInt()) ||
+    if ((!store && alg != "max_num" && alg != "sum" && alg!="welford") ||
+        (!copy && !owners && s.getAttrOfType<StringAttr>("range") != (tail ? "tail" : "full")) ||
+        w != (owners || copy || tail ? 1 : lanes.getInt()) ||
         s.getNumResults() != unsigned(!store) ||
         s.getNumOperands() != unsigned(tail && !store) ||
-        (!store && !s.getResult(0).getType().isF32()) ||
+        (!store && !(alg=="welford"?isa<TupleType>(s.getResult(0).getType()):s.getResult(0).getType().isF32())) ||
         (tail && (alg != full->getAttr("algebra") ||
                   (!store && s.getOperand(0) != full->getResult(0)))))
       return s.emitError("invalid full sweep or scalar tail continuation");
@@ -65,7 +67,15 @@ LogicalResult verifyLoops(ModuleOp m, const TargetProfile &p, bool callable) {
     unsigned writes = 0;
     for (auto &op : bb.without_terminator()) {
       auto code = op.getName().getStringRef();
-      if (code == "mojo_row.read" || code == "mojo_row.write") {
+      if(code=="mojo_row.owner_read" || code=="mojo_row.owner_write"){
+        bool write=code=="mojo_row.owner_write";
+        auto view=cast<MemRefType>(op.getOperand(0).getType());
+        auto val=write?op.getOperand(2):op.getResult(0);
+        if((write && !owners) || !fn->hasAttr("kir.owner_axis") || view.getRank()!=1 ||
+           view.getElementType()!=val.getType() || op.getOperand(1)!=task.getRegion(0).front().getArgument(0))
+          return op.emitError("invalid task-owned scalar view");
+        writes+=write;
+      } else if (code == "mojo_row.read" || code == "mojo_row.write") {
         bool write = code == "mojo_row.write";
         writes += write;
         auto view = cast<MemRefType>(op.getOperand(0).getType());
@@ -85,7 +95,7 @@ LogicalResult verifyLoops(ModuleOp m, const TargetProfile &p, bool callable) {
                          .Case("select", 3)
                          .Case("sqrt", 1)
                          .Case("maximum", 2)
-                         .Case("constant", 0)
+                         .Case("field", 1).Case("constant", 0)
                          .Default(-1);
         if (k == "uniform" && op.getNumOperands() == 2) {
           auto position = dyn_cast<VectorType>(op.getOperand(1).getType());
@@ -115,7 +125,7 @@ LogicalResult verifyLoops(ModuleOp m, const TargetProfile &p, bool callable) {
          cast<MemRefType>(write->getOperand(0).getType()).getRank()!=2)
         return s.emitError("expected a typed matrix read followed by its matching write");
     }
-    full = tail || copy ? nullptr : &s;
+    full = tail || copy || owners ? nullptr : &s;
   }
   if (full)
     return full->emitError("missing matching tail sweep");

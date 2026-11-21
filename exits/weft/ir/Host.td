@@ -16,7 +16,7 @@ def DispatchRows : Op<WeftHost_Dialect, "dispatch_rows", [IsolatedFromAbove, Sin
 
 def PanelSweep : Op<WeftHost_Dialect, "sweep", [SingleBlock]> {
   let arguments=(ins StrAttr:$combine, StrAttr:$tail);
-  let results=(outs Variadic<F32>:$summary);
+  let results=(outs Variadic<AnyType>:$summary);
   let regions=(region AnyRegion:$panels);
 }
 def PanelRead : Op<WeftHost_Dialect,"read_panel"> {
@@ -27,5 +27,5 @@ def PanelWrite : Op<WeftHost_Dialect,"write_panel"> {
   let arguments=(ins AnyMemRef:$dest,Index:$row,Index:$offset,Index:$extent,AnyTensor:$value);
 }
 def PanelYield : Op<WeftHost_Dialect,"yield",[Terminator]> {
-  let arguments=(ins Variadic<F32>:$partial);
+  let arguments=(ins Variadic<AnyType>:$partial);
 }

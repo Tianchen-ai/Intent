@@ -43,27 +43,29 @@ public:
     SmallVector<Operation *> old;
     for (auto &op : task.without_terminator())
       old.push_back(&op);
-    SmallVector<Operation *> writes;
+    SmallVector<Operation *> writes, owned;
     for (auto *op : old)
       if (op->getName().stripDialect() == "write")
         writes.push_back(op);
+      else if(op->getName().stripDialect()=="write_owner") owned.push_back(op);
     auto ordered = old;
     std::stable_partition(ordered.begin(), ordered.end(), [](Operation *op) {
       return op->getName().stripDialect() != "write";
     });
     for (auto *op : ordered) {
       auto name = op->getName().stripDialect();
-      bool store = name == "write";
-      if (store && op != writes.front())
+      bool publish=name=="write_owner";
+      bool store = name == "write" || publish;
+      if (store && op != (publish?owned:writes).front())
         continue;
-      if (!store && name != "sum" && name != "max_num")
+      if (!store && name != "sum" && name != "max_num" && name!="welford")
         continue;
       b.setInsertionPoint(&task.back());
       OperationState s(op->getLoc(), "weft_host.sweep");
       s.addAttribute("tail", b.getStringAttr("scalar"));
-      s.addAttribute("combine", b.getStringAttr(store ? "store" : name));
+      s.addAttribute("combine", b.getStringAttr(publish ? "publish" : store ? "store" : name));
       if (!store)
-        s.addTypes(b.getF32Type());
+        s.addTypes(op->getResult(0).getType());
       s.addRegion();
       auto *sweep = b.create(s);
       auto &body = sweep->getRegion(0).emplaceBlock();
@@ -72,9 +74,14 @@ public:
       b.setInsertionPointToEnd(&body);
       panel.clear();
       if (store) {
-        for (auto *w : writes)
+        auto &dest=publish?owned:writes;
+        for (auto *w : dest)
           local(w->getOperand(2));
-        for (auto *w : writes) {
+        for (auto *w : dest) {
+          if(publish){
+            make("cpu.write_owner",{w->getOperand(0),task.getArgument(0),local(w->getOperand(2))},{});
+            continue;
+          }
           auto *dst = make("weft_host.write_panel",
                            {w->getOperand(0), task.getArgument(0), offset,
                             extent, local(w->getOperand(2))},
@@ -84,7 +91,7 @@ public:
         }
         make("weft_host.yield", {}, {});
       } else {
-        auto partial = local(op->getResult(0));
+        auto partial = name=="welford"?local(op->getOperand(0)):local(op->getResult(0));
         make("weft_host.yield", partial, {});
         summaries.map(op->getResult(0), sweep->getResult(0));
       }
@@ -105,8 +112,8 @@ LogicalResult verifyPanels(Operation *dispatch) {
     if (s.getAttrOfType<StringAttr>("tail") != "scalar")
       return s.emitError("expected scalar remainder after full column blocks");
     auto kind = s.getAttrOfType<StringAttr>("combine");
-    bool store = kind == "store";
-    if ((!store && kind != "max_num" && kind != "sum") ||
+    bool store = kind == "store" || kind=="publish";
+    if ((!store && kind != "max_num" && kind != "sum" && kind!="welford") ||
         s.getNumResults() != unsigned(!store))
       return s.emitError("invalid sweep combine");
     auto &bb = s.getRegion(0).front();
@@ -129,6 +136,10 @@ LogicalResult verifyPanels(Operation *dispatch) {
                 RankedTensorType::get({ShapedType::kDynamic},
                                       view.getElementType()))
           return op.emitError("panel access does not cover the active members");
+      } else if(n=="write_owner") {
+        if(kind!="publish" || op.getOperand(1)!=body.getArgument(0))
+          return op.emitError("owner write outside publication");
+        ++writes;
       } else if (op.getName().getDialectNamespace() != "cpu" || n == "read" ||
                  n == "write" || n == "parallel" || n == "task" || n == "join")
         return op.emitError("unexpected instruction inside Weft panel");
@@ -138,7 +149,8 @@ LogicalResult verifyPanels(Operation *dispatch) {
     if (!store) {
       auto *local = bb.back().getOperand(0).getDefiningOp();
       if (!local || local->getBlock() != &bb ||
-          local->getName().stripDialect() != kind.getValue())
+          (kind=="welford" ? !isa<RankedTensorType>(bb.back().getOperand(0).getType()) :
+          local->getName().stripDialect() != kind.getValue()))
         return s.emitError("panel and cross-panel combine differ");
     }
   }

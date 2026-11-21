@@ -17,7 +17,7 @@ class Columns {
   IRMapping reduced, tile;
   Value col;
   int64_t width;
-  SmallVector<Operation *> stores;
+  SmallVector<Operation *> stores, ownerStores;
   Operation *make(StringRef name, ValueRange args, TypeRange types,
                   ArrayRef<NamedAttribute> attrs = {}) {
     OperationState s(loc, ("mojo_row." + name).str());
@@ -39,7 +39,9 @@ class Columns {
     if (auto ranked = dyn_cast<RankedTensorType>(t))
       t = VectorType::get({width}, ranked.getElementType());
     Value result;
-    if (n == "ordinal") {
+    if(n=="read_owner")
+      result=make("owner_read",op->getOperands(),t)->getResult(0);
+    else if (n == "ordinal") {
       result = make("apply", {task->getRegion(0).front().getArgument(0), col},
                     t, b.getNamedAttr("kind", b.getStringAttr("ordinal")))
                    ->getResult(0);
@@ -59,6 +61,7 @@ class Columns {
     }
     if (auto c = op->getAttr("value"))
       result.getDefiningOp()->setAttr("value", c);
+    if(auto pos=op->getAttr("position")) result.getDefiningOp()->setAttr("position",pos);
     tile.map(v, result);
     return result;
   }
@@ -66,12 +69,14 @@ class Columns {
     OpBuilder::InsertionGuard restore(b);
     width = lanes;
     tile.clear();
-    bool store = op->getName().stripDialect() == "write";
+    auto code=op->getName().stripDialect();
+    bool owned=code=="write_owner";
+    bool store = code=="write" || owned;
     OperationState s(loc, "mojo_row.sweep");
     if (prev)
       s.addOperands(prev);
     if (!store)
-      s.addTypes(b.getF32Type());
+      s.addTypes(op->getResult(0).getType());
     s.addAttribute("width", b.getI64IntegerAttr(width));
     s.addAttribute("range", b.getStringAttr(range));
     s.addAttribute(
@@ -83,10 +88,12 @@ class Columns {
     col = bb.addArgument(b.getIndexType(), loc);
     b.setInsertionPointToEnd(&bb);
     if (store) {
-      for (auto *w : stores)
+      auto &writes=owned?ownerStores:stores;
+      for (auto *w : writes)
         expression(w->getOperand(2));
-      for (auto *w : stores)
-        make("write",
+      for (auto *w : writes)
+        if(owned) make("owner_write",{w->getOperand(0),w->getOperand(1),expression(w->getOperand(2))},{});
+        else make("write",
              {w->getOperand(0), w->getOperand(1), col,
               expression(w->getOperand(2))},
              {}, w->getAttrs());
@@ -115,16 +122,18 @@ public:
     for (auto *op : original)
       if (op->getName().stripDialect() == "write")
         stores.push_back(op);
+      else if(op->getName().stripDialect()=="write_owner") ownerStores.push_back(op);
     b.setInsertionPoint(&bb.back());
     auto ordered = original;
     std::stable_partition(ordered.begin(), ordered.end(), [](Operation *op) {
-      return op->getName().stripDialect() != "write";
+      auto n=op->getName().stripDialect();return n!="write" && n!="write_owner";
     });
     for (auto *op : ordered) {
       auto n = op->getName().stripDialect();
       if (n == "write" && op != stores.front())
         continue;
-      if (n != "sum" && n != "max_num" && n != "write")
+      if(n=="write_owner") continue;
+      if (n != "sum" && n != "max_num" && n!="welford" && n != "write")
         continue;
       if (storeInterval(original,op)) {
         sweep(op,"copy",{},1);
@@ -135,6 +144,7 @@ public:
       if (done)
         reduced.map(op->getResult(0), done);
     }
+    if(!ownerStores.empty())sweep(ownerStores.front(),"owners",{},1);
     for (auto *op : llvm::reverse(original))
       op->erase();
     task->setAttr("mojo_row.schedule", b.getStringAttr("static-row-groups"));

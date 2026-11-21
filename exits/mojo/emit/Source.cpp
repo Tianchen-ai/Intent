@@ -70,6 +70,7 @@ public:
       if (loop.getName().getStringRef() != "mojo_row.sweep")
         return llvm::createStringError("Mojo requires realized sweeps");
       bool tail = loop.getAttrOfType<StringAttr>("range") == "tail";
+      bool owners = loop.getAttrOfType<StringAttr>("range") == "owners";
       if(loop.getAttrOfType<StringAttr>("range")=="copy"){
         auto &read=loop.getRegion(0).front().front();auto &write=*read.getNextNode();
         auto address=[&](Operation &access){
@@ -86,16 +87,20 @@ public:
       auto lanes =
           std::to_string(loop.getAttrOfType<IntegerAttr>("width").getInt());
       std::string result = temp(), acc = result + "_acc";
-      if (reduction)
+      bool moments=kind=="welford";
+      if(moments){
+        line(2,"var "+acc+" = "+(tail?var(loop.getOperand(0)):"(Int32(0), Float32(0), Float32(0))"));
+      } else if (reduction)
         line(2, "var " + acc + " = SIMD[DType.float32, " + lanes + "](" +
                     (sum ? "0.0" : "-inf[DType.float32]()") + ")");
       std::string stop = "Int(cols)//" + std::to_string(fullWidth) + "*" +
                          std::to_string(fullWidth);
-      if (!tail) {
+      if (!tail && !owners) {
         line(2, "for base in range(0, " + stop + ", Int(columns_per_block)):");
         depth = 1;
       }
-      line(2, "for j in range(" +
+      if(owners)line(2,"for j in range(1):");
+      else line(2, "for j in range(" +
                   (tail ? stop + ", Int(cols), 1"
                         : "base, min(base + Int(columns_per_block), " + stop +
                               "), " + lanes) +
@@ -107,10 +112,22 @@ public:
         auto arg = [&](unsigned i) { return var(op.getOperand(i)); };
         auto lhs = temp();
         if (code == "yield") {
-          if (reduction)
+          if(moments){
+            line(3,"comptime for lane in range("+lanes+"):");
+            line(4,"var total = "+acc+"[0]+1");
+            line(4,"var delta = "+arg(0)+"[lane]-"+acc+"[1]");
+            line(4,"var correction = delta/Float32(total)");
+            line(4,"if "+acc+"[0] == 0:");
+            line(5,acc+" = (total,"+arg(0)+"[lane], Float32(0))");
+            line(4,"else:");
+            line(5,acc+" = (total, "+acc+"[1]+correction, "+acc+"[2]+delta*Float32("+acc+"[0])*correction)");
+          } else if (reduction)
             line(3, acc + " = " +
                         (sum ? acc + " + " + arg(0)
                              : "max(" + acc + "," + arg(0) + ")"));
+        } else if(code=="owner_read" || code=="owner_write"){
+          auto address=arg(0)+"[unsafe_offset=r*Int("+arg(0)+"s0)]";
+          line(3,code=="owner_read"?"var "+lhs+" = "+address:address+" = "+arg(2));
         } else if (code == "read" || code == "write") {
           auto view = cast<MemRefType>(op.getOperand(0).getType());
           bool matrix = view.getRank() == 2;
@@ -120,6 +137,23 @@ public:
           auto offset =
               (matrix ? "r*Int(" + a + (swap ? "s1)+" : "s0)+") : "") +
               std::string("j*") + stride;
+          if(auto axis=fn->getAttrOfType<IntegerAttr>("kir.owner_axis")){
+            int rank=view.getRank(), owner=axis.getInt();
+            std::string index="(j+lane)", relative="r*Int("+a+"s"+std::to_string(owner)+")";
+            std::string last="Int(cols)";
+            for(int i=0;i+1<rank;++i)if(i!=owner)last+="//Int("+a+"d"+std::to_string(i)+")";
+            for(int i=rank-1;i>=0;--i)if(i!=owner){
+              auto size=i==rank-1?"("+last+")":"Int("+a+"d"+std::to_string(i)+")";
+              relative+="+("+index+"%"+size+")*Int("+a+"s"+std::to_string(i)+")";
+              index="("+index+"//"+size+")";
+            }
+            auto address=a+"[unsafe_offset="+relative+"]";
+            if(code=="read")line(3,"var "+lhs+" = SIMD[DType."+dtype(view.getElementType())+","+lanes+"](0)");
+            line(3,"comptime for lane in range("+lanes+"):");
+            line(4,code=="read"?lhs+"[lane] = "+address:address+" = "+arg(3)+"[lane]");
+            if(code=="read")vars[op.getResult(0)]=lhs;
+            continue;
+          }
           if(view.getRank()>2){
             stride="Int("+a+"s"+std::to_string(view.getRank()-1)+")";
             offset="j*"+stride;
@@ -166,7 +200,8 @@ public:
             vars[op.getResult(0)] = lhs;
             continue;
           }
-          if (opKind == "uniform")
+          if(opKind=="field")expr=arg(0)+"["+std::to_string(op.getAttrOfType<IntegerAttr>("position").getInt())+"]";
+          else if (opKind == "uniform")
             expr = "uniform_at[" + lanes + "](" + arg(0) + "," + arg(1) + ")";
           else if (opKind == "select") {
             auto t = "SIMD[DType." + dtype(op.getResult(0).getType()) + "," +
@@ -230,6 +265,7 @@ public:
       }
       depth = 0;
       if (reduction) {
+        if(moments){vars[loop.getResult(0)]=acc;continue;}
         auto value = acc + (sum ? ".reduce_add()" : ".reduce_max()");
         if (loop.getNumOperands())
           value = sum ? var(loop.getOperand(0)) + " + " + value

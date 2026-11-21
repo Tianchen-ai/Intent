@@ -28,6 +28,9 @@ class CanonicalTask {
   llvm::DenseMap<Value, Term> terms;
   unsigned serial = 0;
   Term origin, columns;
+  std::optional<int64_t> ownerAxis;
+  SmallVector<Term> extents;
+  llvm::DenseMap<Value,SmallVector<Term>> records;
   std::string spelling(Type t) {
     return t.isInteger(32) ? "si32" : printType(t);
   }
@@ -46,6 +49,117 @@ class CanonicalTask {
     llvm::interleaveComma(args, s, [&](auto &a) { s << a.type; });
     s << ") -> " << type << "\n";
     return {id, type};
+  }
+
+  Term uniform(Term seed, Term position, int dim) {
+    const auto vector = regionType("value", "ui64", 1, dim);
+    auto constant = [&](uint64_t value) {
+      return inst("constant", {}, "ui64", "value="+std::to_string(value)+" : ui64");
+    };
+    auto binary = [&](StringRef kind, Term lhs, Term rhs) {
+      return inst("binary", {lhs,rhs}, lhs.type, "kind=\""+kind.str()+"\"");
+    };
+    auto mask=constant(UINT32_MAX), bits=constant(32), zero=constant(0);
+    auto base=binary("shr",position,constant(2));
+    auto a=binary("and",base,mask), b=binary("shr",base,bits);
+    auto c=binary("and",base,zero), d=c;
+    auto lo=binary("and",seed,mask), hi=binary("shr",seed,bits);
+    const auto multiplierA=constant(0xd2511f53), multiplierB=constant(0xcd9e8d57);
+    const auto incrementA=constant(0x9e3779b9), incrementB=constant(0xbb67ae85);
+    for(unsigned round=0; round<10; ++round) {
+      auto left=binary("mul",a,multiplierA), right=binary("mul",c,multiplierB);
+      a=binary("xor",binary("xor",binary("shr",right,bits),b),lo);
+      c=binary("xor",binary("xor",binary("shr",left,bits),d),hi);
+      b=binary("and",right,mask);
+      d=binary("and",left,mask);
+      lo=binary("and",binary("add",lo,incrementA),mask);
+      hi=binary("and",binary("add",hi,incrementB),mask);
+    }
+    auto word=binary("and",position,constant(3));
+    for(auto [index,value]: {std::pair{2,c},std::pair{1,b},std::pair{0,a}}){
+      auto active=inst("compare",{word,constant(index)},regionType("value","i1",1,dim),"predicate=\"eq\"");
+      d=inst("select",{active,value,d},vector);
+    }
+    auto f=inst("cast",{binary("shr",d,constant(8))},regionType("value","f32",1,dim));
+    return binary("mul",f,inst("constant",{},"f32","value=0x33800000 : f32"));
+  }
+
+  // A projected task owns an interval of one tensor axis. Its scalar member
+  // coordinate ranges over the product of all remaining extents.
+  Term memberSlice(Operation &op, Term member, bool owned) {
+    auto view=op.getOperand(0);
+    auto rank=cast<MemRefType>(view.getType()).getRank();
+    SmallVector<Term> coords(rank);
+    for(int i=rank-1;i>=0;--i){
+      if(owned || i==*ownerAxis){coords[i]={"%r","index"};continue;}
+      auto size=extents[i];
+      coords[i]=inst("binary",{member,size},"index","kind=\"mod\"");
+      member=inst("binary",{member,size},"index","kind=\"div\"");
+    }
+    SmallVector<Term> args{terms.lookup(view)};
+    args.append(coords);
+    SmallVector<std::string> selectors(rank,"\"index\"");
+    auto elem=printType(cast<MemRefType>(view.getType()).getElementType());
+    return inst("slice",args,"!weft_kernel.slice<!weft_kernel.encoding<\""+elem+"\",\"dense\",\"dense."+elem+"\",[]>,[],[]>",
+                "selectors=["+llvm::join(selectors,",")+"]");
+  }
+
+  llvm::Error ownerSweep(Operation &sweep) {
+    auto kind=sweep.getAttrOfType<StringAttr>("combine");
+    bool publish=kind=="publish", moments=kind=="welford";
+    if(!publish && !moments && kind!="store")return llvm::createStringError("unsupported member sweep algebra");
+    std::string prefix="%owner"+std::to_string(serial++);
+    Term index{prefix+"_i","index"};
+    if(!publish) {
+      if(moments) s<<prefix<<":3 = ";
+      s<<"scf.for "<<index.id<<" = %lo to "<<columns.id<<" step %step";
+      if(moments)s<<" iter_args("<<prefix<<"_n = %zero_count, "<<prefix<<"_m = %zero_f, "<<prefix<<"_s = %zero_f) -> (si32,f32,f32)";
+      s<<" {\n";
+    }
+    auto &body=sweep.getRegion(0).front();
+    for(auto &op:body.without_terminator()){
+      auto n=op.getName().stripDialect();
+      if(n=="write_panel" || n=="write_owner"){
+        auto addr=memberSlice(op,index,n=="write_owner");
+        inst("commit",{terms.lookup(op.getOperands().back()),addr},"()");
+        continue;
+      }
+      auto v=op.getResult(0);
+      Type t=v.getType();if(auto vector=dyn_cast<ShapedType>(t))t=vector.getElementType();
+      auto ty=spelling(t);
+      if(n=="read_panel" || n=="read_owner"){
+        terms[v]=inst("admit",{memberSlice(op,index,n=="read_owner")},ty);
+      } else if(n=="field"){
+        auto saved=records.find(op.getOperand(0));
+        if(saved==records.end())return llvm::createStringError("unbound Weft tuple field");
+        terms[v]=saved->second[op.getAttrOfType<IntegerAttr>("position").getInt()];
+      } else if(n=="constant"){
+        std::string lit;llvm::raw_string_ostream(lit)<<op.getAttr("value");
+        terms[v]=inst("constant",{},ty,"value="+lit);
+      } else {
+        SmallVector<Term> args;
+        for(auto a:op.getOperands())args.push_back(terms.lookup(a));
+        if(n=="cast")terms[v]=inst("cast",args,ty);
+        else if(n=="rsqrt" || n=="exp" || n=="sqrt")terms[v]=inst("unary",args,ty,"kind=\""+n.str()+"\"");
+        else if(n=="mul" || n=="add" || n=="div" || n=="sub")terms[v]=inst("binary",args,ty,"kind=\""+n.str()+"\"");
+        else return llvm::createStringError("unsupported scalar member calculation "+n.str());
+      }
+    }
+    if(moments){
+      Term n{prefix+"_n","si32"},mean{prefix+"_m","f32"},m2{prefix+"_s","f32"},v=terms.lookup(body.back().getOperand(0));
+      auto bin=[&](StringRef k,Term a,Term b){return inst("binary",{a,b},a.type,"kind=\""+k.str()+"\"");};
+      auto count=bin("add",n,{"%one_count","si32"});
+      auto delta=bin("sub",v,mean), change=bin("div",delta,inst("cast",{count},"f32"));
+      auto m=bin("add",mean,change);
+      auto variance=bin("add",m2,bin("mul",bin("mul",delta,inst("cast",{n},"f32")),change));
+      auto first=inst("compare",{n,{"%zero_count","si32"}},"i1","predicate=\"eq\"");
+      m=inst("select",{first,v,m},"f32");
+      variance=inst("select",{first,{"%zero_f","f32"},variance},"f32");
+      s<<"scf.yield "<<count.id<<","<<m.id<<","<<variance.id<<" : si32,f32,f32\n";
+      records[sweep.getResult(0)]={{prefix+"#0","si32"},{prefix+"#1","f32"},{prefix+"#2","f32"}};
+    }
+    if(!publish)s<<"}\n";
+    return llvm::Error::success();
   }
 
   llvm::Error writeBody(Block &body, StringRef start, Term active,
@@ -86,11 +200,8 @@ class CanonicalTask {
         continue;
       }
       if (code == "ordinal") {
-        if (!cast<RankedTensorType>(op.getResult(0).getType())
-                 .getElementType()
-                 .isInteger(32))
-          return llvm::createStringError(
-              "Weft requires a u64 ordinal lowering for this program");
+        bool wide=cast<RankedTensorType>(op.getResult(0).getType())
+                     .getElementType().isUnsignedInteger(64);
         if (dim <= 0 || start.empty())
           return llvm::createStringError(
               "absolute lane coordinates require static panels");
@@ -99,13 +210,18 @@ class CanonicalTask {
         auto offset = inst("binary", {row, columns}, "index", "kind=\"mul\"");
         offset = inst("binary", {offset, {start.str(), "index"}}, "index",
                       "kind=\"add\"");
-        auto ix = regionType("value", "ui32", 1, dim);
-        offset = inst("cast", {offset}, "ui32");
+        auto elem=wide?"ui64":"ui32";
+        auto ix = regionType("value", elem, 1, dim);
+        offset = inst("cast", {offset}, elem);
         auto lanes = inst("iota", {}, ix,
                           "start=0:i64,end=" + std::to_string(dim) + ":i64");
         auto idx = inst("binary", {lanes, offset}, ix, "kind=\"add\"");
         terms[op.getResult(0)] =
-            inst("cast", {idx}, regionType("value", "si32", 1, dim));
+            wide ? idx : inst("cast", {idx}, regionType("value", "si32", 1, dim));
+        continue;
+      }
+      if (code=="uniform") {
+        terms[op.getResult(0)]=uniform(terms.lookup(op.getOperand(0)),terms.lookup(op.getOperand(1)),dim);
         continue;
       }
       if (code == "constant") {
@@ -167,6 +283,13 @@ class CanonicalTask {
 public:
   explicit CanonicalTask(llvm::raw_ostream &s) : s(s) {}
   llvm::Error write(Operation *task, const llvm::json::Array &abi) {
+    const bool absolute =
+        task->getAttrOfType<BoolAttr>("weft_host.absolute_origin").getValue();
+    auto fn=task->getParentOfType<func::FuncOp>();
+    int rankDomain=cast<MemRefType>(fn.getArgument(fn->getAttrOfType<IntegerAttr>("kir.domain_arg").getInt()).getType()).getRank();
+    if(auto a=fn->getAttrOfType<IntegerAttr>("kir.owner_axis"))ownerAxis=a.getInt();
+    std::string extraSymbols;
+    if(ownerAxis)for(int j=0;j<rankDomain;++j)extraSymbols+=",\"D"+std::to_string(j)+"\"";
     SmallVector<std::string> names, effects, aliases, strided, params;
     auto &bb = task->getRegion(0).front();
     for (auto [i, arg] : llvm::enumerate(bb.getArguments().drop_front())) {
@@ -176,7 +299,18 @@ public:
       int rank = std::min<size_t>(2,a->getArray("dims")->size());
       if (elem == "i32")
         elem = "si32";
+      if (elem == "u64")
+        elem = "ui64";
       auto t = rank ? regionType("view", elem, rank) : elem;
+      if(ownerAxis && rank){
+        rank=a->getArray("dims")->size();
+        SmallVector<std::string> shape,axes;
+        for(int j=0;j<rank;++j){
+          shape.push_back(j==*ownerAxis || rank==1?"-1":std::to_string(-4-absolute-j));
+          axes.push_back(std::to_string(j+1));
+        }
+        t="!weft_kernel.view<!weft_kernel.encoding<\""+elem+"\",\"dense\",\"dense."+elem+"\",[]>,["+llvm::join(shape,",")+"],["+llvm::join(axes,",")+"]>";
+      }
       terms[arg] = {"%" + n, t};
       names.push_back("\"" + n + "\"");
       params.push_back("%" + n + ": " + t);
@@ -189,14 +323,12 @@ public:
       if (rank)
         strided.push_back(names.back());
     }
-    bool absolute =
-        task->getAttrOfType<BoolAttr>("weft_host.absolute_origin").getValue();
     s << "module {\n\"weft_kernel.kernel\"() <{sym_name=\""
       << task->getAttrOfType<StringAttr>("task_symbol").getValue()
       << "\",source=\"CPU row interval\",arg_names=[" << llvm::join(names, ",")
       << "],arg_access=[" << llvm::join(effects, ",")
       << "],arg_alias_sets=array<i64:" << llvm::join(aliases, ",")
-      << ">,shape_symbols=[\"T\",\"N\",\"C\"" << (absolute ? ",\"O\"" : "")
+      << ">,shape_symbols=[\"T\",\"N\",\"C\"" << (absolute ? ",\"O\"" : "") << extraSymbols
       << "],strided_args=[" << llvm::join(strided, ",") << "]}> ({\n^bb0("
       << llvm::join(params, ",") << "):\n";
     auto extent = inst("symbol", {}, "index",
@@ -208,9 +340,19 @@ public:
     if (absolute)
       origin = inst("symbol", {}, "index",
                     "choices=array<i64>,kind=\"shape\",name=\"O\"");
+    if(ownerAxis){
+      for(int j=0;j<rankDomain;++j)
+        extents.push_back(inst("symbol",{},"index","choices=array<i64>,kind=\"shape\",name=\"D"+std::to_string(j)+"\""));
+    }
+    // Entry descriptors are materialized at the root. All ABI shape symbols
+    // used by their types must dominate that boundary.
     inst("root_domain", {},
          "!weft_kernel.domain<\"root\",0,-1,0,\"root\",\"exact\">");
     s << "%lo=arith.constant 0 : index\n%step=arith.constant 1 : index\n";
+    if(ownerAxis){
+      for(auto [name,literal,type]:{std::tuple{"zero_count","0","si32"},std::tuple{"one_count","1","si32"},std::tuple{"zero_f","0.0","f32"}})
+        s<<"%"<<name<<" = \"weft_kernel.constant\"() <{value="<<literal<<" : "<<type<<"}> : ()->"<<type<<"\n";
+    }
     bool whole = cast<DictionaryAttr>(task->getAttrOfType<ArrayAttr>("rows")[0])
                      .getAs<IntegerAttr>("columns")
                      .getInt() == 0;
@@ -232,7 +374,10 @@ public:
           inst("binary", {panelCount, panelWidth}, "index", "kind=\"mul\"");
     }
     s << "scf.for %r = %lo to " << extent.id << " step %step {\n";
-    if (whole) {
+    if(ownerAxis){
+      for(auto &sweep:bb.without_terminator())
+        if(auto error=ownerSweep(sweep))return error;
+    } else if (whole) {
       if (auto e = writeBody(bb, {}, {}))
         return e;
     } else
@@ -298,6 +443,8 @@ std::string hostSource(Operation *dispatch, const llvm::json::Array &abi) {
   auto symbol = dispatch->getAttrOfType<StringAttr>("task_symbol").str();
   SmallVector<std::string> params, args, strides;
   bool projected=llvm::any_of(slots.asArrayRef(),[](auto n){return n>2;});
+  auto owner=dispatch->getParentOfType<func::FuncOp>()->getAttrOfType<IntegerAttr>("kir.owner_axis");
+  if(owner)projected=false;
   for (auto [i, entry] : llvm::enumerate(abi)) {
     auto a = entry.getAsObject();
     auto n = "a" + std::to_string(i);
@@ -305,6 +452,7 @@ std::string hostSource(Operation *dispatch, const llvm::json::Array &abi) {
     auto type = a->getString("dtype") == "f16"    ? "_Float16"
                 : a->getString("dtype") == "bf16" ? "uint16_t"
                 : a->getString("dtype") == "i32"  ? "int32_t"
+                : a->getString("dtype") == "u64"  ? "uint64_t"
                                                   : "float";
     params.push_back(std::string(type) + (rank ? " *" : " ") + n);
     bool swap = false;
@@ -318,9 +466,10 @@ std::string hostSource(Operation *dispatch, const llvm::json::Array &abi) {
     for (size_t axis = 0; axis < rank; ++axis) {
       auto stride = n + "s" + std::to_string(axis);
       params.push_back("int64_t " + stride);
-      if(rank<=2 || axis>=rank-2)strides.push_back(swap ? n + "s" + std::to_string(1 - axis) : stride);
+      if(owner || rank<=2 || axis>=rank-2)strides.push_back(swap ? n + "s" + std::to_string(1 - axis) : stride);
     }
-    if(rank>2){
+    if(owner && rank)args.push_back(n+"+start*"+n+"s"+std::to_string(rank==1?0:owner.getInt()));
+    else if(rank>2){
       std::string row="start",offset=n;
       for(int j=rank-2;j>=0;--j){auto dim=n+"d"+std::to_string(j);offset+="+(("+row+")%"+dim+")*"+n+"s"+std::to_string(j);row="("+row+"/"+dim+")";}
       args.push_back(offset);
@@ -332,6 +481,13 @@ std::string hostSource(Operation *dispatch, const llvm::json::Array &abi) {
   args.push_back("panel ? panel : cols");
   if (dispatch->getAttrOfType<BoolAttr>("weft_host.absolute_origin").getValue())
     args.push_back("start");
+  if(owner){
+    auto domain=dispatch->getAttrOfType<IntegerAttr>("domain_arg").getInt();
+    auto rank=slots[domain]; auto base="a"+std::to_string(domain);
+    std::string last="cols";
+    for(int j=0;j<rank-1;++j)if(j!=owner.getInt())last+="/"+base+"d"+std::to_string(j);
+    for(int j=0;j<rank;++j)args.push_back(j==owner.getInt()?"count": j+1==rank?last:base+"d"+std::to_string(j));
+  }
   args.append(strides);
   auto domain=dispatch->getAttrOfType<IntegerAttr>("domain_arg").getInt();
   std::string chunk=projected?"a"+std::to_string(domain)+"d"+std::to_string(slots[domain]-2):"rows";

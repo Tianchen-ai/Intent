@@ -13,7 +13,7 @@ void registerPointwise(Unit &u,StringRef family) {
     op->walk([&](Operation *o) {
       auto n = o->getName().stripDialect();
       hasWrite |= n == "write";
-      hasSummary |= n == "sum" || n == "max_num";
+      hasSummary |= n == "sum" || n == "max_num" || n == "welford";
     });
     if (!hasWrite || hasSummary)
       return Attribute{};

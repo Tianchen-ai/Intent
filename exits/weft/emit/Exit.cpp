@@ -60,6 +60,12 @@ llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
           ? llvm::json::Array{"T", "N", "C", "O"}
           : llvm::json::Array{"T", "N", "C"};
   fields["version"] = 3;
+  if(fn->hasAttr("kir.owner_axis")){
+    auto ranks=task.getAttrOfType<DenseI64ArrayAttr>("weft_host.slot_ranks");
+    auto rank=ranks[intentdsl::domainSlot(fn)];
+    for(int i=0;i<rank;++i)fields["shape_parameters"].getAsArray()->push_back("D"+std::to_string(i));
+    fields["task_ranks"]=llvm::json::Array(ranks.asArrayRef());
+  }
   fields["domain"]=intentdsl::publishDomain(fn);
   fields["abi"] = std::move(*abi);
   fields["rows"] = std::move(rows);

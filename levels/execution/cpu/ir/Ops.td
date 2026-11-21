@@ -6,6 +6,8 @@ def Cpu_Dialect : Dialect {
 }
 class Inst<string mnemonic, list<Trait> traits = []>
     : Op<Cpu_Dialect, mnemonic, traits>;
+def CPU_WelfordOp : Inst<"welford"> { let arguments=(ins AnyRankedTensor:$samples); let results=(outs AnyTuple:$summary); }
+def CPU_FieldOp : Inst<"field"> { let arguments=(ins AnyTuple:$summary,I64Attr:$position); let results=(outs AnyType:$element); }
 def Cpu_parallel : Inst<"parallel"> {
   let arguments = (ins AnyMemRef:$domain);
   let results = (outs);
@@ -18,6 +20,12 @@ def Cpu_end : Inst<"end", [Terminator]> {
 def Cpu_read : Inst<"read"> {
   let arguments = (ins AnyMemRef:$view, Variadic<Index>:$indices);
   let results = (outs AnyType:$result);
+}
+def Cpu_OwnerReadOp : Inst<"read_owner"> {
+  let arguments = (ins AnyMemRef:$source,Index:$owner); let results = (outs AnyType:$scalar);
+}
+def Cpu_OwnerWriteOp : Inst<"write_owner"> {
+  let arguments = (ins AnyMemRef:$destination,Index:$owner,AnyType:$scalar);
 }
 def Cpu_write : Inst<"write"> {
   let arguments = (ins AnyMemRef:$view, Index:$row, AnyTensor:$value);

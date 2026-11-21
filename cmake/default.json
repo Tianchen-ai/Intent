@@ -16,6 +16,7 @@
       "decisions": {
         "levels/execution/cpu::partition": {
           "strategies": [
+            "levels/execution/cpu::tuple-reduction",
             "levels/execution/cpu::row-reduction",
             "levels/execution/cpu::pointwise"
           ],

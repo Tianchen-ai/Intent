@@ -48,14 +48,23 @@ bool RowMachine::accepts(ArrayAttr values) const {
 namespace CI_UNIT_NAMESPACE {
 void registerRowReduction(Unit &);
 void registerPanelReduction(Unit &);
+void registerTupleReduction(Unit &);
 void registerPointwise(Unit &,StringRef);
 llvm::Expected<Attribute> proposeRows(Operation *op,const TargetProfile &profile,bool structured){
   auto *machine=profile.services.get<intentdsl::cpu::RowMachine>();
   if(!machine)return llvm::createStringError("missing CPU capacity");
-  bool reduces=false;
-  op->walk([&](Operation *v){auto n=v->getName().getStringRef();reduces |= n=="cpu.sum" || n=="cpu.max_num";});
+  bool reduces=false, ordinal=false, widens=false;
+  op->walk([&](Operation *v){auto n=v->getName().getStringRef();reduces |= n=="cpu.sum" || n=="cpu.max_num";
+    ordinal |= n=="cpu.ordinal";
+    if(n=="cpu.cast"){
+      auto from=dyn_cast<RankedTensorType>(v->getOperand(0).getType());
+      auto to=dyn_cast<RankedTensorType>(v->getResult(0).getType());
+      widens |= from && to && from.getElementTypeBitWidth()<to.getElementTypeBitWidth();
+    }});
   if(!reduces)return Attribute{};
   Builder b(op->getContext());
+  if ((ordinal || (widens && machine->boundWidening)) && machine->wideningPanel)
+    return Attribute(intentdsl::cpu::partition(b,"source",machine->wideningConfigurations(op->getContext())));
   return Attribute(intentdsl::cpu::partition(b,"source",machine->configurations(op->getContext(),structured && machine->structuredRows)));
 }
 void registerPartition(Unit &u,bool permuted) {
@@ -85,7 +94,7 @@ void registerPartition(Unit &u,bool permuted) {
     return llvm::createStringError("CPU topology disagrees with its parameter domain");};
   u.families.push_back(
       {{partition, "cpu@formed", "cpu@formed"}, COMPILERINFRA_SOURCE});
-  if(!permuted){registerRowReduction(u);registerPanelReduction(u);}
+  if(!permuted){registerTupleReduction(u);registerRowReduction(u);registerPanelReduction(u);}
   auto family=permuted?"permutation":"partition";registerPointwise(u,family);
   u.realizers.push_back(
       {{permuted?"permute-rows":"group-rows", u.qualify(family),

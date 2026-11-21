@@ -9,3 +9,5 @@ def LaneRead : RowInst<"read"> {let arguments=(ins AnyMemRef:$source,Index:$row,
 def LaneWrite : RowInst<"write"> {let arguments=(ins AnyMemRef:$dest,Index:$row,Index:$column,AnyFixedVectorOfNonZeroRank:$value);}
 def ValueExpr : RowInst<"apply"> {let arguments=(ins Variadic<AnyType>:$inputs,StrAttr:$kind);let results=(outs AnyType:$result);}
 def StepYield : RowInst<"yield",[Terminator]> {let arguments=(ins Variadic<AnyType>:$values);}
+def OwnerRead : RowInst<"owner_read"> {let arguments=(ins AnyMemRef:$source,Index:$row);let results=(outs AnyType:$value);}
+def OwnerWrite : RowInst<"owner_write"> {let arguments=(ins AnyMemRef:$destination,Index:$row,AnyType:$value);}
