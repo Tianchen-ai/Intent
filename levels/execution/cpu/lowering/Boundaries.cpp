@@ -21,12 +21,9 @@ LogicalResult verifyTask(ModuleOp m, const TargetProfile &profile,
       join->getName().getStringRef() != "cpu.join" ||
       join->getOperand(0) != task.getResult(0))
     return fn.emitError("join must complete the owned task range");
-  auto rows = task.getAttrOfType<DenseI64ArrayAttr>("rows");
+  auto rows = task.getAttrOfType<ArrayAttr>("rows");
   auto *machine = profile.services.get<RowMachine>();
-  if (!machine || !rows || rows.empty() ||
-      !llvm::all_of(rows.asArrayRef(), [&](auto r) {
-        return r > 0 && llvm::is_contained(machine->rows, r);
-      }))
+  if (!machine || !machine->accepts(rows))
     return task.emitError("invalid row partition");
   if (!llvm::hasSingleElement(task.getRegion(0)))
     return task.emitError("expected one task body");
@@ -161,13 +158,9 @@ void bind(Unit &u) {
             if (failed(intentdsl::verifyLogicalRows(m, "cpu", true)))
               return failure();
             auto &op = (*m.getOps<func::FuncOp>().begin()).front().front();
-            auto rowGroups =
-                op.getAttrOfType<DenseI64ArrayAttr>("cpu.row_groups");
+            auto rowGroups = op.getAttrOfType<ArrayAttr>("cpu.row_groups");
             auto *caps = p.services.get<intentdsl::cpu::RowMachine>();
-            if (!rowGroups || rowGroups.empty() || !caps ||
-                !llvm::all_of(rowGroups.asArrayRef(), [&](int64_t r) {
-                  return r > 0 && llvm::is_contained(caps->rows, r);
-                }))
+            if (!caps || !caps->accepts(rowGroups))
               return op.emitError(
                   "formed row partition is outside target capabilities");
             return success();

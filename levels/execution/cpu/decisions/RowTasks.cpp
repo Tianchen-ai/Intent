@@ -1,6 +1,27 @@
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
+#include "llvm/ADT/DenseSet.h"
 using namespace mlir;
 using namespace compilerinfra;
+namespace intentdsl::cpu {
+ArrayAttr RowMachine::configurations(MLIRContext *ctx) const {
+  Builder b(ctx);
+  SmallVector<Attribute> values;
+  for (auto [r, c] : rows)
+    values.push_back(b.getDictionaryAttr(
+        {b.getNamedAttr("grain", b.getI64IntegerAttr(r)),
+         b.getNamedAttr("columns", b.getI64IntegerAttr(c))}));
+  return b.getArrayAttr(values);
+}
+bool RowMachine::accepts(ArrayAttr values) const {
+  if (!values || values.empty())
+    return false;
+  auto allowed = configurations(values.getContext());
+  llvm::SmallDenseSet<Attribute> seen;
+  return llvm::all_of(values, [&](Attribute row) {
+    return llvm::is_contained(allowed, row) && seen.insert(row).second;
+  });
+}
+} // namespace intentdsl::cpu
 namespace CI_UNIT_NAMESPACE {
 void rowTasks(Unit &u) {
   DecisionFamily partition;
@@ -15,12 +36,8 @@ void rowTasks(Unit &u) {
   };
   partition.verify = [](Operation *, Attribute a,
                         const TargetProfile &p) -> llvm::Error {
-    auto rows = dyn_cast<DenseI64ArrayAttr>(a);
     auto *machine = p.services.get<intentdsl::cpu::RowMachine>();
-    if (!machine || !rows || rows.empty() ||
-        !llvm::all_of(rows.asArrayRef(), [&](auto r) {
-          return llvm::is_contained(machine->rows, r);
-        }))
+    if (!machine || !machine->accepts(dyn_cast<ArrayAttr>(a)))
       return llvm::createStringError("illegal CPU work partition");
     return llvm::Error::success();
   };
@@ -40,8 +57,7 @@ void rowTasks(Unit &u) {
                     });
                     if (!reduction)
                       return Attribute{};
-                    return Attribute(DenseI64ArrayAttr::get(op->getContext(),
-                                                            machine->rows));
+                    return Attribute(machine->configurations(op->getContext()));
                   }};
   u.strategies.push_back({select, COMPILERINFRA_SOURCE});
   u.realizers.push_back(

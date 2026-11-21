@@ -72,7 +72,7 @@ class HostVariants:
             NativeBinding(
                 fn,
                 bound,
-                (*bound.shape, r, self.artifact.workers),
+                (*bound.shape, r["grain"], r["columns"], self.artifact.workers),
                 lambda: self.artifact.validate(self.scope),
             )
             for r in self.artifact.data["rows"]

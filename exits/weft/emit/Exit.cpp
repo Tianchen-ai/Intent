@@ -21,7 +21,12 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
   auto caps = std::make_shared<intentdsl::cpu::RowMachine>();
   caps->vectorBits = *bits;
   caps->workers = *workers;
-  caps->rows = {1, *bits == 1024 ? 2 : 4};
+  // Locally reported mvendorid/marchid for the V100 core.
+  bool v100 = options.getString("core") == "0x710/0x8000000058000002";
+  int64_t columns = *bits == 128 ? 32 : *bits == 1024 ? 128 : 64;
+  caps->rows = {
+      {1, columns},
+      {(*bits == 1024 || (*bits == 256 && v100)) ? 2 : 4, 2 * columns}};
   if (auto e = p.services.provide<intentdsl::cpu::RowMachine>(caps))
     return e;
   return p;
@@ -33,8 +38,12 @@ llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
     return abi.takeError();
   auto &task = fn.front().front();
   llvm::json::Array rows;
-  for (auto r : task.getAttrOfType<DenseI64ArrayAttr>("rows").asArrayRef())
-    rows.push_back(r);
+  for (auto a : task.getAttrOfType<ArrayAttr>("rows")) {
+    auto row = cast<DictionaryAttr>(a);
+    rows.push_back(llvm::json::Object{
+        {"grain", row.getAs<IntegerAttr>("grain").getInt()},
+        {"columns", row.getAs<IntegerAttr>("columns").getInt()}});
+  }
   auto program = taskSource(&task, *abi->getAsArray());
   if (!program)
     return program.takeError();

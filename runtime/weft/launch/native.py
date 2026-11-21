@@ -70,6 +70,7 @@ class Artifact:
         if abi["symbol"] != "row_task_instance" or abi["shape_parameters"] != [
             "T",
             "N",
+            "C",
         ]:
             raise ValueError("compiled task shape or entry ABI mismatch")
         actual = abi["arguments"]

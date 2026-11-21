@@ -2,9 +2,14 @@
 #include "compilerinfra/Assembly.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 namespace intentdsl::cpu {
+struct RowConfig {
+  int64_t grain, columns;
+};
 struct RowMachine {
   int64_t vectorBits, workers;
-  llvm::SmallVector<int64_t> rows;
+  llvm::SmallVector<RowConfig> rows;
+  mlir::ArrayAttr configurations(mlir::MLIRContext *) const;
+  bool accepts(mlir::ArrayAttr) const;
 };
 mlir::LogicalResult verifyTask(mlir::ModuleOp,
                                const compilerinfra::TargetProfile &,

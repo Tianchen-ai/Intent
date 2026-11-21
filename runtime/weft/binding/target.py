@@ -1,5 +1,6 @@
 import os
 from functools import lru_cache
+from pathlib import Path
 from runtime.weft.launch.native import Artifact
 
 
@@ -13,7 +14,27 @@ def discover(scope):
     if set(facts["cpus"]) != set(scope):
         raise ValueError("Weft native discovery does not match the active CPU set")
     t = facts["target"]
-    return cpu, int(t["vector_bits"] if cpu.arch == "x86_64" else t["vlen_bits"])
+    core_id = ""
+    if cpu.arch == "riscv64":
+        ids = set()
+        for record in Path("/proc/cpuinfo").read_text().split("\n\n"):
+            fields = dict(
+                (k.strip(), v.strip())
+                for k, v in (
+                    line.split(":", 1) for line in record.splitlines() if ":" in line
+                )
+            )
+            if "processor" in fields and int(fields["processor"]) in scope:
+                ids.add((fields.get("mvendorid", ""), fields.get("marchid", "")))
+        if len(ids) > 1:
+            raise ValueError("choose a homogeneous CPU set for native Weft")
+        if ids:
+            core_id = "/".join(ids.pop())
+    return (
+        cpu,
+        core_id,
+        int(t["vector_bits"] if cpu.arch == "x86_64" else t["vlen_bits"]),
+    )
 
 
 class Target:
@@ -28,8 +49,8 @@ class Target:
 
     def options(self, key, shape):
         scope, self.workers = key
-        self.info, bits = discover(scope)
-        return dict(vector_bits=bits, workers=self.workers)
+        self.info, core, bits = discover(scope)
+        return dict(vector_bits=bits, workers=self.workers, core=core)
 
     def materialize(self, data):
         return Artifact(data, self.info, self.workers)

@@ -66,63 +66,100 @@ public:
       << "\",source=\"CPU row interval\",arg_names=[" << llvm::join(names, ",")
       << "],arg_access=[" << llvm::join(effects, ",")
       << "],arg_alias_sets=array<i64:" << llvm::join(aliases, ",")
-      << ">,shape_symbols=[\"T\",\"N\"],strided_args=["
+      << ">,shape_symbols=[\"T\",\"N\",\"C\"],strided_args=["
       << llvm::join(strided, ",") << "]}> ({\n^bb0(" << llvm::join(params, ",")
       << "):\n";
     auto extent = inst("symbol", {}, "index",
                        "choices=array<i64>,kind=\"shape\",name=\"T\"");
+    auto columns = inst("symbol", {}, "index",
+                        "choices=array<i64>,kind=\"shape\",name=\"N\"");
+    auto panelWidth = inst("symbol", {}, "index",
+                           "choices=array<i64>,kind=\"shape\",name=\"C\"");
     inst("root_domain", {},
          "!weft_kernel.domain<\"root\",0,-1,0,\"root\",\"exact\">");
     s << "%lo=arith.constant 0 : index\n%step=arith.constant 1 : "
          "index\nscf.for %r = %lo to "
       << extent.id << " step %step {\n";
-    for (auto &op : bb.without_terminator()) {
-      auto code = op.getName().stripDialect();
-      SmallVector<Term> args;
-      if (code == "read" || code == "write") {
-        auto view = op.getOperand(0);
-        auto vt = cast<MemRefType>(view.getType());
-        std::string e = printType(vt.getElementType());
-        args.push_back(terms.lookup(view));
-        if (vt.getRank() == 2)
-          args.push_back({"%r", "index"});
-        auto slice = inst("slice", args, regionType("slice", e, 1),
-                          vt.getRank() == 2 ? "selectors=[\"index\",\"all\"]"
-                                            : "selectors=[\"all\"]");
-        if (code == "write")
-          inst("commit", {terms.lookup(op.getOperand(2)), slice}, "()");
-        else
-          terms[op.getResult(0)] =
-              inst("admit", {slice}, regionType("value", e, 1));
-        continue;
+    for (auto &sweep : bb.without_terminator()) {
+      auto combine = sweep.getAttrOfType<StringAttr>("combine");
+      bool store = combine == "store";
+      auto id = std::to_string(serial++);
+      std::string start = "%off" + id, acc = "%acc" + id,
+                  summary = "%summary" + id;
+      if (!store) {
+        s << "%identity" << id << "=arith.constant "
+          << (combine == "sum" ? "0.0" : "0xFF800000") << " : f32\n";
+        s << summary << "=";
       }
-      for (auto operand : op.getOperands())
-        args.push_back(terms.lookup(operand));
-      auto v = op.getResult(0);
-      auto t = v.getType();
-      std::string result =
-          isa<RankedTensorType>(t)
-              ? regionType(
-                    "value",
-                    printType(cast<RankedTensorType>(t).getElementType()), 1)
-              : printType(t);
-      std::string kind = code.str(), operation;
-      if (code == "max_num" || code == "sum") {
-        operation = "reduce";
-        kind = code == "max_num" ? "max" : "add";
-      } else if (code == "cast")
-        operation = "cast";
-      else if (code == "rsqrt" || code == "exp")
-        operation = "unary";
-      else if (code == "mul" || code == "add" || code == "div" || code == "sub")
-        operation = "binary";
-      else
-        return llvm::createStringError("unsupported Weft task operation " +
-                                       kind);
-      auto p = operation == "cast" ? "" : "kind=\"" + kind + "\"";
-      if (operation == "reduce")
-        p += ",axis=0:i64";
-      terms[v] = inst(operation, args, result, p);
+      s << "scf.for " << start << " = %lo to " << columns.id << " step "
+        << panelWidth.id;
+      if (!store)
+        s << " iter_args(" << acc << "=%identity" << id << ") -> (f32)";
+      s << " {\n";
+      auto rem =
+          inst("binary", {columns, {start, "index"}}, "index", "kind=\"sub\"");
+      auto active = inst("binary", {rem, panelWidth}, "index", "kind=\"min\"");
+      auto &body = sweep.getRegion(0).front();
+      for (auto &op : body.without_terminator()) {
+        auto code = op.getName().stripDialect();
+        SmallVector<Term> args;
+        if (code == "read_panel" || code == "write_panel") {
+          auto view = op.getOperand(0);
+          auto vt = cast<MemRefType>(view.getType());
+          std::string e = printType(vt.getElementType());
+          args.push_back(terms.lookup(view));
+          if (vt.getRank() == 2)
+            args.push_back({"%r", "index"});
+          auto slice = inst("slice", args, regionType("slice", e, 1),
+                            vt.getRank() == 2 ? "selectors=[\"index\",\"all\"]"
+                                              : "selectors=[\"all\"]");
+          auto window =
+              inst("subview", {slice, {start, "index"}, active}, slice.type,
+                   "offsets=array<i64:-1>,extents=array<i64:-1>");
+          if (code == "write_panel")
+            inst("commit", {terms.lookup(op.getOperand(4)), window}, "()");
+          else
+            terms[op.getResult(0)] =
+                inst("admit", {window}, regionType("value", e, 1));
+          continue;
+        }
+        for (auto operand : op.getOperands())
+          args.push_back(terms.lookup(operand));
+        auto v = op.getResult(0);
+        auto t = v.getType();
+        std::string result =
+            isa<RankedTensorType>(t)
+                ? regionType(
+                      "value",
+                      printType(cast<RankedTensorType>(t).getElementType()), 1)
+                : printType(t);
+        std::string kind = code.str(), operation;
+        if (code == "max_num" || code == "sum") {
+          operation = "reduce";
+          kind = code == "max_num" ? "max" : "add";
+        } else if (code == "cast")
+          operation = "cast";
+        else if (code == "rsqrt" || code == "exp")
+          operation = "unary";
+        else if (code == "mul" || code == "add" || code == "div" ||
+                 code == "sub")
+          operation = "binary";
+        else
+          return llvm::createStringError("unsupported Weft task operation " +
+                                         kind);
+        auto p = operation == "cast" ? "" : "kind=\"" + kind + "\"";
+        if (operation == "reduce")
+          p += ",axis=0:i64";
+        terms[v] = inst(operation, args, result, p);
+      }
+      if (!store) {
+        auto partial = terms.lookup(body.back().getOperand(0));
+        auto next = inst("binary", {{acc, "f32"}, partial}, "f32",
+                         combine == "sum" ? "kind=\"add\"" : "kind=\"max\"");
+        s << "scf.yield " << next.id << " : f32\n";
+        terms[sweep.getResult(0)] = {summary, "f32"};
+      }
+      s << "}\n";
     }
     s << "}\n\"weft_kernel.return\"():()->()\n}):()->()\n}\n";
     return llvm::Error::success();
@@ -158,10 +195,12 @@ std::string hostSource(Operation *dispatch, const llvm::json::Array &abi) {
   }
   args.push_back("count");
   args.push_back("cols");
+  args.push_back("panel");
   args.append(strides);
   return "#include <stdint.h>\n#include \"task_bridge.h\"\nvoid intent_entry(" +
          llvm::join(params, ",") +
-         ", int64_t rows, int64_t cols, int64_t grain, int64_t workers){\nif "
+         ", int64_t rows, int64_t cols, int64_t grain, int64_t panel, int64_t "
+         "workers){\nif "
          "(!cols) return;\n#pragma omp parallel for num_threads(workers) "
          "schedule(static) if(workers>1)\n"
          "for(int64_t start=0;start<rows;start+=grain){int64_t "

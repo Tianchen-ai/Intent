@@ -18,6 +18,8 @@ void intentdsl::wefthost::WeftHostDialect::initialize() {
       >();
 }
 namespace CI_UNIT_NAMESPACE {
+void buildPanels(Operation *);
+LogicalResult verifyPanels(Operation *);
 void dialect(DialectRegistry &r) {
   r.insert<intentdsl::wefthost::WeftHostDialect>();
 }
@@ -46,7 +48,9 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
     s.addAttributes(task.getAttrs());
     s.addAttribute("task_symbol", b.getStringAttr("row_task"));
     s.addRegion()->takeBody(task.getRegion(0));
-    task.replaceAllUsesWith(b.create(s));
+    auto *dispatch = b.create(s);
+    task.replaceAllUsesWith(dispatch);
+    buildPanels(dispatch);
     task.erase();
   }
 };
@@ -57,9 +61,11 @@ void lower(OpPassManager &pm, bool callable) {
 LogicalResult verifyHost(ModuleOp m, const compilerinfra::TargetProfile &p,
                          bool callable) {
   if (failed(intentdsl::cpu::verifyTask(m, p, "weft-task-ssa",
-                                        "weft_host.dispatch_rows")))
+                                        "weft_host.dispatch_rows", false)))
     return failure();
   auto &task = (*m.getOps<func::FuncOp>().begin()).front().front();
+  if (failed(verifyPanels(&task)))
+    return failure();
   if (task.getAttrOfType<StringAttr>("task_symbol") != "row_task")
     return task.emitError("unbound native row task");
   if (callable) {

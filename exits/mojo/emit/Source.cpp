@@ -7,8 +7,9 @@ class Source {
   llvm::raw_ostream &out;
   llvm::DenseMap<Value, std::string> vars;
   int next = 0;
+  unsigned depth = 0;
   void line(unsigned n, const std::string &s) {
-    out.indent(n * 4) << s << "\n";
+    out.indent((n + depth) * 4) << s << "\n";
   }
   std::string var(Value v) { return vars.lookup(v); }
   std::string temp() { return "v" + std::to_string(next++); }
@@ -46,7 +47,8 @@ public:
                ->getAttrOfType<StringAttr>("mojo_row.entry")
                .getValue()
         << "\")\ndef intent_entry(" << llvm::join(params, ",")
-        << ", rows: Int64, cols: Int64, grain: Int64, workers: Int64) "
+        << ", rows: Int64, cols: Int64, grain: Int64, columns_per_block: "
+           "Int64, workers: Int64) "
            "abi(\"C\"):\n";
     line(1, "var groups = (Int(rows)+Int(grain)-1)//Int(grain)");
     line(1, "var threads = min(Int(workers),groups)");
@@ -70,10 +72,15 @@ public:
                     (sum ? "0.0" : "-inf[DType.float32]()") + ")");
       std::string stop = "Int(cols)//" + std::to_string(fullWidth) + "*" +
                          std::to_string(fullWidth);
-      line(4,
-           "for j in range(" +
-               (tail ? stop + ", Int(cols), 1" : "0, " + stop + ", " + lanes) +
-               "):");
+      if (!tail) {
+        line(4, "for base in range(0, " + stop + ", Int(columns_per_block)):");
+        depth = 1;
+      }
+      line(4, "for j in range(" +
+                  (tail ? stop + ", Int(cols), 1"
+                        : "base, min(base + Int(columns_per_block), " + stop +
+                              "), " + lanes) +
+                  "):");
       auto &bb = loop.getRegion(0).front();
       vars[bb.getArgument(0)] = "j";
       for (auto &op : bb) {
@@ -143,6 +150,7 @@ public:
         if (op.getNumResults())
           vars[op.getResult(0)] = lhs;
       }
+      depth = 0;
       if (reduction) {
         auto value = acc + (sum ? ".reduce_add()" : ".reduce_max()");
         if (loop.getNumOperands())

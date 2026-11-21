@@ -61,7 +61,7 @@ def Cpu_max_num : Inst<"max_num"> {
 }
 
 def Cpu_task : Inst<"task", [IsolatedFromAbove, SingleBlock]> {
-  let arguments = (ins Variadic<AnyType>:$captures, I64Attr:$domain_arg, DenseI64ArrayAttr:$rows);
+  let arguments = (ins Variadic<AnyType>:$captures, I64Attr:$domain_arg, ArrayAttr:$rows);
   let results = (outs Index:$completion);
   let regions = (region AnyRegion:$body);
 }
