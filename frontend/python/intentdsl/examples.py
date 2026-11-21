@@ -11,6 +11,15 @@ def softmax(x: I.In[I.f16, ("M", "N")], out: I.Out[I.f16, ("M", "N")]):
 
 
 @I.kernel
+def softmax_f32(x: I.In[I.f32, ("M", "N")], out: I.Out[I.f32, ("M", "N")]):
+    for r in I.parallel(x.dim(0)):
+        v = x[r, :]
+        m = I.reduce(v, axis=0, combine=I.max_num, init=I.neg_inf(I.f32))
+        w = I.exp(v - m)
+        out[r, :] = w / I.sum(w, axis=0, acc=I.f32)
+
+
+@I.kernel
 def rms_norm(
     x: I.In[I.f32, ("M", "N")],
     gain: I.In[I.f32, ("N",)],

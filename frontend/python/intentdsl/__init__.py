@@ -38,8 +38,8 @@ def jit(definition, *, backend, library=None, configuration=None):
     from pathlib import Path
     from compilerinfra import Compiler
 
-    if backend != "triton":
-        raise ValueError(f"unsupported V2 exit: {backend}")
+    from .compiler import Kernel
+
     installed = Path(__file__).resolve().parents[3] / "libintentdsl.so"
     path = (
         library
@@ -51,6 +51,6 @@ def jit(definition, *, backend, library=None, configuration=None):
         )
     )
     compiler = Compiler(path, configuration)
-    return compiler.runtime("kir", "binding.kernel").Kernel(
-        compiler, definition, backend
-    )
+    if backend not in compiler.describe()["exits"]:
+        raise ValueError(f"unknown exit: {backend}")
+    return Kernel(compiler, definition, backend)

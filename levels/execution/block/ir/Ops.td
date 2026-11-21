@@ -62,10 +62,6 @@ def Iblock_yield : Inst<"yield", [Terminator]> {
   let arguments = (ins Variadic<AnyType>:$values);
   let results = (outs);
 }
-def Iblock_width : Inst<"width"> {
-  let arguments = (ins);
-  let results = (outs AnyType:$result);
-}
 def Iblock_zero : Inst<"zero"> {
   let arguments = (ins);
   let results = (outs Index:$result);

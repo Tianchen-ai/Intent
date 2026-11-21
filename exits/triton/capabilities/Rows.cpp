@@ -18,21 +18,25 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
   auto caps = std::make_shared<intentdsl::RowCapacity>();
   caps->upperBound = *upper;
   unsigned width = *upper ? *upper : 8192;
-  // Opaque payloads contain only native options. The shared model sees no warp
-  // count.
-  caps->rows = {{0, 1, width, R"({"num_warps":4,"num_stages":1})"},
-                {1, 2, width,
-                 *arch == 90 ? R"({"num_warps":8,"num_stages":1})"
-                             : R"({"num_warps":4,"num_stages":1})"}};
+  struct NativeRow {
+    unsigned id, rows, warps, stages;
+  };
+  static constexpr NativeRow hopper[] = {{0, 1, 4, 1}, {1, 2, 8, 1}};
+  static constexpr NativeRow blackwell[] = {{0, 1, 4, 1}, {1, 2, 4, 1}};
   auto warp = options.getInteger("warp_size"),
        threads = options.getInteger("max_threads");
   if (!warp || !threads || *warp <= 0 || *threads <= 0)
     return llvm::createStringError(
         "expected local warp size and block thread limit");
-  llvm::erase_if(caps->rows, [&](const auto &r) {
-    auto warps = (r.id == 1 && *arch == 90) ? 8 : 4;
-    return warps > *threads / *warp;
-  });
+  for (const auto &r : (*arch == 90 ? hopper : blackwell)) {
+    if (r.warps > *threads / *warp)
+      continue;
+    std::string payload;
+    llvm::raw_string_ostream os(payload);
+    os << llvm::json::Value(llvm::json::Object{
+        {"num_warps", int64_t(r.warps)}, {"num_stages", int64_t(r.stages)}});
+    caps->rows.push_back({r.id, r.rows, width, std::move(payload)});
+  }
   if (auto e = profile.services.provide<intentdsl::RowCapacity>(caps))
     return e;
   return profile;

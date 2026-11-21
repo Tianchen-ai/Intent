@@ -54,7 +54,7 @@ class Prepared:
                     WIDTH=r["width"],
                     grid=grid(self.m, r),
                     enable_fp_fusion=False,
-                    **r["native"]
+                    **r["native"],
                 )
                 self.launchers[r["id"]] = native[grid(self.m, r)]
         self.ready = True
@@ -101,6 +101,10 @@ class Prepared:
                         )
                     self.row = self.artifact.winners[key]
             self._invoke(self.row, self.flat)
+            stream = torch.cuda.current_stream(self.device)
+            for value in self.values:
+                if isinstance(value, torch.Tensor):
+                    value.record_stream(stream)
 
     def result(self):
         return self.outputs[0] if len(self.outputs) == 1 else tuple(self.outputs)

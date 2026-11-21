@@ -1,12 +1,13 @@
 import ast
 import json
 
-from runtime.kir.binding.signature import argument_type, signature, spelling
+from .intentdsl.signature import argument_type, signature, spelling, namespace
 
 
 class Capture:
     def __init__(self, fn):
         self.fn = fn
+        self.namespace = namespace(fn)
         self.args = signature(fn)
         self.values = {
             a["name"]: ("%" + a["name"], argument_type(a)) for a in self.args
@@ -61,7 +62,7 @@ class Capture:
             ty = next((t for _, t in args if t.startswith("tensor")), args[0][1])
             return self.emit(op, args, ty)
         if isinstance(n, ast.Call):
-            fn = spelling(n.func)
+            fn = spelling(n.func, self.namespace)
             count = 2 if fn == "cast" else 1
             if len(n.args) != count or (fn not in ("sum", "reduce") and n.keywords):
                 raise ValueError(f"unsupported arguments for {fn}")
@@ -72,20 +73,21 @@ class Capture:
                     raise ValueError("expected f32 row reduction on axis 0")
                 if fn == "reduce" and (
                     set(kw) != {"axis", "combine", "init"}
-                    or spelling(kw["combine"]) != "max_num"
+                    or spelling(kw["combine"], self.namespace) != "max_num"
                     or not isinstance(kw["init"], ast.Call)
-                    or spelling(kw["init"].func) != "neg_inf"
+                    or spelling(kw["init"].func, self.namespace) != "neg_inf"
                     or len(kw["init"].args) != 1
-                    or spelling(kw["init"].args[0]) != "f32"
+                    or spelling(kw["init"].args[0], self.namespace) != "f32"
                 ):
                     raise ValueError("unsupported reduction algebra")
                 if fn == "sum" and (
-                    set(kw) != {"axis", "acc"} or spelling(kw["acc"]) != "f32"
+                    set(kw) != {"axis", "acc"}
+                    or spelling(kw["acc"], self.namespace) != "f32"
                 ):
                     raise ValueError("expected an explicit f32 accumulator")
                 return self.emit("sum" if fn == "sum" else "max_num", [v], "f32")
             if fn == "cast":
-                dst = spelling(n.args[1])
+                dst = spelling(n.args[1], self.namespace)
                 return self.emit(
                     "cast",
                     [v],
@@ -102,7 +104,7 @@ class Capture:
         if (
             not isinstance(loop, ast.For)
             or loop.orelse
-            or spelling(loop.iter.func) != "parallel"
+            or spelling(loop.iter.func, self.namespace) != "parallel"
         ):
             raise ValueError("expected an independent parallel row domain")
         (dim,) = loop.iter.args
