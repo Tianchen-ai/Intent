@@ -19,6 +19,17 @@ class Kernel:
         self.artifacts = {}
         self.lock = RLock()
 
+    def compilation_target(self, *inputs, outputs=None):
+        """Open the same configured compiler as prepare, for explicit development observation."""
+        values, _, device = self.binding.bind(inputs, outputs)
+        facts = self.domain.arguments(self.args, values)
+        key = self.target.profile(device, values)
+        return self._target_compiler(key, facts)
+
+    def _target_compiler(self, key, facts):
+        options = dict(self.target.options(key), arguments=facts)
+        return self.compiler.derive({"exits": {self.backend: {"options": options}}})
+
     def prepare(self, *inputs, outputs=None, artifact_file=None):
         values, result, device = self.binding.bind(inputs, outputs)
         with self.lock:
@@ -31,12 +42,9 @@ class Kernel:
             group = [] if artifact_file is not None else self.artifacts.setdefault((key,geometry_key), [])
             artifact = next((a for a in group if a.accepts(self.domain.evaluate(a.data["domain"],facts))), None)
             if artifact is None:
-                options = dict(self.target.options(key), arguments=facts)
                 if self.root is None:
                     self.root = self.compiler.root_ir(self.source)
-                with self.compiler.derive(
-                    {"exits": {self.backend: {"options": options}}}
-                ) as target:
+                with self._target_compiler(key, facts) as target:
                     receipt = None
                     if artifact_file is None:
                         emitted, receipt = target.compile_runtime(self.root, exit=self.backend)

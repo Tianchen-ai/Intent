@@ -147,7 +147,8 @@ class ProgramKernel:
         self.kernels = {s[1]: Kernel(compiler, s[1], backend)
                         for s in definition.steps if s[0] == "call"}
 
-    def prepare(self, *args, **kwargs):
+    def bind(self, *args, **kwargs):
+        """Resolve author slots once for inspection, member replay or a full launch."""
         bound = self.definition.signature.bind(*args, **kwargs)
         bound.apply_defaults()
         values = dict(bound.arguments)
@@ -158,8 +159,7 @@ class ProgramKernel:
         if any(self.views.inspect(v).device != device for v in inputs[1:]):
             raise ValueError("program inputs span devices")
         allocator = self.views.adapter(inputs[0])
-        calls = []
-        labels = []
+        steps = []
         for step in self.definition.steps:
             if step[0] == "allocate":
                 _, name, dtype, extents = step
@@ -168,20 +168,34 @@ class ProgramKernel:
                     raise ValueError(f"{name}: invalid workspace or output extent {shape}")
                 values[name] = allocator.allocate(shape, dtype, device)
             elif step[0] == "fill":
-                calls.append(self.sequence.Fill(values[step[1]], step[2](values)))
-                labels.append(step[1])
+                steps.append((step[1], self.sequence.Fill(values[step[1]], step[2](values))))
             else:
                 kernel = self.kernels[step[1]]
                 inputs, outputs = [], []
                 for operand, spec in zip(step[2], kernel.args):
                     value = values[operand] if isinstance(operand, str) else operand(values)
                     (outputs if spec["direction"] == "Out" else inputs).append(value)
-                calls.append(kernel.prepare(*inputs, outputs=outputs))
-                labels.append(step[1].name)
+                steps.append((step[1].name, BoundMember(kernel, tuple(inputs), tuple(outputs))))
         result = tuple(values[n] for n in self.definition.returns)
-        return self.sequence.PreparedSequence(calls, labels, result if self.definition.multiple else result[0])
+        return tuple(steps), result if self.definition.multiple else result[0]
+
+    def prepare(self, *args, **kwargs):
+        steps, result = self.bind(*args, **kwargs)
+        return self.sequence.PreparedSequence(
+            [member.prepare() if isinstance(member, BoundMember) else member for _, member in steps],
+            [name for name, _ in steps], result)
 
     def run(self, *args, **kwargs):
         prepared = self.prepare(*args, **kwargs)
         prepared.launch()
         return prepared.result()
+
+
+@dataclass(frozen=True)
+class BoundMember:
+    kernel: object
+    inputs: tuple
+    outputs: tuple
+
+    def prepare(self, *, artifact_file=None):
+        return self.kernel.prepare(*self.inputs, outputs=self.outputs, artifact_file=artifact_file)
