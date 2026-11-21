@@ -1,4 +1,32 @@
-"""Bind declared directions, dimensions, device and storage for one call."""
+"""Bind logical views while leaving allocation and ownership with the container."""
+
+from dataclasses import dataclass
+from math import gcd, prod
+from . import numpy_views, torch_views
+
+ADAPTERS = (numpy_views, torch_views)
+
+
+def adapter(value):
+    for implementation in ADAPTERS:
+        if implementation.accepts(value):
+            return implementation
+    raise TypeError(f"unsupported tensor container: {type(value).__module__}")
+
+
+@dataclass(frozen=True)
+class View:
+    dtype: str
+    shape: tuple
+    strides: tuple
+    device: object
+    allocation: object
+    address: int
+    writable: bool
+
+
+def inspect(value):
+    return View(*adapter(value).describe(value))
 
 
 class Signature:
@@ -6,86 +34,64 @@ class Signature:
         self.args = arguments
 
     def bind(self, inputs, outputs):
-        import torch
-
-        ins = [a for a in self.args if a["direction"] != "Out"]
-        if len(ins) != len(inputs):
-            raise TypeError(f"expected {len(ins)} inputs")
+        arguments = [arg for arg in self.args if arg["direction"] != "Out"]
+        if len(inputs) != len(arguments):
+            raise TypeError("input count differs from signature")
         shapes, bound = {}, {}
-        device = None
-        for arg, value in zip(ins, inputs):
-            bound[arg["name"]] = value
+        device = allocator = None
+
+        def check(arg, value):
+            view = inspect(value)
+            if view.dtype != arg["dtype"] or len(view.shape) != len(arg["dims"]):
+                raise ValueError(f"invalid view for {arg['name']}")
+            for axis, n in zip(arg["dims"], view.shape):
+                if shapes.setdefault(axis, n) != n:
+                    raise ValueError(f"inconsistent dimension {axis}")
+            return view
+
+        for arg, value in zip(arguments, inputs):
             if arg["direction"] == "Scalar":
                 if not isinstance(value, (int, float)):
-                    raise TypeError(f"expected host scalar for {arg['name']}")
-                bound[arg["name"]] = float(value)
-                continue
-            if not isinstance(value, torch.Tensor):
-                raise ValueError("expected a tensor argument")
-            if device is not None and value.device != device:
-                raise ValueError("arguments span multiple devices")
-            device = value.device
-            self._view(arg, value, shapes, device)
-        out_args = [a for a in self.args if a["direction"] == "Out"]
-        supplied = (
-            ()
-            if outputs is None
-            else ((outputs,) if isinstance(outputs, torch.Tensor) else tuple(outputs))
-        )
-        if outputs is not None and len(supplied) != len(out_args):
-            raise ValueError("output count differs from signature")
+                    raise TypeError("expected a host scalar")
+                value = float(value)
+            else:
+                view = check(arg, value)
+                if device is not None and device != view.device:
+                    raise ValueError("arguments span devices")
+                allocator = allocator or adapter(value)
+                device = view.device
+            bound[arg["name"]] = value
+        outs = [a for a in self.args if a["direction"] == "Out"]
+        supplied = outputs if isinstance(outputs, (tuple, list)) else (outputs,)
+        if outputs is not None and len(supplied) != len(outs):
+            raise ValueError("output count differs")
         result = []
-        for i, arg in enumerate(out_args):
-            shape = [shapes[n] for n in arg["dims"]]
+        for i, arg in enumerate(outs):
             y = (
                 supplied[i]
-                if supplied
-                else torch.empty(shape, device=device, dtype=self.dtype(arg))
+                if outputs is not None
+                else allocator.allocate(
+                    tuple(shapes[n] for n in arg["dims"]), arg["dtype"], device
+                )
             )
-            self._view(arg, y, shapes, device)
-            if y.numel() and (
-                not self.non_overlapping(y)
+            view = check(arg, y)
+            if view.device != device or not view.writable:
+                raise ValueError("output device or write permissions differ")
+            dims = [(n, abs(s)) for n, s in zip(view.shape, view.strides) if n > 1]
+            conflict = any(s == 0 for _, s in dims)
+            if len(dims) == 2 and not conflict:
+                (m, a), (n, b) = dims
+                g = gcd(a, b)
+                conflict = m > b // g and n > a // g
+            if prod(view.shape) and (
+                conflict
                 or any(
-                    isinstance(v, torch.Tensor)
-                    and y.untyped_storage().data_ptr() == v.untyped_storage().data_ptr()
-                    for v in bound.values()
+                    adapter(y).overlaps(y, bound[a["name"]])
+                    for a in self.args
+                    if a["name"] in bound and a["direction"] != "Scalar"
                 )
             ):
-                raise ValueError(
-                    "this row implementation needs distinct writable storage"
-                )
-            bound[arg["name"]] = y
+                raise ValueError("row kernel needs nonoverlapping writable storage")
             result.append(y)
-        vals = tuple(bound[a["name"]] for a in self.args)
-        return vals, result, device
-
-    @staticmethod
-    def non_overlapping(view):
-        # For a 2-D view the shortest collision solves i*s0 == j*s1.
-        from math import gcd
-
-        dims = [(n, s) for n, s in zip(view.shape, view.stride()) if n > 1]
-        if any(s == 0 for _, s in dims):
-            return False
-        if len(dims) < 2:
-            return True
-        (m, a), (n, b) = dims
-        g = gcd(a, b)
-        return m <= b // g or n <= a // g
-
-    @staticmethod
-    def dtype(arg):
-        import torch
-
-        return {"f16": torch.float16, "f32": torch.float32}[arg["dtype"]]
-
-    def _view(self, arg, value, shapes, device):
-        if (
-            value.device != device
-            or value.dtype != self.dtype(arg)
-            or value.ndim != len(arg["dims"])
-        ):
-            raise ValueError(f"view signature mismatch for {arg['name']}")
-        for name, extent in zip(arg["dims"], value.shape):
-            if shapes.setdefault(name, extent) != extent:
-                raise ValueError(f"inconsistent dimension {name}")
+            bound[arg["name"]] = y
+        return tuple(bound[a["name"]] for a in self.args), result, device

@@ -1,6 +1,6 @@
 # CPU 任务程序与本机出口
 
-**V2-3 设计，待裁决。** 本文给出 softmax 和 weighted RMSNorm 的实施合同，以及收缩、共享准备和有序状态接入同一模型的位置。基线是产品 `b01f659` 和 CompilerInfra `3ddeef2`。下文的 IR 名称表示拟议的有类型操作；候选行是首轮设计值，尚无 V2 CPU 编译或计时结果。
+**V2-3 设计，四项实施选择已批准。** 本文给出 softmax 和 weighted RMSNorm 的实施合同，以及收缩、共享准备和有序状态接入同一模型的位置。基线是产品 `b01f659` 和 CompilerInfra `3ddeef2`。下文的 IR 名称表示拟议的有类型操作；候选行是首轮设计值，尚无 V2 CPU 编译或计时结果。
 
 ## 1. 一份值程序，两个交接点
 
@@ -115,7 +115,7 @@ Triton–Weft 的导出物同时描述了单实例和 grid 接口。本路线校
 | `frontend/python/intentdsl/compiler.py` 与公开 JIT | 当前已按出口名装载 `binding.target`，调用 specialize/options/materialize/bind 协议。两个新出口可按该协议返回 CPU 产物（保留顶层 `abi`），shape 元组携带目标需要的调用形状。首轮沿进程执行集合和出口配置取得线程预算，现有入口无须逐出口修改。 |
 | `runtime/kir/binding/views.py` | Torch CPU tensor 路径可直接复用。实际文件无条件导入 Torch，只接受 Torch tensor、以 Torch 分配输出；SG2044 和 RVV V100 的已配置 Weft Python 本轮均有 NumPy、无 Torch。若覆盖这两处现有环境，建议在该文件把现有存储操作分派给本单元的 Torch/NumPy 绑定组件，保持原接口，做到仅在需要时导入相应库。依赖 shape/dtype/元素 stride、写权限、底层 allocation、偏移与所有权，不得为适配静默拷贝。首轮对共享可写 storage 延续现有诊断。此项是输入容器能力扩充，与 Weft 特判无关。 |
 
-**待裁决的四项选择**（正文以倾向方案说明）：
+**已批准的四项实施选择**（以下保留选型时的依据）：
 
 1. **无 Torch 的 CPU 输入。** 扩充共享绑定以直接接受 NumPy 数组，或首轮限定 Torch 环境。倾向前者，保证已配置的 SG2044/V100 可以从普通 JIT 直接调用。暂不要求通用 DLPack/全部 Python buffer 格式。
 2. **首轮任务划分。** 行归约先支持完整行归属；或同时引入小 M、超宽 N 的跨 task 两阶段归约。倾向先做行间分工；后者保留在同一分区/供数家族，以派生比较再启用，归约顺序另核。

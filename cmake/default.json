@@ -9,6 +9,22 @@
           "realizer": "levels/execution/block::tile-rows"
         }
       }
+    },
+    "cpu": {
+      "decisions": {
+        "levels/execution/cpu::partition": {
+          "strategies": [
+            "levels/execution/cpu::row-reduction"
+          ],
+          "realizer": "levels/execution/cpu::group-rows"
+        },
+        "levels/execution/cpu::storage": {
+          "strategies": [
+            "levels/execution/cpu::private-values"
+          ],
+          "realizer": "levels/execution/cpu::allocate"
+        }
+      }
     }
   },
   "exits": {}

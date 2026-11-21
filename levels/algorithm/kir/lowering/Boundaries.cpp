@@ -8,13 +8,7 @@
 using namespace compilerinfra;
 using namespace mlir;
 namespace intentdsl {
-LogicalResult verifyLogicalRows(ModuleOp module,StringRef dialect,bool canonical) {
-  auto funcs = module.getOps<func::FuncOp>();
-  if (!llvm::hasSingleElement(funcs))
-    return module.emitError("expected one author kernel");
-  auto fn = *funcs.begin();
-  if (fn.empty() || !llvm::hasSingleElement(fn.getBody()) || fn.getNumResults())
-    return fn.emitError("expected a defined output-buffer kernel");
+LogicalResult verifyRowComputation(func::FuncOp fn, Block &row, ValueRange captures, unsigned domainIndex, StringRef dialect, bool canonical) {
   auto abi = fn->getAttrOfType<StringAttr>("kir.abi");
   if (!abi)
     return fn.emitError("missing author ABI");
@@ -24,7 +18,7 @@ LogicalResult verifyLogicalRows(ModuleOp module,StringRef dialect,bool canonical
     return fn.emitError("invalid ABI JSON");
   }
   auto *args = parsed->getAsArray();
-  if (!args || args->size() != fn.getNumArguments())
+  if (!args || args->size() != fn.getNumArguments() || captures.size()!=args->size() || domainIndex>=args->size())
     return fn.emitError("signature length mismatch");
   for (auto [arg, entry] : llvm::zip(fn.getArguments(), *args)) {
     auto *desc = entry.getAsObject();
@@ -37,29 +31,18 @@ LogicalResult verifyLogicalRows(ModuleOp module,StringRef dialect,bool canonical
       rank = view.getRank();
       elt = view.getElementType();
     }
+    auto direction = *desc->getString("direction");
+    if ((rank && direction!="In" && direction!="Out") || (!rank && direction!="Scalar"))
+      return fn.emitError("direction disagrees with the scalar or view type");
     if (rank != desc->getArray("dims")->size() ||
         (!elt.isF16() && !elt.isF32()) ||
         desc->getString("dtype") != (elt.isF16() ? "f16" : "f32"))
       return fn.emitError("parameter descriptor does not match its IR type");
   }
-  auto &body = fn.front();
-  if (body.getOperations().size() != 2 ||
-      body.front().getName().getStringRef() != (dialect+".parallel").str())
-    return fn.emitError("expected a parallel row domain and return");
-  auto &loop = body.front();
-  auto domain = dyn_cast<MemRefType>(loop.getOperand(0).getType());
-  if (!domain || domain.getRank() != 2 ||
-      !llvm::hasSingleElement(loop.getRegion(0)))
-    return loop.emitError("expected a rank-two domain");
-  auto &row = loop.getRegion(0).front();
-  if (row.getNumArguments() != 1 || !row.getArgument(0).getType().isIndex() ||
-      row.empty() || row.back().getName().getStringRef() != (dialect+".end").str())
-    return loop.emitError("invalid row region");
-  auto domainArg = dyn_cast<BlockArgument>(loop.getOperand(0));
-  if (!domainArg || domainArg.getOwner() != &body)
-    return loop.emitError("expected domain argument");
+  auto domainType=dyn_cast<MemRefType>(captures[domainIndex].getType());
+  if(!domainType || domainType.getRank()!=2)return fn.emitError("expected a matrix row domain");
   auto &axes =
-      *(*args)[domainArg.getArgNumber()].getAsObject()->getArray("dims");
+      *(*args)[domainIndex].getAsObject()->getArray("dims");
   llvm::SmallDenseSet<unsigned> written;
   for (auto &op : row) {
     auto name = op.getName().stripDialect();
@@ -71,10 +54,12 @@ LogicalResult verifyLogicalRows(ModuleOp module,StringRef dialect,bool canonical
     if (name == "read" || name == "write") {
       auto view = cast<MemRefType>(op.getOperand(0).getType());
       auto arg = dyn_cast<BlockArgument>(op.getOperand(0));
-      if (!arg || arg.getOwner() != &body)
+      auto slot = llvm::find(captures, op.getOperand(0));
+      if (!arg || slot == captures.end())
         return op.emitError("expected an external view");
       bool write = name == "write";
-      auto *info = (*args)[arg.getArgNumber()].getAsObject();
+      size_t index = slot - captures.begin();
+      auto *info = (*args)[index].getAsObject();
       if (info->getString("direction") != (write ? "Out" : "In") ||
           view.getRank() < 1 || view.getRank() > 2 ||
           op.getNumOperands() != unsigned(view.getRank() + write) ||
@@ -85,7 +70,7 @@ LogicalResult verifyLogicalRows(ModuleOp module,StringRef dialect,bool canonical
           (view.getRank() == 2 && dims.front() != axes.front()))
         return op.emitError("view does not share the row domain");
       if (write)
-        written.insert(arg.getArgNumber());
+        written.insert(index);
       auto type = write ? op.getOperand(op.getNumOperands() - 1).getType()
                         : op.getResult(0).getType();
       if (type !=
@@ -128,6 +113,31 @@ LogicalResult verifyLogicalRows(ModuleOp module,StringRef dialect,bool canonical
         !written.contains(i))
       return fn.emitError("declared output has no write");
   return success();
+}
+LogicalResult verifyLogicalRows(ModuleOp module,StringRef dialect,bool canonical) {
+  auto funcs = module.getOps<func::FuncOp>();
+  if (!llvm::hasSingleElement(funcs))
+    return module.emitError("expected one author kernel");
+  auto fn = *funcs.begin();
+  if (fn.empty() || !llvm::hasSingleElement(fn.getBody()) || fn.getNumResults())
+    return fn.emitError("expected a defined output-buffer kernel");
+  auto &body = fn.front();
+  if (body.getOperations().size() != 2 ||
+      body.front().getName().getStringRef() != (dialect+".parallel").str())
+    return fn.emitError("expected a parallel row domain and return");
+  auto &loop = body.front();
+  auto domain = dyn_cast<MemRefType>(loop.getOperand(0).getType());
+  if (!domain || domain.getRank() != 2 ||
+      !llvm::hasSingleElement(loop.getRegion(0)))
+    return loop.emitError("expected a rank-two domain");
+  auto &row = loop.getRegion(0).front();
+  if (row.getNumArguments() != 1 || !row.getArgument(0).getType().isIndex() ||
+      row.empty() || row.back().getName().getStringRef() != (dialect+".end").str())
+    return loop.emitError("invalid row region");
+  auto domainArg = dyn_cast<BlockArgument>(loop.getOperand(0));
+  if (!domainArg || domainArg.getOwner() != &body)
+    return loop.emitError("expected domain argument");
+  return verifyRowComputation(fn,row,fn.getArguments(),domainArg.getArgNumber(),dialect,canonical);
 }
 
 } // namespace intentdsl

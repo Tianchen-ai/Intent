@@ -36,7 +36,10 @@ class Kernel:
                     raise ValueError("compiled ABI differs from author signature")
                 artifact = self.target.materialize(data)
                 group.append(artifact)
-        return artifact.bind(values, result, device, *shape)
+        call = artifact.bind(values, result, device, *shape)
+        # A prepared call may outlive its JIT object. Pin its installed module namespace.
+        call.compiler_owner = self.compiler
+        return call
 
     def run(self, *inputs):
         call = self.prepare(*inputs)

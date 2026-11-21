@@ -34,6 +34,17 @@
         "realized",
         "normalized"
       ]
+    },
+    {
+      "name": "cpu",
+      "level": "execution",
+      "parent": "kir@canonical",
+      "contract": "Isolated row tasks over structured SSA values",
+      "boundaries": [
+        "formed",
+        "tasked",
+        "buffers"
+      ]
     }
   ],
   "exits": [
@@ -45,12 +56,33 @@
         "legal",
         "callable"
       ]
+    },
+    {
+      "name": "weft",
+      "at": "cpu@tasked",
+      "description": "Synchronous native CPU program",
+      "boundaries": [
+        "legal",
+        "callable"
+      ]
+    },
+    {
+      "name": "mojo",
+      "at": "cpu@buffers",
+      "description": "Synchronous native CPU program",
+      "boundaries": [
+        "legal",
+        "realized",
+        "callable"
+      ]
     }
   ],
   "runtimes": [
     "kir",
     "block",
-    "triton"
+    "triton",
+    "weft",
+    "mojo"
   ],
   "frontend": {
     "language": "python",
@@ -60,7 +92,9 @@
   "build": {
     "configure_args": []
   },
-  "bench": {"package": "intent_bench.compilerinfra_adapter"},
+  "bench": {
+    "package": "intent_bench.compilerinfra_adapter"
+  },
   "install": {
     "python": "python3"
   }

@@ -7,7 +7,7 @@ class Target:
         self.devices = {}
 
     def specialize(self, device, values):
-        if device is None or device.type != "cuda":
+        if getattr(device, "type", None) != "cuda":
             raise ValueError("Triton requires local CUDA buffers")
         matrix = next(v for v in values if isinstance(v, torch.Tensor) and v.ndim == 2)
         m, n = matrix.shape
