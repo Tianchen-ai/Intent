@@ -1,3 +1,4 @@
+#include "intentdsl/levels/execution/block/ir/Grid.h"
 #include "llvm/ADT/StringExtras.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/algorithm/kir/ir/Literal.h"
@@ -67,7 +68,12 @@ class Kernel {
       else if (code == "maximum")
         expr = "ct.maximum(" + arg(0) + "," + arg(1) + ",propagate_nan=True)";
       else if (code == "pid")
-        expr = "ct.astype(ct.bid(0), " + indexType + ")";
+        { expr = "ct.astype(ct.bid(0), " + indexType + ")";
+          auto fn=op.getParentOfType<func::FuncOp>(); Builder b(fn.getContext());
+          if(fn->getAttr("block.grid")==intentdsl::block::grid(b,true)) {
+            expr += op.getAttrOfType<IntegerAttr>("axis").getInt()==0 ? " // COLUMN_TILES" : " % COLUMN_TILES";
+          }
+        }
       else if (code == "zero")
         expr = "0";
       else if (code == "rows")
@@ -95,16 +101,18 @@ class Kernel {
         if(rank>2){
           auto array=arg(0), row=arg(1);
           SmallVector<std::string> indices(rank),shape(rank,"1");
-          indices.back()=arg(2);shape.back()="W";
+          indices.back()=arg(2);shape.back()="W";shape[rank-2]="R";
           for(int j=rank-2;j>=0;--j){
-            indices[j]="("+row+" % "+array+".shape["+std::to_string(j)+"])";
-            row="("+row+" // "+array+".shape["+std::to_string(j)+"])";
+            auto span="D"+std::to_string(j);
+            if(j==rank-2) span="("+span+"//R)";
+            indices[j]="("+row+" % "+span+")";
+            row="("+row+" // "+span+")";
           }
           auto coord="("+llvm::join(indices,",")+")", tile="("+llvm::join(shape,",")+")";
           if(code=="tile_store")line(depth,"ct.store("+array+","+coord+",ct.reshape("+arg(3)+","+tile+")"+hint+")");
           else {
             auto id=local();names[op.getResult(0)]=id;
-            line(depth,id+" = ct.reshape(ct.load("+array+","+coord+",shape="+tile+",padding_mode=ct.PaddingMode.ZERO"+hint+"),(1,W))");
+            line(depth,id+" = ct.reshape(ct.load("+array+","+coord+",shape="+tile+",padding_mode=ct.PaddingMode.ZERO"+hint+"),(R,W))");
           }
           continue;
         }
@@ -187,6 +195,13 @@ public:
         out << (wide ? ": ct.IndexedWithInt64[ct.Array]" : ": ct.Array");
       out << ", ";
     }
+    auto domain=fn.getArgument(intentdsl::domainSlot(fn));
+    int rank=cast<MemRefType>(domain.getType()).getRank();
+    if(rank>2)
+      for(int axis=0;axis<rank-1;++axis) out<<"D"<<axis<<": ct.Constant[int], ";
+    Builder b(fn.getContext());
+    if(fn->getAttr("block.grid")==intentdsl::block::grid(b,true))
+      out << "COLUMN_TILES: ct.Constant[int], ";
     out << "R: ct.Constant[int], W: ct.Constant[int]):\n";
     return body(fn.front(), 1);
   }
@@ -209,9 +224,8 @@ llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
                            {"width", d.getAs<IntegerAttr>("width").getInt()},
                            {"native", std::move(*hints)}});
   }
-  llvm::json::Array formula;
-  for (auto a : fn->getAttrOfType<ArrayAttr>("block.grid"))
-    formula.push_back(cast<StringAttr>(a).str());
+  Builder b(fn.getContext());
+  auto formula=intentdsl::block::gridExpression(fn->getAttr("block.grid"));
   auto guard = fn->getAttrOfType<DenseI64ArrayAttr>("block.guard");
   std::string src;
   llvm::raw_string_ostream stream(src);
@@ -220,7 +234,9 @@ llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
   out << llvm::json::Value(llvm::json::Object{
       {"domain",intentdsl::publishDomain(fn)},
       {"abi", std::move(*abi)},
-      {"version", 1},
+      {"version", 3},
+      {"column_tiles_parameter",fn->getAttr("block.grid")==intentdsl::block::grid(b,true)},
+      {"outer_shape_slot",cast<MemRefType>(fn.getArgument(intentdsl::domainSlot(fn)).getType()).getRank()>2 ? intentdsl::domainSlot(fn) : -1},
       {"source", src},
       {"entry", fn->getAttrOfType<StringAttr>("ct_src.entry").str()},
       {"grid", llvm::json::Array{std::move(formula), 1, 1}},

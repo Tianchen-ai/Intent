@@ -66,18 +66,36 @@ void registerCost(Unit &u) {
                 {"strided_store", {ws, "B"}},
                 {"waves", {waves, "count"}},
                 {"tail", {instances * rows * tiles * width - m * n, "lane"}}};
+            bool gridTiles=choice.get("walk") && choice.getAs<StringAttr>("walk")=="grid-tile";
+            // Independent columns create concurrently schedulable instances.
+            // The other streaming walks issue all column tiles serially.
+            double scheduled=gridTiles ? instances*tiles : instances;
+            double serial=gridTiles ? 1 : tiles;
+            v.terms["serial_tiles"]={serial,"count"};
             double regs=peak*rows*width;
             double resident=regFile && regs>0?std::max(1.,std::floor(*regFile/regs)):1.;
             v.terms["fragment_register_estimate"]={regs,"reg32"};
             v.terms["resident_instance_upper_estimate"]={resident,"instance"};
             v.terms["active_instances"]={std::min(instances,resident*f->participants),"count"};
-            double occupancyPenalty=regFile?2./std::min(2.,resident):1.;
+            double active = std::min(scheduled, resident * f->participants);
+            v.terms["active_instances"]={active,"count"};
+            double rounds = active ? std::ceil(scheduled / active) : 0.;
+            double capacity = resident * f->participants;
+            double laneEfficiency = instances && tiles ? (m*n)/(instances*rows*tiles*width) : 1.;
+            // Each memory warp still issues a transaction for its active tail.
+            // Count sectors, not bytes for masked-off lanes.
+            double sectors = std::ceil(n/16.);
+            double allocatedSectors = tiles * std::ceil(width/16.);
+            double tailCost = laneEfficiency ? std::min(1./laneEfficiency,
+                sectors ? allocatedSectors/sectors : 1.) : 1.;
+            v.terms["lane_efficiency"]={laneEfficiency,"ratio"};
+            v.terms["resident_waves"]={rounds,"count"};
             if (read && write && strided && stridedRead && launch) {
               v.timeNs =
                   *launch +
                   (r / (swapped ? *stridedRead : *read) + w / *write +
                    ws / *strided) *
-                      (instances ? waves * f->participants / instances : 0.) * occupancyPenalty;
+                      (scheduled ? rounds * std::min(capacity, double(f->participants)*2) / scheduled : 0.) * tailCost;
               if (!e.timeNs || *v.timeNs < *e.timeNs) {
                 e.timeNs = v.timeNs;
                 e.terms = v.terms;

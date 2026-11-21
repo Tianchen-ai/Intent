@@ -12,7 +12,7 @@ class Artifact:
     def __init__(self, data):
         if version("cuda-tile").split(".")[:2] != ["1", "6"]:
             raise RuntimeError("Intent cuTile requires SDK 1.6.x")
-        if data["version"] != 1:
+        if data["version"] not in (1, 2, 3):
             raise ValueError("unsupported cuTile ABI")
         self.data = data
         self.function = load(data["source"], data["entry"])._pyfunc
@@ -39,7 +39,10 @@ class Call:
         self.timings = {}
 
     def args(self, row, values):
-        return (*values, row["rows"], row["width"])
+        slot=self.artifact.data.get("outer_shape_slot", -1)
+        outer=values[slot].shape[:-1] if slot>=0 else ()
+        columns=((-(-self.shape[1]//row["width"])),) if self.artifact.data.get("column_tiles_parameter") else ()
+        return (*values, *outer, *columns, row["rows"], row["width"])
 
     def grid(self, row):
         return grid(self.artifact.data["grid"], self.shape, row)
@@ -143,6 +146,13 @@ class Call:
             for v in self.values:
                 if isinstance(v, torch.Tensor):
                     v.record_stream(stream)
+
+    def bind_row(self, row_id):
+        from copy import copy
+        self.compile()
+        row = copy(self)
+        row.selected=self.candidates[row_id]
+        return row
 
     def tuning_report(self):
         from runtime.kir.binding.selection import selection

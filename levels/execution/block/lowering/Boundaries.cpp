@@ -61,12 +61,13 @@ void bind(Unit &unit) {
     if(!d)return llvm::createStringError("missing block decision");
     return intentdsl::verifyRows(op,d.getAs<ArrayAttr>("rows"),d.getAs<StringAttr>("topology"),d.getAs<DenseI64ArrayAttr>("guard"),profile);
   };
-  f.verifyCandidate=[](Operation *op,const StructuralCandidate &c,const TargetProfile &)->llvm::Error{
+  f.verifyCandidate=[](Operation *op,const StructuralCandidate &c,const TargetProfile &profile)->llvm::Error{
     auto d=cast<DictionaryAttr>(c.value);auto topology=d.getAs<StringAttr>("topology").str();
     auto rows=d.getAs<ArrayAttr>("rows");auto group=cast<DictionaryAttr>(rows[0]).getAs<IntegerAttr>("rows");
     if(auto walk=d.getAs<StringAttr>("walk")){
       if(c.topology!=walk.str() || c.id!=walk.str() || c.preconditions!=std::vector<std::string>{walk=="source"?"independent-members":"bijective-rectangular-copy"} ||
-         (walk!="source" && (!intentdsl::rectangularCopy(op) || (walk!="destination" && walk!="tile") || topology!="stream")))
+         (walk!="source" && (!intentdsl::rectangularCopy(op) || (walk!="destination" && walk!="tile" && walk!="grid-tile") || topology!="stream")) ||
+         (walk=="grid-tile" && profile.services.get<intentdsl::RowCapacity>()->independentWidths.empty()))
         return llvm::createStringError("invalid traversal for the access domain");
       return llvm::Error::success();
     }

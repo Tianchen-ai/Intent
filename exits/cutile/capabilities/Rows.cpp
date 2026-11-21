@@ -26,17 +26,21 @@ capabilities(const llvm::json::Object &options) {
           profile.services.provide<intentdsl::cutile::ArrayIndices>(indices))
     return e;
   auto table = std::make_shared<intentdsl::RowCapacity>();
+  table->rectangularProjectedRows = true;
+  table->independentWidths = {8, 16, 32, 64};
   if(auto error=table->bind(options))return error;
   // Wide rectangular transfers amortize a large resident tile. For generic
   // strided loads a smaller table also bounds native compile-time expansion.
   const unsigned maxWidth = indices->permitTma ? 4096 : 256;
   for (unsigned width = 1; width <= maxWidth; width *= 2) {
-    for (unsigned rows : {1u, 2u}) {
-      unsigned occupancy = *architecture == 90 ? 3 - rows : rows;
+    for (unsigned rows : {1u, 2u, 8u, 16u}) {
+      if(rows>2 && width>128) continue;
+      unsigned occupancy = *architecture == 90 ? (rows == 1 ? 2 : 1) : std::min(rows, 2u);
       std::string options;
       llvm::raw_string_ostream(options) << llvm::json::Value(llvm::json::Object{
           {"num_ctas", 1}, {"occupancy", occupancy}, {"opt_level", 3}});
-      table->rows.push_back({2 * width + rows, rows, width, options});
+      auto id = rows <= 2 ? 2 * width + rows : 65536u + 32 * width + rows;
+      table->rows.push_back({id, rows, width, options});
     }
   }
   if (auto e = profile.services.provide<intentdsl::RowCapacity>(table))

@@ -13,6 +13,7 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
   if (*arch != 90 && *arch != 120)
     return llvm::createStringError("unsupported Triton GPU architecture");
   auto caps = std::make_shared<intentdsl::RowCapacity>();
+  caps->independentWidths = {32};
   if(auto error=caps->bind(options))return error;
   struct NativeRow {
     unsigned id, rows, warps, stages;
@@ -31,8 +32,12 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
     llvm::raw_string_ostream os(payload);
     os << llvm::json::Value(llvm::json::Object{
         {"num_warps", int64_t(r.warps)}, {"num_stages", int64_t(r.stages)}});
-    for(unsigned width=1; width<=8192; width*=2)
+    for(unsigned width=1; width<=8192; width*=2) {
       caps->rows.push_back({width*2+r.id, r.rows, width, payload});
+      if(r.id==0 && width<=128)
+        for(unsigned group:{8u,16u})
+          caps->rows.push_back({65536+32*width+group,group,width,payload});
+    }
   }
   if(auto registers=options.getInteger("registers"))
     if(auto err=profile.services.facts.query("register_file",{*registers,"reg32","CUDA",llvm::json::Object{{"source","device properties"}}}))return err;

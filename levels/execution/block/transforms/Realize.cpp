@@ -1,4 +1,5 @@
 #include "compilerinfra/Assembly.h"
+#include "intentdsl/levels/execution/block/ir/Grid.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
@@ -29,7 +30,8 @@ public:
       anchor->walk([](Operation *op){if(op->getName().stripDialect()=="write")op->removeAttr("axes");});
     }
     fn->setAttr("block.guard",choice.get("guard"));
-    fn->setAttr("block.grid", rw.getStrArrayAttr({"ceildiv", "M", "rows"}));
+    gridTiles = choice.get("walk") && choice.getAs<StringAttr>("walk")=="grid-tile";
+    fn->setAttr("block.grid", intentdsl::block::grid(rw,gridTiles));
     fn->setAttr("block.configs", choice.get("rows"));
     fn->setAttr("block.topology", choice.get("topology"));
   }
@@ -38,7 +40,9 @@ public:
     auto pid = make("pid", {}, rw.getIndexType(), rw.getNamedAttr("axis",rw.getI32IntegerAttr(0)))->getResult(0);
     rows = make("rows", pid, vector(rw.getIndexType(), 1), rw.getNamedAttr("step",rw.getStringAttr("rows")))->getResult(0);
     auto &body = anchor->getRegion(0).front();
-    if (resident)
+    if(gridTiles)
+      tile(make("pid", {}, rw.getIndexType(),rw.getNamedAttr("axis",rw.getI32IntegerAttr(1)))->getResult(0));
+    else if (resident)
       tile(make("zero", {}, rw.getIndexType())->getResult(0));
     for (auto &operation : body.without_terminator()) {
       if (operation.getName().stripDialect() == "write")
@@ -51,7 +55,7 @@ public:
       }
     }
     if (!writes.empty()) {
-      if (resident) {
+      if (resident || gridTiles) {
         for (auto *write : writes)
           expr(write->getOperand(2));
         for (auto *write : writes)
@@ -67,7 +71,7 @@ private:
   RewriterBase &rw;
   Location loc;
   Value domain, rows, cols, active;
-  bool resident;
+  bool resident, gridTiles;
   SmallVector<Operation *> writes;
   IRMapping fixed, local;
   Type vector(Type element, unsigned rank) {

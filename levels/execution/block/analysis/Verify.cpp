@@ -4,6 +4,7 @@
 #include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "llvm/ADT/DenseSet.h"
+#include "intentdsl/levels/execution/block/ir/Grid.h"
 namespace intentdsl {
 using namespace mlir;
 llvm::Error verifyRows(Operation *anchor,ArrayAttr rows,StringAttr topology,DenseI64ArrayAttr guard,const compilerinfra::TargetProfile &p){
@@ -21,7 +22,8 @@ llvm::Error verifyRows(Operation *anchor,ArrayAttr rows,StringAttr topology,Dens
     if(!d || !d.getAs<IntegerAttr>("id") || !d.getAs<IntegerAttr>("rows") ||
        !d.getAs<IntegerAttr>("width") || !d.getAs<StringAttr>("payload"))return llvm::createStringError("incomplete parameter row");
     auto id=d.getAs<IntegerAttr>("id").getInt(), width=d.getAs<IntegerAttr>("width").getInt();
-    if(!seen.insert(id).second || (topology=="resident" && (hi<0 || width<hi)) ||
+    if(!caps->acceptsGroup(anchor, d.getAs<IntegerAttr>("rows").getInt()) ||
+       !seen.insert(id).second || (topology=="resident" && (hi<0 || width<hi)) ||
        !llvm::any_of(caps->rows,[&](auto &r){return id==r.id && width==r.width &&
        d.getAs<IntegerAttr>("rows").getInt()==r.rows && d.getAs<StringAttr>("payload")==r.payload;}))
         return llvm::createStringError("invalid row id, width guard or native payload");
@@ -43,7 +45,9 @@ LogicalResult verifyMapping(ModuleOp m,const compilerinfra::TargetProfile &p,Str
   auto topology=f->getAttrOfType<StringAttr>("block.topology");
   if(auto e=verifyRows(f,f->getAttrOfType<ArrayAttr>("block.configs"),topology,f->getAttrOfType<DenseI64ArrayAttr>("block.guard"),p))
     return f.emitError()<<llvm::toString(std::move(e));
-  if(f->getAttr("block.grid")!=b.getStrArrayAttr({"ceildiv","M","rows"}))
+  bool tiles=f->getAttr("block.grid")==block::grid(b,true);
+  if((tiles && (p.services.get<RowCapacity>()->independentWidths.empty() || topology!="stream")) ||
+     (!tiles && f->getAttr("block.grid")!=block::grid(b,false)))
     return f.emitError("grid must cover the M domain at the instance row step");
   auto domainIndex = f->getAttrOfType<IntegerAttr>("kir.domain_arg");
   if (!domainIndex || domainIndex.getInt()<0 || domainIndex.getInt()>=f.getNumArguments())
@@ -58,8 +62,8 @@ LogicalResult verifyMapping(ModuleOp m,const compilerinfra::TargetProfile &p,Str
     auto n=op->getName().stripDialect();
     auto def=[&](Value v,StringRef k){auto *d=v.getDefiningOp();return d && d->getName().getDialectNamespace()==dialect && d->getName().stripDialect()==k;};
     bool ok=true;
-    if(n=="pid"){instances.insert(op->getResult(0));ok=op->getAttr("axis")==b.getI32IntegerAttr(0);}
-    if(n=="rows"){mapped.insert(op->getOperand(0));ok=op->getAttr("step")==b.getStringAttr("rows") && def(op->getOperand(0),"pid");}
+    if(n=="pid"){instances.insert(op->getResult(0));ok=op->getAttr("axis")==b.getI32IntegerAttr(0) || (tiles && op->getAttr("axis")==b.getI32IntegerAttr(1));}
+    if(n=="rows"){mapped.insert(op->getOperand(0));ok=op->getAttr("step")==b.getStringAttr("rows") && def(op->getOperand(0),"pid") && op->getOperand(0).getDefiningOp()->getAttr("axis")==b.getI32IntegerAttr(0);}
     if(n=="tiles"){
       ++sweeps;
       if(!llvm::hasSingleElement(op->getRegion(0)))return WalkResult::interrupt();
@@ -77,7 +81,8 @@ LogicalResult verifyMapping(ModuleOp m,const compilerinfra::TargetProfile &p,Str
     }
     if(n=="columns"){
       auto v=op->getOperand(0);
-      ok=topology=="resident"?def(v,"zero"):isa<BlockArgument>(v) && cast<BlockArgument>(v).getArgNumber()==0 && v.getParentBlock()->getParentOp()->getName().stripDialect()=="tiles";
+      if(tiles){mapped.insert(v);ok=def(v,"pid") && v.getDefiningOp()->getAttr("axis")==b.getI32IntegerAttr(1);}
+      else ok=topology=="resident"?def(v,"zero"):isa<BlockArgument>(v) && cast<BlockArgument>(v).getArgNumber()==0 && v.getParentBlock()->getParentOp()->getName().stripDialect()=="tiles";
     }
     if(n=="active")
       ok=def(op->getOperand(1),"rows") && def(op->getOperand(2),"columns");
@@ -129,6 +134,7 @@ LogicalResult verifyMapping(ModuleOp m,const compilerinfra::TargetProfile &p,Str
           type.getShape()!=data.getShape() || mask.getParentBlock()!=op->getBlock())
         return op->emitError("reduction requires its tile's boolean active mask"), WalkResult::interrupt();
     }
+    if(tiles && (n=="reduce" || n=="combine" || n=="identity"))return op->emitError("column tile cannot split a row collective"),WalkResult::interrupt();
     if(n=="reduce" || n=="combine" || n=="identity"){
       auto alg=op->getAttrOfType<StringAttr>("algebra");ok=alg && (alg=="max_num" || alg=="sum");
       if(n=="combine")ok &= def(op->getOperand(1),"reduce") && op->getOperand(1).getDefiningOp()->getAttr("algebra")==alg;
@@ -137,7 +143,7 @@ LogicalResult verifyMapping(ModuleOp m,const compilerinfra::TargetProfile &p,Str
     return WalkResult::advance();
   });
   if(result.wasInterrupted())return failure();
-  if(instances.empty() || instances!=mapped || ((topology=="stream")!=(sweeps!=0)))return f.emitError("instance mapping does not match topology");
+  if(instances.size()!=(tiles?2u:1u) || instances!=mapped || ((topology=="stream" && !tiles)!=(sweeps!=0)))return f.emitError("instance mapping does not match topology");
   return success();
 }
 }

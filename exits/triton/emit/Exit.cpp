@@ -1,3 +1,4 @@
+#include "intentdsl/levels/execution/block/ir/Grid.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/algorithm/kir/ir/Literal.h"
 #include "intentdsl/levels/execution/block/ir/Access.h"
@@ -44,10 +45,10 @@ public:
       values[arg] = id;
       out << id << ", ";
       if (auto v=dyn_cast<MemRefType>(arg.getType()); v && v.getRank()>2)
-        for(int i=0;i<v.getRank()-1;++i)out<<id<<"_d"<<i<<", ";
+        for(int i=0;i<v.getRank()-1;++i)out<<id<<"_d"<<i<<": tl.constexpr, ";
       if (auto v = dyn_cast<MemRefType>(arg.getType()))
         for (int i = 0; i < v.getRank(); ++i)
-          out << id << "_s" << i << ", ";
+          out << id << "_s" << i << (v.getRank()>2 ? ": tl.constexpr, " : ", ");
     }
     out << "M, N, ROWS: tl.constexpr, WIDTH: tl.constexpr):\n";
     return body(fn.front(), 1);
@@ -107,7 +108,12 @@ public:
         e = "tl.maximum(" + arg(0) + "," + arg(1) +
             ",propagate_nan=tl.PropagateNan.ALL)";
       else if (n == "pid")
-        e = "tl.program_id(0).to(tl.int64)";
+        { e = "tl.program_id(0).to(tl.int64)";
+          auto fn=op.getParentOfType<func::FuncOp>();
+          Builder b(fn.getContext());
+          if(fn->getAttr("block.grid")==intentdsl::block::grid(b,true))
+            e += op.getAttrOfType<IntegerAttr>("axis").getInt()==0 ? " // tl.cdiv(N,WIDTH)" : " % tl.cdiv(N,WIDTH)";
+        }
       else if (n == "rows")
         e = arg(0) + " * ROWS + tl.arange(0, ROWS)";
       else if (n == "zero")
@@ -203,10 +209,7 @@ llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
   if (auto err = Writer(stream).write(fn))
     return err;
   out << llvm::json::Value(llvm::json::Object{
-      {"version", 2},{"grid", llvm::json::Array{llvm::json::Array{
-      cast<StringAttr>(fn->getAttrOfType<ArrayAttr>("block.grid")[0]).str(),
-      cast<StringAttr>(fn->getAttrOfType<ArrayAttr>("block.grid")[1]).str(),
-      cast<StringAttr>(fn->getAttrOfType<ArrayAttr>("block.grid")[2]).str()},1,1}},
+{"version", 2},{"grid", llvm::json::Array{intentdsl::block::gridExpression(fn->getAttr("block.grid")),1,1}},
       {"entry", "kernel"},
       {"source", src},
       {"domain",intentdsl::publishDomain(fn)},

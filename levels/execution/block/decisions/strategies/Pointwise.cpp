@@ -44,8 +44,8 @@ void registerPointwise(Unit &u) {
     for (auto &r : capacity->rows)
       if ((r.width == width ||
            (!fits && llvm::is_contained(capacity->streamingWidths, r.width))) &&
-          (cast<MemRefType>(op->getOperand(0).getType()).getRank() == 2 ||
-           r.rows == 1))
+          (cast<MemRefType>(op->getOperand(0).getType()).getRank() > 1 ||
+           r.rows == 1) && capacity->acceptsGroup(op, r.rows))
         rows.push_back(b.getDictionaryAttr(
             {b.getNamedAttr("id", b.getI32IntegerAttr(r.id)),
              b.getNamedAttr("rows", b.getI32IntegerAttr(r.rows)),
@@ -65,12 +65,13 @@ void registerPointwise(Unit &u) {
     std::vector<StructuralCandidate> cs;auto v=original(op,p,a);if(!v)return v.takeError();
     if(!*v)return cs;
     Builder b(op->getContext());auto caps=p.services.get<intentdsl::RowCapacity>();
-    for(StringRef walk:{"source","destination","tile"}){
+    for(StringRef walk:{"source","destination","tile","grid-tile"}){
+      if(walk=="grid-tile" && caps->independentWidths.empty()) continue;
       if(walk!="source" && !intentdsl::rectangularCopy(op))continue;
       NamedAttrList d(cast<DictionaryAttr>(*v));d.set("walk",b.getStringAttr(walk));
       if(walk!="source"){
         SmallVector<Attribute> rows;
-        for(auto &r:caps->rows)if(r.width==32 && (walk=="tile"?r.rows>1:r.rows==1))
+        for(auto &r:caps->rows)if((walk=="grid-tile"?llvm::is_contained(caps->independentWidths,r.width):r.width==32) && (walk=="destination"?r.rows==1:r.rows>1))
           rows.push_back(b.getDictionaryAttr({b.getNamedAttr("width",b.getI32IntegerAttr(r.width)),b.getNamedAttr("rows",b.getI32IntegerAttr(r.rows)),b.getNamedAttr("id",b.getI32IntegerAttr(r.id)),b.getNamedAttr("payload",b.getStringAttr(r.payload))}));
         if(rows.empty())continue;
         d.set("guard",b.getDenseI64ArrayAttr({0,-1}));d.set("rows",b.getArrayAttr(rows));d.set("topology",b.getStringAttr("stream"));

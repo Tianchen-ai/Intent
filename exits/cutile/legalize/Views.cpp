@@ -156,6 +156,10 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
                  DenseI64ArrayAttr::get(fn.getContext(), {0}))) &&
            pid && pid->getName().getStringRef() == "ct_src.pid" &&
            ((col && col->getName().getStringRef() == "ct_src.zero") ||
+            (col && col->getName().getStringRef()=="ct_src.pid" &&
+             col->getAttrOfType<IntegerAttr>("axis").getInt()==1 &&
+             pid->getAttrOfType<IntegerAttr>("axis").getInt()==0 &&
+             isa<ArrayAttr>(fn->getAttrOfType<ArrayAttr>("block.grid")[1])) ||
             (ind && ind.getArgNumber() == 0 &&
              ind.getOwner()->getParentOp()->getName().getStringRef() ==
                  "ct_src.tiles"));

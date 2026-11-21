@@ -33,6 +33,25 @@ struct RowCapacity {
       return llvm::createStringError("logical inner axis has no bound extent");
     return *dims->back().getAsInteger();
   }
+  // Rectangular tile consumers cannot span a carry between two projected
+  // outer axes in one transfer. Other consumers linearize lanes separately.
+  bool rectangularProjectedRows = false;
+  llvm::SmallVector<unsigned> independentWidths;
+  bool acceptsGroup(mlir::Operation *op, unsigned count) const {
+    if (count == 1) return true;
+    auto fn = mlir::dyn_cast<mlir::func::FuncOp>(op);
+    if (!fn) fn = op->getParentOfType<mlir::func::FuncOp>();
+    auto bounds = fn->getAttrOfType<mlir::DenseI64ArrayAttr>("kir.iteration");
+    if (!bounds || bounds.size() <= 8 || !rectangularProjectedRows) return true;
+    auto axis = bounds.asArrayRef().take_back(8).take_front(4);
+    if(axis[0]<0) return axis[3]%count == 0;
+    if(size_t(axis[0])>=bindings.size() || axis[2]<=0) return false;
+    auto *record=bindings[axis[0]].getAsObject();
+    auto *shape=record?record->getArray("shape"):nullptr;
+    if(!shape || size_t(axis[1])>=shape->size()) return false;
+    auto dim=(*shape)[axis[1]].getAsInteger();
+    return dim && (*dim/axis[2])%count==0;
+  }
   struct Row {
     unsigned id, rows, width;
     std::string payload;

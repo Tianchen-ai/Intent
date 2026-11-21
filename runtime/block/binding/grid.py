@@ -13,6 +13,8 @@ def grid(mapping, shape, row):
             return values[expression]
         op, lhs, rhs = expression
         a,b = evaluate(lhs),evaluate(rhs)
+        if op == "mul":
+            return a*b
         if op == "ceildiv":
             return -(-a // b)
         raise ValueError(f"unknown instance mapping operation {op}")

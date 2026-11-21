@@ -123,6 +123,15 @@ class Prepared:
                 if isinstance(value, torch.Tensor):
                     value.record_stream(stream)
 
+    def bind_row(self, row_id):
+        from copy import copy
+        self.compile()
+        row = copy(self)
+        row.row=next((r for r in self.rows if r["id"]==row_id), None)
+        if row.row is None:
+            raise ValueError("unknown Triton row")
+        return row
+
     def tuning_report(self):
         from runtime.kir.binding.selection import selection
 
