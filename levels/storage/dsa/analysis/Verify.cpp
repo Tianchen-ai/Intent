@@ -96,6 +96,23 @@ bool access(Operation *op, unsigned mask, Operation &window, func::FuncOp fn,
   return mask != 2 || seen.size() == logical->size();
 }
 } // namespace
+bool projectsConsecutiveRows(Operation *op, unsigned maskIndex) {
+  auto rank = cast<MemRefType>(op->getOperand(0).getType()).getRank();
+  if (rank < 3 || op->getNumOperands() != maskIndex + 1 + rank)
+    return false;
+  auto mask = dyn_cast<OpResult>(op->getOperand(maskIndex));
+  if (!mask || mask.getOwner()->getName().getStringRef() != "dsa.window")
+    return false;
+  auto *window = mask.getOwner();
+  auto domain = window->getOperand(0);
+  auto logicalRank = cast<MemRefType>(domain.getType()).getRank();
+  auto coordinates = op->getOperands().drop_front(maskIndex + 1);
+  auto *axis = coordinates[rank - 2].getDefiningOp();
+  return axis && axis->getName().getStringRef() == "dsa.member_axis" &&
+         axis->getOperand(0) == window->getResult(0) && axis->getOperand(1) == domain &&
+         axis->getAttrOfType<IntegerAttr>("axis").getInt() == logicalRank - 2 &&
+         coordinates.back() == window->getResult(1);
+}
 LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
                             bool supplied) {
   auto fs = m.getOps<func::FuncOp>();

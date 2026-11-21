@@ -61,18 +61,23 @@ StringRef primitive(Operation *op, int64_t depth) {
   if (n == "dsa.phase")
     return "block_tasks";
   if (n == "dsa.copy_in") {
-    auto rank=cast<MemRefType>(op->getOperand(0).getType()).getRank();
-    if(rank>2 && op->getNumOperands()==rank+2 &&
-       op->getOperand(rank).getDefiningOp()->getName().getStringRef()=="dsa.member_axis")
+    // The grouped transfer increments the view's penultimate stride. Prove
+    // that it is precisely the fastest logical row axis; earlier coordinates
+    // are invariant until that axis wraps. The emitted guard excludes wraps.
+    if (intentdsl::dsa::projectsConsecutiveRows(op, 1))
       return depth==2 ? "group_dma_async" : "group_dma";
     return depth == 2 ? "dma_async" : "dma";
   }
   if (n == "dsa.await")
     return depth == 2 ? "wait_slot" : "ready";
-  if (n == "dsa.write_back")
+  if (n == "dsa.write_back") {
+    if (intentdsl::dsa::projectsConsecutiveRows(op, 2))
+      return op->getAttrOfType<BoolAttr>("async").getValue()
+                 ? "group_store_async" : "group_store";
     return op->getAttrOfType<BoolAttr>("async").getValue()
                ? "async_store_extent"
                : "store_extent";
+  }
   if (n == "dsa.drain")
     return "drain_writes";
   if (n == "dsa.issued" || n == "dsa.yield")

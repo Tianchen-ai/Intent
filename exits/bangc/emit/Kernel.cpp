@@ -221,16 +221,19 @@ class Source {
           auto axis=std::to_string(cast<MemRefType>(inst.getOperand(0).getType()).getRank()-2);
           auto stride=ptr+"s"+axis, dim=ptr+"d"+axis;
           Text write=inst.getAttrOfType<BoolAttr>("async").getValue()?"__memcpy_async":"__memcpy";
-          line("{int first=j;if(members>1 && "+columnStride+"==1 && "+stride+">=live && "+stride+"<=2147483647/sizeof("+t+") && (row0+j)%"+dim+"+members<="+dim+"){");
-          line(write+"("+ptr+"+"+rowStride+"+col,"+src+",live*sizeof("+t+"),NRAM2GDRAM,"+stride+"*sizeof("+t+"),P*sizeof("+t+"),members-1);");
-          line("}else for(int h=0;h<members;++h){int j=first+h;auto *out="+ptr+"+"+rowStride+"+col*"+columnStride+";auto *v="+src+"+h*P;");
+          line("{int first=j;auto *first_value="+src+";");
+          if (prim=="group_store" || prim=="group_store_async") {
+            line("if(members>1 && "+columnStride+"==1 && "+stride+">=live && "+stride+"<=2147483647/sizeof("+t+") && (row0+j)%"+dim+"+members<="+dim+"){");
+            line(write+"("+ptr+"+"+rowStride+"+col,first_value,live*sizeof("+t+"),NRAM2GDRAM,"+stride+"*sizeof("+t+"),P*sizeof("+t+"),members-1); }else");
+          }
+          line("for(int h=0;h<members;++h){int j=first+h;auto *out="+ptr+"+"+rowStride+"+col*"+columnStride+";auto *v=first_value+h*P;");
           line("if("+columnStride+"==1)"+write+"(out,v,live*sizeof("+t+"),NRAM2GDRAM);else for(int k=0;k<live;++k)out[k*"+columnStride+"]=v[k];}}");
           continue;
         }
         line("{auto *out=" + ptr + "+" + rowStride + "+col*" +
              columnStride + ";");
         Text move =
-            prim == "async_store_extent" ? "__memcpy_async" : "__memcpy";
+            (prim == "async_store_extent" || prim == "group_store_async") ? "__memcpy_async" : "__memcpy";
         line("if(" + columnStride + "==1)" + move + "(out," + src +
              ",live*sizeof(" + t +
              "),NRAM2GDRAM);else for(int k=0;k<live;++k)out[k*" + columnStride +
