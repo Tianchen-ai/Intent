@@ -89,7 +89,12 @@ LogicalResult phase(Operation *anchor, Block &source, bool stream,
     auto domain=w->getOperand(0);
     auto rank=cast<MemRefType>(domain.getType()).getRank();
     auto mapping=op->getAttrOfType<DenseI64ArrayAttr>("block.member_axes");
-    if(mapping){
+    if(auto owner=fn->getAttrOfType<IntegerAttr>("kir.owner_axis")){
+      for(int i=0;i<rank;++i)
+        if(i==owner.getInt())axes.push_back(w->getResult(0));
+        else axes.push_back(inst(b,loc,"dsa.slab_axis",{w->getResult(1),domain},w->getResult(1).getType(),
+                                 b.getNamedAttr("axis",b.getI64IntegerAttr(i)))->getResult(0));
+    }else if(mapping){
       for(auto axis:mapping.asArrayRef()){
         if(axis==rank-1)axes.push_back(w->getResult(1));
         else if(rank==2 && axis==0)axes.push_back(w->getResult(0));
@@ -147,7 +152,14 @@ LogicalResult phase(Operation *anchor, Block &source, bool stream,
     auto val = [&](unsigned i) {
       return map.lookupOrDefault(op->getOperand(i));
     };
-    if (code == "linear_index") {
+    if(code=="owner_store") {
+      auto done=inst(b,loc,"dsa.owner_write",{val(0),writeWindow->getResult(0),val(2)},b.getI1Type());
+      completions.push_back(done->getResult(0));
+    } else if(code=="owner_load") {
+      map.map(op->getResult(0),inst(b,loc,"dsa.owner_read",{val(0),writeWindow->getResult(0)},op->getResultTypes())->getResult(0));
+    } else if(code=="summary_reduce"){
+      map.map(op->getResult(0),inst(b,loc,"block.summary_reduce",{val(0),writeWindow->getResult(2)},op->getResultTypes())->getResult(0));
+    } else if (code == "linear_index") {
       auto *index = inst(b, loc, "block.linear_index",
                          {active->getOperand(0), writeWindow->getResult(0),
                           writeWindow->getResult(1)},

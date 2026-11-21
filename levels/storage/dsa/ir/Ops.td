@@ -25,6 +25,9 @@ def LoadShared : Inst<"load_shared", (ins Index:$start,Index:$limit), (outs)>;
 def Window : Inst<"window", (ins AnyMemRef:$domain), (outs IndexTensor:$rows, IndexTensor:$columns, I1Tensor:$mask)>;
 // Project a flattened instance-row coordinate into one logical prefix axis.
 def MemberAxis : Inst<"member_axis",(ins IndexTensor:$flat,AnyMemRef:$domain,I64Attr:$axis),(outs IndexTensor:$members)>;
+def SlabAxis : Inst<"slab_axis",(ins IndexTensor:$flat,AnyMemRef:$domain,I64Attr:$axis),(outs IndexTensor:$members)>;
+def OwnerRead : Inst<"owner_read",(ins Arg<AnyMemRef,"owner view",[MemRead]>:$view,IndexTensor:$rows),(outs AnyTensor:$values)>;
+def OwnerWrite : Inst<"owner_write",(ins Arg<AnyMemRef,"owner view",[MemWrite]>:$view,IndexTensor:$rows,AnyTensor:$values),(outs I1:$done)>;
 def Copy : Inst<"copy_in", (ins Arg<AnyMemRef, "device view", [MemRead]>:$source,
                                 I1Tensor:$mask, Variadic<IndexTensor>:$coordinates), (outs AnyTensor:$pending)>;
 def Ready : Inst<"await", (ins AnyTensor:$pending), (outs AnyTensor:$value)>;

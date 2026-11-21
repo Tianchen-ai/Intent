@@ -33,6 +33,9 @@ bool narrowedQuotient(Operation *div) {
 }
 StringRef primitive(Operation *op, int64_t depth) {
   auto n = op->getName().getStringRef();
+  if(n=="block.summary_reduce")return "welford_f32";
+  if(n=="block.summary_field" || n=="block.summary_merge" || n=="block.summary_identity" ||
+     n=="dsa.owner_read" || n=="dsa.owner_write" || n=="dsa.slab_axis")return op->getName().stripDialect();
   if(n=="dsa.compute_members"){
     auto layout=op->getParentOfType<func::FuncOp>()->getAttrOfType<DictionaryAttr>("dsa.layout");
     if(layout.getAs<BoolAttr>("group_temporaries").getValue())return "packed_pointwise";
@@ -61,6 +64,7 @@ StringRef primitive(Operation *op, int64_t depth) {
   if (n == "dsa.phase")
     return "block_tasks";
   if (n == "dsa.copy_in") {
+    if(op->getParentOfType<func::FuncOp>()->hasAttr("kir.owner_axis"))return "slab_read";
     // The grouped transfer increments the view's penultimate stride. Prove
     // that it is precisely the fastest logical row axis; earlier coordinates
     // are invariant until that axis wraps. The emitted guard excludes wraps.
@@ -71,6 +75,7 @@ StringRef primitive(Operation *op, int64_t depth) {
   if (n == "dsa.await")
     return depth == 2 ? "wait_slot" : "ready";
   if (n == "dsa.write_back") {
+    if(op->getParentOfType<func::FuncOp>()->hasAttr("kir.owner_axis"))return "slab_write";
     if (intentdsl::dsa::projectsConsecutiveRows(op, 2))
       return op->getAttrOfType<BoolAttr>("async").getValue()
                  ? "group_store_async" : "group_store";
@@ -100,11 +105,11 @@ StringRef primitive(Operation *op, int64_t depth) {
         zero.getType().isF16() && zero.getValue().isPosZero())
       return "positive_half_or_nan";
   }
-  if (n == "block.linear_index" &&
-      !cast<RankedTensorType>(op->getResult(0).getType())
-           .getElementType()
-           .isInteger(32))
-    return {};
+  if (n == "block.uniform") return "philox4x32_uniform";
+  if (n == "block.linear_index") {
+    auto element=cast<RankedTensorType>(op->getResult(0).getType()).getElementType();
+    if (!element.isInteger(32) && !element.isUnsignedInteger(64)) return {};
+  }
   if (n == "block.sqrt" || n == "block.linear_index" || n == "block.xor" ||
       n == "block.and" || n == "block.shl" || n == "block.shr" ||
       n == "block.gt" || n == "block.select")
@@ -132,7 +137,7 @@ LogicalResult offsets(func::FuncOp f, bool install) {
       return o.getAttr("bangc.offset") == address;
     };
     for (auto &o : p->getRegion(0).front().without_terminator()) {
-      if (o.getName().getStringRef() == "dsa.window" || o.getName().getStringRef()=="dsa.member_axis")
+      if (o.getName().getStringRef() == "dsa.window" || o.getName().getStringRef()=="dsa.member_axis" || o.getName().getStringRef()=="dsa.slab_axis")
         continue;
       if (o.getName().getStringRef() != "dsa.copy_in" || !attach(o, grouped, 0))
         return WalkResult::interrupt();
@@ -219,16 +224,17 @@ LogicalResult callable(func::FuncOp fn) {
     int rank = view ? view.getRank() : 0;
     if (!slot || !slot->getArray("dims") ||
         slot->getArray("dims")->size() != unsigned(rank) || rank > 4 ||
-        (!t.isF32() && !t.isF16() && !t.isBF16() && !t.isInteger(32)) ||
+        (!t.isF32() && !t.isF16() && !t.isBF16() && !t.isInteger(32) &&
+         (view || !t.isUnsignedInteger(64))) ||
         slot->getString("dtype") != (t.isF16()         ? "f16"
                                      : t.isBF16()      ? "bf16"
                                      : t.isInteger(32) ? "i32"
-                                                       : "f32") ||
+                                        : t.isUnsignedInteger(64) ? "u64" : "f32") ||
         (view ? (slot->getString("direction") != "In" &&
                  slot->getString("direction") != "Out" &&
                  slot->getString("direction") != "InOut")
               : (slot->getString("direction") != "Scalar" ||
-                 (!t.isF32() && !t.isInteger(32)))))
+                 (!t.isF32() && !t.isInteger(32) && !t.isUnsignedInteger(64)))))
       return fn.emitError(
           "row ABI dtype, extent or direction inconsistent with function");
   }

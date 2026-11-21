@@ -13,7 +13,7 @@ struct Footprint {
     for (auto &op : body) {
       auto code = op.getName().stripDialect();
       if (code == "await" || code == "active" || code == "window" ||
-          code == "member_axis" || code == "rows" || code == "columns")
+          code == "member_axis" || code == "slab_axis" || code == "rows" || code == "columns")
         continue;
       if (code == "reduce") {
         f.collectiveBytes = reductionScratch;

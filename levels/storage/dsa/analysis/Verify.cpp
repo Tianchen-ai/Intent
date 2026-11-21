@@ -80,7 +80,15 @@ bool access(Operation *op, unsigned mask, Operation &window, func::FuncOp fn,
     auto axis = dyn_cast<OpResult>(v);
     if(!axis)return false;
     int64_t dim=-1;
-    if(v==window.getResult(1))dim=logical->size()-1;
+    auto owner = fn->getAttrOfType<IntegerAttr>("kir.owner_axis");
+    if(owner && v==window.getResult(0)) dim=owner.getInt();
+    else if(owner && axis.getOwner()->getName().getStringRef()=="dsa.slab_axis" &&
+            axis.getOwner()->getOperand(0)==window.getResult(1) && axis.getOwner()->getOperand(1)==domain){
+      dim=axis.getOwner()->getAttrOfType<IntegerAttr>("axis").getInt();
+      if(dim==owner.getInt())return false;
+    }
+    else if(owner)return false;
+    else if(v==window.getResult(1))dim=logical->size()-1;
     else if(logical->size()==2 && v==window.getResult(0))dim=0;
     else if (axis.getOwner()->getName().getStringRef() == "dsa.member_axis" &&
              axis.getOwner()->getOperand(0) == window.getResult(0) &&
@@ -162,13 +170,14 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
     return failure();
   llvm::SmallDenseSet<unsigned> written;
   auto coverage = fn.walk([&](Operation *op) {
-    if (op->getName().getStringRef() !=
+    bool owner=op->getName().getStringRef()==(supplied?"dsa.owner_write":"block.owner_store");
+    if (!owner && op->getName().getStringRef() !=
         (supplied ? "dsa.write_back" : "block.store"))
       return WalkResult::advance();
     auto arg = dyn_cast<BlockArgument>(op->getOperand(0));
     auto view = dyn_cast<MemRefType>(op->getOperand(0).getType());
     auto value = dyn_cast<RankedTensorType>(
-        op->getOperand(supplied ? 1 : 4).getType());
+        op->getOperand(owner?2:supplied ? 1 : 4).getType());
     if (!arg || arg.getOwner() != &fn.front() || !view || !value ||
         value.getElementType() != view.getElementType()) {
       op->emitError("write value and destination must have the same element type");
@@ -250,6 +259,18 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
     SmallVector<Value> writes;
     for (auto &item : body) {
       auto name = item.getName().getStringRef();
+      if(name=="dsa.owner_write" || name=="dsa.owner_read"){
+        auto owner=fn->getAttrOfType<IntegerAttr>("kir.owner_axis");
+        auto slot=dyn_cast<BlockArgument>(item.getOperand(0));
+        if(!owner || !slot || slot.getOwner()!=&fn.front() ||
+           item.getOperand(1)!=body.front().getResult(0))return WalkResult::interrupt();
+        auto *desc=(*abi)[slot.getArgNumber()].getAsObject(),*dom=(*abi)[idx.getInt()].getAsObject();
+        if(!desc || !dom || !desc->getArray("dims") || !dom->getArray("dims") ||
+           desc->getArray("dims")->size()!=1 || size_t(owner.getInt())>=dom->getArray("dims")->size() ||
+           (*desc->getArray("dims"))[0]!=(*dom->getArray("dims"))[owner.getInt()])
+          return WalkResult::interrupt();
+        if(name=="dsa.owner_write")writes.push_back(item.getResult(0));
+      }
       if (name == "dsa.write_back") {
         if (!access(&item, 2, body.front(), fn, *abi) ||
             cast<RankedTensorType>(item.getOperand(1).getType()).getShape() != windowType.getShape()) {
@@ -258,7 +279,7 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
         }
         writes.push_back(item.getResult(0));
       }
-      if (name == "dsa.reduce" &&
+      if ((name == "dsa.reduce" || name=="block.summary_reduce") &&
           (item.getOperand(1) != body.front().getResult(2) ||
            !isa<RankedTensorType>(item.getOperand(0).getType()) ||
            cast<RankedTensorType>(item.getOperand(0).getType()).getShape() !=
@@ -283,7 +304,7 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
     for (auto [i, arg] : llvm::enumerate(issued.getOperands())) {
       auto *def = arg.getDefiningOp();
       auto in = body.getArgument(i);
-      while(transfer!=fetch.end() && transfer->getName().getStringRef()=="dsa.member_axis")++transfer;
+      while(transfer!=fetch.end() && (transfer->getName().getStringRef()=="dsa.member_axis" || transfer->getName().getStringRef()=="dsa.slab_axis"))++transfer;
       if (!def || transfer==fetch.end() || def != &*transfer++ || def->getBlock() != &fetch ||
           def->getName().getStringRef() != "dsa.copy_in" ||
           arg.getType() != in.getType() || !in.hasOneUse() ||

@@ -59,7 +59,7 @@ class Native:
             if arg["dims"]:
                 types += [C.c_void_p, *([C.c_int64] * (2 * len(arg["dims"])))]
             else:
-                types.append(C.c_int32 if arg["dtype"] == "i32" else C.c_float)
+                types.append({"i32":C.c_int32,"f32":C.c_float,"u64":C.c_uint64}[arg["dtype"]])
         self.launch.argtypes = [
             *types,
             C.c_int64,

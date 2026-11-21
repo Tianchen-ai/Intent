@@ -17,6 +17,7 @@ Text ctype(Type t) {
     return "unsigned char";
   if (t.isInteger(32))
     return "int";
+  if (t.isUnsignedInteger(64)) return "unsigned long long";
   return t.isF16() ? "half" : "float";
 }
 bool tile(Value v) {
@@ -71,13 +72,27 @@ class Source {
       else step=stride;
     }return {offset,step};
   }
+  Text slabOffset(Operation &op,unsigned first,const Text &view){
+    Text offset="0", member="(col+k)";
+    auto positions=op.getOperands().drop_front(first);
+    for(int i=positions.size()-1;i>=0;--i){
+      auto coord=positions[i].getDefiningOp();
+      auto stride=view+"s"+std::to_string(i);
+      if(coord->getName().getStringRef()=="dsa.slab_axis"){
+        auto dim=view+"d"+std::to_string(i);
+        offset+="+("+member+"%"+dim+")*"+stride;
+        member="("+member+"/"+dim+")";
+      }else offset+="+(row0+j)*"+stride;
+    }
+    return offset;
+  }
   void issue(Block &fetch, const Text &iteration, const Text &slot) {
     line("{ long long incoming=" + iteration + ";");
     line(resident ? "long long row0=incoming*R, col=0;"
                   : "long long row0=group*R, col=incoming*W;");
     line("int live=(int)((N-col)<W?(N-col):W);");
     for (auto &op : fetch.without_terminator()) {
-      if (op.getName().getStringRef() == "dsa.window" || op.getName().getStringRef()=="dsa.member_axis")
+      if (op.getName().getStringRef() == "dsa.window" || op.getName().getStringRef()=="dsa.member_axis" || op.getName().getStringRef()=="dsa.slab_axis")
         continue;
       if(op.hasAttr("dsa.shared"))continue;
       auto src = op.getOperand(0);
@@ -85,6 +100,10 @@ class Source {
            type = ctype(src.getType());
       auto [rowStride, stride] = strides(op, 2, n);
       auto primitive=op.getAttrOfType<StringAttr>("bangc.primitive").getValue();
+      if(primitive=="slab_read"){
+        line("for(int j=0;j<R && row0+j<M;++j)for(int k=0;k<live;++k)"+dst+"[("+slot+"*R+j)*P+k]="+n+"["+slabOffset(op,2,n)+"];");
+        continue;
+      }
       bool grouped=primitive.starts_with("group_dma");
       Text move=primitive.ends_with("_async") ? "__memcpy_async" : "__memcpy";
       if(grouped) {
@@ -118,7 +137,7 @@ class Source {
     line("{");
     unsigned index = 0;
     for (auto &copy : fetch.without_terminator()) {
-      if (copy.getName().getStringRef() == "dsa.window" || copy.getName().getStringRef()=="dsa.member_axis")
+      if (copy.getName().getStringRef() == "dsa.window" || copy.getName().getStringRef()=="dsa.member_axis" || copy.getName().getStringRef()=="dsa.slab_axis")
         continue;
       auto n = fresh();
       auto t = ctype(copy.getResult(0).getType());
@@ -198,8 +217,15 @@ class Source {
         names[inst.getResult(0)] = "(" + in(0) + ")";
         continue;
       }
-      if (n == "window" || n=="member_axis")
+      if (n == "window" || n=="member_axis" || n=="slab_axis")
         continue;
+      if(n=="owner_read"){
+        auto v=fresh(); names[inst.getResult(0)]=v;line("auto "+v+"="+in(0)+"[(row0+j)*"+in(0)+"s0];");
+        continue;
+      }
+      if(n=="owner_write"){
+        line(in(0)+"[(row0+j)*"+in(0)+"s0]="+in(2)+";");continue;
+      }
       if (n == "complete") {
         if (inst.getNumOperands() > 1)
           line(carry + "[j]=" + in(1) + ";");
@@ -207,15 +233,16 @@ class Source {
       }
       if (n == "drain") {
         if (llvm::any_of(inst.getOperands(), [](Value v) {
-              return v.getDefiningOp()
-                  ->getAttrOfType<BoolAttr>("async")
-                  .getValue();
+              auto mode=v.getDefiningOp()->getAttrOfType<BoolAttr>("async"); return mode && mode.getValue();
             }))
           line("__sync();");
         continue;
       }
       if (n == "write_back") {
         auto ptr = in(0), src = in(1), t = ctype(inst.getOperand(0).getType());
+        if(prim=="slab_write"){
+          line("for(int k=0;k<live;++k)"+ptr+"["+slabOffset(inst,3,ptr)+"]="+src+"[k];");continue;
+        }
         auto [rowStride, columnStride] = strides(inst, 3, ptr);
         if(packed) {
           auto axis=std::to_string(cast<MemRefType>(inst.getOperand(0).getType()).getRank()-2);
@@ -243,6 +270,15 @@ class Source {
       auto val = inst.getResult(0);
       Text id = fresh();
       names[val] = id;
+      if(prim=="welford_f32"){
+        line("Moment "+id+"={0,0,0};for(int k=0;k<live;++k)"+id+"=merge_moments("+id+",Moment{1,"+in(0)+"[k],0});");continue;
+      }
+      if(prim=="summary_field"){
+        auto pos=inst.getAttrOfType<IntegerAttr>("position").getInt();
+        if(pos<0 || pos>2)return llvm::createStringError("invalid moment field");
+        line("auto "+id+"="+in(0)+(pos==0?".n;":pos==1?".mean;":".m2;"));continue;
+      }
+      if(prim=="summary_merge"){line("auto "+id+"=merge_moments("+in(0)+","+in(1)+");");continue;}
       if (n == "reduce") {
         Text fn = prim == "row_sum" ? "row_sum" : "row_max_num";
         line("float " + id + "=" + fn + "((float*)" + address(inst) + "," +
@@ -288,8 +324,11 @@ class Source {
         continue;
       }
       if (n == "linear_index") {
-        line("for(int k=0;k<live;++k)" + id +
-             "[k]=(int)((unsigned)(row0+j)*(unsigned)N+(unsigned)col+k);");
+        line("for(int k=0;k<live;++k)" + id + "[k]=("+type+")((unsigned long long)(row0+j)*N+col+k);");
+        continue;
+      }
+      if (prim=="philox4x32_uniform") {
+        line("for(int k=0;k<live;++k)"+id+"[k]=uniform_at("+operand(0)+","+operand(1)+");");
         continue;
       }
       if (n == "constant") {
@@ -374,6 +413,16 @@ public:
         depth(d) {}
   llvm::Error write() {
     line("#include <bang.h>\n#include <cnrt.h>\n#include <math.h>");
+    bool moments=false;
+    fn.walk([&](Operation *op){moments |= op->getName().stripDialect()=="summary_reduce";});
+    if(moments) o <<
+#include "Moments.inc"
+    ;
+    bool random=false;
+    fn.walk([&](Operation *op){random |= op->getName().getStringRef()=="block.uniform";});
+    if (random) o <<
+#include "Philox.inc"
+      ;
     o <<
 #include "RowMath.inc"
         ;
