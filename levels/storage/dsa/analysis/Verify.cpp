@@ -70,16 +70,19 @@ bool access(Operation *op, unsigned mask, Operation &window, func::FuncOp fn,
     return s ? s->getArray("dims") : nullptr;
   };
   auto *actual = dims(view), *logical = dims(domain);
-  if (!actual || !logical || logical->size() != 2 ||
+  if (!actual || !logical || (logical->empty() || logical->size()>4) ||
       actual->size() != coords.size())
     return false;
   llvm::SmallDenseSet<unsigned> seen;
   for (auto [i, v] : llvm::enumerate(coords)) {
     auto axis = dyn_cast<OpResult>(v);
-    if (!axis || axis.getOwner() != &window || axis.getResultNumber() > 1 ||
-        !seen.insert(axis.getResultNumber()).second ||
-        (*actual)[i] != (*logical)[axis.getResultNumber()])
-      return false;
+    if(!axis)return false;
+    int64_t dim=-1;
+    if(v==window.getResult(1))dim=logical->size()-1;
+    else if(logical->size()==2 && v==window.getResult(0))dim=0;
+    else if(axis.getOwner()->getName().getStringRef()=="dsa.member_axis" && axis.getOwner()->getOperand(0)==window.getResult(0) && axis.getOwner()->getOperand(1)==domain)
+      dim=axis.getOwner()->getAttrOfType<IntegerAttr>("axis").getInt();
+    if(dim<0 || size_t(dim)>=logical->size() || !seen.insert(dim).second || (*actual)[i]!=(*logical)[dim])return false;
   }
   return true;
 }
@@ -196,8 +199,7 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
         body.back().getOperand(0) != body.back().getPrevNode()->getResult(0) ||
         body.getNumArguments() != issued.getNumOperands() + o->getNumResults())
       return WalkResult::interrupt();
-    if (std::distance(fetch.begin(), fetch.end()) !=
-            issued.getNumOperands() + 2 ||
+    if (
         o->getNumOperands() != o->getNumResults() ||
         !llvm::equal(o->getResultTypes(),
                      body.back().getOperands().drop_front().getTypes()))
@@ -206,7 +208,8 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
     for (auto [i, arg] : llvm::enumerate(issued.getOperands())) {
       auto *def = arg.getDefiningOp();
       auto in = body.getArgument(i);
-      if (!def || def != &*transfer++ || def->getBlock() != &fetch ||
+      while(transfer!=fetch.end() && transfer->getName().getStringRef()=="dsa.member_axis")++transfer;
+      if (!def || transfer==fetch.end() || def != &*transfer++ || def->getBlock() != &fetch ||
           def->getName().getStringRef() != "dsa.copy_in" ||
           arg.getType() != in.getType() || !in.hasOneUse() ||
           in.use_begin()->getOwner()->getName().getStringRef() != "dsa.await")
@@ -214,6 +217,7 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
       if (!access(def, 1, fetch.front(), fn, *abi))
         return WalkResult::interrupt();
     }
+    if(transfer==fetch.end() || &*transfer!=&issued)return WalkResult::interrupt();
     return WalkResult::advance();
   });
   if (count == 0 || walk.wasInterrupted())

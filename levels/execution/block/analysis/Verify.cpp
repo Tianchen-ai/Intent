@@ -46,15 +46,16 @@ LogicalResult verifyMapping(ModuleOp m,const compilerinfra::TargetProfile &p,Str
     return f.emitError("missing bound row domain argument");
   auto domain=f.getArgument(domainIndex.getInt());
   auto view=dyn_cast<MemRefType>(domain.getType());
-  if (!view || view.getRank()!=2) return f.emitError("row domain must be a matrix argument");
-  unsigned pids=0,rowMaps=0,sweeps=0;
+  if (!view || view.getRank()<1 || view.getRank()>4) return f.emitError("row domain must be a matrix argument");
+  llvm::SmallDenseSet<Value> instances,mapped;
+  unsigned sweeps=0;
   auto result=f.walk([&](Operation *op){
     if(op->getName().getDialectNamespace()!=dialect)return WalkResult::advance();
     auto n=op->getName().stripDialect();
     auto def=[&](Value v,StringRef k){auto *d=v.getDefiningOp();return d && d->getName().getDialectNamespace()==dialect && d->getName().stripDialect()==k;};
     bool ok=true;
-    if(n=="pid"){++pids;ok=op->getAttr("axis")==b.getI32IntegerAttr(0);}
-    if(n=="rows"){++rowMaps;ok=op->getAttr("step")==b.getStringAttr("rows") && def(op->getOperand(0),"pid");}
+    if(n=="pid"){instances.insert(op->getResult(0));ok=op->getAttr("axis")==b.getI32IntegerAttr(0);}
+    if(n=="rows"){mapped.insert(op->getOperand(0));ok=op->getAttr("step")==b.getStringAttr("rows") && def(op->getOperand(0),"pid");}
     if(n=="tiles"){
       ++sweeps;
       if(!llvm::hasSingleElement(op->getRegion(0)))return WalkResult::interrupt();
@@ -90,7 +91,16 @@ LogicalResult verifyMapping(ModuleOp m,const compilerinfra::TargetProfile &p,Str
       auto *entries=abi->getAsArray();if(!entries || entries->size()!=f.getNumArguments())return WalkResult::interrupt();
       auto dims=[&](unsigned i){auto *d=(*entries)[i].getAsObject();return d?d->getArray("dims"):nullptr;};
       auto *a=dims(slot.getArgNumber()),*d=dims(domainIndex.getInt());
-      if(!a || !d || d->size()!=2 || (a->size()!=1 && a->size()!=2))return WalkResult::interrupt();
+      if(!a || !d || d->size()!=size_t(view.getRank()))return WalkResult::interrupt();
+      if(auto projection=op->getAttrOfType<DenseI64ArrayAttr>("block.member_axes")){
+        if(!ok || reversed || size_t(projection.size())!=a->size())return WalkResult::interrupt();
+        llvm::SmallDenseSet<int64_t> seen;
+        for(auto [i,axis]:llvm::enumerate(projection.asArrayRef()))
+          if(axis<0 || size_t(axis)>=d->size() || !seen.insert(axis).second || (*a)[i]!=(*d)[axis])return WalkResult::interrupt();
+        if(n=="store" && seen.size()!=d->size())return op->emitError("noninjective projected write"),WalkResult::interrupt();
+        return WalkResult::advance();
+      }
+      if(d->size()!=2 || (a->size()!=1 && a->size()!=2))return op->emitError("explicit axes required for this member domain"),WalkResult::interrupt();
       if(a->size()==2)ok &= ((*a)[0]==(*d)[reversed?1:0] && (*a)[1]==(*d)[reversed?0:1]);
       else ok &= !reversed && (*a)[0]==(*d)[1];
     }
@@ -117,7 +127,7 @@ LogicalResult verifyMapping(ModuleOp m,const compilerinfra::TargetProfile &p,Str
     return WalkResult::advance();
   });
   if(result.wasInterrupted())return failure();
-  if(pids!=1 || rowMaps!=1 || ((topology=="stream")!=(sweeps!=0)))return f.emitError("instance mapping does not match topology");
+  if(instances.empty() || instances!=mapped || ((topology=="stream")!=(sweeps!=0)))return f.emitError("instance mapping does not match topology");
   return success();
 }
 }

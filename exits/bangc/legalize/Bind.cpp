@@ -37,7 +37,7 @@ StringRef primitive(Operation *op, int64_t depth) {
     return "quotient_for_narrow";
   if (n == "block.cast" && narrowedQuotient(op->getOperand(0).getDefiningOp()))
     return "certified_half_quotient";
-  if (n == "dsa.window" || n == "dsa.task_groups" || n == "dsa.range" ||
+  if (n == "dsa.member_axis" || n == "dsa.window" || n == "dsa.task_groups" || n == "dsa.range" ||
       n == "dsa.slot_zero" || n == "dsa.next" || n == "dsa.other_slot" ||
       n == "dsa.issue_if_in_bounds" || n == "dsa.wait_slot" ||
       n == "dsa.compute_members" || n == "dsa.iterate" || n == "dsa.advance" ||
@@ -86,7 +86,7 @@ LogicalResult offsets(func::FuncOp f, bool install) {
       return o.getAttr("bangc.offset") == address;
     };
     for (auto &o : p->getRegion(0).front().without_terminator()) {
-      if (o.getName().getStringRef() == "dsa.window")
+      if (o.getName().getStringRef() == "dsa.window" || o.getName().getStringRef()=="dsa.member_axis")
         continue;
       if (o.getName().getStringRef() != "dsa.copy_in" || !attach(o, grouped, 0))
         return WalkResult::interrupt();

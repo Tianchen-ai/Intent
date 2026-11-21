@@ -79,7 +79,7 @@ void bind(Unit &unit) {
               pending += op->hasAttr("block.structure");
             });
             bool ready = phase == "realized" || phase == "normalized";
-            if (loops != unsigned(!ready) || pids != unsigned(ready) ||
+            if (loops != unsigned(!ready) || (pids != 0) != ready ||
                 pending != unsigned(phase == "decided"))
               return m.emitError("invalid row structure at ") << phase,
                      failure();

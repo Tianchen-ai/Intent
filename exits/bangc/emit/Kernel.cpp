@@ -55,11 +55,17 @@ class Source {
   }
   std::pair<Text, Text> strides(Operation &op, unsigned start,
                                 const Text &view) {
-    Text steps[2] = {"0", "0"};
-    for (auto [i, c] : llvm::enumerate(op.getOperands().drop_front(start)))
-      steps[cast<OpResult>(c).getResultNumber()] =
-          view + "s" + std::to_string(i);
-    return {steps[0], steps[1]};
+    Text offset="0",step="0";
+    for(auto [i,c]:llvm::enumerate(op.getOperands().drop_front(start))){
+      auto value=cast<OpResult>(c);Text stride=view+"s"+std::to_string(i);
+      if(c.getDefiningOp()->getName().getStringRef()=="dsa.member_axis"){
+        auto *axis=c.getDefiningOp();auto domain=axis->getOperand(1);int k=axis->getAttrOfType<IntegerAttr>("axis").getInt();
+        Text coord="(row0+j)";
+        for(int j=k+1;j<cast<MemRefType>(domain.getType()).getRank()-1;++j)coord+="/"+name(domain)+"d"+std::to_string(j);
+        offset+="+(("+coord+")%"+name(domain)+"d"+std::to_string(k)+")*"+stride;
+      }else if(value.getResultNumber()==0)offset+="+(row0+j)*"+stride;
+      else step=stride;
+    }return {offset,step};
   }
   void issue(Block &fetch, const Text &iteration, const Text &slot) {
     line("{ long long incoming=" + iteration + ";");
@@ -67,14 +73,14 @@ class Source {
                   : "long long row0=group*R, col=incoming*W;");
     line("int live=(int)((N-col)<W?(N-col):W);");
     for (auto &op : fetch.without_terminator()) {
-      if (op.getName().getStringRef() == "dsa.window")
+      if (op.getName().getStringRef() == "dsa.window" || op.getName().getStringRef()=="dsa.member_axis")
         continue;
       auto src = op.getOperand(0);
       auto n = name(src), dst = name(op.getResult(0)),
            type = ctype(src.getType());
       auto [rowStride, stride] = strides(op, 2, n);
       line("for(int j=0;j<R && row0+j<M;++j){");
-      line("auto *src=" + n + "+" + "(row0+j)*" + rowStride + "+" + "col*" +
+      line("auto *src=" + n + "+" + rowStride + "+" + "col*" +
            stride + ";");
       line("auto *dst=" + dst + "+((" + slot + ")*R+j)*P;");
       line("if(" + stride + "==1){" +
@@ -97,7 +103,7 @@ class Source {
     line("{");
     unsigned index = 0;
     for (auto &copy : fetch.without_terminator()) {
-      if (copy.getName().getStringRef() == "dsa.window")
+      if (copy.getName().getStringRef() == "dsa.window" || copy.getName().getStringRef()=="dsa.member_axis")
         continue;
       auto n = fresh();
       auto t = ctype(copy.getResult(0).getType());
@@ -167,7 +173,7 @@ class Source {
         names[inst.getResult(0)] = "(" + in(0) + ")";
         continue;
       }
-      if (n == "window")
+      if (n == "window" || n=="member_axis")
         continue;
       if (n == "complete") {
         if (inst.getNumOperands() > 1)
@@ -186,7 +192,7 @@ class Source {
       if (n == "write_back") {
         auto ptr = in(0), src = in(1), t = ctype(inst.getOperand(0).getType());
         auto [rowStride, columnStride] = strides(inst, 3, ptr);
-        line("{auto *out=" + ptr + "+(row0+j)*" + rowStride + "+col*" +
+        line("{auto *out=" + ptr + "+" + rowStride + "+col*" +
              columnStride + ";");
         Text move =
             prim == "async_store_extent" ? "__memcpy_async" : "__memcpy";

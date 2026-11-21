@@ -80,14 +80,27 @@ LogicalResult phase(Operation *anchor, Block &source, bool stream,
                  active->getResult(0).getType()});
   };
   auto *readWindow = window(fetch), *writeWindow = window(calc);
-  auto coords = [&](Operation *op, Operation *w) {
+  auto coords=[&](Operation *op,Operation *w){
+    b.setInsertionPointAfter(w);
     SmallVector<Value> axes;
-    for (auto v : op->getOperands().slice(1, 2)) {
-      if (v == active->getOperand(1))
-        axes.push_back(w->getResult(0));
-      else if (v == active->getOperand(2))
-        axes.push_back(w->getResult(1));
+    auto domain=w->getOperand(0);
+    auto rank=cast<MemRefType>(domain.getType()).getRank();
+    auto mapping=op->getAttrOfType<DenseI64ArrayAttr>("block.member_axes");
+    if(mapping){
+      for(auto axis:mapping.asArrayRef()){
+        if(axis==rank-1)axes.push_back(w->getResult(1));
+        else if(rank==2 && axis==0)axes.push_back(w->getResult(0));
+        else axes.push_back(inst(b,loc,"dsa.member_axis",{w->getResult(0),domain},w->getResult(0).getType(),
+                    b.getNamedAttr("axis",b.getI64IntegerAttr(axis)))->getResult(0));
+      }
+    }else{
+      for(auto v:op->getOperands().slice(1,2)){
+        if(v==active->getOperand(1))axes.push_back(w->getResult(0));
+        else if(v==active->getOperand(2))axes.push_back(w->getResult(1));
+      }
+      if(cast<MemRefType>(op->getOperand(0).getType()).getRank()==1 && axes.size()==2)axes.erase(axes.begin());
     }
+    b.setInsertionPointToEnd(w->getBlock());
     return axes;
   };
   SmallVector<Value> reads;
@@ -100,17 +113,12 @@ LogicalResult phase(Operation *anchor, Block &source, bool stream,
     if (op->getName().getStringRef() != "block.load")
       continue;
     auto view = op->getOperand(0);
-    auto projection = intentdsl::block::projection(view.getType());
-    if (failed(projection))
-      return op->emitError("cannot stage unprojected view");
     b.setInsertionPointToEnd(fetch);
     auto axes = coords(op, readWindow);
-    if (axes.size() != 2 || op->getOperand(3) != active->getResult(0))
+    if (axes.size() != size_t(cast<MemRefType>(op->getOperand(0).getType()).getRank()) || op->getOperand(3) != active->getResult(0))
       return op->emitError("mismatched access domain");
     SmallVector<Value> address{view, readWindow->getResult(2)};
-    if (*projection == intentdsl::block::RowProjection::Matrix)
-      address.push_back(axes[0]);
-    address.push_back(axes[1]);
+    address.append(axes);
     auto *copy = inst(b, loc, "dsa.copy_in", address, op->getResultTypes());
     reads.push_back(copy->getResult(0));
     b.setInsertionPointToEnd(calc);
@@ -141,11 +149,13 @@ LogicalResult phase(Operation *anchor, Block &source, bool stream,
       map.map(op->getResult(0), r->getResult(0));
     } else if (code == "store") {
       auto axes = coords(op, writeWindow);
-      if (axes.size() != 2 || op->getOperand(3) != active->getResult(0))
+      if (axes.size() != size_t(cast<MemRefType>(op->getOperand(0).getType()).getRank()) || op->getOperand(3) != active->getResult(0))
         return op->emitError("inconsistent write domain");
+      SmallVector<Value> address{val(0),val(4),writeWindow->getResult(2)};
+      address.append(axes);
       auto *store =
           inst(b, loc, "dsa.write_back",
-               {val(0), val(4), writeWindow->getResult(2), axes[0], axes[1]},
+               address,
                b.getI1Type(), b.getNamedAttr("async", b.getBoolAttr(false)));
       completions.push_back(store->getResult(0));
     } else if (code == "yield") {
