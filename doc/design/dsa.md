@@ -1,6 +1,6 @@
 # DSA 的显式存储程序与 BANG C 出口
 
-**V2-5 设计，待裁决。** 首个消费者是 MLU370 上的 softmax 和 weighted RMSNorm。本轮仅查询设备与工具链，不据此声称 V2 已在 MLU 上编译或执行。
+**V2-5 已实现行归约路线。** 从执行机上的普通 JIT 进入 MLU370 的 CNCC/CNRT。已验证稳定 softmax 和 weighted RMSNorm。矩阵供数、共享空间和矩阵微核的扩展见 [V2-6](../plan/v2-6.md)。
 
 ```text
 block@realized → dsa@formed → dsa@supplied → bangc@bound → @legal → @callable → .mlu
@@ -35,12 +35,12 @@ block@realized → dsa@formed → dsa@supplied → bangc@bound → @legal → @c
 
 物理容量、SDK/ABI 保留量、微核占用、产品允许的工作集预算分别记录来源。若 CNRT 报告的是已可用上限，应显式标明，避免二次扣减。每资源实际峰值须 ≤ min(已核实可用量，行预算)，共享资源按同驻者聚合。工具链保留量未知时，使用有该工具链依据的保守上限或拒绝相应实现；不得把未查询的保留量填成零。
 
-首轮建议两套**分别派生**的配置，数值是待验证的起点。BANG C 在父节点通过既有 RowCapacity 提供公共 R、W 及行 ID；下表以流式 W=512 类说明。小宽度可声明 1、2、…、512 的有限宽度类，由 Block 产生实际 guard。
+直供和双缓冲是两份独立的编译配置。BANG C 在父节点通过既有 RowCapacity 提供公共 R、W 及行 ID；下表以流式 W=512 类说明。小宽度可声明 1、2、…、512 的有限宽度类，由 Block 产生实际 guard。
 
 | 配置 | 同组两行 | 出口承诺 |
 |---|---|---|
-| 直接供数，默认 | (1,512)、(2,512) | 计算参与者从设备内存直供私有槽，单缓冲；建议各用至多 16 个并行计算任务，超额逻辑实例由核上循环覆盖。两行预算初值各 128 KiB 私有工作集。 |
-| 重叠供数，派生 | (1,512)、(2,512) | 两个输入槽、一个输出槽；仅当本地 SDK 的异步搬运、完成和可见性支持所选拓扑，才准入。不要让普通行归约无端占用共享 SRAM。 |
+| 直接供数，可派生 | (1,512)、(2,512) | 计算参与者从设备内存直供私有槽，单缓冲；建议各用至多 16 个并行计算任务，超额逻辑实例由核上循环覆盖。两行预算初值各 128 KiB 私有工作集。 |
+| 重叠供数，MLU370 默认 | (1,512)、(2,512) | 两个输入槽、一个输出槽；仅当本地 SDK 的异步搬运、完成和可见性支持所选拓扑，才准入。不要让普通行归约无端占用共享 SRAM。 |
 
 这两项行程序使用向量单元；不分配矩阵权重空间。矩阵实现另外登记完整行，包含 M/N/K 块、输入 packing、权重空间、对齐、累加类型、尾块与所需执行组。受管 hint 可表达 Block/Union 等目标运行模式；参与者的物理编号和厂商枚举只存在于 BANG C 目标组件。
 
@@ -73,8 +73,10 @@ block@realized → dsa@formed → dsa@supplied → bangc@bound → @legal → @c
 
 V1 的 BANG C BlockLowering 在配置循环中 clone module 并逐次构造 Block storage；较早 DSA 公共 verifier 还以二维 NRAM tile、memory core 等形式定义公共合法性。当前 V1 checkout 的一部分物理检查已经归入 BANG C 私有目录。V2 在选定出口时只运行一次 KIR→Block→DSA；每行资源校验遍历同一参数化区域，原生行特化从已绑定出口程序开始。由产品树、阶段 verifier、能力服务共同约束这一点。
 
-## 6. 请裁决的实现选择
+## 6. 当前实现与适用范围
 
-1. 首轮默认使用单缓冲直供，还是两程序均以共享双缓冲为默认？建议直供；双缓冲作为单独派生配置，比较时同时计入额外槽、尾声等待和同步。
-2. 地址 ABI 可保留动态 extent/stride，仅特化必须静态的微核参数；也可对子形状全特化。建议前者，将必要的对齐/形状 guard 随产物发布。
-3. 多行可共享一个带完整参数行的原生模块，也可为确需编译期常量的微核分别生成原生入口。建议共享出口 IR，允许后一种原生特化，按行或共享构建如实计冷启动。
+MLU370 的本机 JIT 按设备能力表向 Block 提供 R ∈ {1, 2, 16}、W ∈ {1, 2, …, 4096} 的整行，W 取二次幂。形状 guard 与实例映射由 Block 生成。DSA 在同一个 func/phase 上为各行计算输入槽、逐行计算临时量及目标 collective scratch 的对齐后峰值。128 KiB 是产品工作集预算；CNRT 另行返回每核可用 NRAM。dsa 以本核为 owner，归约程序不申请 WRAM、SRAM 或外部 workspace。
+
+供数决定包含深度、保留下来的原始 row ID、pitch、预算与被剔除的原因。每个 phase 含 issue 和 compute 区域，lookahead、槽数、可见域、await 和 drain 都在 supplied 边界可见。BANG C 把各存活区间绑定为以 pitch 和 R 参数化的字节地址。在驻留程序中双缓冲预取下一个实例组，在流式程序的同一遍历中预取下一列块。动态尺寸、每个 view 的真实元素 stride 和 queue 由 host ABI 传入；运行时只向 CNCC 提交出口 IR 已发布的行，按行特化片段、pitch 和片上数组容量。
+
+独立 Bench 实测在 64×1024 f16 softmax 上两拓扑热中位数持平，在 8192×4096 f32 weighted RMSNorm 上双缓冲较快；MLU370 默认采用 `levels/storage/dsa::double-buffer`。将同一决策的策略改为 `levels/storage/dsa::direct` 即可独立派生单缓冲。每份配置只在自身行组内选优。当前 KIR 行程序为只读 In 与不重叠的 Out；RMSNorm 的 gain 为真实输入。后续 InOut、多 workspace 和其他存储空间在相应 program 工作包接入。

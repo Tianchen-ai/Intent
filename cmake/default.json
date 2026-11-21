@@ -25,6 +25,16 @@
           "realizer": "levels/execution/cpu::allocate"
         }
       }
+    },
+    "dsa": {
+      "decisions": {
+        "levels/storage/dsa::supply": {
+          "strategies": [
+            "levels/storage/dsa::double-buffer"
+          ],
+          "realizer": "levels/storage/dsa::stage-transfers"
+        }
+      }
     }
   },
   "exits": {}

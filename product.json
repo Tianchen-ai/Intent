@@ -10,6 +10,10 @@
     {
       "name": "execution",
       "responsibility": "Program instances, member coverage and traversal"
+    },
+    {
+      "name": "storage",
+      "responsibility": "Explicit supply, completion and storage lifetimes"
     }
   ],
   "nodes": [
@@ -44,6 +48,16 @@
         "formed",
         "tasked",
         "buffers"
+      ]
+    },
+    {
+      "name": "dsa",
+      "level": "storage",
+      "parent": "block@realized",
+      "contract": "Owned tile stages with explicit transfers and completion",
+      "boundaries": [
+        "formed",
+        "supplied"
       ]
     }
   ],
@@ -84,6 +98,16 @@
         "legal",
         "callable"
       ]
+    },
+    {
+      "name": "bangc",
+      "at": "dsa@supplied",
+      "description": "Native BANG C program and CNRT queue entry",
+      "boundaries": [
+        "bound",
+        "legal",
+        "callable"
+      ]
     }
   ],
   "runtimes": [
@@ -93,7 +117,8 @@
     "triton",
     "weft",
     "mojo",
-    "cutile"
+    "cutile",
+    "bangc"
   ],
   "frontend": {
     "language": "python",
