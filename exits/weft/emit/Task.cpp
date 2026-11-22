@@ -547,7 +547,11 @@ public:
       for(auto &v:effects)if(v.getName().stripDialect()=="scan_sum")scans.push_back(v.getResult(0));
       auto slot=[&](Value v){return std::to_string(llvm::find(scans,v)-scans.begin());};
       SmallVector<std::string> binds,types;
-      for(auto v:scans){binds.push_back("%carry"+slot(v)+"="+zero.id);types.push_back("si32");}
+      for(auto v:scans){
+        auto type=spelling(cast<ShapedType>(v.getType()).getElementType());
+        auto init=type=="si32"?zero:inst("constant",{},type,"value=0.0:"+type);
+        binds.push_back("%carry"+slot(v)+"="+init.id);types.push_back(type);
+      }
       if(!scans.empty())s<<"%scan:"<<scans.size()<<" = ";
       s<<"scf.for %j=%lo to "<<columns.id<<" step %step";
       if(!scans.empty())s<<" iter_args("<<llvm::join(binds,",")<<")->("<<llvm::join(types,",")<<")";
@@ -580,7 +584,7 @@ public:
           else {std::string repr;llvm::raw_string_ostream(repr)<<v.getAttr("value");rhs=inst("constant",{},"f32","value="+repr);}
         }else if(n=="member_index")rhs=inst("cast",{{"%j","index"}},"si32");
         else if(n=="ne")rhs=inst("compare",{a(0),a(1)},"i1","predicate=\"ne\"");
-        else if(n=="cast")rhs=inst("cast",{a(0)},"si32");
+        else if(n=="cast")rhs=inst("cast",{a(0)},spelling(cast<ShapedType>(v.getResult(0).getType()).getElementType()));
         else if(n=="prefix_scatter"){
           s<<"scf.if "<<a(3).id<<" {\n";
           auto ix=inst("binary",{inst("cast",{a(4)},"index"),{"%step","index"}},"index","kind=\"sub\"");
@@ -592,7 +596,7 @@ public:
           auto row=inst("binary",{r,columns},"index","kind=\"mul\"");
           rhs=inst("cast",{inst("binary",{row,{"%j","index"}},"index","kind=\"add\"")},"si32");
         }else if(n=="add" || n=="shr" || n=="shl")rhs=inst("binary",{a(0),a(1)},"si32","kind=\""+n.str()+"\"");
-        else if(n=="scan_sum")rhs=inst("binary",{{"%carry"+slot(v.getResult(0)),"si32"},a(0)},"si32","kind=\"add\"");
+        else if(n=="scan_sum")rhs=inst("binary",{{"%carry"+slot(v.getResult(0)),a(0).type},a(0)},a(0).type,"kind=\"add\"");
         else if(n=="write_offsets"){
           auto dst=inst("binary",{{"%j","index"},{"%step","index"}},"index","kind=\"add\"");
           inst("commit",{a(3),address(v.getOperand(0),{dst})},"()");continue;

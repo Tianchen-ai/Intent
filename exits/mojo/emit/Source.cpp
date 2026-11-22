@@ -15,7 +15,7 @@ class Source {
   std::string var(Value v) { return vars.lookup(v); }
   std::string temp() { return "v" + std::to_string(next++); }
   std::string dtype(Type t) {
-    if (auto v = dyn_cast<VectorType>(t))
+    if (auto v = dyn_cast<ShapedType>(t))
       t = v.getElementType();
     if (t.isInteger(1))
       return "bool";
@@ -108,7 +108,7 @@ public:
           llvm::DenseMap<Value,std::string> carries;
           for(auto &v:loop.getRegion(0).front())if(v.getName().stripDialect()=="scan_sum"){
             auto carry=temp();carries[v.getResult(0)]=carry;
-            line(2,"var "+carry+"=Int32(0)");
+            line(2,"var "+carry+"=Scalar[DType."+dtype(v.getResult(0).getType())+"](0)");
           }
           SmallVector<std::string> final;
           line(2,"for j in range(Int(cols)):");
@@ -123,7 +123,7 @@ public:
             }
             else if(n=="constant")rhs=(v.getResult(0).getType().isF32()?"Float32(":"Int32(")+intentdsl::kir::literal(v.getAttrOfType<TypedAttr>("value"))+")";
             else if(n=="ne")rhs=a(0)+" != "+a(1);
-            else if(n=="cast")rhs="Int32("+a(0)+")";
+            else if(n=="cast")rhs="Scalar[DType."+dtype(v.getResult(0).getType())+"]("+a(0)+")";
             else if(n=="member_index")rhs="Int32(j)";
             else if(n=="prefix_scatter"){
               auto stride=src+"s",carry=carries.lookup(v.getOperand(4));
