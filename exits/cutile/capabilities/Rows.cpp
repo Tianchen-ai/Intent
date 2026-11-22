@@ -27,6 +27,10 @@ capabilities(const llvm::json::Object &options) {
     return e;
   auto table = std::make_shared<intentdsl::RowCapacity>();
   table->rectangularProjectedRows = true;
+  // Bound tileiras expansion of repeated collectives. The limit admits a
+  // single streamed 4096-wide row with 16 reductions; expanding that body
+  // over two rows exceeded the native compilation budget on both targets.
+  table->maxExpandedReductionLanes = 65536;
   table->independentWidths = {8, 16, 32, 64};
   if(auto error=table->bind(options))return error;
   // Wide rectangular transfers amortize a large resident tile. For generic

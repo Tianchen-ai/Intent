@@ -266,6 +266,7 @@ llvm::Error stageTransfers(Operation *op, Attribute a,
   return llvm::Error::success();
 }
 } // namespace intentdsl::dsa
+namespace intentdsl::dsa { void reuseFragments(mlir::OpPassManager &); }
 namespace CI_UNIT_NAMESPACE {
 using namespace compilerinfra;
 void dialect(DialectRegistry &);
@@ -277,7 +278,8 @@ void bind(Unit &u) {
   supply(u);
   for (bool ready : {false, true})
     u.boundaries.push_back({{ready ? "supplied" : "formed",
-                             [](OpPassManager &, const TargetProfile &) {
+                             [ready](OpPassManager &pm, const TargetProfile &) {
+                               if (!ready) intentdsl::dsa::reuseFragments(pm);
                                return llvm::Error::success();
                              },
                              [ready](ModuleOp m, const TargetProfile &p) {

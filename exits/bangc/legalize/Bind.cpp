@@ -64,7 +64,7 @@ StringRef primitive(Operation *op, int64_t depth) {
   if (n == "dsa.phase")
     return "block_tasks";
   if (n == "dsa.copy_in") {
-    if(op->getParentOfType<func::FuncOp>()->hasAttr("kir.owner_axis"))return "slab_read";
+    if(op->getParentOfType<func::FuncOp>()->hasAttr("kir.owner_axis"))return "segmented_slab_read";
     // The grouped transfer increments the view's penultimate stride. Prove
     // that it is precisely the fastest logical row axis; earlier coordinates
     // are invariant until that axis wraps. The emitted guard excludes wraps.
@@ -75,7 +75,7 @@ StringRef primitive(Operation *op, int64_t depth) {
   if (n == "dsa.await")
     return depth == 2 ? "wait_slot" : "ready";
   if (n == "dsa.write_back") {
-    if(op->getParentOfType<func::FuncOp>()->hasAttr("kir.owner_axis"))return "slab_write";
+    if(op->getParentOfType<func::FuncOp>()->hasAttr("kir.owner_axis"))return "segmented_slab_write";
     if (intentdsl::dsa::projectsConsecutiveRows(op, 2))
       return op->getAttrOfType<BoolAttr>("async").getValue()
                  ? "group_store_async" : "group_store";

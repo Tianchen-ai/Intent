@@ -91,6 +91,45 @@ class Source {
     }
     return offset;
   }
+  // A flattened slab stays affine until the fastest non-owner axis wraps.
+  // Projected views retain their bound strides, including zero for broadcast.
+  void slabTransfer(Operation &op,unsigned first,const Text &view,
+                    const Text &local,bool load) {
+    auto owner=fn->getAttrOfType<IntegerAttr>("kir.owner_axis").getInt();
+    Text extent="1", stride="0", outerStride;
+    for(auto [pos,v]:llvm::enumerate(op.getOperands().drop_front(first))){
+      auto *axis=v.getDefiningOp();
+      if(axis->getName().getStringRef()!="dsa.slab_axis") continue;
+      auto domain=axis->getOperand(1);
+      auto rank=cast<MemRefType>(domain.getType()).getRank();
+      auto inner=rank-1-(owner==rank-1);
+      extent=name(domain)+"d"+std::to_string(inner);
+      if(axis->getAttrOfType<IntegerAttr>("axis").getInt()==inner)
+        stride=view+"s"+std::to_string(pos);
+      else if(rank==3) outerStride=view+"s"+std::to_string(pos);
+    }
+    line("{auto *buffer="+local+";for(int k=0;k<live;){long long avail="+extent+"-(col+k)%"+extent+";int run=avail<live-k?(int)avail:live-k;");
+    line("auto *global="+view+"+("+slabOffset(op,first,view)+");");
+    if(!outerStride.empty()) {
+      // In a two-axis reduction all complete inner runs have the same pitch.
+      line("if("+stride+"==1 && run=="+extent+" && live-k>=2*run && "+outerStride+">=run && "+outerStride+"<=2147483647/sizeof(*global)){");
+      line("int count=(live-k)/run,bytes=run*sizeof(*global);");
+      if(load)
+        line("__memcpy(buffer+k,global,bytes,GDRAM2NRAM,bytes,"+outerStride+"*sizeof(*global),count-1);");
+      else
+        line("__memcpy(global,buffer+k,bytes,NRAM2GDRAM,"+outerStride+"*sizeof(*global),bytes,count-1);");
+      line("k+=count*run;continue;}");
+    }
+    if(load) {
+      line("if("+stride+"==1)__memcpy(buffer+k,global,run*sizeof(*global),GDRAM2NRAM);");
+      line("else if("+stride+"==0){auto scalar=*global;__bang_write_value(buffer+k,run,scalar);}");
+      line("else for(int t=0;t<run;++t)buffer[k+t]=global[t*"+stride+"];");
+    } else{
+      line("if("+stride+"==1)__memcpy(global,buffer+k,run*sizeof(*global),NRAM2GDRAM);");
+      line("else for(int t=0;t<run;++t)global[t*"+stride+"]=buffer[k+t];");
+    }
+    line("k+=run;}}");
+  }
   void issue(Block &fetch, const Text &iteration, const Text &slot) {
     line("{ long long incoming=" + iteration + ";");
     line(resident ? "long long row0=incoming*R, col=0;"
@@ -105,8 +144,9 @@ class Source {
            type = ctype(src.getType());
       auto [rowStride, stride] = strides(op, 2, n);
       auto primitive=op.getAttrOfType<StringAttr>("bangc.primitive").getValue();
-      if(primitive=="slab_read"){
-        line("for(int j=0;j<R && row0+j<M;++j)for(int k=0;k<live;++k)"+dst+"[("+slot+"*R+j)*P+k]="+n+"["+slabOffset(op,2,n)+"];");
+      if(primitive=="segmented_slab_read"){
+        line("for(int j=0;j<R && row0+j<M;++j)");
+        slabTransfer(op,2,n,dst+"+("+slot+"*R+j)*P",true);
         continue;
       }
       bool grouped=primitive.starts_with("group_dma");
@@ -126,7 +166,7 @@ class Source {
       line("if(" + stride + "==1){" +
            move +
            "(dst,src,live*sizeof(" + type +
-           "),GDRAM2NRAM);}else{for(int k=0;k<live;++k) dst[k]=src[k*" +
+           "),GDRAM2NRAM);}else if("+stride+"==0){auto scalar=*src;__bang_write_value(dst,live,scalar);}else{for(int k=0;k<live;++k) dst[k]=src[k*" +
            stride + "];}}");
       if(grouped) line("}");
     }
@@ -245,8 +285,8 @@ class Source {
       }
       if (n == "write_back") {
         auto ptr = in(0), src = in(1), t = ctype(inst.getOperand(0).getType());
-        if(prim=="slab_write"){
-          line("for(int k=0;k<live;++k)"+ptr+"["+slabOffset(inst,3,ptr)+"]="+src+"[k];");continue;
+        if(prim=="segmented_slab_write"){
+          slabTransfer(inst,3,ptr,src,false);continue;
         }
         auto [rowStride, columnStride] = strides(inst, 3, ptr);
         if(packed) {

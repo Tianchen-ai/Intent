@@ -78,5 +78,8 @@ struct RowCapacity {
   // Nonzero when the consumer stages all distinct input tiles in private storage
   // before evaluating a resident body. Bytes refer to one instance.
   uint64_t stagedInputBudget = 0;
+  // Exporter limit on additional collective lanes replicated by a multi-row
+  // schedule or by separate streaming passes. Zero means no declared limit.
+  uint64_t maxExpandedReductionLanes = 0;
 };
 } // namespace intentdsl

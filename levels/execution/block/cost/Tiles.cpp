@@ -52,6 +52,28 @@ void registerCost(Unit &u) {
                  llvm::none_of(v.getUsers(),[&](Operation *u){return u->getBlock()==i.getBlock() && i.isBeforeInBlock(u);}))live--;
           }
           auto regFile=ctx.target.services.facts.find("register_file")?intentdsl::quantity(ctx,"register_file","reg32"):std::nullopt;
+          // A rectangular projected input can issue one pitched read for the
+          // entire row group. Charge the setup once per participating wave.
+          std::optional<double> dmaSetup;
+          unsigned rectangles = 0;
+          if (!stream && ctx.target.services.facts.find("dma_in_latency")) {
+            auto fn = op->getParentOfType<func::FuncOp>();
+            llvm::SmallDenseSet<Value> seen;
+            op->walk([&](Operation *readOp) {
+              if (readOp->getName().getStringRef() != "block.read") return;
+              auto slot = dyn_cast<BlockArgument>(readOp->getOperand(0));
+              if (!slot || slot.getOwner() != &fn.front() || !seen.insert(slot).second) return;
+              auto attr = fn.getArgAttrOfType<AffineMapAttr>(slot.getArgNumber(), "kir.indexing");
+              if (!attr) return;
+              auto map = attr.getValue();
+              if (map.getNumDims() < 3 || map.getNumResults() < 2) return;
+              auto inner = dyn_cast<AffineDimExpr>(map.getResults().back());
+              if (inner && inner.getPosition()+1 == map.getNumDims() &&
+                  map.getResult(map.getNumResults()-2).isFunctionOfDim(map.getNumDims()-2))
+                ++rectangles;
+            });
+            if (rectangles) dmaSetup=intentdsl::quantity(ctx,"dma_in_latency","ns");
+          }
           for (auto value : choice.getAs<ArrayAttr>("rows")) {
             auto row = cast<DictionaryAttr>(value);
             double rows = row.getAs<IntegerAttr>("rows").getInt(),
@@ -98,6 +120,11 @@ void registerCost(Unit &u) {
                   (r / (swapped ? *stridedRead : *read) + w / *write +
                    ws / *strided) *
                       (scheduled ? rounds * std::min(capacity, double(f->participants)*2) / scheduled : 0.) * tailCost;
+              if (dmaSetup) {
+                double submission = waves * rectangles * *dmaSetup;
+                v.terms["projected_dma_setup"] = {submission, "ns"};
+                *v.timeNs += submission;
+              }
               if (!e.timeNs || *v.timeNs < *e.timeNs) {
                 e.timeNs = v.timeNs;
                 e.terms = v.terms;

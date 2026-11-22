@@ -12,13 +12,14 @@ void registerRowStrategy(Unit &unit, StringRef mode, bool tuple) {
   strategy.family = unit.qualify("structure");
   auto propose = [tuple](Operation *op, const TargetProfile &target,
                         StringRef mode) -> llvm::Expected<Attribute> {
-    bool reduces = false, hasTuple=false;
+    unsigned reductions = 0;
+    bool hasTuple=false;
     op->walk([&](Operation *v) {
       auto n = v->getName().getStringRef();
-      reduces |= n == "block.sum" || n == "block.max_num";
+      reductions += n == "block.sum" || n == "block.max_num" || n == "block.welford";
       hasTuple |= n == "block.welford";
     });
-    if (tuple != hasTuple || (!reduces && !hasTuple))
+    if (tuple != hasTuple || !reductions)
       return Attribute{};
     auto *caps = target.services.get<intentdsl::RowCapacity>();
     if (!caps || caps->rows.empty())
@@ -33,15 +34,15 @@ void registerRowStrategy(Unit &unit, StringRef mode, bool tuple) {
       if(r.width>=*extent && (!width || r.width<width)) width=r.width;
     }
     bool mustStream=false;
+    uint64_t inputBytesPerLane=0;
     if(caps->stagedInputBudget && width) {
       llvm::SmallDenseSet<Value> slots;
       op->walk([&](Operation *read){
         if(read->getName().getStringRef()=="block.read")slots.insert(read->getOperand(0));
       });
-      uint64_t minimum=0;
       for(auto slot:slots)
-        minimum+=llvm::divideCeil(cast<MemRefType>(slot.getType()).getElementTypeBitWidth(),8u);
-      mustStream=minimum>caps->stagedInputBudget/width;
+        inputBytesPerLane+=llvm::divideCeil(cast<MemRefType>(slot.getType()).getElementTypeBitWidth(),8u);
+      mustStream=inputBytesPerLane>caps->stagedInputBudget/width;
     }
     bool resident = width && !mustStream && mode!="stream-row";
     if(!resident && mode=="resident-row") return Attribute{};
@@ -53,6 +54,13 @@ void registerRowStrategy(Unit &unit, StringRef mode, bool tuple) {
     for (const auto &r : caps->rows) {
       if (r.width != width && !(mustStream && llvm::is_contained(caps->streamingWidths,r.width)))
         continue;
+      if (resident && caps->stagedInputBudget &&
+          inputBytesPerLane > caps->stagedInputBudget/r.width/r.rows)
+        continue;
+      uint64_t copies = r.rows - 1 + (resident ? 0 : r.rows);
+      if (caps->maxExpandedReductionLanes &&
+          copies * r.width * reductions > caps->maxExpandedReductionLanes)
+        continue;
       rows.push_back(b.getDictionaryAttr(
           {b.getNamedAttr("id", b.getI32IntegerAttr(r.id)),
            b.getNamedAttr("rows", b.getI32IntegerAttr(r.rows)),
@@ -60,7 +68,7 @@ void registerRowStrategy(Unit &unit, StringRef mode, bool tuple) {
            b.getNamedAttr("payload", b.getStringAttr(r.payload))}));
     }
     if (rows.empty())
-      return llvm::createStringError("no legal row configurations");
+      return Attribute{};
     return Attribute(b.getDictionaryAttr(
         {b.getNamedAttr("guard",guard),b.getNamedAttr("topology",
                         b.getStringAttr(resident ? "resident" : "stream")),
