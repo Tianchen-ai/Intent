@@ -482,6 +482,37 @@ struct Writer {
   }
 };
 } // namespace
+static MatrixPanels::PackedRight packedRight(MatrixPanels &p) {
+  auto mode=p.domain.getAttrOfType<StringAttr>("cpu.packing");
+  if(!mode || mode!="reduction-packets")return {};
+  MatrixPanels::PackedRight pack;llvm::raw_string_ostream s(pack.prepare);
+
+    auto b = p.dot.getOperand(1);
+    auto i = cast<BlockArgument>(b).getArgNumber();
+    auto stride = p.fn.getArgAttrOfType<DenseI64ArrayAttr>(i, "cpu.strides");
+    int k = p.dot.getAttrOfType<IntegerAttr>("rhs_k").getInt(),
+        batch = p.dot.getAttrOfType<IntegerAttr>("rhs_batch").getInt(), n = 0;
+    while (n == k || n == batch)
+      ++n;
+    int bytes = cast<MemRefType>(b.getType()).getElementTypeBitWidth() / 8;
+    s << "const int64_t K=" << p.shape[2] << ",banks=" << (batch < 0 ? "1" : "G")
+      << ",tiles=(N+nr-1)/nr;\n"
+      << "size_t "
+         "count;if(__builtin_mul_overflow((size_t)(banks*tiles),(size_t)K,&"
+         "count))return 2;\n"
+      << "unsigned char *rhs=calloc(count?count:1,nr*" << bytes
+      << ");if(!rhs)return 2;\n"
+      << "#pragma omp parallel for num_threads(workers) schedule(static) "
+         "if(banks*tiles>1)\n"
+      << "for(int64_t b=0;b<banks*tiles;b++){int64_t "
+         "g=b/tiles,c=b%tiles*nr,nc=N-c<nr?N-c:nr;for(int64_t k=0;k<K;k++){"
+      << "unsigned char *dst=rhs+(b*K+k)*nr*" << bytes
+      << ";unsigned char *src=(unsigned char*)a" << i << "+(g*"
+      << (batch < 0 ? 0 : stride[batch]) << "+k*" << stride[k] << "+c*"
+      << stride[n] << ")*" << bytes << ";";
+    s<<"for(int j=0;j<nc;j++)rhs[(b*nr+j)*K+k]=src[j*"<<stride[n]<<"];}}\n";
+  pack.address=std::string("rhs+((")+(batch<0?"0":"g")+"*tiles+c/nr)*K)*nr";pack.release="free(rhs);";return pack;
+}
 llvm::Error emitMatrix(func::FuncOp fn, llvm::raw_pwrite_stream &out) {
   MatrixPanels p(fn);
   Writer w{p};
@@ -526,7 +557,7 @@ llvm::Error emitMatrix(func::FuncOp fn, llvm::raw_pwrite_stream &out) {
       {"host",
        p.dispatch("#include \"task_bridge.h\"",
                   "matrix_panel_instance(" + llvm::join(args, ",") + ");",
-                  true)},
+                  true,packedRight(p))},
       {"domain", intentdsl::publishDomain(fn)},
       {"abi", std::move(*abi)},
       {"rows", llvm::json::Array{llvm::json::Object{{"grain", p.tile[0]},

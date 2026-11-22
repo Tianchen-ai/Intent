@@ -72,8 +72,11 @@ struct Writer : intentdsl::block::MatrixAccess {
   void scaled() {
     auto a = name(dot.getOperand(0)), b = name(dot.getOperand(2)),
          sa = name(dot.getOperand(1)),
-         sb = name(dot.getOperand(3).getDefiningOp()->getOperand(0));
-    bool mx = dot.getAttrOfType<StringAttr>("ct_src.scaled_engine") == "mx";
+         sb = name(intentdsl::kir::RightScale(dot).view);
+    bool columnsFirst=intentdsl::kir::RightScale(dot).column==0;
+    auto *dispatch=dot.getPrevNode();
+    bool mx = dispatch->getAttrOfType<StringAttr>("on_match") == "mx";
+    auto bounds=dispatch->getAttrOfType<DenseI64ArrayAttr>("interval");
     auto flat =
         dot.getAttrOfType<DenseI64ArrayAttr>("ct_src.flat_groups").asArrayRef();
     auto linear = [&](unsigned pos) {
@@ -84,9 +87,9 @@ struct Writer : intentdsl::block::MatrixAccess {
       << "        l=ct.load(" << sa
       << ",(ct.bid(0),panel),shape=(BM,BK//"
          "32),padding_mode=ct.PaddingMode.ZERO,allow_tma=False)\n"
-      << "        h=ct.load(" << sb
-      << ",(panel,ct.bid(1)),shape=(BK//"
-         "32,BN),padding_mode=ct.PaddingMode.ZERO,allow_tma=False)\n"
+      << "        h="<<(columnsFirst?"ct.permute(":"")<<"ct.load(" << sb
+      << (columnsFirst?",(ct.bid(1),panel),shape=(BN,BK//32)":",(panel,ct.bid(1)),shape=(BK//32,BN)")
+      << ",padding_mode=ct.PaddingMode.ZERO,allow_tma=False)"<<(columnsFirst?",(1,0))":"")<<"\n"
       << "        x=ct.reshape(ct.load(" << a
       << (linear(0) ? ",(ct.bid(0),panel),shape=(BM,BK)"
                     : ",(ct.bid(0),panel,0),shape=(BM,BK//32,32)")
@@ -99,9 +102,9 @@ struct Writer : intentdsl::block::MatrixAccess {
       << (mx ? "True" : "False") << "),(BK//32,32,BN))\n"
       << "        li=ct.astype(l,ct.int32)\n        hi=ct.astype(h,ct.int32)\n"
       << "        "
-         "vl=ct.min(ct.reshape((li>=87)&(li<=163),(BM*(BK//32),)),axis=0)\n"
+         "vl=ct.min(ct.reshape((li>="<<bounds[0]<<")&(li<="<<bounds[1]<<"),(BM*(BK//32),)),axis=0)\n"
       << "        "
-         "vr=ct.min(ct.reshape((hi>=87)&(hi<=163),(BN*(BK//32),)),axis=0)\n"
+         "vr=ct.min(ct.reshape((hi>="<<bounds[0]<<")&(hi<="<<bounds[1]<<"),(BN*(BK//32),)),axis=0)\n"
       << "        if vl & vr:\n";
     if (mx)
       s << "            "

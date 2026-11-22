@@ -19,7 +19,7 @@ multiclass MatrixExpressions<Dialect d> {
   }
   def PanelValue : Op<d,"panel_value",[Terminator]> {let arguments=(ins BF16:$element);}
   def ScaledContract : Op<d,"scaled_contract"> {
-    let arguments=(ins AnyMemRef:$lhs,AnyMemRef:$leftScale,AnyMemRef:$rhs,AnyRankedTensor:$rightScale);
+    let arguments=(ins AnyMemRef:$lhs,AnyMemRef:$leftScale,AnyMemRef:$rhs,AnyTypeOf<[AnyMemRef,AnyRankedTensor]>:$rightScale);
     let results=(outs AnyRankedTensor:$sums);
   }
   def Q8Encode : Op<d,"quantize_q8k"> {

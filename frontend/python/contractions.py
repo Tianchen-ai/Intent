@@ -69,6 +69,8 @@ def capture(fn):
             return emit("q4k_dot", [view(node.args[0]), expr(node.args[1])], tensor(rank, "f32"))
         if name == "scaled_contract" and len(node.args) == 4 and set(kw) == {"acc"}:
             transpose = node.args[3]
+            if isinstance(transpose,ast.Subscript):
+                return emit("scaled_contract",[view(a) for a in node.args],tensor(rank,spelling(kw["acc"],api)))
             if (not isinstance(transpose, ast.Call) or spelling(transpose.func, api) != "transpose" or
                     len(transpose.args) != 2 or transpose.keywords or ast.literal_eval(transpose.args[1]) != (1, 0)):
                 raise ValueError("right scale requires an explicit [G,N] to [N,G] transpose")

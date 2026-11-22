@@ -187,4 +187,6 @@ defm Ordered : OrderedOwners<Itsrc_Dialect>;
 include "intentdsl/levels/execution/block/ir/Columns.td"
 defm Columns : ColumnTiles<Itsrc_Dialect>;
 defm NativePanels : MatrixPanelLoop<Itsrc_Dialect>;
+include "intentdsl/levels/execution/block/ir/ScaleDispatch.td"
+defm Scale : ScaleDispatch<Itsrc_Dialect>;
 def MatrixEnd : Op<Itsrc_Dialect,"end",[Terminator]>;

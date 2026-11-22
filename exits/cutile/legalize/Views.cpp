@@ -1,4 +1,5 @@
 #include "../capabilities/Index.h"
+#include "intentdsl/levels/execution/block/ir/ScaleDispatch.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/ProjectedLayout.h"
 #include "intentdsl/levels/execution/block/decisions/Verify.h"
@@ -58,7 +59,6 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
                            (slab ? (code=="load"?"gather_slab":"scatter_slab") : access ? ("tile_" + code).str() : code.str()));
       s.addAttributes(op->getAttrs());
       if(code=="scaled_contract"){
-        s.addAttribute("ct_src.scaled_engine",b.getStringAttr(scaledMma?"mx":"wide"));
         s.addAttribute("ct_src.flat_groups",adjacentScaleGroups(op,fn));
       }
       if(code=="sum_columns"){
@@ -84,7 +84,9 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
       s.addTypes(op->getResultTypes());
       for (auto &region : op->getRegions())
         s.addRegion()->takeBody(region);
-      op->replaceAllUsesWith(b.create(s));
+      auto *lowered=b.create(s);
+      if(code=="scaled_contract")intentdsl::block::formScaleDispatch(*lowered,scaledMma?"mx":"bf16");
+      op->replaceAllUsesWith(lowered);
       op->erase();
     });
     fn.walk([&](Operation *store){
@@ -124,13 +126,12 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
     return intentdsl::block::verifyOwnerMap(matrix, profile, "ct_src",
                                             "realized");
   if(intentdsl::kir::matrixDomain(matrix)){
-    if(failed(intentdsl::block::verifyTiledMatrix(matrix,profile,"ct_src")))return failure();
+    if(failed(intentdsl::block::verifyScaleDispatch(matrix,profile,"ct_src",profile.services.get<intentdsl::cutile::ArrayIndices>()->scaledMma?"mx":"bf16")))return failure();
     if(callable && matrix->getAttr("ct_src.index_bits")!=Builder(matrix.getContext()).getI32IntegerAttr(profile.services.get<intentdsl::cutile::ArrayIndices>()->bits))
       return matrix.emitError("matrix index width disagrees with the target");
-    auto expected=Builder(module.getContext()).getStringAttr(profile.services.get<intentdsl::cutile::ArrayIndices>()->scaledMma?"mx":"wide");
     return success(!matrix.walk([&](Operation *op){
       return op->getName().getStringRef()=="ct_src.scaled_contract" &&
-        (op->getAttr("ct_src.scaled_engine")!=expected || op->getAttr("ct_src.flat_groups")!=adjacentScaleGroups(op,matrix))?
+        op->getAttr("ct_src.flat_groups")!=adjacentScaleGroups(op,matrix)?
         WalkResult::interrupt():WalkResult::advance();}).wasInterrupted());
   }
   if (failed(intentdsl::verifyMapping(module, profile, "ct_src")))

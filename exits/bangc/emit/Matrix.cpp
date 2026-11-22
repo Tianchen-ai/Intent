@@ -56,8 +56,11 @@ struct Matrix : intentdsl::block::MatrixAccess {
     s << "for(int i=0;i<nr;i++)acc[i]=0;\n"
       << "for(long long gq=0;gq<K/256;++gq){float e=0;\n"
       << "for(int k=0;k<256;++k){float x=*" << ptr(x, "float", {"gq", "k"})
-      << ";if(fabsf(x)>fabsf(e)||(fabsf(x)==fabsf(e)&&x<e))e=x;}if(e==0)"
-         "continue;\n"
+      << ";if(fabsf(x)>fabsf(e)||(fabsf(x)==fabsf(e)&&x<e))e=x;}\n"
+      << "if(e==0){for(int i=0;i<nr;++i){const unsigned char *header="
+      << ptr(w,"unsigned char",{"r+i","gq","0"}) << ";"
+      << "bool nonfinite=(header["<<stride(w,2)<<"LL]&0x7c)==0x7c || (header[3LL*"
+      <<stride(w,2)<<"]&0x7c)==0x7c;acc[i]+=nonfinite?NAN:0.f;}continue;}\n"
       << "float inv=-127.f/e,ds=1.f/inv;int q[256],sums[8]={};\n"
       << "for(int k=0;k<256;++k){float f=*" << ptr(x, "float", {"gq", "k"})
       << "*inv;int lo=(int)floorf(f);f-=lo;lo+=(f>.5f||(f==.5f&&(lo&1)));"
@@ -238,10 +241,10 @@ struct Matrix : intentdsl::block::MatrixAccess {
   }
   void scaled() {
     auto a = dot.getOperand(0), sa = dot.getOperand(1), b = dot.getOperand(2),
-         sb = dot.getOperand(3).getDefiningOp()->getOperand(0);
+         sb = intentdsl::kir::RightScale(dot).view;
     s << "__bang_write_value(acc,BM*BN,0.f);\nfor(long long u=0;u<K/32;++u){\n"
       << "for(int j=0;j<nc;++j){unsigned scale=*"
-      << ptr(sb, "unsigned char", {"u", "c+j"})
+      << ptr(sb, "unsigned char", intentdsl::kir::RightScale(dot).index("c+j","u"))
       << ";"
          "for(int t=0;t<32;t++)right[t*BN+j]=decode8(*"
       << ptr(b, "unsigned char", {"u", "t", "c+j"}) << ",scale);}\n"
@@ -275,6 +278,23 @@ struct Matrix : intentdsl::block::MatrixAccess {
       s <<
 #include "BFloatPanel.inc"
           ;
+    if(mode=="exact-i8-conv")s<<R"mlu(
+__mlu_func__ bfloat16_t signed_to_bf16(int x){
+  union { unsigned short bits; bfloat16_t value; } out;
+  unsigned mag=x<0?0u-(unsigned)x:(unsigned)x;
+  if(!mag){out.bits=0;return out.value;}
+  int exponent=0;
+  for(unsigned v=mag;v>1;v>>=1)++exponent;
+  int shift=exponent-7;
+  unsigned sig=shift>0?mag>>shift:mag<<(-shift);
+  if(shift>0){
+    unsigned midpoint=1u<<(shift-1), discarded=mag&((1u<<shift)-1);
+    if(discarded>midpoint || (discarded==midpoint && (sig&1)))++sig;
+  }
+  out.bits=(x<0?32768u:0u)|(((unsigned)(exponent+126)<<7)+sig);
+  return out.value;
+}
+)mlu";
     if (dot.getName().stripDialect() == "window_contract") {
       s <<
 #include "RowMath.inc"
@@ -413,6 +433,10 @@ __mlu_func__ float decode8(unsigned x,unsigned scale){
         auto type = scalar(
             cast<ShapedType>(op.getResult(0).getType()).getElementType());
         auto next = "v" + std::to_string(stage++);
+        if(n=="convert_matrix" && type=="bfloat16_t" &&
+           cast<ShapedType>(op.getOperand(0).getType()).getElementType().isInteger(32)){
+          s<<"bfloat16_t "<<next<<"=signed_to_bf16("<<val<<");\n"; val=next;continue;
+        }
         if (n == "convert_matrix" && type == "bfloat16_t" &&
             dot.hasAttr("bangc.bf16_arithmetic") &&
             cast<ShapedType>(op.getOperand(0).getType())

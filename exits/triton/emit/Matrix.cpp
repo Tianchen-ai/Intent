@@ -95,7 +95,10 @@ struct Writer : intentdsl::block::MatrixAccess {
   }
   void scaled() {
     auto a = dot.getOperand(0), sa = dot.getOperand(1), b = dot.getOperand(2),
-         sb = dot.getOperand(3).getDefiningOp()->getOperand(0);
+         sb = intentdsl::kir::RightScale(dot).view;
+    intentdsl::kir::RightScale axes(dot);
+    auto *dispatch=dot.getPrevNode();
+    auto bounds=dispatch->getAttrOfType<DenseI64ArrayAttr>("interval");
     auto *store = domain.getRegion(0).front().back().getPrevNode();
     if (dot.getAttrOfType<BoolAttr>("triton_src.neutral_scale_dispatch")
             .getValue()) {
@@ -105,7 +108,7 @@ struct Writer : intentdsl::block::MatrixAccess {
         << addr(sa, "r[:,None]", 0, "group[None,:]", 1)
         << ",r[:,None]<M,other=127)\n"
         << "    right_scale=tl.load("
-        << addr(sb, "group[:,None]", 0, "c[None,:]", 1)
+        << addr(sb, "group[:,None]", axes.group, "c[None,:]", axes.column)
         << ",c[None,:]<N,other=127)\n"
         << "    if "
            "(tl.min((left_scale==127).to(tl.int32),None)==1)&(tl.min((right_"
@@ -132,7 +135,7 @@ struct Writer : intentdsl::block::MatrixAccess {
       << shape[2] / 32 << "):\n"
       << "        ax=tl.load(" << addr(sa, "r", 0, "g", 1)
       << ",r<M,other=127).to(tl.int32)\n"
-      << "        bx=tl.load(" << addr(sb, "g", 0, "c", 1)
+      << "        bx=tl.load(" << addr(sb, "g", axes.group, "c", axes.column)
       << ",c<N,other=127).to(tl.int32)\n"
       << "        "
          "ls=tl.where(ax==255,float('nan'),libdevice.ldexp(tl.full((ROWS,),1.,"
@@ -152,8 +155,8 @@ struct Writer : intentdsl::block::MatrixAccess {
       << ",c[None,:]<N,other=0).to(tl.float8e4nv,bitcast=True).to(tl.float32)*"
          "rs[None,:]\n"
       << "        if "
-         "(tl.min(ax,0)>=87)&(tl.max(ax,0)<=163)&(tl.min(bx,0)>=87)&(tl.max(bx,"
-         "0)<=163):\n"
+         "(tl.min(ax,0)>="<<bounds[0]<<")&(tl.max(ax,0)<="<<bounds[1]<<")&(tl.min(bx,0)>="<<bounds[0]<<")&(tl.max(bx,"
+         "0)<="<<bounds[1]<<"):\n"
       << "            acc=tl.dot(av.to(tl.bfloat16),bv.to(tl.bfloat16),acc)\n"
       << "        else:\n"
       << "            acc=tl.dot(av,bv,acc,input_precision='ieee')\n";

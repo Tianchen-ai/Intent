@@ -198,9 +198,10 @@ LogicalResult verifyMatrixBody(func::FuncOp fn, Operation &domain,
           dtype(op.getOperand(1)) != "u8" ||
           shapes.lookup(op.getOperand(1)) != Shape{A[0], A[1]} ||
           shapes.lookup(op.getOperand(3)) != Shape{B[2], A[1]} ||
-          !op.getOperand(3).getDefiningOp() ||
-          op.getOperand(3).getDefiningOp()->getName().stripDialect() !=
-              "transpose_scale")
+          !elem(op.getOperand(3)).isInteger(8) ||
+          (op.getOperand(3).getDefiningOp() ?
+             op.getOperand(3).getDefiningOp()->getName().stripDialect()!="transpose_scale" :
+             dtype(op.getOperand(3))!="u8"))
         return op.emitError(
             "expected E4M3FN [M,G,32] x [G,32,N] and E8M0 [M,G], [N,G]");
       shape = {A[0], B[2]};

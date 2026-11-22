@@ -94,6 +94,7 @@ inline mlir::LogicalResult bindMatrix(mlir::func::FuncOp fn, unsigned phase,
         p.routed() && p.stride(dst, p.rank(dst) - 1) == 1 && convert &&
         convert->getName().stripDialect() == "convert_matrix" &&
         convert->getOperand(0) == p.fold.getResult(0) && publish &&
+        mlir::cast<mlir::ShapedType>(p.fold.getResult(0).getType()).getElementType().isF32() &&
         publish->getName().stripDialect() == "publish_matrix" &&
         mlir::cast<mlir::MemRefType>(dst.getType()).getElementType().isBF16();
     auto writeback = contiguous     ? "pitched-dma"

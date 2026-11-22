@@ -103,4 +103,6 @@ defm Ordered : OrderedOwners<TileSource>;
 include "intentdsl/levels/execution/block/ir/Columns.td"
 defm Columns : ColumnTiles<TileSource>;
 defm NativePanels : MatrixPanelLoop<TileSource>;
+include "intentdsl/levels/execution/block/ir/ScaleDispatch.td"
+defm Scale : ScaleDispatch<TileSource>;
 def MatrixEnd : Op<TileSource,"end",[Terminator]>;

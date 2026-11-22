@@ -108,6 +108,9 @@ LogicalResult verifyMatrixPartition(func::FuncOp fn, Operation &region,
     return region.emitError("invalid shared activation packing contract");
   if (!s)
     return region.emitError() << llvm::toString(s.takeError());
+  auto placement=region.getAttrOfType<StringAttr>("cpu.record_storage");
+  if(kind=="q4k_dot" ? (!placement || placement!=(s->k/256>32?"heap":"stack")) : bool(placement))
+    return region.emitError("invalid Q8_K record workspace placement");
   auto sh = region.getAttrOfType<DenseI64ArrayAttr>("cpu.extents");
   if (!sh || sh.asArrayRef() != ArrayRef<int64_t>{s->m, s->n, s->k, s->batches})
     return region.emitError("incorrect task output coverage");
@@ -251,8 +254,10 @@ void matrixTasks(Unit &u) {
                           : "rhs-panels-per-call"));
     op->setAttr("cpu.extents",
                 b.getDenseI64ArrayAttr({g->m, g->n, g->k, g->batches}));
-    if (cpu::calculation(*op).getName().stripDialect() == "q4k_dot")
+    if (cpu::calculation(*op).getName().stripDialect() == "q4k_dot"){
       op->setAttr("cpu.packing", b.getStringAttr("shared-q8k-per-call"));
+      op->setAttr("cpu.record_storage",b.getStringAttr(g->k/256>32?"heap":"stack"));
+    }
     if (cpu::calculation(*op).getName().stripDialect() == "scaled_contract")
       op->setAttr("cpu.packing", b.getStringAttr("decoded-f32-per-call"));
     if (cpu::calculation(*op).getName().stripDialect() == "window_contract")

@@ -2,6 +2,20 @@
 #include "intentdsl/levels/algorithm/kir/ir/PanelMap.h"
 #include "intentdsl/levels/algorithm/kir/ir/Performance.h"
 namespace intentdsl::kir {
+// Logical right scales are [column, group]. Preserve their physical view
+// and express the axis exchange exactly once for all panel consumers.
+struct RightScale {
+  mlir::Value view;
+  unsigned column, group;
+  explicit RightScale(mlir::Operation &dot):view(dot.getOperand(3)),column(0),group(1){
+    if(auto *transpose=view.getDefiningOp()){
+      view=transpose->getOperand(0);column=1;group=0;
+    }
+  }
+  std::vector<std::string> index(std::string n,std::string g) const {
+    return column==0?std::vector<std::string>{n,g}:std::vector<std::string>{g,n};
+  }
+};
 struct ContractionShape {
   int64_t m, n, k, batches;
   unsigned lhs, rhs, dst;

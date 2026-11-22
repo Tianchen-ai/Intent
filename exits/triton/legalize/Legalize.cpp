@@ -1,5 +1,6 @@
 #include "intentdsl/levels/execution/block/ir/Access.h"
 #include "intentdsl/levels/execution/block/ir/MatrixAccess.h"
+#include "intentdsl/levels/execution/block/ir/ScaleDispatch.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/exits/triton/ir/Dialect.h"
 #include "mlir/Pass/Pass.h"
@@ -13,7 +14,7 @@ bool neutralScaleDispatch(intentdsl::block::MatrixAccess &p) {
       publish->getName().stripDialect()=="publish_matrix" && publish->getOperand(1)==p.fold.getResult(0);
 }
 LogicalResult verifyMatrixExit(func::FuncOp fn,const compilerinfra::TargetProfile &profile){
-  if(failed(intentdsl::block::verifyTiledMatrix(fn,profile,"triton_src")))return failure();
+  if(failed(intentdsl::block::verifyScaleDispatch(fn,profile,"triton_src","bf16")))return failure();
   intentdsl::block::MatrixAccess p(fn);
   if(p.dot.getName().stripDialect()=="scaled_contract" &&
      p.dot.getAttr("triton_src.neutral_scale_dispatch")!=Builder(fn.getContext()).getBoolAttr(neutralScaleDispatch(p)))
@@ -92,8 +93,10 @@ struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
     });
     for(auto fn:getOperation().getOps<func::FuncOp>())if(intentdsl::kir::matrixDomain(fn)){
       intentdsl::block::MatrixAccess p(fn);
-      if(p.dot.getName().stripDialect()=="scaled_contract")p.dot.setAttr("triton_src.neutral_scale_dispatch",
-          Builder(fn.getContext()).getBoolAttr(neutralScaleDispatch(p)));
+      if(p.dot.getName().stripDialect()=="scaled_contract"){
+        intentdsl::block::formScaleDispatch(p.dot,"bf16");
+        p.dot.setAttr("triton_src.neutral_scale_dispatch",Builder(fn.getContext()).getBoolAttr(neutralScaleDispatch(p)));
+      }
     }
   }
 };

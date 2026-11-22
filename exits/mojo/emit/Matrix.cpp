@@ -317,6 +317,37 @@ def round_bf16[W:Int](x:SIMD[DType.float32,W])->SIMD[DType.bfloat16,W]:
   }
 };
 } // namespace
+static MatrixPanels::PackedRight packedRight(MatrixPanels &p) {
+  auto mode=p.domain.getAttrOfType<StringAttr>("cpu.packing");
+  if(!mode || mode!="signed-dot4-panels")return {};
+  MatrixPanels::PackedRight pack;llvm::raw_string_ostream s(pack.prepare);
+  auto rhs = p.dot.getOperand(1);
+    auto i = cast<BlockArgument>(rhs).getArgNumber();
+    auto t = p.fn.getArgAttrOfType<DenseI64ArrayAttr>(i, "cpu.strides");
+    int k = p.dot.getAttrOfType<IntegerAttr>("rhs_k").getInt(),
+        b = p.dot.getAttrOfType<IntegerAttr>("rhs_batch").getInt(), n = 0;
+    while (n == k || n == b)
+      ++n;
+    s << "const int64_t K=" << p.shape[2]
+      << ",tiles=N/nr,panels=" << (b < 0 ? "1" : "G") << "*tiles;\n"
+      << "const size_t bytes=nr*(K+4);unsigned char "
+         "*rhs=calloc(panels?panels:1,bytes);if(!rhs)return 2;\n"
+      << "#pragma omp parallel for num_threads(workers) schedule(static) "
+         "if(panels>1)\n"
+      << "for(int64_t panel=0;panel<panels;panel++){int64_t "
+         "g=panel/tiles,c=panel%tiles*nr;unsigned char *p=rhs+panel*bytes;"
+         "uint32_t *correction=(uint32_t*)(p+K*nr);"
+         "for(int64_t k=0;k<K;k+=4){const int8_t *base=(int8_t*)a"
+      << i << "+g*" << (b < 0 ? 0 : t[b]) << "+c*" << t[n] << "+k*" << t[k]
+      << ";"
+         "for(int j=0;j<nr;j++){int sum=0;for(int lane=0;lane<4;lane++){int8_t "
+         "x=base[j*"
+      << t[n] << "+lane*" << t[k]
+      << "];"
+         "p[k*nr+4*j+lane]=(uint8_t)x;sum+=x;}correction[j]-=(uint32_t)(sum*"
+         "128);}}}\n";
+  pack.address=std::string("rhs+(")+(b<0?"0":"g")+"*tiles+c/nr)*bytes";pack.release="free(rhs);";return pack;
+}
 llvm::Error emitMatrix(func::FuncOp fn, llvm::raw_pwrite_stream &out) {
   MatrixPanels p(fn);
   Writer w{p};
@@ -329,7 +360,7 @@ llvm::Error emitMatrix(func::FuncOp fn, llvm::raw_pwrite_stream &out) {
   auto host =
       p.dispatch("extern void intent_panel(" + llvm::join(declarations, ",") +
                      ",int64_t,int64_t);",
-                 "intent_panel(" + llvm::join(args, ",") + ",R,C);", true);
+                 "intent_panel(" + llvm::join(args, ",") + ",R,C);", true,packedRight(p));
   auto abi = llvm::json::parse(fn->getAttrOfType<StringAttr>("kir.abi"));
   if (!abi)
     return abi.takeError();

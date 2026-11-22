@@ -27,7 +27,7 @@ SmallVector<std::pair<Value, std::string>> feeds(block::MatrixAccess &a) {
     return {{dot.getOperand(0), "left-groups"},
             {dot.getOperand(1), "left-scales"},
             {dot.getOperand(2), "right-groups"},
-            {dot.getOperand(3).getDefiningOp()->getOperand(0), "right-scales"}};
+            {kir::RightScale(dot).view, "right-scales"}};
   return {{dot.getOperand(0), "left-panel"},
           {dot.getOperand(1), "right-panel"}};
 }

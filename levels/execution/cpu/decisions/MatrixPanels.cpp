@@ -113,7 +113,7 @@ MatrixPanels::MatrixPanels(func::FuncOp f)
   }
 }
 std::string MatrixPanels::dispatch(StringRef decl, StringRef invoke,
-                                   bool status) {
+                                   bool status,const PackedRight &native) {
   std::string text;
   llvm::raw_string_ostream s(text);
   auto index = [](std::string expr, StringRef var) {
@@ -126,9 +126,9 @@ std::string MatrixPanels::dispatch(StringRef decl, StringRef invoke,
   bool widened = packing && packing == "mapped-f32-panels";
   bool mapped = widened || (packing && packing == "mapped-right-per-call");
   bool packRhs = packing && packing == "rhs-panels-per-call";
-  bool interleave = packing && packing == "signed-dot4-panels";
-  bool packets = packing && packing == "reduction-packets";
-  const bool heap = pack && shape[2] / 256 > 32;
+  auto placement=domain.getAttrOfType<StringAttr>("cpu.record_storage");
+  const bool heap=placement && placement=="heap";
+  auto releaseRight=packRhs?std::string("free(rhs);"):native.release;
   s << "#include <stdint.h>\n#include <stddef.h>\n#include <math.h>\n#include "
        "<stdlib.h>\n#include <string.h>\n#include <omp.h>\n"
     << decl << "\n";
@@ -214,7 +214,8 @@ static inline float decode(unsigned x,unsigned scale){
         << (widened ? "expand_bf(" : "(")
         << kir::panelExpression(dot, {a, c, d, l}, math) << ");}\n";
   }
-  if (packRhs || packets) {
+  s<<native.prepare;
+  if (packRhs) {
     auto b = dot.getOperand(1);
     auto i = cast<BlockArgument>(b).getArgNumber();
     auto stride = fn.getArgAttrOfType<DenseI64ArrayAttr>(i, "cpu.strides");
@@ -238,41 +239,12 @@ static inline float decode(unsigned x,unsigned scale){
       << ";unsigned char *src=(unsigned char*)a" << i << "+(g*"
       << (batch < 0 ? 0 : stride[batch]) << "+k*" << stride[k] << "+c*"
       << stride[n] << ")*" << bytes << ";";
-    if (packets)
-      s << "for(int j=0;j<nc;j++)rhs[(b*nr+j)*K+k]=src[j*" << stride[n] << "];";
-    else if (stride[n] == 1)
+    if (stride[n] == 1)
       s << "memcpy(dst,src,nc*" << bytes << ");";
     else
       s << "for(int j=0;j<nc;j++)memcpy(dst+j*" << bytes << ",src+j*"
         << stride[n] * bytes << "," << bytes << ");";
     s << "}}\n";
-  }
-  if (interleave) {
-    auto rhs = dot.getOperand(1);
-    auto i = cast<BlockArgument>(rhs).getArgNumber();
-    auto t = fn.getArgAttrOfType<DenseI64ArrayAttr>(i, "cpu.strides");
-    int k = dot.getAttrOfType<IntegerAttr>("rhs_k").getInt(),
-        b = dot.getAttrOfType<IntegerAttr>("rhs_batch").getInt(), n = 0;
-    while (n == k || n == b)
-      ++n;
-    s << "const int64_t K=" << shape[2]
-      << ",tiles=N/nr,panels=" << (b < 0 ? "1" : "G") << "*tiles;\n"
-      << "const size_t bytes=nr*(K+4);unsigned char "
-         "*rhs=calloc(panels?panels:1,bytes);if(!rhs)return 2;\n"
-      << "#pragma omp parallel for num_threads(workers) schedule(static) "
-         "if(panels>1)\n"
-      << "for(int64_t panel=0;panel<panels;panel++){int64_t "
-         "g=panel/tiles,c=panel%tiles*nr;unsigned char *p=rhs+panel*bytes;"
-         "uint32_t *correction=(uint32_t*)(p+K*nr);"
-         "for(int64_t k=0;k<K;k+=4){const int8_t *base=(int8_t*)a"
-      << i << "+g*" << (b < 0 ? 0 : t[b]) << "+c*" << t[n] << "+k*" << t[k]
-      << ";"
-         "for(int j=0;j<nr;j++){int sum=0;for(int lane=0;lane<4;lane++){int8_t "
-         "x=base[j*"
-      << t[n] << "+lane*" << t[k]
-      << "];"
-         "p[k*nr+4*j+lane]=(uint8_t)x;sum+=x;}correction[j]-=(uint32_t)(sum*"
-         "128);}}}\n";
   }
   if (decoded) {
     int64_t k = shape[2];
@@ -299,7 +271,7 @@ static inline float decode(unsigned x,unsigned scale){
       << "for(int64_t g=0;g<K/32;g++)for(int t=0;t<32;t++)for(int64_t "
          "c=0;c<N;c++)right[(g*32+t)*N+c]=decode("
       << acc(dot.getOperand(2), {"g", "t", "c"}) << ","
-      << acc(dot.getOperand(3).getDefiningOp()->getOperand(0), {"g", "c"})
+      << acc(kir::RightScale(dot).view, kir::RightScale(dot).index("c","g"))
       << ");\n";
   }
   if (pack) {
@@ -343,15 +315,16 @@ static inline float decode(unsigned x,unsigned scale){
     auto bytes = elemBytes(input.slot);
     s << "size_t elements;if(__builtin_mul_overflow((size_t)M,(size_t)" << width
       << ",&elements)){"
-      << (packRhs || packets || interleave ? "free(rhs);" : "")
+      << releaseRight
       << "return 2;}"
          "unsigned char *members=calloc(elements?elements:1,"
       << bytes << ");if(!members){"
-      << (packRhs || packets || interleave ? "free(rhs);" : "")
+      << releaseRight
       << "return 2;}\n"
+      << "int64_t active_begin="<<index(offsets,"0")<<",active_end="<<index(offsets,"G")<<";\n"
       << "#pragma omp parallel for num_threads(workers) schedule(static) "
-         "if(M>1)\n"
-         "for(int64_t r=0;r<M;r++){int64_t src="
+         "if(active_end>active_begin+1)\n"
+         "for(int64_t r=active_begin;r<active_end;r++){int64_t src="
       << index(routes, "r") << "/" << multiplicity
       << ";unsigned char *from=(unsigned char*)a" << input.slot << "+src*"
       << strides[1 - k] * bytes << ",*to=members+r*" << width * bytes << ";";
@@ -393,14 +366,8 @@ static inline float decode(unsigned x,unsigned scale){
         << "=output;\n";
       continue;
     }
-    if (interleave && i == 1) {
-      s << "void *p1=rhs+("
-        << (dot.getAttrOfType<IntegerAttr>("rhs_batch").getInt() < 0 ? "0"
-                                                                     : "g")
-        << "*tiles+c/nr)*bytes;\n";
-      continue;
-    }
-    if (i == 1 && (packRhs || packets)) {
+    if(!native.address.empty() && i==1){s<<"void *p1="<<native.address<<";\n";continue;}
+    if (i == 1 && packRhs) {
       auto bytes = cast<MemRefType>(fn.getArgument(v.slot).getType())
                        .getElementTypeBitWidth() /
                    8;
@@ -443,7 +410,7 @@ static inline float decode(unsigned x,unsigned scale){
   s << "}}" << (routed ? "free(members);" : "") << (heap ? "free(packed);" : "")
     << (decoded ? "free(workspace);" : "") << (mapped ? "free(right);" : "")
     << (widened ? "free(left);" : "")
-    << (packRhs || packets || interleave ? "free(rhs);" : "")
+    << releaseRight
     << (status ? "return rc;" : "") << "}\n";
   return text;
 }

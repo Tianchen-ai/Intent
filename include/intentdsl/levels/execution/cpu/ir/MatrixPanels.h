@@ -11,6 +11,7 @@ struct PanelView {
   bool writes;
 };
 struct MatrixPanels {
+  struct PackedRight {std::string prepare, address, release;};
   explicit MatrixPanels(mlir::func::FuncOp);
   mlir::func::FuncOp fn;
   mlir::Operation &domain, &dot;
@@ -19,6 +20,6 @@ struct MatrixPanels {
   std::string offsets, routes;
   int64_t multiplicity = 1;
   std::string dispatch(llvm::StringRef declarations, llvm::StringRef invoke,
-                       bool returnsStatus);
+                       bool returnsStatus, const PackedRight &native={});
 };
 } // namespace intentdsl::cpu

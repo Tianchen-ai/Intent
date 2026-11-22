@@ -16,7 +16,7 @@ matrixIssues(mlir::Operation *domain,
         return o.getName().stripDialect() == "q4k_dot";
       });
   if (!records)
-    estimate.terms["native_mma_fragments"] = {std::ceil(double(t[0]) / m) *
+    estimate.terms["native_matrix_fragments"] = {std::ceil(double(t[0]) / m) *
                                                   std::ceil(double(t[1]) / n) *
                                                   std::ceil(double(t[2]) / k),
                                               "count"};
