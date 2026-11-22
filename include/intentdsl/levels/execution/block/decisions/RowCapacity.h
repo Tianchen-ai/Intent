@@ -16,14 +16,23 @@ struct RowCapacity {
     auto fn=mlir::dyn_cast<mlir::func::FuncOp>(op);if(!fn)fn=op->getParentOfType<mlir::func::FuncOp>();
     if(auto bounds=fn->getAttrOfType<mlir::DenseI64ArrayAttr>("kir.iteration")){
       if(bounds.empty() || bounds.size()%4)return llvm::createStringError("invalid logical bounds");
-      auto inner=bounds.asArrayRef().take_back(4);
-      if(inner[0]<0)return inner[3];
-      if(size_t(inner[0])>=bindings.size())return llvm::createStringError("absent domain binding");
-      auto *v=bindings[inner[0]].getAsObject();auto *shape=v?v->getArray("shape"):nullptr;
-      if(!shape || inner[1]<0 || size_t(inner[1])>=shape->size() || inner[2]<=0)return llvm::createStringError("invalid domain axis");
-      auto extent=(*shape)[inner[1]].getAsInteger();
-      if(!extent || *extent<0 || *extent%inner[2])return llvm::createStringError("inexact domain extent");
-      return *extent/inner[2];
+      auto owner=fn->getAttrOfType<mlir::IntegerAttr>("kir.owner_axis");
+      int64_t width=1;
+      for(int i=0;i<bounds.size();i+=4){
+        if(owner ? i/4==owner.getInt() : i+4!=bounds.size())continue;
+        auto inner=bounds.asArrayRef().slice(i,4);
+        int64_t n=inner[3];
+        if(inner[0]>=0){
+          if(size_t(inner[0])>=bindings.size())return llvm::createStringError("absent domain binding");
+          auto *v=bindings[inner[0]].getAsObject();auto *shape=v?v->getArray("shape"):nullptr;
+          if(!shape || inner[1]<0 || size_t(inner[1])>=shape->size() || inner[2]<=0)return llvm::createStringError("invalid domain axis");
+          auto extent=(*shape)[inner[1]].getAsInteger();
+          if(!extent || *extent<0 || *extent%inner[2])return llvm::createStringError("inexact domain extent");
+          n=*extent/inner[2];
+        }
+        if(n<0 || __builtin_mul_overflow(width,n,&width))return llvm::createStringError("invalid member extent");
+      }
+      return width;
     }
     auto slot=domainSlot(op);
     if(slot<0 || size_t(slot)>=bindings.size())return llvm::createStringError("logical map refers to an absent binding");

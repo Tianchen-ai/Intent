@@ -211,7 +211,10 @@ class Capture:
             or spelling(loop.iter.func, self.namespace) != "parallel"
         ):
             raise ValueError("expected an independent parallel row domain")
-        if isinstance(loop.target, ast.Tuple):
+        first=loop.body[0] if loop.body else None
+        named_domain=(isinstance(first,ast.Assign) and isinstance(first.value,ast.Call) and
+                      ast.unparse(first.value.func)==self.namespace+".domain")
+        if isinstance(loop.target, ast.Tuple) or named_domain:
             from .indexed import IndexedCapture
             return IndexedCapture(self, loop).module()
         (dim,) = loop.iter.args

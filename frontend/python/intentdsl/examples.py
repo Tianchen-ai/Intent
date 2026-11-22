@@ -101,6 +101,67 @@ def batch_norm(x, weight, bias, moving_mean, moving_var, epsilon, momentum):
 
 
 @I.kernel
+def merge_affine_gradients(weight_partials: I.In[I.bf16, ("P", "F")],
+                           bias_partials: I.In[I.bf16, ("P", "F")],
+                           dw: I.Out[I.f32, ("F",)], db: I.Out[I.f32, ("F",)]):
+    for feature in I.parallel(weight_partials.dim(1)):
+        weight_terms = I.cast(weight_partials[:, feature], I.f32)
+        bias_terms = I.cast(bias_partials[:, feature], I.f32)
+        dw[feature] = I.sum(weight_terms, axis=0, acc=I.f32)
+        db[feature] = I.sum(bias_terms, axis=0, acc=I.f32)
+
+
+@I.kernel
+def group_input_gradient(x: I.In[I.f16, ("B","C","S")],
+                         dy: I.In[I.f16, ("B","C","S")], gain: I.In[I.f16, ("C",)],
+                         mean: I.In[I.f16, ("B","G")], inv: I.In[I.f16, ("B","G")],
+                         dx: I.Out[I.f16, ("B","C","S")], inv_count: I.f32):
+    for batch, group in I.parallel((x.dim(0), mean.dim(1))):
+        position = I.domain(0,x.dim(2))
+        total = I.cast(0,I.f32)
+        projection = I.cast(0,I.f32)
+        center = I.cast(mean[batch,group],I.f32)
+        inverse = I.cast(inv[batch,group],I.f32)
+        for h in I.static_range(8):
+            normalized = (I.cast(x[batch,8*group+h,position],I.f32)-center)*inverse
+            upstream = I.cast(dy[batch,8*group+h,position],I.f32)*I.cast(gain[8*group+h],I.f32)
+            total = total+I.sum(upstream,axis=0,acc=I.f32)
+            projection = projection+I.sum(normalized*upstream,axis=0,acc=I.f32)
+        for h in I.static_range(8):
+            normalized = (I.cast(x[batch,8*group+h,position],I.f32)-center)*inverse
+            upstream = I.cast(dy[batch,8*group+h,position],I.f32)*I.cast(gain[8*group+h],I.f32)
+            dx[batch,8*group+h,position] = I.cast(inverse*(upstream-total*inv_count-normalized*projection*inv_count),I.f16)
+
+
+@I.kernel
+def group_affine_gradient(x: I.In[I.f16, ("B","C","S")], dy: I.In[I.f16, ("B","C","S")],
+                          mean: I.In[I.f16, ("B","G")], inv: I.In[I.f16, ("B","G")],
+                          dw: I.Out[I.f16, ("C",)], db: I.Out[I.f16, ("C",)]):
+    for group in I.parallel(mean.dim(1)):
+        batch = I.domain(0,x.dim(0))
+        position = I.domain(0,x.dim(2))
+        center = I.cast(mean[batch,group],I.f32)
+        inverse = I.cast(inv[batch,group],I.f32)
+        for h in I.static_range(8):
+            normalized = (I.cast(x[batch,8*group+h,position],I.f32)-center)*inverse
+            upstream = I.cast(dy[batch,8*group+h,position],I.f32)
+            weight_sum = I.sum(normalized*upstream,axis=0,acc=I.f32)
+            bias_sum = I.sum(upstream,axis=0,acc=I.f32)
+            dw[8*group+h] = I.cast(weight_sum,I.f16)
+            db[8*group+h] = I.cast(bias_sum,I.f16)
+
+
+@I.program
+def group_norm_backward(x, dy, gain, mean, inv, inv_count):
+    dx = I.output(I.f16,(x.dim(0),x.dim(1),x.dim(2)))
+    dw = I.output(I.f16,(x.dim(1),))
+    db = I.output(I.f16,(x.dim(1),))
+    group_input_gradient(x,dy,gain,mean,inv,dx,inv_count)
+    group_affine_gradient(x,dy,mean,inv,dw,db)
+    return dx,dw,db
+
+
+@I.kernel
 def transpose(x: I.In[I.f16, ("M", "N")], out: I.Out[I.f16, ("N", "M")]):
     for row in I.parallel(x.dim(0)):
         out[:, row] = x[row, :]

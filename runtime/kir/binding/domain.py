@@ -54,10 +54,16 @@ def bind_views(descriptor, facts, values):
     active = all(shape)
     result = []
     written = {}
+    write_counts = {}
     for view in descriptor["views"]:
         i = view["source"]
         src = values[i]
         fact = facts[i]
+        if "coordinates" not in view:
+            if fact is not None:
+                raise ValueError("expected a scalar capture in the projected ABI")
+            result.append(src)
+            continue
         rows = view["coordinates"]
         offsets = [axis[-1] for axis in rows]
         stride = [
@@ -75,7 +81,12 @@ def bind_views(descriptor, facts, values):
                 raise ValueError("projected members outside the source extent")
             ranges.append((lo, hi, functools.reduce(gcd, axis[:-1], 0)))
         offset = sum(s * v for s, v in zip(fact["strides"], offsets)) if active else 0
-        a = adapter(src).project(src, shape, stride, offset)
+        if "axis" in view:
+            axis = view["axis"]
+            bound_shape, bound_strides = (shape[axis],), (stride[axis],)
+        else:
+            bound_shape, bound_strides = shape, stride
+        a = adapter(src).project(src, bound_shape, bound_strides, offset)
         if descriptor["public_abi"][i]["direction"] != "In" and active:
             Signature.require_writable(inspect(a))
             for prev in written.setdefault(i, []):
@@ -87,8 +98,9 @@ def bind_views(descriptor, facts, values):
                 if not any(disjoint(x, y) for x, y in zip(ranges, prev)):
                     raise ValueError("overlapping projected output domains")
             written[i].append(ranges)
+            write_counts[i]=write_counts.get(i,0)+prod(bound_shape)
         result.append(a)
     for i, maps in written.items():
-        if prod(shape) * len(maps) != prod(facts[i]["shape"]):
+        if write_counts[i] != prod(facts[i]["shape"]):
             raise ValueError("indexed outputs do not cover the public view")
     return tuple(result)

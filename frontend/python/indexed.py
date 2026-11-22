@@ -10,8 +10,30 @@ class IndexedCapture:
         self.capture = capture
         self.public = list(capture.args)
         self.positions = {a["name"]: i for i, a in enumerate(self.public)}
-        self.axes = [item.id for item in loop.target.elts]
-        extents = loop.iter.args[0].elts
+        targets=loop.target.elts if isinstance(loop.target,ast.Tuple) else [loop.target]
+        self.axes = [item.id for item in targets]
+        owners=len(self.axes)
+        extents = list(loop.iter.args[0].elts) if isinstance(loop.iter.args[0],ast.Tuple) else list(loop.iter.args)
+        statements = list(loop.body)
+        # A named member domain is a tensor axis inside each parallel owner.
+        while statements and isinstance(statements[0], ast.Assign):
+            decl = statements[0]
+            if (len(decl.targets)==1 and isinstance(decl.targets[0], ast.Name)
+                    and isinstance(decl.value, ast.Call)
+                    and ast.unparse(decl.value.func)==capture.namespace+".domain"):
+                begin,stop=decl.value.args
+                if ast.literal_eval(begin)!=0:
+                    raise ValueError("an affine member axis must start at zero")
+                self.axes.append(decl.targets[0].id)
+                extents.append(stop)
+                statements=statements[1:]
+            else:
+                break
+        self.members=len(self.axes)-owners
+        self.owner_axis=0 if self.members>1 and owners==1 else None
+        if self.members>1 and self.owner_axis is None:
+            raise ValueError("multiple member axes require a single owner axis")
+        self.owner_bindings=set()
         if not 1 <= len(extents) == len(self.axes) <= 4 or len(set(self.axes)) != len(
             self.axes
         ):
@@ -23,7 +45,15 @@ class IndexedCapture:
         capture.args = []
         capture.values = {}
         capture.access = self.access
-        self.body(loop.body)
+        # Scalar captures keep one public slot, independent of the access maps.
+        # Append them after projected views so the root domain has a view owner.
+        scalars=[(i,a) for i,a in enumerate(self.public) if a["direction"]=="Scalar"]
+        for _,a in scalars:
+            capture.values[a["name"]]=("%"+a["name"],argument_type(a))
+        self.body(statements)
+        for i,a in scalars:
+            self.slots[(i,None)]=len(capture.args)
+            capture.args.append(a)
 
     def extent(self, n):
         if isinstance(n, ast.Constant) and type(n.value) is int and n.value > 0:
@@ -64,7 +94,7 @@ class IndexedCapture:
                 return (*zero[:-1], a[-1] % b[-1])
         raise ValueError("subscript is outside the affine projection subset")
 
-    def access(self, node, store=False):
+    def access(self, node, store=False, scalar_result=False):
         src = self.positions[node.value.id]
         actual = self.public[src]
         if (
@@ -76,6 +106,9 @@ class IndexedCapture:
         if len(indices) != len(actual["dims"]):
             raise ValueError("subscript rank differs from view")
         matrix = tuple(self.affine(x) for x in indices)
+        owned = scalar_result and store and self.members>0
+        if owned and any(any(row[-1-self.members:-1]) for row in matrix):
+            raise ValueError("a reduced scalar can write only an owner coordinate")
         key = (src, matrix)
         if key not in self.slots:
             i = len(self.slots)
@@ -84,16 +117,17 @@ class IndexedCapture:
                 name="view" + str(i),
                 direction=actual["direction"],
                 dtype=actual["dtype"],
-                dims=["axis" + str(j) for j in range(len(self.axes))],
+                dims=["axis0"] if owned else ["axis" + str(j) for j in range(len(self.axes))],
             )
             self.capture.args.append(desc)
         if store:
             self.written.add(src)
+        if owned:self.owner_bindings.add(key)
         d = self.capture.args[self.slots[key]]
         return [
             ("%" + d["name"], argument_type(d)),
             ("%row", "index"),
-        ], f'tensor<?x{actual["dtype"]}>'
+        ], actual["dtype"] if owned else f'tensor<?x{actual["dtype"]}>'
 
     def body(self, statements):
         c = self.capture
@@ -119,10 +153,10 @@ class IndexedCapture:
             if isinstance(dest, ast.Name):
                 c.values[dest.id] = value
             else:
-                args, t = self.access(dest, True)
+                args, t = self.access(dest, True, not value[1].startswith("tensor"))
                 if t != value[1]:
                     raise ValueError("write dtype differs from destination")
-                c.emit("write", [*args, value])
+                c.emit("write" if t.startswith("tensor") else "write_owner", [*args, value])
 
     def module(self):
         c = self.capture
@@ -132,22 +166,25 @@ class IndexedCapture:
             raise ValueError("indexed kernel leaves an output undefined")
         formals = []
         for (src, matrix), d in zip(self.slots, c.args, strict=True):
+            if matrix is None:
+                formals.append(f'%{d["name"]}: {argument_type(d)} {{kir.source = {src} : i64}}')
+                continue
             axes = ",".join("d" + str(j) for j in range(len(self.axes)))
             exprs = []
             for row in matrix:
                 terms = [f"d{j} * {k}" for j, k in enumerate(row[:-1]) if k]
                 exprs.append(" + ".join([*terms, str(row[-1])]))
             layout = "affine_map<(" + axes + ")->(" + ",".join(exprs) + ")>"
-            formals.append(
-                f'%{d["name"]}: {argument_type(d)} {{kir.source = {src} : i64, kir.indexing = {layout}}}'
-            )
+            owner=", kir.owner_projection" if (src,matrix) in self.owner_bindings else ""
+            formals.append(f'%{d["name"]}: {argument_type(d)} {{kir.source = {src} : i64, kir.indexing = {layout}{owner}}}')
         string = lambda x: json.dumps(json.dumps(x, separators=(",", ":")))
         bounds = ", ".join(str(x) for row in self.bounds for x in row)
         first = c.args[0]
+        owner=", kir.owner_axis=0:i64" if self.owner_axis==0 else ""
         return (
             f"module {{ func.func @{c.fn.name}("
             + ", ".join(formals)
-            + f") attributes {{kir.abi={string(c.args)}, kir.public_abi={string(self.public)}, kir.iteration=array<i64:{bounds}>}} {{\n"
+            + f") attributes {{kir.abi={string(c.args)}, kir.public_abi={string(self.public)}, kir.iteration=array<i64:{bounds}>{owner}}} {{\n"
             + f'"kir.parallel"(%{first["name"]}) ({{^bb0(%row:index):\n'
             + "\n".join(c.ops)
             + '\n"kir.end"():()->()\n}):('

@@ -51,7 +51,7 @@ LogicalResult verifyRowComputation(func::FuncOp fn, Block &row, ValueRange captu
   if(failed(verifyDomain(fn)) || domainSlot(fn)!=domainIndex)return fn.emitError("logical domain slot differs from ownership");
   auto domainType=dyn_cast<MemRefType>(captures[domainIndex].getType());
   auto ownerAxis=fn->getAttrOfType<IntegerAttr>("kir.owner_axis");
-  if (!domainType || (ownerAxis && (indexed || ownerAxis.getInt()<0 || ownerAxis.getInt()>=domainType.getRank())) ||
+  if (!domainType || (ownerAxis && (ownerAxis.getInt()<0 || ownerAxis.getInt()>=domainType.getRank())) ||
       (!ownerAxis && !indexed && domainType.getRank() != 2 && domainType.getRank() != 1))
     return fn.emitError("expected a matrix row domain");
   auto &axes =

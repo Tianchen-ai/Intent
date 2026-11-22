@@ -61,7 +61,6 @@ inline mlir::LogicalResult verifyDomain(mlir::func::FuncOp fn) {
     }
     return success();
   }
-  if(fn->hasAttr("kir.owner_axis"))return fn.emitError("ambiguous indexed and reduction domain");
   auto abi = fn->getAttrOfType<StringAttr>("kir.abi");
   if (!abi)
     return fn.emitError("missing projected signature");
@@ -79,6 +78,9 @@ inline mlir::LogicalResult verifyDomain(mlir::func::FuncOp fn) {
   if (!bounds || bounds.empty() || bounds.size() % 4 || bounds.size() > 16 ||
       !publicABI)
     return fn.emitError("invalid indexed domain");
+  auto owner=fn->getAttrOfType<IntegerAttr>("kir.owner_axis");
+  if(owner && (owner.getInt()<0 || size_t(owner.getInt())>=bounds.size()/4))
+    return fn.emitError("owner axis outside projected domain");
   auto parsed = llvm::json::parse(publicABI.getValue());
   if (!parsed) {
     llvm::consumeError(parsed.takeError());
@@ -107,23 +109,36 @@ inline mlir::LogicalResult verifyDomain(mlir::func::FuncOp fn) {
     auto source = fn.getArgAttrOfType<IntegerAttr>(i, "kir.source");
     auto layout = fn.getArgAttrOfType<AffineMapAttr>(i, "kir.indexing");
     auto view = dyn_cast<MemRefType>(fn.getArgument(i).getType());
-    if (!source || !validSlot(source.getInt()) || !layout || !view ||
-        view.getRank() != bounds.size() / 4)
+    if (!source || !validSlot(source.getInt()))
       return fn.emitError("invalid projected binding");
     auto *pub = (*slots)[source.getInt()].getAsObject();
     auto *priv = (*args)[i].getAsObject();
     if (!priv)
       return fn.emitError("invalid projected slot descriptor");
+    if (!view) {
+      if (layout || pub->getString("direction") != "Scalar" || *priv != *pub)
+        return fn.emitError("scalar capture must preserve the public parameter");
+      continue;
+    }
+    bool owned=bool(fn.getArgAttr(i,"kir.owner_projection"));
+    if (!layout || (owned ? (!owner || view.getRank()!=1 || !priv->getArray("dims") ||
+                             priv->getArray("dims")->size()!=1)
+                         : view.getRank()!=bounds.size()/4))
+      return fn.emitError("projected view rank differs from the iteration domain");
     auto map = layout.getValue();
     if (pub->getString("dtype") != priv->getString("dtype") ||
         pub->getString("direction") != priv->getString("direction") ||
-        map.getNumDims() != view.getRank() || map.getNumSymbols() ||
+        map.getNumDims() != bounds.size()/4 || map.getNumSymbols() ||
         map.getNumResults() != pub->getArray("dims")->size())
       return fn.emitError("indexed view disagrees with its source");
     for (auto expr : map.getResults()) {
       SmallVector<int64_t> terms(map.getNumDims() + 1, 0);
       if (!coefficients(expr, terms))
         return fn.emitError("nonlinear indexed binding");
+      if(owned)
+        for(unsigned axis=0;axis<map.getNumDims();++axis)
+          if(int64_t(axis)!=owner.getInt() && terms[axis]!=0)
+            return fn.emitError("owner projection varies along a reduction axis");
     }
   }
 
@@ -152,6 +167,10 @@ inline llvm::json::Object publishDomain(mlir::func::FuncOp fn) {
                                              bounds[i + 2], bounds[i + 3]});
     for (unsigned i = 0; i < fn.getNumArguments(); ++i) {
       llvm::json::Array coords;
+      if (!mlir::isa<mlir::MemRefType>(fn.getArgument(i).getType())) {
+        views.emplace_back(llvm::json::Object{{"source",fn.getArgAttrOfType<mlir::IntegerAttr>(i,"kir.source").getInt()}});
+        continue;
+      }
       auto map = fn.getArgAttrOfType<mlir::AffineMapAttr>(i, "kir.indexing")
                      .getValue();
       for (auto expr : map.getResults()) {
@@ -162,10 +181,13 @@ inline llvm::json::Object publishDomain(mlir::func::FuncOp fn) {
           polynomial.emplace_back(v);
         coords.emplace_back(std::move(polynomial));
       }
-      views.emplace_back(llvm::json::Object{
+      llvm::json::Object binding{
           {"source",
            fn.getArgAttrOfType<mlir::IntegerAttr>(i, "kir.source").getInt()},
-          {"coordinates", std::move(coords)}});
+          {"coordinates", std::move(coords)}};
+      if(fn.getArgAttr(i,"kir.owner_projection"))
+        binding["axis"]=fn->getAttrOfType<mlir::IntegerAttr>("kir.owner_axis").getInt();
+      views.emplace_back(std::move(binding));
     }
     domain["extents"] = std::move(extents);
     domain["views"] = std::move(views);
