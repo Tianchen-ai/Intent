@@ -1,5 +1,6 @@
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/execution/cpu/ir/Dialect.h"
+#include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
 #include "intentdsl/levels/algorithm/kir/ir/Permutation.h"
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
 #include "intentdsl/levels/algorithm/kir/ir/RowSemantics.h"
@@ -15,6 +16,8 @@ LogicalResult verifyTask(ModuleOp m, const TargetProfile &profile,
   if (!llvm::hasSingleElement(funcs))
     return m.emitError("expected one host");
   auto fn = *funcs.begin();
+  if (matrixTask(fn))
+    return verifyMatrixTask(fn, profile, storage);
   if (fn.empty() || fn.front().getOperations().size() != 3)
     return fn.emitError("expected task, join, return");
   if(failed(intentdsl::verifyDomain(fn)))return failure();
@@ -109,6 +112,22 @@ struct Construct : PassWrapper<Construct, OperationPass<ModuleOp>> {
     auto *loop = &fn.front().front();
     OpBuilder b(loop);
     auto loc = loop->getLoc();
+    if (intentdsl::kir::matrixDomain(fn)) {
+      OperationState state(loc, "cpu.matrix_task");
+      state.addOperands(fn.getArguments());
+      state.addTypes(b.getIndexType());
+      state.addRegion();
+      auto *task = b.create(state);
+      auto &body = task->getRegion(0).emplaceBlock();
+      loop->moveBefore(&body, body.end());
+      b.setInsertionPointToEnd(&body);
+      b.create(OperationState(loc, "cpu.end"));
+      b.setInsertionPointAfter(task);
+      OperationState join(loc, "cpu.join");
+      join.addOperands(task->getResult(0));
+      b.create(join);
+      return;
+    }
     OperationState s(loc, "cpu.task");
     s.addOperands(fn.getArguments());
     s.addTypes(b.getIndexType());
@@ -142,8 +161,12 @@ struct Construct : PassWrapper<Construct, OperationPass<ModuleOp>> {
   }
 };
 void registerCost(Unit &);
+void matrixCost(Unit &);
+void matrixTasks(Unit &);
 void bind(Unit &u) {
   registerCost(u);
+  matrixTasks(u);
+  matrixCost(u);
   u.dialects = [](DialectRegistry &r) {
     r.insert<intentdsl::cpu::CpuDialect>();
   };
@@ -151,7 +174,8 @@ void bind(Unit &u) {
   DecisionFamily f;
   f.name = "storage";
   f.applies = [](Operation *op) {
-    return op->getName().getStringRef() == "cpu.task";
+    return op->getName().getStringRef() == "cpu.task" ||
+           op->getName().getStringRef() == "cpu.matrix_task";
   };
   f.read = [](Operation *op) { return op->getAttr("cpu.storage"); };
   f.write = [](Operation *op, Attribute a) {
@@ -188,6 +212,11 @@ void bind(Unit &u) {
             if (phase != "formed")
               return intentdsl::cpu::verifyTask(
                   m, p, phase == "tasked" ? "pending" : "private-values");
+            auto fn = *m.getOps<func::FuncOp>().begin();
+            if (intentdsl::kir::matrixDomain(fn)) {
+              if(failed(intentdsl::kir::verifyMatrix(fn,"cpu",true)))return failure();
+              return intentdsl::cpu::verifyMatrixPartition(fn,fn.front().front(),p);
+            }
             if (failed(intentdsl::verifyLogicalRows(m, "cpu", true)))
               return failure();
             auto &op = (*m.getOps<func::FuncOp>().begin()).front().front();

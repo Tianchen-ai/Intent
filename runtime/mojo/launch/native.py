@@ -13,6 +13,8 @@ class Artifact:
         if data["version"] != 2 or not data["rows"]:
             raise ValueError("invalid CPU row artifact")
         self.data, self.info, self.workers = data, info, workers
+        if data.get("returns_status"):
+            self.status_type = ct.c_int32
         self.winners = {}
         self.lock = threading.RLock()
         self.library = None

@@ -1,4 +1,6 @@
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
+#include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
+#include "../legalize/Matrix.h"
 #include "intentdsl/levels/execution/cpu/ir/Pack.h"
 #include "intentdsl/levels/execution/cpu/ir/IndexedEffects.h"
 #include "intentdsl/levels/algorithm/kir/ir/RowSemantics.h"
@@ -28,15 +30,39 @@ void dialect(DialectRegistry &r) {
   r.insert<intentdsl::wefthost::WeftHostDialect>();
 }
 namespace {
+bool nativeRecords(func::FuncOp f){
+  auto &domain=f.front().front().getRegion(0).front().front();auto &dot=intentdsl::cpu::calculation(domain);
+  if(dot.getName().stripDialect()!="q4k_dot")return false;
+  auto slot=cast<BlockArgument>(dot.getOperand(0)).getArgNumber();auto s=f.getArgAttrOfType<DenseI64ArrayAttr>(slot,"cpu.strides");
+  auto shape=f.getArgAttrOfType<DenseI64ArrayAttr>(slot,"cpu.shape");
+  return s[2]==1 && s[1]==144 && s[0]==144*shape[1];
+}
+int64_t registerRows(func::FuncOp fn,bool rvv){
+  auto &domain=fn.front().front().getRegion(0).front().front();auto &op=intentdsl::cpu::calculation(domain);
+  auto tile=domain.getAttrOfType<DenseI64ArrayAttr>("cpu.output_tile"),dims=domain.getAttrOfType<DenseI64ArrayAttr>("cpu.extents");
+  if(rvv || op.getName().stripDialect()=="q4k_dot" ||
+     (op.getName().stripDialect()=="contract" && op.getNumOperands()>2) || dims[0]%tile[0] || dims[1]%tile[1])return 1;
+  return std::min<int64_t>(tile[0],4);
+}
 struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(Lower)
   bool callable;
   intentdsl::CallFacts facts;
-  Lower(bool callable,const intentdsl::CallFacts &f) : callable(callable),facts(f) {}
+  bool grouped;
+  Lower(bool callable,const intentdsl::CallFacts &f,bool grouped) : callable(callable),facts(f),grouped(grouped) {}
   void runOnOperation() final {
     auto f = *getOperation().getOps<func::FuncOp>().begin();
     auto &task = f.front().front();
     OpBuilder b(&task);
+    if(task.getName().getStringRef()=="cpu.matrix_task"){
+      bool empty=task.getRegion(0).front().front().getAttrOfType<DenseI64ArrayAttr>("cpu.extents")[2]==0;
+      if(empty)task.setAttr("weft_host.empty_reduction",b.getUnitAttr());
+      if(!empty && grouped && nativeRecords(f))task.setAttr("weft_host.record_fields",b.getUnitAttr());
+      task.setAttr("weft_host.register_rows",b.getI64IntegerAttr(registerRows(f,grouped)));
+      task.setAttr("weft_host.schedule",b.getStringAttr("single-instance-output-panel"));
+      if(callable)task.setAttr("task_symbol",b.getStringAttr("matrix_panel"));
+      return;
+    }
     if (callable) {
       SmallVector<int64_t> ranks;
       for (Type t : task.getOperandTypes()) {
@@ -128,8 +154,8 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
   }
 };
 } // namespace
-void lower(OpPassManager &pm, bool callable,const intentdsl::CallFacts &facts) {
-  pm.addPass(std::make_unique<Lower>(callable,facts));
+void lower(OpPassManager &pm, bool callable,const intentdsl::CallFacts &facts,bool grouped) {
+  pm.addPass(std::make_unique<Lower>(callable,facts,grouped));
 }
 LogicalResult verifyHost(ModuleOp m, const compilerinfra::TargetProfile &p,
                          bool callable) {
@@ -137,6 +163,19 @@ LogicalResult verifyHost(ModuleOp m, const compilerinfra::TargetProfile &p,
                                         "weft_host.dispatch_rows", false)))
     return failure();
   auto &task = (*m.getOps<func::FuncOp>().begin()).front().front();
+  if(task.getName().getStringRef()=="cpu.matrix_task"){
+    bool empty=task.getRegion(0).front().front().getAttrOfType<DenseI64ArrayAttr>("cpu.extents")[2]==0;
+    if(empty!=task.hasAttr("weft_host.empty_reduction"))return task.emitError("zero reduction differs from bound K extent");
+    if((!empty && p.services.get<RecordFields>()->grouped && nativeRecords(*m.getOps<func::FuncOp>().begin()))!=task.hasAttr("weft_host.record_fields"))
+      return task.emitError("record contraction requires packed group and row strides");
+    auto width=task.getAttrOfType<IntegerAttr>("weft_host.register_rows");
+    if(!width || width.getInt()!=registerRows(*m.getOps<func::FuncOp>().begin(),p.services.get<RecordFields>()->grouped))
+      return task.emitError("native accumulator rows exceed the task extent");
+    if(task.getAttrOfType<StringAttr>("weft_host.schedule")!="single-instance-output-panel" ||
+       (callable && task.getAttrOfType<StringAttr>("task_symbol")!="matrix_panel"))
+      return task.emitError("incomplete native matrix task binding");
+    return success();
+  }
   bool whole = cast<DictionaryAttr>(task.getAttrOfType<ArrayAttr>("rows")[0])
                    .getAs<IntegerAttr>("columns")
                    .getInt() == 0;

@@ -99,6 +99,9 @@ class HostVariants:
         from time import perf_counter_ns
 
         self.compile()
+        if self.selected is None and len(self.entries)==1:
+            self.winner,self.selected=0,self.entries[0]
+            self.timings={0: []}
         if self.selected is None:
             shape = self.bound.shape
             key = (

@@ -70,22 +70,27 @@ class Artifact:
         native = triton.compile(str(source), target=self.info)
         abi = native.metadata.single_instance_abi
         if (
-            abi["symbol"] != "row_task_instance"
+            abi["symbol"] != self.data.get("native_symbol","row_task_instance")
             or abi["shape_parameters"] != self.data["shape_parameters"]
         ):
             raise ValueError("compiled task shape or entry ABI mismatch")
         actual = abi["arguments"]
-        if len(actual) != len(self.data["abi"]):
+        task_slots = self.data.get("task_slots", self.data["abi"])
+        if len(actual) != len(task_slots):
             raise ValueError("task parameter count differs")
         ctypes = {
             "f16": "_Float16",
             "f32": "float",
+            "i8": "int8_t",
+            "u8": "uint8_t",
+            "i16": "int16_t",
+            "f8e4m3fn": "uint8_t",
             "bf16": "uint16_t",
             "i32": "int32_t",
             "i64": "int64_t",
             "u64": "uint64_t",
         }
-        for i, (arg, item) in enumerate(zip(actual, self.data["abi"])):
+        for i, (arg, item) in enumerate(zip(actual, task_slots)):
             rank = self.data["task_ranks"][i] if "task_ranks" in self.data else min(2,len(item["dims"]))
             wanted = (
                 (
@@ -98,6 +103,7 @@ class Artifact:
             )
             if (
                 arg["name"] != "a" + str(i)
+                or ("encoding" in item and arg["encoding"] != item["encoding"])
                 or arg["c_type"].strip() != wanted
                 or len(arg.get("shape", [])) != rank
                 or (rank and bool(arg["strided"]) != (i not in self.data.get("contiguous_slots",())))

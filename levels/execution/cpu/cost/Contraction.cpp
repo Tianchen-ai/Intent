@@ -1,0 +1,98 @@
+#include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
+namespace CI_UNIT_NAMESPACE {
+using namespace compilerinfra;
+void matrixCost(Unit &u) {
+  u.costModels.push_back(
+      {{"matrix-work", u.qualify("matrix-partition"), "1",
+        [](mlir::Operation *op, const StructuralCandidate &c,
+           CostContext &ctx) -> llvm::Expected<CostEstimate> {
+          auto f = ctx.target.services.get<intentdsl::CallFacts>();
+          auto g = intentdsl::kir::contractionShape(
+              intentdsl::cpu::calculation(*op), op->getOperand(0), *f);
+          if (!g)
+            return g.takeError();
+          auto t = mlir::cast<mlir::DenseI64ArrayAttr>(c.value);
+          double jobs = std::ceil(double(g->m) / t[0]) *
+                        std::ceil(double(g->n) / t[1]) * g->batches;
+          auto workers =
+              ctx.target.services.get<intentdsl::cpu::RowMachine>()->workers;
+          double waves = std::ceil(jobs / workers),
+                 reads = waves * (t[0] + t[1]) * g->k * 2;
+          double ops = waves * t[0] * std::ceil(double(t[1]) / t[3]) * g->k;
+          if (t[4] == 2)
+            ops /= 4;
+          auto &dot = intentdsl::cpu::calculation(*op);
+          double packBytes = 0, translationBytes = 0, scatteredBytes = 0;
+          if (dot.getName().stripDialect() == "contract") {
+            auto b = dot.getOperand(1);
+            auto slot = mlir::cast<mlir::BlockArgument>(b).getArgNumber();
+            int k = dot.getAttrOfType<mlir::IntegerAttr>("rhs_k").getInt();
+            int batch = dot.getAttrOfType<mlir::IntegerAttr>("rhs_batch").getInt();
+            int column = 0;
+            while (column == k || column == batch)
+              ++column;
+            auto strides = f->arguments[slot].getAsObject()->getArray("strides");
+            auto step =
+                (*f->arguments[slot].getAsObject()->getArray("strides"))[k]
+                    .getAsInteger()
+                    .value();
+            auto bytes = mlir::cast<mlir::MemRefType>(b.getType())
+                             .getElementTypeBitWidth() /
+                         8;
+            if (t[4])
+              packBytes =
+                  2. * g->n * g->k *
+                  (dot.getAttrOfType<mlir::IntegerAttr>("rhs_batch").getInt() <
+                           0
+                       ? 1
+                       : g->batches) *
+                  bytes;
+            else if (step * bytes >= 4096)
+              translationBytes = jobs * g->k * 64.;
+            if (!t[4]) {
+              double columnStride = std::abs((*strides)[column].getAsInteger().value());
+              // A vector of columns can fetch a distinct cache line per lane.
+              // Shared packing pays this transpose once for all row owners.
+              double extra = std::max(0., std::min(64., columnStride * bytes) - bytes);
+              double rowBlocks = std::ceil(double(g->m) / t[0]);
+              scatteredBytes = rowBlocks * g->k * g->n * extra *
+                               (g->grouped ? 1. : double(g->batches));
+            }
+          }
+          CostEstimate e;
+          e.scope = "full_call";
+          e.bottleneck = "output block parallelism";
+          e.terms["task_waves"] = {waves, "count"};
+          e.terms["operand_bytes_per_worker"] = {reads, "B"};
+          e.terms["vector_products"] = {ops, "count"};
+          e.terms["shared_pack_bytes"] = {packBytes, "B"};
+          e.terms["page_walk_bytes"] = {translationBytes, "B"};
+          e.terms["strided_column_bytes"] = {scatteredBytes, "B"};
+          auto bw = intentdsl::quantity(ctx, "read_1", "B/ns"),
+               rate = intentdsl::quantity(ctx, "vector", "FLOP/ns");
+          if (bw)
+            e.timeNs = (reads * workers + packBytes + translationBytes + scatteredBytes) / *bw +
+                       (rate ? ops * t[3] / *rate : 0);
+          if (dot.getName().stripDialect() == "q4k_dot" && bw) {
+            double bytes = waves * t[0] * (g->k / 256) * 144;
+            auto dispatch = intentdsl::quantity(ctx, "launch", "ns");
+            e.terms["record_bytes_per_worker"] = {bytes, "B"};
+            e.timeNs =
+                bytes * workers / *bw + (dispatch ? waves * *dispatch : 0.);
+          }
+          const auto &name =
+              ctx.target.services.get<intentdsl::cpu::MatrixMachine>()
+                  ->estimate;
+          if (!name.empty()) {
+            auto local = ctx.local(name);
+            if (!local)
+              return local.takeError();
+            e.terms.insert(local->terms.begin(), local->terms.end());
+            if (local->timeNs && e.timeNs)
+              *e.timeNs += waves * *local->timeNs;
+          }
+          return e;
+        }},
+       COMPILERINFRA_SOURCE});
+}
+} // namespace CI_UNIT_NAMESPACE

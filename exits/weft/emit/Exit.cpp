@@ -1,13 +1,16 @@
 #include "intentdsl/levels/algorithm/kir/ir/Performance.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
+#include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
+#include "../legalize/Matrix.h"
 using namespace compilerinfra;
 using namespace mlir;
 namespace CI_UNIT_NAMESPACE {
 llvm::Expected<std::string> taskSource(Operation *, const llvm::json::Array &);
 std::string hostSource(Operation *, const llvm::json::Array &);
 void dialect(DialectRegistry &);
-void lower(OpPassManager &, bool,const intentdsl::CallFacts &);
+llvm::Error emitMatrix(func::FuncOp,llvm::raw_pwrite_stream &);
+void lower(OpPassManager &, bool,const intentdsl::CallFacts &,bool);
 LogicalResult verifyHost(ModuleOp, const TargetProfile &, bool);
 namespace {
 llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
@@ -25,8 +28,15 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
   caps->vectorBits = *bits;
   caps->structuredRows = true;
   caps->workers = *workers;
+  int64_t v=*bits/32;auto matrix=std::make_shared<intentdsl::cpu::MatrixMachine>();
+  matrix->choices={{2,v,32,v},{4,2*v,64,v},{8,4*v,128,v},{8,3*v,64,v}};
+  matrix->estimate="exits/weft::native-panels";
+  if(*bits==512 && options.getBoolean("grouped_i8").value_or(false))matrix->integerPacking="reduction-packets";
+  matrix->records={{8,1,256,v},{16,1,256,v},{64,1,256,v}};
+  if(auto e=p.services.provide<intentdsl::cpu::MatrixMachine>(matrix))return e;
   caps->wideningPanel = *bits / 32;
   caps->boundWidening = options.getString("arch") == "riscv64";
+  if(auto e=p.services.provide<RecordFields>(std::make_shared<RecordFields>(RecordFields{caps->boundWidening})))return e;
   // Locally reported mvendorid/marchid for the V100 core.
   bool v100 = options.getString("core") == "0x710/0x8000000058000002";
   int64_t columns = *bits == 128 ? 32 : *bits == 1024 ? 128 : 64;
@@ -39,6 +49,7 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
 }
 llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
   auto fn = *m.getOps<func::FuncOp>().begin();
+  if(intentdsl::cpu::matrixTask(fn))return emitMatrix(fn,out);
   auto abi = llvm::json::parse(fn->getAttrOfType<StringAttr>("kir.abi"));
   if (!abi)
     return abi.takeError();
@@ -80,7 +91,9 @@ llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
   return llvm::Error::success();
 }
 } // namespace
+void nativePanelCost(Unit &);
 void bind(Unit &u) {
+  nativePanelCost(u);
   u.dialects = dialect;
   u.realizers.push_back(
       {{"task-values", "levels/execution/cpu::storage",
@@ -97,7 +110,7 @@ void bind(Unit &u) {
   for (StringRef phase : {"legal", "callable"})
     u.boundaries.push_back({{phase.str(),
                              [phase](OpPassManager &pm, const TargetProfile &p) {
-                               lower(pm, phase == "callable",*p.services.get<intentdsl::CallFacts>());
+                               lower(pm, phase == "callable",*p.services.get<intentdsl::CallFacts>(),p.services.get<RecordFields>()->grouped);
                                return llvm::Error::success();
                              },
                              [phase](ModuleOp m, const TargetProfile &p) {

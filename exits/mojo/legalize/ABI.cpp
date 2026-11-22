@@ -26,6 +26,15 @@ LogicalResult verifyLoops(ModuleOp m, const TargetProfile &p, bool callable) {
                                         false)))
     return failure();
   auto fn = *m.getOps<func::FuncOp>().begin();
+  if(fn.front().front().getName().getStringRef()=="cpu.matrix_task"){
+    auto &task=fn.front().front();
+    auto lanes=task.getAttrOfType<IntegerAttr>("mojo_row.column_lanes");
+    if(!lanes || lanes.getInt()!=task.getRegion(0).front().front().getAttrOfType<DenseI64ArrayAttr>("cpu.output_tile")[3] ||
+       task.getAttrOfType<StringAttr>("mojo_row.schedule")!="static-output-blocks" ||
+       (callable && fn->getAttrOfType<StringAttr>("mojo_row.entry")!="intent_entry"))
+      return task.emitError("invalid Mojo matrix vector or host mapping");
+    return success();
+  }
   if(failed(intentdsl::specializeProjectedLayout(fn,*p.services.get<intentdsl::CallFacts>(),"mojo_row",false)))return failure();
   auto &task = fn.front().front();
   if (task.getAttrOfType<StringAttr>("mojo_row.schedule") !=

@@ -53,6 +53,7 @@ class Target:
         self.info, core, bits = discover(scope)
         return dict(
             vector_bits=bits, workers=self.workers, core=core, arch=self.info.arch,
+            grouped_i8=self.info.arch=="x86_64" and "+avx512vnni" in self.info.march,
             calibration=calibration(scope,self.workers,bits)
         )
 

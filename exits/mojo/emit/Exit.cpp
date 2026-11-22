@@ -1,10 +1,12 @@
 #include "intentdsl/levels/algorithm/kir/ir/Performance.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
+#include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
 using namespace compilerinfra;
 using namespace mlir;
 namespace CI_UNIT_NAMESPACE {
 void dialect(DialectRegistry &);
+llvm::Error emitMatrix(func::FuncOp,llvm::raw_pwrite_stream &);
 std::string hostSource(func::FuncOp);
 void publishABI(OpPassManager &);
 LogicalResult verifyLoops(ModuleOp, const TargetProfile &, bool callable);
@@ -25,6 +27,13 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
   auto caps = std::make_shared<intentdsl::cpu::RowMachine>();
   caps->vectorBits = *bits;
   caps->workers = *workers;
+  int64_t v=*bits/32;
+  auto matrix=std::make_shared<intentdsl::cpu::MatrixMachine>();
+  if(*bits==512 && options.getBoolean("grouped_i8").value_or(false))matrix->integerPacking="signed-dot4-panels";
+  matrix->choices={{2,v,32,v},{4,2*v,64,v},{8,4*v,64,v},{8,3*v,128,v},{12,2*v,128,v}};
+  matrix->estimate="exits/mojo::register-block";
+  matrix->records={{8,1,256,v},{16,1,256,v},{64,1,256,v}};
+  if(auto e=p.services.provide<intentdsl::cpu::MatrixMachine>(matrix))return e;
   caps->rows = {{1, 64}, {4, *bits == 512 ? 128 : 64}, {32, 256}, {64, 128}};
   if (auto e = p.services.provide<intentdsl::cpu::RowMachine>(caps))
     return e;
@@ -32,6 +41,7 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
 }
 llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
   auto fn = *m.getOps<func::FuncOp>().begin();
+  if(intentdsl::cpu::matrixTask(fn))return emitMatrix(fn,out);
   auto abi = llvm::json::parse(fn->getAttrOfType<StringAttr>("kir.abi"));
   if (!abi)
     return abi.takeError();
@@ -55,7 +65,9 @@ llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
   return llvm::Error::success();
 }
 } // namespace
+void registerBlockCost(Unit &);
 void bind(Unit &u) {
+  registerBlockCost(u);
   u.dialects = dialect;
   for (StringRef phase : {"legal", "realized", "callable"})
     u.boundaries.push_back(

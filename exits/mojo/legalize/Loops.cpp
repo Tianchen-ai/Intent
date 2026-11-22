@@ -188,6 +188,14 @@ struct Realize : PassWrapper<Realize, OperationPass<ModuleOp>> {
   intentdsl::CallFacts facts;
   Realize(int64_t lanes,const intentdsl::CallFacts &f) : lanes(lanes),facts(f) {}
   void runOnOperation() final {
+    auto &first=(*getOperation().getOps<func::FuncOp>().begin()).front().front();
+    if(first.getName().getStringRef()=="cpu.matrix_task"){
+      auto &region=first.getRegion(0).front().front();
+      first.setAttr("mojo_row.column_lanes",IntegerAttr::get(IntegerType::get(&getContext(),64),
+                    region.getAttrOfType<DenseI64ArrayAttr>("cpu.output_tile")[3]));
+      first.setAttr("mojo_row.schedule",StringAttr::get(&getContext(),"static-output-blocks"));
+      return;
+    }
     for(auto fn:getOperation().getOps<func::FuncOp>())fn.walk([&](Operation *op){
       auto n=op->getName().stripDialect();if(n!="count_keys" && n!="column_sum")return;
       auto extent=intentdsl::kir::keyExtent(op,facts);

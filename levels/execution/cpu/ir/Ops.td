@@ -132,3 +132,8 @@ def Cpu_Dialect_Ranges : Op<Cpu_Dialect,"fill_ranges"> {let arguments=(ins AnyMe
 def CpuTally : Op<Cpu_Dialect,"tally_keys"> {let arguments=(ins AnyMemRef:$keys);let results=(outs AnyMemRef:$private_counts);}
 def CpuReserve : Op<Cpu_Dialect,"reserve_tickets"> {let arguments=(ins AnyMemRef:$counters,AnyMemRef:$counts,StrAttr:$ordering);let results=(outs AnyMemRef:$private_bases);}
 def CpuDistribute : Op<Cpu_Dialect,"distribute_tickets"> {let arguments=(ins AnyMemRef:$keys,AnyMemRef:$offsets,AnyMemRef:$bases,AnyMemRef:$out);}
+include "intentdsl/levels/algorithm/kir/ir/Matrix.td"
+defm Matrix : MatrixExpressions<Cpu_Dialect>;
+def MatrixTasks : Inst<"matrix_task",[SingleBlock]> {
+  let arguments=(ins Variadic<AnyMemRef>:$captures);let results=(outs Index:$completion);let regions=(region AnyRegion:$body);
+}

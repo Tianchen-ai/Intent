@@ -51,7 +51,7 @@ def discover(scope):
         gomp,
         os.stat(cc).st_mtime_ns,
         os.stat(gomp).st_mtime_ns,
-    ), bits
+    ), bits, "+avx512vnni" in isa and all("avx512_vnni" in cpu_flags[c] for c in scope)
 
 
 class Target:
@@ -66,8 +66,9 @@ class Target:
 
     def options(self, key):
         scope, self.workers = key
-        self.info, bits = discover(scope)
-        return dict(vector_bits=bits, workers=self.workers, calibration=calibration(scope,self.workers,bits))
+        self.info, bits, dot4 = discover(scope)
+        return dict(vector_bits=bits, workers=self.workers, grouped_i8=dot4,
+                    calibration=calibration(scope,self.workers,bits))
 
     def materialize(self, data):
         return Artifact(data, self.info, self.workers)

@@ -26,6 +26,10 @@
     },
     "cpu": {
       "decisions": {
+        "levels/execution/cpu::matrix-partition": {
+          "strategies": ["levels/execution/cpu::contract-blocks"],
+          "realizer": "levels/execution/cpu::own-output-blocks"
+        },
         "levels/execution/cpu::partition": {
           "strategies": [
             "levels/execution/cpu::tuple-reduction",
