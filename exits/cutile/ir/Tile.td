@@ -86,7 +86,7 @@ def TileSource_SumColumns : Op<TileSource,"sum_columns"> {
   let arguments=(ins AnyMemRef:$source,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active,I64Attr:$extent);let results=(outs I32Tensor:$counts);
 }
 def TileSource_PrivateBinStore : Op<TileSource,"private_bin_store"> {
-  let arguments=(ins AnyMemRef:$keys,AnyMemRef:$dest,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active,I64Attr:$extent,I64Attr:$span);
+  let arguments=(ins AnyMemRef:$keys,AnyMemRef:$dest,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active,I64Attr:$extent,I64Attr:$span,I64Attr:$source_step);
 }
 def TileSource_Different : Op<TileSource,"ne"> {let arguments=(ins AnyType:$lhs,AnyType:$rhs);let results=(outs AnyTensor:$mask);}
 def TileSource_ColumnsTile : Op<TileSource,"member_tile"> {let arguments=(ins AnyTensor:$columns,I1Tensor:$active);let results=(outs I32Tensor:$members);}
