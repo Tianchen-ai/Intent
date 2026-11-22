@@ -6,6 +6,18 @@ def SupplyDialect : Dialect {
   let cppNamespace = "::intentdsl::dsa";
 }
 
+def MatrixSetup : Op<SupplyDialect,"panel_supply",[SingleBlock]> {
+ let arguments=(ins I64Attr:$participants,I64Attr:$scratch_bytes);
+ let regions=(region AnyRegion:$transfers);
+}
+def MatrixStage : Op<SupplyDialect,"stage_operand"> {
+ let arguments=(ins AnyMemRef:$source, I64Attr:$slot, StrAttr:$access);
+ let results=(outs Index:$completion);
+}
+def MatrixReady : Op<SupplyDialect,"panel_ready",[Terminator]> {
+ let arguments=(ins Variadic<Index>:$completed);
+}
+
 class Inst<string mnemonic, dag inspec, dag outspec, list<Trait> traits = []>
     : Op<SupplyDialect, mnemonic, traits> {
   let arguments = inspec;

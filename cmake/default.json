@@ -60,6 +60,10 @@
     },
     "dsa": {
       "decisions": {
+        "levels/storage/dsa::panel-supply": {
+          "strategies": ["levels/storage/dsa::task-panels"],
+          "realizer": "levels/storage/dsa::place-panels"
+        },
         "levels/storage/dsa::supply": {
           "strategies": [
             "levels/storage/dsa::double-buffer",

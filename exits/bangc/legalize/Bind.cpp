@@ -2,6 +2,7 @@
 #include "intentdsl/levels/storage/dsa/ir/Supply.h"
 #include "mlir/Pass/Pass.h"
 #include "Slab.h"
+#include "Matrix.h"
 using namespace mlir;
 namespace CI_UNIT_NAMESPACE {
 using namespace compilerinfra;
@@ -214,6 +215,10 @@ struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
   Legalize(unsigned step,const intentdsl::CallFacts &f,const intentdsl::dsa::LocalSupply &s) : phase(step),facts(f),supply(s) {}
   void runOnOperation() final {
     auto f = *getOperation().getOps<func::FuncOp>().begin();
+    if(intentdsl::kir::matrixDomain(f)){
+      if(failed(bindMatrix(f,phase,true)))signalPassFailure();
+      return;
+    }
     Builder b(&getContext());
     if (phase == 0) {
       if (failed(offsets(f, true))) {
@@ -307,6 +312,7 @@ LogicalResult verify(ModuleOp m, const TargetProfile &p, unsigned stage) {
   if (failed(intentdsl::dsa::verifyProgram(m, p, true)))
     return failure();
   auto fn = *m.getOps<func::FuncOp>().begin();
+  if(intentdsl::kir::matrixDomain(fn))return bindMatrix(fn,stage,false);
   auto layout = fn->getAttrOfType<DictionaryAttr>("dsa.layout");
   auto depth = layout.getAs<IntegerAttr>("depth").getInt();
   if (fn->getAttrOfType<StringAttr>("bangc.space") != "private.nram" ||
@@ -362,8 +368,10 @@ LogicalResult verify(ModuleOp m, const TargetProfile &p, unsigned stage) {
 }
 } // namespace
 void dmaCost(Unit &);
+void panelCost(Unit &);
 void bind(Unit &u) {
   dmaCost(u);
+  panelCost(u);
   unsigned stage = 0;
   for (StringRef name : {"bound", "legal", "callable"}) {
     u.boundaries.push_back({{name.str(),

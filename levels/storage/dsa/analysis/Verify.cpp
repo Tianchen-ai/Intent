@@ -1,3 +1,4 @@
+#include "intentdsl/levels/storage/dsa/ir/Matrix.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "../decisions/Plan.h"
 #include "intentdsl/levels/execution/block/ir/Access.h"
@@ -136,6 +137,7 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
   if (!llvm::hasSingleElement(fs))
     return m.emitError("requires one tile function");
   auto fn = *fs.begin();
+  if(kir::matrixDomain(fn))return verifyMatrix(fn,p,supplied);
   if(failed(intentdsl::verifyDomain(fn)))return failure();
   auto d = fn->getAttrOfType<DictionaryAttr>(supplied ? "dsa.layout"
                                                       : "dsa.pending");

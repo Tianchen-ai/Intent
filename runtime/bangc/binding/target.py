@@ -19,6 +19,7 @@ def facts(index):
         ("clusters", 0x205),
         ("cores", 0x206),
         ("nram_bytes", 0x302),
+        ("wram_bytes", 0x303),
     ):
         value = C.c_int()
         status = get(C.byref(value), field, index)

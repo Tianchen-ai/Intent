@@ -1,8 +1,15 @@
 #include "intentdsl/levels/algorithm/kir/ir/Performance.h"
 #include "intentdsl/levels/storage/dsa/ir/Supply.h"
+#include "intentdsl/levels/storage/dsa/ir/Matrix.h"
+#include "intentdsl/levels/execution/block/ir/Contraction.h"
 #include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
 
 namespace CI_UNIT_NAMESPACE {
+static int64_t matrixPrivateBytes(int64_t rows,int64_t columns,int64_t depth) {
+  // Upper bound shared by the supported convolution, record and scaled-dot
+  // microkernels, including conversion and record scratch.
+  return 256+4*(rows*depth+2*depth*columns+2*rows*columns)+2*292;
+}
 llvm::Expected<compilerinfra::TargetProfile>
 capabilities(const llvm::json::Object &opts) {
   compilerinfra::TargetProfile profile;
@@ -16,6 +23,21 @@ capabilities(const llvm::json::Object &opts) {
     return llvm::createStringError(
         "BANG C requires the MLU370 CNRT ISA, local capacity and core counts");
   auto caps = std::make_shared<intentdsl::RowCapacity>();
+  auto matrices=std::make_shared<intentdsl::block::MatrixTarget>();
+  matrices->tiles={{8,64,64,"{}"},{16,64,128,"{}"},{32,64,128,"{}"},
+                   {16,64,256,"{}","contract"},{32,64,256,"{}","contract"},
+                   {64,64,256,"{}","contract"},{128,64,256,"{}","contract"}};
+  auto wram=opts.getInteger("wram_bytes");
+  // Only admit implementations that fit both physical owners. A row-only
+  // offline profile can still compile its original row programs.
+  llvm::erase_if(matrices->tiles,[&](auto &t){
+    return !wram || 2*t.k*t.n>*wram ||
+      matrixPrivateBytes(t.m,t.n,t.k)>std::min<int64_t>(*nram/3*2,512*1024);
+  });
+  matrices->estimate="exits/bangc::matrix-transfer";
+  if(auto e=profile.services.provide<intentdsl::dsa::MatrixStorage>(
+      std::make_shared<intentdsl::dsa::MatrixStorage>(intentdsl::dsa::MatrixStorage{matrixPrivateBytes})))return e;
+  if(auto e=profile.services.provide<intentdsl::block::MatrixTarget>(matrices))return e;
   if(auto error=caps->bind(opts))return error;
   caps->streamingWidths = {128, 512, 4096};
   for (unsigned w = 1; w <= 4096; w *= 2)

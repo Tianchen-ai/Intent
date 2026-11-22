@@ -294,8 +294,12 @@ using namespace compilerinfra;
 void dialect(DialectRegistry &);
 void supply(Unit &);
 void supplyCost(Unit &);
+void matrixSupply(Unit &);
+void matrixSupplyCost(Unit &);
 void bind(Unit &u) {
   supplyCost(u);
+  matrixSupply(u);
+  matrixSupplyCost(u);
   u.dialects = dialect;
   supply(u);
   for (bool ready : {false, true})

@@ -1,4 +1,5 @@
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
+#include "intentdsl/levels/algorithm/kir/ir/Matrix.h"
 #include "intentdsl/levels/execution/block/ir/Grid.h"
 #include "intentdsl/levels/algorithm/kir/ir/Literal.h"
 #include "compilerinfra/Assembly.h"
@@ -683,8 +684,10 @@ public:
   }
 };
 } // namespace
+llvm::Error emitMatrix(func::FuncOp,llvm::raw_pwrite_stream &);
 llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
   auto fn = *m.getOps<func::FuncOp>().begin();
+  if(intentdsl::kir::matrixDomain(fn))return emitMatrix(fn,out);
   auto layout = fn->getAttrOfType<DictionaryAttr>("dsa.layout");
   std::string program;
   llvm::raw_string_ostream text(program);

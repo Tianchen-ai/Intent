@@ -1,0 +1,93 @@
+#pragma once
+#include "intentdsl/levels/storage/dsa/ir/Matrix.h"
+namespace CI_UNIT_NAMESPACE {
+inline mlir::LogicalResult bindMatrix(mlir::func::FuncOp fn, unsigned phase,
+                                      bool write) {
+  using namespace mlir;
+  intentdsl::block::MatrixAccess p(fn);
+  auto &setup = p.fold.getRegion(0).front().front();
+  Builder b(fn.getContext());
+  auto field = [&](Operation &op, StringRef key, Attribute a) {
+    if (write)
+      op.setAttr(key, a);
+    return op.getAttr(key) == a;
+  };
+  if (!field(setup, "bangc.space", b.getStringAttr("private.nram")) ||
+      !field(setup, "bangc.worker", b.getStringAttr("task-stride")))
+    return setup.emitError("matrix task or local storage mismatch");
+  if (phase >= 1) {
+    auto a = p.dot.getOperand(0);
+    auto type = cast<MemRefType>(a.getType()).getElementType();
+    auto name = p.dot.getName().stripDialect();
+    StringRef primitive = name == "q4k_dot"               ? "q4k-q8k"
+                          : name == "scaled_contract"     ? "scaled-f32"
+                          : type.isF16() || type.isBF16() ? "wram-conv"
+                          : type.isInteger(8)             ? "exact-i8-conv"
+                                                          : "f32-outer";
+    if (!field(p.dot, "bangc.matrix", b.getStringAttr(primitive)))
+      return p.dot.emitError("incorrect matrix microkernel");
+    if (primitive == "exact-i8-conv" && p.tile[2] > 1024)
+      return p.dot.emitError(
+          "signed byte partial dot exceeds exact binary32 integer range");
+    for (auto &op : setup.getRegion(0).front().without_terminator()) {
+      auto v = op.getOperand(0);
+      auto role = op.getAttrOfType<StringAttr>("access").getValue();
+      StringRef mode = "record";
+      if (role == "left-panel" || role == "right-panel") {
+        bool lhs = role == "left-panel";
+        auto k = p.axis(lhs ? "lhs_k" : "rhs_k"),
+             batch = p.axis(lhs ? "lhs_batch" : "rhs_batch"),
+             f = p.freeAxis(v, k, batch);
+        auto inner = lhs ? k : f;
+        if (lhs && p.routed() && p.stride(v, k) == 1)
+          mode = "routed-row-dma";
+        else if (!lhs && p.stride(v, k) == 1 && primitive != "f32-outer")
+          mode = "filter-major-dma";
+        else
+          mode = p.stride(v, inner) == 1 ? "pitched-dma" : "indexed-pack";
+      } else if (role.starts_with("left-") || role.starts_with("right-"))
+        mode = "group-scale";
+      if (!field(op, "bangc.transfer", b.getStringAttr(mode)))
+        return op.emitError("illegal panel transfer projection");
+    }
+    auto dst = p.domain.getOperand(0);
+    bool contiguous = p.stride(dst, p.rank(dst) - 1) == 1 && !p.routed();
+    if (p.rank(dst) == 1 &&
+        llvm::any_of(p.domain.getRegion(0).front(), [](Operation &op) {
+          return op.getName().stripDialect() == "add_columns";
+        }))
+      contiguous = false;
+    // The transfer conversion fuses a single final narrowing only. A later
+    // bias consumes the rounded value and must retain its scalar SSA type.
+    for (auto &step : p.domain.getRegion(0).front())
+      if (step.getName().stripDialect() == "convert_matrix") {
+        auto type = mlir::cast<mlir::ShapedType>(step.getOperand(0).getType())
+                        .getElementType();
+        auto result = mlir::cast<mlir::ShapedType>(step.getResult(0).getType())
+                          .getElementType();
+        contiguous &=
+            step.getNextNode() &&
+            step.getNextNode()->getName().stripDialect() == "publish_matrix" &&
+            type.isF32() && (result.isF16() || result.isBF16());
+      }
+    auto *convert = p.fold.getNextNode();
+    auto *publish = convert ? convert->getNextNode() : nullptr;
+    bool routedNarrow =
+        p.routed() && p.stride(dst, p.rank(dst) - 1) == 1 && convert &&
+        convert->getName().stripDialect() == "convert_matrix" &&
+        convert->getOperand(0) == p.fold.getResult(0) && publish &&
+        publish->getName().stripDialect() == "publish_matrix" &&
+        mlir::cast<mlir::MemRefType>(dst.getType()).getElementType().isBF16();
+    auto writeback = contiguous     ? "pitched-dma"
+                     : routedNarrow ? "routed-row-dma"
+                                    : "indexed-store";
+    if (!field(setup, "bangc.writeback", b.getStringAttr(writeback)))
+      return setup.emitError(
+          "output projection disagrees with native transfer");
+  }
+  if (phase >= 2 &&
+      !field(setup, "bangc.entry", b.getStringAttr("intent_enqueue")))
+    return setup.emitError("missing matrix queue entry");
+  return success();
+}
+} // namespace CI_UNIT_NAMESPACE
