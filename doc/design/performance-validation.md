@@ -82,3 +82,28 @@ GPU 在 H100 和 5090D 的两个出口分别测 FP16 转置 353×701、1024×204
 | x86 | weft | fused_add_rms_norm | row-reduction | row-reduction | b3e02d516b145045 |
 | x86 | weft | batch_norm_training | tuple-reduction | tuple-reduction | 1729648656e61753 |
 | x86 | weft | layer_norm | row-reduction | row-reduction | c85713d5da484c05 |
+
+## 第 2 组首次留出 · GroupNorm 反向
+
+两个成员分别求输入梯度和仿射参数梯度，按现有 `program/group_norm_backward` 的 B=32、C=256、S=1024、32 组和原容差验证。完整 program 另外计时。以下是在任何该程序的 Bench 热调用采样前保存的顺序与选择。编译记录和产物仍在同一 Bench 首次留出目录。
+
+| 设备 | 出口 | 成员 | 首次排序 | 默认 | explain 摘要 |
+|---|---|---|---|---|---|
+| 5090d | cutile | group_affine_gradient | stream-1 / stream-2 | stream-1 | 21b9f456670c0c27 |
+| 5090d | cutile | group_input_gradient | resident-1 / resident-2 / stream-1 / stream-2 | resident-1 | 04c27ef3367f151a |
+| 5090d | triton | group_affine_gradient | stream-1 / stream-2 | stream-1 | 8ceb2c7402476929 |
+| 5090d | triton | group_input_gradient | resident-1 / resident-2 / stream-1 / stream-2 | resident-1 | 41067f160302d22e |
+| h100 | cutile | group_affine_gradient | stream-1 / stream-2 | stream-1 | 3dcfb14f0651d3d9 |
+| h100 | cutile | group_input_gradient | resident-1 / resident-2 / stream-1 / stream-2 | resident-1 | 2a05af25f2dc4c38 |
+| h100 | triton | group_affine_gradient | stream-1 / stream-2 | stream-1 | b413576b27cbb295 |
+| h100 | triton | group_input_gradient | resident-1 / resident-2 / stream-1 / stream-2 | resident-1 | 66cf624f0863d15d |
+| mlu-native | bangc | group_affine_gradient | double-buffer-16 / direct-16 / double-buffer-8 / direct-8 / double-buffer-4 / direct-4 / double-buffer-2 / direct-2 / double-buffer-1 / direct-1 | double-buffer-16 | 8bb17c5595b5e7f3 |
+| mlu-native | bangc | group_input_gradient | double-buffer-16 / direct-16 / double-buffer-8 / direct-8 / double-buffer-4 / direct-4 / double-buffer-2 / direct-2 / double-buffer-1 / direct-1 | double-buffer-16 | e7231a948269228a |
+| rvv-native | weft | group_affine_gradient | row-reduction | row-reduction | 719d67c424dc8ed5 |
+| rvv-native | weft | group_input_gradient | row-reduction | row-reduction | a425325fad0b2377 |
+| rvv-v100 | weft | group_affine_gradient | row-reduction | row-reduction | ba989cadebd1ac65 |
+| rvv-v100 | weft | group_input_gradient | row-reduction | row-reduction | 2860f7c56aed98a9 |
+| x86 | mojo | group_affine_gradient | row-reduction | row-reduction | 7dc89b544fca4601 |
+| x86 | mojo | group_input_gradient | row-reduction | row-reduction | 51bc4f8440df955f |
+| x86 | weft | group_affine_gradient | row-reduction | row-reduction | d1e4a5beed0959f5 |
+| x86 | weft | group_input_gradient | row-reduction | row-reduction | e30cf82c7b4f69a5 |
