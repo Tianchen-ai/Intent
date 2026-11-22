@@ -6,6 +6,7 @@ struct LocalSupply {
   int64_t capacity, budget, alignment, consumers, reductionScratchPerColumn;
   bool asynchronous;
   int64_t featurePanelMembers;
+  int64_t indexScratchPerMember;
 };
 bool projectsConsecutiveRows(mlir::Operation *access, unsigned maskIndex);
 struct TemporaryLayout {

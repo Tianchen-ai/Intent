@@ -119,7 +119,7 @@ static llvm::Expected<DictionaryAttr> planStorage(func::FuncOp fn, const LocalSu
       bytes =
           std::max<int64_t>(bytes, pitch * (depth * r * p.inputBytes +
                                             (wide ? r : 1)*p.vectorBytes + p.collectiveBytes));
-    if(indexed)bytes=llvm::alignTo(bytes,c.alignment)+llvm::alignTo(12*r,c.alignment);
+    if(indexed)bytes=llvm::alignTo(bytes,c.alignment)+llvm::alignTo(c.indexScratchPerMember*r,c.alignment);
     auto reason = (depth == 2 && !c.asynchronous)
                       ? "no participant-local DMA completion"
                   : bytes > std::min(c.budget, c.capacity)

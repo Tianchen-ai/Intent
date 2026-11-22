@@ -151,9 +151,12 @@ class Source {
         auto keyType=ctype(op.getOperand(2).getDefiningOp()->getOperand(0).getType());
         line("{int count=(M-row0<R?M-row0:R);");
         line("if(R>1 && "+keys+"s0==1 && "+n+"s1==1 && "+n+"d0>0 && (unsigned long long)"+n+"s0<=0xffffffffULL/sizeof("+type+")/"+n+"d0){");
-        for(auto step:op.getAttrOfType<DictionaryAttr>("bangc.indexed_loop").getAs<ArrayAttr>("batch")){
+        auto loop=op.getAttrOfType<DictionaryAttr>("bangc.indexed_loop");
+        auto strideBytes=std::to_string(loop.getAs<IntegerAttr>("scratch_per_member").getInt());
+        auto alignment=std::to_string(loop.getAs<IntegerAttr>("scratch_alignment").getInt());
+        for(auto step:loop.getAs<ArrayAttr>("batch")){
           if(step==StringAttr::get(op.getContext(),"stage_contiguous_indices")){
-            line("auto *ids=("+keyType+"*)(storage+BYTES-((R*12+127)/128*128));");
+            line("auto *ids=("+keyType+"*)(storage+BYTES-((R*"+strideBytes+"+"+alignment+"-1)/"+alignment+"*"+alignment+"));");
             line("__memcpy(ids,"+keys+"+row0,count*sizeof(*ids),GDRAM2NRAM);");
           }else if(step==StringAttr::get(op.getContext(),"async_dma_per_member"))
             line("for(int j=0;j<count;++j)__memcpy_async("+dst+"+(("+slot+")*R+j)*P,"+n+"+col+ids[j]*"+n+"s0,live*sizeof("+type+"),GDRAM2NRAM);");

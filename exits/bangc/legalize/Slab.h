@@ -4,11 +4,13 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 
 namespace CI_UNIT_NAMESPACE {
-inline mlir::DictionaryAttr indexedLoop(mlir::Builder b,int64_t depth){
+inline mlir::DictionaryAttr indexedLoop(mlir::Builder b,int64_t depth,int64_t slot,int64_t alignment){
   llvm::SmallVector<mlir::Attribute> batch{b.getStringAttr("stage_contiguous_indices"),
                                          b.getStringAttr("async_dma_per_member")};
   if(depth==1)batch.push_back(b.getStringAttr("wait_io"));
   return b.getDictionaryAttr({b.getNamedAttr("when",b.getStringAttr("batch_contiguous_u32_pitch")),
+          b.getNamedAttr("scratch_per_member",b.getI64IntegerAttr(slot)),
+          b.getNamedAttr("scratch_alignment",b.getI64IntegerAttr(alignment)),
           b.getNamedAttr("batch",b.getArrayAttr(batch)),
           b.getNamedAttr("otherwise",b.getStringAttr("blocking_member_gather"))});
 }

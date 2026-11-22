@@ -210,8 +210,8 @@ struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(Legalize)
   unsigned phase;
   intentdsl::CallFacts facts;
-  int64_t panelMembers;
-  Legalize(unsigned step,const intentdsl::CallFacts &f,int64_t members) : phase(step),facts(f),panelMembers(members) {}
+  intentdsl::dsa::LocalSupply supply;
+  Legalize(unsigned step,const intentdsl::CallFacts &f,const intentdsl::dsa::LocalSupply &s) : phase(step),facts(f),supply(s) {}
   void runOnOperation() final {
     auto f = *getOperation().getOps<func::FuncOp>().begin();
     Builder b(&getContext());
@@ -240,8 +240,8 @@ struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
         return;
       }
       o->setAttr("bangc.primitive", b.getStringAttr(p));
-      if(p=="feature_panel_sum")o->setAttr("bangc.panel_members",b.getI64IntegerAttr(panelMembers));
-      if(p=="indexed_dma")o->setAttr("bangc.indexed_loop",indexedLoop(b,depth));
+      if(p=="feature_panel_sum")o->setAttr("bangc.panel_members",b.getI64IntegerAttr(supply.featurePanelMembers));
+      if(p=="indexed_dma")o->setAttr("bangc.indexed_loop",indexedLoop(b,depth,supply.indexScratchPerMember,supply.alignment));
       if(auto slot=emptyCountSlot(o))o->setAttr("bangc.empty_count_slot",slot);
       if(p.starts_with("segmented_slab_"))
         o->setAttr("bangc.slab_loop",slabLoop(o,p.ends_with("_read"),facts));
@@ -335,7 +335,7 @@ LogicalResult verify(ModuleOp m, const TargetProfile &p, unsigned stage) {
             return o->emitError("empty owner publication disagrees with phase effects"),WalkResult::interrupt();
           if(k=="feature_panel_sum" && o->getAttr("bangc.panel_members")!=Builder(m.getContext()).getI64IntegerAttr(capacity->featurePanelMembers))
             return o->emitError("feature staging disagrees with reserved storage"), WalkResult::interrupt();
-          if(k=="indexed_dma" && o->getAttr("bangc.indexed_loop")!=indexedLoop(Builder(m.getContext()),depth))
+          if(k=="indexed_dma" && o->getAttr("bangc.indexed_loop")!=indexedLoop(Builder(m.getContext()),depth,capacity->indexScratchPerMember,capacity->alignment))
             return o->emitError("invalid index prefetch, member copies or completion"), WalkResult::interrupt();
           DictionaryAttr loop;
           if(k.starts_with("segmented_slab_"))
@@ -368,7 +368,7 @@ void bind(Unit &u) {
   for (StringRef name : {"bound", "legal", "callable"}) {
     u.boundaries.push_back({{name.str(),
                              [stage](OpPassManager &pm, const TargetProfile &p) {
-                               pm.addPass(std::make_unique<Legalize>(stage,*p.services.get<intentdsl::CallFacts>(),p.services.get<intentdsl::dsa::LocalSupply>()->featurePanelMembers));
+                               pm.addPass(std::make_unique<Legalize>(stage,*p.services.get<intentdsl::CallFacts>(),*p.services.get<intentdsl::dsa::LocalSupply>()));
                                return llvm::Error::success();
                              },
                              [stage](ModuleOp m, const TargetProfile &p) {
