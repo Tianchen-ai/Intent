@@ -82,7 +82,7 @@ class Call:
 
     def launch(self):
         self.compile()
-        if not all(self.shape):
+        if not any(self.grid_sizes.values()):
             return
         a = self.artifact
         with torch.mlu.device(self.device):

@@ -83,7 +83,7 @@ class Prepared:
     def launch(self):
         with torch.cuda.device(self.device):
             self.compile()
-            if self.m == 0 or self.n == 0:
+            if not all(grid(self.artifact.data["grid"], (self.m, self.n), self.rows[0])):
                 return
             if self.row is None:
                 key = (

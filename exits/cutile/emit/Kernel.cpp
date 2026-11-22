@@ -206,7 +206,7 @@ class Kernel {
         int rank=cast<MemRefType>(op.getOperand(0).getType()).getRank();
         SmallVector<std::string> coords(rank);
         for(int i=rank-1;i>=0;--i){
-          auto size=base+".shape["+std::to_string(i)+"]";
+          auto size="ct.maximum("+base+".shape["+std::to_string(i)+"],1)";
           if(i==owner.getInt()) coords[i]="ct.expand_dims("+arg(1)+",1)";
           else {coords[i]="("+col+")%"+size;col="(("+col+")//"+size+")";}
         }
@@ -234,7 +234,7 @@ class Kernel {
                         .getElementType()
                         .isUnsignedInteger(64);
         std::string row = wide ? "ct.astype(" + arg(1) + ",ct.uint64)" : arg(1);
-        auto width=arg(0)+".shape[1]", column=arg(2);
+        auto width=owner?memberCount(op.getOperand(0),arg(0)):arg(0)+".shape[-1]", column=arg(2);
         if (wide) {
           width="ct.astype("+width+",ct.uint64)";
           column="ct.astype("+column+",ct.uint64)";

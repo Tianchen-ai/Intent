@@ -662,7 +662,7 @@ public:
     line("}");
     line("extern \"C\" int intent_enqueue(" + args(true) +
          ",int cores,void *queue){");
-    line("if(grid==0 || N==0)return 0; cnrtDim3_t "
+    line("if(grid==0)return 0; cnrtDim3_t "
          "dim={(unsigned)(grid<cores?grid:cores),1,1};");
     line("tile<<<dim,cnrtFuncTypeBlock,(cnrtQueue_t)queue>>>(" + args(false) +
          ");return (int)cnrtGetLastError();}");

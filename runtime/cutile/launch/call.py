@@ -79,7 +79,7 @@ class Call:
         a = self.artifact
         with torch.cuda.device(self.device):
             self.compile()
-            if not all(self.shape):
+            if not all(self.grid(a.data["rows"][0])):
                 return
             stream = torch.cuda.current_stream(self.device)
             if self.selected is None:

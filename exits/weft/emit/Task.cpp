@@ -472,7 +472,7 @@ public:
     inst("root_domain", {},
          "!weft_kernel.domain<\"root\",0,-1,0,\"root\",\"exact\">");
     s << "%lo=arith.constant 0 : index\n%step=arith.constant 1 : index\n";
-    if(ownerAxis){
+    if(task->hasAttr("weft_host.scalar_members")){
       for(auto [name,literal,type]:{std::tuple{"zero_count","0","si32"},std::tuple{"one_count","1","si32"},std::tuple{"zero_f","0.0","f32"}})
         s<<"%"<<name<<" = \"weft_kernel.constant\"() <{value="<<literal<<" : "<<type<<"}> : ()->"<<type<<"\n";
       s<<"%minus_inf=arith.constant 0xFF800000 : f32\n";
@@ -620,9 +620,12 @@ public:
       s<<"scf.yield "<<next.id<<":index\n}\nscf.for %tail=%count to "<<columns.id<<" step %step {\n";
       inst("commit",{pad,address(pack.getOperand(1),{row,{"%tail","index"}})},"()");s<<"}\n";
       inst("commit",{inst("cast",{{"%count","index"}},"si32"),address(pack.getOperand(2),{row})},"()");
-    }else if(ownerAxis){
-      for(auto &sweep:bb.without_terminator())
-        if(auto error=ownerSweep(sweep))return error;
+    }else if(task->hasAttr("weft_host.scalar_members")){
+      for(auto &op:bb.without_terminator()){
+        if(op.getName().stripDialect()=="capture_owner")
+          terms[op.getResult(0)]=inst("admit",{memberSlice(op,{},true)},spelling(op.getResult(0).getType()));
+        else if(auto error=ownerSweep(op))return error;
+      }
     } else if (whole) {
       if (auto e = writeBody(bb, {}, {}))
         return e;

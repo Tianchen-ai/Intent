@@ -259,7 +259,7 @@ public:
           auto base=arg(0), col=arg(2)+"[None,:]";
           e=arg(1)+"[:,None]*"+base+"_s"+std::to_string(ownerAxis.getInt());
           for(int i=dims-1;i>=0;--i)if(i!=ownerAxis.getInt()){
-            auto size=base+"_d"+std::to_string(i);
+            auto size="tl.maximum("+base+"_d"+std::to_string(i)+",1)";
             e+="+(("+col+")%"+size+")*"+base+"_s"+std::to_string(i);
             col="(("+col+")//"+size+")";
           }

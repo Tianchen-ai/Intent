@@ -19,6 +19,10 @@ def PanelSweep : Op<WeftHost_Dialect, "sweep", [SingleBlock]> {
   let results=(outs Variadic<AnyType>:$summary);
   let regions=(region AnyRegion:$panels);
 }
+def OwnerCapture : Op<WeftHost_Dialect,"capture_owner"> {
+  let arguments=(ins AnyMemRef:$view,Index:$owner);
+  let results=(outs AnyType:$snapshot);
+}
 def PanelRead : Op<WeftHost_Dialect,"read_panel"> {
   let arguments=(ins AnyMemRef:$source,Index:$row,Index:$offset,Index:$extent);
   let results=(outs AnyTensor:$value);

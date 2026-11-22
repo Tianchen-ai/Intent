@@ -119,9 +119,10 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
     task.replaceAllUsesWith(dispatch);
     auto &body=dispatch->getRegion(0).front();
     if(failed(intentdsl::cpu::packMemberLoop(body))){signalPassFailure();return;}
-    if (cast<DictionaryAttr>(dispatch->getAttrOfType<ArrayAttr>("rows")[0])
+    bool moments=llvm::any_of(body,[](Operation &op){return op.getName().stripDialect()=="welford";});
+    if ((moments || f->hasAttr("kir.owner_axis") || cast<DictionaryAttr>(dispatch->getAttrOfType<ArrayAttr>("rows")[0])
             .getAs<IntegerAttr>("columns")
-                     .getInt() != 0 && !intentdsl::cpu::packed(body) && !intentdsl::cpu::formReservations(body) && !intentdsl::cpu::formAtomicMembers(body))
+                     .getInt() != 0) && !intentdsl::cpu::packed(body) && !intentdsl::cpu::formReservations(body) && !intentdsl::cpu::formAtomicMembers(body))
       buildPanels(dispatch);
     task.erase();
   }
@@ -139,14 +140,21 @@ LogicalResult verifyHost(ModuleOp m, const compilerinfra::TargetProfile &p,
   bool whole = cast<DictionaryAttr>(task.getAttrOfType<ArrayAttr>("rows")[0])
                    .getAs<IntegerAttr>("columns")
                    .getInt() == 0;
-  if (whole && failed(intentdsl::cpu::verifyTask(
+  auto scalar=task.hasAttr("weft_host.scalar_members");
+  bool momentSweep=llvm::any_of(task.getRegion(0).front(),[](Operation &op){
+    return op.getName().getStringRef()=="weft_host.sweep" &&
+           op.getAttrOfType<StringAttr>("combine")=="welford";
+  });
+  if(scalar!=(task.getParentOfType<func::FuncOp>()->hasAttr("kir.owner_axis") || momentSweep))
+    return task.emitError("member traversal must match the projection or tuple reduction");
+  if (whole && !scalar && failed(intentdsl::cpu::verifyTask(
                    m, p, "weft-task-ssa", "weft_host.dispatch_rows", true)))
     return failure();
   auto &body=task.getRegion(0).front();
   if(intentdsl::cpu::reservations(body) && failed(intentdsl::cpu::verifyReservations(body,*p.services.get<intentdsl::CallFacts>())))return failure();
   if(intentdsl::cpu::atomicMembers(body) && failed(intentdsl::verifyRowComputation(*m.getOps<func::FuncOp>().begin(),
      body.front().getRegion(0).front(),body.getArguments().drop_front(),task.getAttrOfType<IntegerAttr>("domain_arg").getInt(),"cpu",true)))return failure();
-  if (!whole && !intentdsl::cpu::reservations(body) && !intentdsl::cpu::packed(body) && !intentdsl::cpu::atomicMembers(body) && failed(verifyPanels(&task)))
+  if ((!whole || scalar) && !intentdsl::cpu::reservations(body) && !intentdsl::cpu::packed(body) && !intentdsl::cpu::atomicMembers(body) && failed(verifyPanels(&task)))
     return failure();
   if(intentdsl::cpu::packed(task.getRegion(0).front()) && failed(intentdsl::cpu::verifyPack(task.getRegion(0).front())))return failure();
   if (task.getAttrOfType<StringAttr>("task_symbol") != "row_task")

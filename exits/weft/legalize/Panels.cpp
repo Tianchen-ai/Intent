@@ -48,16 +48,20 @@ public:
       if (op->getName().stripDialect() == "write")
         writes.push_back(op);
       else if(op->getName().stripDialect()=="write_owner") owned.push_back(op);
-    auto ordered = old;
-    std::stable_partition(ordered.begin(), ordered.end(), [](Operation *op) {
+    auto dispatch=task.getParentOp();
+    bool scalar=dispatch->getParentOfType<func::FuncOp>()->hasAttr("kir.owner_axis") ||
+                llvm::any_of(old,[](Operation *o){return o->getName().stripDialect()=="welford";});
+    if(scalar)dispatch->setAttr("weft_host.scalar_members",b.getUnitAttr());
+    for (auto *op : old) {
       auto name = op->getName().stripDialect();
-      return name != "write" && name != "write_owner";
-    });
-    for (auto *op : ordered) {
-      auto name = op->getName().stripDialect();
+      if(name=="read_owner"){
+        b.setInsertionPoint(&task.back());
+        summaries.map(op->getResult(0), make("weft_host.capture_owner", op->getOperands(),op->getResultTypes())->getResult(0));
+        continue;
+      }
       bool publish=name=="write_owner";
       bool store = name == "write" || publish;
-      if (store && op != (publish?owned:writes).front())
+      if (!scalar && store && op != (publish?owned:writes).front())
         continue;
       if (!store && name != "sum" && name != "max_num" && name!="welford")
         continue;
@@ -75,7 +79,8 @@ public:
       b.setInsertionPointToEnd(&body);
       panel.clear();
       if (store) {
-        auto &dest=publish?owned:writes;
+        SmallVector<Operation*> single{op};
+        auto &dest=scalar?single:(publish?owned:writes);
         for (auto *w : dest)
           local(w->getOperand(2));
         for (auto *w : dest) {
@@ -100,6 +105,7 @@ public:
     for (auto *op : llvm::reverse(old))
       op->erase();
     for(auto &sweep:task.without_terminator()){
+      if(sweep.getName().stripDialect()=="capture_owner")continue;
       for(auto &o:sweep.getRegion(0).front()){
         auto n=o.getName().stripDialect();
         if(n=="count_keys")sweep.setAttr("weft_host.private_bins",b.getUnitAttr());
@@ -119,6 +125,13 @@ void buildPanels(Operation *task) {
 LogicalResult verifyPanels(Operation *dispatch) {
   auto &body = dispatch->getRegion(0).front();
   for (auto &s : body.without_terminator()) {
+    if(s.getName().getStringRef()=="weft_host.capture_owner"){
+      auto view=cast<MemRefType>(s.getOperand(0).getType());
+      if(!dispatch->hasAttr("weft_host.scalar_members") || view.getRank()!=1 ||
+         view.getElementType()!=s.getResult(0).getType() || s.getOperand(1)!=body.getArgument(0))
+        return s.emitError("snapshot must read the current owner's scalar");
+      continue;
+    }
     if (s.getName().getStringRef() != "weft_host.sweep")
       return s.emitError("expected a column panel sweep");
     if (s.getAttrOfType<StringAttr>("tail") != "scalar")
