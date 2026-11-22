@@ -1,4 +1,6 @@
 import intentdsl as I
+from .matrix import (gemm, batched_gemm, ragged_gemm, int8_gemm, q4_projection,
+                     fp8_gemm, qkv_projection, expert_projection)
 
 @I.kernel
 def count_routes(ids:I.In[I.i32,(4096,2)], counts:I.InOut[I.i32,(64,)]):

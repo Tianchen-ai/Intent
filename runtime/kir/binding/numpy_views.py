@@ -13,6 +13,8 @@ def describe(a):
         np.dtype("float32"): "f32",
         np.dtype("int32"): "i32",
         np.dtype("int64"): "i64",
+        np.dtype("int8"): "i8",
+        np.dtype("uint8"): "u8",
     }.get(a.dtype)
     if any(s % a.itemsize for s in a.strides):
         raise ValueError("nonintegral element stride")
@@ -20,7 +22,7 @@ def describe(a):
     while getattr(owner, "base", None) is not None:
         owner = owner.base
     return (
-        "bf16" if a.dtype.name == "bfloat16" else dtype,
+        {"bfloat16":"bf16","float8_e4m3fn":"f8e4m3fn"}.get(a.dtype.name,dtype),
         a.shape,
         tuple(s // a.itemsize for s in a.strides),
         "cpu",

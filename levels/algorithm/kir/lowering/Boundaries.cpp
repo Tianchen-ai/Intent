@@ -1,4 +1,5 @@
 #include "intentdsl/levels/algorithm/kir/ir/Segment.h"
+#include "intentdsl/levels/algorithm/kir/ir/Matrix.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/Dialect.h"
@@ -340,6 +341,7 @@ LogicalResult verifyLogicalRows(ModuleOp module,StringRef dialect,bool canonical
   if (!llvm::hasSingleElement(funcs))
     return module.emitError("expected one author kernel");
   auto fn = *funcs.begin();
+  if(kir::matrixDomain(fn))return kir::verifyMatrix(fn,dialect,canonical);
   if (fn.empty() || !llvm::hasSingleElement(fn.getBody()) || fn.getNumResults())
     return fn.emitError("expected a defined output-buffer kernel");
   auto &body = fn.front();

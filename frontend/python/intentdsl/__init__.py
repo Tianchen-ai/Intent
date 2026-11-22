@@ -23,6 +23,9 @@ class InOut(_Direction):
 
 
 bf16 = "bf16"
+i8 = "i8"
+u8 = "u8"
+f8e4m3fn = "f8e4m3fn"
 i32 = "i32"
 i64 = "i64"
 u64 = "u64"

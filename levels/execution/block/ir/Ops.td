@@ -225,3 +225,5 @@ def Iblock_Dialect_WriteOffsets : Op<Iblock_Dialect,"write_offsets"> {let argume
 def Iblock_Dialect_PublishOffsets : Op<Iblock_Dialect,"publish_offsets"> {let arguments=(ins AnyMemRef:$offsets,AnyMemRef:$total,AnyTensor:$columns,I1Tensor:$active,I32Tensor:$prefix);}
 def Iblock_Dialect_Ranges : Op<Iblock_Dialect,"fill_ranges"> {let arguments=(ins AnyMemRef:$out,AnyMemRef:$offsets,Index:$owner,I64Attr:$unit,UnitAttr:$disjoint_in_bounds);}
 def Iblock_Dialect_RangesAt : Op<Iblock_Dialect,"fill_ranges_at"> {let arguments=(ins AnyMemRef:$out,AnyMemRef:$offsets,AnyTensor:$columns,I1Tensor:$active,I64Attr:$unit,UnitAttr:$disjoint_in_bounds);}
+include "intentdsl/levels/algorithm/kir/ir/Matrix.td"
+defm Matrix : MatrixExpressions<Iblock_Dialect>;
