@@ -100,6 +100,8 @@ public:
     for (auto *op : llvm::reverse(old))
       op->erase();
     for(auto &sweep:task.without_terminator()){
+      if(sweep.walk([](Operation *op){return op->getName().stripDialect()=="ordered_sum"?WalkResult::interrupt():WalkResult::advance();}).wasInterrupted())
+        sweep.setAttr("weft_host.segment_loop",b.getUnitAttr());
       if(sweep.walk([](Operation *op){return op->getName().getStringRef()=="cpu.scan_sum"?WalkResult::interrupt():WalkResult::advance();}).wasInterrupted())
         sweep.setAttr("weft_host.prefix_carry",b.getUnitAttr());
     }
@@ -117,6 +119,8 @@ LogicalResult verifyPanels(Operation *dispatch) {
     if (s.getAttrOfType<StringAttr>("tail") != "scalar")
       return s.emitError("expected scalar remainder after full column blocks");
     auto kind = s.getAttrOfType<StringAttr>("combine");
+    auto segment=s.walk([](Operation *v){return v->getName().stripDialect()=="ordered_sum"?WalkResult::interrupt():WalkResult::advance();}).wasInterrupted();
+    if(s.hasAttr("weft_host.segment_loop")!=segment)return s.emitError("segment loop must own its ordered member region");
     auto scans=s.walk([](Operation *op){return op->getName().getStringRef()=="cpu.scan_sum"?WalkResult::interrupt():WalkResult::advance();}).wasInterrupted();
     if(s.hasAttr("weft_host.prefix_carry")!=scans)return s.emitError("prefix carry must match the panel computation");
     bool store = kind == "store" || kind=="publish";

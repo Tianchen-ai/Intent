@@ -107,3 +107,13 @@ def Kir_Dialect_GatherRow : Op<Kir_Dialect,"gather_row"> {
   let arguments=(ins AnyMemRef:$table,AnyMemRef:$indices,Index:$owner,UnitAttr:$in_bounds);
   let results=(outs AnyRankedTensor:$fragment);
 }
+def Kir_Dialect_Ordered : Op<Kir_Dialect,"ordered_sum",[SingleBlock]> {
+  let arguments=(ins AnyMemRef:$offsets,Index:$owner); let results=(outs F32Tensor:$value); let regions=(region AnyRegion:$terms);
+}
+def Kir_Dialect_Length : Op<Kir_Dialect,"segment_length"> {
+  let arguments=(ins AnyMemRef:$offsets,Index:$owner);let results=(outs F32Tensor:$value);
+}
+def Kir_Dialect_MemberLoad : Op<Kir_Dialect,"member_load"> {
+  let arguments=(ins AnyMemRef:$source,Variadic<AnyType>:$coordinates);let results=(outs AnyType:$value);
+}
+def Kir_Dialect_Term : Op<Kir_Dialect,"term",[Terminator]> {let arguments=(ins F32:$value);}

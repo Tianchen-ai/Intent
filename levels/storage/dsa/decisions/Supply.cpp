@@ -1,3 +1,4 @@
+#include "intentdsl/levels/algorithm/kir/ir/Segment.h"
 #include "Plan.h"
 #include "llvm/Support/MathExtras.h"
 
@@ -19,6 +20,8 @@ struct Footprint {
         f.collectiveBytes = reductionScratch;
       } else if (op.getNumResults() == 1) {
         if(code=="scan_sum")f.collectiveBytes=reductionScratch;
+        if(code=="segment_fold" && kir::contiguousFeatureRead(&op))
+          f.collectiveBytes=std::max<int64_t>(f.collectiveBytes,16*sizeof(float));
         auto t = dyn_cast<RankedTensorType>(op.getResult(0).getType());
         if (!t || t.getRank() < 1 || !t.getElementType().isIntOrFloat())
           continue;
@@ -129,6 +132,10 @@ static llvm::Expected<DictionaryAttr> planStorage(func::FuncOp fn, const LocalSu
       accepted.push_back(attrs.getDictionary(fn.getContext()));
   }
   NamedAttrList out;
+  if(fn->getAttrOfType<StringAttr>("block.topology")=="stream" && phases.size()==1 &&
+     fn.walk([](Operation *op){return op->getName().stripDialect()=="segment_fold"?WalkResult::interrupt():WalkResult::advance();}).wasInterrupted() &&
+     !fn.walk([](Operation *op){auto n=op->getName().stripDialect();return n=="reduce" || n=="combine" || n=="owner_store" || n=="summary_reduce"?WalkResult::interrupt():WalkResult::advance();}).wasInterrupted())
+    out.set("independent_columns",b.getUnitAttr());
   if(reuse)out.set("reuse_temporaries", b.getUnitAttr());
   out.set("group_temporaries",b.getBoolAttr(wide));
   out.set("persistent",b.getBoolAttr(persistent));

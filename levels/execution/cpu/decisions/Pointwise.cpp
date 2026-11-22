@@ -15,7 +15,7 @@ void registerPointwise(Unit &u,StringRef family) {
       auto n = o->getName().stripDialect();
       hasWrite |= n == "write";
       hasGather |= n=="gather_row";
-      hasSummary |= n == "sum" || n == "max_num" || n == "welford" || n=="scan_sum";
+      hasSummary |= n == "sum" || n == "max_num" || n == "welford" || n=="scan_sum" || n=="ordered_sum";
     });
     if (!hasWrite || hasSummary || hasGather!=indirect)
       return Attribute{};

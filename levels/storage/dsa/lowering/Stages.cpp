@@ -14,13 +14,13 @@ Operation *inst(OpBuilder &b, Location l, StringRef name, ValueRange args = {},
   s.addAttributes(attrs);
   return b.create(s);
 }
-void schedule(Block *entry, bool stream, int64_t depth,bool persistent, OpBuilder &b,
+void schedule(Block *entry, bool stream, int64_t depth,bool persistent,bool independent, OpBuilder &b,
               Location loc) {
   b.setInsertionPointToEnd(entry);
   auto idx = b.getIndexType();
   auto range = inst(
       b, loc, "dsa.range", {}, {idx, idx, idx},
-      b.getNamedAttr("source", b.getStringAttr(stream ? "tile_extent"
+      b.getNamedAttr("source", b.getStringAttr(independent ? "owned_tile" : stream ? "tile_extent"
                                                       : "participant_stride")));
   auto init = inst(b, loc, "dsa.slot_zero", {}, idx)->getResult(0);
   auto lo = range->getResult(0), end = range->getResult(1),
@@ -68,7 +68,8 @@ LogicalResult phase(Operation *anchor, Block &source, bool stream,
   auto *calc = b.createBlock(&p->getRegion(1));
   auto fn=anchor->getParentOfType<func::FuncOp>();
   bool persistent=fn->getAttrOfType<DictionaryAttr>("dsa.pending").getAs<BoolAttr>("persistent").getValue();
-  schedule(b.createBlock(&p->getRegion(2)), stream, depth,persistent, b, loc);
+  bool independent=fn->getAttrOfType<DictionaryAttr>("dsa.pending").contains("independent_columns");
+  schedule(b.createBlock(&p->getRegion(2)), stream, depth,persistent,independent, b, loc);
   Operation *active = nullptr;
   for (auto &op : source)
     if (op.getName().getStringRef() == "block.active")
@@ -149,6 +150,9 @@ LogicalResult phase(Operation *anchor, Block &source, bool stream,
     map.map(source.getArgument(1),
             calc->addArgument(p->getResult(0).getType(), loc));
   SmallVector<Value> yields, completions;
+  map.map(active->getOperand(1),writeWindow->getResult(0));
+  map.map(active->getOperand(2),writeWindow->getResult(1));
+  map.map(active->getResult(0),writeWindow->getResult(2));
   for (auto *op : old) {
     auto code = op->getName().stripDialect();
     if (code == "pid" || code == "rows" || code == "columns" ||

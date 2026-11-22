@@ -43,6 +43,9 @@ void registerCost(Unit &u) {
               w += bytes;
           });
           r *= stream ? 1 + reductions : 1;
+          auto segmentedRead=f->segmentReads(op);
+          r+=segmentedRead;
+          if(segmentedRead)e.terms["packed_member_reads"]={segmentedRead,"B"};
           double live=0, peak=0;
           for(auto &i:op->getRegion(0).front()){
             for(auto v:i.getResults()) if(isa<RankedTensorType>(v.getType()) && !v.use_empty())live++;
@@ -90,7 +93,8 @@ void registerCost(Unit &u) {
                 {"strided_store", {ws, "B"}},
                 {"waves", {waves, "count"}},
                 {"tail", {instances * rows * tiles * width - m * n, "lane"}}};
-            bool gridTiles=choice.get("walk") && choice.getAs<StringAttr>("walk")=="grid-tile";
+            auto walk=choice.getAs<StringAttr>("walk");
+            bool gridTiles=walk=="grid-tile" || walk=="segment-tile";
             // Independent columns create concurrently schedulable instances.
             // The other streaming walks issue all column tiles serially.
             double scheduled=gridTiles ? instances*tiles : instances;

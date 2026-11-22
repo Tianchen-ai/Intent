@@ -85,6 +85,8 @@ void registerCost(Unit &u) {
               }
             });
             if(strideError)return std::move(strideError);
+            auto segments=facts->segmentReads(op);
+            if(segments){read+=segments;if(rd)readNs+=segments/ *rd;e.terms["packed_member_reads"]={segments,"B"};}
             e.terms["read"] = {read, "B"};
             e.terms["write"] = {write, "B"};
             if (intentdsl::rectangularCopy(op) && read == write &&

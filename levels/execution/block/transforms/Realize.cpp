@@ -30,7 +30,8 @@ public:
       anchor->walk([](Operation *op){if(op->getName().stripDialect()=="write")op->removeAttr("axes");});
     }
     fn->setAttr("block.guard",choice.get("guard"));
-    gridTiles = choice.get("walk") && choice.getAs<StringAttr>("walk")=="grid-tile";
+    auto walk = choice.getAs<StringAttr>("walk");
+    gridTiles = walk=="grid-tile" || walk=="segment-tile";
     fn->setAttr("block.grid", intentdsl::block::grid(rw,gridTiles));
     fn->setAttr("block.configs", choice.get("rows"));
     fn->setAttr("block.topology", choice.get("topology"));
@@ -101,6 +102,23 @@ private:
     auto n = op->getName().stripDialect();
     return n == "sum" || n == "max_num" || n == "welford";
   }
+  Value segment(Operation *op) {
+    auto n=op->getName().stripDialect();
+    if (n=="ordered_sum" || n=="segment_length") {
+      bool fold=n=="ordered_sum";
+      OperationState state(loc,fold?"block.segment_fold":"block.segment_size");
+      state.addOperands({op->getOperand(0),rows,cols,active});
+      state.addTypes(vector(rw.getF32Type(),2));
+      if (fold) {
+        state.addAttribute("strict",rw.getUnitAttr());
+        IRMapping capture;
+        op->getRegion(0).cloneInto(state.addRegion(),capture);
+      }
+      auto fragment=rw.create(state)->getResult(0);
+      return fragment;
+    }
+    llvm_unreachable("expected an offset-defined segment");
+  }
   void tile(Value i) {
     cols = make("columns", i, vector(rw.getIndexType(), 1))->getResult(0);
     active = make("active", {domain, rows, cols}, vector(rw.getI1Type(), 2))
@@ -116,6 +134,11 @@ private:
     if (!op)
       return v;
     auto n = op->getName().stripDialect();
+    if(n=="ordered_sum" || n=="segment_length"){
+      auto fragment=segment(op);
+      local.map(v,fragment);
+      return fragment;
+    }
     if (n == "field") {
       auto state=expr(op->getOperand(0));
       auto result=make("summary_field",state,vector(v.getType(),1),op->getAttrs())->getResult(0);

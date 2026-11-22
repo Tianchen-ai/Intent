@@ -57,6 +57,37 @@ class Kernel {
         continue;
       }
       std::string expr;
+      if(code=="segment_fold" || code=="segment_size"){
+        auto fn=op.getParentOfType<func::FuncOp>();
+        auto slot=fn->getAttrOfType<IntegerAttr>("kir.domain_arg").getInt();
+        bool flat=cast<MemRefType>(fn.getArgument(slot).getType()).getRank()==1;
+        auto owner=flat?arg(2):arg(1);
+        auto cursor=local(),limit=local(),acc=local(),live=local();
+        auto lifted=[&](std::string v){return "ct.expand_dims("+v+","+(flat?"0":"1")+")";};
+        line(depth,cursor+" = "+lifted("ct.gather("+arg(0)+","+owner+")"));
+        line(depth,limit+" = "+lifted("ct.gather("+arg(0)+","+owner+"+1)"));
+        if(code=="segment_size"){
+          auto size=local();line(depth,size+" = ct.astype("+limit+"-"+cursor+",ct.float32)");names[op.getResult(0)]=size;continue;
+        }
+        auto &terms=op.getRegion(0).front();
+        names[terms.getArgument(0)]=cursor;names[terms.getArgument(1)]="ct.expand_dims("+arg(2)+",0)";
+        line(depth,acc+" = ct.full((R,W),0.,ct.float32)");
+        line(depth,"for "+local()+" in range(ct.max("+limit+"-"+cursor+")):");
+        line(depth+1,live+" = ("+cursor+" < "+limit+") & "+arg(3));
+        for(auto &v:terms){
+          auto n=v.getName().stripDialect();auto a=[&](unsigned i){return names.lookup(v.getOperand(i));};
+          if(n=="term"){line(depth+1,acc+" = ct.where("+live+",ct.add("+acc+","+a(0)+",rounding_mode=ct.RoundingMode.RN),"+acc+")");break;}
+          std::string rhs;
+          if(n=="member_load"){
+            std::string coords="(";
+            for(unsigned i=1;i<v.getNumOperands();++i)coords+="ct.broadcast_to("+a(i)+",(R,W)),";
+            rhs="ct.gather("+a(0)+","+coords+"),mask="+live+")";
+          }else if(n=="mul" || n=="add")rhs="ct."+n.str()+"("+a(0)+","+a(1)+",rounding_mode=ct.RoundingMode.RN)";
+          else return llvm::createStringError("unknown strict member expression "+n);
+          auto dst=local();names[v.getResult(0)]=dst;line(depth+1,dst+" = "+rhs);
+        }
+        line(depth+1,cursor+" += 1");names[op.getResult(0)]=acc;continue;
+      }
       if(code=="owner_load") expr="ct.gather("+arg(0)+","+arg(1)+")";
       else if(code=="owner_store"){
         line(depth,"ct.scatter("+arg(0)+","+arg(1)+","+arg(2)+")");

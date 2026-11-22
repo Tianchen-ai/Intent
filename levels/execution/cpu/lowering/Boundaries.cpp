@@ -113,6 +113,7 @@ struct Construct : PassWrapper<Construct, OperationPass<ModuleOp>> {
     s.addOperands(fn.getArguments());
     s.addTypes(b.getIndexType());
     s.addAttribute("cpu.walk",loop->getAttr("cpu.walk"));
+    if(auto partition=loop->getAttr("cpu.member_tasks"))s.addAttribute("cpu.member_tasks",partition);
     s.addAttribute("cpu.tile",loop->getAttr("cpu.tile"));
     s.addAttribute("rows", loop->getAttr("cpu.row_groups"));
     s.addAttribute(

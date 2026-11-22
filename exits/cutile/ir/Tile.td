@@ -68,3 +68,14 @@ def TileSource_IndexedTileRead : Op<TileSource,"indexed_tile_read"> {
   let arguments=(ins AnyMemRef:$table,AnyMemRef:$indices,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active);
   let results=(outs AnyRankedTensor:$fragment);
 }
+def TileSource_MemberLoad : Op<TileSource,"member_load"> {
+  let arguments=(ins AnyMemRef:$source,Variadic<AnyType>:$coordinates);let results=(outs AnyType:$value);
+}
+def TileSource_Term : Op<TileSource,"term",[Terminator]> {let arguments=(ins F32:$value);}
+def TileSource_SegmentFold : Op<TileSource,"segment_fold",[SingleBlock]> {
+  let arguments=(ins AnyMemRef:$offsets,AnyTensor:$rows,AnyTensor:$cols,I1Tensor:$active,UnitAttr:$strict);
+  let results=(outs F32Tensor:$value);let regions=(region AnyRegion:$terms);
+}
+def TileSource_SegmentSize : Op<TileSource,"segment_size"> {
+  let arguments=(ins AnyMemRef:$offsets,AnyTensor:$rows,AnyTensor:$cols,I1Tensor:$active);let results=(outs F32Tensor:$value);
+}

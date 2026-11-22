@@ -51,6 +51,7 @@ void registerPanelReduction(Unit &);
 void registerTupleReduction(Unit &);
 void registerScan(Unit &);
 void registerIndirect(Unit &);
+void registerSegment(Unit &);
 void registerPointwise(Unit &,StringRef);
 llvm::Expected<Attribute> proposeRows(Operation *op,const TargetProfile &profile,bool structured){
   auto *machine=profile.services.get<intentdsl::cpu::RowMachine>();
@@ -86,6 +87,10 @@ void registerPartition(Unit &u,bool permuted) {
                         const TargetProfile &p) -> llvm::Error {
     auto *machine = p.services.get<intentdsl::cpu::RowMachine>();
     auto d=dyn_cast<DictionaryAttr>(a);auto walk=d?d.getAs<StringAttr>("walk"):StringAttr();
+    if(d && d.get("member_tasks") &&
+       (cast<MemRefType>(op->getOperand(0).getType()).getRank()!=1 ||
+       !op->walk([](Operation *v){return v->getName().stripDialect()=="ordered_sum"?WalkResult::interrupt():WalkResult::advance();}).wasInterrupted()))
+      return llvm::createStringError("flat segment partition needs independent segment outputs");
     if (!walk || (walk!="source" && ( (walk!="destination" && walk!="tile") || !intentdsl::cpu::rectangularCopy(op))) || !d.getAs<IntegerAttr>("tile") || d.getAs<IntegerAttr>("tile").getInt()!=(walk=="tile"?32:1) || !machine || !machine->accepts(d.getAs<ArrayAttr>("rows")))
       return llvm::createStringError("illegal CPU work partition");
     return llvm::Error::success();
@@ -99,12 +104,13 @@ void registerPartition(Unit &u,bool permuted) {
     return llvm::createStringError("CPU topology disagrees with its parameter domain");};
   u.families.push_back(
       {{partition, "cpu@formed", "cpu@formed"}, COMPILERINFRA_SOURCE});
-  if(!permuted){registerIndirect(u);registerScan(u);registerTupleReduction(u);registerRowReduction(u);registerPanelReduction(u);}
+  if(!permuted){registerIndirect(u);registerScan(u);registerSegment(u);registerTupleReduction(u);registerRowReduction(u);registerPanelReduction(u);}
   auto family=permuted?"permutation":"partition";registerPointwise(u,family);
   u.realizers.push_back(
       {{permuted?"permute-rows":"group-rows", u.qualify(family),
         [carrier](Operation *op, Attribute a, const TargetProfile &, RewriterBase &) {
           auto d=cast<DictionaryAttr>(a);
+          if(d.get("member_tasks"))op->setAttr("cpu.member_tasks",d.get("member_tasks"));
           op->setAttr("cpu.row_groups",d.get("rows"));op->setAttr("cpu.walk",d.get("walk"));op->setAttr("cpu.tile",d.get("tile"));
           op->removeAttr(carrier);
           return llvm::Error::success();

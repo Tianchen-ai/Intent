@@ -43,6 +43,20 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
       bool absolute = false;
       task.walk([&](Operation *o) {
         absolute |= o->getName().getStringRef() == "cpu.ordinal";
+        auto n=o->getName().stripDialect();
+        if(n=="ordered_sum" || n=="segment_length" || n=="member_load"){
+          auto argument=dyn_cast<BlockArgument>(o->getOperand(0));
+          if(!argument || argument.getOwner()!=&task.getRegion(0).front() || !argument.getArgNumber()){
+            o->emitError("segment read requires a captured input");signalPassFailure();return;
+          }
+          auto slot=argument.getArgNumber()-1;
+          auto *record=facts.arguments[slot].getAsObject();auto *shape=record?record->getArray("shape"):nullptr;
+          SmallVector<int64_t> dims;
+          if(shape)for(auto &d:*shape)if(auto extent=d.getAsInteger())dims.push_back(*extent);
+          if(dims.size()!=cast<MemRefType>(argument.getType()).getRank()){o->emitError("missing indexed input extents");signalPassFailure();return;}
+          f.setArgAttr(slot,"weft_host.indirect_extents",b.getDenseI64ArrayAttr(dims));
+          absolute=true;
+        }
         if(o->getName().getStringRef()=="cpu.gather_row"){
           auto table=cast<BlockArgument>(o->getOperand(0)).getArgNumber()-1;
           auto ids=cast<BlockArgument>(o->getOperand(1)).getArgNumber()-1;
@@ -96,7 +110,8 @@ LogicalResult verifyHost(ModuleOp m, const compilerinfra::TargetProfile &p,
     auto slots = task.getAttrOfType<DenseI64ArrayAttr>("weft_host.slot_ranks");
     bool absolute = false;
     task.walk([&](Operation *o) {
-      absolute |= o->getName().getStringRef() == "cpu.ordinal";
+      auto n=o->getName().stripDialect();
+      absolute |= n=="ordinal" || n=="ordered_sum" || n=="segment_length";
     });
     if (task.getAttrOfType<BoolAttr>("weft_host.absolute_origin") !=
         BoolAttr::get(m.getContext(), absolute))

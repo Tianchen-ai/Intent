@@ -7,6 +7,7 @@ namespace CI_UNIT_NAMESPACE {
 // receives its exact row range and never dispatches additional workers.
 std::string hostSource(func::FuncOp entry) {
   SmallVector<std::string> slots, names;
+  bool members=entry.front().front().hasAttr("cpu.member_tasks");
   unsigned projectedRank=0;
   if(entry->hasAttr("kir.iteration") && !entry->hasAttr("kir.owner_axis")){
     auto t=dyn_cast<MemRefType>(entry.getArgument(0).getType());
@@ -20,7 +21,9 @@ std::string hostSource(func::FuncOp entry) {
       for(unsigned axis=0;axis+1<projectedRank;++axis)
         offset+="+c"+std::to_string(axis)+"*"+n+"s"+std::to_string(axis);
       names.push_back("(char*)"+n+"+("+offset+")*"+std::to_string(view.getElementTypeBitWidth()/8));
-    }else names.push_back(n);
+    }else if(members && view && i==entry->getAttrOfType<IntegerAttr>("kir.domain_arg").getInt())
+      names.push_back("(char*)"+n+"+start*"+n+"s0*"+std::to_string(view.getElementTypeBitWidth()/8));
+    else names.push_back(n);
     slots.push_back(std::string(view                         ? "void *"
                                 : type.isUnsignedInteger(64) ? "uint64_t "
                                 : type.isInteger(32)         ? "int32_t "
@@ -48,6 +51,7 @@ std::string hostSource(func::FuncOp entry) {
        "workers){\n"
     << "if (rows == 0 || cols == 0) return;\n";
   auto &task=entry.front().front();
+  if(members)c<<"rows=cols;\n";
   auto walk=task.getAttrOfType<StringAttr>("cpu.walk");
   if(walk=="destination"){
     c<<"int64_t t=rows;rows=cols;cols=t;\n";
@@ -74,7 +78,8 @@ std::string hostSource(func::FuncOp entry) {
     c<<"int64_t span=a0d"<<projectedRank-2<<"-c"<<projectedRank-2
      <<";int64_t end=stop-start<span?stop:start+span;\n"
      <<"intent_row_interval("<<llvm::join(names,",")<<",start,end,cols,columns);start=end;}\n";
-  } else c<<"intent_row_interval("<<llvm::join(names,",")<<",start,stop,cols,columns);\n";
+  } else if(members)c<<"intent_row_interval("<<llvm::join(names,",")<<",start,start+1,stop-start,columns);\n";
+  else c<<"intent_row_interval("<<llvm::join(names,",")<<",start,stop,cols,columns);\n";
   c<<"}\n}\n";
   return out;
 }

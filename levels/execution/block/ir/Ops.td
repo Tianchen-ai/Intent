@@ -181,3 +181,20 @@ def Iblock_Dialect_IndexedTileRead : Op<Iblock_Dialect,"indexed_tile_read"> {
   let arguments=(ins AnyMemRef:$table,AnyMemRef:$indices,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active);
   let results=(outs AnyRankedTensor:$fragment);
 }
+def Iblock_Dialect_Ordered : Op<Iblock_Dialect,"ordered_sum",[SingleBlock]> {
+  let arguments=(ins AnyMemRef:$offsets,Index:$owner); let results=(outs F32Tensor:$value); let regions=(region AnyRegion:$terms);
+}
+def Iblock_Dialect_Length : Op<Iblock_Dialect,"segment_length"> {
+  let arguments=(ins AnyMemRef:$offsets,Index:$owner);let results=(outs F32Tensor:$value);
+}
+def Iblock_Dialect_MemberLoad : Op<Iblock_Dialect,"member_load"> {
+  let arguments=(ins AnyMemRef:$source,Variadic<AnyType>:$coordinates);let results=(outs AnyType:$value);
+}
+def Iblock_Dialect_Term : Op<Iblock_Dialect,"term",[Terminator]> {let arguments=(ins F32:$value);}
+def Iblock_Dialect_SegmentFold : Op<Iblock_Dialect,"segment_fold",[SingleBlock]> {
+  let arguments=(ins AnyMemRef:$offsets,AnyTensor:$rows,AnyTensor:$cols,I1Tensor:$active,UnitAttr:$strict);
+  let results=(outs F32Tensor:$value);let regions=(region AnyRegion:$terms);
+}
+def Iblock_Dialect_SegmentSize : Op<Iblock_Dialect,"segment_size"> {
+  let arguments=(ins AnyMemRef:$offsets,AnyTensor:$rows,AnyTensor:$cols,I1Tensor:$active);let results=(outs F32Tensor:$value);
+}

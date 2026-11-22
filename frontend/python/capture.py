@@ -113,6 +113,12 @@ class Capture:
             return self.emit(op, args, ty)
         if isinstance(n, ast.Call):
             fn = spelling(n.func, self.namespace)
+            if fn=="ordered_sum":
+                from .segments import fold
+                return fold(self,n)
+            if fn=="segment_length":
+                from .segments import bounds
+                return self.emit("segment_length",bounds(self,n),"tensor<?xf32>")
             if fn=="gather_row":
                 if len(n.args)!=3 or len(n.keywords)!=1 or n.keywords[0].arg!="in_bounds" or ast.literal_eval(n.keywords[0].value) is not True:
                     raise ValueError("row gather requires a table, row indices and an explicit bounds promise")

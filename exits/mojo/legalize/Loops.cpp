@@ -1,3 +1,4 @@
+#include "intentdsl/levels/algorithm/kir/ir/Segment.h"
 #include <algorithm>
 #include "intentdsl/levels/algorithm/kir/ir/ProjectedLayout.h"
 #include "compilerinfra/Assembly.h"
@@ -40,7 +41,16 @@ class Columns {
     if (auto ranked = dyn_cast<RankedTensorType>(t))
       t = VectorType::get({width}, ranked.getElementType());
     Value result;
-    if(n=="read_owner")
+    if(n=="ordered_sum" || n=="segment_length"){
+      bool fold=n=="ordered_sum";
+      OperationState s(loc,fold?"mojo_row.segment_fold":"mojo_row.segment_size");
+      s.addOperands({op->getOperand(0),op->getOperand(1),col});
+      s.addTypes(t);
+      if(fold){IRMapping mapping;op->getRegion(0).cloneInto(s.addRegion(),mapping);}
+      auto *physical=b.create(s);
+      if(fold && intentdsl::kir::contiguousFeatureRead(physical))physical->setAttr("feature_vector",b.getUnitAttr());
+      result=physical->getResult(0);
+    }else if(n=="read_owner")
       result=make("owner_read",op->getOperands(),t)->getResult(0);
     else if(n=="gather_row")result=make("indexed_read",{op->getOperand(0),op->getOperand(1),op->getOperand(2),col},t)->getResult(0);
     else if (n == "ordinal") {

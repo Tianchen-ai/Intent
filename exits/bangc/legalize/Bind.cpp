@@ -1,3 +1,4 @@
+#include "intentdsl/levels/algorithm/kir/ir/Segment.h"
 #include "intentdsl/levels/storage/dsa/ir/Supply.h"
 #include "mlir/Pass/Pass.h"
 using namespace mlir;
@@ -33,6 +34,12 @@ bool narrowedQuotient(Operation *div) {
 }
 StringRef primitive(Operation *op, int64_t depth) {
   auto n = op->getName().getStringRef();
+  if(n=="block.segment_size") return "segment_size";
+  if(n=="block.segment_fold"){
+    if(intentdsl::kir::contiguousFeatureRead(op))return "feature_panel_sum";
+    return "ordered_members";
+  }
+  if(n=="block.member_load" || n=="block.term")return op->getName().stripDialect();
   if(n=="block.scan_sum")return "row_inclusive_sum";
   if(n=="block.summary_reduce")return "welford_f32";
   if(n=="block.summary_field" || n=="block.summary_merge" || n=="block.summary_identity" ||

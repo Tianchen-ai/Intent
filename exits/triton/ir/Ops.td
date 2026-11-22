@@ -144,3 +144,14 @@ def Itsrc_Dialect_IndexedTileRead : Op<Itsrc_Dialect,"indexed_tile_read"> {
   let arguments=(ins AnyMemRef:$table,AnyMemRef:$indices,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active);
   let results=(outs AnyRankedTensor:$fragment);
 }
+def Itsrc_Dialect_MemberLoad : Op<Itsrc_Dialect,"member_load"> {
+  let arguments=(ins AnyMemRef:$source,Variadic<AnyType>:$coordinates);let results=(outs AnyType:$value);
+}
+def Itsrc_Dialect_Term : Op<Itsrc_Dialect,"term",[Terminator]> {let arguments=(ins F32:$value);}
+def Itsrc_Dialect_SegmentFold : Op<Itsrc_Dialect,"segment_fold",[SingleBlock]> {
+  let arguments=(ins AnyMemRef:$offsets,AnyTensor:$rows,AnyTensor:$cols,I1Tensor:$active,UnitAttr:$strict);
+  let results=(outs F32Tensor:$value);let regions=(region AnyRegion:$terms);
+}
+def Itsrc_Dialect_SegmentSize : Op<Itsrc_Dialect,"segment_size"> {
+  let arguments=(ins AnyMemRef:$offsets,AnyTensor:$rows,AnyTensor:$cols,I1Tensor:$active);let results=(outs F32Tensor:$value);
+}

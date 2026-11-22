@@ -1,4 +1,5 @@
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
+#include "intentdsl/levels/algorithm/kir/ir/Segment.h"
 #include "intentdsl/levels/execution/block/ir/Access.h"
 #include "intentdsl/levels/execution/block/decisions/Verify.h"
 #include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
@@ -95,6 +96,20 @@ LogicalResult verifyMapping(ModuleOp m,const compilerinfra::TargetProfile &p,Str
       ok=a.getRank()==2 && i.getRank()==1 && i.getElementType().isSignlessIntOrIndex() &&
          def(op->getOperand(4),"active") && mask->getOperand(0)==domain && mask->getOperand(1)==op->getOperand(2) &&
          mask->getOperand(2)==op->getOperand(3) && cast<RankedTensorType>(op->getResult(0).getType()).getElementType()==a.getElementType();
+    }
+    if(n=="segment_fold" || n=="segment_size"){
+      auto *mask=op->getOperand(3).getDefiningOp();
+      auto abi=llvm::json::parse(f->getAttrOfType<StringAttr>("kir.abi").getValue());
+      if(!abi){llvm::consumeError(abi.takeError());return WalkResult::interrupt();}
+      auto isInput=[&](Value v){
+        auto slot=dyn_cast<BlockArgument>(v);
+        return slot && slot.getOwner()==&f.front() && abi->getAsArray() && slot.getArgNumber()<abi->getAsArray()->size() &&
+          (*abi->getAsArray())[slot.getArgNumber()].getAsObject()->getString("direction")=="In";
+      };
+      auto offsets=cast<MemRefType>(op->getOperand(0).getType());
+      ok=isInput(op->getOperand(0)) && offsets.getRank()==1 && offsets.getElementType().isInteger(32) &&
+        def(op->getOperand(3),"active") && mask->getOperand(0)==domain && mask->getOperand(1)==op->getOperand(1) &&
+        mask->getOperand(2)==op->getOperand(2) && (n=="segment_size" || succeeded(kir::verifyMemberExpression(op,isInput)));
     }
     if(dialect=="block" && (n=="load" || n=="store")){
       auto mask=op->getOperand(3).getDefiningOp();

@@ -65,6 +65,12 @@ void bind(Unit &unit) {
     auto d=cast<DictionaryAttr>(c.value);auto topology=d.getAs<StringAttr>("topology").str();
     auto rows=d.getAs<ArrayAttr>("rows");auto group=cast<DictionaryAttr>(rows[0]).getAs<IntegerAttr>("rows");
     if(auto walk=d.getAs<StringAttr>("walk")){
+      if(walk=="segment-tile" || walk=="segment-row" || walk=="segment-stream"){
+        bool fold=op->walk([](Operation *v){return v->getName().stripDialect()=="ordered_sum" ? WalkResult::interrupt():WalkResult::advance();}).wasInterrupted();
+        if(!fold || c.id!=walk.str() || c.topology!=c.id || c.preconditions!=std::vector<std::string>{"distinct-segment-outputs"} ||
+            (walk!="segment-row")!=(topology=="stream"))return llvm::createStringError("invalid segment ownership");
+        return llvm::Error::success();
+      }
       if(c.topology!=walk.str() || c.id!=walk.str() || c.preconditions!=std::vector<std::string>{walk=="source"?"independent-members":"bijective-rectangular-copy"} ||
          (walk!="source" && (!intentdsl::rectangularCopy(op) || (walk!="destination" && walk!="tile" && walk!="grid-tile") || topology!="stream")) ||
          (walk=="grid-tile" && profile.services.get<intentdsl::RowCapacity>()->independentWidths.empty()))

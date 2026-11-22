@@ -103,3 +103,13 @@ def Cpu_Dialect_GatherRow : Op<Cpu_Dialect,"gather_row"> {
   let arguments=(ins AnyMemRef:$table,AnyMemRef:$indices,Index:$owner,UnitAttr:$in_bounds);
   let results=(outs AnyRankedTensor:$fragment);
 }
+def Cpu_Dialect_Ordered : Op<Cpu_Dialect,"ordered_sum",[SingleBlock]> {
+  let arguments=(ins AnyMemRef:$offsets,Index:$owner); let results=(outs F32Tensor:$value); let regions=(region AnyRegion:$terms);
+}
+def Cpu_Dialect_Length : Op<Cpu_Dialect,"segment_length"> {
+  let arguments=(ins AnyMemRef:$offsets,Index:$owner);let results=(outs F32Tensor:$value);
+}
+def Cpu_Dialect_MemberLoad : Op<Cpu_Dialect,"member_load"> {
+  let arguments=(ins AnyMemRef:$source,Variadic<AnyType>:$coordinates);let results=(outs AnyType:$value);
+}
+def Cpu_Dialect_Term : Op<Cpu_Dialect,"term",[Terminator]> {let arguments=(ins F32:$value);}

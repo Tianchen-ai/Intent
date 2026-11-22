@@ -39,6 +39,8 @@ public:
   explicit Writer(llvm::raw_ostream &out) : out(out) {}
   llvm::Error write(func::FuncOp fn) {
     out << "import triton\nimport triton.language as tl\n";
+    if (fn.walk([](Operation *o){return o->getName().stripDialect()=="segment_fold" ? WalkResult::interrupt():WalkResult::advance();}).wasInterrupted())
+      out << "from triton.language.extra.cuda import libdevice\n";
     bool moments=false;
     fn.walk([&](Operation *op){moments |= op->getName().stripDialect()=="summary_reduce";});
     if (moments) out <<
@@ -92,6 +94,38 @@ public:
       }
       std::string e;
       auto ownerAxis=op.getParentOfType<func::FuncOp>()->getAttrOfType<IntegerAttr>("kir.owner_axis");
+      if(n=="segment_fold" || n=="segment_size"){
+        auto fn=op.getParentOfType<func::FuncOp>();
+        auto slot=fn->getAttrOfType<IntegerAttr>("kir.domain_arg").getInt();
+        bool flat=cast<MemRefType>(fn.getArgument(slot).getType()).getRank()==1;
+        std::string tag="seg"+std::to_string(next++), limit=tag+"_end", cursor=tag+"_i", acc=tag+"_sum", live=tag+"_live";
+        auto owner=flat?arg(2)+"[None,:]":arg(1)+"[:,None]";
+        auto offset=arg(0)+" + ("+owner+") * "+arg(0)+"_s0";
+        line(depth,cursor+" = tl.load("+offset+", mask="+owner+" < "+(flat?"N":"M")+", other=0)");
+        line(depth,limit+" = tl.load("+offset+" + "+arg(0)+"_s0, mask="+owner+" < "+(flat?"N":"M")+", other=0)");
+        if(n=="segment_size"){
+          values[op.getResult(0)]=tag;line(depth,tag+" = ("+limit+" - "+cursor+").to(tl.float32)");continue;
+        }
+        auto &terms=op.getRegion(0).front();
+        values[terms.getArgument(0)]=cursor;values[terms.getArgument(1)]=arg(2)+"[None,:]";
+        line(depth,acc+" = tl.full((ROWS,WIDTH), 0., tl.float32)");
+        line(depth,"for "+tag+"_step in range(tl.max("+limit+" - "+cursor+")):");
+        line(depth+1,live+" = ("+cursor+" < "+limit+") & "+arg(3));
+        for(auto &v:terms){
+          auto code=v.getName().stripDialect();
+          auto a=[&](unsigned i){return name(v.getOperand(i));};
+          if(code=="term"){line(depth+1,acc+" = tl.where("+live+",libdevice.add_rn("+acc+","+a(0)+"),"+acc+")");break;}
+          std::string rhs;
+          if(code=="member_load"){
+            auto pointer=a(0);
+            for(unsigned i=1;i<v.getNumOperands();++i)pointer+=" + ("+a(i)+") * "+a(0)+"_s"+std::to_string(i-1);
+            rhs="tl.load("+pointer+",mask="+live+",other=0)";
+          } else if(code=="mul" || code=="add")rhs="libdevice."+code.str()+"_rn("+a(0)+","+a(1)+")";
+          else return llvm::createStringError("unknown strict member expression "+code);
+          auto dst="v"+std::to_string(next++);values[v.getResult(0)]=dst;line(depth+1,dst+" = "+rhs);
+        }
+        line(depth+1,cursor+" += 1");values[op.getResult(0)]=acc;continue;
+      }
       if(n=="owner_load") e="tl.load("+arg(0)+"+"+arg(1)+"*"+arg(0)+"_s0,mask="+arg(1)+"<M,other=0)";
       else if(n=="owner_store"){
         line(depth,"tl.store("+arg(0)+"+"+arg(1)+"*"+arg(0)+"_s0,"+arg(2)+",mask="+arg(1)+"<M)");

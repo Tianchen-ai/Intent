@@ -10,6 +10,13 @@ def LaneWrite : RowInst<"write"> {let arguments=(ins AnyMemRef:$dest,Index:$row,
 def ValueExpr : RowInst<"apply"> {let arguments=(ins Variadic<AnyType>:$inputs,StrAttr:$kind);let results=(outs AnyType:$result);}
 def StepYield : RowInst<"yield",[Terminator]> {let arguments=(ins Variadic<AnyType>:$values);}
 def OwnerRead : RowInst<"owner_read"> {let arguments=(ins AnyMemRef:$source,Index:$row);let results=(outs AnyType:$value);}
+def MojoSegmentFold : RowInst<"segment_fold",[SingleBlock]> {
+  let arguments=(ins AnyMemRef:$offsets,Index:$row,Index:$column);
+  let results=(outs AnyVectorOfAnyRank:$values);let regions=(region AnyRegion:$body);
+}
+def MojoSegmentSize : RowInst<"segment_size"> {
+  let arguments=(ins AnyMemRef:$offsets,Index:$row,Index:$column);let results=(outs AnyVectorOfAnyRank:$values);
+}
 def OwnerWrite : RowInst<"owner_write"> {let arguments=(ins AnyMemRef:$destination,Index:$row,AnyType:$value);}
 def MojoIndirectRead : Op<RowMojo_Dialect,"indexed_read"> {
   let arguments=(ins AnyMemRef:$table,AnyMemRef:$ids,Index:$row,Index:$col);

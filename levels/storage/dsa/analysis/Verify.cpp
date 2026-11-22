@@ -268,7 +268,7 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
                      : "columns"))
       return WalkResult::interrupt();
     if (!legalSchedule(o->getRegion(2).front(), depth,
-                       resident ? "participant_stride" : "tile_extent",persistent))
+                       d.contains("independent_columns")?"owned_tile":resident ? "participant_stride" : "tile_extent",persistent))
       return WalkResult::interrupt();
     for (auto *window : {&fetch.front(), &body.front()})
       if (window->getName().getStringRef() != "dsa.window" ||
@@ -289,6 +289,13 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
     SmallVector<Value> writes;
     for (auto &item : body) {
       auto name = item.getName().getStringRef();
+      if(name=="block.segment_size" || name=="block.segment_fold"){
+        auto *window=&body.front();
+        if(!llvm::equal(item.getOperands().drop_front(),window->getResults()) ||
+           cast<MemRefType>(item.getOperand(0).getType()).getRank()!=1 ||
+           !cast<MemRefType>(item.getOperand(0).getType()).getElementType().isInteger(32))
+          return item.emitError("segment bounds must use the complete phase window"),WalkResult::interrupt();
+      }
       if(name=="dsa.owner_write" || name=="dsa.owner_read"){
         auto owner=fn->getAttrOfType<IntegerAttr>("kir.owner_axis");
         auto slot=dyn_cast<BlockArgument>(item.getOperand(0));

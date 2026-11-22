@@ -148,6 +148,46 @@ class CanonicalTask {
       auto ty=spelling(t);
       if(n=="read_panel" || n=="read_owner"){
         terms[v]=inst("admit",{memberSlice(op,index,n=="read_owner")},ty);
+      } else if(n=="ordered_sum" || n=="segment_length"){
+        auto *task=sweep.getParentOp();
+        auto flat=cast<MemRefType>(task->getOperand(task->getAttrOfType<IntegerAttr>("domain_arg").getInt()).getType()).getRank()==1;
+        Term owner=inst("binary",{origin,flat?index:Term{"%r","index"}},"index","kind=\"add\"");
+        auto read=[&](Value source,ArrayRef<Term> coords){
+          auto view=cast<MemRefType>(source.getType());auto elem=printType(view.getElementType());
+          SmallVector<Term> args{terms.lookup(source)};
+          args.append(coords.begin(),coords.end());
+          SmallVector<std::string> selectors(coords.size(),"\"index\"");
+          auto address=inst("slice",args,"!weft_kernel.slice<!weft_kernel.encoding<\""+elem+"\",\"dense\",\"dense."+elem+"\",[]>,[],[]>",
+                            "selectors=["+llvm::join(selectors,",")+"]");
+          return inst("admit",{address},spelling(view.getElementType()));
+        };
+        Term lo=inst("cast",{read(op.getOperand(0),{owner})},"index");
+        Term next=inst("binary",{owner,{"%step","index"}},"index","kind=\"add\"");
+        Term hi=inst("cast",{read(op.getOperand(0),{next})},"index");
+        if(n=="segment_length"){
+          terms[v]=inst("cast",{inst("binary",{hi,lo},"index","kind=\"sub\"")},"f32");
+        } else {
+          auto &bb=op.getRegion(0).front();
+          std::string tag="%seg"+std::to_string(serial++);
+          Term member{tag+"_i","index"},carry{tag+"_a","f32"};
+          terms[bb.getArgument(0)]=member;terms[bb.getArgument(1)]=index;
+          auto zero=inst("constant",{},"f32","value=0.0 : f32");
+          s<<tag<<"=scf.for "<<member.id<<" = "<<lo.id<<" to "<<hi.id<<" step %step iter_args("<<carry.id<<"="<<zero.id<<")->(f32){\n";
+          for(auto &scalar:bb){
+            auto code=scalar.getName().stripDialect();
+            if(code=="member_load"){
+              SmallVector<Term> coords;
+              for(auto i:scalar.getOperands().drop_front()){auto t=terms.lookup(i);coords.push_back(t.type=="index"?t:inst("cast",{t},"index"));}
+              terms[scalar.getResult(0)]=read(scalar.getOperand(0),coords);
+            }else if(code=="term"){
+              auto total=inst("binary",{carry,terms.lookup(scalar.getOperand(0))},"f32","kind=\"add\"");
+              s<<"scf.yield "<<total.id<<" : f32\n}\n";
+            }else if(code=="mul" || code=="add")
+              terms[scalar.getResult(0)]=inst("binary",{terms.lookup(scalar.getOperand(0)),terms.lookup(scalar.getOperand(1))},"f32","kind=\""+code.str()+"\"");
+            else return llvm::createStringError("illegal ordered member operation "+code);
+          }
+          terms[v]={tag,"f32"};
+        }
       } else if(n=="scan_sum"){
         auto &carry=carries[cursor];carry=inst("binary",{{prefix+"_p"+std::to_string(cursor),ty},terms.lookup(op.getOperand(0))},ty,"kind=\"add\"");
         terms[v]=carry;++cursor;
@@ -361,6 +401,11 @@ public:
         t.replace(t.find("[-1,-2]"),7,"["+std::to_string(count.getInt())+",-2]");
       if(fn.getArgAttr(i,"weft_host.task_indices"))
         t.replace(t.find("[-2],[2]"),8,"[-1],[1]");
+      if(auto sizes=fn.getArgAttrOfType<DenseI64ArrayAttr>(i,"weft_host.indirect_extents")){
+        SmallVector<std::string> bound;for(auto d:sizes.asArrayRef())bound.push_back(std::to_string(d));
+        auto at=t.rfind(">,[")+2;
+        t.replace(at,t.find(']',at)-at+1,"["+llvm::join(bound,",")+"]");
+      }
       if(ownerAxis && rank){
         rank=a->getArray("dims")->size();
         SmallVector<std::string> shape,axes;
@@ -442,7 +487,7 @@ public:
         return e;
     } else
       for (auto &sweep : bb.without_terminator()) {
-        if(sweep.hasAttr("weft_host.prefix_carry")){
+        if(sweep.hasAttr("weft_host.prefix_carry") || sweep.hasAttr("weft_host.segment_loop")){
           if(auto error=ownerSweep(sweep))return error;
           continue;
         }
@@ -502,6 +547,7 @@ llvm::Expected<std::string> taskSource(Operation *op,
 }
 
 std::string hostSource(Operation *dispatch, const llvm::json::Array &abi) {
+  bool members=dispatch->hasAttr("cpu.member_tasks");
   auto slots =
       dispatch->getAttrOfType<DenseI64ArrayAttr>("weft_host.slot_ranks");
   auto symbol = dispatch->getAttrOfType<StringAttr>("task_symbol").str();
@@ -534,7 +580,8 @@ std::string hostSource(Operation *dispatch, const llvm::json::Array &abi) {
       if(owner || rank<=2 || axis>=rank-2)strides.push_back(swap ? n + "s" + std::to_string(1 - axis) : stride);
     }
     auto fn=dispatch->getParentOfType<func::FuncOp>();
-    if(fn.getArgAttr(i,"weft_host.table_rows"))args.push_back(n);
+    if(fn.getArgAttr(i,"weft_host.table_rows") || fn.getArgAttr(i,"weft_host.indirect_extents"))args.push_back(n);
+    else if(members && i==dispatch->getAttrOfType<IntegerAttr>("domain_arg").getInt())args.push_back(n+"+start*"+n+"s0");
     else if(fn.getArgAttr(i,"weft_host.task_indices"))args.push_back(n+"+start*"+n+"s0");
     else if(owner && rank)args.push_back(n+"+start*"+n+"s"+std::to_string(rank==1?0:owner.getInt()));
     else if(rank>2){
@@ -544,8 +591,8 @@ std::string hostSource(Operation *dispatch, const llvm::json::Array &abi) {
     }else args.push_back(n +
                    (rank == 2 ? " + start*" + n + (swap ? "s1" : "s0") : ""));
   }
-  args.push_back("count");
-  args.push_back("cols");
+  args.push_back(members?"1":"count");
+  args.push_back(members?"count":"cols");
   args.push_back("panel ? panel : cols");
   if (dispatch->getAttrOfType<BoolAttr>("weft_host.absolute_origin").getValue())
     args.push_back("start");
@@ -569,6 +616,7 @@ std::string hostSource(Operation *dispatch, const llvm::json::Array &abi) {
   if(walk=="destination")prefix+="int64_t t=rows;rows=cols;cols=t;t=a0s0;a0s0=a0s1;a0s1=t;t=a1s0;a1s0=a1s1;a1s1=t;\n";
   // A worker owns a contiguous range of complete grains. Give its native
   // kernel the full interval, splitting only at a projected view boundary.
+  if(members)prefix+="rows=cols;\n";
   prefix += "int64_t groups=1+(rows-1)/grain; int64_t bins=groups<workers?groups:workers;\n";
   return prefix+"#pragma omp parallel for num_threads(bins) "
          "schedule(static) if(workers>1)\n"

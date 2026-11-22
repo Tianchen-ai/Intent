@@ -1,4 +1,5 @@
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
+#include "intentdsl/levels/algorithm/kir/ir/Segment.h"
 #include "intentdsl/levels/algorithm/kir/ir/ProjectedLayout.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/StringSwitch.h"
@@ -78,6 +79,14 @@ LogicalResult verifyLoops(ModuleOp m, const TargetProfile &p, bool callable) {
            view.getElementType()!=val.getType() || op.getOperand(1)!=task.getRegion(0).front().getArgument(0))
           return op.emitError("invalid task-owned scalar view");
         writes+=write;
+      } else if(code=="mojo_row.segment_fold" || code=="mojo_row.segment_size"){
+        if(code=="mojo_row.segment_fold" && op.hasAttr("feature_vector")!=bool(intentdsl::kir::contiguousFeatureRead(&op)))
+          return op.emitError("feature SIMD must consume contiguous feature coordinates");
+        auto view=cast<MemRefType>(op.getOperand(0).getType());
+        if(view.getRank()!=1 || !view.getElementType().isInteger(32) ||
+           op.getOperand(1)!=task.getRegion(0).front().getArgument(0) || op.getOperand(2)!=bb.getArgument(0) ||
+           op.getResult(0).getType()!=VectorType::get({w},Float32Type::get(m.getContext())))
+          return op.emitError("invalid segment endpoints or SIMD output ownership");
       } else if(code=="mojo_row.indexed_read"){
         auto table=cast<MemRefType>(op.getOperand(0).getType()),ids=cast<MemRefType>(op.getOperand(1).getType());
         if(table.getRank()!=2 || ids.getRank()!=1 || !ids.getElementType().isSignlessIntOrIndex() ||

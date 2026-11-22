@@ -20,6 +20,7 @@ void supplyCost(Unit &u) {
                vector = intentdsl::quantity(ctx, "compute", "lane/ns");
           auto startup = intentdsl::quantity(ctx, "first_io", "ns");
           auto d = cast<DictionaryAttr>(c.value);
+          double segmentWork=facts->segmentReads(op);
           auto depth = d.getAs<IntegerAttr>("depth").getInt();
           double participants = d.getAs<IntegerAttr>("participants").getInt();
           auto configs = op->getAttrOfType<ArrayAttr>("block.configs");
@@ -42,9 +43,14 @@ void supplyCost(Unit &u) {
             double group =
                 cast<DictionaryAttr>(*it).getAs<IntegerAttr>("rows").getInt();
             double steps = std::ceil(std::ceil(m / group) / participants);
+            if(d.contains("independent_columns")){
+              auto width=cast<DictionaryAttr>(*it).getAs<IntegerAttr>("width").getInt();
+              steps=std::ceil(std::ceil(m/group)*std::ceil(n/width)/participants);
+            }
             RowPrediction pred;
             pred.terms = dma->terms;
             pred.terms["steps"] = {steps, "count"};
+            if(segmentWork)pred.terms["packed_member_reads"]={segmentWork,"B"};
             double merges = group * std::max(0., n - 1.) * summaries;
             pred.terms["summary_merges_per_group"] = {merges, "count"};
             pred.terms["serial_prefix_adds"]={group*std::max(0.,n-1.)*scans,"count"};
@@ -65,6 +71,10 @@ void supplyCost(Unit &u) {
               pred.terms["wait"] = {depth == 2 ? steps * *sync : 0., "ns"};
               pred.timeNs = *launch + (steps ? *startup : 0.) + steps * (fetch + compute + write) -
                             overlap + (depth == 2 ? steps * *sync : 0.);
+              if(segmentWork){
+                auto rate=intentdsl::quantity(ctx,"read_1","B/ns");
+                if(rate)*pred.timeNs+=segmentWork/ *rate;
+              }
               if (!e.timeNs || *pred.timeNs < *e.timeNs)
                 e.timeNs = pred.timeNs;
             }

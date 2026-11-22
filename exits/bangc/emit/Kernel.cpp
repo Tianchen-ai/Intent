@@ -1,4 +1,5 @@
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
+#include "intentdsl/levels/execution/block/ir/Grid.h"
 #include "intentdsl/levels/algorithm/kir/ir/Literal.h"
 #include "compilerinfra/Assembly.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -29,6 +30,7 @@ class Source {
   llvm::raw_ostream &o;
   func::FuncOp fn;
   bool resident;
+  bool independent() {return fn->getAttrOfType<DictionaryAttr>("dsa.layout").contains("independent_columns");}
   unsigned depth;
   llvm::DenseMap<Value, Text> names;
   unsigned seq = 0;
@@ -137,7 +139,7 @@ class Source {
   void issue(Block &fetch, const Text &iteration, const Text &slot) {
     line("{ long long incoming=" + iteration + ";");
     line(resident ? "long long row0=incoming*R, col=0;"
-                  : "long long row0=group*R, col=incoming*W;");
+                  : independent()?"long long row0=(group/((N+W-1)/W))*R,col=incoming*W;":"long long row0=group*R, col=incoming*W;");
     line("int live=(int)((N-col)<W?(N-col):W);");
     for (auto &op : fetch.without_terminator()) {
       if (op.getName().getStringRef() == "dsa.window" || op.getName().getStringRef()=="dsa.member_axis" || op.getName().getStringRef()=="dsa.slab_axis" || op.getName().getStringRef()=="dsa.lookup_axis")
@@ -219,6 +221,10 @@ class Source {
       auto n = op.getName().stripDialect();
       auto arg = [&](unsigned i) { return name(op.getOperand(i)); };
       if (n == "range") {
+        if(op.getAttrOfType<StringAttr>("source")=="owned_tile"){
+          names[op.getResult(0)]="(group%((N+W-1)/W))";names[op.getResult(1)]=name(op.getResult(0))+"+1";names[op.getResult(2)]="1";
+          continue;
+        }
         bool tasks =
             op.getAttrOfType<StringAttr>("source") == "participant_stride";
         for (auto [i, expr] : llvm::enumerate(SmallVector<Text>{
@@ -265,7 +271,7 @@ class Source {
   }
   llvm::Error compute(Block &body, const Text &carry, bool packed) {
     line(resident ? "long long row0=pos*R,col=0;"
-                  : "long long row0=group*R,col=pos*W;");
+                  : independent()?"long long row0=(group/((N+W-1)/W))*R,col=pos*W;":"long long row0=group*R,col=pos*W;");
     line("int live=(int)((N-col)<W?(N-col):W);");
     if(packed) {
       line("int members=live==P?(int)((M-row0)<R?(M-row0):R):1;");
@@ -351,6 +357,42 @@ class Source {
       auto type = ctype(val.getType());
       if (vec)
         line("auto *" + id + "=(" + type + "*)" + address(inst) + ";");
+      if(prim=="feature_panel_sum"){
+        auto offset=in(0);auto &bb=inst.getRegion(0).front();
+        auto v=name(bb.back().getOperand(0).getDefiningOp()->getOperand(0));
+        line("{int a="+offset+"[(row0+j)*"+offset+"s0], b="+offset+"[(row0+j+1)*"+offset+"s0];");
+        line("float *panel=(float*)(storage+BYTES)-16*P;__bang_write_value("+id+",lanes,0.f);");
+        line("for(int i=a;i<b;i+=16){int count=(b-i<16?b-i:16);auto *src="+v+"+i*"+v+"s0+col*"+v+"s1;");
+        line("if("+v+"s1==1 && live==P && "+v+"s0==P)__memcpy(panel,src,count*P*sizeof(float),GDRAM2NRAM);");
+        line("else for(int h=0;h<count;++h){if("+v+"s1==1)__memcpy(panel+h*P,src+h*"+v+"s0,live*sizeof(float),GDRAM2NRAM);else for(int k=0;k<live;++k)panel[h*P+k]=src[h*"+v+"s0+k*"+v+"s1];}");
+        line("for(int h=0;h<count;++h)__bang_add("+id+","+id+",panel+h*P,lanes);}}");
+        continue;
+      }
+      if(prim=="ordered_members" || prim=="segment_size"){
+        bool flat=cast<MemRefType>(fn.getArgument(fn->getAttrOfType<IntegerAttr>("kir.domain_arg").getInt()).getType()).getRank()==1;
+        auto offsets=in(0);Text owner=flat?"(col+k)":"(row0+j)";
+        line("for(int k=0;k<live;++k){int lo="+offsets+"["+owner+"*"+offsets+"s0],hi="+offsets+"[("+owner+"+1)*"+offsets+"s0];");
+        if(prim=="segment_size")line(id+"[k]=(float)(hi-lo);}");
+        else{
+          line("float acc=0.f;for(int member=lo;member<hi;++member){");
+          auto &terms=inst.getRegion(0).front();
+          names[terms.getArgument(0)]="member";names[terms.getArgument(1)]="(col+k)";
+          for(auto &v:terms){
+            auto code=v.getName().stripDialect();auto a=[&](unsigned i){return name(v.getOperand(i));};
+            if(code=="term"){line("acc+="+a(0)+";");break;}
+            Text expression;
+            if(code=="member_load"){
+              Text idx="0";for(unsigned i=1;i<v.getNumOperands();++i)idx+="+("+a(i)+")*"+a(0)+"s"+std::to_string(i-1);
+              expression=a(0)+"["+idx+"]";
+            }else if(code=="add" || code=="mul")expression=a(0)+(code=="mul"?"*":"+")+a(1);
+            else return llvm::createStringError("illegal ordered member operation "+code);
+            auto dst=fresh();names[v.getResult(0)]=dst;
+            line(Text(code=="mul"?"volatile ":"")+ctype(v.getResult(0).getType())+" "+dst+"="+expression+";");
+          }
+          line("}"+id+"[k]=acc;}");
+        }
+        continue;
+      }
       if(prim=="row_inclusive_sum"){
         line("tile_prefix("+id+","+in(0)+",("+type+"*)"+address(inst,"bangc.scan_scratch")+",lanes,live);");
         continue;
@@ -616,8 +658,9 @@ llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
     return abi.takeError();
   auto guard = fn->getAttrOfType<DenseI64ArrayAttr>("block.guard");
   llvm::json::Array axes;
-  for (auto a : fn->getAttrOfType<ArrayAttr>("block.grid"))
-    axes.push_back(cast<StringAttr>(a).str());
+  Builder builder(fn.getContext());
+  auto mapping=layout.contains("independent_columns")?intentdsl::block::grid(builder,true):fn->getAttrOfType<ArrayAttr>("block.grid");
+  for(auto expr:mapping)axes.push_back(intentdsl::block::gridExpression(expr));
   out << llvm::json::Value(llvm::json::Object{
       {"version", 2},
       {"source", program},

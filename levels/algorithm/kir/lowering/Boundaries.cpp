@@ -1,3 +1,4 @@
+#include "intentdsl/levels/algorithm/kir/ir/Segment.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/Dialect.h"
@@ -102,6 +103,22 @@ LogicalResult verifyRowComputation(func::FuncOp fn, Block &row, ValueRange captu
       auto t=dyn_cast<RankedTensorType>(op.getOperand(0).getType());
       if(!t || t.getRank()!=1 || (!t.getElementType().isF32() && !t.getElementType().isInteger(32)) ||
          op.getResult(0).getType()!=t)return op.emitError("expected inclusive prefix sum of one member vector");
+      continue;
+    }
+    if(name=="ordered_sum" || name=="segment_length"){
+      auto slot=llvm::find(captures,op.getOperand(0));
+      if(slot==captures.end() || op.getOperand(1)!=row.getArgument(0) || axes.empty() || axes.size()>2)
+        return op.emitError("segmented computation requires a row owner");
+      const auto *desc=(*args)[slot-captures.begin()].getAsObject();
+      auto od=desc->getArray("dims");
+      if(!od || od->size()!=1 || desc->getString("dtype")!="i32" || desc->getString("direction")!="In" ||
+         !axes.front().getAsInteger() || !od->front().getAsInteger() || *od->front().getAsInteger()<=*axes.front().getAsInteger())
+        return op.emitError("offsets must provide both endpoints for each row");
+      if(name=="segment_length")continue;
+      if(failed(kir::verifyMemberExpression(&op,[&](Value v){
+        auto slot=llvm::find(captures,v);
+        return slot!=captures.end() && (*args)[slot-captures.begin()].getAsObject()->getString("direction")=="In";
+      })))return failure();
       continue;
     }
     if(name=="gather_row"){

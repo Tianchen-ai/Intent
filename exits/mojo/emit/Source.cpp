@@ -150,6 +150,45 @@ public:
             line(3, acc + " = " +
                         (sum ? acc + " + " + arg(0)
                              : "max(" + acc + "," + arg(0) + ")"));
+        } else if(code=="segment_fold" || code=="segment_size"){
+          bool flat=cast<MemRefType>(fn.getArgument(task->getAttrOfType<IntegerAttr>("domain_arg").getInt()).getType()).getRank()==1;
+          auto owner=flat?(task->hasAttr("cpu.member_tasks")?"(r+j+lane)":"(j+lane)"):arg(1), offsets=arg(0);
+          auto address=[&](std::string i){return "Int("+offsets+"[unsafe_offset=("+i+")*Int("+offsets+"s0)])";};
+          line(3,"var "+lhs+" = SIMD[DType.float32,"+lanes+"](0)");
+          if(op.hasAttr("feature_vector")){
+            auto &terms=op.getRegion(0).front();
+            auto ptr=var(terms.back().getOperand(0).getDefiningOp()->getOperand(0));
+            line(3,"for member in range("+address("r")+","+address("r+1")+"):");
+            auto base="member*Int("+ptr+"s0)+j*Int("+ptr+"s1)";
+            line(4,"if "+ptr+"s1 == 1:");
+            line(5,lhs+" += "+ptr+".unsafe_offset("+base+").unsafe_load[width="+lanes+"]()");
+            line(4,"else:");
+            line(5,"comptime for lane in range("+lanes+"):");
+            line(6,lhs+"[lane] += "+ptr+"[unsafe_offset="+base+"+lane*Int("+ptr+"s1)]");
+            vars[op.getResult(0)]=lhs;continue;
+          }
+          line(3,"comptime for lane in range("+lanes+"):");
+          auto start=address(owner),end=address(owner+"+1");
+          if(code=="segment_size")line(4,lhs+"[lane] = Float32("+end+"-"+start+")");
+          else{
+            auto &terms=op.getRegion(0).front();
+            vars[terms.getArgument(0)]="member";vars[terms.getArgument(1)]="(j+lane)";
+            auto acc=temp();line(4,"var "+acc+" = Float32(0)");line(4,"for member in range("+start+","+end+"):");
+            for(auto &v:terms){
+              auto n=v.getName().stripDialect();auto a=[&](unsigned i){return var(v.getOperand(i));};
+              if(n=="term"){line(5,acc+" += "+a(0));break;}
+              std::string rhs;
+              if(n=="member_load"){
+                auto ptr=a(0);std::string index="0";
+                for(unsigned i=1;i<v.getNumOperands();++i)index+="+Int("+a(i)+")*Int("+ptr+"s"+std::to_string(i-1)+")";
+                rhs=ptr+"[unsafe_offset="+index+"]";
+              }else if(n=="mul" || n=="add")rhs=a(0)+(n=="mul"?" * ":" + ")+a(1);
+              else return llvm::createStringError("illegal scalar member expression "+n);
+              auto dst=temp();vars[v.getResult(0)]=dst;line(5,"var "+dst+" = "+rhs);
+            }
+            line(4,lhs+"[lane] = "+acc);
+          }
+          vars[op.getResult(0)]=lhs;
         } else if(code=="indexed_read"){
           auto table=arg(0),ids=arg(1);
           auto base="Int("+ids+"[unsafe_offset=r*Int("+ids+"s0)])*Int("+table+"s0)";
