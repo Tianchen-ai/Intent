@@ -1,5 +1,6 @@
 #include "intentdsl/levels/algorithm/kir/ir/Permutation.h"
 #include "intentdsl/levels/execution/block/ir/Access.h"
+#include "intentdsl/levels/execution/block/ir/Contraction.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/RowSemantics.h"
 #include "intentdsl/levels/execution/block/decisions/Verify.h"
@@ -39,8 +40,10 @@ struct Form : PassWrapper<Form, OperationPass<ModuleOp>> {
 };
 } // namespace
 void registerCost(Unit &);
+void matrixCost(Unit &);
 void bind(Unit &unit) {
   registerCost(unit);
+  matrixCost(unit);
   unit.dialects = [](DialectRegistry &r) {
     r.insert<intentdsl::iblock::IblockDialect>();
   };
@@ -132,6 +135,13 @@ void bind(Unit &unit) {
             return llvm::Error::success();
           },
           [phase](ModuleOp m, const TargetProfile &profile) {
+            if(auto fn=*m.getOps<func::FuncOp>().begin();intentdsl::kir::matrixDomain(fn)){
+              auto &region=fn.front().front();
+              if(phase=="realized" || phase=="normalized")return intentdsl::block::verifyTiledMatrix(fn,profile,"block");
+              if(region.hasAttr("block.output_tile") || region.hasAttr("block.contraction")!=(phase=="decided"))
+                return region.emitError("contraction at incorrect decision boundary"),failure();
+              return intentdsl::kir::verifyMatrix(fn,"block",true);
+            }
             unsigned loops = 0, pids = 0, pending = 0;
             m.walk([&](Operation *op) {
               loops += op->getName().getStringRef() == "block.parallel";

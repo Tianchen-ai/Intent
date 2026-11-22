@@ -1,4 +1,5 @@
 #include "../capabilities/Index.h"
+#include "intentdsl/levels/execution/block/ir/Contraction.h"
 #include "intentdsl/levels/algorithm/kir/ir/ProjectedLayout.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/execution/block/ir/Access.h"
@@ -14,6 +15,16 @@ void partitionOwners(func::FuncOp,const intentdsl::CallFacts &);
 llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &);
 llvm::Error emit(ModuleOp, llvm::raw_pwrite_stream &);
 namespace {
+DenseI64ArrayAttr adjacentScaleGroups(Operation *op,func::FuncOp fn){
+  SmallVector<int64_t> slots;
+  for(unsigned pos:{0u,2u}){
+    auto i=cast<BlockArgument>(op->getOperand(pos)).getArgNumber();
+    auto s=fn.getArgAttrOfType<DenseI64ArrayAttr>(i,"block.strides");
+    int axis=pos==0?1:0;
+    if(s && s.size()==3 && s[axis]==32*s[axis+1])slots.push_back(i);
+  }
+  return Builder(fn.getContext()).getDenseI64ArrayAttr(slots);
+}
 bool rectangularSlab(Operation *op,func::FuncOp fn){
   auto arg=dyn_cast<BlockArgument>(op->getOperand(0));
   auto owner=fn->getAttrOfType<IntegerAttr>("kir.owner_axis");
@@ -26,9 +37,9 @@ bool rectangularSlab(Operation *op,func::FuncOp fn){
 }
 struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(Lower)
-  bool tma;
+  bool tma, scaledMma;
   intentdsl::CallFacts facts;
-  Lower(bool permit,const intentdsl::CallFacts &f) : tma(permit),facts(f) {}
+  Lower(const intentdsl::cutile::ArrayIndices &indices,const intentdsl::CallFacts &f) : tma(indices.permitTma),scaledMma(indices.scaledMma),facts(f) {}
   void runOnOperation() final {
     auto fn=*getOperation().getOps<func::FuncOp>().begin();
     if(failed(intentdsl::specializeProjectedLayout(fn,facts,"ct_src",true))){signalPassFailure();return;}
@@ -44,6 +55,10 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
                        "ct_src." +
                            (slab ? (code=="load"?"gather_slab":"scatter_slab") : access ? ("tile_" + code).str() : code.str()));
       s.addAttributes(op->getAttrs());
+      if(code=="scaled_contract"){
+        s.addAttribute("ct_src.scaled_engine",b.getStringAttr(scaledMma?"mx":"wide"));
+        s.addAttribute("ct_src.flat_groups",adjacentScaleGroups(op,fn));
+      }
       if(code=="sum_columns"){
         auto extent=op->getAttrOfType<IntegerAttr>("extent").getInt();
         s.addAttribute("native_panel",b.getI64IntegerAttr(std::min<uint64_t>(128,llvm::PowerOf2Ceil(std::max<int64_t>(1,extent)))));
@@ -100,6 +115,15 @@ struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
 };
 LogicalResult verify(ModuleOp module, const TargetProfile &profile,
                      bool callable) {
+  auto matrix=*module.getOps<func::FuncOp>().begin();
+  if(intentdsl::kir::matrixDomain(matrix)){
+    if(failed(intentdsl::block::verifyTiledMatrix(matrix,profile,"ct_src")))return failure();
+    auto expected=Builder(module.getContext()).getStringAttr(profile.services.get<intentdsl::cutile::ArrayIndices>()->scaledMma?"mx":"wide");
+    return success(!matrix.walk([&](Operation *op){
+      return op->getName().getStringRef()=="ct_src.scaled_contract" &&
+        (op->getAttr("ct_src.scaled_engine")!=expected || op->getAttr("ct_src.flat_groups")!=adjacentScaleGroups(op,matrix))?
+        WalkResult::interrupt():WalkResult::advance();}).wasInterrupted());
+  }
   if (failed(intentdsl::verifyMapping(module, profile, "ct_src")))
     return failure();
   auto fn = *module.getOps<func::FuncOp>().begin();
@@ -270,7 +294,7 @@ void bind(Unit &unit) {
               auto indices = p.services.get<intentdsl::cutile::ArrayIndices>();
               if (!indices)
                 return llvm::createStringError("missing array profile");
-              pm.addPass(std::make_unique<Lower>(indices->permitTma,*p.services.get<intentdsl::CallFacts>()));
+              pm.addPass(std::make_unique<Lower>(*indices,*p.services.get<intentdsl::CallFacts>()));
             }
             return llvm::Error::success();
           },

@@ -38,7 +38,8 @@ def touches(a, first, b, second):
         return False
 
     def span(v):
-        width = {"f32": 4, "i32": 4, "i64":8, "bf16": 2, "f16": 2}[v.dtype]
+        width = {"f32": 4, "i32": 4, "i64":8, "bf16": 2, "f16": 2,
+                 "u8":1,"i8":1,"f8e4m3fn":1}[v.dtype]
         delta = [width * (n - 1) * s for n, s in zip(v.shape, v.strides)]
         return v.address + sum(min(d, 0) for d in delta), v.address + width + sum(
             max(d, 0) for d in delta

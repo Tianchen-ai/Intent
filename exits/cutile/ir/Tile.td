@@ -96,3 +96,7 @@ def TileSource_TicketTile : Op<TileSource,"atomic_add_at"> {let arguments=(ins A
 def TileSource_PutTile : Op<TileSource,"unique_put_at"> {let arguments=(ins AnyMemRef:$base,I32Tensor:$key,I32Tensor:$value,I1Tensor:$valid,UnitAttr:$in_bounds);}
 def TileSource_PublishOffsets : Op<TileSource,"publish_offsets"> {let arguments=(ins AnyMemRef:$offsets,AnyMemRef:$total,AnyTensor:$columns,I1Tensor:$active,I32Tensor:$prefix);}
 def TileSource_RangesAt : Op<TileSource,"fill_ranges_at"> {let arguments=(ins AnyMemRef:$out,AnyMemRef:$offsets,AnyTensor:$columns,I1Tensor:$active,I64Attr:$unit,UnitAttr:$disjoint_in_bounds);}
+include "intentdsl/levels/algorithm/kir/ir/Matrix.td"
+defm Matrix : MatrixExpressions<TileSource>;
+defm NativePanels : MatrixPanelLoop<TileSource>;
+def MatrixEnd : Op<TileSource,"end",[Terminator]>;

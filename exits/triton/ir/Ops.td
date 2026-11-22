@@ -172,3 +172,7 @@ def Itsrc_Dialect_TicketTile : Op<Itsrc_Dialect,"atomic_add_at"> {let arguments=
 def Itsrc_Dialect_PutTile : Op<Itsrc_Dialect,"unique_put_at"> {let arguments=(ins AnyMemRef:$base,I32Tensor:$key,I32Tensor:$value,I1Tensor:$valid,UnitAttr:$in_bounds);}
 def Itsrc_Dialect_PublishOffsets : Op<Itsrc_Dialect,"publish_offsets"> {let arguments=(ins AnyMemRef:$offsets,AnyMemRef:$total,AnyTensor:$columns,I1Tensor:$active,I32Tensor:$prefix);}
 def Itsrc_Dialect_RangesAt : Op<Itsrc_Dialect,"fill_ranges_at"> {let arguments=(ins AnyMemRef:$out,AnyMemRef:$offsets,AnyTensor:$columns,I1Tensor:$active,I64Attr:$unit,UnitAttr:$disjoint_in_bounds);}
+include "intentdsl/levels/algorithm/kir/ir/Matrix.td"
+defm Matrix : MatrixExpressions<Itsrc_Dialect>;
+defm NativePanels : MatrixPanelLoop<Itsrc_Dialect>;
+def MatrixEnd : Op<Itsrc_Dialect,"end",[Terminator]>;

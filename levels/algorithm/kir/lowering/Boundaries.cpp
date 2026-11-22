@@ -371,6 +371,14 @@ struct Canonicalize : PassWrapper<Canonicalize, OperationPass<ModuleOp>> {
     for(auto fn:getOperation().getOps<func::FuncOp>()) {
       auto owner=cast<BlockArgument>(fn.front().front().getOperand(0)).getArgNumber();
       fn->setAttr("kir.domain_arg", IntegerAttr::get(IntegerType::get(&getContext(),64),owner));
+      if(intentdsl::kir::matrixDomain(fn)){
+        auto &body=fn.front().front().getRegion(0).front();
+        for(auto &op:llvm::make_early_inc_range(llvm::reverse(body))){
+          // KIR's contraction expressions read immutable inputs. Only the
+          // publication writes, and its complete operand chain is live.
+          if(op.getNumResults()==1 && op.getResult(0).use_empty())op.erase();
+        }
+      }
     }
     getOperation().walk([](Operation *op) {
       if (op->getName().getStringRef() == "kir.cast" &&

@@ -40,6 +40,8 @@ class Prepared:
         self.row = self.rows[0] if len(self.rows) == 1 else None
 
     def flatten(self, values):
+        if self.artifact.data.get("matrix_views"):
+            return tuple(values)
         args = []
         for value in values:
             args.append(value)

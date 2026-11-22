@@ -1,4 +1,5 @@
 #include "intentdsl/levels/execution/block/ir/Grid.h"
+#include "intentdsl/levels/execution/block/ir/Contraction.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/algorithm/kir/ir/Literal.h"
 #include "intentdsl/levels/execution/block/ir/Access.h"
@@ -14,12 +15,14 @@ namespace CI_UNIT_NAMESPACE {
 using namespace mlir;
 using namespace compilerinfra;
 void legalize(OpPassManager &);
+llvm::Error emitMatrix(func::FuncOp,llvm::raw_pwrite_stream &);
 llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &);
 namespace {
 struct BindCallable : PassWrapper<BindCallable, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(BindCallable)
   void runOnOperation() final {
     auto fn = *getOperation().getOps<func::FuncOp>().begin();
+    if(intentdsl::kir::matrixDomain(fn))return;
     auto guard=fn->getAttrOfType<DenseI64ArrayAttr>("block.guard");
     Builder b(&getContext());
     fn->setAttr("triton_src.min_width", b.getI64IntegerAttr(guard[0]));
@@ -345,6 +348,7 @@ public:
 };
 llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
   auto fn = *m.getOps<func::FuncOp>().begin();
+  if(intentdsl::kir::matrixDomain(fn))return emitMatrix(fn,out);
   auto args = llvm::json::parse(fn->getAttrOfType<StringAttr>("kir.abi"));
   if (!args)
     return args.takeError();
@@ -406,6 +410,7 @@ void bind(Unit &unit) {
             if (!llvm::hasSingleElement(funcs))
               return failure();
             auto fn = *funcs.begin();
+            if(intentdsl::kir::matrixDomain(fn))return intentdsl::block::verifyTiledMatrix(fn,profile,"triton_src");
             if (!fn->getAttrOfType<StringAttr>("kir.abi") ||
                 !fn->getAttrOfType<ArrayAttr>("block.configs") ||
                 !fn->getAttrOfType<StringAttr>("block.topology"))

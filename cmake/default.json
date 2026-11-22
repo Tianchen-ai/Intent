@@ -2,6 +2,10 @@
   "nodes": {
     "block": {
       "decisions": {
+        "levels/execution/block::contraction": {
+          "strategies": ["levels/execution/block::matrix-tiles"],
+          "realizer": "levels/execution/block::tile-matrix"
+        },
         "levels/execution/block::structure": {
           "strategies": [
             "levels/execution/block::tuple-reduction",

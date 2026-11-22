@@ -37,8 +37,20 @@ class Call:
         self.selected = None
         self.failures = {}
         self.timings = {}
+        self.native_values = self._views(self.values)
+
+    def _views(self, values):
+        if not self.artifact.data.get("native_views"):
+            return values
+        result = list(values)
+        for slot, shape in self.artifact.data["native_views"].items():
+            result[int(slot)] = result[int(slot)].view(tuple(shape))
+        return tuple(result)
 
     def args(self, row, values):
+        if self.artifact.data.get("matrix_views"):
+            values = self.native_values if values is self.values else self._views(values)
+            return (*values,row["rows"],row["width"])
         slot=self.artifact.data.get("outer_shape_slot", -1)
         outer=values[slot].shape[:-1] if slot>=0 else ()
         columns=((-(-self.shape[1]//row["width"])),) if self.artifact.data.get("column_tiles_parameter") else ()

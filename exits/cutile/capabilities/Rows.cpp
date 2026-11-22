@@ -2,6 +2,7 @@
 #include "Index.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
+#include "intentdsl/levels/execution/block/ir/Contraction.h"
 namespace CI_UNIT_NAMESPACE {
 llvm::Expected<compilerinfra::TargetProfile>
 capabilities(const llvm::json::Object &options) {
@@ -18,6 +19,7 @@ capabilities(const llvm::json::Object &options) {
         "cuTile requires a proven array index class");
   auto indices = std::make_shared<intentdsl::cutile::ArrayIndices>();
   indices->bits = *bits;
+  indices->scaledMma=*architecture>=100;
   indices->permitTma = options.getBoolean("allow_tma").value_or(false);
   if(auto registers=options.getInteger("registers"))
     if(auto err=profile.services.facts.query("register_file",{*registers,"reg32","CUDA",llvm::json::Object{{"source","device properties"}}}))return err;
@@ -27,6 +29,14 @@ capabilities(const llvm::json::Object &options) {
     return e;
   auto table = std::make_shared<intentdsl::RowCapacity>();
   table->globalAtomicBins=true;
+  auto matrix=std::make_shared<intentdsl::block::MatrixTarget>();
+  if(*architecture==90)matrix->tiles={{32,64,32,R"({"num_ctas":1,"occupancy":2,"opt_level":3})"},
+                                      {64,128,64,R"({"num_ctas":1,"occupancy":1,"opt_level":3})"},
+                                      {64,64,256,R"({"num_ctas":1,"occupancy":1,"opt_level":3})"},
+                                      {32,64,128,R"({"num_ctas":1,"occupancy":2,"opt_level":3})"}};
+  else matrix->tiles={{16,32,32,R"({"num_ctas":1,"occupancy":2,"opt_level":3})"},
+                      {32,64,64,R"({"num_ctas":1,"occupancy":2,"opt_level":3})"}};
+  if(auto err=profile.services.provide<intentdsl::block::MatrixTarget>(matrix))return std::move(err);
   table->privateBinCapacity=options.getInteger("shared_per_block");
   table->rectangularProjectedRows = true;
   // Bound tileiras expansion of repeated collectives. The limit admits a

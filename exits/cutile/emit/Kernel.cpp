@@ -1,4 +1,5 @@
 #include "intentdsl/levels/execution/block/ir/Grid.h"
+#include "intentdsl/levels/execution/block/ir/Contraction.h"
 #include "llvm/ADT/StringExtras.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/algorithm/kir/ir/Literal.h"
@@ -408,6 +409,10 @@ public:
 } // namespace
 llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
   auto fn = *m.getOps<func::FuncOp>().begin();
+  if(intentdsl::kir::matrixDomain(fn)){
+    extern llvm::Error emitMatrix(func::FuncOp,llvm::raw_pwrite_stream &);
+    return emitMatrix(fn,out);
+  }
   auto abi = llvm::json::parse(fn->getAttrOfType<StringAttr>("kir.abi"));
   if (!abi)
     return abi.takeError();

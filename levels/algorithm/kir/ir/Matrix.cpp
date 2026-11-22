@@ -9,11 +9,15 @@ bool matrixDomain(func::FuncOp fn) {
          fn.front().front().getName().stripDialect()=="matrix_domain";
 }
 
-LogicalResult verifyMatrix(func::FuncOp fn,StringRef dialect,bool canonical){
-  auto &domain=fn.front().front();
-  if(!llvm::hasSingleElement(fn.getBody()) || fn.getNumResults() || fn.front().getOperations().size()!=2 ||
-     domain.getName().getDialectNamespace()!=dialect || !llvm::hasSingleElement(domain.getRegion(0)))
+LogicalResult verifyMatrix(func::FuncOp fn,StringRef dialect,bool canonical,MatrixExpression expression){
+  if(!llvm::hasSingleElement(fn.getBody()) || fn.getNumResults() || fn.front().getOperations().size()!=2)
     return fn.emitError("expected a single destination contraction region");
+  return verifyMatrixBody(fn,fn.front().front(),dialect,canonical,expression);
+}
+LogicalResult verifyMatrixBody(func::FuncOp fn,Operation &domain,StringRef dialect,bool canonical,MatrixExpression expression){
+  if(domain.getName().stripDialect()!="matrix_domain" || domain.getName().getDialectNamespace()!=dialect ||
+     !llvm::hasSingleElement(domain.getRegion(0)))
+    return fn.emitError("expected a verified contraction body");
   auto abi=fn->getAttrOfType<StringAttr>("kir.abi");
   if(!abi)return fn.emitError("missing contraction signature");
   auto parsed=llvm::json::parse(abi.getValue());
@@ -45,13 +49,19 @@ LogicalResult verifyMatrix(func::FuncOp fn,StringRef dialect,bool canonical){
   auto &body=domain.getRegion(0).front();unsigned dots=0,stores=0;
   auto dtype=[&](Value v){return (*args)[cast<BlockArgument>(v).getArgNumber()].getAsObject()->getString("dtype");};
   auto elem=[](Value v){return cast<ShapedType>(v.getType()).getElementType();};
-  for(auto &op:body){
+  for(auto &entry:body){
+    auto *resolved=expression?expression(entry):&entry;
+    if(!resolved)return entry.emitError("invalid contraction region");
+    auto &op=*resolved;
     if(op.getName().getDialectNamespace()!=dialect)return op.emitError("foreign matrix expression");
     auto name=op.getName().stripDialect();
     if(name=="end")continue;
+    if(canonical && entry.getNumResults()==1 && entry.getResult(0).use_empty())
+      return entry.emitError("unused canonical contraction expression");
     if(stores)return op.emitError("operation follows matrix publication");
     for(auto v:op.getOperands())if(!shapes.count(v) || (v==output && name!="publish_matrix"))
       return op.emitError("unexpected matrix value or read from output");
+    if(!op.getNumOperands())return op.emitError("unrecognized matrix instruction");
     auto a=op.getOperand(0);auto A=shapes.lookup(a);Shape shape;Type type;
     if(name=="contract"){
       auto b=op.getOperand(1);auto B=shapes.lookup(b);
@@ -104,7 +114,10 @@ LogicalResult verifyMatrix(func::FuncOp fn,StringRef dialect,bool canonical){
     }else if(name=="add_columns"){
       if(A.empty() || shapes.lookup(op.getOperand(1))!=Shape{A.back()} || elem(a)!=elem(op.getOperand(1)))return op.emitError("incompatible column bias");
       shape=A;type=elem(a);
-    }else if(name=="convert_matrix"){shape=A;type=elem(op.getResult(0));}
+    }else if(name=="convert_matrix"){shape=A;type=elem(op.getResult(0));
+      if(!type.isF16() && !type.isBF16() && !type.isF32() && !type.isInteger(32))
+        return op.emitError("unsupported matrix epilogue conversion");
+    }
     else if(name=="publish_matrix"){
       if(a!=output || shapes.lookup(op.getOperand(1))!=A || elem(op.getOperand(1))!=elem(a))
         return op.emitError("result shape or element type disagrees with destination");
@@ -114,7 +127,7 @@ LogicalResult verifyMatrix(func::FuncOp fn,StringRef dialect,bool canonical){
     if(rt.getRank()!=int64_t(shape.size()) || rt.getElementType()!=type)return op.emitError("matrix result type mismatch");
     for(auto [i,d]:llvm::enumerate(rt.getShape()))
       if(!ShapedType::isDynamic(d) && shape[i].getAsInteger()!=d)return op.emitError("static matrix extent mismatch");
-    shapes[result]=std::move(shape);
+    shapes[entry.getResult(0)]=std::move(shape);
   }
   if(dots!=1 || stores!=1 || body.empty() || body.back().getName().stripDialect()!="end")
     return domain.emitError("expected one complete contraction and publication");

@@ -32,3 +32,13 @@ multiclass MatrixExpressions<Dialect d> {
     let arguments=(ins AnyMemRef:$output,AnyRankedTensor:$values);
   }
 }
+
+// Materialized by execution models. One complete accumulator is yielded after
+// all K panels; only this value is visible to bias, conversion or publication.
+multiclass MatrixPanelLoop<Dialect d> {
+  def Fold : Op<d,"panel_fold",[SingleBlock]> {
+    let arguments=(ins I64Attr:$bound,I64Attr:$step);
+    let results=(outs AnyRankedTensor:$accumulated);let regions=(region AnyRegion:$panel);
+  }
+  def Yield : Op<d,"panel_yield",[Terminator]> {let arguments=(ins AnyRankedTensor:$partial);}
+}

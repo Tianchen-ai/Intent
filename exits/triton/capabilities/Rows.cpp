@@ -1,6 +1,7 @@
 #include "intentdsl/levels/algorithm/kir/ir/Performance.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
+#include "intentdsl/levels/execution/block/ir/Contraction.h"
 #include "llvm/Support/MathExtras.h"
 
 namespace CI_UNIT_NAMESPACE {
@@ -14,6 +15,14 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
     return llvm::createStringError("unsupported Triton GPU architecture");
   auto caps = std::make_shared<intentdsl::RowCapacity>();
   caps->globalAtomicBins=true;
+  auto matrix=std::make_shared<intentdsl::block::MatrixTarget>();
+  if(*arch==90)matrix->tiles={{32,64,32,R"({"num_warps":4,"num_stages":3})"},
+                              {64,64,32,R"({"num_warps":4,"num_stages":3})"},
+                              {64,128,64,R"({"num_warps":8,"num_stages":3})"}};
+  else matrix->tiles={{16,32,32,R"({"num_warps":4,"num_stages":2})"},
+                      {32,64,32,R"({"num_warps":4,"num_stages":2})"},
+                      {64,64,64,R"({"num_warps":4,"num_stages":2})"}};
+  if(auto err=profile.services.provide<intentdsl::block::MatrixTarget>(matrix))return std::move(err);
   caps->nativePrivateHistogram=true;
   caps->privateBinCapacity=options.getInteger("shared_per_block");
   caps->independentWidths = {32};
