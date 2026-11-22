@@ -23,6 +23,7 @@ def Phase : Inst<"phase", (ins Variadic<AnyType>:$initial, StrAttr:$axis,
 }
 def LoadShared : Inst<"load_shared", (ins Index:$start,Index:$limit), (outs)>;
 def Window : Inst<"window", (ins AnyMemRef:$domain), (outs IndexTensor:$rows, IndexTensor:$columns, I1Tensor:$mask)>;
+def OwnerRows : Inst<"owner_rows", (ins AnyMemRef:$domain), (outs IndexTensor:$rows)>;
 // Project a flattened instance-row coordinate into one logical prefix axis.
 def MemberAxis : Inst<"member_axis",(ins IndexTensor:$flat,AnyMemRef:$domain,I64Attr:$axis),(outs IndexTensor:$members)>;
 def SlabAxis : Inst<"slab_axis",(ins IndexTensor:$flat,AnyMemRef:$domain,I64Attr:$axis),(outs IndexTensor:$members)>;

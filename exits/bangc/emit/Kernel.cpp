@@ -73,16 +73,21 @@ class Source {
     }return {offset,step};
   }
   Text slabOffset(Operation &op,unsigned first,const Text &view){
-    Text offset="0", member="(col+k)";
-    auto positions=op.getOperands().drop_front(first);
-    for(int i=positions.size()-1;i>=0;--i){
-      auto coord=positions[i].getDefiningOp();
-      auto stride=view+"s"+std::to_string(i);
-      if(coord->getName().getStringRef()=="dsa.slab_axis"){
-        auto dim=view+"d"+std::to_string(i);
-        offset+="+("+member+"%"+dim+")*"+stride;
-        member="("+member+"/"+dim+")";
-      }else offset+="+(row0+j)*"+stride;
+    Text offset="0";
+    const auto owner = fn->getAttrOfType<IntegerAttr>("kir.owner_axis").getInt();
+    for (auto [pos, value] : llvm::enumerate(op.getOperands().drop_front(first))) {
+      auto *coord = value.getDefiningOp();
+      Text index = "(row0+j)";
+      if (coord->getName().getStringRef() == "dsa.slab_axis") {
+        auto domain = coord->getOperand(1);
+        auto axis = coord->getAttrOfType<IntegerAttr>("axis").getInt();
+        auto rank = cast<MemRefType>(domain.getType()).getRank();
+        index = "(col+k)";
+        for (auto dim = axis + 1; dim < rank; ++dim)
+          if (dim != owner) index += "/" + name(domain) + "d" + std::to_string(dim);
+        index = "(" + index + "%" + name(domain) + "d" + std::to_string(axis) + ")";
+      }
+      offset += "+" + index + "*" + view + "s" + std::to_string(pos);
     }
     return offset;
   }
@@ -450,6 +455,23 @@ public:
       } else if (code == "phase") {
         if (auto e = phase(op))
           return e;
+      } else if(code=="owner_rows"){
+        names[op.getResult(0)]="(group*R+j)";
+      } else if(code=="owner_read" || code=="owner_write"){
+        auto base=name(op.getOperand(0)), row=name(op.getOperand(1));
+        auto address=base+"["+row+"*"+base+"s0]";
+        Text lanes="for(int j=0;j<R && group*R+j<M;++j)";
+        if(code=="owner_write")line(lanes+address+"="+name(op.getOperand(2))+";");
+        else{
+          auto v=fresh();names[op.getResult(0)]=v+"[j]";
+          line(ctype(op.getResult(0).getType())+" "+v+"[R];"+lanes+v+"[j]="+address+";");
+        }
+      } else if(code=="drain"){
+        // Owner stores are blocking scalar writes. Their completions need no native wait.
+        continue;
+      } else if(code=="summary_identity"){
+        auto n=fresh();names[op.getResult(0)]=n;
+        line("Moment "+n+"[R]={};");
       } else if (code == "identity") {
         auto n = fresh();
         names[op.getResult(0)] = n;
@@ -457,6 +479,22 @@ public:
              (op.getAttrOfType<StringAttr>("algebra") == "sum" ? "0.0f"
                                                                : "-INFINITY") +
              ";");
+      } else if (code=="cast" || code=="summary_field" || code=="div" || code=="mul" ||
+                 code=="add" || code=="sub" || code=="rsqrt" || code=="constant"){
+        auto n=fresh();auto t=ctype(op.getResult(0).getType());
+        auto input=[&](unsigned i){return name(op.getOperand(i));};
+        bool perOwner=isa<RankedTensorType>(op.getResult(0).getType());
+        Text expr;
+        if(code=="constant")expr=intentdsl::kir::literal(op.getAttrOfType<TypedAttr>("value"));
+        else if(code=="cast")expr="("+t+")("+input(0)+")";
+        else if(code=="rsqrt")expr="1.0f/sqrtf("+input(0)+")";
+        else if(code=="summary_field"){
+          auto pos=op.getAttrOfType<IntegerAttr>("position").getInt();
+          if(pos<0 || pos>=3)return llvm::createStringError("invalid streamed summary field");
+          expr=input(0)+(pos==0?".n":pos==1?".mean":".m2");
+        } else expr="("+input(0)+")"+(code=="add"?"+":code=="sub"?"-":code=="div"?"/":"*")+"("+input(1)+")";
+        names[op.getResult(0)]=perOwner?n+"[j]":n;
+        line(perOwner?t+" "+n+"[R];for(int j=0;j<R && group*R+j<M;++j)"+n+"[j]="+expr+";":t+" "+n+"="+expr+";");
       } else if (code != "return" && code != "end")
         return llvm::createStringError("unexpected native outer op " + code);
     }

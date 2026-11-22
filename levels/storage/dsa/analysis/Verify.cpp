@@ -215,6 +215,27 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
         groups->getOperands() != start.getResults())
       return fn.emitError("stream group loop must consume start, bound and "
                           "stride of the participant range");
+    auto &steps=groups->getRegion(0).front();
+    SmallVector<Value> stores;
+    for(auto &op:steps){
+      auto n=op.getName().getStringRef();
+      if(n=="dsa.owner_rows" && op.getOperand(0)!=fn.getArgument(idx.getInt()))
+        return op.emitError("owner coordinates require the logical domain");
+      if(n=="dsa.owner_write" || n=="dsa.owner_read"){
+        auto *indices=op.getOperand(1).getDefiningOp();
+        auto slot=dyn_cast<BlockArgument>(op.getOperand(0));
+        if(!indices || indices->getBlock()!=&steps || indices->getName().getStringRef()!="dsa.owner_rows" ||
+           !slot || slot.getOwner()!=&fn.front() || !fn->hasAttr("kir.owner_axis") ||
+           cast<MemRefType>(slot.getType()).getRank()!=1)
+          return op.emitError("stream publication requires the entry's per-owner view and group coordinates");
+        if(n=="dsa.owner_write")stores.push_back(op.getResult(0));
+      }
+      if(n=="dsa.drain"){
+        if(op.getOperands()!=ValueRange(stores))return op.emitError("owner store completion list differs");
+        stores.clear();
+      }
+    }
+    if(!stores.empty())return groups->emitError("undrained owner stores");
   }
   bool persistent=d.getAs<BoolAttr>("persistent") && d.getAs<BoolAttr>("persistent").getValue();
   unsigned count = 0;

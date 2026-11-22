@@ -7,6 +7,11 @@ struct LocalSupply {
   bool asynchronous;
 };
 bool projectsConsecutiveRows(mlir::Operation *access, unsigned maskIndex);
+struct TemporaryLayout {
+  llvm::DenseMap<mlir::Operation *, int64_t> offsets;
+  int64_t peak = 0;
+};
+TemporaryLayout placeTemporaries(mlir::Block &calculations);
 mlir::LogicalResult verifyProgram(mlir::ModuleOp,
                                   const compilerinfra::TargetProfile &,
                                   bool supplied);

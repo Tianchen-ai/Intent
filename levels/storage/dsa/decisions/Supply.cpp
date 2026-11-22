@@ -8,7 +8,7 @@ using namespace mlir;
 // are reused after each member's compute and drain.
 struct Footprint {
   int64_t inputBytes = 0, vectorBytes = 0, collectiveBytes = 0;
-  static Footprint of(Block &body, int64_t reductionScratch) {
+  static Footprint of(Block &body, int64_t reductionScratch, bool reuse=false) {
     Footprint f;
     for (auto &op : body) {
       auto code = op.getName().stripDialect();
@@ -28,10 +28,10 @@ struct Footprint {
           continue;
         if (code == "load" || code == "copy_in")
           f.inputBytes += llvm::divideCeil(t.getElementTypeBitWidth(), 8u);
-        else
-          f.vectorBytes += llvm::divideCeil(t.getElementTypeBitWidth(), 8u);
+        else f.vectorBytes += llvm::divideCeil(t.getElementTypeBitWidth(), 8u);
       }
     }
+    if(reuse) f.vectorBytes=placeTemporaries(body).peak;
     return f;
   }
 };
@@ -46,8 +46,8 @@ bool reusableInput(func::FuncOp fn){
     if(n=="block.load" || n=="dsa.copy_in")found|=cast<MemRefType>(op->getOperand(0).getType()).getRank()==1;
   });return found;
 }
-llvm::Expected<DictionaryAttr> plan(func::FuncOp fn, const LocalSupply &c,
-                                    int64_t depth,int64_t participants,bool persistent) {
+static llvm::Expected<DictionaryAttr> planStorage(func::FuncOp fn, const LocalSupply &c,
+                                    int64_t depth,int64_t participants,bool persistent, bool reuse) {
   if(persistent && !reusableInput(fn))return llvm::createStringError("persistent panel requires an immutable row-invariant input");
   if(participants<=0 || participants>c.consumers)return llvm::createStringError("invalid supply work partition");
   Builder b(fn.getContext());
@@ -72,7 +72,7 @@ llvm::Expected<DictionaryAttr> plan(func::FuncOp fn, const LocalSupply &c,
   fn.walk([&](Operation *op) {
     if (op->getName().getStringRef() == "dsa.phase") {
       auto f =
-          Footprint::of(op->getRegion(1).front(), c.reductionScratchPerColumn);
+          Footprint::of(op->getRegion(1).front(), c.reductionScratchPerColumn,reuse);
       f.inputBytes =
           Footprint::of(op->getRegion(0).front(), c.reductionScratchPerColumn)
               .inputBytes;
@@ -81,12 +81,12 @@ llvm::Expected<DictionaryAttr> plan(func::FuncOp fn, const LocalSupply &c,
   });
   if (phases.empty() &&
       fn->getAttrOfType<StringAttr>("block.topology") == "resident")
-    phases.push_back(Footprint::of(fn.front(), c.reductionScratchPerColumn));
+    phases.push_back(Footprint::of(fn.front(), c.reductionScratchPerColumn,reuse));
   else
     fn.walk([&](Operation *op) {
       if (op->getName().getStringRef() == "block.tiles")
         phases.push_back(Footprint::of(op->getRegion(0).front(),
-                                       c.reductionScratchPerColumn));
+                                       c.reductionScratchPerColumn,reuse));
     });
   auto configs = fn->getAttrOfType<ArrayAttr>("block.configs");
   if (!configs || phases.empty() || (depth != 1 && depth != 2))
@@ -122,6 +122,7 @@ llvm::Expected<DictionaryAttr> plan(func::FuncOp fn, const LocalSupply &c,
       accepted.push_back(attrs.getDictionary(fn.getContext()));
   }
   NamedAttrList out;
+  if(reuse)out.set("reuse_temporaries", b.getUnitAttr());
   out.set("group_temporaries",b.getBoolAttr(wide));
   out.set("persistent",b.getBoolAttr(persistent));
   out.set("participants",b.getI64IntegerAttr(participants));
@@ -130,6 +131,14 @@ llvm::Expected<DictionaryAttr> plan(func::FuncOp fn, const LocalSupply &c,
   out.set("rows", b.getArrayAttr(accepted));
   out.set("rejected", b.getArrayAttr(rejected));
   return out.getDictionary(fn.getContext());
+}
+llvm::Expected<DictionaryAttr> plan(func::FuncOp fn, const LocalSupply &c,
+                                    int64_t depth,int64_t participants,bool persistent) {
+  auto ordinary=planStorage(fn,c,depth,participants,persistent,false);
+  if(!ordinary || !ordinary->getAs<ArrayAttr>("rows").empty())return ordinary;
+  auto compact=planStorage(fn,c,depth,participants,persistent,true);
+  if(!compact || !compact->getAs<ArrayAttr>("rows").empty())return compact;
+  return ordinary;
 }
 } // namespace intentdsl::dsa
 namespace CI_UNIT_NAMESPACE {

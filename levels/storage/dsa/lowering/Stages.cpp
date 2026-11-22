@@ -220,6 +220,27 @@ llvm::Error stageTransfers(Operation *op, Attribute a,
       if (failed(phase(l, l->getRegion(0).front(), true,
                        decision.getAs<IntegerAttr>("depth").getInt(), b)))
         return llvm::createStringError("unable to form stream phase");
+    SmallVector<Value> writes;
+    auto domain=fn.getArgument(fn->getAttrOfType<IntegerAttr>("kir.domain_arg").getInt());
+    for(auto &item:llvm::make_early_inc_range(fn.front())){
+      auto code=item.getName().getStringRef();
+      b.setInsertionPoint(&item);
+      if(code=="block.rows" && !item.use_empty()){
+        auto *rows=inst(b,fn.getLoc(),"dsa.owner_rows",domain,item.getResultTypes());
+        b.replaceOp(&item,rows->getResults());
+      } else if(code=="block.owner_load"){
+        auto *load=inst(b,item.getLoc(),"dsa.owner_read",item.getOperands(),item.getResultTypes());
+        b.replaceOp(&item,load->getResults());
+      } else if(code=="block.owner_store"){
+        auto *write=inst(b,item.getLoc(),"dsa.owner_write",item.getOperands(),b.getI1Type());
+        writes.push_back(write->getResult(0));
+        b.eraseOp(&item);
+      }
+    }
+    if(!writes.empty()){
+      b.setInsertionPoint(fn.front().getTerminator());
+      inst(b,fn.getLoc(),"dsa.drain",writes,b.getI1Type());
+    }
     for (auto &item : llvm::make_early_inc_range(llvm::reverse(fn.front())))
       if (item.use_empty() && (item.getName().getStringRef() == "block.rows" ||
                                item.getName().getStringRef() == "block.pid"))

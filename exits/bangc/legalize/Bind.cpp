@@ -35,7 +35,7 @@ StringRef primitive(Operation *op, int64_t depth) {
   auto n = op->getName().getStringRef();
   if(n=="block.summary_reduce")return "welford_f32";
   if(n=="block.summary_field" || n=="block.summary_merge" || n=="block.summary_identity" ||
-     n=="dsa.owner_read" || n=="dsa.owner_write" || n=="dsa.slab_axis")return op->getName().stripDialect();
+     n=="dsa.owner_rows" || n=="dsa.owner_read" || n=="dsa.owner_write" || n=="dsa.slab_axis")return op->getName().stripDialect();
   if(n=="dsa.compute_members"){
     auto layout=op->getParentOfType<func::FuncOp>()->getAttrOfType<DictionaryAttr>("dsa.layout");
     if(layout.getAs<BoolAttr>("group_temporaries").getValue())return "packed_pointwise";
@@ -146,16 +146,18 @@ LogicalResult offsets(func::FuncOp f, bool install) {
           8;
     }
     auto &compute = p->getRegion(1).front();
-    for (auto &o : compute) {
-      if (o.getNumResults() != 1 || o.getName().getStringRef() == "dsa.await")
-        continue;
-      auto t = dyn_cast<RankedTensorType>(o.getResult(0).getType());
-      if (!t || t.getRank() != 2)
-        continue;
-      if (!attach(o, grouped, local))
+    bool reuse=f->getAttrOfType<DictionaryAttr>("dsa.layout").contains("reuse_temporaries");
+    auto temporaries=reuse?intentdsl::dsa::placeTemporaries(compute):intentdsl::dsa::TemporaryLayout{};
+    for(auto &o:compute){
+      if(o.getNumResults()!=1 || o.getName().getStringRef()=="dsa.await")continue;
+      auto t=dyn_cast<RankedTensorType>(o.getResult(0).getType());
+      if(!t || t.getRank()!=2)continue;
+      if (reuse && !temporaries.offsets.count(&o))return WalkResult::interrupt();
+      if (!attach(o, grouped, reuse?temporaries.offsets.lookup(&o):local))
         return WalkResult::interrupt();
-      local += (t.getElementTypeBitWidth() + 7) / 8;
+      local+=(t.getElementTypeBitWidth()+7)/8;
     }
+    if(reuse)local=temporaries.peak;
     for (auto &o : compute)
       if (o.getName().getStringRef() == "dsa.reduce" &&
           !attach(o, grouped, local))
