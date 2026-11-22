@@ -152,6 +152,39 @@ LogicalResult verifyMatrixBody(func::FuncOp fn, Operation &domain,
       type = dtype(a) == "i8" ? Type(IntegerType::get(fn.getContext(), 32))
                               : Type(Float32Type::get(fn.getContext()));
       ++dots;
+    } else if (name == "window_contract") {
+      auto b = op.getOperand(1), step = op.getOperand(2),
+           prefix = op.getOperand(3);
+      auto B = shapes.lookup(b), W = shapes.lookup(step);
+      if (A.size() != 4 || B.size() != 4 || W.size() != 4 ||
+          W != shapes.lookup(prefix) || A[0] != B[0] || A[1] != B[1] ||
+          A[0] != W[0] || A[2] != W[1] || !elem(a).isBF16() ||
+          !elem(b).isBF16() || !elem(step).isF32() || !elem(prefix).isF32() ||
+          op.getAttrOfType<IntegerAttr>("head_group").getInt() <= 0)
+        return op.emitError("inconsistent windowed matrix projections");
+      auto &map = op.getRegion(0).front();
+      if (map.getNumArguments() != 4 ||
+          !map.getArgument(0).getType().isBF16() ||
+          !llvm::all_of(map.getArguments().drop_front(),
+                        [](BlockArgument v) { return v.getType().isF32(); }) ||
+          map.empty() || map.back().getName().stripDialect() != "panel_value" ||
+          map.back().getName().getDialectNamespace() != dialect)
+        return op.emitError("invalid RHS element map signature");
+      for (auto &e : map.without_terminator()) {
+        auto kind = e.getName().getStringRef();
+        if (!llvm::is_contained(
+                ArrayRef<StringRef>{"arith.constant", "arith.extf",
+                                    "arith.truncf", "arith.mulf", "arith.subf",
+                                    "arith.addf", "arith.minimumf", "math.exp"},
+                kind) ||
+            e.getNumResults() != 1 ||
+            (kind == "arith.truncf" ? !e.getResult(0).getType().isBF16()
+                                    : !e.getResult(0).getType().isF32()))
+          return e.emitError("unsupported panel map expression");
+      }
+      shape = {W[0], W[2], W[1], A[3], B[3]};
+      type = Float32Type::get(fn.getContext());
+      ++dots;
     } else if (name == "transpose_scale") {
       if (A.size() != 2 || dtype(a) != "u8")
         return op.emitError("expected a two-axis E8M0 scale view");

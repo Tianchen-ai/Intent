@@ -1,4 +1,5 @@
 #include "compilerinfra/Assembly.h"
+#include "intentdsl/levels/execution/block/ir/Owners.h"
 #include "mlir/Pass/Pass.h"
 
 namespace CI_UNIT_NAMESPACE {
@@ -6,6 +7,12 @@ using namespace mlir;
 struct Normalize : PassWrapper<Normalize, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(Normalize)
   void runOnOperation() final {
+    for (auto fn : getOperation().getOps<func::FuncOp>())
+      if (intentdsl::kir::orderedOwners(fn) &&
+          failed(intentdsl::block::forwardOwners(fn))) {
+        signalPassFailure();
+        return;
+      }
     getOperation().walk([](Operation *op) {
       if (op->getName().getDialectNamespace() != "block" ||
           op->getNumResults() != 1)

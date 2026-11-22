@@ -1,11 +1,12 @@
+#include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/Permutation.h"
+#include "intentdsl/levels/algorithm/kir/ir/RowSemantics.h"
+#include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
+#include "intentdsl/levels/execution/block/decisions/Verify.h"
 #include "intentdsl/levels/execution/block/ir/Access.h"
 #include "intentdsl/levels/execution/block/ir/Contraction.h"
-#include "compilerinfra/Assembly.h"
-#include "intentdsl/levels/algorithm/kir/ir/RowSemantics.h"
-#include "intentdsl/levels/execution/block/decisions/Verify.h"
-#include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
 #include "intentdsl/levels/execution/block/ir/Dialect.h"
+#include "intentdsl/levels/execution/block/ir/Owners.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/DenseSet.h"
@@ -41,9 +42,11 @@ struct Form : PassWrapper<Form, OperationPass<ModuleOp>> {
 } // namespace
 void registerCost(Unit &);
 void matrixCost(Unit &);
+void orderedCost(Unit &);
 void bind(Unit &unit) {
   registerCost(unit);
   matrixCost(unit);
+  orderedCost(unit);
   unit.dialects = [](DialectRegistry &r) {
     r.insert<intentdsl::iblock::IblockDialect>();
   };
@@ -135,9 +138,15 @@ void bind(Unit &unit) {
             return llvm::Error::success();
           },
           [phase](ModuleOp m, const TargetProfile &profile) {
+            if (auto fn = *m.getOps<func::FuncOp>().begin();
+                intentdsl::kir::orderedOwners(fn))
+              return intentdsl::block::verifyOwnerMap(fn, profile, "block",
+                                                      phase);
             if(auto fn=*m.getOps<func::FuncOp>().begin();intentdsl::kir::matrixDomain(fn)){
               auto &region=fn.front().front();
-              if(phase=="realized" || phase=="normalized")return intentdsl::block::verifyTiledMatrix(fn,profile,"block");
+              if(phase=="realized" || phase=="normalized")
+                return intentdsl::block::verifyTiledMatrix(fn, profile,
+                                                           "block");
               if(region.hasAttr("block.output_tile") || region.hasAttr("block.contraction")!=(phase=="decided"))
                 return region.emitError("contraction at incorrect decision boundary"),failure();
               if(phase=="decided" && !intentdsl::block::supportsMatrixTile(&region,region.getAttr("block.contraction"),profile))
@@ -162,8 +171,10 @@ void bind(Unit &unit) {
             if (ready && (!fn->getAttrOfType<ArrayAttr>("block.configs") ||
                           !fn->getAttrOfType<StringAttr>("block.topology")))
               return failure();
-            if(!ready && failed(intentdsl::verifyLogicalRows(m,"block",true))) return failure();
-            if(ready && failed(intentdsl::verifyMapping(m,profile,"block"))) return failure();
+            if(!ready && failed(intentdsl::verifyLogicalRows(m,"block",true)))
+              return failure();
+            if(ready && failed(intentdsl::verifyMapping(m,profile,"block")))
+              return failure();
             auto checked = m.walk([&](Operation *op) {
               if (op->getName().getDialectNamespace() == "func" ||
                   op == m.getOperation())

@@ -8,7 +8,11 @@ def root_ir(source: bytes) -> bytes:
     if not isinstance(definition, ast.FunctionDef):
         raise ValueError("expected one kernel definition")
     if any(isinstance(n,ast.Call) and isinstance(n.func,ast.Attribute) and
-           n.func.attr in {"contract","scaled_contract","q4k_dot"} for n in ast.walk(definition)):
+           n.func.attr=="ordered" for n in ast.walk(definition)):
+        from .ordered import Ordered
+        return Ordered(definition).capture()
+    if any(isinstance(n,ast.Call) and isinstance(n.func,ast.Attribute) and
+           n.func.attr in {"contract","window_contract","scaled_contract","q4k_dot"} for n in ast.walk(definition)):
         from .contractions import capture
         return capture(definition)
     return Capture(definition).capture()

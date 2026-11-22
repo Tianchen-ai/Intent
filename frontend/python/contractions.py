@@ -53,6 +53,18 @@ def capture(fn):
             return emit("convert_matrix", [expr(node.args[0])], tensor(rank, spelling(node.args[1], api)))
         if name == "quantize_q8k" and len(node.args) == 1 and not kw:
             return emit("quantize_q8k", [view(node.args[0])], "tensor<?x292xi8>")
+        if name == "window_contract":
+            from .window import capture_value_map
+            if len(node.args)!=4 or set(kw)!={"head_group","rhs","acc"} or spelling(kw["acc"],api)!="f32":
+                raise ValueError("window_contract needs four views, a head group, an RHS map and an f32 accumulator")
+            group=ast.literal_eval(kw["head_group"])
+            if type(group) is not int or group<1:raise ValueError("expected a positive group size")
+            inputs=[view(a) for a in node.args]
+            ssa=f"%v{len(lines)}";result=tensor(rank,"f32")
+            region=capture_value_map(kw["rhs"],api)
+            lines.append(f'{ssa} = "kir.window_contract"('+', '.join(a for a,_ in inputs)+') ({'+region+
+                f'}}) {{head_group={group}:i64}} : ('+', '.join(t for _,t in inputs)+f')->{result}')
+            return ssa,result
         if name == "q4k_dot" and len(node.args) == 2 and not kw:
             return emit("q4k_dot", [view(node.args[0]), expr(node.args[1])], tensor(rank, "f32"))
         if name == "scaled_contract" and len(node.args) == 4 and set(kw) == {"acc"}:

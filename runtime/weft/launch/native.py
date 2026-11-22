@@ -104,7 +104,7 @@ class Artifact:
             if (
                 arg["name"] != "a" + str(i)
                 or ("encoding" in item and arg["encoding"] != item["encoding"])
-                or arg["c_type"].strip() != wanted
+                or arg["c_type"].strip().removesuffix("restrict").rstrip() != wanted
                 or len(arg.get("shape", [])) != rank
                 or (rank and bool(arg["strided"]) != (i not in self.data.get("contiguous_slots",())))
             ):

@@ -8,11 +8,17 @@ namespace {
 // its accumulator. All sizes include the consumer's padded native footprint.
 int64_t bytes(const block::MatrixAccess &a, const TargetProfile &profile) {
   auto t = a.tile;
-  return profile.services.get<MatrixStorage>()->privateBytes(t[0],t[1],t[2]);
+  return profile.services.get<MatrixStorage>()->privateBytes(
+      t[0], t[1], t[2], a.dot.getName().stripDialect());
 }
 SmallVector<std::pair<Value, std::string>> feeds(block::MatrixAccess &a) {
   auto &dot = a.dot;
   auto n = dot.getName().stripDialect();
+  if (n == "window_contract")
+    return {{dot.getOperand(0), "window-left"},
+            {dot.getOperand(1), "window-right"},
+            {dot.getOperand(2), "row-coefficient"},
+            {dot.getOperand(3), "row-prefix"}};
   if (n == "q4k_dot")
     return {{dot.getOperand(0), "packed-weight"},
             {dot.getOperand(1).getDefiningOp()->getOperand(0),

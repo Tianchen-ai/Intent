@@ -1,14 +1,16 @@
-#include "intentdsl/levels/execution/cpu/ir/Task.h"
-#include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
 #include "../legalize/Matrix.h"
-#include "intentdsl/levels/execution/cpu/ir/Pack.h"
-#include "intentdsl/levels/execution/cpu/ir/IndexedEffects.h"
-#include "intentdsl/levels/algorithm/kir/ir/RowSemantics.h"
 #include "intentdsl/levels/algorithm/kir/ir/Performance.h"
+#include "intentdsl/levels/algorithm/kir/ir/RowSemantics.h"
+#include "intentdsl/levels/execution/cpu/ir/IndexedEffects.h"
+#include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
+#include "intentdsl/levels/execution/cpu/ir/Owners.h"
+#include "intentdsl/levels/execution/cpu/ir/Pack.h"
+#include "intentdsl/levels/execution/cpu/ir/Task.h"
 #include "mlir/Bytecode/BytecodeOpInterface.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/Pass/Pass.h"
+
 #include "Dialect.h.inc"
 #include "Dialect.cpp.inc"
 #define GET_OP_CLASSES
@@ -40,8 +42,10 @@ bool nativeRecords(func::FuncOp f){
 int64_t registerRows(func::FuncOp fn,bool rvv){
   auto &domain=fn.front().front().getRegion(0).front().front();auto &op=intentdsl::cpu::calculation(domain);
   auto tile=domain.getAttrOfType<DenseI64ArrayAttr>("cpu.output_tile"),dims=domain.getAttrOfType<DenseI64ArrayAttr>("cpu.extents");
-  if(rvv || op.getName().stripDialect()=="q4k_dot" ||
-     (op.getName().stripDialect()=="contract" && op.getNumOperands()>2) || dims[0]%tile[0] || dims[1]%tile[1])return 1;
+  if (rvv || op.getName().stripDialect() == "q4k_dot" ||
+      (op.getName().stripDialect() == "contract" && op.getNumOperands() > 2) ||
+      dims[0] % tile[0] || (dims[1] > tile[1] && dims[1] % tile[1]))
+    return 1;
   return std::min<int64_t>(tile[0],4);
 }
 struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
@@ -54,6 +58,13 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
     auto f = *getOperation().getOps<func::FuncOp>().begin();
     auto &task = f.front().front();
     OpBuilder b(&task);
+    if (task.getName().getStringRef() == "cpu.owner_task") {
+      task.setAttr("weft_host.schedule",
+                   b.getStringAttr("ordered-owner-range"));
+      if (callable)
+        task.setAttr("task_symbol", b.getStringAttr("owner_task"));
+      return;
+    }
     if(task.getName().getStringRef()=="cpu.matrix_task"){
       bool empty=task.getRegion(0).front().front().getAttrOfType<DenseI64ArrayAttr>("cpu.extents")[2]==0;
       if(empty)task.setAttr("weft_host.empty_reduction",b.getUnitAttr());
@@ -163,6 +174,15 @@ LogicalResult verifyHost(ModuleOp m, const compilerinfra::TargetProfile &p,
                                         "weft_host.dispatch_rows", false)))
     return failure();
   auto &task = (*m.getOps<func::FuncOp>().begin()).front().front();
+  if (task.getName().getStringRef() == "cpu.owner_task") {
+    auto fn = *m.getOps<func::FuncOp>().begin();
+    if (failed(intentdsl::cpu::verifyOwnerTask(fn, p, "weft-task-ssa")))
+      return failure();
+    return success(task.getAttrOfType<StringAttr>("weft_host.schedule") ==
+                       "ordered-owner-range" &&
+                   (!callable || task.getAttrOfType<StringAttr>(
+                                     "task_symbol") == "owner_task"));
+  }
   if(task.getName().getStringRef()=="cpu.matrix_task"){
     bool empty=task.getRegion(0).front().front().getAttrOfType<DenseI64ArrayAttr>("cpu.extents")[2]==0;
     if(empty!=task.hasAttr("weft_host.empty_reduction"))return task.emitError("zero reduction differs from bound K extent");

@@ -28,7 +28,7 @@ llvm::Expected<kir::ContractionShape> matrixShape(Operation *region,
             ? *entry.getRegion(0).front().back().getOperand(0).getDefiningOp()
             : entry;
     auto n = op.getName().stripDialect();
-    if (n == "contract" || n == "scaled_contract" || n == "q4k_dot")
+    if (kir::isContraction(n))
       return kir::contractionShape(op, region->getOperand(0), f);
   }
   return llvm::createStringError("missing matrix reduction");

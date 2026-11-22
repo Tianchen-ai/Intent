@@ -1,4 +1,5 @@
 #pragma once
+#include "intentdsl/levels/algorithm/kir/ir/PanelMap.h"
 #include "intentdsl/levels/algorithm/kir/ir/Performance.h"
 namespace intentdsl::kir {
 struct ContractionShape {
@@ -17,9 +18,26 @@ contractionShape(mlir::Operation &op, mlir::Value out, const CallFacts &f) {
   };
   {
     auto name = op.getName().stripDialect();
-    if (name != "contract" && name != "scaled_contract" && name != "q4k_dot")
+    if (!isContraction(name))
       return llvm::createStringError("expected a typed contraction");
     auto a = op.getOperand(0);
+    if (name == "window_contract") {
+      auto b = op.getOperand(1), w = op.getOperand(2);
+      auto chunks = axis(w, 2), heads = axis(w, 1), k = axis(w, 3),
+           groups = axis(b, 2);
+      int64_t time = 0, batches = 0, mapped = 0;
+      if (chunks < 0 || heads < 0 || k < 0 || groups < 0 ||
+          __builtin_mul_overflow(chunks, k, &time) || time != axis(a, 1) ||
+          __builtin_mul_overflow(
+              groups, op.getAttrOfType<IntegerAttr>("head_group").getInt(),
+              &mapped) ||
+          mapped != heads || __builtin_mul_overflow(chunks, heads, &batches) ||
+          __builtin_mul_overflow(batches, axis(w, 0), &batches))
+        return llvm::createStringError(
+            "window geometry requires L=C*S and H=G*head_group");
+      return ContractionShape{axis(a, 3), axis(b, 3), k,        batches,
+                              slot(a),    slot(b),    slot(out)};
+    }
     if (name == "q4k_dot") {
       auto x = op.getOperand(1).getDefiningOp()->getOperand(0);
       return ContractionShape{axis(a, 0), 1,       axis(x, 0) * 256, 1,

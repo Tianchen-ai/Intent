@@ -41,7 +41,17 @@ inline mlir::LogicalResult bindMatrix(mlir::func::FuncOp fn, unsigned phase,
       auto v = op.getOperand(0);
       auto role = op.getAttrOfType<StringAttr>("access").getValue();
       StringRef mode = "record";
-      if (role == "left-panel" || role == "right-panel") {
+      if (role == "window-left")
+        mode = p.stride(v, 3) == 1 && p.tile[0] <= p.tile[1]
+                   ? "transpose-window-dma"
+                   : "window-pack";
+      else if (role == "window-right")
+        mode = p.stride(v, 3) == 1 && intentdsl::kir::rowScale(p.dot)
+                   ? "mapped-filter-major-dma"
+                   : "mapped-row-pack";
+      else if (role == "row-coefficient" || role == "row-prefix")
+        mode = "shared-k-value";
+      else if (role == "left-panel" || role == "right-panel") {
         bool lhs = role == "left-panel";
         auto k = p.axis(lhs ? "lhs_k" : "rhs_k"),
              batch = p.axis(lhs ? "lhs_batch" : "rhs_batch"),

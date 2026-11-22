@@ -182,5 +182,9 @@ def Itsrc_Dialect_PublishOffsets : Op<Itsrc_Dialect,"publish_offsets"> {let argu
 def Itsrc_Dialect_RangesAt : Op<Itsrc_Dialect,"fill_ranges_at"> {let arguments=(ins AnyMemRef:$out,AnyMemRef:$offsets,AnyTensor:$columns,I1Tensor:$active,I64Attr:$unit,UnitAttr:$disjoint_in_bounds);}
 include "intentdsl/levels/algorithm/kir/ir/Matrix.td"
 defm Matrix : MatrixExpressions<Itsrc_Dialect>;
+include "intentdsl/levels/algorithm/kir/ir/Ordered.td"
+defm Ordered : OrderedOwners<Itsrc_Dialect>;
+include "intentdsl/levels/execution/block/ir/Columns.td"
+defm Columns : ColumnTiles<Itsrc_Dialect>;
 defm NativePanels : MatrixPanelLoop<Itsrc_Dialect>;
 def MatrixEnd : Op<Itsrc_Dialect,"end",[Terminator]>;

@@ -134,6 +134,11 @@ def CpuReserve : Op<Cpu_Dialect,"reserve_tickets"> {let arguments=(ins AnyMemRef
 def CpuDistribute : Op<Cpu_Dialect,"distribute_tickets"> {let arguments=(ins AnyMemRef:$keys,AnyMemRef:$offsets,AnyMemRef:$bases,AnyMemRef:$out);}
 include "intentdsl/levels/algorithm/kir/ir/Matrix.td"
 defm Matrix : MatrixExpressions<Cpu_Dialect>;
+include "intentdsl/levels/algorithm/kir/ir/Ordered.td"
+defm Ordered : OrderedOwners<Cpu_Dialect>;
+def OwnerTasks : Inst<"owner_task",[SingleBlock]> {
+  let arguments=(ins Variadic<AnyType>:$captures);let results=(outs Index:$completion);let regions=(region AnyRegion:$body);
+}
 def MatrixTasks : Inst<"matrix_task",[SingleBlock]> {
   let arguments=(ins Variadic<AnyMemRef>:$captures);let results=(outs Index:$completion);let regions=(region AnyRegion:$body);
 }

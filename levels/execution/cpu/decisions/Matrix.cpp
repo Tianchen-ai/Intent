@@ -45,7 +45,7 @@ Operation &calculation(Operation &domain) {
   auto &bb = domain.getRegion(0).front();
   return *llvm::find_if(bb, [](Operation &o) {
     auto n = o.getName().stripDialect();
-    return n == "contract" || n == "scaled_contract" || n == "q4k_dot";
+    return kir::isContraction(n);
   });
 }
 LogicalResult verifyMatrixTask(func::FuncOp fn, const TargetProfile &p,
@@ -95,12 +95,16 @@ LogicalResult verifyMatrixPartition(func::FuncOp fn, Operation &region,
     return region.emitError("routed matrix requires member-ordered input and "
                             "disjoint output scatter");
   if ((kind != "contract" && !packing) ||
-      (packing && packing == caps->integerPacking
-           ? !groupedI8(calculation(region), p, tile[1])
-           : packing &&
-                 packing != (kind == "contract"  ? "rhs-panels-per-call"
-                             : kind == "q4k_dot" ? "shared-q8k-per-call"
-                                                 : "decoded-f32-per-call")))
+      (packing &&
+       !(kind == "window_contract" && packing == "mapped-f32-panels") &&
+       (packing == caps->integerPacking
+            ? !groupedI8(calculation(region), p, tile[1])
+            : packing &&
+                  packing != (kind == "contract" ? "rhs-panels-per-call"
+                              : kind == "window_contract"
+                                  ? "mapped-right-per-call"
+                              : kind == "q4k_dot" ? "shared-q8k-per-call"
+                                                  : "decoded-f32-per-call"))))
     return region.emitError("invalid shared activation packing contract");
   if (!s)
     return region.emitError() << llvm::toString(s.takeError());
@@ -128,6 +132,10 @@ std::string matrixHostParams(func::FuncOp fn) {
   SmallVector<std::string> params;
   for (auto [i, v] : llvm::enumerate(fn.getArguments())) {
     auto a = "a" + std::to_string(i);
+    if (!isa<MemRefType>(v.getType())) {
+      params.push_back((v.getType().isF32() ? "float " : "int32_t ") + a);
+      continue;
+    }
     int rank = cast<MemRefType>(v.getType()).getRank();
     params.push_back("void *" + a);
     if (rank > 2)
@@ -160,7 +168,9 @@ void matrixTasks(Unit &u) {
     auto t = dyn_cast<DenseI64ArrayAttr>(a);
     if (!c || !t || t.size() != 5 || t[4] < 0 || t[4] > 2 ||
         (t[4] != 0 &&
-         cpu::calculation(*op).getName().stripDialect() != "contract") ||
+         cpu::calculation(*op).getName().stripDialect() != "contract" &&
+         !(t[4] == 1 && cpu::calculation(*op).getName().stripDialect() ==
+                            "window_contract")) ||
         (t[4] == 2 && !cpu::groupedI8(cpu::calculation(*op), p, t[1])) ||
         !llvm::any_of(cpu::available(*op, *c), [&](auto &r) {
           return t.asArrayRef().take_front(4) ==
@@ -198,7 +208,9 @@ void matrixTasks(Unit &u) {
     for (auto &r : cpu::available(*op, *caps))
       for (int pack : {0, 1, 2}) {
         if (pack &&
-            cpu::calculation(*op).getName().stripDialect() != "contract")
+            cpu::calculation(*op).getName().stripDialect() != "contract" &&
+            !(pack == 1 && cpu::calculation(*op).getName().stripDialect() ==
+                               "window_contract"))
           continue;
         if (pack == 2 && !cpu::groupedI8(cpu::calculation(*op), p, r.cols))
           continue;
@@ -243,6 +255,10 @@ void matrixTasks(Unit &u) {
       op->setAttr("cpu.packing", b.getStringAttr("shared-q8k-per-call"));
     if (cpu::calculation(*op).getName().stripDialect() == "scaled_contract")
       op->setAttr("cpu.packing", b.getStringAttr("decoded-f32-per-call"));
+    if (cpu::calculation(*op).getName().stripDialect() == "window_contract")
+      op->setAttr("cpu.packing",
+                  b.getStringAttr(row[4] ? "mapped-f32-panels"
+                                         : "mapped-right-per-call"));
     auto fn = op->getParentOfType<func::FuncOp>();
     for (auto [i, v] : llvm::enumerate(fn.getArguments())) {
       for (auto key : {"shape", "strides"}) {

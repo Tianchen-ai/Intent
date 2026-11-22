@@ -169,7 +169,9 @@ struct Writer {
         add(i, {-1}, {1});
       return;
     }
-    int64_t cols = p.shape[1] % p.tile[1] == 0 ? p.tile[1] : -2;
+    int64_t cols = p.shape[1] <= p.tile[1]       ? p.shape[1]
+                   : p.shape[1] % p.tile[1] == 0 ? p.tile[1]
+                                                 : -2;
     if (packetDot()) {
       add(0, {-1, k}, {1, 3});
       slots.push_back({{"i8", {cols, k}, {2, 3}}, "p1", {}, false});

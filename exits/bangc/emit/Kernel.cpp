@@ -1,8 +1,9 @@
+#include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
+#include "intentdsl/levels/algorithm/kir/ir/Literal.h"
 #include "intentdsl/levels/algorithm/kir/ir/Matrix.h"
 #include "intentdsl/levels/execution/block/ir/Grid.h"
-#include "intentdsl/levels/algorithm/kir/ir/Literal.h"
-#include "compilerinfra/Assembly.h"
+#include "intentdsl/levels/storage/dsa/ir/Owners.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "llvm/ADT/DenseMap.h"
 
@@ -420,7 +421,7 @@ class Source {
         line("{int a="+offset+"[(row0+j)*"+offset+"s0], b="+offset+"[(row0+j+1)*"+offset+"s0];");
         auto members=std::to_string(inst.getAttrOfType<IntegerAttr>("bangc.panel_members").getInt());
         line("float *panel=(float*)(storage+BYTES)-"+members+"*P;__bang_write_value("+id+",lanes,0.f);");
-        line("for(int i=a;i<b;i+="+members+"){int count=(b-i<"+members+"?b-i:"+members+");auto *src="+v+"+i*"+v+"s0+col*"+v+"s1;");
+        line("for(long long i=a;i<b;i+="+members+"){int count=(b-i<"+members+"?b-i:"+members+");auto *src="+v+"+i*"+v+"s0+col*"+v+"s1;");
         line("if("+v+"s1==1 && live==P && "+v+"s0==P)__memcpy(panel,src,count*P*sizeof(float),GDRAM2NRAM);");
         line("else for(int h=0;h<count;++h){if("+v+"s1==1)__memcpy(panel+h*P,src+h*"+v+"s0,live*sizeof(float),GDRAM2NRAM);else for(int k=0;k<live;++k)panel[h*P+k]=src[h*"+v+"s0+k*"+v+"s1];}");
         line("for(int h=0;h<count;++h)__bang_add("+id+","+id+",panel+h*P,lanes);}}");
@@ -685,9 +686,12 @@ public:
 };
 } // namespace
 llvm::Error emitMatrix(func::FuncOp,llvm::raw_pwrite_stream &);
+llvm::Error emitOrdered(func::FuncOp, llvm::raw_pwrite_stream &);
 llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
   auto fn = *m.getOps<func::FuncOp>().begin();
   if(intentdsl::kir::matrixDomain(fn))return emitMatrix(fn,out);
+  if (intentdsl::kir::orderedOwners(fn))
+    return emitOrdered(fn, out);
   auto layout = fn->getAttrOfType<DictionaryAttr>("dsa.layout");
   std::string program;
   llvm::raw_string_ostream text(program);

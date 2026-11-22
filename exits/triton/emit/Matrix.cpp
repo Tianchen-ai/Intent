@@ -53,6 +53,46 @@ struct Writer : intentdsl::block::MatrixAccess {
          "acc+=libdevice.mul_rn(ds,libdevice.sub_rn(libdevice.mul_rn(d,S.to(tl."
          "float32)),libdevice.mul_rn(dm,T.to(tl.float32))))\n";
   }
+  void window() {
+    auto lhs = dot.getOperand(0), rhs = dot.getOperand(1),
+         step = dot.getOperand(2), prefix = dot.getOperand(3);
+    auto dims =
+        fn.getArgAttrOfType<DenseI64ArrayAttr>(slot(step), "block.shape");
+    s << "    head=gp%" << std::max<int64_t>(1, dims[1]) << "\n    chunk=(gp//"
+      << std::max<int64_t>(1, dims[1]) << ")%" << std::max<int64_t>(1, dims[2])
+      << "\n    batch=gp//" << std::max<int64_t>(1, dims[1] * dims[2])
+      << "\n    group=head//" << axis("head_group") << "\n";
+    auto weight = [&](Value v) {
+      return name(v) + "+batch*" + strideOf(v, 0) + "+head*" + strideOf(v, 1) +
+             "+chunk*" + strideOf(v, 2);
+    };
+    s << "    acc=tl.full((ROWS,WIDTH),0.,tl.float32)\n    for panel in "
+         "range(tl.cdiv(K,BK)):\n"
+      << "        t=tl.cast(panel,tl.int64)*BK+tl.arange(0,BK)\n        "
+         "seq=chunk*K+t\n"
+      << "        a=tl.load(" << name(lhs) << "+batch*" << stride(lhs, 0)
+      << "+seq[None,:]*" << stride(lhs, 1) << "+head*" << stride(lhs, 2)
+      << "+r[:,None]*" << stride(lhs, 3)
+      << ",mask=(r[:,None]<M)&(t[None,:]<K),other=0)\n"
+      << "        b=tl.load(" << name(rhs) << "+batch*" << stride(rhs, 0)
+      << "+seq[:,None]*" << stride(rhs, 1) << "+group*" << stride(rhs, 2)
+      << "+c[None,:]*" << stride(rhs, 3)
+      << ",mask=(t[:,None]<K)&(c[None,:]<N),other=0)\n"
+      << "        d=tl.load(" << weight(step) << "+t*" << stride(step, 3)
+      << ",t<K,other=0)\n"
+      << "        v=tl.load(" << weight(prefix) << "+t*" << stride(prefix, 3)
+      << ",t<K,other=0)\n"
+      << "        last=tl.load(" << weight(prefix) << "+(K-1)*"
+      << stride(prefix, 3) << ")\n"
+      << "        rhs="
+      << intentdsl::kir::panelExpression(
+             dot, {"b", "d[:,None]", "v[:,None]", "last"},
+             {"tl.cast($,tl.float32)", "tl.cast($,tl.bfloat16)", "tl.minimum",
+              "tl.exp", ",propagate_nan=tl.PropagateNan.ALL"})
+      << "\n"
+      << "        "
+         "acc=tl.dot(a,tl.where(t[:,None]<K,rhs,0.).to(tl.bfloat16),acc)\n";
+  }
   void scaled() {
     auto a = dot.getOperand(0), sa = dot.getOperand(1), b = dot.getOperand(2),
          sb = dot.getOperand(3).getDefiningOp()->getOperand(0);
@@ -134,7 +174,9 @@ struct Writer : intentdsl::block::MatrixAccess {
          "end=M\n    src=r\n    target=r\n";
     auto n = dot.getName().stripDialect();
     bool segmented = n == "contract" && dot.getNumOperands() > 2;
-    if (n == "q4k_dot")
+    if (n == "window_contract")
+      window();
+    else if (n == "q4k_dot")
       records();
     else if (n == "scaled_contract")
       scaled();
@@ -210,6 +252,10 @@ struct Writer : intentdsl::block::MatrixAccess {
                        0, "c[None,:]", 2) +
                   "+(target%" + std::to_string(multiplicity) + ")[:,None]*" +
                   strideOf(v, 1);
+          } else if (n == "window_contract") {
+            ptr = addr(v, "r[:,None]", 3, "c[None,:]", 4) + "+batch*" +
+                  strideOf(v, 0) + "+chunk*" + strideOf(v, 1) + "+head*" +
+                  strideOf(v, 2);
           } else
             ptr = addr(v, "target[:,None]", rank(v) - 2, "c[None,:]",
                        rank(v) - 1, rank(v) == 3 ? 0 : -1);

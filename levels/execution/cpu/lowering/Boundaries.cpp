@@ -1,11 +1,12 @@
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
+#include "intentdsl/levels/algorithm/kir/ir/Permutation.h"
+#include "intentdsl/levels/algorithm/kir/ir/RowSemantics.h"
 #include "intentdsl/levels/execution/cpu/ir/Dialect.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
-#include "intentdsl/levels/algorithm/kir/ir/Permutation.h"
+#include "intentdsl/levels/execution/cpu/ir/Owners.h"
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
-#include "intentdsl/levels/algorithm/kir/ir/RowSemantics.h"
-#include "mlir/Pass/Pass.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/Pass/Pass.h"
 using namespace compilerinfra;
 using namespace mlir;
 namespace intentdsl::cpu {
@@ -16,6 +17,8 @@ LogicalResult verifyTask(ModuleOp m, const TargetProfile &profile,
   if (!llvm::hasSingleElement(funcs))
     return m.emitError("expected one host");
   auto fn = *funcs.begin();
+  if (ownerTask(fn))
+    return verifyOwnerTask(fn, profile, storage);
   if (matrixTask(fn))
     return verifyMatrixTask(fn, profile, storage);
   if (fn.empty() || fn.front().getOperations().size() != 3)
@@ -112,8 +115,9 @@ struct Construct : PassWrapper<Construct, OperationPass<ModuleOp>> {
     auto *loop = &fn.front().front();
     OpBuilder b(loop);
     auto loc = loop->getLoc();
-    if (intentdsl::kir::matrixDomain(fn)) {
-      OperationState state(loc, "cpu.matrix_task");
+    bool owners = intentdsl::kir::orderedOwners(fn);
+    if (owners || intentdsl::kir::matrixDomain(fn)) {
+      OperationState state(loc, owners ? "cpu.owner_task" : "cpu.matrix_task");
       state.addOperands(fn.getArguments());
       state.addTypes(b.getIndexType());
       state.addRegion();
@@ -163,9 +167,13 @@ struct Construct : PassWrapper<Construct, OperationPass<ModuleOp>> {
 void registerCost(Unit &);
 void matrixCost(Unit &);
 void matrixTasks(Unit &);
+void ownerTasks(Unit &);
+void ownerCost(Unit &);
 void bind(Unit &u) {
   registerCost(u);
   matrixTasks(u);
+  ownerTasks(u);
+  ownerCost(u);
   matrixCost(u);
   u.dialects = [](DialectRegistry &r) {
     r.insert<intentdsl::cpu::CpuDialect>();
@@ -174,7 +182,8 @@ void bind(Unit &u) {
   DecisionFamily f;
   f.name = "storage";
   f.applies = [](Operation *op) {
-    return op->getName().getStringRef() == "cpu.task" ||
+    return op->getName().getStringRef() == "cpu.owner_task" ||
+           op->getName().getStringRef() == "cpu.task" ||
            op->getName().getStringRef() == "cpu.matrix_task";
   };
   f.read = [](Operation *op) { return op->getAttr("cpu.storage"); };
@@ -213,6 +222,9 @@ void bind(Unit &u) {
               return intentdsl::cpu::verifyTask(
                   m, p, phase == "tasked" ? "pending" : "private-values");
             auto fn = *m.getOps<func::FuncOp>().begin();
+            if (intentdsl::kir::orderedOwners(fn))
+              return intentdsl::cpu::verifyOwnerGrain(fn, fn.front().front(),
+                                                      p);
             if (intentdsl::kir::matrixDomain(fn)) {
               if(failed(intentdsl::kir::verifyMatrix(fn,"cpu",true)))return failure();
               return intentdsl::cpu::verifyMatrixPartition(fn,fn.front().front(),p);

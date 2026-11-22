@@ -3,6 +3,19 @@ import intentdsl as I
 
 
 @I.kernel
+def mamba_chunk_state(basis:I.In[I.bf16,("B","L","G","N")],
+                      x:I.In[I.bf16,("B","L","H","P")],
+                      dt:I.In[I.f32,("B","H","C","S")],
+                      decay:I.In[I.f32,("B","H","C","S")],
+                      state:I.Out[I.f32,("B","C","H","P","N")]):
+    state[:,:,:,:,:] = I.window_contract(
+        x[:,:,:,:],basis[:,:,:,:],dt[:,:,:,:],decay[:,:,:,:],
+        head_group=4,acc=I.f32,
+        rhs=lambda basis, step, current, last: I.cast(
+            I.cast(basis,I.f32)*(I.exp(I.minimum(last-current,I.f32(0)))*step), I.bf16))
+
+
+@I.kernel
 def gemm(lhs: I.In[I.f16, ("M","K")], rhs: I.In[I.f16, ("K","N")],
          out: I.Out[I.f16, ("M","N")]):
     result = I.contract(lhs[:,:], rhs[:,:], axes=((1,), (0,)), acc=I.f32)

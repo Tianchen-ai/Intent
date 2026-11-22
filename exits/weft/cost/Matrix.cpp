@@ -20,7 +20,7 @@ void nativePanelCost(compilerinfra::Unit &u) {
             return g.takeError();
           auto machine = ctx.target.services.get<intentdsl::cpu::RowMachine>();
           bool blocked = !machine->boundWidening && !g->grouped &&
-                         g->m % t[0] == 0 && g->n % t[1] == 0;
+                         g->m % t[0] == 0 && (g->n <= t[1] || g->n % t[1] == 0);
           double rows = blocked ? std::min<int64_t>(t[0], 4) : 1;
           double reloads =
               (std::ceil(t[0] / rows) - 1) * t[1] * g->k *

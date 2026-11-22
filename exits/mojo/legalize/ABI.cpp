@@ -26,6 +26,9 @@ LogicalResult verifyLoops(ModuleOp m, const TargetProfile &p, bool callable) {
                                         false)))
     return failure();
   auto fn = *m.getOps<func::FuncOp>().begin();
+  if (fn.front().front().getName().getStringRef() == "cpu.owner_task")
+    return success(fn.front().front().getAttrOfType<StringAttr>(
+                       "mojo_row.schedule") == "ordered-owner-range");
   if(fn.front().front().getName().getStringRef()=="cpu.matrix_task"){
     auto &task=fn.front().front();
     auto lanes=task.getAttrOfType<IntegerAttr>("mojo_row.column_lanes");

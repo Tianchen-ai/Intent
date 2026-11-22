@@ -98,5 +98,9 @@ def TileSource_PublishOffsets : Op<TileSource,"publish_offsets"> {let arguments=
 def TileSource_RangesAt : Op<TileSource,"fill_ranges_at"> {let arguments=(ins AnyMemRef:$out,AnyMemRef:$offsets,AnyTensor:$columns,I1Tensor:$active,I64Attr:$unit,UnitAttr:$disjoint_in_bounds);}
 include "intentdsl/levels/algorithm/kir/ir/Matrix.td"
 defm Matrix : MatrixExpressions<TileSource>;
+include "intentdsl/levels/algorithm/kir/ir/Ordered.td"
+defm Ordered : OrderedOwners<TileSource>;
+include "intentdsl/levels/execution/block/ir/Columns.td"
+defm Columns : ColumnTiles<TileSource>;
 defm NativePanels : MatrixPanelLoop<TileSource>;
 def MatrixEnd : Op<TileSource,"end",[Terminator]>;

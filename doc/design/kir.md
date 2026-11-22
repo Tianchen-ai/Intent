@@ -253,6 +253,12 @@ mark 只写 expert_blocks 的前 total/128 项。调用方可以重用同一个�
 | relu、swiglu、transpose、dropout、rope、adamw | 元素映射、轴置换、按坐标随机数、多输入/多输出、成对原地更新与优化器状态 |
 | softmax、layer_norm、batch_norm、group_norm_backward | 多归约、权重广播、Welford record、可变统计量、梯度与显式多次调用 |
 | cumsum、causal_linear_attention、gated_delta、mamba_chunk_state、causal_convolution | prefix、矩阵状态、ordered recurrence、contract 与沿源轴的邻域边界 |
+
+### 独立成员内的有序程序
+
+`kir.owner_space` 的操作数与 `axes` 逐项确定成员域。区域的块参数是成员坐标。输出地址必须保留每个独立坐标，同一 InOut 的读写使用相同投影。前端将固定顺序的循环携带值写成 `scf.for` 的迭代参数和 yield。依赖谓词保护的读取放在 `scf.if` 的相应分支内。一次整轴读取产生 rank-one SSA 值，广播、求和和循环状态都保留成员轴的尺寸来源。
+
+`I.window_contract` 在每个 batch、chunk 和 head 上计算独立的矩阵。输入布局为 `[B,L,H,P]` 与 `[B,L,G,N]`，系数视图为 `[B,H,C,S]`。调用时检查 `L=C*S` 和 `H=G*head_group`。右操作数的纯标量区域接收当前 basis、对应系数、当前 prefix 和 chunk 末项，区域必须返回 BF16。两个 BF16 面板在 S 轴做 FP32 累加，发布 `[B,C,H,P,N]`。没有跨 chunk 的状态依赖。
 | embedding、csr_spmv、jagged_mean、nonzero、moe_alignment、histogram | 间接地址、分段/空段、索引生成、计数/前缀/散射、确定冲突语义及 workspace |
 | gemm、batched_gemm、ragged_gemm、int8_gemm、q4_projection、fp8_gemm | 批维、变化的分组 extent、不同累加 dtype、压缩 record 与分组 scales |
 | attention、paged_decode、cholesky | 因果及分页掩码、softmax 状态与部分结果合并、三角域内有序原地状态 |

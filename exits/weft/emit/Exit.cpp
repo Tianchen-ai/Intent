@@ -10,6 +10,7 @@ llvm::Expected<std::string> taskSource(Operation *, const llvm::json::Array &);
 std::string hostSource(Operation *, const llvm::json::Array &);
 void dialect(DialectRegistry &);
 llvm::Error emitMatrix(func::FuncOp,llvm::raw_pwrite_stream &);
+llvm::Error emitOrdered(func::FuncOp, llvm::raw_pwrite_stream &);
 void lower(OpPassManager &, bool,const intentdsl::CallFacts &,bool);
 LogicalResult verifyHost(ModuleOp, const TargetProfile &, bool);
 namespace {
@@ -49,6 +50,9 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
 }
 llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
   auto fn = *m.getOps<func::FuncOp>().begin();
+  if (fn.front().front().getName().getStringRef() == "cpu.owner_task") {
+    return emitOrdered(fn, out);
+  }
   if(intentdsl::cpu::matrixTask(fn))return emitMatrix(fn,out);
   auto abi = llvm::json::parse(fn->getAttrOfType<StringAttr>("kir.abi"));
   if (!abi)

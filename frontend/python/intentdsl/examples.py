@@ -1,5 +1,6 @@
 import intentdsl as I
-from .matrix import (gemm, batched_gemm, ragged_gemm, int8_gemm, q4_projection,
+from .recurrences import causal_convolution, causal_linear_attention, cholesky, gated_delta, selective_state_scan
+from .matrix import (gemm, batched_gemm, ragged_gemm, int8_gemm, q4_projection, mamba_chunk_state,
                      fp8_gemm, qkv_projection, expert_projection)
 
 @I.kernel

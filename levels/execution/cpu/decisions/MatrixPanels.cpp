@@ -59,6 +59,16 @@ MatrixPanels::MatrixPanels(func::FuncOp f)
       multiplicity = fn.getArgAttrOfType<DenseI64ArrayAttr>(
           slot(domain.getOperand(0)), "cpu.shape")[1];
     }
+  } else if (n == "window_contract") {
+    origin(dot.getOperand(0), {"batch", "chunk*K", "head", "src"}, {3, 1});
+    views.push_back(
+        {slot(dot.getOperand(1)), "bf16", "(g*K)*N+c", {shape[1], 1}, false});
+    if (domain.getAttrOfType<StringAttr>("cpu.packing") ==
+        "mapped-f32-panels") {
+      views[0].dtype = views[1].dtype = "f32";
+      views[0].origin = "(g*M+src)*K";
+      views[0].strides = {shape[2], 1};
+    }
   } else if (n == "scaled_contract") {
     views.push_back({slot(dot.getOperand(0)),
                      "f32",
@@ -78,7 +88,9 @@ MatrixPanels::MatrixPanels(func::FuncOp f)
       origin(op.getOperand(1),
              {cast<MemRefType>(dst.getType()).getRank() == 1 ? "dest" : "c"},
              {0});
-  if (!routes.empty())
+  if (n == "window_contract")
+    origin(dst, {"batch", "chunk", "head", "dest", "c"}, {3, 4}, true);
+  else if (!routes.empty())
     origin(dst,
            {"(dest/" + std::to_string(multiplicity) + ")",
             "(dest%" + std::to_string(multiplicity) + ")", "c"},
@@ -111,6 +123,8 @@ std::string MatrixPanels::dispatch(StringRef decl, StringRef invoke,
   auto packing = domain.getAttrOfType<StringAttr>("cpu.packing");
   bool pack = packing && packing == "shared-q8k-per-call";
   bool decoded = packing && packing == "decoded-f32-per-call";
+  bool widened = packing && packing == "mapped-f32-panels";
+  bool mapped = widened || (packing && packing == "mapped-right-per-call");
   bool packRhs = packing && packing == "rhs-panels-per-call";
   bool interleave = packing && packing == "signed-dot4-panels";
   bool packets = packing && packing == "reduction-packets";
@@ -118,6 +132,12 @@ std::string MatrixPanels::dispatch(StringRef decl, StringRef invoke,
   s << "#include <stdint.h>\n#include <stddef.h>\n#include <math.h>\n#include "
        "<stdlib.h>\n#include <string.h>\n#include <omp.h>\n"
     << decl << "\n";
+  if (mapped)
+    s << R"c(
+static inline float expand_bf(uint16_t v){uint32_t b=(uint32_t)v<<16;float f;memcpy(&f,&b,4);return f;}
+static inline uint16_t narrow_bf(float f){uint32_t b;memcpy(&b,&f,4);if((b&0x7fffffff)>0x7f800000)return (b>>16)|64;return (b+32767+((b>>16)&1))>>16;}
+static inline float min_ieee(float a,float b){return isnan(a)?a:isnan(b)?b:fminf(a,b);}
+)c";
   if (decoded)
     s << R"c(
 static inline float decode(unsigned x,unsigned scale){
@@ -134,6 +154,66 @@ static inline float decode(unsigned x,unsigned scale){
     << ";int rc=0;\n"
     << "const int64_t mr=" << tile[0] << ",nr=" << tile[1] << ";\n"
     << "const int64_t jobs=G*((M+mr-1)/mr)*((N+nr-1)/nr);\n";
+  if (mapped) {
+    auto output = domain.getOperand(0);
+    auto i = cast<BlockArgument>(output).getArgNumber();
+    auto sh = fn.getArgAttrOfType<DenseI64ArrayAttr>(i, "cpu.shape");
+    auto access = [&](Value v, StringRef type, ArrayRef<std::string> idx) {
+      auto i = cast<BlockArgument>(v).getArgNumber();
+      auto strides = fn.getArgAttrOfType<DenseI64ArrayAttr>(i, "cpu.strides");
+      std::string base = "((" + type.str() + "*)a" + std::to_string(i) + ")[0";
+      for (auto [j, k] : llvm::enumerate(idx))
+        base += "+(" + k + ")*" + std::to_string(strides[j]);
+      return base + "]";
+    };
+    s << "const int64_t H=" << std::max<int64_t>(1, sh[2])
+      << ",chunks=" << std::max<int64_t>(1, sh[1]) << ",K=" << shape[2] << ";\n"
+      << "size_t elems;if(__builtin_mul_overflow((size_t)G,(size_t)K,&elems) "
+         "|| __builtin_mul_overflow(elems,(size_t)N,&elems))return 2;"
+      << (widened ? "float" : "uint16_t")
+      << " *right=calloc(elems?elems:1,sizeof(*right));if(!right)return 2;\n";
+    if (widened) {
+      s << "size_t lsz;if(__builtin_mul_overflow((size_t)G,(size_t)M,&lsz) || "
+           "__builtin_mul_overflow(lsz,(size_t)K,&lsz)){free(right);return 2;}"
+        << "float "
+           "*left=calloc(lsz?lsz:1,sizeof(*left));if(!left){free(right);return "
+           "2;}\n"
+        << "#pragma omp parallel for num_threads(workers) schedule(static) "
+           "if(G>1)\n"
+        << "for(int64_t g=0;g<G;++g){int64_t "
+           "batch=g/H/chunks,chunk=g/H%chunks,head=g%H;"
+        << "for(int64_t m=0;m<M;++m)for(int64_t "
+           "k=0;k<K;++k)left[(g*M+m)*K+k]=expand_bf("
+        << access(dot.getOperand(0), "uint16_t",
+                  {"batch", "chunk*K+k", "head", "m"})
+        << ");}\n";
+    }
+    s << "#pragma omp parallel for num_threads(workers) schedule(static) "
+         "if(G*K>1)\n"
+      << "for(int64_t p=0;p<G*K;++p){int64_t "
+         "g=p/K,k=p%K,head=g%H,chunk=g/H%chunks,batch=g/H/chunks,group=head/"
+      << dot.getAttrOfType<IntegerAttr>("head_group").getInt() << ";\n";
+    auto a = access(dot.getOperand(1), "uint16_t",
+                    {"batch", "chunk*K+k", "group", "n"});
+    auto c =
+        access(dot.getOperand(2), "float", {"batch", "head", "chunk", "k"});
+    auto d =
+        access(dot.getOperand(3), "float", {"batch", "head", "chunk", "k"});
+    auto l =
+        access(dot.getOperand(3), "float", {"batch", "head", "chunk", "K-1"});
+    kir::PanelMath math{"expand_bf", "narrow_bf", "min_ieee", "expf"};
+    if (auto scalar = kir::rowScale(dot)) {
+      s << "const float factor="
+        << kir::panelExpression(dot, {a, c, d, l}, math, scalar)
+        << ";\n#pragma omp simd\n"
+        << "for(int64_t n=0;n<N;++n)right[p*N+n]="
+        << (widened ? "expand_bf(" : "(") << "narrow_bf(expand_bf(" << a
+        << ")*factor));}\n";
+    } else
+      s << "for(int64_t n=0;n<N;++n)right[p*N+n]="
+        << (widened ? "expand_bf(" : "(")
+        << kir::panelExpression(dot, {a, c, d, l}, math) << ");}\n";
+  }
   if (packRhs || packets) {
     auto b = dot.getOperand(1);
     auto i = cast<BlockArgument>(b).getArgNumber();
@@ -286,6 +366,8 @@ static inline float decode(unsigned x,unsigned scale){
     << "for(int64_t job=0;job<jobs;++job){int64_t "
        "nc=(N+nr-1)/nr,mb=(M+mr-1)/mr;\n"
     << "int64_t g=job/(nc*mb),c=(job%nc)*nr,r=(job/nc%mb)*mr,end=M;\n";
+  if (mapped)
+    s << "int64_t head=g%H,chunk=g/H%chunks,batch=g/H/chunks;\n";
   if (!offsets.empty())
     s << "r+=" << index(offsets, "g") << ";end=" << index(offsets, "(g+1)")
       << ";if(r>=end)continue;\n";
@@ -293,6 +375,14 @@ static inline float decode(unsigned x,unsigned scale){
     << (routes.empty() ? "r" : "dest/" + std::to_string(multiplicity)) << ";\n"
     << "int64_t R=end-r<mr?end-r:mr,C=N-c<nr?N-c:nr;\n";
   for (auto [i, v] : llvm::enumerate(views)) {
+    if (widened && !i) {
+      s << "void *p0=left+" << v.origin << ";\n";
+      continue;
+    }
+    if (mapped && i == 1) {
+      s << "void *p1=right+" << v.origin << ";\n";
+      continue;
+    }
     if (routed && i == 0) {
       s << "void *p0=members+r*" << shape[2] * elemBytes(v.slot) << ";\n";
       continue;
@@ -351,7 +441,8 @@ static inline float decode(unsigned x,unsigned scale){
         << ",from+j*" << bytes << "," << bytes << ");}\n";
   }
   s << "}}" << (routed ? "free(members);" : "") << (heap ? "free(packed);" : "")
-    << (decoded ? "free(workspace);" : "")
+    << (decoded ? "free(workspace);" : "") << (mapped ? "free(right);" : "")
+    << (widened ? "free(left);" : "")
     << (packRhs || packets || interleave ? "free(rhs);" : "")
     << (status ? "return rc;" : "") << "}\n";
   return text;

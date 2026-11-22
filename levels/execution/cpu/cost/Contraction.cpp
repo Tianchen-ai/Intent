@@ -23,6 +23,28 @@ void matrixCost(Unit &u) {
             ops /= 4;
           auto &dot = intentdsl::cpu::calculation(*op);
           double packBytes = 0, translationBytes = 0, scatteredBytes = 0;
+          double widenOps = 0;
+          if (dot.getName().stripDialect() == "window_contract") {
+            if (t[4]) {
+              // Packing transposes [tokens,heads,features] to
+              // [features,tokens]. Its inner read can touch a separate cache
+              // line per element.
+              auto slot = mlir::cast<mlir::BlockArgument>(dot.getOperand(0))
+                              .getArgNumber();
+              auto stride =
+                  (*f->arguments[slot].getAsObject()->getArray("strides"))[1]
+                      .getAsInteger()
+                      .value();
+              double line =
+                  std::min(64., std::max(2., std::abs(double(stride)) * 2.));
+              packBytes =
+                  double(g->batches) * g->k * ((line + 4) * g->m + 2 * g->n);
+              translationBytes =
+                  double(g->batches) * g->m * g->k * std::min(64., line);
+            } else
+              widenOps =
+                  waves * g->k * (std::ceil(double(t[1]) / t[3]) + t[0]) * t[3];
+          }
           if (dot.getName().stripDialect() == "contract") {
             auto b = dot.getOperand(1);
             auto slot = mlir::cast<mlir::BlockArgument>(b).getArgNumber();
@@ -66,13 +88,16 @@ void matrixCost(Unit &u) {
           e.terms["operand_bytes_per_worker"] = {reads, "B"};
           e.terms["vector_products"] = {ops, "count"};
           e.terms["shared_pack_bytes"] = {packBytes, "B"};
+          e.terms["repeated_bf16_widen"] = {widenOps, "FLOP"};
           e.terms["page_walk_bytes"] = {translationBytes, "B"};
           e.terms["strided_column_bytes"] = {scatteredBytes, "B"};
           auto bw = intentdsl::quantity(ctx, "read_1", "B/ns"),
                rate = intentdsl::quantity(ctx, "vector", "FLOP/ns");
           if (bw)
-            e.timeNs = (reads * workers + packBytes + translationBytes + scatteredBytes) / *bw +
-                       (rate ? ops * t[3] / *rate : 0);
+            e.timeNs = (reads * workers + packBytes + translationBytes +
+                        scatteredBytes) /
+                           *bw +
+                       (rate ? (ops * t[3] + widenOps * workers) / *rate : 0);
           if (dot.getName().stripDialect() == "q4k_dot" && bw) {
             double bytes = waves * t[0] * (g->k / 256) * 144;
             auto dispatch = intentdsl::quantity(ctx, "launch", "ns");

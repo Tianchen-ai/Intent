@@ -48,7 +48,7 @@ class Call:
         return tuple(result)
 
     def args(self, row, values):
-        if self.artifact.data.get("matrix_views"):
+        if self.artifact.data.get("matrix_views") or self.artifact.data.get("direct_views"):
             values = self.native_values if values is self.values else self._views(values)
             return (*values,row["rows"],row["width"])
         slot=self.artifact.data.get("outer_shape_slot", -1)

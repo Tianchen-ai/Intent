@@ -1,9 +1,14 @@
-#include "intentdsl/levels/algorithm/kir/ir/Segment.h"
-#include "intentdsl/levels/algorithm/kir/ir/Matrix.h"
-#include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/Dialect.h"
+#include "intentdsl/levels/algorithm/kir/ir/Domain.h"
+#include "intentdsl/levels/algorithm/kir/ir/Matrix.h"
+#include "intentdsl/levels/algorithm/kir/ir/Ordered.h"
+#include "intentdsl/levels/algorithm/kir/ir/Segment.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Math/IR/Math.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
@@ -342,6 +347,8 @@ LogicalResult verifyLogicalRows(ModuleOp module,StringRef dialect,bool canonical
     return module.emitError("expected one author kernel");
   auto fn = *funcs.begin();
   if(kir::matrixDomain(fn))return kir::verifyMatrix(fn,dialect,canonical);
+  if (kir::orderedOwners(fn))
+    return kir::verifyOwners(fn, dialect);
   if (fn.empty() || !llvm::hasSingleElement(fn.getBody()) || fn.getNumResults())
     return fn.emitError("expected a defined output-buffer kernel");
   auto &body = fn.front();
@@ -393,7 +400,8 @@ struct Canonicalize : PassWrapper<Canonicalize, OperationPass<ModuleOp>> {
 namespace CI_UNIT_NAMESPACE {
 void bind(Unit &unit) {
   unit.dialects = [](DialectRegistry &r) {
-    r.insert<intentdsl::kir::KirDialect, func::FuncDialect>();
+    r.insert<intentdsl::kir::KirDialect, func::FuncDialect, arith::ArithDialect,
+             scf::SCFDialect, memref::MemRefDialect, math::MathDialect>();
   };
   for (bool canonical : {false, true})
     unit.boundaries.push_back(

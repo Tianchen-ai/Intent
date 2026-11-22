@@ -296,10 +296,14 @@ void supply(Unit &);
 void supplyCost(Unit &);
 void matrixSupply(Unit &);
 void matrixSupplyCost(Unit &);
+void ownerSupply(Unit &);
+void ownerSupplyCost(Unit &);
 void bind(Unit &u) {
   supplyCost(u);
   matrixSupply(u);
   matrixSupplyCost(u);
+  ownerSupply(u);
+  ownerSupplyCost(u);
   u.dialects = dialect;
   supply(u);
   for (bool ready : {false, true})

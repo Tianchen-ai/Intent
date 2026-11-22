@@ -7,6 +7,7 @@ using namespace mlir;
 namespace CI_UNIT_NAMESPACE {
 void dialect(DialectRegistry &);
 llvm::Error emitMatrix(func::FuncOp,llvm::raw_pwrite_stream &);
+llvm::Error emitOrdered(func::FuncOp, llvm::raw_pwrite_stream &);
 std::string hostSource(func::FuncOp);
 void publishABI(OpPassManager &);
 LogicalResult verifyLoops(ModuleOp, const TargetProfile &, bool callable);
@@ -41,6 +42,8 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
 }
 llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
   auto fn = *m.getOps<func::FuncOp>().begin();
+  if (fn.front().front().getName().getStringRef() == "cpu.owner_task")
+    return emitOrdered(fn, out);
   if(intentdsl::cpu::matrixTask(fn))return emitMatrix(fn,out);
   auto abi = llvm::json::parse(fn->getAttrOfType<StringAttr>("kir.abi"));
   if (!abi)

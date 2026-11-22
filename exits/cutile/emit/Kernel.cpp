@@ -1,10 +1,11 @@
-#include "intentdsl/levels/execution/block/ir/Grid.h"
-#include "intentdsl/levels/execution/block/ir/Contraction.h"
-#include "llvm/ADT/StringExtras.h"
+#include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/algorithm/kir/ir/Literal.h"
-#include "compilerinfra/Assembly.h"
+#include "intentdsl/levels/algorithm/kir/ir/Ordered.h"
+#include "intentdsl/levels/execution/block/ir/Contraction.h"
+#include "intentdsl/levels/execution/block/ir/Grid.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "llvm/ADT/StringExtras.h"
 namespace CI_UNIT_NAMESPACE {
 using namespace mlir;
 namespace {
@@ -413,6 +414,10 @@ public:
 } // namespace
 llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
   auto fn = *m.getOps<func::FuncOp>().begin();
+  if (intentdsl::kir::orderedOwners(fn)) {
+    extern llvm::Error emitOrdered(func::FuncOp, llvm::raw_pwrite_stream &);
+    return emitOrdered(fn, out);
+  }
   if(intentdsl::kir::matrixDomain(fn)){
     extern llvm::Error emitMatrix(func::FuncOp,llvm::raw_pwrite_stream &);
     return emitMatrix(fn,out);

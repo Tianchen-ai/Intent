@@ -189,6 +189,11 @@ struct Realize : PassWrapper<Realize, OperationPass<ModuleOp>> {
   Realize(int64_t lanes,const intentdsl::CallFacts &f) : lanes(lanes),facts(f) {}
   void runOnOperation() final {
     auto &first=(*getOperation().getOps<func::FuncOp>().begin()).front().front();
+    if (first.getName().getStringRef() == "cpu.owner_task") {
+      first.setAttr("mojo_row.schedule",
+                    StringAttr::get(&getContext(), "ordered-owner-range"));
+      return;
+    }
     if(first.getName().getStringRef()=="cpu.matrix_task"){
       auto &region=first.getRegion(0).front().front();
       first.setAttr("mojo_row.column_lanes",IntegerAttr::get(IntegerType::get(&getContext(),64),

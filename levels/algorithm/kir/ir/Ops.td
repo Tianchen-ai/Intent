@@ -133,3 +133,5 @@ def Kir_Dialect_WriteOffsets : Op<Kir_Dialect,"write_offsets"> {let arguments=(i
 def Kir_Dialect_Ranges : Op<Kir_Dialect,"fill_ranges"> {let arguments=(ins AnyMemRef:$out,AnyMemRef:$offsets,Index:$owner,I64Attr:$unit,UnitAttr:$disjoint_in_bounds);}
 include "intentdsl/levels/algorithm/kir/ir/Matrix.td"
 defm Matrix : MatrixExpressions<Kir_Dialect>;
+include "intentdsl/levels/algorithm/kir/ir/Ordered.td"
+defm Ordered : OrderedOwners<Kir_Dialect>;

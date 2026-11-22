@@ -2,6 +2,10 @@
   "nodes": {
     "block": {
       "decisions": {
+        "levels/execution/block::ordered-owners": {
+          "strategies":["levels/execution/block::owner-widths"],
+          "realizer":"levels/execution/block::map-owner-tile"
+        },
         "levels/execution/block::contraction": {
           "strategies": ["levels/execution/block::matrix-tiles"],
           "realizer": "levels/execution/block::tile-matrix"
@@ -26,6 +30,10 @@
     },
     "cpu": {
       "decisions": {
+        "levels/execution/cpu::ordered-owners": {
+          "strategies":["levels/execution/cpu::owner-grains"],
+          "realizer":"levels/execution/cpu::group-owners"
+        },
         "levels/execution/cpu::matrix-partition": {
           "strategies": ["levels/execution/cpu::contract-blocks"],
           "realizer": "levels/execution/cpu::own-output-blocks"
@@ -60,6 +68,10 @@
     },
     "dsa": {
       "decisions": {
+        "levels/storage/dsa::ordered-supply": {
+          "strategies":["levels/storage/dsa::owner-working-set"],
+          "realizer":"levels/storage/dsa::bind-owner-supply"
+        },
         "levels/storage/dsa::panel-supply": {
           "strategies": ["levels/storage/dsa::task-panels"],
           "realizer": "levels/storage/dsa::place-panels"

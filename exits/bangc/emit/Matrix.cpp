@@ -81,6 +81,71 @@ struct Matrix : intentdsl::block::MatrixAccess {
   }
   void operand(bool lhs, StringRef type) {
     auto v = dot.getOperand(lhs ? 0 : 1);
+    if (dot.getName().stripDialect() == "window_contract") {
+      auto &feeds = fold.getRegion(0).front().front().getRegion(0).front();
+      auto transfer = (lhs ? feeds.front() : *feeds.front().getNextNode())
+                          .getAttrOfType<StringAttr>("bangc.transfer");
+      if (transfer == "transpose-window-dma") {
+        if (type != "bfloat16_t")
+          llvm_unreachable("verified BF16 window");
+        s << "if(nr<BM || "
+             "nk<BK)__bang_write_value((short*)trans,BK*BM,(short)0);"
+          << "__memcpy(trans,"
+          << ptr(v, type, {"batch", "chunk*K+kk", "head", "r"})
+          << ",nr*2,GDRAM2NRAM,BM*2," << stride(v, 1) << "*2LL,nk-1);"
+          << "__bang_transpose((short*)left,(short*)trans,BK,BM);\n";
+        return;
+      }
+      if (transfer == "mapped-filter-major-dma") {
+        auto step = dot.getOperand(2), prefix = dot.getOperand(3);
+        s << "if(nc<BN || "
+             "nk<BK)__bang_write_value((short*)right,BK*BN,(short)0);"
+          << "__memcpy(right,"
+          << ptr(v, type, {"batch", "chunk*K+kk", "group", "c"})
+          << ",nc*2,GDRAM2NRAM,BN*2," << stride(v, 1) << "*2LL,nk-1);\n";
+        for (auto [from, name] :
+             {std::pair{step, "stepbuf"}, std::pair{prefix, "prefixbuf"}}) {
+          if (stride(from, 3) == 1)
+            s << "__memcpy(" << name << ","
+              << ptr(from, "float", {"batch", "head", "chunk", "kk"})
+              << ",nk*sizeof(float),GDRAM2NRAM);\n";
+          else
+            s << "__memcpy(" << name << ","
+              << ptr(from, "float", {"batch", "head", "chunk", "kk"})
+              << ",sizeof(float),GDRAM2NRAM,sizeof(float)," << stride(from, 3)
+              << "*4LL,nk-1);\n";
+        }
+        auto scale = intentdsl::kir::panelExpression(
+            dot, {"", "stepbuf[k]", "prefixbuf[k]", "last"},
+            {"widen_value", "narrow_value", "min_ieee", "expf"},
+            intentdsl::kir::rowScale(dot));
+        s << "for(int k=0;k<BK;++k)scales[k]=k<nk?" << scale << ":0.f;\n"
+          << "__bang_transpose((short*)trans,(short*)right,BK,BN);"
+          << "widen_bf16_tile(mapped,(const unsigned short*)trans,BK*BN);"
+          << "__bang_cycle_mul(mapped,mapped,scales,BN*BK,BK);"
+          << "narrow_bf16_tile((unsigned short*)trans,mapped,BN*BK,BN*BK);\n";
+        return;
+      }
+      s << "__bang_write_value((unsigned short*)"
+        << (lhs ? "left,BM*BK" : "right,BK*BN") << ",(unsigned short)0);\n";
+      if (lhs)
+        s << "for(int k=0;k<nk;++k)for(int i=0;i<nr;++i)left[i*BK+k]=*"
+          << ptr(v, type, {"batch", "chunk*K+kk+k", "head", "r+i"}) << ";\n";
+      else {
+        auto step = dot.getOperand(2), prefix = dot.getOperand(3);
+        s << "for(int k=0;k<nk;++k){float d=*"
+          << ptr(step, "float", {"batch", "head", "chunk", "kk+k"}) << ",v=*"
+          << ptr(prefix, "float", {"batch", "head", "chunk", "kk+k"}) << ";\n"
+          << "for(int j=0;j<nc;++j){auto raw=*"
+          << ptr(v, type, {"batch", "chunk*K+kk+k", "group", "c+j"})
+          << ";right[k*BN+j]="
+          << intentdsl::kir::panelExpression(
+                 dot, {"raw", "d", "v", "last"},
+                 {"widen_value", "narrow_value", "min_ieee", "expf"})
+          << ";}}\n";
+      }
+      return;
+    }
     int k = axis(lhs ? "lhs_k" : "rhs_k"),
         b = axis(lhs ? "lhs_batch" : "rhs_batch"), member = freeAxis(v, k, b);
     auto &ops = fold.getRegion(0).front().front().getRegion(0).front();
@@ -135,7 +200,7 @@ struct Matrix : intentdsl::block::MatrixAccess {
                       .front()
                       .getNextNode()
                       ->getAttrOfType<StringAttr>("bangc.transfer");
-      if (mode != "filter-major-dma") {
+      if (mode != "filter-major-dma" && mode != "mapped-filter-major-dma") {
         if (type == "bfloat16_t")
           s << "__bang_transpose((short*)trans,(short*)right,BK,BN);";
         else
@@ -210,6 +275,15 @@ struct Matrix : intentdsl::block::MatrixAccess {
       s <<
 #include "BFloatPanel.inc"
           ;
+    if (dot.getName().stripDialect() == "window_contract") {
+      s <<
+#include "RowMath.inc"
+          ;
+      s << R"mlu(
+__mlu_func__ float widen_value(bfloat16_t v){union{bfloat16_t b;unsigned short u;}x;union{unsigned u;float f;}f;x.b=v;f.u=(unsigned)x.u<<16;return f.f;}
+__mlu_func__ float min_ieee(float a,float b){return isnan(a)?a:isnan(b)?b:fminf(a,b);}
+)mlu";
+    }
     if (mode == "scaled-f32")
       s << R"mlu(
 __mlu_func__ float decode8(unsigned x,unsigned scale){
@@ -237,6 +311,9 @@ __mlu_func__ float decode8(unsigned x,unsigned scale){
       s << "__nram__ unsigned char rec[144];\n";
     if (dot.hasAttr("bangc.bf16_arithmetic"))
       s << "__nram__ unsigned short flags[BK*BN];\n";
+    if (dot.getName().stripDialect() == "window_contract")
+      s << "__nram__ float "
+           "mapped[BK*BN],stepbuf[BK],prefixbuf[BK],scales[BK];\n";
     int64_t mb = llvm::divideCeil(uint64_t(shape[0]), uint64_t(tile[0])),
             nb = llvm::divideCeil(uint64_t(shape[1]), uint64_t(tile[1]));
     s << "for(long long job=taskId;job<grid;job+=taskDim){long long c=job%"
@@ -251,6 +328,17 @@ __mlu_func__ float decode8(unsigned x,unsigned scale){
     }
     s << "int nr=end-r<BM?end-r:BM,nc=" << shape[1] << "-c<BN?" << shape[1]
       << "-c:BN;\n";
+    if (dot.getName().stripDialect() == "window_contract") {
+      auto sh =
+          fn.getArgAttrOfType<DenseI64ArrayAttr>(slot(dst), "block.shape");
+      auto h = std::max<int64_t>(1, sh[2]), c = std::max<int64_t>(1, sh[1]);
+      s << "long long head=g%" << h << ",chunk=g/" << h << "%" << c
+        << ",batch=g/" << h << "/" << c << ",group=head/" << axis("head_group")
+        << ";"
+        << "float last=K?*"
+        << ptr(dot.getOperand(3), "float", {"batch", "head", "chunk", "K-1"})
+        << ":0.f;\n";
+    }
     if (dot.hasAttr("bangc.bf16_arithmetic"))
       s << "bool strict=false;\n";
     if (mode == "q4k-q8k")
@@ -299,8 +387,10 @@ __mlu_func__ float decode8(unsigned x,unsigned scale){
           << "),NRAM2GDRAM);";
       else
         s << "__memcpy("
-          << (rank(dst) == 2 ? ptr(dst, ot, {"r", "c"})
-                             : ptr(dst, ot, {"g", "r", "c"}))
+          << (rank(dst) == 5
+                  ? ptr(dst, ot, {"batch", "chunk", "head", "r", "c"})
+              : rank(dst) == 2 ? ptr(dst, ot, {"r", "c"})
+                               : ptr(dst, ot, {"g", "r", "c"}))
           << ",acc,nc*sizeof(" << ot << "),NRAM2GDRAM,"
           << stride(dst, rank(dst) - 2) << "*sizeof(" << ot << "),BN*sizeof("
           << ot << "),nr-1);";
@@ -349,7 +439,9 @@ __mlu_func__ float decode8(unsigned x,unsigned scale){
         auto q = std::to_string(fn.getArgAttrOfType<DenseI64ArrayAttr>(
             slot(dst), "block.shape")[1]);
         s << "*" << ptr(dst, ot, {"dest/" + q, "dest%" + q, "c+j"});
-      } else
+      } else if (rank(dst) == 5)
+        s << "*" << ptr(dst, ot, {"batch", "chunk", "head", "dest", "c+j"});
+      else
         s << "*" << ptr(dst, ot, {"g", "dest", "c+j"});
       s << "=(" << ot << ")" << val << ";}}";
     }

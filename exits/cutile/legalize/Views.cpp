@@ -1,11 +1,13 @@
 #include "../capabilities/Index.h"
-#include "intentdsl/levels/execution/block/ir/Contraction.h"
-#include "intentdsl/levels/algorithm/kir/ir/ProjectedLayout.h"
 #include "compilerinfra/Assembly.h"
-#include "intentdsl/levels/execution/block/ir/Access.h"
+#include "intentdsl/levels/algorithm/kir/ir/ProjectedLayout.h"
 #include "intentdsl/levels/execution/block/decisions/Verify.h"
+#include "intentdsl/levels/execution/block/ir/Access.h"
+#include "intentdsl/levels/execution/block/ir/Contraction.h"
+#include "intentdsl/levels/execution/block/ir/Owners.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Pass/Pass.h"
+
 #include "Dialect.h.inc"
 namespace CI_UNIT_NAMESPACE {
 using namespace mlir;
@@ -118,6 +120,9 @@ struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
 LogicalResult verify(ModuleOp module, const TargetProfile &profile,
                      bool callable) {
   auto matrix=*module.getOps<func::FuncOp>().begin();
+  if (intentdsl::kir::orderedOwners(matrix))
+    return intentdsl::block::verifyOwnerMap(matrix, profile, "ct_src",
+                                            "realized");
   if(intentdsl::kir::matrixDomain(matrix)){
     if(failed(intentdsl::block::verifyTiledMatrix(matrix,profile,"ct_src")))return failure();
     if(callable && matrix->getAttr("ct_src.index_bits")!=Builder(matrix.getContext()).getI32IntegerAttr(profile.services.get<intentdsl::cutile::ArrayIndices>()->bits))

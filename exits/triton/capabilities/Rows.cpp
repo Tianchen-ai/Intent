@@ -1,7 +1,8 @@
-#include "intentdsl/levels/algorithm/kir/ir/Performance.h"
 #include "compilerinfra/Assembly.h"
+#include "intentdsl/levels/algorithm/kir/ir/Performance.h"
 #include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
 #include "intentdsl/levels/execution/block/ir/Contraction.h"
+#include "intentdsl/levels/execution/block/ir/Owners.h"
 #include "llvm/Support/MathExtras.h"
 
 namespace CI_UNIT_NAMESPACE {
@@ -54,6 +55,10 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
   }
   if(auto registers=options.getInteger("registers"))
     if(auto err=profile.services.facts.query("register_file",{*registers,"reg32","CUDA",llvm::json::Object{{"source","device properties"}}}))return err;
+  if (auto err = profile.services.provide<intentdsl::block::OwnerMachine>(
+          std::make_shared<intentdsl::block::OwnerMachine>(
+              intentdsl::block::OwnerMachine{32, 256})))
+    return err;
   if(auto err=intentdsl::bindPerformance(profile,options,"",options.getString("calibration").value_or("").str(),options.getInteger("sm_count").value_or(1)))return std::move(err);
   if (auto e = profile.services.provide<intentdsl::RowCapacity>(caps))
     return e;

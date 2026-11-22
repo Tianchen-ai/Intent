@@ -88,7 +88,7 @@ void registerContraction(Unit &u) {
     auto &body = op->getRegion(0).front();
     for (auto &calc : llvm::make_early_inc_range(body)) {
       auto n = calc.getName().stripDialect();
-      if (n != "contract" && n != "scaled_contract" && n != "q4k_dot")
+      if (!kir::isContraction(n))
         continue;
       b.setInsertionPoint(&calc);
       OperationState loop(calc.getLoc(), "block.panel_fold");

@@ -1,14 +1,18 @@
 #include "intentdsl/levels/algorithm/kir/ir/Performance.h"
-#include "intentdsl/levels/storage/dsa/ir/Supply.h"
-#include "intentdsl/levels/storage/dsa/ir/Matrix.h"
-#include "intentdsl/levels/execution/block/ir/Contraction.h"
 #include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
+#include "intentdsl/levels/execution/block/ir/Contraction.h"
+#include "intentdsl/levels/execution/block/ir/Owners.h"
+#include "intentdsl/levels/storage/dsa/ir/Matrix.h"
+#include "intentdsl/levels/storage/dsa/ir/Supply.h"
 
 namespace CI_UNIT_NAMESPACE {
-static int64_t matrixPrivateBytes(int64_t rows,int64_t columns,int64_t depth) {
+static int64_t matrixPrivateBytes(int64_t rows, int64_t columns, int64_t depth,
+                                  llvm::StringRef computation) {
   // Upper bound shared by the supported convolution, record and scaled-dot
   // microkernels, including conversion and record scratch.
-  return 256+4*(rows*depth+2*depth*columns+2*rows*columns)+2*292;
+  return 256 + 4 * (rows * depth + 2 * depth * columns + 2 * rows * columns) +
+         2 * 292 +
+         (computation == "window_contract" ? 4 * depth * (columns + 3) : 0);
 }
 llvm::Expected<compilerinfra::TargetProfile>
 capabilities(const llvm::json::Object &opts) {
@@ -24,15 +28,22 @@ capabilities(const llvm::json::Object &opts) {
         "BANG C requires the MLU370 CNRT ISA, local capacity and core counts");
   auto caps = std::make_shared<intentdsl::RowCapacity>();
   auto matrices=std::make_shared<intentdsl::block::MatrixTarget>();
-  matrices->tiles={{8,64,64,"{}"},{16,64,128,"{}"},{32,64,128,"{}"},
-                   {16,64,256,"{}","contract"},{32,64,256,"{}","contract"},
-                   {64,64,256,"{}","contract"},{128,64,256,"{}","contract"}};
+  matrices->tiles = {{8, 64, 64, "{}"},
+                     {16, 64, 128, "{}"},
+                     {32, 64, 128, "{}"},
+                     {16, 64, 256, "{}", "contract"},
+                     {32, 64, 256, "{}", "contract"},
+                     {64, 64, 256, "{}", "contract"},
+                     {128, 64, 256, "{}", "contract"},
+                     {64, 64, 64, "{}", "window_contract"},
+                     {32, 64, 64, "{}", "window_contract"}};
   auto wram=opts.getInteger("wram_bytes");
   // Only admit implementations that fit both physical owners. A row-only
   // offline profile can still compile its original row programs.
-  llvm::erase_if(matrices->tiles,[&](auto &t){
-    return !wram || 2*t.k*t.n>*wram ||
-      matrixPrivateBytes(t.m,t.n,t.k)>std::min<int64_t>(*nram/3*2,512*1024);
+  llvm::erase_if(matrices->tiles, [&](auto &t) {
+    return !wram || 2 * t.k * t.n > *wram ||
+           matrixPrivateBytes(t.m, t.n, t.k, t.operation) >
+               std::min<int64_t>(*nram / 3 * 2, 512 * 1024);
   });
   matrices->estimate="exits/bangc::matrix-transfer";
   if(auto e=profile.services.provide<intentdsl::dsa::MatrixStorage>(
@@ -51,6 +62,10 @@ capabilities(const llvm::json::Object &opts) {
       std::make_shared<intentdsl::dsa::LocalSupply>(intentdsl::dsa::LocalSupply{
           *nram, std::min<int64_t>(*nram/3*2,512*1024), 128, (*clusters) * (*cores), sizeof(float), true, 16, 12});
   caps->stagedInputBudget=std::min(resource->capacity,resource->budget);
+  if (auto err = profile.services.provide<intentdsl::block::OwnerMachine>(
+          std::make_shared<intentdsl::block::OwnerMachine>(
+              intentdsl::block::OwnerMachine{1, 0})))
+    return err;
   if(auto err=intentdsl::bindPerformance(profile,opts,"exits/bangc::dma",opts.getString("calibration").value_or("").str(),*clusters * *cores))return std::move(err);
   if (auto e = profile.services.provide<intentdsl::RowCapacity>(caps))
     return e;

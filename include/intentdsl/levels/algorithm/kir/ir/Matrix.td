@@ -11,6 +11,13 @@ multiclass MatrixExpressions<Dialect d> {
   def ScaleTranspose : Op<d,"transpose_scale"> {
     let arguments=(ins AnyMemRef:$input);let results=(outs AnyRankedTensor:$scale);
   }
+  def WindowContract : Op<d,"window_contract",[SingleBlock,IsolatedFromAbove]> {
+    let arguments=(ins AnyMemRef:$lhs,AnyMemRef:$rhs,AnyMemRef:$coefficients,
+                       AnyMemRef:$prefix,I64Attr:$head_group);
+    let results=(outs AnyRankedTensor:$sums);
+    let regions=(region AnyRegion:$map);
+  }
+  def PanelValue : Op<d,"panel_value",[Terminator]> {let arguments=(ins BF16:$element);}
   def ScaledContract : Op<d,"scaled_contract"> {
     let arguments=(ins AnyMemRef:$lhs,AnyMemRef:$leftScale,AnyMemRef:$rhs,AnyRankedTensor:$rightScale);
     let results=(outs AnyRankedTensor:$sums);

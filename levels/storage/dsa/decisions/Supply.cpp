@@ -1,6 +1,7 @@
+#include "Plan.h"
 #include "intentdsl/levels/algorithm/kir/ir/Matrix.h"
 #include "intentdsl/levels/algorithm/kir/ir/Segment.h"
-#include "Plan.h"
+#include "intentdsl/levels/storage/dsa/ir/Owners.h"
 #include "llvm/Support/MathExtras.h"
 
 namespace intentdsl::dsa {
@@ -166,7 +167,11 @@ using namespace compilerinfra;
 void supply(Unit &u) {
   DecisionFamily family;
   family.name = "supply";
-  family.applies = [](Operation *op) { return isa<func::FuncOp>(op) && !intentdsl::kir::matrixDomain(cast<func::FuncOp>(op)); };
+  family.applies = [](Operation *op) {
+    return isa<func::FuncOp>(op) &&
+           !intentdsl::kir::orderedOwners(cast<func::FuncOp>(op)) &&
+           !intentdsl::kir::matrixDomain(cast<func::FuncOp>(op));
+  };
   family.read = [](Operation *op) { return op->getAttr("dsa.pending"); };
   family.write = [](Operation *op, Attribute a) {
     op->setAttr("dsa.pending", a);

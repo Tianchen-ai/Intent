@@ -1,8 +1,10 @@
-#include "mlir/Interfaces/InferTypeOpInterface.h"
 #include "compilerinfra/Assembly.h"
+#include "mlir/Bytecode/BytecodeOpInterface.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/OpImplementation.h"
-#include "mlir/Bytecode/BytecodeOpInterface.h"
+#include "mlir/Interfaces/InferTypeOpInterface.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
+
 #include "Dialect.h.inc"
 #include "Dialect.cpp.inc"
 #define GET_OP_CLASSES

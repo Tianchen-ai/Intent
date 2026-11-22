@@ -181,6 +181,41 @@ struct Writer : intentdsl::block::MatrixAccess {
     load(b, false, bk, bb);
     s << "        acc=ct.mma(av,bv,acc)\n";
   }
+  void window() {
+    auto step = dot.getOperand(2), prefix = dot.getOperand(3);
+    auto sh = fn.getArgAttrOfType<DenseI64ArrayAttr>(slot(step), "block.shape");
+    s << "    g=ct.astype(gp,ct.int64)\n    head=g%"
+      << std::max<int64_t>(1, sh[1]) << "\n    chunk=(g//"
+      << std::max<int64_t>(1, sh[1]) << ")%" << std::max<int64_t>(1, sh[2])
+      << "\n    batch=g//" << std::max<int64_t>(1, sh[1] * sh[2])
+      << "\n    group=head//" << axis("head_group") << "\n"
+      << "    acc=ct.full((BM,BN),0.,ct.float32)\n    for panel in "
+         "range(ct.cdiv(K,BK)):\n"
+      << "        "
+         "t=ct.astype(panel,ct.int64)*BK+ct.arange(BK,dtype=ct.int32)\n        "
+         "seq=chunk*K+t\n"
+      << "        a=ct.gather(" << name(dot.getOperand(0))
+      << ",(batch,ct.expand_dims(seq,0),head,ct.expand_dims(r,1)),mask=ct."
+         "expand_dims(r<M,1)&ct.expand_dims(t<K,0),padding_value=0)\n"
+      << "        b=ct.gather(" << name(dot.getOperand(1))
+      << ",(batch,ct.expand_dims(seq,1),group,ct.expand_dims(c,0)),mask=ct."
+         "expand_dims(t<K,1)&ct.expand_dims(c<N,0),padding_value=0)\n"
+      << "        d=ct.gather(" << name(step)
+      << ",(batch,head,chunk,t),mask=t<K,padding_value=0)\n"
+      << "        v=ct.gather(" << name(prefix)
+      << ",(batch,head,chunk,t),mask=t<K,padding_value=0)\n"
+      << "        last=ct.gather(" << name(prefix)
+      << ",(batch,head,chunk,K-1))\n"
+      << "        rhs="
+      << intentdsl::kir::panelExpression(
+             dot, {"b", "ct.expand_dims(d,1)", "ct.expand_dims(v,1)", "last"},
+             {"ct.astype($,ct.float32)", "ct.astype($,ct.bfloat16)",
+              "ct.minimum", "ct.exp", ",propagate_nan=True"})
+      << "\n"
+      << "        "
+         "acc=ct.mma(a,ct.where(ct.expand_dims(t<K,1),rhs,ct.astype(0,ct."
+         "bfloat16)),acc)\n";
+  }
   void write() {
     bool wide=fn->getAttrOfType<IntegerAttr>("ct_src.index_bits").getInt()==64;
     s << "import cuda.tile as ct\n@ct.kernel\ndef kernel(";
@@ -194,7 +229,9 @@ struct Writer : intentdsl::block::MatrixAccess {
          "c=ct.astype(ct.bid(1),ct.int64)*BN+ct.arange(BN,dtype=ct.int32)\n    src=r\n    "
          "target=r\n    end=M\n";
     auto n = dot.getName().stripDialect();
-    if (n == "q4k_dot")
+    if (n == "window_contract")
+      window();
+    else if (n == "q4k_dot")
       records();
     else if (n == "scaled_contract")
       scaled();
@@ -236,7 +273,11 @@ struct Writer : intentdsl::block::MatrixAccess {
           s << "    ct.scatter(" << ptr << ",(" << idx
             << ",ct.expand_dims(c,0)),acc,mask=ct.expand_dims(r<end,1)&ct."
                "expand_dims(c<N,0))\n";
-        } else if (rank(v) == 2)
+        } else if (n == "window_contract")
+          s << "    ct.scatter(" << ptr
+            << ",(batch,chunk,head,ct.expand_dims(r,1),ct.expand_dims(c,0)),"
+               "acc,mask=ct.expand_dims(r<M,1)&ct.expand_dims(c<N,0))\n";
+        else if (rank(v) == 2)
           s << "    ct.store(" << ptr << ",(ct.bid(0),ct.bid(1)),acc"
             << (n == "scaled_contract" ? ",allow_tma=False" : "") << ")\n";
         else

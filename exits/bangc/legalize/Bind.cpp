@@ -1,8 +1,10 @@
+#include "Matrix.h"
+#include "OwnerVectors.h"
+#include "Slab.h"
 #include "intentdsl/levels/algorithm/kir/ir/Segment.h"
+#include "intentdsl/levels/storage/dsa/ir/Owners.h"
 #include "intentdsl/levels/storage/dsa/ir/Supply.h"
 #include "mlir/Pass/Pass.h"
-#include "Slab.h"
-#include "Matrix.h"
 using namespace mlir;
 namespace CI_UNIT_NAMESPACE {
 using namespace compilerinfra;
@@ -219,6 +221,23 @@ struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
       if(failed(bindMatrix(f,phase,true)))signalPassFailure();
       return;
     }
+    if (intentdsl::kir::orderedOwners(f)) {
+      auto &space = f.front().front();
+      space.setAttr(
+          "bangc.workers",
+          Builder(f.getContext()).getI64IntegerAttr(supply.consumers));
+      space.setAttr(
+          "bangc.owner_memory",
+          StringAttr::get(
+              f.getContext(),
+              space.getAttrOfType<IntegerAttr>("dsa.owner_bytes").getInt()
+                  ? "private-nram"
+                  : "global"));
+      if (phase >= 1 && failed(ownerVectors(
+                            f, true, std::min(supply.budget, supply.capacity))))
+        signalPassFailure();
+      return;
+    }
     Builder b(&getContext());
     if (phase == 0) {
       if (failed(offsets(f, true))) {
@@ -313,6 +332,24 @@ LogicalResult verify(ModuleOp m, const TargetProfile &p, unsigned stage) {
     return failure();
   auto fn = *m.getOps<func::FuncOp>().begin();
   if(intentdsl::kir::matrixDomain(fn))return bindMatrix(fn,stage,false);
+  if (intentdsl::kir::orderedOwners(fn)) {
+    if (failed(intentdsl::dsa::verifyOwners(fn, p, true)))
+      return failure();
+    auto supply = p.services.get<intentdsl::dsa::LocalSupply>();
+    if (stage >= 1 &&
+        failed(ownerVectors(fn, false,
+                            std::min(supply->budget, supply->capacity))))
+      return failure();
+    auto &space = fn.front().front();
+    auto n = p.services.get<intentdsl::dsa::LocalSupply>()->consumers;
+    if (space.getAttrOfType<StringAttr>("bangc.owner_memory") !=
+        (space.getAttrOfType<IntegerAttr>("dsa.owner_bytes").getInt()
+             ? "private-nram"
+             : "global"))
+      return fn.emitError("invalid owner storage binding");
+    return success(n > 0 && space.getAttr("bangc.workers") ==
+                                Builder(fn.getContext()).getI64IntegerAttr(n));
+  }
   auto layout = fn->getAttrOfType<DictionaryAttr>("dsa.layout");
   auto depth = layout.getAs<IntegerAttr>("depth").getInt();
   if (fn->getAttrOfType<StringAttr>("bangc.space") != "private.nram" ||
