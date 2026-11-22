@@ -20,14 +20,14 @@ struct Writer : intentdsl::block::MatrixAccess {
          x = dot.getOperand(1).getDefiningOp()->getOperand(0);
     s << "    acc=tl.full((ROWS,),0,tl.float32)\n"
       << "    for g in range(" << shape[2] / 256 << "):\n"
-      << "        xs=" << name(x) << "+g*" << stride(x, 0) << "\n"
-      << "        v=tl.load(xs+tl.arange(0,256)*" << stride(x, 1) << ")\n"
+      << "        xs=" << name(x) << "+tl.cast(g,tl.int64)*" << stride(x, 0) << "\n"
+      << "        v=tl.load(xs+tl.arange(0,256).to(tl.int64)*" << stride(x, 1) << ")\n"
       << "        peak=tl.max(tl.abs(v),0)\n"
       << "        extreme=tl.where(tl.sum((v == "
          "-peak).to(tl.int32),0)>0,-peak,peak)\n"
       << "        inv=tl.div_rn(-127.,tl.where(peak==0,1.,extreme))\n"
       << "        ds=tl.where(peak==0,0.,tl.div_rn(1.,inv))\n"
-      << "        base=" << name(w) << "+r*" << stride(w, 0) << "+g*"
+      << "        base=" << name(w) << "+r*" << stride(w, 0) << "+tl.cast(g,tl.int64)*"
       << stride(w, 1) << "\n";
     auto byte = [&](std::string i) {
       return "tl.load(base+(" + i + ")*" + strideOf(w, 2) +
@@ -37,7 +37,7 @@ struct Writer : intentdsl::block::MatrixAccess {
       << "<<8)).to(tl.uint16).to(tl.float16,bitcast=True).to(tl.float32)\n"
       << "        dm=(" << byte("2") << "|(" << byte("3")
       << "<<8)).to(tl.uint16).to(tl.float16,bitcast=True).to(tl.float32)\n"
-      << "        t=tl.arange(0,256)\n        j=t//32\n"
+      << "        t=tl.arange(0,256).to(tl.int64)\n        j=t//32\n"
       << "        header=base[:,None]+(j%4)[None,:]*"<<stride(w,2)<<"\n"
       << "        L=tl.load(header+"<<4*stride(w,2)<<",r[:,None]<M,other=0).to(tl.int32)\n"
       << "        H=tl.load(header+"<<8*stride(w,2)<<",r[:,None]<M,other=0).to(tl.int32)\n"
@@ -60,7 +60,7 @@ struct Writer : intentdsl::block::MatrixAccess {
     if (dot.getAttrOfType<BoolAttr>("triton_src.neutral_scale_dispatch")
             .getValue()) {
       auto v = store->getOperand(0);
-      s << "    group=tl.arange(0," << shape[2] / 32 << ")\n"
+      s << "    group=tl.arange(0," << shape[2] / 32 << ").to(tl.int64)\n"
         << "    left_scale=tl.load("
         << addr(sa, "r[:,None]", 0, "group[None,:]", 1)
         << ",r[:,None]<M,other=127)\n"
@@ -72,7 +72,7 @@ struct Writer : intentdsl::block::MatrixAccess {
            "scale==127).to(tl.int32),None)==1):\n"
         << "        result=tl.full((ROWS,WIDTH),0.,tl.float32)\n        for p "
            "in range(tl.cdiv(K,BK)):\n"
-        << "            tk=p*BK+tl.arange(0,BK)\n"
+        << "            tk=tl.cast(p,tl.int64)*BK+tl.arange(0,BK)\n"
         << "            la=tl.load(" << name(a)
         << ".to(tl.pointer_type(tl.uint8))+r[:,None]*" << stride(a, 0)
         << "+(tk//32)[None,:]*" << stride(a, 1) << "+(tk%32)[None,:]*"
@@ -100,13 +100,13 @@ struct Writer : intentdsl::block::MatrixAccess {
       << "        "
          "rs=tl.where(bx==255,float('nan'),libdevice.ldexp(tl.full((WIDTH,),1.,"
          "tl.float32),bx-127))\n"
-      << "        t=tl.arange(0,32)\n"
+      << "        t=tl.arange(0,32).to(tl.int64)\n"
       << "        av=tl.load(" << name(a)
-      << ".to(tl.pointer_type(tl.uint8))+r[:,None]*" << stride(a, 0) << "+g*"
+      << ".to(tl.pointer_type(tl.uint8))+r[:,None]*" << stride(a, 0) << "+tl.cast(g,tl.int64)*"
       << stride(a, 1) << "+t[None,:]*" << stride(a, 2)
       << ",r[:,None]<M,other=0).to(tl.float8e4nv,bitcast=True).to(tl.float32)*"
          "ls[:,None]\n"
-      << "        bv=tl.load(" << name(b) << ".to(tl.pointer_type(tl.uint8))+g*"
+      << "        bv=tl.load(" << name(b) << ".to(tl.pointer_type(tl.uint8))+tl.cast(g,tl.int64)*"
       << stride(b, 0) << "+t[:,None]*" << stride(b, 1) << "+c[None,:]*"
       << stride(b, 2)
       << ",c[None,:]<N,other=0).to(tl.float8e4nv,bitcast=True).to(tl.float32)*"
@@ -165,7 +165,7 @@ struct Writer : intentdsl::block::MatrixAccess {
       s << "    acc=tl.full((ROWS,WIDTH),0,tl."
         << (integer ? "int32" : "float32")
         << ")\n    for panel in range(tl.cdiv(K,BK)):\n"
-        << "        k=panel*BK+tl.arange(0,BK)\n"
+        << "        k=tl.cast(panel,tl.int64)*BK+tl.arange(0,BK)\n"
         << "        av=tl.load("
         << addr(a, "src[:,None]", freeAxis(a, ak, ab), "k[None,:]", ak, ab)
         << ",mask=(r[:,None]<end)&(k[None,:]<K),other=0)\n"

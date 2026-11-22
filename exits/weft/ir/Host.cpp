@@ -90,8 +90,8 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
             f.setArgAttr(i,"weft_host.indirect_extents",b.getDenseI64ArrayAttr({*shape->front().getAsInteger()}));
           }
         }
-        if(n=="pack_members"){
-          auto slot=cast<BlockArgument>(o->getOperand(2)).getArgNumber()-1;
+        if(n=="pack_members" || n=="prefix_scatter"){
+          auto slot=cast<BlockArgument>(o->getOperand(n=="pack_members"?2:1)).getArgNumber()-1;
           f.setArgAttr(slot,"weft_host.task_indices",b.getUnitAttr());
         }
         if(n=="ordered_sum" || n=="segment_length" || n=="member_load" || n=="count_keys" || n=="column_sum" || n=="atomic_add" || n=="unique_put" || n=="index_read"){

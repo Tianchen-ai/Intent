@@ -139,7 +139,7 @@ struct Writer : intentdsl::block::MatrixAccess {
       auto o = name(dot.getOperand(2));
       s << "    start=ct.gather(" << o << ",gp)\n    end=ct.gather(" << o
         << ",gp+1)\n    r=r+start\n    src=r\n    target=r\n";
-      s << "    if start+ct.bid(0)*BM>=end:\n        return\n";
+      s << "    if start+ct.astype(ct.bid(0),ct.int64)*BM>=end:\n        return\n";
       if (routed())
         s << "    target=ct.gather(" << name(dot.getOperand(3))
           << ",r,mask=r<end,padding_value=0)\n    src=target//"
@@ -176,21 +176,22 @@ struct Writer : intentdsl::block::MatrixAccess {
           << ",padding_value=0)\n";
       }
     };
-    s << "        kk=panel*BK+ct.arange(BK,dtype=ct.int32)\n";
+    s << "        kk=ct.astype(panel,ct.int64)*BK+ct.arange(BK,dtype=ct.int32)\n";
     load(a, true, ak, ab);
     load(b, false, bk, bb);
     s << "        acc=ct.mma(av,bv,acc)\n";
   }
   void write() {
+    bool wide=fn->getAttrOfType<IntegerAttr>("ct_src.index_bits").getInt()==64;
     s << "import cuda.tile as ct\n@ct.kernel\ndef kernel(";
     for (auto v : fn.getArguments())
-      s << name(v) << ",";
+      s << name(v) << (wide?":ct.IndexedWithInt64[ct.Array],":",");
     s << "BM:ct.Constant[int],BN:ct.Constant[int]):\n    M=" << shape[0]
       << "\n    N=" << shape[1] << "\n    K=" << shape[2]
       << "\n    BK=" << tile[2]
       << "\n    gp=ct.bid(2)\n    "
-         "r=ct.bid(0)*BM+ct.arange(BM,dtype=ct.int32)\n    "
-         "c=ct.bid(1)*BN+ct.arange(BN,dtype=ct.int32)\n    src=r\n    "
+         "r=ct.astype(ct.bid(0),ct.int64)*BM+ct.arange(BM,dtype=ct.int32)\n    "
+         "c=ct.astype(ct.bid(1),ct.int64)*BN+ct.arange(BN,dtype=ct.int32)\n    src=r\n    "
          "target=r\n    end=M\n";
     auto n = dot.getName().stripDialect();
     if (n == "q4k_dot")

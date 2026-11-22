@@ -93,20 +93,24 @@ class Kernel {
       if(code=="private_bin_store"){
         auto n=std::to_string(op.getAttrOfType<IntegerAttr>("extent").getInt()),span=std::to_string(op.getAttrOfType<IntegerAttr>("span").getInt());
         auto width=std::to_string(op.getAttrOfType<IntegerAttr>("source_step").getInt());
-        line(depth,"ct.store("+arg(1)+",(ct.bid(0),0),ct.full((1,W),0,ct.int32),allow_tma=False)");
+        bool swap=op.getAttrOfType<BoolAttr>("transposed").getValue();
+        auto bins=arg(1)+".shape["+std::to_string(swap?0:1)+"]";
+        line(depth,"if "+bins+" > 0:");
+        auto destinationDepth=depth+1;
+        line(destinationDepth,"ct.store("+arg(1)+(swap?",(0,ct.bid(0)),ct.full((W,1)":",(ct.bid(0),0),ct.full((1,W)")+",0,ct.int32),allow_tma=False)");
         // Padding is defined for partial tiles only. End the last partition
         // before an entire source tile would lie outside the view.
         std::string steps = span + "//" + width;
         if (op.getAttrOfType<IntegerAttr>("extent").getInt() %
             op.getAttrOfType<IntegerAttr>("span").getInt())
           steps = "ct.astype(ct.minimum(" + steps + ",ct.cdiv(" + n + "-ct.astype(ct.bid(0),ct.int64)*" + span + "," + width + ")),ct.int32)";
-        line(depth, "for step in range(" + steps + "):");
-        line(depth+1,"offset=ct.astype(step,ct.int64)*"+width+"+ct.arange("+width+",dtype=ct.int32)");
-        line(depth+1,"pos=ct.astype(ct.bid(0),ct.int64)*"+span+"+offset");
+        line(destinationDepth, "for step in range(" + steps + "):");
+        line(destinationDepth+1,"offset=ct.astype(step,ct.int64)*"+width+"+ct.arange("+width+",dtype=ct.int32)");
+        line(destinationDepth+1,"pos=ct.astype(ct.bid(0),ct.int64)*"+span+"+offset");
         auto keys="ct.load("+arg(0)+",(ct.astype(ct.bid(0),ct.int64)*("+span+"//"+width+")+step,),shape=("+width+",),padding_mode=ct.PaddingMode.ZERO,allow_tma=False)";
-        line(depth+1,"key="+(cast<MemRefType>(op.getOperand(0).getType()).getElementType().isInteger(64)?keys:"ct.astype("+keys+",ct.int32)"));
-        line(depth+1,"valid=(pos<"+n+")&(key>=0)&(key<"+arg(1)+".shape[1])");
-        line(depth+1,"ct.atomic_add("+arg(1)+",(ct.bid(0),ct.where(valid,key,0)),ct.astype(valid,ct.int32),check_bounds=False,memory_order=ct.MemoryOrder.RELAXED,memory_scope=ct.MemoryScope.BLOCK)");
+        line(destinationDepth+1,"key="+(cast<MemRefType>(op.getOperand(0).getType()).getElementType().isInteger(64)?keys:"ct.astype("+keys+",ct.int32)"));
+        line(destinationDepth+1,"valid=(pos<"+n+")&(key>=0)&(key<"+bins+")");
+        line(destinationDepth+1,"ct.atomic_add("+arg(1)+(swap?",(ct.where(valid,key,0),ct.bid(0))":",(ct.bid(0),ct.where(valid,key,0))")+",ct.astype(valid,ct.int32),check_bounds=False,memory_order=ct.MemoryOrder.RELAXED,memory_scope=ct.MemoryScope.BLOCK)");
         continue;
       }
       if(code=="key_counts" || code=="sum_columns"){

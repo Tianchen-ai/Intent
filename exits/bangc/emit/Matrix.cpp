@@ -29,7 +29,7 @@ struct Matrix : intentdsl::block::MatrixAccess {
   std::string ptr(Value v, StringRef element, ArrayRef<std::string> axes) {
     std::string result = "((" + element.str() + "*)" + name(v) + ")";
     for (auto [i, a] : llvm::enumerate(axes))
-      result += "+(" + a + ")*" + std::to_string(stride(v, i));
+      result += "+((long long)(" + a + "))*" + std::to_string(stride(v, i));
     return "(" + result + ")";
   }
   std::string term(Value v, StringRef ty, int reduction, int batch,
@@ -54,7 +54,7 @@ struct Matrix : intentdsl::block::MatrixAccess {
     auto w = dot.getOperand(0),
          x = dot.getOperand(1).getDefiningOp()->getOperand(0);
     s << "for(int i=0;i<nr;i++)acc[i]=0;\n"
-      << "for(int gq=0;gq<K/256;++gq){float e=0;\n"
+      << "for(long long gq=0;gq<K/256;++gq){float e=0;\n"
       << "for(int k=0;k<256;++k){float x=*" << ptr(x, "float", {"gq", "k"})
       << ";if(fabsf(x)>fabsf(e)||(fabsf(x)==fabsf(e)&&x<e))e=x;}if(e==0)"
          "continue;\n"
@@ -123,7 +123,7 @@ struct Matrix : intentdsl::block::MatrixAccess {
       s << "__bang_write_value(acc,BM*BN,(int)0);\n";
     else
       s << "__bang_write_value(acc,BM*BN,0.f);\n";
-    s << "for(int kk=0;kk<K;kk+=BK){int nk=K-kk<BK?K-kk:BK;\n";
+    s << "for(long long kk=0;kk<K;kk+=BK){int nk=K-kk<BK?K-kk:BK;\n";
     operand(true, type);
     operand(false, type);
     if (mode == "wram-conv" || mode == "exact-i8-conv") {
@@ -174,7 +174,7 @@ struct Matrix : intentdsl::block::MatrixAccess {
   void scaled() {
     auto a = dot.getOperand(0), sa = dot.getOperand(1), b = dot.getOperand(2),
          sb = dot.getOperand(3).getDefiningOp()->getOperand(0);
-    s << "__bang_write_value(acc,BM*BN,0.f);\nfor(int u=0;u<K/32;++u){\n"
+    s << "__bang_write_value(acc,BM*BN,0.f);\nfor(long long u=0;u<K/32;++u){\n"
       << "for(int j=0;j<nc;++j){unsigned scale=*"
       << ptr(sb, "unsigned char", {"u", "c+j"})
       << ";"
@@ -221,7 +221,7 @@ __mlu_func__ float decode8(unsigned x,unsigned scale){
 }
 )mlu";
     s << "__mlu_global__ void matrix(" << abi(true)
-      << "){constexpr int K=" << shape[2] << ";"
+      << "){constexpr long long K=" << shape[2] << ";"
       << "__nram__ " << (mode == "exact-i8-conv" ? "int" : "float")
       << " acc[BM*BN];\n";
     if (mode == "wram-conv" || mode == "exact-i8-conv" || mode == "f32-outer") {

@@ -538,10 +538,7 @@ public:
     s << "scf.for %r = %lo to " << extent.id << " step %step {\n";
     if(intentdsl::cpu::atomicMembers(bb)){
       auto &effects=bb.front().getRegion(0).front();
-      auto found=llvm::find_if(effects,[](Operation &v){return v.getName().stripDialect()=="write_offsets";});
-      bool prefix=found!=effects.end();
       bool guarded=false;
-      Operation *ends=prefix?&*found:nullptr;
       auto zero=inst("constant",{},"si32","value=0:si32");
       SmallVector<Value> scans;
       for(auto &v:effects)if(v.getName().stripDialect()=="scan_sum")scans.push_back(v.getResult(0));
@@ -623,9 +620,9 @@ public:
         s<<"scf.yield "<<llvm::join(outputs,",")<<":"<<llvm::join(types,",")<<"\n";
       }
       s<<"}\n";
-      if(prefix){
-        inst("commit",{zero,address(ends->getOperand(0),{{"%lo","index"}})},"()");
-        inst("commit",{{"%scan#"+slot(ends->getOperand(3)),"si32"},address(ends->getOperand(1),{{"%lo","index"}})},"()");
+      for(auto &ends:effects)if(ends.getName().stripDialect()=="write_offsets"){
+        inst("commit",{zero,address(ends.getOperand(0),{{"%lo","index"}})},"()");
+        inst("commit",{{"%scan#"+slot(ends.getOperand(3)),"si32"},address(ends.getOperand(1),{{"%lo","index"}})},"()");
       }
       for(auto &v:effects)if(v.getName().stripDialect()=="prefix_scatter"){
         Term total{"%scan#"+slot(v.getOperand(4)),"si32"},row{"%r","index"};
@@ -824,7 +821,12 @@ std::string hostSource(Operation *dispatch, const llvm::json::Array &abi) {
     auto domain=dispatch->getAttrOfType<IntegerAttr>("domain_arg").getInt();
     auto rank=slots[domain]; auto base="a"+std::to_string(domain);
     std::string last="cols";
-    for(int j=0;j<rank-1;++j)if(j!=owner.getInt())last+="/"+base+"d"+std::to_string(j);
+    for(int j=0;j<rank-1;++j)if(j!=owner.getInt()){
+      auto dim=base+"d"+std::to_string(j);
+      // No members are read when the product is empty. Preserve the zero
+      // member count while forming a valid task descriptor for each owner.
+      last="("+dim+" ? "+last+"/"+dim+" : 0)";
+    }
     for(int j=0;j<rank;++j)args.push_back(j==owner.getInt()?"count":rank==2?"cols":j+1==rank?last:base+"d"+std::to_string(j));
   }
   args.append(strides);

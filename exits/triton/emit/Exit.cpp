@@ -101,8 +101,8 @@ public:
       if(n=="fill_ranges_at"){
         auto unit=std::to_string(op.getAttrOfType<IntegerAttr>("unit").getInt());
         line(depth,"valid="+arg(2)+"+1<N");
-        line(depth,"begin=tl.load("+arg(1)+"+"+arg(2)+"*"+arg(1)+"_s0,mask=valid,other=0)//"+unit);
-        line(depth,"end=tl.load("+arg(1)+"+("+arg(2)+"+1)*"+arg(1)+"_s0,mask=valid,other=0)//"+unit);
+        line(depth,"begin=tl.load("+arg(1)+"+"+arg(2)+"*"+arg(1)+"_s0,mask=valid,other=0).to(tl.int64)//"+unit);
+        line(depth,"end=tl.load("+arg(1)+"+("+arg(2)+"+1)*"+arg(1)+"_s0,mask=valid,other=0).to(tl.int64)//"+unit);
         line(depth,"for k in range(tl.max(end-begin)):");
         line(depth+1,"tl.store("+arg(0)+"+(begin+k)*"+arg(0)+"_s0,"+arg(2)+".to(tl.int32),mask=begin+k<end)");continue;
       }
@@ -114,7 +114,7 @@ public:
         continue;
       }
       if(n=="index_read_at" || n=="atomic_add_at" || n=="unique_put_at"){
-        auto ptr=arg(0)+"+"+arg(1)+"*"+arg(0)+"_s0";
+        auto ptr=arg(0)+"+"+arg(1)+".to(tl.int64)*"+arg(0)+"_s0";
         if(n=="unique_put_at"){line(depth,"tl.store("+ptr+","+arg(2)+",mask="+arg(3)+")");continue;}
         auto id="v"+std::to_string(next++);values[op.getResult(0)]=id;
         line(depth,id+" = "+(n=="index_read_at"?"tl.load("+ptr+",mask="+arg(2)+",other=0)":
@@ -133,18 +133,35 @@ public:
         line(depth,id+" = "+(n=="ne"?arg(0)+"!="+arg(1):"tl.broadcast_to("+arg(0)+"[None,:],(ROWS,WIDTH)).to(tl.int32)"));continue;
       }
       if(n=="atomic_bins"){
-        auto span=std::to_string(op.getAttrOfType<IntegerAttr>("span").getInt());
-        auto panel=std::to_string(op.getAttrOfType<IntegerAttr>("native_panel").getInt());
-        auto extent=std::to_string(op.getAttrOfType<IntegerAttr>("extent").getInt());
-        line(depth,"owner=tl.program_id(0).to(tl.int64)");
-        line(depth,"dest="+arg(1)+"+owner*"+arg(1)+"_s0");
-        line(depth,"tl.store(dest+"+arg(2)+"*"+arg(1)+"_s1,0,mask="+arg(2)+"<N)");
-        line(depth,"tl.debug_barrier()");
-        line(depth,"for piece in range(tl.cdiv("+span+","+panel+")):");
-        line(depth+1,"off=tl.cast(piece,tl.int64)*"+panel+"+tl.arange(0,"+panel+")");
-        line(depth+1,"pos=owner*"+span+"+off");
-        line(depth+1,"key=tl.load("+arg(0)+"+pos*"+arg(0)+"_s0,mask=(off<"+span+")&(pos<"+extent+"),other=-1).to(tl.int64)");
-        line(depth+1,"tl.atomic_add(dest+key*"+arg(1)+"_s1,1,mask=(key>=0)&(key<N),sem='relaxed',scope='cta')");
+        if(auto error=body(op.getRegion(0).front(),depth))return error;
+        continue;
+      }
+      if(n=="clear_bins" || n=="bin_add"){
+        Operation *bins=op.getParentOp();
+        if(n=="bin_add")bins=bins->getParentOp();
+        bool swap=bins->getAttrOfType<BoolAttr>("transposed").getValue();
+        auto src=name(bins->getOperand(0)),dst=name(bins->getOperand(1)),col=name(bins->getOperand(2));
+        auto pitch=dst+(swap?"_s0":"_s1");
+        auto base=dst+"+tl.program_id(0).to(tl.int64)*"+dst+(swap?"_s1":"_s0");
+        if(n=="clear_bins")line(depth,"tl.store("+base+"+"+col+"*"+pitch+",0,mask="+col+"<N)");
+        else{
+          auto span=std::to_string(bins->getAttrOfType<IntegerAttr>("span").getInt());
+          auto panel=std::to_string(bins->getAttrOfType<IntegerAttr>("native_panel").getInt());
+          auto extent=std::to_string(bins->getAttrOfType<IntegerAttr>("extent").getInt());
+          line(depth,"off=tl.cast("+arg(0)+",tl.int64)*"+panel+"+tl.arange(0,"+panel+")");
+          line(depth,"pos=tl.program_id(0).to(tl.int64)*"+span+"+off");
+          line(depth,"key=tl.load("+src+"+pos*"+src+"_s0,mask=(off<"+span+")&(pos<"+extent+"),other=-1).to(tl.int64)");
+          line(depth,"tl.atomic_add("+base+"+key*"+pitch+",1,mask=(key>=0)&(key<N),sem='relaxed',scope='cta')");
+        }
+        continue;
+      }
+      if(n=="cta_barrier"){line(depth,"tl.debug_barrier()");continue;}
+      if(n=="bin_panels"){
+        auto &inner=op.getRegion(0).front();
+        auto piece="piece"+std::to_string(next++);
+        values[inner.getArgument(0)]=piece;
+        line(depth,"for "+piece+" in range("+std::to_string(op.getAttrOfType<IntegerAttr>("count").getInt())+"):");
+        if(auto error=body(inner,depth+1))return error;
         continue;
       }
       if(n=="key_counts" || n=="sum_columns"){
@@ -176,8 +193,8 @@ public:
         std::string tag="seg"+std::to_string(next++), limit=tag+"_end", cursor=tag+"_i", acc=tag+"_sum", live=tag+"_live";
         auto owner=flat?arg(2)+"[None,:]":arg(1)+"[:,None]";
         auto offset=arg(0)+" + ("+owner+") * "+arg(0)+"_s0";
-        line(depth,cursor+" = tl.load("+offset+", mask="+owner+" < "+(flat?"N":"M")+", other=0)");
-        line(depth,limit+" = tl.load("+offset+" + "+arg(0)+"_s0, mask="+owner+" < "+(flat?"N":"M")+", other=0)");
+        line(depth,cursor+" = tl.load("+offset+", mask="+owner+" < "+(flat?"N":"M")+", other=0).to(tl.int64)");
+        line(depth,limit+" = tl.load("+offset+" + "+arg(0)+"_s0, mask="+owner+" < "+(flat?"N":"M")+", other=0).to(tl.int64)");
         if(n=="segment_size"){
           values[op.getResult(0)]=tag;line(depth,tag+" = ("+limit+" - "+cursor+").to(tl.float32)");continue;
         }
@@ -204,7 +221,7 @@ public:
           std::string rhs;
           if(code=="member_load"){
             auto pointer=a(0);
-            for(unsigned i=1;i<v.getNumOperands();++i)pointer+=" + ("+a(i)+") * "+a(0)+"_s"+std::to_string(i-1);
+            for(unsigned i=1;i<v.getNumOperands();++i)pointer+=" + ("+a(i)+").to(tl.int64) * "+a(0)+"_s"+std::to_string(i-1);
             if(panel)pointer="tl.broadcast_to("+pointer+",(ROWS,WIDTH,"+width+"))";
             rhs="tl.load("+pointer+",mask="+live+",other=0)";
           } else if(code=="mul" || code=="add")rhs="libdevice."+code.str()+"_rn("+a(0)+","+a(1)+")";
@@ -226,7 +243,7 @@ public:
       else if (n=="summary_field") e=arg(0)+"["+std::to_string(op.getAttrOfType<IntegerAttr>("position").getInt())+"]";
       else if(n=="indexed_tile_read"){
         auto key="key"+std::to_string(next++);
-        line(depth,key+" = tl.load("+arg(1)+" + "+arg(2)+" * "+arg(1)+"_s0, mask="+arg(2)+" < M, other=0)");
+        line(depth,key+" = tl.load("+arg(1)+" + "+arg(2)+" * "+arg(1)+"_s0, mask="+arg(2)+" < M, other=0).to(tl.int64)");
         e="tl.load("+arg(0)+" + "+key+"[:,None]*"+arg(0)+"_s0 + "+arg(3)+"[None,:]*"+arg(0)+"_s1,mask="+arg(4)+",other=0)";
       }
       else if(n=="scan_sum")e="tl.cumsum("+arg(0)+",axis=1)";
@@ -269,7 +286,7 @@ public:
       else if (n == "zero")
         e = "0";
       else if (n == "columns")
-        e = "tl.arange(0, WIDTH).to(tl.int64) + " + arg(0) + " * WIDTH";
+        e = "tl.arange(0, WIDTH).to(tl.int64) + tl.cast(" + arg(0) + ",tl.int64) * WIDTH";
       else if (n == "active")
         e = "(" + arg(1) + "[:, None] < M) & (" + arg(2) + "[None, :] < N)";
       else if (n == "offsets") {
@@ -433,6 +450,19 @@ void bind(Unit &unit) {
                    !span || span.getInt()<1 || !panel || !llvm::isPowerOf2_64(panel.getInt())){
                   op->emitError("invalid destination, partition or native panel for global atomic bins");
                   return WalkResult::interrupt();
+                }
+                auto &seq=op->getRegion(0).front();
+                if(seq.getNumArguments() || seq.getOperations().size()!=3 ||
+                   seq.front().getName().stripDialect()!="clear_bins" ||
+                   seq.front().getNextNode()->getName().stripDialect()!="cta_barrier" ||
+                   seq.back().getName().stripDialect()!="bin_panels" ||
+                   seq.back().getAttrOfType<IntegerAttr>("count").getInt()!=int64_t(llvm::divideCeil(span.getInt(),panel.getInt()))){
+                  op->emitError("expected zero initialization, CTA synchronization and complete key panels");return WalkResult::interrupt();
+                }
+                auto &loop=seq.back().getRegion(0).front();
+                if(loop.getNumArguments()!=1 || !loop.getArgument(0).getType().isIndex() || !llvm::hasSingleElement(loop) ||
+                   loop.front().getName().stripDialect()!="bin_add" || loop.front().getOperand(0)!=loop.getArgument(0)){
+                  op->emitError("expected one counted panel update per induction index");return WalkResult::interrupt();
                 }
               }
               if(n=="triton_src.key_counts" || n=="triton_src.sum_columns" || n=="triton_src.atomic_bins"){

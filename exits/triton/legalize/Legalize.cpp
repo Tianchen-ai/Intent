@@ -71,12 +71,24 @@ struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
     getOperation().walk([](Operation *store){
       if(store->getName().getStringRef()!="triton_src.store")return;
       auto *count=store->getOperand(3).getDefiningOp();
-      if(!count || count->getName().getStringRef()!="triton_src.key_counts" ||
+      if(!count || !count->hasOneUse() || count->getName().getStringRef()!="triton_src.key_counts" ||
          count->getAttrOfType<StringAttr>("bin_mode")!="global-atomic")return;
       OpBuilder b(store);
       OperationState state(store->getLoc(),"triton_src.atomic_bins");
       state.addOperands({count->getOperand(0),store->getOperand(0),count->getOperand(2)});
-      state.addAttributes(count->getAttrs());b.create(state);store->erase();count->erase();
+      auto *offset=store->getOperand(1).getDefiningOp();
+      state.addAttribute("transposed",offset->getAttr("permuted")?offset->getAttr("permuted"):b.getBoolAttr(false));
+      state.addAttributes(count->getAttrs());state.addRegion();
+      auto *bins=b.create(state);b.createBlock(&bins->getRegion(0));
+      b.create(OperationState(store->getLoc(),"triton_src.clear_bins"));
+      b.create(OperationState(store->getLoc(),"triton_src.cta_barrier"));
+      OperationState loop(store->getLoc(),"triton_src.bin_panels");
+      auto span=count->getAttrOfType<IntegerAttr>("span").getInt();
+      auto width=count->getAttrOfType<IntegerAttr>("native_panel").getInt();
+      loop.addAttribute("count",b.getI64IntegerAttr(llvm::divideCeil(span,width)));loop.addRegion();
+      auto *body=b.createBlock(&b.create(loop)->getRegion(0),{},b.getIndexType(),{store->getLoc()});
+      OperationState add(store->getLoc(),"triton_src.bin_add");add.addOperands(body->getArgument(0));b.create(add);
+      store->erase();count->erase();
     });
     for(auto fn:getOperation().getOps<func::FuncOp>())if(intentdsl::kir::matrixDomain(fn)){
       intentdsl::block::MatrixAccess p(fn);

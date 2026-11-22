@@ -94,6 +94,8 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
       auto span=value->getAttrOfType<IntegerAttr>("span").getInt();
       int64_t step=std::min<int64_t>(2048,uint64_t(span)&-uint64_t(span));
       OperationState s(store->getLoc(),"ct_src.private_bin_store");
+      auto axes=store->getAttrOfType<DenseI64ArrayAttr>("block.member_axes");
+      s.addAttribute("transposed",b.getBoolAttr(axes && axes[0]==1));
       s.addAttribute("source_step",b.getI64IntegerAttr(step));
       s.addOperands(value->getOperand(0));s.addOperands(store->getOperand(0));s.addOperands(value->getOperands().drop_front());
       s.addAttributes(value->getAttrs());b.create(s);
@@ -118,6 +120,8 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
   auto matrix=*module.getOps<func::FuncOp>().begin();
   if(intentdsl::kir::matrixDomain(matrix)){
     if(failed(intentdsl::block::verifyTiledMatrix(matrix,profile,"ct_src")))return failure();
+    if(callable && matrix->getAttr("ct_src.index_bits")!=Builder(matrix.getContext()).getI32IntegerAttr(profile.services.get<intentdsl::cutile::ArrayIndices>()->bits))
+      return matrix.emitError("matrix index width disagrees with the target");
     auto expected=Builder(module.getContext()).getStringAttr(profile.services.get<intentdsl::cutile::ArrayIndices>()->scaledMma?"mx":"wide");
     return success(!matrix.walk([&](Operation *op){
       return op->getName().getStringRef()=="ct_src.scaled_contract" &&
