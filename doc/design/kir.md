@@ -127,6 +127,23 @@ def histogram(x, bins: I.Constexpr[I.index] = 256,
 
 ## 根 IR 合同
 
+### 归一化 program 的所有权与部分和
+
+训练 BatchNorm 以通道为 owner。每次调用返回归一化输出、保存的均值与逆标准差、
+更新后的 running mean 与 running variance。Welford 摘要包含一个整数计数和两个
+FP32 字段，投影到 owner 的统计量每通道发布一次。
+
+GroupNorm 反向的第一个调用按 batch 和 group 归约空间成员，第二个调用独立归约
+仿射参数梯度。具名成员域保留源轴的仿射映射。结果投影到 owner 时，verifier
+要求地址与全部归约轴无关；绑定器根据真实 stride 检查输出完整覆盖与无碰撞。
+
+已登记的 LayerNorm 反向输入有 4096 行。作者指定 128 个部分和桶，每个桶按行号
+升序接收 32 个贡献。两份 BF16 workspace 在每次 program 调用中先独立清零；
+第一项调用同时写入输入梯度并逐次舍入部分和，第二项调用按特征以 FP32 合并。
+目前这个作者 kernel 将 32 次更新写成静态循环；其他行数需要相应的作者分组。
+完整 program 的观察保留两次 fill 和两次调用的顺序，按成员比较时由同一份
+绑定提供实参、输出与 workspace。
+
 | 类型／操作簇（拟议名称） | 生产者 → 消费者 | 不变量 |
 |---|---|---|
 | view、tensor、index、domain/relation、record、buffer | 前端 → KIR 检查器与执行模型 | rank/type 可判定；符号 identity、来源轴、base/stride/offset 和参数方向各自可追踪；record 保持字段顺序 |
