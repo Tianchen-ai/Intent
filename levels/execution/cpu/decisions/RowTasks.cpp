@@ -65,7 +65,8 @@ llvm::Expected<Attribute> proposeRows(Operation *op,const TargetProfile &profile
   Builder b(op->getContext());
   if ((ordinal || (widens && machine->boundWidening)) && machine->wideningPanel)
     return Attribute(intentdsl::cpu::partition(b,"source",machine->wideningConfigurations(op->getContext())));
-  return Attribute(intentdsl::cpu::partition(b,"source",machine->configurations(op->getContext(),structured && machine->structuredRows)));
+  bool projectedOwner = op->getParentOfType<func::FuncOp>()->hasAttr("kir.owner_axis");
+  return Attribute(intentdsl::cpu::partition(b,"source",machine->configurations(op->getContext(),structured && machine->structuredRows && !projectedOwner)));
 }
 void registerPartition(Unit &u,bool permuted) {
   DecisionFamily partition;

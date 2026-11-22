@@ -107,13 +107,17 @@ class CanonicalTask {
   llvm::Error ownerSweep(Operation &sweep) {
     auto kind=sweep.getAttrOfType<StringAttr>("combine");
     bool publish=kind=="publish", moments=kind=="welford";
-    if(!publish && !moments && kind!="store")return llvm::createStringError("unsupported member sweep algebra");
+    bool scalarReduction=kind=="sum" || kind=="max_num";
+    if(!publish && !moments && !scalarReduction && kind!="store")
+      return llvm::createStringError("unsupported member sweep algebra");
     std::string prefix="%owner"+std::to_string(serial++);
     Term index{prefix+"_i","index"};
     if(!publish) {
       if(moments) s<<prefix<<":3 = ";
+      else if(scalarReduction)s<<prefix<<" = ";
       s<<"scf.for "<<index.id<<" = %lo to "<<columns.id<<" step %step";
       if(moments)s<<" iter_args("<<prefix<<"_n = %zero_count, "<<prefix<<"_m = %zero_f, "<<prefix<<"_s = %zero_f) -> (si32,f32,f32)";
+      if(scalarReduction)s<<" iter_args("<<prefix<<"_acc = "<<(kind=="sum"?"%zero_f":"%minus_inf")<<") -> (f32)";
       s<<" {\n";
     }
     auto &body=sweep.getRegion(0).front();
@@ -129,6 +133,8 @@ class CanonicalTask {
       auto ty=spelling(t);
       if(n=="read_panel" || n=="read_owner"){
         terms[v]=inst("admit",{memberSlice(op,index,n=="read_owner")},ty);
+      } else if(scalarReduction && n==kind.getValue()){
+        terms[v]=terms.lookup(op.getOperand(0));
       } else if(n=="field"){
         auto saved=records.find(op.getOperand(0));
         if(saved==records.end())return llvm::createStringError("unbound Weft tuple field");
@@ -157,6 +163,11 @@ class CanonicalTask {
       variance=inst("select",{first,{"%zero_f","f32"},variance},"f32");
       s<<"scf.yield "<<count.id<<","<<m.id<<","<<variance.id<<" : si32,f32,f32\n";
       records[sweep.getResult(0)]={{prefix+"#0","si32"},{prefix+"#1","f32"},{prefix+"#2","f32"}};
+    } else if(scalarReduction){
+      Term acc{prefix+"_acc","f32"},value=terms.lookup(body.back().getOperand(0));
+      auto next=inst("binary",{acc,value},"f32",kind=="sum"?"kind=\"add\"":"kind=\"max\"");
+      s<<"scf.yield "<<next.id<<" : f32\n";
+      terms[sweep.getResult(0)]={prefix,"f32"};
     }
     if(!publish)s<<"}\n";
     return llvm::Error::success();
@@ -352,6 +363,7 @@ public:
     if(ownerAxis){
       for(auto [name,literal,type]:{std::tuple{"zero_count","0","si32"},std::tuple{"one_count","1","si32"},std::tuple{"zero_f","0.0","f32"}})
         s<<"%"<<name<<" = \"weft_kernel.constant\"() <{value="<<literal<<" : "<<type<<"}> : ()->"<<type<<"\n";
+      s<<"%minus_inf=arith.constant 0xFF800000 : f32\n";
     }
     bool whole = cast<DictionaryAttr>(task->getAttrOfType<ArrayAttr>("rows")[0])
                      .getAs<IntegerAttr>("columns")
@@ -486,7 +498,7 @@ std::string hostSource(Operation *dispatch, const llvm::json::Array &abi) {
     auto rank=slots[domain]; auto base="a"+std::to_string(domain);
     std::string last="cols";
     for(int j=0;j<rank-1;++j)if(j!=owner.getInt())last+="/"+base+"d"+std::to_string(j);
-    for(int j=0;j<rank;++j)args.push_back(j==owner.getInt()?"count": j+1==rank?last:base+"d"+std::to_string(j));
+    for(int j=0;j<rank;++j)args.push_back(j==owner.getInt()?"count":rank==2?"cols":j+1==rank?last:base+"d"+std::to_string(j));
   }
   args.append(strides);
   auto domain=dispatch->getAttrOfType<IntegerAttr>("domain_arg").getInt();

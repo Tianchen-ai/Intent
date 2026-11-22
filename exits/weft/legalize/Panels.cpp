@@ -50,7 +50,8 @@ public:
       else if(op->getName().stripDialect()=="write_owner") owned.push_back(op);
     auto ordered = old;
     std::stable_partition(ordered.begin(), ordered.end(), [](Operation *op) {
-      return op->getName().stripDialect() != "write";
+      auto name = op->getName().stripDialect();
+      return name != "write" && name != "write_owner";
     });
     for (auto *op : ordered) {
       auto name = op->getName().stripDialect();
@@ -148,6 +149,17 @@ LogicalResult verifyPanels(Operation *dispatch) {
       return s.emitError("wrong panel write count");
     if (!store) {
       auto *local = bb.back().getOperand(0).getDefiningOp();
+      if (kind == "welford") {
+        auto summary = dyn_cast<TupleType>(s.getResult(0).getType());
+        auto values = dyn_cast<RankedTensorType>(bb.back().getOperand(0).getType());
+        if (!summary || summary.size() != 3 || !summary.getType(0).isInteger(32) ||
+            !summary.getType(1).isF32() || !summary.getType(2).isF32() ||
+            !values || values.getRank() != 1 || !values.getElementType().isF32())
+          return s.emitError("moment sweep requires f32 members and an (i32,f32,f32) summary");
+      } else if (!s.getResult(0).getType().isF32() ||
+                 s.getResult(0).getType() != bb.back().getOperand(0).getType()) {
+        return s.emitError("scalar panel summary and partial must both be f32");
+      }
       if (!local || local->getBlock() != &bb ||
           (kind=="welford" ? !isa<RankedTensorType>(bb.back().getOperand(0).getType()) :
           local->getName().stripDialect() != kind.getValue()))

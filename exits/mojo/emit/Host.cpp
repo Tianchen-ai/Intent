@@ -8,7 +8,7 @@ namespace CI_UNIT_NAMESPACE {
 std::string hostSource(func::FuncOp entry) {
   SmallVector<std::string> slots, names;
   unsigned projectedRank=0;
-  if(entry->hasAttr("kir.iteration")){
+  if(entry->hasAttr("kir.iteration") && !entry->hasAttr("kir.owner_axis")){
     auto t=dyn_cast<MemRefType>(entry.getArgument(0).getType());
     if(t && t.getRank()>2) projectedRank=t.getRank();
   }

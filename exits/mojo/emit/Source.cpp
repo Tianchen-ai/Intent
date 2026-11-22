@@ -143,7 +143,7 @@ public:
             std::string last="Int(cols)";
             for(int i=0;i+1<rank;++i)if(i!=owner)last+="//Int("+a+"d"+std::to_string(i)+")";
             for(int i=rank-1;i>=0;--i)if(i!=owner){
-              auto size=i==rank-1?"("+last+")":"Int("+a+"d"+std::to_string(i)+")";
+              auto size=rank==2?"Int(cols)":i==rank-1?"("+last+")":"Int("+a+"d"+std::to_string(i)+")";
               relative+="+("+index+"%"+size+")*Int("+a+"s"+std::to_string(i)+")";
               index="("+index+"//"+size+")";
             }
