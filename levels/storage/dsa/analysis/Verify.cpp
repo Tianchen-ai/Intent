@@ -80,6 +80,14 @@ bool access(Operation *op, unsigned mask, Operation &window, func::FuncOp fn,
     auto axis = dyn_cast<OpResult>(v);
     if(!axis)return false;
     int64_t dim=-1;
+    if(axis.getOwner()->getName().getStringRef()=="dsa.lookup_axis"){
+      auto source=dyn_cast<BlockArgument>(axis.getOwner()->getOperand(0));
+      if(mask!=1 || i!=0 || !source || source.getOwner()!=&fn.front() || logical->size()!=2 ||
+         axis.getOwner()->getOperand(1)!=window.getResult(0) || axis.getType()!=window.getResult(0).getType() ||
+         !dims(source) || *dims(source)!=llvm::json::Array{logical->front()} ||
+         !cast<MemRefType>(source.getType()).getElementType().isSignlessIntOrIndex())return false;
+      seen.insert(0);continue;
+    }
     auto owner = fn->getAttrOfType<IntegerAttr>("kir.owner_axis");
     if(owner && v==window.getResult(0)) dim=owner.getInt();
     else if(owner && axis.getOwner()->getName().getStringRef()=="dsa.slab_axis" &&
@@ -106,7 +114,7 @@ bool access(Operation *op, unsigned mask, Operation &window, func::FuncOp fn,
 } // namespace
 bool projectsConsecutiveRows(Operation *op, unsigned maskIndex) {
   auto rank = cast<MemRefType>(op->getOperand(0).getType()).getRank();
-  if (rank < 3 || op->getNumOperands() != maskIndex + 1 + rank)
+  if (rank < 2 || op->getNumOperands() != maskIndex + 1 + rank)
     return false;
   auto mask = dyn_cast<OpResult>(op->getOperand(maskIndex));
   if (!mask || mask.getOwner()->getName().getStringRef() != "dsa.window")
@@ -115,6 +123,7 @@ bool projectsConsecutiveRows(Operation *op, unsigned maskIndex) {
   auto domain = window->getOperand(0);
   auto logicalRank = cast<MemRefType>(domain.getType()).getRank();
   auto coordinates = op->getOperands().drop_front(maskIndex + 1);
+  if(rank==2 && logicalRank==2)return coordinates[0]==window->getResult(0) && coordinates[1]==window->getResult(1);
   auto *axis = coordinates[rank - 2].getDefiningOp();
   return axis && axis->getName().getStringRef() == "dsa.member_axis" &&
          axis->getOperand(0) == window->getResult(0) && axis->getOperand(1) == domain &&
@@ -325,7 +334,7 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
     for (auto [i, arg] : llvm::enumerate(issued.getOperands())) {
       auto *def = arg.getDefiningOp();
       auto in = body.getArgument(i);
-      while(transfer!=fetch.end() && (transfer->getName().getStringRef()=="dsa.member_axis" || transfer->getName().getStringRef()=="dsa.slab_axis"))++transfer;
+      while(transfer!=fetch.end() && (transfer->getName().getStringRef()=="dsa.member_axis" || transfer->getName().getStringRef()=="dsa.slab_axis" || transfer->getName().getStringRef()=="dsa.lookup_axis"))++transfer;
       if (!def || transfer==fetch.end() || def != &*transfer++ || def->getBlock() != &fetch ||
           def->getName().getStringRef() != "dsa.copy_in" ||
           arg.getType() != in.getType() || !in.hasOneUse() ||

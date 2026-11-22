@@ -1,3 +1,4 @@
+#include "mlir/Interfaces/InferTypeOpInterface.h"
 #include "compilerinfra/Assembly.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/OpImplementation.h"

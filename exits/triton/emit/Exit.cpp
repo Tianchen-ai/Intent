@@ -103,6 +103,12 @@ public:
       else if (n=="summary_merge")
         e="merge_moments("+arg(0)+"[0],"+arg(0)+"[1],"+arg(0)+"[2],"+arg(1)+"[0],"+arg(1)+"[1],"+arg(1)+"[2])";
       else if (n=="summary_field") e=arg(0)+"["+std::to_string(op.getAttrOfType<IntegerAttr>("position").getInt())+"]";
+      else if(n=="indexed_tile_read"){
+        auto key="key"+std::to_string(next++);
+        line(depth,key+" = tl.load("+arg(1)+" + "+arg(2)+" * "+arg(1)+"_s0, mask="+arg(2)+" < M, other=0)");
+        e="tl.load("+arg(0)+" + "+key+"[:,None]*"+arg(0)+"_s0 + "+arg(3)+"[None,:]*"+arg(0)+"_s1,mask="+arg(4)+",other=0)";
+      }
+      else if(n=="scan_sum")e="tl.cumsum("+arg(0)+",axis=1)";
       else if (n == "uniform") {
         auto prefix = "rng"+std::to_string(next++);
         auto lane = "("+arg(1)+" & 3)";

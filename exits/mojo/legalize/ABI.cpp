@@ -44,7 +44,8 @@ LogicalResult verifyLoops(ModuleOp m, const TargetProfile &p, bool callable) {
     bool store = alg == "store";
     auto w = s.getAttrOfType<IntegerAttr>("width").getInt();
     bool tail = full != nullptr;
-    bool copy = s.getAttrOfType<StringAttr>("range")=="copy";
+    bool indexed = s.getAttrOfType<StringAttr>("range")=="indexed_copy";
+    bool copy = s.getAttrOfType<StringAttr>("range")=="copy" || indexed;
     bool owners = s.getAttrOfType<StringAttr>("range")=="owners";
     if(owners && (!store || full || w!=1 || !fn->hasAttr("kir.owner_axis")))return s.emitError("invalid owner publication");
     if(copy && (!store || !llvm::hasSingleElement(task.getRegion(0).front().without_terminator())))
@@ -77,6 +78,11 @@ LogicalResult verifyLoops(ModuleOp m, const TargetProfile &p, bool callable) {
            view.getElementType()!=val.getType() || op.getOperand(1)!=task.getRegion(0).front().getArgument(0))
           return op.emitError("invalid task-owned scalar view");
         writes+=write;
+      } else if(code=="mojo_row.indexed_read"){
+        auto table=cast<MemRefType>(op.getOperand(0).getType()),ids=cast<MemRefType>(op.getOperand(1).getType());
+        if(table.getRank()!=2 || ids.getRank()!=1 || !ids.getElementType().isSignlessIntOrIndex() ||
+           op.getOperand(2)!=task.getRegion(0).front().getArgument(0) || op.getOperand(3)!=bb.getArgument(0) ||
+           op.getResult(0).getType()!=VectorType::get({w},table.getElementType()))return op.emitError("invalid indexed SIMD read");
       } else if (code == "mojo_row.read" || code == "mojo_row.write") {
         bool write = code == "mojo_row.write";
         writes += write;
@@ -97,7 +103,7 @@ LogicalResult verifyLoops(ModuleOp m, const TargetProfile &p, bool callable) {
                          .Case("select", 3)
                          .Case("sqrt", 1)
                          .Case("maximum", 2)
-                         .Case("field", 1).Case("constant", 0)
+                         .Cases("field","scan_sum", 1).Case("constant", 0)
                          .Default(-1);
         if (k == "uniform" && op.getNumOperands() == 2) {
           auto position = dyn_cast<VectorType>(op.getOperand(1).getType());
@@ -109,6 +115,9 @@ LogicalResult verifyLoops(ModuleOp m, const TargetProfile &p, bool callable) {
             return op.emitError(
                 "invalid Philox seed, member counters or sample lanes");
         }
+        if(k=="scan_sum" && (!op.getAttrOfType<IntegerAttr>("carry") ||
+            op.getAttrOfType<IntegerAttr>("carry").getInt()<0 || op.getOperand(0).getType()!=op.getResult(0).getType()))
+          return op.emitError("scan requires a typed interval carry");
         if (op.getNumOperands() != nargs ||
             (k == "constant" && !op.getAttrOfType<TypedAttr>("value")))
           return op.emitError("unknown or ill-formed lane expression");
@@ -120,7 +129,7 @@ LogicalResult verifyLoops(ModuleOp m, const TargetProfile &p, bool callable) {
     if(copy){
       auto &read=bb.front();
       auto *write=read.getNextNode();
-      if(bb.getOperations().size()!=3 || read.getName().getStringRef()!="mojo_row.read" ||
+      if(bb.getOperations().size()!=3 || read.getName().getStringRef()!=(indexed?"mojo_row.indexed_read":"mojo_row.read") ||
          !write || write->getName().getStringRef()!="mojo_row.write" ||
          write->getOperand(3)!=read.getResult(0) ||
          cast<MemRefType>(read.getOperand(0).getType()).getRank()!=2 ||

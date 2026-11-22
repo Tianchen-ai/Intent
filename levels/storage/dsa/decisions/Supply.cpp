@@ -18,6 +18,7 @@ struct Footprint {
       if (code == "reduce") {
         f.collectiveBytes = reductionScratch;
       } else if (op.getNumResults() == 1) {
+        if(code=="scan_sum")f.collectiveBytes=reductionScratch;
         auto t = dyn_cast<RankedTensorType>(op.getResult(0).getType());
         if (!t || t.getRank() < 1 || !t.getElementType().isIntOrFloat())
           continue;
@@ -26,7 +27,7 @@ struct Footprint {
         // fragments do.
         if (t.getRank() == 1 && code != "load" && code != "copy_in")
           continue;
-        if (code == "load" || code == "copy_in")
+        if (code == "load" || code == "copy_in" || code=="indexed_tile_read")
           f.inputBytes += llvm::divideCeil(t.getElementTypeBitWidth(), 8u);
         else f.vectorBytes += llvm::divideCeil(t.getElementTypeBitWidth(), 8u);
       }
@@ -69,7 +70,9 @@ static llvm::Expected<DictionaryAttr> planStorage(func::FuncOp fn, const LocalSu
   });
   wide &= arithmetic!=0;
   SmallVector<Footprint> phases;
+  bool indexed=false;
   fn.walk([&](Operation *op) {
+    indexed |= op->getName().getStringRef()=="block.indexed_tile_read" || op->getName().getStringRef()=="dsa.lookup_axis";
     if (op->getName().getStringRef() == "dsa.phase") {
       auto f =
           Footprint::of(op->getRegion(1).front(), c.reductionScratchPerColumn,reuse);
@@ -89,6 +92,9 @@ static llvm::Expected<DictionaryAttr> planStorage(func::FuncOp fn, const LocalSu
                                        c.reductionScratchPerColumn,reuse));
     });
   auto configs = fn->getAttrOfType<ArrayAttr>("block.configs");
+  if(indexed && fn->getAttrOfType<StringAttr>("block.topology")=="resident" &&
+     phases.size()==1 && !phases.front().vectorBytes && !phases.front().collectiveBytes)
+    wide=true;
   if (!configs || phases.empty() || (depth != 1 && depth != 2))
     return llvm::createStringError("expected a realized tile traversal");
   SmallVector<Attribute> accepted, rejected;
@@ -106,6 +112,7 @@ static llvm::Expected<DictionaryAttr> planStorage(func::FuncOp fn, const LocalSu
       bytes =
           std::max<int64_t>(bytes, pitch * (depth * r * p.inputBytes +
                                             (wide ? r : 1)*p.vectorBytes + p.collectiveBytes));
+    if(indexed)bytes=llvm::alignTo(bytes,c.alignment)+llvm::alignTo(12*r,c.alignment);
     auto reason = (depth == 2 && !c.asynchronous)
                       ? "no participant-local DMA completion"
                   : bytes > std::min(c.budget, c.capacity)

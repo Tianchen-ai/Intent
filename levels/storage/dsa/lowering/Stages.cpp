@@ -118,12 +118,18 @@ LogicalResult phase(Operation *anchor, Block &source, bool stream,
     if (&op != p)
       old.push_back(&op);
   for (Operation *op : old) {
-    if (op->getName().getStringRef() != "block.load")
+    bool indexed=op->getName().getStringRef()=="block.indexed_tile_read";
+    if (!indexed && op->getName().getStringRef() != "block.load")
       continue;
     auto view = op->getOperand(0);
     b.setInsertionPointToEnd(fetch);
-    auto axes = coords(op, readWindow);
-    if (axes.size() != size_t(cast<MemRefType>(op->getOperand(0).getType()).getRank()) || op->getOperand(3) != active->getResult(0))
+    SmallVector<Value> axes;
+    if(indexed){
+      auto rows=readWindow->getResult(0);
+      auto *lookup=inst(b,loc,"dsa.lookup_axis",{op->getOperand(1),rows},rows.getType());
+      axes={lookup->getResult(0),readWindow->getResult(1)};
+    }else axes=coords(op, readWindow);
+    if (axes.size() != size_t(cast<MemRefType>(op->getOperand(0).getType()).getRank()) || op->getOperand(indexed?4:3) != active->getResult(0))
       return op->emitError("mismatched access domain");
     SmallVector<Value> address{view, readWindow->getResult(2)};
     address.append(axes);
@@ -146,7 +152,7 @@ LogicalResult phase(Operation *anchor, Block &source, bool stream,
   for (auto *op : old) {
     auto code = op->getName().stripDialect();
     if (code == "pid" || code == "rows" || code == "columns" ||
-        code == "active" || code == "zero" || code == "load" ||
+        code == "active" || code == "zero" || code == "load" || code=="indexed_tile_read" ||
         code == "return")
       continue;
     auto val = [&](unsigned i) {

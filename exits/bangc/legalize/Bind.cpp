@@ -33,9 +33,10 @@ bool narrowedQuotient(Operation *div) {
 }
 StringRef primitive(Operation *op, int64_t depth) {
   auto n = op->getName().getStringRef();
+  if(n=="block.scan_sum")return "row_inclusive_sum";
   if(n=="block.summary_reduce")return "welford_f32";
   if(n=="block.summary_field" || n=="block.summary_merge" || n=="block.summary_identity" ||
-     n=="dsa.owner_rows" || n=="dsa.owner_read" || n=="dsa.owner_write" || n=="dsa.slab_axis")return op->getName().stripDialect();
+     n=="dsa.owner_rows" || n=="dsa.owner_read" || n=="dsa.owner_write" || n=="dsa.slab_axis" || n=="dsa.lookup_axis")return op->getName().stripDialect();
   if(n=="dsa.compute_members"){
     auto layout=op->getParentOfType<func::FuncOp>()->getAttrOfType<DictionaryAttr>("dsa.layout");
     if(layout.getAs<BoolAttr>("group_temporaries").getValue())return "packed_pointwise";
@@ -64,6 +65,8 @@ StringRef primitive(Operation *op, int64_t depth) {
   if (n == "dsa.phase")
     return "block_tasks";
   if (n == "dsa.copy_in") {
+    if(op->getNumOperands()==4 && op->getOperand(2).getDefiningOp()->getName().getStringRef()=="dsa.lookup_axis")
+      return "indexed_dma";
     if(op->getParentOfType<func::FuncOp>()->hasAttr("kir.owner_axis"))return "segmented_slab_read";
     // The grouped transfer increments the view's penultimate stride. Prove
     // that it is precisely the fastest logical row axis; earlier coordinates
@@ -137,7 +140,7 @@ LogicalResult offsets(func::FuncOp f, bool install) {
       return o.getAttr("bangc.offset") == address;
     };
     for (auto &o : p->getRegion(0).front().without_terminator()) {
-      if (o.getName().getStringRef() == "dsa.window" || o.getName().getStringRef()=="dsa.member_axis" || o.getName().getStringRef()=="dsa.slab_axis")
+      if (o.getName().getStringRef() == "dsa.window" || o.getName().getStringRef()=="dsa.member_axis" || o.getName().getStringRef()=="dsa.slab_axis" || o.getName().getStringRef()=="dsa.lookup_axis")
         continue;
       if (o.getName().getStringRef() != "dsa.copy_in" || !attach(o, grouped, 0))
         return WalkResult::interrupt();
@@ -162,6 +165,11 @@ LogicalResult offsets(func::FuncOp f, bool install) {
       if (o.getName().getStringRef() == "dsa.reduce" &&
           !attach(o, grouped, local))
         return WalkResult::interrupt();
+    for (auto &o : compute)if(o.getName().getStringRef()=="block.scan_sum"){
+      auto addr=b.getDenseI64ArrayAttr({grouped,local});
+      if(install)o.setAttr("bangc.scan_scratch",addr);
+      if(o.getAttr("bangc.scan_scratch")!=addr)return WalkResult::interrupt();
+    }
     return WalkResult::advance();
   });
   if (phases.wasInterrupted())
@@ -227,10 +235,11 @@ LogicalResult callable(func::FuncOp fn) {
     if (!slot || !slot->getArray("dims") ||
         slot->getArray("dims")->size() != unsigned(rank) || rank > 4 ||
         (!t.isF32() && !t.isF16() && !t.isBF16() && !t.isInteger(32) &&
-         (view || !t.isUnsignedInteger(64))) ||
+         !(view && t.isSignlessInteger(64)) && (view || !t.isUnsignedInteger(64))) ||
         slot->getString("dtype") != (t.isF16()         ? "f16"
                                      : t.isBF16()      ? "bf16"
                                      : t.isInteger(32) ? "i32"
+                                     : t.isSignlessInteger(64) ? "i64"
                                         : t.isUnsignedInteger(64) ? "u64" : "f32") ||
         (view ? (slot->getString("direction") != "In" &&
                  slot->getString("direction") != "Out" &&

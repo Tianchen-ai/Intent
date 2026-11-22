@@ -25,11 +25,12 @@ void registerCost(Unit &u) {
             std::swap(m, n);
           auto stridedRead = intentdsl::quantity(ctx, "read_16", "B/ns");
           double r = 0, w = 0, ws = 0;
-          unsigned reductions = 0, summaryFields=0;
+          unsigned reductions = 0, summaryFields=0, scans=0;
           op->walk([&](Operation *i) {
             auto k = i->getName().stripDialect();
             reductions += k == "sum" || k == "max_num" || k=="welford";
             summaryFields += k=="welford" ? 3 : 0;
+            scans += k=="scan_sum";
             if (k != "read" && k != "write")
               return;
             auto ty = cast<MemRefType>(i->getOperand(0).getType());
@@ -114,6 +115,8 @@ void registerCost(Unit &u) {
                 sectors ? allocatedSectors/sectors : 1.) : 1.;
             v.terms["lane_efficiency"]={laneEfficiency,"ratio"};
             v.terms["resident_waves"]={rounds,"count"};
+            double scanSteps=scans*rounds*std::ceil(std::log2(width));
+            v.terms["prefix_exchange_steps"]={scanSteps,"count"};
             if (read && write && strided && stridedRead && launch) {
               v.timeNs =
                   *launch +
@@ -124,6 +127,10 @@ void registerCost(Unit &u) {
                 double submission = waves * rectangles * *dmaSetup;
                 v.terms["projected_dma_setup"] = {submission, "ns"};
                 *v.timeNs += submission;
+              }
+              if(scanSteps){
+                auto rate=intentdsl::quantity(ctx,"compute","lane/ns");
+                if(rate)*v.timeNs+=scanSteps*rows*width / *rate;
               }
               if (!e.timeNs || *v.timeNs < *e.timeNs) {
                 e.timeNs = v.timeNs;

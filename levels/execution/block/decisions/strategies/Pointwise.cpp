@@ -5,19 +5,20 @@
 namespace CI_UNIT_NAMESPACE {
 using namespace mlir;
 using namespace compilerinfra;
-void registerPointwise(Unit &u) {
+void registerElementTraversal(Unit &u,bool indirect) {
   Strategy s;
-  s.name = "pointwise";
+  s.name = indirect?"indexed-rows":"pointwise";
   s.family = u.qualify("structure");
-  auto original = [](Operation *op, const TargetProfile &p,
+  auto original = [indirect](Operation *op, const TargetProfile &p,
                  AnalysisManager &) -> llvm::Expected<Attribute> {
-    bool writes = false, collective = false;
+    bool writes = false, collective = false, gathers=false;
     op->walk([&](Operation *o) {
       auto n = o->getName().stripDialect();
       writes |= n == "write";
-      collective |= n == "sum" || n == "max_num" || n == "welford";
+      gathers |= n=="gather_row";
+      collective |= n == "sum" || n == "max_num" || n == "welford" || n=="scan_sum";
     });
-    if (!writes || collective)
+    if (!writes || collective || gathers!=indirect)
       return Attribute{};
     auto *capacity = p.services.get<intentdsl::RowCapacity>();
     if (!capacity || capacity->rows.empty())
@@ -80,4 +81,5 @@ void registerPointwise(Unit &u) {
     }return cs;};
   u.strategies.push_back({std::move(s), COMPILERINFRA_SOURCE});
 }
+void registerPointwise(Unit &u){registerElementTraversal(u,false);}
 } // namespace CI_UNIT_NAMESPACE

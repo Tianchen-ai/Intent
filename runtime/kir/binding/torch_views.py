@@ -14,6 +14,7 @@ def describe(a):
             torch.float16: "f16",
             torch.bfloat16: "bf16",
             torch.int32: "i32",
+            torch.int64: "i64",
         }.get(a.dtype),
         tuple(a.shape),
         tuple(a.stride()),
@@ -34,6 +35,7 @@ def allocate(shape, dtype, device):
             "f16": torch.float16,
             "bf16": torch.bfloat16,
             "i32": torch.int32,
+            "i64": torch.int64,
         }[dtype],
         device=device,
     )

@@ -23,6 +23,7 @@ class Source {
       return "uint64";
     if (t.isInteger(32))
       return "int32";
+    if(t.isSignlessInteger(64))return "int64";
     return t.isBF16() ? "bfloat16" : t.isF16() ? "float16" : "float32";
   }
 
@@ -63,7 +64,7 @@ public:
       out <<
 #include "Philox.inc"
           ;
-    out << "from std.math import exp, sqrt, rsqrt, max, "
+    out << "from std.memory import unsafe_memcpy\nfrom std.math import exp, sqrt, rsqrt, max, "
            "inf\n@export(\"intent_row_interval\")\ndef intent_row_interval("
         << llvm::join(params, ",")
         << ", first: Int64, stop: Int64, cols: Int64, columns_per_block: "
@@ -79,6 +80,18 @@ public:
         return llvm::createStringError("Mojo requires realized sweeps");
       bool tail = loop.getAttrOfType<StringAttr>("range") == "tail";
       bool owners = loop.getAttrOfType<StringAttr>("range") == "owners";
+      if(loop.getAttrOfType<StringAttr>("range")=="indexed_copy"){
+        auto &read=loop.getRegion(0).front().front();
+        auto src=var(read.getOperand(0)), ids=var(read.getOperand(1)), dst=var(read.getNextNode()->getOperand(0));
+        line(2,"var src = "+src+".unsafe_offset(Int("+ids+"[unsafe_offset=r*Int("+ids+"s0)])*Int("+src+"s0))");
+        line(2,"var dest = "+dst+".unsafe_offset(r*Int("+dst+"s0))");
+        line(2,"if "+src+"s1 == 1 and "+dst+"s1 == 1:");
+        line(3,"unsafe_memcpy(dest=dest,src=src,count=Int(cols))");
+        line(2,"else:");
+        line(3,"for j in range(Int(cols)):");
+        line(4,"dest[unsafe_offset=j*Int("+dst+"s1)] = src[unsafe_offset=j*Int("+src+"s1)]");
+        continue;
+      }
       if(loop.getAttrOfType<StringAttr>("range")=="copy"){
         auto &read=loop.getRegion(0).front().front();auto &write=*read.getNextNode();
         auto address=[&](Operation &access){
@@ -96,6 +109,10 @@ public:
           std::to_string(loop.getAttrOfType<IntegerAttr>("width").getInt());
       std::string result = temp(), acc = result + "_acc";
       bool moments=kind=="welford";
+      if(!tail)loop.walk([&](Operation *op){
+        if(auto carry=op->getAttrOfType<IntegerAttr>("carry"))
+          line(2,"var carry"+std::to_string(carry.getInt())+" = Scalar[DType."+dtype(op->getResult(0).getType())+"](0)");
+      });
       if(moments){
         line(2,"var "+acc+" = "+(tail?var(loop.getOperand(0)):"(Int32(0), Float32(0), Float32(0))"));
       } else if (reduction)
@@ -133,6 +150,16 @@ public:
             line(3, acc + " = " +
                         (sum ? acc + " + " + arg(0)
                              : "max(" + acc + "," + arg(0) + ")"));
+        } else if(code=="indexed_read"){
+          auto table=arg(0),ids=arg(1);
+          auto base="Int("+ids+"[unsafe_offset=r*Int("+ids+"s0)])*Int("+table+"s0)";
+          line(3,"var "+lhs+" = SIMD[DType."+dtype(op.getResult(0).getType())+","+lanes+"](0)");
+          line(3,"if "+table+"s1 == 1:");
+          line(4,lhs+" = "+table+".unsafe_offset("+base+"+j).unsafe_load[width="+lanes+"]()");
+          line(3,"else:");
+          line(4,"comptime for lane in range("+lanes+"):");
+          line(5,lhs+"[lane] = "+table+"[unsafe_offset="+base+"+(j+lane)*Int("+table+"s1)]");
+          vars[op.getResult(0)]=lhs;
         } else if(code=="owner_read" || code=="owner_write"){
           auto address=arg(0)+"[unsafe_offset=r*Int("+arg(0)+"s0)]";
           line(3,code=="owner_read"?"var "+lhs+" = "+address:address+" = "+arg(2));
@@ -227,6 +254,15 @@ public:
             continue;
           }
           if(opKind=="field")expr=arg(0)+"["+std::to_string(op.getAttrOfType<IntegerAttr>("position").getInt())+"]";
+          else if(opKind=="scan_sum"){
+            auto carry="carry"+std::to_string(op.getAttrOfType<IntegerAttr>("carry").getInt());
+            line(3,"var "+lhs+" = "+arg(0));
+            line(3,"comptime for lane in range("+lanes+"):");
+            line(4,carry+" += "+arg(0)+"[lane]");
+            line(4,lhs+"[lane] = "+carry);
+            vars[op.getResult(0)]=lhs;
+            continue;
+          }
           else if (opKind == "uniform")
             expr = "uniform_at[" + lanes + "](" + arg(0) + "," + arg(1) + ")";
           else if (opKind == "select") {

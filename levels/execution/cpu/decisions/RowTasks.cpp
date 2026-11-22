@@ -49,6 +49,8 @@ namespace CI_UNIT_NAMESPACE {
 void registerRowReduction(Unit &);
 void registerPanelReduction(Unit &);
 void registerTupleReduction(Unit &);
+void registerScan(Unit &);
+void registerIndirect(Unit &);
 void registerPointwise(Unit &,StringRef);
 llvm::Expected<Attribute> proposeRows(Operation *op,const TargetProfile &profile,bool structured){
   auto *machine=profile.services.get<intentdsl::cpu::RowMachine>();
@@ -88,14 +90,16 @@ void registerPartition(Unit &u,bool permuted) {
       return llvm::createStringError("illegal CPU work partition");
     return llvm::Error::success();
   };
-  partition.verifyCandidate=[](Operation*,const StructuralCandidate &c,const TargetProfile &)->llvm::Error{
+  partition.verifyCandidate=[](Operation *op,const StructuralCandidate &c,const TargetProfile &)->llvm::Error{
     auto walk=cast<DictionaryAttr>(c.value).getAs<StringAttr>("walk");
+    if(c.id=="levels/execution/cpu::row-scan" && c.topology==c.id && walk=="source" && c.preconditions.empty() &&
+       op->walk([](Operation *v){return v->getName().getStringRef()=="cpu.scan_sum"?WalkResult::interrupt():WalkResult::advance();}).wasInterrupted())return llvm::Error::success();
     if(c.id==c.topology && c.topology==walk.getValue() && c.preconditions==std::vector<std::string>{walk=="source"?"row-independent":"bijective-rectangular-copy"})return llvm::Error::success();
     if(c.id==c.topology && c.id.find("reduction")!=std::string::npos && walk=="source" && c.preconditions.empty())return llvm::Error::success();
     return llvm::createStringError("CPU topology disagrees with its parameter domain");};
   u.families.push_back(
       {{partition, "cpu@formed", "cpu@formed"}, COMPILERINFRA_SOURCE});
-  if(!permuted){registerTupleReduction(u);registerRowReduction(u);registerPanelReduction(u);}
+  if(!permuted){registerIndirect(u);registerScan(u);registerTupleReduction(u);registerRowReduction(u);registerPanelReduction(u);}
   auto family=permuted?"permutation":"partition";registerPointwise(u,family);
   u.realizers.push_back(
       {{permuted?"permute-rows":"group-rows", u.qualify(family),

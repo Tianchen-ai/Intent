@@ -132,10 +132,11 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
         record->getArray("dims")->size() !=
             unsigned(view ? view.getRank() : 0) ||
         (!scalar.isF16() && !scalar.isF32() && !scalar.isBF16() &&
-         !scalar.isInteger(32) && (view || !scalar.isUnsignedInteger(64))) ||
+         !scalar.isInteger(32) && !(view && scalar.isSignlessInteger(64)) && (view || !scalar.isUnsignedInteger(64))) ||
         record->getString("dtype") != (scalar.isF16()         ? "f16"
                                        : scalar.isBF16()      ? "bf16"
                                        : scalar.isInteger(32) ? "i32"
+                                       : scalar.isSignlessInteger(64) ? "i64"
                                        : scalar.isUnsignedInteger(64) ? "u64"
                                                               : "f32") ||
         (view ? (record->getString("direction") != "In" &&

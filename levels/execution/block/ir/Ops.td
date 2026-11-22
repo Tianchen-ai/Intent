@@ -1,4 +1,5 @@
 include "mlir/IR/OpBase.td"
+include "mlir/Interfaces/InferTypeOpInterface.td"
 // welford is registered below the dialect declaration.
 include "mlir/Interfaces/SideEffectInterfaces.td"
 def Iblock_Dialect : Dialect {
@@ -168,4 +169,15 @@ def Iblock_Dialect_summary_identityOp : Op<Iblock_Dialect,"summary_identity"> {
 }
 def Iblock_Dialect_summary_mergeOp : Op<Iblock_Dialect,"summary_merge"> {
   let arguments = (ins AnyTuple:$left, AnyTuple:$right, StrAttr:$algebra); let results = (outs AnyTuple:$summary);
+}
+def Iblock_Dialect_ScanSum : Op<Iblock_Dialect, "scan_sum", [SameOperandsAndResultType]> {
+  let arguments=(ins AnyRankedTensor:$input); let results=(outs AnyRankedTensor:$prefix);
+}
+def Iblock_Dialect_GatherRow : Op<Iblock_Dialect,"gather_row"> {
+  let arguments=(ins AnyMemRef:$table,AnyMemRef:$indices,Index:$owner,UnitAttr:$in_bounds);
+  let results=(outs AnyRankedTensor:$fragment);
+}
+def Iblock_Dialect_IndexedTileRead : Op<Iblock_Dialect,"indexed_tile_read"> {
+  let arguments=(ins AnyMemRef:$table,AnyMemRef:$indices,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active);
+  let results=(outs AnyRankedTensor:$fragment);
 }

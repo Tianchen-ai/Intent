@@ -1,3 +1,4 @@
+#include "mlir/Interfaces/InferTypeOpInterface.h"
 #include "intentdsl/levels/execution/block/ir/Dialect.h"
 #include "Dialect.cpp.inc"
 #include "mlir/Bytecode/BytecodeOpInterface.h"

@@ -5,17 +5,19 @@ using namespace mlir;
 using namespace compilerinfra;
 void registerPointwise(Unit &u,StringRef family) {
   Strategy strategy;
-  strategy.name = family=="permutation"?"rectangular-copy":"pointwise";
-  strategy.family = u.qualify(family);
-  auto propose = [](Operation *op, const TargetProfile &p,
+  bool indirect=family=="indirect";
+  strategy.name = indirect?"indexed-rows":family=="permutation"?"rectangular-copy":"pointwise";
+  strategy.family = u.qualify(indirect?"partition":family);
+  auto propose = [indirect](Operation *op, const TargetProfile &p,
                         AnalysisManager &) -> llvm::Expected<Attribute> {
-    bool hasWrite = false, hasSummary = false;
+    bool hasWrite = false, hasSummary = false, hasGather=false;
     op->walk([&](Operation *o) {
       auto n = o->getName().stripDialect();
       hasWrite |= n == "write";
-      hasSummary |= n == "sum" || n == "max_num" || n == "welford";
+      hasGather |= n=="gather_row";
+      hasSummary |= n == "sum" || n == "max_num" || n == "welford" || n=="scan_sum";
     });
-    if (!hasWrite || hasSummary)
+    if (!hasWrite || hasSummary || hasGather!=indirect)
       return Attribute{};
     auto *m = p.services.get<intentdsl::cpu::RowMachine>();
     if (!m)

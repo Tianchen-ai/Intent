@@ -12,7 +12,7 @@ TemporaryLayout placeTemporaries(mlir::Block &body) {
   for (auto &op : body) {
     if (op.getNumResults()!=1) continue;
     auto code=op.getName().stripDialect();
-    if (code=="load" || code=="copy_in" || code=="await" || code=="active") continue;
+    if (code=="load" || code=="indexed_tile_read" || code=="copy_in" || code=="await" || code=="active") continue;
     auto value=op.getResult(0);
     auto t=dyn_cast<RankedTensorType>(value.getType());
     if (!t || t.getRank()!=2 || !t.getElementType().isIntOrFloat()) continue;

@@ -1,4 +1,13 @@
 R"mlu(
+template<class T> __mlu_func__ void tile_prefix(T *dst,const T *src,T *tmp,int lanes,int live){
+  __memcpy(dst,src,lanes*sizeof(T),NRAM2NRAM);
+  for(int stride=1;stride<live;stride*=2){
+    __bang_write_value(tmp,lanes,(T)0);
+    __memcpy(tmp+stride,dst,(live-stride)*sizeof(T),NRAM2NRAM);
+    __bang_add(tmp,tmp,dst,lanes);
+    __memcpy(dst+stride,tmp+stride,(live-stride)*sizeof(T),NRAM2NRAM);
+  }
+}
 __mlu_func__ float widen_bf16(unsigned short bits) {
   union {unsigned u; float f;} x;
   x.u=(unsigned)bits<<16;

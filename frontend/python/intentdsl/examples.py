@@ -1,5 +1,15 @@
 import intentdsl as I
 
+@I.kernel
+def cumsum(values: I.In[I.f32, ("M","N")], prefix: I.Out[I.f32, ("M","N")]):
+    for row in I.parallel(values.dim(0)):
+        prefix[row,:] = I.cumsum(values[row,:], axis=0)
+
+@I.kernel
+def embedding(table:I.In[I.bf16,("V","D")], ids:I.In[I.i64,("T",)], output:I.Out[I.bf16,("T","D")]):
+    for token in I.parallel(output.dim(0)):
+        output[token,:] = I.gather_row(table,ids,token,in_bounds=True)
+
 
 @I.kernel
 def softmax(x: I.In[I.f16, ("M", "N")], out: I.Out[I.f16, ("M", "N")]):

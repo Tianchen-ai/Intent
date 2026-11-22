@@ -122,6 +122,11 @@ private:
       local.map(v,result);
       return result;
     }
+    if(n=="gather_row"){
+      auto elem=cast<MemRefType>(op->getOperand(0).getType()).getElementType();
+      auto result=make("indexed_tile_read",{op->getOperand(0),op->getOperand(1),rows,cols,active},vector(elem,2))->getResult(0);
+      local.map(v,result);return result;
+    }
     if (n == "ordinal") {
       auto ordinal =
           make("linear_index", {domain, rows, cols},

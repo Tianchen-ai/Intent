@@ -17,6 +17,7 @@ Text ctype(Type t) {
     return "unsigned char";
   if (t.isInteger(32))
     return "int";
+  if(t.isSignlessInteger(64))return "long long";
   if (t.isUnsignedInteger(64)) return "unsigned long long";
   return t.isF16() ? "half" : "float";
 }
@@ -63,7 +64,10 @@ class Source {
     Text offset="0",step="0";
     for(auto [i,c]:llvm::enumerate(op.getOperands().drop_front(start))){
       auto value=cast<OpResult>(c);Text stride=view+"s"+std::to_string(i);
-      if(c.getDefiningOp()->getName().getStringRef()=="dsa.member_axis"){
+      if(c.getDefiningOp()->getName().getStringRef()=="dsa.lookup_axis"){
+        auto ids=name(c.getDefiningOp()->getOperand(0));
+        offset+="+"+ids+"[(row0+j)*"+ids+"s0]*"+stride;
+      }else if(c.getDefiningOp()->getName().getStringRef()=="dsa.member_axis"){
         auto *axis=c.getDefiningOp();auto domain=axis->getOperand(1);int k=axis->getAttrOfType<IntegerAttr>("axis").getInt();
         Text coord="(row0+j)";
         for(int j=k+1;j<cast<MemRefType>(domain.getType()).getRank()-1;++j)coord+="/"+name(domain)+"d"+std::to_string(j);
@@ -136,7 +140,7 @@ class Source {
                   : "long long row0=group*R, col=incoming*W;");
     line("int live=(int)((N-col)<W?(N-col):W);");
     for (auto &op : fetch.without_terminator()) {
-      if (op.getName().getStringRef() == "dsa.window" || op.getName().getStringRef()=="dsa.member_axis" || op.getName().getStringRef()=="dsa.slab_axis")
+      if (op.getName().getStringRef() == "dsa.window" || op.getName().getStringRef()=="dsa.member_axis" || op.getName().getStringRef()=="dsa.slab_axis" || op.getName().getStringRef()=="dsa.lookup_axis")
         continue;
       if(op.hasAttr("dsa.shared"))continue;
       auto src = op.getOperand(0);
@@ -144,6 +148,19 @@ class Source {
            type = ctype(src.getType());
       auto [rowStride, stride] = strides(op, 2, n);
       auto primitive=op.getAttrOfType<StringAttr>("bangc.primitive").getValue();
+      if(primitive=="indexed_dma"){
+        auto keys=name(op.getOperand(2).getDefiningOp()->getOperand(0));
+        auto keyType=ctype(op.getOperand(2).getDefiningOp()->getOperand(0).getType());
+        line("{int count=(M-row0<R?M-row0:R);");
+        line("if(R>1 && "+keys+"s0==1 && "+n+"s1==1 && "+n+"d0>0 && (unsigned long long)"+n+"s0<=0xffffffffULL/sizeof("+type+")/"+n+"d0){");
+        line("auto *ids=("+keyType+"*)(storage+BYTES-((R*12+127)/128*128));");
+        line("__memcpy(ids,"+keys+"+row0,count*sizeof(*ids),GDRAM2NRAM);");
+        line("for(int j=0;j<count;++j)__memcpy_async("+dst+"+(("+slot+")*R+j)*P,"+n+"+col+ids[j]*"+n+"s0,live*sizeof("+type+"),GDRAM2NRAM);");
+        if(depth==1)line("__sync_io();");
+        line("}else{for(int j=0;j<count;++j){auto *src="+n+"+"+rowStride+"+col*"+stride+";auto *out="+dst+"+(("+slot+")*R+j)*P;");
+        line("if("+stride+"==1)__memcpy(out,src,live*sizeof("+type+"),GDRAM2NRAM);else for(int k=0;k<live;++k)out[k]=src[k*"+stride+"];}}}");
+        continue;
+      }
       if(primitive=="segmented_slab_read"){
         line("for(int j=0;j<R && row0+j<M;++j)");
         slabTransfer(op,2,n,dst+"+("+slot+"*R+j)*P",true);
@@ -182,7 +199,7 @@ class Source {
     line("{");
     unsigned index = 0;
     for (auto &copy : fetch.without_terminator()) {
-      if (copy.getName().getStringRef() == "dsa.window" || copy.getName().getStringRef()=="dsa.member_axis" || copy.getName().getStringRef()=="dsa.slab_axis")
+      if (copy.getName().getStringRef() == "dsa.window" || copy.getName().getStringRef()=="dsa.member_axis" || copy.getName().getStringRef()=="dsa.slab_axis" || copy.getName().getStringRef()=="dsa.lookup_axis")
         continue;
       auto n = fresh();
       auto t = ctype(copy.getResult(0).getType());
@@ -334,6 +351,10 @@ class Source {
       auto type = ctype(val.getType());
       if (vec)
         line("auto *" + id + "=(" + type + "*)" + address(inst) + ";");
+      if(prim=="row_inclusive_sum"){
+        line("tile_prefix("+id+","+in(0)+",("+type+"*)"+address(inst,"bangc.scan_scratch")+",lanes,live);");
+        continue;
+      }
       if (prim == "positive_half_or_nan") {
         // Signed binary16 encodings -1023..-1 are negative NaNs. Preserve
         // those and every positive encoding; all other negative values map to

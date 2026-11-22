@@ -106,6 +106,11 @@ class Kernel {
       else if (code=="summary_merge")
         expr="merge_moments("+arg(0)+"[0],"+arg(0)+"[1],"+arg(0)+"[2],"+arg(1)+"[0],"+arg(1)+"[1],"+arg(1)+"[2])";
       else if (code=="summary_field") expr=arg(0)+"["+std::to_string(op.getAttrOfType<IntegerAttr>("position").getInt())+"]";
+      else if(code=="indexed_tile_read"){
+        auto key="ct.gather("+arg(1)+","+arg(2)+",mask="+arg(2)+"<"+arg(1)+".shape[0])";
+        expr="ct.gather("+arg(0)+",(ct.expand_dims("+key+",1),ct.expand_dims("+arg(3)+",0)),mask="+arg(4)+")";
+      }
+      else if(code=="scan_sum")expr="ct.cumsum("+arg(0)+",axis=1)";
       else if (code == "uniform")
         expr = "uniform_at("+arg(0)+","+arg(1)+")";
       else if (code == "linear_index") {

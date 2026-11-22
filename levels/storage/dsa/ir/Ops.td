@@ -51,3 +51,4 @@ def Latch : Inst<"advance",(ins Index:$slot),(outs),[Terminator]>;
 def End : Inst<"end",(ins),(outs),[Terminator]>;
 def Summary : Inst<"reduce", (ins AnyTensor:$value, I1Tensor:$mask, StrAttr:$algebra),
                              (outs AnyTensor:$result)>;
+def LookupAxis : Inst<"lookup_axis",(ins AnyMemRef:$indices,AnyTensor:$rows),(outs AnyTensor:$coordinates)>;

@@ -39,10 +39,11 @@ LogicalResult verifyRowComputation(func::FuncOp fn, Block &row, ValueRange captu
       return fn.emitError("direction disagrees with the scalar or view type");
     if (rank != desc->getArray("dims")->size() ||
         (!elt.isF16() && !elt.isF32() && !elt.isBF16() && !elt.isInteger(32) &&
-         !(rank == 0 && elt.isUnsignedInteger(64))) ||
+         !(rank == 0 && elt.isUnsignedInteger(64)) && !(rank && elt.isSignlessInteger(64))) ||
         desc->getString("dtype") != (elt.isF16()                 ? "f16"
                                      : elt.isBF16()              ? "bf16"
                                      : elt.isUnsignedInteger(64) ? "u64"
+                                     : elt.isSignlessInteger(64) ? "i64"
                                      : elt.isInteger(32)         ? "i32"
                                                                  : "f32"))
       return fn.emitError("parameter descriptor does not match its IR type");
@@ -95,6 +96,24 @@ LogicalResult verifyRowComputation(func::FuncOp fn, Block &row, ValueRange captu
           !result.getElementType().isF32())
         return op.emitError(
             "uniform requires one unsigned logical counter per f32 sample");
+      continue;
+    }
+    if (name == "scan_sum") {
+      auto t=dyn_cast<RankedTensorType>(op.getOperand(0).getType());
+      if(!t || t.getRank()!=1 || (!t.getElementType().isF32() && !t.getElementType().isInteger(32)) ||
+         op.getResult(0).getType()!=t)return op.emitError("expected inclusive prefix sum of one member vector");
+      continue;
+    }
+    if(name=="gather_row"){
+      auto src=llvm::find(captures,op.getOperand(0)),idx=llvm::find(captures,op.getOperand(1));
+      if(src==captures.end() || idx==captures.end() || op.getOperand(2)!=row.getArgument(0) || axes.size()!=2)
+        return op.emitError("gather must index a captured table from a row owner");
+      auto *table=(*args)[src-captures.begin()].getAsObject(),*indices=(*args)[idx-captures.begin()].getAsObject();
+      auto &ts=*table->getArray("dims"),&is=*indices->getArray("dims");
+      if(ts.size()!=2 || is.size()!=1 || ts[1]!=axes[1] || is[0]!=axes[0] || table->getString("direction")!="In" ||
+         indices->getString("direction")!="In" || (indices->getString("dtype")!="i32" && indices->getString("dtype")!="i64") ||
+         !op.hasAttr("in_bounds") || op.getResult(0).getType()!=RankedTensorType::get({ShapedType::kDynamic},cast<MemRefType>(op.getOperand(0).getType()).getElementType()))
+        return op.emitError("invalid table gather contract");
       continue;
     }
     if (name == "ordinal") {

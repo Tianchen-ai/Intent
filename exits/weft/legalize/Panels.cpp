@@ -99,6 +99,10 @@ public:
     }
     for (auto *op : llvm::reverse(old))
       op->erase();
+    for(auto &sweep:task.without_terminator()){
+      if(sweep.walk([](Operation *op){return op->getName().getStringRef()=="cpu.scan_sum"?WalkResult::interrupt():WalkResult::advance();}).wasInterrupted())
+        sweep.setAttr("weft_host.prefix_carry",b.getUnitAttr());
+    }
   }
 };
 } // namespace
@@ -113,6 +117,8 @@ LogicalResult verifyPanels(Operation *dispatch) {
     if (s.getAttrOfType<StringAttr>("tail") != "scalar")
       return s.emitError("expected scalar remainder after full column blocks");
     auto kind = s.getAttrOfType<StringAttr>("combine");
+    auto scans=s.walk([](Operation *op){return op->getName().getStringRef()=="cpu.scan_sum"?WalkResult::interrupt():WalkResult::advance();}).wasInterrupted();
+    if(s.hasAttr("weft_host.prefix_carry")!=scans)return s.emitError("prefix carry must match the panel computation");
     bool store = kind == "store" || kind=="publish";
     if ((!store && kind != "max_num" && kind != "sum" && kind!="welford") ||
         s.getNumResults() != unsigned(!store))

@@ -82,6 +82,7 @@ class Artifact:
             "f32": "float",
             "bf16": "uint16_t",
             "i32": "int32_t",
+            "i64": "int64_t",
             "u64": "uint64_t",
         }
         for i, (arg, item) in enumerate(zip(actual, self.data["abi"])):

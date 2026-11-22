@@ -11,3 +11,7 @@ def ValueExpr : RowInst<"apply"> {let arguments=(ins Variadic<AnyType>:$inputs,S
 def StepYield : RowInst<"yield",[Terminator]> {let arguments=(ins Variadic<AnyType>:$values);}
 def OwnerRead : RowInst<"owner_read"> {let arguments=(ins AnyMemRef:$source,Index:$row);let results=(outs AnyType:$value);}
 def OwnerWrite : RowInst<"owner_write"> {let arguments=(ins AnyMemRef:$destination,Index:$row,AnyType:$value);}
+def MojoIndirectRead : Op<RowMojo_Dialect,"indexed_read"> {
+  let arguments=(ins AnyMemRef:$table,AnyMemRef:$ids,Index:$row,Index:$col);
+  let results=(outs AnyVectorOfAnyRank:$lanes);
+}

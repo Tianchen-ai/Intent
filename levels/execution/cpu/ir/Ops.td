@@ -1,4 +1,5 @@
 include "mlir/IR/OpBase.td"
+include "mlir/Interfaces/InferTypeOpInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 def Cpu_Dialect : Dialect {
   let name = "cpu";
@@ -94,4 +95,11 @@ def Cpu_sqrt : Inst<"sqrt"> { let arguments=(ins AnyType:$input); let results=(o
 
 def Cpu_uniform : Inst<"uniform"> {
   let arguments=(ins UI64:$seed,AnyTensor:$counter);let results=(outs AnyTensor:$result);
+}
+def Cpu_Dialect_ScanSum : Op<Cpu_Dialect, "scan_sum", [SameOperandsAndResultType]> {
+  let arguments=(ins AnyRankedTensor:$input); let results=(outs AnyRankedTensor:$prefix);
+}
+def Cpu_Dialect_GatherRow : Op<Cpu_Dialect,"gather_row"> {
+  let arguments=(ins AnyMemRef:$table,AnyMemRef:$indices,Index:$owner,UnitAttr:$in_bounds);
+  let results=(outs AnyRankedTensor:$fragment);
 }

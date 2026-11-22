@@ -1,4 +1,5 @@
 include "mlir/IR/OpBase.td"
+include "mlir/Interfaces/InferTypeOpInterface.td"
 def TileSource : Dialect { let name="ct_src"; let cppNamespace="::intentdsl::cutile"; }
 class Inst<string name,dag args,dag outputs,list<Trait> traits=[]> : Op<TileSource,name,traits> {
   let arguments=args; let results=outputs;
@@ -59,4 +60,11 @@ def TileSource_summary_identityOp : Op<TileSource,"summary_identity"> {
 }
 def TileSource_summary_mergeOp : Op<TileSource,"summary_merge"> {
   let arguments = (ins AnyTuple:$left, AnyTuple:$right, StrAttr:$algebra); let results = (outs AnyTuple:$summary);
+}
+def TileSource_ScanSum : Op<TileSource, "scan_sum", [SameOperandsAndResultType]> {
+  let arguments=(ins AnyRankedTensor:$input); let results=(outs AnyRankedTensor:$prefix);
+}
+def TileSource_IndexedTileRead : Op<TileSource,"indexed_tile_read"> {
+  let arguments=(ins AnyMemRef:$table,AnyMemRef:$indices,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active);
+  let results=(outs AnyRankedTensor:$fragment);
 }

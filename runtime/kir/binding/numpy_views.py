@@ -12,6 +12,7 @@ def describe(a):
         np.dtype("float16"): "f16",
         np.dtype("float32"): "f32",
         np.dtype("int32"): "i32",
+        np.dtype("int64"): "i64",
     }.get(a.dtype)
     if any(s % a.itemsize for s in a.strides):
         raise ValueError("nonintegral element stride")
@@ -44,7 +45,7 @@ def allocate(shape, dtype, device):
 
     return np.empty(
         shape,
-        dtype={"f32": "float32", "f16": "float16", "bf16": "bfloat16", "i32": "int32"}[
+        dtype={"f32": "float32", "f16": "float16", "bf16": "bfloat16", "i32": "int32", "i64":"int64"}[
             dtype
         ],
     )

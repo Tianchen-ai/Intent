@@ -1,4 +1,5 @@
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
+#include "intentdsl/levels/algorithm/kir/ir/Performance.h"
 #include "mlir/Bytecode/BytecodeOpInterface.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/OpImplementation.h"
@@ -27,7 +28,8 @@ namespace {
 struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(Lower)
   bool callable;
-  explicit Lower(bool callable) : callable(callable) {}
+  intentdsl::CallFacts facts;
+  Lower(bool callable,const intentdsl::CallFacts &f) : callable(callable),facts(f) {}
   void runOnOperation() final {
     auto f = *getOperation().getOps<func::FuncOp>().begin();
     auto &task = f.front().front();
@@ -41,6 +43,14 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
       bool absolute = false;
       task.walk([&](Operation *o) {
         absolute |= o->getName().getStringRef() == "cpu.ordinal";
+        if(o->getName().getStringRef()=="cpu.gather_row"){
+          auto table=cast<BlockArgument>(o->getOperand(0)).getArgNumber()-1;
+          auto ids=cast<BlockArgument>(o->getOperand(1)).getArgNumber()-1;
+          auto *slot=facts.arguments[table].getAsObject();auto *shape=slot?slot->getArray("shape"):nullptr;
+          if(!shape || shape->size()!=2 || !shape->front().getAsInteger()){o->emitError("missing indexed table height");signalPassFailure();return;}
+          f.setArgAttr(table,"weft_host.table_rows",b.getI64IntegerAttr(*shape->front().getAsInteger()));
+          f.setArgAttr(ids,"weft_host.task_indices",b.getUnitAttr());
+        }
       });
       task.setAttr("weft_host.absolute_origin", b.getBoolAttr(absolute));
       task.setAttr("weft_host.slot_ranks", b.getDenseI64ArrayAttr(ranks));
@@ -63,8 +73,8 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
   }
 };
 } // namespace
-void lower(OpPassManager &pm, bool callable) {
-  pm.addPass(std::make_unique<Lower>(callable));
+void lower(OpPassManager &pm, bool callable,const intentdsl::CallFacts &facts) {
+  pm.addPass(std::make_unique<Lower>(callable,facts));
 }
 LogicalResult verifyHost(ModuleOp m, const compilerinfra::TargetProfile &p,
                          bool callable) {

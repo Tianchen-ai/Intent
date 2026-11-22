@@ -1,4 +1,5 @@
 include "mlir/IR/OpBase.td"
+include "mlir/Interfaces/InferTypeOpInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 def Kir_Dialect : Dialect {
   let name = "kir";
@@ -98,4 +99,11 @@ def Kir_sqrt : Inst<"sqrt"> { let arguments=(ins AnyType:$input); let results=(o
 
 def Kir_uniform : Inst<"uniform"> {
   let arguments=(ins UI64:$seed,AnyTensor:$counter);let results=(outs AnyTensor:$result);
+}
+def Kir_Dialect_ScanSum : Op<Kir_Dialect, "scan_sum", [SameOperandsAndResultType]> {
+  let arguments=(ins AnyRankedTensor:$input); let results=(outs AnyRankedTensor:$prefix);
+}
+def Kir_Dialect_GatherRow : Op<Kir_Dialect,"gather_row"> {
+  let arguments=(ins AnyMemRef:$table,AnyMemRef:$indices,Index:$owner,UnitAttr:$in_bounds);
+  let results=(outs AnyRankedTensor:$fragment);
 }

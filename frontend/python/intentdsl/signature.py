@@ -40,7 +40,7 @@ def signature(fn):
         else:
             dtype, dims, direction = ann, [], "Scalar"
         dtype = spelling(dtype, owner)
-        if dtype not in ("f16", "bf16", "f32", "i32", "u64"):
+        if dtype not in ("f16", "bf16", "f32", "i32", "u64") and not (dtype=="i64" and dims):
             raise ValueError(f"unsupported element type: {dtype}")
         args.append(dict(name=param.arg, dtype=dtype, dims=dims, direction=direction))
     return args

@@ -16,8 +16,9 @@ std::string regionType(StringRef kind, StringRef element, int rank,
       rank == 2 ? "[-1,-2],[1,2]" : "[" + std::to_string(columnDim) + "],[2]";
   if (kind == "value")
     return "!weft_kernel.value<" + element.str() + "," + shape + ">";
+  std::string family=element=="si64"?"i64":element=="si32"?"i32":element.str();
   return "!weft_kernel." + kind.str() + "<!weft_kernel.encoding<\"" +
-         element.str() + "\",\"dense\",\"dense." + element.str() + "\",[]>," +
+         family + "\",\"dense\",\"dense." + family + "\",[]>," +
          shape + ">";
 }
 struct Term {
@@ -91,6 +92,7 @@ class CanonicalTask {
     auto rank=cast<MemRefType>(view.getType()).getRank();
     SmallVector<Term> coords(rank);
     for(int i=rank-1;i>=0;--i){
+      if(!ownerAxis){coords[i]=i==rank-1?member:Term{"%r","index"};continue;}
       if(owned || i==*ownerAxis){coords[i]={"%r","index"};continue;}
       auto size=extents[i];
       coords[i]=inst("binary",{member,size},"index","kind=\"mod\"");
@@ -112,15 +114,28 @@ class CanonicalTask {
       return llvm::createStringError("unsupported member sweep algebra");
     std::string prefix="%owner"+std::to_string(serial++);
     Term index{prefix+"_i","index"};
+    SmallVector<Term> carries;
+    auto &body=sweep.getRegion(0).front();
+    for(auto &op:body)if(op.getName().stripDialect()=="scan_sum"){
+      auto t=spelling(cast<ShapedType>(op.getResult(0).getType()).getElementType());
+      carries.push_back(inst("constant",{},t,"value="+std::string(t=="f32"?"0.0":"0")+" : "+t));
+    }
+    if(!carries.empty() && kind!="store")return llvm::createStringError("prefix sweep requires a store consumer");
     if(!publish) {
       if(moments) s<<prefix<<":3 = ";
       else if(scalarReduction)s<<prefix<<" = ";
+      else if(!carries.empty())s<<prefix<<":"<<carries.size()<<" = ";
       s<<"scf.for "<<index.id<<" = %lo to "<<columns.id<<" step %step";
       if(moments)s<<" iter_args("<<prefix<<"_n = %zero_count, "<<prefix<<"_m = %zero_f, "<<prefix<<"_s = %zero_f) -> (si32,f32,f32)";
       if(scalarReduction)s<<" iter_args("<<prefix<<"_acc = "<<(kind=="sum"?"%zero_f":"%minus_inf")<<") -> (f32)";
+      if(!carries.empty()){
+        SmallVector<std::string> bindings,types;
+        for(auto [i,c]:llvm::enumerate(carries)){bindings.push_back(prefix+"_p"+std::to_string(i)+"="+c.id);types.push_back(c.type);}
+        s<<" iter_args("<<llvm::join(bindings,",")<<") -> ("<<llvm::join(types,",")<<")";
+      }
       s<<" {\n";
     }
-    auto &body=sweep.getRegion(0).front();
+    unsigned cursor=0;
     for(auto &op:body.without_terminator()){
       auto n=op.getName().stripDialect();
       if(n=="write_panel" || n=="write_owner"){
@@ -133,6 +148,9 @@ class CanonicalTask {
       auto ty=spelling(t);
       if(n=="read_panel" || n=="read_owner"){
         terms[v]=inst("admit",{memberSlice(op,index,n=="read_owner")},ty);
+      } else if(n=="scan_sum"){
+        auto &carry=carries[cursor];carry=inst("binary",{{prefix+"_p"+std::to_string(cursor),ty},terms.lookup(op.getOperand(0))},ty,"kind=\"add\"");
+        terms[v]=carry;++cursor;
       } else if(scalarReduction && n==kind.getValue()){
         terms[v]=terms.lookup(op.getOperand(0));
       } else if(n=="field"){
@@ -150,6 +168,10 @@ class CanonicalTask {
         else if(n=="mul" || n=="add" || n=="div" || n=="sub")terms[v]=inst("binary",args,ty,"kind=\""+n.str()+"\"");
         else return llvm::createStringError("unsupported scalar member calculation "+n.str());
       }
+    }
+    if(!carries.empty()){
+      SmallVector<std::string> ids,types;for(auto &v:carries){ids.push_back(v.id);types.push_back(v.type);}
+      s<<"scf.yield "<<llvm::join(ids,",")<<" : "<<llvm::join(types,",")<<"\n";
     }
     if(moments){
       Term n{prefix+"_n","si32"},mean{prefix+"_m","f32"},m2{prefix+"_s","f32"},v=terms.lookup(body.back().getOperand(0));
@@ -178,6 +200,17 @@ class CanonicalTask {
     for (auto &op : body.without_terminator()) {
       auto code = op.getName().stripDialect();
       SmallVector<Term> args;
+      if(code=="gather_row"){
+        auto keys=terms.lookup(op.getOperand(1)),table=terms.lookup(op.getOperand(0));
+        auto elem=printType(cast<MemRefType>(op.getOperand(1).getType()).getElementType());
+        elem=elem=="i64"?"si64":"si32";
+        auto family=elem=="si64"?std::string("i64"):std::string("i32");
+        auto at=inst("slice",{keys,{"%r","index"}},"!weft_kernel.slice<!weft_kernel.encoding<\""+family+"\",\"dense\",\"dense."+family+"\",[]>,[],[]>","selectors=[\"index\"]");
+        auto source=inst("cast",{inst("admit",{at},elem)},"index");
+        auto dtype=spelling(cast<MemRefType>(op.getOperand(0).getType()).getElementType());
+        auto s=inst("slice",{table,source},regionType("slice",dtype,1),"selectors=[\"index\",\"all\"]");
+        terms[op.getResult(0)]=inst("admit",{s},regionType("value",dtype,1));continue;
+      }
       if (code == "read" || code == "write" || code == "read_panel" ||
           code == "write_panel") {
         auto view = op.getOperand(0);
@@ -230,6 +263,15 @@ class CanonicalTask {
         terms[op.getResult(0)] =
             wide ? idx : inst("cast", {idx}, regionType("value", "si32", 1, dim));
         continue;
+      }
+      if (code=="scan_sum"){
+        auto v=terms.lookup(op.getOperand(0));
+        auto ty=spelling(cast<ShapedType>(op.getResult(0).getType()).getElementType());
+        auto id="%prefix"+std::to_string(serial++);
+        s<<id<<" = \"weft_kernel.scan\"("<<v.id<<") <{axis=0 : i64,reverse=false}> ({\n^bb0(%left:"<<ty<<",%right:"<<ty<<"):\n";
+        auto x=inst("binary",{{"%left",ty},{"%right",ty}},ty,"kind=\"add\"");
+        s<<"\"weft_kernel.scan_yield\"("<<x.id<<"):("<<ty<<")->()\n}):("<<v.type<<")->"<<v.type<<"\n";
+        terms[op.getResult(0)]={id,v.type};continue;
       }
       if (code=="uniform") {
         terms[op.getResult(0)]=uniform(terms.lookup(op.getOperand(0)),terms.lookup(op.getOperand(1)),dim);
@@ -310,9 +352,15 @@ public:
       int rank = std::min<size_t>(2,a->getArray("dims")->size());
       if (elem == "i32")
         elem = "si32";
+      if(elem=="i64")elem="si64";
       if (elem == "u64")
         elem = "ui64";
       auto t = rank ? regionType("view", elem, rank) : elem;
+      auto fn=task->getParentOfType<func::FuncOp>();
+      if(auto count=fn.getArgAttrOfType<IntegerAttr>(i,"weft_host.table_rows"))
+        t.replace(t.find("[-1,-2]"),7,"["+std::to_string(count.getInt())+",-2]");
+      if(fn.getArgAttr(i,"weft_host.task_indices"))
+        t.replace(t.find("[-2],[2]"),8,"[-1],[1]");
       if(ownerAxis && rank){
         rank=a->getArray("dims")->size();
         SmallVector<std::string> shape,axes;
@@ -394,6 +442,10 @@ public:
         return e;
     } else
       for (auto &sweep : bb.without_terminator()) {
+        if(sweep.hasAttr("weft_host.prefix_carry")){
+          if(auto error=ownerSweep(sweep))return error;
+          continue;
+        }
         auto combine = sweep.getAttrOfType<StringAttr>("combine");
         bool store = combine == "store";
         std::string previous;
@@ -464,6 +516,7 @@ std::string hostSource(Operation *dispatch, const llvm::json::Array &abi) {
     auto type = a->getString("dtype") == "f16"    ? "_Float16"
                 : a->getString("dtype") == "bf16" ? "uint16_t"
                 : a->getString("dtype") == "i32"  ? "int32_t"
+                : a->getString("dtype") == "i64"  ? "int64_t"
                 : a->getString("dtype") == "u64"  ? "uint64_t"
                                                   : "float";
     params.push_back(std::string(type) + (rank ? " *" : " ") + n);
@@ -480,7 +533,10 @@ std::string hostSource(Operation *dispatch, const llvm::json::Array &abi) {
       params.push_back("int64_t " + stride);
       if(owner || rank<=2 || axis>=rank-2)strides.push_back(swap ? n + "s" + std::to_string(1 - axis) : stride);
     }
-    if(owner && rank)args.push_back(n+"+start*"+n+"s"+std::to_string(rank==1?0:owner.getInt()));
+    auto fn=dispatch->getParentOfType<func::FuncOp>();
+    if(fn.getArgAttr(i,"weft_host.table_rows"))args.push_back(n);
+    else if(fn.getArgAttr(i,"weft_host.task_indices"))args.push_back(n+"+start*"+n+"s0");
+    else if(owner && rank)args.push_back(n+"+start*"+n+"s"+std::to_string(rank==1?0:owner.getInt()));
     else if(rank>2){
       std::string row="start",offset=n;
       for(int j=rank-2;j>=0;--j){auto dim=n+"d"+std::to_string(j);offset+="+(("+row+")%"+dim+")*"+n+"s"+std::to_string(j);row="("+row+"/"+dim+")";}

@@ -7,7 +7,7 @@ namespace CI_UNIT_NAMESPACE {
 llvm::Expected<std::string> taskSource(Operation *, const llvm::json::Array &);
 std::string hostSource(Operation *, const llvm::json::Array &);
 void dialect(DialectRegistry &);
-void lower(OpPassManager &, bool);
+void lower(OpPassManager &, bool,const intentdsl::CallFacts &);
 LogicalResult verifyHost(ModuleOp, const TargetProfile &, bool);
 namespace {
 llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
@@ -89,8 +89,8 @@ void bind(Unit &u) {
        COMPILERINFRA_SOURCE});
   for (StringRef phase : {"legal", "callable"})
     u.boundaries.push_back({{phase.str(),
-                             [phase](OpPassManager &pm, const TargetProfile &) {
-                               lower(pm, phase == "callable");
+                             [phase](OpPassManager &pm, const TargetProfile &p) {
+                               lower(pm, phase == "callable",*p.services.get<intentdsl::CallFacts>());
                                return llvm::Error::success();
                              },
                              [phase](ModuleOp m, const TargetProfile &p) {

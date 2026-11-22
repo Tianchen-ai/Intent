@@ -113,6 +113,24 @@ class Capture:
             return self.emit(op, args, ty)
         if isinstance(n, ast.Call):
             fn = spelling(n.func, self.namespace)
+            if fn=="gather_row":
+                if len(n.args)!=3 or len(n.keywords)!=1 or n.keywords[0].arg!="in_bounds" or ast.literal_eval(n.keywords[0].value) is not True:
+                    raise ValueError("row gather requires a table, row indices and an explicit bounds promise")
+                table,ids,row=n.args
+                slots={a["name"]:a for a in self.args}
+                t,ix=slots[table.id],slots[ids.id]
+                if (row.id!=self.row or len(self.axes)!=2 or t["direction"]!="In" or ix["direction"]!="In" or
+                    len(t["dims"])!=2 or t["dims"][1]!=self.axes[1] or ix["dims"]!=self.axes[:1] or ix["dtype"] not in ("i32","i64")):
+                    raise ValueError("gather index and feature dimensions do not match the member domain")
+                return self.emit("gather_row",[self.values[table.id],self.values[ids.id],("%row","index")],
+                                 f'tensor<?x{t["dtype"]}>','{in_bounds}')
+            if fn == "cumsum":
+                if len(n.args)!=1 or len(n.keywords)!=1 or n.keywords[0].arg!="axis" or ast.literal_eval(n.keywords[0].value)!=0:
+                    raise ValueError("cumsum requires one member vector and axis=0")
+                v=self.expr(n.args[0])
+                if v[1] not in ("tensor<?xf32>","tensor<?xi32>"):
+                    raise ValueError("inclusive sum requires f32 or i32 members")
+                return self.emit("scan_sum",[v],v[1])
             if fn == "welford" and len(n.args) == 1 and not n.keywords:
                 samples = self.expr(n.args[0])
                 if samples[1] != "tensor<?xf32>":

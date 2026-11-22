@@ -42,6 +42,7 @@ class Columns {
     Value result;
     if(n=="read_owner")
       result=make("owner_read",op->getOperands(),t)->getResult(0);
+    else if(n=="gather_row")result=make("indexed_read",{op->getOperand(0),op->getOperand(1),op->getOperand(2),col},t)->getResult(0);
     else if (n == "ordinal") {
       result = make("apply", {task->getRegion(0).front().getArgument(0), col},
                     t, b.getNamedAttr("kind", b.getStringAttr("ordinal")))
@@ -59,6 +60,14 @@ class Columns {
       result =
           make("apply", args, t, b.getNamedAttr("kind", b.getStringAttr(n)))
               ->getResult(0);
+      if(n=="scan_sum"){
+        unsigned index=0;
+        for(auto &prior:*op->getBlock()){
+          if(&prior==op)break;
+          index+=prior.getName().stripDialect()=="scan_sum";
+        }
+        result.getDefiningOp()->setAttr("carry",b.getI64IntegerAttr(index));
+      }
     }
     if (auto c = op->getAttr("value"))
       result.getDefiningOp()->setAttr("value", c);
@@ -136,6 +145,10 @@ public:
       if(n=="write_owner") continue;
       if (n != "sum" && n != "max_num" && n!="welford" && n != "write")
         continue;
+      if(n=="write" && original.size()==2 && original.front()->getName().stripDialect()=="gather_row" &&
+         op->getOperand(2)==original.front()->getResult(0)){
+        sweep(op,"indexed_copy",{},1);continue;
+      }
       if (storeInterval(original,op)) {
         sweep(op,"copy",{},1);
         continue;

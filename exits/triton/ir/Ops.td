@@ -1,4 +1,5 @@
 include "mlir/IR/OpBase.td"
+include "mlir/Interfaces/InferTypeOpInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 def Itsrc_Dialect : Dialect {
   let name = "triton_src";
@@ -135,4 +136,11 @@ def Itsrc_Dialect_summary_identityOp : Op<Itsrc_Dialect,"summary_identity"> {
 }
 def Itsrc_Dialect_summary_mergeOp : Op<Itsrc_Dialect,"summary_merge"> {
   let arguments = (ins AnyTuple:$left, AnyTuple:$right, StrAttr:$algebra); let results = (outs AnyTuple:$summary);
+}
+def Itsrc_Dialect_ScanSum : Op<Itsrc_Dialect, "scan_sum", [SameOperandsAndResultType]> {
+  let arguments=(ins AnyRankedTensor:$input); let results=(outs AnyRankedTensor:$prefix);
+}
+def Itsrc_Dialect_IndexedTileRead : Op<Itsrc_Dialect,"indexed_tile_read"> {
+  let arguments=(ins AnyMemRef:$table,AnyMemRef:$indices,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active);
+  let results=(outs AnyRankedTensor:$fragment);
 }

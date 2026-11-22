@@ -87,6 +87,15 @@ LogicalResult verifyMapping(ModuleOp m,const compilerinfra::TargetProfile &p,Str
     }
     if(n=="active")
       ok=def(op->getOperand(1),"rows") && def(op->getOperand(2),"columns");
+    if(n=="scan_sum" && topology!="resident")
+      return op->emitError("scan crossing a tile boundary requires a carry"),WalkResult::interrupt();
+    if(n=="indexed_tile_read"){
+      auto a=cast<MemRefType>(op->getOperand(0).getType()),i=cast<MemRefType>(op->getOperand(1).getType());
+      auto mask=op->getOperand(4).getDefiningOp();
+      ok=a.getRank()==2 && i.getRank()==1 && i.getElementType().isSignlessIntOrIndex() &&
+         def(op->getOperand(4),"active") && mask->getOperand(0)==domain && mask->getOperand(1)==op->getOperand(2) &&
+         mask->getOperand(2)==op->getOperand(3) && cast<RankedTensorType>(op->getResult(0).getType()).getElementType()==a.getElementType();
+    }
     if(dialect=="block" && (n=="load" || n=="store")){
       auto mask=op->getOperand(3).getDefiningOp();
       if(!mask || !def(op->getOperand(3),"active") || mask->getBlock()!=op->getBlock())return op->emitError("access requires local validity domain"),WalkResult::interrupt();
