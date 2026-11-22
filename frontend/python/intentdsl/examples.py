@@ -112,6 +112,47 @@ def merge_affine_gradients(weight_partials: I.In[I.bf16, ("P", "F")],
 
 
 @I.kernel
+def layer_gradient_rows(x: I.In[I.bf16,(4096,"N")], dy: I.In[I.bf16,(4096,"N")],
+                        gain: I.In[I.bf16,("N",)], mean: I.In[I.f32,(4096,)],
+                        inv: I.In[I.f32,(4096,)], dx: I.Out[I.bf16,(4096,"N")],
+                        wp: I.InOut[I.bf16,(128,"N")], bp: I.InOut[I.bf16,(128,"N")],
+                        inverse_width: I.f32):
+    for bucket in I.parallel(wp.dim(0)):
+        col = I.domain(0,x.dim(1))
+        weight_sum = wp[bucket,col]
+        bias_sum = bp[bucket,col]
+        weight = I.cast(gain[col],I.f32)
+        for round_id in I.static_range(32):
+            value = I.cast(x[128*round_id+bucket,col],I.f32)
+            grad = I.cast(dy[128*round_id+bucket,col],I.f32)
+            rs = inv[128*round_id+bucket]
+            normalized = (value-mean[128*round_id+bucket])*rs
+            weighted = weight*grad
+            center = I.sum(weighted,axis=0,acc=I.f32)*inverse_width
+            projection = I.sum(normalized*weighted,axis=0,acc=I.f32)*inverse_width
+            dx[128*round_id+bucket,col] = I.cast((weighted-center-normalized*projection)*rs,I.bf16)
+            weight_term = I.cast(grad*normalized,I.bf16)
+            weight_sum = I.cast(I.cast(weight_sum,I.f32)+I.cast(weight_term,I.f32),I.bf16)
+            bias_sum = I.cast(I.cast(bias_sum,I.f32)+grad,I.bf16)
+        wp[bucket,col] = weight_sum
+        bp[bucket,col] = bias_sum
+
+
+@I.program
+def layer_norm_backward(x, dy, gain, mean, inv, inverse_width):
+    dx = I.output(I.bf16,(x.dim(0),x.dim(1)))
+    wp = I.workspace(I.bf16,(128,x.dim(1)))
+    bp = I.workspace(I.bf16,(128,x.dim(1)))
+    dw = I.output(I.f32,(x.dim(1),))
+    db = I.output(I.f32,(x.dim(1),))
+    I.fill(wp,0)
+    I.fill(bp,0)
+    layer_gradient_rows(x,dy,gain,mean,inv,dx,wp,bp,inverse_width)
+    merge_affine_gradients(wp,bp,dw,db)
+    return dx,dw,db
+
+
+@I.kernel
 def group_input_gradient(x: I.In[I.f16, ("B","C","S")],
                          dy: I.In[I.f16, ("B","C","S")], gain: I.In[I.f16, ("C",)],
                          mean: I.In[I.f16, ("B","G")], inv: I.In[I.f16, ("B","G")],

@@ -28,6 +28,7 @@ capabilities(const llvm::json::Object &opts) {
   auto resource =
       std::make_shared<intentdsl::dsa::LocalSupply>(intentdsl::dsa::LocalSupply{
           *nram, std::min<int64_t>(*nram/3*2,512*1024), 128, (*clusters) * (*cores), sizeof(float), true});
+  caps->stagedInputBudget=std::min(resource->capacity,resource->budget);
   if(auto err=intentdsl::bindPerformance(profile,opts,"exits/bangc::dma",opts.getString("calibration").value_or("").str(),*clusters * *cores))return std::move(err);
   if (auto e = profile.services.provide<intentdsl::RowCapacity>(caps))
     return e;

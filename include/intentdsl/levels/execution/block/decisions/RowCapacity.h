@@ -75,5 +75,8 @@ struct RowCapacity {
   };
   llvm::SmallVector<Row> rows;
   llvm::SmallVector<unsigned> streamingWidths;
+  // Nonzero when the consumer stages all distinct input tiles in private storage
+  // before evaluating a resident body. Bytes refer to one instance.
+  uint64_t stagedInputBudget = 0;
 };
 } // namespace intentdsl

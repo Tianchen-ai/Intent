@@ -1,6 +1,7 @@
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
 #include "mlir/IR/Builders.h"
+#include "llvm/ADT/DenseSet.h"
 
 namespace CI_UNIT_NAMESPACE {
 using namespace compilerinfra;
@@ -31,7 +32,18 @@ void registerRowStrategy(Unit &unit, StringRef mode, bool tuple) {
       limit=std::max(limit,r.width);
       if(r.width>=*extent && (!width || r.width<width)) width=r.width;
     }
-    bool resident = width && mode!="stream-row";
+    bool mustStream=false;
+    if(caps->stagedInputBudget && width) {
+      llvm::SmallDenseSet<Value> slots;
+      op->walk([&](Operation *read){
+        if(read->getName().getStringRef()=="block.read")slots.insert(read->getOperand(0));
+      });
+      uint64_t minimum=0;
+      for(auto slot:slots)
+        minimum+=llvm::divideCeil(cast<MemRefType>(slot.getType()).getElementTypeBitWidth(),8u);
+      mustStream=minimum>caps->stagedInputBudget/width;
+    }
+    bool resident = width && !mustStream && mode!="stream-row";
     if(!resident && mode=="resident-row") return Attribute{};
     if(!resident) width=limit;
     for(auto &r:caps->rows) if(r.width<width)previous=std::max(previous,r.width);
@@ -39,7 +51,7 @@ void registerRowStrategy(Unit &unit, StringRef mode, bool tuple) {
     auto guard=b.getDenseI64ArrayAttr({lo,resident?int64_t(width):-1});
     SmallVector<Attribute> rows;
     for (const auto &r : caps->rows) {
-      if (r.width != width)
+      if (r.width != width && !(mustStream && llvm::is_contained(caps->streamingWidths,r.width)))
         continue;
       rows.push_back(b.getDictionaryAttr(
           {b.getNamedAttr("id", b.getI32IntegerAttr(r.id)),
