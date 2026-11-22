@@ -100,7 +100,7 @@ class Kernel {
             op.getAttrOfType<IntegerAttr>("span").getInt())
           steps = "ct.astype(ct.minimum(" + steps + ",ct.cdiv(" + n + "-ct.astype(ct.bid(0),ct.int64)*" + span + "," + width + ")),ct.int32)";
         line(depth, "for step in range(" + steps + "):");
-        line(depth+1,"offset=step*"+width+"+ct.arange("+width+",dtype=ct.int32)");
+        line(depth+1,"offset=ct.astype(step,ct.int64)*"+width+"+ct.arange("+width+",dtype=ct.int32)");
         line(depth+1,"pos=ct.astype(ct.bid(0),ct.int64)*"+span+"+offset");
         auto keys="ct.load("+arg(0)+",(ct.astype(ct.bid(0),ct.int64)*("+span+"//"+width+")+step,),shape=("+width+",),padding_mode=ct.PaddingMode.ZERO,allow_tma=False)";
         line(depth+1,"key="+(cast<MemRefType>(op.getOperand(0).getType()).getElementType().isInteger(64)?keys:"ct.astype("+keys+",ct.int32)"));
@@ -115,7 +115,7 @@ class Kernel {
           auto span=std::to_string(op.getAttrOfType<IntegerAttr>("span").getInt());
           auto start="(ct.astype(ct.bid(0),ct.int64)*"+span+")";
           line(depth,"for step in range(ct.cdiv("+span+",64)):");
-          line(depth+1,"offset=step*64+ct.arange(64,dtype=ct.int32)");
+          line(depth+1,"offset=ct.astype(step,ct.int64)*64+ct.arange(64,dtype=ct.int32)");
           auto keys="ct.gather("+base+","+start+"+offset,mask=(offset<"+span+") & ("+start+"+offset<"+bound+"),padding_value=-1)";
           line(depth+1,"keys="+(cast<MemRefType>(op.getOperand(0).getType()).getElementType().isInteger(64)?keys:"ct.astype("+keys+",ct.int32)"));
           line(depth+1,acc+" += ct.sum(ct.astype(ct.expand_dims(keys,1)==ct.expand_dims("+arg(2)+",0),ct.int32),axis=0)");

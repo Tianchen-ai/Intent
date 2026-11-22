@@ -137,7 +137,7 @@ public:
         line(depth,"tl.store(dest+"+arg(2)+"*"+arg(1)+"_s1,0,mask="+arg(2)+"<N)");
         line(depth,"tl.debug_barrier()");
         line(depth,"for piece in range(tl.cdiv("+span+","+panel+")):");
-        line(depth+1,"off=piece*"+panel+"+tl.arange(0,"+panel+")");
+        line(depth+1,"off=tl.cast(piece,tl.int64)*"+panel+"+tl.arange(0,"+panel+")");
         line(depth+1,"pos=owner*"+span+"+off");
         line(depth+1,"key=tl.load("+arg(0)+"+pos*"+arg(0)+"_s0,mask=(off<"+span+")&(pos<"+extent+"),other=-1).to(tl.int64)");
         line(depth+1,"tl.atomic_add(dest+key*"+arg(1)+"_s1,1,mask=(key>=0)&(key<N),sem='relaxed',scope='cta')");
@@ -150,7 +150,7 @@ public:
           auto span=op.getAttrOfType<IntegerAttr>("span").getInt(), width=op.getAttrOfType<IntegerAttr>("native_panel").getInt();
           std::string start="(tl.program_id(0).to(tl.int64)*"+std::to_string(span)+")";
           line(depth,"for piece in range("+std::to_string(llvm::divideCeil(span,width))+"):");
-          line(depth+1,"offset = piece*"+std::to_string(width)+"+tl.arange(0,"+std::to_string(width)+")");
+          line(depth+1,"offset = tl.cast(piece,tl.int64)*"+std::to_string(width)+"+tl.arange(0,"+std::to_string(width)+")");
           line(depth+1,"key = tl.load("+base+"+("+start+"+offset)*"+base+"_s0, mask=(offset<"+std::to_string(span)+") & ("+start+"+offset<"+size+"),other=-1)");
           bool wide=cast<MemRefType>(op.getOperand(0).getType()).getElementType().isInteger(64);
           line(depth+1,wide?"bin_id=key":"bin_id=key.to(tl.int32)");
@@ -159,7 +159,7 @@ public:
         }else{
           auto height=std::to_string(op.getAttrOfType<IntegerAttr>("native_panel").getInt());
           line(depth,"for panel in range(tl.cdiv("+size+","+height+")):");
-          line(depth+1,"part=panel*"+height+"+tl.arange(0,"+height+").to(tl.int64)");
+          line(depth+1,"part=tl.cast(panel,tl.int64)*"+height+"+tl.arange(0,"+height+")");
           line(depth+1,"v=tl.load("+base+"+part[:,None]*"+base+"_s0+"+arg(2)+"[None,:]*"+base+"_s1,mask=(part[:,None]<"+size+")&("+arg(2)+"[None,:]<N),other=0)");
           line(depth+1,id+" += tl.sum(v,0)");
         }
