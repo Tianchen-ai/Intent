@@ -30,10 +30,11 @@ capabilities(const llvm::json::Object &options) {
   auto table = std::make_shared<intentdsl::RowCapacity>();
   table->globalAtomicBins=true;
   auto matrix=std::make_shared<intentdsl::block::MatrixTarget>();
+  matrix->estimate="exits/cutile::matrix-issues";
   if(*architecture==90)matrix->tiles={{32,64,32,R"({"num_ctas":1,"occupancy":2,"opt_level":3})"},
                                       {64,128,64,R"({"num_ctas":1,"occupancy":1,"opt_level":3})"},
-                                      {64,64,256,R"({"num_ctas":1,"occupancy":1,"opt_level":3})"},
-                                      {32,64,128,R"({"num_ctas":1,"occupancy":2,"opt_level":3})"}};
+                                      {64,64,256,R"({"num_ctas":1,"occupancy":1,"opt_level":3})","scaled_contract"},
+                                      {32,64,128,R"({"num_ctas":1,"occupancy":2,"opt_level":3})","scaled_contract"}};
   else matrix->tiles={{16,32,32,R"({"num_ctas":1,"occupancy":2,"opt_level":3})"},
                       {32,64,64,R"({"num_ctas":1,"occupancy":2,"opt_level":3})"}};
   if(auto err=profile.services.provide<intentdsl::block::MatrixTarget>(matrix))return std::move(err);

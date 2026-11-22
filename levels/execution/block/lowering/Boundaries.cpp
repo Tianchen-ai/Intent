@@ -140,6 +140,8 @@ void bind(Unit &unit) {
               if(phase=="realized" || phase=="normalized")return intentdsl::block::verifyTiledMatrix(fn,profile,"block");
               if(region.hasAttr("block.output_tile") || region.hasAttr("block.contraction")!=(phase=="decided"))
                 return region.emitError("contraction at incorrect decision boundary"),failure();
+              if(phase=="decided" && !intentdsl::block::supportsMatrixTile(&region,region.getAttr("block.contraction"),profile))
+                return region.emitError("contraction choice is unavailable for this region"),failure();
               return intentdsl::kir::verifyMatrix(fn,"block",true);
             }
             unsigned loops = 0, pids = 0, pending = 0;

@@ -1,5 +1,5 @@
 compilerinfra_target(parent levels/execution/block)
-compilerinfra_unit(SOURCES ir/Dialect.cpp emit/Exit.cpp emit/Matrix.cpp legalize/Legalize.cpp capabilities/Rows.cpp
+compilerinfra_unit(SOURCES ir/Dialect.cpp emit/Exit.cpp emit/Matrix.cpp cost/Matrix.cpp legalize/Legalize.cpp capabilities/Rows.cpp
   LINK_LIBRARIES ${parent}
   TABLEGEN
     "ir/Ops.td Dialect.h.inc -gen-dialect-decls -dialect=triton_src"

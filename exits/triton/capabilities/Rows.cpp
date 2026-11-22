@@ -16,6 +16,7 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
   auto caps = std::make_shared<intentdsl::RowCapacity>();
   caps->globalAtomicBins=true;
   auto matrix=std::make_shared<intentdsl::block::MatrixTarget>();
+  matrix->estimate="exits/triton::matrix-issues";
   if(*arch==90)matrix->tiles={{32,64,32,R"({"num_warps":4,"num_stages":3})"},
                               {64,64,32,R"({"num_warps":4,"num_stages":3})"},
                               {64,128,64,R"({"num_warps":8,"num_stages":3})"}};

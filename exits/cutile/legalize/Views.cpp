@@ -278,7 +278,9 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
   return success(!res.wasInterrupted());
 }
 } // namespace
+void matrixIssues(Unit &);
 void bind(Unit &unit) {
+  matrixIssues(unit);
   unit.dialects = registerIR;
   for (bool callable : {false, true})
     unit.boundaries.push_back(

@@ -15,6 +15,7 @@ namespace CI_UNIT_NAMESPACE {
 using namespace mlir;
 using namespace compilerinfra;
 void legalize(OpPassManager &);
+LogicalResult verifyMatrixExit(func::FuncOp,const TargetProfile &);
 llvm::Error emitMatrix(func::FuncOp,llvm::raw_pwrite_stream &);
 llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &);
 namespace {
@@ -389,7 +390,9 @@ llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
   return llvm::Error::success();
 }
 } // namespace
+void matrixIssues(Unit &);
 void bind(Unit &unit) {
+  matrixIssues(unit);
   unit.dialects = [](DialectRegistry &r) {
     r.insert<intentdsl::itsrc::ItsrcDialect>();
   };
@@ -410,7 +413,7 @@ void bind(Unit &unit) {
             if (!llvm::hasSingleElement(funcs))
               return failure();
             auto fn = *funcs.begin();
-            if(intentdsl::kir::matrixDomain(fn))return intentdsl::block::verifyTiledMatrix(fn,profile,"triton_src");
+            if(intentdsl::kir::matrixDomain(fn))return verifyMatrixExit(fn,profile);
             if (!fn->getAttrOfType<StringAttr>("kir.abi") ||
                 !fn->getAttrOfType<ArrayAttr>("block.configs") ||
                 !fn->getAttrOfType<StringAttr>("block.topology"))

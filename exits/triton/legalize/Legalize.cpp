@@ -1,10 +1,25 @@
 #include "intentdsl/levels/execution/block/ir/Access.h"
+#include "intentdsl/levels/execution/block/ir/MatrixAccess.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/exits/triton/ir/Dialect.h"
 #include "mlir/Pass/Pass.h"
 
 namespace CI_UNIT_NAMESPACE {
 using namespace mlir;
+bool neutralScaleDispatch(intentdsl::block::MatrixAccess &p) {
+  auto groups=p.shape[2]/32;
+  auto *publish=p.fold.getNextNode();
+  return groups>0 && groups<=64 && llvm::isPowerOf2_64(groups) && publish &&
+      publish->getName().stripDialect()=="publish_matrix" && publish->getOperand(1)==p.fold.getResult(0);
+}
+LogicalResult verifyMatrixExit(func::FuncOp fn,const compilerinfra::TargetProfile &profile){
+  if(failed(intentdsl::block::verifyTiledMatrix(fn,profile,"triton_src")))return failure();
+  intentdsl::block::MatrixAccess p(fn);
+  if(p.dot.getName().stripDialect()=="scaled_contract" &&
+     p.dot.getAttr("triton_src.neutral_scale_dispatch")!=Builder(fn.getContext()).getBoolAttr(neutralScaleDispatch(p)))
+    return p.dot.emitError("unit-scale FP8 dispatch disagrees with reduction geometry or output use");
+  return success();
+}
 struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(Legalize)
   void runOnOperation() final {
@@ -63,6 +78,11 @@ struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
       state.addOperands({count->getOperand(0),store->getOperand(0),count->getOperand(2)});
       state.addAttributes(count->getAttrs());b.create(state);store->erase();count->erase();
     });
+    for(auto fn:getOperation().getOps<func::FuncOp>())if(intentdsl::kir::matrixDomain(fn)){
+      intentdsl::block::MatrixAccess p(fn);
+      if(p.dot.getName().stripDialect()=="scaled_contract")p.dot.setAttr("triton_src.neutral_scale_dispatch",
+          Builder(fn.getContext()).getBoolAttr(neutralScaleDispatch(p)));
+    }
   }
 };
 void legalize(OpPassManager &pm) { pm.addPass(std::make_unique<Legalize>()); }
