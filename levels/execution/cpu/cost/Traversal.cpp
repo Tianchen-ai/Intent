@@ -1,4 +1,4 @@
-#include "intentdsl/levels/algorithm/kir/ir/Performance.h"
+#include "intentdsl/levels/algorithm/kir/ir/Traffic.h"
 #include "intentdsl/levels/algorithm/kir/ir/Permutation.h"
 namespace CI_UNIT_NAMESPACE {
 using namespace compilerinfra;
@@ -85,8 +85,8 @@ void registerCost(Unit &u) {
               }
             });
             if(strideError)return std::move(strideError);
-            auto segments=facts->segmentReads(op);
-            double keys=facts->keyTraffic(op);if(keys){read+=keys;if(rd)readNs+=keys/ *rd;e.terms["key_input_bytes"]={keys,"B"};}
+            auto [keys,segments]=intentdsl::kir::valueTraffic(op,*facts);
+            if(keys){read+=keys;if(rd)readNs+=keys/ *rd;e.terms["key_input_bytes"]={keys,"B"};}
             if(segments){read+=segments;if(rd)readNs+=segments/ *rd;e.terms["packed_member_reads"]={segments,"B"};}
             e.terms["read"] = {read, "B"};
             e.terms["write"] = {write, "B"};

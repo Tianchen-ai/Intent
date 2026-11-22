@@ -6,4 +6,6 @@ inline bool contains(mlir::Operation *op, llvm::ArrayRef<llvm::StringRef> names)
   return op->walk([&](mlir::Operation *v){return llvm::is_contained(names,v->getName().stripDialect())?mlir::WalkResult::interrupt():mlir::WalkResult::advance();}).wasInterrupted();
 }
 void registerResident(compilerinfra::Unit &,llvm::StringRef,RowMatch,bool singleOwner=false);
+llvm::Expected<std::vector<compilerinfra::StructuralCandidate>> residentCandidates(
+    mlir::Operation *,const compilerinfra::TargetProfile &,bool singleOwner);
 }

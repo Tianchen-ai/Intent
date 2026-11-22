@@ -4,12 +4,8 @@
 namespace CI_UNIT_NAMESPACE {
 using namespace compilerinfra;
 using namespace mlir;
-void registerResident(Unit &u,StringRef name,RowMatch accepts,bool singleOwner) {
-  Strategy strategy;
-  strategy.name=name.str();strategy.family=u.qualify("structure");
-  strategy.enumerate=[accepts,singleOwner](Operation *op,const TargetProfile &p,AnalysisManager &)->llvm::Expected<std::vector<StructuralCandidate>>{
+llvm::Expected<std::vector<StructuralCandidate>> residentCandidates(Operation *op,const TargetProfile &p,bool singleOwner){
     std::vector<StructuralCandidate> choices;
-    if(!accepts(op))return choices;
     auto *caps=p.services.get<intentdsl::RowCapacity>();
     if(!caps)return llvm::createStringError("resident collective requires target row capacities");
     auto n=caps->width(op);if(!n)return n.takeError();
@@ -26,6 +22,13 @@ void registerResident(Unit &u,StringRef name,RowMatch accepts,bool singleOwner) 
       choices.push_back({"resident-"+std::to_string(r.rows),"resident",d,{"legal-width-group"}});
     }
     return choices;
+}
+void registerResident(Unit &u,StringRef name,RowMatch accepts,bool singleOwner) {
+  Strategy strategy;
+  strategy.name=name.str();strategy.family=u.qualify("structure");
+  strategy.enumerate=[accepts,singleOwner](Operation *op,const TargetProfile &p,AnalysisManager &)->llvm::Expected<std::vector<StructuralCandidate>>{
+    if(!accepts(op))return std::vector<StructuralCandidate>{};
+    return residentCandidates(op,p,singleOwner);
   };
   u.strategies.push_back({std::move(strategy),COMPILERINFRA_SOURCE});
 }

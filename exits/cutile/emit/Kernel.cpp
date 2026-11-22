@@ -98,7 +98,7 @@ class Kernel {
         std::string steps = span + "//" + width;
         if (op.getAttrOfType<IntegerAttr>("extent").getInt() %
             op.getAttrOfType<IntegerAttr>("span").getInt())
-          steps = "ct.minimum(" + steps + ",ct.cdiv(" + n + "-ct.astype(ct.bid(0),ct.int64)*" + span + "," + width + "))";
+          steps = "ct.astype(ct.minimum(" + steps + ",ct.cdiv(" + n + "-ct.astype(ct.bid(0),ct.int64)*" + span + "," + width + ")),ct.int32)";
         line(depth, "for step in range(" + steps + "):");
         line(depth+1,"offset=step*"+width+"+ct.arange("+width+",dtype=ct.int32)");
         line(depth+1,"pos=ct.astype(ct.bid(0),ct.int64)*"+span+"+offset");

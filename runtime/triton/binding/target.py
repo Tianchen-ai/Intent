@@ -17,6 +17,7 @@ class Target:
         p = self.devices[device]
         return dict(
             registers=p.regs_per_multiprocessor,
+            shared_per_block=p.shared_memory_per_block,
             calibration={"NVIDIA H100 80GB HBM3":"sm90","NVIDIA GeForce RTX 5090 D":"sm120"}.get(torch.cuda.get_device_name(device),""), sm_count=p.multi_processor_count,
             sm=p.major * 10 + p.minor,
             warp_size=p.warp_size,

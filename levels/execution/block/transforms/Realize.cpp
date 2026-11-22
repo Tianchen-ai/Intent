@@ -37,6 +37,7 @@ public:
     fn->setAttr("block.configs", choice.get("rows"));
     fn->setAttr("block.topology", choice.get("topology"));
     batch=choice.getAs<IntegerAttr>("member_batch");
+    binMode=choice.getAs<StringAttr>("bins");
   }
   void build() {
     rw.setInsertionPoint(anchor);
@@ -105,6 +106,7 @@ private:
   Value domain, rows, cols, active;
   bool resident, gridTiles;
   IntegerAttr batch;
+  StringAttr binMode;
   SmallVector<Operation *> writes;
   IRMapping fixed, local;
   Type vector(Type element, unsigned rank) {
@@ -164,6 +166,7 @@ private:
     if(n=="count_keys" || n=="column_sum"){
       auto fragment=make(n=="count_keys"?"key_counts":"sum_columns",{op->getOperand(0),rows,cols,active},
                          vector(rw.getI32Type(),2),op->getAttrs())->getResult(0);
+      if(n=="count_keys")fragment.getDefiningOp()->setAttr("bin_mode",binMode);
       local.map(v,fragment);return fragment;
     }
     if (n == "field") {

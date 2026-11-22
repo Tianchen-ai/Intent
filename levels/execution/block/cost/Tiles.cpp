@@ -1,5 +1,6 @@
-#include "intentdsl/levels/algorithm/kir/ir/Performance.h"
+#include "intentdsl/levels/algorithm/kir/ir/Traffic.h"
 #include "llvm/ADT/DenseSet.h"
+#include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
 namespace CI_UNIT_NAMESPACE {
 using namespace compilerinfra;
 using namespace mlir;
@@ -44,10 +45,10 @@ void registerCost(Unit &u) {
               w += bytes;
           });
           r *= stream ? 1 + reductions : 1;
-          auto segmentedRead=f->segmentReads(op);
+          auto [keys,segmentedRead]=intentdsl::kir::valueTraffic(op,*f);
           r+=segmentedRead;
           r+=4*m*n*atomics;ws+=4*m*n*atomics;
-          double keys=f->keyTraffic(op);r+=keys;
+          r+=keys;
           if(segmentedRead)e.terms["packed_member_reads"]={segmentedRead,"B"};
           double live=0, peak=0;
           for(auto &i:op->getRegion(0).front()){
@@ -136,6 +137,34 @@ void registerCost(Unit &u) {
                 double submission = waves * rectangles * *dmaSetup;
                 v.terms["projected_dma_setup"] = {submission, "ns"};
                 *v.timeNs += submission;
+              }
+              if(auto mode=choice.getAs<StringAttr>("bins")){
+                auto caps=ctx.target.services.get<intentdsl::RowCapacity>();
+                double updates=0;
+                op->walk([&](Operation *k){if(k->getName().stripDialect()=="count_keys")
+                  updates+=f->viewBytes(k->getOperand(0))/(cast<MemRefType>(k->getOperand(0).getType()).getElementTypeBitWidth()/8.);});
+                // With no distribution promise, estimate contention for
+                // uniform keys over the active bins in each partition.
+                double perBin=updates/std::max(1.,m*n);
+                double collisions=perBin>0?updates-m*n*(-std::expm1(-perBin)):0.;
+                bool local=mode=="private-merge";
+                v.terms["private_bin_bytes"]={local?4.*width:0.,"B"};
+                if(caps->privateBinCapacity)v.terms["per_block_storage_limit"]={double(*caps->privateBinCapacity),"B"};
+                v.terms["bin_merge_bytes"]={local?4.*m*n:0.,"B"};
+                v.terms["contending_global_updates"]={local?0.:collisions,"count"};
+                if(local){
+                  auto rate=intentdsl::quantity(ctx,"compute","lane/ns");
+                  if(rate)*v.timeNs+=updates*(caps->nativePrivateHistogram?1.:width)/ *rate;
+                  if(!caps->nativePrivateHistogram){
+                    // Compare/reduce materializes one i32 predicate per key
+                    // and bin inside the tile. Use on-chip traffic as a proxy
+                    // when the target has no collective instruction.
+                    auto localRate=intentdsl::quantity(ctx,"read_1_shared_bw","B/ns").value_or(*read);
+                    *v.timeNs+=4.*updates*width/localRate;
+                    v.terms["local_predicate_bytes"]={4.*updates*width,"B"};
+                  }
+                  *v.timeNs+=4.*m*n/ *write;
+                }else *v.timeNs+=8.*updates/ *strided+4.*collisions/ *write;
               }
               if(scanSteps){
                 auto rate=intentdsl::quantity(ctx,"compute","lane/ns");

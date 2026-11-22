@@ -2,9 +2,31 @@
 #include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
 namespace CI_UNIT_NAMESPACE {
 void registerKeyReduction(compilerinfra::Unit &unit) {
-  registerResident(unit,"counts-by-key",[](mlir::Operation *op){
-    return contains(op,{"count_keys"});
-  },true);
+  using namespace mlir;
+  using namespace compilerinfra;
+  Strategy bins;
+  bins.name="counts-by-key";bins.family=unit.qualify("structure");
+  bins.enumerate=[](Operation *op,const TargetProfile &p,AnalysisManager &)->llvm::Expected<std::vector<StructuralCandidate>>{
+    std::vector<StructuralCandidate> choices;
+    if(!contains(op,{"count_keys"}))return choices;
+    auto rows=residentCandidates(op,p,true);
+    if(!rows)return rows.takeError();
+    auto caps=p.services.get<intentdsl::RowCapacity>();
+    bool direct=caps->globalAtomicBins;
+    op->walk([&](Operation *k){if(k->getName().stripDialect()=="count_keys")
+      direct &= k->hasOneUse() && (*k->getUsers().begin())->getName().stripDialect()=="write";});
+    for(auto &row:*rows)for(StringRef mode:{"private-merge","global-atomic"}){
+      if(mode=="global-atomic" && !direct)continue;
+      NamedAttrList d(cast<DictionaryAttr>(row.value));Builder b(op->getContext());
+      auto params=cast<DictionaryAttr>(cast<ArrayAttr>(d.get("rows"))[0]);
+      if(mode=="private-merge" && caps->nativePrivateHistogram && caps->privateBinCapacity &&
+         4*params.getAs<IntegerAttr>("width").getInt()>*caps->privateBinCapacity)continue;
+      d.set("bins",b.getStringAttr(mode));
+      choices.push_back({mode.str(),mode.str(),d.getDictionary(op->getContext()),{"exclusive-bin-row"}});
+    }
+    return choices;
+  };
+  unit.strategies.push_back({std::move(bins),COMPILERINFRA_SOURCE});
   registerResident(unit,"complete-bins",[](mlir::Operation *op){return contains(op,{"column_sum"});},true);
   using namespace mlir;
   using namespace compilerinfra;

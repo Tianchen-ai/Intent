@@ -13,6 +13,9 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
   if (*arch != 90 && *arch != 120)
     return llvm::createStringError("unsupported Triton GPU architecture");
   auto caps = std::make_shared<intentdsl::RowCapacity>();
+  caps->globalAtomicBins=true;
+  caps->nativePrivateHistogram=true;
+  caps->privateBinCapacity=options.getInteger("shared_per_block");
   caps->independentWidths = {32};
   if(auto error=caps->bind(options))return error;
   struct NativeRow {

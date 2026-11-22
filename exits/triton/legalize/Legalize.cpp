@@ -53,6 +53,16 @@ struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
       op->replaceAllUsesWith(newOp);
       op->erase();
     });
+    getOperation().walk([](Operation *store){
+      if(store->getName().getStringRef()!="triton_src.store")return;
+      auto *count=store->getOperand(3).getDefiningOp();
+      if(!count || count->getName().getStringRef()!="triton_src.key_counts" ||
+         count->getAttrOfType<StringAttr>("bin_mode")!="global-atomic")return;
+      OpBuilder b(store);
+      OperationState state(store->getLoc(),"triton_src.atomic_bins");
+      state.addOperands({count->getOperand(0),store->getOperand(0),count->getOperand(2)});
+      state.addAttributes(count->getAttrs());b.create(state);store->erase();count->erase();
+    });
   }
 };
 void legalize(OpPassManager &pm) { pm.addPass(std::make_unique<Legalize>()); }

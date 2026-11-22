@@ -26,6 +26,8 @@ capabilities(const llvm::json::Object &options) {
           profile.services.provide<intentdsl::cutile::ArrayIndices>(indices))
     return e;
   auto table = std::make_shared<intentdsl::RowCapacity>();
+  table->globalAtomicBins=true;
+  table->privateBinCapacity=options.getInteger("shared_per_block");
   table->rectangularProjectedRows = true;
   // Bound tileiras expansion of repeated collectives. The limit admits a
   // single streamed 4096-wide row with 16 reductions; expanding that body

@@ -100,6 +100,14 @@ LogicalResult verifyMapping(ModuleOp m,const compilerinfra::TargetProfile &p,Str
       auto size=kir::keyExtent(op,*p.services.get<CallFacts>());
       if(!size)return op->emitError()<<llvm::toString(size.takeError()),WalkResult::interrupt();
       ok &= op->getAttrOfType<IntegerAttr>("extent").getInt()==*size;
+      if(n=="key_counts"){
+        auto mode=op->getAttrOfType<StringAttr>("bin_mode");
+        ok &= mode && (mode=="private-merge" || mode=="global-atomic");
+        if(mode=="global-atomic"){
+          auto caps=p.services.get<RowCapacity>();
+          ok &= caps && caps->globalAtomicBins && op->hasOneUse();
+        }
+      }
     }
     if(n=="indexed_tile_read"){
       auto a=cast<MemRefType>(op->getOperand(0).getType()),i=cast<MemRefType>(op->getOperand(1).getType());

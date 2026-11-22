@@ -1,4 +1,4 @@
-#include "intentdsl/levels/algorithm/kir/ir/Performance.h"
+#include "intentdsl/levels/execution/block/ir/Traffic.h"
 namespace CI_UNIT_NAMESPACE {
 using namespace compilerinfra;
 using namespace mlir;
@@ -20,8 +20,7 @@ void supplyCost(Unit &u) {
                vector = intentdsl::quantity(ctx, "compute", "lane/ns");
           auto startup = intentdsl::quantity(ctx, "first_io", "ns");
           auto d = cast<DictionaryAttr>(c.value);
-          double segmentWork=facts->segmentReads(op,"segment_fold");
-          double keys=facts->keyTraffic(op,"key_counts","sum_columns");
+          auto [keys,segmentWork]=intentdsl::block::realizedTraffic(op,*facts);
           auto depth = d.getAs<IntegerAttr>("depth").getInt();
           double participants = d.getAs<IntegerAttr>("participants").getInt();
           auto configs = op->getAttrOfType<ArrayAttr>("block.configs");

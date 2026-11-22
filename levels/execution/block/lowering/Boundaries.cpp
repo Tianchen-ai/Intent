@@ -60,6 +60,17 @@ void bind(Unit &unit) {
     auto d = dyn_cast<DictionaryAttr>(value);
     if(!d)return llvm::createStringError("missing block decision");
     if(!d.getAs<StringAttr>("topology"))return llvm::createStringError("expected a block topology");
+    unsigned counts=0;bool direct=true;
+    op->walk([&](Operation *v){if(v->getName().stripDialect()=="count_keys"){
+      ++counts;
+      direct &= v->hasOneUse() && (*v->getUsers().begin())->getName().stripDialect()=="write";
+    }});
+    auto bins=d.getAs<StringAttr>("bins");
+    if(counts){
+      auto caps=profile.services.get<intentdsl::RowCapacity>();
+      if(bins!="private-merge" && !(bins=="global-atomic" && caps && caps->globalAtomicBins && direct))
+        return llvm::createStringError("keyed reduction needs a supported accumulation structure");
+    }else if(bins)return llvm::createStringError("bin structure on a region without a keyed reduction");
     if(d.getAs<StringAttr>("topology")!="resident" &&
        op->walk([](Operation *v){auto n=v->getName().stripDialect();return n=="prefix_scatter" || n=="scan_sum" || n=="count_keys" || n=="atomic_add" || n=="fill_ranges"?WalkResult::interrupt():WalkResult::advance();}).wasInterrupted())
       return llvm::createStringError("this row collective requires complete resident coverage");
@@ -68,6 +79,18 @@ void bind(Unit &unit) {
   f.verifyCandidate=[](Operation *op,const StructuralCandidate &c,const TargetProfile &profile)->llvm::Error{
     auto d=cast<DictionaryAttr>(c.value);auto topology=d.getAs<StringAttr>("topology").str();
     auto rows=d.getAs<ArrayAttr>("rows");auto group=cast<DictionaryAttr>(rows[0]).getAs<IntegerAttr>("rows");
+    if(auto bins=d.getAs<StringAttr>("bins")){
+      auto caps=profile.services.get<intentdsl::RowCapacity>();
+      bool legal=topology=="resident" && group.getInt()==1 && c.id==bins.str() && c.topology==c.id &&
+          c.preconditions==std::vector<std::string>{"exclusive-bin-row"} &&
+          (bins=="private-merge" || (bins=="global-atomic" && caps && caps->globalAtomicBins));
+      unsigned reductions=0;
+      op->walk([&](Operation *v){if(v->getName().stripDialect()=="count_keys"){
+        ++reductions;if(bins=="global-atomic")legal&=v->hasOneUse() && (*v->getUsers().begin())->getName().stripDialect()=="write";
+      }});
+      if(!legal || !reductions)return llvm::createStringError("invalid keyed reduction strategy");
+      return llvm::Error::success();
+    }
     if(auto walk=d.getAs<StringAttr>("walk")){
       if(walk=="column-panels"){
         if(c.topology!=walk.str() || c.preconditions!=std::vector<std::string>{"independent-bins"} || topology!="stream" ||

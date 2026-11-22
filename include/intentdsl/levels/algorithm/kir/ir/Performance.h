@@ -8,46 +8,17 @@ struct CallFacts {
   llvm::json::Array arguments;
   std::string localEstimator;
   int64_t participants;
-  double keyTraffic(mlir::Operation *root, llvm::StringRef partition="count_keys",
-                    llvm::StringRef merge="column_sum") const {
-    double bytes=0;
-    root->walk([&](mlir::Operation *op){
-      auto n=op->getName().stripDialect();
-      if(n!=partition && n!=merge)return;
-      auto source=mlir::dyn_cast<mlir::BlockArgument>(op->getOperand(0));
-      if(!source || source.getArgNumber()>=arguments.size())return;
-      auto *view=arguments[source.getArgNumber()].getAsObject();auto *shape=view?view->getArray("shape"):nullptr;
-      if(!shape)return;
-      double elements=1;
-      for(auto &d:*shape)elements*=d.getAsInteger().value_or(0);
-      bytes+=elements*mlir::cast<mlir::MemRefType>(source.getType()).getElementTypeBitWidth()/8;
-    });
-    return bytes;
+  const llvm::json::Array *shapeOf(mlir::Value v) const {
+    auto arg=mlir::dyn_cast<mlir::BlockArgument>(v);
+    if(!arg || arg.getArgNumber()>=arguments.size())return nullptr;
+    auto *desc=arguments[arg.getArgNumber()].getAsObject();
+    return desc?desc->getArray("shape"):nullptr;
   }
-  // Estimate total visits from a packed offsets domain. A subrange of the
-  // packed input may be shorter. This estimate is never a legality bound.
-  double segmentReads(mlir::Operation *program, llvm::StringRef memberRegion="ordered_sum") const {
-    double bytes=0;
-    program->walk([&](mlir::Operation *fold){
-      auto name=fold->getName().stripDialect();
-      if(name!=memberRegion)return;
-      auto &bb=fold->getRegion(0).front();
-      double count=0, featureCount=1, bytesPerTerm=0;
-      for(auto &read:bb){
-        if(read.getName().stripDialect()!="member_load")continue;
-        auto source=mlir::dyn_cast<mlir::BlockArgument>(read.getOperand(0));
-        if(!source || source.getArgNumber()>=arguments.size())continue;
-        auto type=mlir::cast<mlir::MemRefType>(source.getType());
-        bytesPerTerm+=type.getElementTypeBitWidth()/8.;
-        if(read.getOperand(1)!=bb.getArgument(0))continue;
-        auto *record=arguments[source.getArgNumber()].getAsObject();auto *shape=record?record->getArray("shape"):nullptr;
-        if(!shape || shape->empty())continue;
-        count=std::max(count,double(shape->front().getAsInteger().value_or(0)));
-        if(read.getNumOperands()==3 && read.getOperand(2)==bb.getArgument(1) && shape->size()==2)
-          featureCount=std::max(featureCount,double(shape->back().getAsInteger().value_or(0)));
-      }
-      bytes+=count*featureCount*bytesPerTerm;
-    });
+  double viewBytes(mlir::Value v) const {
+    auto *shape=shapeOf(v);
+    if(!shape)return 0;
+    double bytes=mlir::cast<mlir::MemRefType>(v.getType()).getElementTypeBitWidth()/8.;
+    for(auto &extent:*shape)bytes*=extent.getAsInteger().value_or(0);
     return bytes;
   }
   llvm::Expected<double> axisStride(mlir::Operation *op, unsigned slot, unsigned axis) const {

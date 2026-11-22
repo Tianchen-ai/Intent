@@ -128,6 +128,21 @@ public:
         auto id="v"+std::to_string(next++);values[op.getResult(0)]=id;
         line(depth,id+" = "+(n=="ne"?arg(0)+"!="+arg(1):"tl.broadcast_to("+arg(0)+"[None,:],(ROWS,WIDTH)).to(tl.int32)"));continue;
       }
+      if(n=="atomic_bins"){
+        auto span=std::to_string(op.getAttrOfType<IntegerAttr>("span").getInt());
+        auto panel=std::to_string(op.getAttrOfType<IntegerAttr>("native_panel").getInt());
+        auto extent=std::to_string(op.getAttrOfType<IntegerAttr>("extent").getInt());
+        line(depth,"owner=tl.program_id(0).to(tl.int64)");
+        line(depth,"dest="+arg(1)+"+owner*"+arg(1)+"_s0");
+        line(depth,"tl.store(dest+"+arg(2)+"*"+arg(1)+"_s1,0,mask="+arg(2)+"<N)");
+        line(depth,"tl.debug_barrier()");
+        line(depth,"for piece in range(tl.cdiv("+span+","+panel+")):");
+        line(depth+1,"off=piece*"+panel+"+tl.arange(0,"+panel+")");
+        line(depth+1,"pos=owner*"+span+"+off");
+        line(depth+1,"key=tl.load("+arg(0)+"+pos*"+arg(0)+"_s0,mask=(off<"+span+")&(pos<"+extent+"),other=-1).to(tl.int64)");
+        line(depth+1,"tl.atomic_add(dest+key*"+arg(1)+"_s1,1,mask=(key>=0)&(key<N),sem='relaxed',scope='cta')");
+        continue;
+      }
       if(n=="key_counts" || n=="sum_columns"){
         auto size=std::to_string(op.getAttrOfType<IntegerAttr>("extent").getInt()), base=arg(0);
         auto id="bins"+std::to_string(next++);line(depth,id+" = tl.full((WIDTH,),0,tl.int32)");
@@ -402,7 +417,17 @@ void bind(Unit &unit) {
             if(failed(intentdsl::verifyMapping(m,profile,"triton_src")))return failure();
             if(m.walk([](Operation *op){
               auto n=op->getName().getStringRef();
-              if(n=="triton_src.key_counts" || n=="triton_src.sum_columns"){
+              if(n=="triton_src.atomic_bins"){
+                auto src=dyn_cast<BlockArgument>(op->getOperand(0)),dst=dyn_cast<BlockArgument>(op->getOperand(1));
+                auto span=op->getAttrOfType<IntegerAttr>("span"),panel=op->getAttrOfType<IntegerAttr>("native_panel");
+                if(!src || !dst || src==dst || cast<MemRefType>(src.getType()).getRank()!=1 ||
+                   cast<MemRefType>(dst.getType()).getRank()!=2 || op->getAttrOfType<StringAttr>("bin_mode")!="global-atomic" ||
+                   !span || span.getInt()<1 || !panel || !llvm::isPowerOf2_64(panel.getInt())){
+                  op->emitError("invalid destination, partition or native panel for global atomic bins");
+                  return WalkResult::interrupt();
+                }
+              }
+              if(n=="triton_src.key_counts" || n=="triton_src.sum_columns" || n=="triton_src.atomic_bins"){
                 auto bits=op->getAttrOfType<IntegerAttr>("address_bits");
                 if(!bits || bits.getInt()!=64){op->emitError("key partition addressing requires i64");return WalkResult::interrupt();}
               }

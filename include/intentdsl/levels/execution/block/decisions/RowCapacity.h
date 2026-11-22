@@ -54,6 +54,8 @@ struct RowCapacity {
   // outer axes in one transfer. Other consumers linearize lanes separately.
   bool rectangularProjectedRows = false;
   llvm::SmallVector<unsigned> independentWidths;
+  bool globalAtomicBins=false, nativePrivateHistogram=false;
+  std::optional<int64_t> privateBinCapacity;
   bool acceptsGroup(mlir::Operation *op, unsigned count) const {
     if (count == 1) return true;
     auto fn = mlir::dyn_cast<mlir::func::FuncOp>(op);

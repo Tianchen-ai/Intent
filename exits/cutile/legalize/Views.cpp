@@ -74,6 +74,7 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
       if(store->getName().getStringRef()!="ct_src.tile_store")return;
       auto *value=store->getOperand(3).getDefiningOp();
       if(!value || value->getName().getStringRef()!="ct_src.key_counts" || !value->hasOneUse())return;
+      if(value->getAttrOfType<StringAttr>("bin_mode")!="global-atomic")return;
       OpBuilder b(store);
       auto span=value->getAttrOfType<IntegerAttr>("span").getInt();
       int64_t step=std::min<int64_t>(2048,uint64_t(span)&-uint64_t(span));
@@ -193,6 +194,7 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
       auto src=dyn_cast<BlockArgument>(op->getOperand(0)),dst=dyn_cast<BlockArgument>(op->getOperand(1));
       auto *mask=op->getOperand(4).getDefiningOp();
       ok=src && dst && src.getOwner()==&fn.front() && dst.getOwner()==&fn.front() &&
+         op->getAttrOfType<StringAttr>("bin_mode")=="global-atomic" &&
          (*slots)[src.getArgNumber()].getAsObject()->getString("direction")=="In" &&
          (*slots)[dst.getArgNumber()].getAsObject()->getString("direction")=="Out" &&
          cast<MemRefType>(src.getType()).getRank()==1 && cast<MemRefType>(dst.getType()).getRank()==2 &&

@@ -158,6 +158,9 @@ def Itsrc_Dialect_SegmentSize : Op<Itsrc_Dialect,"segment_size"> {
 def Itsrc_Dialect_KeyCounts : Op<Itsrc_Dialect,"key_counts"> {
   let arguments=(ins AnyMemRef:$source,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active,I64Attr:$extent,I64Attr:$span);let results=(outs I32Tensor:$counts);
 }
+def Itsrc_AtomicBins : Op<Itsrc_Dialect,"atomic_bins"> {
+  let arguments=(ins AnyMemRef:$source, AnyMemRef:$dest, AnyTensor:$columns, I64Attr:$extent, I64Attr:$span, I64Attr:$native_panel, I32Attr:$address_bits);
+}
 def Itsrc_Dialect_SumColumns : Op<Itsrc_Dialect,"sum_columns"> {
   let arguments=(ins AnyMemRef:$source,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active,I64Attr:$extent);let results=(outs I32Tensor:$counts);
 }
