@@ -26,6 +26,14 @@ inline mlir::LogicalResult bindMatrix(mlir::func::FuncOp fn, unsigned phase,
                                                           : "f32-outer";
     if (!field(p.dot, "bangc.matrix", b.getStringAttr(primitive)))
       return p.dot.emitError("incorrect matrix microkernel");
+    if ((primitive == "wram-conv" || primitive == "exact-i8-conv") &&
+        p.tile[1] != 64)
+      return p.dot.emitError(
+          "native filter copy implements one 64-channel weight bank");
+    if (type.isBF16() && !field(p.dot, "bangc.bf16_arithmetic",
+                                b.getStringAttr("checked-conv-ieee-fallback")))
+      return p.dot.emitError(
+          "BF16 dot requires an IEEE path outside the native exponent window");
     if (primitive == "exact-i8-conv" && p.tile[2] > 1024)
       return p.dot.emitError(
           "signed byte partial dot exceeds exact binary32 integer range");

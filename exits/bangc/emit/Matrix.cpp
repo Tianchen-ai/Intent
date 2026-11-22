@@ -141,6 +141,16 @@ struct Matrix : intentdsl::block::MatrixAccess {
         else
           s << "__bang_transpose(trans,right,BK,BN);";
       }
+      if (dot.hasAttr("bangc.bf16_arithmetic"))
+        s << "__sync_compute();strict = strict || !ordinary_panel((unsigned "
+             "short*)left,BM*BK,(unsigned short*)right,flags) || "
+             "!ordinary_panel((unsigned short*)trans,BN*BK,(unsigned "
+             "short*)right,flags);\n"
+             "if(strict){for(int i=0;i<nr;i++)for(int j=0;j<nc;j++){unsigned "
+             "z=((unsigned*)acc)[i*BN+j];"
+             "for(int k=0;k<nk;k++)z=add_binary32(z,multiply_bf16(((unsigned "
+             "short*)left)[i*BK+k],((unsigned short*)trans)[j*BK+k]));"
+             "((unsigned*)acc)[i*BN+j]=z;}continue;}\n";
       s << "__sync_compute();__memcpy(filter,trans,BK*BN*sizeof(" << type
         << "),NRAM2WRAM);\n";
       if (dot.getAttrOfType<StringAttr>("bangc.matrix") == "exact-i8-conv") {
@@ -196,6 +206,10 @@ struct Matrix : intentdsl::block::MatrixAccess {
     s << "#include <bang.h>\n#include <cnrt.h>\n#include <math.h>\n"
       << "#define BM " << tile[0] << "\n#define BN " << tile[1]
       << "\n#define BK " << tile[2] << "\n";
+    if (dot.hasAttr("bangc.bf16_arithmetic"))
+      s <<
+#include "BFloatPanel.inc"
+          ;
     if (mode == "scaled-f32")
       s << R"mlu(
 __mlu_func__ float decode8(unsigned x,unsigned scale){
@@ -221,6 +235,8 @@ __mlu_func__ float decode8(unsigned x,unsigned scale){
       s << "__nram__ float right[32*BN],tmp[BN];\n";
     else if (mode == "q4k-q8k")
       s << "__nram__ unsigned char rec[144];\n";
+    if (dot.hasAttr("bangc.bf16_arithmetic"))
+      s << "__nram__ unsigned short flags[BK*BN];\n";
     int64_t mb = llvm::divideCeil(uint64_t(shape[0]), uint64_t(tile[0])),
             nb = llvm::divideCeil(uint64_t(shape[1]), uint64_t(tile[1]));
     s << "for(long long job=taskId;job<grid;job+=taskDim){long long c=job%"
@@ -235,6 +251,8 @@ __mlu_func__ float decode8(unsigned x,unsigned scale){
     }
     s << "int nr=end-r<BM?end-r:BM,nc=" << shape[1] << "-c<BN?" << shape[1]
       << "-c:BN;\n";
+    if (dot.hasAttr("bangc.bf16_arithmetic"))
+      s << "bool strict=false;\n";
     if (mode == "q4k-q8k")
       records();
     else if (mode == "scaled-f32")
@@ -243,10 +261,17 @@ __mlu_func__ float decode8(unsigned x,unsigned scale){
       dense(mode, type);
     auto &setup = fold.getRegion(0).front().front();
     auto writeback = setup.getAttrOfType<StringAttr>("bangc.writeback");
+    auto narrow = [&]() {
+      if (dot.hasAttr("bangc.bf16_arithmetic"))
+        s << "if(strict){for(int i=0;i<BM*BN;i++)((unsigned "
+             "short*)acc)[i]=narrow_bits(((unsigned*)acc)[i]);}else ";
+      s << "__bang_float2bfloat16_rn((bfloat16_t*)acc,acc,BM*BN);\n";
+    };
     if (writeback == "routed-row-dma") {
       auto q = std::to_string(
           fn.getArgAttrOfType<DenseI64ArrayAttr>(slot(dst), "block.shape")[1]);
-      s << "__bang_float2bfloat16_rn((bfloat16_t*)acc,acc,BM*BN);for(int "
+      narrow();
+      s << "for(int "
            "i=0;i<nr;i++){long long dest=*"
         << ptr(dot.getOperand(3), "int", {"r+i"}) << ";__memcpy("
         << ptr(dst, ot, {"dest/" + q, "dest%" + q, "c"})
@@ -265,10 +290,10 @@ __mlu_func__ float decode8(unsigned x,unsigned scale){
               << ";";
           s << "for(int i=0;i<nr;i++)__bang_add(acc+i*BN,acc+i*BN,bias,BN);}\n";
         }
-      if (ot == "half" || ot == "bfloat16_t")
-        s << (ot == "half" ? "__bang_float2half_rn"
-                           : "__bang_float2bfloat16_rn")
-          << "((" << ot << "*)acc,acc,BM*BN);\n";
+      if (ot == "bfloat16_t")
+        narrow();
+      if (ot == "half")
+        s << "__bang_float2half_rn((half*)acc,acc,BM*BN);\n";
       if (rank(dst) == 1)
         s << "__memcpy(" << ptr(dst, ot, {"r"}) << ",acc,nr*sizeof(" << ot
           << "),NRAM2GDRAM);";
@@ -298,6 +323,15 @@ __mlu_func__ float decode8(unsigned x,unsigned scale){
         auto type = scalar(
             cast<ShapedType>(op.getResult(0).getType()).getElementType());
         auto next = "v" + std::to_string(stage++);
+        if (n == "convert_matrix" && type == "bfloat16_t" &&
+            dot.hasAttr("bangc.bf16_arithmetic") &&
+            cast<ShapedType>(op.getOperand(0).getType())
+                .getElementType()
+                .isF32()) {
+          s << "bfloat16_t " << next << "=narrow_value(" << val << ");\n";
+          val = next;
+          continue;
+        }
         s << type << " " << next << "=(" << type << ")(";
         if (n == "add_columns")
           s << (type == "int" ? "(unsigned)" : "") << val << "+*"

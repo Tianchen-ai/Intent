@@ -83,12 +83,17 @@ struct Writer {
       if (op.getName().stripDialect() == "convert_matrix") {
         auto t = cast<ShapedType>(op.getResult(0).getType()).getElementType();
         auto next = "v" + std::to_string(++stage);
-        line(2, "var " + next + "=" + value + ".cast[DType." +
-                    (t.isBF16()  ? "bfloat16"
-                     : t.isF16() ? "float16"
-                     : t.isF32() ? "float32"
-                                 : "int32") +
-                    "]()");
+        if (t.isBF16() && cast<ShapedType>(op.getOperand(0).getType())
+                              .getElementType()
+                              .isF32())
+          line(2, "var " + next + "=round_bf16[1](" + value + ")");
+        else
+          line(2, "var " + next + "=" + value + ".cast[DType." +
+                      (t.isBF16()  ? "bfloat16"
+                       : t.isF16() ? "float16"
+                       : t.isF32() ? "float32"
+                                   : "int32") +
+                      "]()");
         value = next;
       }
     }
@@ -161,12 +166,18 @@ struct Writer {
             auto t = mlir::cast<ShapedType>(op.getResult(0).getType())
                          .getElementType();
             auto dest = "converted" + std::to_string(converts++) + "_" + key;
-            line(depth, "var " + dest + "=" + result + ".cast[DType." +
-                            (t.isF16()    ? "float16"
-                             : t.isBF16() ? "bfloat16"
-                             : t.isF32()  ? "float32"
-                                          : "int32") +
-                            "]()");
+            if (t.isBF16() && mlir::cast<ShapedType>(op.getOperand(0).getType())
+                                  .getElementType()
+                                  .isF32())
+              line(depth,
+                   "var " + dest + "=round_bf16[" + W + "](" + result + ")");
+            else
+              line(depth, "var " + dest + "=" + result + ".cast[DType." +
+                              (t.isF16()    ? "float16"
+                               : t.isBF16() ? "bfloat16"
+                               : t.isF32()  ? "float32"
+                                            : "int32") +
+                              "]()");
             result = dest;
           }
         }
@@ -192,6 +203,15 @@ struct Writer {
                             : dtype(v.dtype)) +
                        "],MutUntrackedOrigin]");
     o << "from std.memory import bitcast\nfrom std.math import fma\n";
+    o << R"mojo(
+@always_inline
+def round_bf16[W:Int](x:SIMD[DType.float32,W])->SIMD[DType.bfloat16,W]:
+    var bits=bitcast[DType.uint32,W](x)
+    var high=bits>>16
+    var rounded=(bits+0x7fff+(high&1))>>16
+    var result=(bits&0x7fffffff).gt(0x7f800000).select(high|0x40,rounded)
+    return bitcast[DType.bfloat16,W](result.cast[DType.uint16]())
+)mojo";
     auto packing = p.domain.getAttrOfType<StringAttr>("cpu.packing");
     bool dot4 = packing && packing == "signed-dot4-panels";
     if (dot4)

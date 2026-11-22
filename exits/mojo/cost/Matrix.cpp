@@ -38,10 +38,15 @@ void registerBlockCost(compilerinfra::Unit &u) {
           conversions += fringe;
           e.terms["tail_rhs_reloads"] = {fringe, "instruction"};
           e.terms["broadcast_and_widen"] = {conversions, "instruction"};
-          auto bw = intentdsl::quantity(ctx, "read_1_private_bw", "B/ns"),
+          auto read = intentdsl::quantity(ctx, "read_1_private_bw", "B/ns"),
+               write = intentdsl::quantity(ctx, "write_1_private_bw", "B/ns"),
                rate = intentdsl::quantity(ctx, "vector", "FLOP/ns");
-          if (bw && rate)
-            e.timeNs = spill / *bw + conversions * widths / *rate;
+          if (read && write && rate) {
+            // Both calibrated streams measure the whole CPU set. All active
+            // tasks in a wave reload and spill from their own register files.
+            auto workers=ctx.target.services.get<intentdsl::cpu::RowMachine>()->workers;
+            e.timeNs = (spill/2)*workers*(1/ *read+1/ *write) + conversions*widths/ *rate;
+          }
           return e;
         }},
        COMPILERINFRA_SOURCE});
