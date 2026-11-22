@@ -133,7 +133,7 @@ public:
         auto id="bins"+std::to_string(next++);line(depth,id+" = tl.full((WIDTH,),0,tl.int32)");
         if(n=="key_counts"){
           auto span=op.getAttrOfType<IntegerAttr>("span").getInt(), width=op.getAttrOfType<IntegerAttr>("native_panel").getInt();
-          std::string start="(tl.program_id(0)*"+std::to_string(span)+")";
+          std::string start="(tl.program_id(0).to(tl.int64)*"+std::to_string(span)+")";
           line(depth,"for piece in range("+std::to_string(llvm::divideCeil(span,width))+"):");
           line(depth+1,"offset = piece*"+std::to_string(width)+"+tl.arange(0,"+std::to_string(width)+")");
           line(depth+1,"key = tl.load("+base+"+("+start+"+offset)*"+base+"_s0, mask=(offset<"+std::to_string(span)+") & ("+start+"+offset<"+size+"),other=-1)");
@@ -144,7 +144,7 @@ public:
         }else{
           auto height=std::to_string(op.getAttrOfType<IntegerAttr>("native_panel").getInt());
           line(depth,"for panel in range(tl.cdiv("+size+","+height+")):");
-          line(depth+1,"part=panel*"+height+"+tl.arange(0,"+height+")");
+          line(depth+1,"part=panel*"+height+"+tl.arange(0,"+height+").to(tl.int64)");
           line(depth+1,"v=tl.load("+base+"+part[:,None]*"+base+"_s0+"+arg(2)+"[None,:]*"+base+"_s1,mask=(part[:,None]<"+size+")&("+arg(2)+"[None,:]<N),other=0)");
           line(depth+1,id+" += tl.sum(v,0)");
         }
@@ -400,6 +400,14 @@ void bind(Unit &unit) {
                  !fn->getAttrOfType<IntegerAttr>("triton_src.max_width")))
               return failure();
             if(failed(intentdsl::verifyMapping(m,profile,"triton_src")))return failure();
+            if(m.walk([](Operation *op){
+              auto n=op->getName().getStringRef();
+              if(n=="triton_src.key_counts" || n=="triton_src.sum_columns"){
+                auto bits=op->getAttrOfType<IntegerAttr>("address_bits");
+                if(!bits || bits.getInt()!=64){op->emitError("key partition addressing requires i64");return WalkResult::interrupt();}
+              }
+              return WalkResult::advance();
+            }).wasInterrupted())return failure();
             if(phase=="callable"){
               auto g=fn->getAttrOfType<DenseI64ArrayAttr>("block.guard");
               if(g[0]!=fn->getAttrOfType<IntegerAttr>("triton_src.min_width").getInt() ||

@@ -101,22 +101,18 @@ class Source {
   // Projected views retain their bound strides, including zero for broadcast.
   void slabTransfer(Operation &op,unsigned first,const Text &view,
                     const Text &local,bool load) {
-    auto owner=fn->getAttrOfType<IntegerAttr>("kir.owner_axis").getInt();
-    Text extent="1", stride="0", outerStride;
-    for(auto [pos,v]:llvm::enumerate(op.getOperands().drop_front(first))){
-      auto *axis=v.getDefiningOp();
-      if(axis->getName().getStringRef()!="dsa.slab_axis") continue;
-      auto domain=axis->getOperand(1);
-      auto rank=cast<MemRefType>(domain.getType()).getRank();
-      auto inner=rank-1-(owner==rank-1);
-      extent=name(domain)+"d"+std::to_string(inner);
-      if(axis->getAttrOfType<IntegerAttr>("axis").getInt()==inner)
-        stride=view+"s"+std::to_string(pos);
-      else if(rank==3) outerStride=view+"s"+std::to_string(pos);
-    }
+    auto loop=op.getAttrOfType<DictionaryAttr>("bangc.slab_loop");
+    auto index=[&](StringRef key){return loop.getAs<IntegerAttr>(key).getInt();};
+    auto slot=index("extent_slot");
+    Text extent=slot<0?"1":name(fn.getArgument(slot))+"d"+std::to_string(index("extent_axis"));
+    Text stride=index("inner_stride")<0?"0":view+"s"+std::to_string(index("inner_stride"));
+    Text outerStride=view+"s"+std::to_string(index("outer_pitch"));
     line("{auto *buffer="+local+";for(int k=0;k<live;){long long avail="+extent+"-(col+k)%"+extent+";int run=avail<live-k?(int)avail:live-k;");
     line("auto *global="+view+"+("+slabOffset(op,first,view)+");");
-    if(!outerStride.empty()) {
+    auto instructions=loop.getAs<ArrayAttr>("body");
+    for(auto [i,attr]:llvm::enumerate(instructions)){
+      auto opcode=cast<StringAttr>(attr).getValue();
+      if(opcode=="pitched_full_runs"){
       // In a two-axis reduction all complete inner runs have the same pitch.
       line("if("+stride+"==1 && run=="+extent+" && live-k>=2*run && "+outerStride+">=run && "+outerStride+"<=2147483647/sizeof(*global)){");
       line("int count=(live-k)/run,bytes=run*sizeof(*global);");
@@ -125,14 +121,14 @@ class Source {
       else
         line("__memcpy(global,buffer+k,bytes,NRAM2GDRAM,"+outerStride+"*sizeof(*global),bytes,count-1);");
       line("k+=count*run;continue;}");
-    }
-    if(load) {
-      line("if("+stride+"==1)__memcpy(buffer+k,global,run*sizeof(*global),GDRAM2NRAM);");
-      line("else if("+stride+"==0){auto scalar=*global;__bang_write_value(buffer+k,run,scalar);}");
-      line("else for(int t=0;t<run;++t)buffer[k+t]=global[t*"+stride+"];");
-    } else{
-      line("if("+stride+"==1)__memcpy(global,buffer+k,run*sizeof(*global),NRAM2GDRAM);");
-      line("else for(int t=0;t<run;++t)global[t*"+stride+"]=buffer[k+t];");
+        continue;
+      }
+      Text guard;
+      if(i+1<instructions.size())guard="if("+stride+(opcode=="contiguous"?"==1)":"==0)");
+      if(opcode=="contiguous")line(guard+(load?"__memcpy(buffer+k,global,run*sizeof(*global),GDRAM2NRAM);":"__memcpy(global,buffer+k,run*sizeof(*global),NRAM2GDRAM);"));
+      else if(opcode=="broadcast")line(guard+"{auto scalar=*global;__bang_write_value(buffer+k,run,scalar);}");
+      else line(load?"for(int t=0;t<run;++t)buffer[k+t]=global[t*"+stride+"];":"for(int t=0;t<run;++t)global[t*"+stride+"]=buffer[k+t];");
+      if(!guard.empty())line("else");
     }
     line("k+=run;}}");
   }
@@ -140,7 +136,7 @@ class Source {
     line("{ long long incoming=" + iteration + ";");
     line(resident ? "long long row0=incoming*R, col=0;"
                   : independent()?"long long row0=(group/((N+W-1)/W))*R,col=incoming*W;":"long long row0=group*R, col=incoming*W;");
-    line("int live=(int)((N-col)<W?(N-col):W);");
+    line("int live=(int)((N-col)<W?(N-col):W);if(live>0){");
     for (auto &op : fetch.without_terminator()) {
       if (op.getName().getStringRef() == "dsa.window" || op.getName().getStringRef()=="dsa.member_axis" || op.getName().getStringRef()=="dsa.slab_axis" || op.getName().getStringRef()=="dsa.lookup_axis")
         continue;
@@ -155,10 +151,14 @@ class Source {
         auto keyType=ctype(op.getOperand(2).getDefiningOp()->getOperand(0).getType());
         line("{int count=(M-row0<R?M-row0:R);");
         line("if(R>1 && "+keys+"s0==1 && "+n+"s1==1 && "+n+"d0>0 && (unsigned long long)"+n+"s0<=0xffffffffULL/sizeof("+type+")/"+n+"d0){");
-        line("auto *ids=("+keyType+"*)(storage+BYTES-((R*12+127)/128*128));");
-        line("__memcpy(ids,"+keys+"+row0,count*sizeof(*ids),GDRAM2NRAM);");
-        line("for(int j=0;j<count;++j)__memcpy_async("+dst+"+(("+slot+")*R+j)*P,"+n+"+col+ids[j]*"+n+"s0,live*sizeof("+type+"),GDRAM2NRAM);");
-        if(depth==1)line("__sync_io();");
+        for(auto step:op.getAttrOfType<DictionaryAttr>("bangc.indexed_loop").getAs<ArrayAttr>("batch")){
+          if(step==StringAttr::get(op.getContext(),"stage_contiguous_indices")){
+            line("auto *ids=("+keyType+"*)(storage+BYTES-((R*12+127)/128*128));");
+            line("__memcpy(ids,"+keys+"+row0,count*sizeof(*ids),GDRAM2NRAM);");
+          }else if(step==StringAttr::get(op.getContext(),"async_dma_per_member"))
+            line("for(int j=0;j<count;++j)__memcpy_async("+dst+"+(("+slot+")*R+j)*P,"+n+"+col+ids[j]*"+n+"s0,live*sizeof("+type+"),GDRAM2NRAM);");
+          else line("__sync_io();");
+        }
         line("}else{for(int j=0;j<count;++j){auto *src="+n+"+"+rowStride+"+col*"+stride+";auto *out="+dst+"+(("+slot+")*R+j)*P;");
         line("if("+stride+"==1)__memcpy(out,src,live*sizeof("+type+"),GDRAM2NRAM);else for(int k=0;k<live;++k)out[k]=src[k*"+stride+"];}}}");
         continue;
@@ -189,7 +189,7 @@ class Source {
            stride + "];}}");
       if(grouped) line("}");
     }
-    line("}");
+    line("}}");
   }
   llvm::Error phase(Operation &op) {
     auto &fetch = op.getRegion(0).front(), &body = op.getRegion(1).front();
@@ -273,6 +273,14 @@ class Source {
     line(resident ? "long long row0=pos*R,col=0;"
                   : independent()?"long long row0=(group/((N+W-1)/W))*R,col=pos*W;":"long long row0=group*R,col=pos*W;");
     line("int live=(int)((N-col)<W?(N-col):W);");
+    // In an empty row there is no vector data to prepare or publish. Counts
+    // are still observable. Only use this shortcut for a pure compaction body.
+    auto emptyCount=body.getParentOp()->getAttrOfType<IntegerAttr>("bangc.empty_count_slot");
+    if(emptyCount){
+      auto dest=name(fn.getArgument(emptyCount.getInt()));
+      line("if(!live){for(int j=0;j<R && row0+j<M;++j)"+dest+"[(row0+j)*"+dest+"s0]=0;}else");
+      line("{");
+    }
     if(packed) {
       line("int members=live==P?(int)((M-row0)<R?(M-row0):R):1;");
       line("for(int j=0;j<R && row0+j<M;j+=members){int lanes=members*((live+63)/64*64);");
@@ -312,7 +320,7 @@ class Source {
         auto fill=std::to_string(inst.getAttrOfType<IntegerAttr>("fill").getInt());
         line("{int *packed=(int*)(storage+BYTES)-P;int count=live?"+prefix+"[live-1]:0;");
         line("for(int k=0;k<live;++k){int p="+prefix+"[k];if("+mask+"[k])packed[p-1]="+payload+"[k];else packed[count+k-p]="+fill+";}");
-        line("auto *dst="+out+"+(row0+j)*"+out+"s0;if("+out+"s1==1)__memcpy(dst,packed,sizeof(int)*live,NRAM2GDRAM);else for(int k=0;k<live;++k)dst[k*"+out+"s1]=packed[k];"+count+"[(row0+j)*"+count+"s0]=count;}");
+        line("if(live){auto *dst="+out+"+(row0+j)*"+out+"s0;if("+out+"s1==1)__memcpy(dst,packed,sizeof(int)*live,NRAM2GDRAM);else for(int k=0;k<live;++k)dst[k*"+out+"s1]=packed[k];}"+count+"[(row0+j)*"+count+"s0]=count;}");
         continue;
       }
       if (n == "complete") {
@@ -406,8 +414,9 @@ class Source {
         auto offset=in(0);auto &bb=inst.getRegion(0).front();
         auto v=name(bb.back().getOperand(0).getDefiningOp()->getOperand(0));
         line("{int a="+offset+"[(row0+j)*"+offset+"s0], b="+offset+"[(row0+j+1)*"+offset+"s0];");
-        line("float *panel=(float*)(storage+BYTES)-16*P;__bang_write_value("+id+",lanes,0.f);");
-        line("for(int i=a;i<b;i+=16){int count=(b-i<16?b-i:16);auto *src="+v+"+i*"+v+"s0+col*"+v+"s1;");
+        auto members=std::to_string(inst.getAttrOfType<IntegerAttr>("bangc.panel_members").getInt());
+        line("float *panel=(float*)(storage+BYTES)-"+members+"*P;__bang_write_value("+id+",lanes,0.f);");
+        line("for(int i=a;i<b;i+="+members+"){int count=(b-i<"+members+"?b-i:"+members+");auto *src="+v+"+i*"+v+"s0+col*"+v+"s1;");
         line("if("+v+"s1==1 && live==P && "+v+"s0==P)__memcpy(panel,src,count*P*sizeof(float),GDRAM2NRAM);");
         line("else for(int h=0;h<count;++h){if("+v+"s1==1)__memcpy(panel+h*P,src+h*"+v+"s0,live*sizeof(float),GDRAM2NRAM);else for(int k=0;k<live;++k)panel[h*P+k]=src[h*"+v+"s0+k*"+v+"s1];}");
         line("for(int h=0;h<count;++h)__bang_add("+id+","+id+",panel+h*P,lanes);}}");
@@ -564,6 +573,7 @@ class Source {
              "=" + expr + ";");
     }
     line("}");
+    if(emptyCount)line("}");
     return llvm::Error::success();
   }
 

@@ -105,8 +105,12 @@ public:
       if (loop.getName().getStringRef() != "mojo_row.sweep")
       {
         if(loop.getName().stripDialect()=="atomic_members"){
-          bool prefix=loop.walk([](Operation *v){return v->getName().stripDialect()=="write_offsets"?WalkResult::interrupt():WalkResult::advance();}).wasInterrupted();
-          if(prefix)line(2,"var prefix=Int32(0)");
+          llvm::DenseMap<Value,std::string> carries;
+          for(auto &v:loop.getRegion(0).front())if(v.getName().stripDialect()=="scan_sum"){
+            auto carry=temp();carries[v.getResult(0)]=carry;
+            line(2,"var "+carry+"=Int32(0)");
+          }
+          SmallVector<std::string> final;
           line(2,"for j in range(Int(cols)):");
           for(auto &v:loop.getRegion(0).front().without_terminator()){
             auto n=v.getName().stripDialect();auto a=[&](unsigned i){return var(v.getOperand(i));};
@@ -117,7 +121,17 @@ public:
               line(3,"if j+1<Int(cols):");line(4,"for block in range(Int("+offsets+"[unsafe_offset=j*Int("+offsets+"s0)])//"+unit+",Int("+offsets+"[unsafe_offset=(j+1)*Int("+offsets+"s0)])//"+unit+"):");
               line(5,src+"[unsafe_offset=block*Int("+src+"s0)]=Int32(j)");continue;
             }
-            else if(n=="constant")rhs="Int32("+intentdsl::kir::literal(v.getAttrOfType<TypedAttr>("value"))+")";
+            else if(n=="constant")rhs=(v.getResult(0).getType().isF32()?"Float32(":"Int32(")+intentdsl::kir::literal(v.getAttrOfType<TypedAttr>("value"))+")";
+            else if(n=="ne")rhs=a(0)+" != "+a(1);
+            else if(n=="cast")rhs="Int32("+a(0)+")";
+            else if(n=="member_index")rhs="Int32(j)";
+            else if(n=="prefix_scatter"){
+              auto stride=src+"s",carry=carries.lookup(v.getOperand(4));
+              line(3,"if "+a(3)+":");line(4,src+"[unsafe_offset=r*Int("+stride+"0)+(Int("+a(4)+")-1)*Int("+stride+"1)]="+a(5));
+              final.push_back("for j in range(Int("+carry+"),Int(cols)):");
+              final.push_back("    "+src+"[unsafe_offset=r*Int("+stride+"0)+j*Int("+stride+"1)] = Int32("+std::to_string(v.getAttrOfType<IntegerAttr>("fill").getInt())+")");
+              final.push_back(a(1)+"[unsafe_offset=r*Int("+a(1)+"s0)]="+carry);continue;
+            }
             else if(n=="atomic_add"){
               if(task->hasAttr("cpu.key_extent")){
                 line(3,"if Int("+a(1)+")<Int(key_lo) or Int("+a(1)+")>=Int(key_hi):");line(4,"continue");
@@ -128,14 +142,15 @@ public:
             else if(n=="unique_put"){line(3,src+"[unsafe_offset=Int("+a(1)+")*Int("+src+"s0)]="+a(2));continue;}
             else if(n=="ordinal")rhs="Int32(r*Int(cols)+j)";
             else if(n=="shr" || n=="shl")rhs=a(0)+(n=="shr"?" >> ":" << ")+a(1);
-            else if(n=="scan_sum"){line(3,"prefix += "+a(0));rhs="prefix";}
+            else if(n=="scan_sum"){rhs=carries.lookup(v.getResult(0));line(3,rhs+" += "+a(0));}
             else if(n=="write_offsets"){
               line(3,src+"[unsafe_offset=(j+1)*Int("+src+"s0)]="+a(3));
-              line(2,src+"[unsafe_offset=0]=0");line(2,a(1)+"[unsafe_offset=0]=prefix");continue;
+              final.push_back(src+"[unsafe_offset=0]=0");final.push_back(a(1)+"[unsafe_offset=0]="+carries.lookup(v.getOperand(3)));continue;
             }else if(n=="add")rhs=a(0)+"+"+a(1);
             else return llvm::createStringError("unsupported atomic task expression "+n);
             auto dst=temp();line(3,"var "+dst+"="+rhs);vars[v.getResult(0)]=dst;
           }
+          for(auto &statement:final)line(2,statement);
           continue;
         }
         if(loop.getName().getStringRef()!="cpu.pack_members")return llvm::createStringError("Mojo requires realized sweeps");

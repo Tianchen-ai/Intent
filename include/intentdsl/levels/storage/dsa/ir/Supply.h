@@ -5,6 +5,7 @@ namespace intentdsl::dsa {
 struct LocalSupply {
   int64_t capacity, budget, alignment, consumers, reductionScratchPerColumn;
   bool asynchronous;
+  int64_t featurePanelMembers;
 };
 bool projectsConsecutiveRows(mlir::Operation *access, unsigned maskIndex);
 struct TemporaryLayout {

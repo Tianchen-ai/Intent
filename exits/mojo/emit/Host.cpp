@@ -50,7 +50,7 @@ std::string hostSource(func::FuncOp entry) {
     << "(" << params
     << ",int64_t rows,int64_t cols,int64_t grain,int64_t columns,int64_t "
        "workers){\n"
-    << "if (rows == 0 || cols == 0) return;\n";
+    << "if (rows == 0) return;\n";
   auto &task=entry.front().front();
   if(keys){
     c<<"const int64_t keys="<<keys.getInt()<<",lines=(keys+15)/16,n=workers<lines?workers:lines;\n"

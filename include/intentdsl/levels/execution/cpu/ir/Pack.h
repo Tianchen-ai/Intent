@@ -18,8 +18,16 @@ inline mlir::LogicalResult packMemberLoop(mlir::Block &body) {
   auto *load=test->getOperand(0).getDefiningOp(), *threshold=test->getOperand(1).getDefiningOp();
   if(!load || load->getName().stripDialect()!="read" || !threshold || !threshold->getAttrOfType<FloatAttr>("value"))
     return store->emitError("expected a row input and scalar comparison threshold");
-  for(auto *op:members)if(op!=store && (op->getNumResults()!=1 || op->getNumRegions()))
-    return op->emitError("additional effects must remain outside the packed row traversal");
+  auto *scan=store->getOperand(4).getDefiningOp();
+  if(!scan || scan->getName().stripDialect()!="scan_sum")return success();
+  auto *cast=scan->getOperand(0).getDefiningOp();
+  if(!cast || cast->getName().stripDialect()!="cast" || cast->getOperand(0)!=test->getResult(0))
+    return success();
+  // Erase exactly the matched expression. An unused SSA result does not
+  // establish that its producer can be dropped (notably for atomic RMW).
+  for(auto *op:members)
+    if(op!=store && op!=test && op!=value && op!=load && op!=threshold && op!=scan && op!=cast)
+      return success();
   OpBuilder b(store);OperationState loop(store->getLoc(),"cpu.pack_members");
   loop.addOperands({load->getOperand(0),store->getOperand(0),store->getOperand(1)});
   loop.addAttribute("threshold",threshold->getAttr("value"));loop.addAttribute("fill",store->getAttr("fill"));

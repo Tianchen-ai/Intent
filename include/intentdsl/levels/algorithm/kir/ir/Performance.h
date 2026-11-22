@@ -8,11 +8,12 @@ struct CallFacts {
   llvm::json::Array arguments;
   std::string localEstimator;
   int64_t participants;
-  double keyTraffic(mlir::Operation *root) const {
+  double keyTraffic(mlir::Operation *root, llvm::StringRef partition="count_keys",
+                    llvm::StringRef merge="column_sum") const {
     double bytes=0;
     root->walk([&](mlir::Operation *op){
       auto n=op->getName().stripDialect();
-      if(n!="count_keys" && n!="column_sum" && n!="key_counts" && n!="sum_columns")return;
+      if(n!=partition && n!=merge)return;
       auto source=mlir::dyn_cast<mlir::BlockArgument>(op->getOperand(0));
       if(!source || source.getArgNumber()>=arguments.size())return;
       auto *view=arguments[source.getArgNumber()].getAsObject();auto *shape=view?view->getArray("shape"):nullptr;
@@ -25,11 +26,11 @@ struct CallFacts {
   }
   // Estimate total visits from a packed offsets domain. A subrange of the
   // packed input may be shorter. This estimate is never a legality bound.
-  double segmentReads(mlir::Operation *program) const {
+  double segmentReads(mlir::Operation *program, llvm::StringRef memberRegion="ordered_sum") const {
     double bytes=0;
     program->walk([&](mlir::Operation *fold){
       auto name=fold->getName().stripDialect();
-      if(name!="ordered_sum" && name!="segment_fold")return;
+      if(name!=memberRegion)return;
       auto &bb=fold->getRegion(0).front();
       double count=0, featureCount=1, bytesPerTerm=0;
       for(auto &read:bb){

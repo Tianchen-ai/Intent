@@ -9,7 +9,8 @@ using namespace mlir;
 // are reused after each member's compute and drain.
 struct Footprint {
   int64_t inputBytes = 0, vectorBytes = 0, collectiveBytes = 0;
-  static Footprint of(Block &body, int64_t reductionScratch, bool reuse=false) {
+  static Footprint of(Block &body, const LocalSupply &c, bool reuse=false) {
+    auto reductionScratch=c.reductionScratchPerColumn;
     Footprint f;
     for (auto &op : body) {
       auto code = op.getName().stripDialect();
@@ -24,7 +25,7 @@ struct Footprint {
         if(code=="key_counts" || code=="sum_columns")
           f.collectiveBytes=std::max<int64_t>(f.collectiveBytes,cast<MemRefType>(op.getOperand(0).getType()).getElementTypeBitWidth()/8);
         if(code=="segment_fold" && kir::contiguousFeatureRead(&op))
-          f.collectiveBytes=std::max<int64_t>(f.collectiveBytes,16*sizeof(float));
+          f.collectiveBytes=std::max<int64_t>(f.collectiveBytes,c.featurePanelMembers*int64_t(sizeof(float)));
         auto t = dyn_cast<RankedTensorType>(op.getResult(0).getType());
         if (!t || t.getRank() < 1 || !t.getElementType().isIntOrFloat())
           continue;
@@ -81,21 +82,21 @@ static llvm::Expected<DictionaryAttr> planStorage(func::FuncOp fn, const LocalSu
     indexed |= op->getName().getStringRef()=="block.indexed_tile_read" || op->getName().getStringRef()=="dsa.lookup_axis";
     if (op->getName().getStringRef() == "dsa.phase") {
       auto f =
-          Footprint::of(op->getRegion(1).front(), c.reductionScratchPerColumn,reuse);
+          Footprint::of(op->getRegion(1).front(),c,reuse);
       f.inputBytes =
-          Footprint::of(op->getRegion(0).front(), c.reductionScratchPerColumn)
+          Footprint::of(op->getRegion(0).front(),c)
               .inputBytes;
       phases.push_back(f);
     }
   });
   if (phases.empty() &&
       fn->getAttrOfType<StringAttr>("block.topology") == "resident")
-    phases.push_back(Footprint::of(fn.front(), c.reductionScratchPerColumn,reuse));
+    phases.push_back(Footprint::of(fn.front(),c,reuse));
   else
     fn.walk([&](Operation *op) {
       if (op->getName().getStringRef() == "block.tiles")
         phases.push_back(Footprint::of(op->getRegion(0).front(),
-                                       c.reductionScratchPerColumn,reuse));
+                                       c,reuse));
     });
   auto configs = fn->getAttrOfType<ArrayAttr>("block.configs");
   if(indexed && fn->getAttrOfType<StringAttr>("block.topology")=="resident" &&

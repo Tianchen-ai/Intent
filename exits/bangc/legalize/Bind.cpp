@@ -1,6 +1,7 @@
 #include "intentdsl/levels/algorithm/kir/ir/Segment.h"
 #include "intentdsl/levels/storage/dsa/ir/Supply.h"
 #include "mlir/Pass/Pass.h"
+#include "Slab.h"
 using namespace mlir;
 namespace CI_UNIT_NAMESPACE {
 using namespace compilerinfra;
@@ -191,10 +192,26 @@ LogicalResult offsets(func::FuncOp f, bool install) {
     return f.emitError("private slot byte binding disagrees with its phase");
   return success();
 }
+IntegerAttr emptyCountSlot(Operation *phase) {
+  if(phase->getName().getStringRef()!="dsa.phase" || phase->getNumResults())return {};
+  BlockArgument count;
+  for(auto &v:phase->getRegion(1).front()){
+    auto n=v.getName().getStringRef();
+    if(n=="dsa.scatter_fragment"){
+      if(count)return {};
+      count=dyn_cast<BlockArgument>(v.getOperand(1));
+    }else if(!llvm::is_contained(ArrayRef<StringRef>{"dsa.await","block.constant","block.ne","block.cast","block.scan_sum",
+        "block.member_tile","dsa.active","dsa.window","dsa.complete","dsa.drain","dsa.yield","block.active",
+        "block.rows","block.columns","dsa.end"},n))return {};
+  }
+  return count?Builder(phase->getContext()).getI32IntegerAttr(count.getArgNumber()):IntegerAttr{};
+}
 struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(Legalize)
   unsigned phase;
-  explicit Legalize(unsigned step) : phase(step) {}
+  intentdsl::CallFacts facts;
+  int64_t panelMembers;
+  Legalize(unsigned step,const intentdsl::CallFacts &f,int64_t members) : phase(step),facts(f),panelMembers(members) {}
   void runOnOperation() final {
     auto f = *getOperation().getOps<func::FuncOp>().begin();
     Builder b(&getContext());
@@ -223,6 +240,11 @@ struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
         return;
       }
       o->setAttr("bangc.primitive", b.getStringAttr(p));
+      if(p=="feature_panel_sum")o->setAttr("bangc.panel_members",b.getI64IntegerAttr(panelMembers));
+      if(p=="indexed_dma")o->setAttr("bangc.indexed_loop",indexedLoop(b,depth));
+      if(auto slot=emptyCountSlot(o))o->setAttr("bangc.empty_count_slot",slot);
+      if(p.starts_with("segmented_slab_"))
+        o->setAttr("bangc.slab_loop",slabLoop(o,p.ends_with("_read"),facts));
       if (p == "certified_half_quotient")
         o->setAttr("bangc.scratch",
                    availableCollective(o->getOperand(0).getDefiningOp())
@@ -309,6 +331,19 @@ LogicalResult verify(ModuleOp m, const TargetProfile &p, unsigned stage) {
           if (o->getName().getDialectNamespace() == "func")
             return WalkResult::advance();
           auto k = primitive(o, depth);
+          if(o->getAttr("bangc.empty_count_slot")!=emptyCountSlot(o))
+            return o->emitError("empty owner publication disagrees with phase effects"),WalkResult::interrupt();
+          if(k=="feature_panel_sum" && o->getAttr("bangc.panel_members")!=Builder(m.getContext()).getI64IntegerAttr(capacity->featurePanelMembers))
+            return o->emitError("feature staging disagrees with reserved storage"), WalkResult::interrupt();
+          if(k=="indexed_dma" && o->getAttr("bangc.indexed_loop")!=indexedLoop(Builder(m.getContext()),depth))
+            return o->emitError("invalid index prefetch, member copies or completion"), WalkResult::interrupt();
+          DictionaryAttr loop;
+          if(k.starts_with("segmented_slab_"))
+            loop=slabLoop(o,k.ends_with("_read"),*p.services.get<intentdsl::CallFacts>());
+          if(o->getAttr("bangc.slab_loop")!=loop){
+            o->emitError("segmented transfer loop differs from the projected strides");
+            return WalkResult::interrupt();
+          }
           if (k == "certified_half_quotient" &&
               o->getAttr("bangc.scratch") !=
                   availableCollective(o->getOperand(0).getDefiningOp())
@@ -332,8 +367,8 @@ void bind(Unit &u) {
   unsigned stage = 0;
   for (StringRef name : {"bound", "legal", "callable"}) {
     u.boundaries.push_back({{name.str(),
-                             [stage](OpPassManager &pm, const TargetProfile &) {
-                               pm.addPass(std::make_unique<Legalize>(stage));
+                             [stage](OpPassManager &pm, const TargetProfile &p) {
+                               pm.addPass(std::make_unique<Legalize>(stage,*p.services.get<intentdsl::CallFacts>(),p.services.get<intentdsl::dsa::LocalSupply>()->featurePanelMembers));
                                return llvm::Error::success();
                              },
                              [stage](ModuleOp m, const TargetProfile &p) {

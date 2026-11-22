@@ -98,11 +98,11 @@ class Kernel {
         std::string steps = span + "//" + width;
         if (op.getAttrOfType<IntegerAttr>("extent").getInt() %
             op.getAttrOfType<IntegerAttr>("span").getInt())
-          steps = "ct.minimum(" + steps + ",ct.cdiv(" + n + "-ct.bid(0)*" + span + "," + width + "))";
+          steps = "ct.minimum(" + steps + ",ct.cdiv(" + n + "-ct.astype(ct.bid(0),ct.int64)*" + span + "," + width + "))";
         line(depth, "for step in range(" + steps + "):");
         line(depth+1,"offset=step*"+width+"+ct.arange("+width+",dtype=ct.int32)");
-        line(depth+1,"pos=ct.bid(0)*"+span+"+offset");
-        auto keys="ct.load("+arg(0)+",(ct.bid(0)*("+span+"//"+width+")+step,),shape=("+width+",),padding_mode=ct.PaddingMode.ZERO,allow_tma=False)";
+        line(depth+1,"pos=ct.astype(ct.bid(0),ct.int64)*"+span+"+offset");
+        auto keys="ct.load("+arg(0)+",(ct.astype(ct.bid(0),ct.int64)*("+span+"//"+width+")+step,),shape=("+width+",),padding_mode=ct.PaddingMode.ZERO,allow_tma=False)";
         line(depth+1,"key="+(cast<MemRefType>(op.getOperand(0).getType()).getElementType().isInteger(64)?keys:"ct.astype("+keys+",ct.int32)"));
         line(depth+1,"valid=(pos<"+n+")&(key>=0)&(key<"+arg(1)+".shape[1])");
         line(depth+1,"ct.atomic_add("+arg(1)+",(ct.bid(0),ct.where(valid,key,0)),ct.astype(valid,ct.int32),check_bounds=False,memory_order=ct.MemoryOrder.RELAXED,memory_scope=ct.MemoryScope.BLOCK)");
@@ -113,7 +113,7 @@ class Kernel {
         line(depth,acc+" = ct.full((W,),0,ct.int32)");
         if(code=="key_counts"){
           auto span=std::to_string(op.getAttrOfType<IntegerAttr>("span").getInt());
-          auto start="(ct.bid(0)*"+span+")";
+          auto start="(ct.astype(ct.bid(0),ct.int64)*"+span+")";
           line(depth,"for step in range(ct.cdiv("+span+",64)):");
           line(depth+1,"offset=step*64+ct.arange(64,dtype=ct.int32)");
           auto keys="ct.gather("+base+","+start+"+offset,mask=(offset<"+span+") & ("+start+"+offset<"+bound+"),padding_value=-1)";

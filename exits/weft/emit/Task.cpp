@@ -506,7 +506,8 @@ public:
       auto store=[&](Term k,Term value){inst("pointer_store",{ptr,inst("cast",{k},"si64"),mask,value},"()");};
       auto addr=[&](Value v,SmallVector<Term> coords){
         SmallVector<Term> args{terms.lookup(v)};args.append(coords);SmallVector<std::string> sel(coords.size(),"\"index\"");
-        return inst("slice",args,"!weft_kernel.slice<!weft_kernel.encoding<\"i32\",\"dense\",\"dense.i32\",[]>,[],[]>","selectors=["+llvm::join(sel,",")+"]");
+        auto elem=printType(cast<MemRefType>(v.getType()).getElementType());
+        return inst("slice",args,"!weft_kernel.slice<!weft_kernel.encoding<\""+elem+"\",\"dense\",\"dense."+elem+"\",[]>,[],[]>","selectors=["+llvm::join(sel,",")+"]");
       };
       auto add=[&](Term a,Term b){return inst("binary",{a,b},a.type,"kind=\"add\"");};
       for(auto &stage:bb.without_terminator()){
@@ -542,20 +543,26 @@ public:
       bool guarded=false;
       Operation *ends=prefix?&*found:nullptr;
       auto zero=inst("constant",{},"si32","value=0:si32");
-      if(prefix)s<<"%total = ";
+      SmallVector<Value> scans;
+      for(auto &v:effects)if(v.getName().stripDialect()=="scan_sum")scans.push_back(v.getResult(0));
+      auto slot=[&](Value v){return std::to_string(llvm::find(scans,v)-scans.begin());};
+      SmallVector<std::string> binds,types;
+      for(auto v:scans){binds.push_back("%carry"+slot(v)+"="+zero.id);types.push_back("si32");}
+      if(!scans.empty())s<<"%scan:"<<scans.size()<<" = ";
       s<<"scf.for %j=%lo to "<<columns.id<<" step %step";
-      if(prefix)s<<" iter_args(%sum="<<zero.id<<")->(si32)";
+      if(!scans.empty())s<<" iter_args("<<llvm::join(binds,",")<<")->("<<llvm::join(types,",")<<")";
       s<<" {\n";
       auto address=[&](Value source,SmallVector<Term> keys){
         auto base=terms.lookup(source);SmallVector<Term> args{base};
         args.append(keys);SmallVector<std::string> sel(keys.size(),"\"index\"");
-        return inst("slice",args,"!weft_kernel.slice<!weft_kernel.encoding<\"i32\",\"dense\",\"dense.i32\",[]>,[],[]>","selectors=["+llvm::join(sel,",")+"]");
+        auto elem=printType(cast<MemRefType>(source.getType()).getElementType());
+        return inst("slice",args,"!weft_kernel.slice<!weft_kernel.encoding<\""+elem+"\",\"dense\",\"dense."+elem+"\",[]>,[],[]>","selectors=["+llvm::join(sel,",")+"]");
       };
       for(auto &v:bb.front().getRegion(0).front().without_terminator()){
         auto n=v.getName().stripDialect();auto a=[&](unsigned i){return terms.lookup(v.getOperand(i));};Term rhs;
         if(n=="read"){
           SmallVector<Term> coords;if(cast<MemRefType>(v.getOperand(0).getType()).getRank()==2)coords.push_back({"%r","index"});
-          coords.push_back({"%j","index"});rhs=inst("admit",{address(v.getOperand(0),coords)},"si32");
+          coords.push_back({"%j","index"});rhs=inst("admit",{address(v.getOperand(0),coords)},spelling(cast<MemRefType>(v.getOperand(0).getType()).getElementType()));
         }
         else if(n=="fill_ranges"){
           auto j=Term{"%j","index"};auto hi=inst("binary",{j,{"%step","index"}},"index","kind=\"add\"");
@@ -568,16 +575,27 @@ public:
           auto first=block(j),end=block(hi);s<<"scf.for %b = "<<first.id<<" to "<<end.id<<" step %step {\n";
           inst("commit",{inst("cast",{j},"si32"),address(v.getOperand(0),{{"%b","index"}})},"()");s<<"}\n}\n";continue;
         }
-        else if(n=="constant")rhs=inst("constant",{},"si32","value="+std::to_string(v.getAttrOfType<IntegerAttr>("value").getInt())+":si32");
+        else if(n=="constant"){
+          if(auto x=v.getAttrOfType<IntegerAttr>("value"))rhs=inst("constant",{},"si32","value="+std::to_string(x.getInt())+":si32");
+          else {std::string repr;llvm::raw_string_ostream(repr)<<v.getAttr("value");rhs=inst("constant",{},"f32","value="+repr);}
+        }else if(n=="member_index")rhs=inst("cast",{{"%j","index"}},"si32");
+        else if(n=="ne")rhs=inst("compare",{a(0),a(1)},"i1","predicate=\"ne\"");
+        else if(n=="cast")rhs=inst("cast",{a(0)},"si32");
+        else if(n=="prefix_scatter"){
+          s<<"scf.if "<<a(3).id<<" {\n";
+          auto ix=inst("binary",{inst("cast",{a(4)},"index"),{"%step","index"}},"index","kind=\"sub\"");
+          inst("commit",{a(5),address(v.getOperand(0),{{"%r","index"},ix})},"()");
+          s<<"}\n";continue;
+        }
         else if(n=="ordinal"){
           auto r=inst("binary",{origin,{"%r","index"}},"index","kind=\"add\"");
           auto row=inst("binary",{r,columns},"index","kind=\"mul\"");
           rhs=inst("cast",{inst("binary",{row,{"%j","index"}},"index","kind=\"add\"")},"si32");
         }else if(n=="add" || n=="shr" || n=="shl")rhs=inst("binary",{a(0),a(1)},"si32","kind=\""+n.str()+"\"");
-        else if(n=="scan_sum")rhs=inst("binary",{{"%sum","si32"},a(0)},"si32","kind=\"add\"");
+        else if(n=="scan_sum")rhs=inst("binary",{{"%carry"+slot(v.getResult(0)),"si32"},a(0)},"si32","kind=\"add\"");
         else if(n=="write_offsets"){
           auto dst=inst("binary",{{"%j","index"},{"%step","index"}},"index","kind=\"add\"");
-          inst("commit",{a(3),address(v.getOperand(0),{dst})},"()");s<<"scf.yield "<<a(3).id<<":si32\n";continue;
+          inst("commit",{a(3),address(v.getOperand(0),{dst})},"()");continue;
         }
         else if(n=="atomic_add" || n=="index_read" || n=="unique_put"){
           auto index=inst("cast",{a(1)},"index");
@@ -595,10 +613,23 @@ public:
         terms[v.getResult(0)]=rhs;
       }
       if(guarded)s<<"}\n";
+      if(!scans.empty()){
+        SmallVector<std::string> outputs;
+        for(auto v:scans)outputs.push_back(terms.lookup(v).id);
+        s<<"scf.yield "<<llvm::join(outputs,",")<<":"<<llvm::join(types,",")<<"\n";
+      }
       s<<"}\n";
       if(prefix){
         inst("commit",{zero,address(ends->getOperand(0),{{"%lo","index"}})},"()");
-        inst("commit",{{"%total","si32"},address(ends->getOperand(1),{{"%lo","index"}})},"()");
+        inst("commit",{{"%scan#"+slot(ends->getOperand(3)),"si32"},address(ends->getOperand(1),{{"%lo","index"}})},"()");
+      }
+      for(auto &v:effects)if(v.getName().stripDialect()=="prefix_scatter"){
+        Term total{"%scan#"+slot(v.getOperand(4)),"si32"},row{"%r","index"};
+        inst("commit",{total,address(v.getOperand(1),{row})},"()");
+        auto first=inst("cast",{total},"index");
+        auto pad=inst("constant",{},"si32","value="+std::to_string(v.getAttrOfType<IntegerAttr>("fill").getInt())+":si32");
+        s<<"scf.for %tail="<<first.id<<" to "<<columns.id<<" step %step {\n";
+        inst("commit",{pad,address(v.getOperand(0),{row,{"%tail","index"}})},"()");s<<"}\n";
       }
     }else if(intentdsl::cpu::packed(bb)){
       auto &pack=bb.front();Term row{"%r","index"},col{"%j","index"};
@@ -800,7 +831,7 @@ std::string hostSource(Operation *dispatch, const llvm::json::Array &abi) {
          llvm::join(params, ",") +
          ", int64_t rows, int64_t cols, int64_t grain, int64_t panel, int64_t "
          "workers){\nif(rows<0 || cols<0 || grain<=0 || panel<0 || workers<=0) return 1;\n"
-         "if(!rows || !cols) return 0;\n";
+         "if(!rows) return 0;\n";
   if(walk=="tile")return prefix+intentdsl::cpu::tileLoop(dispatch->getAttrOfType<IntegerAttr>("cpu.tile").getInt())+symbol+"_instance(a0+r*a0s0+c*a0s1,a1+c*a1s0+r*a1s1,nr,nc,panel?panel:nc,a0s0,a0s1,a1s1,a1s0);}return 0;}\n";
   if(walk=="destination")prefix+="int64_t t=rows;rows=cols;cols=t;t=a0s0;a0s0=a0s1;a0s1=t;t=a1s0;a1s0=a1s1;a1s1=t;\n";
   // A worker owns a contiguous range of complete grains. Give its native
