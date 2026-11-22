@@ -107,3 +107,28 @@ GPU 在 H100 和 5090D 的两个出口分别测 FP16 转置 353×701、1024×204
 | x86 | mojo | group_input_gradient | row-reduction | row-reduction | 51bc4f8440df955f |
 | x86 | weft | group_affine_gradient | row-reduction | row-reduction | d1e4a5beed0959f5 |
 | x86 | weft | group_input_gradient | row-reduction | row-reduction | e30cf82c7b4f69a5 |
+
+## 第 2 组首次留出 · LayerNorm 反向
+
+登记输入为 4096 × 4096、BF16、128 个部分和槽位。作者按桶访问 32 个源行，每次更新保持 BF16 舍入。完整 program 先清零两个 workspace，再计算行梯度和部分和，最后独立合并仿射参数梯度。两份成员预测独立计分，完整调用的 P1 包含两个 fill。首次计分和 P1 采用 Bench 默认自适应采样预算，各跑三轮。
+
+| 设备 | 出口 | 成员 | 预计结构顺序 | 选中 | 首次 explain SHA-256 前缀 |
+|---|---|---|---|---|---|
+| 5090d | cutile | layer_gradient_rows | resident-1 / resident-2 / stream-1 / stream-2 | resident-1 | 298911456c27f151 |
+| 5090d | cutile | merge_affine_gradients | resident-1 / resident-2 / resident-8 / resident-16 / stream-1 / stream-2 | resident-1 | 2a22791c1dd4030c |
+| 5090d | triton | layer_gradient_rows | resident-1 / resident-2 / stream-1 / stream-2 | resident-1 | 4c2b49ed3091bfa2 |
+| 5090d | triton | merge_affine_gradients | resident-1 / resident-2 / resident-8 / resident-16 / stream-1 / stream-2 | resident-1 | 24ff36ec5cf2326f |
+| h100 | cutile | layer_gradient_rows | resident-1 / resident-2 / stream-1 / stream-2 | resident-1 | e4d065bb26aae4a0 |
+| h100 | cutile | merge_affine_gradients | resident-1 / resident-2 / resident-8 / resident-16 / stream-1 / stream-2 | resident-1 | c93067c610c091f1 |
+| h100 | triton | layer_gradient_rows | resident-1 / resident-2 / stream-1 / stream-2 | resident-1 | 0f42fd693d3e7cd8 |
+| h100 | triton | merge_affine_gradients | resident-1 / resident-2 / resident-8 / resident-16 / stream-1 / stream-2 | resident-1 | 511aaa457bcee609 |
+| mlu-native | bangc | layer_gradient_rows | double-buffer-16 / direct-16 / double-buffer-8 / direct-8 / double-buffer-4 / direct-4 / double-buffer-2 / direct-2 / double-buffer-1 / direct-1 | double-buffer-16 | d59bfed2f7d30e05 |
+| mlu-native | bangc | merge_affine_gradients | double-buffer-16 / direct-16 / double-buffer-8 / direct-8 / double-buffer-4 / direct-4 / double-buffer-2 / direct-2 / double-buffer-1 / direct-1 | double-buffer-16 | 18d159099a670645 |
+| rvv-native | weft | layer_gradient_rows | row-reduction | row-reduction | f570162793e7bcad |
+| rvv-native | weft | merge_affine_gradients | row-reduction | row-reduction | 37946bc6ee4e511a |
+| rvv-v100 | weft | layer_gradient_rows | row-reduction | row-reduction | ecd23aaf54505abf |
+| rvv-v100 | weft | merge_affine_gradients | row-reduction | row-reduction | 6830339a443ec8a9 |
+| x86 | mojo | layer_gradient_rows | row-reduction | row-reduction | 80d460c2dd549f11 |
+| x86 | mojo | merge_affine_gradients | row-reduction | row-reduction | b5a3256a4953694c |
+| x86 | weft | layer_gradient_rows | row-reduction | row-reduction | 293e13e7a024b163 |
+| x86 | weft | merge_affine_gradients | row-reduction | row-reduction | 919708613906fda5 |
