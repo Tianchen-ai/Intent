@@ -4,6 +4,11 @@ class Inst<string name,dag args,dag outputs,list<Trait> traits=[]> : Op<TileSour
   let arguments=args; let results=outputs;
 }
 def Bid : Inst<"pid",(ins),(outs Index:$id)>;
+def OutputPartition : Op<TileSource,"output_partition"> {
+  let arguments=(ins I32Attr:$index);
+  let regions=(region AnyRegion:$body);
+}
+def PartitionEnd : Op<TileSource,"partition_end",[Terminator]>;
 def Zero : Inst<"zero",(ins),(outs Index:$index)>;
 foreach i=["rows","columns"] in {
  def Tile_#i : Inst<i,(ins Index:$origin),(outs AnyTensor:$members)>;

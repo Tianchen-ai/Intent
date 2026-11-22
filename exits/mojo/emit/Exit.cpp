@@ -8,7 +8,7 @@ void dialect(DialectRegistry &);
 std::string hostSource(func::FuncOp);
 void publishABI(OpPassManager &);
 LogicalResult verifyLoops(ModuleOp, const TargetProfile &, bool callable);
-void realize(OpPassManager &, int64_t);
+void realize(OpPassManager &, int64_t,const intentdsl::CallFacts &);
 llvm::Expected<std::string> mojoSource(Operation *);
 namespace {
 llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
@@ -66,7 +66,7 @@ void bind(Unit &u) {
             if (phase == "realized") {
               auto *caps = p.services.get<intentdsl::cpu::RowMachine>();
               if (caps)
-                realize(pm, caps->vectorBits);
+                realize(pm, caps->vectorBits,*p.services.get<intentdsl::CallFacts>());
             }
             return llvm::Error::success();
           },

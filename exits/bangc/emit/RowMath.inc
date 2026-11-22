@@ -11,6 +11,21 @@ __mlu_func__ unsigned short round_bf16(float x) {
     return (word.u>>16)|0x40U;
   return (word.u+0x7fffU+((word.u>>16)&1U))>>16;
 }
+__mlu_func__ void widen_bf16_tile(float *dst,const unsigned short *src,int lanes) {
+  // Sign-extend the representation and retain its low 16 bits as the new
+  // high half. Floating conversions on this ISA canonicalize NaN payloads.
+  __bang_int162int32((int*)dst,(const short*)src,lanes,0,16);
+}
+__mlu_func__ void narrow_bf16_tile(unsigned short *dst,const float *src,int live,int lanes) {
+  __bang_float2bfloat16_rn((bfloat16_t*)dst,src,lanes);
+  __bang_band_scalar((short*)dst,(const short*)dst,(short)0x7fff,lanes);
+  __bang_ge_scalar((short*)dst,(const short*)dst,(short)0x7f7f,lanes);
+  if(__bang_count(dst,live)){
+    for(int i=0;i<live;++i)dst[i]=round_bf16(src[i]);
+  } else {
+    __bang_float2bfloat16_rn((bfloat16_t*)dst,src,lanes);
+  }
+}
 __mlu_func__ float row_sum(float *scratch, const float *input, int count) {
   int full = count / 32 * 32;
   float value = 0.0f;

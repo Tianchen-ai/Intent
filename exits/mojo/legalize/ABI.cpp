@@ -1,4 +1,5 @@
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
+#include "intentdsl/levels/algorithm/kir/ir/ProjectedLayout.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/StringSwitch.h"
 using namespace compilerinfra;
@@ -21,6 +22,7 @@ LogicalResult verifyLoops(ModuleOp m, const TargetProfile &p, bool callable) {
                                         false)))
     return failure();
   auto fn = *m.getOps<func::FuncOp>().begin();
+  if(failed(intentdsl::specializeProjectedLayout(fn,*p.services.get<intentdsl::CallFacts>(),"mojo_row",false)))return failure();
   auto &task = fn.front().front();
   if (task.getAttrOfType<StringAttr>("mojo_row.schedule") !=
       "static-row-groups")

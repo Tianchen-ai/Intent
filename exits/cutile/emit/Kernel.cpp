@@ -29,7 +29,12 @@ class Kernel {
         return span;
       };
       bool sum = algebra && algebra == "sum";
-      if (code == "return")
+      if(code=="output_partition"){
+        line(depth,"if ct.bid(1) == "+std::to_string(op.getAttrOfType<IntegerAttr>("index").getInt())+":");
+        if(auto err=body(op.getRegion(0).front(),depth+1))return err;
+        continue;
+      }
+      if (code == "return" || code=="partition_end")
         continue;
       if (code == "yield") {
         if (op.getNumOperands())
@@ -58,6 +63,30 @@ class Kernel {
         continue;
       } else if(code=="gather_slab" || code=="scatter_slab"){
         auto base=arg(0), col="ct.expand_dims("+arg(2)+",0)";
+        if(op.hasAttr("ct_src.rectangular")){
+          auto fn=op.getParentOfType<func::FuncOp>();
+          auto slot=cast<BlockArgument>(op.getOperand(0)).getArgNumber();
+          int64_t extent=fn.getArgAttrOfType<DenseI64ArrayAttr>(slot,"ct_src.shape")[2];
+          auto row=names.lookup(op.getOperand(1).getDefiningOp()->getOperand(0));
+          auto tile=names.lookup(op.getOperand(2).getDefiningOp()->getOperand(0));
+          auto inner="min(W,"+std::to_string(extent)+")";
+          auto segments="(W//"+inner+")";
+          auto major="("+tile+"//("+std::to_string(extent)+"//"+inner+"))";
+          auto minor="("+tile+"%("+std::to_string(extent)+"//"+inner+"))";
+          auto shape=owner.getInt()==0?"(R,"+segments+","+inner+")":"("+segments+",R,"+inner+")";
+          auto coord=owner.getInt()==0?"("+row+","+major+","+minor+")":"("+major+","+row+","+minor+")";
+          if(code=="scatter_slab"){
+            auto v=arg(4);
+            auto shaped="ct.reshape("+v+",(R,"+segments+","+inner+"))";
+            if(owner.getInt()!=0)shaped="ct.permute("+shaped+",(1,0,2))";
+            line(depth,"ct.store("+base+","+coord+","+shaped+",allow_tma=False)");
+          }else{
+            auto v="ct.load("+base+","+coord+",shape="+shape+",padding_mode=ct.PaddingMode.ZERO,allow_tma=False)";
+            if(owner.getInt()!=0)v="ct.permute("+v+",(1,0,2))";
+            auto id=local();line(depth,id+" = ct.reshape("+v+",(R,W))");names[op.getResult(0)]=id;
+          }
+          continue;
+        }
         int rank=cast<MemRefType>(op.getOperand(0).getType()).getRank();
         SmallVector<std::string> coords(rank);
         for(int i=rank-1;i>=0;--i){
@@ -288,7 +317,7 @@ llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
       {"outer_shape_slot",cast<MemRefType>(fn.getArgument(intentdsl::domainSlot(fn)).getType()).getRank()>2 ? intentdsl::domainSlot(fn) : -1},
       {"source", src},
       {"entry", fn->getAttrOfType<StringAttr>("ct_src.entry").str()},
-      {"grid", llvm::json::Array{std::move(formula), 1, 1}},
+      {"grid", llvm::json::Array{std::move(formula),std::max<int64_t>(1,llvm::count_if(fn.front(),[](Operation &op){return op.getName().getStringRef()=="ct_src.output_partition";})),1}},
       {"rows", std::move(rows)},
       {"guard",
        llvm::json::Object{{"min_width", guard[0]},

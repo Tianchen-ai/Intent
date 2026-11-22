@@ -30,6 +30,8 @@ public:
   explicit Source(llvm::raw_ostream &stream) : out(stream) {}
   llvm::Error write(Operation *task) {
     SmallVector<std::string> params;
+    SmallVector<std::string> constants;
+    auto fn = task->getParentOfType<func::FuncOp>();
     auto &body = task->getRegion(0).front();
     vars[body.getArgument(0)] = "r";
     for (auto [i, v] : llvm::enumerate(body.getArguments().drop_front())) {
@@ -38,9 +40,15 @@ public:
       if (auto m = dyn_cast<MemRefType>(v.getType())) {
         params.push_back(n + ": Pointer[Scalar[DType." +
                          dtype(m.getElementType()) + "], MutUntrackedOrigin]");
-        if(m.getRank()>2)for(int j=0;j<m.getRank()-1;++j)params.push_back(n+"d"+std::to_string(j)+": Int64");
-      for (int j = 0; j < m.getRank(); ++j)
-          params.push_back(n + "s" + std::to_string(j) + ": Int64");
+        for(bool shape:{true,false}){
+          auto bound=fn.getArgAttrOfType<DenseI64ArrayAttr>(i,shape?"mojo_row.shape":"mojo_row.strides");
+          int count=shape?(m.getRank()>2?m.getRank()-1:0):m.getRank();
+          for(int j=0;j<count;++j){
+            std::string field=n+(shape?"d":"s")+std::to_string(j);
+            params.push_back((bound?"abi_":"")+field+": Int64");
+            if(bound)constants.push_back("comptime "+field+" = "+std::to_string(bound[j]));
+          }
+        }
       } else
         params.push_back(n + (v.getType().isUnsignedInteger(64) ? ": UInt64"
                               : v.getType().isInteger(32)       ? ": Int32"
@@ -60,8 +68,8 @@ public:
         << llvm::join(params, ",")
         << ", first: Int64, stop: Int64, cols: Int64, columns_per_block: "
            "Int64) abi(\"C\"):\n";
+    for(auto &constant:constants)line(1,constant);
     line(1, "for r in range(Int(first),Int(stop)):");
-    auto fn = task->getParentOfType<func::FuncOp>();
     const bool projected = fn->hasAttr("kir.iteration");
     // For projected views the host supplies each interval's physical base.
     auto fullWidth =
@@ -139,18 +147,34 @@ public:
               std::string("j*") + stride;
           if(auto axis=fn->getAttrOfType<IntegerAttr>("kir.owner_axis")){
             int rank=view.getRank(), owner=axis.getInt();
-            std::string index="(j+lane)", relative="r*Int("+a+"s"+std::to_string(owner)+")";
+            auto shape=fn.getArgAttrOfType<DenseI64ArrayAttr>(cast<BlockArgument>(op.getOperand(0)).getArgNumber()-1,"mojo_row.shape");
             std::string last="Int(cols)";
             for(int i=0;i+1<rank;++i)if(i!=owner)last+="//Int("+a+"d"+std::to_string(i)+")";
-            for(int i=rank-1;i>=0;--i)if(i!=owner){
-              auto size=rank==2?"Int(cols)":i==rank-1?"("+last+")":"Int("+a+"d"+std::to_string(i)+")";
-              relative+="+("+index+"%"+size+")*Int("+a+"s"+std::to_string(i)+")";
-              index="("+index+"//"+size+")";
-            }
-            auto address=a+"[unsafe_offset="+relative+"]";
+            auto size=[&](int i){return shape?std::to_string(std::max<int64_t>(1,shape[i])):rank==2?"Int(cols)":i==rank-1?"("+last+")":"Int("+a+"d"+std::to_string(i)+")";};
+            auto coordinate=[&](std::string index){
+              std::string relative="r*Int("+a+"s"+std::to_string(owner)+")";
+              for(int i=rank-1;i>=0;--i)if(i!=owner){
+                relative+="+("+index+"%"+size(i)+")*Int("+a+"s"+std::to_string(i)+")";
+                index="("+index+"//"+size(i)+")";
+              }
+              return relative;
+            };
+            auto address=a+"[unsafe_offset="+coordinate("(j+lane)")+"]";
             if(code=="read")line(3,"var "+lhs+" = SIMD[DType."+dtype(view.getElementType())+","+lanes+"](0)");
-            line(3,"comptime for lane in range("+lanes+"):");
-            line(4,code=="read"?lhs+"[lane] = "+address:address+" = "+arg(3)+"[lane]");
+            int fast=rank-1-(owner==rank-1);
+            auto span=size(fast);
+            auto step="Int("+a+"s"+std::to_string(fast)+")";
+            auto base=coordinate("j");
+            auto ptr=a+".unsafe_offset("+base+")";
+            line(3,"if "+step+" == 1 and j % "+span+" + "+lanes+" <= "+span+":");
+            line(4,code=="read"?lhs+" = "+ptr+".unsafe_load[width="+lanes+"]()":ptr+".unsafe_store("+arg(3)+")");
+            if(code=="read"){
+              line(3,"elif "+step+" == 0 and j % "+span+" + "+lanes+" <= "+span+":");
+              line(4,lhs+" = SIMD[DType."+dtype(view.getElementType())+","+lanes+"]("+a+"[unsafe_offset="+base+"])");
+            }
+            line(3,"else:");
+            line(4,"comptime for lane in range("+lanes+"):");
+            line(5,code=="read"?lhs+"[lane] = "+address:address+" = "+arg(3)+"[lane]");
             if(code=="read")vars[op.getResult(0)]=lhs;
             continue;
           }
@@ -173,6 +197,8 @@ public:
             line(3, "if " + stride + " == 1:");
             line(4, lhs + " = " + a + ".unsafe_offset(" + offset +
                         ").unsafe_load[width=" + lanes + "]()");
+            line(3, "elif "+stride+" == 0:");
+            line(4, lhs+" = SIMD[DType."+dtype(view.getElementType())+","+lanes+"]("+a+"[unsafe_offset="+offset+"])");
             line(3, "else:");
             line(4, "comptime for lane in range(" + lanes + "):");
             line(5, lhs + "[lane] = " + a + "[unsafe_offset=" + offset +

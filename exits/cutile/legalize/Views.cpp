@@ -1,4 +1,5 @@
 #include "../capabilities/Index.h"
+#include "intentdsl/levels/algorithm/kir/ir/ProjectedLayout.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/execution/block/ir/Access.h"
 #include "intentdsl/levels/execution/block/decisions/Verify.h"
@@ -9,14 +10,28 @@ namespace CI_UNIT_NAMESPACE {
 using namespace mlir;
 using namespace compilerinfra;
 void registerIR(DialectRegistry &);
+void partitionOwners(func::FuncOp,const intentdsl::CallFacts &);
 llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &);
 llvm::Error emit(ModuleOp, llvm::raw_pwrite_stream &);
 namespace {
+bool rectangularSlab(Operation *op,func::FuncOp fn){
+  auto arg=dyn_cast<BlockArgument>(op->getOperand(0));
+  auto owner=fn->getAttrOfType<IntegerAttr>("kir.owner_axis");
+  if(!owner || owner.getInt()>1 || !arg || arg.getOwner()!=&fn.front())return false;
+  auto shape=fn.getArgAttrOfType<DenseI64ArrayAttr>(arg.getArgNumber(),"ct_src.shape");
+  return shape && shape.size()==3 && llvm::isPowerOf2_64(shape[2]) &&
+    llvm::all_of(fn->getAttrOfType<ArrayAttr>("block.configs"),[](Attribute row){
+      return llvm::isPowerOf2_64(cast<DictionaryAttr>(row).getAs<IntegerAttr>("width").getInt());
+    });
+}
 struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(Lower)
   bool tma;
-  explicit Lower(bool permit) : tma(permit) {}
+  intentdsl::CallFacts facts;
+  Lower(bool permit,const intentdsl::CallFacts &f) : tma(permit),facts(f) {}
   void runOnOperation() final {
+    auto fn=*getOperation().getOps<func::FuncOp>().begin();
+    if(failed(intentdsl::specializeProjectedLayout(fn,facts,"ct_src",true))){signalPassFailure();return;}
     getContext().getOrLoadDialect<intentdsl::cutile::TileSource>();
     getOperation().walk<WalkOrder::PostOrder>([&](Operation *op) {
       if (op->getName().getDialectNamespace() != "block")
@@ -29,6 +44,7 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
                        "ct_src." +
                            (slab ? (code=="load"?"gather_slab":"scatter_slab") : access ? ("tile_" + code).str() : code.str()));
       s.addAttributes(op->getAttrs());
+      if(slab && rectangularSlab(op,fn))s.addAttribute("ct_src.rectangular",b.getUnitAttr());
       if (access && !slab) {
         auto view = op->getOperand(0);
         auto axes = intentdsl::block::projection(view.getType());
@@ -50,6 +66,7 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
       op->replaceAllUsesWith(b.create(s));
       op->erase();
     });
+    partitionOwners(fn,facts);
   }
 };
 struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
@@ -68,6 +85,32 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
   if (failed(intentdsl::verifyMapping(module, profile, "ct_src")))
     return failure();
   auto fn = *module.getOps<func::FuncOp>().begin();
+  unsigned branch=0;
+  llvm::SmallDenseSet<Value> published;
+  for(auto &op:fn.front())if(op.getName().getStringRef()=="ct_src.output_partition"){
+    if(op.getAttrOfType<IntegerAttr>("index").getInt()!=branch++ || !llvm::hasSingleElement(op.getRegion(0)))
+      return op.emitError("expected distinct contiguous output partitions");
+    auto &bb=op.getRegion(0).front();
+    if(bb.empty() || bb.back().getName().getStringRef()!="ct_src.partition_end")
+      return op.emitError("unterminated output partition");
+    unsigned writes=0;
+    auto checked=op.walk([&](Operation *inner){
+      auto n=inner->getName().stripDialect();
+      if(n=="tile_store" || n=="scatter_slab")return WalkResult::interrupt();
+      if(n=="owner_store"){
+        if(inner->getBlock()!=&bb || !published.insert(inner->getOperand(0)).second)return WalkResult::interrupt();
+        ++writes;
+      }
+      return WalkResult::advance();
+    });
+    if(checked.wasInterrupted() || writes!=1)
+      return op.emitError("expected one owner publication per partition");
+  }
+  if(branch)for(auto &op:fn.front())
+    if(op.getName().stripDialect()!="output_partition" && op.getName().stripDialect()!="identity" &&
+       op.getName().stripDialect()!="rows" && op.getName().stripDialect()!="pid" &&
+       op.getName().stripDialect()!="return")return op.emitError("unguarded work in partitioned grid");
+  if(failed(intentdsl::specializeProjectedLayout(fn,*profile.services.get<intentdsl::CallFacts>(),"ct_src",false)))return failure();
   if (fn.empty() || !llvm::hasSingleElement(fn.getBody()) || fn.getNumResults())
     return fn.emitError("expected a defined output-buffer kernel");
   auto abi = fn->getAttrOfType<StringAttr>("kir.abi");
@@ -128,6 +171,8 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
       return WalkResult::advance();
     auto n = op->getName().stripDialect();
     bool ok = op->getName().getDialectNamespace() == "ct_src";
+    if(ok && (n=="gather_slab" || n=="scatter_slab"))
+      ok=op->hasAttr("ct_src.rectangular")==rectangularSlab(op,fn);
     if (ok && (n == "tile_store" || n == "tile_load")) {
       auto arg = dyn_cast<BlockArgument>(op->getOperand(0));
       if (!arg || arg.getOwner() != &fn.front() ||
@@ -191,7 +236,7 @@ void bind(Unit &unit) {
               auto indices = p.services.get<intentdsl::cutile::ArrayIndices>();
               if (!indices)
                 return llvm::createStringError("missing array profile");
-              pm.addPass(std::make_unique<Lower>(indices->permitTma));
+              pm.addPass(std::make_unique<Lower>(indices->permitTma,*p.services.get<intentdsl::CallFacts>()));
             }
             return llvm::Error::success();
           },

@@ -358,6 +358,13 @@ class Source {
       };
       if (prim == "bf16_product" || prim == "bf16_round" ||
           prim == "bf16_widen") {
+        if (vec && tile(inst.getOperand(0)) && prim != "bf16_product") {
+          if (prim == "bf16_round")
+            line("narrow_bf16_tile("+id+","+in(0)+",live,lanes);");
+          else
+            line("widen_bf16_tile("+id+","+in(0)+",lanes);");
+          continue;
+        }
         auto a = operand(0);
         auto value = prim == "bf16_product"
                          ? "round_bf16(widen_bf16(" + a + ")*widen_bf16(" +

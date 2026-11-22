@@ -1,4 +1,5 @@
 #include <algorithm>
+#include "intentdsl/levels/algorithm/kir/ir/ProjectedLayout.h"
 #include "compilerinfra/Assembly.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/IR/IRMapping.h"
@@ -154,8 +155,10 @@ public:
 struct Realize : PassWrapper<Realize, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(Realize)
   int64_t lanes;
-  explicit Realize(int64_t lanes) : lanes(lanes) {}
+  intentdsl::CallFacts facts;
+  Realize(int64_t lanes,const intentdsl::CallFacts &f) : lanes(lanes),facts(f) {}
   void runOnOperation() final {
+    if(failed(intentdsl::specializeProjectedLayout(*getOperation().getOps<func::FuncOp>().begin(),facts,"mojo_row",true))){signalPassFailure();return;}
     getContext().getOrLoadDialect<intentdsl::rowmojo::RowMojoDialect>();
     getOperation().walk([&](Operation *op) {
       if (op->getName().getStringRef() == "cpu.task")
@@ -164,7 +167,7 @@ struct Realize : PassWrapper<Realize, OperationPass<ModuleOp>> {
   }
 };
 } // namespace
-void realize(OpPassManager &pm, int64_t lanes) {
-  pm.addPass(std::make_unique<Realize>(lanes));
+void realize(OpPassManager &pm, int64_t lanes,const intentdsl::CallFacts &f) {
+  pm.addPass(std::make_unique<Realize>(lanes,f));
 }
 } // namespace CI_UNIT_NAMESPACE
