@@ -294,6 +294,27 @@ class Source {
       if(n=="owner_write"){
         line(in(0)+"[(row0+j)*"+in(0)+"s0]="+in(2)+";");continue;
       }
+      if(prim=="unique_put"){
+        line("for(int k=0;k<live;++k)"+in(0)+"[(long long)"+in(1)+"[k]*"+in(0)+"s0]="+in(2)+"[k];");
+        continue;
+      }
+      if(prim=="prefix_endpoints"){
+        line(in(0)+"[0]=0; if("+in(0)+"s0==1)__memcpy("+in(0)+"+1,"+in(4)+",live*sizeof(int),NRAM2GDRAM);else for(int k=0;k<live;++k)"+in(0)+"[(k+1)*"+in(0)+"s0]="+in(4)+"[k];");
+        line(in(1)+"[0]="+in(4)+"[live-1];");continue;
+      }
+      if(prim=="mark_intervals"){
+        auto offsets=in(1),unit=std::to_string(inst.getAttrOfType<IntegerAttr>("unit").getInt());
+        line("for(int k=0;k<live && col+k+1<N;++k){int e=col+k;int start="+offsets+"[e*"+offsets+"s0]/"+unit+",end="+offsets+"[(e+1)*"+offsets+"s0]/"+unit+";");
+        line("for(int i=start;i<end;++i)"+in(0)+"[(long long)i*"+in(0)+"s0]=e;}");continue;
+      }
+      if(prim=="pack_scatter"){
+        auto out=in(0),count=in(1),mask=in(5),prefix=in(6),payload=in(7);
+        auto fill=std::to_string(inst.getAttrOfType<IntegerAttr>("fill").getInt());
+        line("{int *packed=(int*)(storage+BYTES)-P;int count=live?"+prefix+"[live-1]:0;");
+        line("for(int k=0;k<live;++k){int p="+prefix+"[k];if("+mask+"[k])packed[p-1]="+payload+"[k];else packed[count+k-p]="+fill+";}");
+        line("auto *dst="+out+"+(row0+j)*"+out+"s0;if("+out+"s1==1)__memcpy(dst,packed,sizeof(int)*live,NRAM2GDRAM);else for(int k=0;k<live;++k)dst[k*"+out+"s1]=packed[k];"+count+"[(row0+j)*"+count+"s0]=count;}");
+        continue;
+      }
       if (n == "complete") {
         if (inst.getNumOperands() > 1)
           line(carry + "[j]=" + in(1) + ";");
@@ -357,6 +378,30 @@ class Source {
       auto type = ctype(val.getType());
       if (vec)
         line("auto *" + id + "=(" + type + "*)" + address(inst) + ";");
+      if(prim=="index_read_at"){
+        line("for(int k=0;k<live;++k)"+id+"[k]="+in(0)+"[(long long)"+in(1)+"[k]*"+in(0)+"s0];");continue;
+      }
+      if(prim=="atomic_fetch_add"){
+        line("{int *delta=(int*)(storage+BYTES)-2*P,*old=delta+P;delta[0]="+in(2)+";");
+        line("for(int k=0;k<live;++k){__bang_atomic_add(old,"+in(0)+"+(long long)"+in(1)+"[k]*"+in(0)+"s0,delta,1);__sync();"+id+"[k]=*old;}}");continue;
+      }
+      if(prim=="member_tile"){line("for(int k=0;k<live;++k)"+id+"[k]=col+k;");continue;}
+      if(prim=="private_bin_count" || prim=="vector_sum_columns"){
+        auto ptr=in(0), t=ctype(inst.getOperand(0).getType());
+        auto extent=std::to_string(inst.getAttrOfType<IntegerAttr>("extent").getInt());
+        line("{auto *panel=("+t+"*)(storage+BYTES)-P;__bang_write_value("+id+",lanes,0);");
+        if(prim=="private_bin_count"){
+          auto span=std::to_string(inst.getAttrOfType<IntegerAttr>("span").getInt());
+          line("long long first=(row0+j)*"+span+",end=first+"+span+";if(end>"+extent+")end="+extent+";");
+          line("for(long long m=first;m<end;m+=P){int take=(end-m<P?end-m:P);");
+          line("if("+ptr+"s0==1)__memcpy(panel,"+ptr+"+m,take*sizeof("+t+"),GDRAM2NRAM);else for(int z=0;z<take;++z)panel[z]="+ptr+"[(m+z)*"+ptr+"s0];");
+          line("for(int z=0;z<take;++z){long long bin=(long long)panel[z];if(bin>=0 && bin<live)++"+id+"[bin];}}}");
+        }else{
+          line("for(long long p=0;p<"+extent+";++p){if("+ptr+"s1==1)__memcpy(panel,"+ptr+"+p*"+ptr+"s0+col,live*sizeof(int),GDRAM2NRAM);");
+          line("else for(int k=0;k<live;++k)panel[k]="+ptr+"[p*"+ptr+"s0+(col+k)*"+ptr+"s1];__bang_add("+id+","+id+",panel,lanes);}}");
+        }
+        continue;
+      }
       if(prim=="feature_panel_sum"){
         auto offset=in(0);auto &bb=inst.getRegion(0).front();
         auto v=name(bb.back().getOperand(0).getDefiningOp()->getOperand(0));
@@ -464,6 +509,7 @@ class Source {
         expr = "expf(" + a + ")";
       else if (n == "select")
         expr = "(" + a + "?" + operand(1) + ":" + operand(2) + ")";
+      else if(n=="ne")expr="("+a+"!="+operand(1)+")";
       else if (n == "gt" || n == "and" || n == "xor" || n == "shr" ||
                n == "shl") {
         auto token = n == "gt"    ? ">"

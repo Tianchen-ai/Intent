@@ -52,3 +52,7 @@ def End : Inst<"end",(ins),(outs),[Terminator]>;
 def Summary : Inst<"reduce", (ins AnyTensor:$value, I1Tensor:$mask, StrAttr:$algebra),
                              (outs AnyTensor:$result)>;
 def LookupAxis : Inst<"lookup_axis",(ins AnyMemRef:$indices,AnyTensor:$rows),(outs AnyTensor:$coordinates)>;
+def SupplyDialect_ScatterDrain : Op<SupplyDialect,"scatter_fragment"> {let arguments=(ins AnyMemRef:$output,AnyMemRef:$counts,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active,I1Tensor:$predicate,I32Tensor:$prefix,I32Tensor:$values,I32Attr:$fill);let results=(outs I1:$done);}
+def SupplyIndexedPut : Op<SupplyDialect,"unique_put"> {let arguments=(ins AnyMemRef:$base,I32Tensor:$indices,I32Tensor:$values,I1Tensor:$valid,UnitAttr:$in_bounds);let results=(outs I1:$done);}
+def SupplyDialect_PublishOffsets : Op<SupplyDialect,"publish_offsets"> {let arguments=(ins AnyMemRef:$offsets,AnyMemRef:$total,AnyTensor:$columns,I1Tensor:$active,I32Tensor:$prefix);let results=(outs I1:$done);}
+def SupplyDialect_RangesAt : Op<SupplyDialect,"fill_ranges_at"> {let arguments=(ins AnyMemRef:$out,AnyMemRef:$offsets,AnyTensor:$columns,I1Tensor:$active,I64Attr:$unit,UnitAttr:$disjoint_in_bounds);let results=(outs I1:$done);}

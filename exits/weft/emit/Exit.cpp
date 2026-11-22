@@ -59,7 +59,14 @@ llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
       task.getAttrOfType<BoolAttr>("weft_host.absolute_origin").getValue()
           ? llvm::json::Array{"T", "N", "C", "O"}
           : llvm::json::Array{"T", "N", "C"};
+  if(task.hasAttr("cpu.key_extent")){
+    auto *symbols=fields["shape_parameters"].getAsArray();
+    symbols->push_back("KL");symbols->push_back("KH");
+  }
   fields["version"] = 3;
+  llvm::json::Array compact;
+  for(unsigned i=0;i<fn.getNumArguments();++i)if(fn.getArgAttr(i,"weft_host.contiguous"))compact.push_back(i);
+  if(!compact.empty())fields["contiguous_slots"]=std::move(compact);
   if(fn->hasAttr("kir.owner_axis")){
     auto ranks=task.getAttrOfType<DenseI64ArrayAttr>("weft_host.slot_ranks");
     auto rank=ranks[intentdsl::domainSlot(fn)];

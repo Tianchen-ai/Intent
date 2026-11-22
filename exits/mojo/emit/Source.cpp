@@ -64,12 +64,38 @@ public:
       out <<
 #include "Philox.inc"
           ;
+    if(task->walk([](Operation *op){auto n=op->getName().stripDialect();return n=="atomic_members" || n=="reserve_tickets"?WalkResult::interrupt():WalkResult::advance();}).wasInterrupted())
+      out<<"from std.atomic import Atomic\nfrom std.memory import unsafe_stack_allocation\n";
     out << "from std.memory import unsafe_memcpy\nfrom std.math import exp, sqrt, rsqrt, max, "
            "inf\n@export(\"intent_row_interval\")\ndef intent_row_interval("
         << llvm::join(params, ",")
         << ", first: Int64, stop: Int64, cols: Int64, columns_per_block: "
-           "Int64) abi(\"C\"):\n";
+           "Int64" << (task->hasAttr("cpu.key_extent")?", key_lo: Int64, key_hi: Int64":"") << ") abi(\"C\"):\n";
     for(auto &constant:constants)line(1,constant);
+    if(auto bins=task->getAttrOfType<IntegerAttr>("cpu.batch_extent")){
+      auto size=std::to_string(bins.getInt());
+      for(auto &step:body.without_terminator()){
+        auto n=step.getName().stripDialect();auto arg=[&](unsigned k){return var(step.getOperand(k));};
+        if(n=="tally_keys"){
+          line(1,"var private=unsafe_stack_allocation["+size+",Int32]()");
+          line(1,"for k in range("+size+"):");line(2,"private[unsafe_offset=k]=0");
+          line(1,"for r in range(Int(first),Int(stop)):");line(2,"for j in range(Int(cols)):");
+          line(3,"var k=Int("+arg(0)+"[unsafe_offset=r*Int("+arg(0)+"s0)+j*Int("+arg(0)+"s1)])");
+          line(3,"private[unsafe_offset=k]+=1");
+        }else if(n=="reserve_tickets"){
+          line(1,"for k in range("+size+"):");
+          line(2,"var count=private[unsafe_offset=k]");line(2,"if count!=0:");
+          line(3,"private[unsafe_offset=k]=Atomic[DType.int32].fetch_add("+arg(0)+".unsafe_offset(k*Int("+arg(0)+"s0)),count)");
+        }else if(n=="distribute_tickets"){
+          line(1,"for r in range(Int(first),Int(stop)):");line(2,"for j in range(Int(cols)):");
+          line(3,"var key=Int("+arg(0)+"[unsafe_offset=r*Int("+arg(0)+"s0)+j*Int("+arg(0)+"s1)])");
+          line(3,"var slot=private[unsafe_offset=key]+"+arg(1)+"[unsafe_offset=key*Int("+arg(1)+"s0)]");
+          line(3,arg(3)+"[unsafe_offset=Int(slot)*Int("+arg(3)+"s0)]=Int32(r*Int(cols)+j)");
+          line(3,"private[unsafe_offset=key]+=1");
+        }else return llvm::createStringError("unexpected reservation stage");
+      }
+      return llvm::Error::success();
+    }
     line(1, "for r in range(Int(first),Int(stop)):");
     const bool projected = fn->hasAttr("kir.iteration");
     // For projected views the host supplies each interval's physical base.
@@ -77,9 +103,63 @@ public:
         task->getAttrOfType<IntegerAttr>("mojo_row.lanes").getInt();
     for (auto &loop : body.without_terminator()) {
       if (loop.getName().getStringRef() != "mojo_row.sweep")
-        return llvm::createStringError("Mojo requires realized sweeps");
+      {
+        if(loop.getName().stripDialect()=="atomic_members"){
+          bool prefix=loop.walk([](Operation *v){return v->getName().stripDialect()=="write_offsets"?WalkResult::interrupt():WalkResult::advance();}).wasInterrupted();
+          if(prefix)line(2,"var prefix=Int32(0)");
+          line(2,"for j in range(Int(cols)):");
+          for(auto &v:loop.getRegion(0).front().without_terminator()){
+            auto n=v.getName().stripDialect();auto a=[&](unsigned i){return var(v.getOperand(i));};
+            auto src=v.getNumOperands()?a(0):std::string();std::string rhs;
+            if(n=="read")rhs=cast<MemRefType>(v.getOperand(0).getType()).getRank()==1?src+"[unsafe_offset=j*Int("+src+"s0)]":src+"[unsafe_offset=r*Int("+src+"s0)+j*Int("+src+"s1)]";
+            else if(n=="fill_ranges"){
+              auto offsets=a(1),unit=std::to_string(v.getAttrOfType<IntegerAttr>("unit").getInt());
+              line(3,"if j+1<Int(cols):");line(4,"for block in range(Int("+offsets+"[unsafe_offset=j*Int("+offsets+"s0)])//"+unit+",Int("+offsets+"[unsafe_offset=(j+1)*Int("+offsets+"s0)])//"+unit+"):");
+              line(5,src+"[unsafe_offset=block*Int("+src+"s0)]=Int32(j)");continue;
+            }
+            else if(n=="constant")rhs="Int32("+intentdsl::kir::literal(v.getAttrOfType<TypedAttr>("value"))+")";
+            else if(n=="atomic_add"){
+              if(task->hasAttr("cpu.key_extent")){
+                line(3,"if Int("+a(1)+")<Int(key_lo) or Int("+a(1)+")>=Int(key_hi):");line(4,"continue");
+              }
+              rhs="Atomic[DType.int32].fetch_add("+src+".unsafe_offset(Int("+a(1)+")*Int("+src+"s0)),"+a(2)+")";
+            }
+            else if(n=="index_read")rhs=src+"[unsafe_offset=Int("+a(1)+")*Int("+src+"s0)]";
+            else if(n=="unique_put"){line(3,src+"[unsafe_offset=Int("+a(1)+")*Int("+src+"s0)]="+a(2));continue;}
+            else if(n=="ordinal")rhs="Int32(r*Int(cols)+j)";
+            else if(n=="shr" || n=="shl")rhs=a(0)+(n=="shr"?" >> ":" << ")+a(1);
+            else if(n=="scan_sum"){line(3,"prefix += "+a(0));rhs="prefix";}
+            else if(n=="write_offsets"){
+              line(3,src+"[unsafe_offset=(j+1)*Int("+src+"s0)]="+a(3));
+              line(2,src+"[unsafe_offset=0]=0");line(2,a(1)+"[unsafe_offset=0]=prefix");continue;
+            }else if(n=="add")rhs=a(0)+"+"+a(1);
+            else return llvm::createStringError("unsupported atomic task expression "+n);
+            auto dst=temp();line(3,"var "+dst+"="+rhs);vars[v.getResult(0)]=dst;
+          }
+          continue;
+        }
+        if(loop.getName().getStringRef()!="cpu.pack_members")return llvm::createStringError("Mojo requires realized sweeps");
+        auto src=var(loop.getOperand(0)),dst=var(loop.getOperand(1)),cnt=var(loop.getOperand(2));
+        auto threshold=intentdsl::kir::literal(loop.getAttrOfType<TypedAttr>("threshold")),fill=std::to_string(loop.getAttrOfType<IntegerAttr>("fill").getInt());
+        line(2,"var output="+dst+".unsafe_offset(r*Int("+dst+"s0))");line(2,"var input="+src+".unsafe_offset(r*Int("+src+"s0))");
+        line(2,"var count=0");line(2,"for j in range(Int(cols)):");line(3,"if input[unsafe_offset=j*Int("+src+"s1)] != "+threshold+":");
+        line(4,"output[unsafe_offset=count*Int("+dst+"s1)]=Int32(j)");line(4,"count+=1");
+        line(2,"for j in range(count,Int(cols)):");line(3,"output[unsafe_offset=j*Int("+dst+"s1)]="+fill);
+        line(2,cnt+"[unsafe_offset=r*Int("+cnt+"s0)] = Int32(count)");continue;
+      }
       bool tail = loop.getAttrOfType<StringAttr>("range") == "tail";
       bool owners = loop.getAttrOfType<StringAttr>("range") == "owners";
+      if(loop.getAttrOfType<StringAttr>("range")=="private_bins"){
+        auto &count=loop.getRegion(0).front().front();auto &write=*count.getNextNode();
+        auto src=var(count.getOperand(0)),dst=var(write.getOperand(0));
+        auto span=std::to_string(count.getAttrOfType<IntegerAttr>("span").getInt()), size=std::to_string(count.getAttrOfType<IntegerAttr>("extent").getInt());
+        line(2,"var bins="+dst+".unsafe_offset(r*Int("+dst+"s0))");
+        line(2,"for k in range(Int(cols)):");line(3,"bins[unsafe_offset=k*Int("+dst+"s1)]=0");
+        line(2,"for m in range(r*"+span+",min((r+1)*"+span+","+size+")):");
+        line(3,"var k=Int("+src+"[unsafe_offset=m*Int("+src+"s0)])");
+        line(3,"if 0<=k and k<Int(cols):");line(4,"bins[unsafe_offset=k*Int("+dst+"s1)] += 1");
+        continue;
+      }
       if(loop.getAttrOfType<StringAttr>("range")=="indexed_copy"){
         auto &read=loop.getRegion(0).front().front();
         auto src=var(read.getOperand(0)), ids=var(read.getOperand(1)), dst=var(read.getNextNode()->getOperand(0));
@@ -150,6 +230,13 @@ public:
             line(3, acc + " = " +
                         (sum ? acc + " + " + arg(0)
                              : "max(" + acc + "," + arg(0) + ")"));
+        } else if(code=="sum_columns"){
+          auto extent=std::to_string(op.getAttrOfType<IntegerAttr>("extent").getInt()),ptr=arg(0);
+          line(3,"var "+lhs+" = SIMD[DType.int32,"+lanes+"](0)");
+          line(3,"for p in range("+extent+"):");
+          line(4,"if "+ptr+"s1==1:");line(5,lhs+" += "+ptr+".unsafe_offset(p*Int("+ptr+"s0)+j).unsafe_load[width="+lanes+"]()");
+          line(4,"else:");line(5,"comptime for k in range("+lanes+"):");line(6,lhs+"[k] += "+ptr+"[unsafe_offset=p*Int("+ptr+"s0)+(j+k)*Int("+ptr+"s1)]");
+          vars[op.getResult(0)]=lhs;
         } else if(code=="segment_fold" || code=="segment_size"){
           bool flat=cast<MemRefType>(fn.getArgument(task->getAttrOfType<IntegerAttr>("domain_arg").getInt()).getType()).getRank()==1;
           auto owner=flat?(task->hasAttr("cpu.member_tasks")?"(r+j+lane)":"(j+lane)"):arg(1), offsets=arg(0);
@@ -296,9 +383,16 @@ public:
           else if(opKind=="scan_sum"){
             auto carry="carry"+std::to_string(op.getAttrOfType<IntegerAttr>("carry").getInt());
             line(3,"var "+lhs+" = "+arg(0));
-            line(3,"comptime for lane in range("+lanes+"):");
-            line(4,carry+" += "+arg(0)+"[lane]");
-            line(4,lhs+"[lane] = "+carry);
+            auto laneCount=loop.getAttrOfType<IntegerAttr>("width").getInt();
+            for(int64_t jump=1;jump<laneCount;jump*=2){
+              auto shift=temp();
+              line(3,"var "+shift+"=SIMD[DType."+dtype(op.getResult(0).getType())+","+lanes+"](0)");
+              line(3,"comptime for lane in range("+std::to_string(jump)+","+lanes+"):");
+              line(4,shift+"[lane]="+lhs+"[lane-"+std::to_string(jump)+"]");
+              line(3,lhs+" += "+shift);
+            }
+            line(3,lhs+" += "+carry);
+            line(3,carry+" = "+lhs+"["+std::to_string(laneCount-1)+"]");
             vars[op.getResult(0)]=lhs;
             continue;
           }

@@ -17,6 +17,11 @@ struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
           op->getLoc(), ("triton_src." + op->getName().stripDialect()).str());
       auto code = op->getName().stripDialect();
       auto args = op->getOperands();
+      if(code=="key_counts" || code=="sum_columns"){
+        auto count=op->getAttrOfType<IntegerAttr>(code=="key_counts"?"span":"extent").getInt();
+        uint64_t width=std::min<uint64_t>(code=="key_counts"?8192:128,llvm::PowerOf2Ceil(std::max<int64_t>(1,count)));
+        state.addAttribute("native_panel",b.getI64IntegerAttr(width));
+      }
       if (code == "load" || code == "store") {
         OperationState offset(op->getLoc(), "triton_src.offsets");
         auto axes=*intentdsl::block::projection(args.front().getType());

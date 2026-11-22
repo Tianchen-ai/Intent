@@ -100,7 +100,7 @@ class Artifact:
                 arg["name"] != "a" + str(i)
                 or arg["c_type"].strip() != wanted
                 or len(arg.get("shape", [])) != rank
-                or (rank and not arg["strided"])
+                or (rank and bool(arg["strided"]) != (i not in self.data.get("contiguous_slots",())))
             ):
                 raise ValueError(
                     f"task slot {i} disagrees with compiled declaration: {arg}"

@@ -114,6 +114,9 @@ struct Construct : PassWrapper<Construct, OperationPass<ModuleOp>> {
     s.addTypes(b.getIndexType());
     s.addAttribute("cpu.walk",loop->getAttr("cpu.walk"));
     if(auto partition=loop->getAttr("cpu.member_tasks"))s.addAttribute("cpu.member_tasks",partition);
+    if(auto single=loop->getAttr("cpu.single_dispatcher"))s.addAttribute("cpu.single_dispatcher",single);
+    if(auto keys=loop->getAttr("cpu.key_extent"))s.addAttribute("cpu.key_extent",keys);
+    if(auto bins=loop->getAttr("cpu.batch_extent"))s.addAttribute("cpu.batch_extent",bins);
     s.addAttribute("cpu.tile",loop->getAttr("cpu.tile"));
     s.addAttribute("rows", loop->getAttr("cpu.row_groups"));
     s.addAttribute(

@@ -3,6 +3,7 @@
 #include "mlir/IR/Operation.h"
 namespace CI_UNIT_NAMESPACE {
 inline int64_t laneCount(mlir::Operation *task,int64_t vectorBits) {
+  if(task->hasAttr("cpu.member_tasks"))return 1;
   // Keep the mixed-precision accumulation width. Uniform half arithmetic
   // and half copies can occupy all the lanes in the same register.
   bool half=true;

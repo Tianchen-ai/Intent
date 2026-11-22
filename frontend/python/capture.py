@@ -13,6 +13,7 @@ class Capture:
             a["name"]: ("%" + a["name"], argument_type(a)) for a in self.args
         }
         self.ops = []
+        self.updated=set()
         self.serial = 0
         self.line = fn.lineno
 
@@ -88,7 +89,7 @@ class Capture:
         if (
             isinstance(n, ast.Compare)
             and len(n.ops) == 1
-            and isinstance(n.ops[0], ast.Gt)
+            and isinstance(n.ops[0], (ast.Gt,ast.NotEq))
         ):
             a, b = self.expr(n.left), self.expr(n.comparators[0])
             ty = (
@@ -96,7 +97,7 @@ class Capture:
                 if any(t.startswith("tensor") for _, t in (a, b))
                 else "i1"
             )
-            return self.emit("gt", [a, b], ty)
+            return self.emit("gt" if isinstance(n.ops[0],ast.Gt) else "ne", [a, b], ty)
         if isinstance(n, ast.BinOp):
             args = [self.expr(n.left), self.expr(n.right)]
             op = {
@@ -113,6 +114,16 @@ class Capture:
             return self.emit(op, args, ty)
         if isinstance(n, ast.Call):
             fn = spelling(n.func, self.namespace)
+            if fn in ("atomic_add", "gather"):
+                from .effects import indexed_expression
+                return indexed_expression(self,n,fn)
+            if fn=="column_index" and [ast.unparse(a) for a in n.args]==[self.owner,self.row]:
+                return self.emit("member_index",[self.values[self.owner],("%row","index")],"tensor<?xi32>")
+            if fn=="reduce_by_key":
+                from .keyed import capture
+                return capture(self,n)
+            if fn=="sum_columns" and len(n.args)==1 and not n.keywords:
+                return self.emit("column_sum",[self.values[n.args[0].id],("%row","index")],"tensor<?xi32>")
             if fn=="ordered_sum":
                 from .segments import fold
                 return fold(self,n)
@@ -259,6 +270,10 @@ class Capture:
         outputs = set()
         for stmt in loop.body:
             self.line = stmt.lineno
+            if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+                from .effects import statement
+                statement(self,stmt.value,outputs)
+                continue
             if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
                 raise ValueError(f"unsupported row statement at line {stmt.lineno}")
             target = stmt.targets[0]
@@ -293,7 +308,7 @@ class Capture:
                     [*args, v],
                     attrs="{axes=array<i64:1,0>}" if transposed else "",
                 )
-        if outputs != {
+        if outputs|self.updated != {
             a["name"] for a in self.args if a["direction"] in ("Out", "InOut")
         }:
             raise ValueError("missing output definition")

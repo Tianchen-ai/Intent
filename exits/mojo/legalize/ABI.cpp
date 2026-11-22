@@ -1,5 +1,8 @@
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
 #include "intentdsl/levels/algorithm/kir/ir/Segment.h"
+#include "intentdsl/levels/execution/cpu/ir/Pack.h"
+#include "intentdsl/levels/execution/cpu/ir/IndexedEffects.h"
+#include "intentdsl/levels/algorithm/kir/ir/RowSemantics.h"
 #include "intentdsl/levels/algorithm/kir/ir/ProjectedLayout.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/StringSwitch.h"
@@ -38,6 +41,13 @@ LogicalResult verifyLoops(ModuleOp m, const TargetProfile &p, bool callable) {
       fn->getAttrOfType<StringAttr>("mojo_row.entry") != "intent_entry")
     return fn.emitError("missing synchronous host entry");
   Operation *full = nullptr;
+  if(intentdsl::cpu::packed(task.getRegion(0).front()))return intentdsl::cpu::verifyPack(task.getRegion(0).front());
+  if(intentdsl::cpu::reservations(task.getRegion(0).front()))return intentdsl::cpu::verifyReservations(task.getRegion(0).front(),*p.services.get<intentdsl::CallFacts>());
+  if(intentdsl::cpu::atomicMembers(task.getRegion(0).front())){
+    auto &body=task.getRegion(0).front();
+    return intentdsl::verifyRowComputation(fn,body.front().getRegion(0).front(),body.getArguments().drop_front(),
+           task.getAttrOfType<IntegerAttr>("domain_arg").getInt(),"cpu",true);
+  }
   for (auto &s : task.getRegion(0).front().without_terminator()) {
     if (s.getName().getStringRef() != "mojo_row.sweep")
       return s.emitError("expected a realized column sweep");
@@ -46,7 +56,8 @@ LogicalResult verifyLoops(ModuleOp m, const TargetProfile &p, bool callable) {
     auto w = s.getAttrOfType<IntegerAttr>("width").getInt();
     bool tail = full != nullptr;
     bool indexed = s.getAttrOfType<StringAttr>("range")=="indexed_copy";
-    bool copy = s.getAttrOfType<StringAttr>("range")=="copy" || indexed;
+    bool key=s.getAttrOfType<StringAttr>("range")=="private_bins";
+    bool copy = s.getAttrOfType<StringAttr>("range")=="copy" || indexed || key;
     bool owners = s.getAttrOfType<StringAttr>("range")=="owners";
     if(owners && (!store || full || w!=1 || !fn->hasAttr("kir.owner_axis")))return s.emitError("invalid owner publication");
     if(copy && (!store || !llvm::hasSingleElement(task.getRegion(0).front().without_terminator())))
@@ -71,7 +82,14 @@ LogicalResult verifyLoops(ModuleOp m, const TargetProfile &p, bool callable) {
     unsigned writes = 0;
     for (auto &op : bb.without_terminator()) {
       auto code = op.getName().getStringRef();
-      if(code=="mojo_row.owner_read" || code=="mojo_row.owner_write"){
+      if(code=="mojo_row.key_counts" || code=="mojo_row.sum_columns"){
+        if(op.getOperand(1)!=task.getRegion(0).front().getArgument(0) || op.getOperand(2)!=bb.getArgument(0) ||
+            op.getResult(0).getType()!=VectorType::get({w},IntegerType::get(m.getContext(),32)) ||
+            op.getAttrOfType<IntegerAttr>("extent").getInt()<0 || (code=="mojo_row.key_counts" && !key))
+          return op.emitError("key reduction must preserve its output tile");
+        if(key && (op.getNextNode()==nullptr || op.getNextNode()->getName().stripDialect()!="write" ||
+                   op.getNextNode()->getOperand(3)!=op.getResult(0)))return op.emitError("bins require private output storage");
+      }else if(code=="mojo_row.owner_read" || code=="mojo_row.owner_write"){
         bool write=code=="mojo_row.owner_write";
         auto view=cast<MemRefType>(op.getOperand(0).getType());
         auto val=write?op.getOperand(2):op.getResult(0);
@@ -138,10 +156,10 @@ LogicalResult verifyLoops(ModuleOp m, const TargetProfile &p, bool callable) {
     if(copy){
       auto &read=bb.front();
       auto *write=read.getNextNode();
-      if(bb.getOperations().size()!=3 || read.getName().getStringRef()!=(indexed?"mojo_row.indexed_read":"mojo_row.read") ||
+      if(bb.getOperations().size()!=3 || read.getName().getStringRef()!=(key?"mojo_row.key_counts":indexed?"mojo_row.indexed_read":"mojo_row.read") ||
          !write || write->getName().getStringRef()!="mojo_row.write" ||
          write->getOperand(3)!=read.getResult(0) ||
-         cast<MemRefType>(read.getOperand(0).getType()).getRank()!=2 ||
+         cast<MemRefType>(read.getOperand(0).getType()).getRank()!=(key?1:2) ||
          cast<MemRefType>(write->getOperand(0).getType()).getRank()!=2)
         return s.emitError("expected a typed matrix read followed by its matching write");
     }

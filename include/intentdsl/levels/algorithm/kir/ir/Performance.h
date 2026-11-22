@@ -8,6 +8,21 @@ struct CallFacts {
   llvm::json::Array arguments;
   std::string localEstimator;
   int64_t participants;
+  double keyTraffic(mlir::Operation *root) const {
+    double bytes=0;
+    root->walk([&](mlir::Operation *op){
+      auto n=op->getName().stripDialect();
+      if(n!="count_keys" && n!="column_sum" && n!="key_counts" && n!="sum_columns")return;
+      auto source=mlir::dyn_cast<mlir::BlockArgument>(op->getOperand(0));
+      if(!source || source.getArgNumber()>=arguments.size())return;
+      auto *view=arguments[source.getArgNumber()].getAsObject();auto *shape=view?view->getArray("shape"):nullptr;
+      if(!shape)return;
+      double elements=1;
+      for(auto &d:*shape)elements*=d.getAsInteger().value_or(0);
+      bytes+=elements*mlir::cast<mlir::MemRefType>(source.getType()).getElementTypeBitWidth()/8;
+    });
+    return bytes;
+  }
   // Estimate total visits from a packed offsets domain. A subrange of the
   // packed input may be shorter. This estimate is never a legality bound.
   double segmentReads(mlir::Operation *program) const {

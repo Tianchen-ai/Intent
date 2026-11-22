@@ -22,3 +22,9 @@ def MojoIndirectRead : Op<RowMojo_Dialect,"indexed_read"> {
   let arguments=(ins AnyMemRef:$table,AnyMemRef:$ids,Index:$row,Index:$col);
   let results=(outs AnyVectorOfAnyRank:$lanes);
 }
+def RowMojo_Dialect_KeyCounts : Op<RowMojo_Dialect,"key_counts"> {
+  let arguments=(ins AnyMemRef:$source,Index:$row,Index:$column,I64Attr:$extent,I64Attr:$span);let results=(outs AnyVectorOfAnyRank:$counts);
+}
+def RowMojo_Dialect_SumColumns : Op<RowMojo_Dialect,"sum_columns"> {
+  let arguments=(ins AnyMemRef:$source,Index:$row,Index:$column,I64Attr:$extent);let results=(outs AnyVectorOfAnyRank:$counts);
+}

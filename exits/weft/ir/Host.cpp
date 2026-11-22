@@ -1,4 +1,7 @@
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
+#include "intentdsl/levels/execution/cpu/ir/Pack.h"
+#include "intentdsl/levels/execution/cpu/ir/IndexedEffects.h"
+#include "intentdsl/levels/algorithm/kir/ir/RowSemantics.h"
 #include "intentdsl/levels/algorithm/kir/ir/Performance.h"
 #include "mlir/Bytecode/BytecodeOpInterface.h"
 #include "mlir/IR/Builders.h"
@@ -44,7 +47,28 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
       task.walk([&](Operation *o) {
         absolute |= o->getName().getStringRef() == "cpu.ordinal";
         auto n=o->getName().stripDialect();
-        if(n=="ordered_sum" || n=="segment_length" || n=="member_load"){
+        if(n=="write_offsets" || n=="fill_ranges"){
+          for(auto v:o->getOperands().take_front(n=="write_offsets"?2:1)){
+            auto i=cast<BlockArgument>(v).getArgNumber()-1;
+            auto *shape=facts.arguments[i].getAsObject()->getArray("shape");
+            f.setArgAttr(i,"weft_host.indirect_extents",b.getDenseI64ArrayAttr({*shape->front().getAsInteger()}));
+          }
+        }
+        if(n=="reserve_tickets" || n=="distribute_tickets"){
+          SmallVector<Value> shared;
+          if(n=="reserve_tickets")shared.push_back(o->getOperand(0));
+          else {shared.push_back(o->getOperand(1));shared.push_back(o->getOperand(3));absolute=true;}
+          for(auto v:shared){
+            auto i=cast<BlockArgument>(v).getArgNumber()-1;
+            auto *shape=facts.arguments[i].getAsObject()->getArray("shape");
+            f.setArgAttr(i,"weft_host.indirect_extents",b.getDenseI64ArrayAttr({*shape->front().getAsInteger()}));
+          }
+        }
+        if(n=="pack_members"){
+          auto slot=cast<BlockArgument>(o->getOperand(2)).getArgNumber()-1;
+          f.setArgAttr(slot,"weft_host.task_indices",b.getUnitAttr());
+        }
+        if(n=="ordered_sum" || n=="segment_length" || n=="member_load" || n=="count_keys" || n=="column_sum" || n=="atomic_add" || n=="unique_put" || n=="index_read"){
           auto argument=dyn_cast<BlockArgument>(o->getOperand(0));
           if(!argument || argument.getOwner()!=&task.getRegion(0).front() || !argument.getArgNumber()){
             o->emitError("segment read requires a captured input");signalPassFailure();return;
@@ -55,7 +79,7 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
           if(shape)for(auto &d:*shape)if(auto extent=d.getAsInteger())dims.push_back(*extent);
           if(dims.size()!=cast<MemRefType>(argument.getType()).getRank()){o->emitError("missing indexed input extents");signalPassFailure();return;}
           f.setArgAttr(slot,"weft_host.indirect_extents",b.getDenseI64ArrayAttr(dims));
-          absolute=true;
+          absolute|=n=="ordered_sum" || n=="segment_length" || n=="member_load" || n=="count_keys";
         }
         if(o->getName().getStringRef()=="cpu.gather_row"){
           auto table=cast<BlockArgument>(o->getOperand(0)).getArgNumber()-1;
@@ -67,6 +91,20 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
         }
       });
       task.setAttr("weft_host.absolute_origin", b.getBoolAttr(absolute));
+      if(task.walk([](Operation *v){return v->getName().stripDialect()=="ordered_sum"?WalkResult::interrupt():WalkResult::advance();}).wasInterrupted()){
+        for(unsigned i=0;i<f.getNumArguments();++i){
+          if(!isa<MemRefType>(f.getArgument(i).getType()))continue;
+          auto *a=facts.arguments[i].getAsObject();
+          auto *shape=a->getArray("shape"),*strides=a->getArray("strides");
+          bool dense=shape && strides && shape->size()==strides->size();int64_t step=1;
+          if(dense)for(int k=shape->size()-1;k>=0;--k){
+            auto n=(*shape)[k].getAsInteger(),s=(*strides)[k].getAsInteger();
+            if(!n || !s || *n<0 || (*n>1 && *s!=step) || (*n && step>INT64_MAX / *n)){dense=false;break;}
+            step*=*n;
+          }
+          if(dense)f.setArgAttr(i,"weft_host.contiguous",b.getUnitAttr());
+        }
+      }
       task.setAttr("weft_host.slot_ranks", b.getDenseI64ArrayAttr(ranks));
       return;
     }
@@ -79,9 +117,11 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
     s.addRegion()->takeBody(task.getRegion(0));
     auto *dispatch = b.create(s);
     task.replaceAllUsesWith(dispatch);
+    auto &body=dispatch->getRegion(0).front();
+    if(failed(intentdsl::cpu::packMemberLoop(body))){signalPassFailure();return;}
     if (cast<DictionaryAttr>(dispatch->getAttrOfType<ArrayAttr>("rows")[0])
             .getAs<IntegerAttr>("columns")
-            .getInt() != 0)
+                     .getInt() != 0 && !intentdsl::cpu::packed(body) && !intentdsl::cpu::formReservations(body) && !intentdsl::cpu::formAtomicMembers(body))
       buildPanels(dispatch);
     task.erase();
   }
@@ -102,8 +142,13 @@ LogicalResult verifyHost(ModuleOp m, const compilerinfra::TargetProfile &p,
   if (whole && failed(intentdsl::cpu::verifyTask(
                    m, p, "weft-task-ssa", "weft_host.dispatch_rows", true)))
     return failure();
-  if (!whole && failed(verifyPanels(&task)))
+  auto &body=task.getRegion(0).front();
+  if(intentdsl::cpu::reservations(body) && failed(intentdsl::cpu::verifyReservations(body,*p.services.get<intentdsl::CallFacts>())))return failure();
+  if(intentdsl::cpu::atomicMembers(body) && failed(intentdsl::verifyRowComputation(*m.getOps<func::FuncOp>().begin(),
+     body.front().getRegion(0).front(),body.getArguments().drop_front(),task.getAttrOfType<IntegerAttr>("domain_arg").getInt(),"cpu",true)))return failure();
+  if (!whole && !intentdsl::cpu::reservations(body) && !intentdsl::cpu::packed(body) && !intentdsl::cpu::atomicMembers(body) && failed(verifyPanels(&task)))
     return failure();
+  if(intentdsl::cpu::packed(task.getRegion(0).front()) && failed(intentdsl::cpu::verifyPack(task.getRegion(0).front())))return failure();
   if (task.getAttrOfType<StringAttr>("task_symbol") != "row_task")
     return task.emitError("unbound native row task");
   if (callable) {
@@ -111,7 +156,7 @@ LogicalResult verifyHost(ModuleOp m, const compilerinfra::TargetProfile &p,
     bool absolute = false;
     task.walk([&](Operation *o) {
       auto n=o->getName().stripDialect();
-      absolute |= n=="ordinal" || n=="ordered_sum" || n=="segment_length";
+      absolute |= n=="ordinal" || n=="ordered_sum" || n=="segment_length" || n=="count_keys" || n=="distribute_tickets";
     });
     if (task.getAttrOfType<BoolAttr>("weft_host.absolute_origin") !=
         BoolAttr::get(m.getContext(), absolute))

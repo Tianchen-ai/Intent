@@ -1,4 +1,7 @@
 #include "intentdsl/levels/algorithm/kir/ir/Segment.h"
+#include "intentdsl/levels/algorithm/kir/ir/KeyReduction.h"
+#include "intentdsl/levels/execution/cpu/ir/Pack.h"
+#include "intentdsl/levels/execution/cpu/ir/IndexedEffects.h"
 #include <algorithm>
 #include "intentdsl/levels/algorithm/kir/ir/ProjectedLayout.h"
 #include "compilerinfra/Assembly.h"
@@ -50,6 +53,8 @@ class Columns {
       auto *physical=b.create(s);
       if(fold && intentdsl::kir::contiguousFeatureRead(physical))physical->setAttr("feature_vector",b.getUnitAttr());
       result=physical->getResult(0);
+    }else if(n=="count_keys" || n=="column_sum"){
+      result=make(n=="count_keys"?"key_counts":"sum_columns",{op->getOperand(0),op->getOperand(1),col},t,op->getAttrs())->getResult(0);
     }else if(n=="read_owner")
       result=make("owner_read",op->getOperands(),t)->getResult(0);
     else if(n=="gather_row")result=make("indexed_read",{op->getOperand(0),op->getOperand(1),op->getOperand(2),col},t)->getResult(0);
@@ -155,6 +160,8 @@ public:
       if(n=="write_owner") continue;
       if (n != "sum" && n != "max_num" && n!="welford" && n != "write")
         continue;
+      if(n=="write" && original.size()==2 && original.front()->getName().stripDialect()=="count_keys" &&
+         op->getOperand(2)==original.front()->getResult(0)){sweep(op,"private_bins",{},1);continue;}
       if(n=="write" && original.size()==2 && original.front()->getName().stripDialect()=="gather_row" &&
          op->getOperand(2)==original.front()->getResult(0)){
         sweep(op,"indexed_copy",{},1);continue;
@@ -181,11 +188,23 @@ struct Realize : PassWrapper<Realize, OperationPass<ModuleOp>> {
   intentdsl::CallFacts facts;
   Realize(int64_t lanes,const intentdsl::CallFacts &f) : lanes(lanes),facts(f) {}
   void runOnOperation() final {
+    for(auto fn:getOperation().getOps<func::FuncOp>())fn.walk([&](Operation *op){
+      auto n=op->getName().stripDialect();if(n!="count_keys" && n!="column_sum")return;
+      auto extent=intentdsl::kir::keyExtent(op,facts);
+      if(!extent){op->emitError()<<llvm::toString(extent.takeError());signalPassFailure();return;}
+      op->setAttr("extent",IntegerAttr::get(IntegerType::get(&getContext(),64),*extent));
+    });
     if(failed(intentdsl::specializeProjectedLayout(*getOperation().getOps<func::FuncOp>().begin(),facts,"mojo_row",true))){signalPassFailure();return;}
     getContext().getOrLoadDialect<intentdsl::rowmojo::RowMojoDialect>();
     getOperation().walk([&](Operation *op) {
-      if (op->getName().getStringRef() == "cpu.task")
-        Columns(op).run(laneCount(op,lanes));
+      if (op->getName().getStringRef() == "cpu.task"){
+        auto &body=op->getRegion(0).front();
+        if(failed(intentdsl::cpu::packMemberLoop(body))){signalPassFailure();return;}
+        if(intentdsl::cpu::packed(body) || intentdsl::cpu::formReservations(body) || intentdsl::cpu::formAtomicMembers(body)){
+          Builder b(&getContext());op->setAttr("mojo_row.schedule",b.getStringAttr("static-row-groups"));
+          op->setAttr("mojo_row.lanes",b.getI64IntegerAttr(laneCount(op,lanes)));
+        }else Columns(op).run(laneCount(op,lanes));
+      }
     });
   }
 };

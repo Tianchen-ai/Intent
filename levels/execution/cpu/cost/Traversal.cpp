@@ -86,6 +86,7 @@ void registerCost(Unit &u) {
             });
             if(strideError)return std::move(strideError);
             auto segments=facts->segmentReads(op);
+            double keys=facts->keyTraffic(op);if(keys){read+=keys;if(rd)readNs+=keys/ *rd;e.terms["key_input_bytes"]={keys,"B"};}
             if(segments){read+=segments;if(rd)readNs+=segments/ *rd;e.terms["packed_member_reads"]={segments,"B"};}
             e.terms["read"] = {read, "B"};
             e.terms["write"] = {write, "B"};
@@ -122,6 +123,13 @@ void registerCost(Unit &u) {
             e.terms["inner_write_stride"] = {writeStep, "element"};
             e.terms["line_touches"] = {lines, "line"};
             auto arithmetic = e.timeNs;
+            double sharedLines=0;
+            op->walk([&](Operation *update){
+              if(update->getName().stripDialect()!="atomic_add")return;
+              auto index=cast<BlockArgument>(update->getOperand(0)).getArgNumber();
+              auto *arg=facts->arguments[index].getAsObject();auto shape=arg->getArray("shape");
+              if(shape && shape->size()==1)sharedLines=std::max(1.,std::ceil(shape->front().getAsInteger().value_or(0)*4./64));
+            });
             e.timeNs.reset();
             for (auto [i, row] : llvm::enumerate(rows)) {
               auto grain = cast<DictionaryAttr>(row)
@@ -143,6 +151,22 @@ void registerCost(Unit &u) {
                     work * (groups ? std::ceil(groups / facts->participants) *
                                          facts->participants / groups
                                    : 0.);
+                if(sharedLines){
+                  bool sharded=d.contains("key_extent");
+                  double writers=d.contains("single_dispatcher")?1:sharded?std::min(sharedLines,double(facts->participants)):std::min(groups,double(facts->participants));
+                  double collisions=sharded?0:std::max(0.,writers-1)/sharedLines;
+                  pred.terms["shared_cacheline_writers"]={collisions,"ratio"};
+                  if(rs && rd){
+                    auto traffic=m*n*(64/std::max(1.,writers)/ *rs+64*collisions/ *rs);
+                    if(sharded)traffic+=read*(writers-1)/ *rd;
+                    if(auto bins=d.getAs<IntegerAttr>("batch_extent")){
+                      double reservations=std::min(m*n,writers*bins.getInt());
+                      pred.terms["maximum_reservations"]={reservations,"count"};
+                      traffic=reservations*(64/std::max(1.,writers)+64*collisions)/ *rs+read/ *rd;
+                    }
+                    *pred.timeNs+=traffic;
+                  }
+                }
                 if (!e.timeNs || *pred.timeNs < *e.timeNs)
                   e.timeNs = pred.timeNs;
               }

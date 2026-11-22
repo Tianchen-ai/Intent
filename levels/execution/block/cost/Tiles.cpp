@@ -25,12 +25,13 @@ void registerCost(Unit &u) {
             std::swap(m, n);
           auto stridedRead = intentdsl::quantity(ctx, "read_16", "B/ns");
           double r = 0, w = 0, ws = 0;
-          unsigned reductions = 0, summaryFields=0, scans=0;
+          unsigned reductions = 0, summaryFields=0, scans=0, atomics=0;
           op->walk([&](Operation *i) {
             auto k = i->getName().stripDialect();
             reductions += k == "sum" || k == "max_num" || k=="welford";
             summaryFields += k=="welford" ? 3 : 0;
             scans += k=="scan_sum";
+            atomics += k=="atomic_add";
             if (k != "read" && k != "write")
               return;
             auto ty = cast<MemRefType>(i->getOperand(0).getType());
@@ -45,6 +46,8 @@ void registerCost(Unit &u) {
           r *= stream ? 1 + reductions : 1;
           auto segmentedRead=f->segmentReads(op);
           r+=segmentedRead;
+          r+=4*m*n*atomics;ws+=4*m*n*atomics;
+          double keys=f->keyTraffic(op);r+=keys;
           if(segmentedRead)e.terms["packed_member_reads"]={segmentedRead,"B"};
           double live=0, peak=0;
           for(auto &i:op->getRegion(0).front()){
@@ -94,7 +97,7 @@ void registerCost(Unit &u) {
                 {"waves", {waves, "count"}},
                 {"tail", {instances * rows * tiles * width - m * n, "lane"}}};
             auto walk=choice.getAs<StringAttr>("walk");
-            bool gridTiles=walk=="grid-tile" || walk=="segment-tile";
+            bool gridTiles=walk && (walk=="grid-tile" || walk=="segment-tile" || walk=="column-panels");
             // Independent columns create concurrently schedulable instances.
             // The other streaming walks issue all column tiles serially.
             double scheduled=gridTiles ? instances*tiles : instances;
@@ -121,6 +124,8 @@ void registerCost(Unit &u) {
             v.terms["resident_waves"]={rounds,"count"};
             double scanSteps=scans*rounds*std::ceil(std::log2(width));
             v.terms["prefix_exchange_steps"]={scanSteps,"count"};
+            if(atomics)v.terms["atomic_updates"]={m*n*atomics,"count"};
+            if(keys)v.terms["key_input_bytes"]={keys,"B"};
             if (read && write && strided && stridedRead && launch) {
               v.timeNs =
                   *launch +
@@ -135,6 +140,15 @@ void registerCost(Unit &u) {
               if(scanSteps){
                 auto rate=intentdsl::quantity(ctx,"compute","lane/ns");
                 if(rate)*v.timeNs+=scanSteps*rows*width / *rate;
+              }
+              if(segmentedRead && gridTiles && stridedRead){
+                // Reuse the same offset endpoints across a group of independent
+                // member loads. Preserve the serial additions, which still cost
+                // one operation per member.
+                auto batch=choice.getAs<IntegerAttr>("member_batch");
+                double groups=std::ceil(segmentedRead/std::max(1.,m*n*4.)/(batch?batch.getInt():1));
+                v.terms["dependent_load_groups"]={groups,"count"};
+                *v.timeNs+=groups*rounds*128.*f->participants/ *stridedRead;
               }
               if (!e.timeNs || *v.timeNs < *e.timeNs) {
                 e.timeNs = v.timeNs;

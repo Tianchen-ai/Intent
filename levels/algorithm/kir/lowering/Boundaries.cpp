@@ -105,6 +105,17 @@ LogicalResult verifyRowComputation(func::FuncOp fn, Block &row, ValueRange captu
          op.getResult(0).getType()!=t)return op.emitError("expected inclusive prefix sum of one member vector");
       continue;
     }
+    if(name=="count_keys" || name=="column_sum"){
+      bool counting=name=="count_keys";
+      auto slot=llvm::find(captures,op.getOperand(0));
+      if(slot==captures.end() || op.getOperand(1)!=row.getArgument(0))return op.emitError("expected owned output and captured input");
+      auto *input=(*args)[slot-captures.begin()].getAsObject();auto dims=input->getArray("dims");
+      if(input->getString("direction")!="In" || !dims || axes.size()!=(counting?2:1) || dims->size()!=(counting?1:2) ||
+         (counting ? (op.getAttrOfType<IntegerAttr>("span").getInt()<=0 || (input->getString("dtype")!="f32" && input->getString("dtype")!="i64" && input->getString("dtype")!="i32")) :
+                     (input->getString("dtype")!="i32" || dims->back()!=axes.back())))
+        return op.emitError("invalid key partition or column reduction domain");
+      continue;
+    }
     if(name=="ordered_sum" || name=="segment_length"){
       auto slot=llvm::find(captures,op.getOperand(0));
       if(slot==captures.end() || op.getOperand(1)!=row.getArgument(0) || axes.empty() || axes.size()>2)
@@ -133,7 +144,67 @@ LogicalResult verifyRowComputation(func::FuncOp fn, Block &row, ValueRange captu
         return op.emitError("invalid table gather contract");
       continue;
     }
-    if (name == "ordinal") {
+    if(name=="prefix_scatter"){
+      auto out=llvm::find(captures,op.getOperand(0)),cnt=llvm::find(captures,op.getOperand(1));
+      if(out==captures.end() || cnt==captures.end() || out==cnt || op.getOperand(2)!=row.getArgument(0) || axes.size()!=2)
+        return op.emitError("scatter requires two owned output views");
+      auto o=out-captures.begin(),c=cnt-captures.begin();
+      auto *dv=(*args)[o].getAsObject(),*cv=(*args)[c].getAsObject();
+      auto *prefix=op.getOperand(4).getDefiningOp();
+      auto *toInt=prefix && prefix->getNumOperands()==1?prefix->getOperand(0).getDefiningOp():nullptr;
+      if(dv->getString("direction")!="Out" || cv->getString("direction")!="Out" ||dv->getString("dtype")!="i32" ||cv->getString("dtype")!="i32" ||
+         *dv->getArray("dims")!=axes || *cv->getArray("dims")!=llvm::json::Array{axes[0]} ||
+         !prefix || prefix->getName().stripDialect()!="scan_sum" || !toInt || toInt->getName().stripDialect()!="cast" ||
+         toInt->getOperand(0)!=op.getOperand(3) || !written.insert(o).second || !written.insert(c).second)
+        return op.emitError("unique row destinations require the inclusive count of the same predicate");
+      sawWrite=true;continue;
+    }
+    if(name=="write_offsets"){
+      auto out=llvm::find(captures,op.getOperand(0)),total=llvm::find(captures,op.getOperand(1));
+      if(out==captures.end() || total==captures.end() || axes.size()!=1 || !axes.front().getAsInteger() ||
+         op.getOperand(2)!=row.getArgument(0))return op.emitError("expected one flat prefix");
+      auto o=out-captures.begin(),t=total-captures.begin();
+      auto valid=[&](unsigned i,int64_t len){
+        auto *a=(*args)[i].getAsObject();
+        return a && a->getString("direction")=="Out" && a->getString("dtype")=="i32" &&
+               *a->getArray("dims")==llvm::json::Array{len};
+      };
+      auto *scan=op.getOperand(3).getDefiningOp();auto n=*axes.front().getAsInteger();
+      if(n<=0 || n==INT64_MAX || !valid(o,n+1) || !valid(t,1) || !scan || scan->getName().stripDialect()!="scan_sum" ||
+         !written.insert(o).second || !written.insert(t).second)return op.emitError("prefix must publish zero, all endpoints and its terminal count");
+      sawWrite=true;continue;
+    }
+    if(name=="fill_ranges"){
+      auto dest=llvm::find(captures,op.getOperand(0));
+      if(dest==captures.end() || axes.size()!=1 || op.getOperand(1)!=captures[domainIndex] || op.getOperand(2)!=row.getArgument(0) ||
+         !cast<MemRefType>(op.getOperand(1).getType()).getElementType().isInteger(32) || op.getAttrOfType<IntegerAttr>("unit").getInt()<=0)return op.emitError("invalid disjoint offset intervals");
+      auto *slot=(*args)[dest-captures.begin()].getAsObject();
+      if(slot->getString("direction")!="InOut" || slot->getString("dtype")!="i32" || slot->getArray("dims")->size()!=1)
+        return op.emitError("sparse interval updates require initialized storage");
+      continue;
+    }
+    if(name=="atomic_add" || name=="index_read" || name=="unique_put"){
+      auto slot=llvm::find(captures,op.getOperand(0));
+      if(slot==captures.end())return op.emitError("missing indexed vector");
+      auto *record=(*args)[slot-captures.begin()].getAsObject();
+      if(axes.size()!=2 || record->getString("dtype")!="i32" || record->getArray("dims")->size()!=1 ||
+         record->getString("direction")!=(name=="index_read"?"In":"InOut") || !op.hasAttr("in_bounds"))
+        return op.emitError("invalid indexed i32 access contract");
+      if(name=="atomic_add" && op.getAttrOfType<StringAttr>("ordering")!="relaxed")return op.emitError("unsupported integer atomic ordering");
+      if(name=="unique_put"){
+        // Disjoint expert intervals and in-bounds keys are author preconditions.
+        // The fetch-add supplies a fresh ticket in the keyed interval.
+        auto *add=op.getOperand(1).getDefiningOp();
+        if(!add || add->getName().stripDialect()!="add")return op.emitError("expected a keyed base plus a unique atomic ticket");
+        auto *base=add->getOperand(0).getDefiningOp(), *ticket=add->getOperand(1).getDefiningOp();
+        if(!base || !ticket || base->getName().stripDialect()!="index_read" || ticket->getName().stripDialect()!="atomic_add" ||
+           base->getOperand(1)!=ticket->getOperand(1))return op.emitError("scatter requires an old ticket for the same key");
+        auto *one=ticket->getOperand(2).getDefiningOp();
+        if(!one || one->getAttrOfType<IntegerAttr>("value")!=IntegerAttr::get(IntegerType::get(fn.getContext(),32),1))return op.emitError("unique scatter requires unit tickets");
+      }
+      continue;
+    }
+    if (name == "ordinal" || name=="member_index") {
       if (op.getOperand(0) != captures[domainIndex] ||
           op.getOperand(1) != row.getArgument(0) ||
           (op.getResult(0).getType() !=
@@ -148,7 +219,7 @@ LogicalResult verifyRowComputation(func::FuncOp fn, Block &row, ValueRange captu
       continue;
     }
     if (name != "read_owner" && name != "write_owner" && name != "sqrt" && name != "and" && name != "xor" && name != "shl" &&
-        name != "shr" && name != "gt" && name != "select" &&
+        name != "shr" && name != "gt" && name!="ne" && name != "select" &&
         name != "maximum" && name != "read" && name != "write" &&
         name != "end" && name != "sum" && name != "max_num" && name != "add" &&
         name != "sub" && name != "mul" && name != "div" && name != "cast" &&
@@ -232,11 +303,11 @@ LogicalResult verifyRowComputation(func::FuncOp fn, Block &row, ValueRange captu
       };
       if ((!allowed(valueType) &&
            !(name == "cast" && valueType.isInteger(1))) ||
-          (name == "gt" ? !element(result).isInteger(1)
+          (name == "gt" || name=="ne" ? !element(result).isInteger(1)
                         : !allowed(element(result))) ||
           ((name == "xor" || name == "and" || name == "shr" || name == "shl") &&
            !valueType.isInteger(32)) ||
-          (name != "gt" && name != "cast" && element(result) != valueType) ||
+          (name != "gt" && name!="ne" && name != "cast" && element(result) != valueType) ||
           ((name == "sqrt" || name == "rsqrt" || name == "exp" ||
             name == "div") &&
            !isa<FloatType>(valueType)))

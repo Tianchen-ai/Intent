@@ -44,6 +44,10 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
                        "ct_src." +
                            (slab ? (code=="load"?"gather_slab":"scatter_slab") : access ? ("tile_" + code).str() : code.str()));
       s.addAttributes(op->getAttrs());
+      if(code=="sum_columns"){
+        auto extent=op->getAttrOfType<IntegerAttr>("extent").getInt();
+        s.addAttribute("native_panel",b.getI64IntegerAttr(std::min<uint64_t>(128,llvm::PowerOf2Ceil(std::max<int64_t>(1,extent)))));
+      }
       if(slab && rectangularSlab(op,fn))s.addAttribute("ct_src.rectangular",b.getUnitAttr());
       if (access && !slab) {
         auto view = op->getOperand(0);
@@ -65,6 +69,19 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
         s.addRegion()->takeBody(region);
       op->replaceAllUsesWith(b.create(s));
       op->erase();
+    });
+    fn.walk([&](Operation *store){
+      if(store->getName().getStringRef()!="ct_src.tile_store")return;
+      auto *value=store->getOperand(3).getDefiningOp();
+      if(!value || value->getName().getStringRef()!="ct_src.key_counts" || !value->hasOneUse())return;
+      OpBuilder b(store);
+      auto span=value->getAttrOfType<IntegerAttr>("span").getInt();
+      int64_t step=std::min<int64_t>(2048,uint64_t(span)&-uint64_t(span));
+      OperationState s(store->getLoc(),"ct_src.private_bin_store");
+      s.addAttribute("source_step",b.getI64IntegerAttr(step));
+      s.addOperands(value->getOperand(0));s.addOperands(store->getOperand(0));s.addOperands(value->getOperands().drop_front());
+      s.addAttributes(value->getAttrs());b.create(s);
+      store->erase();value->erase();
     });
     partitionOwners(fn,facts);
   }
@@ -172,6 +189,20 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
       return WalkResult::advance();
     auto n = op->getName().stripDialect();
     bool ok = op->getName().getDialectNamespace() == "ct_src";
+    if(ok && n=="private_bin_store"){
+      auto src=dyn_cast<BlockArgument>(op->getOperand(0)),dst=dyn_cast<BlockArgument>(op->getOperand(1));
+      auto *mask=op->getOperand(4).getDefiningOp();
+      ok=src && dst && src.getOwner()==&fn.front() && dst.getOwner()==&fn.front() &&
+         (*slots)[src.getArgNumber()].getAsObject()->getString("direction")=="In" &&
+         (*slots)[dst.getArgNumber()].getAsObject()->getString("direction")=="Out" &&
+         cast<MemRefType>(src.getType()).getRank()==1 && cast<MemRefType>(dst.getType()).getRank()==2 &&
+         cast<MemRefType>(dst.getType()).getElementType().isInteger(32) && mask && mask->getName().stripDialect()=="active" &&
+         mask->getOperand(1)==op->getOperand(2) && mask->getOperand(2)==op->getOperand(3) &&
+         op->getAttrOfType<IntegerAttr>("span").getInt()>0 && fn->getAttrOfType<StringAttr>("block.topology")=="resident" &&
+         llvm::all_of(fn->getAttrOfType<ArrayAttr>("block.configs"),[](Attribute row){return cast<DictionaryAttr>(row).getAs<IntegerAttr>("rows").getInt()==1;});
+      auto step=op->getAttrOfType<IntegerAttr>("source_step");
+      ok=ok && step && step.getInt()>0 && step.getInt()<=2048 && llvm::isPowerOf2_64(step.getInt()) && op->getAttrOfType<IntegerAttr>("span").getInt()%step.getInt()==0;
+    }
     if(ok && (n=="gather_slab" || n=="scatter_slab"))
       ok=op->hasAttr("ct_src.rectangular")==rectangularSlab(op,fn);
     if (ok && (n == "tile_store" || n == "tile_load")) {

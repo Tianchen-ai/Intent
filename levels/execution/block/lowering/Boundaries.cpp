@@ -59,15 +59,27 @@ void bind(Unit &unit) {
                 const TargetProfile &profile) -> llvm::Error {
     auto d = dyn_cast<DictionaryAttr>(value);
     if(!d)return llvm::createStringError("missing block decision");
+    if(!d.getAs<StringAttr>("topology"))return llvm::createStringError("expected a block topology");
+    if(d.getAs<StringAttr>("topology")!="resident" &&
+       op->walk([](Operation *v){auto n=v->getName().stripDialect();return n=="prefix_scatter" || n=="scan_sum" || n=="count_keys" || n=="atomic_add" || n=="fill_ranges"?WalkResult::interrupt():WalkResult::advance();}).wasInterrupted())
+      return llvm::createStringError("this row collective requires complete resident coverage");
     return intentdsl::verifyRows(op,d.getAs<ArrayAttr>("rows"),d.getAs<StringAttr>("topology"),d.getAs<DenseI64ArrayAttr>("guard"),profile);
   };
   f.verifyCandidate=[](Operation *op,const StructuralCandidate &c,const TargetProfile &profile)->llvm::Error{
     auto d=cast<DictionaryAttr>(c.value);auto topology=d.getAs<StringAttr>("topology").str();
     auto rows=d.getAs<ArrayAttr>("rows");auto group=cast<DictionaryAttr>(rows[0]).getAs<IntegerAttr>("rows");
     if(auto walk=d.getAs<StringAttr>("walk")){
+      if(walk=="column-panels"){
+        if(c.topology!=walk.str() || c.preconditions!=std::vector<std::string>{"independent-bins"} || topology!="stream" ||
+           !op->walk([](Operation *v){return v->getName().stripDialect()=="column_sum"?WalkResult::interrupt():WalkResult::advance();}).wasInterrupted())
+          return llvm::createStringError("partition requires independent output bins");
+        return llvm::Error::success();
+      }
       if(walk=="segment-tile" || walk=="segment-row" || walk=="segment-stream"){
         bool fold=op->walk([](Operation *v){return v->getName().stripDialect()=="ordered_sum" ? WalkResult::interrupt():WalkResult::advance();}).wasInterrupted();
-        if(!fold || c.id!=walk.str() || c.topology!=c.id || c.preconditions!=std::vector<std::string>{"distinct-segment-outputs"} ||
+        auto batch=d.getAs<IntegerAttr>("member_batch");
+        if(!fold || c.id!=(batch?walk.str()+"-8":walk.str()) || c.topology!=walk.str() || (batch && (walk!="segment-tile" || batch.getInt()!=8)) ||
+            c.preconditions!=std::vector<std::string>{"distinct-segment-outputs"} ||
             (walk!="segment-row")!=(topology=="stream"))return llvm::createStringError("invalid segment ownership");
         return llvm::Error::success();
       }

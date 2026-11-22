@@ -179,6 +179,21 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
     return failure();
   llvm::SmallDenseSet<unsigned> written;
   auto coverage = fn.walk([&](Operation *op) {
+    if(op->getName().stripDialect()=="publish_offsets"){
+      auto a=dyn_cast<BlockArgument>(op->getOperand(0)),t=dyn_cast<BlockArgument>(op->getOperand(1));
+      if(!a || !t || a.getOwner()!=&fn.front() || t.getOwner()!=&fn.front() || !written.insert(a.getArgNumber()).second || !written.insert(t.getArgNumber()).second)return WalkResult::interrupt();
+      return WalkResult::advance();
+    }
+    if(op->getName().stripDialect()=="scatter_fragment"){
+      auto a=dyn_cast<BlockArgument>(op->getOperand(0)),c=dyn_cast<BlockArgument>(op->getOperand(1));
+      if(!a || !c || a.getOwner()!=&fn.front() || c.getOwner()!=&fn.front())return WalkResult::interrupt();
+      auto *out=(*abi)[a.getArgNumber()].getAsObject(), *counts=(*abi)[c.getArgNumber()].getAsObject();
+      if(!out || !counts || out->getString("direction")!="Out" || counts->getString("direction")!="Out" ||
+         out->getString("dtype")!="i32" || counts->getString("dtype")!="i32" || !out->getArray("dims") || !counts->getArray("dims") ||
+         out->getArray("dims")->size()!=2 || *counts->getArray("dims")!=llvm::json::Array{out->getArray("dims")->front()} ||
+         !written.insert(a.getArgNumber()).second || !written.insert(c.getArgNumber()).second)return WalkResult::interrupt();
+      return WalkResult::advance();
+    }
     bool owner=op->getName().getStringRef()==(supplied?"dsa.owner_write":"block.owner_store");
     if (!owner && op->getName().getStringRef() !=
         (supplied ? "dsa.write_back" : "block.store"))
@@ -289,11 +304,33 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
     SmallVector<Value> writes;
     for (auto &item : body) {
       auto name = item.getName().getStringRef();
-      if(name=="block.segment_size" || name=="block.segment_fold"){
+      if(name=="dsa.fill_ranges_at"){
+        if(item.getOperand(2)!=body.front().getResult(1) || item.getOperand(3)!=body.front().getResult(2))return WalkResult::interrupt();
+        writes.push_back(item.getResult(0));
+      }
+      if(name=="dsa.publish_offsets"){
+        if(!resident || item.getOperand(2)!=body.front().getResult(1) || item.getOperand(3)!=body.front().getResult(2))
+          return WalkResult::interrupt();
+        writes.push_back(item.getResult(0));
+      }
+      if(name=="dsa.unique_put" || name=="block.atomic_add_at" || name=="block.index_read_at"){
+        if(item.getOperands().back()!=body.front().getResult(2))return WalkResult::interrupt();
+        auto arg=dyn_cast<BlockArgument>(item.getOperand(0));
+        if(!arg || arg.getOwner()!=&fn.front())return WalkResult::interrupt();
+        auto *entry=(*abi)[arg.getArgNumber()].getAsObject();
+        if(!entry || entry->getString("direction")!=(name=="block.index_read_at"?"In":"InOut"))return WalkResult::interrupt();
+        if(name=="dsa.unique_put")writes.push_back(item.getResult(0));
+      }
+      if(name=="dsa.scatter_fragment"){
+        if(!resident || !llvm::equal(item.getOperands().slice(2,3),body.front().getResults()))return WalkResult::interrupt();
+        writes.push_back(item.getResult(0));
+      }
+      if(name=="block.segment_size" || name=="block.segment_fold" || name=="block.key_counts" || name=="block.sum_columns"){
         auto *window=&body.front();
+        bool offsets=name=="block.segment_size" || name=="block.segment_fold";
+        auto view=cast<MemRefType>(item.getOperand(0).getType());
         if(!llvm::equal(item.getOperands().drop_front(),window->getResults()) ||
-           cast<MemRefType>(item.getOperand(0).getType()).getRank()!=1 ||
-           !cast<MemRefType>(item.getOperand(0).getType()).getElementType().isInteger(32))
+           view.getRank()!=(name=="block.sum_columns"?2:1) || (offsets && !view.getElementType().isInteger(32)))
           return item.emitError("segment bounds must use the complete phase window"),WalkResult::interrupt();
       }
       if(name=="dsa.owner_write" || name=="dsa.owner_read"){

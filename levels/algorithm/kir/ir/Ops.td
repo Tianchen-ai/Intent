@@ -117,3 +117,17 @@ def Kir_Dialect_MemberLoad : Op<Kir_Dialect,"member_load"> {
   let arguments=(ins AnyMemRef:$source,Variadic<AnyType>:$coordinates);let results=(outs AnyType:$value);
 }
 def Kir_Dialect_Term : Op<Kir_Dialect,"term",[Terminator]> {let arguments=(ins F32:$value);}
+def Kir_Dialect_CountKeys : Op<Kir_Dialect,"count_keys"> {
+  let arguments=(ins AnyMemRef:$source,Index:$owner,I64Attr:$span);let results=(outs I32Tensor:$counts);
+}
+def Kir_Dialect_ColumnSum : Op<Kir_Dialect,"column_sum"> {
+  let arguments=(ins AnyMemRef:$source,Index:$owner);let results=(outs I32Tensor:$counts);
+}
+def Kir_Dialect_Different : Op<Kir_Dialect,"ne"> {let arguments=(ins AnyType:$lhs,AnyType:$rhs);let results=(outs AnyTensor:$mask);}
+def Kir_Dialect_ColumnsI32 : Op<Kir_Dialect,"member_index"> {let arguments=(ins AnyMemRef:$domain,Index:$row);let results=(outs I32Tensor:$members);}
+def Kir_Dialect_PrefixScatter : Op<Kir_Dialect,"prefix_scatter"> {let arguments=(ins AnyMemRef:$output,AnyMemRef:$counts,Index:$owner,I1Tensor:$predicate,I32Tensor:$prefix,I32Tensor:$values,I32Attr:$fill);}
+def Kir_Dialect_Input : Op<Kir_Dialect,"index_read"> {let arguments=(ins AnyMemRef:$base,I32Tensor:$key,UnitAttr:$in_bounds);let results=(outs I32Tensor:$values);}
+def Kir_Dialect_Ticket : Op<Kir_Dialect,"atomic_add"> {let arguments=(ins AnyMemRef:$base,I32Tensor:$key,I32:$delta,StrAttr:$ordering,UnitAttr:$in_bounds);let results=(outs I32Tensor:$values);}
+def Kir_Dialect_Put : Op<Kir_Dialect,"unique_put"> {let arguments=(ins AnyMemRef:$base,I32Tensor:$key,I32Tensor:$value,UnitAttr:$in_bounds);}
+def Kir_Dialect_WriteOffsets : Op<Kir_Dialect,"write_offsets"> {let arguments=(ins AnyMemRef:$offsets,AnyMemRef:$total,Index:$owner,I32Tensor:$prefix);}
+def Kir_Dialect_Ranges : Op<Kir_Dialect,"fill_ranges"> {let arguments=(ins AnyMemRef:$out,AnyMemRef:$offsets,Index:$owner,I64Attr:$unit,UnitAttr:$disjoint_in_bounds);}

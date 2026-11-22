@@ -8,6 +8,7 @@ namespace CI_UNIT_NAMESPACE {
 std::string hostSource(func::FuncOp entry) {
   SmallVector<std::string> slots, names;
   bool members=entry.front().front().hasAttr("cpu.member_tasks");
+  auto keys=entry.front().front().getAttrOfType<IntegerAttr>("cpu.key_extent");
   unsigned projectedRank=0;
   if(entry->hasAttr("kir.iteration") && !entry->hasAttr("kir.owner_axis")){
     auto t=dyn_cast<MemRefType>(entry.getArgument(0).getType());
@@ -44,13 +45,20 @@ std::string hostSource(func::FuncOp entry) {
   std::string out;
   llvm::raw_string_ostream c(out);
   c << "#include <stdint.h>\n#include <omp.h>\nextern void intent_row_interval(" << params
-    << ",int64_t,int64_t,int64_t,int64_t);\n"
+    << ",int64_t,int64_t,int64_t,int64_t" << (keys?",int64_t,int64_t":"") << ");\n"
     << "void " << entry->getAttrOfType<StringAttr>("mojo_row.entry").getValue()
     << "(" << params
     << ",int64_t rows,int64_t cols,int64_t grain,int64_t columns,int64_t "
        "workers){\n"
     << "if (rows == 0 || cols == 0) return;\n";
   auto &task=entry.front().front();
+  if(keys){
+    c<<"const int64_t keys="<<keys.getInt()<<",lines=(keys+15)/16,n=workers<lines?workers:lines;\n"
+      <<"#pragma omp parallel for num_threads(n) schedule(static) if(n>1)\n"
+      <<"for(int64_t b=0;b<n;++b)intent_row_interval("<<llvm::join(names,",")<<",0,rows,cols,columns,16*(lines*b/n),16*(lines*(b+1)/n));}\n";
+    return out;
+  }
+  if(task.hasAttr("cpu.single_dispatcher"))c<<"workers=1;\n";
   if(members)c<<"rows=cols;\n";
   auto walk=task.getAttrOfType<StringAttr>("cpu.walk");
   if(walk=="destination"){

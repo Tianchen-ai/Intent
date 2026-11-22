@@ -1,4 +1,6 @@
 #include "intentdsl/levels/execution/cpu/ir/Traversal.h"
+#include "intentdsl/levels/execution/cpu/ir/Pack.h"
+#include "intentdsl/levels/execution/cpu/ir/IndexedEffects.h"
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
 #include "llvm/ADT/StringExtras.h"
 using namespace mlir;
@@ -29,11 +31,16 @@ class CanonicalTask {
   llvm::DenseMap<Value, Term> terms;
   unsigned serial = 0;
   Term origin, columns;
+  Term indexLiteral(int64_t value) {
+    Term result{"%index"+std::to_string(serial++),"index"};
+    s<<result.id<<"=arith.constant "<<value<<" : index\n";
+    return result;
+  }
   std::optional<int64_t> ownerAxis;
   SmallVector<Term> extents;
   llvm::DenseMap<Value,SmallVector<Term>> records;
   std::string spelling(Type t) {
-    return t.isInteger(32) ? "si32" : printType(t);
+    return t.isInteger(32) ? "si32" : t.isSignlessInteger(64) ? "si64" : printType(t);
   }
 
   Term inst(StringRef op, ArrayRef<Term> args, std::string type,
@@ -382,6 +389,8 @@ public:
     int rankDomain=cast<MemRefType>(fn.getArgument(fn->getAttrOfType<IntegerAttr>("kir.domain_arg").getInt()).getType()).getRank();
     if(auto a=fn->getAttrOfType<IntegerAttr>("kir.owner_axis"))ownerAxis=a.getInt();
     std::string extraSymbols;
+    bool ownedKeys=task->hasAttr("cpu.key_extent");
+    if(ownedKeys)extraSymbols=",\"KL\",\"KH\"";
     if(ownerAxis)for(int j=0;j<rankDomain;++j)extraSymbols+=",\"D"+std::to_string(j)+"\"";
     SmallVector<std::string> names, effects, aliases, strided, params;
     auto &bb = task->getRegion(0).front();
@@ -418,13 +427,18 @@ public:
       terms[arg] = {"%" + n, t};
       names.push_back("\"" + n + "\"");
       params.push_back("%" + n + ": " + t);
-      effects.push_back(rank ? (a->getString("direction") == "Out" ? "\"write\""
+      bool initializedBins=task->walk([&](Operation *s){
+        if(!s->hasAttr("weft_host.private_bins"))return WalkResult::advance();
+        auto &body=s->getRegion(0).front();
+        return body.front().getNextNode()->getOperand(0)==arg?WalkResult::interrupt():WalkResult::advance();
+      }).wasInterrupted();
+      effects.push_back(rank ? (a->getString("direction") == "Out" ? (initializedBins?"\"readwrite\"":"\"write\"")
                                 : a->getString("direction") == "InOut"
                                     ? "\"readwrite\""
                                     : "\"read\"")
                              : "\"none\"");
       aliases.push_back(rank ? "0" : "-1");
-      if (rank)
+      if (rank && !fn.getArgAttr(i,"weft_host.contiguous"))
         strided.push_back(names.back());
     }
     s << "module {\n\"weft_kernel.kernel\"() <{sym_name=\""
@@ -444,6 +458,11 @@ public:
     if (absolute)
       origin = inst("symbol", {}, "index",
                     "choices=array<i64>,kind=\"shape\",name=\"O\"");
+    Term keyLo,keyHi;
+    if(ownedKeys){
+      keyLo=inst("symbol",{},"index","choices=array<i64>,kind=\"shape\",name=\"KL\"");
+      keyHi=inst("symbol",{},"index","choices=array<i64>,kind=\"shape\",name=\"KH\"");
+    }
     if(ownerAxis){
       for(int j=0;j<rankDomain;++j)
         extents.push_back(inst("symbol",{},"index","choices=array<i64>,kind=\"shape\",name=\"D"+std::to_string(j)+"\""));
@@ -478,8 +497,130 @@ public:
       tailStart =
           inst("binary", {panelCount, panelWidth}, "index", "kind=\"mul\"");
     }
+    if(intentdsl::cpu::reservations(bb)){
+      auto bins=task->getAttrOfType<IntegerAttr>("cpu.batch_extent").getInt();
+      auto size=indexLiteral(bins),one=inst("constant",{},"si32","value=1:si32"),zero=inst("constant",{},"si32","value=0:si32");
+      auto mask=inst("compare",{one,one},"i1","predicate=\"eq\"");
+      auto ptr=inst("local_alloc",{},"!weft_kernel.pointer<si32>","elements="+std::to_string(bins)+":i64,alignment=64:i64");
+      auto read=[&](Term k){return inst("pointer_load",{ptr,inst("cast",{k},"si64"),mask,zero},"si32");};
+      auto store=[&](Term k,Term value){inst("pointer_store",{ptr,inst("cast",{k},"si64"),mask,value},"()");};
+      auto addr=[&](Value v,SmallVector<Term> coords){
+        SmallVector<Term> args{terms.lookup(v)};args.append(coords);SmallVector<std::string> sel(coords.size(),"\"index\"");
+        return inst("slice",args,"!weft_kernel.slice<!weft_kernel.encoding<\"i32\",\"dense\",\"dense.i32\",[]>,[],[]>","selectors=["+llvm::join(sel,",")+"]");
+      };
+      auto add=[&](Term a,Term b){return inst("binary",{a,b},a.type,"kind=\"add\"");};
+      for(auto &stage:bb.without_terminator()){
+        auto n=stage.getName().stripDialect();
+        if(n=="tally_keys"){
+          s<<"scf.for %k0=%lo to "<<size.id<<" step %step {\n";
+          store(inst("cast",{{"%k0","index"}},"si32"),zero);s<<"}\n";
+        }
+        if(n=="reserve_tickets"){
+          s<<"scf.for %k1=%lo to "<<size.id<<" step %step {\n";Term k{"%k1","index"};
+          auto offset=inst("cast",{k},"si32"),count=read(offset),used=inst("compare",{count,zero},"i1","predicate=\"ne\"");
+          s<<"scf.if "<<used.id<<" {\n";auto base=inst("atomic_rmw",{count,addr(stage.getOperand(0),{k})},"si32","kind=\"add\",ordering=\"relaxed\"");
+          store(offset,base);s<<"}\n}\n";continue;
+        }
+        std::string suffix=n=="tally_keys"?"1":"2";Term r{"%r"+suffix,"index"},j{"%j"+suffix,"index"};
+        s<<"scf.for "<<r.id<<"=%lo to "<<extent.id<<" step %step {\nscf.for "<<j.id<<"=%lo to "<<columns.id<<" step %step {\n";
+        auto key=inst("admit",{addr(stage.getOperand(0),{r,j})},"si32"),old=read(key);
+        if(n=="distribute_tickets"){
+          auto offset=inst("admit",{addr(stage.getOperand(1),{inst("cast",{key},"index")})},"si32");
+          auto pos=inst("cast",{add(old,offset)},"index");
+          auto global=inst("binary",{add(r,origin),columns},"index","kind=\"mul\"");
+          inst("commit",{inst("cast",{add(global,j)},"si32"),addr(stage.getOperand(3),{pos})},"()");
+        }
+        store(key,add(old,one));s<<"}\n}\n";
+      }
+      s<<"\"weft_kernel.return\"():()->()\n}):()->()\n}\n";return llvm::Error::success();
+    }
     s << "scf.for %r = %lo to " << extent.id << " step %step {\n";
-    if(ownerAxis){
+    if(intentdsl::cpu::atomicMembers(bb)){
+      auto &effects=bb.front().getRegion(0).front();
+      auto found=llvm::find_if(effects,[](Operation &v){return v.getName().stripDialect()=="write_offsets";});
+      bool prefix=found!=effects.end();
+      bool guarded=false;
+      Operation *ends=prefix?&*found:nullptr;
+      auto zero=inst("constant",{},"si32","value=0:si32");
+      if(prefix)s<<"%total = ";
+      s<<"scf.for %j=%lo to "<<columns.id<<" step %step";
+      if(prefix)s<<" iter_args(%sum="<<zero.id<<")->(si32)";
+      s<<" {\n";
+      auto address=[&](Value source,SmallVector<Term> keys){
+        auto base=terms.lookup(source);SmallVector<Term> args{base};
+        args.append(keys);SmallVector<std::string> sel(keys.size(),"\"index\"");
+        return inst("slice",args,"!weft_kernel.slice<!weft_kernel.encoding<\"i32\",\"dense\",\"dense.i32\",[]>,[],[]>","selectors=["+llvm::join(sel,",")+"]");
+      };
+      for(auto &v:bb.front().getRegion(0).front().without_terminator()){
+        auto n=v.getName().stripDialect();auto a=[&](unsigned i){return terms.lookup(v.getOperand(i));};Term rhs;
+        if(n=="read"){
+          SmallVector<Term> coords;if(cast<MemRefType>(v.getOperand(0).getType()).getRank()==2)coords.push_back({"%r","index"});
+          coords.push_back({"%j","index"});rhs=inst("admit",{address(v.getOperand(0),coords)},"si32");
+        }
+        else if(n=="fill_ranges"){
+          auto j=Term{"%j","index"};auto hi=inst("binary",{j,{"%step","index"}},"index","kind=\"add\"");
+          auto in=inst("compare",{hi,columns},"i1","predicate=\"lt\"");s<<"scf.if "<<in.id<<" {\n";
+          auto step=indexLiteral(v.getAttrOfType<IntegerAttr>("unit").getInt());
+          auto block=[&](Term pos){
+            auto n=inst("admit",{address(v.getOperand(1),{pos})},"si32");
+            return inst("binary",{inst("cast",{n},"index"),step},"index","kind=\"div\"");
+          };
+          auto first=block(j),end=block(hi);s<<"scf.for %b = "<<first.id<<" to "<<end.id<<" step %step {\n";
+          inst("commit",{inst("cast",{j},"si32"),address(v.getOperand(0),{{"%b","index"}})},"()");s<<"}\n}\n";continue;
+        }
+        else if(n=="constant")rhs=inst("constant",{},"si32","value="+std::to_string(v.getAttrOfType<IntegerAttr>("value").getInt())+":si32");
+        else if(n=="ordinal"){
+          auto r=inst("binary",{origin,{"%r","index"}},"index","kind=\"add\"");
+          auto row=inst("binary",{r,columns},"index","kind=\"mul\"");
+          rhs=inst("cast",{inst("binary",{row,{"%j","index"}},"index","kind=\"add\"")},"si32");
+        }else if(n=="add" || n=="shr" || n=="shl")rhs=inst("binary",{a(0),a(1)},"si32","kind=\""+n.str()+"\"");
+        else if(n=="scan_sum")rhs=inst("binary",{{"%sum","si32"},a(0)},"si32","kind=\"add\"");
+        else if(n=="write_offsets"){
+          auto dst=inst("binary",{{"%j","index"},{"%step","index"}},"index","kind=\"add\"");
+          inst("commit",{a(3),address(v.getOperand(0),{dst})},"()");s<<"scf.yield "<<a(3).id<<":si32\n";continue;
+        }
+        else if(n=="atomic_add" || n=="index_read" || n=="unique_put"){
+          auto index=inst("cast",{a(1)},"index");
+          if(ownedKeys && n=="atomic_add"){
+            auto lower=inst("compare",{index,keyLo},"i1","predicate=\"ge\"");
+            auto upper=inst("compare",{index,keyHi},"i1","predicate=\"lt\"");
+            auto live=inst("binary",{lower,upper},"i1","kind=\"and\"");
+            s<<"scf.if "<<live.id<<" {\n";guarded=true;
+          }
+          auto dst=address(v.getOperand(0),{index});
+          if(n=="atomic_add")rhs=inst("atomic_rmw",{a(2),dst},"si32","kind=\"add\",ordering=\"relaxed\"");
+          else if(n=="unique_put"){inst("commit",{a(2),dst},"()");continue;}
+          else rhs=inst("admit",{dst},"si32");
+        }else return llvm::createStringError("unsupported atomic task expression "+n);
+        terms[v.getResult(0)]=rhs;
+      }
+      if(guarded)s<<"}\n";
+      s<<"}\n";
+      if(prefix){
+        inst("commit",{zero,address(ends->getOperand(0),{{"%lo","index"}})},"()");
+        inst("commit",{{"%total","si32"},address(ends->getOperand(1),{{"%lo","index"}})},"()");
+      }
+    }else if(intentdsl::cpu::packed(bb)){
+      auto &pack=bb.front();Term row{"%r","index"},col{"%j","index"};
+      auto address=[&](Value v,SmallVector<Term> at){
+        auto elem=printType(cast<MemRefType>(v.getType()).getElementType());
+        SmallVector<Term> args{terms.lookup(v)};args.append(at);
+        SmallVector<std::string> selector(at.size(),"\"index\"");
+        return inst("slice",args,"!weft_kernel.slice<!weft_kernel.encoding<\""+elem+"\",\"dense\",\"dense."+elem+"\",[]>,[],[]>","selectors=["+llvm::join(selector,",")+"]");
+      };
+      std::string threshold;llvm::raw_string_ostream(threshold)<<pack.getAttr("threshold");
+      auto rhs=inst("constant",{},"f32","value="+threshold);
+      auto pad=inst("constant",{},"si32","value="+std::to_string(pack.getAttrOfType<IntegerAttr>("fill").getInt())+":si32");
+      s<<"%count=scf.for %j=%lo to "<<columns.id<<" step %step iter_args(%pos=%lo)->(index){\n";
+      auto x=inst("admit",{address(pack.getOperand(0),{row,col})},"f32");
+      auto keep=inst("compare",{x,rhs},"i1","predicate=\"ne\"");
+      s<<"scf.if "<<keep.id<<" {\n";
+      inst("commit",{inst("cast",{col},"si32"),address(pack.getOperand(1),{row,{"%pos","index"}})},"()");s<<"}\n";
+      auto next=inst("binary",{{"%pos","index"},inst("select",{keep,{"%step","index"},{"%lo","index"}},"index")},"index","kind=\"add\"");
+      s<<"scf.yield "<<next.id<<":index\n}\nscf.for %tail=%count to "<<columns.id<<" step %step {\n";
+      inst("commit",{pad,address(pack.getOperand(1),{row,{"%tail","index"}})},"()");s<<"}\n";
+      inst("commit",{inst("cast",{{"%count","index"}},"si32"),address(pack.getOperand(2),{row})},"()");
+    }else if(ownerAxis){
       for(auto &sweep:bb.without_terminator())
         if(auto error=ownerSweep(sweep))return error;
     } else if (whole) {
@@ -487,6 +628,49 @@ public:
         return e;
     } else
       for (auto &sweep : bb.without_terminator()) {
+        if(sweep.hasAttr("weft_host.private_bins") || sweep.hasAttr("weft_host.vertical_sum")){
+          auto &body=sweep.getRegion(0).front();auto &key=body.front();auto src=key.getOperand(0),dst=body.back().getPrevNode()->getOperand(0);
+          auto *fnOp=task->getParentOfType<func::FuncOp>().getOperation();
+          auto shape=cast<func::FuncOp>(fnOp).getArgAttrOfType<DenseI64ArrayAttr>(cast<BlockArgument>(src).getArgNumber()-1,"weft_host.indirect_extents");
+          auto size=indexLiteral(shape[0]);
+          auto scalarAddress=[&](Value buffer,SmallVector<Term> coords){
+            auto e=printType(cast<MemRefType>(buffer.getType()).getElementType());
+            SmallVector<Term> args{terms.lookup(buffer)};args.append(coords);
+            SmallVector<std::string> selectors(coords.size(),"\"index\"");
+            return inst("slice",args,"!weft_kernel.slice<!weft_kernel.encoding<\""+e+"\",\"dense\",\"dense."+e+"\",[]>,[],[]>","selectors=["+llvm::join(selectors,",")+"]");
+          };
+          auto zero=inst("constant",{},"si32","value=0:si32");
+          if(sweep.hasAttr("weft_host.private_bins")){
+            s<<"scf.for %bin = %lo to "<<columns.id<<" step %step {\n";
+            inst("commit",{zero,scalarAddress(dst,{{"%r","index"},{"%bin","index"}})},"()");s<<"}\n";
+            auto span=indexLiteral(key.getAttrOfType<IntegerAttr>("span").getInt());
+            auto row=inst("binary",{origin,{"%r","index"}},"index","kind=\"add\"");
+            auto start=inst("binary",{row,span},"index","kind=\"mul\"");
+            auto limit=inst("binary",{start,span},"index","kind=\"add\"");
+            auto shorter=inst("compare",{limit,size},"i1","predicate=\"lt\"");
+            auto end=inst("select",{shorter,limit,size},"index");
+            s<<"scf.for %sample = "<<start.id<<" to "<<end.id<<" step %step {\n";
+            auto val=inst("admit",{scalarAddress(src,{{"%sample","index"}})},spelling(cast<MemRefType>(src.getType()).getElementType()));
+            auto bin=val.type=="f32"?inst("cast",{val},"si32"):val;
+            auto k=inst("cast",{bin},"index");
+            auto lo=inst("compare",{k,{"%lo","index"}},"i1","predicate=\"ge\"");
+            auto hi=inst("compare",{k,columns},"i1","predicate=\"lt\"");
+            auto keep=inst("binary",{lo,hi},"i1","kind=\"and\"");
+            s<<"scf.if "<<keep.id<<" {\n";
+            auto ptr=scalarAddress(dst,{{"%r","index"},k}),old=inst("admit",{ptr},"si32");
+            auto one=inst("constant",{},"si32","value=1:si32");
+            inst("commit",{inst("binary",{old,one},"si32","kind=\"add\""),ptr},"()");s<<"}\n}\n";
+          }else{
+            s<<"scf.for %bin = %lo to "<<columns.id<<" step %step {\n%sum=scf.for %part=%lo to "<<size.id<<" step %step iter_args(%count="<<zero.id<<")->(si32){\n";
+            auto x=inst("admit",{scalarAddress(src,{{"%part","index"},{"%bin","index"}})},"si32");
+            auto sum=inst("binary",{{"%count","si32"},x},"si32","kind=\"add\"");
+            s<<"scf.yield "<<sum.id<<" : si32\n}\n";
+            Term total{"%sum","si32"};auto type=spelling(cast<MemRefType>(dst.getType()).getElementType());
+            if(type!=total.type)total=inst("cast",{total},type);
+            inst("commit",{total,scalarAddress(dst,{{"%bin","index"}})},"()");s<<"}\n";
+          }
+          continue;
+        }
         if(sweep.hasAttr("weft_host.prefix_carry") || sweep.hasAttr("weft_host.segment_loop")){
           if(auto error=ownerSweep(sweep))return error;
           continue;
@@ -577,7 +761,8 @@ std::string hostSource(Operation *dispatch, const llvm::json::Array &abi) {
     for (size_t axis = 0; axis < rank; ++axis) {
       auto stride = n + "s" + std::to_string(axis);
       params.push_back("int64_t " + stride);
-      if(owner || rank<=2 || axis>=rank-2)strides.push_back(swap ? n + "s" + std::to_string(1 - axis) : stride);
+      if(!dispatch->getParentOfType<func::FuncOp>().getArgAttr(i,"weft_host.contiguous") &&
+         (owner || rank<=2 || axis>=rank-2))strides.push_back(swap ? n + "s" + std::to_string(1 - axis) : stride);
     }
     auto fn=dispatch->getParentOfType<func::FuncOp>();
     if(fn.getArgAttr(i,"weft_host.table_rows") || fn.getArgAttr(i,"weft_host.indirect_extents"))args.push_back(n);
@@ -596,6 +781,7 @@ std::string hostSource(Operation *dispatch, const llvm::json::Array &abi) {
   args.push_back("panel ? panel : cols");
   if (dispatch->getAttrOfType<BoolAttr>("weft_host.absolute_origin").getValue())
     args.push_back("start");
+  if(dispatch->hasAttr("cpu.key_extent")){args.push_back("lo");args.push_back("hi");}
   if(owner){
     auto domain=dispatch->getAttrOfType<IntegerAttr>("domain_arg").getInt();
     auto rank=slots[domain]; auto base="a"+std::to_string(domain);
@@ -617,6 +803,12 @@ std::string hostSource(Operation *dispatch, const llvm::json::Array &abi) {
   // A worker owns a contiguous range of complete grains. Give its native
   // kernel the full interval, splitting only at a projected view boundary.
   if(members)prefix+="rows=cols;\n";
+  if(auto keys=dispatch->getAttrOfType<IntegerAttr>("cpu.key_extent")){
+    prefix+="int64_t keys="+std::to_string(keys.getInt())+",lines=(keys+15)/16,n=workers<lines?workers:lines;\n";
+    return prefix+"#pragma omp parallel for num_threads(n) schedule(static) if(n>1)\nfor(int64_t b=0;b<n;++b){int64_t start=0,count=rows,lo=16*(lines*b/n),hi=16*(lines*(b+1)/n);"+
+      symbol+"_instance("+llvm::join(args,",")+");}return 0;}\n";
+  }
+  if(dispatch->hasAttr("cpu.single_dispatcher"))prefix+="workers=1;\n";
   prefix += "int64_t groups=1+(rows-1)/grain; int64_t bins=groups<workers?groups:workers;\n";
   return prefix+"#pragma omp parallel for num_threads(bins) "
          "schedule(static) if(workers>1)\n"

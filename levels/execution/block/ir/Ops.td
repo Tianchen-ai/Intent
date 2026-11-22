@@ -198,3 +198,30 @@ def Iblock_Dialect_SegmentFold : Op<Iblock_Dialect,"segment_fold",[SingleBlock]>
 def Iblock_Dialect_SegmentSize : Op<Iblock_Dialect,"segment_size"> {
   let arguments=(ins AnyMemRef:$offsets,AnyTensor:$rows,AnyTensor:$cols,I1Tensor:$active);let results=(outs F32Tensor:$value);
 }
+def Iblock_Dialect_CountKeys : Op<Iblock_Dialect,"count_keys"> {
+  let arguments=(ins AnyMemRef:$source,Index:$owner,I64Attr:$span);let results=(outs I32Tensor:$counts);
+}
+def Iblock_Dialect_ColumnSum : Op<Iblock_Dialect,"column_sum"> {
+  let arguments=(ins AnyMemRef:$source,Index:$owner);let results=(outs I32Tensor:$counts);
+}
+def Iblock_Dialect_KeyCounts : Op<Iblock_Dialect,"key_counts"> {
+  let arguments=(ins AnyMemRef:$source,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active,I64Attr:$extent,I64Attr:$span);let results=(outs I32Tensor:$counts);
+}
+def Iblock_Dialect_SumColumns : Op<Iblock_Dialect,"sum_columns"> {
+  let arguments=(ins AnyMemRef:$source,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active,I64Attr:$extent);let results=(outs I32Tensor:$counts);
+}
+def Iblock_Dialect_Different : Op<Iblock_Dialect,"ne"> {let arguments=(ins AnyType:$lhs,AnyType:$rhs);let results=(outs AnyTensor:$mask);}
+def Iblock_Dialect_ColumnsI32 : Op<Iblock_Dialect,"member_index"> {let arguments=(ins AnyMemRef:$domain,Index:$row);let results=(outs I32Tensor:$members);}
+def Iblock_Dialect_PrefixScatter : Op<Iblock_Dialect,"prefix_scatter"> {let arguments=(ins AnyMemRef:$output,AnyMemRef:$counts,Index:$owner,I1Tensor:$predicate,I32Tensor:$prefix,I32Tensor:$values,I32Attr:$fill);}
+def Iblock_Dialect_ColumnsTile : Op<Iblock_Dialect,"member_tile"> {let arguments=(ins AnyTensor:$columns,I1Tensor:$active);let results=(outs I32Tensor:$members);}
+def Iblock_Dialect_ScatterFragment : Op<Iblock_Dialect,"scatter_fragment"> {let arguments=(ins AnyMemRef:$output,AnyMemRef:$counts,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active,I1Tensor:$predicate,I32Tensor:$prefix,I32Tensor:$values,I32Attr:$fill);}
+def Iblock_Dialect_Input : Op<Iblock_Dialect,"index_read"> {let arguments=(ins AnyMemRef:$base,I32Tensor:$key,UnitAttr:$in_bounds);let results=(outs I32Tensor:$values);}
+def Iblock_Dialect_InputTile : Op<Iblock_Dialect,"index_read_at"> {let arguments=(ins AnyMemRef:$base,I32Tensor:$key,I1Tensor:$valid,UnitAttr:$in_bounds);let results=(outs I32Tensor:$values);}
+def Iblock_Dialect_Ticket : Op<Iblock_Dialect,"atomic_add"> {let arguments=(ins AnyMemRef:$base,I32Tensor:$key,I32:$delta,StrAttr:$ordering,UnitAttr:$in_bounds);let results=(outs I32Tensor:$values);}
+def Iblock_Dialect_TicketTile : Op<Iblock_Dialect,"atomic_add_at"> {let arguments=(ins AnyMemRef:$base,I32Tensor:$key,I32:$delta,I1Tensor:$valid,StrAttr:$ordering,UnitAttr:$in_bounds);let results=(outs I32Tensor:$values);}
+def Iblock_Dialect_Put : Op<Iblock_Dialect,"unique_put"> {let arguments=(ins AnyMemRef:$base,I32Tensor:$key,I32Tensor:$value,UnitAttr:$in_bounds);}
+def Iblock_Dialect_PutTile : Op<Iblock_Dialect,"unique_put_at"> {let arguments=(ins AnyMemRef:$base,I32Tensor:$key,I32Tensor:$value,I1Tensor:$valid,UnitAttr:$in_bounds);}
+def Iblock_Dialect_WriteOffsets : Op<Iblock_Dialect,"write_offsets"> {let arguments=(ins AnyMemRef:$offsets,AnyMemRef:$total,Index:$owner,I32Tensor:$prefix);}
+def Iblock_Dialect_PublishOffsets : Op<Iblock_Dialect,"publish_offsets"> {let arguments=(ins AnyMemRef:$offsets,AnyMemRef:$total,AnyTensor:$columns,I1Tensor:$active,I32Tensor:$prefix);}
+def Iblock_Dialect_Ranges : Op<Iblock_Dialect,"fill_ranges"> {let arguments=(ins AnyMemRef:$out,AnyMemRef:$offsets,Index:$owner,I64Attr:$unit,UnitAttr:$disjoint_in_bounds);}
+def Iblock_Dialect_RangesAt : Op<Iblock_Dialect,"fill_ranges_at"> {let arguments=(ins AnyMemRef:$out,AnyMemRef:$offsets,AnyTensor:$columns,I1Tensor:$active,I64Attr:$unit,UnitAttr:$disjoint_in_bounds);}

@@ -162,7 +162,19 @@ LogicalResult phase(Operation *anchor, Block &source, bool stream,
     auto val = [&](unsigned i) {
       return map.lookupOrDefault(op->getOperand(i));
     };
-    if(code=="owner_store") {
+    if(code=="scatter_fragment"){
+      SmallVector<Value> operands;for(auto v:op->getOperands())operands.push_back(map.lookupOrDefault(v));
+      auto done=inst(b,loc,"dsa.scatter_fragment",operands,b.getI1Type(),op->getAttrs());
+      completions.push_back(done->getResult(0));
+    }else if(code=="fill_ranges_at"){
+      completions.push_back(inst(b,loc,"dsa.fill_ranges_at",{val(0),val(1),val(2),val(3)},b.getI1Type(),op->getAttrs())->getResult(0));
+    }else if(code=="publish_offsets"){
+      SmallVector<Value> args;for(auto v:op->getOperands())args.push_back(map.lookupOrDefault(v));
+      completions.push_back(inst(b,loc,"dsa.publish_offsets",args,b.getI1Type())->getResult(0));
+    }else if(code=="unique_put_at"){
+      auto done=inst(b,loc,"dsa.unique_put",{val(0),val(1),val(2),val(3)},b.getI1Type(),op->getAttrs());
+      completions.push_back(done->getResult(0));
+    }else if(code=="owner_store") {
       auto done=inst(b,loc,"dsa.owner_write",{val(0),writeWindow->getResult(0),val(2)},b.getI1Type());
       completions.push_back(done->getResult(0));
     } else if(code=="owner_load") {

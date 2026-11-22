@@ -1,4 +1,5 @@
 #include "compilerinfra/Assembly.h"
+#include "intentdsl/levels/algorithm/kir/ir/KeyReduction.h"
 #include "intentdsl/levels/execution/block/ir/Grid.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/IRMapping.h"
@@ -31,10 +32,11 @@ public:
     }
     fn->setAttr("block.guard",choice.get("guard"));
     auto walk = choice.getAs<StringAttr>("walk");
-    gridTiles = walk=="grid-tile" || walk=="segment-tile";
+    gridTiles = walk && (walk=="grid-tile" || walk=="segment-tile" || walk=="column-panels");
     fn->setAttr("block.grid", intentdsl::block::grid(rw,gridTiles));
     fn->setAttr("block.configs", choice.get("rows"));
     fn->setAttr("block.topology", choice.get("topology"));
+    batch=choice.getAs<IntegerAttr>("member_batch");
   }
   void build() {
     rw.setInsertionPoint(anchor);
@@ -48,6 +50,24 @@ public:
     SmallVector<Operation*> ownerStores;
     for (auto &operation : body.without_terminator()) {
       auto code=operation.getName().stripDialect();
+      if(code=="fill_ranges"){
+        make("fill_ranges_at",{operation.getOperand(0),operation.getOperand(1),cols,active},{},operation.getAttrs());continue;
+      }
+      if(code=="write_offsets"){
+        make("publish_offsets",{operation.getOperand(0),operation.getOperand(1),cols,active,expr(operation.getOperand(3))},{});
+        continue;
+      }
+      if(code=="atomic_add"){expr(operation.getResult(0));continue;}
+      if(code=="unique_put"){
+        make("unique_put_at",{operation.getOperand(0),expr(operation.getOperand(1)),expr(operation.getOperand(2)),active},{},operation.getAttrs());
+        continue;
+      }
+      if(code=="prefix_scatter"){
+        if(!resident)llvm_unreachable("prefix scatter requires one complete row");
+        make("scatter_fragment",{operation.getOperand(0),operation.getOperand(1),rows,cols,active,
+             expr(operation.getOperand(3)),expr(operation.getOperand(4)),expr(operation.getOperand(5))},{},operation.getAttrs());
+        continue;
+      }
       if(code=="read_owner") {
         auto v=operation.getResult(0);
         fixed.map(v,make("owner_load",{operation.getOperand(0),rows},vector(v.getType(),1))->getResult(0));
@@ -84,6 +104,7 @@ private:
   Location loc;
   Value domain, rows, cols, active;
   bool resident, gridTiles;
+  IntegerAttr batch;
   SmallVector<Operation *> writes;
   IRMapping fixed, local;
   Type vector(Type element, unsigned rank) {
@@ -111,6 +132,7 @@ private:
       state.addTypes(vector(rw.getF32Type(),2));
       if (fold) {
         state.addAttribute("strict",rw.getUnitAttr());
+        if(batch)state.addAttribute("member_batch",batch);
         IRMapping capture;
         op->getRegion(0).cloneInto(state.addRegion(),capture);
       }
@@ -139,6 +161,11 @@ private:
       local.map(v,fragment);
       return fragment;
     }
+    if(n=="count_keys" || n=="column_sum"){
+      auto fragment=make(n=="count_keys"?"key_counts":"sum_columns",{op->getOperand(0),rows,cols,active},
+                         vector(rw.getI32Type(),2),op->getAttrs())->getResult(0);
+      local.map(v,fragment);return fragment;
+    }
     if (n == "field") {
       auto state=expr(op->getOperand(0));
       auto result=make("summary_field",state,vector(v.getType(),1),op->getAttrs())->getResult(0);
@@ -157,6 +184,17 @@ private:
               ->getResult(0);
       local.map(v, ordinal);
       return ordinal;
+    }
+    if(n=="member_index"){
+      auto index=make("member_tile",{cols,active},vector(rw.getI32Type(),2))->getResult(0);
+      local.map(v,index);return index;
+    }
+    if(n=="atomic_add" || n=="index_read"){
+      SmallVector<Value> inputs{op->getOperand(0),expr(op->getOperand(1))};
+      if(n=="atomic_add")inputs.push_back(expr(op->getOperand(2)));
+      inputs.push_back(active);
+      auto fragment=make((n+"_at").str(),inputs,vector(rw.getI32Type(),2),op->getAttrs())->getResult(0);
+      local.map(v,fragment);return fragment;
     }
     if (n == "read") {
       auto view = op->getOperand(0);
@@ -255,10 +293,18 @@ void registerRealizer(Unit &unit) {
   Realizer r;
   r.name = "tile-rows";
   r.family = unit.qualify("structure");
-  r.apply = [](Operation *op, Attribute a, const TargetProfile &,
+  r.apply = [](Operation *op, Attribute a, const TargetProfile &p,
                RewriterBase &rw) {
+    llvm::Error problem=llvm::Error::success();
+    op->walk([&](Operation *v){
+      if(problem)return;
+      auto n=v->getName().stripDialect();if(n!="count_keys" && n!="column_sum")return;
+      auto e=intentdsl::kir::keyExtent(v,*p.services.get<intentdsl::CallFacts>());
+      if(!e)problem=e.takeError();else v->setAttr("extent",rw.getI64IntegerAttr(*e));
+    });
+    if(problem)return problem;
     RowTile(op, cast<DictionaryAttr>(a), rw).build();
-    return llvm::Error::success();
+    return llvm::Error(llvm::Error::success());
   };
   unit.realizers.push_back({std::move(r), COMPILERINFRA_SOURCE});
 }

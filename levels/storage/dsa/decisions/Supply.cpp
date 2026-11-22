@@ -20,6 +20,9 @@ struct Footprint {
         f.collectiveBytes = reductionScratch;
       } else if (op.getNumResults() == 1) {
         if(code=="scan_sum")f.collectiveBytes=reductionScratch;
+        if(code=="atomic_add_at")f.collectiveBytes=std::max<int64_t>(f.collectiveBytes,8);
+        if(code=="key_counts" || code=="sum_columns")
+          f.collectiveBytes=std::max<int64_t>(f.collectiveBytes,cast<MemRefType>(op.getOperand(0).getType()).getElementTypeBitWidth()/8);
         if(code=="segment_fold" && kir::contiguousFeatureRead(&op))
           f.collectiveBytes=std::max<int64_t>(f.collectiveBytes,16*sizeof(float));
         auto t = dyn_cast<RankedTensorType>(op.getResult(0).getType());

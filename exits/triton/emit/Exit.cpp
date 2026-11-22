@@ -94,6 +94,62 @@ public:
       }
       std::string e;
       auto ownerAxis=op.getParentOfType<func::FuncOp>()->getAttrOfType<IntegerAttr>("kir.owner_axis");
+      if(n=="fill_ranges_at"){
+        auto unit=std::to_string(op.getAttrOfType<IntegerAttr>("unit").getInt());
+        line(depth,"valid="+arg(2)+"+1<N");
+        line(depth,"begin=tl.load("+arg(1)+"+"+arg(2)+"*"+arg(1)+"_s0,mask=valid,other=0)//"+unit);
+        line(depth,"end=tl.load("+arg(1)+"+("+arg(2)+"+1)*"+arg(1)+"_s0,mask=valid,other=0)//"+unit);
+        line(depth,"for k in range(tl.max(end-begin)):");
+        line(depth+1,"tl.store("+arg(0)+"+(begin+k)*"+arg(0)+"_s0,"+arg(2)+".to(tl.int32),mask=begin+k<end)");continue;
+      }
+      if(n=="publish_offsets"){
+        auto index=arg(2)+"[None,:]";
+        line(depth,"tl.store("+arg(0)+",0)");
+        line(depth,"tl.store("+arg(0)+"+("+index+"+1)*"+arg(0)+"_s0,"+arg(4)+",mask="+arg(3)+")");
+        line(depth,"tl.store("+arg(1)+"+0*"+index+","+arg(4)+",mask="+arg(3)+" & ("+index+"==N-1))");
+        continue;
+      }
+      if(n=="index_read_at" || n=="atomic_add_at" || n=="unique_put_at"){
+        auto ptr=arg(0)+"+"+arg(1)+"*"+arg(0)+"_s0";
+        if(n=="unique_put_at"){line(depth,"tl.store("+ptr+","+arg(2)+",mask="+arg(3)+")");continue;}
+        auto id="v"+std::to_string(next++);values[op.getResult(0)]=id;
+        line(depth,id+" = "+(n=="index_read_at"?"tl.load("+ptr+",mask="+arg(2)+",other=0)":
+            "tl.atomic_add("+ptr+","+arg(2)+",mask="+arg(3)+",sem='relaxed',scope='gpu')"));continue;
+      }
+      if(n=="scatter_fragment"){
+        auto fill=std::to_string(op.getAttrOfType<IntegerAttr>("fill").getInt());
+        line(depth,"total=tl.max(tl.where("+arg(4)+","+arg(6)+",0),1)");
+        line(depth,"slot=tl.where("+arg(5)+","+arg(6)+"-1,total[:,None]+"+arg(3)+"[None,:]-"+arg(6)+")");
+        line(depth,"tl.store("+arg(0)+"+"+arg(2)+"[:,None]*"+arg(0)+"_s0+slot*"+arg(0)+"_s1,tl.where("+arg(5)+","+arg(7)+","+fill+"),mask="+arg(4)+")");
+        line(depth,"tl.store("+arg(1)+"+"+arg(2)+"*"+arg(1)+"_s0,total,mask="+arg(2)+"<M)");
+        continue;
+      }
+      if(n=="ne" || n=="member_tile"){
+        auto id="v"+std::to_string(next++);values[op.getResult(0)]=id;
+        line(depth,id+" = "+(n=="ne"?arg(0)+"!="+arg(1):"tl.broadcast_to("+arg(0)+"[None,:],(ROWS,WIDTH)).to(tl.int32)"));continue;
+      }
+      if(n=="key_counts" || n=="sum_columns"){
+        auto size=std::to_string(op.getAttrOfType<IntegerAttr>("extent").getInt()), base=arg(0);
+        auto id="bins"+std::to_string(next++);line(depth,id+" = tl.full((WIDTH,),0,tl.int32)");
+        if(n=="key_counts"){
+          auto span=op.getAttrOfType<IntegerAttr>("span").getInt(), width=op.getAttrOfType<IntegerAttr>("native_panel").getInt();
+          std::string start="(tl.program_id(0)*"+std::to_string(span)+")";
+          line(depth,"for piece in range("+std::to_string(llvm::divideCeil(span,width))+"):");
+          line(depth+1,"offset = piece*"+std::to_string(width)+"+tl.arange(0,"+std::to_string(width)+")");
+          line(depth+1,"key = tl.load("+base+"+("+start+"+offset)*"+base+"_s0, mask=(offset<"+std::to_string(span)+") & ("+start+"+offset<"+size+"),other=-1)");
+          bool wide=cast<MemRefType>(op.getOperand(0).getType()).getElementType().isInteger(64);
+          line(depth+1,wide?"bin_id=key":"bin_id=key.to(tl.int32)");
+          line(depth+1,"keep=(bin_id>=0)&(bin_id<N)");
+          line(depth+1,id+" += tl.histogram(tl.where(keep,bin_id,0).to(tl.int32),WIDTH) - tl.where(tl.arange(0,WIDTH)==0,tl.sum((~keep).to(tl.int32),0),0)");
+        }else{
+          auto height=std::to_string(op.getAttrOfType<IntegerAttr>("native_panel").getInt());
+          line(depth,"for panel in range(tl.cdiv("+size+","+height+")):");
+          line(depth+1,"part=panel*"+height+"+tl.arange(0,"+height+")");
+          line(depth+1,"v=tl.load("+base+"+part[:,None]*"+base+"_s0+"+arg(2)+"[None,:]*"+base+"_s1,mask=(part[:,None]<"+size+")&("+arg(2)+"[None,:]<N),other=0)");
+          line(depth+1,id+" += tl.sum(v,0)");
+        }
+        values[op.getResult(0)]=id+"[None,:]";continue;
+      }
       if(n=="segment_fold" || n=="segment_size"){
         auto fn=op.getParentOfType<func::FuncOp>();
         auto slot=fn->getAttrOfType<IntegerAttr>("kir.domain_arg").getInt();
@@ -107,24 +163,36 @@ public:
           values[op.getResult(0)]=tag;line(depth,tag+" = ("+limit+" - "+cursor+").to(tl.float32)");continue;
         }
         auto &terms=op.getRegion(0).front();
-        values[terms.getArgument(0)]=cursor;values[terms.getArgument(1)]=arg(2)+"[None,:]";
+        auto batch=op.getAttrOfType<IntegerAttr>("member_batch");bool panel=bool(batch);
+        auto width=panel?std::to_string(batch.getInt()):"1";
+        values[terms.getArgument(0)]=panel?"("+cursor+"[:,:,None]+tl.arange(0,"+width+")[None,None,:])":cursor;
+        values[terms.getArgument(1)]=arg(2)+(panel?"[None,:,None]":"[None,:]");
         line(depth,acc+" = tl.full((ROWS,WIDTH), 0., tl.float32)");
-        line(depth,"for "+tag+"_step in range(tl.max("+limit+" - "+cursor+")):");
-        line(depth+1,live+" = ("+cursor+" < "+limit+") & "+arg(3));
+        line(depth,"for "+tag+"_step in range(tl.cdiv(tl.max("+limit+" - "+cursor+"),"+width+")):");
+        if(panel)line(depth+1,live+" = ("+name(terms.getArgument(0))+" < "+limit+"[:,:,None]) & "+arg(3)+"[:,:,None]");
+        else line(depth+1,live+" = ("+cursor+" < "+limit+") & "+arg(3));
         for(auto &v:terms){
           auto code=v.getName().stripDialect();
           auto a=[&](unsigned i){return name(v.getOperand(i));};
-          if(code=="term"){line(depth+1,acc+" = tl.where("+live+",libdevice.add_rn("+acc+","+a(0)+"),"+acc+")");break;}
+          if(code=="term"){
+            if(panel){
+              line(depth+1,"for lane in tl.static_range(0,"+width+"):");
+              line(depth+2,"sample=tl.reshape(tl.gather("+a(0)+",tl.full((ROWS,WIDTH,1),lane,tl.int32),2),(ROWS,WIDTH))");
+              line(depth+2,acc+" = tl.where(("+cursor+"+lane < "+limit+") & "+arg(3)+",libdevice.add_rn("+acc+",sample),"+acc+")");
+            }else line(depth+1,acc+" = tl.where("+live+",libdevice.add_rn("+acc+","+a(0)+"),"+acc+")");
+            break;
+          }
           std::string rhs;
           if(code=="member_load"){
             auto pointer=a(0);
             for(unsigned i=1;i<v.getNumOperands();++i)pointer+=" + ("+a(i)+") * "+a(0)+"_s"+std::to_string(i-1);
+            if(panel)pointer="tl.broadcast_to("+pointer+",(ROWS,WIDTH,"+width+"))";
             rhs="tl.load("+pointer+",mask="+live+",other=0)";
           } else if(code=="mul" || code=="add")rhs="libdevice."+code.str()+"_rn("+a(0)+","+a(1)+")";
           else return llvm::createStringError("unknown strict member expression "+code);
           auto dst="v"+std::to_string(next++);values[v.getResult(0)]=dst;line(depth+1,dst+" = "+rhs);
         }
-        line(depth+1,cursor+" += 1");values[op.getResult(0)]=acc;continue;
+        line(depth+1,cursor+" += "+width);values[op.getResult(0)]=acc;continue;
       }
       if(n=="owner_load") e="tl.load("+arg(0)+"+"+arg(1)+"*"+arg(0)+"_s0,mask="+arg(1)+"<M,other=0)";
       else if(n=="owner_store"){

@@ -21,17 +21,19 @@ void supplyCost(Unit &u) {
           auto startup = intentdsl::quantity(ctx, "first_io", "ns");
           auto d = cast<DictionaryAttr>(c.value);
           double segmentWork=facts->segmentReads(op);
+          double keys=facts->keyTraffic(op);
           auto depth = d.getAs<IntegerAttr>("depth").getInt();
           double participants = d.getAs<IntegerAttr>("participants").getInt();
           auto configs = op->getAttrOfType<ArrayAttr>("block.configs");
           unsigned ops = 0;
-          unsigned summaries = 0, scans = 0;
+          unsigned summaries = 0, scans = 0, atomics=0;
           op->walk([&](Operation *i) {
             auto k = i->getName().stripDialect();
             ops += k == "mul" || k == "add" || k == "reduce" || k == "exp" ||
                    k == "rsqrt" || k == "div";
             summaries += k == "summary_reduce";
             scans += k == "scan_sum";
+            atomics += k == "atomic_add_at";
           });
           e.timeNs.reset();
           for (auto a : d.getAs<ArrayAttr>("rows")) {
@@ -51,9 +53,11 @@ void supplyCost(Unit &u) {
             pred.terms = dma->terms;
             pred.terms["steps"] = {steps, "count"};
             if(segmentWork)pred.terms["packed_member_reads"]={segmentWork,"B"};
+            if(keys)pred.terms["key_input_bytes"]={keys,"B"};
             double merges = group * std::max(0., n - 1.) * summaries;
             pred.terms["summary_merges_per_group"] = {merges, "count"};
             pred.terms["serial_prefix_adds"]={group*std::max(0.,n-1.)*scans,"count"};
+            if(atomics)pred.terms["atomic_updates_per_group"]={group*n*atomics,"count"};
             pred.terms["working_set"] = {
                 double(row.getAs<IntegerAttr>("bytes").getInt()), "B"};
             if (dma->timeNs && launch && sync && vector && startup) {
@@ -71,9 +75,10 @@ void supplyCost(Unit &u) {
               pred.terms["wait"] = {depth == 2 ? steps * *sync : 0., "ns"};
               pred.timeNs = *launch + (steps ? *startup : 0.) + steps * (fetch + compute + write) -
                             overlap + (depth == 2 ? steps * *sync : 0.);
-              if(segmentWork){
+              if(atomics)pred.timeNs=*pred.timeNs+steps*group*n*atomics*(*sync);
+              if(segmentWork || keys){
                 auto rate=intentdsl::quantity(ctx,"read_1","B/ns");
-                if(rate)*pred.timeNs+=segmentWork/ *rate;
+                if(rate)*pred.timeNs+=(segmentWork+keys)/ *rate;
               }
               if (!e.timeNs || *pred.timeNs < *e.timeNs)
                 e.timeNs = pred.timeNs;

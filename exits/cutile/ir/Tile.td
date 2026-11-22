@@ -79,3 +79,20 @@ def TileSource_SegmentFold : Op<TileSource,"segment_fold",[SingleBlock]> {
 def TileSource_SegmentSize : Op<TileSource,"segment_size"> {
   let arguments=(ins AnyMemRef:$offsets,AnyTensor:$rows,AnyTensor:$cols,I1Tensor:$active);let results=(outs F32Tensor:$value);
 }
+def TileSource_KeyCounts : Op<TileSource,"key_counts"> {
+  let arguments=(ins AnyMemRef:$source,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active,I64Attr:$extent,I64Attr:$span);let results=(outs I32Tensor:$counts);
+}
+def TileSource_SumColumns : Op<TileSource,"sum_columns"> {
+  let arguments=(ins AnyMemRef:$source,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active,I64Attr:$extent);let results=(outs I32Tensor:$counts);
+}
+def TileSource_PrivateBinStore : Op<TileSource,"private_bin_store"> {
+  let arguments=(ins AnyMemRef:$keys,AnyMemRef:$dest,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active,I64Attr:$extent,I64Attr:$span);
+}
+def TileSource_Different : Op<TileSource,"ne"> {let arguments=(ins AnyType:$lhs,AnyType:$rhs);let results=(outs AnyTensor:$mask);}
+def TileSource_ColumnsTile : Op<TileSource,"member_tile"> {let arguments=(ins AnyTensor:$columns,I1Tensor:$active);let results=(outs I32Tensor:$members);}
+def TileSource_ScatterFragment : Op<TileSource,"scatter_fragment"> {let arguments=(ins AnyMemRef:$output,AnyMemRef:$counts,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active,I1Tensor:$predicate,I32Tensor:$prefix,I32Tensor:$values,I32Attr:$fill);}
+def TileSource_InputTile : Op<TileSource,"index_read_at"> {let arguments=(ins AnyMemRef:$base,I32Tensor:$key,I1Tensor:$valid,UnitAttr:$in_bounds);let results=(outs I32Tensor:$values);}
+def TileSource_TicketTile : Op<TileSource,"atomic_add_at"> {let arguments=(ins AnyMemRef:$base,I32Tensor:$key,I32:$delta,I1Tensor:$valid,StrAttr:$ordering,UnitAttr:$in_bounds);let results=(outs I32Tensor:$values);}
+def TileSource_PutTile : Op<TileSource,"unique_put_at"> {let arguments=(ins AnyMemRef:$base,I32Tensor:$key,I32Tensor:$value,I1Tensor:$valid,UnitAttr:$in_bounds);}
+def TileSource_PublishOffsets : Op<TileSource,"publish_offsets"> {let arguments=(ins AnyMemRef:$offsets,AnyMemRef:$total,AnyTensor:$columns,I1Tensor:$active,I32Tensor:$prefix);}
+def TileSource_RangesAt : Op<TileSource,"fill_ranges_at"> {let arguments=(ins AnyMemRef:$out,AnyMemRef:$offsets,AnyTensor:$columns,I1Tensor:$active,I64Attr:$unit,UnitAttr:$disjoint_in_bounds);}

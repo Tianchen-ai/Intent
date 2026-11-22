@@ -34,6 +34,17 @@ void registerSegment(Unit &unit) {
     auto d=b.getDictionaryAttr({b.getNamedAttr("rows",b.getArrayAttr(rows)),b.getNamedAttr("walk",b.getStringAttr(walk)),
         b.getNamedAttr("topology",b.getStringAttr(width?"resident":"stream")),b.getNamedAttr("guard",b.getDenseI64ArrayAttr({previous?previous+1:0,width?int64_t(width):-1}))});
     candidates.push_back({walk.str(),walk.str(),d,{"distinct-segment-outputs"}});
+    if(grid){
+      SmallVector<Attribute> panels;
+      for(auto a:rows){
+        auto r=cast<DictionaryAttr>(a);
+        if(r.getAs<IntegerAttr>("rows").getInt()*r.getAs<IntegerAttr>("width").getInt()<=128)panels.push_back(a);
+      }
+      if(!panels.empty()){
+        NamedAttrList panel(d);panel.set("member_batch",b.getI64IntegerAttr(8));panel.set("rows",b.getArrayAttr(panels));
+        candidates.push_back({"segment-tile-8",walk.str(),panel.getDictionary(op->getContext()),{"distinct-segment-outputs"}});
+      }
+    }
     return candidates;
   };
   unit.strategies.push_back({std::move(s),COMPILERINFRA_SOURCE});

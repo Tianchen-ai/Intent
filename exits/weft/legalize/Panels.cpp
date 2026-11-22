@@ -100,6 +100,11 @@ public:
     for (auto *op : llvm::reverse(old))
       op->erase();
     for(auto &sweep:task.without_terminator()){
+      for(auto &o:sweep.getRegion(0).front()){
+        auto n=o.getName().stripDialect();
+        if(n=="count_keys")sweep.setAttr("weft_host.private_bins",b.getUnitAttr());
+        if(n=="column_sum")sweep.setAttr("weft_host.vertical_sum",b.getUnitAttr());
+      }
       if(sweep.walk([](Operation *op){return op->getName().stripDialect()=="ordered_sum"?WalkResult::interrupt():WalkResult::advance();}).wasInterrupted())
         sweep.setAttr("weft_host.segment_loop",b.getUnitAttr());
       if(sweep.walk([](Operation *op){return op->getName().getStringRef()=="cpu.scan_sum"?WalkResult::interrupt():WalkResult::advance();}).wasInterrupted())
@@ -128,6 +133,16 @@ LogicalResult verifyPanels(Operation *dispatch) {
         s.getNumResults() != unsigned(!store))
       return s.emitError("invalid sweep combine");
     auto &bb = s.getRegion(0).front();
+    if(s.hasAttr("weft_host.private_bins") || s.hasAttr("weft_host.vertical_sum")){
+      bool keys=s.hasAttr("weft_host.private_bins");
+      auto &first=bb.front();auto *next=first.getNextNode(), *value=&first;
+      if(!keys && next && next->getName().stripDialect()=="cast" && next->getOperand(0)==first.getResult(0)){
+        value=next;next=next->getNextNode();
+      }
+      if(bb.getOperations().size()!=(value==&first?3:4) || first.getName().stripDialect()!=(keys?"count_keys":"column_sum") ||
+         !next || next->getName().stripDialect()!="write_panel" || next->getOperand(4)!=value->getResult(0))
+        return s.emitError("direct bin publication needs one owned output");
+    }
     if (bb.getNumArguments() != 2 || !bb.getArgument(0).getType().isIndex() ||
         !bb.getArgument(1).getType().isIndex() || bb.empty() ||
         bb.back().getName().getStringRef() != "weft_host.yield" ||

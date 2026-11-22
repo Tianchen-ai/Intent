@@ -41,6 +41,14 @@ StringRef primitive(Operation *op, int64_t depth) {
   }
   if(n=="block.member_load" || n=="block.term")return op->getName().stripDialect();
   if(n=="block.scan_sum")return "row_inclusive_sum";
+  if(n=="dsa.publish_offsets")return "prefix_endpoints";
+  if(n=="dsa.fill_ranges_at")return "mark_intervals";
+  if(n=="block.atomic_add_at")return "atomic_fetch_add";
+  if(n=="block.index_read_at" || n=="dsa.unique_put")return op->getName().stripDialect();
+  if(n=="dsa.scatter_fragment")return "pack_scatter";
+  if(n=="block.member_tile" || n=="block.ne")return op->getName().stripDialect();
+  if(n=="block.key_counts")return "private_bin_count";
+  if(n=="block.sum_columns")return "vector_sum_columns";
   if(n=="block.summary_reduce")return "welford_f32";
   if(n=="block.summary_field" || n=="block.summary_merge" || n=="block.summary_identity" ||
      n=="dsa.owner_rows" || n=="dsa.owner_read" || n=="dsa.owner_write" || n=="dsa.slab_axis" || n=="dsa.lookup_axis")return op->getName().stripDialect();

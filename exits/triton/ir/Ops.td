@@ -155,3 +155,17 @@ def Itsrc_Dialect_SegmentFold : Op<Itsrc_Dialect,"segment_fold",[SingleBlock]> {
 def Itsrc_Dialect_SegmentSize : Op<Itsrc_Dialect,"segment_size"> {
   let arguments=(ins AnyMemRef:$offsets,AnyTensor:$rows,AnyTensor:$cols,I1Tensor:$active);let results=(outs F32Tensor:$value);
 }
+def Itsrc_Dialect_KeyCounts : Op<Itsrc_Dialect,"key_counts"> {
+  let arguments=(ins AnyMemRef:$source,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active,I64Attr:$extent,I64Attr:$span);let results=(outs I32Tensor:$counts);
+}
+def Itsrc_Dialect_SumColumns : Op<Itsrc_Dialect,"sum_columns"> {
+  let arguments=(ins AnyMemRef:$source,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active,I64Attr:$extent);let results=(outs I32Tensor:$counts);
+}
+def Itsrc_Dialect_Different : Op<Itsrc_Dialect,"ne"> {let arguments=(ins AnyType:$lhs,AnyType:$rhs);let results=(outs AnyTensor:$mask);}
+def Itsrc_Dialect_ColumnsTile : Op<Itsrc_Dialect,"member_tile"> {let arguments=(ins AnyTensor:$columns,I1Tensor:$active);let results=(outs I32Tensor:$members);}
+def Itsrc_Dialect_ScatterFragment : Op<Itsrc_Dialect,"scatter_fragment"> {let arguments=(ins AnyMemRef:$output,AnyMemRef:$counts,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active,I1Tensor:$predicate,I32Tensor:$prefix,I32Tensor:$values,I32Attr:$fill);}
+def Itsrc_Dialect_InputTile : Op<Itsrc_Dialect,"index_read_at"> {let arguments=(ins AnyMemRef:$base,I32Tensor:$key,I1Tensor:$valid,UnitAttr:$in_bounds);let results=(outs I32Tensor:$values);}
+def Itsrc_Dialect_TicketTile : Op<Itsrc_Dialect,"atomic_add_at"> {let arguments=(ins AnyMemRef:$base,I32Tensor:$key,I32:$delta,I1Tensor:$valid,StrAttr:$ordering,UnitAttr:$in_bounds);let results=(outs I32Tensor:$values);}
+def Itsrc_Dialect_PutTile : Op<Itsrc_Dialect,"unique_put_at"> {let arguments=(ins AnyMemRef:$base,I32Tensor:$key,I32Tensor:$value,I1Tensor:$valid,UnitAttr:$in_bounds);}
+def Itsrc_Dialect_PublishOffsets : Op<Itsrc_Dialect,"publish_offsets"> {let arguments=(ins AnyMemRef:$offsets,AnyMemRef:$total,AnyTensor:$columns,I1Tensor:$active,I32Tensor:$prefix);}
+def Itsrc_Dialect_RangesAt : Op<Itsrc_Dialect,"fill_ranges_at"> {let arguments=(ins AnyMemRef:$out,AnyMemRef:$offsets,AnyTensor:$columns,I1Tensor:$active,I64Attr:$unit,UnitAttr:$disjoint_in_bounds);}

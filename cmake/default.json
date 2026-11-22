@@ -6,6 +6,11 @@
           "strategies": [
             "levels/execution/block::tuple-reduction",
             "levels/execution/block::row-scan",
+            "levels/execution/block::counts-by-key",
+            "levels/execution/block::column-panels",
+            "levels/execution/block::complete-bins",
+            "levels/execution/block::prefix-scatter",
+            "levels/execution/block::keyed-atomics",
             "levels/execution/block::segment-members",
             "levels/execution/block::indexed-rows",
             "levels/execution/block::row-reduction",
@@ -22,6 +27,9 @@
             "levels/execution/cpu::tuple-reduction",
             "levels/execution/cpu::row-scan",
             "levels/execution/cpu::segment-reduction",
+            "levels/execution/cpu::key-reduction",
+            "levels/execution/cpu::keyed-atomics",
+            "levels/execution/cpu::scatter-reduction",
             "levels/execution/cpu::indexed-rows",
             "levels/execution/cpu::row-reduction",
             "levels/execution/cpu::pointwise"

@@ -1,5 +1,6 @@
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/algorithm/kir/ir/Segment.h"
+#include "intentdsl/levels/algorithm/kir/ir/KeyReduction.h"
 #include "intentdsl/levels/execution/block/ir/Access.h"
 #include "intentdsl/levels/execution/block/decisions/Verify.h"
 #include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
@@ -90,12 +91,30 @@ LogicalResult verifyMapping(ModuleOp m,const compilerinfra::TargetProfile &p,Str
       ok=def(op->getOperand(1),"rows") && def(op->getOperand(2),"columns");
     if(n=="scan_sum" && topology!="resident")
       return op->emitError("scan crossing a tile boundary requires a carry"),WalkResult::interrupt();
+    if(n=="key_counts" || n=="sum_columns"){
+      auto *window=op->getOperand(3).getDefiningOp();
+      auto cfg=f->getAttrOfType<ArrayAttr>("block.configs");
+      ok=(topology=="resident" || (tiles && n=="sum_columns")) && def(op->getOperand(3),"active") && window->getOperand(0)==domain &&
+        window->getOperand(1)==op->getOperand(1) && window->getOperand(2)==op->getOperand(2) &&
+        llvm::all_of(cfg,[](Attribute a){return cast<DictionaryAttr>(a).getAs<IntegerAttr>("rows").getInt()==1;});
+      auto size=kir::keyExtent(op,*p.services.get<CallFacts>());
+      if(!size)return op->emitError()<<llvm::toString(size.takeError()),WalkResult::interrupt();
+      ok &= op->getAttrOfType<IntegerAttr>("extent").getInt()==*size;
+    }
     if(n=="indexed_tile_read"){
       auto a=cast<MemRefType>(op->getOperand(0).getType()),i=cast<MemRefType>(op->getOperand(1).getType());
       auto mask=op->getOperand(4).getDefiningOp();
       ok=a.getRank()==2 && i.getRank()==1 && i.getElementType().isSignlessIntOrIndex() &&
          def(op->getOperand(4),"active") && mask->getOperand(0)==domain && mask->getOperand(1)==op->getOperand(2) &&
          mask->getOperand(2)==op->getOperand(3) && cast<RankedTensorType>(op->getResult(0).getType()).getElementType()==a.getElementType();
+    }
+    if(n=="scatter_fragment"){
+      auto mask=op->getOperand(4);
+      auto *prefix=op->getOperand(6).getDefiningOp();
+      auto *flags=prefix && prefix->getNumOperands()==1?prefix->getOperand(0).getDefiningOp():nullptr;
+      ok=topology=="resident" && def(mask,"active") && mask.getDefiningOp()->getOperand(0)==domain &&
+         mask.getDefiningOp()->getOperand(1)==op->getOperand(2) && mask.getDefiningOp()->getOperand(2)==op->getOperand(3) &&
+         prefix && prefix->getName().stripDialect()=="scan_sum" && flags && flags->getName().stripDialect()=="cast" && flags->getOperand(0)==op->getOperand(5);
     }
     if(n=="segment_fold" || n=="segment_size"){
       auto *mask=op->getOperand(3).getDefiningOp();
@@ -110,6 +129,10 @@ LogicalResult verifyMapping(ModuleOp m,const compilerinfra::TargetProfile &p,Str
       ok=isInput(op->getOperand(0)) && offsets.getRank()==1 && offsets.getElementType().isInteger(32) &&
         def(op->getOperand(3),"active") && mask->getOperand(0)==domain && mask->getOperand(1)==op->getOperand(1) &&
         mask->getOperand(2)==op->getOperand(2) && (n=="segment_size" || succeeded(kir::verifyMemberExpression(op,isInput)));
+      if(auto batch=op->getAttrOfType<IntegerAttr>("member_batch"))
+        ok &= n=="segment_fold" && batch.getInt()==8 && tiles && llvm::all_of(f->getAttrOfType<ArrayAttr>("block.configs"),[](Attribute attr){
+          auto row=cast<DictionaryAttr>(attr);return row.getAs<IntegerAttr>("rows").getInt()*row.getAs<IntegerAttr>("width").getInt()<=128;
+        });
     }
     if(dialect=="block" && (n=="load" || n=="store")){
       auto mask=op->getOperand(3).getDefiningOp();

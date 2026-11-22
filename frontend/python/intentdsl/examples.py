@@ -1,6 +1,93 @@
 import intentdsl as I
 
 @I.kernel
+def count_routes(ids:I.In[I.i32,(4096,2)], counts:I.InOut[I.i32,(64,)]):
+    for r in I.parallel(ids.dim(0)):
+        I.atomic_add(counts,ids[r,:],I.cast(1,I.i32),order="relaxed",in_bounds=True)
+
+@I.kernel
+def mark_route_blocks(offsets:I.In[I.i32,(65,)], blocks:I.InOut[I.i32,(128,)]):
+    for expert in I.parallel(offsets.dim(0)):
+        I.fill_ranges(blocks,offsets,expert,unit=128,disjoint_in_bounds=True)
+
+@I.kernel
+def aligned_offsets(counts:I.In[I.i32,(64,)], offsets:I.Out[I.i32,(65,)], total:I.Out[I.i32,(1,)]):
+    for e in I.parallel(counts.dim(0)):
+        n = counts[e]+I.cast(127,I.i32)
+        padded = (n >> I.cast(7,I.i32)) << I.cast(7,I.i32)
+        prefix = I.cumsum(padded,axis=0)
+        I.write_offsets(offsets,total,prefix)
+
+@I.kernel
+def place_routes(ids:I.In[I.i32,(4096,2)], offsets:I.In[I.i32,(65,)], cursors:I.InOut[I.i32,(64,)], routes:I.InOut[I.i32,(16320,)]):
+    for r in I.parallel(ids.dim(0)):
+        key=ids[r,:]
+        ticket=I.atomic_add(cursors,key,I.cast(1,I.i32),order="relaxed",in_bounds=True)
+        dst=I.gather(offsets,key,in_bounds=True)+ticket
+        I.scatter_unique(routes,dst,I.linear_index(ids,r),in_bounds=True)
+
+@I.program
+def moe_alignment_into(ids, expert_blocks:I.InOut[I.i32,(128,)]):
+    counts=I.workspace(I.i32,(64,))
+    cursors=I.workspace(I.i32,(64,))
+    offsets=I.workspace(I.i32,(65,))
+    routes=I.output(I.i32,(16320,))
+    total=I.output(I.i32,(1,))
+    I.fill(counts,0)
+    I.fill(cursors,0)
+    I.fill(routes,8192)
+    count_routes(ids,counts)
+    aligned_offsets(counts,offsets,total)
+    place_routes(ids,offsets,cursors,routes)
+    mark_route_blocks(offsets,expert_blocks)
+    return routes,expert_blocks,total
+
+@I.kernel
+def nonzero(values:I.In[I.f32,("M","N")], indices:I.Out[I.i32,("M","N")], counts:I.Out[I.i32,("M",)]):
+    for r in I.parallel(values.dim(0)):
+        keep = values[r,:] != I.cast(0.0,I.f32)
+        rank = I.cumsum(I.cast(keep,I.i32),axis=0)
+        I.scatter_unique(indices[r,:], rank, I.column_index(values,r), valid=keep,fill=-1,count=counts[r])
+
+@I.kernel
+def count_partitions(samples:I.In[I.f32,("N",)], counts:I.Out[I.i32,("P",256)]):
+    for partition in I.parallel(counts.dim(0)):
+        counts[partition,:] = I.reduce_by_key(I.cast(I.chunk(samples,partition,8192),I.i32),1,
+                                               size=counts.dim(1),invalid="skip",combine=I.add,init=0)
+
+@I.kernel
+def merge_counts(partials:I.In[I.i32,("P",256)], bins:I.Out[I.i32,(256,)]):
+    for column in I.parallel(bins.dim(0)):
+        bins[column] = I.sum_columns(partials)
+
+@I.program
+def histogram(samples):
+    parts=I.workspace(I.i32,(I.ceildiv(samples.dim(0),8192),256))
+    bins=I.output(I.i32,(256,))
+    count_partitions(samples,parts)
+    merge_counts(parts,bins)
+    return bins
+
+@I.kernel
+def count_index_parts(samples:I.In[I.i64,("N",)], counts:I.Out[I.i32,("P","B")]):
+    for part in I.parallel(counts.dim(0)):
+        counts[part,:] = I.reduce_by_key(I.chunk(samples,part,8192),1,
+                                         size=counts.dim(1),invalid="skip",combine=I.add,init=0)
+
+@I.kernel
+def merge_counts_f32(parts:I.In[I.i32,("P","B")], output:I.Out[I.f32,("B",)]):
+    for k in I.parallel(output.dim(0)):
+        output[k] = I.cast(I.sum_columns(parts),I.f32)
+
+@I.program
+def histogram_from_indices(samples, bin_count):
+    parts=I.workspace(I.i32,(I.ceildiv(samples.dim(0),8192),bin_count))
+    result=I.output(I.f32,(bin_count,))
+    count_index_parts(samples,parts)
+    merge_counts_f32(parts,result)
+    return result
+
+@I.kernel
 def cumsum(values: I.In[I.f32, ("M","N")], prefix: I.Out[I.f32, ("M","N")]):
     for row in I.parallel(values.dim(0)):
         prefix[row,:] = I.cumsum(values[row,:], axis=0)

@@ -240,6 +240,12 @@ order 是操作属性，拒绝表外组合；一个逻辑原子地址上存在�
 
 ## 对 V1 30 个登记程序的语言覆盖设计
 
+### MoE 的预分配输出调用
+
+产品入口 `moe_alignment_into(ids, expert_blocks)` 接受 4096×2 的 i32 expert ID 和调用方提供的 128 项 i32 缓冲。每个 ID 属于 [0,64)。程序分配 counts、cursors、offsets、routes 和 total，两次清零计数器，并把 routes 填成 8192。count、prefix、scatter、mark 按声明顺序执行。返回值为 routes、原 expert_blocks 和 total。
+
+mark 只写 expert_blocks 的前 total/128 项。调用方可以重用同一个输出缓冲，未覆盖的尾部保留调用前的内容。直接通过 `intentdsl.jit(examples.moe_alignment_into, backend=...).run(ids, expert_blocks)` 执行时，工作区、三个 fill 和四个 kernel 均由产品管理。
+
 此表按 V1 的程序标识核对语言需要，不是 V2 运行结果。weighted RMSNorm 是额外的首路线代表；30 项中登记的是 layer_norm。
 
 | V1 登记项 | 必须能表达的结构／不能丢的事实 |

@@ -16,7 +16,7 @@ void registerElementTraversal(Unit &u,bool indirect) {
       auto n = o->getName().stripDialect();
       writes |= n == "write";
       gathers |= n=="gather_row";
-      collective |= n == "sum" || n == "max_num" || n == "welford" || n=="scan_sum" || n=="ordered_sum";
+      collective |= n == "sum" || n == "max_num" || n == "welford" || n=="scan_sum" || n=="ordered_sum" || n=="count_keys" || n=="column_sum";
     });
     if (!writes || collective || gathers!=indirect)
       return Attribute{};

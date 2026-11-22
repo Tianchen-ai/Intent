@@ -113,3 +113,22 @@ def Cpu_Dialect_MemberLoad : Op<Cpu_Dialect,"member_load"> {
   let arguments=(ins AnyMemRef:$source,Variadic<AnyType>:$coordinates);let results=(outs AnyType:$value);
 }
 def Cpu_Dialect_Term : Op<Cpu_Dialect,"term",[Terminator]> {let arguments=(ins F32:$value);}
+def Cpu_Dialect_CountKeys : Op<Cpu_Dialect,"count_keys"> {
+  let arguments=(ins AnyMemRef:$source,Index:$owner,I64Attr:$span);let results=(outs I32Tensor:$counts);
+}
+def Cpu_Dialect_ColumnSum : Op<Cpu_Dialect,"column_sum"> {
+  let arguments=(ins AnyMemRef:$source,Index:$owner);let results=(outs I32Tensor:$counts);
+}
+def Cpu_Dialect_Different : Op<Cpu_Dialect,"ne"> {let arguments=(ins AnyType:$lhs,AnyType:$rhs);let results=(outs AnyTensor:$mask);}
+def Cpu_Dialect_ColumnsI32 : Op<Cpu_Dialect,"member_index"> {let arguments=(ins AnyMemRef:$domain,Index:$row);let results=(outs I32Tensor:$members);}
+def Cpu_Dialect_PrefixScatter : Op<Cpu_Dialect,"prefix_scatter"> {let arguments=(ins AnyMemRef:$output,AnyMemRef:$counts,Index:$owner,I1Tensor:$predicate,I32Tensor:$prefix,I32Tensor:$values,I32Attr:$fill);}
+def CpuPackTraversal : Op<Cpu_Dialect,"pack_members"> {let arguments=(ins AnyMemRef:$input,AnyMemRef:$output,AnyMemRef:$counts,F32Attr:$threshold,I32Attr:$fill);}
+def Cpu_Dialect_Input : Op<Cpu_Dialect,"index_read"> {let arguments=(ins AnyMemRef:$base,I32Tensor:$key,UnitAttr:$in_bounds);let results=(outs I32Tensor:$values);}
+def Cpu_Dialect_Ticket : Op<Cpu_Dialect,"atomic_add"> {let arguments=(ins AnyMemRef:$base,I32Tensor:$key,I32:$delta,StrAttr:$ordering,UnitAttr:$in_bounds);let results=(outs I32Tensor:$values);}
+def Cpu_Dialect_Put : Op<Cpu_Dialect,"unique_put"> {let arguments=(ins AnyMemRef:$base,I32Tensor:$key,I32Tensor:$value,UnitAttr:$in_bounds);}
+def CpuAtomicTraversal : Op<Cpu_Dialect,"atomic_members",[SingleBlock]> {let regions=(region AnyRegion:$body);}
+def Cpu_Dialect_WriteOffsets : Op<Cpu_Dialect,"write_offsets"> {let arguments=(ins AnyMemRef:$offsets,AnyMemRef:$total,Index:$owner,I32Tensor:$prefix);}
+def Cpu_Dialect_Ranges : Op<Cpu_Dialect,"fill_ranges"> {let arguments=(ins AnyMemRef:$out,AnyMemRef:$offsets,Index:$owner,I64Attr:$unit,UnitAttr:$disjoint_in_bounds);}
+def CpuTally : Op<Cpu_Dialect,"tally_keys"> {let arguments=(ins AnyMemRef:$keys);let results=(outs AnyMemRef:$private_counts);}
+def CpuReserve : Op<Cpu_Dialect,"reserve_tickets"> {let arguments=(ins AnyMemRef:$counters,AnyMemRef:$counts,StrAttr:$ordering);let results=(outs AnyMemRef:$private_bases);}
+def CpuDistribute : Op<Cpu_Dialect,"distribute_tickets"> {let arguments=(ins AnyMemRef:$keys,AnyMemRef:$offsets,AnyMemRef:$bases,AnyMemRef:$out);}
