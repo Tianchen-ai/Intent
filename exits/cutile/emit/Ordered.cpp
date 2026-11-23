@@ -1,8 +1,8 @@
-#include "intentdsl/levels/execution/block/ir/OwnerSource.h"
+#include "OwnerSource.h"
 using namespace mlir;
 namespace CI_UNIT_NAMESPACE {
 namespace {
-struct Ordered : intentdsl::block::OwnerSource {
+struct Ordered : OwnerSource {
   using OwnerSource::OwnerSource;
   mlir::IntegerAttr nativeMatrixRows() const override {
     return space.getAttrOfType<mlir::IntegerAttr>("ct_src.matrix_rows");

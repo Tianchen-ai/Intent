@@ -14,6 +14,7 @@ def TileWrite : Inst<"tile_write", [MemoryEffects<[MemWrite]>]> {
 }
 def TileAxis : Inst<"tile_axis", [Pure]> {let results=(outs AnyRankedTensor:$lane);}
 def TilePid : Inst<"tile_pid", [Pure]> {let arguments=(ins I64Attr:$axis);let results=(outs I64:$id);}
+def TilePrefix : Inst<"tile_prefix", [Pure]> {let arguments=(ins AnyRankedTensor:$tile); let results=(outs AnyRankedTensor:$logical);}
 def TileBroadcast : Inst<"tile_broadcast", [Pure]> {
   let arguments=(ins AnyType:$value, I64Attr:$axis); let results=(outs AnyRankedTensor:$expanded);
 }
@@ -23,7 +24,7 @@ def TileDot : Inst<"tile_dot", [Pure]> {
   let results=(outs AnyRankedTensor:$sum);
 }
 def TileReduce : Inst<"tile_reduce", [Pure]> {
-  let arguments=(ins AnyRankedTensor:$fragment, StrAttr:$algebra); let results=(outs AnyRankedTensor:$result);
+  let arguments=(ins AnyRankedTensor:$fragment, StrAttr:$algebra, I64Attr:$axis); let results=(outs AnyType:$result);
 }
 def TileProgram : Inst<"tile_program", [SingleBlock]> {
   let arguments=(ins Variadic<AnyMemRef>:$domain, StrAttr:$calling_convention);

@@ -1,96 +1,13 @@
-#include "intentdsl/levels/execution/block/ir/OwnerSource.h"
+#include "intentdsl/levels/execution/block/ir/Owners.h"
+
 using namespace mlir;
 namespace CI_UNIT_NAMESPACE {
 llvm::Expected<std::string> printColumns(func::FuncOp fn);
-namespace {
-struct Ordered : intentdsl::block::OwnerSource {
-  using OwnerSource::OwnerSource;
-  mlir::IntegerAttr nativeMatrixRows() const override {
-    return space.getAttrOfType<mlir::IntegerAttr>("triton_src.matrix_rows");
-  }
-  llvm::StringRef language() override { return "tl"; }
-  std::string logicalOwners(std::string fragment, std::string count) override {
-    return "tl.gather("+fragment+",tl.arange(0,"+count+"),0)";
-  }
-  std::string matrixProduct(std::string a, std::string b, bool trans,
-                            std::string) override {
-    return "tl.dot(" + a + "," + (trans ? "tl.trans(" + b + ")" : b) + ")";
-  }
-  std::string matrixAccumulate(std::string a, std::string b,
-                               std::string c) override {
-    return "tl.dot(" + a + "," + b + "," + c + ")";
-  }
-  void signature() override {
-    out << "import triton\nimport triton.language as tl\nfrom "
-           "triton.language.extra.cuda import libdevice\n@triton.jit\ndef "
-           "kernel(";
-    for (auto v : fn.getArguments())
-      out << name(v) << ",";
-    out << "ROWS:tl.constexpr,WIDTH:tl.constexpr):\n";
-  }
-  std::string tileOwner() override {
-    return "tl.program_id(0).to(tl.int64)*ROWS+tl.arange(0,ROWS)";
-  }
-  std::string tileStart() override {
-    return "(tl.cast(tl.program_id(0),tl.int64)*ROWS)";
-  }
-  std::string broadcast(llvm::StringRef v) override {
-    return "tl.broadcast_to(tl.to_tensor(" + v.str() + "),(" + fragmentRows() +
-           ",))";
-  }
-  std::string memberRange(int64_t width) override {
-    return "tl.arange(0," + std::to_string(width) + ").to(tl.int64)";
-  }
-  std::string memberAccess(Operation &op, ArrayRef<std::string> coords,
-                           StringRef mask, bool write) override {
-    auto view = op.getOperand(write ? 1 : 0);
-    auto addr = name(view);
-    auto strides = layout(view, "block.strides");
-    for (auto [a, c] : llvm::enumerate(coords))
-      addr += "+tl.cast(" + c + ",tl.int64)*" + std::to_string(strides[a]);
-    return write ? "tl.store(" + addr + "," + name(op.getOperand(0)) +
-                       ",mask=" + mask.str() + ")"
-                 : "tl.load(" + addr + ",mask=" + mask.str() + ",other=0)";
-  }
-  std::string address(Value buffer, ValueRange coords) {
-    std::string a = name(buffer);
-    auto strides = layout(buffer, "block.strides");
-    for (auto [i, v] : llvm::enumerate(coords))
-      a += "+tl.cast(" + name(v) + ",tl.int64)*" + std::to_string(strides[i]);
-    return a;
-  }
-  std::string load(memref::LoadOp op, llvm::StringRef mask) override {
-    return "tl.load(" + address(op.getMemref(), op.getIndices()) +
-           "+owner*0,mask=" + mask.str() + ",other=0)";
-  }
-  std::string gatherScalars(memref::LoadOp op, ArrayRef<std::string> at,
-                            StringRef mask) override {
-    auto strides = layout(op.getMemref(), "block.strides");
-    std::string ptr = name(op.getMemref());
-    for (auto [j, a] : llvm::enumerate(at))
-      ptr += "+tl.cast(" + a + ",tl.int64)*" + std::to_string(strides[j]);
-    return "tl.load(" + ptr + ",mask=" + mask.str() + ",other=0)";
-  }
-  std::string store(memref::StoreOp op, llvm::StringRef mask) override {
-    return "tl.store(" + address(op.getMemref(), op.getIndices()) + "," +
-           name(op.getValue()) + ",mask=" + mask.str() + ")";
-  }
-  std::string cast(llvm::StringRef v, Type t) override {
-    if (t.isIndex())
-      return "tl.cast(" + v.str() + ",tl.int64)";
-    return "tl.cast(" + v.str() + ",tl." +
-           (t.isBF16()  ? "bfloat16"
-            : t.isF16() ? "float16"
-                        : "float32") +
-           ")";
-  }
-};
-} // namespace
 llvm::Error emitOrdered(func::FuncOp fn, llvm::raw_pwrite_stream &out) {
-  Ordered writer(fn);
-  auto src = fn.front().front().hasAttr("block.column_prefixes")
-                 ? printColumns(fn)
-                 : writer.write();
+  if (!fn.front().front().hasAttr("block.column_prefixes"))
+    return llvm::createStringError(
+        "owner program missing terminal tile lowering");
+  auto src = printColumns(fn);
   if (!src)
     return src.takeError();
   return intentdsl::block::emitOwnerArtifact(

@@ -7,10 +7,12 @@ llvm::Error emitPairFold(mlir::scf::ForOp loop, unsigned depth, int64_t span) {
     return lib + ".expand_dims(" + v + "," + std::to_string(axis) + ")";
   };
   auto owners = [&](std::string v) {
-    auto fragment=broadcast(v);
-    if(!nativeMatrixRows())return fragment;
-    auto count=std::to_string(space.getAttrOfType<IntegerAttr>("block.owner_tile").getInt());
-    return logicalOwners(fragment,count);
+    auto fragment = broadcast(v);
+    if (!nativeMatrixRows())
+      return fragment;
+    auto count = std::to_string(
+        space.getAttrOfType<IntegerAttr>("block.owner_tile").getInt());
+    return logicalOwners(fragment, count);
   };
   auto uniform = [&](std::string v) {
     return lib + ".min(" + owners(v) + ",axis=0)";
@@ -62,14 +64,15 @@ llvm::Error emitPairFold(mlir::scf::ForOp loop, unsigned depth, int64_t span) {
          "while " + base + "<" + lib + ".max(" + owners(hi) + ",axis=0):");
   }
   line(depth + 1, iv + "=" + base + "+" + memberRange(span));
-  if(loop->hasAttr("block.uniform_tokens")){
-    line(depth+1,any+"=("+iv+">="+uniform(lo)+")&("+iv+"<"+uniform(hi)+")");
+  if (loop->hasAttr("block.uniform_tokens")) {
+    line(depth + 1, any + "=(" + iv + ">=" + uniform(lo) + ")&(" + iv + "<" +
+                        uniform(hi) + ")");
     line(depth + 1, live + "=" + lib + ".broadcast_to(" + ex(any, 0) + ",(" +
                         fragmentRows() + "," + sz + "))");
-  }else{
-  line(depth + 1, live + "=(" + ex(iv, 0) + ">=" + ex(broadcast(lo), 1) +
-                      ")&(" + ex(iv, 0) + "<" + ex(broadcast(hi), 1) + ")");
-  line(depth + 1, any + "=" + lib + ".max(" + live + ",axis=0)!=0");
+  } else {
+    line(depth + 1, live + "=(" + ex(iv, 0) + ">=" + ex(broadcast(lo), 1) +
+                        ")&(" + ex(iv, 0) + "<" + ex(broadcast(hi), 1) + ")");
+    line(depth + 1, any + "=" + lib + ".max(" + live + ",axis=0)!=0");
   }
   enum Role { owner, column, pair, scalar };
   struct Tile {

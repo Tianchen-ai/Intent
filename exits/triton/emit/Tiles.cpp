@@ -67,6 +67,10 @@ TerminalPrinter tilePrinter() {
            std::to_string(op.getAttrOfType<IntegerAttr>("axis").getInt()) +
            ").to(tl.int64)";
   });
+  leaf("triton_src.tile_prefix", [](Operation &op, auto &a) {
+    return "tl.gather(" + a[0] + ",tl.arange(0," +
+           std::to_string(shape(op.getResult(0).getType())[0]) + "),0)";
+  });
   leaf("triton_src.tile_address", [](Operation &op, auto &a) {
     auto strides = op.getAttrOfType<DenseI64ArrayAttr>("strides");
     auto axes = op.getAttrOfType<DenseI64ArrayAttr>("projection");
@@ -76,7 +80,8 @@ TerminalPrinter tilePrinter() {
       std::string projection = rank == 2 && axes[i] >= 0
                                    ? (axes[i] == 0 ? "[:,None]" : "[None,:]")
                                    : "";
-      terms.push_back(a[i + 1] + projection + "*" + std::to_string(strides[i]));
+      terms.push_back("tl.cast(" + a[i + 1] + ",tl.int64)" + projection + "*" +
+                      std::to_string(strides[i]));
     }
     return llvm::join(terms, " + ");
   });
@@ -90,7 +95,7 @@ TerminalPrinter tilePrinter() {
   });
   leaf("triton_src.tile_broadcast", [](Operation &op, auto &a) {
     auto axis = op.getAttrOfType<IntegerAttr>("axis").getInt();
-    auto v = "tl.to_tensor(" + a[0] + ")" +
+    auto v = "tl.cast(" + a[0] + "," + dtype(op.getOperand(0).getType()) + ")" +
              (axis < 0    ? ""
               : axis == 0 ? "[:,None]"
                           : "[None,:]");
@@ -106,8 +111,13 @@ TerminalPrinter tilePrinter() {
            dtype(op.getResult(0).getType()) + ")";
   });
   leaf("triton_src.tile_reduce", [](Operation &op, auto &a) {
-    return "tl." + op.getAttrOfType<StringAttr>("algebra").str() + "(" + a[0] +
-           ",1)";
+    auto expression =
+        "tl." + op.getAttrOfType<StringAttr>("algebra").str() + "(" + a[0] +
+        "," + std::to_string(op.getAttrOfType<IntegerAttr>("axis").getInt()) +
+        ")";
+    return getElementTypeOrSelf(op.getResult(0).getType()).isInteger(1)
+               ? expression + ".to(tl.int1)"
+               : expression;
   });
   leaf("arith.constant", [](Operation &op, auto &) {
     auto v = op.getAttr("value");
@@ -119,7 +129,10 @@ TerminalPrinter tilePrinter() {
         return std::string(num.isNegative() ? "-float('inf')" : "float('inf')");
       llvm::SmallString<32> txt;
       num.toString(txt);
-      return txt.str().str();
+      std::string number = txt.str().str();
+      if (number.find_first_of(".eE") == std::string::npos)
+        number += ".0";
+      return number;
     }
     auto type = op.getResult(0).getType();
     return "tl.full(" + tuple(type) + ",0," + dtype(type) + ")";
@@ -135,24 +148,45 @@ TerminalPrinter tilePrinter() {
                              {"arith.andi", "&"}})
     leaf(name, [token](auto &, auto &v) { return v[0] + token + v[1]; });
   leaf("arith.cmpi", [](Operation &op, auto &a) {
-    return a[0] +
-           (cast<arith::CmpIOp>(op).getPredicate() == arith::CmpIPredicate::sge
-                ? ">="
-                : "<") +
-           a[1];
+    auto pred = cast<arith::CmpIOp>(op).getPredicate();
+    auto token = pred == arith::CmpIPredicate::sge  ? ">="
+                 : pred == arith::CmpIPredicate::eq ? "=="
+                 : pred == arith::CmpIPredicate::ne ? "!="
+                                                    : "<";
+    return a[0] + token + a[1];
   });
+  leaf("arith.cmpf", [](Operation &, auto &a) { return a[0] + "!=" + a[1]; });
+  for (auto [name, op] :
+       {std::pair{"arith.maxnumf", "maximum"}, {"arith.minsi", "minimum"}})
+    leaf(name, [op](auto &, auto &a) {
+      return "tl." + std::string(op) + "(" + llvm::join(a, ",") + ")";
+    });
+  for (auto [name, token] : {std::pair{"arith.subi", "-"},
+                             {"arith.floordivsi", "//"},
+                             {"arith.remsi", "%"},
+                             {"arith.ori", "|"},
+                             {"arith.xori", "^"}})
+    leaf(name, [token](auto &, auto &a) { return a[0] + token + a[1]; });
+  for (auto name : {"exp", "sqrt", "log"})
+    leaf("math." + std::string(name), [name](auto &, auto &a) {
+      return "tl." + std::string(name) + "(" + a[0] + ")";
+    });
   leaf("arith.select",
        [](auto &, auto &a) { return "tl.where(" + llvm::join(a, ",") + ")"; });
   p.operations["scf.if"] = [](Operation &op, PrintPoint at, PrintContext &c) {
-    if (at == PrintPoint::Enter) {
+    if (at == PrintPoint::Enter)
       c.line("if " + c.name(op.getOperand(0)) + ":");
+    if (at == PrintPoint::BeginRegion && !op.getRegion(c.region).empty()) {
+      if (c.region)
+        c.line("else:");
       ++c.indent;
-    } else if (at == PrintPoint::Leave)
+    } else if (at == PrintPoint::EndRegion && !op.getRegion(c.region).empty())
       --c.indent;
     return llvm::Error::success();
   };
-  for (auto name : {"arith.truncf", "arith.extf", "arith.extsi", "arith.sitofp",
-                    "arith.fptosi", "arith.index_cast"})
+  for (auto name :
+       {"arith.truncf", "arith.extf", "arith.extsi", "arith.sitofp",
+        "arith.fptosi", "arith.index_cast", "arith.trunci", "arith.extui"})
     leaf(name, [](Operation &op, auto &a) {
       return "tl.cast(" + a[0] + "," + dtype(op.getResult(0).getType()) + ")";
     });
@@ -184,14 +218,17 @@ LogicalResult dotSignature(Operation *op) {
        op->getOperand(2).getType() == op->getResult(0).getType()));
 }
 LogicalResult collectiveSignature(Operation *op) {
-  auto a = shape(op->getOperand(0).getType()),
-       r = shape(op->getResult(0).getType());
+  auto input = op->getOperand(0).getType(), result = op->getResult(0).getType();
+  SmallVector<int64_t> dims(shape(input));
+  auto axis = op->getAttrOfType<IntegerAttr>("axis").getInt();
   auto alg = op->getAttrOfType<StringAttr>("algebra");
-  return success(a.size() == 2 && r.size() == 1 && a[0] == r[0] &&
-                 llvm::isPowerOf2_64(a[1]) &&
-                 getElementTypeOrSelf(op->getOperand(0).getType()).isF32() &&
-                 getElementTypeOrSelf(op->getResult(0).getType()).isF32() &&
-                 (alg == "sum" || alg == "max"));
+  if (axis < 0 || size_t(axis) >= dims.size() ||
+      !llvm::isPowerOf2_64(dims[axis]))
+    return failure();
+  dims.erase(dims.begin() + axis);
+  return success(ArrayRef<int64_t>(dims) == shape(result) &&
+                 getElementTypeOrSelf(input) == getElementTypeOrSelf(result) &&
+                 (alg == "sum" || alg == "min" || alg == "max"));
 }
 } // namespace
 void tileContracts(Unit &unit) {
@@ -253,6 +290,16 @@ LogicalResult verifyTileProgram(func::FuncOp fn, const TargetProfile &profile) {
     return sp.emitError("unknown tile calling convention");
   auto check = sp.walk([&](Operation *op) {
     auto name = op->getName().getStringRef();
+    if (name == "triton_src.tile_prefix") {
+      auto input = op->getOperand(0).getType(),
+           out = op->getResult(0).getType();
+      auto a = shape(input), y = shape(out);
+      if (a.size() != 1 || y.size() != 1 || y[0] < 1 || y[0] > a[0] ||
+          !llvm::isPowerOf2_64(y[0]) || y[0] > INT32_MAX ||
+          getElementTypeOrSelf(input) != getElementTypeOrSelf(out))
+        return op->emitError("invalid logical fragment prefix"),
+               WalkResult::interrupt();
+    }
     if (name == "triton_src.tile_address") {
       auto view = dyn_cast<BlockArgument>(op->getOperand(0));
       auto axes = op->getAttrOfType<DenseI64ArrayAttr>("projection"),
@@ -329,7 +376,9 @@ LogicalResult verifyTileProgram(func::FuncOp fn, const TargetProfile &profile) {
                WalkResult::interrupt();
     }
     if (auto cmp = dyn_cast<arith::CmpIOp>(op);
-        cmp && cmp.getPredicate() != arith::CmpIPredicate::sge &&
+        cmp && cmp.getPredicate() != arith::CmpIPredicate::eq &&
+        cmp.getPredicate() != arith::CmpIPredicate::ne &&
+        cmp.getPredicate() != arith::CmpIPredicate::sge &&
         cmp.getPredicate() != arith::CmpIPredicate::slt)
       return op->emitError("unsupported tile comparison"),
              WalkResult::interrupt();

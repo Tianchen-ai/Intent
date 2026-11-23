@@ -1,127 +1,8 @@
-#include "intentdsl/levels/execution/block/ir/MatrixAccess.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Math/IR/Math.h"
-#include "mlir/Dialect/SCF/IR/SCF.h"
-#include "mlir/IR/IRMapping.h"
+#include "OwnerTiles.h"
 
 namespace CI_UNIT_NAMESPACE {
 using namespace mlir;
 namespace {
-struct Tiles {
-  OpBuilder b;
-  Location loc;
-  func::FuncOp fn;
-  Operation *program;
-  Tiles(func::FuncOp f, StringRef convention)
-      : b(&f.front().front()), loc(f.getLoc()), fn(f) {
-    auto &original = f.front().front();
-    OperationState s(loc, "triton_src.tile_program");
-    s.addOperands(original.getOperands());
-    s.addAttributes(original.getAttrs());
-    s.addAttribute("calling_convention", b.getStringAttr(convention));
-    s.addRegion();
-    program = b.create(s);
-    auto *body = b.createBlock(&program->getRegion(0));
-    b.setInsertionPointToStart(body);
-  }
-  Operation *op(StringRef name, ValueRange args = {}, TypeRange results = {},
-                ArrayRef<NamedAttribute> attrs = {}) {
-    OperationState s(loc, ("triton_src." + name).str());
-    s.addOperands(args);
-    s.addTypes(results);
-    s.addAttributes(attrs);
-    return b.create(s);
-  }
-  Type elem(Type t) { return getElementTypeOrSelf(t); }
-  Type shaped(ArrayRef<int64_t> shape, Type t) {
-    return shape.empty() ? t : RankedTensorType::get(shape, t);
-  }
-  Value like(Value v, Type type, int axis = -1) {
-    if (type == v.getType())
-      return v;
-    return op("tile_broadcast", v, type,
-              {b.getNamedAttr("axis", b.getI64IntegerAttr(axis))})
-        ->getResult(0);
-  }
-  Value integer(int64_t i) {
-    return b.create<arith::ConstantIntOp>(loc, i, 64);
-  }
-  Value scalar(float f) {
-    return b.create<arith::ConstantOp>(loc, b.getF32FloatAttr(f));
-  }
-  Value pid(int axis) {
-    return op("tile_pid", {}, b.getI64Type(),
-              {b.getNamedAttr("axis", b.getI64IntegerAttr(axis))})
-        ->getResult(0);
-  }
-  Value lanes(int64_t n) {
-    return op("tile_axis", {}, shaped({n}, b.getI64Type()))->getResult(0);
-  }
-  Value stepped(Value first, int64_t n) {
-    auto r = lanes(n);
-    return b.create<arith::AddIOp>(loc, like(first, r.getType()), r);
-  }
-  Value address(Value base, ValueRange coordinates,
-                ArrayRef<int64_t> projection) {
-    SmallVector<int64_t> dims;
-    for (auto [index, axis] : llvm::zip(coordinates, projection))
-      if (axis >= 0) {
-        dims.resize(std::max(dims.size(), size_t(axis + 1)), 1);
-        dims[axis] = cast<RankedTensorType>(index.getType()).getDimSize(0);
-      }
-    SmallVector<Value> args{base};
-    llvm::append_range(args, coordinates);
-    auto strides = fn.getArgAttr(cast<BlockArgument>(base).getArgNumber(),
-                                 "block.strides");
-    return op("tile_address", args, shaped(dims, b.getI64Type()),
-              {b.getNamedAttr("projection", b.getDenseI64ArrayAttr(projection)),
-               b.getNamedAttr("strides", strides)})
-        ->getResult(0);
-  }
-  Value read(Value base, Value addr, Value mask = {}) {
-    SmallVector<Value> args{base, addr};
-    if (mask)
-      args.push_back(mask);
-    auto t = cast<MemRefType>(base.getType()).getElementType();
-    if (auto s = dyn_cast<RankedTensorType>(addr.getType()))
-      t = s.clone(t);
-    return op("tile_read", args, t)->getResult(0);
-  }
-  void write(Value base, Value addr, Value val, Value mask = {}) {
-    SmallVector<Value> args{base, addr, val};
-    if (mask)
-      args.push_back(mask);
-    op("tile_write", args);
-  }
-  Value dot(Value a, Value rhs, bool trans, Value acc = {}) {
-    auto l = cast<RankedTensorType>(a.getType()),
-         r = cast<RankedTensorType>(rhs.getType());
-    auto t = shaped({l.getDimSize(0), r.getDimSize(trans ? 0 : 1)},
-                    l.getElementType().isInteger(8) ? Type(b.getI32Type())
-                                                    : Type(b.getF32Type()));
-    SmallVector<Value> args{a, rhs};
-    if (acc)
-      args.push_back(acc);
-    return op("tile_dot", args, t,
-              {b.getNamedAttr("transpose_rhs", b.getBoolAttr(trans)),
-               b.getNamedAttr("ci.implementation",
-                              b.getStringAttr("exits/triton::native-dot"))})
-        ->getResult(0);
-  }
-  Value reduce(Value input, StringRef algebra) {
-    auto t = cast<RankedTensorType>(input.getType());
-    return op("tile_reduce", input,
-              shaped({t.getDimSize(0)}, t.getElementType()),
-              {b.getNamedAttr("algebra", b.getStringAttr(algebra)),
-               b.getNamedAttr("ci.implementation",
-                              b.getStringAttr("exits/triton::row-collective"))})
-        ->getResult(0);
-  }
-  DenseI64ArrayAttr shape(Value view) {
-    return fn.getArgAttrOfType<DenseI64ArrayAttr>(
-        cast<BlockArgument>(view).getArgNumber(), "block.shape");
-  }
-};
 // Lower the chosen panel loop with a loop-carried accumulator. The pointers
 // for both transposed and contiguous operands use their verified ABI strides.
 void matrixTiles(Tiles &t, intentdsl::block::MatrixAccess &p) {
@@ -352,6 +233,11 @@ void lowerTileProgram(func::FuncOp fn) {
     Tiles tiles(fn, "owners");
     scoreTiles(tiles, root);
     tiles.op("end");
+    root.erase();
+  } else if (intentdsl::kir::orderedOwners(fn) &&
+             !root.hasAttr("block.column_prefixes")) {
+    OwnerTiles tiles(fn, root);
+    (void)tiles.build();
     root.erase();
   } else if (intentdsl::kir::matrixDomain(fn)) {
     intentdsl::block::MatrixAccess p(fn);

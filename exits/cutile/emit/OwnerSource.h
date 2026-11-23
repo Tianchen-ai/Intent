@@ -6,10 +6,10 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "llvm/ADT/StringExtras.h"
 
-namespace intentdsl::block {
-// Both block-language exits have structured Python control. An exit spells
-// only native scalar/tile operations and addressing; the IR supplies the
-// loop nest, carry dependencies and publication order.
+namespace CI_UNIT_NAMESPACE {
+using namespace intentdsl;
+using namespace intentdsl::block;
+// Private cuTile emitter for owner programs until the cuTile migration.
 class OwnerSource {
 protected:
   mlir::func::FuncOp fn;
@@ -30,7 +30,8 @@ protected:
   virtual std::string tileOwner() = 0;
   virtual bool countedPanels(mlir::scf::ForOp) { return false; }
   virtual std::string tileStart() = 0;
-  virtual std::string logicalOwners(std::string fragment,std::string count) = 0;
+  virtual std::string logicalOwners(std::string fragment,
+                                    std::string count) = 0;
   virtual std::string load(mlir::memref::LoadOp, llvm::StringRef mask) = 0;
   virtual std::string gatherScalars(mlir::memref::LoadOp,
                                     llvm::ArrayRef<std::string>,
@@ -116,8 +117,8 @@ public:
   }
 
 private:
-#include "intentdsl/levels/execution/block/ir/FoldSource.inc"
-#include "intentdsl/levels/execution/block/ir/PairSource.inc"
+#include "FoldSource.inc"
+#include "PairSource.inc"
   bool uniformBound(mlir::Value v) const {
     if (auto arg = mlir::dyn_cast<mlir::BlockArgument>(v)) {
       if (auto loop =
@@ -315,8 +316,8 @@ private:
                n == "math.log")
         expr = language().str() + "." + op.getName().stripDialect().str() +
                "(" + arg(0) + ")";
-      else if(n=="arith.minsi")
-        expr=lib+".minimum("+arg(0)+","+arg(1)+")";
+      else if (n == "arith.minsi")
+        expr = lib + ".minimum(" + arg(0) + "," + arg(1) + ")";
       else {
         auto token = llvm::StringSwitch<llvm::StringRef>(n)
                          .Cases("arith.addf", "arith.addi", "+")
@@ -353,4 +354,4 @@ private:
     return llvm::Error::success();
   }
 };
-} // namespace intentdsl::block
+} // namespace CI_UNIT_NAMESPACE
