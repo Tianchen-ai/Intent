@@ -106,6 +106,153 @@ llvm::Error describeArtifact(func::FuncOp fn, llvm::raw_pwrite_stream &out) {
   return llvm::Error::success();
 }
 } // namespace
+static LogicalResult verifyBoundary(ModuleOp m, const TargetProfile &profile,
+                                    StringRef phase) {
+
+  auto funcs = m.getOps<func::FuncOp>();
+  if (!llvm::hasSingleElement(funcs))
+    return failure();
+  auto fn = *funcs.begin();
+  if (fn.empty() || fn.front().empty())
+    return failure();
+  if (phase == "callable" &&
+      !m->getAttrOfType<StringAttr>("triton_src.package"))
+    return failure();
+  if (fn.front().front().getName().getStringRef() == "triton_src.tile_program")
+    return phase == "callable" ? verifyTileProgram(fn, profile) : failure();
+  if (failed(verifyColumnViews(fn)))
+    return failure();
+  if (intentdsl::kir::orderedOwners(fn)) {
+    auto &owner = fn.front().front();
+    auto rows = owner.getAttrOfType<IntegerAttr>("block.owner_tile");
+    Attribute expected;
+    if (owner.hasAttr("block.pair_axis") && rows && rows.getInt() < 16)
+      expected = Builder(fn.getContext()).getI64IntegerAttr(16);
+    if (owner.getAttr("triton_src.matrix_rows") != expected)
+      return fn.emitError("invalid native matrix fragment height"), failure();
+  }
+  if (intentdsl::kir::orderedOwners(fn))
+    return intentdsl::block::verifyOwnerMap(fn, profile, "triton_src",
+                                            "realized");
+  if (intentdsl::kir::matrixDomain(fn))
+    return verifyMatrixExit(fn, profile);
+  if (!fn->getAttrOfType<StringAttr>("kir.abi") ||
+      !fn->getAttrOfType<ArrayAttr>("block.configs") ||
+      !fn->getAttrOfType<StringAttr>("block.topology"))
+    return failure();
+  if (phase == "callable" &&
+      (!fn->getAttrOfType<IntegerAttr>("triton_src.min_width") ||
+       !fn->getAttrOfType<IntegerAttr>("triton_src.max_width")))
+    return failure();
+  if (failed(intentdsl::verifyMapping(m, profile, "triton_src")))
+    return failure();
+  if (m.walk([](Operation *op) {
+         auto n = op->getName().getStringRef();
+         if (n == "triton_src.atomic_bins") {
+           auto src = dyn_cast<BlockArgument>(op->getOperand(0)),
+                dst = dyn_cast<BlockArgument>(op->getOperand(1));
+           auto span = op->getAttrOfType<IntegerAttr>("span"),
+                panel = op->getAttrOfType<IntegerAttr>("native_panel");
+           if (!src || !dst || src == dst ||
+               cast<MemRefType>(src.getType()).getRank() != 1 ||
+               cast<MemRefType>(dst.getType()).getRank() != 2 ||
+               op->getAttrOfType<StringAttr>("bin_mode") != "global-atomic" ||
+               !span || span.getInt() < 1 || !panel ||
+               !llvm::isPowerOf2_64(panel.getInt())) {
+             op->emitError("invalid destination, partition or native panel for "
+                           "global atomic bins");
+             return WalkResult::interrupt();
+           }
+           auto &seq = op->getRegion(0).front();
+           if (seq.getNumArguments() || seq.getOperations().size() != 3 ||
+               seq.front().getName().stripDialect() != "clear_bins" ||
+               seq.front().getNextNode()->getName().stripDialect() !=
+                   "cta_barrier" ||
+               seq.back().getName().stripDialect() != "bin_panels" ||
+               seq.back().getAttrOfType<IntegerAttr>("count").getInt() !=
+                   int64_t(llvm::divideCeil(span.getInt(), panel.getInt()))) {
+             op->emitError("expected zero initialization, CTA synchronization "
+                           "and complete key panels");
+             return WalkResult::interrupt();
+           }
+           auto &loop = seq.back().getRegion(0).front();
+           if (loop.getNumArguments() != 1 ||
+               !loop.getArgument(0).getType().isIndex() ||
+               !llvm::hasSingleElement(loop) ||
+               loop.front().getName().stripDialect() != "bin_add" ||
+               loop.front().getOperand(0) != loop.getArgument(0)) {
+             op->emitError(
+                 "expected one counted panel update per induction index");
+             return WalkResult::interrupt();
+           }
+         }
+         if (n == "triton_src.key_counts" || n == "triton_src.sum_columns" ||
+             n == "triton_src.atomic_bins") {
+           auto bits = op->getAttrOfType<IntegerAttr>("address_bits");
+           if (!bits || bits.getInt() != 64) {
+             op->emitError("key partition addressing requires i64");
+             return WalkResult::interrupt();
+           }
+         }
+         return WalkResult::advance();
+       }).wasInterrupted())
+    return failure();
+  if (phase == "callable") {
+    auto g = fn->getAttrOfType<DenseI64ArrayAttr>("block.guard");
+    if (g[0] !=
+            fn->getAttrOfType<IntegerAttr>("triton_src.min_width").getInt() ||
+        g[1] != fn->getAttrOfType<IntegerAttr>("triton_src.max_width").getInt())
+      return fn.emitError("call guard differs from verified block class"),
+             failure();
+    for (auto a : fn->getAttrOfType<ArrayAttr>("block.configs")) {
+      auto payload = llvm::json::parse(
+          cast<DictionaryAttr>(a).getAs<StringAttr>("payload").getValue());
+      if (!payload) {
+        llvm::consumeError(payload.takeError());
+        return failure();
+      }
+      auto *opts = payload->getAsObject();
+      if (!opts || opts->size() != 2 ||
+          opts->getInteger("num_warps").value_or(0) <= 0 ||
+          opts->getInteger("num_stages").value_or(0) <= 0)
+        return fn.emitError("illegal native configuration"), failure();
+    }
+  }
+  bool valid = true;
+  m.walk([&](Operation *op) {
+    auto ns = op->getName().getDialectNamespace();
+    if (ns == "triton_src") {
+      auto name = op->getName().stripDialect();
+      auto matches = [&](unsigned i, StringRef opName) {
+        auto *v = op->getOperand(i).getDefiningOp();
+        return v && v->getName().getStringRef() == opName;
+      };
+      if (name == "offsets") {
+        auto axes = intentdsl::block::projection(op->getOperand(0).getType());
+        valid &= succeeded(axes) &&
+                 op->getAttrOfType<BoolAttr>("matrix").getValue() ==
+                     (*axes == intentdsl::block::RowProjection::Matrix) &&
+                 matches(1, "triton_src.rows") &&
+                 matches(2, "triton_src.columns");
+      }
+      if (name == "neutralize") {
+        auto a = op->getAttrOfType<StringAttr>("algebra");
+        valid &= (a == "sum" || a == "max_num") &&
+                 matches(1, "triton_src.active") &&
+                 op->getOperand(1).getParentBlock() == op->getBlock();
+      }
+      if (name == "reduce")
+        valid &= matches(0, "triton_src.neutralize") &&
+                 op->getOperand(0).getDefiningOp()->getAttr("algebra") ==
+                     op->getAttr("algebra");
+    }
+    valid &= ns == "builtin" || ns == "func" || ns == "triton_src" ||
+             (phase == "callable" && (ns == "scf" || ns == "arith"));
+  });
+  if (!valid)
+    return failure();
+  return phase == "callable" ? verifyDynamicRows(fn) : success();
+}
 void matrixIssues(Unit &);
 void addressOptimization(Unit &);
 void bind(Unit &unit) {
@@ -128,102 +275,23 @@ void bind(Unit &unit) {
             return llvm::Error::success();
           },
           [phase](ModuleOp m, const TargetProfile &profile) {
-            auto funcs = m.getOps<func::FuncOp>();
-            if (!llvm::hasSingleElement(funcs))
+            if (failed(verifyBoundary(m, profile, phase)))
               return failure();
-            auto fn = *funcs.begin();
-            if (fn.empty() || fn.front().empty())
-              return failure();
-            if (phase == "callable" &&
-                !m->getAttrOfType<StringAttr>("triton_src.package"))
-              return failure();
-            if (fn.front().front().getName().getStringRef() ==
-                "triton_src.tile_program")
-              return phase == "callable" ? verifyTileProgram(fn, profile)
-                                         : failure();
-            if (failed(verifyColumnViews(fn))) return failure();
-    if (intentdsl::kir::orderedOwners(fn)) {
-      auto &owner = fn.front().front();
-      auto rows = owner.getAttrOfType<IntegerAttr>("block.owner_tile");
-      Attribute expected;
-      if (owner.hasAttr("block.pair_axis") && rows && rows.getInt() < 16)
-        expected = Builder(fn.getContext()).getI64IntegerAttr(16);
-      if (owner.getAttr("triton_src.matrix_rows") != expected)
-        return fn.emitError("invalid native matrix fragment height"), failure();
-    }
-            if (intentdsl::kir::orderedOwners(fn))
-              return intentdsl::block::verifyOwnerMap(fn, profile, "triton_src",
-                                                      "realized");
-            if(intentdsl::kir::matrixDomain(fn))return verifyMatrixExit(fn,profile);
-            if (!fn->getAttrOfType<StringAttr>("kir.abi") ||
-                !fn->getAttrOfType<ArrayAttr>("block.configs") ||
-                !fn->getAttrOfType<StringAttr>("block.topology"))
-              return failure();
-            if (phase == "callable" &&
-                (!fn->getAttrOfType<IntegerAttr>("triton_src.min_width") ||
-                 !fn->getAttrOfType<IntegerAttr>("triton_src.max_width")))
-              return failure();
-            if(failed(intentdsl::verifyMapping(m,profile,"triton_src")))return failure();
-            if(m.walk([](Operation *op){
-              auto n=op->getName().getStringRef();
-              if(n=="triton_src.atomic_bins"){
-                auto src=dyn_cast<BlockArgument>(op->getOperand(0)),dst=dyn_cast<BlockArgument>(op->getOperand(1));
-                auto span=op->getAttrOfType<IntegerAttr>("span"),panel=op->getAttrOfType<IntegerAttr>("native_panel");
-                if(!src || !dst || src==dst || cast<MemRefType>(src.getType()).getRank()!=1 ||
-                   cast<MemRefType>(dst.getType()).getRank()!=2 || op->getAttrOfType<StringAttr>("bin_mode")!="global-atomic" ||
-                   !span || span.getInt()<1 || !panel || !llvm::isPowerOf2_64(panel.getInt())){
-                  op->emitError("invalid destination, partition or native panel for global atomic bins");
-                  return WalkResult::interrupt();
-                }
-                auto &seq=op->getRegion(0).front();
-                if(seq.getNumArguments() || seq.getOperations().size()!=3 ||
-                   seq.front().getName().stripDialect()!="clear_bins" ||
-                   seq.front().getNextNode()->getName().stripDialect()!="cta_barrier" ||
-                   seq.back().getName().stripDialect()!="bin_panels" ||
-                   seq.back().getAttrOfType<IntegerAttr>("count").getInt()!=int64_t(llvm::divideCeil(span.getInt(),panel.getInt()))){
-                  op->emitError("expected zero initialization, CTA synchronization and complete key panels");return WalkResult::interrupt();
-                }
-                auto &loop=seq.back().getRegion(0).front();
-                if(loop.getNumArguments()!=1 || !loop.getArgument(0).getType().isIndex() || !llvm::hasSingleElement(loop) ||
-                   loop.front().getName().stripDialect()!="bin_add" || loop.front().getOperand(0)!=loop.getArgument(0)){
-                  op->emitError("expected one counted panel update per induction index");return WalkResult::interrupt();
-                }
-              }
-              if(n=="triton_src.key_counts" || n=="triton_src.sum_columns" || n=="triton_src.atomic_bins"){
-                auto bits=op->getAttrOfType<IntegerAttr>("address_bits");
-                if(!bits || bits.getInt()!=64){op->emitError("key partition addressing requires i64");return WalkResult::interrupt();}
-              }
-              return WalkResult::advance();
-            }).wasInterrupted())return failure();
-            if(phase=="callable"){
-              auto g=fn->getAttrOfType<DenseI64ArrayAttr>("block.guard");
-              if(g[0]!=fn->getAttrOfType<IntegerAttr>("triton_src.min_width").getInt() ||
-                 g[1]!=fn->getAttrOfType<IntegerAttr>("triton_src.max_width").getInt())
-                return fn.emitError("call guard differs from verified block class"),failure();
-              for(auto a:fn->getAttrOfType<ArrayAttr>("block.configs")){
-                auto payload=llvm::json::parse(cast<DictionaryAttr>(a).getAs<StringAttr>("payload").getValue());
-                if(!payload){llvm::consumeError(payload.takeError());return failure();}
-                auto *opts=payload->getAsObject();
-                if(!opts || opts->size()!=2 || opts->getInteger("num_warps").value_or(0)<=0 ||
-                    opts->getInteger("num_stages").value_or(0)<=0)return fn.emitError("illegal native configuration"),failure();
-              }
-            }
-            bool valid = true;
-            m.walk([&](Operation *op) {
-              auto ns = op->getName().getDialectNamespace();
-              if (ns=="triton_src") {
-                auto name=op->getName().stripDialect();
-                auto matches=[&](unsigned i,StringRef opName){auto *v=op->getOperand(i).getDefiningOp();return v && v->getName().getStringRef()==opName;};
-                if(name=="offsets"){auto axes=intentdsl::block::projection(op->getOperand(0).getType());valid &= succeeded(axes) && op->getAttrOfType<BoolAttr>("matrix").getValue()==(*axes==intentdsl::block::RowProjection::Matrix) && matches(1,"triton_src.rows") && matches(2,"triton_src.columns");}
-                if(name=="neutralize"){auto a=op->getAttrOfType<StringAttr>("algebra"); valid &= (a=="sum" || a=="max_num") && matches(1,"triton_src.active") && op->getOperand(1).getParentBlock()==op->getBlock();}
-                if(name=="reduce") valid &= matches(0,"triton_src.neutralize") && op->getOperand(0).getDefiningOp()->getAttr("algebra")==op->getAttr("algebra");
-              }
-              valid &= ns == "builtin" || ns == "func" || ns == "triton_src" ||
-                       (phase == "callable" && (ns == "scf" || ns == "arith"));
-            });
-            if (!valid)
-              return failure();
-            return phase == "callable" ? verifyDynamicRows(fn) : success();
+            if (phase == "legal")
+              return success();
+            auto fn = *m.getOps<func::FuncOp>().begin();
+            llvm::SmallVector<char> expected;
+            llvm::raw_svector_ostream os(expected);
+            if (auto err = describeArtifact(fn, os))
+              return fn.emitError() << llvm::toString(std::move(err)),
+                     failure();
+            auto package = m->getAttrOfType<StringAttr>("triton_src.package");
+            if (!package || package.getValue() !=
+                                StringRef(expected.data(), expected.size()))
+              return fn.emitError("Triton package disagrees with the verified "
+                                  "entry ABI or launch rows"),
+                     failure();
+            return success();
           }},
          COMPILERINFRA_SOURCE});
   ExitImplementation exit;

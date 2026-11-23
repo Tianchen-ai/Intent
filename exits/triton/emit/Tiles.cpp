@@ -1,4 +1,5 @@
 #include "compilerinfra/Assembly.h"
+#include "intentdsl/levels/algorithm/kir/ir/Literal.h"
 #include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 #include "intentdsl/levels/execution/block/ir/Contraction.h"
 #include "intentdsl/levels/execution/block/ir/Owners.h"
@@ -163,7 +164,10 @@ TerminalPrinter tilePrinter() {
       return number;
     }
     auto type = op.getResult(0).getType();
-    return "tl.full(" + tuple(type) + ",0," + dtype(type) + ")";
+    auto dense = cast<DenseElementsAttr>(v);
+    auto attr = dense.getSplatValue<Attribute>();
+    std::string literal = intentdsl::kir::literal(cast<TypedAttr>(attr));
+    return "tl.full(" + tuple(type) + "," + literal + "," + dtype(type) + ")";
   });
   for (auto [name, token] : {std::pair{"arith.muli", "*"},
                              {"arith.addi", "+"},
@@ -335,17 +339,18 @@ void tileContracts(Unit &unit) {
     ImplementationContract c;
     c.name = isDot ? "native-dot" : "row-collective";
     c.operation = isDot ? "triton_src.tile_dot" : "triton_src.tile_reduce";
-    c.symbol = isDot ? "tl.dot" : "tl.sum/tl.max";
+    c.symbol = isDot ? "tl.dot" : "tl.sum/tl.min/tl.max";
     c.source = ImplementationSource::Builtin;
     c.minimum = Reuse::Native;
-    c.operands =
-        isDot ? "[M,K] x [K,N] or transposed RHS" : "f32[M,K] -> f32[M]";
+    c.operands = isDot ? "[M,K] x [K,N] or transposed RHS"
+                       : "tile -> tile with declared reduction axis removed";
     c.layout = isDot ? "register tiles, contracted axis agrees"
                      : "row fragment, power-of-two width";
-    c.accumulator = isDot ? "f32 or i32" : "f32";
+    c.accumulator = isDot ? "f32 or i32"
+                          : "preserve f32, integer or predicate element type";
     c.effects = "pure register results";
     c.numerical = isDot ? "IEEE input precision, declared accumulator"
-                        : "Triton sum or max along axis 1";
+                        : "native sum, min or max along the explicit axis";
     c.estimator = isDot ? "exits/triton::matrix-issues"
                         : "exits/triton::collective-steps";
     c.costParameters = isDot ? std::vector<std::string>{"M", "N", "K"}

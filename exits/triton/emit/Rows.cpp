@@ -12,13 +12,10 @@ llvm::Error row(Operation &op, PrintPoint point, PrintContext &c) {
   auto n = op.getName().stripDialect();
   auto name = [&](Value v) { return c.name(v); };
   auto arg = [&](unsigned i) { return name(op.getOperand(i)); };
-  if (n == "tiles" || n == "bin_panels") {
+  if (n == "tiles") {
     if (point == PrintPoint::Enter) {
       auto &body = op.getRegion(0).front();
-      std::string limit =
-          n == "tiles"
-              ? "tl.cdiv(N, WIDTH)"
-              : std::to_string(op.getAttrOfType<IntegerAttr>("count").getInt());
+      std::string limit = "tl.cdiv(N, WIDTH)";
       if (op.getNumResults())
         c.line(name(op.getResult(0)) + " = " + arg(1));
       c.line("for " + name(body.getArgument(0)) + " in range(" + limit + "):");
@@ -29,7 +26,7 @@ llvm::Error row(Operation &op, PrintPoint point, PrintContext &c) {
       --c.indent;
     return llvm::Error::success();
   }
-  if (point != PrintPoint::Enter || n == "atomic_bins")
+  if (point != PrintPoint::Enter)
     return llvm::Error::success();
   if (n == "yield") {
     if (op.getNumOperands())
@@ -46,20 +43,6 @@ llvm::Error row(Operation &op, PrintPoint point, PrintContext &c) {
     return llvm::createStringError("unrecognized row algebra");
   bool sum = alg && alg == "sum";
   std::string e;
-  if (n == "index_read_at" || n == "atomic_add_at" || n == "unique_put_at") {
-    auto ptr = arg(0) + "+" + arg(1) + ".to(tl.int64)*" + arg(0) + "_s0";
-    if (n == "unique_put_at") {
-      c.line("tl.store(" + ptr + "," + arg(2) + ",mask=" + arg(3) + ")");
-      return llvm::Error::success();
-    }
-    auto id = name(op.getResult(0));
-    c.line(id + " = " +
-           (n == "index_read_at"
-                ? "tl.load(" + ptr + ",mask=" + arg(2) + ",other=0)"
-                : "tl.atomic_add(" + ptr + "," + arg(2) + ",mask=" + arg(3) +
-                      ",sem='relaxed',scope='gpu')"));
-    return llvm::Error::success();
-  }
   if (n == "ne" || n == "member_tile") {
     auto id = name(op.getResult(0));
     c.line(id + " = " +
@@ -68,48 +51,11 @@ llvm::Error row(Operation &op, PrintPoint point, PrintContext &c) {
                             "[None,:],(ROWS,WIDTH)).to(tl.int32)"));
     return llvm::Error::success();
   }
-  if (n == "clear_bins" || n == "bin_add") {
-    Operation *bins = op.getParentOp();
-    if (n == "bin_add")
-      bins = bins->getParentOp();
-    bool swap = bins->getAttrOfType<BoolAttr>("transposed").getValue();
-    auto src = name(bins->getOperand(0)), dst = name(bins->getOperand(1)),
-         col = name(bins->getOperand(2));
-    auto pitch = dst + (swap ? "_s0" : "_s1");
-    auto base =
-        dst + "+tl.program_id(0).to(tl.int64)*" + dst + (swap ? "_s1" : "_s0");
-    if (n == "clear_bins")
-      c.line("tl.store(" + base + "+" + col + "*" + pitch + ",0,mask=" + col +
-             "<N)");
-    else {
-      auto span =
-          std::to_string(bins->getAttrOfType<IntegerAttr>("span").getInt());
-      auto panel = std::to_string(
-          bins->getAttrOfType<IntegerAttr>("native_panel").getInt());
-      auto extent =
-          std::to_string(bins->getAttrOfType<IntegerAttr>("extent").getInt());
-      c.line("off=tl.cast(" + arg(0) + ",tl.int64)*" + panel + "+tl.arange(0," +
-             panel + ")");
-      c.line("pos=tl.program_id(0).to(tl.int64)*" + span + "+off");
-      c.line("key=tl.load(" + src + "+pos*" + src + "_s0,mask=(off<" + span +
-             ")&(pos<" + extent + "),other=-1).to(tl.int64)");
-      c.line("tl.atomic_add(" + base + "+key*" + pitch +
-             ",1,mask=(key>=0)&(key<N),sem='relaxed',scope='cta')");
-    }
-    return llvm::Error::success();
-  }
   if (n == "cta_barrier") {
     c.line("tl.debug_barrier()");
     return llvm::Error::success();
   }
-  if (n == "owner_load")
-    e = "tl.load(" + arg(0) + "+" + arg(1) + "*" + arg(0) +
-        "_s0,mask=" + arg(1) + "<M,other=0)";
-  else if (n == "owner_store") {
-    c.line("tl.store(" + arg(0) + "+" + arg(1) + "*" + arg(0) + "_s0," +
-           arg(2) + ",mask=" + arg(1) + "<M)");
-    return llvm::Error::success();
-  } else if (n == "summary_reduce")
+  if (n == "summary_reduce")
     e = "tl.reduce((" + arg(1) + ".to(tl.int32),tl.where(" + arg(1) + "," +
         arg(0) + ",0.),tl.full((ROWS,WIDTH),0.,tl.float32)),1,merge_moments)";
   else if (n == "summary_identity")
@@ -122,13 +68,7 @@ llvm::Error row(Operation &op, PrintPoint point, PrintContext &c) {
     e = arg(0) + "[" +
         std::to_string(op.getAttrOfType<IntegerAttr>("position").getInt()) +
         "]";
-  else if (n == "indexed_tile_read") {
-    auto key = "key" + name(op.getResult(0));
-    c.line(key + " = tl.load(" + arg(1) + " + " + arg(2) + " * " + arg(1) +
-           "_s0, mask=" + arg(2) + " < M, other=0).to(tl.int64)");
-    e = "tl.load(" + arg(0) + " + " + key + "[:,None]*" + arg(0) + "_s0 + " +
-        arg(3) + "[None,:]*" + arg(0) + "_s1,mask=" + arg(4) + ",other=0)";
-  } else if (n == "scan_sum")
+  else if (n == "scan_sum")
     e = "tl.cumsum(" + arg(0) + ",axis=1)";
   else if (n == "uniform") {
     auto prefix = "rng" + name(op.getResult(0));
@@ -289,6 +229,10 @@ llvm::Error dynamicTile(Operation &op, PrintPoint point, PrintContext &c) {
   else if (n == "write_at")
     s = "tl.store(" + arg(0) + "+" + arg(1) + "," + arg(2) + ",mask=" + arg(3) +
         ")";
+  else if (n == "fetch_add")
+    s = "tl.atomic_add(" + arg(0) + "+" + arg(1) + "," + arg(2) +
+        ",mask=" + arg(3) + ",sem='relaxed',scope='" +
+        op.getAttrOfType<StringAttr>("scope").str() + "')";
   else if (n == "bin_count")
     s = "tl.histogram(" + arg(0) + ",WIDTH)";
   else if (n == "extract_lane")
@@ -327,29 +271,19 @@ llvm::Error dynamicTile(Operation &op, PrintPoint point, PrintContext &c) {
 }
 } // namespace
 void addRowRules(TerminalPrinter &printer) {
-  for (auto n :
-       {"dimension", "expand", "splat", "range", "view_offset", "read_at",
-        "write_at", "bin_count", "extract_lane", "axis_reduce", "map"})
+  for (auto n : {"dimension", "expand", "splat", "range", "view_offset",
+                 "read_at", "write_at", "bin_count", "fetch_add",
+                 "extract_lane", "axis_reduce", "map"})
     printer.operations["triton_src." + std::string(n)] = dynamicTile;
   for (auto n : {"tiles",
-                 "bin_panels",
-                 "atomic_bins",
-                 "clear_bins",
-                 "bin_add",
                  "cta_barrier",
                  "yield",
-                 "index_read_at",
-                 "atomic_add_at",
-                 "unique_put_at",
                  "ne",
                  "member_tile",
-                 "owner_load",
-                 "owner_store",
                  "summary_reduce",
                  "summary_identity",
                  "summary_merge",
                  "summary_field",
-                 "indexed_tile_read",
                  "scan_sum",
                  "uniform",
                  "linear_index",

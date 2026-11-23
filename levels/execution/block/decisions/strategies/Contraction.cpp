@@ -45,6 +45,13 @@ void registerContraction(Unit &u) {
       return llvm::createStringError("exit has no contraction implementation");
     Builder b(op->getContext());
     std::vector<StructuralCandidate> rows;
+    std::vector<std::string> implementations;
+    for (auto &operation : op->getRegion(0).front()) {
+      auto found =
+          caps->implementations.find(operation.getName().stripDialect().str());
+      if (found != caps->implementations.end())
+        llvm::append_range(implementations, found->second);
+    }
     for (auto &t : caps->tiles) {
       if (!t.operation.empty() &&
           llvm::none_of(op->getRegion(0).front(), [&](Operation &entry) {
@@ -55,7 +62,8 @@ void registerContraction(Unit &u) {
                           std::to_string(t.k),
                       "output-stationary",
                       b.getDenseI64ArrayAttr({t.m, t.n, t.k}),
-                      {"independent-output-tiles"}});
+                      {"independent-output-tiles"},
+                      implementations});
     }
     return rows;
   };

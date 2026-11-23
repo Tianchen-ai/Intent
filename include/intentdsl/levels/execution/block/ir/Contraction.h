@@ -13,6 +13,7 @@ struct MatrixTile {
 struct MatrixTarget {
   std::vector<MatrixTile> tiles;
   std::string estimate;
+  std::map<std::string, std::vector<std::string>> implementations;
 };
 bool supportsMatrixTile(mlir::Operation *, mlir::Attribute,
                         const compilerinfra::TargetProfile &);

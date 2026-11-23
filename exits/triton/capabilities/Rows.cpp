@@ -18,6 +18,12 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
   caps->globalAtomicBins=true;
   auto matrix=std::make_shared<intentdsl::block::MatrixTarget>();
   matrix->estimate="exits/triton::matrix-issues";
+  matrix->implementations = {
+      {"contract", {"exits/triton::native-dot"}},
+      {"window_contract", {"exits/triton::native-dot"}},
+      {"scaled_contract",
+       {"exits/triton::native-dot", "exits/triton::row-collective"}},
+      {"q4k_dot", {"exits/triton::row-collective"}}};
   if(*arch==90)matrix->tiles={{32,64,32,R"({"num_warps":4,"num_stages":3})"},
                               {64,64,32,R"({"num_warps":4,"num_stages":3})"},
                               {64,128,64,R"({"num_warps":8,"num_stages":3})"}};

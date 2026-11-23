@@ -272,6 +272,64 @@ struct Row {
           binary("and", arg(3), final, i1));
     old.erase();
   }
+  void indirect(StringRef code) {
+    if (code == "indexed_tile_read") {
+      auto key = read(arg(1), arg(2), binary("lt", arg(2), meta("M"), i1));
+      replace(read(arg(0), {expand(key, 1), expand(arg(3), 0)}, arg(4)));
+    } else if (code == "owner_load")
+      replace(read(arg(0), arg(1), binary("lt", arg(1), meta("M"), i1)));
+    else if (code == "owner_store") {
+      store(arg(0), arg(1), arg(2), binary("lt", arg(1), meta("M"), i1));
+      old.erase();
+    } else if (code == "index_read_at")
+      replace(read(arg(0), arg(1), arg(2)));
+    else if (code == "unique_put_at") {
+      store(arg(0), arg(1), arg(2), arg(3));
+      old.erase();
+    } else
+      replace(op("fetch_add", {arg(0), offset(arg(0), arg(1)), arg(2), arg(3)},
+                 old.getResult(0).getType(), str("scope", "gpu"))
+                  ->getResult(0));
+  }
+  void atomicBins() {
+    Value source = arg(0), target = arg(1), col = arg(2),
+          partition = op("tile_pid", {}, i64, num("axis", 0))->getResult(0);
+    auto dst = [&](Value index) {
+      return old.getAttrOfType<BoolAttr>("transposed").getValue()
+                 ? SmallVector<Value>{index, partition}
+                 : SmallVector<Value>{partition, index};
+    };
+    auto width = attr("native_panel"), span = attr("span"),
+         extent = attr("extent");
+    // The legal boundary verifies the clear/barrier/panel sequence before
+    // specializing its address projections and the load/atomic pair.
+    for (Operation &item : old.getRegion(0).front()) {
+      auto n = item.getName().stripDialect();
+      if (n == "clear_bins")
+        store(target, dst(col), constant(0), binary("lt", col, meta("N"), i1));
+      else if (n == "cta_barrier")
+        op("cta_barrier", {}, {});
+      else if (n == "bin_panels") {
+        auto panels = item.getAttrOfType<IntegerAttr>("count").getInt();
+        loop(constant(panels), {}, [&](Value piece, Value) {
+          auto off = binary(
+              "add", binary("mul", map("i64", piece, i64), constant(width)),
+              lanes(width));
+          auto pos =
+              binary("add", binary("mul", partition, constant(span)), off);
+          auto mask = binary("and", binary("lt", off, constant(span), i1),
+                             binary("lt", pos, constant(extent), i1));
+          auto key = map("i64", read(source, pos, mask, -1), i64);
+          auto keep = binary("and", binary("ge", key, constant(0), i1),
+                             binary("lt", key, meta("N"), i1));
+          op("fetch_add", {target, offset(target, dst(key)), constant(1), keep},
+             tile(1, i32), str("scope", "cta"));
+          return Value();
+        });
+      }
+    }
+    old.erase();
+  }
   void scatter() {
     auto zero = b.create<arith::ConstantIntOp>(l, 0, 32);
     auto total = reduce("max", map("select", {arg(4), arg(6), zero}, i32), 1,
@@ -311,7 +369,15 @@ void lowerRows(func::FuncOp fn) {
     if (code == "triton_src.offsets")
       op->setAttr("index_bits",
                   Builder(op->getContext()).getI32IntegerAttr(64));
-    if (code == "triton_src.publish_offsets")
+    auto kind = op->getName().stripDialect();
+    if (code == "triton_src.atomic_bins")
+      Row(*op).atomicBins();
+    else if (op->getName().getDialectNamespace() == "triton_src" &&
+             (kind == "indexed_tile_read" || kind == "owner_load" ||
+              kind == "owner_store" || kind == "unique_put_at" ||
+              kind == "index_read_at" || kind == "atomic_add_at"))
+      Row(*op).indirect(kind);
+    else if (code == "triton_src.publish_offsets")
       Row(*op).publishOffsets();
     else if (code == "triton_src.fill_ranges_at")
       Row(*op).fill();
@@ -359,7 +425,13 @@ LogicalResult verifyDynamicRows(func::FuncOp fn) {
         if (d != "ROWS" && d != "WIDTH")
           return reject("unknown launch-row extent");
       }
-    if (code == "triton_src.read_at" || code == "triton_src.write_at") {
+    if (code == "triton_src.read_at" || code == "triton_src.write_at" ||
+        code == "triton_src.fetch_add") {
+      if (code == "triton_src.fetch_add") {
+        auto scope = op->getAttrOfType<StringAttr>("scope");
+        if (scope != "gpu" && scope != "cta")
+          return reject("invalid atomic scope");
+      }
       bool read = code == "triton_src.read_at";
       auto *offset = op->getOperand(1).getDefiningOp();
       if (!offset ||

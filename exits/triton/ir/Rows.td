@@ -13,5 +13,9 @@ def MaskedStore : Inst<"write_at",[MemoryEffects<[MemWrite]>]> {let arguments=(i
 def RowMath : Inst<"map",[Pure]> {let arguments=(ins Variadic<AnyType>:$args,StrAttr:$kind);let results=(outs AnyType:$value);}
 def RowLanes : Inst<"range",[Pure]> {let arguments=(ins I64Attr:$size);let results=(outs AnyRankedTensor:$lanes);}
 def BinCount : Inst<"bin_count",[Pure]> {let arguments=(ins AnyRankedTensor:$keys);let results=(outs AnyRankedTensor:$counts);}
+def FetchAdd : Inst<"fetch_add",[MemoryEffects<[MemRead,MemWrite]>]> {
+  let arguments=(ins AnyMemRef:$view, AnyType:$offset, AnyType:$delta, AnyType:$active, StrAttr:$scope);
+  let results=(outs AnyRankedTensor:$old);
+}
 def RowReduce : Inst<"axis_reduce",[Pure]> {let arguments=(ins AnyRankedTensor:$input,I64Attr:$axis,StrAttr:$algebra);let results=(outs AnyType:$reduced);}
 def ExtractLane : Inst<"extract_lane",[Pure]> {let arguments=(ins AnyRankedTensor:$panel,Index:$lane);let results=(outs AnyRankedTensor:$value);}
