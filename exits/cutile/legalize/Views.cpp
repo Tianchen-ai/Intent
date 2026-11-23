@@ -18,6 +18,36 @@ void partitionOwners(func::FuncOp,const intentdsl::CallFacts &);
 llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &);
 llvm::Error emit(ModuleOp, llvm::raw_pwrite_stream &);
 namespace {
+bool ownerRectangle(Operation *op, func::FuncOp fn) {
+  auto kind = op->getName().stripDialect();
+  if (kind != "slice_read" && kind != "slice_write")
+    return false;
+  auto &space = fn.front().front();
+  auto pair = space.getAttrOfType<IntegerAttr>("block.pair_axis");
+  if (!pair || op->getParentOp() != &space)
+    return false;
+  auto &bb = space.getRegion(0).front();
+  auto coords = op->getOperands().drop_front(kind == "slice_write" ? 2 : 1);
+  if (coords.empty() ||
+      op->getAttrOfType<IntegerAttr>("axis").getInt() !=
+          int64_t(coords.size()) ||
+      coords.back() != bb.getArgument(pair.getInt()))
+    return false;
+  auto view =
+      cast<BlockArgument>(op->getOperand(kind == "slice_write" ? 1 : 0));
+  auto shape = fn.getArgAttrOfType<DenseI64ArrayAttr>(view.getArgNumber(),
+                                                      "block.shape");
+  return shape &&
+         shape[shape.size() - 2] %
+                 space.getAttrOfType<IntegerAttr>("block.owner_tile")
+                     .getInt() ==
+             0 &&
+         llvm::isPowerOf2_64(shape.asArrayRef().back()) &&
+         llvm::all_of(coords.drop_back(), [&](Value v) {
+           auto arg = dyn_cast<BlockArgument>(v);
+           return arg && arg.getOwner() == &bb && arg != coords.back();
+         });
+}
 DenseI64ArrayAttr adjacentScaleGroups(Operation *op,func::FuncOp fn){
   SmallVector<int64_t> slots;
   for(unsigned pos:{0u,2u}){
@@ -58,6 +88,8 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
                        "ct_src." +
                            (slab ? (code=="load"?"gather_slab":"scatter_slab") : access ? ("tile_" + code).str() : code.str()));
       s.addAttributes(op->getAttrs());
+      if (ownerRectangle(op, fn))
+        s.addAttribute("ct_src.owner_rectangle", b.getUnitAttr());
       if(code=="scaled_contract"){
         s.addAttribute("ct_src.flat_groups",adjacentScaleGroups(op,fn));
       }
@@ -122,9 +154,20 @@ struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
 LogicalResult verify(ModuleOp module, const TargetProfile &profile,
                      bool callable) {
   auto matrix=*module.getOps<func::FuncOp>().begin();
-  if (intentdsl::kir::orderedOwners(matrix))
-    return intentdsl::block::verifyOwnerMap(matrix, profile, "ct_src",
-                                            "realized");
+  if (intentdsl::kir::orderedOwners(matrix)) {
+    if (failed(intentdsl::block::verifyOwnerMap(matrix, profile, "ct_src",
+                                                "realized")))
+      return failure();
+    auto result = matrix.walk([&](Operation *op) {
+      if (op->hasAttr("ct_src.owner_rectangle") != ownerRectangle(op, matrix)) {
+        op->emitError("owner rectangle requires an aligned full group and "
+                      "contiguous logical axes");
+        return WalkResult::interrupt();
+      }
+      return WalkResult::advance();
+    });
+    return success(!result.wasInterrupted());
+  }
   if(intentdsl::kir::matrixDomain(matrix)){
     if(failed(intentdsl::block::verifyScaleDispatch(matrix,profile,"ct_src",profile.services.get<intentdsl::cutile::ArrayIndices>()->scaledMma?"mx":"bf16")))return failure();
     if(callable && matrix->getAttr("ct_src.index_bits")!=Builder(matrix.getContext()).getI32IntegerAttr(profile.services.get<intentdsl::cutile::ArrayIndices>()->bits))

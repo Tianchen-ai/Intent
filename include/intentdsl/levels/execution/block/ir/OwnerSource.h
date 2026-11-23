@@ -1,4 +1,5 @@
 #pragma once
+#include "intentdsl/levels/execution/block/ir/FoldIssue.h"
 #include "intentdsl/levels/execution/block/ir/Owners.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -22,7 +23,17 @@ protected:
     out.indent(4 * d) << s << "\n";
   }
   virtual std::string tileOwner() = 0;
+  virtual std::string tileStart() = 0;
   virtual std::string load(mlir::memref::LoadOp, llvm::StringRef mask) = 0;
+  virtual std::string gatherScalars(mlir::memref::LoadOp,
+                                    llvm::ArrayRef<std::string>,
+                                    llvm::StringRef) = 0;
+  virtual std::string loadMemberPanel(mlir::Operation &,
+                                      llvm::ArrayRef<std::string>, std::string,
+                                      int64_t, int64_t, std::string) {
+    return {};
+  }
+  virtual std::string ownerPanelAccess(mlir::Operation &, bool) { return {}; }
   virtual std::string store(mlir::memref::StoreOp, llvm::StringRef mask) = 0;
   virtual std::string cast(llvm::StringRef, mlir::Type) = 0;
   virtual std::string broadcast(llvm::StringRef) = 0;
@@ -31,6 +42,10 @@ protected:
                                    llvm::StringRef mask, bool write) = 0;
   virtual std::string memberRange(int64_t width) = 0;
   virtual llvm::StringRef language() = 0;
+  virtual std::string matrixProduct(std::string, std::string, bool,
+                                    std::string) = 0;
+  virtual std::string matrixAccumulate(std::string, std::string,
+                                       std::string) = 0;
   virtual void signature() = 0;
   std::string name(mlir::Value v) { return names.at(v); }
   mlir::DenseI64ArrayAttr layout(mlir::Value v, llvm::StringRef key) {
@@ -53,11 +68,23 @@ public:
                     space.getAttrOfType<mlir::IntegerAttr>("block.owners")
                         .getInt()));
     int64_t pitch = 1;
-    for (int i = axes.size() - 1; i >= 0; --i) {
+    llvm::SmallVector<unsigned> order;
+    auto group = space.getAttrOfType<mlir::IntegerAttr>("block.group_axis");
+    if (auto pair = space.getAttrOfType<mlir::IntegerAttr>("block.pair_axis"))
+      group = pair;
+    if (group)
+      order.push_back(group.getInt());
+    for (int i = axes.size() - 1; i >= 0; --i)
+      if (!group || group.getInt() != i)
+        order.push_back(i);
+    for (auto i : order) {
       auto extent = layout(space.getOperand(i), "block.shape")[axes[i]];
       auto id = fresh();
       names[body.getArgument(i)] = id;
-      line(1, id + "=(owner//" + std::to_string(pitch) + ")%" +
+      auto width =
+          space.getAttrOfType<mlir::IntegerAttr>("block.owner_tile").getInt();
+      auto base = group && pitch % width == 0 ? tileStart() : "owner";
+      line(1, id + "=(" + base + "//" + std::to_string(pitch) + ")%" +
                   std::to_string(std::max<int64_t>(1, extent)));
       pitch *= std::max<int64_t>(1, extent);
     }
@@ -67,13 +94,43 @@ public:
   }
 
 private:
-  llvm::Error emit(mlir::Block &body, unsigned depth, std::string mask) {
+#include "intentdsl/levels/execution/block/ir/FoldSource.inc"
+#include "intentdsl/levels/execution/block/ir/PairSource.inc"
+  bool uniformBound(mlir::Value v) const {
+    if (auto arg = mlir::dyn_cast<mlir::BlockArgument>(v)) {
+      if (auto loop =
+              mlir::dyn_cast<mlir::scf::ForOp>(arg.getOwner()->getParentOp()))
+        return arg == loop.getInductionVar() &&
+               uniformBound(loop.getLowerBound());
+      return arg.getOwner() == &fn->getRegion(0).front();
+    }
+    auto *op = v.getDefiningOp();
+    if (mlir::isa<mlir::arith::ConstantOp, mlir::memref::DimOp>(op))
+      return true;
+    return op->getName().getDialectNamespace() == "arith" &&
+           llvm::all_of(op->getOperands(),
+                        [&](auto x) { return uniformBound(x); });
+  }
+  llvm::Error emit(mlir::Block &body, unsigned depth, std::string mask,
+                   mlir::Operation *replay = nullptr) {
     using namespace mlir;
     for (auto &op : body) {
+      if (replay && &op != replay)
+        continue;
       auto n = op.getName().getStringRef();
       if (n == "scf.yield" || op.getName().stripDialect() == "end")
         continue;
       if (auto loop = dyn_cast<scf::ForOp>(op)) {
+        if (auto panel =
+                op.getAttrOfType<IntegerAttr>("block.contribution_width");
+            panel && !replay) {
+          auto err = space.hasAttr("block.pair_axis")
+                         ? emitPairFold(loop, depth, panel.getInt())
+                         : emitFold(loop, depth, panel.getInt());
+          if (err)
+            return err;
+          continue;
+        }
         SmallVector<std::string> bindings;
         for (auto [arg, v, ret] :
              llvm::zip(loop.getRegionIterArgs(), loop.getInitArgs(),
@@ -88,18 +145,44 @@ private:
         }
         auto iv = fresh();
         names[loop.getInductionVar()] = iv;
-        line(depth, "for " + iv + " in range(" + name(loop.getLowerBound()) +
-                        "," + name(loop.getUpperBound()) + "," +
-                        name(loop.getStep()) + "):");
-        if (auto e = emit(*loop.getBody(), depth + 1, mask))
+        auto lo = name(loop.getLowerBound()), hi = name(loop.getUpperBound());
+        auto step = name(loop.getStep()), active = mask;
+        bool ragged = !uniformBound(loop.getLowerBound()) ||
+                      !uniformBound(loop.getUpperBound());
+        std::string offset;
+        if (ragged) {
+          auto lib = language().str(), span = fresh();
+          offset = fresh();
+          line(depth, span + "=" + lib + ".max(" + lib + ".where(" + mask +
+                          "," + hi + "-" + lo + ",0),axis=0)");
+          auto indexType = mlir::IndexType::get(op.getContext());
+          line(depth, offset + "=" + cast("0", indexType));
+          line(depth, "while " + offset + "<" + span + ":");
+          line(depth + 1, iv + "=" + lo + "+" + offset);
+          active = "(" + mask + ")&(" + iv + "<" + hi + ")";
+        } else
+          line(depth,
+               "for " + iv + " in range(" + lo + "," + hi + "," + step + "):");
+        if (auto e = emit(*loop.getBody(), depth + 1, active))
           return e;
         if (!bindings.empty()) {
           SmallVector<std::string> yielded;
-          for (auto v : loop.getBody()->getTerminator()->getOperands())
-            yielded.push_back(name(v));
+          for (auto [v, old] : llvm::zip(
+                   loop.getBody()->getTerminator()->getOperands(), bindings)) {
+            auto predicate =
+                isa<RankedTensorType>(v.getType())
+                    ? language().str() + ".expand_dims(" + active + ",1)"
+                    : active;
+            yielded.push_back(ragged
+                                  ? language().str() + ".where(" + predicate +
+                                        "," + name(v) + "," + old + ")"
+                                  : name(v));
+          }
           line(depth + 1,
                llvm::join(bindings, ",") + "=" + llvm::join(yielded, ","));
         }
+        if (ragged)
+          line(depth + 1, offset + "=" + offset + "+" + step);
         continue;
       }
       if (auto branch = dyn_cast<scf::IfOp>(op)) {
@@ -145,16 +228,35 @@ private:
           expr = lib + ".broadcast_to(" + expand(arg(0)) + ",(ROWS," +
                  std::to_string(width) + "))";
         else {
+          expr = ownerPanelAccess(op, write);
+          if (!expr.empty()) {
+            if (write)
+              line(depth, expr);
+            else {
+              auto id = fresh();
+              names[op.getResult(0)] = id;
+              line(depth, id + "=" + expr);
+            }
+            continue;
+          }
           SmallVector<std::string> coords;
+          bool shared = op.hasAttr("block.broadcast_read");
+          auto one = [&](StringRef x) {
+            return lib + ".min(" + broadcast(x) + ",axis=0)";
+          };
           for (auto c : op.getOperands().drop_front(write ? 2 : 1))
-            coords.push_back(expand(name(c)));
+            coords.push_back(shared ? one(name(c)) : expand(name(c)));
           coords.insert(coords.begin() +
                             op.getAttrOfType<IntegerAttr>("axis").getInt(),
                         lanes);
-          expr = memberAccess(op, coords,
-                              expand(mask) + "&(" + lanes + "<" +
-                                  std::to_string(k) + ")",
-                              write);
+          auto valid = "(" + lanes + "<" + std::to_string(k) + ")";
+          expr = memberAccess(
+              op, coords,
+              (shared ? "(" + one(mask) + "!=0)" : expand(mask)) + "&" + valid,
+              write);
+          if (shared)
+            expr = lib + ".broadcast_to(" + expr + ",(ROWS," +
+                   std::to_string(width) + "))";
           if (write) {
             line(depth, expr);
             continue;
@@ -172,16 +274,23 @@ private:
           llvm::SmallString<32> spelling;
           val.getValue().toString(spelling);
           expr = spelling.str().str();
-          if (expr.find_first_of(".eE") == std::string::npos)
+          if (val.getValue().isInfinity())
+            expr =
+                val.getValue().isNegative() ? "-float('inf')" : "float('inf')";
+          else if (expr.find_first_of(".eE") == std::string::npos)
             expr += ".0";
         } else
           expr = std::to_string(mlir::cast<IntegerAttr>(c.getValue()).getInt());
-      } else if (n == "arith.extf" || n == "arith.truncf") {
+      } else if (n == "arith.extf" || n == "arith.truncf" ||
+                 n == "arith.index_cast") {
         auto t = op.getResult(0).getType();
         if (auto shaped = dyn_cast<ShapedType>(t))
           t = shaped.getElementType();
         expr = cast(arg(0), t);
-      } else if (n == "math.exp" || n == "math.sqrt")
+      } else if (n == "arith.maxnumf")
+        expr = language().str() + ".maximum(" + arg(0) + "," + arg(1) + ")";
+      else if (n == "math.exp" || n == "math.sqrt" || n == "math.exp2" ||
+               n == "math.log")
         expr = language().str() + "." + op.getName().stripDialect().str() +
                "(" + arg(0) + ")";
       else {

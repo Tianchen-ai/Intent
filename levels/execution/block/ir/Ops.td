@@ -231,4 +231,6 @@ include "intentdsl/levels/algorithm/kir/ir/Ordered.td"
 defm Ordered : OrderedOwners<Iblock_Dialect>;
 include "intentdsl/levels/execution/block/ir/Columns.td"
 defm Columns : ColumnTiles<Iblock_Dialect>;
+include "intentdsl/levels/execution/block/ir/ScorePanel.td"
+defm Score : ScoreTiles<Iblock_Dialect>;
 defm MatrixPanel : MatrixPanelLoop<Iblock_Dialect>;

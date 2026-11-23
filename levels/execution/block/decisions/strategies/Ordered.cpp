@@ -1,5 +1,9 @@
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
+#include "intentdsl/levels/execution/block/ir/FoldIssue.h"
+#include "intentdsl/levels/execution/block/ir/FoldPanel.h"
 #include "intentdsl/levels/execution/block/ir/Owners.h"
+#include "intentdsl/levels/execution/block/ir/ScorePanel.h"
+#include "intentdsl/levels/execution/block/ir/SharedReads.h"
 #include "mlir/IR/PatternMatch.h"
 using namespace mlir;
 using namespace compilerinfra;
@@ -12,7 +16,11 @@ static bool legalWidth(IntegerAttr width, int64_t owners) {
 LogicalResult verifyOwnerMap(func::FuncOp fn, const TargetProfile &p,
                              StringRef dialect, StringRef phase) {
   bool columns = fn.front().front().hasAttr("block.column_prefixes");
-  if (columns) {
+  if (fn.front().front().hasAttr("block.score_panel")) {
+    if (phase == "formed" || phase == "decided" ||
+        failed(verifyScoreTile(fn, dialect, p)))
+      return failure();
+  } else if (columns) {
     if (phase == "formed" || phase == "decided")
       return fn.emitError("unexpected realized columns");
     if (failed(verifyColumns(fn, dialect)))
@@ -25,6 +33,73 @@ LogicalResult verifyOwnerMap(func::FuncOp fn, const TargetProfile &p,
     return fn.emitError("missing native argument layout");
   if (failed(kir::verifyProjectedOwners(space, *facts)))
     return failure();
+  if (failed(verifySharedReads(&space, *facts)))
+    return failure();
+  auto span = space.getAttrOfType<IntegerAttr>("block.token_span");
+  auto pairAxis = space.getAttrOfType<IntegerAttr>("block.pair_axis");
+  auto validPair = [&](IntegerAttr width, IntegerAttr s, IntegerAttr axis) {
+    if (!width || !s || !axis)
+      return false;
+    auto result = issueAxis(&space, p, width.getInt(), s.getInt());
+    return result && *result == axis.getInt();
+  };
+  if (pairAxis &&
+      !validPair(space.getAttrOfType<IntegerAttr>("block.owner_tile"), span,
+                 pairAxis))
+    return space.emitError("invalid projection for cooperative fold");
+  if (span &&
+      (!panelFolds(&space, p, span.getInt()) || phase == "formed" ||
+       phase == "decided" ||
+       (!pairAxis && space.getAttr("block.owner_tile") !=
+                         Builder(fn.getContext()).getI64IntegerAttr(1))))
+    return space.emitError("invalid fold contribution panel");
+  if (space
+          .walk([&](Operation *v) {
+            bool required = span &&
+                            v->getBlock() == &space.getRegion(0).front() &&
+                            isa<scf::ForOp>(v) && v->hasAttr("kir.reassociate");
+            if (pairAxis && required) {
+              auto loop = cast<scf::ForOp>(v);
+              auto w =
+                  space.getAttrOfType<IntegerAttr>("block.owner_tile").getInt();
+              if (v->hasAttr("block.uniform_tokens") !=
+                  sharedBounds(loop, pairAxis.getInt(), w))
+                return WalkResult::interrupt();
+              bool replay = !v->hasAttr("block.uniform_tokens") &&
+                            llvm::any_of(loop.getResultTypes(), [](Type t) {
+                              return isa<ShapedType>(t);
+                            });
+              if (v->hasAttr("block.repair_masked_nan") != replay)
+                return WalkResult::interrupt();
+            } else if (v->hasAttr("block.uniform_tokens") ||
+                       v->hasAttr("block.repair_masked_nan"))
+              return WalkResult::interrupt();
+            auto loop = v->getParentOfType<scf::ForOp>();
+            bool pair = pairAxis && loop &&
+                        loop->hasAttr("block.contribution_width") &&
+                        v->getBlock() == loop.getBody();
+            if (v->hasAttr("block.rectangular_tokens") !=
+                bool(span && loop &&
+                     loop->hasAttr("block.contribution_width") &&
+                     v->getBlock() == loop.getBody() &&
+                     rectangularTokenLoad(*v, loop)))
+              return WalkResult::interrupt();
+            if (v->hasAttr("block.pair_dot") != bool(pair && tileDot(v, loop)))
+              return WalkResult::interrupt();
+            bool update = pair && isa<arith::AddFOp>(v) &&
+                          isa<RankedTensorType>(v->getResult(0).getType()) &&
+                          llvm::is_contained(
+                              loop.getBody()->getTerminator()->getOperands(),
+                              v->getResult(0));
+            if (v->hasAttr("block.masked_dot_update") != update)
+              return WalkResult::interrupt();
+            return v->getAttr("block.contribution_width") !=
+                           (required ? Attribute(span) : Attribute())
+                       ? WalkResult::interrupt()
+                       : WalkResult::advance();
+          })
+          .wasInterrupted())
+    return space.emitError("fold panel differs from owner decision");
   auto owners = ownerCount(&space, *facts);
   if (owners < 0)
     return space.emitError("owner space exceeds signed index range");
@@ -41,12 +116,30 @@ LogicalResult verifyOwnerMap(func::FuncOp fn, const TargetProfile &p,
   }
   if (phase == "formed")
     return success(!tile && !choice);
+  auto scoreChoice = [&](DictionaryAttr d) {
+    auto w = d ? d.getAs<IntegerAttr>("width") : IntegerAttr();
+    if (!w || d.getAs<StringAttr>("memory") != "score")
+      return false;
+    auto panel = scorePanel(&space, p);
+    return panel && fitsScoreTile(*panel, w.getInt(), p);
+  };
   if (phase == "decided")
     return success(
         !tile && choice &&
         legalWidth(choice.getAs<IntegerAttr>("width"), owners) &&
         choice.getAs<StringAttr>("memory") &&
         (choice.getAs<StringAttr>("memory") == "direct" ||
+         scoreChoice(choice) ||
+         (choice.getAs<StringAttr>("memory") == "matrix-fold" &&
+          validPair(choice.getAs<IntegerAttr>("width"),
+                    choice.getAs<IntegerAttr>("span"),
+                    choice.getAs<IntegerAttr>("axis"))) ||
+         (choice.getAs<StringAttr>("memory") == "token" &&
+          choice.getAs<IntegerAttr>("span") &&
+          choice.getAs<IntegerAttr>("width").getInt() == 1 &&
+          panelFolds(&space, p, choice.getAs<IntegerAttr>("span").getInt())) ||
+         (choice.getAs<StringAttr>("memory") == "shared" &&
+          legalSharedReads(&space, p, choice)) ||
          (choice.getAs<StringAttr>("memory") == "forward" &&
           canForwardOwners(&space, p)) ||
          (choice.getAs<StringAttr>("memory") == "columns" &&
@@ -122,9 +215,32 @@ void registerOrdered(Unit &u) {
                 const TargetProfile &p) -> llvm::Error {
     auto count = block::ownerCount(o, *p.services.get<CallFacts>());
     auto d = dyn_cast<DictionaryAttr>(a);
+    if (d && d.getAs<StringAttr>("memory") == "matrix-fold") {
+      auto w = d.getAs<IntegerAttr>("width"), s = d.getAs<IntegerAttr>("span"),
+           ax = d.getAs<IntegerAttr>("axis");
+      if (w && s && ax) {
+        auto allowed = block::issueAxis(o, p, w.getInt(), s.getInt());
+        if (allowed && *allowed == ax.getInt())
+          return llvm::Error::success();
+      }
+    }
+    if (d && d.getAs<StringAttr>("memory") == "token" &&
+        d.getAs<IntegerAttr>("width") &&
+        d.getAs<IntegerAttr>("width").getInt() == 1 &&
+        d.getAs<IntegerAttr>("span") &&
+        block::panelFolds(o, p, d.getAs<IntegerAttr>("span").getInt()))
+      return llvm::Error::success();
+    if (d && d.getAs<StringAttr>("memory") == "score") {
+      auto panel = block::scorePanel(o, p);
+      auto w = d.getAs<IntegerAttr>("width");
+      if (panel && w && block::fitsScoreTile(*panel, w.getInt(), p))
+        return llvm::Error::success();
+    }
     if (count < 0 || !d || !d.getAs<StringAttr>("memory") ||
         !block::legalWidth(d.getAs<IntegerAttr>("width"), count) ||
         !(d.getAs<StringAttr>("memory") == "direct" ||
+          (d.getAs<StringAttr>("memory") == "shared" &&
+           block::legalSharedReads(o, p, d)) ||
           (d.getAs<StringAttr>("memory") == "forward" &&
            block::canForwardOwners(o, p)) ||
           (d.getAs<StringAttr>("memory") == "columns" &&
@@ -145,15 +261,39 @@ void registerOrdered(Unit &u) {
     auto w = d ? d.getAs<IntegerAttr>("width") : IntegerAttr();
     if (!d || !d.getAs<StringAttr>("memory"))
       return llvm::createStringError("missing owner memory mode");
+    if (d.getAs<StringAttr>("memory") == "matrix-fold") {
+      auto span = d.getAs<IntegerAttr>("span");
+      if (w && span && c.topology == "fold-matrix-issue" &&
+          c.id == "pair-" + std::to_string(w.getInt()) + "x" +
+                      std::to_string(span.getInt()) &&
+          c.preconditions == std::vector<std::string>{"disjoint-owners"})
+        return llvm::Error::success();
+      return llvm::createStringError("invalid cooperative fold candidate");
+    }
+    if (d.getAs<StringAttr>("memory") == "token") {
+      auto span = d.getAs<IntegerAttr>("span");
+      if (w && w.getInt() == 1 && span &&
+          c.topology == "parallel-fold-contributions" &&
+          c.id == "tokens-" + std::to_string(span.getInt()) &&
+          c.preconditions == std::vector<std::string>{"disjoint-owners"})
+        return llvm::Error::success();
+      return llvm::createStringError("invalid fold candidate");
+    }
     bool forward = d.getAs<StringAttr>("memory") == "forward";
+    bool score = d.getAs<StringAttr>("memory") == "score";
+    bool shared = d.getAs<StringAttr>("memory") == "shared";
     bool columns = d && d.getAs<StringAttr>("memory") == "columns";
     auto fetch = d ? d.getAs<IntegerAttr>("prefetch") : IntegerAttr();
     if (!w ||
         c.topology != (fetch     ? "grouped-reads"
+                       : score   ? "resident-score-panel"
+                       : shared  ? "shared-owner-reads"
                        : columns ? "column-prefix"
                        : forward ? "resident-owner-slab"
                                  : "ordered-owner-tile") ||
         c.id != (fetch     ? "prefetch" + std::to_string(fetch.getInt()) + "-"
+                 : score   ? "score-"
+                 : shared  ? "shared-"
                  : columns ? "columns-"
                  : forward ? "resident-"
                            : "owners-") +
@@ -230,6 +370,43 @@ void registerOrdered(Unit &u) {
                         b.getDenseI64ArrayAttr(ds));
         }
     auto d = cast<DictionaryAttr>(a);
+    if (d.getAs<StringAttr>("memory") == "matrix-fold")
+      o->setAttr("block.pair_axis", d.get("axis"));
+    if (d.getAs<StringAttr>("memory") == "token" ||
+        d.getAs<StringAttr>("memory") == "matrix-fold") {
+      o->setAttr("block.token_span", d.get("span"));
+      for (auto loop : o->getRegion(0).front().getOps<scf::ForOp>())
+        if (loop->hasAttr("kir.reassociate")) {
+          loop->setAttr("block.contribution_width", d.get("span"));
+          for (auto &op : loop.getBody()->without_terminator())
+            if (block::rectangularTokenLoad(op, loop))
+              op.setAttr("block.rectangular_tokens", b.getUnitAttr());
+          if (o->hasAttr("block.pair_axis")) {
+            if (block::sharedBounds(loop, d.getAs<IntegerAttr>("axis").getInt(),
+                                    d.getAs<IntegerAttr>("width").getInt()))
+              loop->setAttr("block.uniform_tokens", b.getUnitAttr());
+            else if (llvm::any_of(loop.getResultTypes(),
+                                  [](Type t) { return isa<ShapedType>(t); }))
+              loop->setAttr("block.repair_masked_nan", b.getUnitAttr());
+            for (auto &op : loop.getBody()->without_terminator())
+              if (block::tileDot(&op, loop))
+                op.setAttr("block.pair_dot", b.getUnitAttr());
+            for (auto next : loop.getBody()->getTerminator()->getOperands())
+              if (isa<ShapedType>(next.getType()))
+                next.getDefiningOp()->setAttr("block.masked_dot_update",
+                                              b.getUnitAttr());
+          }
+        }
+    }
+    if (d.getAs<StringAttr>("memory") == "score")
+      block::realizeScoreTile(o, *block::scorePanel(o, p),
+                              d.getAs<IntegerAttr>("width").getInt());
+    if (d.getAs<StringAttr>("memory") == "shared") {
+      auto reads = block::sharedReads(o, *f);
+      o->setAttr("block.group_axis", d.get("axis"));
+      for (auto *s : reads->slices)
+        s->setAttr("block.broadcast_read", b.getUnitAttr());
+    }
     if (d.getAs<StringAttr>("memory") == "forward")
       o->setAttr("block.forward_slab", b.getUnitAttr());
     if (d.getAs<StringAttr>("memory") == "columns") {
