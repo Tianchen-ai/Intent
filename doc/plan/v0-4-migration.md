@@ -1,4 +1,4 @@
-# v0.4 出口迁移与 V2-6.P 性能收口（待评审）
+# v0.4 出口迁移与 V2-6.P 性能收口
 
 产品起点为 `4fed147` 的五个出口。沿用现有树：KIR 表达算法，Block 和 CPU 决定工作归属、分块与复用，DSA 从 Block 的已兑现边界接出，负责显式供数。Triton/cuTile 从 Block 接出；Weft 从 CPU 的值任务边界接出并兑现存储，Mojo 从 buffers 接出。库支持通过出口能力加入候选，不增加新出口。下表是后续实施计划，本轮只调整 Bench 数学裁判与范围说明。
 
@@ -50,7 +50,7 @@
 
 ## 二、量化：从格式推导访问和解码
 
-KIR 持有作者可见的逻辑值与数值合同。可复用的**物理存储类型描述**归能被 CPU、Block、DSA 共同使用的祖先（拟放 KIR 单元公开的 storage type/interface）；DSA 的 `storage` 级只是一个分支，CPU 不从它导入格式。类型由相应产品组件登记，出口查询同一份描述。框架只提供目标操作合同。描述给出逻辑轴到记录／组／成员的映射、块与超块长度、记录字节数、端序、字段偏移、scale/min 位宽与跨字节拼接、nibble 次序、有符号性、scale dtype、分组轴及尾部规则。解码先用有宽度的 IR 索引定位记录，再形成 load、extract、移位、扩展、转换和算术。硬件 primitive 可以替代等价的子图。
+KIR 持有作者可见的逻辑值与数值合同。可复用的**物理存储类型描述**归能被 CPU、Block、DSA 共同使用的祖先（KIR 单元公开的 storage type）；DSA 的 `storage` 级只是一个分支，CPU 不从它导入格式。类型由相应产品组件登记，出口查询同一份描述。框架只提供目标操作合同。描述给出逻辑轴到记录／组／成员的映射、块与超块长度、记录字节数、端序、字段偏移、scale/min 位宽与跨字节拼接、nibble 次序、有符号性、scale dtype、分组轴及尾部规则。解码先用有宽度的 IR 索引定位记录，再形成 load、extract、移位、扩展、转换和算术。硬件 primitive 可以替代等价的子图。
 
 | 首批格式 | 由描述推导的关键事实 |
 |---|---|
@@ -81,4 +81,4 @@ KIR 持有作者可见的逻辑值与数值合同。可复用的**物理存储�
 - **Weft。** 已获准修改下游 triton-weft。在 x86 dot/contract lowering 兑现实现绑定、ABI 和必要 packing 要求，调用 ukernel；Weft host 继续只调度 task 和 join。以同一个 Canonical Weft 输入分别走 native/vendor，核对 task IR、真实库调用及原生结果；没有在 host 里替换整个 dot 所在算法的旁路。
 - **SG2044。** 2026-11-23 在板上只读实查：`pkg-config --modversion openblas` 为 0.3.25，`pkg-config --cflags --libs openblas` 返回 CBLAS 头目录和 `-lopenblas`；`libopenblas.so` 导出 `cblas_sgemm`，实际 f32 的 [1,2]·[3,4] 得 11。系统另有 64 位整数接口变体和本地 GGML 构建。动态链接器缓存未登记 oneDNN/libxsmm。OpenBLAS 整矩阵调用只能作 library 候选或对照，没有据此宣称板上有 BRGeMM ukernel。vendor 默认下继续使用合法的 RVV native 候选；将来需新探测其 ABI、线程行为和数值能力才可登记另一实现。
 
-**建议裁决。** 首次迁移以 Triton 检验共享 Block、以第二个 GPU 出口检验它确实可复用；CPU vendor 首先接 oneDNN 对应的合法小集合。整库只在显式 library 档和完整 region/effects 匹配时参加，与 native/vendor 一起计入 packing、scratch、同步和初始化成本。离线权重重排等作者冻结语义明确后开放。
+**已批准。** 首次迁移以 Triton 检验共享 Block、以第二个 GPU 出口检验它确实可复用；CPU vendor 首先接 oneDNN 对应的合法小集合。整库只在显式 library 档和完整 region/effects 匹配时参加，与 native/vendor 一起计入 packing、scratch、同步和初始化成本。离线权重重排等作者冻结语义明确后开放。
