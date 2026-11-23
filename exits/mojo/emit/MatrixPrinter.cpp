@@ -680,7 +680,7 @@ TerminalPrinter mojoMatrixPrinter() {
         c.line("static inline void widen_bf16_span(float *out, const uint16_t *src, int64_t n){");
         c.line("  if (n <= 0) return; int64_t i=0;");
         c.line("#if defined(__AVX512F__)");
-        c.line("  for (; i+16<=n; i+=16) { __m256i h = _mm256_loadu_si256((const __m256i*)(src+i)); _mm512_storeu_ps(out+i, _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(h), 16))); }");
+        c.line("  for (; i <= n - 16; i += 16) { __m256i h = _mm256_loadu_si256((const __m256i*)(src+i)); _mm512_storeu_ps(out+i, _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(h), 16))); }");
         c.line("#endif");
         c.line("  for (; i<n; ++i) out[i] = expand_bf(src[i]);");
         c.line("}");
@@ -700,7 +700,7 @@ TerminalPrinter mojoMatrixPrinter() {
         c.line("static inline void widen_f16_span(float *out, const uint16_t *src, int64_t n){");
         c.line("  if (n <= 0) return; int64_t i=0;");
         c.line("#if defined(__AVX512F__) && defined(__F16C__)");
-        c.line("  for (; i+16<=n; i+=16) { __m256i h = _mm256_loadu_si256((const __m256i*)(src+i)); _mm512_storeu_ps(out+i, _mm512_cvtph_ps(h)); }");
+        c.line("  for (; i <= n - 16; i += 16) { __m256i h = _mm256_loadu_si256((const __m256i*)(src+i)); _mm512_storeu_ps(out+i, _mm512_cvtph_ps(h)); }");
         c.line("#endif");
         c.line("  for (; i<n; ++i) out[i] = expand_f16(src[i]);");
         c.line("}");
@@ -841,7 +841,7 @@ TerminalPrinter mojoMatrixPrinter() {
       std::string fnWiden = dt == "bf16" ? "expand_bf" : "expand_f16";
       std::string fnSpan = dt == "bf16" ? "widen_bf16_span" : "widen_f16_span";
       c.line("#pragma omp parallel for num_threads(workers) schedule(static) if((" +
-             banks + ")*M*K > 32768)");
+             banks + ")*M*K > 131072)");
       c.line("for (int64_t row=0; row<(" + banks + ")*M; ++row) {");
       c.line("  const int64_t g = M ? row / M : 0, m = M ? row % M : 0;");
       c.line("  const uint16_t *src = (const uint16_t*)a" +
@@ -868,7 +868,7 @@ TerminalPrinter mojoMatrixPrinter() {
       std::string fnWiden = dt == "bf16" ? "expand_bf" : "expand_f16";
       std::string fnSpan = dt == "bf16" ? "widen_bf16_span" : "widen_f16_span";
       c.line("#pragma omp parallel for num_threads(workers) schedule(static) if((" +
-             banks + ")*nc*K*nr > 32768)");
+             banks + ")*nc*K*nr > 131072 && (" + banks + ")*nc >= 4)");
       c.line("for (int64_t p=0; p<(" + banks + ")*nc; ++p) {");
       c.line("  const int64_t g = nc ? p / nc : 0, c = (nc ? p % nc : 0)*nr, valid = N-c < nr ? N-c : nr;");
       c.line("  for (int64_t k=0; k<K; ++k) {");
@@ -898,7 +898,7 @@ TerminalPrinter mojoMatrixPrinter() {
         ++bn;
       std::string banks = bb < 0 ? "1LL" : "G";
       c.line("#pragma omp parallel for num_threads(workers) schedule(static) if((" +
-             banks + ")*nc*K*nr > 32768)");
+             banks + ")*nc*K*nr > 131072 && (" + banks + ")*nc >= 4)");
       c.line("for (int64_t p=0; p<(" + banks + ")*nc; ++p) {");
       c.line("  const int64_t g = nc ? p / nc : 0, c = (nc ? p % nc : 0)*nr, valid = N-c < nr ? N-c : nr;");
       c.line("  for (int64_t k=0; k<K; ++k) {");
@@ -929,7 +929,7 @@ TerminalPrinter mojoMatrixPrinter() {
         ++bn;
       std::string banks = bb < 0 ? "1LL" : "G";
       c.line("#pragma omp parallel for num_threads(workers) schedule(static) if((" +
-             banks + ")*nc*K*nr > 32768)");
+             banks + ")*nc*K*nr > 131072 && (" + banks + ")*nc >= 4)");
       c.line("for (int64_t p=0; p<(" + banks + ")*nc; ++p) {");
       c.line("  const int64_t g = nc ? p / nc : 0, c = (nc ? p % nc : 0)*nr;");
       c.line("  unsigned char *out = (unsigned char*)" + dst + " + p*nr*(K+4);");
@@ -939,12 +939,19 @@ TerminalPrinter mojoMatrixPrinter() {
              std::to_string(slots[0]) + " + g*" +
              std::to_string(bb < 0 ? 0 : st[bb]) + "LL + c*" +
              std::to_string(st[bn]) + "LL + k*" + std::to_string(st[bk]) + "LL;");
+      c.line("    const int8_t *r0 = base, *r1 = base + " +
+             std::to_string(st[bk]) + "LL, *r2 = base + " +
+             std::to_string(2 * st[bk]) + "LL, *r3 = base + " +
+             std::to_string(3 * st[bk]) + "LL;");
+      c.line("    unsigned char *dst_k = out + k*nr;");
+      c.line("    #pragma omp simd");
       c.line("    for (int64_t j=0; j<nr; ++j) {");
-      c.line("      int sum = 0;");
-      c.line("      for (int lane=0; lane<4; ++lane) { int8_t x = base[j*" +
-             std::to_string(st[bn]) + "LL + lane*" + std::to_string(st[bk]) +
-             "LL]; out[k*nr + 4*j + lane] = (uint8_t)x; sum += x; }");
-      c.line("      corr[j] -= (uint32_t)(sum * 128);");
+      c.line("      int8_t v0 = r0[j*" + std::to_string(st[bn]) + "LL], v1 = r1[j*" +
+             std::to_string(st[bn]) + "LL], v2 = r2[j*" +
+             std::to_string(st[bn]) + "LL], v3 = r3[j*" +
+             std::to_string(st[bn]) + "LL];");
+      c.line("      dst_k[4*j] = (uint8_t)v0; dst_k[4*j+1] = (uint8_t)v1; dst_k[4*j+2] = (uint8_t)v2; dst_k[4*j+3] = (uint8_t)v3;");
+      c.line("      corr[j] -= (uint32_t)(((int)v0 + (int)v1 + (int)v2 + (int)v3) * 128);");
       c.line("    }");
       c.line("  }");
       c.line("}");
@@ -960,14 +967,30 @@ TerminalPrinter mojoMatrixPrinter() {
         ++bn;
       std::string banks = bb < 0 ? "1LL" : "G";
       c.line("#pragma omp parallel for num_threads(workers) schedule(static) if((" +
-             banks + ")*nc*K*nr > 32768)");
+             banks + ")*nc*K*nr > 131072 && (" + banks + ")*nc >= 4)");
       c.line("for (int64_t p=0; p<(" + banks + ")*nc; ++p) {");
       c.line("  const int64_t g = nc ? p / nc : 0, c = (nc ? p % nc : 0)*nr, valid = N-c < nr ? N-c : nr;");
       c.line("  const int64_t kPad = ((K+" + std::to_string(kBlk - 1) + ")/" +
              std::to_string(kBlk) + ")*" + std::to_string(kBlk) + ";");
       c.line("  " + cTy + " *out = (" + cTy + "*)" + dst + " + p*kPad*nr;");
       c.line("  if (valid < nr || kPad > K) memset(out, 0, (size_t)(kPad*nr)*sizeof(" + cTy + "));");
-      c.line("  for (int64_t kb=0; kb<K; kb+=" + std::to_string(kBlk) + ") {");
+      c.line("  int64_t kb = 0;");
+      c.line("  for (; kb + " + std::to_string(kBlk) + " <= K; kb += " +
+             std::to_string(kBlk) + ") {");
+      c.line("    const " + cTy + " *base = (const " + cTy + "*)a" +
+             std::to_string(slots[0]) + " + g*" +
+             std::to_string(bb < 0 ? 0 : st[bb]) + "LL + c*" +
+             std::to_string(st[bn]) + "LL + kb*" + std::to_string(st[bk]) + "LL;");
+      c.line("    " + cTy + " *dst_k = out + (kb/" + std::to_string(kBlk) +
+             ")*nr*" + std::to_string(kBlk) + ";");
+      c.line("    #pragma omp simd");
+      c.line("    for (int64_t j=0; j<valid; ++j)");
+      c.line("      for (int lane=0; lane<" + std::to_string(kBlk) + "; ++lane)");
+      c.line("        dst_k[j*" + std::to_string(kBlk) +
+             " + lane] = base[j*" + std::to_string(st[bn]) + "LL + lane*" +
+             std::to_string(st[bk]) + "LL];");
+      c.line("  }");
+      c.line("  for (; kb < K; kb += " + std::to_string(kBlk) + ") {");
       c.line("    const " + cTy + " *base = (const " + cTy + "*)a" +
              std::to_string(slots[0]) + " + g*" +
              std::to_string(bb < 0 ? 0 : st[bb]) + "LL + c*" +
@@ -1135,17 +1158,19 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line("if (jobs > 0) {");
       c.indent++;
       c.line("const int nt = jobs < workers ? (int)jobs : (int)workers;");
-      c.line("#pragma omp parallel num_threads(nt) if(nt > 1) reduction(|:rc)");
-      c.line("{");
-      c.indent++;
       if (usesBrg) {
+        c.line("#pragma omp parallel num_threads(nt) if(nt > 1) reduction(|:rc)");
+        c.line("{");
+        c.indent++;
         c.line("_Alignas(64) unsigned char brg_scratch_stk[8192];");
         c.line("void *brg_scratch = brg_scratch_bytes <= 8192 ? (void*)brg_scratch_stk : aligned_alloc(64, (size_t)brg_scratch_bytes);");
         c.line("const void *brg_active = NULL;");
         c.line("int thr_ok = brg_scratch != NULL;");
         c.line("if (!thr_ok) rc |= 2;");
+        c.line("#pragma omp for schedule(static) nowait");
+      } else {
+        c.line("#pragma omp parallel for num_threads(nt) schedule(static) if(nt > 1)");
       }
-      c.line("#pragma omp for schedule(static)");
       c.line("for (int64_t job=0; job<jobs; ++job) {");
       c.indent++;
       if (usesBrg)
@@ -1190,9 +1215,9 @@ TerminalPrinter mojoMatrixPrinter() {
       if (usesBrg) {
         c.line("if (brg_active) intent_brgemm_thread_leave();");
         c.line("if (brg_scratch != (void*)brg_scratch_stk) free(brg_scratch);");
+        c.indent--;
+        c.line("}");
       }
-      c.indent--;
-      c.line("}");
       c.indent--;
       c.line("}");
     }

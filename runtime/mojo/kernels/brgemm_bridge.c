@@ -63,14 +63,22 @@ static int same_key(const IntentBrgemmKey *a, const IntentBrgemmKey *b) {
 const void *intent_brgemm_get(int64_t M, int64_t N, int64_t K, int64_t lda,
                               int64_t ldb, int64_t ldc, int32_t a_dt,
                               int32_t b_dt, int32_t c_dt) {
+  static __thread const IntentBrgemmEntry *tls_cache[4];
+  static __thread unsigned tls_slot;
   if (M <= 0 || N <= 0 || K <= 0)
     return NULL;
   IntentBrgemmKey key = {M, N, K, lda, ldb, ldc, a_dt, b_dt, c_dt};
+  for (unsigned i = 0; i < 4; ++i) {
+    const IntentBrgemmEntry *ce = tls_cache[i];
+    if (ce && same_key(&ce->key, &key))
+      return ce;
+  }
   size_t idx = (size_t)(hash_key(&key) & (INTENT_BRGEMM_BUCKETS - 1));
   pthread_rwlock_rdlock(&g_lock);
   for (IntentBrgemmEntry *e = g_buckets[idx]; e; e = e->next) {
     if (same_key(&e->key, &key)) {
       pthread_rwlock_unlock(&g_lock);
+      tls_cache[tls_slot++ & 3u] = e;
       return e;
     }
   }
@@ -80,6 +88,7 @@ const void *intent_brgemm_get(int64_t M, int64_t N, int64_t K, int64_t lda,
   for (IntentBrgemmEntry *e = g_buckets[idx]; e; e = e->next) {
     if (same_key(&e->key, &key)) {
       pthread_rwlock_unlock(&g_lock);
+      tls_cache[tls_slot++ & 3u] = e;
       return e;
     }
   }
@@ -109,6 +118,7 @@ const void *intent_brgemm_get(int64_t M, int64_t N, int64_t K, int64_t lda,
   entry->next = g_buckets[idx];
   g_buckets[idx] = entry;
   pthread_rwlock_unlock(&g_lock);
+  tls_cache[tls_slot++ & 3u] = entry;
   return entry;
 }
 

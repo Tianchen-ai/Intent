@@ -19,7 +19,8 @@ void registerBlockCost(compilerinfra::Unit &u) {
           if (!g)
             return g.takeError();
           double columns = std::ceil(double(t[1]) / t[3]),
-                 live = t[0] * columns + columns + 1;
+                 live = t[0] * columns + columns +
+                        (t[4] == 2 ? double(t[0]) + 2. : 1.);
           double spill = std::max(0., live - (t[3] == 16 ? 32 : 16)) * t[3] *
                          4 * 2 * g->k / (t[4] == 2 ? 4 : 1);
           e.terms["live_vectors"] = {live, "count"};
@@ -27,13 +28,26 @@ void registerBlockCost(compilerinfra::Unit &u) {
           double widths =
               ctx.target.services.get<intentdsl::cpu::RowMachine>()->workers *
               t[3];
-          double conversions = (t[4] == 2 ? 0. : g->k * (t[0] + columns));
+          double l1Loads = (t[4] == 2 ? (g->k / 4.) * (t[0] + columns)
+                                      : g->k * (t[0] + columns));
+          bool needsWiden = false;
+          if (t[4] != 2 && t[4] != 3 &&
+              dot.getName().stripDialect() != "scaled_contract") {
+            auto inBytes =
+                mlir::cast<mlir::MemRefType>(dot.getOperand(0).getType())
+                    .getElementTypeBitWidth() /
+                8;
+            needsWiden = inBytes < 4;
+          }
+          double conversions =
+              needsWiden ? double(g->k) * (columns + double(t[0]) / t[3]) : 0.;
           auto tail = g->m % t[0];
           double fringe =
               tail ? (tail - 1) * columns * g->k /
                          std::max(1., std::ceil(double(g->m) / t[0]))
                    : 0.;
           conversions += fringe;
+          e.terms["l1_panel_loads"] = {l1Loads, "instruction"};
           e.terms["tail_rhs_reloads"] = {fringe, "instruction"};
           e.terms["broadcast_and_widen"] = {conversions, "instruction"};
           auto read = intentdsl::quantity(ctx, "read_1_private_bw", "B/ns"),
@@ -43,7 +57,7 @@ void registerBlockCost(compilerinfra::Unit &u) {
             auto workers =
                 ctx.target.services.get<intentdsl::cpu::RowMachine>()->workers;
             e.timeNs = (spill / 2) * workers * (1 / *read + 1 / *write) +
-                       conversions * widths / *rate;
+                       ((l1Loads * 0.5 + conversions) * widths) / *rate;
           }
           return e;
         }},
@@ -96,34 +110,52 @@ void registerBlockCost(compilerinfra::Unit &u) {
           auto read = intentdsl::quantity(ctx, "read_1_private_bw", "B/ns"),
                write = intentdsl::quantity(ctx, "write_1_private_bw", "B/ns"),
                rate = intentdsl::quantity(ctx, "vector", "FLOP/ns"),
-               launch = intentdsl::quantity(ctx, "launch", "ns");
+               launch = intentdsl::quantity(ctx, "launch", "ns"),
+               sync = intentdsl::quantity(ctx, "sync", "ns");
           auto workers =
               ctx.target.services.get<intentdsl::cpu::RowMachine>()->workers;
+          double jobs = std::ceil(double(g->m) / t[0]) *
+                        std::ceil(double(g->n) / t[1]) * g->batches;
+          double waves = std::max(1., std::ceil(jobs / workers));
+          double planNs = sync ? *sync * 1.5 : 1000.;
+          double ffiCallNs = sync ? *sync * 0.15 : 100.;
+          double amxEnterLeaveNs =
+              (launch ? *launch * 4.0 : 11000.) +
+              (sync ? *sync * 2.0 : 1400.);
 
           if (impl.dtype == "q4k") {
+            bool amx = ctx.target.features.count("amx_int8") > 0;
             e.bottleneck = "per-subgroup ukernel call and stack nibble unpack";
             double subgroups = double(g->k) / 32.;
             double unpackBytes = double(t[0]) * g->k * 2.;
+            double amxCtx = amx ? amxEnterLeaveNs : planNs;
             e.terms["subgroup_ukernel_calls"] = {subgroups, "count"};
             e.terms["nibble_stack_bytes"] = {unpackBytes, "B"};
             if (read && write) {
               double callCost = launch ? std::min(*launch * 0.05, 25.) : 20.;
-              e.timeNs = subgroups * callCost +
+              e.timeNs = amxCtx / waves + subgroups * callCost +
                          (unpackBytes / 2.) * workers *
                              (1. / *read + 1. / *write);
             }
             return e;
           }
 
-          if (impl.dtype == "s8") {
-            bool amx = ctx.target.features.count("amx_int8") > 0;
-            e.bottleneck = amx ? "AMX int8 tile unit" : "VNNI JIT microkernel";
+          if (impl.dtype == "s8" || impl.dtype == "bf16") {
+            bool amx = impl.dtype == "s8"
+                           ? (ctx.target.features.count("amx_int8") > 0)
+                           : (ctx.target.features.count("amx_bf16") > 0);
+            e.bottleneck = amx ? "AMX tile unit and context transition"
+                               : "VNNI/BF16 JIT microkernel";
+            double columns = std::ceil(double(t[1]) / t[3]);
             double tileBytes = double(t[0]) * t[1] * 4.;
+            double amxCtx = amx ? amxEnterLeaveNs : planNs;
             e.terms["tile_buffer_bytes"] = {tileBytes, "B"};
-            if (read && write) {
-              e.timeNs =
-                  tileBytes * workers * (1. / *read + 1. / *write) *
-                  (amx ? 0.25 : 1.0);
+            e.terms["ukernel_setup_ns"] = {amxCtx / waves + ffiCallNs, "ns"};
+            if (read && write && rate) {
+              double widths = workers * t[3];
+              e.timeNs = amxCtx / waves + ffiCallNs +
+                         tileBytes * workers * (1. / *read + 1. / *write) +
+                         (double(t[0]) * columns * widths) / *rate;
             }
             return e;
           }
@@ -147,9 +179,11 @@ void registerBlockCost(compilerinfra::Unit &u) {
           e.terms["l1_panel_loads"] = {l1Loads, "instruction"};
           e.terms["in_tile_f16_widen"] = {inTileConvert, "instruction"};
           e.terms["tile_buffer_bytes"] = {tileBytes, "B"};
+          e.terms["ukernel_setup_ns"] = {planNs / waves + ffiCallNs, "ns"};
           if (read && write && rate) {
             double widths = workers * t[3];
-            e.timeNs = (spill / 2. + tileBytes / 2.) * workers *
+            e.timeNs = planNs / waves + ffiCallNs +
+                       (spill / 2. + tileBytes / 2.) * workers *
                            (1. / *read + 1. / *write) +
                        ((l1Loads * 0.5 + inTileConvert) * widths) / *rate;
           }

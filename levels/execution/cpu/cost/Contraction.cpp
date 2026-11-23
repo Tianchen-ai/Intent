@@ -13,8 +13,9 @@ void matrixCost(Unit &u) {
             return g.takeError();
           auto t = mlir::cast<mlir::DenseI64ArrayAttr>(c.value);
           auto *caps = ctx.target.services.get<intentdsl::cpu::MatrixMachine>();
-          double jobs = std::ceil(double(g->m) / t[0]) *
-                        std::ceil(double(g->n) / t[1]) * g->batches;
+          double mb = std::ceil(double(g->m) / t[0]);
+          double nc = std::ceil(double(g->n) / t[1]);
+          double jobs = mb * nc * g->batches;
           auto workers =
               ctx.target.services.get<intentdsl::cpu::RowMachine>()->workers;
           double waves = jobs > 0 ? std::ceil(jobs / workers) : 0.;
@@ -31,11 +32,18 @@ void matrixCost(Unit &u) {
           }
           double reads = waves * (t[0] + t[1]) * g->k * elemReadBytes;
           double ops = waves * t[0] * std::ceil(double(t[1]) / t[3]) * g->k;
-          if (packCode == 2 ||
-              (t.size() == 6 && caps->contracts[t[5]].dtype == "s8"))
+          if (packCode == 2) {
             ops /= 4.;
+          } else if (t.size() == 6) {
+            const auto &impl = caps->contracts[t[5]];
+            if (impl.dtype == "s8")
+              ops /= ctx.target.features.count("amx_int8") ? 16. : 4.;
+            else if (impl.dtype == "bf16")
+              ops /= ctx.target.features.count("amx_bf16") ? 8. : 2.;
+          }
           double packBytes = 0, translationBytes = 0, scatteredBytes = 0;
           double widenOps = 0;
+          double lhsBanks = double(g->batches), rhsBanks = double(g->batches);
           if (dot.getName().stripDialect() == "window_contract") {
             auto slot = mlir::cast<mlir::BlockArgument>(dot.getOperand(0))
                             .getArgNumber();
@@ -53,8 +61,9 @@ void matrixCost(Unit &u) {
               packBytes = double(g->batches) * g->k * 4. * g->n;
               scatteredBytes =
                   double(g->batches) * g->m * g->k * line * colBlocks;
-              widenOps =
-                  waves * g->k * (std::ceil(double(t[1]) / t[3]) + t[0]) * t[3];
+              if (t.size() < 6)
+                widenOps = waves * g->k *
+                           (std::ceil(double(t[1]) / t[3]) + t[0]) * t[3];
             }
           }
           if (dot.getName().stripDialect() == "contract") {
@@ -63,6 +72,8 @@ void matrixCost(Unit &u) {
             int k = dot.getAttrOfType<mlir::IntegerAttr>("rhs_k").getInt();
             int batch =
                 dot.getAttrOfType<mlir::IntegerAttr>("rhs_batch").getInt();
+            int lhsBatch =
+                dot.getAttrOfType<mlir::IntegerAttr>("lhs_batch").getInt();
             int column = 0;
             while (column == k || column == batch)
               ++column;
@@ -71,11 +82,9 @@ void matrixCost(Unit &u) {
             auto bytes = mlir::cast<mlir::MemRefType>(b.getType())
                              .getElementTypeBitWidth() /
                          8;
-            double rhsBanks = batch < 0 ? 1. : double(g->batches);
+            lhsBanks = lhsBatch < 0 ? 1. : double(g->batches);
+            rhsBanks = batch < 0 ? 1. : double(g->batches);
             if (packCode == 3) {
-              int lhsBatch =
-                  dot.getAttrOfType<mlir::IntegerAttr>("lhs_batch").getInt();
-              double lhsBanks = lhsBatch < 0 ? 1. : double(g->batches);
               double lhsPack =
                   g->routed ? double(g->m) * g->k * std::max(0., 4. - bytes)
                             : lhsBanks * g->m * g->k * (bytes + 4.);
@@ -100,6 +109,25 @@ void matrixCost(Unit &u) {
                                (g->grouped ? 1. : double(g->batches));
             }
           }
+          double lhsReads = waves * double(t[0]) * g->k * elemReadBytes;
+          double rhsReads = waves * double(t[1]) * g->k * elemReadBytes;
+          constexpr double kPrivateL2Bytes = 2. * 1024. * 1024.;
+          constexpr double kSharedL3Bytes = 96. * 1024. * 1024.;
+          bool contiguousUnpacked =
+              !packCode && scatteredBytes == 0. && translationBytes == 0.;
+          if (t.size() == 6) {
+            double rhsPanelBytes = double(t[1]) * g->k * elemReadBytes;
+            if ((packCode != 0 || contiguousUnpacked) &&
+                rhsPanelBytes <= kPrivateL2Bytes) {
+              double workerPanels =
+                  waves > 0
+                      ? std::min(nc * g->batches,
+                                 std::ceil(waves / std::max(1., mb)) + 1.)
+                      : 0.;
+              rhsReads = workerPanels * rhsPanelBytes;
+            }
+            reads = lhsReads + rhsReads;
+          }
           CostEstimate e;
           e.scope = "full_call";
           e.bottleneck = "output block parallelism";
@@ -115,15 +143,65 @@ void matrixCost(Unit &u) {
           if (bw) {
             if (t.size() == 6) {
               auto midBw = intentdsl::quantity(ctx, "read_1_mid_bw", "B/ns");
+              auto sharedBw =
+                  intentdsl::quantity(ctx, "read_1_shared_bw", "B/ns");
               auto syncNs = intentdsl::quantity(ctx, "sync", "ns");
-              double tileBw = (packCode && midBw) ? *midBw : *bw;
+              auto launchNs = intentdsl::quantity(ctx, "launch", "ns");
+              double lhsFootprint =
+                  lhsBanks * double(g->m) * g->k * elemReadBytes;
+              double totalFootprint =
+                  lhsFootprint + rhsBanks * double(g->n) * g->k * elemReadBytes;
+              double rhsBw = ((packCode != 0 ||
+                               (contiguousUnpacked &&
+                                totalFootprint <= kPrivateL2Bytes)) &&
+                              midBw)
+                                 ? *midBw
+                                 : *bw;
+              double lhsBw = *bw;
+              if (packCode != 0 || contiguousUnpacked) {
+                if (lhsFootprint <= 2. * kPrivateL2Bytes && midBw)
+                  lhsBw = *midBw;
+                else if (lhsFootprint <= kSharedL3Bytes && sharedBw)
+                  lhsBw = *sharedBw;
+              }
+              bool isWindow = dot.getName().stripDialect() == "window_contract";
               double prepSteps =
-                  packCode == 3 ? (g->routed ? 1. : 2.) : (packCode ? 1. : 0.);
-              double syncCost =
-                  (syncNs && packBytes > 131072.) ? prepSteps * *syncNs : 0.;
-              e.timeNs = (reads * workers) / tileBw +
-                         (packBytes + translationBytes + scatteredBytes) / *bw +
-                         syncCost +
+                  isWindow
+                      ? (packCode ? 2. : 1.)
+                      : ((packCode == 3 ? (g->routed ? 1. : 2.)
+                                        : (packCode ? 1. : 0.)) +
+                         (g->routed ? 1. : 0.));
+              double prepTime = 0.;
+              if (packBytes > 0.) {
+                auto writeBw = intentdsl::quantity(ctx, "write_1", "B/ns");
+                double copyBw =
+                    writeBw ? (2. / (1. / *bw + 1. / *writeBw)) : *bw;
+                double oneCoreBw =
+                    midBw ? std::min(copyBw,
+                                     *midBw / std::max<int64_t>(1, workers))
+                          : (copyBw / std::max<int64_t>(1, workers));
+                double widenElems =
+                    packCode == 3
+                        ? (lhsBanks * double(g->m) + rhsBanks * double(g->n)) *
+                              g->k
+                        : 0.;
+                double seqPrep =
+                    (syncNs ? prepSteps * *syncNs * 0.5 : 0.) +
+                    packBytes / std::max(1., oneCoreBw) +
+                    (rate ? widenElems * 2. * workers / *rate : 0.);
+                double parPrep =
+                    prepSteps * ((launchNs ? *launchNs : 0.) +
+                                 (syncNs ? *syncNs : 0.)) +
+                    packBytes / copyBw +
+                    (rate ? widenElems * 2. / *rate : 0.);
+                prepTime = std::min(seqPrep, parPrep);
+              }
+              double tileDispatch =
+                  (jobs > 1. && launchNs) ? *launchNs : 0.;
+              e.timeNs = tileDispatch + prepTime +
+                         (lhsReads * workers) / lhsBw +
+                         (rhsReads * workers) / rhsBw +
+                         (translationBytes + scatteredBytes) / *bw +
                          (rate ? (ops * t[3] * 2. * workers +
                                   widenOps * workers) /
                                      *rate
@@ -138,9 +216,12 @@ void matrixCost(Unit &u) {
           if (dot.getName().stripDialect() == "q4k_dot" && bw) {
             double bytes = waves * t[0] * (g->k / 256) * 144;
             auto dispatch = intentdsl::quantity(ctx, "launch", "ns");
+            auto syncNs = intentdsl::quantity(ctx, "sync", "ns");
             e.terms["record_bytes_per_worker"] = {bytes, "B"};
             e.timeNs =
-                bytes * workers / *bw + (dispatch ? waves * *dispatch : 0.);
+                bytes * workers / *bw +
+                ((jobs > 1. && dispatch) ? *dispatch : 0.) +
+                (syncNs ? waves * *syncNs * 0.02 : 0.);
           }
           const std::string &name =
               t.size() == 6 ? caps->contracts[t[5]].estimator : caps->estimate;

@@ -208,12 +208,12 @@ void populateMojoMatrixContracts(intentdsl::cpu::MatrixMachine &m, int64_t v) {
     add(r, c, d, v, "onednn-brgemm-f32", "brgemm-tile", "f32", 1, true, false);
     add(r, c, d, v, "onednn-brgemm-f16", "brgemm-tile", "f16", 1, true, false);
   }
-  add(16, 4 * v, 64, v, "onednn-brgemm-bf16", "brgemm-tile", "bf16", 2, true,
-      true);
-  add(16, 4 * v, 64, v, "onednn-brgemm-s8", "brgemm-tile", "s8", 4, true,
-      false);
-  add(32, 4 * v, 64, v, "onednn-brgemm-s8", "brgemm-tile", "s8", 4, true,
-      false);
+  for (auto [r, c, d] :
+       std::initializer_list<std::tuple<int64_t, int64_t, int64_t>>{
+           {16, 2 * v, 64}, {32, 2 * v, 64}, {16, 4 * v, 64}, {32, 4 * v, 64}}) {
+    add(r, c, d, v, "onednn-brgemm-bf16", "brgemm-tile", "bf16", 2, true, true);
+    add(r, c, d, v, "onednn-brgemm-s8", "brgemm-tile", "s8", 4, true, false);
+  }
   add(16, 1, 256, v, "onednn-brgemm-u8s8", "brgemm-tile", "q4k", 32, false,
       false);
 }
