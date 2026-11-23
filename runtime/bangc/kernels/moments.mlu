@@ -14,7 +14,34 @@ __mlu_func__ Moment merge_moments(Moment a, Moment b) {
   return Moment{n, a.mean + change, a.m2 + b.m2 + delta * (float)a.n * change};
 }
 
-__mlu_func__ Moment welford_row(const float *samples, int live) {
+__mlu_func__ Moment welford_row(const float *samples, float *scratch,
+                                int live) {
+  int full = (live / 32) * 32;
+  if (full >= 32) {
+    float *red = scratch + full;
+    __bang_sumpool(red, samples, 32, full / 32, 1, full / 32, 1, 1, 1);
+    __bang_reduce_sum(red, red, 32);
+    __sync_compute();
+    float sum = ((volatile float *)red)[0];
+    float mean = __cn_scalar_div_f32_rn(sum, (float)full);
+    union {
+      float f;
+      unsigned u;
+    } mu;
+    mu.f = mean;
+    if ((mu.u & 0x7fffffffU) < 0x7f800000U) {
+      __bang_add_scalar(scratch, samples, -mean, full);
+      __bang_mul(scratch, scratch, scratch, full);
+      __bang_sumpool(red, scratch, 32, full / 32, 1, full / 32, 1, 1, 1);
+      __bang_reduce_sum(red, red, 32);
+      __sync_compute();
+      float m2 = ((volatile float *)red)[0];
+      Moment acc = {full, mean, m2};
+      for (int k = full; k < live; ++k)
+        acc = merge_moments(acc, Moment{1, samples[k], 0.0f});
+      return acc;
+    }
+  }
   Moment acc = {0, 0.0f, 0.0f};
   for (int k = 0; k < live; ++k)
     acc = merge_moments(acc, Moment{1, samples[k], 0.0f});

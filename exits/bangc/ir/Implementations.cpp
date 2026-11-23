@@ -73,17 +73,37 @@ void rowContracts(Unit &unit) {
       });
 
   add("validated-exp", "row_exp", "row_exp", "exp.mlu",
-      "NRAM f32 input and NRAM f32 output over [members, pitch]",
+      "NRAM f32 input, NRAM f32 maxpool scratch and NRAM f32 output over "
+      "[members, pitch]",
       "128-byte aligned NRAM vector lanes", "f32",
-      "writes NRAM f32 output buffer",
+      "writes NRAM f32 scratch and output buffer",
       "__bang_active_exphp in [-80, 80] with exact scalar expf repair outside",
       [](Operation *op) {
         auto outTy = dyn_cast<MemRefType>(op->getOperand(0).getType());
-        auto inTy = dyn_cast<MemRefType>(op->getOperand(1).getType());
+        auto scTy = dyn_cast<MemRefType>(op->getOperand(1).getType());
+        auto inTy = dyn_cast<MemRefType>(op->getOperand(2).getType());
         return success(isSpace(op->getOperand(0), 1) &&
                        isSpace(op->getOperand(1), 1) &&
+                       isSpace(op->getOperand(2), 1) &&
                        outTy.getElementType().isF32() &&
+                       scTy.getElementType().isF32() &&
                        inTy.getElementType().isF32());
+      });
+
+  add("nram-transpose", "tile_transpose",
+      "transpose_tile_b16/transpose_tile_b32", "transpose.mlu",
+      "NRAM source tile [rows, cols] and NRAM destination tile [cols, rows]",
+      "64-byte aligned 2D NRAM tile", "none",
+      "writes transposed NRAM tile",
+      "bit-exact 2D NRAM element permutation via __bang_transpose",
+      [](Operation *op) {
+        auto dstTy = dyn_cast<MemRefType>(op->getOperand(0).getType());
+        auto srcTy = dyn_cast<MemRefType>(op->getOperand(1).getType());
+        if (!isSpace(op->getOperand(0), 1) || !isSpace(op->getOperand(1), 1) ||
+            dstTy.getElementType() != srcTy.getElementType())
+          return failure();
+        unsigned bits = dstTy.getElementTypeBitWidth();
+        return success(bits == 16 || bits == 32);
       });
 
   add("certified-half-quotient", "narrow_quotient", "group_narrow_quotient",
@@ -92,7 +112,7 @@ void rowContracts(Unit &unit) {
       "NRAM f16 output",
       "pitched rows [members, pitch] in NRAM", "f32",
       "writes NRAM quotient/scratch and certified f16 output",
-      "+-4 ULP f32 endpoint certification with exact RN f32->f16 fallback",
+      "+-2 ULP f32 endpoint certification with exact RN f32->f16 fallback",
       [](Operation *op) {
         auto outTy = dyn_cast<MemRefType>(op->getOperand(0).getType());
         auto qTy = dyn_cast<MemRefType>(op->getOperand(1).getType());
@@ -248,13 +268,18 @@ void rowContracts(Unit &unit) {
       });
 
   add("moments-reduce", "summary_reduce", "welford_row", "moments.mlu",
-      "NRAM f32 row fragment and active count", "contiguous NRAM row", "f32",
-      "pure Moment tuple (n, mean, m2)",
-      "sequential Welford moment accumulation with RN f32 division",
+      "NRAM f32 row fragment, NRAM f32 sumpool scratch and active count",
+      "contiguous NRAM row", "f32",
+      "writes NRAM f32 scratch and returns Moment tuple (n, mean, m2)",
+      "vectorized two-pass sumpool Welford moment accumulation with RN f32 "
+      "division and sequential non-finite fallback",
       [](Operation *op) {
         auto inTy = dyn_cast<MemRefType>(op->getOperand(0).getType());
+        auto scTy = dyn_cast<MemRefType>(op->getOperand(1).getType());
         return success(isSpace(op->getOperand(0), 1) &&
+                       isSpace(op->getOperand(1), 1) &&
                        inTy.getElementType().isF32() &&
+                       scTy.getElementType().isF32() &&
                        isMomentTuple(op->getResult(0).getType()));
       });
 

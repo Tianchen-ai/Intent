@@ -55,9 +55,9 @@ __mlu_func__ void row_narrow_quotient(half *out, float *q, float *tmp,
     return;
   }
   __bang_mul_scalar(q, x, __cn_scalar_div_f32_rn(1.f, d), lanes);
-  __bang_add_scalar((int *)tmp, (const int *)q, -4, lanes);
+  __bang_add_scalar((int *)tmp, (const int *)q, -2, lanes);
   __bang_float2half_rn(out, tmp, lanes);
-  __bang_add_scalar((int *)q, (const int *)q, 4, lanes);
+  __bang_add_scalar((int *)q, (const int *)q, 2, lanes);
   half *upper = (half *)tmp;
   __bang_float2half_rn(upper, q, lanes);
   __bang_bxor((short *)upper, (short *)upper, (short *)out, lanes);
@@ -88,9 +88,9 @@ __mlu_func__ void group_narrow_quotient(half *out, float *q, float *tmp,
       for (int j = 0; j < members; ++j)
         __bang_mul_scalar(q + j * pitch, x + j * pitch,
                           __cn_scalar_div_f32_rn(1.f, d[j]), pitch);
-      __bang_add_scalar((int *)tmp, (const int *)q, -4, total);
+      __bang_add_scalar((int *)tmp, (const int *)q, -2, total);
       __bang_float2half_rn(out, tmp, total);
-      __bang_add_scalar((int *)q, (const int *)q, 4, total);
+      __bang_add_scalar((int *)q, (const int *)q, 2, total);
       half *upper = (half *)tmp;
       __bang_float2half_rn(upper, q, total);
       __bang_bxor((short *)upper, (short *)upper, (short *)out, total);

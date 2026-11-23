@@ -939,11 +939,26 @@ struct RowLowerer {
           b.create<arith::DivSIOp>(
               loc, b.create<arith::AddIOp>(loc, live, cI64(63)), cI64(64)),
           cI64(64));
+      bool hasTransposeStore = false, needsFullPitch = false;
+      for (auto &inst : body) {
+        auto pAttr = inst.getAttrOfType<StringAttr>("bangc.primitive");
+        StringRef pr = pAttr ? pAttr.getValue() : StringRef{};
+        hasTransposeStore |= pr.starts_with("transpose_store");
+        StringRef cn = inst.getName().stripDialect();
+        needsFullPitch |= cn == "reduce" || cn == "exp" || cn == "div" ||
+                          pr == "certified_half_quotient" ||
+                          pr == "bf16_product" || pr == "bf16_round";
+      }
       Value members = cI64(1);
       if (packed) {
-        Value fullPitch =
-            b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, live, symP);
-        members = b.create<arith::SelectOp>(loc, fullPitch, count, cI64(1));
+        if (hasTransposeStore && !needsFullPitch) {
+          members = count;
+          rowLanes = symP;
+        } else {
+          Value fullPitch = b.create<arith::CmpIOp>(
+              loc, arith::CmpIPredicate::eq, live, symP);
+          members = b.create<arith::SelectOp>(loc, fullPitch, count, cI64(1));
+        }
       }
       Value stepMembers = b.create<arith::MaxSIOp>(loc, members, cI64(1));
 
@@ -1234,6 +1249,68 @@ struct RowLowerer {
               });
             };
             if (packed && multiMember &&
+                (prim == "transpose_store" ||
+                 prim == "transpose_store_async")) {
+              Type elemTy = cast<MemRefType>(ptr.getType()).getElementType();
+              unsigned bits = elemTy.getIntOrFloatBitWidth();
+              if (bits == 16 || bits == 32) {
+                Value outS0 = viewStride(ptr, 0), outS1 = viewStride(ptr, 1);
+                Value rIdx0 = b.create<arith::AddIOp>(loc, row0, j);
+                Value outBase = makeAddr(ptr, {col, rIdx0}, {outS0, outS1}, 0);
+                Value ebAligned = b.create<arith::CmpIOp>(
+                    loc, arith::CmpIPredicate::eq,
+                    b.create<arith::RemSIOp>(loc, symEB, cI64(32)), cI64(0));
+                Value hasRows = b.create<arith::CmpIOp>(
+                    loc, arith::CmpIPredicate::sgt, members, cI64(0));
+                Value hasCols = b.create<arith::CmpIOp>(
+                    loc, arith::CmpIPredicate::sgt, live, cI64(0));
+                Value unitInner = b.create<arith::CmpIOp>(
+                    loc, arith::CmpIPredicate::eq, outS1, cI64(1));
+                Value validPitch = b.create<arith::AndIOp>(
+                    loc,
+                    b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge,
+                                            outS0, members),
+                    b.create<arith::CmpIOp>(
+                        loc, arith::CmpIPredicate::sle, outS0,
+                        cI64(2147483647LL / std::max<int64_t>(1, elemBytes))));
+                Value canTrans = b.create<arith::AndIOp>(
+                    loc, ebAligned,
+                    b.create<arith::AndIOp>(
+                        loc, hasRows,
+                        b.create<arith::AndIOp>(
+                            loc, hasCols,
+                            b.create<arith::AndIOp>(loc, unitInner,
+                                                    validPitch))));
+                Value transScratch = nramAt(
+                    elemTy,
+                    phaseByteOffset(inst.getAttrOfType<DenseI64ArrayAttr>(
+                        "bangc.scratch")));
+                ifThenElse(
+                    canTrans,
+                    [&]() {
+                      makeOp("tile_transpose",
+                             {transScratch, src, symEB, symP}, {}, {},
+                             "nram-transpose");
+                      Value oneCol = b.create<arith::CmpIOp>(
+                          loc, arith::CmpIPredicate::eq, live, cI64(1));
+                      ifThenElse(
+                          oneCol,
+                          [&]() {
+                            memcpy1D(outBase, transScratch, members,
+                                     "NRAM2GDRAM", async);
+                          },
+                          [&]() {
+                            Value seg =
+                                b.create<arith::SubIOp>(loc, live, cI64(1));
+                            memcpy2D(outBase, transScratch, members, outS0,
+                                     symEB, seg, "NRAM2GDRAM", async);
+                          });
+                    },
+                    emitMemberStores);
+                continue;
+              }
+            }
+            if (packed && multiMember &&
                 (prim == "group_store" || prim == "group_store_async")) {
               int64_t axis = cast<MemRefType>(ptr.getType()).getRank() - 2;
               Value stride = viewStride(ptr, axis), dim = viewDim(ptr, axis);
@@ -1292,10 +1369,15 @@ struct RowLowerer {
 
           Value resVal = inst.getResult(0);
           if (prim == "welford_f32") {
-            Value m =
-                makeOp("summary_reduce", {getVal(inst.getOperand(0)), live},
-                       {momentTuple(b.getContext())}, {}, "moments-reduce")
-                    ->getResult(0);
+            Value scratch = nramAt(
+                b.getF32Type(),
+                phaseByteOffset(
+                    inst.getAttrOfType<DenseI64ArrayAttr>("bangc.scratch")));
+            Value m = makeOp("summary_reduce",
+                             {getVal(inst.getOperand(0)), scratch, live},
+                             {momentTuple(b.getContext())}, {},
+                             "moments-reduce")
+                          ->getResult(0);
             localMap[resVal] = m;
             continue;
           }
@@ -1773,14 +1855,19 @@ struct RowLowerer {
             }
             if (n == "exp" && dstElem.isF32() &&
                 rankOf(inst.getOperand(0).getType()) == 2) {
+              Value scratch = nramAt(
+                  b.getF32Type(),
+                  phaseByteOffset(
+                      inst.getAttrOfType<DenseI64ArrayAttr>("bangc.scratch")));
               Value oneRow = b.create<arith::CmpIOp>(
                   loc, arith::CmpIPredicate::eq, members, cI64(1));
               Value activeElems = b.create<arith::SelectOp>(
                   loc, oneRow, live,
                   b.create<arith::MulIOp>(loc, members, symP));
               makeOp("row_exp",
-                     {dst, getVal(inst.getOperand(0)), activeElems, lanes}, {},
-                     {}, "validated-exp");
+                     {dst, scratch, getVal(inst.getOperand(0)), activeElems,
+                      lanes},
+                     {}, {}, "validated-exp");
               continue;
             }
             if (n == "sqrt" && dstElem.isF32() &&

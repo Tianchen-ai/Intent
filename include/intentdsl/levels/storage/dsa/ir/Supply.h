@@ -10,6 +10,7 @@ struct LocalSupply {
   int64_t randomScratchBytes = 0;
 };
 bool projectsConsecutiveRows(mlir::Operation *access, unsigned maskIndex);
+bool projectsTransposed2D(mlir::Operation *op);
 struct TemporaryLayout {
   llvm::DenseMap<mlir::Operation *, int64_t> offsets;
   int64_t peak = 0;

@@ -51,6 +51,7 @@ capabilities(const llvm::json::Object &opts) {
       std::make_shared<intentdsl::dsa::MatrixStorage>(intentdsl::dsa::MatrixStorage{matrixPrivateBytes})))return e;
   if(auto e=profile.services.provide<intentdsl::block::MatrixTarget>(matrices))return e;
   if(auto error=caps->bind(opts))return error;
+  caps->storeSectorBytes = 128;
   caps->streamingWidths = {128, 512, 4096};
   for (unsigned w = 1; w <= 4096; w *= 2)
     for (unsigned r : {1u, 2u, 16u, 32u, 64u}) {

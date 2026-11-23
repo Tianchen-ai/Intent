@@ -1,0 +1,10 @@
+__mlu_func__ void transpose_tile_b16(void *dst, const void *src, int rows,
+                                     int cols) {
+  __bang_transpose((unsigned short *)dst, (const unsigned short *)src, rows,
+                   cols);
+}
+
+__mlu_func__ void transpose_tile_b32(void *dst, const void *src, int rows,
+                                     int cols) {
+  __bang_transpose((float *)dst, (const float *)src, rows, cols);
+}

@@ -138,6 +138,28 @@ bool projectsConsecutiveRows(Operation *op, unsigned maskIndex) {
          axis->getAttrOfType<IntegerAttr>("axis").getInt() == logicalRank - 2 &&
          coordinates.back() == window->getResult(1);
 }
+bool projectsTransposed2D(Operation *op) {
+  auto name = op->getName().getStringRef();
+  if (name != "block.store" && name != "dsa.write_back")
+    return false;
+  auto viewTy = dyn_cast<MemRefType>(op->getOperand(0).getType());
+  if (!viewTy || viewTy.getRank() != 2)
+    return false;
+  if (name == "block.store") {
+    auto axes = op->getAttrOfType<DenseI64ArrayAttr>("block.member_axes");
+    return axes && axes.asArrayRef() == ArrayRef<int64_t>({1, 0});
+  }
+  if (op->getNumOperands() != 5)
+    return false;
+  auto *win = op->getOperand(2).getDefiningOp();
+  if (!win || win->getName().getStringRef() != "dsa.window")
+    return false;
+  auto domain = win->getOperand(0);
+  if (cast<MemRefType>(domain.getType()).getRank() != 2)
+    return false;
+  return op->getOperand(3) == win->getResult(1) &&
+         op->getOperand(4) == win->getResult(0);
+}
 LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
                             bool supplied) {
   auto fs = m.getOps<func::FuncOp>();

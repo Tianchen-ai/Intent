@@ -102,6 +102,15 @@ StringRef primitive(Operation *op, int64_t depth) {
     return depth == 2 ? "wait_slot" : "ready";
   if (n == "dsa.write_back") {
     if(op->getParentOfType<func::FuncOp>()->hasAttr("kir.owner_axis"))return "segmented_slab_write";
+    auto layout =
+        op->getParentOfType<func::FuncOp>()->getAttrOfType<DictionaryAttr>(
+            "dsa.layout");
+    if (intentdsl::dsa::projectsTransposed2D(op) && layout &&
+        layout.getAs<BoolAttr>("group_temporaries") &&
+        layout.getAs<BoolAttr>("group_temporaries").getValue())
+      return op->getAttrOfType<BoolAttr>("async").getValue()
+                 ? "transpose_store_async"
+                 : "transpose_store";
     if (intentdsl::dsa::projectsConsecutiveRows(op, 2))
       return op->getAttrOfType<BoolAttr>("async").getValue()
                  ? "group_store_async" : "group_store";
@@ -188,6 +197,10 @@ LogicalResult offsets(func::FuncOp f, bool install) {
       if (o.getName().getStringRef() == "dsa.reduce" &&
           !attach(o, grouped, local))
         return WalkResult::interrupt();
+    bool wideGroup =
+        f->getAttrOfType<DictionaryAttr>("dsa.layout")
+            .getAs<BoolAttr>("group_temporaries")
+            .getValue();
     for (auto &o : compute) {
       auto code = o.getName().getStringRef();
       auto resTy = o.getNumResults() == 1
@@ -203,7 +216,11 @@ LogicalResult offsets(func::FuncOp f, bool install) {
       if ((code == "block.mul" && resTy && resTy.getRank() == 2 &&
            resTy.getElementType().isBF16()) ||
           (code == "block.div" && resTy && resTy.getRank() == 2 &&
-           resTy.getElementType().isF32() && !narrowedQuotient(&o))) {
+           resTy.getElementType().isF32() && !narrowedQuotient(&o)) ||
+          (code == "block.exp" && resTy && resTy.getRank() == 2 &&
+           resTy.getElementType().isF32()) ||
+          code == "block.summary_reduce" ||
+          (wideGroup && intentdsl::dsa::projectsTransposed2D(&o))) {
         auto addr = b.getDenseI64ArrayAttr({grouped, local});
         if (install)
           o.setAttr("bangc.scratch", addr);

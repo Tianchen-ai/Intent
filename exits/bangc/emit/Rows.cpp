@@ -76,6 +76,7 @@ void loadRuntimeSources(TerminalPrinter &p) {
   static const std::pair<const char *, const char *> bindings[] = {
       {"exits/bangc::row-reduce", "runtime/bangc/kernels/reduce.mlu"},
       {"exits/bangc::validated-exp", "runtime/bangc/kernels/exp.mlu"},
+      {"exits/bangc::nram-transpose", "runtime/bangc/kernels/transpose.mlu"},
       {"exits/bangc::certified-half-quotient",
        "runtime/bangc/kernels/quotient.mlu"},
       {"exits/bangc::bf16-tile-convert", "runtime/bangc/kernels/bf16.mlu"},
@@ -271,8 +272,8 @@ TerminalPrinter rowPrinter() {
 
   enter("bangc_src.summary_reduce", [](Operation &op, PrintContext &c) {
     c.line("Moment " + c.name(op.getResult(0)) + " = welford_row(" +
-           c.name(op.getOperand(0)) + ", (int)(" + c.name(op.getOperand(1)) +
-           "));");
+           c.name(op.getOperand(0)) + ", " + c.name(op.getOperand(1)) +
+           ", (int)(" + c.name(op.getOperand(2)) + "));");
     return llvm::Error::success();
   });
 
@@ -433,6 +434,18 @@ TerminalPrinter rowPrinter() {
 
   enter("bangc_src.row_exp", [](Operation &op, PrintContext &c) {
     c.line("row_exp(" + c.name(op.getOperand(0)) + ", " +
+           c.name(op.getOperand(1)) + ", " + c.name(op.getOperand(2)) +
+           ", (int)(" + c.name(op.getOperand(3)) + "), (int)(" +
+           c.name(op.getOperand(4)) + "));");
+    return llvm::Error::success();
+  });
+
+  enter("bangc_src.tile_transpose", [](Operation &op, PrintContext &c) {
+    auto ty = cast<MemRefType>(op.getOperand(0).getType());
+    std::string fnName = ty.getElementTypeBitWidth() == 16
+                             ? "transpose_tile_b16"
+                             : "transpose_tile_b32";
+    c.line(fnName + "(" + c.name(op.getOperand(0)) + ", " +
            c.name(op.getOperand(1)) + ", (int)(" + c.name(op.getOperand(2)) +
            "), (int)(" + c.name(op.getOperand(3)) + "));");
     return llvm::Error::success();

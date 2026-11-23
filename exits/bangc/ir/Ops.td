@@ -81,7 +81,7 @@ def SummaryZeroOp : BangcOp<"summary_zero"> {
 }
 
 def SummaryReduceOp : BangcOp<"summary_reduce"> {
-  let arguments = (ins AnyMemRef:$input, I64:$live);
+  let arguments = (ins AnyMemRef:$input, AnyMemRef:$scratch, I64:$live);
   let results = (outs AnyTuple:$moment);
 }
 
@@ -158,8 +158,12 @@ def RowReduceOp : BangcOp<"row_reduce"> {
 }
 
 def RowExpOp : BangcOp<"row_exp"> {
-  let arguments = (ins AnyMemRef:$out, AnyMemRef:$input, I64:$active,
-                       I64:$lanes);
+  let arguments = (ins AnyMemRef:$out, AnyMemRef:$scratch, AnyMemRef:$input,
+                       I64:$active, I64:$lanes);
+}
+
+def TileTransposeOp : BangcOp<"tile_transpose"> {
+  let arguments = (ins AnyMemRef:$dst, AnyMemRef:$src, I64:$rows, I64:$cols);
 }
 
 def NarrowQuotientOp : BangcOp<"narrow_quotient"> {

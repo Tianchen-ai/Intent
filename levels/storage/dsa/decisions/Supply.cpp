@@ -19,8 +19,16 @@ struct Footprint {
       if (code == "await" || code == "active" || code == "window" ||
           code == "member_axis" || code == "slab_axis" || code == "rows" || code == "columns")
         continue;
-      if (code == "reduce") {
+      if (code == "reduce" || code == "exp") {
         f.collectiveBytes = std::max<int64_t>(f.collectiveBytes, reductionScratch);
+      } else if (code == "summary_reduce") {
+        f.collectiveBytes =
+            std::max<int64_t>(f.collectiveBytes, 2 * reductionScratch);
+      } else if (projectsTransposed2D(&op)) {
+        int64_t elemBytes = llvm::divideCeil(
+            cast<MemRefType>(op.getOperand(0).getType()).getElementTypeBitWidth(),
+            8u);
+        f.collectiveBytes = std::max<int64_t>(f.collectiveBytes, elemBytes);
       } else if (op.getNumResults() == 1) {
         if(code=="scan_sum")f.collectiveBytes=std::max<int64_t>(f.collectiveBytes,reductionScratch);
         if(code=="atomic_add_at")f.collectiveBytes=std::max<int64_t>(f.collectiveBytes,8);
@@ -133,15 +141,20 @@ planStorage(func::FuncOp fn, const LocalSupply &c, int64_t depth,
   }
   unsigned arithmetic=0;
   bool hasUniform = false;
+  bool permuted2D = false, hasCollective = false;
   fn.walk([&](Operation *op){
     auto code=op->getName().stripDialect();
     hasUniform |= code == "uniform";
+    permuted2D |= projectsTransposed2D(op);
+    hasCollective |= code == "reduce" || code == "summary_reduce" ||
+                     code == "scan_sum";
     if(code=="add" || code=="sub" || code=="mul") {++arithmetic;return;}
     if(code=="reduce" || (op->getName().getDialectNamespace()=="block" &&
        code!="rows" && code!="columns" && code!="pid" && code!="active" &&
        code!="load" && code!="store" && code!="zero")) wide=false;
   });
-  wide = (wide && arithmetic != 0) || batch > 1;
+  wide = (wide && arithmetic != 0) || batch > 1 ||
+         (permuted2D && !hasCollective);
   SmallVector<Footprint> phases;
   bool indexed=false;
   fn.walk([&](Operation *op) {

@@ -16,6 +16,22 @@ void dmaCost(Unit &u) {
           double batch = choice.getAs<IntegerAttr>("batch")
                              ? choice.getAs<IntegerAttr>("batch").getInt()
                              : 1.;
+          bool canTileTranspose = false;
+          if (auto cfgs = op->getAttrOfType<ArrayAttr>("block.configs");
+              cfgs && choice.getAs<ArrayAttr>("rows")) {
+            for (auto a : choice.getAs<ArrayAttr>("rows")) {
+              auto id = cast<DictionaryAttr>(a).get("id");
+              for (auto cfg : cfgs) {
+                auto row = cast<DictionaryAttr>(cfg);
+                if (row.get("id") == id) {
+                  int64_t effR =
+                      row.getAs<IntegerAttr>("rows").getInt() * int64_t(batch);
+                  if (effR >= 32 && (effR % 32) == 0)
+                    canTileTranspose = true;
+                }
+              }
+            }
+          }
           double in = 0, out = 0, r = 0, w = 0, scatter = 0;
           op->walk([&](Operation *i) {
             auto k = i->getName().stripDialect();
@@ -45,8 +61,10 @@ void dmaCost(Unit &u) {
               if (auto axes =
                       i->getAttrOfType<DenseI64ArrayAttr>("block.member_axes");
                   axes && axes.size() == 2 && axes[0] == 1) {
-                scatter += bytes;
-                permuted = true;
+                if (!canTileTranspose) {
+                  scatter += bytes;
+                  permuted = true;
+                }
               }
               w += (!permuted && view.getRank() >= 2) ? 1. / batch : 1.;
             }
