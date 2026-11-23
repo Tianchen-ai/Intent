@@ -196,7 +196,9 @@ struct OwnerLoop {
         e = arg(0) + " if isnan(" + arg(1) + ") else (" + arg(1) +
             " if isnan(" + arg(0) + ") else max(" + arg(0) + "," + arg(1) +
             "))";
-      else if (n == "math.sqrt" || n == "math.exp" || n == "math.exp2" ||
+      else if (n == "math.exp2")
+        e = arg(0) + " if isnan(" + arg(0) + ") else exp2(" + arg(0) + ")";
+      else if (n == "math.sqrt" || n == "math.exp" ||
                n == "math.log")
         e = op.getName().stripDialect().str() + "(" + arg(0) + ")";
       else {

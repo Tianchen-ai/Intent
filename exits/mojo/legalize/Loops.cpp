@@ -1,4 +1,3 @@
-#include "Dialect.h.inc"
 #include "MemberAccess.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/KeyReduction.h"
@@ -9,6 +8,7 @@
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/Pass.h"
 #include <algorithm>
+#include "Dialect.h.inc"
 using namespace mlir;
 #include "Lanes.h"
 namespace CI_UNIT_NAMESPACE {
