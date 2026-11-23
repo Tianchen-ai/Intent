@@ -1,5 +1,6 @@
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
 #include "intentdsl/levels/execution/cpu/ir/Owners.h"
+#include "intentdsl/levels/execution/cpu/ir/ScoreCache.h"
 #include "mlir/IR/PatternMatch.h"
 using namespace mlir;
 using namespace compilerinfra;
@@ -14,6 +15,22 @@ LogicalResult verifyOwnerGrain(func::FuncOp fn, Operation &space,
     return failure();
   auto facts = p.services.get<CallFacts>();
   auto grain = space.getAttrOfType<IntegerAttr>("cpu.grain");
+  auto cached = space.getAttrOfType<IntegerAttr>("cpu.score_cache");
+  auto panel = cached ? reusableScores(&space, p) : std::nullopt;
+  if (cached && (!panel || cached.getInt() != panel->keys))
+    return space.emitError(
+        "score cache requires two equivalent contractions over the key axis");
+  auto marks = space.walk([&](Operation *v) {
+    if (v->hasAttr("cpu.record_score") !=
+            (panel && v == panel->maxScore.getDefiningOp()) ||
+        v->hasAttr("cpu.replay_score") !=
+            (panel && v == panel->weightScore.getDefiningOp()))
+      return WalkResult::interrupt();
+    return WalkResult::advance();
+  });
+  if (marks.wasInterrupted())
+    return space.emitError(
+        "score recording and replay must refer to the same key and query");
   if (facts && failed(kir::verifyProjectedOwners(space, *facts)))
     return failure();
   if (!facts || !grain || grain.getInt() < 1 || grain.getInt() > 256 ||
@@ -90,8 +107,15 @@ void ownerTasks(Unit &u) {
     o->setAttr("cpu.owner_choice", a);
     return llvm::Error::success();
   };
-  f.verify = [](Operation *, Attribute a,
-                const TargetProfile &) -> llvm::Error {
+  f.verify = [](Operation *o, Attribute a,
+                const TargetProfile &p) -> llvm::Error {
+    if (auto d = dyn_cast<DictionaryAttr>(a)) {
+      auto s = cpu::reusableScores(o, p);
+      auto extent = d.getAs<IntegerAttr>("scores");
+      if (!s || !extent || extent.getInt() != s->keys)
+        return llvm::createStringError("invalid retained score range");
+      a = d.get("grain");
+    }
     auto w = dyn_cast<IntegerAttr>(a);
     if (!w || w.getInt() < 1 || w.getInt() > 256 ||
         !llvm::isPowerOf2_64(w.getInt()))
@@ -100,6 +124,14 @@ void ownerTasks(Unit &u) {
   };
   f.verifyCandidate = [](Operation *, const StructuralCandidate &c,
                          const TargetProfile &) -> llvm::Error {
+    if (auto d = dyn_cast<DictionaryAttr>(c.value)) {
+      auto w = d.getAs<IntegerAttr>("grain");
+      if (!w || c.id != "retained-" + std::to_string(w.getInt()) ||
+          c.topology != "retained-scores" ||
+          c.preconditions != std::vector<std::string>{"exclusive-output"})
+        return llvm::createStringError("invalid retained row candidate");
+      return llvm::Error::success();
+    }
     if (c.id !=
             "grain-" + std::to_string(cast<IntegerAttr>(c.value).getInt()) ||
         c.topology != "independent-owners" ||
@@ -112,7 +144,7 @@ void ownerTasks(Unit &u) {
   Strategy s;
   s.name = "owner-grains";
   s.family = u.qualify("ordered-owners");
-  s.enumerate = [](Operation *o, const TargetProfile &, AnalysisManager &)
+  s.enumerate = [](Operation *o, const TargetProfile &p, AnalysisManager &)
       -> llvm::Expected<std::vector<StructuralCandidate>> {
     std::vector<StructuralCandidate> cs;
     for (auto w : {1, 8, 32, 128, 256})
@@ -120,6 +152,18 @@ void ownerTasks(Unit &u) {
                     "independent-owners",
                     Builder(o->getContext()).getI64IntegerAttr(w),
                     {"exclusive-output"}});
+    if (auto panel = cpu::reusableScores(o, p)) {
+      Builder b(o->getContext());
+      for (int w : {8, 32, 128}) {
+        auto d = b.getDictionaryAttr(
+            {b.getNamedAttr("grain", b.getI64IntegerAttr(w)),
+             b.getNamedAttr("scores", b.getI64IntegerAttr(panel->keys))});
+        cs.push_back({"retained-" + std::to_string(w),
+                      "retained-scores",
+                      d,
+                      {"exclusive-output"}});
+      }
+    }
     return cs;
   };
   u.strategies.push_back({std::move(s), COMPILERINFRA_SOURCE});
@@ -144,6 +188,14 @@ void ownerTasks(Unit &u) {
                         b.getDenseI64ArrayAttr(values));
         }
     o->removeAttr("cpu.owner_choice");
+    if (auto d = dyn_cast<DictionaryAttr>(a)) {
+      auto s = cpu::reusableScores(o, p);
+      o->setAttr("cpu.score_cache", d.get("scores"));
+      s->maxScore.getDefiningOp()->setAttr("cpu.record_score", b.getUnitAttr());
+      s->weightScore.getDefiningOp()->setAttr("cpu.replay_score",
+                                              b.getUnitAttr());
+      a = d.get("grain");
+    }
     o->setAttr("cpu.grain", a);
     o->setAttr("cpu.owners", b.getI64IntegerAttr(count));
     return llvm::Error::success();

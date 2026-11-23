@@ -1,9 +1,10 @@
-#include "intentdsl/levels/execution/cpu/ir/Task.h"
-#include "intentdsl/levels/algorithm/kir/ir/Segment.h"
-#include "intentdsl/levels/execution/cpu/ir/Pack.h"
-#include "intentdsl/levels/execution/cpu/ir/IndexedEffects.h"
-#include "intentdsl/levels/algorithm/kir/ir/RowSemantics.h"
+#include "MemberAccess.h"
 #include "intentdsl/levels/algorithm/kir/ir/ProjectedLayout.h"
+#include "intentdsl/levels/algorithm/kir/ir/RowSemantics.h"
+#include "intentdsl/levels/algorithm/kir/ir/Segment.h"
+#include "intentdsl/levels/execution/cpu/ir/IndexedEffects.h"
+#include "intentdsl/levels/execution/cpu/ir/Pack.h"
+#include "intentdsl/levels/execution/cpu/ir/Task.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/StringSwitch.h"
 using namespace compilerinfra;
@@ -28,7 +29,8 @@ LogicalResult verifyLoops(ModuleOp m, const TargetProfile &p, bool callable) {
   auto fn = *m.getOps<func::FuncOp>().begin();
   if (fn.front().front().getName().getStringRef() == "cpu.owner_task")
     return success(fn.front().front().getAttrOfType<StringAttr>(
-                       "mojo_row.schedule") == "ordered-owner-range");
+                       "mojo_row.schedule") == "ordered-owner-range" &&
+                   succeeded(memberAccesses(fn, false)));
   if(fn.front().front().getName().getStringRef()=="cpu.matrix_task"){
     auto &task=fn.front().front();
     auto lanes=task.getAttrOfType<IntegerAttr>("mojo_row.column_lanes");

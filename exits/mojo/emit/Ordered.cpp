@@ -1,3 +1,4 @@
+#include "ScoreRows.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/execution/cpu/ir/Owners.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -98,6 +99,12 @@ struct OwnerLoop {
         continue;
       }
       auto arg = [&](unsigned i) { return name(op.getOperand(i)); };
+      if (op.hasAttr("cpu.replay_score")) {
+        auto idx = name(op.getParentOfType<scf::ForOp>().getInductionVar());
+        values[op.getResult(0)] = id;
+        line(depth, "var " + id + "=saved[unsafe_offset=" + idx + "]");
+        continue;
+      }
       std::string e;
       auto kind = op.getName().stripDialect();
       if (kind == "slice_read" || kind == "slice_write" ||
@@ -121,6 +128,17 @@ struct OwnerLoop {
                     std::to_string(
                         axis(base, "cpu.strides", j + (int64_t(j) >= ax)));
           auto step = axis(base, "cpu.strides", ax);
+          if (op.hasAttr("mojo_row.contiguous_simd")) {
+            auto ptr = name(base) + ".unsafe_offset(" + addr + ")";
+            if (write)
+              line(depth, ptr + ".unsafe_store(" + arg(0) + ")");
+            else {
+              values[v] = id;
+              line(depth, "var " + id + "=" + ptr + ".unsafe_load[width=" +
+                              std::to_string(k) + "]()");
+            }
+            continue;
+          }
           if (!write)
             line(depth, "var " + id + "=" + ty + "(0)");
           auto lane = fresh();
@@ -160,16 +178,26 @@ struct OwnerLoop {
           llvm::SmallString<32> num;
           val.getValue().toString(num);
           e = "Float32(" + num.str().str() + ")";
+          if (val.getValue().isInfinity())
+            e = val.getValue().isNegative()
+                    ? "bitcast[DType.float32](UInt32(0xff800000))"
+                    : "bitcast[DType.float32](UInt32(0x7f800000))";
         } else
           e = type(op.getResult(0).getType()) + "(" +
               std::to_string(cast<IntegerAttr>(c.getValue()).getInt()) + ")";
-      } else if (n == "arith.extf" || n == "arith.truncf") {
+      } else if (n == "arith.extf" || n == "arith.truncf" ||
+                 n == "arith.index_cast") {
         auto t = op.getResult(0).getType();
         if (auto shaped = dyn_cast<RankedTensorType>(t))
           e = arg(0) + ".cast[" + dtype(shaped.getElementType()) + "]()";
         else
           e = type(t) + "(" + arg(0) + ")";
-      } else if (n == "math.sqrt" || n == "math.exp")
+      } else if (n == "arith.maxnumf")
+        e = arg(0) + " if isnan(" + arg(1) + ") else (" + arg(1) +
+            " if isnan(" + arg(0) + ") else max(" + arg(0) + "," + arg(1) +
+            "))";
+      else if (n == "math.sqrt" || n == "math.exp" || n == "math.exp2" ||
+               n == "math.log")
         e = op.getName().stripDialect().str() + "(" + arg(0) + ")";
       else {
         auto tok = llvm::StringSwitch<StringRef>(n)
@@ -191,6 +219,10 @@ struct OwnerLoop {
       }
       values[op.getResult(0)] = id;
       line(depth, "var " + id + "=" + e);
+      if (op.hasAttr("cpu.record_score")) {
+        auto idx = name(op.getParentOfType<scf::ForOp>().getInductionVar());
+        line(depth, "saved[unsafe_offset=" + idx + "]=" + id);
+      }
     }
     return llvm::Error::success();
   }
@@ -212,25 +244,33 @@ llvm::Error emitOrdered(func::FuncOp fn, llvm::raw_pwrite_stream &output) {
                       : arg.getType().isF32() ? "float"
                                               : "int32_t");
   }
-  w.out << "from std.math import exp,sqrt\n@export(\"owner_task\")\ndef "
-           "owner_task("
-        << llvm::join(params, ",")
-        << ",lo:Int64,hi:Int64) abi(\"C\"):\n    for owner in "
-           "range(Int(lo),Int(hi)):\n";
+  w.out
+      << "from std.math import exp,sqrt,exp2,log,isnan\nfrom std.memory import "
+         "bitcast,unsafe_stack_allocation\n@export(\"owner_task\")\ndef "
+         "owner_task("
+      << llvm::join(params, ",") << ",lo:Int64,hi:Int64) abi(\"C\"):\n";
   auto &space = w.space;
-  auto &body = space.getRegion(0).front();
-  auto axes = space.getAttrOfType<DenseI64ArrayAttr>("axes");
-  int64_t pitch = 1;
-  for (int i = axes.size() - 1; i >= 0; --i) {
-    auto n = w.axis(space.getOperand(i), "cpu.shape", axes[i]);
-    auto id = w.fresh();
-    w.values[body.getArgument(i)] = id;
-    w.line(2, "var " + id + "=(owner//" + std::to_string(pitch) + ")%" +
-                  std::to_string(std::max<int64_t>(1, n)));
-    pitch *= std::max<int64_t>(1, n);
+  if (space.hasAttr("mojo_row.score_microtile"))
+    scoreRows(w.out, fn, space);
+  else {
+    if (auto k = w.space.getAttrOfType<IntegerAttr>("cpu.score_cache"))
+      w.line(1, "var saved=unsafe_stack_allocation[" +
+                    std::to_string(k.getInt()) + ",Float32]()");
+    w.line(1, "for owner in range(Int(lo),Int(hi)):");
+    auto &body = space.getRegion(0).front();
+    auto axes = space.getAttrOfType<DenseI64ArrayAttr>("axes");
+    int64_t pitch = 1;
+    for (int i = axes.size() - 1; i >= 0; --i) {
+      auto n = w.axis(space.getOperand(i), "cpu.shape", axes[i]);
+      auto id = w.fresh();
+      w.values[body.getArgument(i)] = id;
+      w.line(2, "var " + id + "=(owner//" + std::to_string(pitch) + ")%" +
+                    std::to_string(std::max<int64_t>(1, n)));
+      pitch *= std::max<int64_t>(1, n);
+    }
+    if (auto err = w.body(body, 2))
+      return err;
   }
-  if (auto err = w.body(body, 2))
-    return err;
   auto host = intentdsl::cpu::ownerDispatcher(
       fn,
       "extern void owner_task(" + llvm::join(cParams, ",") +

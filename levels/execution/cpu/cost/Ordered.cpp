@@ -1,4 +1,5 @@
 #include "intentdsl/levels/execution/cpu/ir/Owners.h"
+#include "intentdsl/levels/execution/cpu/ir/ScoreCache.h"
 namespace CI_UNIT_NAMESPACE {
 using namespace compilerinfra;
 void ownerCost(Unit &u) {
@@ -8,7 +9,10 @@ void ownerCost(Unit &u) {
            CostContext &ctx) -> llvm::Expected<CostEstimate> {
           auto f = ctx.target.services.get<intentdsl::CallFacts>();
           auto n = intentdsl::kir::ownerCount(o, *f);
-          auto w = mlir::cast<mlir::IntegerAttr>(c.value).getInt();
+          auto cache = mlir::dyn_cast<mlir::DictionaryAttr>(c.value);
+          auto w = mlir::cast<mlir::IntegerAttr>(cache ? cache.get("grain")
+                                                       : c.value)
+                       .getInt();
           auto workers =
               ctx.target.services.get<intentdsl::cpu::RowMachine>()->workers;
           double tasks = llvm::divideCeil(n, w),
@@ -24,6 +28,14 @@ void ownerCost(Unit &u) {
             e.timeNs = *launch +
                        waves * (1 + std::min(w, n)) * workers / *rate +
                        tasks / *rate;
+          if (auto panel = intentdsl::cpu::reusableScores(o, ctx.target)) {
+            double dots = double(n) * panel->keys * (cache ? 1 : 2);
+            e.terms["score_dot_products"] = {dots, "count"};
+            auto bandwidth = intentdsl::quantity(ctx, "read_1", "B/ns");
+            if (e.timeNs && bandwidth && rate)
+              *e.timeNs += 2. * dots * panel->depth / *rate +
+                           (cache ? 8. * n * panel->keys / *bandwidth : 0.);
+          }
           return e;
         }},
        COMPILERINFRA_SOURCE});

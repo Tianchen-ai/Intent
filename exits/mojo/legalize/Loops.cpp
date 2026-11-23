@@ -1,13 +1,14 @@
-#include "intentdsl/levels/algorithm/kir/ir/Segment.h"
-#include "intentdsl/levels/algorithm/kir/ir/KeyReduction.h"
-#include "intentdsl/levels/execution/cpu/ir/Pack.h"
-#include "intentdsl/levels/execution/cpu/ir/IndexedEffects.h"
-#include <algorithm>
-#include "intentdsl/levels/algorithm/kir/ir/ProjectedLayout.h"
-#include "compilerinfra/Assembly.h"
-#include "mlir/Pass/Pass.h"
-#include "mlir/IR/IRMapping.h"
 #include "Dialect.h.inc"
+#include "MemberAccess.h"
+#include "compilerinfra/Assembly.h"
+#include "intentdsl/levels/algorithm/kir/ir/KeyReduction.h"
+#include "intentdsl/levels/algorithm/kir/ir/ProjectedLayout.h"
+#include "intentdsl/levels/algorithm/kir/ir/Segment.h"
+#include "intentdsl/levels/execution/cpu/ir/IndexedEffects.h"
+#include "intentdsl/levels/execution/cpu/ir/Pack.h"
+#include "mlir/IR/IRMapping.h"
+#include "mlir/Pass/Pass.h"
+#include <algorithm>
 using namespace mlir;
 #include "Lanes.h"
 namespace CI_UNIT_NAMESPACE {
@@ -190,6 +191,10 @@ struct Realize : PassWrapper<Realize, OperationPass<ModuleOp>> {
   void runOnOperation() final {
     auto &first=(*getOperation().getOps<func::FuncOp>().begin()).front().front();
     if (first.getName().getStringRef() == "cpu.owner_task") {
+      if (failed(memberAccesses(first.getParentOfType<func::FuncOp>(), true))) {
+        signalPassFailure();
+        return;
+      }
       first.setAttr("mojo_row.schedule",
                     StringAttr::get(&getContext(), "ordered-owner-range"));
       return;
