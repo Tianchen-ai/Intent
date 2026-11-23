@@ -9,7 +9,8 @@ void encodedTiles(Tiles &, MatrixAccess &, ScaledPanelLowering);
 namespace {
 // Lower the chosen panel loop with a loop-carried accumulator. The pointers
 // for both transposed and contiguous operands use their verified ABI strides.
-void matrixTiles(Tiles &t, intentdsl::block::MatrixAccess &p) {
+void matrixTiles(Tiles &t, intentdsl::block::MatrixAccess &p,
+                 MatrixPanelRead native) {
   auto &b = t.b;
   auto loc = t.loc;
   auto [m, n, k] = std::tuple{p.shape[0], p.shape[1], p.shape[2]};
@@ -90,11 +91,15 @@ void matrixTiles(Tiles &t, intentdsl::block::MatrixAccess &p) {
   int ak = p.axis("lhs_k"), rk = p.axis("rhs_k"), ab = p.axis("lhs_batch"),
       rb = p.axis("rhs_batch");
   auto km = less(member, t.integer(k));
-  auto left = t.read(a, panelAddress(a, src, p.freeAxis(a, ak, ab), ak, ab, 0),
-                     mask(validRow, km, bm, bk));
-  auto right =
-      t.read(rhs, panelAddress(rhs, col, p.freeAxis(rhs, rk, rb), rk, rb, 1),
-             mask(km, validCol, bk, bn));
+  auto left = native ? native(t, p, true, gp, panel) : Value();
+  if (!left)
+    left = t.read(a, panelAddress(a, src, p.freeAxis(a, ak, ab), ak, ab, 0),
+                  mask(validRow, km, bm, bk));
+  auto right = native ? native(t, p, false, gp, panel) : Value();
+  if (!right)
+    right =
+        t.read(rhs, panelAddress(rhs, col, p.freeAxis(rhs, rk, rb), rk, rb, 1),
+               mask(km, validCol, bk, bn));
   auto acc = t.dot(left, right, false, loop.getRegionIterArgs()[0]);
   b.create<scf::YieldOp>(loc, acc);
   b.setInsertionPointAfter(loop);
@@ -149,7 +154,7 @@ void matrixTiles(Tiles &t, intentdsl::block::MatrixAccess &p) {
 
 } // namespace
 void expandMatrixProgram(func::FuncOp fn, StringRef unit,
-                         ScaledPanelLowering scaled) {
+                         ScaledPanelLowering scaled, MatrixPanelRead native) {
   fn.getContext()
       ->loadDialect<arith::ArithDialect, scf::SCFDialect, math::MathDialect>();
   auto &root = fn.front().front();
@@ -157,7 +162,7 @@ void expandMatrixProgram(func::FuncOp fn, StringRef unit,
     intentdsl::block::MatrixAccess p(fn);
     Tiles tiles(fn, "matrix", unit);
     if (p.dot.getName().stripDialect() == "contract")
-      matrixTiles(tiles, p);
+      matrixTiles(tiles, p, native);
     else
       encodedTiles(tiles, p, scaled);
     tiles.op("end");

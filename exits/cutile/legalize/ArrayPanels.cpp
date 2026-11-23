@@ -73,5 +73,39 @@ Value panel(Tiles &t, Operation &op, ArrayRef<Value> coords, Value start,
   return reshape(t, load(t, op.getOperand(0), at, dims, tma), {span, width});
 }
 } // namespace
+mlir::Value nativeMatrixRead(Tiles &t, intentdsl::block::MatrixAccess &p,
+                             bool left, Value group, Value panel) {
+  if (left && p.dot.getNumOperands() > 2)
+    return {};
+  auto view = p.dot.getOperand(left ? 0 : 1);
+  int rank = p.rank(view), batch = p.axis(left ? "lhs_batch" : "rhs_batch"),
+      inner = p.axis(left ? "lhs_k" : "rhs_k");
+  if ((rank != 2 && rank != 3) || (batch != -1 && batch != 0))
+    return {};
+  SmallVector<Value> at(rank);
+  SmallVector<int64_t> dims(rank);
+  if (batch == 0) {
+    at[0] = group;
+    dims[0] = 1;
+  }
+  auto free = p.freeAxis(view, inner, batch);
+  at[inner] = panel;
+  dims[inner] = p.tile[2];
+  at[free] = t.pid(left ? 0 : 1);
+  dims[free] = p.tile[left ? 0 : 1];
+  auto value = load(t, view, at, dims, t.fn->hasAttr("ct_src.tma"));
+  if (rank == 3)
+    value = reshape(t, value, ArrayRef<int64_t>(dims).drop_front());
+  bool transpose = inner != (left ? rank - 1 : rank - 2);
+  if (transpose) {
+    auto tile = cast<RankedTensorType>(value.getType());
+    return t
+        .op("transpose", value,
+            t.shaped({tile.getDimSize(1), tile.getDimSize(0)},
+                     tile.getElementType()))
+        ->getResult(0);
+  }
+  return value;
+}
 intentdsl::block::OwnerAccess nativeOwnerViews() { return {rectangle, panel}; }
 } // namespace CI_UNIT_NAMESPACE

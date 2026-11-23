@@ -23,6 +23,8 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &);
 llvm::Error describeArtifact(ModuleOp, llvm::raw_pwrite_stream &);
 TerminalPrinter cutilePrinter();
 void registerContracts(Unit &);
+Value nativeMatrixRead(intentdsl::block::Tiles &,
+                       intentdsl::block::MatrixAccess &, bool, Value, Value);
 LogicalResult verifyArrayGeometry(func::FuncOp,const TargetProfile &);
 intentdsl::block::OwnerAccess nativeOwnerViews();
 namespace {
@@ -186,7 +188,8 @@ struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
           views[std::to_string(slot)]=slot==p.slot(p.dot.getOperand(0))?llvm::json::Array{p.shape[0],p.shape[2]}:llvm::json::Array{p.shape[2],p.shape[1]};
         fn->setAttr("ct_src.native_views",b.getStringAttr(llvm::formatv("{0}",llvm::json::Value(std::move(views))).str()));
       }
-      intentdsl::block::expandMatrixProgram(fn,"exits/cutile",scaledPanels);
+      intentdsl::block::expandMatrixProgram(fn, "exits/cutile", scaledPanels,
+                                            nativeMatrixRead);
     }
     else fn.walk<WalkOrder::PostOrder>([](Operation *op){
       if(op->getName().getDialectNamespace()!="ct_src") return;
