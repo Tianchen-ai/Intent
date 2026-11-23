@@ -90,6 +90,9 @@ class Ordered:
         return v
 
     def expr(self, node):
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+            if ast.unparse(node.operand) == self.ns + ".inf":
+                return self.literal("0xFF800000", "f32")
         if isinstance(node, ast.Name):
             return self.env[node.id]
         if isinstance(node, ast.Constant) and type(node.value) in (float, int):
@@ -192,6 +195,8 @@ class Ordered:
                 src = a.type.removeprefix("tensor<?x").removesuffix(">")
                 if ty == src:
                     return a
+                if src == "i32" and ty == "index" and a not in self.lanes:
+                    return self.emit(f"arith.index_cast {a.name} : i32 to index", "index")
                 if (src, ty) not in {
                     ("f16", "f32"),
                     ("bf16", "f32"),
@@ -206,7 +211,12 @@ class Ordered:
                 if a in self.lanes:
                     self.lanes[result] = self.lanes[a]
                 return result
-            if name in {"sqrt", "exp"} and len(node.args) == 1:
+            if name == "maximum_num" and len(node.args) == 2:
+                a, b = (self.expr(arg) for arg in node.args)
+                if a.type != "f32" or b.type != "f32":
+                    raise ValueError("maximum_num requires f32 scalar operands")
+                return self.emit(f"arith.maxnumf {a.name}, {b.name} : f32", "f32")
+            if name in {"sqrt", "exp", "exp2", "log"} and len(node.args) == 1:
                 a = self.expr(node.args[0])
                 if a.type != "f32":
                     raise ValueError("expected f32 operand")
@@ -248,7 +258,7 @@ class Ordered:
         if (
             not isinstance(stmt.target, ast.Name)
             or not isinstance(it, ast.Call)
-            or ast.unparse(it.func) != self.ns + ".ordered"
+            or ast.unparse(it.func) not in (self.ns + ".ordered", self.ns + ".fold")
             or it.keywords
             or len(it.args) not in (1, 2)
             or stmt.orelse
@@ -300,7 +310,7 @@ class Ordered:
                 + " : "
                 + ", ".join(types)
             )
-        self.lines.append("}")
+        self.lines.append("} {kir.reassociate}" if ast.unparse(it.func) == self.ns + ".fold" else "}")
         self.env = saved.copy()
         self.env.update((k, Value(r, t)) for k, r, t in zip(carry, results, types))
         for k in carry:

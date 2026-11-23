@@ -276,6 +276,27 @@ LogicalResult verifyOwnerBody(func::FuncOp fn, Operation &op,
       return WalkResult::interrupt();
     }
     if (auto loop = dyn_cast<scf::ForOp>(child)) {
+      if(loop->hasAttr("kir.reassociate")){
+        bool pure=loop->getAttrOfType<UnitAttr>("kir.reassociate") &&
+          !loop.getRegion().walk([](Operation *v){
+            bool read=isa<memref::LoadOp,memref::DimOp>(v) ||
+                      v->getName().stripDialect()=="slice_read";
+            return read || isMemoryEffectFree(v) || isa<scf::IfOp>(v) ?
+                WalkResult::advance() : WalkResult::interrupt();
+          }).wasInterrupted();
+        if(!pure || !loop.getNumRegionIterArgs()){
+          child->emitError("a reassociable fold requires read-only contributions and explicit accumulators");
+          return WalkResult::interrupt();
+        }
+        for(auto [arg,next]:llvm::zip(loop.getRegionIterArgs(),loop.getBody()->getTerminator()->getOperands())){
+          auto *combine=next.getDefiningOp();
+          if(!combine || !isa<arith::AddFOp,arith::MaxNumFOp>(combine) ||
+             !arg.hasOneUse() || !next.hasOneUse() || combine->getOperand(0)!=arg){
+            child->emitError("each fold state must feed only its own sum or maximum combiner");
+            return WalkResult::interrupt();
+          }
+        }
+      }
       auto step = loop.getStep().getDefiningOp<arith::ConstantIndexOp>();
       if (!step || step.value() <= 0) {
         child->emitError("ordered-for requires a positive fixed step");

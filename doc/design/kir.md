@@ -192,6 +192,10 @@ order 是操作属性，拒绝表外组合；一个逻辑原子地址上存在�
 
 ## Region 的 source 与 captures
 
+在独立 owner 内，`I.ordered` 保留迭代及累加顺序。`I.fold` 是作者对该循环的结合次序许可，入口生成带 `kir.reassociate` 的 `scf.for`。每个迭代参数只能进入自己的 sum 或 maximum_num，combine 的结果直接 yield。verifier 要求循环体只读、累加初值与返回类型匹配。它允许执行节点同时求一批贡献，也允许将点积和按概率加权的收缩映射到矩阵指令。概率窄化的舍入点和因果遮蔽仍在原表达式处生效。
+
+这项许可本身不包含在线归一化。当前 attention 显式先求最大值，再计算概率、分母与分子。可驻留的实现可复用同一份分数。在两个阶段间改变归一化基准、移动概率窄化或将 exp 换成 exp2，均不由上述许可推出。
+
 `region_fold/region_scan` 分别有 source 元组与 captures 元组。所有 source 在所选轴有同一 extent，随同一组连续、保序切点切分；需绝对坐标时将坐标作为 source 成员传入。captures 是支配该 op 的值：运行时标量或 tensor 按位置作为显式 SSA operands，不参与切片；constexpr 保留为特化事实。每个分段使用相同的 captures 类型、形状和值。回调不得读取隐式可变状态、段号或调度选择，不得产生外部 effects。
 
 | 签名（C 表示同一组 captures） | verifier 检查及作者保证 |
@@ -203,6 +207,7 @@ order 是操作属性，拒绝表外组合；一个逻辑原子地址上存在�
 
 | 作者的 merge | 部分 split 为空 | 某输出行全部 split 为空 |
 |---|---|---|
+| V2 分页 GQA，partial 写 log₂ LSE，merge 用 exp2 | 有限最大值下，空 split 权重为零 | 全部为空时，输出为 NaN。Bench 以标准 attention 判定数值。V1 混用底数，只作性能对照。 |
 | 沿用 V1 的 `splitk_attention_f32_to_f16_reduce` | 按原式对所有 split 求最大值、`exp(lse−maximum)`、分母与加权和，保留原有指数和窄化。若最大值有限，空 split 的权重为零 | 有 split 且 LSE 全为 −∞ 时，减法得到 NaN，结果各分量为 f16 NaN。lowering 保留这一行为 |
 | 作者显式选择跳过空 split，并定义空结果为零 | 作者从成员域或显式传递的有效位构造 mask，最大值、权重和加权和只使用有效成员。在归一化前按是否存在有效成员分支 | 作者分支直接写出各分量 +0，不对空域执行除法。额外传递有效位时，由作者同步声明 partial 与 merge 的接口 |
 
