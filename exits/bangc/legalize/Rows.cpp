@@ -115,6 +115,12 @@ struct RowLowerer {
   bool wide = false;
   int64_t depth = 1;
   int64_t batch = 1;
+  bool multiMember = true;
+  Operation *constAnchor = nullptr;
+  llvm::DenseMap<int64_t, Value> constI64Map;
+  llvm::DenseMap<int32_t, Value> constI32Map;
+  llvm::DenseMap<std::pair<Value, int64_t>, Value> dimCache;
+  llvm::DenseMap<std::pair<Value, int64_t>, Value> strideCache;
   Value storage;
   Value symM, symN, symGrid, symTaskId, symTaskDim, symR, symB, symEB, symW,
       symP, symBytes;
@@ -130,10 +136,44 @@ struct RowLowerer {
     batch = layout.getAs<IntegerAttr>("batch")
                 ? layout.getAs<IntegerAttr>("batch").getInt()
                 : 1;
+    int64_t maxRows = 1;
+    if (auto rowsAttr = layout.getAs<ArrayAttr>("rows")) {
+      for (auto a : rowsAttr) {
+        auto id = cast<DictionaryAttr>(a).getAs<IntegerAttr>("id");
+        for (auto cfg : fn->getAttrOfType<ArrayAttr>("block.configs")) {
+          auto row = cast<DictionaryAttr>(cfg);
+          if (row.get("id") == id)
+            maxRows = std::max(maxRows, row.getAs<IntegerAttr>("rows").getInt());
+        }
+      }
+    }
+    multiMember = (maxRows * batch) > 1;
   }
 
-  Value cI64(int64_t v) { return b.create<arith::ConstantIntOp>(loc, v, 64); }
-  Value cI32(int32_t v) { return b.create<arith::ConstantIntOp>(loc, v, 32); }
+  Value cI64(int64_t v) {
+    if (!constAnchor)
+      return b.create<arith::ConstantIntOp>(loc, v, 64);
+    if (auto it = constI64Map.find(v); it != constI64Map.end())
+      return it->second;
+    OpBuilder::InsertionGuard g(b);
+    b.setInsertionPointAfter(constAnchor);
+    Value res = b.create<arith::ConstantIntOp>(loc, v, 64);
+    constAnchor = res.getDefiningOp();
+    constI64Map[v] = res;
+    return res;
+  }
+  Value cI32(int32_t v) {
+    if (!constAnchor)
+      return b.create<arith::ConstantIntOp>(loc, v, 32);
+    if (auto it = constI32Map.find(v); it != constI32Map.end())
+      return it->second;
+    OpBuilder::InsertionGuard g(b);
+    b.setInsertionPointAfter(constAnchor);
+    Value res = b.create<arith::ConstantIntOp>(loc, v, 32);
+    constAnchor = res.getDefiningOp();
+    constI32Map[v] = res;
+    return res;
+  }
   Value cF32(float v) {
     return b.create<arith::ConstantOp>(loc, b.getF32FloatAttr(v));
   }
@@ -228,11 +268,37 @@ struct RowLowerer {
         ->getResult(0);
   }
   Value viewDim(Value view, int64_t axis) {
+    if (constAnchor && isa<BlockArgument>(view)) {
+      auto key = std::make_pair(view, axis);
+      if (auto it = dimCache.find(key); it != dimCache.end())
+        return it->second;
+      OpBuilder::InsertionGuard g(b);
+      b.setInsertionPointAfter(constAnchor);
+      Value res = makeOp("dim", {view}, {b.getI64Type()},
+                         {b.getNamedAttr("axis", b.getI64IntegerAttr(axis))})
+                      ->getResult(0);
+      constAnchor = res.getDefiningOp();
+      dimCache[key] = res;
+      return res;
+    }
     return makeOp("dim", {view}, {b.getI64Type()},
                   {b.getNamedAttr("axis", b.getI64IntegerAttr(axis))})
         ->getResult(0);
   }
   Value viewStride(Value view, int64_t axis) {
+    if (constAnchor && isa<BlockArgument>(view)) {
+      auto key = std::make_pair(view, axis);
+      if (auto it = strideCache.find(key); it != strideCache.end())
+        return it->second;
+      OpBuilder::InsertionGuard g(b);
+      b.setInsertionPointAfter(constAnchor);
+      Value res = makeOp("stride", {view}, {b.getI64Type()},
+                         {b.getNamedAttr("axis", b.getI64IntegerAttr(axis))})
+                      ->getResult(0);
+      constAnchor = res.getDefiningOp();
+      strideCache[key] = res;
+      return res;
+    }
     return makeOp("stride", {view}, {b.getI64Type()},
                   {b.getNamedAttr("axis", b.getI64IntegerAttr(axis))})
         ->getResult(0);
@@ -799,7 +865,7 @@ struct RowLowerer {
           continue;
         }
 
-        if (prim.starts_with("group_dma")) {
+        if (prim.starts_with("group_dma") && multiMember) {
           int64_t axis = cast<MemRefType>(src.getType()).getRank() - 2;
           Value dim = viewDim(src, axis), outer = viewStride(src, axis);
           Value colStride;
@@ -1167,7 +1233,7 @@ struct RowLowerer {
                     });
               });
             };
-            if (packed &&
+            if (packed && multiMember &&
                 (prim == "group_store" || prim == "group_store_async")) {
               int64_t axis = cast<MemRefType>(ptr.getType()).getRank() - 2;
               Value stride = viewStride(ptr, axis), dim = viewDim(ptr, axis);
@@ -2178,6 +2244,7 @@ struct RowLowerer {
     symW = makeSym("W");
     symP = makeSym("P");
     symBytes = makeSym("BYTES");
+    constAnchor = symBytes.getDefiningOp();
 
     if (failed(emitOuterOps(oldOps, cI64(0))))
       return fn.emitError("failed to lower row program to bangc_src");

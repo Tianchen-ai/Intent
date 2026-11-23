@@ -34,14 +34,6 @@ __mlu_func__ void philox4x32_linear(float *out, unsigned *scratch,
   }
   volatile unsigned mul0 = 0xd2511f53U, mul1 = 0xcd9e8d57U;
   unsigned m0 = mul0, m1 = mul1;
-  unsigned *va = scratch;
-  unsigned *vb = scratch + 256;
-  unsigned *vc = scratch + 512;
-  unsigned *vd = scratch + 768;
-  unsigned *vleft = scratch + 1024;
-  unsigned *vright = scratch + 1280;
-  unsigned *vah = scratch + 1536;
-  unsigned *vch = scratch + 1792;
   int done = 0;
   while (done + 256 <= live) {
     int remQ = (live - done) / 4;
@@ -49,9 +41,24 @@ __mlu_func__ void philox4x32_linear(float *out, unsigned *scratch,
     unsigned long long q0 = (base + (unsigned long long)done) >> 2;
     if ((q0 >> 32) != ((q0 + (unsigned long long)(qCnt - 1)) >> 32))
       break;
+    unsigned *va = scratch;
+    unsigned *vb = scratch + 256;
+    unsigned *vc = scratch + 512;
+    unsigned *vd = scratch + 768;
+    unsigned *vleft = scratch + 1024;
+    unsigned *vright = scratch + 1280;
+    unsigned *vah = scratch + 1536;
+    unsigned *vch = scratch + 1792;
     unsigned lo0 = (unsigned)q0, hi0 = (unsigned)(q0 >> 32);
-    for (int q = 0; q < qCnt; ++q)
+    for (int q = 0; q < 64; ++q)
       va[q] = lo0 + (unsigned)q;
+    __sync();
+    if (qCnt >= 128)
+      __bang_add_scalar(va + 64, va, 64U, 64);
+    if (qCnt == 256)
+      __bang_add_scalar(va + 128, va, 128U, 128);
+    else if (qCnt == 192)
+      __bang_add_scalar(va + 128, va, 128U, 64);
     __bang_write_value(vb, qCnt, hi0);
     __bang_write_value(vc, qCnt, 0U);
     __bang_write_value(vd, qCnt, 0U);
@@ -73,13 +80,16 @@ __mlu_func__ void philox4x32_linear(float *out, unsigned *scratch,
       k0 += 0x9e3779b9U;
       k1 += 0xbb67ae85U;
     }
+    __bang_srl(scratch, scratch, 8, 1024);
     __sync_compute();
-    for (int q = 0; q < qCnt; ++q) {
-      out[done + 4 * q + 0] = (float)(va[q] >> 8) * 0x1p-24f;
-      out[done + 4 * q + 1] = (float)(vb[q] >> 8) * 0x1p-24f;
-      out[done + 4 * q + 2] = (float)(vc[q] >> 8) * 0x1p-24f;
-      out[done + 4 * q + 3] = (float)(vd[q] >> 8) * 0x1p-24f;
-    }
+    unsigned *inter = scratch + 1024;
+    __memcpy(inter + 0, va, 4, NRAM2NRAM, 16, 4, qCnt - 1);
+    __memcpy(inter + 1, vb, 4, NRAM2NRAM, 16, 4, qCnt - 1);
+    __memcpy(inter + 2, vc, 4, NRAM2NRAM, 16, 4, qCnt - 1);
+    __memcpy(inter + 3, vd, 4, NRAM2NRAM, 16, 4, qCnt - 1);
+    __sync_move();
+    __bang_int322float(out + done, (const int *)inter, qCnt * 4, -24);
+    __sync_compute();
     done += qCnt * 4;
   }
   for (int k = done; k < live; ++k)
