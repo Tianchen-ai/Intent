@@ -1,4 +1,5 @@
 #include "compilerinfra/Assembly.h"
+#include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 #include "intentdsl/levels/execution/block/ir/Contraction.h"
 #include "intentdsl/levels/execution/block/ir/Owners.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -28,6 +29,8 @@ std::string dtype(Type t) {
     return "tl.bfloat16";
   if (t.isF16())
     return "tl.float16";
+  if (isa<Float8E4M3FNType>(t))
+    return "tl.float8e4nv";
   if (t.isF32())
     return "tl.float32";
   if (t.isInteger(32))
@@ -85,9 +88,23 @@ TerminalPrinter tilePrinter() {
     }
     return llvm::join(terms, " + ");
   });
-  leaf("triton_src.tile_read", [](auto &, auto &a) {
-    return "tl.load(" + a[0] + "+" + a[1] +
-           (a.size() == 3 ? ",mask=" + a[2] + ",other=0" : "") + ")";
+  leaf("triton_src.tile_read", [](Operation &op, auto &a) {
+    auto e = getElementTypeOrSelf(op.getResult(0).getType());
+    bool fp8 = isa<Float8E4M3FNType>(e);
+    return "tl.load(" + a[0] + (fp8 ? ".to(tl.pointer_type(tl.uint8))" : "") +
+           "+" + a[1] + (a.size() == 3 ? ",mask=" + a[2] + ",other=0" : "") +
+           ")" + (fp8 ? ".to(tl.float8e4nv,bitcast=True)" : "");
+  });
+  leaf("triton_src.from_le_half", [](auto &, auto &a) {
+    return "(" + a[0] + "|(" + a[1] +
+           "<<8)).to(tl.uint16).to(tl.float16,bitcast=True).to(tl.float32)";
+  });
+  leaf("triton_src.e8m0", [](Operation &op, auto &a) {
+    using F = intentdsl::kir::MX8Block;
+    return "tl.where(" + a[0] + "==" + std::to_string(F::nan) +
+           ",float('nan'),libdevice.ldexp(tl.full(" +
+           tuple(op.getResult(0).getType()) + ",1.,tl.float32)," + a[0] + "-" +
+           std::to_string(F::bias) + "))";
   });
   leaf("triton_src.tile_write", [](auto &, auto &a) {
     return "tl.store(" + a[0] + "+" + a[1] + "," + a[2] +
@@ -107,6 +124,8 @@ TerminalPrinter tilePrinter() {
                    ? "tl.trans(" + a[1] + ")"
                    : a[1];
     return "tl.dot(" + a[0] + "," + rhs + (a.size() == 3 ? "," + a[2] : "") +
+           (op.hasAttr("triton_src.exact_acc") ? ",max_num_imprecise_acc=0"
+                                               : "") +
            ",input_precision='ieee',out_dtype=" +
            dtype(op.getResult(0).getType()) + ")";
   });
@@ -146,7 +165,12 @@ TerminalPrinter tilePrinter() {
                              {"arith.subf", "-"},
                              {"arith.addf", "+"},
                              {"arith.andi", "&"}})
-    leaf(name, [token](auto &, auto &v) { return v[0] + token + v[1]; });
+    leaf(name, [token](Operation &op, auto &v) {
+      if (op.hasAttr("triton_src.round_nearest"))
+        return "libdevice." + op.getName().stripDialect().drop_back().str() +
+               "_rn(" + llvm::join(v, ",") + ")";
+      return v[0] + token + v[1];
+    });
   leaf("arith.cmpi", [](Operation &op, auto &a) {
     auto pred = cast<arith::CmpIOp>(op).getPredicate();
     auto token = pred == arith::CmpIPredicate::sge  ? ">="
@@ -155,7 +179,27 @@ TerminalPrinter tilePrinter() {
                                                     : "<";
     return a[0] + token + a[1];
   });
-  leaf("arith.cmpf", [](Operation &, auto &a) { return a[0] + "!=" + a[1]; });
+  leaf("arith.cmpf", [](Operation &op, auto &a) {
+    return a[0] +
+           (cast<arith::CmpFOp>(op).getPredicate() == arith::CmpFPredicate::OEQ
+                ? "=="
+                : "!=") +
+           a[1];
+  });
+  leaf("arith.minimumf", [](auto &, auto &a) {
+    return "tl.minimum(" + llvm::join(a, ",") +
+           ",propagate_nan=tl.PropagateNan.ALL)";
+  });
+  leaf("math.absf", [](auto &, auto &a) { return "tl.abs(" + a[0] + ")"; });
+  leaf("math.roundeven",
+       [](auto &, auto &a) { return "libdevice.rint(" + a[0] + ")"; });
+  leaf("arith.minnumf", [](auto &, auto &a) {
+    return "tl.minimum(" + llvm::join(a, ",") + ")";
+  });
+  leaf("arith.shli", [](auto &, auto &a) { return a[0] + "<<" + a[1]; });
+  leaf("arith.shrui", [](auto &, auto &a) {
+    return "(" + a[0] + ".to(tl.uint32)>>" + a[1] + ").to(tl.int32)";
+  });
   for (auto [name, op] :
        {std::pair{"arith.maxnumf", "maximum"}, {"arith.minsi", "minimum"}})
     leaf(name, [op](auto &, auto &a) {
@@ -207,7 +251,8 @@ LogicalResult dotSignature(Operation *op) {
   auto acc = getElementTypeOrSelf(op->getResult(0).getType());
   bool type = element.isInteger(8)
                   ? acc.isInteger(32)
-                  : ((element.isBF16() || element.isF16() || element.isF32()) &&
+                  : ((isa<Float8E4M3FNType>(element) || element.isBF16() ||
+                      element.isF16() || element.isF32()) &&
                      acc.isF32());
   return success(
       type && element == getElementTypeOrSelf(op->getOperand(1).getType()) &&

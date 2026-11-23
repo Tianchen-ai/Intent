@@ -22,7 +22,6 @@ llvm::Error emitTileProgram(func::FuncOp, llvm::raw_pwrite_stream &);
 void tileContracts(Unit &);
 LogicalResult verifyColumnViews(func::FuncOp);
 LogicalResult verifyMatrixExit(func::FuncOp,const TargetProfile &);
-llvm::Error emitMatrix(func::FuncOp,llvm::raw_pwrite_stream &);
 llvm::Error emitOrdered(func::FuncOp, llvm::raw_pwrite_stream &);
 llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &);
 namespace {
@@ -381,7 +380,9 @@ llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
     return emitTileProgram(fn, out);
   if (intentdsl::kir::orderedOwners(fn))
     return emitOrdered(fn, out);
-  if(intentdsl::kir::matrixDomain(fn))return emitMatrix(fn,out);
+  if (intentdsl::kir::matrixDomain(fn))
+    return llvm::createStringError(
+        "contraction missing terminal tile lowering");
   auto args = llvm::json::parse(fn->getAttrOfType<StringAttr>("kir.abi"));
   if (!args)
     return args.takeError();

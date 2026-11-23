@@ -2,6 +2,7 @@
 
 namespace CI_UNIT_NAMESPACE {
 using namespace mlir;
+void encodedTiles(Tiles &, intentdsl::block::MatrixAccess &);
 namespace {
 // Lower the chosen panel loop with a loop-carried accumulator. The pointers
 // for both transposed and contiguous operands use their verified ABI strides.
@@ -241,10 +242,11 @@ void lowerTileProgram(func::FuncOp fn) {
     root.erase();
   } else if (intentdsl::kir::matrixDomain(fn)) {
     intentdsl::block::MatrixAccess p(fn);
-    if (p.dot.getName().stripDialect() != "contract")
-      return;
     Tiles tiles(fn, "matrix");
-    matrixTiles(tiles, p);
+    if (p.dot.getName().stripDialect() == "contract")
+      matrixTiles(tiles, p);
+    else
+      encodedTiles(tiles, p);
     tiles.op("end");
     root.erase();
   }
