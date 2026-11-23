@@ -72,26 +72,46 @@ void orderedCost(Unit &u) {
                   (1. + std::max(0., live / 32768. - 1.)) / span.getInt();
               // Independent matrix updates compete for resident accumulator
               // fragments and exchange score columns between issue groups.
-              unsigned carries = 0;
+              unsigned carries = 0, projections = 0;
               for (auto loop :
-                   op->getRegion(0).front().getOps<mlir::scf::ForOp>())
-                if (loop->hasAttr("kir.reassociate"))
-                  carries = std::max<unsigned>(
-                      carries,
-                      llvm::count_if(loop.getResultTypes(), [](mlir::Type t) {
-                        return mlir::isa<mlir::ShapedType>(t);
-                      }));
-              if (carries > 1 && caps->exchangeWidth &&
+                   op->getRegion(0).front().getOps<mlir::scf::ForOp>()) {
+                if (!loop->hasAttr("kir.reassociate"))
+                  continue;
+                carries = std::max<unsigned>(
+                    carries,
+                    llvm::count_if(loop.getResultTypes(), [](mlir::Type t) {
+                      return mlir::isa<mlir::ShapedType>(t);
+                    }));
+                if (!caps->operandGroupRows)
+                  continue;
+                llvm::SmallPtrSet<mlir::Operation *, 4> scores;
+                for (auto &s : loop.getBody()->without_terminator()) {
+                  if (s.getName().stripDialect() != "lane_sum")
+                    continue;
+                  auto *consumer =
+                      s.hasOneUse() ? *s.getUsers().begin() : nullptr;
+                  // Dot products summed directly produce one live score.
+                  scores.insert(consumer &&
+                                        mlir::isa<mlir::arith::AddFOp>(consumer)
+                                    ? consumer
+                                    : &s);
+                }
+                projections = std::max<unsigned>(projections, scores.size());
+              }
+              auto streams = caps->operandGroupRows ? projections : carries;
+              if (streams > 1 && caps->exchangeWidth &&
                   caps->residentRegisters) {
+                auto rowGroup = caps->operandGroupRows ? caps->operandGroupRows
+                                                       : caps->exchangeWidth;
                 double packets =
                     std::ceil(double(span.getInt()) / caps->exchangeWidth);
                 double slots =
-                    carries * ((physicalRows + span.getInt()) * lanes +
+                    streams * ((physicalRows + span.getInt()) * lanes +
                                physicalRows * span.getInt()) +
                     carries * physicalRows * lanes;
-                issueGroups = std::ceil(physicalRows / caps->exchangeWidth) *
+                issueGroups = std::ceil(physicalRows / rowGroup) *
                               std::ceil(double(lanes) / 32.);
-                dependency *= (1. + (packets - 1.) * carries) *
+                dependency *= (1. + (packets - 1.) * streams) *
                               std::max(1., slots / caps->residentRegisters);
                 e.terms["concurrent_accumulator_slots"] = {slots, "reg32"};
                 e.terms["score_exchange_packets"] = {packets, "count"};
