@@ -1,5 +1,6 @@
 #include "ScoreRows.h"
 #include "intentdsl/levels/execution/cpu/ir/OwnerTraversal.h"
+#include "intentdsl/levels/execution/cpu/ir/RepeatedScore.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/execution/cpu/ir/Owners.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"

@@ -1,6 +1,7 @@
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
 #include "intentdsl/levels/execution/cpu/ir/Owners.h"
 #include "intentdsl/levels/execution/cpu/ir/ScoreCache.h"
+#include "intentdsl/levels/execution/cpu/ir/RepeatedScore.h"
 #include "intentdsl/levels/execution/cpu/ir/OwnerTraversal.h"
 #include "mlir/IR/PatternMatch.h"
 using namespace mlir;
@@ -61,6 +62,12 @@ LogicalResult verifyOwnerGrain(func::FuncOp fn, Operation &space,
   if (marks.wasInterrupted())
     return space.emitError(
         "score recording and replay must refer to the same key and query");
+  auto batch = space.getAttrOfType<IntegerAttr>("cpu.owner_batch");
+  auto repeat = batch ? repeatedScore(space) : std::nullopt;
+  auto window = space.getAttrOfType<IntegerAttr>("cpu.batch_score_window");
+  if (window &&
+      (!repeat || window.getInt() != batchScoreSlots / batch.getInt()))
+    return space.emitError("invalid private score window");
   if (facts && failed(kir::verifyProjectedOwners(space, *facts)))
     return failure();
   if (!facts || !grain || grain.getInt() < 1 || grain.getInt() > 256 ||
@@ -145,10 +152,14 @@ void ownerTasks(Unit &u) {
         auto batch = d.getAs<IntegerAttr>("batch"),
              grain = d.getAs<IntegerAttr>("grain");
         auto w = batch ? batch.getInt() : 0;
-        if (!reuse || reuse->axis != inner.getInt() || d.size() != 3 || w < 2 ||
+        auto retained = d.getAs<IntegerAttr>("window");
+        if (!reuse || reuse->axis != inner.getInt() ||
+            d.size() != (retained ? 4u : 3u) || w < 2 ||
             !llvm::isPowerOf2_64(w) ||
             w > p.services.get<cpu::RowMachine>()->packedOwners || !grain ||
-            grain.getInt() % w || reuse->group % w || reuse->extent % w)
+            grain.getInt() % w || reuse->group % w || reuse->extent % w ||
+            (retained && (retained.getInt() != cpu::batchScoreSlots / w ||
+                          !cpu::repeatedScore(*o))))
           return llvm::createStringError("invalid shared interval traversal");
       } else {
         auto s = cpu::reusableScores(o, p);
@@ -173,7 +184,8 @@ void ownerTasks(Unit &u) {
       if (!w || shared != bool(batch) ||
           c.id != (shared ? "shared-" : "retained-") +
                       std::to_string(w.getInt()) +
-                      (shared ? "x" + std::to_string(batch.getInt()) : "") ||
+                      (shared ? "x" + std::to_string(batch.getInt()) : "") +
+                      (d.get("window") ? "-scores" : "") ||
           c.topology !=
               (shared ? "shared-interval-owners" : "retained-scores") ||
           c.preconditions != std::vector<std::string>{"exclusive-output"})
@@ -240,6 +252,8 @@ void ownerTasks(Unit &u) {
       if (auto axis = d.getAs<IntegerAttr>("inner")) {
         o->setAttr("cpu.innermost_owner", axis);
         o->setAttr("cpu.owner_batch", d.get("batch"));
+        if (auto win = d.get("window"))
+          o->setAttr("cpu.batch_score_window", win);
         auto shared = *cpu::sharedInterval(o, *f);
         o->walk([&](Operation *op) {
           if (op->getNumResults() == 1 &&

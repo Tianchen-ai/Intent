@@ -1,10 +1,14 @@
 // Lower a task's verified packed owner interval. Each logical owner has
 // private SSA values; the CPU common-value marks identify shared loads.
 using Bindings = llvm::DenseMap<Value, std::string>;
+std::optional<intentdsl::cpu::RepeatedScore> reusable;
+bool replayWindow = false;
+std::string window, offset;
 llvm::Error issueTogether(Block &bb, unsigned depth,
                           SmallVectorImpl<Bindings> &lanes) {
   for (auto &op : bb.without_terminator()) {
     if (auto loop = dyn_cast<scf::ForOp>(op)) {
+      bool replay = reusable && reusable->replay->getBlock() == loop.getBody();
       for (auto &lane : lanes) {
         for (auto [arg, ret, init] :
              llvm::zip(loop.getRegionIterArgs(), loop.getResults(),
@@ -16,23 +20,41 @@ llvm::Error issueTogether(Block &bb, unsigned depth,
       }
       auto iv = fresh();
       auto &first = lanes.front();
-      line(depth, "for " + iv + " in range(" + first.at(loop.getLowerBound()) +
-                      "," + first.at(loop.getUpperBound()) + "," +
-                      first.at(loop.getStep()) + "):");
-      for (auto &lane : lanes)
-        lane[loop.getInductionVar()] = iv;
-      if (auto err = issueTogether(*loop.getBody(), depth + 1, lanes))
-        return err;
-      for (auto &lane : lanes) {
-        SmallVector<std::string> next;
-        for (auto v : loop.getBody()->getTerminator()->getOperands()) {
-          auto tmp = fresh();
-          line(depth + 1, "var " + tmp + "=" + lane.at(v));
-          next.push_back(tmp);
+      auto start = first.at(loop.getLowerBound());
+      auto head = "for " + iv + " in range(" + start + "," +
+                  first.at(loop.getUpperBound()) + "," +
+                  first.at(loop.getStep()) + "):";
+      if (replay)
+        line(depth, "if " + first.at(loop.getUpperBound()) + "-" + start +
+                        "<=" + window + ":");
+      for (unsigned variant = 0; variant < (replay ? 2u : 1u); ++variant) {
+        if (replay && variant)
+          line(depth, "else:");
+        unsigned level = depth + int(replay);
+        line(level, head);
+        offset = "(" + iv + "-" + start + ")";
+        replayWindow = replay && !variant;
+        for (auto &lane : lanes)
+          lane[loop.getInductionVar()] = iv;
+        if (auto err = issueTogether(*loop.getBody(), level + 1, lanes))
+          return err;
+        for (auto &lane : lanes) {
+          SmallVector<std::string> next;
+          for (auto v : loop.getBody()->getTerminator()->getOperands()) {
+            auto tmp = fresh();
+            line(level + 1, "var " + tmp + "=" + lane.at(v));
+            next.push_back(tmp);
+          }
+          for (auto [r, t] : llvm::zip(loop.getResults(), next))
+            line(level + 1, lane.at(r) + "=" + t);
         }
-        for (auto [r, t] : llvm::zip(loop.getResults(), next))
-          line(depth + 1, lane.at(r) + "=" + t);
       }
+      replayWindow = false;
+    } else if (replayWindow && reusable->replay == &op) {
+      for (auto [i, lane] : llvm::enumerate(lanes))
+        lane[op.getResult(0)] = "saved[unsafe_offset=" + offset + "*" +
+                                std::to_string(lanes.size()) + "+" +
+                                std::to_string(i) + "]";
     } else if (op.hasAttr("mojo_row.pack_scalars")) {
       Value input = op.getOperand(0), result = op.getResult(0);
       auto pack = fresh();
@@ -62,12 +84,26 @@ llvm::Error issueTogether(Block &bb, unsigned depth,
         }
       }
     }
+    if (reusable && &op == reusable->record) {
+      line(depth, "if " + offset + "<" + window + ":");
+      for (auto [i, lane] : llvm::enumerate(lanes))
+        line(depth + 1, "saved[unsafe_offset=" + offset + "*" +
+                            std::to_string(lanes.size()) + "+" +
+                            std::to_string(i) +
+                            "]=" + lane.at(op.getResult(0)));
+    }
   }
   return llvm::Error::success();
 }
 llvm::Error issueBatch(unsigned batch) {
   auto &bb = space.getRegion(0).front();
   SmallVector<Bindings, 2> lanes(batch, values);
+  if (auto slots = space.getAttrOfType<IntegerAttr>("cpu.batch_score_window")) {
+    reusable = intentdsl::cpu::repeatedScore(space);
+    window = std::to_string(slots.getInt());
+    line(1, "var saved=unsafe_stack_allocation[" +
+                std::to_string(batch * slots.getInt()) + ",Float32]()");
+  }
   line(1, "for owner in range(Int(lo),Int(hi)," + std::to_string(batch) + "):");
   auto axes = space.getAttrOfType<DenseI64ArrayAttr>("axes");
   int64_t pitch = 1;

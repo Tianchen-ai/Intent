@@ -1,4 +1,5 @@
 #include "intentdsl/levels/execution/cpu/ir/OwnerTraversal.h"
+#include "intentdsl/levels/execution/cpu/ir/RepeatedScore.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -117,6 +118,7 @@ void sharedOwnerTraversal(compilerinfra::Unit &u) {
     if (!reuse || !maximum)
       return cs;
     Builder b(op->getContext());
+    bool repeat = bool(intentdsl::cpu::repeatedScore(*op));
     for (int grain : {8, 32, 128, 256})
       for (unsigned batch : {2u, 4u, 8u, 16u}) {
         if (batch > maximum || grain % batch || reuse->group % batch ||
@@ -131,6 +133,15 @@ void sharedOwnerTraversal(compilerinfra::Unit &u) {
              "shared-interval-owners",
              d,
              {"exclusive-output"}});
+        if (repeat) {
+          NamedAttrList row(d);
+          row.set("window",
+                  b.getI64IntegerAttr(intentdsl::cpu::batchScoreSlots / batch));
+          cs.push_back({cs.back().id + "-scores",
+                        "shared-interval-owners",
+                        row.getDictionary(b.getContext()),
+                        {"exclusive-output"}});
+        }
       }
     return cs;
   };

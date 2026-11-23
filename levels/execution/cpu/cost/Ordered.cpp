@@ -44,6 +44,10 @@ void ownerCost(Unit &u) {
                 together ? cache.getAs<mlir::IntegerAttr>("batch").getInt()
                          : int64_t(1);
             auto bytes = shared->readBytes * n / ownersPerLoad;
+            // One of the two projections is replaced by a private FP32
+            // store/load pair for the score of each owner.
+            if (together && cache.get("window"))
+              bytes = bytes * .5 + 8. * n;
             e.terms["common_input_bytes_per_member"] = {bytes, "B"};
             if (auto bw = intentdsl::quantity(ctx, "read_1", "B/ns");
                 e.timeNs && bw)
