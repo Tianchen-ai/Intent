@@ -4,6 +4,7 @@
 #include "intentdsl/levels/algorithm/kir/ir/ProjectedLayout.h"
 #include "intentdsl/levels/algorithm/kir/ir/Segment.h"
 #include "intentdsl/levels/execution/cpu/ir/IndexedEffects.h"
+#include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
 #include "intentdsl/levels/execution/cpu/ir/Pack.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/Pass.h"
@@ -199,11 +200,16 @@ struct Realize : PassWrapper<Realize, OperationPass<ModuleOp>> {
                     StringAttr::get(&getContext(), "ordered-owner-range"));
       return;
     }
-    if(first.getName().getStringRef()=="cpu.matrix_task"){
-      auto &region=first.getRegion(0).front().front();
-      first.setAttr("mojo_row.column_lanes",IntegerAttr::get(IntegerType::get(&getContext(),64),
-                    region.getAttrOfType<DenseI64ArrayAttr>("cpu.output_tile")[3]));
-      first.setAttr("mojo_row.schedule",StringAttr::get(&getContext(),"static-output-blocks"));
+    if (auto *mt = intentdsl::cpu::findMatrixTask(
+            first.getParentOfType<func::FuncOp>())) {
+      auto &region = mt->getRegion(0).front().front();
+      mt->setAttr("mojo_row.column_lanes",
+                  IntegerAttr::get(
+                      IntegerType::get(&getContext(), 64),
+                      region.getAttrOfType<DenseI64ArrayAttr>(
+                          "cpu.output_tile")[3]));
+      mt->setAttr("mojo_row.schedule",
+                  StringAttr::get(&getContext(), "static-output-blocks"));
       return;
     }
     for(auto fn:getOperation().getOps<func::FuncOp>())fn.walk([&](Operation *op){

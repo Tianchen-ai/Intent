@@ -20,7 +20,8 @@ LogicalResult verifyTask(ModuleOp m, const TargetProfile &profile,
   if (ownerTask(fn))
     return verifyOwnerTask(fn, profile, storage);
   if (matrixTask(fn))
-    return verifyMatrixTask(fn, profile, storage);
+    return storage == "pending" ? verifyMatrixTask(fn, profile, storage)
+                                : verifyMatrixBuffers(fn, profile);
   if (fn.empty() || fn.front().getOperations().size() != 3)
     return fn.emitError("expected task, join, return");
   if(failed(intentdsl::verifyDomain(fn)))return failure();
@@ -81,6 +82,8 @@ llvm::Error realizeLocalValues(Operation *op, Attribute value,
                                const TargetProfile &, RewriterBase &rw) {
   if (value != rw.getStringAttr("private-values"))
     return llvm::createStringError("unsupported storage contract");
+  if (op->getName().getStringRef() == "cpu.matrix_task")
+    return materializeMatrixBuffers(op->getParentOfType<func::FuncOp>(), rw);
   op->setAttr("cpu.realization", value);
   op->removeAttr("cpu.storage");
   return llvm::Error::success();

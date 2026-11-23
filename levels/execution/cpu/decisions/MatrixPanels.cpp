@@ -3,7 +3,7 @@
 using namespace mlir;
 namespace intentdsl::cpu {
 MatrixPanels::MatrixPanels(func::FuncOp f)
-    : fn(f), domain(f.front().front().getRegion(0).front().front()),
+    : fn(f), domain(findMatrixTask(f)->getRegion(0).front().front()),
       dot(calculation(domain)),
       shape(domain.getAttrOfType<DenseI64ArrayAttr>("cpu.extents")),
       tile(domain.getAttrOfType<DenseI64ArrayAttr>("cpu.output_tile")) {

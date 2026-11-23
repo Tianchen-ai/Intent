@@ -3,32 +3,41 @@ namespace CI_UNIT_NAMESPACE {
 using namespace compilerinfra;
 void matrixCost(Unit &u) {
   u.costModels.push_back(
-      {{"matrix-work", u.qualify("matrix-partition"), "1",
+      {{"matrix-work", u.qualify("matrix-partition"), "2",
         [](mlir::Operation *op, const StructuralCandidate &c,
            CostContext &ctx) -> llvm::Expected<CostEstimate> {
           auto f = ctx.target.services.get<intentdsl::CallFacts>();
-          auto g = intentdsl::kir::contractionShape(
-              intentdsl::cpu::calculation(*op), op->getOperand(0), *f);
+          auto &dot = intentdsl::cpu::calculation(*op);
+          auto g = intentdsl::kir::contractionShape(dot, op->getOperand(0), *f);
           if (!g)
             return g.takeError();
           auto t = mlir::cast<mlir::DenseI64ArrayAttr>(c.value);
+          auto *caps = ctx.target.services.get<intentdsl::cpu::MatrixMachine>();
           double jobs = std::ceil(double(g->m) / t[0]) *
                         std::ceil(double(g->n) / t[1]) * g->batches;
           auto workers =
               ctx.target.services.get<intentdsl::cpu::RowMachine>()->workers;
-          double waves = std::ceil(jobs / workers),
-                 reads = waves * (t[0] + t[1]) * g->k * 2;
+          double waves = jobs > 0 ? std::ceil(jobs / workers) : 0.;
+          int64_t packCode = t[4];
+          double elemReadBytes = packCode == 3 ? 4. : 2.;
+          if (dot.getName().stripDialect() == "contract") {
+            auto inBytes =
+                mlir::cast<mlir::MemRefType>(dot.getOperand(0).getType())
+                    .getElementTypeBitWidth() /
+                8.;
+            elemReadBytes = packCode == 3 ? 4. : inBytes;
+          } else if (dot.getName().stripDialect() == "scaled_contract") {
+            elemReadBytes = 4.;
+          }
+          double reads = waves * (t[0] + t[1]) * g->k * elemReadBytes;
           double ops = waves * t[0] * std::ceil(double(t[1]) / t[3]) * g->k;
-          if (t[4] == 2)
-            ops /= 4;
-          auto &dot = intentdsl::cpu::calculation(*op);
+          if (packCode == 2 ||
+              (t.size() == 6 && caps->contracts[t[5]].dtype == "s8"))
+            ops /= 4.;
           double packBytes = 0, translationBytes = 0, scatteredBytes = 0;
           double widenOps = 0;
           if (dot.getName().stripDialect() == "window_contract") {
-            if (t[4]) {
-              // Packing transposes [tokens,heads,features] to
-              // [features,tokens]. Its inner read can touch a separate cache
-              // line per element.
+            if (packCode) {
               auto slot = mlir::cast<mlir::BlockArgument>(dot.getOperand(0))
                               .getArgNumber();
               auto stride =
@@ -49,33 +58,40 @@ void matrixCost(Unit &u) {
             auto b = dot.getOperand(1);
             auto slot = mlir::cast<mlir::BlockArgument>(b).getArgNumber();
             int k = dot.getAttrOfType<mlir::IntegerAttr>("rhs_k").getInt();
-            int batch = dot.getAttrOfType<mlir::IntegerAttr>("rhs_batch").getInt();
+            int batch =
+                dot.getAttrOfType<mlir::IntegerAttr>("rhs_batch").getInt();
             int column = 0;
             while (column == k || column == batch)
               ++column;
             auto strides = f->arguments[slot].getAsObject()->getArray("strides");
-            auto step =
-                (*f->arguments[slot].getAsObject()->getArray("strides"))[k]
-                    .getAsInteger()
-                    .value();
+            auto step = (*strides)[k].getAsInteger().value();
             auto bytes = mlir::cast<mlir::MemRefType>(b.getType())
                              .getElementTypeBitWidth() /
                          8;
-            if (t[4])
+            double rhsBanks = batch < 0 ? 1. : double(g->batches);
+            if (packCode == 3) {
+              int lhsBatch =
+                  dot.getAttrOfType<mlir::IntegerAttr>("lhs_batch").getInt();
+              double lhsBanks = lhsBatch < 0 ? 1. : double(g->batches);
+              double lhsPack =
+                  g->routed ? double(g->m) * g->k * std::max(0., 4. - bytes)
+                            : lhsBanks * g->m * g->k * (bytes + 4.);
+              double colStride =
+                  std::abs(double((*strides)[column].getAsInteger().value()));
+              double extraOnce =
+                  std::max(0., std::min(64., colStride * bytes) - bytes);
               packBytes =
-                  2. * g->n * g->k *
-                  (dot.getAttrOfType<mlir::IntegerAttr>("rhs_batch").getInt() <
-                           0
-                       ? 1
-                       : g->batches) *
-                  bytes;
-            else if (step * bytes >= 4096)
+                  lhsPack + rhsBanks * g->n * g->k * (bytes + 4. + extraOnce);
+            } else if (packCode) {
+              packBytes = 2. * g->n * g->k * rhsBanks * bytes;
+            } else if (step * bytes >= 4096) {
               translationBytes = jobs * g->k * 64.;
-            if (!t[4]) {
-              double columnStride = std::abs((*strides)[column].getAsInteger().value());
-              // A vector of columns can fetch a distinct cache line per lane.
-              // Shared packing pays this transpose once for all row owners.
-              double extra = std::max(0., std::min(64., columnStride * bytes) - bytes);
+            }
+            if (!packCode) {
+              double columnStride =
+                  std::abs(double((*strides)[column].getAsInteger().value()));
+              double extra =
+                  std::max(0., std::min(64., columnStride * bytes) - bytes);
               double rowBlocks = std::ceil(double(g->m) / t[0]);
               scatteredBytes = rowBlocks * g->k * g->n * extra *
                                (g->grouped ? 1. : double(g->batches));
@@ -105,9 +121,8 @@ void matrixCost(Unit &u) {
             e.timeNs =
                 bytes * workers / *bw + (dispatch ? waves * *dispatch : 0.);
           }
-          const auto &name =
-              ctx.target.services.get<intentdsl::cpu::MatrixMachine>()
-                  ->estimate;
+          const std::string &name =
+              t.size() == 6 ? caps->contracts[t[5]].estimator : caps->estimate;
           if (!name.empty()) {
             auto local = ctx.local(name);
             if (!local)

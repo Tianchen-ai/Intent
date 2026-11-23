@@ -142,3 +142,15 @@ def OwnerTasks : Inst<"owner_task",[SingleBlock]> {
 def MatrixTasks : Inst<"matrix_task",[SingleBlock]> {
   let arguments=(ins Variadic<AnyMemRef>:$captures);let results=(outs Index:$completion);let regions=(region AnyRegion:$body);
 }
+def Cpu_AllocBuffer : Inst<"alloc_buffer"> {
+  let arguments=(ins StrAttr:$placement, I64Attr:$elements, I64Attr:$element_bytes, I64Attr:$alignment, StrAttr:$role);
+  let results=(outs AnyMemRef:$buffer);
+}
+def Cpu_PreparePanels : Inst<"prepare_panels"> {
+  let arguments=(ins Variadic<AnyMemRef>:$operands, StrAttr:$kind);
+  let results=(outs Index:$completion);
+  let regions=(region VariadicRegion<AnyRegion>:$map);
+}
+def Cpu_ReleaseBuffer : Inst<"release_buffer"> {
+  let arguments=(ins AnyMemRef:$buffer, StrAttr:$placement);
+}

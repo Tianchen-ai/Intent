@@ -120,6 +120,16 @@
     "cutile",
     "bangc"
   ],
+  "optional_dependencies": [
+    {
+      "id": "onednn",
+      "owner": "exits/mojo",
+      "package": "dnnl",
+      "version": ">=3.13,<4",
+      "cmake_target": "DNNL::dnnl",
+      "probe": "exits/mojo::onednn-brgemm"
+    }
+  ],
   "frontend": {
     "language": "python",
     "entry": "author:root_ir"

@@ -70,8 +70,10 @@ llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
 }
 } // namespace
 void registerBlockCost(Unit &);
+void registerOneDNN(Unit &);
 void bind(Unit &u) {
   registerBlockCost(u);
+  registerOneDNN(u);
   u.dialects = dialect;
   for (StringRef phase : {"legal", "realized", "callable"})
     u.boundaries.push_back(
