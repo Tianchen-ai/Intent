@@ -13,6 +13,7 @@ def TileWrite : Inst<"tile_write", [MemoryEffects<[MemWrite]>]> {
   let arguments=(ins AnyMemRef:$view, AnyType:$offset, AnyType:$fragment, Optional<AnyType>:$mask);
 }
 def TileAxis : Inst<"tile_axis", [Pure]> {let results=(outs AnyRankedTensor:$lane);}
+def DropOwner : Inst<"drop_unit_owner", [Pure]> {let arguments=(ins AnyRankedTensor:$tile);let results=(outs AnyRankedTensor:$members);}
 def TilePid : Inst<"tile_pid", [Pure]> {let arguments=(ins I64Attr:$axis);let results=(outs I64:$id);}
 def TilePrefix : Inst<"tile_prefix", [Pure]> {let arguments=(ins AnyRankedTensor:$tile); let results=(outs AnyRankedTensor:$logical);}
 def FromLEHalf : Inst<"from_le_half",[Pure]> {let arguments=(ins AnyRankedTensor:$lo,AnyRankedTensor:$hi);let results=(outs AnyRankedTensor:$number);}

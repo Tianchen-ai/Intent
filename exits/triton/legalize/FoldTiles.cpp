@@ -101,7 +101,9 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
       return x.value;
     if (auto s = dyn_cast<RankedTensorType>(x.value.getType());
         s && s.getRank() == 2)
-      return reduce(x.value, "sum", 0);
+      return op("drop_unit_owner", x.value,
+                shaped({s.getDimSize(1)}, s.getElementType()))
+          ->getResult(0);
     return uniform(x.value);
   };
   for (auto &old : loop.getBody()->without_terminator()) {

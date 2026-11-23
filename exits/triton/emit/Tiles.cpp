@@ -65,6 +65,9 @@ TerminalPrinter tilePrinter() {
            std::to_string(op.getAttrOfType<IntegerAttr>("axis").getInt()) +
            ").to(tl.int64)";
   });
+  leaf("triton_src.drop_unit_owner", [](Operation &op, auto &a) {
+    return "tl.reshape(" + a[0] + "," + tuple(op.getResult(0).getType()) + ")";
+  });
   leaf("triton_src.tile_prefix", [](Operation &op, auto &a) {
     return "tl.gather(" + a[0] + ",tl.arange(0," +
            std::to_string(shape(op.getResult(0).getType())[0]) + "),0)";

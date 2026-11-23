@@ -38,6 +38,15 @@ LogicalResult verifyTileProgram(func::FuncOp fn, const TargetProfile &profile) {
     return sp.emitError("unknown tile calling convention");
   auto check = sp.walk([&](Operation *op) {
     auto name = op->getName().getStringRef();
+    if (name == "triton_src.drop_unit_owner") {
+      auto input = op->getOperand(0).getType(),
+           out = op->getResult(0).getType();
+      if (shape(input).size() != 2 || shape(input)[0] != 1 ||
+          shape(input).drop_front() != shape(out) ||
+          getElementTypeOrSelf(input) != getElementTypeOrSelf(out))
+        return op->emitError("fold capture must have exactly one owner"),
+               WalkResult::interrupt();
+    }
     if (name == "triton_src.tile_prefix") {
       auto input = op->getOperand(0).getType(),
            out = op->getResult(0).getType();
