@@ -24,7 +24,9 @@ struct Writer : intentdsl::block::MatrixAccess {
       << "        xx=ct.reshape(ct.load(" << x
       << ",(g,0),shape=(1,256)),(256,))\n"
       << "        peak=ct.max(ct.abs(xx))\n        "
-         "e=ct.where(ct.min(xx)==-peak,-peak,peak)\n"
+         "lane=ct.arange(256,dtype=ct.int32)\n"
+      << "        first=ct.min(ct.where(ct.abs(xx)==peak,lane,256))\n"
+      << "        e=ct.sum(ct.where(lane==first,xx,0.))\n"
       << "        "
          "inv=ct.truediv(-127.,ct.where(peak==0,1.,e),rounding_mode=ct."
          "RoundingMode.RN)\n"

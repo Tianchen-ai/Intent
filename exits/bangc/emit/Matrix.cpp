@@ -56,7 +56,7 @@ struct Matrix : intentdsl::block::MatrixAccess {
     s << "for(int i=0;i<nr;i++)acc[i]=0;\n"
       << "for(long long gq=0;gq<K/256;++gq){float e=0;\n"
       << "for(int k=0;k<256;++k){float x=*" << ptr(x, "float", {"gq", "k"})
-      << ";if(fabsf(x)>fabsf(e)||(fabsf(x)==fabsf(e)&&x<e))e=x;}\n"
+      << ";if(fabsf(x)>fabsf(e))e=x;}\n"
       << "if(e==0){for(int i=0;i<nr;++i){const unsigned char *header="
       << ptr(w,"unsigned char",{"r+i","gq","0"}) << ";"
       << "bool nonfinite=(header["<<stride(w,2)<<"LL]&0x7c)==0x7c || (header[3LL*"

@@ -132,6 +132,33 @@ std::string MatrixPanels::dispatch(StringRef decl, StringRef invoke,
   s << "#include <stdint.h>\n#include <stddef.h>\n#include <math.h>\n#include "
        "<stdlib.h>\n#include <string.h>\n#include <omp.h>\n"
     << decl << "\n";
+  if (pack)
+    s << R"c(
+struct Record { float d; int8_t q[256]; int16_t sums[16]; };
+_Static_assert(sizeof(struct Record)==292, "Q8_K record ABI");
+static inline void pack_q8_record(struct Record *out, const float *x, int64_t stride) {
+  float extreme=0.0f;
+  for (int64_t k=0; k<256; ++k) {
+    float v=x[k*stride];
+    if (fabsf(v)>fabsf(extreme)) extreme=v;
+  }
+  float inv=extreme==0.0f ? 0.0f : -127.0f/extreme;
+  out->d=extreme==0.0f ? 0.0f : 1.0f/inv;
+  for (int group=0; group<16; ++group) {
+    int sum=0;
+    #pragma omp simd reduction(+:sum)
+    for (int64_t k=16*group; k<16*group+16; ++k) {
+      float v=x[k*stride]*inv;
+      int q=(int)v;
+      float fraction=fabsf(v-(float)q);
+      if (fraction>0.5f || (fraction==0.5f && (q&1))) q+=v<0 ? -1 : 1;
+      out->q[k]=(int8_t)(q>127 ? 127 : q);
+      sum+=out->q[k];
+    }
+    out->sums[group]=(int16_t)sum;
+  }
+}
+)c";
   if (mapped)
     s << R"c(
 static inline float expand_bf(uint16_t v){uint32_t b=(uint32_t)v<<16;float f;memcpy(&f,&b,4);return f;}
@@ -277,29 +304,13 @@ static inline float decode(unsigned x,unsigned scale){
   if (pack) {
     auto &x = views[1];
     int64_t groups = shape[2] / 256;
-    s << "struct Record {float d;int8_t q[256];int16_t sums[16];};\n"
-      << "_Static_assert(sizeof(struct Record)==292,\"Q8_K record ABI\");\n";
     if (heap)
       s << "struct Record *packed=calloc(" << groups
         << ",sizeof(*packed));if(!packed)return 2;\n";
     else
       s << "struct Record packed[" << std::max<int64_t>(1, groups) << "];\n";
-    s << "for(int64_t g=0;g<" << groups << ";++g){float *x=(float*)a" << x.slot
-      << "+g*" << x.strides[0] << ";uint32_t peak=0;\n"
-      << "#pragma omp simd reduction(max:peak)\n"
-      << "for(int64_t k=0;k<256;++k){uint32_t bits;memcpy(&bits,x+k*"
-      << x.strides[1]
-      << ",4);uint32_t key=(bits<<1)|(bits>>31);if(key>peak)peak=key;}\n"
-      << "uint32_t bits=(peak>>1)|(peak<<31);float e;memcpy(&e,&bits,4);\n"
-      << "float inv=e==0?0.0f:-127.0f/e;packed[g].d=e==0?0.0f:1.0f/inv;\n"
-      << "#pragma omp simd\n"
-      << "for(int64_t k=0;k<256;++k){float v=x[k*" << x.strides[1]
-      << "]*inv;int trunc=(int)v;float f=fabsf(v-(float)trunc);"
-         "int round=(f>0.5f)||(f==0.5f&&(trunc&1));int "
-         "q=trunc+(v<0?-round:round);packed[g].q[k]=q>127?127:q< "
-         "-128?-128:q;}\n"
-         "for(int j=0;j<16;++j){int sum=0;for(int "
-         "k=j*16;k<(j+1)*16;++k)sum+=packed[g].q[k];packed[g].sums[j]=sum;}}\n";
+    s << "for(int64_t g=0;g<" << groups << ";++g)pack_q8_record(&packed[g],(float*)a"
+      << x.slot << "+g*" << x.strides[0] << "," << x.strides[1] << ");\n";
   }
   bool routed = domain.hasAttr("cpu.route_storage");
   auto elemBytes = [&](unsigned i) {
