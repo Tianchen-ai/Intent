@@ -16,6 +16,7 @@ namespace CI_UNIT_NAMESPACE {
 using namespace mlir;
 using namespace compilerinfra;
 void legalize(OpPassManager &);
+LogicalResult verifyColumnViews(func::FuncOp);
 LogicalResult verifyMatrixExit(func::FuncOp,const TargetProfile &);
 llvm::Error emitMatrix(func::FuncOp,llvm::raw_pwrite_stream &);
 llvm::Error emitOrdered(func::FuncOp, llvm::raw_pwrite_stream &);
@@ -435,6 +436,7 @@ void bind(Unit &unit) {
             if (!llvm::hasSingleElement(funcs))
               return failure();
             auto fn = *funcs.begin();
+            if (failed(verifyColumnViews(fn))) return failure();
             if (intentdsl::kir::orderedOwners(fn))
               return intentdsl::block::verifyOwnerMap(fn, profile, "triton_src",
                                                       "realized");

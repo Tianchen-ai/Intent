@@ -1,6 +1,7 @@
 #include "intentdsl/levels/execution/block/ir/OwnerSource.h"
 using namespace mlir;
 namespace CI_UNIT_NAMESPACE {
+llvm::Expected<std::string> printColumns(func::FuncOp fn);
 namespace {
 struct Ordered : intentdsl::block::OwnerSource {
   using OwnerSource::OwnerSource;
@@ -80,35 +81,6 @@ struct Ordered : intentdsl::block::OwnerSource {
                         : "float32") +
            ")";
   }
-  std::string columns() {
-    signature();
-    auto view = fn.getArgument(0);
-    auto n = layout(view, "block.shape")[1];
-    auto strides = layout(view, "block.strides");
-    out << "    batch=tl.cast(tl.program_id(0),tl.int64)\n    i=tl.arange(0,"
-        << n << ").to(tl.int64)\n"
-        << "    base=a0+batch*" << strides[0]
-        << "\n    matrix=tl.load(base+i[:,None]*" << strides[1] << "+i[None,:]*"
-        << strides[2] << ")\n"
-        << "    prefix=tl.full((" << n << "," << n
-        << "),0.,tl.float32)\n    for c in tl.static_range(" << n << "):\n"
-        << "        ix=tl.full((" << n
-        << ",1),c,tl.int32)\n        raw=tl.reshape(tl.gather(matrix,ix,1),("
-        << n << ",))\n"
-        << "        prev=tl.reshape(tl.gather(prefix,ix,1),(" << n
-        << ",))\n        diff=libdevice.sub_rn(raw,prev)\n"
-        << "        "
-           "diag=tl.sqrt_rn(tl.reshape(tl.gather(diff,tl.full((1,),c,tl.int32),"
-           "0),()))\n"
-        << "        "
-           "col=tl.where(i<c,0.,tl.where(i==c,diag,tl.div_rn(diff,diag)))\n"
-        << "        tl.store(base+i*" << strides[1] << "+c*" << strides[2]
-        << ",col)\n"
-        << "        "
-           "prefix=libdevice.add_rn(prefix,libdevice.mul_rn(col[:,None],col["
-           "None,:]))\n";
-    return result;
-  }
   std::string scorePanel() {
     signature();
     auto &bb = space.getRegion(0).front();
@@ -164,7 +136,7 @@ llvm::Error emitOrdered(func::FuncOp fn, llvm::raw_pwrite_stream &out) {
   auto src = fn.front().front().hasAttr("block.score_panel")
                  ? llvm::Expected<std::string>(writer.scorePanel())
              : fn.front().front().hasAttr("block.column_prefixes")
-                 ? llvm::Expected<std::string>(writer.columns())
+                 ? printColumns(fn)
                  : writer.write();
   if (!src)
     return src.takeError();

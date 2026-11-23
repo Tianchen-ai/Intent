@@ -21,6 +21,30 @@ LogicalResult verifyMatrixExit(func::FuncOp fn,const compilerinfra::TargetProfil
     return p.dot.emitError("unit-scale FP8 dispatch disagrees with reduction geometry or output use");
   return success();
 }
+LogicalResult verifyColumnViews(func::FuncOp fn) {
+  auto walk = fn.walk([&](Operation *op) {
+    auto code = op->getName().getStringRef();
+    if (code != "triton_src.read_owner_matrix" && code != "triton_src.store_column")
+      return WalkResult::advance();
+    auto view = dyn_cast<BlockArgument>(op->getOperand(0));
+    if (view && view.getOwner() == &fn.front()) {
+      auto s = view.getArgNumber();
+      auto shape = fn.getArgAttrOfType<DenseI64ArrayAttr>(s, "block.shape");
+      auto strides = fn.getArgAttrOfType<DenseI64ArrayAttr>(s, "block.strides");
+      Builder b(fn.getContext());
+      if (shape && shape.size() == 3 && shape[1] == shape[2] &&
+          shape[1] > 0 && llvm::isPowerOf2_64(shape[1]) &&
+          shape[1] <= INT32_MAX && strides && strides.size() == 3 &&
+          op->getAttr("triton_src.view_strides") == strides &&
+          op->getAttr("triton_src.side") == b.getI64IntegerAttr(shape[1]) &&
+          op->getAttr("address_bits") == b.getI32IntegerAttr(64))
+        return WalkResult::advance();
+    }
+    op->emitError("requires a square column tile with ABI strides and i64 addressing");
+    return WalkResult::interrupt();
+  });
+  return success(!walk.wasInterrupted());
+}
 struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(Legalize)
   void runOnOperation() final {
@@ -33,6 +57,14 @@ struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
           op->getLoc(), ("triton_src." + op->getName().stripDialect()).str());
       auto code = op->getName().stripDialect();
       auto args = op->getOperands();
+      if (code == "read_owner_matrix" || code == "store_column") {
+        auto slot = cast<BlockArgument>(args[0]).getArgNumber();
+        auto fn = op->getParentOfType<func::FuncOp>();
+        auto shape = fn.getArgAttrOfType<DenseI64ArrayAttr>(slot, "block.shape");
+        state.addAttribute("triton_src.side", b.getI64IntegerAttr(shape[1]));
+        state.addAttribute("triton_src.view_strides", fn.getArgAttr(slot, "block.strides"));
+        state.addAttribute("address_bits", b.getI32IntegerAttr(64));
+      }
       if(code=="key_counts" || code=="sum_columns"){
         auto count=op->getAttrOfType<IntegerAttr>(code=="key_counts"?"span":"extent").getInt();
         uint64_t width=std::min<uint64_t>(code=="key_counts"?8192:128,llvm::PowerOf2Ceil(std::max<int64_t>(1,count)));
