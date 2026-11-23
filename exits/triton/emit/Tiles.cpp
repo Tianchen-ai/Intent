@@ -220,10 +220,11 @@ TerminalPrinter tilePrinter() {
                              {"arith.ori", "|"},
                              {"arith.xori", "^"}})
     leaf(name, [token](auto &, auto &a) { return a[0] + token + a[1]; });
-  for (auto name : {"exp", "sqrt", "log"})
+  for (auto name : {"exp", "log"})
     leaf("math." + std::string(name), [name](auto &, auto &a) {
       return "tl." + std::string(name) + "(" + a[0] + ")";
     });
+  leaf("math.sqrt", [](auto &, auto &a) { return "tl.sqrt_rn(" + a[0] + ")"; });
   leaf("arith.select",
        [](auto &, auto &a) { return "tl.where(" + llvm::join(a, ",") + ")"; });
   p.operations["scf.if"] = [](Operation &op, PrintPoint at, PrintContext &c) {
@@ -256,8 +257,27 @@ void addRowRules(TerminalPrinter &);
 TerminalPrinter tritonPrinter() {
   auto printer = tilePrinter();
   addRowRules(printer);
-  printer.operations["builtin.module"] = [](Operation &, PrintPoint,
-                                            PrintContext &) {
+  printer.operations["builtin.module"] = [](Operation &, PrintPoint at,
+                                            PrintContext &p) {
+    if (at == PrintPoint::Enter) {
+      p.file = "kernel.py";
+      p.line("import triton");
+      p.line("import triton.language as tl");
+      p.line("from triton.language.extra.cuda import libdevice");
+    }
+    return llvm::Error::success();
+  };
+  printer.operations["triton_src.runtime_source"] =
+      [](Operation &op, PrintPoint at, PrintContext &p) -> llvm::Error {
+    if (at == PrintPoint::Enter) {
+      auto impl = op.getAttrOfType<StringAttr>("implementation");
+      if (!impl)
+        return llvm::createStringError("missing runtime_source implementation");
+      auto helper = p.source(impl.getValue());
+      if (!helper)
+        return helper.takeError();
+      p.line(*helper);
+    }
     return llvm::Error::success();
   };
   printer.package = [](DictionaryAttr attrs, const auto &files,

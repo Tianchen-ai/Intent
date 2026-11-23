@@ -13,6 +13,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/StringMap.h"
+#include <set>
 
 namespace CI_UNIT_NAMESPACE {
 using namespace mlir;
@@ -31,6 +32,8 @@ namespace {
 llvm::Error describeArtifact(func::FuncOp, llvm::raw_pwrite_stream &);
 struct BindCallable : PassWrapper<BindCallable, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(BindCallable)
+  TargetProfile profile;
+  explicit BindCallable(const TargetProfile &p) : profile(p) {}
   void runOnOperation() final {
     auto module = getOperation();
     auto fn = *module.getOps<func::FuncOp>().begin();
@@ -45,6 +48,24 @@ struct BindCallable : PassWrapper<BindCallable, OperationPass<ModuleOp>> {
       fn->setAttr("triton_src.min_width", b.getI64IntegerAttr(guard[0]));
       fn->setAttr("triton_src.max_width", b.getI64IntegerAttr(guard[1]));
       lowerRows(fn);
+    }
+    std::set<std::string> seenResources;
+    SmallVector<std::string> runtimeImpls;
+    fn.walk([&](Operation *op) {
+      if (auto attr = op->getAttrOfType<StringAttr>("ci.implementation")) {
+        auto key = attr.getValue().str();
+        auto it = profile.implementations.find(key);
+        if (it != profile.implementations.end() &&
+            it->second.source == ImplementationSource::Runtime &&
+            seenResources.insert(it->second.resource).second)
+          runtimeImpls.push_back(key);
+      }
+    });
+    OpBuilder mb(fn);
+    for (auto &impl : runtimeImpls) {
+      OperationState st(fn.getLoc(), "triton_src.runtime_source");
+      st.addAttribute("implementation", mb.getStringAttr(impl));
+      mb.create(st);
     }
     llvm::SmallVector<char> metadata;
     llvm::raw_svector_ostream os(metadata);
@@ -119,9 +140,46 @@ static LogicalResult verifyBoundary(ModuleOp m, const TargetProfile &profile,
   auto fn = *funcs.begin();
   if (fn.empty() || fn.front().empty())
     return failure();
-  if (phase == "callable" &&
-      !m->getAttrOfType<StringAttr>("triton_src.package"))
-    return failure();
+  if (phase != "callable") {
+    if (!llvm::hasSingleElement(m.getBody()->getOperations()))
+      return failure();
+  } else {
+    if (!m->getAttrOfType<StringAttr>("triton_src.package"))
+      return failure();
+    if (&m.getBody()->back() != fn.getOperation())
+      return fn.emitError("expected function after runtime_source declarations"),
+             failure();
+    std::set<std::string> declaredResources;
+    for (auto &top : m.getBody()->without_terminator()) {
+      if (&top == fn.getOperation())
+        break;
+      if (top.getName().getStringRef() != "triton_src.runtime_source")
+        return top.emitError("unexpected module-level operation"), failure();
+      auto impl = top.getAttrOfType<StringAttr>("implementation");
+      if (!impl)
+        return top.emitError("missing runtime_source implementation"),
+               failure();
+      if (auto err = profile.checkImplementation(impl.getValue()))
+        return top.emitError() << llvm::toString(std::move(err)), failure();
+      auto &c = profile.implementations.at(impl.getValue().str());
+      if (c.source != ImplementationSource::Runtime ||
+          !declaredResources.insert(c.resource).second)
+        return top.emitError("invalid or duplicate runtime_source"), failure();
+    }
+    std::set<std::string> usedResources;
+    fn.walk([&](Operation *op) {
+      if (auto attr = op->getAttrOfType<StringAttr>("ci.implementation")) {
+        auto it = profile.implementations.find(attr.getValue().str());
+        if (it != profile.implementations.end() &&
+            it->second.source == ImplementationSource::Runtime)
+          usedResources.insert(it->second.resource);
+      }
+    });
+    if (declaredResources != usedResources)
+      return fn.emitError(
+                 "runtime_source declarations disagree with bound operations"),
+             failure();
+  }
   if (fn.front().front().getName().getStringRef() == "triton_src.tile_program")
     return phase == "callable" ? verifyTileProgram(fn, profile) : failure();
   if (failed(verifyColumnViews(fn)))
@@ -274,7 +332,7 @@ void bind(Unit &unit) {
             if (phase == "legal")
               legalize(pm);
             else {
-              pm.addPass(std::make_unique<BindCallable>());
+              pm.addPass(std::make_unique<BindCallable>(profile));
             }
             return llvm::Error::success();
           },

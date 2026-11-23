@@ -14,7 +14,13 @@ static llvm::ArrayRef<int64_t> shape(Type t) {
 LogicalResult
 verifyTileProgram(func::FuncOp fn, const TargetProfile &profile,
                   llvm::function_ref<bool(Operation &)> canNarrowAddress) {
+  if (!llvm::hasSingleElement(fn.getBody()) ||
+      fn.front().getOperations().size() != 2 ||
+      !isa<func::ReturnOp>(fn.front().back()))
+    return fn.emitError("expected single tile_program followed by return");
   auto &sp = fn.front().front();
+  if (sp.getName().stripDialect() != "tile_program")
+    return sp.emitError("expected tile_program entry");
   auto facts = profile.services.get<intentdsl::CallFacts>();
   if (!facts || !fn->getAttrOfType<StringAttr>("kir.abi") ||
       !fn->hasAttr("kir.domain_arg"))
@@ -42,7 +48,7 @@ verifyTileProgram(func::FuncOp fn, const TargetProfile &profile,
           "invalid installed contraction grid or native parameter row");
   } else
     return sp.emitError("unknown tile calling convention");
-  auto check = sp.walk([&](Operation *op) {
+  auto check = fn.walk([&](Operation *op) {
     auto name = op->getName().stripDialect();
     if (name == "drop_unit_owner") {
       auto input = op->getOperand(0).getType(),

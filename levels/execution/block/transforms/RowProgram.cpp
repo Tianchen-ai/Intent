@@ -300,7 +300,7 @@ struct Row {
       old.erase();
     } else
       replace(op("fetch_add", {arg(0), offset(arg(0), arg(1)), arg(2), arg(3)},
-                 old.getResult(0).getType(), str("scope", "gpu"))
+                 old.getResult(0).getType(), str("scope", "device"))
                   ->getResult(0));
   }
   void atomicBins() {
@@ -337,7 +337,7 @@ struct Row {
           auto keep = binary("and", binary("ge", key, constant(0), i1),
                              binary("lt", key, meta("N"), i1));
           op("fetch_add", {target, offset(target, dst(key)), constant(1), keep},
-             tile(1, i32), str("scope", "cta"));
+             tile(1, i32), str("scope", "workgroup"));
           return Value();
         });
       }
@@ -381,9 +381,7 @@ void expandRowOperation(Operation &op, StringRef unit, bool nativeHistogram) {
   else if (kind == "scatter_fragment")
     row.scatter();
 }
-LogicalResult verifyRowProgram(func::FuncOp fn, StringRef dialect,
-                               StringRef helperAttr) {
-  bool moments = false;
+LogicalResult verifyRowProgram(func::FuncOp fn, StringRef dialect) {
   auto valid = fn.walk([&](Operation *op) {
     if (op->getName().getDialectNamespace() != dialect)
       return WalkResult::advance();
@@ -392,8 +390,6 @@ LogicalResult verifyRowProgram(func::FuncOp fn, StringRef dialect,
       op->emitError(reason);
       return WalkResult::interrupt();
     };
-    if (code == "summary_reduce" || code=="summary_merge")
-      moments = true;
     if (code == "view_offset" || code == "offsets") {
       if (op->getAttr("index_bits") !=
           Builder(op->getContext()).getI32IntegerAttr(64))
@@ -421,7 +417,7 @@ LogicalResult verifyRowProgram(func::FuncOp fn, StringRef dialect,
     if (code == "read_at" || code == "write_at" || code == "fetch_add") {
       if (code == "fetch_add") {
         auto scope = op->getAttrOfType<StringAttr>("scope");
-        if (scope != "gpu" && scope != "cta")
+        if (scope != "device" && scope != "workgroup")
           return reject("invalid atomic scope");
       }
       bool read = code == "read_at";
@@ -439,7 +435,7 @@ LogicalResult verifyRowProgram(func::FuncOp fn, StringRef dialect,
       auto arity = llvm::StringSwitch<int>(k)
                        .Cases("i64", "i32", "f32", 1)
                        .Case("select", 3)
-                       .Cases("add", "sub", "mul", "floordiv", "ceildiv", 2)
+                       .Cases("add", "sub", "mul", "floordiv", "ceildiv", "min", 2)
                        .Cases("and", "lt", "ge", "eq", "add_rn", "mul_rn", 2)
                        .Default(0);
       if (!arity || op->getNumOperands() != arity)
@@ -447,6 +443,6 @@ LogicalResult verifyRowProgram(func::FuncOp fn, StringRef dialect,
     }
     return WalkResult::advance();
   });
-  return success(!valid.wasInterrupted() && moments == fn->hasAttr(helperAttr));
+  return success(!valid.wasInterrupted());
 }
 } // namespace intentdsl::block

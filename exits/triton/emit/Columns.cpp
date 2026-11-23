@@ -28,17 +28,7 @@ void registerColumnRules(TerminalPrinter &printer) {
   rules["func.func"] = [](Operation &op, PrintPoint at,
                           PrintContext &p) -> llvm::Error {
     if (at == PrintPoint::Enter) {
-      p.file = "kernel.py";
-      p.line("import triton");
-      p.line("import triton.language as tl");
-      p.line("from triton.language.extra.cuda import libdevice");
       bool row = op.hasAttr("triton_src.min_width");
-      if (op.hasAttr("triton_src.moments")) {
-        auto helper = p.source("exits/triton::moments-reduction");
-        if (!helper)
-          return helper.takeError();
-        p.line(*helper);
-      }
       p.line("@triton.jit");
       std::vector<std::string> args;
       for (Value arg : cast<func::FuncOp>(op).getArguments()) {
@@ -158,11 +148,6 @@ void registerColumnRules(TerminalPrinter &printer) {
   expression("triton_src.outer_product", [](Operation &, auto &v) {
     return "libdevice.mul_rn(" + v[0] + "[:,None]," + v[1] + "[None,:])";
   });
-  for (auto [name, callee] : {std::pair{"arith.addf","libdevice.add_rn"},
-                               {"arith.subf","libdevice.sub_rn"}, {"math.sqrt","tl.sqrt_rn"}})
-    expression(name, [callee](Operation &, auto &v) {
-      return std::string(callee) + "(" + llvm::join(v,",") + ")";
-    });
 }
 
 } // namespace CI_UNIT_NAMESPACE

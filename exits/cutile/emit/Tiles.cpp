@@ -62,23 +62,32 @@ TerminalPrinter cutilePrinter() {
     };
   };
   for (auto n :
-       {"builtin.module", "func.return", "ct_src.tile_program", "ct_src.end"})
+       {"func.return", "ct_src.tile_program", "ct_src.end"})
     rule(n, [](auto &, auto &) { return ""; });
-  p.operations["func.func"] = [](Operation &op, PrintPoint at,
-                                 PrintContext &c) -> llvm::Error {
+  p.operations["builtin.module"] = [](Operation &, PrintPoint at,
+                                      PrintContext &c) {
     if (at == PrintPoint::Enter) {
       c.file = "kernel.py";
       c.line("import cuda.tile as ct");
-      for (auto [flag, id] : {std::pair{"ct_src.has_summary_reduce",
-                                        "exits/cutile::moments-reduction"},
-                              {"ct_src.has_uniform", "exits/cutile::random"}}) {
-        if (op.hasAttr(flag)) {
-          auto helper = c.source(id);
-          if (!helper)
-            return helper.takeError();
-          c.line(*helper);
-        }
-      }
+    }
+    return llvm::Error::success();
+  };
+  p.operations["ct_src.runtime_source"] =
+      [](Operation &op, PrintPoint at, PrintContext &c) -> llvm::Error {
+    if (at == PrintPoint::Enter) {
+      auto impl = op.getAttrOfType<StringAttr>("implementation");
+      if (!impl)
+        return llvm::createStringError("missing runtime_source implementation");
+      auto helper = c.source(impl.getValue());
+      if (!helper)
+        return helper.takeError();
+      c.line(*helper);
+    }
+    return llvm::Error::success();
+  };
+  p.operations["func.func"] = [](Operation &op, PrintPoint at,
+                                 PrintContext &c) -> llvm::Error {
+    if (at == PrintPoint::Enter) {
       c.line("@ct.kernel");
       auto fn = cast<func::FuncOp>(op);
       SmallVector<std::string> args;

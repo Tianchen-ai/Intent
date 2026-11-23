@@ -194,4 +194,7 @@ defm Scale : ScaleDispatch<Itsrc_Dialect>;
 class TileInstruction<string mnemonic, list<Trait> traits = []> : Op<Itsrc_Dialect, mnemonic, traits>;
 include "intentdsl/levels/execution/block/ir/RowInstructions.td"
 include "intentdsl/levels/execution/block/ir/TileInstructions.td"
+def Itsrc_RuntimeSource : Op<Itsrc_Dialect,"runtime_source"> {
+  let arguments=(ins StrAttr:$implementation);
+}
 def MatrixEnd : Op<Itsrc_Dialect,"end",[Terminator]>;

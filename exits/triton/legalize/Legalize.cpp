@@ -3,6 +3,8 @@
 #include "intentdsl/levels/execution/block/ir/ScaleDispatch.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/exits/triton/ir/Dialect.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Pass/Pass.h"
 
 namespace CI_UNIT_NAMESPACE {
@@ -22,6 +24,19 @@ LogicalResult verifyMatrixExit(func::FuncOp fn,const compilerinfra::TargetProfil
   return success();
 }
 LogicalResult verifyColumnViews(func::FuncOp fn) {
+  if (!fn.empty() && !fn.front().empty() &&
+      fn.front().front().hasAttr("block.column_prefixes")) {
+    auto rnWalk = fn.walk([&](Operation *op) {
+      if (isa<arith::AddFOp, arith::SubFOp, math::SqrtOp>(op) &&
+          !op->hasAttr("triton_src.round_nearest")) {
+        op->emitError("Cholesky column update requires round-to-nearest");
+        return WalkResult::interrupt();
+      }
+      return WalkResult::advance();
+    });
+    if (rnWalk.wasInterrupted())
+      return failure();
+  }
   auto walk = fn.walk([&](Operation *op) {
     auto code = op->getName().getStringRef();
     if (code != "triton_src.read_owner_matrix" && code != "triton_src.store_column")
@@ -54,6 +69,14 @@ struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
           op->hasAttr("block.pair_axis") &&
           op->getAttrOfType<IntegerAttr>("block.owner_tile").getInt() < 16)
         op->setAttr("triton_src.matrix_rows", Builder(&getContext()).getI64IntegerAttr(16));
+      if (op->getName().getStringRef() == "block.owner_space" &&
+          op->hasAttr("block.column_prefixes")) {
+        Builder b(&getContext());
+        op->walk([&](Operation *inner) {
+          if (isa<arith::AddFOp, arith::SubFOp, math::SqrtOp>(inner))
+            inner->setAttr("triton_src.round_nearest", b.getUnitAttr());
+        });
+      }
     });
     getOperation().walk<WalkOrder::PostOrder>([](Operation *op) {
       if (op->getName().getDialectNamespace() != "block")

@@ -4,6 +4,7 @@
 #include "../capabilities/Index.h"
 #include "intentdsl/levels/execution/block/ir/ScaleDispatch.h"
 #include "compilerinfra/Assembly.h"
+#include "intentdsl/levels/algorithm/kir/ir/KeyReduction.h"
 #include "intentdsl/levels/algorithm/kir/ir/ProjectedLayout.h"
 #include "intentdsl/levels/execution/block/decisions/Verify.h"
 #include "intentdsl/levels/execution/block/ir/Access.h"
@@ -11,6 +12,7 @@
 #include "intentdsl/levels/execution/block/ir/Owners.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Pass/Pass.h"
+#include <set>
 
 #include "Dialect.h.inc"
 namespace CI_UNIT_NAMESPACE {
@@ -150,27 +152,125 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
       if(!value || value->getName().getStringRef()!="ct_src.key_counts" || !value->hasOneUse())return;
       if(value->getAttrOfType<StringAttr>("bin_mode")!="global-atomic")return;
       OpBuilder b(store);
-      auto span=value->getAttrOfType<IntegerAttr>("span").getInt();
-      int64_t step=std::min<int64_t>(2048,uint64_t(span)&-uint64_t(span));
-      OperationState s(store->getLoc(),"ct_src.private_bin_store");
-      auto axes=store->getAttrOfType<DenseI64ArrayAttr>("block.member_axes");
-      s.addAttribute("transposed",b.getBoolAttr(axes && axes[0]==1));
-      s.addAttribute("source_step",b.getI64IntegerAttr(step));
-      s.addOperands(value->getOperand(0));s.addOperands(store->getOperand(0));s.addOperands(value->getOperands().drop_front());
-      s.addAttributes(value->getAttrs());s.addRegion();
-      auto *guard=b.create(s);b.createBlock(&guard->getRegion(0));
-      b.create(OperationState(store->getLoc(),"ct_src.zero_bins"));
-      OperationState panels(store->getLoc(),"ct_src.bin_panels");panels.addRegion();
-      auto *body=b.createBlock(&b.create(panels)->getRegion(0),{},b.getIndexType(),{store->getLoc()});
-      OperationState read(store->getLoc(),"ct_src.read_bin_keys");
-      read.addOperands(body->getArgument(0));read.addTypes(RankedTensorType::get({step},cast<MemRefType>(value->getOperand(0).getType()).getElementType()));
-      auto raw=b.create(read)->getResult(0);
-      auto type=cast<RankedTensorType>(raw.getType());
-      OperationState convert(store->getLoc(),"ct_src.bin_index");
-      convert.addOperands(raw);convert.addTypes(type.clone(type.getElementType().isInteger(64)?b.getI64Type():b.getI32Type()));
-      auto keys=b.create(convert)->getResult(0);
-      OperationState update(store->getLoc(),"ct_src.atomic_bins"); update.addOperands({body->getArgument(0),keys});b.create(update);
-      store->erase();value->erase();
+      Location loc = store->getLoc();
+      auto extent = value->getAttrOfType<IntegerAttr>("extent").getInt();
+      auto span = value->getAttrOfType<IntegerAttr>("span").getInt();
+      int64_t step = std::min<int64_t>(2048, uint64_t(span) & -uint64_t(span));
+      int64_t panels = span / step;
+      auto axes = store->getAttrOfType<DenseI64ArrayAttr>("block.member_axes");
+      bool swap = axes && axes[0] == 1;
+      Value src = value->getOperand(0), dst = store->getOperand(0);
+      auto cInt = [&](int64_t v, Type ty) -> Value {
+        OperationState cs(loc, "ct_src.constant");
+        cs.addAttribute("value", b.getIntegerAttr(ty, v));
+        cs.addTypes(ty);
+        return b.create(cs)->getResult(0);
+      };
+      auto rowMap = [&](StringRef kind, ValueRange args, Type resTy) -> Value {
+        OperationState ms(loc, "ct_src.map");
+        ms.addOperands(args);
+        ms.addAttribute("kind", b.getStringAttr(kind));
+        ms.addTypes(resTy);
+        return b.create(ms)->getResult(0);
+      };
+      OperationState dimSt(loc, "ct_src.array_dim");
+      dimSt.addOperands(dst);
+      dimSt.addAttribute("axis", b.getI64IntegerAttr(swap ? 0 : 1));
+      dimSt.addTypes(b.getI64Type());
+      Value bins = b.create(dimSt)->getResult(0);
+      Value c0 = cInt(0, b.getI64Type());
+      Value hasBins = rowMap("lt", {c0, bins}, b.getI1Type());
+
+      OperationState s(loc, "ct_src.private_bin_store");
+      s.addAttribute("transposed", b.getBoolAttr(swap));
+      s.addAttribute("source_step", b.getI64IntegerAttr(step));
+      s.addOperands(src);
+      s.addOperands(dst);
+      s.addOperands(value->getOperands().drop_front());
+      s.addOperands(hasBins);
+      s.addAttributes(value->getAttrs());
+      s.addRegion();
+      auto *guard = b.create(s);
+      b.setInsertionPointToStart(b.createBlock(&guard->getRegion(0)));
+
+      OperationState zb(loc, "ct_src.zero_bins");
+      zb.addOperands(dst);
+      zb.addAttribute("transposed", b.getBoolAttr(swap));
+      b.create(zb);
+
+      OperationState pidSt(loc, "ct_src.tile_pid");
+      pidSt.addAttribute("axis", b.getI64IntegerAttr(0));
+      pidSt.addTypes(b.getI64Type());
+      Value pid = b.create(pidSt)->getResult(0);
+      Value cPanels = cInt(panels, b.getI64Type());
+      Value cSpan = cInt(span, b.getI64Type());
+      Value cExt = cInt(extent, b.getI64Type());
+      Value cStep = cInt(step, b.getI64Type());
+      Value limit;
+      if (extent % span == 0) {
+        limit = cInt(panels, b.getI32Type());
+      } else {
+        Value partBase = rowMap("mul", {pid, cSpan}, b.getI64Type());
+        Value rem = rowMap("sub", {cExt, partBase}, b.getI64Type());
+        Value remPanels = rowMap("ceildiv", {rem, cStep}, b.getI64Type());
+        Value clamped = rowMap("min", {cPanels, remPanels}, b.getI64Type());
+        limit = rowMap("i32", {clamped}, b.getI32Type());
+      }
+
+      OperationState panelsSt(loc, "ct_src.bin_panels");
+      panelsSt.addOperands(limit);
+      panelsSt.addRegion();
+      auto *panelsOp = b.create(panelsSt);
+      auto *body = b.createBlock(&panelsOp->getRegion(0), {}, b.getI32Type(),
+                                 {loc});
+      b.setInsertionPointToStart(body);
+      Value iv = body->getArgument(0);
+      Value iv64 = rowMap("i64", {iv}, b.getI64Type());
+      Value panelBase = rowMap("mul", {pid, cPanels}, b.getI64Type());
+      Value panelIdx = rowMap("add", {panelBase, iv64}, b.getI64Type());
+
+      Type srcElemTy = cast<MemRefType>(src.getType()).getElementType();
+      OperationState read(loc, "ct_src.read_bin_keys");
+      read.addOperands({src, panelIdx});
+      read.addTypes(RankedTensorType::get({step}, srcElemTy));
+      Value raw = b.create(read)->getResult(0);
+      Type keyElemTy = srcElemTy.isInteger(64) ? b.getI64Type() : b.getI32Type();
+      auto keyVecTy = RankedTensorType::get({step}, keyElemTy);
+      auto i64VecTy = RankedTensorType::get({step}, b.getI64Type());
+      auto i32VecTy = RankedTensorType::get({step}, b.getI32Type());
+      auto i1VecTy = RankedTensorType::get({step}, b.getI1Type());
+      OperationState convert(loc, "ct_src.bin_index");
+      convert.addOperands(raw);
+      convert.addTypes(keyVecTy);
+      Value keys = b.create(convert)->getResult(0);
+
+      Value partOff = rowMap("mul", {pid, cSpan}, b.getI64Type());
+      Value stepOff = rowMap("mul", {iv64, cStep}, b.getI64Type());
+      Value basePos = rowMap("add", {partOff, stepOff}, b.getI64Type());
+      OperationState rangeSt(loc, "ct_src.range");
+      rangeSt.addAttribute("size", b.getI64IntegerAttr(step));
+      rangeSt.addTypes(i64VecTy);
+      Value lanes = b.create(rangeSt)->getResult(0);
+      Value pos = rowMap("add", {basePos, lanes}, i64VecTy);
+      Value inExtent = rowMap("lt", {pos, cExt}, i1VecTy);
+      Value cZeroKey = cInt(0, keyElemTy);
+      Value ge0 = rowMap("ge", {keys, cZeroKey}, i1VecTy);
+      Value binsKey =
+          keyElemTy.isInteger(64) ? bins : rowMap("i32", {bins}, b.getI32Type());
+      Value ltBins = rowMap("lt", {keys, binsKey}, i1VecTy);
+      Value inBins = rowMap("and", {ge0, ltBins}, i1VecTy);
+      Value valid = rowMap("and", {inExtent, inBins}, i1VecTy);
+      Value safeKey = rowMap("select", {valid, keys, cZeroKey}, keyVecTy);
+      Value inc = rowMap("i32", {valid}, i32VecTy);
+
+      OperationState update(loc, "ct_src.atomic_bins");
+      update.addOperands({dst, safeKey, inc});
+      update.addAttribute("transposed", b.getBoolAttr(swap));
+      update.addAttribute("scope", b.getStringAttr("workgroup"));
+      b.create(update);
+
+      store->erase();
+      value->erase();
     });
     partitionOwners(fn,facts);
   }
@@ -178,7 +278,8 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
 struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(Signature)
   unsigned bits;
-  explicit Signature(unsigned bits) : bits(bits) {}
+  TargetProfile profile;
+  Signature(unsigned bits, const TargetProfile &p) : bits(bits), profile(p) {}
   void runOnOperation() final {
     auto fn = *getOperation().getOps<func::FuncOp>().begin();
     Builder b(&getContext());
@@ -211,9 +312,25 @@ struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
       auto id=llvm::StringSwitch<StringRef>(n).Case("summary_reduce","moments-reduction").Case("summary_merge","moments-merge").Case("uniform","random")
         .Case("scan_sum","inclusive-scan").Case("reduce","native-row-reduce").Default("");
       if(!id.empty())op->setAttr("ci.implementation",b.getStringAttr(("exits/cutile::"+id).str()));
-      if(n=="summary_reduce" || n=="summary_merge")fn->setAttr("ct_src.has_summary_reduce",b.getUnitAttr());
-      if(n=="uniform")fn->setAttr("ct_src.has_uniform",b.getUnitAttr());
     });
+    std::set<std::string> seenResources;
+    SmallVector<std::string> runtimeImpls;
+    fn.walk([&](Operation *op) {
+      if (auto attr = op->getAttrOfType<StringAttr>("ci.implementation")) {
+        auto key = attr.getValue().str();
+        auto it = profile.implementations.find(key);
+        if (it != profile.implementations.end() &&
+            it->second.source == ImplementationSource::Runtime &&
+            seenResources.insert(it->second.resource).second)
+          runtimeImpls.push_back(key);
+      }
+    });
+    OpBuilder mb(fn);
+    for (auto &impl : runtimeImpls) {
+      OperationState st(fn.getLoc(), "ct_src.runtime_source");
+      st.addAttribute("implementation", mb.getStringAttr(impl));
+      mb.create(st);
+    }
     SmallVector<char> data;llvm::raw_svector_ostream os(data);
     if(auto err=describeArtifact(getOperation(),os)){fn.emitError()<<llvm::toString(std::move(err));signalPassFailure();return;}
     getOperation()->setAttr("ct_src.package",b.getStringAttr(os.str()));
@@ -221,13 +338,50 @@ struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
 };
 LogicalResult verify(ModuleOp module, const TargetProfile &profile,
                      bool callable) {
-  auto matrix=*module.getOps<func::FuncOp>().begin();
-  auto arrayCap=profile.services.get<intentdsl::cutile::ArrayIndices>();
-  if(!arrayCap || matrix->hasAttr("ct_src.tma")!=arrayCap->permitTma)return matrix.emitError("invalid array transfer capability");
-  if(callable){
+  auto funcs = module.getOps<func::FuncOp>();
+  if (!llvm::hasSingleElement(funcs))
+    return failure();
+  auto matrix=*funcs.begin();
+  if (matrix.empty() || matrix.front().empty())
+    return failure();
+  if (!callable) {
+    if (!llvm::hasSingleElement(module.getBody()->getOperations()))
+      return failure();
+  } else {
     auto attached=module->getAttrOfType<StringAttr>("ct_src.package");
     if(!attached)return matrix.emitError("missing cuTile callable package");
+    if (&module.getBody()->back() != matrix.getOperation())
+      return matrix.emitError("expected function after runtime_source declarations");
+    std::set<std::string> declaredResources;
+    for (auto &top : module.getBody()->without_terminator()) {
+      if (&top == matrix.getOperation())
+        break;
+      if (top.getName().getStringRef() != "ct_src.runtime_source")
+        return top.emitError("unexpected module-level operation");
+      auto impl = top.getAttrOfType<StringAttr>("implementation");
+      if (!impl)
+        return top.emitError("missing runtime_source implementation");
+      if (auto err = profile.checkImplementation(impl.getValue()))
+        return top.emitError() << llvm::toString(std::move(err));
+      auto &c = profile.implementations.at(impl.getValue().str());
+      if (c.source != ImplementationSource::Runtime ||
+          !declaredResources.insert(c.resource).second)
+        return top.emitError("invalid or duplicate runtime_source");
+    }
+    std::set<std::string> usedResources;
+    matrix.walk([&](Operation *op) {
+      if (auto attr = op->getAttrOfType<StringAttr>("ci.implementation")) {
+        auto it = profile.implementations.find(attr.getValue().str());
+        if (it != profile.implementations.end() &&
+            it->second.source == ImplementationSource::Runtime)
+          usedResources.insert(it->second.resource);
+      }
+    });
+    if (declaredResources != usedResources)
+      return matrix.emitError("runtime_source declarations disagree with bound operations");
   }
+  auto arrayCap=profile.services.get<intentdsl::cutile::ArrayIndices>();
+  if(!arrayCap || matrix->hasAttr("ct_src.tma")!=arrayCap->permitTma)return matrix.emitError("invalid array transfer capability");
   if(matrix.front().front().getName().getStringRef()=="ct_src.tile_program"){
     if(!callable || failed(verifyArrayGeometry(matrix,profile)))return failure();
     return intentdsl::block::verifyTileProgram(matrix,profile,[](Operation &){return false;});
@@ -363,13 +517,22 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
         (o->getInteger("occupancy") != 1 && o->getInteger("occupancy") != 2))
       return fn.emitError("invalid native hints for row");
   }
-  if(callable && failed(intentdsl::block::verifyRowProgram(fn,"ct_src","ct_src.has_summary_reduce")))return failure();
+  if(callable && failed(intentdsl::block::verifyRowProgram(fn,"ct_src")))return failure();
   auto res = module.walk([&](Operation *op) {
     if(callable && isa<arith::ConstantOp,arith::IndexCastOp,scf::ForOp,scf::YieldOp>(op))return WalkResult::advance();
-    if (op == module || op->getName().getDialectNamespace() == "func")
+    if (op == module || op->getName().getDialectNamespace() == "func" ||
+        (callable && op->getName().getStringRef() == "ct_src.runtime_source"))
       return WalkResult::advance();
     auto n = op->getName().stripDialect();
     bool ok = op->getName().getDialectNamespace() == "ct_src";
+    if (ok && n == "array_dim") {
+      auto arr = dyn_cast<BlockArgument>(op->getOperand(0));
+      auto ax = op->getAttrOfType<IntegerAttr>("axis");
+      ok = arr && arr.getOwner() == &fn.front() && isa<MemRefType>(arr.getType()) &&
+           ax && ax.getInt() >= 0 && ax.getInt() < cast<MemRefType>(arr.getType()).getRank();
+      if (!ok)
+        return op->emitError("invalid array_dim operand or axis"), WalkResult::interrupt();
+    }
     if (ok && (n=="zero_bins" || n=="bin_panels" || n=="read_bin_keys" || n=="bin_index" || n=="atomic_bins")) {
       auto parent=op->getParentOp();
       StringRef required=n=="zero_bins" || n=="bin_panels"?"ct_src.private_bin_store":"ct_src.bin_panels";
@@ -379,6 +542,32 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
     if(ok && n=="private_bin_store"){
       auto src=dyn_cast<BlockArgument>(op->getOperand(0)),dst=dyn_cast<BlockArgument>(op->getOperand(1));
       auto *mask=op->getOperand(4).getDefiningOp();
+      auto actualExtent = intentdsl::kir::keyExtent(
+          op, *profile.services.get<intentdsl::CallFacts>());
+      if (!actualExtent ||
+          op->getAttrOfType<IntegerAttr>("extent").getInt() != *actualExtent)
+        return op->emitError(
+                   "private_bin_store extent disagrees with source view"),
+               WalkResult::interrupt();
+      int64_t extentVal = *actualExtent;
+      int64_t spanVal = op->getAttrOfType<IntegerAttr>("span").getInt();
+      bool swapVal = op->getAttrOfType<BoolAttr>("transposed").getValue();
+      auto isMap = [](Value v, StringRef kind) -> Operation * {
+        auto *d = v.getDefiningOp();
+        return d && d->getName().getStringRef() == "ct_src.map" &&
+                       d->getAttrOfType<StringAttr>("kind") == kind
+                   ? d
+                   : nullptr;
+      };
+      auto isConst = [](Value v, int64_t expected) -> bool {
+        auto *d = v.getDefiningOp();
+        if (!d || d->getName().getStringRef() != "ct_src.constant")
+          return false;
+        auto a = d->getAttrOfType<IntegerAttr>("value");
+        return a && a.getValue().getSExtValue() == expected;
+      };
+      auto *nonEmpty = isMap(op->getOperand(5), "lt");
+      auto *binsDef = nonEmpty ? nonEmpty->getOperand(1).getDefiningOp() : nullptr;
       ok=src && dst && src.getOwner()==&fn.front() && dst.getOwner()==&fn.front() &&
          op->getAttrOfType<StringAttr>("bin_mode")=="global-atomic" &&
          (*slots)[src.getArgNumber()].getAsObject()->getString("direction")=="In" &&
@@ -386,25 +575,68 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
          cast<MemRefType>(src.getType()).getRank()==1 && cast<MemRefType>(dst.getType()).getRank()==2 &&
          cast<MemRefType>(dst.getType()).getElementType().isInteger(32) && mask && mask->getName().stripDialect()=="active" &&
          mask->getOperand(1)==op->getOperand(2) && mask->getOperand(2)==op->getOperand(3) &&
-         op->getAttrOfType<IntegerAttr>("span").getInt()>0 && fn->getAttrOfType<StringAttr>("block.topology")=="resident" &&
+         nonEmpty && isConst(nonEmpty->getOperand(0), 0) && binsDef &&
+         binsDef->getName().getStringRef() == "ct_src.array_dim" &&
+         binsDef->getOperand(0) == dst &&
+         binsDef->getAttrOfType<IntegerAttr>("axis").getInt() == (swapVal ? 0 : 1) &&
+         spanVal>0 && fn->getAttrOfType<StringAttr>("block.topology")=="resident" &&
          llvm::all_of(fn->getAttrOfType<ArrayAttr>("block.configs"),[](Attribute row){return cast<DictionaryAttr>(row).getAs<IntegerAttr>("rows").getInt()==1;});
       auto step=op->getAttrOfType<IntegerAttr>("source_step");
-      if(!llvm::hasSingleElement(op->getRegion(0)))return WalkResult::interrupt();
+      if(!step || step.getInt()<=0 || step.getInt()>2048 || !llvm::isPowerOf2_64(step.getInt()) || spanVal%step.getInt()!=0 || !llvm::hasSingleElement(op->getRegion(0)))
+        return op->emitError("invalid private_bin_store step or region"),WalkResult::interrupt();
+      int64_t stepVal = step.getInt(), panelsVal = spanVal / stepVal;
       auto &guard=op->getRegion(0).front();
-      if(guard.getOperations().size()!=2 || guard.front().getName().getStringRef()!="ct_src.zero_bins" ||
-         guard.back().getName().getStringRef()!="ct_src.bin_panels" || !llvm::hasSingleElement(guard.back().getRegion(0)))
+      if(guard.empty() || guard.front().getName().getStringRef()!="ct_src.zero_bins" ||
+         guard.front().getOperand(0)!=dst ||
+         guard.front().getAttrOfType<BoolAttr>("transposed").getValue()!=swapVal ||
+         guard.back().getName().getStringRef()!="ct_src.bin_panels" ||
+         !llvm::hasSingleElement(guard.back().getRegion(0)))
         return op->emitError("expected guarded zero then count panels"),WalkResult::interrupt();
+      Value limitVal = guard.back().getOperand(0);
+      bool limitOk = false;
+      if (extentVal % spanVal == 0) {
+        limitOk = isConst(limitVal, panelsVal);
+      } else if (auto *toI32 = isMap(limitVal, "i32")) {
+        if (auto *mn = isMap(toI32->getOperand(0), "min"))
+          if (isConst(mn->getOperand(0), panelsVal))
+            if (auto *cd = isMap(mn->getOperand(1), "ceildiv"))
+              if (isConst(cd->getOperand(1), stepVal))
+                if (auto *sb = isMap(cd->getOperand(0), "sub"))
+                  if (isConst(sb->getOperand(0), extentVal))
+                    if (auto *ml = isMap(sb->getOperand(1), "mul"))
+                      limitOk = ml->getOperand(0).getDefiningOp() &&
+                                ml->getOperand(0).getDefiningOp()->getName().getStringRef() == "ct_src.tile_pid" &&
+                                isConst(ml->getOperand(1), spanVal);
+      }
+      if (!limitOk)
+        return guard.back().emitError("bin_panels upper bound disagrees with partition geometry"), WalkResult::interrupt();
       auto &loop=guard.back().getRegion(0).front();
-      if(!step || loop.getNumArguments()!=1 || !loop.getArgument(0).getType().isIndex() || loop.getOperations().size()!=3 ||
-         loop.front().getName().getStringRef()!="ct_src.read_bin_keys" || loop.back().getName().getStringRef()!="ct_src.atomic_bins" ||
-         loop.front().getOperand(0)!=loop.getArgument(0) || loop.back().getOperand(0)!=loop.getArgument(0) ||
-         loop.front().getNextNode()->getName().getStringRef()!="ct_src.bin_index" ||
-         loop.front().getNextNode()->getOperand(0)!=loop.front().getResult(0) ||
-         loop.back().getOperand(1)!=loop.front().getNextNode()->getResult(0) || !src ||
-         loop.back().getOperand(1).getType()!=RankedTensorType::get({step.getInt()},cast<MemRefType>(src.getType()).getElementType().isInteger(64)?IntegerType::get(fn.getContext(),64):IntegerType::get(fn.getContext(),32)) ||
-         loop.front().getResult(0).getType()!=RankedTensorType::get({step.getInt()},cast<MemRefType>(src.getType()).getElementType()))
+      Operation *readOp = nullptr, *convOp = nullptr, *atomOp = &loop.back();
+      for (auto &inst : loop) {
+        if (inst.getName().getStringRef() == "ct_src.read_bin_keys")
+          readOp = &inst;
+        else if (inst.getName().getStringRef() == "ct_src.bin_index")
+          convOp = &inst;
+      }
+      if(loop.getNumArguments()!=1 || !loop.getArgument(0).getType().isInteger(32) ||
+         !readOp || !convOp || atomOp->getName().getStringRef()!="ct_src.atomic_bins" ||
+         readOp->getOperand(0)!=src || convOp->getOperand(0)!=readOp->getResult(0) ||
+         atomOp->getOperand(0)!=dst ||
+         atomOp->getAttrOfType<BoolAttr>("transposed").getValue()!=swapVal ||
+         atomOp->getAttrOfType<StringAttr>("scope")!="workgroup" || !src ||
+         convOp->getResult(0).getType()!=RankedTensorType::get({stepVal},cast<MemRefType>(src.getType()).getElementType().isInteger(64)?IntegerType::get(fn.getContext(),64):IntegerType::get(fn.getContext(),32)) ||
+         readOp->getResult(0).getType()!=RankedTensorType::get({stepVal},cast<MemRefType>(src.getType()).getElementType()))
         return op->emitError("invalid count panel or atomic update"),WalkResult::interrupt();
-      ok=ok && step && step.getInt()>0 && step.getInt()<=2048 && llvm::isPowerOf2_64(step.getInt()) && op->getAttrOfType<IntegerAttr>("span").getInt()%step.getInt()==0;
+      auto *sel = isMap(atomOp->getOperand(1), "select");
+      auto *incCast = isMap(atomOp->getOperand(2), "i32");
+      auto *validOp = (sel && incCast && sel->getOperand(0) == incCast->getOperand(0))
+                          ? isMap(sel->getOperand(0), "and")
+                          : nullptr;
+      auto *inExtOp = validOp ? isMap(validOp->getOperand(0), "lt") : nullptr;
+      auto *inBinsOp = validOp ? isMap(validOp->getOperand(1), "and") : nullptr;
+      if (!sel || sel->getOperand(1) != convOp->getResult(0) || !isConst(sel->getOperand(2), 0) ||
+          !inExtOp || !isConst(inExtOp->getOperand(1), extentVal) || !inBinsOp)
+        return atomOp->emitError("atomic_bins requires verified extent and bin range masks"), WalkResult::interrupt();
     }
     if(ok && (n=="gather_slab" || n=="scatter_slab"))
       ok=op->hasAttr("ct_src.rectangular")==rectangularSlab(op,fn);
@@ -469,7 +701,7 @@ void bind(Unit &unit) {
               if (!indices)
                 return llvm::createStringError(
                     "cuTile needs bound device options");
-              pm.addPass(std::make_unique<Signature>(indices->bits));
+              pm.addPass(std::make_unique<Signature>(indices->bits, p));
             } else {
               auto indices = p.services.get<intentdsl::cutile::ArrayIndices>();
               if (!indices)

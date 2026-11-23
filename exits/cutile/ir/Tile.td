@@ -87,14 +87,15 @@ def TileSource_SumColumns : Op<TileSource,"sum_columns"> {
   let arguments=(ins AnyMemRef:$source,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active,I64Attr:$extent);let results=(outs I32Tensor:$counts);
 }
 def TileSource_PrivateBinStore : Op<TileSource,"private_bin_store",[SingleBlock,NoTerminator]> {
-  let arguments=(ins AnyMemRef:$keys,AnyMemRef:$dest,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active,I64Attr:$extent,I64Attr:$span,I64Attr:$source_step,BoolAttr:$transposed);
+  let arguments=(ins AnyMemRef:$keys,AnyMemRef:$dest,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active,I1:$non_empty,I64Attr:$extent,I64Attr:$span,I64Attr:$source_step,BoolAttr:$transposed);
   let regions=(region AnyRegion:$body);
 }
-def ZeroBins : Op<TileSource,"zero_bins",[MemoryEffects<[MemWrite]>]>;
-def BinPanels : Op<TileSource,"bin_panels",[SingleBlock,NoTerminator]> {let regions=(region AnyRegion:$body);}
-def ReadBinKeys : Op<TileSource,"read_bin_keys",[MemoryEffects<[MemRead]>]> {let arguments=(ins Index:$panel);let results=(outs AnyRankedTensor:$keys);}
+def ArrayDim : Inst<"array_dim",(ins AnyMemRef:$array,I64Attr:$axis),(outs I64:$size),[Pure]>;
+def ZeroBins : Op<TileSource,"zero_bins",[MemoryEffects<[MemWrite]>]> {let arguments=(ins AnyMemRef:$dest,BoolAttr:$transposed);}
+def BinPanels : Op<TileSource,"bin_panels",[SingleBlock,NoTerminator]> {let arguments=(ins I32:$limit);let regions=(region AnyRegion:$body);}
+def ReadBinKeys : Op<TileSource,"read_bin_keys",[MemoryEffects<[MemRead]>]> {let arguments=(ins AnyMemRef:$source,I64:$panel);let results=(outs AnyRankedTensor:$keys);}
 def BinIndex : Op<TileSource,"bin_index",[Pure]> {let arguments=(ins AnyRankedTensor:$raw);let results=(outs AnyRankedTensor:$key);}
-def AtomicBins : Op<TileSource,"atomic_bins",[MemoryEffects<[MemRead,MemWrite]>]> {let arguments=(ins Index:$panel,AnyRankedTensor:$keys);}
+def AtomicBins : Op<TileSource,"atomic_bins",[MemoryEffects<[MemRead,MemWrite]>]> {let arguments=(ins AnyMemRef:$dest,AnyRankedTensor:$keys,I32Tensor:$increment,BoolAttr:$transposed,StrAttr:$scope);}
 def TileSource_Different : Op<TileSource,"ne"> {let arguments=(ins AnyType:$lhs,AnyType:$rhs);let results=(outs AnyTensor:$mask);}
 def TileSource_ColumnsTile : Op<TileSource,"member_tile"> {let arguments=(ins AnyTensor:$columns,I1Tensor:$active);let results=(outs I32Tensor:$members);}
 def TileSource_ScatterFragment : Op<TileSource,"scatter_fragment"> {let arguments=(ins AnyMemRef:$output,AnyMemRef:$counts,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active,I1Tensor:$predicate,I32Tensor:$prefix,I32Tensor:$values,I32Attr:$fill);}
@@ -129,4 +130,5 @@ def ArrayReshape : Inst<"reshape",(ins AnyRankedTensor:$value),(outs AnyRankedTe
 def ArrayTranspose : Inst<"transpose",(ins AnyRankedTensor:$value),(outs AnyRankedTensor:$result),[Pure]>;
 def ExpandScale : Inst<"expand_scale",(ins AnyRankedTensor:$value,I64Attr:$axis),(outs AnyRankedTensor:$result),[Pure]>;
 include "intentdsl/levels/execution/block/ir/RowInstructions.td"
+def RuntimeSource : Op<TileSource,"runtime_source"> {let arguments=(ins StrAttr:$implementation);}
 def RectWrite : Op<TileSource,"rect_write",[MemoryEffects<[MemWrite]>]> {let arguments=(ins AnyMemRef:$base, AnyRankedTensor:$value, Variadic<I64>:$indices);}

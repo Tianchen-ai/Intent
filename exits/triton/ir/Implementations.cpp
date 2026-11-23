@@ -47,14 +47,15 @@ void tileContracts(Unit &unit) {
         {"bin_count", "histogram", "tl.histogram"},
         {"reduce", "native-row-reduce", "tl.sum/tl.max"},
         {"scan_sum", "inclusive-scan", "tl.cumsum"},
-        {"summary_reduce", "moments-reduction", "tl.reduce"}}) {
+        {"summary_reduce", "moments-reduction", "tl.reduce"},
+        {"summary_merge", "moments-merge", "merge_moments"}}) {
     ImplementationContract c;
     c.operation = "triton_src." + std::string(op);
     c.name = name;
     c.symbol = symbol;
     c.source = ImplementationSource::Builtin;
     c.minimum = Reuse::Native;
-    if (c.name == "moments-reduction") {
+    if (c.name == "moments-reduction" || c.name == "moments-merge") {
       c.source = ImplementationSource::Runtime;
       c.symbol = "merge_moments";
       c.resource = "runtime/triton/kernels/moments.py";
@@ -73,6 +74,16 @@ void tileContracts(Unit &unit) {
       return llvm::Error::success();
     };
     c.verify = [](Operation *o) {
+      if (o->getName().stripDialect() == "summary_merge") {
+        auto tuple = dyn_cast<TupleType>(o->getOperand(0).getType());
+        if (!tuple || tuple.size() != 3 ||
+            tuple != o->getOperand(1).getType() ||
+            tuple != o->getResult(0).getType())
+          return failure();
+        return success(getElementTypeOrSelf(tuple.getType(0)).isInteger(32) &&
+                       getElementTypeOrSelf(tuple.getType(1)).isF32() &&
+                       tuple.getType(1) == tuple.getType(2));
+      }
       if (!isa<RankedTensorType>(o->getOperand(0).getType()))
         return failure();
       if (o->getName().stripDialect() == "axis_reduce") {

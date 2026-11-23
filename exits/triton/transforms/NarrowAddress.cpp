@@ -1,6 +1,7 @@
 #include "compilerinfra/Assembly.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/TypeUtilities.h"
 #include "mlir/Pass/Pass.h"
 #include <limits>
 
@@ -16,8 +17,26 @@ Range i32(__int128 lo, __int128 hi) {
     return {};
   return Interval{int64_t(lo), int64_t(hi)};
 }
-// Only static operations for which all lanes have a proved signed range.
-// Unknown launch ids, ABI values and loaded indices keep full-width arithmetic.
+Range fitSigned(__int128 lo, __int128 hi, Type t) {
+  Type elem = getElementTypeOrSelf(t);
+  unsigned bits = 0;
+  if (elem.isIndex())
+    bits = 64;
+  else if (auto it = dyn_cast<IntegerType>(elem); it && it.isSignless())
+    bits = it.getWidth();
+  if (bits == 0 || bits > 64 || lo > hi)
+    return {};
+  __int128 minVal = INT32_MIN, maxVal = INT32_MAX;
+  if (bits < 32) {
+    minVal = -(static_cast<__int128>(1) << (bits - 1));
+    maxVal = (static_cast<__int128>(1) << (bits - 1)) - 1;
+  }
+  if (lo < minVal || hi > maxVal)
+    return {};
+  return Interval{int64_t(lo), int64_t(hi)};
+}
+// Only static operations for which all lanes have a proved signed range
+// without wraparound in their declared integer width.
 class Bounds {
   llvm::DenseMap<Value, Range> known;
   Range compute(Value v) {
@@ -27,34 +46,45 @@ class Bounds {
         return {};
       auto a = get(loop.getLowerBound()), z = get(loop.getUpperBound()),
            s = get(loop.getStep());
-      if (!a || !z || !s || s->lo <= 0)
+      if (!a || !z || !s || s->lo <= 0 || a->lo >= z->hi)
         return {};
-      return i32(a->lo, z->hi - 1);
+      return fitSigned(a->lo, static_cast<__int128>(z->hi) - 1, v.getType());
     }
     auto *op = v.getDefiningOp();
+    if (!op)
+      return {};
     if (auto c = dyn_cast<arith::ConstantOp>(op)) {
       if (auto attr = dyn_cast<IntegerAttr>(c.getValue()))
-        return i32(attr.getInt(), attr.getInt());
+        return fitSigned(attr.getValue().getSExtValue(),
+                         attr.getValue().getSExtValue(), v.getType());
+      if (auto dense = dyn_cast<DenseIntElementsAttr>(c.getValue());
+          dense && dense.isSplat()) {
+        auto val = dense.getSplatValue<APInt>().getSExtValue();
+        return fitSigned(val, val, v.getType());
+      }
       return {};
     }
     auto n = op->getName().getStringRef();
     if (n == "triton_src.tile_axis")
-      return i32(0, cast<RankedTensorType>(v.getType()).getDimSize(0) - 1);
+      return fitSigned(0, cast<RankedTensorType>(v.getType()).getDimSize(0) - 1,
+                       v.getType());
     if (n == "triton_src.tile_broadcast" ||
-        isa<arith::IndexCastOp, arith::ExtSIOp>(op))
-      return get(op->getOperand(0));
+        isa<arith::IndexCastOp, arith::ExtSIOp>(op)) {
+      auto r = get(op->getOperand(0));
+      return r ? fitSigned(r->lo, r->hi, v.getType()) : Range{};
+    }
     if (!isa<arith::MulIOp, arith::AddIOp, arith::SubIOp>(op))
       return {};
     auto a = get(op->getOperand(0)), b = get(op->getOperand(1));
     if (!a || !b)
       return {};
+    __int128 al = a->lo, ah = a->hi, bl = b->lo, bh = b->hi;
     if (isa<arith::AddIOp>(op))
-      return i32(a->lo + b->lo, a->hi + b->hi);
+      return fitSigned(al + bl, ah + bh, v.getType());
     if (isa<arith::SubIOp>(op))
-      return i32(a->lo - b->hi, a->hi - b->lo);
-    auto extremes = std::minmax(
-        {a->lo * b->lo, a->lo * b->hi, a->hi * b->lo, a->hi * b->hi});
-    return i32(extremes.first, extremes.second);
+      return fitSigned(al - bh, ah - bl, v.getType());
+    auto extremes = std::minmax({al * bl, al * bh, ah * bl, ah * bh});
+    return fitSigned(extremes.first, extremes.second, v.getType());
   }
 
 public:
@@ -79,10 +109,13 @@ bool canNarrowAddress(Operation &op) {
     auto r = bounds.get(v);
     if (!r || stride < INT32_MIN || stride > INT32_MAX)
       return false;
-    auto l = r->lo * stride, h = r->hi * stride;
+    __int128 l = static_cast<__int128>(r->lo) * stride,
+             h = static_cast<__int128>(r->hi) * stride;
     if (l > h)
       std::swap(l, h);
-    auto term = i32(l, h), next = i32(sum.lo + l, sum.hi + h);
+    auto term = i32(l, h),
+         next = i32(static_cast<__int128>(sum.lo) + l,
+                    static_cast<__int128>(sum.hi) + h);
     if (!term || !next)
       return false;
     sum = *next;

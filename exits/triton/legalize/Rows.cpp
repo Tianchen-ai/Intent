@@ -9,6 +9,7 @@ using namespace mlir;
 static StringRef binding(StringRef op) {
   return llvm::StringSwitch<StringRef>(op)
       .Case("triton_src.summary_reduce", "moments-reduction")
+      .Case("triton_src.summary_merge", "moments-merge")
       .Case("triton_src.scan_sum", "inclusive-scan")
       .Case("triton_src.reduce", "native-row-reduce")
       .Default("");
@@ -21,11 +22,7 @@ void lowerRows(func::FuncOp fn) {
       Builder b(op->getContext());
       op->setAttr("ci.implementation",
                   b.getStringAttr(("exits/triton::" + implementation).str()));
-      if (code == "triton_src.summary_reduce")
-        op->getParentOfType<func::FuncOp>()->setAttr("triton_src.moments",
-                                                     b.getUnitAttr());
     }
-    if(code=="triton_src.summary_merge")op->getParentOfType<func::FuncOp>()->setAttr("triton_src.moments",UnitAttr::get(op->getContext()));
     if (code == "triton_src.offsets")
       op->setAttr("index_bits",
                   Builder(op->getContext()).getI32IntegerAttr(64));
@@ -34,7 +31,6 @@ void lowerRows(func::FuncOp fn) {
   });
 }
 LogicalResult verifyDynamicRows(func::FuncOp fn) {
-  return intentdsl::block::verifyRowProgram(fn, "triton_src",
-                                            "triton_src.moments");
+  return intentdsl::block::verifyRowProgram(fn, "triton_src");
 }
 } // namespace CI_UNIT_NAMESPACE

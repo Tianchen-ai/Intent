@@ -176,7 +176,9 @@ llvm::Error row(Operation &op, PrintPoint point, PrintContext &c) {
     e = arg(0) + (n == "add" ? " + " : n == "sub" ? " - " : " * ") + arg(1);
   else if (n == "div")
     e = "tl.div_rn(" + arg(0) + ", " + arg(1) + ")";
-  else if (n == "sqrt" || n == "exp" || n == "rsqrt")
+  else if (n == "sqrt")
+    e = "tl.sqrt_rn(" + arg(0) + ")";
+  else if (n == "exp" || n == "rsqrt")
     e = "tl." + n.str() + "(" + arg(0) + ")";
   else if (n == "cast") {
     auto t = op.getResult(0).getType();
@@ -229,11 +231,15 @@ llvm::Error dynamicTile(Operation &op, PrintPoint point, PrintContext &c) {
   else if (n == "write_at")
     s = "tl.store(" + arg(0) + "+" + arg(1) + "," + arg(2) + ",mask=" + arg(3) +
         ")";
-  else if (n == "fetch_add")
+  else if (n == "fetch_add") {
+    auto scope = op.getAttrOfType<StringAttr>("scope").getValue();
+    if (scope != "workgroup" && scope != "device")
+      return llvm::createStringError("invalid Triton atomic scope " +
+                                     scope.str());
+    std::string targetScope = scope == "workgroup" ? "cta" : "gpu";
     s = "tl.atomic_add(" + arg(0) + "+" + arg(1) + "," + arg(2) +
-        ",mask=" + arg(3) + ",sem='relaxed',scope='" +
-        op.getAttrOfType<StringAttr>("scope").str() + "')";
-  else if (n == "bin_count")
+        ",mask=" + arg(3) + ",sem='relaxed',scope='" + targetScope + "')";
+  } else if (n == "bin_count")
     s = "tl.histogram(" + arg(0) + ",WIDTH)";
   else if (n == "extract_lane")
     s = "tl.reshape(tl.gather(" + arg(0) + ",tl.full((ROWS,WIDTH,1)," + arg(1) +
@@ -254,6 +260,8 @@ llvm::Error dynamicTile(Operation &op, PrintPoint point, PrintContext &c) {
       s = "tl.where(" + arg(0) + "," + arg(1) + "," + arg(2) + ")";
     else if (kind == "ceildiv")
       s = "tl.cdiv(" + arg(0) + "," + arg(1) + ")";
+    else if (kind == "min")
+      s = "tl.minimum(" + arg(0) + "," + arg(1) + ")";
     else if (kind == "add_rn" || kind == "mul_rn")
       s = "libdevice." + kind + "(" + arg(0) + "," + arg(1) + ")";
     else {

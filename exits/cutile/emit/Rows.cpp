@@ -94,58 +94,52 @@ llvm::Error rowRule(Operation &op, PrintPoint at, PrintContext &c) {
     line(result()+" = ct.astype("+arg(0)+(type.isInteger(64)?",ct.int64)":",ct.int32)"));
     return llvm::Error::success();
   }
-  if (code == "private_bin_store" || code == "zero_bins" ||
-      code == "bin_panels" || code == "read_bin_keys" ||
-      code == "atomic_bins") {
-    auto *guard = &op;
-    while (guard->getName().stripDialect() != "private_bin_store")
-      guard = guard->getParentOp();
-    auto dest = c.name(guard->getOperand(1)),
-         src = c.name(guard->getOperand(0));
-    auto extent =
-        std::to_string(guard->getAttrOfType<IntegerAttr>("extent").getInt());
-    auto span =
-        std::to_string(guard->getAttrOfType<IntegerAttr>("span").getInt());
+  if (code == "array_dim") {
+    line(result() + " = " + arg(0) + ".shape[" +
+         std::to_string(op.getAttrOfType<IntegerAttr>("axis").getInt()) + "]");
+    return llvm::Error::success();
+  }
+  if (code == "private_bin_store") {
+    line("if " + arg(5) + ":");
+    ++c.indent;
+    return llvm::Error::success();
+  }
+  if (code == "zero_bins") {
+    bool swap = op.getAttrOfType<BoolAttr>("transposed").getValue();
+    line("ct.store(" + arg(0) +
+         (swap ? ",(0,ct.bid(0)),ct.full((W,1)"
+               : ",(ct.bid(0),0),ct.full((1,W)") +
+         ",0,ct.int32),allow_tma=False)");
+    return llvm::Error::success();
+  }
+  if (code == "bin_panels") {
+    auto step = c.name(op.getRegion(0).front().getArgument(0));
+    line("for " + step + " in range(" + arg(0) + "):");
+    ++c.indent;
+    return llvm::Error::success();
+  }
+  if (code == "read_bin_keys") {
     auto width = std::to_string(
-        guard->getAttrOfType<IntegerAttr>("source_step").getInt());
-    bool swap = guard->getAttrOfType<BoolAttr>("transposed").getValue();
-    auto bins = dest + ".shape[" + std::to_string(swap ? 0 : 1) + "]";
-    if (code == "private_bin_store") {
-      line("if " + bins + " > 0:");
-      ++c.indent;
-    } else if (code == "zero_bins") {
-      line("ct.store(" + dest +
-           (swap ? ",(0,ct.bid(0)),ct.full((W,1)"
-                 : ",(ct.bid(0),0),ct.full((1,W)") +
-           ",0,ct.int32),allow_tma=False)");
-    } else if (code == "bin_panels") {
-      auto step = c.name(op.getRegion(0).front().getArgument(0)),
-           limit = span + "//" + width;
-      if (guard->getAttrOfType<IntegerAttr>("extent").getInt() %
-          guard->getAttrOfType<IntegerAttr>("span").getInt())
-        limit = "ct.astype(ct.minimum(" + limit + ",ct.cdiv(" + extent +
-                "-ct.astype(ct.bid(0),ct.int64)*" + span + "," + width +
-                ")),ct.int32)";
-
-      line("for " + step + " in range(" + limit + "):");
-      ++c.indent;
-    } else if (code == "read_bin_keys") {
-      auto keys = result();
-      line(keys + "=ct.load(" + src + ",(ct.astype(ct.bid(0),ct.int64)*(" +
-           span + "//" + width + ")+" + arg(0) + ",),shape=(" + width +
-           ",),padding_mode=ct.PaddingMode.ZERO,allow_tma=False)");
-    } else {
-      auto pos = "ct.astype(ct.bid(0),ct.int64)*" + span + "+ct.astype(" +
-                 arg(0) + ",ct.int64)*" + width + "+ct.arange(" + width +
-                 ",dtype=ct.int32)";
-      line("valid=(" + pos + "<" + extent + ")&(" + arg(1) + ">=0)&(" + arg(1) +
-           "<" + bins + ")");
-      auto key = "ct.where(valid,"+arg(1)+",0)";
-      line("ct.atomic_add(" + dest +
-           (swap ? ",(" + key + ",ct.bid(0))" : ",(ct.bid(0)," + key + ")") +
-           ",ct.astype(valid,ct.int32),check_bounds=False,memory_order=ct."
-           "MemoryOrder.RELAXED,memory_scope=ct.MemoryScope.BLOCK)");
-    }
+        cast<RankedTensorType>(op.getResult(0).getType()).getDimSize(0));
+    line(result() + " = ct.load(" + arg(0) + ",(" + arg(1) + ",),shape=(" +
+         width + ",),padding_mode=ct.PaddingMode.ZERO,allow_tma=False)");
+    return llvm::Error::success();
+  }
+  if (code == "atomic_bins") {
+    bool swap = op.getAttrOfType<BoolAttr>("transposed").getValue();
+    auto scope = op.getAttrOfType<StringAttr>("scope").getValue();
+    if (scope != "workgroup" && scope != "device")
+      return llvm::createStringError("invalid cuTile atomic scope " +
+                                     scope.str());
+    std::string memScope = scope == "workgroup" ? "ct.MemoryScope.BLOCK"
+                                                : "ct.MemoryScope.DEVICE";
+    line("ct.atomic_add(" + arg(0) +
+         (swap ? ",(" + arg(1) + ",ct.bid(0))"
+               : ",(ct.bid(0)," + arg(1) + ")") +
+         "," + arg(2) +
+         ",check_bounds=False,memory_order=ct.MemoryOrder.RELAXED,"
+         "memory_scope=" +
+         memScope + ")");
     return llvm::Error::success();
   }
   if (code == "dimension") {
@@ -207,6 +201,8 @@ llvm::Error rowRule(Operation &op, PrintPoint at, PrintContext &c) {
              ")";
     else if (kind == "ceildiv")
       expr = "ct.cdiv(" + arg(0) + "," + arg(1) + ")";
+    else if (kind == "min")
+      expr = "ct.minimum(" + arg(0) + "," + arg(1) + ")";
     else if (kind == "add_rn" || kind == "mul_rn")
       expr = "ct." + kind.drop_back(3).str() + "(" + arg(0) + "," + arg(1) +
              ",rounding_mode=ct.RoundingMode.RN)";
@@ -462,6 +458,7 @@ void rowRules(TerminalPrinter &printer) {
                   "unique_put_at",
                   "ne",
                   "member_tile",
+                  "array_dim",
                   "private_bin_store",
                   "zero_bins",
                   "bin_panels",
