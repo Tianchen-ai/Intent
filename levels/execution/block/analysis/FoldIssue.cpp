@@ -135,6 +135,20 @@ static bool sameExtent(Value first,Value second){
   return lhs && rhs && lhs.getSource()==rhs.getSource() && lhs.getConstantIndex() &&
          lhs.getConstantIndex()==rhs.getConstantIndex();
 }
+Value causalPrefixOwner(scf::ForOp loop) {
+  auto branch = loop.getUpperBound().getDefiningOp<scf::IfOp>();
+  if (!branch || !matchPattern(loop.getLowerBound(), m_Zero()) ||
+      branch.getNumResults() != 1 || branch.getElseRegion().empty() ||
+      loop.getUpperBound() != branch.getResult(0))
+    return {};
+  auto cmp = branch.getCondition().getDefiningOp<arith::CmpIOp>();
+  auto next = branch.thenYield().getOperand(0).getDefiningOp<arith::AddIOp>();
+  if (!cmp || cmp.getPredicate() != arith::CmpIPredicate::slt || !next ||
+      next.getLhs() != cmp.getLhs() || !matchPattern(next.getRhs(), m_One()) ||
+      !sameExtent(cmp.getRhs(), branch.elseYield().getOperand(0)))
+    return {};
+  return cmp.getLhs();
+}
 void partitionOwnerFolds(Operation *space,unsigned axis,int64_t rows,int64_t span){
   auto &body=space->getRegion(0).front();
   auto owner=body.getArgument(axis);
@@ -144,15 +158,12 @@ void partitionOwnerFolds(Operation *space,unsigned axis,int64_t rows,int64_t spa
     bool suffix=lo==owner && sharedCoordinate(hi,owner,loop,rows);
     if(suffix)cap=hi;
     else{
-      auto clamped=hi.getDefiningOp<scf::IfOp>();
-      if(!clamped || !matchPattern(lo,m_Zero()))continue;
-      auto cond=clamped.getCondition().getDefiningOp<arith::CmpIOp>();
-      auto next=clamped.thenYield().getOperand(0).getDefiningOp<arith::AddIOp>();
-      cap=clamped.elseYield().getOperand(0);
-      if(!cond || cond.getPredicate()!=arith::CmpIPredicate::slt || cond.getLhs()!=owner ||
-         !sameExtent(cond.getRhs(),cap) || !next || next.getLhs()!=owner || !matchPattern(next.getRhs(),m_One()) ||
-         !sharedCoordinate(cond.getRhs(),owner,loop,rows))continue;
-      cap=cond.getRhs(); // The comparison dominates both new loops.
+      if (causalPrefixOwner(loop) != owner)
+        continue;
+      auto branch = hi.getDefiningOp<scf::IfOp>();
+      cap = branch.getCondition().getDefiningOp<arith::CmpIOp>().getRhs();
+      if (!sharedCoordinate(cap, owner, loop, rows))
+        continue;
     }
     auto loc=loop.getLoc();OpBuilder b(loop);
     Value width=b.create<arith::ConstantIndexOp>(loc,std::max(rows,span));

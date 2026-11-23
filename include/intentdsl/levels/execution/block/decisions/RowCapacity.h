@@ -5,6 +5,7 @@
 
 namespace intentdsl {
 struct RowCapacity {
+  unsigned storeSectorBytes = 0;
   llvm::json::Array bindings;
   llvm::Error bind(const llvm::json::Object &options) {
     const auto *facts=options.getArray("arguments");

@@ -1,3 +1,4 @@
+#include "intentdsl/levels/execution/block/ir/FoldIssue.h"
 #include "intentdsl/levels/execution/block/ir/Owners.h"
 #include "intentdsl/levels/execution/block/ir/ScorePanel.h"
 #include "intentdsl/levels/execution/block/ir/SharedReads.h"
@@ -38,7 +39,69 @@ void orderedCost(Unit &u) {
           double issueGroups = std::ceil(double(w) * lanes / issue);
           double dependency = 1;
           auto span = choice.getAs<mlir::IntegerAttr>("span");
-          double panelBytes = 0;
+          // A slice indexed by the fold induction variable is loaded once per
+          // visited token per tile of owners. Use its actual access dimension,
+          // not the number of tokens in a single issue packet.
+          double sweepBytesPerOwner = 0;
+          for (auto loop :
+               op->getRegion(0).front().getOps<mlir::scf::ForOp>()) {
+            if (!loop->hasAttr("kir.reassociate"))
+              continue;
+            double tokenBytes = 0;
+            int64_t extent = 0;
+            for (auto &inst : loop.getBody()->without_terminator()) {
+              bool slice = inst.getName().stripDialect() == "slice_read";
+              if (!slice && !mlir::isa<mlir::memref::LoadOp>(inst))
+                continue;
+              auto sh = f->shapeOf(inst.getOperand(0));
+              if (!sh)
+                continue;
+              unsigned at = 0;
+              for (mlir::Value index : inst.getOperands().drop_front()) {
+                if (slice &&
+                    at == static_cast<unsigned>(
+                              inst.getAttrOfType<mlir::IntegerAttr>("axis")
+                                  .getInt()))
+                  ++at;
+                if (index == loop.getInductionVar()) {
+                  int64_t depth = 1;
+                  if (slice)
+                    depth = (*sh)[inst.getAttrOfType<mlir::IntegerAttr>("axis")
+                                      .getInt()]
+                                .getAsInteger()
+                                .value_or(1);
+                  tokenBytes +=
+                      depth *
+                      mlir::cast<mlir::MemRefType>(inst.getOperand(0).getType())
+                          .getElementTypeBitWidth() /
+                      8.;
+                  extent =
+                      std::max(extent, (*sh)[at].getAsInteger().value_or(0));
+                }
+                ++at;
+              }
+            }
+            if (!extent)
+              continue;
+            // For a causal one-to-one owner axis the mean prefix or suffix
+            // length is (L+1)/2. Otherwise count the full sweep.
+            double visits = extent;
+            auto iv = mlir::dyn_cast<mlir::BlockArgument>(loop.getLowerBound());
+            if (!iv)
+              iv = mlir::dyn_cast_if_present<mlir::BlockArgument>(
+                  intentdsl::block::causalPrefixOwner(loop));
+            if (iv && iv.getOwner() == loop->getBlock()) {
+              auto axes = op->getAttrOfType<mlir::DenseI64ArrayAttr>("axes");
+              auto sh = f->shapeOf(op->getOperand(iv.getArgNumber()));
+              if (axes && sh &&
+                  (*sh)[axes[iv.getArgNumber()]].getAsInteger() == extent)
+                visits = (extent + 1.) / 2;
+            }
+            sweepBytesPerOwner += visits * tokenBytes;
+          }
+          if (sweepBytesPerOwner)
+            e.terms["sweep_bytes_per_owner"] = {sweepBytesPerOwner, "B"};
+          double panelBytes = sweepBytesPerOwner * n, spillBytes = 0;
           if (span) {
             auto lanesPerPanel = span.getInt() * lanes;
             // Independent contributions issue as a tile. Working sets wider
@@ -52,22 +115,7 @@ void orderedCost(Unit &u) {
               double live = physicalRows * lanes +
                             double(span.getInt()) * lanes +
                             physicalRows * span.getInt();
-              double bytesPerToken = 0;
-              op->walk([&](mlir::Operation *load) {
-                if (load->getName().stripDialect() != "slice_read" ||
-                    !load->getParentOfType<mlir::scf::ForOp>())
-                  return;
-                auto ax = intentdsl::kir::memberAxis(load->getResult(0));
-                bytesPerToken +=
-                    (*f->shapeOf(ax->first))[ax->second]
-                        .getAsInteger()
-                        .value() *
-                    mlir::cast<mlir::ShapedType>(load->getResult(0).getType())
-                        .getElementTypeBitWidth() /
-                    8.;
-              });
-              // The same K/V panel serves every owner row in this block.
-              panelBytes = blocks * span.getInt() * bytesPerToken;
+              panelBytes = blocks * sweepBytesPerOwner;
               dependency =
                   (1. + std::max(0., live / 32768. - 1.)) / span.getInt();
               // Independent matrix updates compete for resident accumulator
@@ -99,6 +147,32 @@ void orderedCost(Unit &u) {
                 projections = std::max<unsigned>(projections, scores.size());
               }
               auto streams = caps->operandGroupRows ? projections : carries;
+              if (sweepBytesPerOwner) {
+                // An operand issue group streams both score products through
+                // the same staging area. Independent accumulator streams
+                // otherwise retain their own pair of fragments.
+                double operandStreams =
+                    caps->operandGroupRows ? 1. : std::max(1u, carries);
+                double slots =
+                    operandStreams * (physicalRows + span.getInt()) * lanes +
+                    std::max(2u, carries) * physicalRows * span.getInt() +
+                    carries * physicalRows * lanes;
+                auto file =
+                    ctx.target.services.facts.find("register_file")
+                        ? intentdsl::quantity(ctx, "register_file", "reg32")
+                        : std::nullopt;
+                double budget = caps->residentRegisters
+                                    ? caps->residentRegisters
+                                    : file.value_or(0) / 2;
+                // Resident matrix A/B operands, two score intermediates,
+                // and each live FP32 accumulator occupy the CTA register file.
+                // Excess live words need a store and reload per issue.
+                double spill = budget ? std::max(0., slots - budget) : 0.;
+                spillBytes =
+                    panelBytes * 8. * spill / (span.getInt() * lanes * 4.);
+                e.terms["live_fragment_words"] = {slots, "reg32"};
+                e.terms["excess_fragment_bytes"] = {spillBytes, "B"};
+              }
               if (streams > 1 && caps->exchangeWidth &&
                   caps->residentRegisters) {
                 auto rowGroup = caps->operandGroupRows ? caps->operandGroupRows
@@ -186,7 +260,10 @@ void orderedCost(Unit &u) {
               *e.timeNs += readCost / *rate;
           if (e.timeNs && panelBytes)
             if (auto rate = intentdsl::quantity(ctx, "read_1", "B/ns"))
-              *e.timeNs += panelBytes / *rate / span.getInt();
+              *e.timeNs += panelBytes / intentdsl::quantity(
+                                            ctx, "read_1_shared_bw", "B/ns")
+                                            .value_or(*rate) +
+                           spillBytes / *rate;
           return e;
         }},
        COMPILERINFRA_SOURCE});

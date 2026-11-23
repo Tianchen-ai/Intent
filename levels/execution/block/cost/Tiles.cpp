@@ -1,6 +1,7 @@
+#include "intentdsl/levels/algorithm/kir/ir/Permutation.h"
 #include "intentdsl/levels/algorithm/kir/ir/Traffic.h"
-#include "llvm/ADT/DenseSet.h"
 #include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
+#include "llvm/ADT/DenseSet.h"
 namespace CI_UNIT_NAMESPACE {
 using namespace compilerinfra;
 using namespace mlir;
@@ -50,6 +51,11 @@ void registerCost(Unit &u) {
           r+=4*m*n*atomics;ws+=4*m*n*atomics;
           r+=keys;
           if(segmentedRead)e.terms["packed_member_reads"]={segmentedRead,"B"};
+          auto capacityFacts =
+              ctx.target.services.get<intentdsl::RowCapacity>();
+          auto sector = capacityFacts ? capacityFacts->storeSectorBytes : 0;
+          const bool permutation =
+              choice.get("walk") && intentdsl::rectangularCopy(op);
           double live=0, peak=0;
           for(auto &i:op->getRegion(0).front()){
             for(auto v:i.getResults()) if(isa<RankedTensorType>(v.getType()) && !v.use_empty())live++;
@@ -128,11 +134,25 @@ void registerCost(Unit &u) {
             if(atomics)v.terms["atomic_updates"]={m*n*atomics,"count"};
             if(keys)v.terms["key_input_bytes"]={keys,"B"};
             if (read && write && strided && stridedRead && launch) {
+              double scatterRate = *strided;
+              if (permutation && sector && ws) {
+                // Adjacent source rows write adjacent destination columns.
+                // Each packet shares a sector up to its physical byte width.
+                double bytes = ws / std::max(1., m * n);
+                double neighbors = std::min(rows, std::max(1., sector / bytes));
+                scatterRate = std::min(*write, *strided * neighbors);
+                v.terms["contiguous_store_neighbors"] = {neighbors, "count"};
+              }
               v.timeNs =
                   *launch +
                   (r / (swapped ? *stridedRead : *read) + w / *write +
-                   ws / *strided) *
-                      (scheduled ? rounds * std::min(capacity, double(f->participants)*2) / scheduled : 0.) * tailCost;
+                   ws / scatterRate) *
+                      (scheduled ? rounds *
+                                       std::min(capacity,
+                                                double(f->participants) * 2) /
+                                       scheduled
+                                 : 0.) *
+                      tailCost;
               if (dmaSetup) {
                 double submission = waves * rectangles * *dmaSetup;
                 v.terms["projected_dma_setup"] = {submission, "ns"};
