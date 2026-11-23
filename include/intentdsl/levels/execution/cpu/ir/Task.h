@@ -7,6 +7,7 @@ struct RowConfig {
 };
 struct RowMachine {
   int64_t vectorBits, workers;
+  unsigned packedOwners = 0;
   llvm::SmallVector<RowConfig> rows;
   bool structuredRows = false;
   bool boundWidening = false;

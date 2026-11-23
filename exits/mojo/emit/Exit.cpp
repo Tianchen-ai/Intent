@@ -27,6 +27,7 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
   if(auto err=intentdsl::bindPerformance(p,options,"",options.getString("calibration").value_or("").str(),*workers))return std::move(err);
   auto caps = std::make_shared<intentdsl::cpu::RowMachine>();
   caps->vectorBits = *bits;
+  caps->packedOwners = 8;
   caps->workers = *workers;
   int64_t v=*bits/32;
   auto matrix=std::make_shared<intentdsl::cpu::MatrixMachine>();

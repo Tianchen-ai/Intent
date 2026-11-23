@@ -1,4 +1,5 @@
 #include "ScoreRows.h"
+#include "intentdsl/levels/execution/cpu/ir/OwnerTraversal.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/execution/cpu/ir/Owners.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -45,8 +46,10 @@ struct OwnerLoop {
           "+" + name(j) + "*" + std::to_string(axis(v, "cpu.strides", i));
     return name(v) + "[unsafe_offset=" + address + "]";
   }
-  llvm::Error body(Block &bb, unsigned depth) {
+  llvm::Error body(Block &bb, unsigned depth, Operation *only = nullptr) {
     for (auto &op : bb) {
+      if (only && &op != only)
+        continue;
       auto id = fresh();
       auto n = op.getName().getStringRef();
       if (n == "scf.yield" || op.getName().stripDialect() == "end")
@@ -228,6 +231,7 @@ struct OwnerLoop {
     }
     return llvm::Error::success();
   }
+#include "OwnerBatch.inc"
 };
 } // namespace
 llvm::Error emitOrdered(func::FuncOp fn, llvm::raw_pwrite_stream &output) {
@@ -254,7 +258,10 @@ llvm::Error emitOrdered(func::FuncOp fn, llvm::raw_pwrite_stream &output) {
   auto &space = w.space;
   if (space.hasAttr("mojo_row.score_microtile"))
     scoreRows(w.out, fn, space);
-  else {
+  else if (auto batch = space.getAttrOfType<IntegerAttr>("cpu.owner_batch")) {
+    if (auto err = w.issueBatch(batch.getInt()))
+      return err;
+  } else {
     if (auto k = w.space.getAttrOfType<IntegerAttr>("cpu.score_cache"))
       w.line(1, "var saved=unsafe_stack_allocation[" +
                     std::to_string(k.getInt()) + ",Float32]()");
@@ -262,7 +269,7 @@ llvm::Error emitOrdered(func::FuncOp fn, llvm::raw_pwrite_stream &output) {
     auto &body = space.getRegion(0).front();
     auto axes = space.getAttrOfType<DenseI64ArrayAttr>("axes");
     int64_t pitch = 1;
-    for (int i = axes.size() - 1; i >= 0; --i) {
+    for (unsigned i : intentdsl::cpu::ownerRadices(space)) {
       auto n = w.axis(space.getOperand(i), "cpu.shape", axes[i]);
       auto id = w.fresh();
       w.values[body.getArgument(i)] = id;

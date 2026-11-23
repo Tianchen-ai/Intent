@@ -1,6 +1,7 @@
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
 #include "intentdsl/levels/execution/cpu/ir/Owners.h"
 #include "intentdsl/levels/execution/cpu/ir/ScoreCache.h"
+#include "intentdsl/levels/execution/cpu/ir/OwnerTraversal.h"
 #include "mlir/IR/PatternMatch.h"
 using namespace mlir;
 using namespace compilerinfra;
@@ -16,6 +17,35 @@ LogicalResult verifyOwnerGrain(func::FuncOp fn, Operation &space,
   auto facts = p.services.get<CallFacts>();
   auto grain = space.getAttrOfType<IntegerAttr>("cpu.grain");
   auto cached = space.getAttrOfType<IntegerAttr>("cpu.score_cache");
+  if (auto axis = space.getAttrOfType<IntegerAttr>("cpu.innermost_owner")) {
+    auto reuse = facts ? sharedInterval(&space, *facts) : std::nullopt;
+    auto batch = space.getAttrOfType<IntegerAttr>("cpu.owner_batch");
+    int64_t w = batch ? batch.getInt() : 0;
+    if (!reuse || axis.getInt() != reuse->axis || cached ||
+        !llvm::isPowerOf2_64(w) || w < 2 ||
+        w > p.services.get<RowMachine>()->packedOwners || !grain ||
+        grain.getInt() % w || reuse->group % w || reuse->extent % w)
+      return space.emitError("shared interval must project identical input "
+                             "coordinates across independent owners");
+    auto bad = space.walk([&](Operation *op) {
+      return op->hasAttr("cpu.owner_common") !=
+                     (op->getNumResults() == 1 &&
+                      invariantOwnerValue(op->getResult(0), space, *reuse))
+                 ? WalkResult::interrupt()
+                 : WalkResult::advance();
+    });
+    if (bad.wasInterrupted())
+      return space.emitError("invalid common value for packed owners");
+  } else if (space.hasAttr("cpu.owner_batch") ||
+             space
+                 .walk([](Operation *op) {
+                   return op->hasAttr("cpu.owner_common")
+                              ? WalkResult::interrupt()
+                              : WalkResult::advance();
+                 })
+                 .wasInterrupted())
+    return space.emitError(
+        "packed owner annotations require a shared interval");
   auto panel = cached ? reusableScores(&space, p) : std::nullopt;
   if (cached && (!panel || cached.getInt() != panel->keys))
     return space.emitError(
@@ -110,10 +140,22 @@ void ownerTasks(Unit &u) {
   f.verify = [](Operation *o, Attribute a,
                 const TargetProfile &p) -> llvm::Error {
     if (auto d = dyn_cast<DictionaryAttr>(a)) {
-      auto s = cpu::reusableScores(o, p);
-      auto extent = d.getAs<IntegerAttr>("scores");
-      if (!s || !extent || extent.getInt() != s->keys)
-        return llvm::createStringError("invalid retained score range");
+      if (auto inner = d.getAs<IntegerAttr>("inner")) {
+        auto reuse = cpu::sharedInterval(o, *p.services.get<CallFacts>());
+        auto batch = d.getAs<IntegerAttr>("batch"),
+             grain = d.getAs<IntegerAttr>("grain");
+        auto w = batch ? batch.getInt() : 0;
+        if (!reuse || reuse->axis != inner.getInt() || d.size() != 3 || w < 2 ||
+            !llvm::isPowerOf2_64(w) ||
+            w > p.services.get<cpu::RowMachine>()->packedOwners || !grain ||
+            grain.getInt() % w || reuse->group % w || reuse->extent % w)
+          return llvm::createStringError("invalid shared interval traversal");
+      } else {
+        auto s = cpu::reusableScores(o, p);
+        auto extent = d.getAs<IntegerAttr>("scores");
+        if (!s || !extent || extent.getInt() != s->keys)
+          return llvm::createStringError("invalid retained score range");
+      }
       a = d.get("grain");
     }
     auto w = dyn_cast<IntegerAttr>(a);
@@ -126,8 +168,14 @@ void ownerTasks(Unit &u) {
                          const TargetProfile &) -> llvm::Error {
     if (auto d = dyn_cast<DictionaryAttr>(c.value)) {
       auto w = d.getAs<IntegerAttr>("grain");
-      if (!w || c.id != "retained-" + std::to_string(w.getInt()) ||
-          c.topology != "retained-scores" ||
+      bool shared = bool(d.getAs<IntegerAttr>("inner"));
+      auto batch = d.getAs<IntegerAttr>("batch");
+      if (!w || shared != bool(batch) ||
+          c.id != (shared ? "shared-" : "retained-") +
+                      std::to_string(w.getInt()) +
+                      (shared ? "x" + std::to_string(batch.getInt()) : "") ||
+          c.topology !=
+              (shared ? "shared-interval-owners" : "retained-scores") ||
           c.preconditions != std::vector<std::string>{"exclusive-output"})
         return llvm::createStringError("invalid retained row candidate");
       return llvm::Error::success();
@@ -189,11 +237,23 @@ void ownerTasks(Unit &u) {
         }
     o->removeAttr("cpu.owner_choice");
     if (auto d = dyn_cast<DictionaryAttr>(a)) {
-      auto s = cpu::reusableScores(o, p);
-      o->setAttr("cpu.score_cache", d.get("scores"));
-      s->maxScore.getDefiningOp()->setAttr("cpu.record_score", b.getUnitAttr());
-      s->weightScore.getDefiningOp()->setAttr("cpu.replay_score",
-                                              b.getUnitAttr());
+      if (auto axis = d.getAs<IntegerAttr>("inner")) {
+        o->setAttr("cpu.innermost_owner", axis);
+        o->setAttr("cpu.owner_batch", d.get("batch"));
+        auto shared = *cpu::sharedInterval(o, *f);
+        o->walk([&](Operation *op) {
+          if (op->getNumResults() == 1 &&
+              cpu::invariantOwnerValue(op->getResult(0), *o, shared))
+            op->setAttr("cpu.owner_common", b.getUnitAttr());
+        });
+      } else {
+        auto s = cpu::reusableScores(o, p);
+        o->setAttr("cpu.score_cache", d.get("scores"));
+        s->maxScore.getDefiningOp()->setAttr("cpu.record_score",
+                                             b.getUnitAttr());
+        s->weightScore.getDefiningOp()->setAttr("cpu.replay_score",
+                                                b.getUnitAttr());
+      }
       a = d.get("grain");
     }
     o->setAttr("cpu.grain", a);

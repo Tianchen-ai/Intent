@@ -31,7 +31,7 @@
     "cpu": {
       "decisions": {
         "levels/execution/cpu::ordered-owners": {
-          "strategies":["levels/execution/cpu::owner-grains"],
+          "strategies":["levels/execution/cpu::owner-grains","levels/execution/cpu::shared-intervals"],
           "realizer":"levels/execution/cpu::group-owners"
         },
         "levels/execution/cpu::matrix-partition": {

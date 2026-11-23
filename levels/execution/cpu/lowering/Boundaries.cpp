@@ -168,11 +168,13 @@ void registerCost(Unit &);
 void matrixCost(Unit &);
 void matrixTasks(Unit &);
 void ownerTasks(Unit &);
+void sharedOwnerTraversal(Unit &);
 void ownerCost(Unit &);
 void bind(Unit &u) {
   registerCost(u);
   matrixTasks(u);
   ownerTasks(u);
+  sharedOwnerTraversal(u);
   ownerCost(u);
   matrixCost(u);
   u.dialects = [](DialectRegistry &r) {

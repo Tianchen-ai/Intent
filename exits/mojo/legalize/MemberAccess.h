@@ -1,6 +1,7 @@
 #pragma once
 #include "intentdsl/levels/algorithm/kir/ir/Normalized.h"
 #include "intentdsl/levels/algorithm/kir/ir/Ordered.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 namespace CI_UNIT_NAMESPACE {
 inline mlir::LogicalResult memberAccesses(mlir::func::FuncOp fn, bool assign) {
   using namespace mlir;
@@ -29,6 +30,16 @@ inline mlir::LogicalResult memberAccesses(mlir::func::FuncOp fn, bool assign) {
                            "complete query rows and contiguous member vectors");
   auto result = fn.walk([&](Operation *op) {
     auto kind = op->getName().stripDialect();
+    bool across = space.hasAttr("cpu.owner_batch") &&
+                  !op->hasAttr("cpu.owner_common") && op->getParentOp() &&
+                  isa<scf::ForOp>(op->getParentOp()) &&
+                  op->getNumResults() == 1 &&
+                  isa<FloatType>(op->getResult(0).getType()) &&
+                  (kind == "exp" || kind == "truncf" || kind == "extf");
+    if (assign && across)
+      op->setAttr("mojo_row.pack_scalars", UnitAttr::get(op->getContext()));
+    if (op->hasAttr("mojo_row.pack_scalars") != across)
+      return WalkResult::interrupt();
     bool vector = false;
     if (kind == "slice_read" || kind == "slice_write") {
       auto base =

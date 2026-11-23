@@ -1,5 +1,6 @@
 #include "intentdsl/levels/execution/cpu/ir/Owners.h"
 #include "intentdsl/levels/execution/cpu/ir/ScoreCache.h"
+#include "intentdsl/levels/execution/cpu/ir/OwnerTraversal.h"
 namespace CI_UNIT_NAMESPACE {
 using namespace compilerinfra;
 void ownerCost(Unit &u) {
@@ -29,12 +30,24 @@ void ownerCost(Unit &u) {
                        waves * (1 + std::min(w, n)) * workers / *rate +
                        tasks / *rate;
           if (auto panel = intentdsl::cpu::reusableScores(o, ctx.target)) {
-            double dots = double(n) * panel->keys * (cache ? 1 : 2);
+            bool retained = cache && cache.get("scores");
+            double dots = double(n) * panel->keys * (retained ? 1 : 2);
             e.terms["score_dot_products"] = {dots, "count"};
             auto bandwidth = intentdsl::quantity(ctx, "read_1", "B/ns");
             if (e.timeNs && bandwidth && rate)
               *e.timeNs += 2. * dots * panel->depth / *rate +
-                           (cache ? 8. * n * panel->keys / *bandwidth : 0.);
+                           (retained ? 8. * n * panel->keys / *bandwidth : 0.);
+          }
+          if (auto shared = intentdsl::cpu::sharedInterval(o, *f)) {
+            bool together = cache && cache.get("inner");
+            auto ownersPerLoad =
+                together ? cache.getAs<mlir::IntegerAttr>("batch").getInt()
+                         : int64_t(1);
+            auto bytes = shared->readBytes * n / ownersPerLoad;
+            e.terms["common_input_bytes_per_member"] = {bytes, "B"};
+            if (auto bw = intentdsl::quantity(ctx, "read_1", "B/ns");
+                e.timeNs && bw)
+              *e.timeNs += bytes / *bw;
           }
           return e;
         }},
