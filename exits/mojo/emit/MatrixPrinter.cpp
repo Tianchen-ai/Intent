@@ -588,8 +588,9 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line("#include <stdlib.h>");
       c.line("#include <string.h>");
       c.line("#include <omp.h>");
-      if (op.getAttrOfType<BoolAttr>("uses_f16_math").getValue()) {
-        c.line("#if defined(__F16C__)");
+      if (op.getAttrOfType<BoolAttr>("uses_f16_math").getValue() ||
+          op.getAttrOfType<BoolAttr>("uses_bf16_math").getValue()) {
+        c.line("#if defined(__AVX512F__) || defined(__F16C__)");
         c.line("#include <immintrin.h>");
         c.line("#endif");
       }
@@ -607,6 +608,25 @@ TerminalPrinter mojoMatrixPrinter() {
         c.line("extern void intent_brgemm_thread_leave(void);");
       }
       c.line("extern void intent_panel(" + llvm::join(ptypes, ",") + ");");
+      c.line("typedef struct { void *ptr; size_t cap; int busy; } IntentWsSlot;");
+      c.line("static IntentWsSlot g_intent_ws[4];");
+      c.line("static inline void *intent_ws_acquire(int slot, size_t bytes) {");
+      c.line("  size_t need = bytes ? ((bytes + 63u) & ~(size_t)63u) : 64u;");
+      c.line("  if ((unsigned)slot < 4u && __atomic_exchange_n(&g_intent_ws[slot].busy, 1, __ATOMIC_ACQUIRE) == 0) {");
+      c.line("    if (g_intent_ws[slot].cap < need) {");
+      c.line("      void *np = aligned_alloc(64, need);");
+      c.line("      if (!np) { __atomic_store_n(&g_intent_ws[slot].busy, 0, __ATOMIC_RELEASE); return NULL; }");
+      c.line("      free(g_intent_ws[slot].ptr); g_intent_ws[slot].ptr = np; g_intent_ws[slot].cap = need;");
+      c.line("    }");
+      c.line("    return g_intent_ws[slot].ptr;");
+      c.line("  }");
+      c.line("  return aligned_alloc(64, need);");
+      c.line("}");
+      c.line("static inline void intent_ws_release(int slot, void *p) {");
+      c.line("  if (!p) return;");
+      c.line("  if ((unsigned)slot < 4u && p == g_intent_ws[slot].ptr) { __atomic_store_n(&g_intent_ws[slot].busy, 0, __ATOMIC_RELEASE); return; }");
+      c.line("  free(p);");
+      c.line("}");
 
       if (op.getAttrOfType<BoolAttr>("uses_q8k").getValue()) {
         using Q8 = intentdsl::kir::Q8KRecord;
@@ -636,6 +656,13 @@ TerminalPrinter mojoMatrixPrinter() {
         c.line("static inline float expand_bf(uint16_t v){uint32_t b=(uint32_t)v<<16;float f;memcpy(&f,&b,4);return f;}");
         c.line("static inline uint16_t narrow_bf(float f){uint32_t b;memcpy(&b,&f,4);if((b&0x7fffffff)>0x7f800000)return (b>>16)|64;return (b+32767+((b>>16)&1))>>16;}");
         c.line("static inline float min_ieee(float a,float b){return isnan(a)?a:isnan(b)?b:fminf(a,b);}");
+        c.line("static inline void widen_bf16_span(float *out, const uint16_t *src, int64_t n){");
+        c.line("  int64_t i=0;");
+        c.line("#if defined(__AVX512F__)");
+        c.line("  for (; i+16<=n; i+=16) { __m256i h = _mm256_loadu_si256((const __m256i*)(src+i)); _mm512_storeu_ps(out+i, _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(h), 16))); }");
+        c.line("#endif");
+        c.line("  for (; i<n; ++i) out[i] = expand_bf(src[i]);");
+        c.line("}");
       }
       if (op.getAttrOfType<BoolAttr>("uses_f16_math").getValue()) {
         c.line("static inline float expand_f16(uint16_t h){");
@@ -648,6 +675,13 @@ TerminalPrinter mojoMatrixPrinter() {
         c.line("  else bits=sign|((exp+112u)<<23)|(mant<<13);");
         c.line("  float f; memcpy(&f,&bits,4); return f;");
         c.line("#endif");
+        c.line("}");
+        c.line("static inline void widen_f16_span(float *out, const uint16_t *src, int64_t n){");
+        c.line("  int64_t i=0;");
+        c.line("#if defined(__AVX512F__) && defined(__F16C__)");
+        c.line("  for (; i+16<=n; i+=16) { __m256i h = _mm256_loadu_si256((const __m256i*)(src+i)); _mm512_storeu_ps(out+i, _mm512_cvtph_ps(h)); }");
+        c.line("#endif");
+        c.line("  for (; i<n; ++i) out[i] = expand_f16(src[i]);");
         c.line("}");
       }
       if (op.getAttrOfType<BoolAttr>("uses_mx8_math").getValue()) {
@@ -693,14 +727,22 @@ TerminalPrinter mojoMatrixPrinter() {
     auto place = op.getAttrOfType<StringAttr>("placement").getValue();
     auto cType = op.getAttrOfType<StringAttr>("c_type").str();
     auto count = op.getAttrOfType<StringAttr>("count_expr").str();
+    int wsSlot = name == "left"      ? 0
+                 : name == "rhs"     ? 1
+                 : name == "members" ? 2
+                                     : 3;
     if (place == "stack") {
       c.line("_Alignas(64) " + cType + " " + name + "[" + count + "];");
     } else {
       std::string frees;
-      for (Attribute a : op.getAttrOfType<ArrayAttr>("cleanup"))
-        frees += "free(" + cast<StringAttr>(a).str() + ");";
-      c.line(cType + " *" + name + " = (" + cType + "*)calloc(" + count +
-             ", sizeof(" + cType + "));");
+      for (Attribute a : op.getAttrOfType<ArrayAttr>("cleanup")) {
+        std::string prev = cast<StringAttr>(a).str();
+        int pSlot = prev == "left" ? 0 : prev == "rhs" ? 1 : prev == "members" ? 2 : 3;
+        frees += "intent_ws_release(" + std::to_string(pSlot) + ", " + prev + ");";
+      }
+      c.line(cType + " *" + name + " = (" + cType + "*)intent_ws_acquire(" +
+             std::to_string(wsSlot) + ", (size_t)(" + count + ") * sizeof(" +
+             cType + "));");
       c.line("if (!" + name + ") { " + frees + "return 2; }");
     }
     return llvm::Error::success();
@@ -732,19 +774,22 @@ TerminalPrinter mojoMatrixPrinter() {
                ", chunk=g/" + std::to_string(H) + "%" + std::to_string(chunks) +
                ", batch=g/" + std::to_string(H) + "/" + std::to_string(chunks) +
                ", group=head/" + std::to_string(hg) + ";");
-        auto &mBb = op.getRegion(0).front();
-        c.line("const float " + c.name(mBb.getArgument(1)) + " = " +
+        auto &invBb = op.getRegion(0).front();
+        c.line("const float " + c.name(invBb.getArgument(0)) + " = " +
                access(1, "float", {"batch", "head", "chunk", "k"}) + ";");
-        c.line("const float " + c.name(mBb.getArgument(2)) + " = " +
+        c.line("const float " + c.name(invBb.getArgument(1)) + " = " +
                access(2, "float", {"batch", "head", "chunk", "k"}) + ";");
-        c.line("const float " + c.name(mBb.getArgument(3)) + " = " +
+        c.line("const float " + c.name(invBb.getArgument(2)) + " = " +
                access(2, "float", {"batch", "head", "chunk", "K-1"}) + ";");
+      } else if (at == PrintPoint::BeginBlock && c.region == 1) {
+        auto &varBb = op.getRegion(1).front();
+        c.line("#pragma omp simd");
         c.line("for (int64_t n=0; n<N; ++n) {");
         c.indent++;
-        c.line("const uint16_t " + c.name(mBb.getArgument(0)) + " = " +
+        c.line("const uint16_t " + c.name(varBb.getArgument(0)) + " = " +
                access(0, "uint16_t", {"batch", "chunk*K+k", "group", "n"}) +
                ";");
-      } else if (at == PrintPoint::EndBlock) {
+      } else if (at == PrintPoint::EndBlock && c.region == 1) {
         c.indent--;
         c.line("}");
         c.indent--;
@@ -783,8 +828,9 @@ TerminalPrinter mojoMatrixPrinter() {
         ++am;
       std::string banks = ab < 0 ? "1LL" : "G";
       std::string fnWiden = dt == "bf16" ? "expand_bf" : "expand_f16";
+      std::string fnSpan = dt == "bf16" ? "widen_bf16_span" : "widen_f16_span";
       c.line("#pragma omp parallel for num_threads(workers) schedule(static) if((" +
-             banks + ")*M > 64)");
+             banks + ")*M*K > 32768)");
       c.line("for (int64_t row=0; row<(" + banks + ")*M; ++row) {");
       c.line("  const int64_t g = M ? row / M : 0, m = M ? row % M : 0;");
       c.line("  const uint16_t *src = (const uint16_t*)a" +
@@ -792,8 +838,12 @@ TerminalPrinter mojoMatrixPrinter() {
              std::to_string(ab < 0 ? 0 : st[ab]) + "LL + m*" +
              std::to_string(st[am]) + "LL;");
       c.line("  float *out = " + dst + " + row*K;");
-      c.line("  for (int64_t k=0; k<K; ++k) out[k] = " + fnWiden + "(src[k*" +
-             std::to_string(st[ak]) + "LL]);");
+      if (st[ak] == 1) {
+        c.line("  " + fnSpan + "(out, src, K);");
+      } else {
+        c.line("  for (int64_t k=0; k<K; ++k) out[k] = " + fnWiden + "(src[k*" +
+               std::to_string(st[ak]) + "LL]);");
+      }
       c.line("}");
     } else if (pk == "widen-pack-rhs-f32") {
       auto st = op.getAttrOfType<DenseI64ArrayAttr>("src_strides_0");
@@ -805,8 +855,9 @@ TerminalPrinter mojoMatrixPrinter() {
         ++bn;
       std::string banks = bb < 0 ? "1LL" : "G";
       std::string fnWiden = dt == "bf16" ? "expand_bf" : "expand_f16";
+      std::string fnSpan = dt == "bf16" ? "widen_bf16_span" : "widen_f16_span";
       c.line("#pragma omp parallel for num_threads(workers) schedule(static) if((" +
-             banks + ")*nc > 1)");
+             banks + ")*nc*K*nr > 32768)");
       c.line("for (int64_t p=0; p<(" + banks + ")*nc; ++p) {");
       c.line("  const int64_t g = nc ? p / nc : 0, c = (nc ? p % nc : 0)*nr, valid = N-c < nr ? N-c : nr;");
       c.line("  for (int64_t k=0; k<K; ++k) {");
@@ -816,8 +867,13 @@ TerminalPrinter mojoMatrixPrinter() {
              std::to_string(st[bk]) + "LL + c*" + std::to_string(st[bn]) +
              "LL;");
       c.line("    float *out = " + dst + " + (p*K + k)*nr;");
-      c.line("    for (int64_t j=0; j<valid; ++j) out[j] = " + fnWiden +
-             "(src[j*" + std::to_string(st[bn]) + "LL]);");
+      if (st[bn] == 1) {
+        c.line("    " + fnSpan + "(out, src, valid);");
+      } else {
+        c.line("    for (int64_t j=0; j<valid; ++j) out[j] = " + fnWiden +
+               "(src[j*" + std::to_string(st[bn]) + "LL]);");
+      }
+      c.line("    for (int64_t j=valid; j<nr; ++j) out[j] = 0.0f;");
       c.line("  }");
       c.line("}");
     } else if (pk == "pack-rhs-panels") {
@@ -831,7 +887,7 @@ TerminalPrinter mojoMatrixPrinter() {
         ++bn;
       std::string banks = bb < 0 ? "1LL" : "G";
       c.line("#pragma omp parallel for num_threads(workers) schedule(static) if((" +
-             banks + ")*nc > 1)");
+             banks + ")*nc*K*nr > 32768)");
       c.line("for (int64_t p=0; p<(" + banks + ")*nc; ++p) {");
       c.line("  const int64_t g = nc ? p / nc : 0, c = (nc ? p % nc : 0)*nr, valid = N-c < nr ? N-c : nr;");
       c.line("  for (int64_t k=0; k<K; ++k) {");
@@ -849,6 +905,8 @@ TerminalPrinter mojoMatrixPrinter() {
                std::to_string(bytes) + "LL, src+j*" +
                std::to_string(st[bn] * bytes) + "LL, " +
                std::to_string(bytes) + ");");
+      c.line("    if (valid < nr) memset(out + valid*" + std::to_string(bytes) +
+             "LL, 0, (nr - valid)*" + std::to_string(bytes) + "LL);");
       c.line("  }");
       c.line("}");
     } else if (pk == "pack-signed-dot4") {
@@ -860,11 +918,11 @@ TerminalPrinter mojoMatrixPrinter() {
         ++bn;
       std::string banks = bb < 0 ? "1LL" : "G";
       c.line("#pragma omp parallel for num_threads(workers) schedule(static) if((" +
-             banks + ")*nc > 1)");
+             banks + ")*nc*K*nr > 32768)");
       c.line("for (int64_t p=0; p<(" + banks + ")*nc; ++p) {");
       c.line("  const int64_t g = nc ? p / nc : 0, c = (nc ? p % nc : 0)*nr;");
       c.line("  unsigned char *out = (unsigned char*)" + dst + " + p*nr*(K+4);");
-      c.line("  uint32_t *corr = (uint32_t*)(out + K*nr);");
+      c.line("  uint32_t *corr = (uint32_t*)(out + K*nr); memset(corr, 0, nr*sizeof(uint32_t));");
       c.line("  for (int64_t k=0; k<K; k+=4) {");
       c.line("    const int8_t *base = (const int8_t*)a" +
              std::to_string(slots[0]) + " + g*" +
@@ -891,12 +949,13 @@ TerminalPrinter mojoMatrixPrinter() {
         ++bn;
       std::string banks = bb < 0 ? "1LL" : "G";
       c.line("#pragma omp parallel for num_threads(workers) schedule(static) if((" +
-             banks + ")*nc > 1)");
+             banks + ")*nc*K*nr > 32768)");
       c.line("for (int64_t p=0; p<(" + banks + ")*nc; ++p) {");
       c.line("  const int64_t g = nc ? p / nc : 0, c = (nc ? p % nc : 0)*nr, valid = N-c < nr ? N-c : nr;");
       c.line("  const int64_t kPad = ((K+" + std::to_string(kBlk - 1) + ")/" +
              std::to_string(kBlk) + ")*" + std::to_string(kBlk) + ";");
       c.line("  " + cTy + " *out = (" + cTy + "*)" + dst + " + p*kPad*nr;");
+      c.line("  if (valid < nr || kPad > K) memset(out, 0, (size_t)(kPad*nr)*sizeof(" + cTy + "));");
       c.line("  for (int64_t kb=0; kb<K; kb+=" + std::to_string(kBlk) + ") {");
       c.line("    const " + cTy + " *base = (const " + cTy + "*)a" +
              std::to_string(slots[0]) + " + g*" +
@@ -1006,8 +1065,11 @@ TerminalPrinter mojoMatrixPrinter() {
     bool isQ4k = op.getAttrOfType<BoolAttr>("is_q4k").getValue();
     bool grouped = op.getAttrOfType<BoolAttr>("grouped").getValue();
     std::string frees;
-    for (Attribute a : op.getAttrOfType<ArrayAttr>("cleanup"))
-      frees += "free(" + cast<StringAttr>(a).str() + ");";
+    for (Attribute a : op.getAttrOfType<ArrayAttr>("cleanup")) {
+      std::string prev = cast<StringAttr>(a).str();
+      int pSlot = prev == "left" ? 0 : prev == "rhs" ? 1 : prev == "members" ? 2 : 3;
+      frees += "intent_ws_release(" + std::to_string(pSlot) + ", " + prev + ");";
+    }
 
     c.line("const void *brg_plan[2*(mr+1)]; memset(brg_plan, 0, sizeof(brg_plan));");
     c.line("const void *brg_first = NULL; int64_t brg_scratch_bytes = 64;");
@@ -1066,7 +1128,8 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line("{");
       c.indent++;
       if (usesBrg) {
-        c.line("void *brg_scratch = aligned_alloc(64, (size_t)brg_scratch_bytes);");
+        c.line("_Alignas(64) unsigned char brg_scratch_stk[8192];");
+        c.line("void *brg_scratch = brg_scratch_bytes <= 8192 ? (void*)brg_scratch_stk : aligned_alloc(64, (size_t)brg_scratch_bytes);");
         c.line("const void *brg_active = NULL;");
         c.line("int thr_ok = brg_scratch != NULL;");
         c.line("if (!thr_ok) rc |= 2;");
@@ -1115,7 +1178,7 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line("}");
       if (usesBrg) {
         c.line("if (brg_active) intent_brgemm_thread_leave();");
-        c.line("free(brg_scratch);");
+        c.line("if (brg_scratch != (void*)brg_scratch_stk) free(brg_scratch);");
       }
       c.indent--;
       c.line("}");
@@ -1192,8 +1255,14 @@ TerminalPrinter mojoMatrixPrinter() {
 
   p.operations["mojo_row.host_free"] = [](Operation &op, PrintPoint at,
                                           PrintContext &c) {
-    if (at == PrintPoint::Enter)
-      c.line("free(" + op.getAttrOfType<StringAttr>("buf_name").str() + ");");
+    if (at == PrintPoint::Enter) {
+      std::string name = op.getAttrOfType<StringAttr>("buf_name").str();
+      int wsSlot = name == "left"      ? 0
+                   : name == "rhs"     ? 1
+                   : name == "members" ? 2
+                                       : 3;
+      c.line("intent_ws_release(" + std::to_string(wsSlot) + ", " + name + ");");
+    }
     return llvm::Error::success();
   };
 

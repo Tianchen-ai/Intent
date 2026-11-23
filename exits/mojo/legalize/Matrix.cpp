@@ -1029,14 +1029,37 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
     OperationState ps(loc, "mojo_row.host_prep");
     ps.addAttributes(attrs);
     if (!pop->getRegions().empty() && !pop->getRegion(0).empty()) {
-      Region *mr = ps.addRegion();
+      // Split map region into row-invariant pre-loop (Region 0) and per-column
+      // inner-loop (Region 1) based on SSA dependence on argument 0.
+      Region *invReg = ps.addRegion();
+      Region *varReg = ps.addRegion();
+      Block &invBb = invReg->emplaceBlock();
+      Block &varBb = varReg->emplaceBlock();
+      auto &srcBb = pop->getRegion(0).front();
       IRMapping mapping;
-      pop->getRegion(0).cloneInto(mr, mapping);
-      // Replace cpu.panel_value terminator with mojo_row.host_panel_yield
-      Operation *term = mr->front().getTerminator();
-      OpBuilder tb(term);
-      makeOp(tb, loc, "host_panel_yield", term->getOperands());
-      term->erase();
+      Value colArg = varBb.addArgument(srcBb.getArgument(0).getType(), loc);
+      mapping.map(srcBb.getArgument(0), colArg);
+      for (unsigned ai = 1; ai < srcBb.getNumArguments(); ++ai)
+        mapping.map(srcBb.getArgument(ai),
+                    invBb.addArgument(srcBb.getArgument(ai).getType(), loc));
+      llvm::DenseSet<Value> dependsOnCol{srcBb.getArgument(0)};
+      OpBuilder ib(fn.getContext()), vb(fn.getContext());
+      ib.setInsertionPointToEnd(&invBb);
+      vb.setInsertionPointToEnd(&varBb);
+      for (auto &mop : srcBb.without_terminator()) {
+        bool colDep = llvm::any_of(mop.getOperands(), [&](Value v) {
+          return dependsOnCol.contains(v);
+        });
+        if (colDep) {
+          dependsOnCol.insert(mop.getResult(0));
+          vb.clone(mop, mapping);
+        } else {
+          ib.clone(mop, mapping);
+        }
+      }
+      makeOp(ib, loc, "end");
+      Operation *term = srcBb.getTerminator();
+      makeOp(vb, loc, "host_panel_yield", {mapping.lookup(term->getOperand(0))});
     }
     b.create(ps);
   }

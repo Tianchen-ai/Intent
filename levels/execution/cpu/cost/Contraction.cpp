@@ -37,22 +37,25 @@ void matrixCost(Unit &u) {
           double packBytes = 0, translationBytes = 0, scatteredBytes = 0;
           double widenOps = 0;
           if (dot.getName().stripDialect() == "window_contract") {
+            auto slot = mlir::cast<mlir::BlockArgument>(dot.getOperand(0))
+                            .getArgNumber();
+            auto stride =
+                (*f->arguments[slot].getAsObject()->getArray("strides"))[1]
+                    .getAsInteger()
+                    .value();
+            double line =
+                std::min(64., std::max(2., std::abs(double(stride)) * 2.));
             if (packCode) {
-              auto slot = mlir::cast<mlir::BlockArgument>(dot.getOperand(0))
-                              .getArgNumber();
-              auto stride =
-                  (*f->arguments[slot].getAsObject()->getArray("strides"))[1]
-                      .getAsInteger()
-                      .value();
-              double line =
-                  std::min(64., std::max(2., std::abs(double(stride)) * 2.));
               packBytes =
-                  double(g->batches) * g->k * ((line + 4) * g->m + 2 * g->n);
-              translationBytes =
-                  double(g->batches) * g->m * g->k * std::min(64., line);
-            } else
+                  double(g->batches) * g->k * ((line + 4) * g->m + 6 * g->n);
+            } else {
+              double colBlocks = std::ceil(double(g->n) / t[1]);
+              packBytes = double(g->batches) * g->k * 4. * g->n;
+              scatteredBytes =
+                  double(g->batches) * g->m * g->k * line * colBlocks;
               widenOps =
                   waves * g->k * (std::ceil(double(t[1]) / t[3]) + t[0]) * t[3];
+            }
           }
           if (dot.getName().stripDialect() == "contract") {
             auto b = dot.getOperand(1);
@@ -112,9 +115,15 @@ void matrixCost(Unit &u) {
           if (bw) {
             if (t.size() == 6) {
               auto midBw = intentdsl::quantity(ctx, "read_1_mid_bw", "B/ns");
+              auto syncNs = intentdsl::quantity(ctx, "sync", "ns");
               double tileBw = (packCode && midBw) ? *midBw : *bw;
+              double prepSteps =
+                  packCode == 3 ? (g->routed ? 1. : 2.) : (packCode ? 1. : 0.);
+              double syncCost =
+                  (syncNs && packBytes > 131072.) ? prepSteps * *syncNs : 0.;
               e.timeNs = (reads * workers) / tileBw +
                          (packBytes + translationBytes + scatteredBytes) / *bw +
+                         syncCost +
                          (rate ? (ops * t[3] * 2. * workers +
                                   widenOps * workers) /
                                      *rate
