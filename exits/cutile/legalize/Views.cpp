@@ -151,7 +151,15 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
       s.addAttribute("transposed",b.getBoolAttr(axes && axes[0]==1));
       s.addAttribute("source_step",b.getI64IntegerAttr(step));
       s.addOperands(value->getOperand(0));s.addOperands(store->getOperand(0));s.addOperands(value->getOperands().drop_front());
-      s.addAttributes(value->getAttrs());b.create(s);
+      s.addAttributes(value->getAttrs());s.addRegion();
+      auto *guard=b.create(s);b.createBlock(&guard->getRegion(0));
+      b.create(OperationState(store->getLoc(),"ct_src.zero_bins"));
+      OperationState panels(store->getLoc(),"ct_src.bin_panels");panels.addRegion();
+      auto *body=b.createBlock(&b.create(panels)->getRegion(0),{},b.getIndexType(),{store->getLoc()});
+      OperationState read(store->getLoc(),"ct_src.read_bin_keys");
+      read.addOperands(body->getArgument(0));read.addTypes(RankedTensorType::get({step},cast<MemRefType>(value->getOperand(0).getType()).getElementType()));
+      auto keys=b.create(read)->getResult(0);
+      OperationState update(store->getLoc(),"ct_src.atomic_bins"); update.addOperands({body->getArgument(0),keys});b.create(update);
       store->erase();value->erase();
     });
     partitionOwners(fn,facts);
@@ -325,6 +333,18 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
          op->getAttrOfType<IntegerAttr>("span").getInt()>0 && fn->getAttrOfType<StringAttr>("block.topology")=="resident" &&
          llvm::all_of(fn->getAttrOfType<ArrayAttr>("block.configs"),[](Attribute row){return cast<DictionaryAttr>(row).getAs<IntegerAttr>("rows").getInt()==1;});
       auto step=op->getAttrOfType<IntegerAttr>("source_step");
+      if(!llvm::hasSingleElement(op->getRegion(0)))return WalkResult::interrupt();
+      auto &guard=op->getRegion(0).front();
+      if(guard.getOperations().size()!=2 || guard.front().getName().getStringRef()!="ct_src.zero_bins" ||
+         guard.back().getName().getStringRef()!="ct_src.bin_panels" || !llvm::hasSingleElement(guard.back().getRegion(0)))
+        return op->emitError("expected guarded zero then count panels"),WalkResult::interrupt();
+      auto &loop=guard.back().getRegion(0).front();
+      if(!step || loop.getNumArguments()!=1 || !loop.getArgument(0).getType().isIndex() || loop.getOperations().size()!=2 ||
+         loop.front().getName().getStringRef()!="ct_src.read_bin_keys" || loop.back().getName().getStringRef()!="ct_src.atomic_bins" ||
+         loop.front().getOperand(0)!=loop.getArgument(0) || loop.back().getOperand(0)!=loop.getArgument(0) ||
+         loop.back().getOperand(1)!=loop.front().getResult(0) || !src ||
+         loop.front().getResult(0).getType()!=RankedTensorType::get({step.getInt()},cast<MemRefType>(src.getType()).getElementType()))
+        return op->emitError("invalid count panel or atomic update"),WalkResult::interrupt();
       ok=ok && step && step.getInt()>0 && step.getInt()<=2048 && llvm::isPowerOf2_64(step.getInt()) && op->getAttrOfType<IntegerAttr>("span").getInt()%step.getInt()==0;
     }
     if(ok && (n=="gather_slab" || n=="scatter_slab"))

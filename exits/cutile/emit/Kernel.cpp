@@ -91,27 +91,37 @@ class Kernel {
         auto id=local();names[op.getResult(0)]=id;
         line(depth,id+" = "+(code=="ne"?arg(0)+"!="+arg(1):"ct.astype(ct.broadcast_to(ct.expand_dims("+arg(0)+",0),(R,W)),ct.int32)"));continue;
       }
-      if(code=="private_bin_store"){
-        auto n=std::to_string(op.getAttrOfType<IntegerAttr>("extent").getInt()),span=std::to_string(op.getAttrOfType<IntegerAttr>("span").getInt());
-        auto width=std::to_string(op.getAttrOfType<IntegerAttr>("source_step").getInt());
-        bool swap=op.getAttrOfType<BoolAttr>("transposed").getValue();
-        auto bins=arg(1)+".shape["+std::to_string(swap?0:1)+"]";
-        line(depth,"if "+bins+" > 0:");
-        auto destinationDepth=depth+1;
-        line(destinationDepth,"ct.store("+arg(1)+(swap?",(0,ct.bid(0)),ct.full((W,1)":",(ct.bid(0),0),ct.full((1,W)")+",0,ct.int32),allow_tma=False)");
-        // Padding is defined for partial tiles only. End the last partition
-        // before an entire source tile would lie outside the view.
-        std::string steps = span + "//" + width;
-        if (op.getAttrOfType<IntegerAttr>("extent").getInt() %
-            op.getAttrOfType<IntegerAttr>("span").getInt())
-          steps = "ct.astype(ct.minimum(" + steps + ",ct.cdiv(" + n + "-ct.astype(ct.bid(0),ct.int64)*" + span + "," + width + ")),ct.int32)";
-        line(destinationDepth, "for step in range(" + steps + "):");
-        line(destinationDepth+1,"offset=ct.astype(step,ct.int64)*"+width+"+ct.arange("+width+",dtype=ct.int32)");
-        line(destinationDepth+1,"pos=ct.astype(ct.bid(0),ct.int64)*"+span+"+offset");
-        auto keys="ct.load("+arg(0)+",(ct.astype(ct.bid(0),ct.int64)*("+span+"//"+width+")+step,),shape=("+width+",),padding_mode=ct.PaddingMode.ZERO,allow_tma=False)";
-        line(destinationDepth+1,"key="+(cast<MemRefType>(op.getOperand(0).getType()).getElementType().isInteger(64)?keys:"ct.astype("+keys+",ct.int32)"));
-        line(destinationDepth+1,"valid=(pos<"+n+")&(key>=0)&(key<"+bins+")");
-        line(destinationDepth+1,"ct.atomic_add("+arg(1)+(swap?",(ct.where(valid,key,0),ct.bid(0))":",(ct.bid(0),ct.where(valid,key,0))")+",ct.astype(valid,ct.int32),check_bounds=False,memory_order=ct.MemoryOrder.RELAXED,memory_scope=ct.MemoryScope.BLOCK)");
+      if(code=="private_bin_store" || code=="zero_bins" || code=="bin_panels" || code=="read_bin_keys" || code=="atomic_bins"){
+        auto *guard=&op;
+        while(guard->getName().stripDialect()!="private_bin_store")guard=guard->getParentOp();
+        auto dest=names.lookup(guard->getOperand(1)),src=names.lookup(guard->getOperand(0));
+        auto extent=std::to_string(guard->getAttrOfType<IntegerAttr>("extent").getInt());
+        auto span=std::to_string(guard->getAttrOfType<IntegerAttr>("span").getInt());
+        auto width=std::to_string(guard->getAttrOfType<IntegerAttr>("source_step").getInt());
+        bool swap=guard->getAttrOfType<BoolAttr>("transposed").getValue();
+        auto bins=dest+".shape["+std::to_string(swap?0:1)+"]";
+        if(code=="private_bin_store"){
+          line(depth,"if "+bins+" > 0:");
+          if(auto err=body(op.getRegion(0).front(),depth+1))return err;
+        }else if(code=="zero_bins"){
+          line(depth,"ct.store("+dest+(swap?",(0,ct.bid(0)),ct.full((W,1)":",(ct.bid(0),0),ct.full((1,W)")+",0,ct.int32),allow_tma=False)");
+        }else if(code=="bin_panels"){
+          auto step=local(), limit=span+"//"+width;
+          if(guard->getAttrOfType<IntegerAttr>("extent").getInt()%guard->getAttrOfType<IntegerAttr>("span").getInt())
+            limit="ct.astype(ct.minimum("+limit+",ct.cdiv("+extent+"-ct.astype(ct.bid(0),ct.int64)*"+span+","+width+")),ct.int32)";
+          auto &loop=op.getRegion(0).front();names[loop.getArgument(0)]=step;
+          line(depth,"for "+step+" in range("+limit+"):");
+          if(auto err=body(loop,depth+1))return err;
+        }else if(code=="read_bin_keys"){
+          auto keys=local();names[op.getResult(0)]=keys;
+          line(depth,keys+"=ct.load("+src+",(ct.astype(ct.bid(0),ct.int64)*("+span+"//"+width+")+"+arg(0)+",),shape=("+width+",),padding_mode=ct.PaddingMode.ZERO,allow_tma=False)");
+        }else{
+          auto pos="ct.astype(ct.bid(0),ct.int64)*"+span+"+ct.astype("+arg(0)+",ct.int64)*"+width+"+ct.arange("+width+",dtype=ct.int32)";
+          line(depth,"valid=("+pos+"<"+extent+")&("+arg(1)+">=0)&("+arg(1)+"<"+bins+")");
+          auto index=cast<ShapedType>(op.getOperand(1).getType()).getElementType().isInteger(64)?arg(1):"ct.astype("+arg(1)+",ct.int32)";
+          auto key="ct.where(valid,"+index+",0)";
+          line(depth,"ct.atomic_add("+dest+(swap?",("+key+",ct.bid(0))":",(ct.bid(0),"+key+")")+",ct.astype(valid,ct.int32),check_bounds=False,memory_order=ct.MemoryOrder.RELAXED,memory_scope=ct.MemoryScope.BLOCK)");
+        }
         continue;
       }
       if(code=="key_counts" || code=="sum_columns"){
