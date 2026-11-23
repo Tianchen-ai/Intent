@@ -99,8 +99,20 @@ class Bounds {
         }
         unsigned idx = arg.getArgNumber() - 1;
         auto init = get(loop.getInitArgs()[idx]);
-        auto next = get(loop.getBody()->getTerminator()->getOperand(idx));
-        if (!init || !next)
+        if (!init)
+          return {};
+        Value yielded = loop.getBody()->getTerminator()->getOperand(idx);
+        if (yielded == v)
+          return fit(v.getType(), init->lo, init->hi);
+        if (auto sub = yielded.getDefiningOp<arith::SubIOp>();
+            sub && sub.getRhs() == v) {
+          if (auto one = get(sub.getLhs());
+              one && one->lo == 1 && one->hi == 1 && init->lo == 0 &&
+              init->hi == 0)
+            return fit(v.getType(), 0, 1);
+        }
+        auto next = get(yielded);
+        if (!next)
           return {};
         return fit(v.getType(), std::min(init->lo, next->lo),
                    std::max(init->hi, next->hi));
@@ -149,10 +161,14 @@ class Bounds {
       auto a = get(op->getOperand(0)), b = get(op->getOperand(1));
       if (a && b)
         return fit(v.getType(), std::min(a->lo, b->lo), std::min(a->hi, b->hi));
-      if (b && b->lo >= 0) {
-        // clamp(x, W) where x >= 0 is checked only if both sides are bounded;
-        // keep unbounded unless both operands are known.
-        return {};
+      if (b) {
+        if (auto mx = op->getOperand(0).getDefiningOp<arith::MaxSIOp>()) {
+          auto loBound = get(mx.getRhs());
+          if (!loBound)
+            loBound = get(mx.getLhs());
+          if (loBound && loBound->lo <= b->lo)
+            return fit(v.getType(), loBound->lo, b->hi);
+        }
       }
       return {};
     }

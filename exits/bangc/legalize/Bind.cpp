@@ -1,9 +1,13 @@
 #include "Matrix.h"
 #include "OwnerVectors.h"
+#include "Rows.h"
 #include "Slab.h"
+#include "intentdsl/exits/bangc/ir/Dialect.h"
 #include "intentdsl/levels/algorithm/kir/ir/Segment.h"
 #include "intentdsl/levels/storage/dsa/ir/Owners.h"
 #include "intentdsl/levels/storage/dsa/ir/Supply.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Pass/Pass.h"
 using namespace mlir;
 namespace CI_UNIT_NAMESPACE {
@@ -212,9 +216,12 @@ IntegerAttr emptyCountSlot(Operation *phase) {
 struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(Legalize)
   unsigned phase;
+  compilerinfra::TargetProfile target;
   intentdsl::CallFacts facts;
   intentdsl::dsa::LocalSupply supply;
-  Legalize(unsigned step,const intentdsl::CallFacts &f,const intentdsl::dsa::LocalSupply &s) : phase(step),facts(f),supply(s) {}
+  Legalize(unsigned step, const compilerinfra::TargetProfile &p,
+           const intentdsl::CallFacts &f, const intentdsl::dsa::LocalSupply &s)
+      : phase(step), target(p), facts(f), supply(s) {}
   void runOnOperation() final {
     auto f = *getOperation().getOps<func::FuncOp>().begin();
     if(intentdsl::kir::matrixDomain(f)){
@@ -258,7 +265,8 @@ struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
       return;
     }
     if (phase == 2) {
-      f->setAttr("bangc.entry", b.getStringAttr("intent_enqueue"));
+      if (failed(lowerRowsToCallable(getOperation(), target)))
+        signalPassFailure();
       return;
     }
     auto layout = f->getAttrOfType<DictionaryAttr>("dsa.layout");
@@ -337,9 +345,15 @@ LogicalResult callable(func::FuncOp fn) {
   return success(!access.wasInterrupted());
 }
 LogicalResult verify(ModuleOp m, const TargetProfile &p, unsigned stage) {
+  auto funcs = m.getOps<func::FuncOp>();
+  if (!llvm::hasSingleElement(funcs))
+    return failure();
+  auto fn = *funcs.begin();
+  if (stage == 2 && !intentdsl::kir::matrixDomain(fn) &&
+      !intentdsl::kir::orderedOwners(fn))
+    return verifyCallableRows(m, p);
   if (failed(intentdsl::dsa::verifyProgram(m, p, true)))
     return failure();
-  auto fn = *m.getOps<func::FuncOp>().begin();
   if(intentdsl::kir::matrixDomain(fn))return bindMatrix(fn,stage,false);
   if (intentdsl::kir::orderedOwners(fn)) {
     if (failed(intentdsl::dsa::verifyOwners(fn, p, true)))
@@ -428,17 +442,26 @@ void panelCost(Unit &);
 void bind(Unit &u) {
   dmaCost(u);
   panelCost(u);
+  rowContracts(u);
+  addressOptimization(u);
+  u.dialects = [](DialectRegistry &r) {
+    r.insert<intentdsl::bangc_src::BangcSrcDialect, scf::SCFDialect,
+             arith::ArithDialect>();
+  };
   unsigned stage = 0;
   for (StringRef name : {"bound", "legal", "callable"}) {
-    u.boundaries.push_back({{name.str(),
-                             [stage](OpPassManager &pm, const TargetProfile &p) {
-                               pm.addPass(std::make_unique<Legalize>(stage,*p.services.get<intentdsl::CallFacts>(),*p.services.get<intentdsl::dsa::LocalSupply>()));
-                               return llvm::Error::success();
-                             },
-                             [stage](ModuleOp m, const TargetProfile &p) {
-                               return verify(m, p, stage);
-                             }},
-                            COMPILERINFRA_SOURCE});
+    u.boundaries.push_back(
+        {{name.str(),
+          [stage](OpPassManager &pm, const TargetProfile &p) {
+            pm.addPass(std::make_unique<Legalize>(
+                stage, p, *p.services.get<intentdsl::CallFacts>(),
+                *p.services.get<intentdsl::dsa::LocalSupply>()));
+            return llvm::Error::success();
+          },
+          [stage](ModuleOp m, const TargetProfile &p) {
+            return verify(m, p, stage);
+          }},
+         COMPILERINFRA_SOURCE});
     ++stage;
   }
   u.exit =

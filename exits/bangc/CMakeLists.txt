@@ -2,7 +2,8 @@ compilerinfra_target(dsa levels/storage/dsa)
 compilerinfra_unit(SOURCES
     ir/Dialect.cpp ir/Implementations.cpp transforms/NarrowAddress.cpp
     cost/Transfers.cpp cost/Matrix.cpp capabilities/Rows.cpp
-    legalize/Bind.cpp emit/Kernel.cpp emit/Matrix.cpp emit/Ordered.cpp
+    legalize/Bind.cpp legalize/Rows.cpp legalize/VerifyRows.cpp
+    emit/Kernel.cpp emit/Rows.cpp emit/Matrix.cpp emit/Ordered.cpp
   LINK_LIBRARIES ${dsa}
   TABLEGEN
     "ir/Ops.td Dialect.h.inc -gen-dialect-decls -dialect=bangc_src"
