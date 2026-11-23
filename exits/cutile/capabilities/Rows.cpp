@@ -29,7 +29,7 @@ capabilities(const llvm::json::Object &options) {
               intentdsl::block::OwnerMachine{
                   32, 256,
                   options.getInteger("dynamic_shared_per_block").value_or(0),
-                  32768})))
+                  32768, 32, options.getInteger("registers").value_or(0) / 2})))
     return err;
   if(auto err=intentdsl::bindPerformance(profile,options,"",options.getString("calibration").value_or("").str(),options.getInteger("sm_count").value_or(1)))return std::move(err);
   if (auto e =

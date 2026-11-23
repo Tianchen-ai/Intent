@@ -70,6 +70,32 @@ void orderedCost(Unit &u) {
               panelBytes = blocks * span.getInt() * bytesPerToken;
               dependency =
                   (1. + std::max(0., live / 32768. - 1.)) / span.getInt();
+              // Independent matrix updates compete for resident accumulator
+              // fragments and exchange score columns between issue groups.
+              unsigned carries = 0;
+              for (auto loop :
+                   op->getRegion(0).front().getOps<mlir::scf::ForOp>())
+                if (loop->hasAttr("kir.reassociate"))
+                  carries = std::max<unsigned>(
+                      carries,
+                      llvm::count_if(loop.getResultTypes(), [](mlir::Type t) {
+                        return mlir::isa<mlir::ShapedType>(t);
+                      }));
+              if (carries > 1 && caps->exchangeWidth &&
+                  caps->residentRegisters) {
+                double packets =
+                    std::ceil(double(span.getInt()) / caps->exchangeWidth);
+                double slots =
+                    carries * ((physicalRows + span.getInt()) * lanes +
+                               physicalRows * span.getInt()) +
+                    carries * physicalRows * lanes;
+                issueGroups = std::ceil(physicalRows / caps->exchangeWidth) *
+                              std::ceil(double(lanes) / 32.);
+                dependency *= (1. + (packets - 1.) * carries) *
+                              std::max(1., slots / caps->residentRegisters);
+                e.terms["concurrent_accumulator_slots"] = {slots, "reg32"};
+                e.terms["score_exchange_packets"] = {packets, "count"};
+              }
               e.terms["matrix_issue_groups"] = {issueGroups, "count"};
               e.terms["shared_panel_read_bytes"] = {panelBytes, "B"};
             }

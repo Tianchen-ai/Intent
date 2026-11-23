@@ -8,6 +8,8 @@ struct OwnerMachine {
   int residentElements;
   int64_t panelBytes = 0;
   int64_t contributionLimit = 0;
+  int64_t exchangeWidth = 0;
+  int64_t residentRegisters = 0;
 };
 bool canForwardOwners(mlir::Operation *, const compilerinfra::TargetProfile &);
 mlir::LogicalResult forwardOwners(mlir::func::FuncOp);
