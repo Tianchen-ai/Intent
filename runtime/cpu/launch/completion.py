@@ -3,15 +3,22 @@
 from concurrent.futures import ThreadPoolExecutor
 import os
 import select
+from threading import Lock
 
 
-# Each candidate owns its dispatch queue. The native host entry still owns
-# task partitioning, worker threads and joins.
-_queue = ThreadPoolExecutor(max_workers=1, thread_name_prefix="intent-cpu")
+# Native libraries may retain OpenMP teams between calls. Reusing a dispatch
+# thread across CPU sets would leave those team members on the old cores.
+_queues = {}
+_lock = Lock()
 
 
 def submit(enqueue, device):
-    affinity = os.sched_getaffinity(0)
+    affinity = frozenset(os.sched_getaffinity(0))
+    with _lock:
+        queue = _queues.get(affinity)
+        if queue is None:
+            queue = ThreadPoolExecutor(max_workers=1, thread_name_prefix="intent-cpu")
+            _queues[affinity] = queue
     signal = os.fdopen(os.eventfd(0, os.EFD_CLOEXEC), "rb", buffering=0)
     ready = select.poll()
     ready.register(signal, select.POLLIN)
@@ -24,7 +31,7 @@ def submit(enqueue, device):
         finally:
             os.eventfd_write(signal.fileno(), 1)
 
-    future = _queue.submit(invoke)
+    future = queue.submit(invoke)
 
     def wait():
         ready.poll()
