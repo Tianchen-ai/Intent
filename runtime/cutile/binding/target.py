@@ -1,9 +1,13 @@
+from runtime.kir.binding.completion import submit_device as submit
 from math import prod
 import torch
 from runtime.cutile.launch.call import Artifact
 
 
+
 class Target:
+    submit = staticmethod(submit)
+
     def profile(self, device, buffers):
         if getattr(device, "type", None) != "cuda":
             raise ValueError("cuTile requires local CUDA arrays")

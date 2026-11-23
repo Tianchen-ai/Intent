@@ -3,6 +3,7 @@
 import ctypes as ct
 from dataclasses import dataclass
 from runtime.kir.binding.views import inspect
+from runtime.kir.binding.completion import PreparedLaunch
 
 
 @dataclass
@@ -63,8 +64,10 @@ class NativeBinding:
             )
 
 
-class HostVariants:
+class HostVariants(PreparedLaunch):
     """Bind synchronous host entries with distinct parameters to the same author ABI."""
+
+    device = "cpu"
 
     def __init__(self, artifact, values, outputs, scope, shape):
         self.artifact = artifact
@@ -95,7 +98,7 @@ class HostVariants:
             for r in self.artifact.data["rows"]
         ]
 
-    def launch(self):
+    def enqueue(self):
         from time import perf_counter_ns
 
         self.compile()
@@ -151,7 +154,7 @@ class HostVariants:
 
     def tuning_report(self):
         from runtime.kir.binding.selection import selection
-
+        self.wait_previous()
         return selection(self, self.winner, self.timings)
 
     def compilation_report(self):
@@ -164,9 +167,11 @@ class HostVariants:
         }
 
     def native_call(self):
+        self.wait_previous()
         if self.selected is None:
             raise RuntimeError("launch once before requesting the native winner")
         return self.selected
 
     def result(self):
+        self.wait_previous()
         return self.outputs[0] if len(self.outputs) == 1 else self.outputs

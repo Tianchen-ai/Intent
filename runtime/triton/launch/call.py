@@ -1,4 +1,5 @@
 from threading import RLock
+from runtime.kir.binding.completion import PreparedLaunch
 from time import perf_counter
 import torch
 import triton
@@ -23,7 +24,7 @@ class Artifact:
         return Prepared(self, values, outputs, device, m, n)
 
 
-class Prepared:
+class Prepared(PreparedLaunch):
     def __init__(self, artifact, values, outputs, device, m, n):
         self.artifact, self.values, self.outputs = artifact, values, outputs
         self.device, self.m, self.n = device, m, n
@@ -82,7 +83,7 @@ class Prepared:
     def _invoke(self, row, args):
         self.launchers[row["id"]](*args, row["rows"], row["width"])
 
-    def launch(self):
+    def enqueue(self):
         with torch.cuda.device(self.device):
             self.compile()
             if not all(grid(self.artifact.data["grid"], (self.m, self.n), self.rows[0])):

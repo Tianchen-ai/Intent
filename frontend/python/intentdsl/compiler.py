@@ -4,6 +4,7 @@ import ast
 import json
 from threading import RLock
 from .signature import signature
+from .completion import Completion
 
 
 class Kernel:
@@ -71,11 +72,13 @@ class Kernel:
         call = artifact.bind(views, result, device, shape, key)
         # A prepared call may outlive its JIT object. Pin its installed module namespace.
         call.compiler_owner = self.compiler
+        call.completion_type = Completion
+        call.submit = self.target.submit
         return call
 
     def run(self, *inputs):
         call = self.prepare(*inputs)
-        call.launch()
+        call.execute()
         return call.result()
 
     def __call__(self, *args):
@@ -84,4 +87,4 @@ class Kernel:
         ins, outs = [], []
         for arg, v in zip(self.args, args):
             (outs if arg["direction"] == "Out" else ins).append(v)
-        self.prepare(*ins, outputs=outs).launch()
+        self.prepare(*ins, outputs=outs).execute()

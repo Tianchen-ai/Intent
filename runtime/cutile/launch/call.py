@@ -1,4 +1,5 @@
 from threading import RLock
+from runtime.kir.binding.completion import PreparedLaunch
 from importlib.metadata import version
 import torch
 import cuda.tile as ct
@@ -28,7 +29,7 @@ class Artifact:
         return Call(self, values, outputs, device, (m, n))
 
 
-class Call:
+class Call(PreparedLaunch):
     def __init__(self, artifact, values, outputs, device, shape):
         self.artifact, self.values, self.outputs = artifact, tuple(values), outputs
         self.device, self.shape = device, shape
@@ -87,7 +88,7 @@ class Call:
                 d.compiles for _, d in self.candidates.values()
             )
 
-    def launch(self):
+    def enqueue(self):
         a = self.artifact
         with torch.cuda.device(self.device):
             self.compile()

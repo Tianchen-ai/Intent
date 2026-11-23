@@ -105,7 +105,10 @@ CPU 行组参数帧、同步返回和选优归 runtime/cpu，由 Weft、Mojo 复
 1. **定义与捕获**　`intent.kernel/fn/program` 记录定义、源码位置与闭包常量。安装包的薄 Python 入口持有 SDK Compiler；候选安装内的前端生成根 KIR 字节。捕获不查询设备。
 2. **prepare**　给定定义、显式出口和本机 buffers，检查 shape/dtype/device/alias，绑定 constexpr 和输出，分配作者声明的 workspace。获取 device/CPU 集及工具链事实；由出口将快照绑定到 typed services。可做必要 Intent lowering；不执行、调优或同步设备。
 3. **compile**　沿唯一父链作 Intent lowering 并 emit，若 prepare 已完成则复用。出口的 native builder 在目标机编译适用行；Weft 在此编译 task 和 host 并核对两者的链接签名。出口 runtime 加载可调用产物。原生编译与首次调优有不同的失败阶段；不可把首次执行藏入 compile。
-4. **launch**　首次需选择时，只在同一控制和供数拓扑下、已声明且守卫成立的行中测量，恢复 InOut、别名关系及累积初态；对真实用户状态提交一次选中实现。单一行无需试跑；无法隔离试跑外部 effects 的调用须选定安全单行或报告原因。GPU/MLU 按原 stream/queue 异步；CPU 完成后返回。捕获图前完成编译与选行，热调用不重新探测或读表。
+4. **launch**　首次需选择时，只在同一控制和供数拓扑下、已声明且守卫成立的行中测量，恢复 InOut、别名关系及累积初态；对真实用户状态提交一次选中实现。单一行无需试跑；无法隔离试跑外部 effects 的调用须选定安全单行或报告原因。五个出口的 prepared.launch() 都返回 intentdsl.Completion。捕获图前完成编译与选行，热调用不重新探测或读表。
+   - `handle.wait()` 等待该次提交并传播执行错误，包括 Weft host 的状态码。`done()` 与 `poll()` 非阻塞查询。CUDA 在当前 stream 记录 event，MLU 在当前 queue 记录 notifier。句柄持有绑定对象，加速器分配同时登记在执行流上。
+   - Mojo 与 Weft 共用 runtime/cpu 的后台提交队列。任务按提交线程的 CPU affinity 调用原生 host，返回时写入 Linux eventfd。进行中的调用持有输入、输出和工作区。CPU 的 `run`、全参数调用和取 prepared result 均保留同步语义。
+   - 一个 program 提交整段作者序列。CPU 在同一后台任务内按依赖执行 fill、成员调用和 join；加速器在同一流上按序提交，只在序列末尾记录完成事件。独立提交之间有数据依赖时，调用方使用同一设备流或先等待生产者。
 5. **缓存**　Intent/原生编译缓存以定义、出口、有效目标/工具链、数值选项、constexpr、必要的 shape/stride 类和配置版本区分。winner 独立按有效候选集合、设备及性能相关参数区分。绑定对象单独持有本次地址、输出与生命周期；更换 buffer 重新绑定。数据内容与指针地址不进入通用 IR。缓存在候选安装间按实际构建与配置隔离。
 6. **开发与验证**　同一产品库支持配置派生和源码派生；普通 JIT 仅留编译 ID，显式观察或 development profile 才记录 IR 变化。Bench 拿完整 prepared call、输入及同设备成熟对照做数值和完整调用计时。Bench 不补 ABI、不替作者分解 program。
 

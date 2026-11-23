@@ -1,4 +1,5 @@
 from threading import RLock
+from runtime.kir.binding.completion import PreparedLaunch
 from statistics import median
 import torch
 from runtime.block.binding.grid import accepts, grid
@@ -22,7 +23,7 @@ class Artifact:
         return Call(self, values, outputs, device, (m, n))
 
 
-class Call:
+class Call(PreparedLaunch):
     def __init__(self, artifact, values, outputs, device, shape):
         self.artifact, self.values, self.outputs, self.device, self.shape = (
             artifact,
@@ -80,7 +81,7 @@ class Call:
                 f"MLU row {row['id']} enqueue on {self.device} failed with CNRT status {status}"
             )
 
-    def launch(self):
+    def enqueue(self):
         self.compile()
         if not any(self.grid_sizes.values()):
             return

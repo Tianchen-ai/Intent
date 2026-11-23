@@ -1,8 +1,12 @@
+from runtime.kir.binding.completion import submit_device as submit
 import torch
 from runtime.triton.launch.call import Artifact
 
 
+
 class Target:
+    submit = staticmethod(submit)
+
     def __init__(self):
         self.devices = {}
 

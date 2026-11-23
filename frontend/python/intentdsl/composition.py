@@ -144,6 +144,7 @@ class ProgramKernel:
         self.definition = definition
         self.views = compiler.runtime("kir", "binding.views")
         self.sequence = compiler.runtime("kir", "binding.sequence")
+        self.submit = compiler.runtime(backend, "binding.target").Target.submit
         self.kernels = {s[1]: Kernel(compiler, s[1], backend)
                         for s in definition.steps if s[0] == "call"}
 
@@ -180,14 +181,17 @@ class ProgramKernel:
         return tuple(steps), result if self.definition.multiple else result[0]
 
     def prepare(self, *args, **kwargs):
+        from .completion import Completion
+
         steps, result = self.bind(*args, **kwargs)
+        device = self.views.inspect(result[0] if isinstance(result, tuple) else result).device
         return self.sequence.PreparedSequence(
             [member.prepare() if isinstance(member, BoundMember) else member for _, member in steps],
-            [name for name, _ in steps], result)
+            [name for name, _ in steps], result, device, self.submit, Completion)
 
     def run(self, *args, **kwargs):
         prepared = self.prepare(*args, **kwargs)
-        prepared.launch()
+        prepared.execute()
         return prepared.result()
 
 

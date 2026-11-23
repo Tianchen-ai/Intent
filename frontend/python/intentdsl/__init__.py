@@ -5,6 +5,9 @@ from inspect import getsource
 from textwrap import dedent
 
 
+from .completion import Completion
+
+
 class _Direction:
     def __class_getitem__(cls, item):
         return cls, item

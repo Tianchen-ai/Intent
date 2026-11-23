@@ -1,3 +1,4 @@
+from runtime.cpu.launch.completion import submit
 from runtime.cpu.binding.profile import calibration
 import os
 from functools import lru_cache
@@ -54,7 +55,10 @@ def discover(scope):
     ), bits, "+avx512vnni" in isa and all("avx512_vnni" in cpu_flags[c] for c in scope)
 
 
+
 class Target:
+    submit = staticmethod(submit)
+
     def profile(self, device, buffers):
         if str(device) != "cpu":
             raise ValueError("CPU backend requires CPU views")

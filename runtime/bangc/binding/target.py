@@ -1,5 +1,6 @@
 """Local CNRT device facts for the BANG C exit."""
 
+from runtime.kir.binding.completion import submit_device as submit
 from math import prod
 import ctypes as C
 from functools import lru_cache
@@ -29,7 +30,10 @@ def facts(index):
     return values
 
 
+
 class Target:
+    submit = staticmethod(submit)
+
     def profile(self, device, buffers):
         if device.type != "mlu":
             raise ValueError("BANG C requires inputs on a local MLU")

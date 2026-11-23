@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from math import prod
 from . import views
+from .completion import PreparedLaunch
 
 
 @dataclass(frozen=True)
@@ -32,8 +33,10 @@ class Fill:
     def compile(self):
         pass
 
-    def launch(self):
+    def enqueue(self):
         views.adapter(self.destination).fill(self.destination, self.value)
+
+    launch = enqueue
 
     def native_calls(self):
         import numpy as np
@@ -56,28 +59,34 @@ class Fill:
                            np.asarray(self.value, dtype=dtype).tobytes(), self.destination),)
 
 
-class PreparedSequence:
-    def __init__(self, steps, labels, outputs):
+class PreparedSequence(PreparedLaunch):
+    def __init__(self, steps, labels, outputs, device, submit, completion_type):
         self.steps = tuple(steps)
         self.labels = tuple(labels)
         self.outputs = outputs
+        self.device = device
+        self.submit = submit
+        self.completion_type = completion_type
 
     def compile(self):
         for step in self.steps:
             step.compile()
 
-    def launch(self):
+    def enqueue(self):
         for step in self.steps:
-            step.launch()
+            step.enqueue()
 
     def result(self):
+        self.wait_previous()
         return self.outputs
 
     def native_calls(self):
+        self.wait_previous()
         return tuple(binding for step in self.steps for binding in
                      (step.native_calls() if isinstance(step, Fill) else (step.native_call(),)))
 
     def tuning_report(self):
+        self.wait_previous()
         return {"steps": [
             {"op": "fill", "slot": name, "value": step.value, "dtype": step.desc.dtype,
              "shape": tuple(step.desc.shape), "strides": tuple(step.desc.strides)}
