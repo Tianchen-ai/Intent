@@ -510,7 +510,7 @@ static MatrixPanels::PackedRight packedRight(MatrixPanels &p) {
       << ";unsigned char *src=(unsigned char*)a" << i << "+(g*"
       << (batch < 0 ? 0 : stride[batch]) << "+k*" << stride[k] << "+c*"
       << stride[n] << ")*" << bytes << ";";
-    s<<"for(int j=0;j<nc;j++)rhs[(b*nr+j)*K+k]=src[j*"<<stride[n]<<"];}}\n";
+    s<<"for(int64_t j=0;j<nc;j++)rhs[(b*nr+j)*K+k]=src[j*"<<stride[n]<<"];}}\n";
   pack.address=std::string("rhs+((")+(batch<0?"0":"g")+"*tiles+c/nr)*K)*nr";pack.release="free(rhs);";return pack;
 }
 llvm::Error emitMatrix(func::FuncOp fn, llvm::raw_pwrite_stream &out) {
