@@ -1,4 +1,5 @@
 {
+  "reuse": "vendor",
   "nodes": {
     "block": {
       "decisions": {
