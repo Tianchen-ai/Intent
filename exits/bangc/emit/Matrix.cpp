@@ -71,7 +71,7 @@ struct Matrix : intentdsl::block::MatrixAccess {
     if (st == 1)
       s << "__memcpy(rec,base,144,GDRAM2NRAM);";
     else
-      s << "for(int z=0;z<144;z++)rec[z]=base[z*" << st << "];";
+      s << "for(long long z=0;z<144;z++)rec[z]=base[z*" << st << "];";
     s << "union{unsigned short u;half h;} "
          "d,dm;d.u=rec[0]|(rec[1]<<8);dm.u=rec[2]|(rec[3]<<8);int S=0,T=0;\n"
       << "for(int j=0;j<8;j++){int "

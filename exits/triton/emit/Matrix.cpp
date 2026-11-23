@@ -133,9 +133,9 @@ struct Writer : intentdsl::block::MatrixAccess {
     }
     s << "    acc=tl.full((ROWS,WIDTH),0.,tl.float32)\n    for g in range("
       << shape[2] / 32 << "):\n"
-      << "        ax=tl.load(" << addr(sa, "r", 0, "g", 1)
+      << "        ax=tl.load(" << addr(sa, "r", 0, "tl.cast(g,tl.int64)", 1)
       << ",r<M,other=127).to(tl.int32)\n"
-      << "        bx=tl.load(" << addr(sb, "g", axes.group, "c", axes.column)
+      << "        bx=tl.load(" << addr(sb, "tl.cast(g,tl.int64)", axes.group, "c", axes.column)
       << ",c<N,other=127).to(tl.int32)\n"
       << "        "
          "ls=tl.where(ax==255,float('nan'),libdevice.ldexp(tl.full((ROWS,),1.,"

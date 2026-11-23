@@ -242,7 +242,7 @@ static inline float decode(unsigned x,unsigned scale){
     if (stride[n] == 1)
       s << "memcpy(dst,src,nc*" << bytes << ");";
     else
-      s << "for(int j=0;j<nc;j++)memcpy(dst+j*" << bytes << ",src+j*"
+      s << "for(int64_t j=0;j<nc;j++)memcpy(dst+j*" << bytes << ",src+j*"
         << stride[n] * bytes << "," << bytes << ");";
     s << "}}\n";
   }
@@ -257,7 +257,7 @@ static inline float decode(unsigned x,unsigned scale){
       auto t = fn.getArgAttrOfType<DenseI64ArrayAttr>(i, "cpu.strides");
       std::string a = "0";
       for (auto [ax, j] : llvm::enumerate(axes))
-        a += "+" + j + "*" + std::to_string(t[ax]);
+        a += "+(int64_t)(" + j + ")*" + std::to_string(t[ax]);
       return "((uint8_t*)a" + std::to_string(i) + ")[" + a + "]";
     };
     s << "#pragma omp parallel for num_threads(workers) schedule(static) "
@@ -287,13 +287,13 @@ static inline float decode(unsigned x,unsigned scale){
     s << "for(int64_t g=0;g<" << groups << ";++g){float *x=(float*)a" << x.slot
       << "+g*" << x.strides[0] << ";uint32_t peak=0;\n"
       << "#pragma omp simd reduction(max:peak)\n"
-      << "for(int k=0;k<256;++k){uint32_t bits;memcpy(&bits,x+k*"
+      << "for(int64_t k=0;k<256;++k){uint32_t bits;memcpy(&bits,x+k*"
       << x.strides[1]
       << ",4);uint32_t key=(bits<<1)|(bits>>31);if(key>peak)peak=key;}\n"
       << "uint32_t bits=(peak>>1)|(peak<<31);float e;memcpy(&e,&bits,4);\n"
       << "float inv=e==0?0.0f:-127.0f/e;packed[g].d=e==0?0.0f:1.0f/inv;\n"
       << "#pragma omp simd\n"
-      << "for(int k=0;k<256;++k){float v=x[k*" << x.strides[1]
+      << "for(int64_t k=0;k<256;++k){float v=x[k*" << x.strides[1]
       << "]*inv;int trunc=(int)v;float f=fabsf(v-(float)trunc);"
          "int round=(f>0.5f)||(f==0.5f&&(trunc&1));int "
          "q=trunc+(v<0?-round:round);packed[g].q[k]=q>127?127:q< "
