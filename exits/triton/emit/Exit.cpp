@@ -16,6 +16,10 @@ namespace CI_UNIT_NAMESPACE {
 using namespace mlir;
 using namespace compilerinfra;
 void legalize(OpPassManager &);
+void lowerTileProgram(func::FuncOp);
+LogicalResult verifyTileProgram(func::FuncOp, const TargetProfile &);
+llvm::Error emitTileProgram(func::FuncOp, llvm::raw_pwrite_stream &);
+void tileContracts(Unit &);
 LogicalResult verifyColumnViews(func::FuncOp);
 LogicalResult verifyMatrixExit(func::FuncOp,const TargetProfile &);
 llvm::Error emitMatrix(func::FuncOp,llvm::raw_pwrite_stream &);
@@ -26,7 +30,10 @@ struct BindCallable : PassWrapper<BindCallable, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(BindCallable)
   void runOnOperation() final {
     auto fn = *getOperation().getOps<func::FuncOp>().begin();
-    if (intentdsl::kir::orderedOwners(fn) || intentdsl::kir::matrixDomain(fn))
+    lowerTileProgram(fn);
+    if (fn.front().front().getName().getStringRef() ==
+            "triton_src.tile_program" ||
+        intentdsl::kir::orderedOwners(fn) || intentdsl::kir::matrixDomain(fn))
       return;
     auto guard=fn->getAttrOfType<DenseI64ArrayAttr>("block.guard");
     Builder b(&getContext());
@@ -370,6 +377,8 @@ public:
 };
 llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
   auto fn = *m.getOps<func::FuncOp>().begin();
+  if (fn.front().front().getName().getStringRef() == "triton_src.tile_program")
+    return emitTileProgram(fn, out);
   if (intentdsl::kir::orderedOwners(fn))
     return emitOrdered(fn, out);
   if(intentdsl::kir::matrixDomain(fn))return emitMatrix(fn,out);
@@ -416,6 +425,7 @@ llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
 void matrixIssues(Unit &);
 void bind(Unit &unit) {
   matrixIssues(unit);
+  tileContracts(unit);
   unit.dialects = [](DialectRegistry &r) {
     r.insert<intentdsl::itsrc::ItsrcDialect>();
   };
@@ -436,6 +446,12 @@ void bind(Unit &unit) {
             if (!llvm::hasSingleElement(funcs))
               return failure();
             auto fn = *funcs.begin();
+            if (fn.empty() || fn.front().empty())
+              return failure();
+            if (fn.front().front().getName().getStringRef() ==
+                "triton_src.tile_program")
+              return phase == "callable" ? verifyTileProgram(fn, profile)
+                                         : failure();
             if (failed(verifyColumnViews(fn))) return failure();
     if (intentdsl::kir::orderedOwners(fn)) {
       auto &owner = fn.front().front();

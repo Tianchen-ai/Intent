@@ -1,6 +1,6 @@
 compilerinfra_target(parent levels/execution/block)
 compilerinfra_target(algorithm levels/algorithm/kir)
-compilerinfra_unit(SOURCES ir/Dialect.cpp emit/Exit.cpp emit/Matrix.cpp emit/Ordered.cpp emit/Columns.cpp cost/Matrix.cpp legalize/Legalize.cpp capabilities/Rows.cpp
+compilerinfra_unit(SOURCES ir/Dialect.cpp emit/Exit.cpp emit/Matrix.cpp emit/Ordered.cpp emit/Columns.cpp emit/Tiles.cpp cost/Matrix.cpp legalize/Legalize.cpp legalize/Tiles.cpp capabilities/Rows.cpp
   LINK_LIBRARIES ${parent} ${algorithm}
   TABLEGEN
     "ir/Ops.td Dialect.h.inc -gen-dialect-decls -dialect=triton_src"

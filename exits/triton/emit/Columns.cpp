@@ -13,7 +13,8 @@ std::string extent(Type t) {
   return std::to_string(cast<RankedTensorType>(t).getDimSize(0));
 }
 
-void registerColumns(TerminalPrinter &printer) {
+} // namespace
+void registerColumnRules(TerminalPrinter &printer) {
   auto &rules = printer.operations;
   auto leaf = [&](std::string name, auto emit) {
     rules[name] = [emit](Operation &op, PrintPoint at, PrintContext &p) {
@@ -64,7 +65,10 @@ void registerColumns(TerminalPrinter &printer) {
     if (at == PrintPoint::Enter) {
       for (auto [result, init] : llvm::zip(loop.getResults(), loop.getInitArgs()))
         p.line(p.name(result) + " = " + p.name(init));
-      p.line("for " + p.name(loop.getInductionVar()) + " in tl.static_range(" +
+      auto syntax = loop->hasAttr("triton_src.runtime_range")
+                        ? " in range("
+                        : " in tl.static_range(";
+      p.line("for " + p.name(loop.getInductionVar()) + syntax +
              p.name(loop.getLowerBound()) + "," + p.name(loop.getUpperBound()) +
              "," + p.name(loop.getStep()) + "):");
       ++p.indent;
@@ -80,7 +84,8 @@ void registerColumns(TerminalPrinter &printer) {
       lhs.push_back(p.name(result));
       rhs.push_back(p.name(next));
     }
-    p.line(llvm::join(lhs, ",") + " = " + llvm::join(rhs, ","));
+    if (!lhs.empty())
+      p.line(llvm::join(lhs, ",") + " = " + llvm::join(rhs, ","));
   });
   // The layout, address width and view rank are checked during exit legalization.
   for (bool store : {false, true}) {
@@ -131,11 +136,10 @@ void registerColumns(TerminalPrinter &printer) {
       return std::string(callee) + "(" + llvm::join(v,",") + ")";
     });
 }
-} // namespace
 
 llvm::Expected<std::string> printColumns(func::FuncOp fn) {
   TerminalPrinter printer;
-  registerColumns(printer);
+  registerColumnRules(printer);
   printer.package = [](DictionaryAttr, const auto &files, llvm::raw_pwrite_stream &out) {
     out << files.at("kernel.py");
     return llvm::Error::success();

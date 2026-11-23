@@ -84,61 +84,11 @@ struct Ordered : intentdsl::block::OwnerSource {
                         : "float32") +
            ")";
   }
-  std::string scorePanel() {
-    signature();
-    auto &bb = space.getRegion(0).front();
-    auto &dot = bb.front();
-    auto *weights = dot.getNextNode(), *val = weights->getNextNode(),
-         *store = val->getNextNode();
-    auto q = dot.getOperand(0), k = dot.getOperand(1), v = val->getOperand(1),
-         y = store->getOperand(2);
-    auto size = [&](Value buf, int axis) {
-      return std::to_string(layout(buf, "block.shape")[axis]);
-    };
-    auto address = [&](Value buf, std::array<std::string, 4> coords) {
-      std::string ptr = name(buf);
-      for (unsigned i = 0; i < 4; ++i)
-        ptr += "+(" + coords[i] + ")*" +
-               std::to_string(layout(buf, "block.strides")[i]);
-      return ptr;
-    };
-    line(1, "pid=tl.cast(tl.program_id(0),tl.int64)");
-    line(1, "tiles=" + size(q, 2) + "//ROWS");
-    line(1, "head=(pid//tiles)%" + size(q, 1));
-    line(1, "batch=pid//(tiles*" + size(q, 1) + ")");
-    line(1,
-         "kv=head//" +
-             std::to_string(dot.getAttrOfType<IntegerAttr>("group").getInt()));
-    line(1, "row=(pid%tiles)*ROWS+tl.arange(0,ROWS)");
-    line(1, "t=tl.arange(0," + size(k, 2) + ").to(tl.int64)");
-    line(1, "d=tl.arange(0," + size(k, 3) + ").to(tl.int64)");
-    line(1, "f=tl.arange(0," + size(v, 3) + ").to(tl.int64)");
-    line(1, "q=tl.load(" +
-                address(q, {"batch", "head", "row[:,None]", "d[None,:]"}) +
-                ")");
-    line(1, "k=tl.load(" +
-                address(k, {"batch", "kv", "t[:,None]", "d[None,:]"}) + ")");
-    line(1, "scores=tl.dot(q,tl.trans(k))*(" + name(dot.getOperand(2)) +
-                "*1.4426950408889634)");
-    line(1, "valid=row[:,None]>=t[None,:]");
-    line(1, "peak=tl.max(tl.where(valid,scores,-float('inf')),axis=1)");
-    line(1, "p=tl.where(valid,tl.exp2(scores-peak[:,None]),0.)");
-    line(1, "mass=tl.sum(p,axis=1)");
-    line(1, "v=tl.load(" +
-                address(v, {"batch", "kv", "t[:,None]", "f[None,:]"}) + ")");
-    line(1, "z=tl.dot(p.to(tl.bfloat16),v)*(1./mass[:,None])");
-    line(1, "tl.store(" +
-                address(y, {"batch", "head", "row[:,None]", "f[None,:]"}) +
-                ",z.to(tl.bfloat16))");
-    return result;
-  }
 };
 } // namespace
 llvm::Error emitOrdered(func::FuncOp fn, llvm::raw_pwrite_stream &out) {
   Ordered writer(fn);
-  auto src = fn.front().front().hasAttr("block.score_panel")
-                 ? llvm::Expected<std::string>(writer.scorePanel())
-             : fn.front().front().hasAttr("block.column_prefixes")
+  auto src = fn.front().front().hasAttr("block.column_prefixes")
                  ? printColumns(fn)
                  : writer.write();
   if (!src)

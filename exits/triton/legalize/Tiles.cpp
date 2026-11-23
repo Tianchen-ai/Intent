@@ -1,0 +1,366 @@
+#include "intentdsl/levels/execution/block/ir/MatrixAccess.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Math/IR/Math.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/IRMapping.h"
+
+namespace CI_UNIT_NAMESPACE {
+using namespace mlir;
+namespace {
+struct Tiles {
+  OpBuilder b;
+  Location loc;
+  func::FuncOp fn;
+  Operation *program;
+  Tiles(func::FuncOp f, StringRef convention)
+      : b(&f.front().front()), loc(f.getLoc()), fn(f) {
+    auto &original = f.front().front();
+    OperationState s(loc, "triton_src.tile_program");
+    s.addOperands(original.getOperands());
+    s.addAttributes(original.getAttrs());
+    s.addAttribute("calling_convention", b.getStringAttr(convention));
+    s.addRegion();
+    program = b.create(s);
+    auto *body = b.createBlock(&program->getRegion(0));
+    b.setInsertionPointToStart(body);
+  }
+  Operation *op(StringRef name, ValueRange args = {}, TypeRange results = {},
+                ArrayRef<NamedAttribute> attrs = {}) {
+    OperationState s(loc, ("triton_src." + name).str());
+    s.addOperands(args);
+    s.addTypes(results);
+    s.addAttributes(attrs);
+    return b.create(s);
+  }
+  Type elem(Type t) { return getElementTypeOrSelf(t); }
+  Type shaped(ArrayRef<int64_t> shape, Type t) {
+    return shape.empty() ? t : RankedTensorType::get(shape, t);
+  }
+  Value like(Value v, Type type, int axis = -1) {
+    if (type == v.getType())
+      return v;
+    return op("tile_broadcast", v, type,
+              {b.getNamedAttr("axis", b.getI64IntegerAttr(axis))})
+        ->getResult(0);
+  }
+  Value integer(int64_t i) {
+    return b.create<arith::ConstantIntOp>(loc, i, 64);
+  }
+  Value scalar(float f) {
+    return b.create<arith::ConstantOp>(loc, b.getF32FloatAttr(f));
+  }
+  Value pid(int axis) {
+    return op("tile_pid", {}, b.getI64Type(),
+              {b.getNamedAttr("axis", b.getI64IntegerAttr(axis))})
+        ->getResult(0);
+  }
+  Value lanes(int64_t n) {
+    return op("tile_axis", {}, shaped({n}, b.getI64Type()))->getResult(0);
+  }
+  Value stepped(Value first, int64_t n) {
+    auto r = lanes(n);
+    return b.create<arith::AddIOp>(loc, like(first, r.getType()), r);
+  }
+  Value address(Value base, ValueRange coordinates,
+                ArrayRef<int64_t> projection) {
+    SmallVector<int64_t> dims;
+    for (auto [index, axis] : llvm::zip(coordinates, projection))
+      if (axis >= 0) {
+        dims.resize(std::max(dims.size(), size_t(axis + 1)), 1);
+        dims[axis] = cast<RankedTensorType>(index.getType()).getDimSize(0);
+      }
+    SmallVector<Value> args{base};
+    llvm::append_range(args, coordinates);
+    auto strides = fn.getArgAttr(cast<BlockArgument>(base).getArgNumber(),
+                                 "block.strides");
+    return op("tile_address", args, shaped(dims, b.getI64Type()),
+              {b.getNamedAttr("projection", b.getDenseI64ArrayAttr(projection)),
+               b.getNamedAttr("strides", strides)})
+        ->getResult(0);
+  }
+  Value read(Value base, Value addr, Value mask = {}) {
+    SmallVector<Value> args{base, addr};
+    if (mask)
+      args.push_back(mask);
+    auto t = cast<MemRefType>(base.getType()).getElementType();
+    if (auto s = dyn_cast<RankedTensorType>(addr.getType()))
+      t = s.clone(t);
+    return op("tile_read", args, t)->getResult(0);
+  }
+  void write(Value base, Value addr, Value val, Value mask = {}) {
+    SmallVector<Value> args{base, addr, val};
+    if (mask)
+      args.push_back(mask);
+    op("tile_write", args);
+  }
+  Value dot(Value a, Value rhs, bool trans, Value acc = {}) {
+    auto l = cast<RankedTensorType>(a.getType()),
+         r = cast<RankedTensorType>(rhs.getType());
+    auto t = shaped({l.getDimSize(0), r.getDimSize(trans ? 0 : 1)},
+                    l.getElementType().isInteger(8) ? Type(b.getI32Type())
+                                                    : Type(b.getF32Type()));
+    SmallVector<Value> args{a, rhs};
+    if (acc)
+      args.push_back(acc);
+    return op("tile_dot", args, t,
+              {b.getNamedAttr("transpose_rhs", b.getBoolAttr(trans)),
+               b.getNamedAttr("ci.implementation",
+                              b.getStringAttr("exits/triton::native-dot"))})
+        ->getResult(0);
+  }
+  Value reduce(Value input, StringRef algebra) {
+    auto t = cast<RankedTensorType>(input.getType());
+    return op("tile_reduce", input,
+              shaped({t.getDimSize(0)}, t.getElementType()),
+              {b.getNamedAttr("algebra", b.getStringAttr(algebra)),
+               b.getNamedAttr("ci.implementation",
+                              b.getStringAttr("exits/triton::row-collective"))})
+        ->getResult(0);
+  }
+  DenseI64ArrayAttr shape(Value view) {
+    return fn.getArgAttrOfType<DenseI64ArrayAttr>(
+        cast<BlockArgument>(view).getArgNumber(), "block.shape");
+  }
+};
+// Lower the chosen panel loop with a loop-carried accumulator. The pointers
+// for both transposed and contiguous operands use their verified ABI strides.
+void matrixTiles(Tiles &t, intentdsl::block::MatrixAccess &p) {
+  auto &b = t.b;
+  auto loc = t.loc;
+  auto [m, n, k] = std::tuple{p.shape[0], p.shape[1], p.shape[2]};
+  auto [bm, bn, bk] = std::tuple{p.tile[0], p.tile[1], p.tile[2]};
+  Value gp = t.pid(2);
+  Value first = b.create<arith::MulIOp>(loc, t.pid(0), t.integer(bm));
+  Value row = t.stepped(first, bm),
+        col = t.stepped(b.create<arith::MulIOp>(loc, t.pid(1), t.integer(bn)),
+                        bn);
+  Value end = t.integer(m), groupStart, live;
+  auto less = [&](Value x, Value y) -> Value {
+    return b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, x,
+                                   t.like(y, x.getType()));
+  };
+  bool segmented = p.dot.getNumOperands() > 2;
+  scf::IfOp active;
+  if (segmented) {
+    auto bounds = p.dot.getOperand(2);
+    auto next = b.create<arith::AddIOp>(loc, gp, t.integer(1));
+    auto at = [&](Value i) -> Value {
+      auto raw = t.read(bounds, t.address(bounds, i, {-1}));
+      return b.create<arith::ExtSIOp>(loc, b.getI64Type(), raw);
+    };
+    groupStart = at(gp);
+    end = at(next);
+    active = b.create<scf::IfOp>(
+        loc, less(b.create<arith::AddIOp>(loc, first, groupStart), end), false);
+    b.setInsertionPointToStart(active.thenBlock());
+    row = b.create<arith::AddIOp>(loc, row, t.like(groupStart, row.getType()));
+  }
+  Value validRow = less(row, end), validCol = less(col, t.integer(n)),
+        dst = row, src = row;
+  Value multiplicity;
+  if (p.routed()) {
+    auto route = p.dot.getOperand(3), y = p.domain.getOperand(0);
+    auto ids = t.read(route, t.address(route, row, {0}), validRow);
+    dst = b.create<arith::ExtSIOp>(loc, row.getType(), ids);
+    multiplicity = t.like(t.integer(t.shape(y)[1]), row.getType());
+    src = b.create<arith::DivUIOp>(loc, dst, multiplicity);
+  }
+  Value a = p.dot.getOperand(0), rhs = p.dot.getOperand(1);
+  Type element = cast<MemRefType>(a.getType()).getElementType().isInteger(8)
+                     ? Type(b.getI32Type())
+                     : Type(b.getF32Type());
+  auto mt = RankedTensorType::get({bm, bn}, element);
+  auto zero = b.create<arith::ConstantOp>(
+      loc, mt, DenseElementsAttr::get(mt, b.getZeroAttr(element)));
+  auto bound = p.fold.getAttrOfType<IntegerAttr>("bound").getInt();
+  auto step = p.fold.getAttrOfType<IntegerAttr>("step").getInt();
+  auto limit =
+      b.create<arith::ConstantIndexOp>(loc, llvm::divideCeil(bound, step));
+  auto lo = b.create<arith::ConstantIndexOp>(loc, 0),
+       one = b.create<arith::ConstantIndexOp>(loc, 1);
+  auto loop = b.create<scf::ForOp>(loc, lo, limit, one, ValueRange{zero});
+  loop->setAttr("triton_src.runtime_range", b.getUnitAttr());
+  b.setInsertionPointToStart(loop.getBody());
+  auto panel =
+      b.create<arith::IndexCastOp>(loc, b.getI64Type(), loop.getInductionVar());
+  auto member =
+      t.stepped(b.create<arith::MulIOp>(loc, panel, t.integer(step)), bk);
+  auto panelAddress = [&](Value base, Value free, int fa, int ka, int ba,
+                          int dim) {
+    SmallVector<Value> coords(p.rank(base));
+    SmallVector<int64_t> axes(p.rank(base), -1);
+    coords[fa] = free;
+    axes[fa] = dim;
+    coords[ka] = member;
+    axes[ka] = 1 - dim;
+    if (ba >= 0)
+      coords[ba] = gp;
+    return t.address(base, coords, axes);
+  };
+  auto mask = [&](Value rows, Value columns, int64_t nr, int64_t nc) -> Value {
+    auto maskType = t.shaped({nr, nc}, b.getI1Type());
+    return b.create<arith::AndIOp>(loc, t.like(rows, maskType, 0),
+                                   t.like(columns, maskType, 1));
+  };
+  int ak = p.axis("lhs_k"), rk = p.axis("rhs_k"), ab = p.axis("lhs_batch"),
+      rb = p.axis("rhs_batch");
+  auto km = less(member, t.integer(k));
+  auto left = t.read(a, panelAddress(a, src, p.freeAxis(a, ak, ab), ak, ab, 0),
+                     mask(validRow, km, bm, bk));
+  auto right =
+      t.read(rhs, panelAddress(rhs, col, p.freeAxis(rhs, rk, rb), rk, rb, 1),
+             mask(km, validCol, bk, bn));
+  auto acc = t.dot(left, right, false, loop.getRegionIterArgs()[0]);
+  b.create<scf::YieldOp>(loc, acc);
+  b.setInsertionPointAfter(loop);
+  IRMapping map;
+  map.map(p.fold.getResult(0), loop.getResult(0));
+  for (auto &op : p.domain.getRegion(0).front()) {
+    auto name = op.getName().stripDialect();
+    if (name == "add_columns") {
+      auto bias = op.getOperand(1), v = map.lookup(op.getOperand(0));
+      auto lane = t.read(bias, t.address(bias, col, {0}), validCol);
+      Value values = t.like(lane, v.getType(), 1);
+      Value added = getElementTypeOrSelf(v.getType()).isInteger(32)
+                        ? Value(b.create<arith::AddIOp>(loc, v, values))
+                        : Value(b.create<arith::AddFOp>(loc, v, values));
+      map.map(op.getResult(0), added);
+    } else if (name == "convert_matrix") {
+      Value v = map.lookup(op.getOperand(0));
+      auto to = mt.clone(getElementTypeOrSelf(op.getResult(0).getType()));
+      if (v.getType() != to) {
+        auto from = getElementTypeOrSelf(v.getType());
+        if (from.isInteger(32))
+          v = b.create<arith::SIToFPOp>(loc, to, v);
+        else if (to.getElementType().isInteger(32))
+          v = b.create<arith::FPToSIOp>(loc, to, v);
+        else if (from.getIntOrFloatBitWidth() < to.getElementTypeBitWidth())
+          v = b.create<arith::ExtFOp>(loc, to, v);
+        else {
+          if (from.getIntOrFloatBitWidth() == to.getElementTypeBitWidth())
+            v = b.create<arith::ExtFOp>(loc, mt.clone(b.getF32Type()), v);
+          v = b.create<arith::TruncFOp>(loc, to, v);
+        }
+      }
+      map.map(op.getResult(0), v);
+    } else if (name == "publish_matrix") {
+      auto y = op.getOperand(0);
+      Value addr;
+      if (p.routed()) {
+        Value a = b.create<arith::DivUIOp>(loc, dst, multiplicity),
+              r = b.create<arith::RemUIOp>(loc, dst, multiplicity);
+        addr = t.address(y, {a, r, col}, {0, 0, 1});
+      } else if (p.rank(y) == 3)
+        addr = t.address(y, {gp, dst, col}, {-1, 0, 1});
+      else
+        addr = t.address(y, {dst, col}, {0, 1});
+      t.write(y, addr, map.lookup(op.getOperand(1)),
+              mask(validRow, validCol, bm, bn));
+    }
+  }
+  if (active)
+    b.setInsertionPointAfter(active);
+}
+
+void scoreTiles(Tiles &t, Operation &old) {
+  auto &b = t.b;
+  auto loc = t.loc;
+  auto height = old.getAttrOfType<IntegerAttr>("block.owner_tile").getInt();
+  IRMapping map;
+  Value pid = t.pid(0);
+  for (auto &op : old.getRegion(0).front().without_terminator()) {
+    auto n = op.getName().stripDialect();
+    Value result;
+    auto a = [&](unsigned i) { return map.lookupOrDefault(op.getOperand(i)); };
+    if (n == "score_contract") {
+      auto q = a(0), k = a(1);
+      auto qs = t.shape(q), ks = t.shape(k);
+      auto tiles = t.integer(qs[2] / height), heads = t.integer(qs[1]);
+      auto group = b.create<arith::DivUIOp>(loc, pid, tiles);
+      Value batch = b.create<arith::DivUIOp>(loc, group, heads),
+            h = b.create<arith::RemUIOp>(loc, group, heads);
+      auto kv = b.create<arith::DivUIOp>(
+          loc, h, t.integer(op.getAttrOfType<IntegerAttr>("group").getInt()));
+      auto block = b.create<arith::RemUIOp>(loc, pid, tiles);
+      Value row = t.stepped(
+          b.create<arith::MulIOp>(loc, block, t.integer(height)), height);
+      map.map(op.getOperand(3), batch);
+      map.map(op.getOperand(4), h);
+      map.map(op.getOperand(5), row);
+      auto d = t.lanes(qs[3]), keys = t.lanes(ks[2]);
+      auto lhs = t.read(q, t.address(q, {batch, h, row, d}, {-1, -1, 0, 1}));
+      auto rhs = t.read(k, t.address(k, {batch, kv, keys, d}, {-1, -1, 0, 1}));
+      auto dot = t.dot(lhs, rhs, true);
+      auto scale =
+          b.create<arith::MulFOp>(loc, a(2), t.scalar(1.4426950408889634f));
+      result = b.create<arith::MulFOp>(loc, dot, t.like(scale, dot.getType()));
+    } else if (n == "causal_exp") {
+      auto scores = a(0);
+      auto mt = cast<RankedTensorType>(scores.getType());
+      auto wide = mt.clone(b.getI64Type());
+      auto row = t.like(a(1), wide, 0),
+           col = t.like(t.lanes(mt.getDimSize(1)), wide, 1);
+      auto valid =
+          b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge, row, col);
+      auto masked = b.create<arith::SelectOp>(loc, valid, scores,
+                                              t.like(t.scalar(-INFINITY), mt));
+      auto max = t.reduce(masked, "max");
+      auto scaled = b.create<arith::SubFOp>(loc, scores, t.like(max, mt, 0));
+      auto weight = b.create<arith::SelectOp>(
+          loc, valid, b.create<math::Exp2Op>(loc, scaled),
+          t.like(t.scalar(0), mt));
+      map.map(op.getResult(0), b.create<arith::TruncFOp>(
+                                   loc, mt.clone(b.getBF16Type()), weight));
+      map.map(op.getResult(1), t.reduce(weight, "sum"));
+      continue;
+    } else if (n == "value_contract") {
+      auto v = a(1);
+      auto size = t.shape(v);
+      auto kv = b.create<arith::DivUIOp>(
+          loc, a(3),
+          t.integer(op.getAttrOfType<IntegerAttr>("group").getInt()));
+      auto fragment =
+          t.read(v, t.address(v, {a(2), kv, t.lanes(size[2]), t.lanes(size[3])},
+                              {-1, -1, 0, 1}));
+      result = t.dot(a(0), fragment, false);
+    } else if (n == "normalize_store") {
+      auto sum = a(1), v = a(2), matrix = a(0);
+      auto size = t.shape(v);
+      auto inv =
+          b.create<arith::DivFOp>(loc, t.like(t.scalar(1), sum.getType()), sum);
+      auto normalized = b.create<arith::MulFOp>(
+          loc, matrix, t.like(inv, matrix.getType(), 0));
+      auto cast = b.create<arith::TruncFOp>(
+          loc,
+          mlir::cast<RankedTensorType>(normalized.getType())
+              .clone(b.getBF16Type()),
+          normalized);
+      t.write(
+          v, t.address(v, {a(3), a(4), a(5), t.lanes(size[3])}, {-1, -1, 0, 1}),
+          cast);
+      continue;
+    }
+    map.map(op.getResult(0), result);
+  }
+}
+} // namespace
+void lowerTileProgram(func::FuncOp fn) {
+  fn.getContext()
+      ->loadDialect<arith::ArithDialect, scf::SCFDialect, math::MathDialect>();
+  auto &root = fn.front().front();
+  if (root.hasAttr("block.score_panel")) {
+    Tiles tiles(fn, "owners");
+    scoreTiles(tiles, root);
+    tiles.op("end");
+    root.erase();
+  } else if (intentdsl::kir::matrixDomain(fn)) {
+    intentdsl::block::MatrixAccess p(fn);
+    if (p.dot.getName().stripDialect() != "contract")
+      return;
+    Tiles tiles(fn, "matrix");
+    matrixTiles(tiles, p);
+    tiles.op("end");
+    root.erase();
+  }
+}
+} // namespace CI_UNIT_NAMESPACE

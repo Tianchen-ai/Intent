@@ -181,50 +181,15 @@ struct Writer : intentdsl::block::MatrixAccess {
       << "    c=tl.program_id(1).to(tl.int64)*WIDTH+tl.arange(0,WIDTH)\n    "
          "end=M\n    src=r\n    target=r\n";
     auto n = dot.getName().stripDialect();
-    bool segmented = n == "contract" && dot.getNumOperands() > 2;
     if (n == "window_contract")
       window();
     else if (n == "q4k_dot")
       records();
     else if (n == "scaled_contract")
       scaled();
-    else {
-      auto a = dot.getOperand(0), b = dot.getOperand(1);
-      int ak = axis("lhs_k"), bk = axis("rhs_k"), ab = axis("lhs_batch"),
-          bb = axis("rhs_batch");
-      if (segmented) {
-        auto o = dot.getOperand(2);
-        s << "    start=tl.load(" << name(o) << "+gp*" << stride(o, 0)
-          << ")\n    end=tl.load(" << name(o) << "+(gp+1)*" << stride(o, 0)
-          << ")\n    r=r+start\n    target=r\n    src=r\n";
-        s << "    if "
-             "start.to(tl.int64)+tl.program_id(0).to(tl.int64)*ROWS>=end:\n    "
-             "    return\n";
-        if (routed()) {
-          auto ids = dot.getOperand(3);
-          s << "    target=tl.load(" << name(ids) << "+r*" << stride(ids, 0)
-            << ",r<end,other=0).to(tl.int64)\n"
-            << "    src=target//"
-            << fn.getArgAttrOfType<DenseI64ArrayAttr>(
-                   slot(domain.getOperand(0)), "block.shape")[1]
-            << "\n";
-        }
-      }
-      bool integer =
-          cast<MemRefType>(a.getType()).getElementType().isInteger(8);
-      s << "    acc=tl.full((ROWS,WIDTH),0,tl."
-        << (integer ? "int32" : "float32")
-        << ")\n    for panel in range(tl.cdiv(K,BK)):\n"
-        << "        k=tl.cast(panel,tl.int64)*BK+tl.arange(0,BK)\n"
-        << "        av=tl.load("
-        << addr(a, "src[:,None]", freeAxis(a, ak, ab), "k[None,:]", ak, ab)
-        << ",mask=(r[:,None]<end)&(k[None,:]<K),other=0)\n"
-        << "        bv=tl.load("
-        << addr(b, "k[:,None]", bk, "c[None,:]", freeAxis(b, bk, bb), bb)
-        << ",mask=(k[:,None]<K)&(c[None,:]<N),other=0)\n"
-        << "        acc=tl.dot(av,bv,acc,input_precision='ieee',out_dtype=tl."
-        << (integer ? "int32" : "float32") << ")\n";
-    }
+    else
+      return llvm::createStringError(
+          "ordinary contraction requires a legalized tile program");
     for (auto &op : domain.getRegion(0).front()) {
       auto kind = op.getName().stripDialect();
       if (kind == "add_columns") {
@@ -252,15 +217,7 @@ struct Writer : intentdsl::block::MatrixAccess {
             << ",acc,r<M)\n";
         else {
           std::string ptr;
-          if (routed()) {
-            auto multiplicity = fn.getArgAttrOfType<DenseI64ArrayAttr>(
-                slot(v), "block.shape")[1];
-            ptr = addr(v,
-                       "(target//" + std::to_string(multiplicity) + ")[:,None]",
-                       0, "c[None,:]", 2) +
-                  "+(target%" + std::to_string(multiplicity) + ")[:,None]*" +
-                  strideOf(v, 1);
-          } else if (n == "window_contract") {
+          if (n == "window_contract") {
             ptr = addr(v, "r[:,None]", 3, "c[None,:]", 4) + "+batch*" +
                   strideOf(v, 0) + "+chunk*" + strideOf(v, 1) + "+head*" +
                   strideOf(v, 2);
