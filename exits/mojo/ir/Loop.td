@@ -146,6 +146,9 @@ def MojoHostPrep : RowInst<"host_prep"> {
   let arguments=(ins StrAttr:$kind, ArrayAttr:$cleanup);
   let regions=(region VariadicRegion<AnyRegion>:$map);
 }
+def MojoHostColLoop : RowInst<"host_col_loop",[SingleBlock]> {
+  let regions=(region AnyRegion:$body);
+}
 def MojoHostPanelYield : RowInst<"host_panel_yield",[Terminator]> {
   let arguments=(ins AnyType:$value);
 }

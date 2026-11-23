@@ -113,12 +113,33 @@ TerminalPrinter mojoMatrixPrinter() {
                                                  PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
-    auto *parent = op.getParentOp();
-    bool wide = parent->getAttrOfType<StringAttr>("kind").getValue() ==
+    auto *prep = op.getParentOp()->getParentOp();
+    bool wide = prep->getAttrOfType<StringAttr>("kind").getValue() ==
                 "map-window-rhs-f32";
-    std::string dst = parent->getAttrOfType<StringAttr>("dst_buf").str();
+    std::string dst = prep->getAttrOfType<StringAttr>("dst_buf").str();
     std::string v = c.name(op.getOperand(0));
     c.line(dst + "[p*N+n] = " + (wide ? "expand_bf(" + v + ")" : v) + ";");
+    return llvm::Error::success();
+  };
+  p.operations["mojo_row.host_col_loop"] = [](Operation &op, PrintPoint at,
+                                              PrintContext &c) {
+    auto *prep = op.getParentOp();
+    auto slots = prep->getAttrOfType<DenseI64ArrayAttr>("src_slots");
+    auto st = prep->getAttrOfType<DenseI64ArrayAttr>("src_strides_0");
+    if (at == PrintPoint::Enter) {
+      auto &varBb = op.getRegion(0).front();
+      c.line("#pragma omp simd");
+      c.line("for (int64_t n=0; n<N; ++n) {");
+      c.indent++;
+      c.line("const uint16_t " + c.name(varBb.getArgument(0)) +
+             " = ((const uint16_t*)a" + std::to_string(slots[0]) + ")[batch*" +
+             std::to_string(st[0]) + "LL+(chunk*K+k)*" +
+             std::to_string(st[1]) + "LL+group*" + std::to_string(st[2]) +
+             "LL+n*" + std::to_string(st[3]) + "LL];");
+    } else if (at == PrintPoint::EndBlock) {
+      c.indent--;
+      c.line("}");
+    }
     return llvm::Error::success();
   };
 
@@ -657,7 +678,7 @@ TerminalPrinter mojoMatrixPrinter() {
         c.line("static inline uint16_t narrow_bf(float f){uint32_t b;memcpy(&b,&f,4);if((b&0x7fffffff)>0x7f800000)return (b>>16)|64;return (b+32767+((b>>16)&1))>>16;}");
         c.line("static inline float min_ieee(float a,float b){return isnan(a)?a:isnan(b)?b:fminf(a,b);}");
         c.line("static inline void widen_bf16_span(float *out, const uint16_t *src, int64_t n){");
-        c.line("  int64_t i=0;");
+        c.line("  if (n <= 0) return; int64_t i=0;");
         c.line("#if defined(__AVX512F__)");
         c.line("  for (; i+16<=n; i+=16) { __m256i h = _mm256_loadu_si256((const __m256i*)(src+i)); _mm512_storeu_ps(out+i, _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(h), 16))); }");
         c.line("#endif");
@@ -677,7 +698,7 @@ TerminalPrinter mojoMatrixPrinter() {
         c.line("#endif");
         c.line("}");
         c.line("static inline void widen_f16_span(float *out, const uint16_t *src, int64_t n){");
-        c.line("  int64_t i=0;");
+        c.line("  if (n <= 0) return; int64_t i=0;");
         c.line("#if defined(__AVX512F__) && defined(__F16C__)");
         c.line("  for (; i+16<=n; i+=16) { __m256i h = _mm256_loadu_si256((const __m256i*)(src+i)); _mm512_storeu_ps(out+i, _mm512_cvtph_ps(h)); }");
         c.line("#endif");
@@ -781,17 +802,7 @@ TerminalPrinter mojoMatrixPrinter() {
                access(2, "float", {"batch", "head", "chunk", "k"}) + ";");
         c.line("const float " + c.name(invBb.getArgument(2)) + " = " +
                access(2, "float", {"batch", "head", "chunk", "K-1"}) + ";");
-      } else if (at == PrintPoint::BeginBlock && c.region == 1) {
-        auto &varBb = op.getRegion(1).front();
-        c.line("#pragma omp simd");
-        c.line("for (int64_t n=0; n<N; ++n) {");
-        c.indent++;
-        c.line("const uint16_t " + c.name(varBb.getArgument(0)) + " = " +
-               access(0, "uint16_t", {"batch", "chunk*K+k", "group", "n"}) +
-               ";");
-      } else if (at == PrintPoint::EndBlock && c.region == 1) {
-        c.indent--;
-        c.line("}");
+      } else if (at == PrintPoint::EndBlock) {
         c.indent--;
         c.line("}");
       }

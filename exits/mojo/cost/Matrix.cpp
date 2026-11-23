@@ -133,6 +133,7 @@ void registerBlockCost(compilerinfra::Unit &u) {
           double live = t[0] * columns + columns + 2;
           double spill = std::max(0., live - (t[3] == 16 ? 32 : 16)) * t[3] *
                          4 * 2 * g->k;
+          double l1Loads = double(g->k) * (t[0] + columns);
           double inTileConvert = 0.;
           if (impl.dtype == "f16" &&
               !ctx.target.features.count("amx_fp16")) {
@@ -143,13 +144,14 @@ void registerBlockCost(compilerinfra::Unit &u) {
           double tileBytes = double(t[0]) * t[1] * 4.;
           e.terms["live_vectors"] = {live, "count"};
           e.terms["spill_bytes_per_task"] = {spill, "B"};
+          e.terms["l1_panel_loads"] = {l1Loads, "instruction"};
           e.terms["in_tile_f16_widen"] = {inTileConvert, "instruction"};
           e.terms["tile_buffer_bytes"] = {tileBytes, "B"};
           if (read && write && rate) {
             double widths = workers * t[3];
             e.timeNs = (spill / 2. + tileBytes / 2.) * workers *
                            (1. / *read + 1. / *write) +
-                       (inTileConvert * widths) / *rate;
+                       ((l1Loads * 0.5 + inTileConvert) * widths) / *rate;
           }
           return e;
         }},
