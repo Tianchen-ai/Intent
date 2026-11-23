@@ -208,10 +208,11 @@ struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
     fn.walk([&](Operation *op){
       if(op->getName().getDialectNamespace()!="ct_src")return;
       auto n=op->getName().stripDialect();
-      auto id=llvm::StringSwitch<StringRef>(n).Case("summary_reduce","moments-reduction").Case("uniform","random")
+      auto id=llvm::StringSwitch<StringRef>(n).Case("summary_reduce","moments-reduction").Case("summary_merge","moments-merge").Case("uniform","random")
         .Case("scan_sum","inclusive-scan").Case("reduce","native-row-reduce").Default("");
       if(!id.empty())op->setAttr("ci.implementation",b.getStringAttr(("exits/cutile::"+id).str()));
-      if(n=="summary_reduce" || n=="uniform")fn->setAttr(("ct_src.has_"+n).str(),b.getUnitAttr());
+      if(n=="summary_reduce" || n=="summary_merge")fn->setAttr("ct_src.has_summary_reduce",b.getUnitAttr());
+      if(n=="uniform")fn->setAttr("ct_src.has_uniform",b.getUnitAttr());
     });
     SmallVector<char> data;llvm::raw_svector_ostream os(data);
     if(auto err=describeArtifact(getOperation(),os)){fn.emitError()<<llvm::toString(std::move(err));signalPassFailure();return;}
@@ -369,6 +370,12 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
       return WalkResult::advance();
     auto n = op->getName().stripDialect();
     bool ok = op->getName().getDialectNamespace() == "ct_src";
+    if (ok && (n=="zero_bins" || n=="bin_panels" || n=="read_bin_keys" || n=="bin_index" || n=="atomic_bins")) {
+      auto parent=op->getParentOp();
+      StringRef required=n=="zero_bins" || n=="bin_panels"?"ct_src.private_bin_store":"ct_src.bin_panels";
+      if(!parent || parent->getName().getStringRef()!=required)
+        return op->emitError("histogram operation requires its enclosing count region"),WalkResult::interrupt();
+    }
     if(ok && n=="private_bin_store"){
       auto src=dyn_cast<BlockArgument>(op->getOperand(0)),dst=dyn_cast<BlockArgument>(op->getOperand(1));
       auto *mask=op->getOperand(4).getDefiningOp();

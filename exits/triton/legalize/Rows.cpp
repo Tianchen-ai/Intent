@@ -25,6 +25,7 @@ void lowerRows(func::FuncOp fn) {
         op->getParentOfType<func::FuncOp>()->setAttr("triton_src.moments",
                                                      b.getUnitAttr());
     }
+    if(code=="triton_src.summary_merge")op->getParentOfType<func::FuncOp>()->setAttr("triton_src.moments",UnitAttr::get(op->getContext()));
     if (code == "triton_src.offsets")
       op->setAttr("index_bits",
                   Builder(op->getContext()).getI32IntegerAttr(64));

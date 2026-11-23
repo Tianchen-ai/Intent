@@ -392,7 +392,7 @@ LogicalResult verifyRowProgram(func::FuncOp fn, StringRef dialect,
       op->emitError(reason);
       return WalkResult::interrupt();
     };
-    if (code == "summary_reduce")
+    if (code == "summary_reduce" || code=="summary_merge")
       moments = true;
     if (code == "view_offset" || code == "offsets") {
       if (op->getAttr("index_bits") !=

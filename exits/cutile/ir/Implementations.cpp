@@ -51,6 +51,7 @@ void registerContracts(Unit &unit) {
         {"native-row-reduce", "reduce", "ct.sum/ct.max"},
         {"inclusive-scan", "scan_sum", "ct.cumsum"},
         {"moments-reduction", "summary_reduce", "merge_moments"},
+        {"moments-merge", "summary_merge", "merge_moments"},
         {"random", "uniform", "uniform_at"}}) {
     ImplementationContract c;
     c.name = name;
@@ -58,7 +59,7 @@ void registerContracts(Unit &unit) {
     c.symbol = builtin;
     auto n = StringRef(name);
     bool dot = n == "scaled-mma" || n == "native-dot";
-    if (n == "moments-reduction" || n == "random") {
+    if (n == "moments-reduction" || n=="moments-merge" || n == "random") {
       c.source = ImplementationSource::Runtime;
       c.resource = n == "random" ? "runtime/cutile/kernels/philox.py"
                                  : "runtime/cutile/kernels/moments.py";
@@ -87,6 +88,11 @@ void registerContracts(Unit &unit) {
       if (dot)
         return matrix(op);
       auto n = op->getName().stripDialect();
+      if(n=="summary_merge"){
+        auto tuple=dyn_cast<TupleType>(op->getOperand(0).getType());
+        if(!tuple || tuple.size()!=3 || tuple!=op->getOperand(1).getType() || tuple!=op->getResult(0).getType())return failure();
+        return success(getElementTypeOrSelf(tuple.getType(0)).isInteger(32) && getElementTypeOrSelf(tuple.getType(1)).isF32() && tuple.getType(1)==tuple.getType(2));
+      }
       if (n == "uniform")
         return success(getElementTypeOrSelf(op->getOperand(1).getType())
                            .isUnsignedInteger(64));
