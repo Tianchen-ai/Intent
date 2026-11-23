@@ -38,15 +38,28 @@ llvm::Error emitPairFold(mlir::scf::ForOp loop, unsigned depth, int64_t span) {
   for (auto &op : bb)
     if (op.hasAttr("block.pair_dot"))
       deferred.insert(op.getOperand(0).getDefiningOp());
-  line(depth, base + "=(" +
-                  cast(uniform(lo), IndexType::get(loop.getContext())) + "//" +
-                  sz + ")*" + sz);
-  line(depth,
-       "while " + base + "<" + lib + ".max(" + broadcast(hi) + ",axis=0):");
+  if (countedPanels(loop)) {
+    auto i = fresh(),
+         low = cast("(" + uniform(lo) + "//" + sz + ")",
+                    IntegerType::get(loop.getContext(), 32)),
+         high = cast("((" + uniform(hi) + "+" + std::to_string(span - 1) +
+                         ")//" + sz + ")",
+                     IntegerType::get(loop.getContext(), 32));
+    line(depth, "for " + i + " in range(" + low + "," + high + "):");
+    line(depth + 1,
+         base + "=" + cast(i, IndexType::get(loop.getContext())) + "*" + sz);
+  } else {
+    line(depth, base + "=(" +
+                    cast(uniform(lo), IndexType::get(loop.getContext())) +
+                    "//" + sz + ")*" + sz);
+    line(depth,
+         "while " + base + "<" + lib + ".max(" + broadcast(hi) + ",axis=0):");
+  }
   line(depth + 1, iv + "=" + base + "+" + memberRange(span));
   if(loop->hasAttr("block.uniform_tokens")){
     line(depth+1,any+"=("+iv+">="+uniform(lo)+")&("+iv+"<"+uniform(hi)+")");
-    line(depth+1,live+"="+lib+".broadcast_to("+ex(any,0)+",(ROWS,"+sz+"))");
+    line(depth + 1, live + "=" + lib + ".broadcast_to(" + ex(any, 0) + ",(" +
+                        fragmentRows() + "," + sz + "))");
   }else{
   line(depth + 1, live + "=(" + ex(iv, 0) + ">=" + ex(broadcast(lo), 1) +
                       ")&(" + ex(iv, 0) + "<" + ex(broadcast(hi), 1) + ")");
@@ -77,7 +90,7 @@ llvm::Error emitPairFold(mlir::scf::ForOp loop, unsigned depth, int64_t span) {
     return x.role == owner ? uniform(x.name) : x.name;
   };
   auto asMatrix = [&](std::string v) {
-    return lib + ".broadcast_to(" + v + ",(ROWS," + sz + "))";
+    return lib + ".broadcast_to(" + v + ",(" + fragmentRows() + "," + sz + "))";
   };
   for (auto &op : bb.without_terminator()) {
     if (deferred.contains(&op))
@@ -99,6 +112,12 @@ llvm::Error emitPairFold(mlir::scf::ForOp loop, unsigned depth, int64_t span) {
         for (auto c : op.getOperands().drop_front().drop_back())
           outer.push_back(coordinate(c));
         read = loadMemberPanel(op, outer, base, span, n, ex(any, 1));
+      }
+      if (op.hasAttr("block.page_extent")) {
+        SmallVector<std::string> at{coordinate(op.getOperand(1))};
+        for (auto c : op.getOperands().drop_front(3))
+          at.push_back(coordinate(c));
+        read = loadPagePanel(op, at, base, span, n, ex(any, 1));
       }
       result = {read.empty() ? memberAccess(op, coords, ex(any, 1), false)
                              : read,
@@ -192,7 +211,8 @@ llvm::Error emitPairFold(mlir::scf::ForOp loop, unsigned depth, int64_t span) {
                                    : acc + "+" + sum));
     }
   }
-  line(depth + 1, base + "=" + base + "+" + sz);
+  if (!countedPanels(loop))
+    line(depth + 1, base + "=" + base + "+" + sz);
   if (loop->hasAttr("block.repair_masked_nan")) {
     SmallVector<std::string> bad;
     for (auto [i, ret] : llvm::enumerate(loop.getResults()))

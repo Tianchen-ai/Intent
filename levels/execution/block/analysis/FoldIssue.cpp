@@ -41,6 +41,51 @@ bool sharedCoordinate(Value v, BlockArgument owner, scf::ForOp loop,
   });
 }
 } // namespace
+int64_t alignedPageExtent(Operation &read, scf::ForOp loop,
+                          const CallFacts &facts, int64_t span) {
+  if (read.getName().stripDialect() != "slice_read" ||
+      read.getNumOperands() < 3)
+    return 0;
+  auto coords = read.getOperands().drop_front();
+  auto axis = read.getAttrOfType<IntegerAttr>("axis");
+  if (!axis || axis.getInt() != int64_t(coords.size()) ||
+      !llvm::all_of(coords.drop_front(2),
+                    [&](Value v) { return loop.isDefinedOutsideOfLoop(v); }))
+    return 0;
+  auto rem = coords[1].getDefiningOp<arith::RemSIOp>();
+  auto page = coords[0].getDefiningOp<arith::IndexCastOp>();
+  if (!rem || rem.getLhs() != loop.getInductionVar() || !page)
+    return 0;
+  auto table = page.getIn().getDefiningOp<memref::LoadOp>();
+  if (!table || table.getIndices().size() != 1)
+    return 0;
+  auto quotient = [&](Value v) {
+    auto div = v.getDefiningOp<arith::FloorDivSIOp>();
+    return div && div.getLhs() == rem.getLhs() && div.getRhs() == rem.getRhs();
+  };
+  auto index = table.getIndices().front();
+  auto add = index.getDefiningOp<arith::AddIOp>();
+  if (!quotient(index) &&
+      !(add && ((quotient(add.getLhs()) &&
+                 loop.isDefinedOutsideOfLoop(add.getRhs())) ||
+                (quotient(add.getRhs()) &&
+                 loop.isDefinedOutsideOfLoop(add.getLhs())))))
+    return 0;
+  auto shape = facts.shapeOf(read.getOperand(0));
+  if (!shape || shape->size() < 3)
+    return 0;
+  auto width = (*shape)[1].getAsInteger().value_or(0);
+  if (width < span || width % span)
+    return 0;
+  if (auto c = rem.getRhs().getDefiningOp<arith::ConstantIndexOp>())
+    return c.value() == width ? width : 0;
+  auto dim = rem.getRhs().getDefiningOp<memref::DimOp>();
+  if (!dim || !dim.getConstantIndex())
+    return 0;
+  auto sh = facts.shapeOf(dim.getSource());
+  return sh && (*sh)[*dim.getConstantIndex()].getAsInteger() == width ? width
+                                                                      : 0;
+}
 std::optional<TileDot> tileDot(Operation *s, scf::ForOp loop) {
   if (s->getName().stripDialect() != "lane_sum")
     return {};
@@ -114,7 +159,8 @@ std::optional<TileAccumulate> tileAccumulate(Value v, scf::ForOp loop) {
 std::optional<unsigned> issueAxis(Operation *op,
                                   const compilerinfra::TargetProfile &p,
                                   int64_t rows, int64_t span) {
-  if ((rows != 16 && rows != 32 && rows != 64 && rows != 128) ||
+  if ((rows != 4 && rows != 8 && rows != 16 && rows != 32 && rows != 64 &&
+       rows != 128) ||
       !panelFolds(op, p, span))
     return {};
   auto &bb = op->getRegion(0).front();
@@ -170,21 +216,27 @@ std::optional<unsigned> issueAxis(Operation *op,
         }
       }
     auto caps = p.services.get<OwnerMachine>();
+    if (rows < 16 && !llvm::all_of(
+                         bb.getOps<scf::ForOp>(),
+                         [&](scf::ForOp l) {
+                           return !l->hasAttr("kir.reassociate") ||
+                                  sharedBounds(l, j, rows);
+                         }))
+      good = false;
     // Operand staging and score/probability exchanges share the block-local
     // budget. The compiler also needs a lane fallback for non-finite values
     // when causal rows cover different token intervals.
-    auto transferBytes =
-        2 * (rows + span) * maxDepth + 8 * rows * span + 2 * span * maxDepth;
+    auto physical = std::max<int64_t>(16, rows);
+    auto transferBytes = 2 * (physical + span) * maxDepth +
+                         8 * physical * span + 2 * span * maxDepth;
     if (!caps->panelBytes || transferBytes > caps->panelBytes)
       good = false;
     if (caps->contributionLimit &&
-        (rows + span) * maxDepth > caps->contributionLimit / 2)
+        (physical + span) * maxDepth > caps->contributionLimit / 2)
       good = false;
-    for (auto loop : bb.getOps<scf::ForOp>())
-      if (loop->hasAttr("kir.reassociate") && caps->contributionLimit &&
-          !sharedBounds(loop, j, rows) &&
-          rows * span * maxDepth > 4 * caps->contributionLimit)
-        good = false;
+    // A masked edge replays at most one member vector per owner. The score
+    // matrix and operand panels are live separately; no [row,token,depth]
+    // tensor is produced even when two causal intervals differ.
     if (good && dot)
       return j;
   }

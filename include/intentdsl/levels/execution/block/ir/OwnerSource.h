@@ -19,10 +19,15 @@ protected:
   llvm::raw_string_ostream out{result};
   unsigned counter = 0;
   std::string fresh() { return "v" + std::to_string(counter++); }
+  std::string fragmentRows() const {
+    auto w = space.getAttrOfType<mlir::IntegerAttr>("block.matrix_rows");
+    return w ? std::to_string(w.getInt()) : "ROWS";
+  }
   void line(unsigned d, const llvm::Twine &s) {
     out.indent(4 * d) << s << "\n";
   }
   virtual std::string tileOwner() = 0;
+  virtual bool countedPanels(mlir::scf::ForOp) { return false; }
   virtual std::string tileStart() = 0;
   virtual std::string load(mlir::memref::LoadOp, llvm::StringRef mask) = 0;
   virtual std::string gatherScalars(mlir::memref::LoadOp,
@@ -34,6 +39,11 @@ protected:
     return {};
   }
   virtual std::string ownerPanelAccess(mlir::Operation &, bool) { return {}; }
+  virtual std::string loadPagePanel(mlir::Operation &,
+                                    llvm::ArrayRef<std::string>, std::string,
+                                    int64_t, int64_t, std::string) {
+    return {};
+  }
   virtual std::string store(mlir::memref::StoreOp, llvm::StringRef mask) = 0;
   virtual std::string cast(llvm::StringRef, mlir::Type) = 0;
   virtual std::string broadcast(llvm::StringRef) = 0;
@@ -62,11 +72,22 @@ public:
     signature();
     auto &body = space.getRegion(0).front();
     auto axes = space.getAttrOfType<mlir::DenseI64ArrayAttr>("axes");
-    line(1, "owner=" + tileOwner());
-    line(1, "active=owner<" +
-                std::to_string(
-                    space.getAttrOfType<mlir::IntegerAttr>("block.owners")
-                        .getInt()));
+    auto nativeRows =
+        space.getAttrOfType<mlir::IntegerAttr>("block.matrix_rows");
+    auto logical =
+        space.getAttrOfType<mlir::IntegerAttr>("block.owner_tile").getInt();
+    if (nativeRows) {
+      line(1, "owner=" + tileStart() + "+" + memberRange(nativeRows.getInt()) +
+                  "%" + std::to_string(logical));
+      line(1, "active=" + memberRange(nativeRows.getInt()) + "<" +
+                  std::to_string(logical));
+    } else {
+      line(1, "owner=" + tileOwner());
+      line(1, "active=owner<" +
+                  std::to_string(
+                      space.getAttrOfType<mlir::IntegerAttr>("block.owners")
+                          .getInt()));
+    }
     int64_t pitch = 1;
     llvm::SmallVector<unsigned> order;
     auto group = space.getAttrOfType<mlir::IntegerAttr>("block.group_axis");
@@ -225,8 +246,8 @@ private:
           expr = lib + ".sum(" + lib + ".where(" + lanes + "<" +
                  std::to_string(k) + "," + arg(0) + ",0.0),axis=1)";
         else if (kind == "lane_splat")
-          expr = lib + ".broadcast_to(" + expand(arg(0)) + ",(ROWS," +
-                 std::to_string(width) + "))";
+          expr = lib + ".broadcast_to(" + expand(arg(0)) + ",(" +
+                 fragmentRows() + "," + std::to_string(width) + "))";
         else {
           expr = ownerPanelAccess(op, write);
           if (!expr.empty()) {
@@ -255,7 +276,7 @@ private:
               (shared ? "(" + one(mask) + "!=0)" : expand(mask)) + "&" + valid,
               write);
           if (shared)
-            expr = lib + ".broadcast_to(" + expr + ",(ROWS," +
+            expr = lib + ".broadcast_to(" + expr + ",(" + fragmentRows() + "," +
                    std::to_string(width) + "))";
           if (write) {
             line(depth, expr);

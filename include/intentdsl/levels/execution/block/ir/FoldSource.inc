@@ -71,6 +71,12 @@ llvm::Error emitFold(mlir::scf::ForOp loop, unsigned depth, int64_t span) {
           outer.push_back(value(c));
         e = loadMemberPanel(op, outer, base, span, k, expand(live));
       }
+      if (op.hasAttr("block.page_extent") && llvm::isPowerOf2_64(k)) {
+        SmallVector<std::string> at{value(op.getOperand(1))};
+        for (auto c : op.getOperands().drop_front(3))
+          at.push_back(value(c));
+        e = loadPagePanel(op, at, base, span, k, expand(live));
+      }
       if (e.empty())
         e = memberAccess(
             op, coords,

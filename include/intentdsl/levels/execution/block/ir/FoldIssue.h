@@ -15,5 +15,7 @@ std::optional<unsigned> issueAxis(mlir::Operation *,
                                   const compilerinfra::TargetProfile &, int64_t,
                                   int64_t);
 bool sharedBounds(mlir::scf::ForOp, unsigned, int64_t);
+int64_t alignedPageExtent(mlir::Operation &, mlir::scf::ForOp,
+                          const CallFacts &, int64_t);
 void partitionOwnerFolds(mlir::Operation *, unsigned, int64_t);
 } // namespace intentdsl::block

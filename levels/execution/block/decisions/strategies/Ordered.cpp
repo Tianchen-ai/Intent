@@ -37,6 +37,13 @@ LogicalResult verifyOwnerMap(func::FuncOp fn, const TargetProfile &p,
     return failure();
   auto span = space.getAttrOfType<IntegerAttr>("block.token_span");
   auto pairAxis = space.getAttrOfType<IntegerAttr>("block.pair_axis");
+  auto logical = space.getAttrOfType<IntegerAttr>("block.owner_tile");
+  bool padded = pairAxis && logical && logical.getInt() < 16;
+  if (space.getAttr("block.matrix_rows") !=
+      (padded ? Attribute(Builder(fn.getContext()).getI64IntegerAttr(16))
+              : Attribute()))
+    return space.emitError(
+        "narrow owner groups require padding to the matrix issue width");
   auto validPair = [&](IntegerAttr width, IntegerAttr s, IntegerAttr axis) {
     if (!width || !s || !axis)
       return false;
@@ -75,6 +82,16 @@ LogicalResult verifyOwnerMap(func::FuncOp fn, const TargetProfile &p,
                        v->hasAttr("block.repair_masked_nan"))
               return WalkResult::interrupt();
             auto loop = v->getParentOfType<scf::ForOp>();
+            int64_t page =
+                span && loop && loop->hasAttr("block.contribution_width") &&
+                        v->getBlock() == loop.getBody()
+                    ? alignedPageExtent(*v, loop, *facts, span.getInt())
+                    : 0;
+            if (v->getAttr("block.page_extent") !=
+                (page ? Attribute(
+                            Builder(fn.getContext()).getI64IntegerAttr(page))
+                      : Attribute()))
+              return WalkResult::interrupt();
             bool pair = pairAxis && loop &&
                         loop->hasAttr("block.contribution_width") &&
                         v->getBlock() == loop.getBody();
@@ -372,6 +389,9 @@ void registerOrdered(Unit &u) {
     auto d = cast<DictionaryAttr>(a);
     if (d.getAs<StringAttr>("memory") == "matrix-fold")
       o->setAttr("block.pair_axis", d.get("axis"));
+    if (o->hasAttr("block.pair_axis") &&
+        d.getAs<IntegerAttr>("width").getInt() < 16)
+      o->setAttr("block.matrix_rows", b.getI64IntegerAttr(16));
     if (d.getAs<StringAttr>("memory") == "token" ||
         d.getAs<StringAttr>("memory") == "matrix-fold") {
       o->setAttr("block.token_span", d.get("span"));
@@ -380,9 +400,13 @@ void registerOrdered(Unit &u) {
       for (auto loop : o->getRegion(0).front().getOps<scf::ForOp>())
         if (loop->hasAttr("kir.reassociate")) {
           loop->setAttr("block.contribution_width", d.get("span"));
-          for (auto &op : loop.getBody()->without_terminator())
+          for (auto &op : loop.getBody()->without_terminator()) {
             if (block::rectangularTokenLoad(op, loop))
               op.setAttr("block.rectangular_tokens", b.getUnitAttr());
+            if (auto page = block::alignedPageExtent(
+                    op, loop, *f, d.getAs<IntegerAttr>("span").getInt()))
+              op.setAttr("block.page_extent", b.getI64IntegerAttr(page));
+          }
           if (o->hasAttr("block.pair_axis")) {
             if (block::sharedBounds(loop, d.getAs<IntegerAttr>("axis").getInt(),
                                     d.getAs<IntegerAttr>("width").getInt()))

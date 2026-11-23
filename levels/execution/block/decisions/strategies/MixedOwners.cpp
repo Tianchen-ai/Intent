@@ -15,7 +15,7 @@ void registerMixedOwners(Unit &u) {
       -> llvm::Expected<std::vector<StructuralCandidate>> {
     std::vector<StructuralCandidate> candidates;
     Builder b(o->getContext());
-    for (int rows : {16, 32, 64, 128})
+    for (int rows : {4, 8, 16, 32, 64, 128})
       for (int span : {32, 64, 128})
         if (auto axis = intentdsl::block::issueAxis(o, p, rows, span)) {
           auto d = b.getDictionaryAttr(

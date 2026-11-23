@@ -48,8 +48,10 @@ void orderedCost(Unit &u) {
             if (choice.getAs<mlir::StringAttr>("memory") == "matrix-fold") {
               issueGroups =
                   std::ceil(double(w) / 16.) * std::ceil(double(lanes) / 32.);
-              double live = double(w) * lanes + double(span.getInt()) * lanes +
-                            w * span.getInt();
+              double physicalRows = std::max<int64_t>(w, 16);
+              double live = physicalRows * lanes +
+                            double(span.getInt()) * lanes +
+                            physicalRows * span.getInt();
               double bytesPerToken = 0;
               op->walk([&](mlir::Operation *load) {
                 if (load->getName().stripDialect() != "slice_read" ||

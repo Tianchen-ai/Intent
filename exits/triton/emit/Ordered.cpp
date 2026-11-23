@@ -28,7 +28,8 @@ struct Ordered : intentdsl::block::OwnerSource {
     return "(tl.cast(tl.program_id(0),tl.int64)*ROWS)";
   }
   std::string broadcast(llvm::StringRef v) override {
-    return "tl.broadcast_to(tl.to_tensor(" + v.str() + "),(ROWS,))";
+    return "tl.broadcast_to(tl.to_tensor(" + v.str() + "),(" + fragmentRows() +
+           ",))";
   }
   std::string memberRange(int64_t width) override {
     return "tl.arange(0," + std::to_string(width) + ").to(tl.int64)";
