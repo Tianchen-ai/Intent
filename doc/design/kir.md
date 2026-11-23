@@ -155,7 +155,7 @@ GroupNorm 反向的第一个调用按 batch 和 group 归约空间成员，第�
 
 **imported → canonical。** 入口校验签名和基本类型、有限的纯 helper 调用关系、SSA/region 合法性、源位置。规范化将整轴切片/索引简写变为同一成员 relation，将 Python 循环变量变为 region arguments，补齐隐式合法广播与 promotion，规范化可证明等价的控制和无副作用表达式。canonical verifier 要求无待解释的 Python 语法或设备属性，所有动态等式均有来源或显式 guard。它给出可证明的 alias/effect 信息，未知须保守建模。两种作者写法若仍有不同的舍入边界、alias 或 effects，保留差异。
 
-**数值许可。** 默认 source。cast 明示目的格式；f16/bf16 普通窄化 RN-even。max 与 max_num 分开；argmax 的 NaN/tie 和空域合同属于操作本身。普通 source 浮点表达式仅沿用 V1 已允许的乘加融合，不混入任意重结合、TF32 或隐式 FTZ。由操作选择 reduce/scan/region 的代数自由度；quant record 内指定独立 R32 的步骤不得跨越。近似指令许可附着在对应操作，调用级在线归约许可附着在 kernel 数值属性，记录适用对象和有限输入等前提。允许重写 ≠ 选择重写。KIR 单元提供唯一的匹配、数值前提检查和替换构造。block/cpu 的入口在降低 KIR 前据实际成本选择是否调用同一接口；匹配或许可不满足就保留源表达式。改写结果仍须通过 KIR verifier，且保持作者的 kernel 边界。
+**数值许可。** 默认 source。cast 明示目的格式；f16/bf16 普通窄化 RN-even。max 与 max_num 分开；argmax 的 NaN/tie 和空域合同属于操作本身。普通 source 浮点表达式仅沿用 V1 已允许的乘加融合，不混入任意重结合、TF32 或隐式 FTZ。`contract(..., allow_subnormal_ftz=True)`（默认 `False`）是附着在收缩操作上的显式次正规数冲零许可，表示允许将输入、累加中间值或抵消产生的次正规数冲零；未开启时必须保留 IEEE 次正规数语义。由操作选择 reduce/scan/region 的代数自由度；quant record 内指定独立 R32 的步骤不得跨越。近似指令许可附着在对应操作，调用级在线归约许可附着在 kernel 数值属性，记录适用对象和有限输入等前提。允许重写 ≠ 选择重写。KIR 单元提供唯一的匹配、数值前提检查和替换构造。block/cpu 的入口在降低 KIR 前据实际成本选择是否调用同一接口；匹配或许可不满足就保留源表达式。改写结果仍须通过 KIR verifier，且保持作者的 kernel 边界。
 
 具体保留 V1 的 `source` 与 `relaxed_normalization` 区别。后一模式仅许可合格的 max/mass/weighted-moment 按连续段重缩放；要求有效 score 及实际参与加权收缩的 value 有限。它不能泛化为所有 softmax 或其他浮点运算的 fast-math 开关。设备无关的必要前提由用户显式选择模式承担，前端不额外扫描 tensor。相同输入下用哪一种合法实现由子节点决定。
 

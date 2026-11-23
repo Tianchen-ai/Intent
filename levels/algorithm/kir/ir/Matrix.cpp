@@ -92,6 +92,9 @@ LogicalResult verifyMatrixBody(func::FuncOp fn, Operation &domain,
       return op.emitError("foreign matrix expression");
     auto name = op.getName().stripDialect();
     if (failed(verifyStorageFormat(op,canonical))) return failure();
+    if (op.hasAttr("kir.allow_subnormal_ftz") && name != "contract")
+      return op.emitError(
+          "subnormal flush-to-zero permission only applies to contract");
     if (name == "end")
       continue;
     if (canonical && entry.getNumResults() == 1 &&
@@ -126,6 +129,11 @@ LogicalResult verifyMatrixBody(func::FuncOp fn, Operation &domain,
           (dtype(a) != "i8" && dtype(a) != "bf16" && dtype(a) != "f16" &&
            dtype(a) != "f32"))
         return op.emitError("incompatible contraction axes or input types");
+      if (op.hasAttr("kir.allow_subnormal_ftz") &&
+          (!op.getAttrOfType<UnitAttr>("kir.allow_subnormal_ftz") ||
+           dtype(a) == "i8"))
+        return op.emitError(
+            "subnormal flush-to-zero permission requires floating-point operands");
       auto free = [](const Shape &s, int64_t k, int64_t batch) {
         for (size_t i = 0; i < s.size(); ++i)
           if (int64_t(i) != k && int64_t(i) != batch)

@@ -3,8 +3,8 @@ from .attention import attention, merge_splits, paged_decode
 from .attention_grad import flash_attention_backward
 from .decode import grouped_flash_decode, paged_mla_decode_partials
 from .recurrences import causal_convolution, causal_linear_attention, cholesky, gated_delta, selective_state_scan
-from .matrix import (gemm, batched_gemm, ragged_gemm, int8_gemm, q4_projection, mamba_chunk_state,
-                     fp8_gemm, qkv_projection, expert_projection)
+from .matrix import (gemm, batched_gemm, batched_gemm_subnormal_ftz, ragged_gemm, int8_gemm,
+                     q4_projection, mamba_chunk_state, fp8_gemm, qkv_projection, expert_projection)
 
 @I.kernel
 def count_routes(ids:I.In[I.i32,(4096,2)], counts:I.InOut[I.i32,(64,)]):

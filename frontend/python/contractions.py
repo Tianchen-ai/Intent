@@ -77,11 +77,14 @@ def capture(fn):
             scale = emit("transpose_scale", [view(transpose.args[0])], tensor(2, "u8"))
             return emit("scaled_contract", [view(a) for a in node.args[:3]] + [scale],
                         tensor(rank, spelling(kw["acc"], api)))
-        if name != "contract" or len(node.args) != 2 or not {"axes","acc"} <= kw.keys() or kw.keys()-{"axes","acc","batch","offsets","routes"}:
+        if name != "contract" or len(node.args) != 2 or not {"axes","acc"} <= kw.keys() or kw.keys()-{"axes","acc","batch","offsets","routes","allow_subnormal_ftz"}:
             raise ValueError("expected contract(lhs, rhs, axes=..., acc=...)")
         lhs, rhs = (view(a) for a in node.args)
         axes = ast.literal_eval(kw["axes"])
         batch = ast.literal_eval(kw["batch"]) if "batch" in kw else ((), ())
+        ftz = ast.literal_eval(kw["allow_subnormal_ftz"]) if "allow_subnormal_ftz" in kw else False
+        if type(ftz) is not bool:
+            raise ValueError("allow_subnormal_ftz must be a boolean literal")
         if len(axes)!=2 or any(len(x)!=1 for x in axes) or len(batch)!=2 or any(len(x)>1 for x in batch):
             raise ValueError("expected paired contraction axes and at most one batch axis per view")
         if "routes" in kw and "offsets" not in kw:
@@ -90,7 +93,8 @@ def capture(fn):
                      lhs_batch=next(iter(batch[0]),-1), rhs_batch=next(iter(batch[1]),-1))
         if any(type(x) is not int for x in attrs.values()):
             raise ValueError("axis indices must be integers")
-        attr = "{"+", ".join(f"{k}={v}:i64" for k,v in attrs.items())+"}"
+        attr_items = (["kir.allow_subnormal_ftz"] if ftz else []) + [f"{k}={v}:i64" for k,v in attrs.items()]
+        attr = "{"+", ".join(attr_items)+"}"
         extras = [view(kw[k]) for k in ("offsets","routes") if k in kw]
         return emit("contract",[lhs,rhs,*extras],tensor(rank,spelling(kw["acc"],api)),attr)
 

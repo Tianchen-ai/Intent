@@ -30,6 +30,14 @@ def batched_gemm(lhs: I.In[I.bf16, ("B","M","K")], rhs: I.In[I.bf16, ("B","K","N
 
 
 @I.kernel
+def batched_gemm_subnormal_ftz(lhs: I.In[I.bf16, ("B","M","K")], rhs: I.In[I.bf16, ("B","K","N")],
+                               out: I.Out[I.bf16, ("B","M","N")]):
+    total = I.contract(lhs[:,:,:], rhs[:,:,:], axes=((2,), (1,)), batch=((0,), (0,)), acc=I.f32,
+                       allow_subnormal_ftz=True)
+    out[:,:,:] = I.cast(total, I.bf16)
+
+
+@I.kernel
 def ragged_gemm(tokens: I.In[I.f16, ("T","K")], ends: I.In[I.i32, ("E1",)],
                 banks: I.In[I.f16, ("E","K","N")], out: I.Out[I.f16, ("T","N")]):
     total = I.contract(tokens[:,:], banks[:,:,:], axes=((1,), (1,)), batch=((), (0,)),

@@ -140,7 +140,7 @@ void registerMatrixContracts(Unit &u) {
       "onednn-brgemm-bf16", "bf16 x bf16 -> f32",
       "LHS row-major (unit K stride, K%2==0), RHS VNNI pack32 [K/2, nr, 2]",
       "f32 AMX/AVX-512 BF16 dot-pair accumulator",
-      "AMX/AVX512-BF16 dot2 to f32; flushes BF16 subnormal inputs to zero (FTZ)",
+      "AMX/AVX512-BF16 dot2 to f32; may flush input, intermediate, and output subnormals to zero (requires allow_subnormal_ftz)",
       [](const TargetProfile &p) -> llvm::Error {
         if (!p.features.count("amx_bf16") && !p.features.count("avx512_bf16"))
           return llvm::createStringError(

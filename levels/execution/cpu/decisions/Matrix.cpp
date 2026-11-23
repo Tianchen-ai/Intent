@@ -110,7 +110,9 @@ static llvm::Error checkContractPreconditions(Operation &region,
   if (impl.kAlign > 1 && g->k % impl.kAlign != 0)
     return llvm::createStringError(
         "reduction extent K is not a multiple of microkernel K alignment");
-  if (impl.flushesSubnormals && !region.hasAttr("kir.allow_subnormal_ftz"))
+  bool allowSubnormalFtz = dot.hasAttr("kir.allow_subnormal_ftz") ||
+                           region.hasAttr("kir.allow_subnormal_ftz");
+  if (impl.flushesSubnormals && !allowSubnormalFtz)
     return llvm::createStringError(
         "numerical contract forbids implicit BF16 subnormal FTZ");
   if (kind == "contract" && impl.requiresContiguousLhsK && packCode != 3 &&
