@@ -46,6 +46,11 @@ inline mlir::LogicalResult ownerVectors(mlir::func::FuncOp fn, bool assign,
   auto walk = fn.walk([&](Operation *op) {
     auto name = op->getName().stripDialect();
     StringRef mode;
+    if (name == "lane_sum" &&
+        intentdsl::kir::memberExtent(fn, op->getOperand(0), "block.shape") >
+            32 &&
+        available - scratch >= 128)
+      mode = "pool-members";
     if (name == "lane_sum" && op->getOperand(0).hasOneUse() &&
         op->getOperand(0).getDefiningOp() &&
         op->getOperand(0).getDefiningOp()->getName().getStringRef() ==
@@ -70,6 +75,20 @@ inline mlir::LogicalResult ownerVectors(mlir::func::FuncOp fn, bool assign,
                 32 ==
             0)
       mode = "widen-bits";
+    if ((name == "extf" || name == "truncf") &&
+        isa<RankedTensorType>(op->getOperand(0).getType()) &&
+        intentdsl::kir::memberExtent(fn, op->getOperand(0), "block.shape") %
+                32 ==
+            0) {
+      auto from =
+          cast<RankedTensorType>(op->getOperand(0).getType()).getElementType();
+      auto to =
+          cast<RankedTensorType>(op->getResult(0).getType()).getElementType();
+      if (from.isF16() && to.isF32())
+        mode = "widen-half";
+      if (from.isF32() && to.isF16())
+        mode = "narrow-half";
+    }
     if (auto loop = dyn_cast<scf::ForOp>(op)) {
       if (loop.getNumResults() == 1 &&
           isa<RankedTensorType>(loop.getResult(0).getType()))

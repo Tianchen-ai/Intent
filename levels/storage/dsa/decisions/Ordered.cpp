@@ -1,4 +1,5 @@
 #include "intentdsl/levels/storage/dsa/ir/Owners.h"
+#include "intentdsl/levels/storage/dsa/ir/ScoreSupply.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/PatternMatch.h"
 using namespace mlir;
@@ -16,6 +17,23 @@ LogicalResult memberStorage(func::FuncOp fn, const TargetProfile &p,
   int64_t offset = 0;
   Builder b(fn.getContext());
   auto &space = fn.front().front();
+  if (space.hasAttr("block.score_panel")) {
+    auto plan = scoreSupply(space);
+    if (plan.localBytes() > std::min(caps->capacity, caps->budget))
+      return failure();
+    if (required) {
+      *required = plan.localBytes();
+      return success();
+    }
+    auto slots = b.getDenseI64ArrayAttr(plan.sizes());
+    auto bytes = b.getI64IntegerAttr(plan.localBytes());
+    if (assign) {
+      space.setAttr("dsa.panel_slots", slots);
+      space.setAttr("dsa.member_bytes", bytes);
+    }
+    return success(space.getAttr("dsa.panel_slots") == slots &&
+                   space.getAttr("dsa.member_bytes") == bytes);
+  }
   auto status = space.walk([&](Operation *op) {
     SmallVector<int64_t> offsets;
     for (auto v : op->getResults()) {

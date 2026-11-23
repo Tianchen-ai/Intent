@@ -1,3 +1,4 @@
+#include "ScorePanel.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/storage/dsa/ir/Owners.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -269,6 +270,10 @@ struct OwnerCall {
         else if (impl == "widen-bits")
           s << "widen_bf16_tile(" << local << "," << arg(0) << "," << lanes
             << ");\n";
+        else if (impl == "widen-half" || impl == "narrow-half")
+          s << (impl == "widen-half" ? "__bang_half2float"
+                                     : "__bang_float2half_rn")
+            << "(" << local << "," << arg(0) << "," << lanes << ");\n";
         else if (n == "arith.extf" || n == "arith.truncf")
           s << "for(int j=0;j<" << lanes << ";++j)" << local << "[j]="
             << convert(cast<ShapedType>(op.getOperand(0).getType())
@@ -314,7 +319,10 @@ struct OwnerCall {
         if (impl == "deferred-row-reduction")
           continue;
         values[op.getResult(0)] = id;
-        if (impl == "reduce32-reuse-product")
+        if (impl == "pool-members")
+          s << "float " << id << "=row_sum(pool_scratch," << arg(0) << ","
+            << count(op.getOperand(0)) << ");\n";
+        else if (impl == "reduce32-reuse-product")
           s << "__bang_reduce_sum(" << arg(0) << "," << arg(0)
             << ",32);__sync_compute();float " << id << "=((volatile float*)"
             << arg(0) << ")[0];\n";
@@ -334,12 +342,18 @@ struct OwnerCall {
           llvm::SmallString<32> n;
           v.getValue().toString(n);
           e = n.str().str();
+          if (v.getValue().isInfinity())
+            e = v.getValue().isNegative() ? "-INFINITY" : "INFINITY";
         } else
           e = std::to_string(cast<IntegerAttr>(c.getValue()).getInt());
-      } else if (n == "arith.extf" || n == "arith.truncf")
+      } else if (n == "arith.extf" || n == "arith.truncf" ||
+                 n == "arith.index_cast")
         e = convert(op.getOperand(0).getType(), op.getResult(0).getType(),
                     arg(0));
-      else if (n == "math.sqrt" || n == "math.exp")
+      else if (n == "arith.maxnumf")
+        e = "fmaxf(" + arg(0) + "," + arg(1) + ")";
+      else if (n == "math.sqrt" || n == "math.exp" || n == "math.exp2" ||
+               n == "math.log")
         e = kind.str() + "f(" + arg(0) + ")";
       else {
         auto tok = llvm::StringSwitch<StringRef>(n)
@@ -395,47 +409,61 @@ llvm::Error emitOrdered(func::FuncOp fn, llvm::raw_pwrite_stream &out) {
   w.s <<
 #include "RowMath.inc"
       ;
-  w.s << "__mlu_global__ void ordered(" << params << "){\n";
-  auto workspace =
-      space.getAttrOfType<IntegerAttr>("dsa.member_bytes").getInt();
-  if (workspace)
-    w.s << "__nram__ unsigned char storage[" << workspace << "];\n";
-  if (auto bytes = space.getAttrOfType<IntegerAttr>("dsa.stream_bytes"))
-    w.s << "__nram__ unsigned char streambuf[" << bytes.getInt() << "];\n";
-  if (auto bytes = space.getAttrOfType<IntegerAttr>("bangc.deferred_bytes");
-      bytes && bytes.getInt())
-    w.s << "__nram__ float deferred[" << bytes.getInt() / 4 << "];\n";
-  if (w.slab)
-    w.s << "__nram__ "
-        << OwnerCall::type(
-               cast<MemRefType>(fn.getArgument(0).getType()).getElementType())
-        << " local["
-        << w.slab / (cast<MemRefType>(fn.getArgument(0).getType())
-                         .getElementTypeBitWidth() /
-                     8)
-        << "];\n";
   auto tile = space.getAttrOfType<IntegerAttr>("block.owner_tile").getInt();
   auto owners = space.getAttrOfType<IntegerAttr>("block.owners").getInt();
-  w.s << "for(int64_t job=taskId;job<grid;job+=taskDim){for(int64_t owner=job*"
-      << tile << ";owner<" << owners << " && owner-job*" << tile << "<" << tile
-      << ";++owner){\n";
-  auto axes = space.getAttrOfType<DenseI64ArrayAttr>("axes");
-  int64_t pitch = 1;
-  for (int i = axes.size() - 1; i >= 0; --i) {
-    auto n = std::max<int64_t>(
-        1, w.dim(space.getOperand(i), "block.shape", axes[i]));
-    auto id = w.fresh();
-    w.values[bb.getArgument(i)] = id;
-    w.s << "int64_t " << id << "=(owner/" << pitch << ")%" << n << ";\n";
-    pitch *= n;
+  if (space.hasAttr("block.score_panel")) {
+    scoreBody(w.s, space, params);
+  } else {
+    w.s << "__mlu_global__ void ordered(" << params << "){\n";
+    if (space
+            .walk([](Operation *op) {
+              auto impl = op->getAttrOfType<StringAttr>("bangc.vector_impl");
+              return impl && impl == "pool-members" ? WalkResult::interrupt()
+                                                    : WalkResult::advance();
+            })
+            .wasInterrupted())
+      w.s << "__nram__ float pool_scratch[32];\n";
+    auto workspace =
+        space.getAttrOfType<IntegerAttr>("dsa.member_bytes").getInt();
+    if (workspace)
+      w.s << "__nram__ unsigned char storage[" << workspace << "];\n";
+    if (auto bytes = space.getAttrOfType<IntegerAttr>("dsa.stream_bytes"))
+      w.s << "__nram__ unsigned char streambuf[" << bytes.getInt() << "];\n";
+    if (auto bytes = space.getAttrOfType<IntegerAttr>("bangc.deferred_bytes");
+        bytes && bytes.getInt())
+      w.s << "__nram__ float deferred[" << bytes.getInt() / 4 << "];\n";
+    if (w.slab)
+      w.s << "__nram__ "
+          << OwnerCall::type(
+                 cast<MemRefType>(fn.getArgument(0).getType()).getElementType())
+          << " local["
+          << w.slab / (cast<MemRefType>(fn.getArgument(0).getType())
+                           .getElementTypeBitWidth() /
+                       8)
+          << "];\n";
+    w.s << "for(int64_t job=taskId;job<grid;job+=taskDim){for(int64_t "
+           "owner=job*"
+        << tile << ";owner<" << owners << " && owner-job*" << tile << "<"
+        << tile << ";++owner){\n";
+    auto axes = space.getAttrOfType<DenseI64ArrayAttr>("axes");
+    int64_t pitch = 1;
+    for (int i = axes.size() - 1; i >= 0; --i) {
+      auto n = std::max<int64_t>(
+          1, w.dim(space.getOperand(i), "block.shape", axes[i]));
+      auto id = w.fresh();
+      w.values[bb.getArgument(i)] = id;
+      w.s << "int64_t " << id << "=(owner/" << pitch << ")%" << n << ";\n";
+      pitch *= n;
+    }
+    if (w.slab)
+      w.s << "__memcpy(local,a0+owner*a0s0," << w.slab << ",GDRAM2NRAM);\n";
+    if (auto err = w.emit(bb))
+      return err;
+    if (w.slab)
+      w.s << "__memcpy(a0+owner*a0s0,local," << w.slab << ",NRAM2GDRAM);\n";
+    w.s << "}}}\n";
   }
-  if (w.slab)
-    w.s << "__memcpy(local,a0+owner*a0s0," << w.slab << ",GDRAM2NRAM);\n";
-  if (auto err = w.emit(bb))
-    return err;
-  if (w.slab)
-    w.s << "__memcpy(a0+owner*a0s0,local," << w.slab << ",NRAM2GDRAM);\n";
-  w.s << "}}}\nextern \"C\" int intent_enqueue(" << params
+  w.s << "extern \"C\" int intent_enqueue(" << params
       << ",int cores,void *queue){if(!grid)return 0;cnrtDim3_t "
          "d={(unsigned)(grid<cores?grid:cores),1,1};"
          "ordered<<<d,cnrtFuncTypeBlock,(cnrtQueue_t)queue>>>("
