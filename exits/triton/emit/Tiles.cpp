@@ -11,6 +11,7 @@ namespace CI_UNIT_NAMESPACE {
 using namespace compilerinfra;
 using namespace mlir;
 void registerColumnRules(TerminalPrinter &);
+bool canNarrowAddress(Operation &);
 namespace {
 using Shape = ArrayRef<int64_t>;
 Shape shape(Type t) {
@@ -35,7 +36,7 @@ std::string dtype(Type t) {
     return "tl.float32";
   if (t.isInteger(32))
     return "tl.int32";
-  if (t.isInteger(64))
+  if (t.isIndex() || t.isInteger(64))
     return "tl.int64";
   if (t.isInteger(8))
     return "tl.int8";
@@ -83,10 +84,15 @@ TerminalPrinter tilePrinter() {
       std::string projection = rank == 2 && axes[i] >= 0
                                    ? (axes[i] == 0 ? "[:,None]" : "[None,:]")
                                    : "";
-      terms.push_back("tl.cast(" + a[i + 1] + ",tl.int64)" + projection + "*" +
+      auto width = op.getAttrOfType<IntegerAttr>("index_bits").getInt();
+      terms.push_back("tl.cast(" + a[i + 1] + ",tl.int" +
+                      std::to_string(width) + ")" + projection + "*" +
                       std::to_string(strides[i]));
     }
-    return llvm::join(terms, " + ");
+    auto sum = llvm::join(terms, " + ");
+    return op.getAttrOfType<IntegerAttr>("index_bits").getInt() == 32
+               ? "tl.cast(" + sum + ",tl.int64)"
+               : sum;
   });
   leaf("triton_src.tile_read", [](Operation &op, auto &a) {
     auto e = getElementTypeOrSelf(op.getResult(0).getType());
@@ -140,8 +146,11 @@ TerminalPrinter tilePrinter() {
   });
   leaf("arith.constant", [](Operation &op, auto &) {
     auto v = op.getAttr("value");
-    if (auto i = dyn_cast<IntegerAttr>(v))
+    if (auto i = dyn_cast<IntegerAttr>(v)) {
+      if (i.getType().isInteger(1))
+        return std::string(i.getValue().isZero() ? "False" : "True");
       return std::to_string(i.getInt());
+    }
     if (auto f = dyn_cast<FloatAttr>(v)) {
       auto num = f.getValue();
       if (num.isInfinity())
@@ -277,6 +286,51 @@ LogicalResult collectiveSignature(Operation *op) {
 }
 } // namespace
 void tileContracts(Unit &unit) {
+  for (auto [op, name, symbol] :
+       {std::tuple{"axis_reduce", "dynamic-collective", "tl.sum/tl.max"},
+        {"bin_count", "histogram", "tl.histogram"},
+        {"reduce", "native-row-reduce", "tl.sum/tl.max"},
+        {"scan_sum", "inclusive-scan", "tl.cumsum"},
+        {"summary_reduce", "moments-reduction", "tl.reduce"}}) {
+    ImplementationContract c;
+    c.operation = "triton_src." + std::string(op);
+    c.name = name;
+    c.symbol = symbol;
+    c.source = ImplementationSource::Builtin;
+    c.minimum = Reuse::Native;
+    if (c.name == "moments-reduction") {
+      c.source = ImplementationSource::Runtime;
+      c.symbol = "merge_moments";
+      c.resource = "runtime/triton/kernels/moments.py";
+    }
+    c.operands =
+        "typed register fragment in the selected ROWS and WIDTH parameter row";
+    c.layout = "declared logical reduction axis";
+    c.accumulator = "i32 counters or declared floating accumulator";
+    c.effects = "pure within program instance";
+    c.numerical = "declared reduction algebra and author identity";
+    c.estimator = "exits/triton::collective-steps";
+    c.costParameters = {"participants", "width"};
+    c.available = [](const TargetProfile &p) -> llvm::Error {
+      if (!p.services.get<intentdsl::block::OwnerMachine>())
+        return llvm::createStringError("missing CUDA execution facts");
+      return llvm::Error::success();
+    };
+    c.verify = [](Operation *o) {
+      if (!isa<RankedTensorType>(o->getOperand(0).getType()))
+        return failure();
+      if (o->getName().stripDialect() == "axis_reduce") {
+        auto a = o->getAttrOfType<IntegerAttr>("axis").getInt();
+        auto kind = o->getAttrOfType<StringAttr>("algebra");
+        return success(
+            a >= -1 &&
+            a < cast<RankedTensorType>(o->getOperand(0).getType()).getRank() &&
+            (kind == "max" || kind == "sum"));
+      }
+      return success();
+    };
+    unit.implementations.push_back({std::move(c), COMPILERINFRA_SOURCE});
+  }
   for (bool isDot : {true, false}) {
     ImplementationContract c;
     c.name = isDot ? "native-dot" : "row-collective";
@@ -292,7 +346,8 @@ void tileContracts(Unit &unit) {
     c.effects = "pure register results";
     c.numerical = isDot ? "IEEE input precision, declared accumulator"
                         : "Triton sum or max along axis 1";
-    c.estimator = "exits/triton::matrix-issues";
+    c.estimator = isDot ? "exits/triton::matrix-issues"
+                        : "exits/triton::collective-steps";
     c.costParameters = isDot ? std::vector<std::string>{"M", "N", "K"}
                              : std::vector<std::string>{"M", "K"};
     c.available = [](const TargetProfile &p) -> llvm::Error {
@@ -346,6 +401,11 @@ LogicalResult verifyTileProgram(func::FuncOp fn, const TargetProfile &profile) {
                WalkResult::interrupt();
     }
     if (name == "triton_src.tile_address") {
+      auto bits = op->getAttrOfType<IntegerAttr>("index_bits").getInt();
+      if (bits != 64 && (bits != 32 || !canNarrowAddress(*op)))
+        return op->emitError(
+                   "address narrowing lacks a static signed range proof"),
+               WalkResult::interrupt();
       auto view = dyn_cast<BlockArgument>(op->getOperand(0));
       auto axes = op->getAttrOfType<DenseI64ArrayAttr>("projection"),
            strides = op->getAttrOfType<DenseI64ArrayAttr>("strides");
@@ -433,16 +493,29 @@ LogicalResult verifyTileProgram(func::FuncOp fn, const TargetProfile &profile) {
     return failure();
   return tilePrinter().verify(fn, profile);
 }
-llvm::Error emitTileProgram(func::FuncOp fn, llvm::raw_pwrite_stream &out) {
-  llvm::SmallVector<char> chars;
-  llvm::raw_svector_ostream stream(chars);
-  if (auto err = tilePrinter().emit(fn, stream))
-    return err;
-  StringRef src(chars.data(), chars.size());
-  if (fn.front().front().getAttrOfType<StringAttr>("calling_convention") ==
-      "matrix")
-    return intentdsl::block::emitMatrixPackage(fn, src, out, 2);
-  return intentdsl::block::emitOwnerArtifact(
-      fn, src, llvm::json::Object{{"num_warps", 4}, {"num_stages", 1}}, 2, out);
+void addRowRules(TerminalPrinter &);
+TerminalPrinter tritonPrinter() {
+  auto printer = tilePrinter();
+  addRowRules(printer);
+  printer.operations["builtin.module"] = [](Operation &, PrintPoint,
+                                            PrintContext &) {
+    return llvm::Error::success();
+  };
+  printer.package = [](DictionaryAttr attrs, const auto &files,
+                       llvm::raw_pwrite_stream &os) -> llvm::Error {
+    auto package = attrs.getAs<StringAttr>("triton_src.package");
+    if (!package)
+      return llvm::createStringError("missing verified Triton ABI");
+    auto data = llvm::json::parse(package.getValue());
+    if (!data)
+      return data.takeError();
+    auto file = files.find("kernel.py");
+    if (!data->getAsObject() || file == files.end())
+      return llvm::createStringError("incomplete kernel artifact");
+    (*data->getAsObject())["source"] = file->second;
+    os << *data;
+    return llvm::Error::success();
+  };
+  return printer;
 }
 } // namespace CI_UNIT_NAMESPACE

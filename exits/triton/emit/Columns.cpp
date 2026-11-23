@@ -25,16 +25,39 @@ void registerColumnRules(TerminalPrinter &printer) {
   };
   leaf("func.return", [](auto &, auto &) {});
   leaf("triton_src.end", [](auto &, auto &) {});
-  rules["func.func"] = [](Operation &op, PrintPoint at, PrintContext &p) {
+  rules["func.func"] = [](Operation &op, PrintPoint at,
+                          PrintContext &p) -> llvm::Error {
     if (at == PrintPoint::Enter) {
       p.file = "kernel.py";
       p.line("import triton");
       p.line("import triton.language as tl");
       p.line("from triton.language.extra.cuda import libdevice");
+      bool row = op.hasAttr("triton_src.min_width");
+      if (op.hasAttr("triton_src.moments")) {
+        auto helper = p.source("exits/triton::moments-reduction");
+        if (!helper)
+          return helper.takeError();
+        p.line(*helper);
+      }
       p.line("@triton.jit");
       std::vector<std::string> args;
-      for (Value arg : cast<func::FuncOp>(op).getArguments())
-        args.push_back(p.name(arg));
+      for (Value arg : cast<func::FuncOp>(op).getArguments()) {
+        auto id = p.name(arg);
+        args.push_back(id);
+        if (row)
+          if (auto view = dyn_cast<MemRefType>(arg.getType())) {
+            auto dims = view.getRank();
+            bool owner = op.hasAttr("kir.owner_axis");
+            if (dims > 2 || (owner && dims > 1))
+              for (int i = 0; i < dims - (owner ? 0 : 1); ++i)
+                args.push_back(id + "_d" + std::to_string(i) + ":tl.constexpr");
+            for (int i = 0; i < dims; ++i)
+              args.push_back(id + "_s" + std::to_string(i) +
+                             (dims > 2 ? ":tl.constexpr" : ""));
+          }
+      }
+      if (row)
+        args.insert(args.end(), {"M", "N"});
       args.insert(args.end(), {"ROWS:tl.constexpr", "WIDTH:tl.constexpr"});
       p.line("def kernel(" + llvm::join(args, ",") + "):");
       ++p.indent;
@@ -68,9 +91,14 @@ void registerColumnRules(TerminalPrinter &printer) {
       auto syntax = loop->hasAttr("triton_src.runtime_range")
                         ? " in range("
                         : " in tl.static_range(";
+      auto bound = [&](Value v) {
+        if (auto i = v.getDefiningOp<arith::ConstantIndexOp>())
+          return std::to_string(i.value());
+        return p.name(v);
+      };
       p.line("for " + p.name(loop.getInductionVar()) + syntax +
-             p.name(loop.getLowerBound()) + "," + p.name(loop.getUpperBound()) +
-             "," + p.name(loop.getStep()) + "):");
+             bound(loop.getLowerBound()) + "," + bound(loop.getUpperBound()) +
+             "," + bound(loop.getStep()) + "):");
       ++p.indent;
       for (auto [carry, result] : llvm::zip(loop.getRegionIterArgs(), loop.getResults()))
         p.line(p.name(carry) + " = " + p.name(result));
@@ -137,17 +165,4 @@ void registerColumnRules(TerminalPrinter &printer) {
     });
 }
 
-llvm::Expected<std::string> printColumns(func::FuncOp fn) {
-  TerminalPrinter printer;
-  registerColumnRules(printer);
-  printer.package = [](DictionaryAttr, const auto &files, llvm::raw_pwrite_stream &out) {
-    out << files.at("kernel.py");
-    return llvm::Error::success();
-  };
-  llvm::SmallVector<char> bytes;
-  llvm::raw_svector_ostream os(bytes);
-  if (auto err = printer.emit(fn, os))
-    return std::move(err);
-  return std::string(bytes.begin(),bytes.end());
-}
 } // namespace CI_UNIT_NAMESPACE

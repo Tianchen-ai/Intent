@@ -2,7 +2,7 @@
 // memref is projected into the result tile (-1 denotes a scalar).
 def TileAddr : Inst<"tile_address", [Pure]> {
   let arguments=(ins AnyMemRef:$view, Variadic<AnyType>:$coordinates,
-                     DenseI64ArrayAttr:$projection, DenseI64ArrayAttr:$strides);
+                     DenseI64ArrayAttr:$projection, DenseI64ArrayAttr:$strides, I32Attr:$index_bits);
   let results=(outs AnyType:$offset);
 }
 def TileRead : Inst<"tile_read", [MemoryEffects<[MemRead]>]> {

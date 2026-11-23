@@ -75,7 +75,8 @@ struct Tiles {
                                  "block.strides");
     return op("tile_address", args, shaped(dims, b.getI64Type()),
               {b.getNamedAttr("projection", b.getDenseI64ArrayAttr(projection)),
-               b.getNamedAttr("strides", strides)})
+               b.getNamedAttr("strides", strides),
+               b.getNamedAttr("index_bits", b.getI32IntegerAttr(64))})
         ->getResult(0);
   }
   Value read(Value base, Value addr, Value mask = {}) {
