@@ -6,6 +6,8 @@
 #include "intentdsl/levels/execution/cpu/ir/IndexedEffects.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
 #include "intentdsl/levels/execution/cpu/ir/Pack.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/Pass.h"
 #include <algorithm>
@@ -13,8 +15,10 @@
 using namespace mlir;
 #include "Lanes.h"
 namespace CI_UNIT_NAMESPACE {
+LogicalResult lowerMojoMatrix(func::FuncOp);
 void dialect(DialectRegistry &r) {
-  r.insert<intentdsl::rowmojo::RowMojoDialect>();
+  r.insert<intentdsl::rowmojo::RowMojoDialect, mlir::arith::ArithDialect,
+           mlir::math::MathDialect>();
 }
 namespace {
 class Columns {
@@ -200,16 +204,12 @@ struct Realize : PassWrapper<Realize, OperationPass<ModuleOp>> {
                     StringAttr::get(&getContext(), "ordered-owner-range"));
       return;
     }
-    if (auto *mt = intentdsl::cpu::findMatrixTask(
-            first.getParentOfType<func::FuncOp>())) {
-      auto &region = mt->getRegion(0).front().front();
-      mt->setAttr("mojo_row.column_lanes",
-                  IntegerAttr::get(
-                      IntegerType::get(&getContext(), 64),
-                      region.getAttrOfType<DenseI64ArrayAttr>(
-                          "cpu.output_tile")[3]));
-      mt->setAttr("mojo_row.schedule",
-                  StringAttr::get(&getContext(), "static-output-blocks"));
+    if (intentdsl::cpu::findMatrixTask(first.getParentOfType<func::FuncOp>())) {
+      getContext().getOrLoadDialect<intentdsl::rowmojo::RowMojoDialect>();
+      getContext().getOrLoadDialect<mlir::arith::ArithDialect>();
+      getContext().getOrLoadDialect<mlir::math::MathDialect>();
+      if (failed(lowerMojoMatrix(first.getParentOfType<func::FuncOp>())))
+        signalPassFailure();
       return;
     }
     for(auto fn:getOperation().getOps<func::FuncOp>())fn.walk([&](Operation *op){

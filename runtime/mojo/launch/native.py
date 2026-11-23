@@ -1,5 +1,6 @@
 import ctypes as ct
 import os
+from pathlib import Path
 import subprocess
 import threading
 from time import perf_counter
@@ -7,8 +8,17 @@ from runtime.cpu.binding.frame import HostVariants
 from runtime.cpu.cache.files import build_directory
 
 
+def _bridge_source():
+    here = Path(__file__).resolve()
+    local = here.parents[1] / "kernels" / "brgemm_bridge.c"
+    if local.is_file():
+        return local
+    raise FileNotFoundError(f"missing runtime kernel source {local}")
+
+
 class Artifact:
     status_type = None
+
     def __init__(self, data, info, workers):
         if data["version"] != 2 or not data["rows"]:
             raise ValueError("invalid CPU row artifact")
@@ -60,10 +70,54 @@ class Artifact:
         host = path / "entry.c"
         host.write_text(self.data["host"])
         obj = path / "entry.o"
+        bits = self.info[7]
+        isa_flags = ["-mavx512f", "-mf16c"] if bits == 512 else ["-mavx2", "-mf16c"]
         subprocess.run(
-            [self.info[3], "-O3", "-fopenmp", "-fPIC", "-c", str(host), "-o", str(obj)],
+            [
+                self.info[3],
+                "-O3",
+                "-fopenmp",
+                "-fPIC",
+                *isa_flags,
+                "-c",
+                str(host),
+                "-o",
+                str(obj),
+            ],
             check=True,
         )
+        link_args = ["-Xlinker", str(obj), "-Xlinker", self.info[4]]
+        if self.data.get("onednn"):
+            onednn_lib, onednn_inc = self.info[8], self.info[9]
+            if not onednn_lib or not onednn_inc:
+                raise RuntimeError("oneDNN runtime library required by compiled artifact")
+            bridge_obj = path / "brgemm_bridge.o"
+            subprocess.run(
+                [
+                    self.info[3],
+                    "-O3",
+                    "-fPIC",
+                    f"-I{onednn_inc}",
+                    "-c",
+                    str(_bridge_source()),
+                    "-o",
+                    str(bridge_obj),
+                ],
+                check=True,
+            )
+            onednn_dir = str(Path(onednn_lib).parent)
+            link_args.extend(
+                [
+                    "-Xlinker",
+                    str(bridge_obj),
+                    "-Xlinker",
+                    onednn_lib,
+                    "-Xlinker",
+                    f"-rpath={onednn_dir}",
+                    "-Xlinker",
+                    "-lpthread",
+                ]
+            )
         subprocess.run(
             [
                 self.info[0],
@@ -71,10 +125,7 @@ class Artifact:
                 "--emit",
                 "shared-lib",
                 str(source),
-                "-Xlinker",
-                str(obj),
-                "-Xlinker",
-                self.info[4],
+                *link_args,
                 "-o",
                 str(path / "host.so"),
             ],

@@ -109,11 +109,23 @@ void matrixCost(Unit &u) {
           e.terms["strided_column_bytes"] = {scatteredBytes, "B"};
           auto bw = intentdsl::quantity(ctx, "read_1", "B/ns"),
                rate = intentdsl::quantity(ctx, "vector", "FLOP/ns");
-          if (bw)
-            e.timeNs = (reads * workers + packBytes + translationBytes +
-                        scatteredBytes) /
-                           *bw +
-                       (rate ? (ops * t[3] + widenOps * workers) / *rate : 0);
+          if (bw) {
+            if (t.size() == 6) {
+              auto midBw = intentdsl::quantity(ctx, "read_1_mid_bw", "B/ns");
+              double tileBw = (packCode && midBw) ? *midBw : *bw;
+              e.timeNs = (reads * workers) / tileBw +
+                         (packBytes + translationBytes + scatteredBytes) / *bw +
+                         (rate ? (ops * t[3] * 2. * workers +
+                                  widenOps * workers) /
+                                     *rate
+                               : 0.);
+            } else {
+              e.timeNs = (reads * workers + packBytes + translationBytes +
+                          scatteredBytes) /
+                             *bw +
+                         (rate ? (ops * t[3] + widenOps * workers) / *rate : 0);
+            }
+          }
           if (dot.getName().stripDialect() == "q4k_dot" && bw) {
             double bytes = waves * t[0] * (g->k / 256) * 144;
             auto dispatch = intentdsl::quantity(ctx, "launch", "ns");

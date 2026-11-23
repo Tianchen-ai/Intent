@@ -2,9 +2,26 @@ from runtime.cpu.launch.completion import submit
 from runtime.cpu.binding.profile import calibration
 import os
 from functools import lru_cache
+from pathlib import Path
 import shutil
 import subprocess
 from runtime.mojo.launch.native import Artifact
+
+
+def _discover_onednn():
+    override = os.environ.get("INTENT_ONEDNN_LIB", "").strip()
+    candidates = [override] if override else [
+        "/opt/rc-dependencies/onednn-3.13.4/lib/libdnnl.so",
+        "/opt/rc-dependencies/onednn-3.13.4/lib/libdnnl.so.3",
+    ]
+    for cand in candidates:
+        if cand and os.path.isfile(cand):
+            real = os.path.realpath(cand)
+            prefix = Path(real).parents[1]
+            inc = prefix / "include"
+            if (inc / "oneapi" / "dnnl" / "dnnl_ukernel.h").is_file():
+                return real, str(inc), os.stat(real).st_mtime_ns
+    return "", "", 0
 
 
 @lru_cache(maxsize=16)
@@ -20,7 +37,7 @@ def discover(scope):
         for line in report.splitlines()
         if line.strip().startswith("--target-")
     )
-    isa = fields["--target-features"].split(",")
+    isa = set(fields["--target-features"].split(","))
     bits = 512 if "+avx512f" in isa else 256 if "+avx2" in isa else 0
     if not bits or not fields["--target-triple"].startswith("x86_64"):
         raise ValueError("unsupported Mojo CPU target")
@@ -44,6 +61,18 @@ def discover(scope):
     ).strip()
     if not os.path.isabs(gomp) or not os.path.isfile(gomp):
         raise FileNotFoundError("GNU OpenMP runtime for Mojo host")
+
+    def has_all(*flags):
+        return all(all(f in cpu_flags[c] for f in flags) for c in scope)
+
+    feats = dict(
+        grouped_i8=("+avx512vnni" in isa and has_all("avx512_vnni")),
+        avx512_bf16=has_all("avx512_bf16"),
+        avx512_fp16=has_all("avx512_fp16"),
+        amx_int8=has_all("amx_tile", "amx_int8"),
+        amx_bf16=has_all("amx_tile", "amx_bf16"),
+    )
+    onednn_lib, onednn_inc, onednn_mtime = _discover_onednn()
     return (
         binary,
         fields["--target-cpu"],
@@ -52,8 +81,11 @@ def discover(scope):
         gomp,
         os.stat(cc).st_mtime_ns,
         os.stat(gomp).st_mtime_ns,
-    ), bits, "+avx512vnni" in isa and all("avx512_vnni" in cpu_flags[c] for c in scope)
-
+        bits,
+        onednn_lib,
+        onednn_inc,
+        onednn_mtime,
+    ), bits, feats
 
 
 class Target:
@@ -63,16 +95,22 @@ class Target:
         if str(device) != "cpu":
             raise ValueError("CPU backend requires CPU views")
         scope = tuple(sorted(os.sched_getaffinity(0)))
-        workers = min(len(scope), int(os.environ.get("INTENT_CPU_THREADS", len(scope))))
+        workers = min(
+            len(scope), int(os.environ.get("INTENT_CPU_THREADS", len(scope)))
+        )
         if workers < 1:
             raise ValueError("worker budget must be positive")
         return scope, workers
 
     def options(self, key):
         scope, self.workers = key
-        self.info, bits, dot4 = discover(scope)
-        return dict(vector_bits=bits, workers=self.workers, grouped_i8=dot4,
-                    calibration=calibration(scope,self.workers,bits))
+        self.info, bits, feats = discover(scope)
+        return dict(
+            vector_bits=bits,
+            workers=self.workers,
+            calibration=calibration(scope, self.workers, bits),
+            **feats,
+        )
 
     def materialize(self, data):
         return Artifact(data, self.info, self.workers)

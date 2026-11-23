@@ -12,18 +12,38 @@ using namespace compilerinfra;
 using namespace mlir;
 #include "Lanes.h"
 namespace CI_UNIT_NAMESPACE {
+bool hasMojoMatrixProgram(ModuleOp);
+llvm::Error describeMojoMatrixPackage(func::FuncOp, Operation &,
+                                      llvm::raw_pwrite_stream &);
+LogicalResult verifyMojoMatrix(ModuleOp, const TargetProfile &, bool callable);
 namespace {
 struct Publish : PassWrapper<Publish, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(Publish)
   void runOnOperation() final {
-    auto fn = *getOperation().getOps<func::FuncOp>().begin();
+    auto module = getOperation();
+    auto fn = *module.getOps<func::FuncOp>().begin();
     fn->setAttr("mojo_row.entry",
                 StringAttr::get(&getContext(), "intent_entry"));
+    if (hasMojoMatrixProgram(module)) {
+      llvm::SmallVector<char> metadata;
+      llvm::raw_svector_ostream os(metadata);
+      if (auto err = describeMojoMatrixPackage(fn, fn.front().front(), os)) {
+        fn.emitError() << llvm::toString(std::move(err));
+        signalPassFailure();
+        return;
+      }
+      module->setAttr("mojo_row.package",
+                      StringAttr::get(&getContext(),
+                                      StringRef(metadata.data(),
+                                                metadata.size())));
+    }
   }
 };
 } // namespace
 void publishABI(OpPassManager &pm) { pm.addPass(std::make_unique<Publish>()); }
 LogicalResult verifyLoops(ModuleOp m, const TargetProfile &p, bool callable) {
+  if (hasMojoMatrixProgram(m))
+    return verifyMojoMatrix(m, p, callable);
   if (failed(intentdsl::cpu::verifyTask(m, p, "private-values", "cpu.task",
                                         false)))
     return failure();
@@ -32,21 +52,6 @@ LogicalResult verifyLoops(ModuleOp m, const TargetProfile &p, bool callable) {
     return success(fn.front().front().getAttrOfType<StringAttr>(
                        "mojo_row.schedule") == "ordered-owner-range" &&
                    succeeded(memberAccesses(fn, false)));
-  if (auto *mt = intentdsl::cpu::findMatrixTask(fn)) {
-    auto lanes = mt->getAttrOfType<IntegerAttr>("mojo_row.column_lanes");
-    if (!lanes ||
-        lanes.getInt() != mt->getRegion(0)
-                              .front()
-                              .front()
-                              .getAttrOfType<DenseI64ArrayAttr>(
-                                  "cpu.output_tile")[3] ||
-        mt->getAttrOfType<StringAttr>("mojo_row.schedule") !=
-            "static-output-blocks" ||
-        (callable &&
-         fn->getAttrOfType<StringAttr>("mojo_row.entry") != "intent_entry"))
-      return mt->emitError("invalid Mojo matrix vector or host mapping");
-    return success();
-  }
   if(failed(intentdsl::specializeProjectedLayout(fn,*p.services.get<intentdsl::CallFacts>(),"mojo_row",false)))return failure();
   auto &task = fn.front().front();
   if (task.getAttrOfType<StringAttr>("mojo_row.schedule") !=

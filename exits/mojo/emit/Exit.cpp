@@ -1,17 +1,19 @@
-#include "intentdsl/levels/algorithm/kir/ir/Performance.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
-#include "intentdsl/levels/execution/cpu/ir/Task.h"
+#include "intentdsl/levels/algorithm/kir/ir/Performance.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
+#include "intentdsl/levels/execution/cpu/ir/Task.h"
 using namespace compilerinfra;
 using namespace mlir;
 namespace CI_UNIT_NAMESPACE {
 void dialect(DialectRegistry &);
-llvm::Error emitMatrix(func::FuncOp,llvm::raw_pwrite_stream &);
+bool hasMojoMatrixProgram(ModuleOp);
+TerminalPrinter mojoMatrixPrinter();
+void populateMojoMatrixContracts(intentdsl::cpu::MatrixMachine &, int64_t);
 llvm::Error emitOrdered(func::FuncOp, llvm::raw_pwrite_stream &);
 std::string hostSource(func::FuncOp);
 void publishABI(OpPassManager &);
 LogicalResult verifyLoops(ModuleOp, const TargetProfile &, bool callable);
-void realize(OpPassManager &, int64_t,const intentdsl::CallFacts &);
+void realize(OpPassManager &, int64_t, const intentdsl::CallFacts &);
 llvm::Expected<std::string> mojoSource(Operation *);
 namespace {
 llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
@@ -24,28 +26,50 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
       (*bits != 128 && *bits != 256 && *bits != 512 && *bits != 1024))
     return llvm::createStringError(
         "invalid execution group or vector capabilities");
-  if(auto err=intentdsl::bindPerformance(p,options,"",options.getString("calibration").value_or("").str(),*workers))return std::move(err);
+  if (auto err = intentdsl::bindPerformance(
+          p, options, "",
+          options.getString("calibration").value_or("").str(), *workers))
+    return std::move(err);
+  if (*bits >= 256)
+    p.features.insert("avx2");
+  if (*bits >= 512)
+    p.features.insert("avx512f");
+  if (options.getBoolean("grouped_i8").value_or(false))
+    p.features.insert("avx512_vnni");
+  for (StringRef feat :
+       {"avx512_bf16", "avx512_fp16", "amx_int8", "amx_bf16"}) {
+    if (options.getBoolean(feat).value_or(false))
+      p.features.insert(feat.str());
+  }
   auto caps = std::make_shared<intentdsl::cpu::RowMachine>();
   caps->vectorBits = *bits;
   caps->packedOwners = 8;
   caps->workers = *workers;
-  int64_t v=*bits/32;
-  auto matrix=std::make_shared<intentdsl::cpu::MatrixMachine>();
-  if(*bits==512 && options.getBoolean("grouped_i8").value_or(false))matrix->integerPacking="signed-dot4-panels";
-  matrix->choices={{2,v,32,v},{4,2*v,64,v},{8,4*v,64,v},{8,3*v,128,v},{12,2*v,128,v}};
-  matrix->estimate="exits/mojo::register-block";
-  matrix->records={{8,1,256,v},{16,1,256,v},{64,1,256,v}};
-  if(auto e=p.services.provide<intentdsl::cpu::MatrixMachine>(matrix))return e;
+  int64_t v = *bits / 32;
+  auto matrix = std::make_shared<intentdsl::cpu::MatrixMachine>();
+  if (*bits == 512 && options.getBoolean("grouped_i8").value_or(false))
+    matrix->integerPacking = "signed-dot4-panels";
+  matrix->choices = {{2, v, 32, v},
+                     {4, 2 * v, 64, v},
+                     {8, 4 * v, 64, v},
+                     {8, 3 * v, 128, v},
+                     {12, 2 * v, 128, v}};
+  matrix->estimate = "exits/mojo::register-block";
+  matrix->records = {{8, 1, 256, v}, {16, 1, 256, v}, {64, 1, 256, v}};
+  populateMojoMatrixContracts(*matrix, v);
+  if (auto e = p.services.provide<intentdsl::cpu::MatrixMachine>(matrix))
+    return e;
   caps->rows = {{1, 64}, {4, *bits == 512 ? 128 : 64}, {32, 256}, {64, 128}};
   if (auto e = p.services.provide<intentdsl::cpu::RowMachine>(caps))
     return e;
   return p;
 }
 llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
+  if (hasMojoMatrixProgram(m))
+    return mojoMatrixPrinter().emit(m, out);
   auto fn = *m.getOps<func::FuncOp>().begin();
   if (fn.front().front().getName().getStringRef() == "cpu.owner_task")
     return emitOrdered(fn, out);
-  if(intentdsl::cpu::matrixTask(fn))return emitMatrix(fn,out);
   auto abi = llvm::json::parse(fn->getAttrOfType<StringAttr>("kir.abi"));
   if (!abi)
     return abi.takeError();
@@ -62,7 +86,7 @@ llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
     return program.takeError();
   llvm::json::Object fields{{"source", *program}, {"host", hostSource(fn)}};
   fields["version"] = 2;
-  fields["domain"]=intentdsl::publishDomain(fn);
+  fields["domain"] = intentdsl::publishDomain(fn);
   fields["abi"] = std::move(*abi);
   fields["rows"] = std::move(rows);
   out << llvm::json::Value(std::move(fields));
@@ -71,9 +95,13 @@ llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
 } // namespace
 void registerBlockCost(Unit &);
 void registerOneDNN(Unit &);
+void registerMatrixContracts(Unit &);
+void registerMojoAddressOptimization(Unit &);
 void bind(Unit &u) {
   registerBlockCost(u);
   registerOneDNN(u);
+  registerMatrixContracts(u);
+  registerMojoAddressOptimization(u);
   u.dialects = dialect;
   for (StringRef phase : {"legal", "realized", "callable"})
     u.boundaries.push_back(
@@ -84,7 +112,8 @@ void bind(Unit &u) {
             if (phase == "realized") {
               auto *caps = p.services.get<intentdsl::cpu::RowMachine>();
               if (caps)
-                realize(pm, caps->vectorBits,*p.services.get<intentdsl::CallFacts>());
+                realize(pm, caps->vectorBits,
+                        *p.services.get<intentdsl::CallFacts>());
             }
             return llvm::Error::success();
           },
@@ -94,7 +123,9 @@ void bind(Unit &u) {
             return verifyLoops(m, p, phase == "callable");
           }},
          COMPILERINFRA_SOURCE});
-  u.exit =
-      Located<ExitImplementation>{{emit, capabilities}, COMPILERINFRA_SOURCE};
+  ExitImplementation exit;
+  exit.emit = emit;
+  exit.capabilities = capabilities;
+  u.exit = Located<ExitImplementation>{std::move(exit), COMPILERINFRA_SOURCE};
 }
 } // namespace CI_UNIT_NAMESPACE
