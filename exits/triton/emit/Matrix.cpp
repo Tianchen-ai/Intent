@@ -1,4 +1,5 @@
 #include "intentdsl/levels/execution/block/ir/MatrixAccess.h"
+#include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 #include "llvm/ADT/StringExtras.h"
 
 using namespace mlir;
@@ -16,15 +17,17 @@ struct Writer : intentdsl::block::MatrixAccess {
            strideOf(v, c);
   }
   void records() {
+    using Format = intentdsl::kir::Q4KRecord;
+    using Input = intentdsl::kir::Q8KRecord;
     auto w = dot.getOperand(0),
          x = dot.getOperand(1).getDefiningOp()->getOperand(0);
     s << "    acc=tl.full((ROWS,),0,tl.float32)\n"
-      << "    for g in range(" << shape[2] / 256 << "):\n"
+      << "    for g in range(" << shape[2] / Format::elements << "):\n"
       << "        xs=" << name(x) << "+tl.cast(g,tl.int64)*" << stride(x, 0) << "\n"
-      << "        v=tl.load(xs+tl.arange(0,256).to(tl.int64)*" << stride(x, 1) << ")\n"
+      << "        v=tl.load(xs+tl.arange(0," << Input::elements << ").to(tl.int64)*" << stride(x, 1) << ")\n"
       << "        peak=tl.max(tl.abs(v),0)\n"
-      << "        lane=tl.arange(0,256)\n"
-      << "        first=tl.min(tl.where(tl.abs(v)==peak,lane,256),0)\n"
+      << "        lane=tl.arange(0," << Input::elements << ")\n"
+      << "        first=tl.min(tl.where(tl.abs(v)==peak,lane," << Input::elements << "),0)\n"
       << "        extreme=tl.sum(tl.where(lane==first,v,0.),0)\n"
       << "        inv=tl.div_rn(-127.,tl.where(peak==0,1.,extreme))\n"
       << "        ds=tl.where(peak==0,0.,tl.div_rn(1.,inv))\n"
@@ -34,21 +37,21 @@ struct Writer : intentdsl::block::MatrixAccess {
       return "tl.load(base+(" + i + ")*" + strideOf(w, 2) +
              ",mask=r<M,other=0).to(tl.int32)";
     };
-    s << "        d=(" << byte("0") << "|(" << byte("1")
+    s << "        d=(" << byte(std::to_string(Format::d)) << "|(" << byte(std::to_string(Format::d+1))
       << "<<8)).to(tl.uint16).to(tl.float16,bitcast=True).to(tl.float32)\n"
-      << "        dm=(" << byte("2") << "|(" << byte("3")
+      << "        dm=(" << byte(std::to_string(Format::dmin)) << "|(" << byte(std::to_string(Format::dmin+1))
       << "<<8)).to(tl.uint16).to(tl.float16,bitcast=True).to(tl.float32)\n"
-      << "        t=tl.arange(0,256).to(tl.int64)\n        j=t//32\n"
-      << "        header=base[:,None]+(j%4)[None,:]*"<<stride(w,2)<<"\n"
-      << "        L=tl.load(header+"<<4*stride(w,2)<<",r[:,None]<M,other=0).to(tl.int32)\n"
-      << "        H=tl.load(header+"<<8*stride(w,2)<<",r[:,None]<M,other=0).to(tl.int32)\n"
-      << "        P=tl.load(header+"<<12*stride(w,2)<<",r[:,None]<M,other=0).to(tl.int32)\n"
-      << "        sc=tl.where(j[None,:]<4,L&63,(P&15)|((L>>6)<<4))\n"
-      << "        mn=tl.where(j[None,:]<4,H&63,(P>>4)|((H>>6)<<4))\n"
+      << "        t=tl.arange(0," << Input::elements << ").to(tl.int64)\n        j=t//" << Format::group << "\n"
+      << "        header=base[:,None]+(j%" << Format::halfGroups << ")[None,:]*"<<stride(w,2)<<"\n"
+      << "        L=tl.load(header+"<<Format::factors*stride(w,2)<<",r[:,None]<M,other=0).to(tl.int32)\n"
+      << "        H=tl.load(header+"<<(Format::factors+Format::halfGroups)*stride(w,2)<<",r[:,None]<M,other=0).to(tl.int32)\n"
+      << "        P=tl.load(header+"<<(Format::factors+2*Format::halfGroups)*stride(w,2)<<",r[:,None]<M,other=0).to(tl.int32)\n"
+      << "        sc=tl.where(j[None,:]<" << Format::halfGroups << ",L&" << ((1<<Format::scaleBits)-1) << ",(P&" << ((1<<Format::nibbleBits)-1) << ")|((L>>" << Format::scaleBits << ")<<" << Format::nibbleBits << "))\n"
+      << "        mn=tl.where(j[None,:]<" << Format::halfGroups << ",H&" << ((1<<Format::scaleBits)-1) << ",(P>>" << Format::nibbleBits << ")|((H>>" << Format::scaleBits << ")<<" << Format::nibbleBits << "))\n"
       << "        q=tl.minimum(tl.maximum(libdevice.rint(libdevice.mul_rn(inv,v)),-128.),127.).to(tl.int32)\n"
-      << "        raw=tl.load(base[:,None]+(16+32*(j//2)+t%32)[None,:]*"
+      << "        raw=tl.load(base[:,None]+(" << Format::packed << "+" << Format::group << "*(j//2)+t%" << Format::group << ")[None,:]*"
       << stride(w,2)<<",r[:,None]<M,other=0).to(tl.int32)\n"
-      << "        nib=(raw>>(4*(j%2))[None,:])&15\n"
+      << "        nib=(raw>>(" << Format::nibbleBits << "*(j%2))[None,:])&" << ((1<<Format::nibbleBits)-1) << "\n"
       << "        S=tl.sum(sc*nib*q[None,:],1)\n        T=tl.sum(mn*q[None,:],1)\n"
       << "        "
          "acc+=libdevice.mul_rn(ds,libdevice.sub_rn(libdevice.mul_rn(d,S.to(tl."
@@ -95,6 +98,7 @@ struct Writer : intentdsl::block::MatrixAccess {
          "acc=tl.dot(a,tl.where(t[:,None]<K,rhs,0.).to(tl.bfloat16),acc)\n";
   }
   void scaled() {
+    using Format = intentdsl::kir::MX8Block;
     auto a = dot.getOperand(0), sa = dot.getOperand(1), b = dot.getOperand(2),
          sb = intentdsl::kir::RightScale(dot).view;
     intentdsl::kir::RightScale axes(dot);
@@ -104,28 +108,28 @@ struct Writer : intentdsl::block::MatrixAccess {
     if (dot.getAttrOfType<BoolAttr>("triton_src.neutral_scale_dispatch")
             .getValue()) {
       auto v = store->getOperand(0);
-      s << "    group=tl.arange(0," << shape[2] / 32 << ").to(tl.int64)\n"
+      s << "    group=tl.arange(0," << shape[2] / Format::group << ").to(tl.int64)\n"
         << "    left_scale=tl.load("
         << addr(sa, "r[:,None]", 0, "group[None,:]", 1)
-        << ",r[:,None]<M,other=127)\n"
+        << ",r[:,None]<M,other=" << Format::bias << ")\n"
         << "    right_scale=tl.load("
         << addr(sb, "group[:,None]", axes.group, "c[None,:]", axes.column)
-        << ",c[None,:]<N,other=127)\n"
+        << ",c[None,:]<N,other=" << Format::bias << ")\n"
         << "    if "
-           "(tl.min((left_scale==127).to(tl.int32),None)==1)&(tl.min((right_"
-           "scale==127).to(tl.int32),None)==1):\n"
+           "(tl.min((left_scale==" << Format::bias << ").to(tl.int32),None)==1)&(tl.min((right_"
+           "scale==" << Format::bias << ").to(tl.int32),None)==1):\n"
         << "        result=tl.full((ROWS,WIDTH),0.,tl.float32)\n        for p "
            "in range(tl.cdiv(K,BK)):\n"
         << "            tk=tl.cast(p,tl.int64)*BK+tl.arange(0,BK)\n"
         << "            la=tl.load(" << name(a)
         << ".to(tl.pointer_type(tl.uint8))+r[:,None]*" << stride(a, 0)
-        << "+(tk//32)[None,:]*" << stride(a, 1) << "+(tk%32)[None,:]*"
+        << "+(tk//" << Format::group << ")[None,:]*" << stride(a, 1) << "+(tk%" << Format::group << ")[None,:]*"
         << stride(a, 2)
         << ",mask=(r[:,None]<M)&(tk[None,:]<K),other=0).to(tl.float8e4nv,"
            "bitcast=True)\n"
         << "            rb=tl.load(" << name(b)
-        << ".to(tl.pointer_type(tl.uint8))+(tk//32)[:,None]*" << stride(b, 0)
-        << "+(tk%32)[:,None]*" << stride(b, 1) << "+c[None,:]*" << stride(b, 2)
+        << ".to(tl.pointer_type(tl.uint8))+(tk//" << Format::group << ")[:,None]*" << stride(b, 0)
+        << "+(tk%" << Format::group << ")[:,None]*" << stride(b, 1) << "+c[None,:]*" << stride(b, 2)
         << ",mask=(tk[:,None]<K)&(c[None,:]<N),other=0).to(tl.float8e4nv,"
            "bitcast=True)\n"
         << "            result=tl.dot(la,rb,result,max_num_imprecise_acc=0)\n"
@@ -133,18 +137,18 @@ struct Writer : intentdsl::block::MatrixAccess {
         << ",result,mask=(r[:,None]<M)&(c[None,:]<N))\n        return\n";
     }
     s << "    acc=tl.full((ROWS,WIDTH),0.,tl.float32)\n    for g in range("
-      << shape[2] / 32 << "):\n"
+      << shape[2] / Format::group << "):\n"
       << "        ax=tl.load(" << addr(sa, "r", 0, "tl.cast(g,tl.int64)", 1)
-      << ",r<M,other=127).to(tl.int32)\n"
+      << ",r<M,other=" << Format::bias << ").to(tl.int32)\n"
       << "        bx=tl.load(" << addr(sb, "tl.cast(g,tl.int64)", axes.group, "c", axes.column)
-      << ",c<N,other=127).to(tl.int32)\n"
+      << ",c<N,other=" << Format::bias << ").to(tl.int32)\n"
       << "        "
-         "ls=tl.where(ax==255,float('nan'),libdevice.ldexp(tl.full((ROWS,),1.,"
-         "tl.float32),ax-127))\n"
+         "ls=tl.where(ax==" << Format::nan << ",float('nan'),libdevice.ldexp(tl.full((ROWS,),1.,"
+         "tl.float32),ax-" << Format::bias << "))\n"
       << "        "
-         "rs=tl.where(bx==255,float('nan'),libdevice.ldexp(tl.full((WIDTH,),1.,"
-         "tl.float32),bx-127))\n"
-      << "        t=tl.arange(0,32).to(tl.int64)\n"
+         "rs=tl.where(bx==" << Format::nan << ",float('nan'),libdevice.ldexp(tl.full((WIDTH,),1.,"
+         "tl.float32),bx-" << Format::bias << "))\n"
+      << "        t=tl.arange(0," << Format::group << ").to(tl.int64)\n"
       << "        av=tl.load(" << name(a)
       << ".to(tl.pointer_type(tl.uint8))+r[:,None]*" << stride(a, 0) << "+tl.cast(g,tl.int64)*"
       << stride(a, 1) << "+t[None,:]*" << stride(a, 2)

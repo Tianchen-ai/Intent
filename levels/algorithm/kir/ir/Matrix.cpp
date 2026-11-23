@@ -1,4 +1,5 @@
 #include "intentdsl/levels/algorithm/kir/ir/Matrix.h"
+#include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/Support/JSON.h"
 
@@ -90,6 +91,7 @@ LogicalResult verifyMatrixBody(func::FuncOp fn, Operation &domain,
     if (op.getName().getDialectNamespace() != dialect)
       return op.emitError("foreign matrix expression");
     auto name = op.getName().stripDialect();
+    if (failed(verifyStorageFormat(op,canonical))) return failure();
     if (name == "end")
       continue;
     if (canonical && entry.getNumResults() == 1 &&
@@ -192,7 +194,7 @@ LogicalResult verifyMatrixBody(func::FuncOp fn, Operation &domain,
       type = elem(a);
     } else if (name == "scaled_contract") {
       auto B = shapes.lookup(op.getOperand(2));
-      if (A.size() != 3 || B.size() != 3 || A[2].getAsInteger() != 32 ||
+      if (A.size() != 3 || B.size() != 3 || A[2].getAsInteger() != MX8Block::group ||
           B[1] != A[2] || A[1] != B[0] || dtype(a) != "f8e4m3fn" ||
           dtype(op.getOperand(2)) != "f8e4m3fn" ||
           dtype(op.getOperand(1)) != "u8" ||
@@ -208,15 +210,15 @@ LogicalResult verifyMatrixBody(func::FuncOp fn, Operation &domain,
       type = Float32Type::get(fn.getContext());
       ++dots;
     } else if (name == "quantize_q8k") {
-      if (A.size() != 2 || A[1].getAsInteger() != 256 || !elem(a).isF32())
+      if (A.size() != 2 || A[1].getAsInteger() != Q8KRecord::elements || !elem(a).isF32())
         return op.emitError("Q8_K input must be f32[G,256]");
-      shape = {A[0], 292};
+      shape = {A[0], Q8KRecord::bytes};
       type = IntegerType::get(fn.getContext(), 8);
     } else if (name == "q4k_dot") {
       auto *encoder = op.getOperand(1).getDefiningOp();
-      if (A.size() != 3 || A[2].getAsInteger() != 144 || dtype(a) != "u8" ||
+      if (A.size() != 3 || A[2].getAsInteger() != Q4KRecord::bytes || dtype(a) != "u8" ||
           !encoder || encoder->getName().stripDialect() != "quantize_q8k" ||
-          shapes.lookup(op.getOperand(1)) != Shape{A[1], 292})
+          shapes.lookup(op.getOperand(1)) != Shape{A[1], Q8KRecord::bytes})
         return op.emitError("expected Q4_K[N,G,144] and Q8_K[G,292]");
       shape = {A[0]};
       type = Float32Type::get(fn.getContext());

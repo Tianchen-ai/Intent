@@ -4,6 +4,7 @@
 #include "intentdsl/levels/algorithm/kir/ir/Matrix.h"
 #include "intentdsl/levels/algorithm/kir/ir/Ordered.h"
 #include "intentdsl/levels/algorithm/kir/ir/Segment.h"
+#include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Math/IR/Math.h"
@@ -383,6 +384,8 @@ struct Canonicalize : PassWrapper<Canonicalize, OperationPass<ModuleOp>> {
         for(auto &op:llvm::make_early_inc_range(llvm::reverse(body))){
           // KIR's contraction expressions read immutable inputs. Only the
           // publication writes, and its complete operand chain is live.
+          if (auto type = intentdsl::kir::storageFormat(op))
+            op.setAttr("kir.storage", TypeAttr::get(type));
           if(op.getNumResults()==1 && op.getResult(0).use_empty())op.erase();
         }
       }

@@ -1,6 +1,11 @@
 #include "mlir/Interfaces/InferTypeOpInterface.h"
 #include "intentdsl/levels/algorithm/kir/ir/Dialect.h"
+#include "intentdsl/levels/algorithm/kir/ir/Storage.h"
+#include "mlir/IR/DialectImplementation.h"
+#include "llvm/ADT/TypeSwitch.h"
 #include "Dialect.cpp.inc"
+#define GET_TYPEDEF_CLASSES
+#include "Storage.cpp.inc"
 #include "mlir/Bytecode/BytecodeOpInterface.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -11,6 +16,7 @@
 #define GET_OP_CLASSES
 #include "Ops.cpp.inc"
 void intentdsl::kir::KirDialect::initialize() {
+  addTypes<Q4KType,Q8KType,MX8Type>();
   addOperations<
 #define GET_OP_LIST
 #include "Ops.cpp.inc"
