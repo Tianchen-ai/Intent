@@ -6,8 +6,14 @@ llvm::Error emitPairFold(mlir::scf::ForOp loop, unsigned depth, int64_t span) {
   auto ex = [&](std::string v, int axis) {
     return lib + ".expand_dims(" + v + "," + std::to_string(axis) + ")";
   };
+  auto owners = [&](std::string v) {
+    auto fragment=broadcast(v);
+    if(!space.hasAttr("block.matrix_rows"))return fragment;
+    auto count=std::to_string(space.getAttrOfType<IntegerAttr>("block.owner_tile").getInt());
+    return logicalOwners(fragment,count);
+  };
   auto uniform = [&](std::string v) {
-    return lib + ".min(" + broadcast(v) + ",axis=0)";
+    return lib + ".min(" + owners(v) + ",axis=0)";
   };
   auto token = [&](std::string v) {
     return lib + ".broadcast_to(" + v + ",(" + sz + ",))";
@@ -53,7 +59,7 @@ llvm::Error emitPairFold(mlir::scf::ForOp loop, unsigned depth, int64_t span) {
                     cast(uniform(lo), IndexType::get(loop.getContext())) +
                     "//" + sz + ")*" + sz);
     line(depth,
-         "while " + base + "<" + lib + ".max(" + broadcast(hi) + ",axis=0):");
+         "while " + base + "<" + lib + ".max(" + owners(hi) + ",axis=0):");
   }
   line(depth + 1, iv + "=" + base + "+" + memberRange(span));
   if(loop->hasAttr("block.uniform_tokens")){

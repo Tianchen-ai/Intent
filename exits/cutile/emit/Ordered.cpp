@@ -5,6 +5,9 @@ namespace {
 struct Ordered : intentdsl::block::OwnerSource {
   using OwnerSource::OwnerSource;
   llvm::StringRef language() override { return "ct"; }
+  std::string logicalOwners(std::string fragment,std::string count) override {
+    return "ct.extract("+fragment+",(0,),shape=("+count+",))";
+  }
   bool countedPanels(scf::ForOp loop) override {
     return loop->hasAttr("ct_src.counted_panels");
   }

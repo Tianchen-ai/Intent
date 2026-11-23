@@ -5,6 +5,9 @@ namespace {
 struct Ordered : intentdsl::block::OwnerSource {
   using OwnerSource::OwnerSource;
   llvm::StringRef language() override { return "tl"; }
+  std::string logicalOwners(std::string fragment, std::string count) override {
+    return "tl.gather("+fragment+",tl.arange(0,"+count+"),0)";
+  }
   std::string matrixProduct(std::string a, std::string b, bool trans,
                             std::string) override {
     return "tl.dot(" + a + "," + (trans ? "tl.trans(" + b + ")" : b) + ")";

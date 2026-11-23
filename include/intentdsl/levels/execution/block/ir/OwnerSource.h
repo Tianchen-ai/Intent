@@ -29,6 +29,7 @@ protected:
   virtual std::string tileOwner() = 0;
   virtual bool countedPanels(mlir::scf::ForOp) { return false; }
   virtual std::string tileStart() = 0;
+  virtual std::string logicalOwners(std::string fragment,std::string count) = 0;
   virtual std::string load(mlir::memref::LoadOp, llvm::StringRef mask) = 0;
   virtual std::string gatherScalars(mlir::memref::LoadOp,
                                     llvm::ArrayRef<std::string>,
