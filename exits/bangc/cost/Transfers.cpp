@@ -12,35 +12,43 @@ void dmaCost(Unit &u) {
           e.bottleneck = "transfer";
           auto [m, n] =
               ctx.target.services.get<intentdsl::CallFacts>()->geometry(op);
+          auto choice = cast<DictionaryAttr>(c.value);
+          double batch = choice.getAs<IntegerAttr>("batch")
+                             ? choice.getAs<IntegerAttr>("batch").getInt()
+                             : 1.;
           double in = 0, out = 0, r = 0, w = 0, scatter = 0;
           op->walk([&](Operation *i) {
             auto k = i->getName().stripDialect();
             if (k != "load" && k != "store")
               return;
-            double bytes = n *
-                           cast<MemRefType>(i->getOperand(0).getType())
-                               .getElementTypeBitWidth() /
-                           8;
+            auto view = cast<MemRefType>(i->getOperand(0).getType());
+            double bytes = n * view.getElementTypeBitWidth() / 8;
             if (k == "load") {
-              auto choice = cast<DictionaryAttr>(c.value);
               double frequency = 1.;
               if (choice.getAs<BoolAttr>("persistent").getValue() &&
-                  cast<MemRefType>(i->getOperand(0).getType()).getRank() == 1)
+                  view.getRank() == 1) {
                 frequency =
                     1. /
                     std::max(
                         1.,
                         std::ceil(m / choice.getAs<IntegerAttr>("participants")
                                           .getInt()));
-              in += frequency * bytes;
-              r += frequency;
+                in += frequency * bytes;
+                r += frequency;
+              } else {
+                in += bytes;
+                r += view.getRank() >= 2 ? 1. / batch : 1.;
+              }
             } else {
               out += bytes;
-              ++w;
+              bool permuted = false;
               if (auto axes =
                       i->getAttrOfType<DenseI64ArrayAttr>("block.member_axes");
-                  axes && axes.size() == 2 && axes[0] == 1)
+                  axes && axes.size() == 2 && axes[0] == 1) {
                 scatter += bytes;
+                permuted = true;
+              }
+              w += (!permuted && view.getRank() >= 2) ? 1. / batch : 1.;
             }
           });
           auto bi = intentdsl::quantity(ctx, "dma_in_bw", "B/ns"),
@@ -51,7 +59,8 @@ void dmaCost(Unit &u) {
           e.terms = {{"incoming", {in, "B"}},
                      {"outgoing", {out, "B"}},
                      {"requests", {r + w, "count"}}};
-          double specialized=0, count=0;
+          double specialized = 0, count = 0;
+          double lanes = n * batch;
           op->walk([&](Operation *i) {
             auto code=i->getName().stripDialect();
             std::string primitive;
@@ -67,13 +76,15 @@ void dmaCost(Unit &u) {
                 primitive="quotient";
             }
             if(primitive.empty())return;
-            int low=n<=512?64:512, high=n<=512?512:2048;
+            int low = lanes <= 512 ? 64 : 512, high = lanes <= 512 ? 512 : 2048;
             auto prefix="compute_"+primitive+"_";
             auto a=intentdsl::quantity(ctx,prefix+std::to_string(low),"ns");
             auto b=intentdsl::quantity(ctx,prefix+std::to_string(high),"ns");
             if(a && b){
-              double t=std::clamp((n-low)/(high-low),0.,1.);
-              specialized+=((*a)*(1-t)+(*b)*t)*std::max(1.,n/high);
+              double u = lanes <= 512
+                             ? std::clamp((lanes - low) / (high - low), 0., 1.)
+                             : (lanes - low) / (high - low);
+              specialized += ((*a) + ((*b) - (*a)) * u) / batch;
               ++count;
             }
           });

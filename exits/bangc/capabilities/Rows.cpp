@@ -61,7 +61,8 @@ capabilities(const llvm::json::Object &opts) {
     }
   auto resource =
       std::make_shared<intentdsl::dsa::LocalSupply>(intentdsl::dsa::LocalSupply{
-          *nram, std::min<int64_t>(*nram/3*2,512*1024), 128, (*clusters) * (*cores), sizeof(float), true, 16, 12});
+          *nram, std::min<int64_t>(*nram / 3 * 2, 512 * 1024), 128,
+          (*clusters) * (*cores), sizeof(float), true, 16, 12, 8192});
   caps->stagedInputBudget=std::min(resource->capacity,resource->budget);
   if (auto err = profile.services.provide<intentdsl::block::OwnerMachine>(
           std::make_shared<intentdsl::block::OwnerMachine>(

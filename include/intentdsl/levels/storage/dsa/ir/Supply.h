@@ -7,6 +7,7 @@ struct LocalSupply {
   bool asynchronous;
   int64_t featurePanelMembers;
   int64_t indexScratchPerMember;
+  int64_t randomScratchBytes = 0;
 };
 bool projectsConsecutiveRows(mlir::Operation *access, unsigned maskIndex);
 struct TemporaryLayout {

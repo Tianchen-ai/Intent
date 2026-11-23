@@ -9,7 +9,8 @@ namespace intentdsl::dsa {
 namespace {
 // Each slot has one producer and one consuming interval per iteration.
 // A lookahead copy targets the other slot only after the current slot is ready.
-bool legalSchedule(Block &schedule, int64_t depth, StringRef source,bool persistent) {
+bool legalSchedule(Block &schedule, int64_t depth, StringRef source,
+                   bool persistent, int64_t batch) {
   auto it = schedule.begin();
   auto take = [](Block &block, Block::iterator &pos,
                  StringRef code) -> Operation * {
@@ -19,7 +20,12 @@ bool legalSchedule(Block &schedule, int64_t depth, StringRef source,bool persist
   };
   auto *r = take(schedule, it, "dsa.range"),
        *z = take(schedule, it, "dsa.slot_zero");
-  if (!r || !z || r->getAttrOfType<StringAttr>("source") != source)
+  Attribute expectedBatch =
+      (source == "participant_stride" && batch > 1)
+          ? Builder(schedule.getParentOp()->getContext()).getI64IntegerAttr(batch)
+          : Attribute{};
+  if (!r || !z || r->getAttrOfType<StringAttr>("source") != source ||
+      r->getAttr("batch") != expectedBatch)
     return false;
   auto initial = z->getResult(0), limit = r->getResult(1),
        step = r->getResult(2);
@@ -159,10 +165,18 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
   if (!supplied && failed(intentdsl::verifyMapping(m, p, "block")))
     return failure();
   if (!d || !caps || !d.getAs<ArrayAttr>("rows") ||
-      d.getAs<ArrayAttr>("rows").empty() || !d.getAs<IntegerAttr>("depth"))
-    return fn.emitError("missing supply rows or depth");
+      d.getAs<ArrayAttr>("rows").empty() || !d.getAs<IntegerAttr>("depth") ||
+      !d.getAs<IntegerAttr>("batch"))
+    return fn.emitError("missing supply rows, depth or batch");
   auto verifyLayout = [&]() -> LogicalResult {
-    auto expected = plan(fn, *caps, d.getAs<IntegerAttr>("depth").getInt(), d.getAs<IntegerAttr>("participants")?d.getAs<IntegerAttr>("participants").getInt():0,d.getAs<BoolAttr>("persistent") && d.getAs<BoolAttr>("persistent").getValue());
+    auto expected = plan(
+        fn, *caps, d.getAs<IntegerAttr>("depth").getInt(),
+        d.getAs<IntegerAttr>("participants")
+            ? d.getAs<IntegerAttr>("participants").getInt()
+            : 0,
+        d.getAs<BoolAttr>("persistent") &&
+            d.getAs<BoolAttr>("persistent").getValue(),
+        d.getAs<IntegerAttr>("batch").getInt());
     if (!expected) {
       return fn.emitError() << llvm::toString(expected.takeError());
     }
@@ -244,7 +258,9 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
         groups->getOperands() != start.getResults())
       return fn.emitError("stream group loop must consume start, bound and "
                           "stride of the participant range");
-    auto &steps=groups->getRegion(0).front();
+    if (start.hasAttr("batch"))
+      return fn.emitError("stream group loop does not batch outer groups");
+    auto &steps = groups->getRegion(0).front();
     SmallVector<Value> stores;
     for(auto &op:steps){
       auto n=op.getName().getStringRef();
@@ -288,7 +304,10 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
                      : "columns"))
       return WalkResult::interrupt();
     if (!legalSchedule(o->getRegion(2).front(), depth,
-                       d.contains("independent_columns")?"owned_tile":resident ? "participant_stride" : "tile_extent",persistent))
+                       d.contains("independent_columns") ? "owned_tile"
+                       : resident                        ? "participant_stride"
+                                                         : "tile_extent",
+                       persistent, d.getAs<IntegerAttr>("batch").getInt()))
       return WalkResult::interrupt();
     for (auto *window : {&fetch.front(), &body.front()})
       if (window->getName().getStringRef() != "dsa.window" ||

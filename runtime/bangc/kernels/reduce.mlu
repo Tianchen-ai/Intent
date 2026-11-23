@@ -1,0 +1,82 @@
+__mlu_func__ float row_sum(float *scratch, const float *input, int count) {
+  int full = count / 32 * 32;
+  float value = 0.0f;
+  if (full) {
+    __bang_sumpool(scratch, input, 32, full / 32, 1, full / 32, 1, 1, 1);
+    __bang_reduce_sum(scratch, scratch, 32);
+    __sync_compute();
+    value = ((volatile float *)scratch)[0];
+  }
+  for (int k = full; k < count; ++k)
+    value += input[k];
+  return value;
+}
+
+__mlu_func__ void group_sum(float *out, float *scratch, const float *input,
+                            int members, int pitch, int live) {
+  if (members > 1 && live == pitch && (pitch % 32 == 0)) {
+    __bang_sumpool(scratch, input, 32, members, pitch / 32, 1, pitch / 32, 1,
+                   1);
+    for (int j = 0; j < members; ++j)
+      __bang_reduce_sum(scratch + j * 32, scratch + j * 32, 32);
+    __sync_compute();
+    for (int j = 0; j < members; ++j)
+      out[j] = ((volatile float *)(scratch + j * 32))[0];
+    return;
+  }
+  for (int j = 0; j < members; ++j)
+    out[j] = row_sum(scratch, input + j * pitch, live);
+}
+
+__mlu_func__ float row_max_num(float *scratch, const float *input, int count) {
+  if (count >= 4 && !isnan(input[0])) {
+    __bang_argmax(scratch, input, count);
+    __sync_compute();
+    union {
+      float f;
+      unsigned u;
+    } high;
+    high.f = ((volatile float *)scratch)[0];
+    unsigned mag = high.u & 0x7fffffff;
+    if (mag >= 0x00800000 && mag <= 0x7f800000)
+      return high.f;
+  }
+  float value = -INFINITY;
+  for (int k = 0; k < count; ++k)
+    value = fmaxf(value, input[k]);
+  return value;
+}
+
+__mlu_func__ void group_max_num(float *out, float *scratch, const float *input,
+                                int members, int pitch, int live) {
+  if (members > 1 && live == pitch && (pitch % 32 == 0)) {
+    bool checkFirst = true;
+    for (int j = 0; j < members; ++j)
+      if (isnan(input[j * pitch]))
+        checkFirst = false;
+    if (checkFirst) {
+      __bang_maxpool(scratch, input, 32, members, pitch / 32, 1, pitch / 32, 1,
+                     1);
+      for (int j = 0; j < members; ++j)
+        __bang_argmax(scratch + j * 32, scratch + j * 32, 32);
+      __sync_compute();
+      bool allNormal = true;
+      for (int j = 0; j < members; ++j) {
+        union {
+          float f;
+          unsigned u;
+        } high;
+        high.f = ((volatile float *)(scratch + j * 32))[0];
+        unsigned mag = high.u & 0x7fffffff;
+        if (mag >= 0x00800000 && mag <= 0x7f800000)
+          out[j] = high.f;
+        else
+          allNormal = false;
+      }
+      if (allNormal)
+        return;
+    }
+  }
+  for (int j = 0; j < members; ++j)
+    out[j] = row_max_num(scratch, input + j * pitch, live);
+}

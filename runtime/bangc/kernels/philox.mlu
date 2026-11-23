@@ -1,0 +1,87 @@
+__mlu_func__ unsigned high_product(unsigned x, unsigned y) {
+  unsigned a = x >> 16, b = x & 65535, c = y >> 16, d = y & 65535;
+  unsigned cross = a * d + ((b * d) >> 16);
+  return a * c + (cross >> 16) + (((cross & 65535) + b * c) >> 16);
+}
+
+__mlu_func__ float uniform_at(unsigned long long seed,
+                              unsigned long long index) {
+  const unsigned long long counter = index >> 2;
+  unsigned a = counter, b = counter >> 32, c = 0, d = 0;
+  unsigned k0 = seed, k1 = seed >> 32;
+  for (int round = 0; round < 10; ++round) {
+    unsigned left = a * 0xd2511f53U, right = c * 0xcd9e8d57U;
+    unsigned ah = high_product(a, 0xd2511f53U),
+             ch = high_product(c, 0xcd9e8d57U);
+    a = ch ^ b ^ k0;
+    c = ah ^ d ^ k1;
+    b = right;
+    d = left;
+    k0 += 0x9e3779b9U;
+    k1 += 0xbb67ae85U;
+  }
+  unsigned word = (index & 2) ? ((index & 1) ? d : c) : ((index & 1) ? b : a);
+  return (float)(word >> 8) * 0x1p-24f;
+}
+
+__mlu_func__ void philox4x32_linear(float *out, unsigned *scratch,
+                                    unsigned long long seed,
+                                    unsigned long long base, int live) {
+  if ((base & 3ULL) != 0ULL || live < 256) {
+    for (int k = 0; k < live; ++k)
+      out[k] = uniform_at(seed, base + (unsigned long long)k);
+    return;
+  }
+  volatile unsigned mul0 = 0xd2511f53U, mul1 = 0xcd9e8d57U;
+  unsigned m0 = mul0, m1 = mul1;
+  unsigned *va = scratch;
+  unsigned *vb = scratch + 256;
+  unsigned *vc = scratch + 512;
+  unsigned *vd = scratch + 768;
+  unsigned *vleft = scratch + 1024;
+  unsigned *vright = scratch + 1280;
+  unsigned *vah = scratch + 1536;
+  unsigned *vch = scratch + 1792;
+  int done = 0;
+  while (done + 256 <= live) {
+    int remQ = (live - done) / 4;
+    int qCnt = remQ > 256 ? 256 : (remQ / 64) * 64;
+    unsigned long long q0 = (base + (unsigned long long)done) >> 2;
+    if ((q0 >> 32) != ((q0 + (unsigned long long)(qCnt - 1)) >> 32))
+      break;
+    unsigned lo0 = (unsigned)q0, hi0 = (unsigned)(q0 >> 32);
+    for (int q = 0; q < qCnt; ++q)
+      va[q] = lo0 + (unsigned)q;
+    __bang_write_value(vb, qCnt, hi0);
+    __bang_write_value(vc, qCnt, 0U);
+    __bang_write_value(vd, qCnt, 0U);
+    unsigned k0 = (unsigned)seed, k1 = (unsigned)(seed >> 32);
+    for (int round = 0; round < 10; ++round) {
+      __bang_mul_scalar(vleft, va, m0, qCnt);
+      __bang_mul_scalar(vright, vc, m1, qCnt);
+      __bang_mulh_scalar(vah, va, m0, qCnt);
+      __bang_mulh_scalar(vch, vc, m1, qCnt);
+      __bang_bxor(va, vch, vb, qCnt);
+      __bang_bxor_scalar(va, va, k0, qCnt);
+      __bang_bxor(vc, vah, vd, qCnt);
+      __bang_bxor_scalar(vc, vc, k1, qCnt);
+      unsigned *tb = vb, *td = vd;
+      vb = vright;
+      vd = vleft;
+      vright = tb;
+      vleft = td;
+      k0 += 0x9e3779b9U;
+      k1 += 0xbb67ae85U;
+    }
+    __sync_compute();
+    for (int q = 0; q < qCnt; ++q) {
+      out[done + 4 * q + 0] = (float)(va[q] >> 8) * 0x1p-24f;
+      out[done + 4 * q + 1] = (float)(vb[q] >> 8) * 0x1p-24f;
+      out[done + 4 * q + 2] = (float)(vc[q] >> 8) * 0x1p-24f;
+      out[done + 4 * q + 3] = (float)(vd[q] >> 8) * 0x1p-24f;
+    }
+    done += qCnt * 4;
+  }
+  for (int k = done; k < live; ++k)
+    out[k] = uniform_at(seed, base + (unsigned long long)k);
+}

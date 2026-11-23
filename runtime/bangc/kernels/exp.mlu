@@ -1,0 +1,18 @@
+__mlu_func__ void row_exp(float *out, const float *in, int live, int lanes) {
+  bool repair = true;
+  if (live >= 4) {
+    __bang_abs(out, in, lanes);
+    __bang_argmax(out, out, live);
+    __sync_compute();
+    repair = !(((volatile float *)out)[0] <= 80.0f);
+  }
+  __bang_active_exphp(out, in, lanes);
+  if (repair) {
+    __sync_compute();
+    for (int k = 0; k < live; ++k) {
+      float x = in[k];
+      if (x < -80.0f || x > 80.0f)
+        out[k] = x == -INFINITY ? 0.0f : (x == INFINITY ? INFINITY : expf(x));
+    }
+  }
+}

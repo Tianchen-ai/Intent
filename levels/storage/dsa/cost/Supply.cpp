@@ -23,6 +23,9 @@ void supplyCost(Unit &u) {
           auto [keys,segmentWork]=intentdsl::block::realizedTraffic(op,*facts);
           auto depth = d.getAs<IntegerAttr>("depth").getInt();
           double participants = d.getAs<IntegerAttr>("participants").getInt();
+          double batch = d.getAs<IntegerAttr>("batch")
+                             ? d.getAs<IntegerAttr>("batch").getInt()
+                             : 1.;
           auto configs = op->getAttrOfType<ArrayAttr>("block.configs");
           unsigned ops = 0;
           unsigned summaries = 0, scans = 0, atomics=0;
@@ -43,26 +46,27 @@ void supplyCost(Unit &u) {
             });
             double group =
                 cast<DictionaryAttr>(*it).getAs<IntegerAttr>("rows").getInt();
-            double steps = std::ceil(std::ceil(m / group) / participants);
+            double effGroup = group * batch;
+            double steps = std::ceil(std::ceil(m / effGroup) / participants);
             if(d.contains("independent_columns")){
               auto width=cast<DictionaryAttr>(*it).getAs<IntegerAttr>("width").getInt();
-              steps=std::ceil(std::ceil(m/group)*std::ceil(n/width)/participants);
+              steps=std::ceil(std::ceil(m/effGroup)*std::ceil(n/width)/participants);
             }
             RowPrediction pred;
             pred.terms = dma->terms;
             pred.terms["steps"] = {steps, "count"};
             if(segmentWork)pred.terms["packed_member_reads"]={segmentWork,"B"};
             if(keys)pred.terms["key_input_bytes"]={keys,"B"};
-            double merges = group * std::max(0., n - 1.) * summaries;
+            double merges = effGroup * std::max(0., n - 1.) * summaries;
             pred.terms["summary_merges_per_group"] = {merges, "count"};
-            pred.terms["serial_prefix_adds"]={group*std::max(0.,n-1.)*scans,"count"};
-            if(atomics)pred.terms["atomic_updates_per_group"]={group*n*atomics,"count"};
+            pred.terms["serial_prefix_adds"]={effGroup*std::max(0.,n-1.)*scans,"count"};
+            if(atomics)pred.terms["atomic_updates_per_group"]={effGroup*n*atomics,"count"};
             pred.terms["working_set"] = {
                 double(row.getAs<IntegerAttr>("bytes").getInt()), "B"};
             if (dma->timeNs && launch && sync && vector && startup) {
-              double fetch = group * e.terms.at("fetch").value,
-                     compute = (group * n * std::max(0.,ops-e.terms.at("native_operations").value) + 8 * merges + pred.terms["serial_prefix_adds"].value) / *vector + group * e.terms.at("native_compute").value,
-                     write = group * e.terms.at("writeback").value;
+              double fetch = effGroup * e.terms.at("fetch").value,
+                     compute = (effGroup * n * std::max(0.,ops-e.terms.at("native_operations").value) + 8 * merges + pred.terms["serial_prefix_adds"].value) / *vector + effGroup * e.terms.at("native_compute").value,
+                     write = effGroup * e.terms.at("writeback").value;
               double overlap = depth == 2 ? std::max(0., steps - 1) *
                                                 std::min(fetch, compute)
                                           : 0.;
@@ -74,7 +78,7 @@ void supplyCost(Unit &u) {
               pred.terms["wait"] = {depth == 2 ? steps * *sync : 0., "ns"};
               pred.timeNs = *launch + (steps ? *startup : 0.) + steps * (fetch + compute + write) -
                             overlap + (depth == 2 ? steps * *sync : 0.);
-              if(atomics)pred.timeNs=*pred.timeNs+steps*group*n*atomics*(*sync);
+              if(atomics)pred.timeNs=*pred.timeNs+steps*effGroup*n*atomics*(*sync);
               if(segmentWork || keys){
                 auto rate=intentdsl::quantity(ctx,"read_1","B/ns");
                 if(rate)*pred.timeNs+=(segmentWork+keys)/ *rate;

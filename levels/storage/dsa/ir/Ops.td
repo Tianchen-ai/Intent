@@ -51,7 +51,7 @@ def Send : Inst<"issued", (ins Variadic<AnyType>:$pending), (outs), [Terminator]
 def Drain : Inst<"drain", (ins Variadic<I1>:$completions), (outs I1:$done)>;
 def Complete : Inst<"complete", (ins I1:$done, Variadic<AnyType>:$values), (outs), [Terminator]>;
 def GroupLoop : Inst<"task_groups",(ins Index:$first,Index:$end,Index:$step),(outs),[RecursiveMemoryEffects]> {let regions=(region AnyRegion:$body);}
-def Cursor : Inst<"range",(ins StrAttr:$source),(outs Index:$start,Index:$limit,Index:$step)>;
+def Cursor : Inst<"range",(ins StrAttr:$source,OptionalAttr<I64Attr>:$batch),(outs Index:$start,Index:$limit,Index:$step)>;
 def SlotZero : Inst<"slot_zero",(ins),(outs Index:$slot)>;
 def Next : Inst<"next",(ins Index:$current,Index:$step),(outs Index:$next)>;
 def Flip : Inst<"other_slot",(ins Index:$slot),(outs Index:$alternate)>;

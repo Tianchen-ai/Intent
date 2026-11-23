@@ -14,14 +14,18 @@ Operation *inst(OpBuilder &b, Location l, StringRef name, ValueRange args = {},
   s.addAttributes(attrs);
   return b.create(s);
 }
-void schedule(Block *entry, bool stream, int64_t depth,bool persistent,bool independent, OpBuilder &b,
-              Location loc) {
+void schedule(Block *entry, bool stream, int64_t depth, bool persistent,
+              bool independent, int64_t batch, OpBuilder &b, Location loc) {
   b.setInsertionPointToEnd(entry);
   auto idx = b.getIndexType();
-  auto range = inst(
-      b, loc, "dsa.range", {}, {idx, idx, idx},
-      b.getNamedAttr("source", b.getStringAttr(independent ? "owned_tile" : stream ? "tile_extent"
-                                                      : "participant_stride")));
+  SmallVector<NamedAttribute> rangeAttrs{b.getNamedAttr(
+      "source",
+      b.getStringAttr(independent ? "owned_tile"
+                      : stream    ? "tile_extent"
+                                  : "participant_stride"))};
+  if (!stream && !independent && batch > 1)
+    rangeAttrs.push_back(b.getNamedAttr("batch", b.getI64IntegerAttr(batch)));
+  auto range = inst(b, loc, "dsa.range", {}, {idx, idx, idx}, rangeAttrs);
   auto init = inst(b, loc, "dsa.slot_zero", {}, idx)->getResult(0);
   auto lo = range->getResult(0), end = range->getResult(1),
        step = range->getResult(2);
@@ -67,9 +71,13 @@ LogicalResult phase(Operation *anchor, Block &source, bool stream,
   auto *fetch = b.createBlock(&p->getRegion(0));
   auto *calc = b.createBlock(&p->getRegion(1));
   auto fn=anchor->getParentOfType<func::FuncOp>();
-  bool persistent=fn->getAttrOfType<DictionaryAttr>("dsa.pending").getAs<BoolAttr>("persistent").getValue();
-  bool independent=fn->getAttrOfType<DictionaryAttr>("dsa.pending").contains("independent_columns");
-  schedule(b.createBlock(&p->getRegion(2)), stream, depth,persistent,independent, b, loc);
+  auto pending = fn->getAttrOfType<DictionaryAttr>("dsa.pending");
+  bool persistent = pending.getAs<BoolAttr>("persistent").getValue();
+  bool independent = pending.contains("independent_columns");
+  int64_t batch =
+      pending.getAs<IntegerAttr>("batch") ? pending.getAs<IntegerAttr>("batch").getInt() : 1;
+  schedule(b.createBlock(&p->getRegion(2)), stream, depth, persistent,
+           independent, batch, b, loc);
   Operation *active = nullptr;
   for (auto &op : source)
     if (op.getName().getStringRef() == "block.active")
