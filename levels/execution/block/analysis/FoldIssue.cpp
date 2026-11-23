@@ -1,4 +1,5 @@
 #include "intentdsl/levels/execution/block/ir/FoldIssue.h"
+#include "mlir/IR/IRMapping.h"
 using namespace mlir;
 namespace intentdsl::block {
 namespace {
@@ -60,6 +61,37 @@ bool sharedBounds(scf::ForOp loop, unsigned axis, int64_t rows) {
   auto member = loop->getBlock()->getArgument(axis);
   return sharedCoordinate(loop.getLowerBound(), member, loop, rows) &&
          sharedCoordinate(loop.getUpperBound(), member, loop, rows);
+}
+// Split the common interval from the ragged fringe in increasing token
+// order. Only the fringe can mix excluded and included non-finite operands.
+void partitionOwnerFolds(Operation *space,unsigned axis,int64_t rows){
+  auto &body=space->getRegion(0).front();
+  auto owner=body.getArgument(axis);
+  for(auto loop:llvm::make_early_inc_range(body.getOps<scf::ForOp>())){
+    if(!loop->hasAttr("kir.reassociate"))continue;
+    Value lo=loop.getLowerBound(),hi=loop.getUpperBound(),cap;
+    bool suffix=lo==owner && sharedCoordinate(hi,owner,loop,rows);
+    if(suffix)cap=hi;
+    else{
+      auto clamped=hi.getDefiningOp<scf::IfOp>();
+      if(!clamped || !matchPattern(lo,m_Zero()))continue;
+      auto cond=clamped.getCondition().getDefiningOp<arith::CmpIOp>();
+      auto next=clamped.thenYield().getOperand(0).getDefiningOp<arith::AddIOp>();
+      cap=clamped.elseYield().getOperand(0);
+      if(!cond || cond.getPredicate()!=arith::CmpIPredicate::slt || cond.getLhs()!=owner ||
+         cond.getRhs()!=cap || !next || next.getLhs()!=owner || !matchPattern(next.getRhs(),m_One()) ||
+         !sharedCoordinate(cap,owner,loop,rows))continue;
+    }
+    auto loc=loop.getLoc();OpBuilder b(loop);
+    Value width=b.create<arith::ConstantIndexOp>(loc,rows);
+    Value base=b.create<arith::MulIOp>(loc,b.create<arith::FloorDivSIOp>(loc,owner,width),width);
+    if(suffix)base=b.create<arith::AddIOp>(loc,base,width);
+    Value cut=b.create<arith::MinSIOp>(loc,cap,base);
+    IRMapping map;auto first=cast<scf::ForOp>(b.clone(*loop,map));
+    first.setUpperBound(cut);
+    loop.setLowerBound(cut);
+    loop.getInitArgsMutable().assign(first.getResults());
+  }
 }
 std::optional<TileAccumulate> tileAccumulate(Value v, scf::ForOp loop) {
   auto m = v.getDefiningOp<arith::MulFOp>();

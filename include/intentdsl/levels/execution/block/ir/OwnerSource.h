@@ -293,6 +293,8 @@ private:
                n == "math.log")
         expr = language().str() + "." + op.getName().stripDialect().str() +
                "(" + arg(0) + ")";
+      else if(n=="arith.minsi")
+        expr=lib+".minimum("+arg(0)+","+arg(1)+")";
       else {
         auto token = llvm::StringSwitch<llvm::StringRef>(n)
                          .Cases("arith.addf", "arith.addi", "+")

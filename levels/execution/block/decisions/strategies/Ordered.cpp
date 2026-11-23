@@ -375,6 +375,8 @@ void registerOrdered(Unit &u) {
     if (d.getAs<StringAttr>("memory") == "token" ||
         d.getAs<StringAttr>("memory") == "matrix-fold") {
       o->setAttr("block.token_span", d.get("span"));
+      if(o->hasAttr("block.pair_axis"))
+        block::partitionOwnerFolds(o,d.getAs<IntegerAttr>("axis").getInt(),d.getAs<IntegerAttr>("width").getInt());
       for (auto loop : o->getRegion(0).front().getOps<scf::ForOp>())
         if (loop->hasAttr("kir.reassociate")) {
           loop->setAttr("block.contribution_width", d.get("span"));

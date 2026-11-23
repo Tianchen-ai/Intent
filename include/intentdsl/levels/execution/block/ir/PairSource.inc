@@ -44,9 +44,14 @@ llvm::Error emitPairFold(mlir::scf::ForOp loop, unsigned depth, int64_t span) {
   line(depth,
        "while " + base + "<" + lib + ".max(" + broadcast(hi) + ",axis=0):");
   line(depth + 1, iv + "=" + base + "+" + memberRange(span));
+  if(loop->hasAttr("block.uniform_tokens")){
+    line(depth+1,any+"=("+iv+">="+uniform(lo)+")&("+iv+"<"+uniform(hi)+")");
+    line(depth+1,live+"="+lib+".broadcast_to("+ex(any,0)+",(ROWS,"+sz+"))");
+  }else{
   line(depth + 1, live + "=(" + ex(iv, 0) + ">=" + ex(broadcast(lo), 1) +
                       ")&(" + ex(iv, 0) + "<" + ex(broadcast(hi), 1) + ")");
   line(depth + 1, any + "=" + lib + ".max(" + live + ",axis=0)!=0");
+  }
   enum Role { owner, column, pair, scalar };
   struct Tile {
     std::string name;
