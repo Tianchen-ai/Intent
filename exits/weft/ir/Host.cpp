@@ -1,4 +1,5 @@
 #include "../legalize/Matrix.h"
+#include "../legalize/MemberStore.h"
 #include "intentdsl/levels/algorithm/kir/ir/Performance.h"
 #include "intentdsl/levels/algorithm/kir/ir/RowSemantics.h"
 #include "intentdsl/levels/execution/cpu/ir/IndexedEffects.h"
@@ -59,6 +60,10 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
     auto &task = f.front().front();
     OpBuilder b(&task);
     if (task.getName().getStringRef() == "cpu.owner_task") {
+      if (failed(bindMemberStores(task, grouped, true))) {
+        signalPassFailure();
+        return;
+      }
       task.setAttr("weft_host.schedule",
                    b.getStringAttr("ordered-owner-range"));
       if (callable)
@@ -176,6 +181,9 @@ LogicalResult verifyHost(ModuleOp m, const compilerinfra::TargetProfile &p,
   auto &task = (*m.getOps<func::FuncOp>().begin()).front().front();
   if (task.getName().getStringRef() == "cpu.owner_task") {
     auto fn = *m.getOps<func::FuncOp>().begin();
+    if (failed(bindMemberStores(task, p.services.get<RecordFields>()->grouped,
+                                false)))
+      return failure();
     if (failed(intentdsl::cpu::verifyOwnerTask(fn, p, "weft-task-ssa")))
       return failure();
     return success(task.getAttrOfType<StringAttr>("weft_host.schedule") ==
