@@ -3,8 +3,8 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
-namespace CI_UNIT_NAMESPACE {
-// Range proof for the SDK's signed i32 counted loop. Tensor addressing still
+namespace intentdsl::block {
+// Range proof for the signed i32 panel trip count. Tensor addressing still
 // uses index arithmetic. A data-dependent interval keeps the wide loop.
 inline std::optional<int64_t> panelBound(mlir::Value v, mlir::Operation &space,
                                          const intentdsl::CallFacts &facts) {
@@ -57,4 +57,4 @@ inline bool countedPanel(mlir::Operation *o,
          panelBound(l.getLowerBound(), *o->getParentOp(), facts) &&
          panelBound(l.getUpperBound(), *o->getParentOp(), facts);
 }
-} // namespace CI_UNIT_NAMESPACE
+} // namespace intentdsl::block

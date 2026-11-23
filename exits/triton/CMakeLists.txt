@@ -3,8 +3,8 @@ compilerinfra_target(algorithm levels/algorithm/kir)
 compilerinfra_unit(SOURCES
     ir/Dialect.cpp ir/Implementations.cpp
     capabilities/Rows.cpp cost/Matrix.cpp transforms/NarrowAddress.cpp
-    legalize/Legalize.cpp legalize/Tiles.cpp legalize/OwnerTiles.cpp
-    legalize/FoldTiles.cpp legalize/EncodedPanels.cpp legalize/Rows.cpp legalize/VerifyTiles.cpp
+    legalize/Legalize.cpp
+    legalize/Rows.cpp legalize/VerifyTiles.cpp
     emit/Exit.cpp emit/Rows.cpp emit/Columns.cpp emit/Tiles.cpp
   LINK_LIBRARIES ${parent} ${algorithm}
   TABLEGEN

@@ -1,5 +1,7 @@
+#include "intentdsl/levels/execution/block/ir/RowProgram.h"
+#include "intentdsl/levels/execution/block/ir/MatrixProgram.h"
+#include "intentdsl/levels/execution/block/ir/OwnerProgram.h"
 #include "../capabilities/Index.h"
-#include "PanelBounds.h"
 #include "intentdsl/levels/execution/block/ir/ScaleDispatch.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/ProjectedLayout.h"
@@ -12,12 +14,17 @@
 
 #include "Dialect.h.inc"
 namespace CI_UNIT_NAMESPACE {
+mlir::Value scaledPanels(intentdsl::block::Tiles &,intentdsl::block::MatrixAccess &);
 using namespace mlir;
 using namespace compilerinfra;
 void registerIR(DialectRegistry &);
 void partitionOwners(func::FuncOp,const intentdsl::CallFacts &);
 llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &);
-llvm::Error emit(ModuleOp, llvm::raw_pwrite_stream &);
+llvm::Error describeArtifact(ModuleOp, llvm::raw_pwrite_stream &);
+TerminalPrinter cutilePrinter();
+void registerContracts(Unit &);
+LogicalResult verifyArrayGeometry(func::FuncOp,const TargetProfile &);
+intentdsl::block::OwnerAccess nativeOwnerViews();
 namespace {
 bool ownerRectangle(Operation *op, func::FuncOp fn) {
   auto kind = op->getName().stripDialect();
@@ -77,16 +84,13 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
   Lower(const intentdsl::cutile::ArrayIndices &indices,const intentdsl::CallFacts &f) : tma(indices.permitTma),scaledMma(indices.scaledMma),facts(f) {}
   void runOnOperation() final {
     auto fn=*getOperation().getOps<func::FuncOp>().begin();
+    if(tma)fn->setAttr("ct_src.tma",UnitAttr::get(fn.getContext()));
     if(failed(intentdsl::specializeProjectedLayout(fn,facts,"ct_src",true))){signalPassFailure();return;}
     getOperation().walk([&](Operation *op) {
       if (op->getName().getStringRef() == "block.owner_space" &&
           op->hasAttr("block.pair_axis") &&
           op->getAttrOfType<IntegerAttr>("block.owner_tile").getInt() < 16)
         op->setAttr("ct_src.matrix_rows", Builder(&getContext()).getI64IntegerAttr(16));
-    });
-    fn.walk([&](scf::ForOp loop) {
-      if (countedPanel(loop, facts))
-        loop->setAttr("ct_src.counted_panels", UnitAttr::get(fn.getContext()));
     });
     getContext().getOrLoadDialect<intentdsl::cutile::TileSource>();
     getOperation().walk<WalkOrder::PostOrder>([&](Operation *op) {
@@ -172,13 +176,54 @@ struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
   void runOnOperation() final {
     auto fn = *getOperation().getOps<func::FuncOp>().begin();
     Builder b(&getContext());
+    getContext().loadDialect<arith::ArithDialect,scf::SCFDialect>();
+    if(intentdsl::kir::orderedOwners(fn)) intentdsl::block::expandOwnerProgram(fn,"exits/cutile",nativeOwnerViews());
+    else if(intentdsl::kir::matrixDomain(fn)){
+      intentdsl::block::MatrixAccess p(fn);
+      if(auto flat=p.dot.getAttrOfType<DenseI64ArrayAttr>("ct_src.flat_groups")){
+        llvm::json::Object views;
+        for(auto slot:flat.asArrayRef())
+          views[std::to_string(slot)]=slot==p.slot(p.dot.getOperand(0))?llvm::json::Array{p.shape[0],p.shape[2]}:llvm::json::Array{p.shape[2],p.shape[1]};
+        fn->setAttr("ct_src.native_views",b.getStringAttr(llvm::formatv("{0}",llvm::json::Value(std::move(views))).str()));
+      }
+      intentdsl::block::expandMatrixProgram(fn,"exits/cutile",scaledPanels);
+    }
+    else fn.walk<WalkOrder::PostOrder>([](Operation *op){
+      if(op->getName().getDialectNamespace()!="ct_src") return;
+      auto n=op->getName().stripDialect();
+      if(n=="key_counts")op->setAttr("native_panel",Builder(op->getContext()).getI64IntegerAttr(64));
+      if(n=="indexed_tile_read" || n=="fill_ranges_at" || n=="segment_fold" || n=="segment_size" || n=="scatter_fragment" ||
+         n=="sum_columns" || n=="key_counts" || n=="publish_offsets")
+        intentdsl::block::expandRowOperation(*op,"exits/cutile",false);
+    });
     fn->setAttr("ct_src.entry", b.getStringAttr("kernel"));
     fn->setAttr("ct_src.index_bits", b.getI32IntegerAttr(bits));
+    fn.walk([&](Operation *op){
+      if(op->getName().getDialectNamespace()!="ct_src")return;
+      auto n=op->getName().stripDialect();
+      auto id=llvm::StringSwitch<StringRef>(n).Case("summary_reduce","moments-reduction").Case("uniform","random")
+        .Case("scan_sum","inclusive-scan").Case("reduce","native-row-reduce").Default("");
+      if(!id.empty())op->setAttr("ci.implementation",b.getStringAttr(("exits/cutile::"+id).str()));
+      if(n=="summary_reduce" || n=="uniform")fn->setAttr(("ct_src.has_"+n).str(),b.getUnitAttr());
+    });
+    SmallVector<char> data;llvm::raw_svector_ostream os(data);
+    if(auto err=describeArtifact(getOperation(),os)){fn.emitError()<<llvm::toString(std::move(err));signalPassFailure();return;}
+    getOperation()->setAttr("ct_src.package",b.getStringAttr(os.str()));
   }
 };
 LogicalResult verify(ModuleOp module, const TargetProfile &profile,
                      bool callable) {
   auto matrix=*module.getOps<func::FuncOp>().begin();
+  auto arrayCap=profile.services.get<intentdsl::cutile::ArrayIndices>();
+  if(!arrayCap || matrix->hasAttr("ct_src.tma")!=arrayCap->permitTma)return matrix.emitError("invalid array transfer capability");
+  if(callable){
+    auto attached=module->getAttrOfType<StringAttr>("ct_src.package");
+    if(!attached)return matrix.emitError("missing cuTile callable package");
+  }
+  if(matrix.front().front().getName().getStringRef()=="ct_src.tile_program"){
+    if(!callable || failed(verifyArrayGeometry(matrix,profile)))return failure();
+    return intentdsl::block::verifyTileProgram(matrix,profile,[](Operation &){return false;});
+  }
   if (intentdsl::kir::orderedOwners(matrix)) {
     {
       auto &owner = matrix.front().front();
@@ -193,11 +238,6 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
                                                 "realized")))
       return failure();
     auto result = matrix.walk([&](Operation *op) {
-      if (op->hasAttr("ct_src.counted_panels") !=
-          countedPanel(op, *profile.services.get<intentdsl::CallFacts>())) {
-        op->emitError("counted loop requires bounded native tile indices");
-        return WalkResult::interrupt();
-      }
       auto cap = profile.services.get<intentdsl::cutile::ArrayIndices>();
       if (op->hasAttr("ct_src.panel_tma") !=
           (op->hasAttr("block.rectangular_tokens") && cap->permitTma &&
@@ -315,7 +355,9 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
         (o->getInteger("occupancy") != 1 && o->getInteger("occupancy") != 2))
       return fn.emitError("invalid native hints for row");
   }
+  if(callable && failed(intentdsl::block::verifyRowProgram(fn,"ct_src","ct_src.has_summary_reduce")))return failure();
   auto res = module.walk([&](Operation *op) {
+    if(callable && isa<arith::ConstantOp,arith::IndexCastOp,scf::ForOp,scf::YieldOp>(op))return WalkResult::advance();
     if (op == module || op->getName().getDialectNamespace() == "func")
       return WalkResult::advance();
     auto n = op->getName().stripDialect();
@@ -399,6 +441,7 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
 void matrixIssues(Unit &);
 void bind(Unit &unit) {
   matrixIssues(unit);
+  registerContracts(unit);
   unit.dialects = registerIR;
   for (bool callable : {false, true})
     unit.boundaries.push_back(
@@ -422,7 +465,7 @@ void bind(Unit &unit) {
             return verify(m, p, callable);
           }},
          COMPILERINFRA_SOURCE});
-  unit.exit =
-      Located<ExitImplementation>{{emit, capabilities}, COMPILERINFRA_SOURCE};
+  ExitImplementation exit;exit.capabilities=capabilities;exit.terminal=cutilePrinter();
+  unit.exit=Located<ExitImplementation>{std::move(exit),COMPILERINFRA_SOURCE};
 }
 } // namespace CI_UNIT_NAMESPACE

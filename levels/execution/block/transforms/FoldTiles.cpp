@@ -1,6 +1,6 @@
 #include "OwnerTiles.h"
 using namespace mlir;
-namespace CI_UNIT_NAMESPACE {
+namespace intentdsl::block {
 namespace {
 enum class Axis { Scalar, Owner, Token, Both };
 struct Fragment {
@@ -30,9 +30,12 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
                      x.axis == Axis::Token ? 1 : 0);
   };
   auto uniform = [&](Value v) { return asScalar(v, "min"); };
+  bool full = loop->hasAttr("block.full_panels");
   Value width = integer(span), lo = uniform(lower), hi = asScalar(upper, "max");
-  Value start = b.create<arith::MulIOp>(
-      loc, b.create<arith::FloorDivSIOp>(loc, lo, width), width);
+  Value start =
+      full ? lo
+           : Value(b.create<arith::MulIOp>(
+                 loc, b.create<arith::FloorDivSIOp>(loc, lo, width), width));
   SmallVector<Value> init;
   SmallVector<Type> types;
   for (auto v : loop.getInitArgs()) {
@@ -40,14 +43,32 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
     init.push_back(broadcast(at(v, parent), t));
     types.push_back(t);
   }
-  auto l = b.create<scf::ForOp>(loc, start, hi, width, init);
-  l->setAttr("triton_src.runtime_range", b.getUnitAttr());
+  Value begin = start, end = hi, stride = width;
+  bool counted = loop->hasAttr("block.counted_panels");
+  if (counted) {
+    begin = b.create<arith::TruncIOp>(
+        loc, b.getI32Type(), b.create<arith::DivUIOp>(loc, start, width));
+    auto last = b.create<arith::AddIOp>(loc, hi, integer(span - 1));
+    end = b.create<arith::TruncIOp>(loc, b.getI32Type(),
+                                    b.create<arith::DivUIOp>(loc, last, width));
+    stride = b.create<arith::ConstantIntOp>(loc, 1, 32);
+  }
+  auto l = b.create<scf::ForOp>(loc, begin, end, stride, init);
+  l->setAttr(symbol("runtime_range"), b.getUnitAttr());
   b.setInsertionPointToStart(l.getBody());
-  Value token = stepped(l.getInductionVar(), span);
+  Value base = l.getInductionVar();
+  if (counted)
+    base = b.create<arith::MulIOp>(
+        loc, b.create<arith::ExtSIOp>(loc, b.getI64Type(), base), width);
+  Value token = stepped(base, span);
   auto tokens = Fragment{token, Axis::Token};
   auto tokenType = token.getType();
   Value live, any;
-  if (loop->hasAttr("block.uniform_tokens") || !paired) {
+  if (full) {
+    auto one = b.create<arith::ConstantOp>(loc, b.getBoolAttr(true));
+    any = like(one, shaped({span}, b.getI1Type()));
+    live = like(one, tileType(b.getI1Type()));
+  } else if (loop->hasAttr("block.uniform_tokens") || !paired) {
     any = b.create<arith::AndIOp>(
         loc,
         b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge, token,
@@ -124,6 +145,22 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
         coords.push_back(broadcast(ix, tokenType));
         axes.push_back(0);
       }
+      if (code == "slice_read" && access.panel) {
+        SmallVector<Value> outer;
+        for (auto v : old.getOperands().drop_front())
+          outer.push_back(widen(coordinate(v)));
+        auto n = shape(view)[old.getAttrOfType<IntegerAttr>("axis").getInt()];
+        if (Value tile = access.panel(*this, old, outer, base, span, n)) {
+          auto zero = castElement(scalar(0), elem(tile.getType()));
+          auto maskType =
+              cast<RankedTensorType>(tile.getType()).clone(b.getI1Type());
+          local[out] = {full ? tile
+                             : select(broadcast(any, maskType, 0), tile,
+                                      broadcast(zero, tile.getType())),
+                        Axis::Token};
+          continue;
+        }
+      }
       Value accessMask = any;
       if (code == "slice_read") {
         auto ax = old.getAttrOfType<IntegerAttr>("axis").getInt(),
@@ -141,8 +178,13 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
               b.create<arith::AndIOp>(loc, accessMask, broadcast(within, m, 1));
         }
       }
-      result = {read(view, address(view, coords, axes), accessMask),
-                Axis::Token};
+      bool whole =
+          full && (code != "slice_read" ||
+                   llvm::isPowerOf2_64(shape(
+                       view)[old.getAttrOfType<IntegerAttr>("axis").getInt()]));
+      result = {
+          read(view, address(view, coords, axes), whole ? Value() : accessMask),
+          Axis::Token};
     } else if (old.hasAttr("block.pair_dot")) {
       auto operands = *intentdsl::block::tileDot(&old, loop);
       result = {
@@ -212,7 +254,7 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
       auto w = plane(value(operands.weights));
       auto v = value(operands.values).value;
       auto zero = castElement(scalar(0), elem(w.getType()));
-      auto guarded = select(live, w, broadcast(zero, w.getType()));
+      auto guarded = full ? w : select(live, w, broadcast(zero, w.getType()));
       next.push_back(
           dot(castElement(guarded, elem(v.getType())), v, false, acc));
     } else {
@@ -251,4 +293,4 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
   b.setInsertionPointAfter(branch);
   return SmallVector<Value>(branch.getResults());
 }
-} // namespace CI_UNIT_NAMESPACE
+} // namespace intentdsl::block

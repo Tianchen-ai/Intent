@@ -1,6 +1,6 @@
 #include "OwnerTiles.h"
 using namespace mlir;
-namespace CI_UNIT_NAMESPACE {
+namespace intentdsl::block {
 namespace {
 Type retype(Type t, Type elem) {
   if (auto shaped = dyn_cast<RankedTensorType>(t))
@@ -8,10 +8,11 @@ Type retype(Type t, Type elem) {
   return elem;
 }
 } // namespace
-OwnerTiles::OwnerTiles(func::FuncOp f, Operation &s)
-    : Tiles(f, "owners"), space(s) {
+OwnerTiles::OwnerTiles(func::FuncOp f, Operation &s, StringRef unit,
+                       OwnerAccess access)
+    : Tiles(f, "owners", unit), space(s), access(access) {
   logical = s.getAttrOfType<IntegerAttr>("block.owner_tile").getInt();
-  auto native = s.getAttrOfType<IntegerAttr>("triton_src.matrix_rows");
+  auto native = s.getAttrOfType<IntegerAttr>(symbol("matrix_rows"));
   rows = native ? native.getInt() : logical;
 }
 Type OwnerTiles::lifted(Value v) {
@@ -79,6 +80,10 @@ Value OwnerTiles::slice(Operation &old, ArrayRef<Value> outerCoords, Value mask,
   int axis = old.getAttrOfType<IntegerAttr>("axis").getInt();
   int64_t n = shape(view)[axis],
           w = std::max<int64_t>(1, llvm::PowerOf2Ceil(n));
+  Value result;
+  if (access.rectangle &&
+      access.rectangle(*this, old, outerCoords, rows, stored, result))
+    return result;
   auto lanesK = lanes(w);
   if (old.hasAttr("block.broadcast_read") && !stored) {
     // The block verifier proved equality of every owner's source coordinates.
@@ -140,7 +145,7 @@ SmallVector<Value> OwnerTiles::serialLoop(scf::ForOp loop, const Values &parent,
   for (Value v : loop.getInitArgs())
     init.push_back(broadcast(at(v, parent), lifted(v)));
   auto l = b.create<scf::ForOp>(loc, start, limit, step, init);
-  l->setAttr("triton_src.runtime_range", b.getUnitAttr());
+  l->setAttr(symbol("runtime_range"), b.getUnitAttr());
   b.setInsertionPointToStart(l.getBody());
   Values env = parent;
   Value iv = l.getInductionVar(), live = mask;
@@ -292,7 +297,9 @@ LogicalResult OwnerTiles::build() {
   int64_t pitch = 1;
   for (int i : order) {
     auto size = std::max<int64_t>(1, shape(space.getOperand(i))[axes[i]]);
-    Value base = group && pitch % logical == 0 ? start : Value(owner);
+    // The first owner is aligned to logical. Dividing its consecutive
+    // lanes by a multiple of logical gives one shared outer coordinate.
+    Value base = pitch % logical == 0 ? start : Value(owner);
     auto coord = b.create<arith::DivUIOp>(loc, base,
                                           like(integer(pitch), base.getType()));
     outer[space.getRegion(0).front().getArgument(i)] = b.create<arith::RemUIOp>(
@@ -303,4 +310,4 @@ LogicalResult OwnerTiles::build() {
   op("end");
   return success();
 }
-} // namespace CI_UNIT_NAMESPACE
+} // namespace intentdsl::block

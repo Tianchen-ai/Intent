@@ -1,5 +1,6 @@
 include "mlir/IR/OpBase.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
+include "mlir/Interfaces/SideEffectInterfaces.td"
 def TileSource : Dialect { let name="ct_src"; let cppNamespace="::intentdsl::cutile"; }
 class Inst<string name,dag args,dag outputs,list<Trait> traits=[]> : Op<TileSource,name,traits> {
   let arguments=args; let results=outputs;
@@ -113,3 +114,18 @@ defm NativePanels : MatrixPanelLoop<TileSource>;
 include "intentdsl/levels/execution/block/ir/ScaleDispatch.td"
 defm Scale : ScaleDispatch<TileSource>;
 def MatrixEnd : Op<TileSource,"end",[Terminator]>;
+class TileInstruction<string mnemonic, list<Trait> traits = []> : Op<TileSource, mnemonic, traits>;
+include "intentdsl/levels/execution/block/ir/TileInstructions.td"
+def NativeRectRead : Op<TileSource,"rect_read",[MemoryEffects<[MemRead]>]> {
+  let arguments=(ins AnyMemRef:$base, Variadic<I64>:$indices,BoolAttr:$allow_tma);
+  let results=(outs AnyRankedTensor:$tile);
+}
+def NativeScaleMMA : Op<TileSource,"scaled_mma",[Pure]> {
+  let arguments=(ins AnyRankedTensor:$lhs,AnyRankedTensor:$ls,AnyRankedTensor:$rhs,AnyRankedTensor:$rs,AnyRankedTensor:$acc);
+  let results=(outs AnyRankedTensor:$value);
+}
+def ArrayReshape : Inst<"reshape",(ins AnyRankedTensor:$value),(outs AnyRankedTensor:$result),[Pure]>;
+def ArrayTranspose : Inst<"transpose",(ins AnyRankedTensor:$value),(outs AnyRankedTensor:$result),[Pure]>;
+def ExpandScale : Inst<"expand_scale",(ins AnyRankedTensor:$value,I64Attr:$axis),(outs AnyRankedTensor:$result),[Pure]>;
+include "intentdsl/levels/execution/block/ir/RowInstructions.td"
+def RectWrite : Op<TileSource,"rect_write",[MemoryEffects<[MemWrite]>]> {let arguments=(ins AnyMemRef:$base, AnyRankedTensor:$value, Variadic<I64>:$indices);}

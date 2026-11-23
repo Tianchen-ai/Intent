@@ -102,6 +102,25 @@ std::optional<TileDot> tileDot(Operation *s, scf::ForOp loop) {
   }
   return {};
 }
+// Propagate divisibility through the actual bounds. The proof applies to
+// the entire interval, including the last panel, independently of input data.
+bool fullFoldPanels(scf::ForOp loop,const CallFacts &facts,int64_t span) {
+  if(span<=0 || !matchPattern(loop.getStep(),m_One()))return false;
+  std::function<bool(Value)> multiple=[&](Value v) {
+    if(auto c=v.getDefiningOp<arith::ConstantIndexOp>())return c.value()%span==0;
+    if(auto dim=v.getDefiningOp<memref::DimOp>()){
+      auto ax=dim.getConstantIndex();
+      auto shape=facts.shapeOf(dim.getSource());
+      if(!ax || !shape)return false;
+      auto n=(*shape)[*ax].getAsInteger();return n && *n%span==0;
+    }
+    if(auto m=v.getDefiningOp<arith::MulIOp>())return multiple(m.getLhs())||multiple(m.getRhs());
+    if(auto a=v.getDefiningOp<arith::AddIOp>())return multiple(a.getLhs())&&multiple(a.getRhs());
+    if(auto m=v.getDefiningOp<arith::MinSIOp>())return multiple(m.getLhs())&&multiple(m.getRhs());
+    return false;
+  };
+  return multiple(loop.getLowerBound()) && multiple(loop.getUpperBound());
+}
 bool sharedBounds(scf::ForOp loop, unsigned axis, int64_t rows) {
   auto member = loop->getBlock()->getArgument(axis);
   return sharedCoordinate(loop.getLowerBound(), member, loop, rows) &&
@@ -109,7 +128,14 @@ bool sharedBounds(scf::ForOp loop, unsigned axis, int64_t rows) {
 }
 // Split the common interval from the ragged fringe in increasing token
 // order. Only the fringe can mix excluded and included non-finite operands.
-void partitionOwnerFolds(Operation *space,unsigned axis,int64_t rows){
+// Distinct memref.dim operations can denote the same immutable extent.
+static bool sameExtent(Value first,Value second){
+  if(first==second)return true;
+  auto lhs=first.getDefiningOp<memref::DimOp>(),rhs=second.getDefiningOp<memref::DimOp>();
+  return lhs && rhs && lhs.getSource()==rhs.getSource() && lhs.getConstantIndex() &&
+         lhs.getConstantIndex()==rhs.getConstantIndex();
+}
+void partitionOwnerFolds(Operation *space,unsigned axis,int64_t rows,int64_t span){
   auto &body=space->getRegion(0).front();
   auto owner=body.getArgument(axis);
   for(auto loop:llvm::make_early_inc_range(body.getOps<scf::ForOp>())){
@@ -124,11 +150,12 @@ void partitionOwnerFolds(Operation *space,unsigned axis,int64_t rows){
       auto next=clamped.thenYield().getOperand(0).getDefiningOp<arith::AddIOp>();
       cap=clamped.elseYield().getOperand(0);
       if(!cond || cond.getPredicate()!=arith::CmpIPredicate::slt || cond.getLhs()!=owner ||
-         cond.getRhs()!=cap || !next || next.getLhs()!=owner || !matchPattern(next.getRhs(),m_One()) ||
-         !sharedCoordinate(cap,owner,loop,rows))continue;
+         !sameExtent(cond.getRhs(),cap) || !next || next.getLhs()!=owner || !matchPattern(next.getRhs(),m_One()) ||
+         !sharedCoordinate(cond.getRhs(),owner,loop,rows))continue;
+      cap=cond.getRhs(); // The comparison dominates both new loops.
     }
     auto loc=loop.getLoc();OpBuilder b(loop);
-    Value width=b.create<arith::ConstantIndexOp>(loc,rows);
+    Value width=b.create<arith::ConstantIndexOp>(loc,std::max(rows,span));
     Value base=b.create<arith::MulIOp>(loc,b.create<arith::FloorDivSIOp>(loc,owner,width),width);
     if(suffix)base=b.create<arith::AddIOp>(loc,base,width);
     Value cut=b.create<arith::MinSIOp>(loc,cap,base);

@@ -1,9 +1,10 @@
-#include "TileBuilder.h"
 #include "intentdsl/levels/algorithm/kir/ir/PanelMap.h"
 #include "intentdsl/levels/algorithm/kir/ir/Storage.h"
+#include "intentdsl/levels/execution/block/ir/MatrixProgram.h"
 
-namespace CI_UNIT_NAMESPACE {
+namespace intentdsl::block {
 using namespace mlir;
+
 namespace {
 struct Panel {
   Tiles &t;
@@ -51,7 +52,7 @@ struct Panel {
              std::function<Value(Value, Value)> body) {
     auto loop = b.create<scf::ForOp>(loc, t.integer(0), t.integer(groups),
                                      t.integer(1), ValueRange{init});
-    loop->setAttr("triton_src.runtime_range", b.getUnitAttr());
+    loop->setAttr(t.symbol("runtime_range"), b.getUnitAttr());
     b.setInsertionPointToStart(loop.getBody());
     auto next = body(loop.getInductionVar(), loop.getRegionIterArgs()[0]);
     b.create<scf::YieldOp>(loc, next);
@@ -76,7 +77,7 @@ struct Panel {
     OperationState s(loc, code);
     s.addOperands({x, y});
     s.addTypes(x.getType());
-    s.addAttribute("triton_src.round_nearest", b.getUnitAttr());
+    s.addAttribute(t.symbol("round_nearest"), b.getUnitAttr());
     return b.create(s)->getResult(0);
   }
   Value record() {
@@ -275,7 +276,7 @@ struct Panel {
             [&]() { return t.dot(x, y, false, acc); });
       });
     };
-    if (!p.dot.getAttrOfType<BoolAttr>("triton_src.neutral_scale_dispatch")
+    if (!p.dot.getAttrOfType<BoolAttr>(t.symbol("neutral_scale_dispatch"))
              .getValue())
       return general();
     auto g = t.lanes(groups);
@@ -306,7 +307,7 @@ struct Panel {
                     t.read(rhs, t.address(rhs, {group, lane, col}, {0, 0, 1}),
                            pairMask(active, validCol));
                 auto sum = t.dot(av, bv, false, acc);
-                sum.getDefiningOp()->setAttr("triton_src.exact_acc",
+                sum.getDefiningOp()->setAttr(t.symbol("exact_acc"),
                                              b.getUnitAttr());
                 return sum;
               });
@@ -382,12 +383,13 @@ struct Panel {
                        false, carry);
         });
   }
-  void run() {
+  void run(ScaledPanelLowering native) {
     bool records = p.dot.getName().stripDialect() == "q4k_dot";
     bool hasWindow = p.dot.getName().stripDialect() == "window_contract";
     Value batch, chunk, head;
     Value acc = records     ? record()
                 : hasWindow ? window(batch, chunk, head)
+                : native    ? native(t, p)
                             : scaled();
     IRMapping map;
     map.map(p.fold.getResult(0), acc);
@@ -420,7 +422,8 @@ struct Panel {
   }
 };
 } // namespace
-void encodedTiles(Tiles &t, intentdsl::block::MatrixAccess &access) {
-  Panel(t, access).run();
+void encodedTiles(Tiles &t, intentdsl::block::MatrixAccess &access,
+                  ScaledPanelLowering native) {
+  Panel(t, access).run(native);
 }
-} // namespace CI_UNIT_NAMESPACE
+} // namespace intentdsl::block

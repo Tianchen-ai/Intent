@@ -5,17 +5,22 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/IRMapping.h"
 
-namespace CI_UNIT_NAMESPACE {
+namespace intentdsl::block {
 using namespace mlir;
 struct Tiles {
   OpBuilder b;
   Location loc;
   func::FuncOp fn;
   Operation *program;
-  Tiles(func::FuncOp f, StringRef convention)
-      : b(&f.front().front()), loc(f.getLoc()), fn(f) {
+  StringRef dialect, unit;
+  std::string symbol(StringRef name) const {
+    return (dialect + "." + name).str();
+  }
+  Tiles(func::FuncOp f, StringRef convention, StringRef unit)
+      : b(&f.front().front()), loc(f.getLoc()), fn(f),
+        dialect(f.front().front().getName().getDialectNamespace()), unit(unit) {
     auto &original = f.front().front();
-    OperationState s(loc, "triton_src.tile_program");
+    OperationState s(loc, symbol("tile_program"));
     s.addOperands(original.getOperands());
     s.addAttributes(original.getAttrs());
     s.addAttribute("calling_convention", b.getStringAttr(convention));
@@ -26,7 +31,7 @@ struct Tiles {
   }
   Operation *op(StringRef name, ValueRange args = {}, TypeRange results = {},
                 ArrayRef<NamedAttribute> attrs = {}) {
-    OperationState s(loc, ("triton_src." + name).str());
+    OperationState s(loc, symbol(name));
     s.addOperands(args);
     s.addTypes(results);
     s.addAttributes(attrs);
@@ -106,7 +111,7 @@ struct Tiles {
     return op("tile_dot", args, t,
               {b.getNamedAttr("transpose_rhs", b.getBoolAttr(trans)),
                b.getNamedAttr("ci.implementation",
-                              b.getStringAttr("exits/triton::native-dot"))})
+                              b.getStringAttr((unit + "::native-dot").str()))})
         ->getResult(0);
   }
   Value reduce(Value input, StringRef algebra, int64_t axis = 1) {
@@ -116,8 +121,9 @@ struct Tiles {
     return op("tile_reduce", input, shaped(dims, t.getElementType()),
               {b.getNamedAttr("algebra", b.getStringAttr(algebra)),
                b.getNamedAttr("axis", b.getI64IntegerAttr(axis)),
-               b.getNamedAttr("ci.implementation",
-                              b.getStringAttr("exits/triton::row-collective"))})
+               b.getNamedAttr(
+                   "ci.implementation",
+                   b.getStringAttr((unit + "::row-collective").str()))})
         ->getResult(0);
   }
   DenseI64ArrayAttr shape(Value view) {
@@ -125,4 +131,4 @@ struct Tiles {
         cast<BlockArgument>(view).getArgNumber(), "block.shape");
   }
 };
-} // namespace CI_UNIT_NAMESPACE
+} // namespace intentdsl::block

@@ -14,8 +14,9 @@ std::optional<TileAccumulate> tileAccumulate(mlir::Value, mlir::scf::ForOp);
 std::optional<unsigned> issueAxis(mlir::Operation *,
                                   const compilerinfra::TargetProfile &, int64_t,
                                   int64_t);
+bool fullFoldPanels(mlir::scf::ForOp,const CallFacts &,int64_t span);
 bool sharedBounds(mlir::scf::ForOp, unsigned, int64_t);
 int64_t alignedPageExtent(mlir::Operation &, mlir::scf::ForOp,
                           const CallFacts &, int64_t);
-void partitionOwnerFolds(mlir::Operation *, unsigned, int64_t);
+void partitionOwnerFolds(mlir::Operation *, unsigned, int64_t rows, int64_t span);
 } // namespace intentdsl::block

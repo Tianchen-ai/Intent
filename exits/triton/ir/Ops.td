@@ -191,6 +191,7 @@ defm Columns : ColumnTiles<Itsrc_Dialect>;
 defm NativePanels : MatrixPanelLoop<Itsrc_Dialect>;
 include "intentdsl/levels/execution/block/ir/ScaleDispatch.td"
 defm Scale : ScaleDispatch<Itsrc_Dialect>;
-include "ir/Rows.td"
-include "ir/Tiles.td"
+class TileInstruction<string mnemonic, list<Trait> traits = []> : Op<Itsrc_Dialect, mnemonic, traits>;
+include "intentdsl/levels/execution/block/ir/RowInstructions.td"
+include "intentdsl/levels/execution/block/ir/TileInstructions.td"
 def MatrixEnd : Op<Itsrc_Dialect,"end",[Terminator]>;

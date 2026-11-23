@@ -1,4 +1,3 @@
-R"python(
 @ct.function
 def merge_moments(an, am, av, bn, bm, bv):
     count = an + bn
@@ -7,4 +6,3 @@ def merge_moments(an, am, av, bn, bm, bv):
     merged = am + correction
     spread = av + bv + delta * ct.astype(an, ct.float32) * correction
     return count, ct.where(an == 0, bm, ct.where(bn == 0, am, merged)), ct.where(an == 0, bv, ct.where(bn == 0, av, spread))
-)python"

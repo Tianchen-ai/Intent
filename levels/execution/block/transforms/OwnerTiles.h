@@ -1,17 +1,20 @@
+#include "intentdsl/levels/execution/block/ir/OwnerProgram.h"
 #pragma once
-#include "TileBuilder.h"
 #include "intentdsl/levels/execution/block/ir/FoldIssue.h"
+#include "intentdsl/levels/execution/block/ir/TileBuilder.h"
 
-namespace CI_UNIT_NAMESPACE {
+namespace intentdsl::block {
 // An owner is one parallel execution of the author's ordered region. Outside
 // panel folds scalars become [owner] and member vectors become [owner,member].
 struct OwnerTiles : Tiles {
   Operation &space;
   int64_t rows, logical;
   Value active;
+  OwnerAccess access;
   using Values = llvm::DenseMap<Value, Value>;
   Values outer;
-  OwnerTiles(func::FuncOp fn, Operation &scope);
+  OwnerTiles(func::FuncOp fn, Operation &scope, StringRef unit,
+             OwnerAccess access);
   Type lifted(Value source);
   Value widen(Value v);
   Value castElement(Value v, Type element);
@@ -27,4 +30,4 @@ struct OwnerTiles : Tiles {
   SmallVector<Value> panelLoop(scf::ForOp loop, const Values &env, Value mask);
   LogicalResult build();
 };
-} // namespace CI_UNIT_NAMESPACE
+} // namespace intentdsl::block

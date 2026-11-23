@@ -1,4 +1,3 @@
-R"python(
 @ct.function
 def uniform_at(seed, position):
     counter = ct.astype(position, ct.uint64) >> 2
@@ -21,4 +20,3 @@ def uniform_at(seed, position):
     word = position & 3
     bits = ct.where(word == 0, a, ct.where(word == 1, b, ct.where(word == 2, c, d)))
     return ct.astype(bits >> 8,ct.float32) * 0.000000059604644775390625
-)python"

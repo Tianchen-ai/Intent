@@ -1,3 +1,4 @@
+#include "intentdsl/levels/execution/block/ir/PanelBounds.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/execution/block/ir/FoldIssue.h"
 #include "intentdsl/levels/execution/block/ir/FoldPanel.h"
@@ -65,13 +66,16 @@ LogicalResult verifyOwnerMap(func::FuncOp fn, const TargetProfile &p,
               if (v->hasAttr("block.uniform_tokens") !=
                   sharedBounds(loop, pairAxis.getInt(), w))
                 return WalkResult::interrupt();
+              if(v->hasAttr("block.full_panels")!=(v->hasAttr("block.uniform_tokens") && fullFoldPanels(loop,*facts,span.getInt())))
+                return WalkResult::interrupt();
+              if(v->hasAttr("block.counted_panels")!=countedPanel(v,*facts))return WalkResult::interrupt();
               bool replay = !v->hasAttr("block.uniform_tokens") &&
                             llvm::any_of(loop.getResultTypes(), [](Type t) {
                               return isa<ShapedType>(t);
                             });
               if (v->hasAttr("block.repair_masked_nan") != replay)
                 return WalkResult::interrupt();
-            } else if (v->hasAttr("block.uniform_tokens") ||
+            } else if (v->hasAttr("block.counted_panels") || v->hasAttr("block.full_panels") || v->hasAttr("block.uniform_tokens") ||
                        v->hasAttr("block.repair_masked_nan"))
               return WalkResult::interrupt();
             auto loop = v->getParentOfType<scf::ForOp>();
@@ -386,7 +390,7 @@ void registerOrdered(Unit &u) {
         d.getAs<StringAttr>("memory") == "matrix-fold") {
       o->setAttr("block.token_span", d.get("span"));
       if(o->hasAttr("block.pair_axis"))
-        block::partitionOwnerFolds(o,d.getAs<IntegerAttr>("axis").getInt(),d.getAs<IntegerAttr>("width").getInt());
+        block::partitionOwnerFolds(o,d.getAs<IntegerAttr>("axis").getInt(),d.getAs<IntegerAttr>("width").getInt(),d.getAs<IntegerAttr>("span").getInt());
       for (auto loop : o->getRegion(0).front().getOps<scf::ForOp>())
         if (loop->hasAttr("kir.reassociate")) {
           loop->setAttr("block.contribution_width", d.get("span"));
@@ -399,8 +403,12 @@ void registerOrdered(Unit &u) {
           }
           if (o->hasAttr("block.pair_axis")) {
             if (block::sharedBounds(loop, d.getAs<IntegerAttr>("axis").getInt(),
-                                    d.getAs<IntegerAttr>("width").getInt()))
+                                    d.getAs<IntegerAttr>("width").getInt())) {
               loop->setAttr("block.uniform_tokens", b.getUnitAttr());
+              if(block::countedPanel(loop,*f))loop->setAttr("block.counted_panels",b.getUnitAttr());
+              if(block::fullFoldPanels(loop,*f,d.getAs<IntegerAttr>("span").getInt()))
+                loop->setAttr("block.full_panels",b.getUnitAttr());
+            }
             else if (llvm::any_of(loop.getResultTypes(),
                                   [](Type t) { return isa<ShapedType>(t); }))
               loop->setAttr("block.repair_masked_nan", b.getUnitAttr());

@@ -1,3 +1,5 @@
+#include "intentdsl/levels/execution/block/ir/MatrixProgram.h"
+#include "intentdsl/levels/execution/block/ir/OwnerProgram.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/exits/triton/ir/Dialect.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
@@ -16,7 +18,7 @@ namespace CI_UNIT_NAMESPACE {
 using namespace mlir;
 using namespace compilerinfra;
 void legalize(OpPassManager &);
-void lowerTileProgram(func::FuncOp);
+
 LogicalResult verifyTileProgram(func::FuncOp, const TargetProfile &);
 TerminalPrinter tritonPrinter();
 void lowerRows(func::FuncOp);
@@ -32,7 +34,9 @@ struct BindCallable : PassWrapper<BindCallable, OperationPass<ModuleOp>> {
   void runOnOperation() final {
     auto module = getOperation();
     auto fn = *module.getOps<func::FuncOp>().begin();
-    lowerTileProgram(fn);
+    if(intentdsl::kir::orderedOwners(fn))
+      intentdsl::block::expandOwnerProgram(fn,"exits/triton");
+    else intentdsl::block::expandMatrixProgram(fn,"exits/triton");
     Builder b(fn.getContext());
     if (fn.front().front().getName().getStringRef() !=
             "triton_src.tile_program" &&
