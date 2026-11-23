@@ -1,4 +1,5 @@
 #include "../capabilities/Index.h"
+#include "PanelBounds.h"
 #include "intentdsl/levels/execution/block/ir/ScaleDispatch.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/ProjectedLayout.h"
@@ -24,7 +25,8 @@ bool ownerRectangle(Operation *op, func::FuncOp fn) {
     return false;
   auto &space = fn.front().front();
   auto pair = space.getAttrOfType<IntegerAttr>("block.pair_axis");
-  if (!pair || op->getParentOp() != &space)
+  if (!pair || space.hasAttr("block.matrix_rows") ||
+      op->getParentOp() != &space)
     return false;
   auto &bb = space.getRegion(0).front();
   auto coords = op->getOperands().drop_front(kind == "slice_write" ? 2 : 1);
@@ -76,6 +78,10 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
   void runOnOperation() final {
     auto fn=*getOperation().getOps<func::FuncOp>().begin();
     if(failed(intentdsl::specializeProjectedLayout(fn,facts,"ct_src",true))){signalPassFailure();return;}
+    fn.walk([&](scf::ForOp loop) {
+      if (countedPanel(loop, facts))
+        loop->setAttr("ct_src.counted_panels", UnitAttr::get(fn.getContext()));
+    });
     getContext().getOrLoadDialect<intentdsl::cutile::TileSource>();
     getOperation().walk<WalkOrder::PostOrder>([&](Operation *op) {
       if (op->getName().getDialectNamespace() != "block")
@@ -88,6 +94,11 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
                        "ct_src." +
                            (slab ? (code=="load"?"gather_slab":"scatter_slab") : access ? ("tile_" + code).str() : code.str()));
       s.addAttributes(op->getAttrs());
+      if (tma && op->hasAttr("block.page_extent"))
+        s.addAttribute("ct_src.page_tma", b.getUnitAttr());
+      if (tma && op->hasAttr("block.rectangular_tokens") &&
+          op->getParentOp()->hasAttr("block.uniform_tokens"))
+        s.addAttribute("ct_src.panel_tma", b.getUnitAttr());
       if (ownerRectangle(op, fn))
         s.addAttribute("ct_src.owner_rectangle", b.getUnitAttr());
       if(code=="scaled_contract"){
@@ -159,6 +170,25 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
                                                 "realized")))
       return failure();
     auto result = matrix.walk([&](Operation *op) {
+      if (op->hasAttr("ct_src.counted_panels") !=
+          countedPanel(op, *profile.services.get<intentdsl::CallFacts>())) {
+        op->emitError("counted loop requires bounded native tile indices");
+        return WalkResult::interrupt();
+      }
+      auto cap = profile.services.get<intentdsl::cutile::ArrayIndices>();
+      if (op->hasAttr("ct_src.panel_tma") !=
+          (op->hasAttr("block.rectangular_tokens") && cap->permitTma &&
+           op->getParentOp()->hasAttr("block.uniform_tokens"))) {
+        op->emitError(
+            "rectangular transfer requires a compatible array layout");
+        return WalkResult::interrupt();
+      }
+      if (op->hasAttr("ct_src.page_tma") !=
+          (op->hasAttr("block.page_extent") && cap->permitTma)) {
+        op->emitError("page transfer requires bounded page coordinates and a "
+                      "compatible array layout");
+        return WalkResult::interrupt();
+      }
       if (op->hasAttr("ct_src.owner_rectangle") != ownerRectangle(op, matrix)) {
         op->emitError("owner rectangle requires an aligned full group and "
                       "contiguous logical axes");

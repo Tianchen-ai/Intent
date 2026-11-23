@@ -5,10 +5,13 @@ namespace {
 struct Ordered : intentdsl::block::OwnerSource {
   using OwnerSource::OwnerSource;
   llvm::StringRef language() override { return "ct"; }
+  bool countedPanels(scf::ForOp loop) override {
+    return loop->hasAttr("ct_src.counted_panels");
+  }
   std::string matrixProduct(std::string a, std::string b, bool trans,
                             std::string n) override {
     return "ct.mma(" + a + "," + (trans ? "ct.transpose(" + b + ")" : b) +
-           ",ct.full((ROWS," + n + "),0.,ct.float32))";
+           ",ct.full((" + fragmentRows() + "," + n + "),0.,ct.float32))";
   }
   std::string matrixAccumulate(std::string a, std::string b,
                                std::string c) override {
@@ -32,7 +35,7 @@ struct Ordered : intentdsl::block::OwnerSource {
     return "(ct.astype(ct.bid(0),ct.int64)*ROWS)";
   }
   std::string broadcast(llvm::StringRef v) override {
-    return "ct.broadcast_to(" + v.str() + ",(ROWS,))";
+    return "ct.broadcast_to(" + v.str() + ",(" + fragmentRows() + ",))";
   }
   std::string memberRange(int64_t width) override {
     return "ct.arange(" + std::to_string(width) + ",dtype=ct.int64)";
@@ -48,8 +51,10 @@ struct Ordered : intentdsl::block::OwnerSource {
   }
   std::string coords(ValueRange indices) {
     SmallVector<std::string> parts;
-    for (auto v : indices)
-      parts.push_back(name(v));
+    // A grouped axis can leave every subscript scalar even though validity
+    // is per owner. Give gather/scatter the logical owner shape explicitly.
+    for (auto [i, v] : llvm::enumerate(indices))
+      parts.push_back(i == 0 ? broadcast(name(v)) : name(v));
     return "(" + llvm::join(parts, ",") + ",)";
   }
   std::string load(memref::LoadOp op, llvm::StringRef mask) override {
@@ -71,9 +76,30 @@ struct Ordered : intentdsl::block::OwnerSource {
     dims.push_back(std::to_string(lanes));
     auto panel = "ct.reshape(ct.load(" + name(op.getOperand(0)) + ",(" +
                  llvm::join(at, ",") + "),shape=(" + llvm::join(dims, ",") +
-                 "),padding_mode=ct.PaddingMode.ZERO,allow_tma=False),(" +
+                 "),padding_mode=ct.PaddingMode.ZERO,allow_tma=" +
+                 (op.hasAttr("ct_src.panel_tma") ? "True" : "False") + "),(" +
                  std::to_string(span) + "," + std::to_string(lanes) + "))";
     return "ct.where(" + live + "," + panel + ",0)";
+  }
+  std::string loadPagePanel(Operation &op, ArrayRef<std::string> outer,
+                            std::string base, int64_t span, int64_t lanes,
+                            std::string live) override {
+    auto page = std::to_string(
+        op.getAttrOfType<IntegerAttr>("block.page_extent").getInt());
+    auto rows = std::to_string(span), members = std::to_string(lanes);
+    SmallVector<std::string> at{"ct.max(" + outer.front() + ",axis=0)",
+                                "(" + base + "%" + page + ")//" + rows};
+    llvm::append_range(at, outer.drop_front());
+    at.push_back("0");
+    SmallVector<std::string> shape(at.size(), "1");
+    shape[1] = rows;
+    shape.back() = members;
+    auto panel = "ct.load(" + name(op.getOperand(0)) + ",(" +
+                 llvm::join(at, ",") + "),shape=(" + llvm::join(shape, ",") +
+                 "),padding_mode=ct.PaddingMode.ZERO,allow_tma=" +
+                 (op.hasAttr("ct_src.page_tma") ? "True" : "False") + ")";
+    return "ct.where(" + live + ",ct.reshape(" + panel + ",(" + rows + "," +
+           members + ")),0)";
   }
   std::string ownerPanelAccess(Operation &op, bool write) override {
     if (!op.hasAttr("ct_src.owner_rectangle"))
@@ -109,6 +135,8 @@ struct Ordered : intentdsl::block::OwnerSource {
   std::string cast(llvm::StringRef v, Type t) override {
     if (t.isIndex())
       return "ct.astype(" + v.str() + ",ct.int64)";
+    if (t.isInteger(32))
+      return "ct.astype(" + v.str() + ",ct.int32)";
     return "ct.astype(" + v.str() + ",ct." +
            (t.isBF16()  ? "bfloat16"
             : t.isF16() ? "float16"
