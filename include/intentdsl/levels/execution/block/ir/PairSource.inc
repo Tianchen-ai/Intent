@@ -8,7 +8,7 @@ llvm::Error emitPairFold(mlir::scf::ForOp loop, unsigned depth, int64_t span) {
   };
   auto owners = [&](std::string v) {
     auto fragment=broadcast(v);
-    if(!space.hasAttr("block.matrix_rows"))return fragment;
+    if(!nativeMatrixRows())return fragment;
     auto count=std::to_string(space.getAttrOfType<IntegerAttr>("block.owner_tile").getInt());
     return logicalOwners(fragment,count);
   };

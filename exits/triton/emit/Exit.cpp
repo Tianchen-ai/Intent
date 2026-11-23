@@ -437,6 +437,15 @@ void bind(Unit &unit) {
               return failure();
             auto fn = *funcs.begin();
             if (failed(verifyColumnViews(fn))) return failure();
+    if (intentdsl::kir::orderedOwners(fn)) {
+      auto &owner = fn.front().front();
+      auto rows = owner.getAttrOfType<IntegerAttr>("block.owner_tile");
+      Attribute expected;
+      if (owner.hasAttr("block.pair_axis") && rows && rows.getInt() < 16)
+        expected = Builder(fn.getContext()).getI64IntegerAttr(16);
+      if (owner.getAttr("triton_src.matrix_rows") != expected)
+        return fn.emitError("invalid native matrix fragment height"), failure();
+    }
             if (intentdsl::kir::orderedOwners(fn))
               return intentdsl::block::verifyOwnerMap(fn, profile, "triton_src",
                                                       "realized");

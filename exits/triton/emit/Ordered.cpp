@@ -5,6 +5,9 @@ llvm::Expected<std::string> printColumns(func::FuncOp fn);
 namespace {
 struct Ordered : intentdsl::block::OwnerSource {
   using OwnerSource::OwnerSource;
+  mlir::IntegerAttr nativeMatrixRows() const override {
+    return space.getAttrOfType<mlir::IntegerAttr>("triton_src.matrix_rows");
+  }
   llvm::StringRef language() override { return "tl"; }
   std::string logicalOwners(std::string fragment, std::string count) override {
     return "tl.gather("+fragment+",tl.arange(0,"+count+"),0)";

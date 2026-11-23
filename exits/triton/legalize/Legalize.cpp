@@ -49,6 +49,12 @@ struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(Legalize)
   void runOnOperation() final {
     getContext().getOrLoadDialect<intentdsl::itsrc::ItsrcDialect>();
+    getOperation().walk([&](Operation *op) {
+      if (op->getName().getStringRef() == "block.owner_space" &&
+          op->hasAttr("block.pair_axis") &&
+          op->getAttrOfType<IntegerAttr>("block.owner_tile").getInt() < 16)
+        op->setAttr("triton_src.matrix_rows", Builder(&getContext()).getI64IntegerAttr(16));
+    });
     getOperation().walk<WalkOrder::PostOrder>([](Operation *op) {
       if (op->getName().getDialectNamespace() != "block")
         return;

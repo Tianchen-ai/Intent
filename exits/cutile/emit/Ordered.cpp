@@ -4,6 +4,9 @@ namespace CI_UNIT_NAMESPACE {
 namespace {
 struct Ordered : intentdsl::block::OwnerSource {
   using OwnerSource::OwnerSource;
+  mlir::IntegerAttr nativeMatrixRows() const override {
+    return space.getAttrOfType<mlir::IntegerAttr>("ct_src.matrix_rows");
+  }
   llvm::StringRef language() override { return "ct"; }
   std::string logicalOwners(std::string fragment,std::string count) override {
     return "ct.extract("+fragment+",(0,),shape=("+count+",))";

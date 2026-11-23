@@ -25,7 +25,7 @@ bool ownerRectangle(Operation *op, func::FuncOp fn) {
     return false;
   auto &space = fn.front().front();
   auto pair = space.getAttrOfType<IntegerAttr>("block.pair_axis");
-  if (!pair || space.hasAttr("block.matrix_rows") ||
+  if (!pair || space.hasAttr("ct_src.matrix_rows") ||
       op->getParentOp() != &space)
     return false;
   auto &bb = space.getRegion(0).front();
@@ -78,6 +78,12 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
   void runOnOperation() final {
     auto fn=*getOperation().getOps<func::FuncOp>().begin();
     if(failed(intentdsl::specializeProjectedLayout(fn,facts,"ct_src",true))){signalPassFailure();return;}
+    getOperation().walk([&](Operation *op) {
+      if (op->getName().getStringRef() == "block.owner_space" &&
+          op->hasAttr("block.pair_axis") &&
+          op->getAttrOfType<IntegerAttr>("block.owner_tile").getInt() < 16)
+        op->setAttr("ct_src.matrix_rows", Builder(&getContext()).getI64IntegerAttr(16));
+    });
     fn.walk([&](scf::ForOp loop) {
       if (countedPanel(loop, facts))
         loop->setAttr("ct_src.counted_panels", UnitAttr::get(fn.getContext()));
@@ -166,6 +172,15 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
                      bool callable) {
   auto matrix=*module.getOps<func::FuncOp>().begin();
   if (intentdsl::kir::orderedOwners(matrix)) {
+    {
+      auto &owner = matrix.front().front();
+      auto rows = owner.getAttrOfType<IntegerAttr>("block.owner_tile");
+      Attribute expected;
+      if (owner.hasAttr("block.pair_axis") && rows && rows.getInt() < 16)
+        expected = Builder(matrix.getContext()).getI64IntegerAttr(16);
+      if (owner.getAttr("ct_src.matrix_rows") != expected)
+        return matrix.emitError("invalid native matrix fragment height"), failure();
+    }
     if (failed(intentdsl::block::verifyOwnerMap(matrix, profile, "ct_src",
                                                 "realized")))
       return failure();

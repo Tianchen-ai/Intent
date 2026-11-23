@@ -19,8 +19,9 @@ protected:
   llvm::raw_string_ostream out{result};
   unsigned counter = 0;
   std::string fresh() { return "v" + std::to_string(counter++); }
+  virtual mlir::IntegerAttr nativeMatrixRows() const = 0;
   std::string fragmentRows() const {
-    auto w = space.getAttrOfType<mlir::IntegerAttr>("block.matrix_rows");
+    auto w = nativeMatrixRows();
     return w ? std::to_string(w.getInt()) : "ROWS";
   }
   void line(unsigned d, const llvm::Twine &s) {
@@ -73,8 +74,7 @@ public:
     signature();
     auto &body = space.getRegion(0).front();
     auto axes = space.getAttrOfType<mlir::DenseI64ArrayAttr>("axes");
-    auto nativeRows =
-        space.getAttrOfType<mlir::IntegerAttr>("block.matrix_rows");
+    auto nativeRows = nativeMatrixRows();
     auto logical =
         space.getAttrOfType<mlir::IntegerAttr>("block.owner_tile").getInt();
     if (nativeRows) {

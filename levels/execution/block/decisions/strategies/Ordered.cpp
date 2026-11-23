@@ -37,13 +37,6 @@ LogicalResult verifyOwnerMap(func::FuncOp fn, const TargetProfile &p,
     return failure();
   auto span = space.getAttrOfType<IntegerAttr>("block.token_span");
   auto pairAxis = space.getAttrOfType<IntegerAttr>("block.pair_axis");
-  auto logical = space.getAttrOfType<IntegerAttr>("block.owner_tile");
-  bool padded = pairAxis && logical && logical.getInt() < 16;
-  if (space.getAttr("block.matrix_rows") !=
-      (padded ? Attribute(Builder(fn.getContext()).getI64IntegerAttr(16))
-              : Attribute()))
-    return space.emitError(
-        "narrow owner groups require padding to the matrix issue width");
   auto validPair = [&](IntegerAttr width, IntegerAttr s, IntegerAttr axis) {
     if (!width || !s || !axis)
       return false;
@@ -389,9 +382,6 @@ void registerOrdered(Unit &u) {
     auto d = cast<DictionaryAttr>(a);
     if (d.getAs<StringAttr>("memory") == "matrix-fold")
       o->setAttr("block.pair_axis", d.get("axis"));
-    if (o->hasAttr("block.pair_axis") &&
-        d.getAs<IntegerAttr>("width").getInt() < 16)
-      o->setAttr("block.matrix_rows", b.getI64IntegerAttr(16));
     if (d.getAs<StringAttr>("memory") == "token" ||
         d.getAs<StringAttr>("memory") == "matrix-fold") {
       o->setAttr("block.token_span", d.get("span"));
