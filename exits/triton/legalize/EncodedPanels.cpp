@@ -5,8 +5,6 @@
 namespace CI_UNIT_NAMESPACE {
 using namespace mlir;
 namespace {
-using intentdsl::kir::MX8Block;
-using intentdsl::kir::Q4KRecord;
 struct Panel {
   Tiles &t;
   intentdsl::block::MatrixAccess &p;
@@ -82,12 +80,18 @@ struct Panel {
     return b.create(s)->getResult(0);
   }
   Value record() {
+    auto q4 = cast<intentdsl::kir::Q4KType>(
+                  p.dot.getAttrOfType<TypeAttr>("kir.storage").getValue())
+                  .getLayout();
+    auto *encoder = p.dot.getOperand(1).getDefiningOp();
+    auto q8 = cast<intentdsl::kir::Q8KType>(
+                  encoder->getAttrOfType<TypeAttr>("kir.storage").getValue())
+                  .getLayout();
     auto w = p.dot.getOperand(0),
          x = p.dot.getOperand(1).getDefiningOp()->getOperand(0);
     return fold(
-        p.shape[2] / Q4KRecord::elements, zero({p.tile[0]}),
-        [&](Value g, Value acc) {
-          auto ix = t.lanes(Q4KRecord::elements);
+        p.shape[2] / q4.elements, zero({p.tile[0]}), [&](Value g, Value acc) {
+          auto ix = t.lanes(q8.elements);
           auto v = t.read(x, t.address(x, {g, ix}, {-1, 0}));
           auto abs = b.create<math::AbsFOp>(loc, v);
           auto peak = t.reduce(abs, "max", 0);
@@ -95,7 +99,7 @@ struct Panel {
                                             t.like(peak, v.getType()));
           auto first =
               t.reduce(b.create<arith::SelectOp>(
-                           loc, eq, ix, lit(Q4KRecord::elements, ix.getType())),
+                           loc, eq, ix, lit(q4.elements, ix.getType())),
                        "min", 0);
           auto extreme =
               t.reduce(b.create<arith::SelectOp>(
@@ -132,35 +136,34 @@ struct Panel {
                     acc.getType())
                 ->getResult(0);
           };
-          auto d = half(Q4KRecord::d), dm = half(Q4KRecord::dmin);
-          auto j = b.create<arith::DivUIOp>(
-              loc, ix, lit(Q4KRecord::group, ix.getType()));
+          auto d = half(q4.d), dm = half(q4.dmin);
+          auto j =
+              b.create<arith::DivUIOp>(loc, ix, lit(q4.group, ix.getType()));
           auto slot = b.create<arith::RemUIOp>(
-              loc, j, lit(Q4KRecord::halfGroups, ix.getType()));
+              loc, j, lit(q4.halfGroups, ix.getType()));
           auto field = [&](int base) {
             return byte(
                 b.create<arith::AddIOp>(loc, slot, lit(base, slot.getType())),
                 1);
           };
-          auto low = field(Q4KRecord::factors),
-               high = field(Q4KRecord::factors + Q4KRecord::halfGroups),
-               packed = field(Q4KRecord::factors + 2 * Q4KRecord::halfGroups);
+          auto low = field(q4.factors),
+               high = field(q4.factors + q4.halfGroups),
+               packed = field(q4.factors + 2 * q4.halfGroups);
           Type ty = low.getType(),
                maskType = cast<RankedTensorType>(ty).clone(b.getI1Type());
-          auto firstHalf = t.like(cmp(arith::CmpIPredicate::slt, j,
-                                      t.integer(Q4KRecord::halfGroups)),
-                                  maskType, 1);
-          auto nibMask = lit((1 << Q4KRecord::nibbleBits) - 1, ty),
-               bits = lit(Q4KRecord::nibbleBits, ty);
+          auto firstHalf = t.like(
+              cmp(arith::CmpIPredicate::slt, j, t.integer(q4.halfGroups)),
+              maskType, 1);
+          auto nibMask = lit((1 << q4.nibbleBits) - 1, ty),
+               bits = lit(q4.nibbleBits, ty);
           auto coeff = [&](Value x, Value upper) {
             auto top = b.create<arith::ShLIOp>(
-                loc,
-                b.create<arith::ShRUIOp>(loc, x, lit(Q4KRecord::scaleBits, ty)),
+                loc, b.create<arith::ShRUIOp>(loc, x, lit(q4.scaleBits, ty)),
                 bits);
             return b.create<arith::SelectOp>(
                 loc, firstHalf,
-                b.create<arith::AndIOp>(
-                    loc, x, lit((1 << Q4KRecord::scaleBits) - 1, ty)),
+                b.create<arith::AndIOp>(loc, x,
+                                        lit((1 << q4.scaleBits) - 1, ty)),
                 b.create<arith::OrIOp>(loc, upper, top));
           };
           auto sc = coeff(low, b.create<arith::AndIOp>(loc, packed, nibMask));
@@ -169,16 +172,14 @@ struct Panel {
               loc,
               b.create<arith::MulIOp>(
                   loc, b.create<arith::DivUIOp>(loc, j, lit(2, ix.getType())),
-                  lit(Q4KRecord::group, ix.getType())),
-              b.create<arith::RemUIOp>(loc, ix,
-                                       lit(Q4KRecord::group, ix.getType())));
-          auto raw =
-              byte(b.create<arith::AddIOp>(
-                       loc, offset, lit(Q4KRecord::packed, ix.getType())),
-                   1);
+                  lit(q4.group, ix.getType())),
+              b.create<arith::RemUIOp>(loc, ix, lit(q4.group, ix.getType())));
+          auto raw = byte(b.create<arith::AddIOp>(loc, offset,
+                                                  lit(q4.packed, ix.getType())),
+                          1);
           auto shift = b.create<arith::MulIOp>(
               loc, b.create<arith::RemUIOp>(loc, j, lit(2, ix.getType())),
-              lit(Q4KRecord::nibbleBits, ix.getType()));
+              lit(q4.nibbleBits, ix.getType()));
           auto nib = b.create<arith::AndIOp>(
               loc,
               b.create<arith::ShRUIOp>(
@@ -206,11 +207,14 @@ struct Panel {
         });
   }
   Value scaled() {
+    auto mx = cast<intentdsl::kir::MX8Type>(
+                  p.dot.getAttrOfType<TypeAttr>("kir.storage").getValue())
+                  .getLayout();
     auto a = p.dot.getOperand(0), sa = p.dot.getOperand(1),
          rhs = p.dot.getOperand(2);
     intentdsl::kir::RightScale right(p.dot);
     auto init = zero({p.tile[0], p.tile[1]});
-    auto groups = p.shape[2] / MX8Block::group;
+    auto groups = p.shape[2] / mx.group;
     auto rightScale = [&](Value g, bool all) {
       SmallVector<Value> coords(2);
       SmallVector<int64_t> dims(2);
@@ -230,24 +234,22 @@ struct Panel {
       auto ix = cast<RankedTensorType>(ptr.getType());
       auto mask = t.like(valid, ix.clone(b.getI1Type()), axis);
       auto v = castTo("arith.extui", t.read(base, ptr, mask), b.getI32Type());
-      return b
-          .create<arith::SelectOp>(loc, mask, v,
-                                   lit(MX8Block::bias, v.getType()))
+      return b.create<arith::SelectOp>(loc, mask, v, lit(mx.bias, v.getType()))
           .getResult();
     };
     auto general = [&]() {
       return fold(groups, init, [&](Value g, Value acc) {
         auto ax = readScale(sa, t.address(sa, {row, g}, {0, -1}), validRow, 0),
              bx = readScale(right.view, rightScale(g, false), validCol, 0);
-        auto k = t.lanes(MX8Block::group);
-        auto av = t.read(
-            a, t.address(a, {row, g, k}, {0, -1, 1}),
-            t.like(validRow,
-                   t.shaped({p.tile[0], MX8Block::group}, b.getI1Type()), 0));
-        auto bv = t.read(
-            rhs, t.address(rhs, {g, k, col}, {-1, 0, 1}),
-            t.like(validCol,
-                   t.shaped({MX8Block::group, p.tile[1]}, b.getI1Type()), 1));
+        auto k = t.lanes(mx.group);
+        auto av =
+            t.read(a, t.address(a, {row, g, k}, {0, -1, 1}),
+                   t.like(validRow,
+                          t.shaped({p.tile[0], mx.group}, b.getI1Type()), 0));
+        auto bv =
+            t.read(rhs, t.address(rhs, {g, k, col}, {-1, 0, 1}),
+                   t.like(validCol,
+                          t.shaped({mx.group, p.tile[1]}, b.getI1Type()), 1));
         auto rescale = [&](Value val, Value scale, int axis) -> Value {
           auto fp = castTo("arith.extf", val, b.getF32Type());
           auto factor = t.op("e8m0", scale,
@@ -280,8 +282,7 @@ struct Panel {
     auto ax = readScale(sa, t.address(sa, {row, g}, {0, 1}), validRow, 0),
          bx = readScale(right.view, rightScale(g, true), validCol, 1);
     auto unit = [&](Value s) {
-      auto eq =
-          cmp(arith::CmpIPredicate::eq, s, lit(MX8Block::bias, s.getType()));
+      auto eq = cmp(arith::CmpIPredicate::eq, s, lit(mx.bias, s.getType()));
       return t.reduce(t.reduce(eq, "min", 1), "min", 0);
     };
     return choice(
@@ -294,9 +295,9 @@ struct Panel {
                     b.create<arith::MulIOp>(loc, it, t.integer(p.tile[2])),
                     p.tile[2]);
                 auto group = b.create<arith::DivUIOp>(
-                    loc, k, lit(MX8Block::group, k.getType()));
+                    loc, k, lit(mx.group, k.getType()));
                 auto lane = b.create<arith::RemUIOp>(
-                    loc, k, lit(MX8Block::group, k.getType()));
+                    loc, k, lit(mx.group, k.getType()));
                 auto active =
                     cmp(arith::CmpIPredicate::slt, k, t.integer(p.shape[2]));
                 auto av = t.read(a, t.address(a, {row, group, lane}, {0, 1, 1}),

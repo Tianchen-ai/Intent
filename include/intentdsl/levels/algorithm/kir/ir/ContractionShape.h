@@ -1,6 +1,7 @@
 #pragma once
 #include "intentdsl/levels/algorithm/kir/ir/PanelMap.h"
 #include "intentdsl/levels/algorithm/kir/ir/Performance.h"
+#include "intentdsl/levels/algorithm/kir/ir/StorageLayout.h"
 namespace intentdsl::kir {
 // Logical right scales are [column, group]. Preserve their physical view
 // and express the axis exchange exactly once for all panel consumers.
@@ -54,8 +55,10 @@ contractionShape(mlir::Operation &op, mlir::Value out, const CallFacts &f) {
     }
     if (name == "q4k_dot") {
       auto x = op.getOperand(1).getDefiningOp()->getOperand(0);
-      return ContractionShape{axis(a, 0), 1,       axis(x, 0) * 256, 1,
-                              slot(a),    slot(x), slot(out)};
+      int64_t k;
+      if (__builtin_mul_overflow(axis(x, 0), int64_t(Q8KRecord::elements), &k))
+        return llvm::createStringError("Q8_K contraction extent exceeds i64");
+      return ContractionShape{axis(a, 0), 1, k, 1, slot(a), slot(x), slot(out)};
     }
     bool scaled = name == "scaled_contract";
     auto b = op.getOperand(scaled ? 2 : 1);
@@ -66,7 +69,8 @@ contractionShape(mlir::Operation &op, mlir::Value out, const CallFacts &f) {
         scaled ? -1 : op.getAttrOfType<IntegerAttr>("rhs_batch").getInt();
     int64_t k = axis(a, ak), m = 0, n = 0;
     if (scaled) {
-      k *= 32;
+      if (__builtin_mul_overflow(k, int64_t(MX8Block::group), &k))
+        return llvm::createStringError("MX contraction extent exceeds i64");
       m = axis(a, 0);
       n = axis(b, 2);
     } else {

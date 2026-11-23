@@ -80,6 +80,25 @@ Value OwnerTiles::slice(Operation &old, ArrayRef<Value> outerCoords, Value mask,
   int64_t n = shape(view)[axis],
           w = std::max<int64_t>(1, llvm::PowerOf2Ceil(n));
   auto lanesK = lanes(w);
+  if (old.hasAttr("block.broadcast_read") && !stored) {
+    // The block verifier proved equality of every owner's source coordinates.
+    SmallVector<Value> ix;
+    for (auto coord : outerCoords)
+      ix.push_back(isa<RankedTensorType>(coord.getType())
+                       ? reduce(coord, "min", 0)
+                       : coord);
+    ix.insert(ix.begin() + axis, lanesK);
+    SmallVector<int64_t> axes(ix.size(), -1);
+    axes[axis] = 0;
+    auto active = reduce(mask, "max", 0);
+    auto inside =
+        b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, lanesK,
+                                like(integer(n), lanesK.getType()));
+    auto keep =
+        b.create<arith::AndIOp>(loc, like(active, inside.getType()), inside);
+    auto v = read(view, address(view, ix, axes), keep);
+    return like(v, lifted(old.getResult(0)), 1);
+  }
   SmallVector<Value> coords(outerCoords);
   coords.insert(coords.begin() + axis, lanesK);
   SmallVector<int64_t> projections;

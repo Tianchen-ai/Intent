@@ -11,9 +11,15 @@ class StorageFormat<string name, string spelling> : TypeDef<Kir_Dialect, name> {
   let mnemonic = spelling;
   let assemblyFormat = "";
 }
-def Q4K : StorageFormat<"Q4K", "q4_k">;
-def Q8K : StorageFormat<"Q8K", "q8_k">;
-def MX8 : StorageFormat<"MX8", "mx_e4m3_e8m0">;
+def Q4K : StorageFormat<"Q4K", "q4_k"> {
+  let extraClassDeclaration = [{ ::intentdsl::kir::Q4KRecord getLayout() const { return {}; } }];
+}
+def Q8K : StorageFormat<"Q8K", "q8_k"> {
+  let extraClassDeclaration = [{ ::intentdsl::kir::Q8KRecord getLayout() const { return {}; } }];
+}
+def MX8 : StorageFormat<"MX8", "mx_e4m3_e8m0"> {
+  let extraClassDeclaration = [{ ::intentdsl::kir::MX8Block getLayout() const { return {}; } }];
+}
 class Inst<string mnemonic, list<Trait> traits = []>
     : Op<Kir_Dialect, mnemonic, traits>;
 def Kir_parallel : Inst<"parallel"> {
