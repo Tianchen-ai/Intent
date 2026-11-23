@@ -26,7 +26,10 @@ capabilities(const llvm::json::Object &options) {
     if(auto err=profile.services.facts.query("register_file",{*registers,"reg32","CUDA",llvm::json::Object{{"source","device properties"}}}))return err;
   if (auto err = profile.services.provide<intentdsl::block::OwnerMachine>(
           std::make_shared<intentdsl::block::OwnerMachine>(
-              intentdsl::block::OwnerMachine{32, 256})))
+              intentdsl::block::OwnerMachine{
+                  32, 256,
+                  options.getInteger("dynamic_shared_per_block").value_or(0),
+                  32768})))
     return err;
   if(auto err=intentdsl::bindPerformance(profile,options,"",options.getString("calibration").value_or("").str(),options.getInteger("sm_count").value_or(1)))return std::move(err);
   if (auto e =

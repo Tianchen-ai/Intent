@@ -27,6 +27,7 @@ class Target:
         p = torch.cuda.get_device_properties(device)
         return dict(
             shared_per_block=p.shared_memory_per_block,
+            dynamic_shared_per_block=getattr(p,"shared_memory_per_block_optin",p.shared_memory_per_block),
             registers=p.regs_per_multiprocessor,
             calibration={"NVIDIA H100 80GB HBM3":"sm90","NVIDIA GeForce RTX 5090 D":"sm120"}.get(torch.cuda.get_device_name(device),""), sm_count=torch.cuda.get_device_properties(device).multi_processor_count,
             sm=10 * arch[0] + arch[1],
