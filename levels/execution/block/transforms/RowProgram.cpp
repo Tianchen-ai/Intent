@@ -151,9 +151,9 @@ struct Row {
             auto mask = binary("and", binary("lt", index, constant(span), i1),
                                binary("lt", pos, constant(n), i1));
             auto key = read(arg(0), pos, mask, -1);
+            if(getElementTypeOrSelf(key.getType()).isF32())key=map("i32",key,i32);
             if (!nativeHistogram) {
-              auto ints = map("i32", key, i32);
-              auto equal = binary("eq", expand(ints, 1), expand(arg(2), 0), i1);
+              auto equal = binary("eq", expand(key, 1), expand(arg(2), 0), i1);
               auto live = binary("and", equal, expand(mask, 1), i1);
               return binary(
                   "add", carry,
@@ -331,7 +331,9 @@ struct Row {
               binary("add", binary("mul", partition, constant(span)), off);
           auto mask = binary("and", binary("lt", off, constant(span), i1),
                              binary("lt", pos, constant(extent), i1));
-          auto key = map("i64", read(source, pos, mask, -1), i64);
+          auto raw=read(source,pos,mask,-1);
+          if(getElementTypeOrSelf(raw.getType()).isF32())raw=map("i32",raw,i32);
+          auto key=map("i64",raw,i64);
           auto keep = binary("and", binary("ge", key, constant(0), i1),
                              binary("lt", key, meta("N"), i1));
           op("fetch_add", {target, offset(target, dst(key)), constant(1), keep},

@@ -164,7 +164,11 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
       auto *body=b.createBlock(&b.create(panels)->getRegion(0),{},b.getIndexType(),{store->getLoc()});
       OperationState read(store->getLoc(),"ct_src.read_bin_keys");
       read.addOperands(body->getArgument(0));read.addTypes(RankedTensorType::get({step},cast<MemRefType>(value->getOperand(0).getType()).getElementType()));
-      auto keys=b.create(read)->getResult(0);
+      auto raw=b.create(read)->getResult(0);
+      auto type=cast<RankedTensorType>(raw.getType());
+      OperationState convert(store->getLoc(),"ct_src.bin_index");
+      convert.addOperands(raw);convert.addTypes(type.clone(type.getElementType().isInteger(64)?b.getI64Type():b.getI32Type()));
+      auto keys=b.create(convert)->getResult(0);
       OperationState update(store->getLoc(),"ct_src.atomic_bins"); update.addOperands({body->getArgument(0),keys});b.create(update);
       store->erase();value->erase();
     });
@@ -384,10 +388,13 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
          guard.back().getName().getStringRef()!="ct_src.bin_panels" || !llvm::hasSingleElement(guard.back().getRegion(0)))
         return op->emitError("expected guarded zero then count panels"),WalkResult::interrupt();
       auto &loop=guard.back().getRegion(0).front();
-      if(!step || loop.getNumArguments()!=1 || !loop.getArgument(0).getType().isIndex() || loop.getOperations().size()!=2 ||
+      if(!step || loop.getNumArguments()!=1 || !loop.getArgument(0).getType().isIndex() || loop.getOperations().size()!=3 ||
          loop.front().getName().getStringRef()!="ct_src.read_bin_keys" || loop.back().getName().getStringRef()!="ct_src.atomic_bins" ||
          loop.front().getOperand(0)!=loop.getArgument(0) || loop.back().getOperand(0)!=loop.getArgument(0) ||
-         loop.back().getOperand(1)!=loop.front().getResult(0) || !src ||
+         loop.front().getNextNode()->getName().getStringRef()!="ct_src.bin_index" ||
+         loop.front().getNextNode()->getOperand(0)!=loop.front().getResult(0) ||
+         loop.back().getOperand(1)!=loop.front().getNextNode()->getResult(0) || !src ||
+         loop.back().getOperand(1).getType()!=RankedTensorType::get({step.getInt()},cast<MemRefType>(src.getType()).getElementType().isInteger(64)?IntegerType::get(fn.getContext(),64):IntegerType::get(fn.getContext(),32)) ||
          loop.front().getResult(0).getType()!=RankedTensorType::get({step.getInt()},cast<MemRefType>(src.getType()).getElementType()))
         return op->emitError("invalid count panel or atomic update"),WalkResult::interrupt();
       ok=ok && step && step.getInt()>0 && step.getInt()<=2048 && llvm::isPowerOf2_64(step.getInt()) && op->getAttrOfType<IntegerAttr>("span").getInt()%step.getInt()==0;

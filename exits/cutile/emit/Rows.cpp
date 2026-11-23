@@ -89,6 +89,11 @@ llvm::Error rowRule(Operation &op, PrintPoint at, PrintContext &c) {
                              ",0),(R,W)),ct.int32)"));
     return llvm::Error::success();
   }
+  if(code=="bin_index"){
+    auto type=getElementTypeOrSelf(op.getResult(0).getType());
+    line(result()+" = ct.astype("+arg(0)+(type.isInteger(64)?",ct.int64)":",ct.int32)"));
+    return llvm::Error::success();
+  }
   if (code == "private_bin_store" || code == "zero_bins" ||
       code == "bin_panels" || code == "read_bin_keys" ||
       code == "atomic_bins") {
@@ -135,12 +140,7 @@ llvm::Error rowRule(Operation &op, PrintPoint at, PrintContext &c) {
                  ",dtype=ct.int32)";
       line("valid=(" + pos + "<" + extent + ")&(" + arg(1) + ">=0)&(" + arg(1) +
            "<" + bins + ")");
-      auto index = cast<ShapedType>(op.getOperand(1).getType())
-                           .getElementType()
-                           .isInteger(64)
-                       ? arg(1)
-                       : "ct.astype(" + arg(1) + ",ct.int32)";
-      auto key = "ct.where(valid," + index + ",0)";
+      auto key = "ct.where(valid,"+arg(1)+",0)";
       line("ct.atomic_add(" + dest +
            (swap ? ",(" + key + ",ct.bid(0))" : ",(ct.bid(0)," + key + ")") +
            ",ct.astype(valid,ct.int32),check_bounds=False,memory_order=ct."
@@ -467,6 +467,7 @@ void rowRules(TerminalPrinter &printer) {
                   "bin_panels",
                   "read_bin_keys",
                   "atomic_bins",
+                  "bin_index",
                   "dimension",
                   "range",
                   "expand",

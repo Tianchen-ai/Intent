@@ -93,6 +93,7 @@ def TileSource_PrivateBinStore : Op<TileSource,"private_bin_store",[SingleBlock,
 def ZeroBins : Op<TileSource,"zero_bins">;
 def BinPanels : Op<TileSource,"bin_panels",[SingleBlock,NoTerminator]> {let regions=(region AnyRegion:$body);}
 def ReadBinKeys : Op<TileSource,"read_bin_keys"> {let arguments=(ins Index:$panel);let results=(outs AnyRankedTensor:$keys);}
+def BinIndex : Op<TileSource,"bin_index",[Pure]> {let arguments=(ins AnyRankedTensor:$raw);let results=(outs AnyRankedTensor:$key);}
 def AtomicBins : Op<TileSource,"atomic_bins"> {let arguments=(ins Index:$panel,AnyRankedTensor:$keys);}
 def TileSource_Different : Op<TileSource,"ne"> {let arguments=(ins AnyType:$lhs,AnyType:$rhs);let results=(outs AnyTensor:$mask);}
 def TileSource_ColumnsTile : Op<TileSource,"member_tile"> {let arguments=(ins AnyTensor:$columns,I1Tensor:$active);let results=(outs I32Tensor:$members);}
