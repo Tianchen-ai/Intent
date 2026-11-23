@@ -3,7 +3,7 @@
     "block": {
       "decisions": {
         "levels/execution/block::ordered-owners": {
-          "strategies":["levels/execution/block::owner-widths"],
+          "strategies":["levels/execution/block::mixed-owner-reads","levels/execution/block::owner-widths"],
           "realizer":"levels/execution/block::map-owner-tile"
         },
         "levels/execution/block::contraction": {
