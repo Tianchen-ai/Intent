@@ -188,10 +188,28 @@ LogicalResult offsets(func::FuncOp f, bool install) {
       if (o.getName().getStringRef() == "dsa.reduce" &&
           !attach(o, grouped, local))
         return WalkResult::interrupt();
-    for (auto &o : compute)if(o.getName().getStringRef()=="block.scan_sum"){
-      auto addr=b.getDenseI64ArrayAttr({grouped,local});
-      if(install)o.setAttr("bangc.scan_scratch",addr);
-      if(o.getAttr("bangc.scan_scratch")!=addr)return WalkResult::interrupt();
+    for (auto &o : compute) {
+      auto code = o.getName().getStringRef();
+      auto resTy = o.getNumResults() == 1
+                       ? dyn_cast<RankedTensorType>(o.getResult(0).getType())
+                       : RankedTensorType{};
+      if (code == "block.scan_sum") {
+        auto addr = b.getDenseI64ArrayAttr({grouped, local});
+        if (install)
+          o.setAttr("bangc.scan_scratch", addr);
+        if (o.getAttr("bangc.scan_scratch") != addr)
+          return WalkResult::interrupt();
+      }
+      if ((code == "block.mul" && resTy && resTy.getRank() == 2 &&
+           resTy.getElementType().isBF16()) ||
+          (code == "block.div" && resTy && resTy.getRank() == 2 &&
+           resTy.getElementType().isF32() && !narrowedQuotient(&o))) {
+        auto addr = b.getDenseI64ArrayAttr({grouped, local});
+        if (install)
+          o.setAttr("bangc.scratch", addr);
+        if (o.getAttr("bangc.scratch") != addr)
+          return WalkResult::interrupt();
+      }
     }
     return WalkResult::advance();
   });

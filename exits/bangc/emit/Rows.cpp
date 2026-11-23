@@ -79,7 +79,10 @@ void loadRuntimeSources(TerminalPrinter &p) {
       {"exits/bangc::certified-half-quotient",
        "runtime/bangc/kernels/quotient.mlu"},
       {"exits/bangc::bf16-tile-convert", "runtime/bangc/kernels/bf16.mlu"},
+      {"exits/bangc::bf16-tile-product", "runtime/bangc/kernels/bf16.mlu"},
       {"exits/bangc::bf16-scalar-convert", "runtime/bangc/kernels/bf16.mlu"},
+      {"exits/bangc::ieee-sqrt-rn", "runtime/bangc/kernels/ieee_math.mlu"},
+      {"exits/bangc::ieee-div-rn", "runtime/bangc/kernels/ieee_math.mlu"},
       {"exits/bangc::inclusive-scan", "runtime/bangc/kernels/scan.mlu"},
       {"exits/bangc::moments-reduce", "runtime/bangc/kernels/moments.mlu"},
       {"exits/bangc::moments-merge", "runtime/bangc/kernels/moments.mlu"},
@@ -455,6 +458,33 @@ TerminalPrinter rowPrinter() {
       c.line("narrow_bf16_tile(" + c.name(op.getOperand(0)) + ", " +
              c.name(op.getOperand(1)) + ", (int)(" + c.name(op.getOperand(2)) +
              "), (int)(" + c.name(op.getOperand(3)) + "));");
+    return llvm::Error::success();
+  });
+
+  enter("bangc_src.bf16_product", [](Operation &op, PrintContext &c) {
+    c.line("bf16_product_tile(" + c.name(op.getOperand(0)) + ", " +
+           c.name(op.getOperand(1)) + ", " + c.name(op.getOperand(2)) + ", " +
+           c.name(op.getOperand(3)) + ", (int)(" + c.name(op.getOperand(4)) +
+           "), (int)(" + c.name(op.getOperand(5)) + "));");
+    return llvm::Error::success();
+  });
+
+  enter("bangc_src.vec_sqrt_rn", [](Operation &op, PrintContext &c) {
+    c.line("vec_sqrt_rn(" + c.name(op.getOperand(0)) + ", " +
+           c.name(op.getOperand(1)) + ", (int)(" + c.name(op.getOperand(2)) +
+           "));");
+    return llvm::Error::success();
+  });
+
+  enter("bangc_src.vec_div_rn", [](Operation &op, PrintContext &c) {
+    auto mode = op.getAttrOfType<StringAttr>("mode").getValue();
+    std::string fnName = mode == "vv"   ? "vec_div_rn"
+                         : mode == "vs" ? "vec_div_scalar_rn"
+                                        : "scalar_div_vec_rn";
+    c.line(fnName + "(" + c.name(op.getOperand(0)) + ", " +
+           c.name(op.getOperand(1)) + ", " + c.name(op.getOperand(2)) + ", " +
+           c.name(op.getOperand(3)) + ", (int)(" + c.name(op.getOperand(4)) +
+           "), (int)(" + c.name(op.getOperand(5)) + "));");
     return llvm::Error::success();
   });
 

@@ -20,9 +20,9 @@ struct Footprint {
           code == "member_axis" || code == "slab_axis" || code == "rows" || code == "columns")
         continue;
       if (code == "reduce") {
-        f.collectiveBytes = reductionScratch;
+        f.collectiveBytes = std::max<int64_t>(f.collectiveBytes, reductionScratch);
       } else if (op.getNumResults() == 1) {
-        if(code=="scan_sum")f.collectiveBytes=reductionScratch;
+        if(code=="scan_sum")f.collectiveBytes=std::max<int64_t>(f.collectiveBytes,reductionScratch);
         if(code=="atomic_add_at")f.collectiveBytes=std::max<int64_t>(f.collectiveBytes,8);
         if(code=="key_counts" || code=="sum_columns")
           f.collectiveBytes=std::max<int64_t>(f.collectiveBytes,cast<MemRefType>(op.getOperand(0).getType()).getElementTypeBitWidth()/8);
@@ -31,6 +31,27 @@ struct Footprint {
         auto t = dyn_cast<RankedTensorType>(op.getResult(0).getType());
         if (!t || t.getRank() < 1 || !t.getElementType().isIntOrFloat())
           continue;
+        if (t.getRank() == 2 && code == "mul" && t.getElementType().isBF16())
+          f.collectiveBytes =
+              std::max<int64_t>(f.collectiveBytes, 2 * int64_t(sizeof(float)));
+        if (t.getRank() == 2 && code == "div" && t.getElementType().isF32()) {
+          bool narrowed = false;
+          if (op.hasOneUse()) {
+            Operation *u = *op.getUsers().begin();
+            auto uTy = u->getNumResults() == 1
+                           ? dyn_cast<RankedTensorType>(u->getResult(0).getType())
+                           : RankedTensorType{};
+            if (u->getBlock() == &body && u->getName().stripDialect() == "cast" &&
+                uTy && uTy.getElementType().isF16()) {
+              for (auto *prev = op.getPrevNode(); prev; prev = prev->getPrevNode())
+                if (prev->getName().stripDialect() == "reduce")
+                  narrowed = true;
+            }
+          }
+          if (!narrowed)
+            f.collectiveBytes = std::max<int64_t>(f.collectiveBytes,
+                                                  6 * int64_t(sizeof(float)));
+        }
         // Rank-one calculation results in the block contract are per-row
         // summaries. Projected coordinates have no local storage; copied
         // fragments do.
@@ -193,9 +214,20 @@ planStorage(func::FuncOp fn, const LocalSupply &c, int64_t depth,
       accepted.push_back(attrs.getDictionary(fn.getContext()));
   }
   NamedAttrList out;
-  if(fn->getAttrOfType<StringAttr>("block.topology")=="stream" && phases.size()==1 &&
-     fn.walk([](Operation *op){return op->getName().stripDialect()=="segment_fold"?WalkResult::interrupt():WalkResult::advance();}).wasInterrupted() &&
-     !fn.walk([](Operation *op){auto n=op->getName().stripDialect();return n=="reduce" || n=="combine" || n=="owner_store" || n=="summary_reduce"?WalkResult::interrupt():WalkResult::advance();}).wasInterrupted())
+  if (fn->getAttrOfType<StringAttr>("block.topology") == "stream" &&
+      phases.size() == 1 && !fn->hasAttr("kir.owner_axis") &&
+      !fn.walk([](Operation *op) {
+           auto n = op->getName().stripDialect();
+           return (n == "reduce" || n == "combine" || n == "owner_store" ||
+                   n == "owner_load" || n == "summary_reduce" ||
+                   n == "summary_merge" || n == "scan_sum" ||
+                   n == "publish_offsets" || n == "fill_ranges_at" ||
+                   n == "scatter_fragment" || n == "unique_put" ||
+                   n == "unique_put_at" || n == "atomic_add_at" ||
+                   n == "key_counts")
+                      ? WalkResult::interrupt()
+                      : WalkResult::advance();
+         }).wasInterrupted())
     out.set("independent_columns",b.getUnitAttr());
   if(reuse)out.set("reuse_temporaries", b.getUnitAttr());
   out.set("group_temporaries",b.getBoolAttr(wide));

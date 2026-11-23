@@ -48,9 +48,11 @@ void supplyCost(Unit &u) {
                 cast<DictionaryAttr>(*it).getAs<IntegerAttr>("rows").getInt();
             double effGroup = group * batch;
             double steps = std::ceil(std::ceil(m / effGroup) / participants);
+            double tileFraction = 1.;
             if(d.contains("independent_columns")){
               auto width=cast<DictionaryAttr>(*it).getAs<IntegerAttr>("width").getInt();
               steps=std::ceil(std::ceil(m/effGroup)*std::ceil(n/width)/participants);
+              tileFraction = std::min(1., double(width) / std::max(1., double(n)));
             }
             RowPrediction pred;
             pred.terms = dma->terms;
@@ -64,9 +66,9 @@ void supplyCost(Unit &u) {
             pred.terms["working_set"] = {
                 double(row.getAs<IntegerAttr>("bytes").getInt()), "B"};
             if (dma->timeNs && launch && sync && vector && startup) {
-              double fetch = effGroup * e.terms.at("fetch").value,
-                     compute = (effGroup * n * std::max(0.,ops-e.terms.at("native_operations").value) + 8 * merges + pred.terms["serial_prefix_adds"].value) / *vector + effGroup * e.terms.at("native_compute").value,
-                     write = effGroup * e.terms.at("writeback").value;
+              double fetch = effGroup * tileFraction * e.terms.at("fetch").value,
+                     compute = tileFraction * ((effGroup * n * std::max(0.,ops-e.terms.at("native_operations").value) + 8 * merges + pred.terms["serial_prefix_adds"].value) / *vector + effGroup * e.terms.at("native_compute").value),
+                     write = effGroup * tileFraction * e.terms.at("writeback").value;
               double overlap = depth == 2 ? std::max(0., steps - 1) *
                                                 std::min(fetch, compute)
                                           : 0.;

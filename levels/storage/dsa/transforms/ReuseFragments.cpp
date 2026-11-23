@@ -17,8 +17,12 @@ struct ReuseFragments : PassWrapper<ReuseFragments, OperationPass<ModuleOp>> {
       for (auto &op : llvm::make_early_inc_range(*block)) {
         auto name = op.getName().stripDialect();
         if (op.getName().getDialectNamespace() != "block" ||
-            !llvm::is_contained(ArrayRef<StringRef>{"load", "cast", "mul",
-                "add", "sub", "div", "rsqrt", "constant", "reduce"}, name)) {
+            !llvm::is_contained(
+                ArrayRef<StringRef>{"load", "cast", "mul", "add", "sub", "div",
+                                    "rsqrt", "sqrt", "exp", "maximum",
+                                    "constant", "reduce", "gt", "ne", "select",
+                                    "and", "xor", "shl", "shr"},
+                name)) {
           available.clear();
           continue;
         }

@@ -133,6 +133,81 @@ void rowContracts(Unit &unit) {
         return failure();
       });
 
+  add("bf16-tile-product", "bf16_product", "bf16_product_tile", "bf16.mlu",
+      "NRAM bf16 destination, two NRAM bf16 inputs and NRAM f32 scratch",
+      "64-lane aligned NRAM vector fragment", "f32",
+      "writes NRAM f32 scratch and destination NRAM bf16 tile",
+      "correctly rounded IEEE-754 binary32 product narrowed with NaN-preserving "
+      "bf16 round-to-nearest-even",
+      [](Operation *op) {
+        auto dst = dyn_cast<MemRefType>(op->getOperand(0).getType());
+        auto lhs = dyn_cast<MemRefType>(op->getOperand(1).getType());
+        auto rhs = dyn_cast<MemRefType>(op->getOperand(2).getType());
+        auto sc = dyn_cast<MemRefType>(op->getOperand(3).getType());
+        return success(isSpace(op->getOperand(0), 1) &&
+                       isSpace(op->getOperand(1), 1) &&
+                       isSpace(op->getOperand(2), 1) &&
+                       isSpace(op->getOperand(3), 1) &&
+                       dst.getElementType().isBF16() &&
+                       lhs.getElementType().isBF16() &&
+                       rhs.getElementType().isBF16() &&
+                       sc.getElementType().isF32());
+      });
+
+  add("ieee-sqrt-rn", "vec_sqrt_rn", "vec_sqrt_rn", "ieee_math.mlu",
+      "NRAM f32 destination and NRAM f32 input",
+      "64-lane aligned NRAM vector fragment", "f32",
+      "writes NRAM f32 destination tile",
+      "correctly rounded IEEE-754 binary32 round-to-nearest-even (0 ULP)",
+      [](Operation *op) {
+        auto dst = dyn_cast<MemRefType>(op->getOperand(0).getType());
+        auto src = dyn_cast<MemRefType>(op->getOperand(1).getType());
+        return success(isSpace(op->getOperand(0), 1) &&
+                       isSpace(op->getOperand(1), 1) &&
+                       dst.getElementType().isF32() &&
+                       src.getElementType().isF32());
+      });
+
+  add("ieee-div-rn", "vec_div_rn",
+      "vec_div_rn/vec_div_scalar_rn/scalar_div_vec_rn", "ieee_math.mlu",
+      "NRAM f32 destination, NRAM or scalar f32 dividend and divisor, and NRAM "
+      "f32 scratch",
+      "64-lane aligned NRAM vector fragment with 6x lanes f32 scratch", "f32",
+      "writes NRAM f32 scratch and correctly rounded NRAM f32 quotient",
+      "correctly rounded IEEE-754 binary32 round-to-nearest-even (0 ULP): "
+      "exponent scaling + reciprocal Newton-Raphson + 48-bit "
+      "Veltkamp-Dekker/TwoDiff residual + endpoint certification",
+      [](Operation *op) {
+        auto mode = op->getAttrOfType<StringAttr>("mode");
+        auto dst = dyn_cast<MemRefType>(op->getOperand(0).getType());
+        auto sc = dyn_cast<MemRefType>(op->getOperand(3).getType());
+        if (!mode || !isSpace(op->getOperand(0), 1) ||
+            !isSpace(op->getOperand(3), 1) || !dst.getElementType().isF32() ||
+            !sc.getElementType().isF32())
+          return failure();
+        if (mode == "vv") {
+          auto l = dyn_cast<MemRefType>(op->getOperand(1).getType());
+          auto r = dyn_cast<MemRefType>(op->getOperand(2).getType());
+          return success(isSpace(op->getOperand(1), 1) &&
+                         isSpace(op->getOperand(2), 1) &&
+                         l.getElementType().isF32() &&
+                         r.getElementType().isF32());
+        }
+        if (mode == "vs") {
+          auto l = dyn_cast<MemRefType>(op->getOperand(1).getType());
+          return success(isSpace(op->getOperand(1), 1) &&
+                         l.getElementType().isF32() &&
+                         op->getOperand(2).getType().isF32());
+        }
+        if (mode == "sv") {
+          auto r = dyn_cast<MemRefType>(op->getOperand(2).getType());
+          return success(op->getOperand(1).getType().isF32() &&
+                         isSpace(op->getOperand(2), 1) &&
+                         r.getElementType().isF32());
+        }
+        return failure();
+      });
+
   add("bf16-scalar-convert", "bf16_scalar", "widen_bf16/round_bf16", "bf16.mlu",
       "scalar bf16 or f32 values", "scalar value", "f32", "pure scalar result",
       "IEEE round-to-nearest-even bf16 scalar conversion and product",

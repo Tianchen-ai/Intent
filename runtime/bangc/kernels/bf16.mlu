@@ -35,3 +35,15 @@ __mlu_func__ void narrow_bf16_tile(unsigned short *dst, const float *src,
     __bang_float2bfloat16_rn((bfloat16_t *)dst, src, lanes);
   }
 }
+
+__mlu_func__ void bf16_product_tile(unsigned short *dst,
+                                    const unsigned short *lhs,
+                                    const unsigned short *rhs, float *scratch,
+                                    int live, int lanes) {
+  float *a = scratch;
+  float *b = scratch + lanes;
+  widen_bf16_tile(a, lhs, lanes);
+  widen_bf16_tile(b, rhs, lanes);
+  __bang_mul(a, a, b, lanes);
+  narrow_bf16_tile(dst, a, live, lanes);
+}

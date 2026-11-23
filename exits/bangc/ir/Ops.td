@@ -173,6 +173,21 @@ def Bf16TileOp : BangcOp<"bf16_tile"> {
                        StrAttr:$mode);
 }
 
+def Bf16ProductOp : BangcOp<"bf16_product"> {
+  let arguments = (ins AnyMemRef:$dst, AnyMemRef:$lhs, AnyMemRef:$rhs,
+                       AnyMemRef:$scratch, I64:$live, I64:$lanes);
+}
+
+def VecSqrtRnOp : BangcOp<"vec_sqrt_rn"> {
+  let arguments = (ins AnyMemRef:$dst, AnyMemRef:$src, I64:$lanes);
+}
+
+def VecDivRnOp : BangcOp<"vec_div_rn"> {
+  let arguments = (ins AnyMemRef:$dst, AnyType:$lhs, AnyType:$rhs,
+                       AnyMemRef:$scratch, I64:$live, I64:$lanes,
+                       StrAttr:$mode);
+}
+
 def Bf16ScalarOp : BangcOp<"bf16_scalar"> {
   let arguments = (ins Variadic<AnyType>:$inputs, StrAttr:$mode);
   let results = (outs AnyType:$result);

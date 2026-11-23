@@ -1783,6 +1783,72 @@ struct RowLowerer {
                      {}, "validated-exp");
               continue;
             }
+            if (n == "sqrt" && dstElem.isF32() &&
+                rankOf(inst.getOperand(0).getType()) == 2) {
+              makeOp("vec_sqrt_rn", {dst, getVal(inst.getOperand(0)), lanes},
+                     {}, {}, "ieee-sqrt-rn");
+              continue;
+            }
+            if (prim == "bf16_product" &&
+                rankOf(inst.getOperand(0).getType()) == 2 &&
+                rankOf(inst.getOperand(1).getType()) == 2) {
+              Value scratch = nramAt(
+                  b.getF32Type(),
+                  phaseByteOffset(
+                      inst.getAttrOfType<DenseI64ArrayAttr>("bangc.scratch")));
+              Value oneRow = b.create<arith::CmpIOp>(
+                  loc, arith::CmpIPredicate::eq, members, cI64(1));
+              Value activeElems = b.create<arith::SelectOp>(
+                  loc, oneRow, live,
+                  b.create<arith::MulIOp>(loc, members, symP));
+              makeOp("bf16_product",
+                     {dst, getVal(inst.getOperand(0)),
+                      getVal(inst.getOperand(1)), scratch, activeElems, lanes},
+                     {}, {}, "bf16-tile-product");
+              continue;
+            }
+            if (n == "div" && prim != "quotient_for_narrow" &&
+                dstElem.isF32()) {
+              int r0 = rankOf(inst.getOperand(0).getType());
+              int r1 = rankOf(inst.getOperand(1).getType());
+              Value scratch = nramAt(
+                  b.getF32Type(),
+                  phaseByteOffset(
+                      inst.getAttrOfType<DenseI64ArrayAttr>("bangc.scratch")));
+              Value oneRow = b.create<arith::CmpIOp>(
+                  loc, arith::CmpIPredicate::eq, members, cI64(1));
+              Value activeElems = b.create<arith::SelectOp>(
+                  loc, oneRow, live,
+                  b.create<arith::MulIOp>(loc, members, symP));
+              if ((r0 == 2 && r1 == 2) || (r0 == 2 && r1 == 0) ||
+                  (r0 == 0 && r1 == 2)) {
+                StringRef mode = (r0 == 2 && r1 == 2)   ? "vv"
+                                 : (r0 == 2 && r1 == 0) ? "vs"
+                                                        : "sv";
+                makeOp("vec_div_rn",
+                       {dst, getVal(inst.getOperand(0)),
+                        getVal(inst.getOperand(1)), scratch, activeElems,
+                        lanes},
+                       {}, {b.getNamedAttr("mode", b.getStringAttr(mode))},
+                       "ieee-div-rn");
+                continue;
+              }
+              if (r0 == 2 && r1 == 1) {
+                Value lhsIn = getVal(inst.getOperand(0));
+                Value rhsIn = getVal(inst.getOperand(1));
+                forLoop(cI64(0), members, cI64(1), [&](Value h) {
+                  Value dH = makeAddr(dst, {h}, {symP}, 1);
+                  Value sH = makeAddr(lhsIn, {h}, {symP}, 1);
+                  Value scVal =
+                      loadAt(rhsIn, b.create<arith::AddIOp>(loc, j, h));
+                  makeOp("vec_div_rn",
+                         {dH, sH, scVal, scratch, live, rowLanes}, {},
+                         {b.getNamedAttr("mode", b.getStringAttr("vs"))},
+                         "ieee-div-rn");
+                });
+                continue;
+              }
+            }
             if ((n == "add" || n == "sub" || n == "mul") &&
                 prim != "bf16_product" &&
                 (dstElem.isF32() || dstElem.isF16() ||
@@ -1808,6 +1874,21 @@ struct RowLowerer {
                        {dst, getVal(inst.getOperand(1)),
                         getVal(inst.getOperand(0)), lanes},
                        {}, {b.getNamedAttr("op", b.getStringAttr(n))});
+                continue;
+              }
+              if (r0 == 0 && r1 == 2 && n == "sub") {
+                Value negOne =
+                    dstElem.isF32()
+                        ? cF32(-1.0f)
+                        : dstElem.isF16()
+                              ? scalarCast(cF32(-1.0f), dstElem)
+                              : cI32(-1);
+                makeOp("vec_scalar",
+                       {dst, getVal(inst.getOperand(1)), negOne, lanes}, {},
+                       {b.getNamedAttr("op", b.getStringAttr("mul"))});
+                makeOp("vec_scalar",
+                       {dst, dst, getVal(inst.getOperand(0)), lanes}, {},
+                       {b.getNamedAttr("op", b.getStringAttr("add"))});
                 continue;
               }
               if ((r0 == 2 && r1 == 1) ||
