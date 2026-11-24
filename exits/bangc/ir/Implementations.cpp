@@ -1,6 +1,7 @@
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/storage/dsa/ir/Matrix.h"
 #include "intentdsl/levels/storage/dsa/ir/Supply.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinTypes.h"
 
 namespace CI_UNIT_NAMESPACE {
@@ -22,9 +23,32 @@ bool isMomentTuple(Type t) {
   return tup && tup.size() == 3 && tup.getType(0).isInteger(32) &&
          tup.getType(1).isF32() && tup.getType(2).isF32();
 }
+
+TypedContract makeTyped(std::optional<unsigned> minIn,
+                        std::optional<unsigned> maxIn, unsigned numOut,
+                        std::vector<ScalarTypeKind> inTypes,
+                        std::vector<ScalarTypeKind> outTypes,
+                        std::vector<ScalarTypeKind> accTypes,
+                        EffectMask effects, uint64_t minAlign = 64,
+                        std::optional<uint64_t> space = 1) {
+  TypedContract tc;
+  tc.shape.minOperands = minIn;
+  tc.shape.maxOperands = maxIn;
+  tc.shape.minResults = numOut;
+  tc.shape.maxResults = numOut;
+  tc.operandTypes = std::move(inTypes);
+  tc.resultTypes = std::move(outTypes);
+  tc.accumulatorTypes = std::move(accTypes);
+  tc.layout.minAlignmentBytes = minAlign;
+  tc.layout.requiredMemorySpace = space;
+  tc.effects = effects;
+  tc.verifyEffectsInterface = true;
+  return tc;
+}
 } // namespace
 
 void rowContracts(Unit &unit) {
+  using STK = ScalarTypeKind;
   auto hasNram = [](const TargetProfile &p) -> llvm::Error {
     if (!p.services.get<intentdsl::dsa::LocalSupply>())
       return llvm::createStringError("missing MLU370 NRAM supply capabilities");
@@ -40,6 +64,7 @@ void rowContracts(Unit &unit) {
   auto add = [&](StringRef name, StringRef op, StringRef symbol,
                  StringRef resource, StringRef operands, StringRef layout,
                  StringRef acc, StringRef effects, StringRef numerical,
+                 TypedContract typed,
                  std::function<LogicalResult(Operation *)> verify) {
     ImplementationContract c;
     c.name = name.str();
@@ -57,12 +82,13 @@ void rowContracts(Unit &unit) {
     c.costParameters = {"participants", "width", "batch"};
     c.available = hasNram;
     c.verify = std::move(verify);
+    c.typed = std::move(typed);
     unit.implementations.push_back({std::move(c), COMPILERINFRA_SOURCE});
   };
   auto addBuiltin = [&](StringRef name, StringRef op, StringRef symbol,
                         StringRef estimator, StringRef operands,
                         StringRef layout, StringRef acc, StringRef effects,
-                        StringRef numerical,
+                        StringRef numerical, TypedContract typed,
                         std::function<llvm::Error(const TargetProfile &)> avail,
                         std::function<LogicalResult(Operation *)> verify) {
     ImplementationContract c;
@@ -80,6 +106,7 @@ void rowContracts(Unit &unit) {
     c.costParameters = {"m", "n", "k"};
     c.available = std::move(avail);
     c.verify = std::move(verify);
+    c.typed = std::move(typed);
     unit.implementations.push_back({std::move(c), COMPILERINFRA_SOURCE});
   };
 
@@ -90,8 +117,10 @@ void rowContracts(Unit &unit) {
       "filter and i1 accumulate flag",
       "NRAM row-major [BM, BK] x WRAM 64-channel filter [BN=64, BK]", "f32",
       "writes NRAM f32[BM, BN] accumulator",
-      "MLU370 matrix-engine FP16xFP16 contraction accumulated in FP32", hasWram,
-      [](Operation *op) {
+      "MLU370 matrix-engine FP16xFP16 contraction accumulated in FP32",
+      makeTyped(4, 4, 0, {STK::F32, STK::F16, STK::I1}, {}, {STK::F32},
+                EffectMask::ReadWrite, 64, std::nullopt),
+      hasWram, [](Operation *op) {
         auto mode = op->getAttrOfType<StringAttr>("mode");
         auto bn = op->getAttrOfType<IntegerAttr>("bn");
         if (!mode || mode != "f16" || !bn || bn.getInt() != 64 ||
@@ -109,32 +138,63 @@ void rowContracts(Unit &unit) {
                        op->getOperand(3).getType().isInteger(1));
       });
 
-  addBuiltin(
-      "wram-conv-bf16", "wram_conv", "__bang_conv/__bang_conv_partial",
-      "exits/bangc::matrix-transfer",
-      "NRAM f32[BM, BN] accumulator, NRAM bf16[BM, BK] input, WRAM bf16[BN, "
-      "BK] filter and i1 accumulate flag",
-      "NRAM row-major [BM, BK] x WRAM 64-channel filter [BN=64, BK]", "f32",
-      "writes NRAM f32[BM, BN] accumulator",
-      "MLU370 matrix-engine BF16xBF16 contraction accumulated in FP32 over "
-      "verified finite normal exponent window or kir.allow_subnormal_ftz",
-      hasWram, [](Operation *op) {
-        auto mode = op->getAttrOfType<StringAttr>("mode");
-        auto bn = op->getAttrOfType<IntegerAttr>("bn");
-        if (!mode || mode != "bf16" || !bn || bn.getInt() != 64 ||
-            op->getNumOperands() != 4)
-          return failure();
-        auto acc = dyn_cast<MemRefType>(op->getOperand(0).getType());
-        auto lhs = dyn_cast<MemRefType>(op->getOperand(1).getType());
-        auto flt = dyn_cast<MemRefType>(op->getOperand(2).getType());
-        return success(isSpace(op->getOperand(0), 1) &&
-                       isSpace(op->getOperand(1), 1) &&
-                       isSpace(op->getOperand(2), 3) &&
-                       acc.getElementType().isF32() &&
-                       lhs.getElementType().isBF16() &&
-                       flt.getElementType().isBF16() &&
-                       op->getOperand(3).getType().isInteger(1));
-      });
+  {
+    TypedContract bf16ConvTyped =
+        makeTyped(4, 4, 0, {STK::F32, STK::BF16, STK::I1}, {}, {STK::F32},
+                  EffectMask::ReadWrite, 64, std::nullopt);
+    bf16ConvTyped.precondition =
+        [](Operation *op, const TargetProfile &target) -> llvm::Error {
+      if (allowsSubnormalFlush(op, target.numerical))
+        return llvm::Error::success();
+      if (op->getName().getStringRef() != "bangc_src.wram_conv")
+        return llvm::Error::success();
+      auto guarded = op->getAttrOfType<BoolAttr>("bangc.guarded_bf16_window");
+      for (Operation *cur = op->getParentOp(); cur; cur = cur->getParentOp()) {
+        if (auto parentIf = dyn_cast<scf::IfOp>(cur)) {
+          bool hasPanelGuard = false;
+          if (Block *enclosing = parentIf->getBlock()) {
+            for (Operation &prev : *enclosing) {
+              if (&prev == parentIf.getOperation())
+                break;
+              if (prev.getName().getStringRef() == "bangc_src.bf16_panel_ok")
+                hasPanelGuard = true;
+            }
+          }
+          if (guarded && guarded.getValue() && hasPanelGuard)
+            return llvm::Error::success();
+        }
+      }
+      return llvm::createStringError(
+          "wram-conv-bf16 requires function denormal-fp-math FTZ permission or "
+          "an explicit bf16_panel_ok normal-exponent guard");
+    };
+    addBuiltin(
+        "wram-conv-bf16", "wram_conv", "__bang_conv/__bang_conv_partial",
+        "exits/bangc::matrix-transfer",
+        "NRAM f32[BM, BN] accumulator, NRAM bf16[BM, BK] input, WRAM bf16[BN, "
+        "BK] filter and i1 accumulate flag",
+        "NRAM row-major [BM, BK] x WRAM 64-channel filter [BN=64, BK]", "f32",
+        "writes NRAM f32[BM, BN] accumulator",
+        "MLU370 matrix-engine BF16xBF16 contraction accumulated in FP32 over "
+        "verified finite normal exponent window or denormal-fp-math FTZ",
+        std::move(bf16ConvTyped), hasWram, [](Operation *op) {
+          auto mode = op->getAttrOfType<StringAttr>("mode");
+          auto bn = op->getAttrOfType<IntegerAttr>("bn");
+          if (!mode || mode != "bf16" || !bn || bn.getInt() != 64 ||
+              op->getNumOperands() != 4)
+            return failure();
+          auto acc = dyn_cast<MemRefType>(op->getOperand(0).getType());
+          auto lhs = dyn_cast<MemRefType>(op->getOperand(1).getType());
+          auto flt = dyn_cast<MemRefType>(op->getOperand(2).getType());
+          return success(isSpace(op->getOperand(0), 1) &&
+                         isSpace(op->getOperand(1), 1) &&
+                         isSpace(op->getOperand(2), 3) &&
+                         acc.getElementType().isF32() &&
+                         lhs.getElementType().isBF16() &&
+                         flt.getElementType().isBF16() &&
+                         op->getOperand(3).getType().isInteger(1));
+        });
+  }
 
   addBuiltin(
       "wram-conv-i8", "wram_conv",
@@ -146,6 +206,8 @@ void rowContracts(Unit &unit) {
       "i32", "writes NRAM f32 partial scratch and NRAM i32[BM, BN] accumulator",
       "exact signed int8xint8 contraction (BK <= 1024 keeps |partial| <= 2^24 "
       "exact in binary32) accumulated in i32",
+      makeTyped(4, 4, 0, {STK::I32, STK::F32, STK::I8, STK::UI8}, {},
+                {STK::I32}, EffectMask::ReadWrite, 64, std::nullopt),
       hasWram, [](Operation *op) {
         auto mode = op->getAttrOfType<StringAttr>("mode");
         auto bn = op->getAttrOfType<IntegerAttr>("bn");
@@ -172,8 +234,10 @@ void rowContracts(Unit &unit) {
              "NRAM f32 destination, NRAM f32 source and NRAM f32 cyclic vector",
              "contiguous NRAM f32 tile with periodic 1D multiplier", "f32",
              "writes NRAM f32 destination tile",
-             "IEEE-754 binary32 elementwise cyclic product", hasNram,
-             [](Operation *op) {
+             "IEEE-754 binary32 elementwise cyclic product",
+             makeTyped(5, 5, 0, {STK::F32, STK::I64}, {}, {STK::F32},
+                       EffectMask::ReadWrite, 64, 1),
+             hasNram, [](Operation *op) {
                auto dst = dyn_cast<MemRefType>(op->getOperand(0).getType());
                auto src = dyn_cast<MemRefType>(op->getOperand(1).getType());
                auto cyc = dyn_cast<MemRefType>(op->getOperand(2).getType());
@@ -191,6 +255,8 @@ void rowContracts(Unit &unit) {
       "64-lane aligned NRAM vector fragment", "f32",
       "writes NRAM f32 scratch and clamped NRAM f32 destination",
       "IEEE-754 minimumf(x, bound) preserving NaN propagation",
+      makeTyped(6, 6, 0, {STK::F32, STK::I64}, {}, {STK::F32},
+                EffectMask::ReadWrite, 64, 1),
       [](Operation *op) {
         auto dst = dyn_cast<MemRefType>(op->getOperand(0).getType());
         auto sc = dyn_cast<MemRefType>(op->getOperand(1).getType());
@@ -210,6 +276,8 @@ void rowContracts(Unit &unit) {
       "writes NRAM u16 scratch buffers and returns i1 finite-normal predicate",
       "certifies every BF16 element is zero or has normal exponent in "
       "[127-48, 127+46] so products avoid binary32 subnormals and overflow",
+      makeTyped(4, 4, 1, {STK::BF16, STK::I16, STK::I64}, {STK::I1}, {STK::I16},
+                EffectMask::ReadWrite, 64, 1),
       [](Operation *op) {
         auto p = dyn_cast<MemRefType>(op->getOperand(0).getType());
         auto m = dyn_cast<MemRefType>(op->getOperand(1).getType());
@@ -230,6 +298,8 @@ void rowContracts(Unit &unit) {
       "updates NRAM f32[BM, BN] accumulator in place",
       "exact IEEE-754 binary32 BF16 multiply-add preserving subnormals, signed "
       "zeros, Inf and NaN",
+      makeTyped(8, 8, 0, {STK::F32, STK::BF16, STK::I64}, {}, {STK::F32},
+                EffectMask::ReadWrite, 64, 1),
       [](Operation *op) {
         auto acc = dyn_cast<MemRefType>(op->getOperand(0).getType());
         auto lhs = dyn_cast<MemRefType>(op->getOperand(1).getType());
@@ -246,6 +316,8 @@ void rowContracts(Unit &unit) {
       "NRAM bf16 destination, NRAM f32 accumulator and i1 strict flag",
       "contiguous NRAM tile", "f32", "writes NRAM bf16 destination",
       "round-to-nearest-even f32->bf16 preserving NaN payloads on strict path",
+      makeTyped(4, 4, 0, {STK::BF16, STK::F32, STK::I64, STK::I1}, {},
+                {STK::F32}, EffectMask::ReadWrite, 64, 1),
       [](Operation *op) {
         auto dst = dyn_cast<MemRefType>(op->getOperand(0).getType());
         auto acc = dyn_cast<MemRefType>(op->getOperand(1).getType());
@@ -259,6 +331,8 @@ void rowContracts(Unit &unit) {
   add("i32-to-bf16", "i32_to_bf16", "signed_to_bf16", "matrix.mlu",
       "scalar i32 value", "scalar value", "i32", "pure scalar bf16 result",
       "correctly rounded IEEE round-to-nearest-even signed i32 to bf16",
+      makeTyped(1, 1, 1, {STK::I32}, {STK::BF16}, {STK::I32}, EffectMask::None,
+                0, std::nullopt),
       [](Operation *op) {
         return success(op->getOperand(0).getType().isInteger(32) &&
                        op->getResult(0).getType().isBF16());
@@ -269,6 +343,8 @@ void rowContracts(Unit &unit) {
       "contiguous pitched rows [members, pitch] in NRAM", "f32",
       "writes NRAM scratch and per-member f32 reduction results",
       "sumpool+reduce_sum or maxpool+argmax with IEEE NaN/subnormal fallback",
+      makeTyped(6, 6, 0, {STK::F32, STK::I64}, {}, {STK::F32},
+                EffectMask::ReadWrite, 64, std::nullopt),
       [](Operation *op) {
         auto alg = op->getAttrOfType<StringAttr>("algebra");
         auto inTy = dyn_cast<MemRefType>(op->getOperand(2).getType());
@@ -290,6 +366,8 @@ void rowContracts(Unit &unit) {
       "128-byte aligned NRAM vector lanes", "f32",
       "writes NRAM f32 scratch and output buffer",
       "__bang_active_exphp in [-80, 80] with exact scalar expf repair outside",
+      makeTyped(5, 5, 0, {STK::F32, STK::I64}, {}, {STK::F32},
+                EffectMask::ReadWrite, 64, 1),
       [](Operation *op) {
         auto outTy = dyn_cast<MemRefType>(op->getOperand(0).getType());
         auto scTy = dyn_cast<MemRefType>(op->getOperand(1).getType());
@@ -309,6 +387,8 @@ void rowContracts(Unit &unit) {
       "writes NRAM f32 scratch and output buffer",
       "ln(2) scaling + __bang_active_exphp in [-115, 115] with exact scalar "
       "exp2f repair outside",
+      makeTyped(5, 5, 0, {STK::F32, STK::I64}, {}, {STK::F32},
+                EffectMask::ReadWrite, 64, 1),
       [](Operation *op) {
         auto outTy = dyn_cast<MemRefType>(op->getOperand(0).getType());
         auto scTy = dyn_cast<MemRefType>(op->getOperand(1).getType());
@@ -325,7 +405,10 @@ void rowContracts(Unit &unit) {
              "exits/bangc::dma", "32-lane NRAM f32 buffer",
              "32-element aligned NRAM f32 vector", "f32",
              "reduces NRAM buffer in place and returns scalar f32 sum",
-             "32-lane hardware tree sum in FP32", hasNram, [](Operation *op) {
+             "32-lane hardware tree sum in FP32",
+             makeTyped(1, 1, 1, {STK::F32}, {STK::F32}, {STK::F32},
+                       EffectMask::ReadWrite, 64, 1),
+             hasNram, [](Operation *op) {
                auto ty = dyn_cast<MemRefType>(op->getOperand(0).getType());
                return success(isSpace(op->getOperand(0), 1) &&
                               ty.getElementType().isF32() &&
@@ -337,7 +420,10 @@ void rowContracts(Unit &unit) {
              "[height, channel]",
              "channel-last NRAM 2D f32 tile", "f32",
              "writes NRAM f32 channel sums",
-             "batched NRAM column sumpool in FP32", hasNram, [](Operation *op) {
+             "batched NRAM column sumpool in FP32",
+             makeTyped(4, 4, 0, {STK::F32, STK::I64}, {}, {STK::F32},
+                       EffectMask::ReadWrite, 64, 1),
+             hasNram, [](Operation *op) {
                auto dst = dyn_cast<MemRefType>(op->getOperand(0).getType());
                auto src = dyn_cast<MemRefType>(op->getOperand(1).getType());
                return success(isSpace(op->getOperand(0), 1) &&
@@ -349,9 +435,12 @@ void rowContracts(Unit &unit) {
   add("nram-transpose", "tile_transpose",
       "transpose_tile_b16/transpose_tile_b32", "transpose.mlu",
       "NRAM source tile [rows, cols] and NRAM destination tile [cols, rows]",
-      "64-byte aligned 2D NRAM tile", "none",
-      "writes transposed NRAM tile",
+      "64-byte aligned 2D NRAM tile", "none", "writes transposed NRAM tile",
       "bit-exact 2D NRAM element permutation via __bang_transpose",
+      makeTyped(4, 4, 0,
+                {STK::I8, STK::UI8, STK::I16, STK::F16, STK::BF16, STK::I32,
+                 STK::F32, STK::I64},
+                {}, {}, EffectMask::ReadWrite, 64, 1),
       [](Operation *op) {
         auto dstTy = dyn_cast<MemRefType>(op->getOperand(0).getType());
         auto srcTy = dyn_cast<MemRefType>(op->getOperand(1).getType());
@@ -369,6 +458,8 @@ void rowContracts(Unit &unit) {
       "pitched rows [members, pitch] in NRAM", "f32",
       "writes NRAM quotient/scratch and certified f16 output",
       "+-2 ULP f32 endpoint certification with exact RN f32->f16 fallback",
+      makeTyped(9, 9, 0, {STK::F16, STK::F32, STK::I64}, {}, {STK::F32},
+                EffectMask::ReadWrite, 64, std::nullopt),
       [](Operation *op) {
         auto outTy = dyn_cast<MemRefType>(op->getOperand(0).getType());
         auto qTy = dyn_cast<MemRefType>(op->getOperand(1).getType());
@@ -394,6 +485,8 @@ void rowContracts(Unit &unit) {
       "64-lane aligned NRAM vector fragment", "f32",
       "writes destination NRAM tile",
       "NaN-preserving bf16<->f32 round-to-nearest-even",
+      makeTyped(4, 5, 0, {STK::BF16, STK::F32, STK::I16, STK::I64}, {},
+                {STK::F32}, EffectMask::ReadWrite, 64, 1),
       [](Operation *op) {
         auto mode = op->getAttrOfType<StringAttr>("mode");
         if (!mode || (op->getNumOperands() != 4 && op->getNumOperands() != 5))
@@ -425,6 +518,8 @@ void rowContracts(Unit &unit) {
       "writes NRAM f32 scratch and destination NRAM bf16 tile",
       "correctly rounded IEEE-754 binary32 product narrowed with NaN-preserving "
       "bf16 round-to-nearest-even",
+      makeTyped(6, 6, 0, {STK::BF16, STK::F32, STK::I64}, {}, {STK::F32},
+                EffectMask::ReadWrite, 64, 1),
       [](Operation *op) {
         auto dst = dyn_cast<MemRefType>(op->getOperand(0).getType());
         auto lhs = dyn_cast<MemRefType>(op->getOperand(1).getType());
@@ -449,6 +544,8 @@ void rowContracts(Unit &unit) {
       "endpoint certification on exact Veltkamp-Dekker/TwoDiff residual "
       "x - r^2 with bit-exact integer RN-even fallback (a priori candidate "
       "accuracy only bounds fallback frequency)",
+      makeTyped(5, 5, 0, {STK::F32, STK::I64}, {}, {STK::F32},
+                EffectMask::ReadWrite, 64, 1),
       [](Operation *op) {
         if (op->getNumOperands() != 5)
           return failure();
@@ -474,6 +571,8 @@ void rowContracts(Unit &unit) {
       "endpoint certification on exact Veltkamp-Dekker/TwoDiff residual "
       "a' - r * b' with exact __cn_scalar_div_f32_rn fallback (a priori "
       "candidate accuracy only bounds fallback frequency)",
+      makeTyped(6, 6, 0, {STK::F32, STK::I64}, {}, {STK::F32},
+                EffectMask::ReadWrite, 64, 1),
       [](Operation *op) {
         auto mode = op->getAttrOfType<StringAttr>("mode");
         auto dst = dyn_cast<MemRefType>(op->getOperand(0).getType());
@@ -508,6 +607,8 @@ void rowContracts(Unit &unit) {
   add("bf16-scalar-convert", "bf16_scalar", "widen_bf16/round_bf16", "bf16.mlu",
       "scalar bf16 or f32 values", "scalar value", "f32", "pure scalar result",
       "IEEE round-to-nearest-even bf16 scalar conversion and product",
+      makeTyped(1, 2, 1, {STK::BF16, STK::F32}, {STK::BF16, STK::F32},
+                {STK::F32}, EffectMask::None, 0, std::nullopt),
       [](Operation *op) {
         auto mode = op->getAttrOfType<StringAttr>("mode");
         if (!mode || op->getNumResults() != 1)
@@ -531,6 +632,8 @@ void rowContracts(Unit &unit) {
       "contiguous NRAM row fragment", "i32 or f32",
       "writes NRAM prefix destination and scratch",
       "Hillis-Steele power-of-two inclusive prefix sum in NRAM",
+      makeTyped(5, 5, 0, {STK::F32, STK::I32, STK::I64}, {},
+                {STK::F32, STK::I32}, EffectMask::ReadWrite, 64, 1),
       [](Operation *op) {
         auto d = dyn_cast<MemRefType>(op->getOperand(0).getType());
         auto s = dyn_cast<MemRefType>(op->getOperand(1).getType());
@@ -550,6 +653,8 @@ void rowContracts(Unit &unit) {
       "writes NRAM f32 scratch and returns Moment tuple (n, mean, m2)",
       "vectorized 5-level binary tree of KIR adjacent merge_moments summaries "
       "with sequential merge_moments block/tail/non-normal fallback",
+      makeTyped(3, 3, 1, {STK::F32, STK::I64}, {}, {STK::F32},
+                EffectMask::ReadWrite, 64, 1),
       [](Operation *op) {
         auto inTy = dyn_cast<MemRefType>(op->getOperand(0).getType());
         auto scTy = dyn_cast<MemRefType>(op->getOperand(1).getType());
@@ -564,6 +669,7 @@ void rowContracts(Unit &unit) {
       "two Moment tuples (n, mean, m2)", "scalar Moment struct", "f32",
       "pure Moment tuple result",
       "parallel Chan/Welford merge with RN f32 division",
+      makeTyped(2, 2, 1, {}, {}, {STK::F32}, EffectMask::None, 0, std::nullopt),
       [](Operation *op) {
         return success(isMomentTuple(op->getOperand(0).getType()) &&
                        isMomentTuple(op->getOperand(1).getType()) &&
@@ -575,6 +681,8 @@ void rowContracts(Unit &unit) {
       "contiguous logical counters [base .. base + live)", "u32/f32",
       "writes NRAM scratch and uniform f32 samples",
       "exact 10-round Philox-4x32 uniform float in [0, 1)",
+      makeTyped(5, 5, 0, {STK::F32, STK::I32, STK::I64}, {}, {STK::I32},
+                EffectMask::ReadWrite, 64, 1),
       [](Operation *op) {
         auto dst = dyn_cast<MemRefType>(op->getOperand(0).getType());
         auto sc = dyn_cast<MemRefType>(op->getOperand(1).getType());
@@ -590,6 +698,8 @@ void rowContracts(Unit &unit) {
       "u64 seed and u64 logical counter", "scalar value", "u32/f32",
       "pure scalar uniform f32 result",
       "exact 10-round Philox-4x32 uniform float in [0, 1)",
+      makeTyped(2, 2, 1, {STK::I64}, {STK::F32}, {STK::I32}, EffectMask::None,
+                0, std::nullopt),
       [](Operation *op) {
         return success(
             op->getOperand(0).getType().getIntOrFloatBitWidth() == 64 &&

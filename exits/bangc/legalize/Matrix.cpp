@@ -109,9 +109,16 @@ struct MatrixLowerer {
     st.addOperands(operands);
     st.addTypes(results);
     st.addAttributes(attrs);
-    if (!contract.empty())
+    if (!contract.empty()) {
       st.addAttribute("ci.implementation",
                       b.getStringAttr(("exits/bangc::" + contract).str()));
+      if (llvm::any_of(operands,
+                       [](Value v) { return isa<MemRefType>(v.getType()); }) &&
+          llvm::none_of(attrs, [](const NamedAttribute &na) {
+            return na.getName() == "alignment";
+          }))
+        st.addAttribute("alignment", b.getI64IntegerAttr(64));
+    }
     return b.create(st);
   }
 
@@ -1188,7 +1195,7 @@ struct MatrixLowerer {
                            {trans, right, cI64(bk), cI64(bn)}, {}, {},
                            "nram-transpose");
                   }
-                  auto runWramConv = [&]() {
+                  auto runWramConv = [&](bool guardedWindow) {
                     sync("compute");
                     memcpy1D(filter, trans, cI64(bk * bn), "NRAM2WRAM");
                     if (mode == "exact-i8-conv") {
@@ -1204,12 +1211,16 @@ struct MatrixLowerer {
                       StringRef mKind = inElem.isBF16() ? "bf16" : "f16";
                       StringRef cKey =
                           inElem.isBF16() ? "wram-conv-bf16" : "wram-conv-f16";
+                      SmallVector<NamedAttribute, 5> convAttrs{
+                          b.getNamedAttr("bm", b.getI64IntegerAttr(bm)),
+                          b.getNamedAttr("bn", b.getI64IntegerAttr(bn)),
+                          b.getNamedAttr("bk", b.getI64IntegerAttr(bk)),
+                          b.getNamedAttr("mode", b.getStringAttr(mKind))};
+                      if (guardedWindow && inElem.isBF16())
+                        convAttrs.push_back(b.getNamedAttr(
+                            "bangc.guarded_bf16_window", b.getBoolAttr(true)));
                       makeOp("wram_conv", {acc, left, filter, accum}, {},
-                             {b.getNamedAttr("bm", b.getI64IntegerAttr(bm)),
-                              b.getNamedAttr("bn", b.getI64IntegerAttr(bn)),
-                              b.getNamedAttr("bk", b.getI64IntegerAttr(bk)),
-                              b.getNamedAttr("mode", b.getStringAttr(mKind))},
-                             cKey);
+                             convAttrs, cKey);
                       sync("compute");
                     }
                   };
@@ -1237,11 +1248,11 @@ struct MatrixLowerer {
                                   cI64(bn)},
                                  {}, {}, "bf16-ieee-dot");
                         },
-                        runWramConv);
+                        [&]() { runWramConv(/*guardedWindow=*/true); });
                     b.create<scf::YieldOp>(loc, ValueRange{nextStrict});
                     return;
                   }
-                  runWramConv();
+                  runWramConv(/*guardedWindow=*/false);
                 } else {
                   forLoop(cI64(0), nr, cI64(1), [&](Value i) {
                     forLoop(cI64(0), nk, cI64(1), [&](Value t) {
@@ -1495,11 +1506,14 @@ LogicalResult lowerMatrixToCallable(ModuleOp m, const TargetProfile &profile) {
   ctx->getOrLoadDialect<scf::SCFDialect>();
   ctx->getOrLoadDialect<arith::ArithDialect>();
   auto fn = *m.getOps<func::FuncOp>().begin();
-  if (failed(bindMatrix(fn, 2, true)))
+  if (failed(bindMatrix(fn, 2, true, profile)))
     return failure();
   Builder b(ctx);
   fn->setAttr("bangc.entry", b.getStringAttr("intent_enqueue"));
   MatrixLowerer lowerer(fn, profile);
-  return lowerer.run(m);
+  if (failed(lowerer.run(m)))
+    return failure();
+  stampScfCarryIds(m);
+  return success();
 }
 } // namespace CI_UNIT_NAMESPACE

@@ -203,7 +203,7 @@ LogicalResult offsets(func::FuncOp f, bool install) {
           8;
     }
     bool reuse=f->getAttrOfType<DictionaryAttr>("dsa.layout").contains("reuse_temporaries");
-    auto temporaries=reuse?intentdsl::dsa::placeTemporaries(compute):intentdsl::dsa::TemporaryLayout{};
+    auto temporaries=reuse?intentdsl::dsa::placeTemporaries(compute):intentdsl::dsa::TemporaryLayout();
     int64_t tempBase = local;
     for(auto &o:compute){
       if(o.getNumResults()!=1 || o.getName().getStringRef()=="dsa.await")continue;
@@ -291,7 +291,7 @@ struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
           signalPassFailure();
         return;
       }
-      if(failed(bindMatrix(f,phase,true)))signalPassFailure();
+      if(failed(bindMatrix(f,phase,true,target)))signalPassFailure();
       return;
     }
     if (intentdsl::kir::orderedOwners(f)) {
@@ -425,7 +425,7 @@ LogicalResult verify(ModuleOp m, const TargetProfile &p, unsigned stage) {
     return failure();
   if (failed(intentdsl::dsa::verifyProgram(m, p, true)))
     return failure();
-  if(intentdsl::kir::matrixDomain(fn))return bindMatrix(fn,stage,false);
+  if(intentdsl::kir::matrixDomain(fn))return bindMatrix(fn,stage,false,p);
   if (intentdsl::kir::orderedOwners(fn)) {
     if (failed(intentdsl::dsa::verifyOwners(fn, p, true)))
       return failure();

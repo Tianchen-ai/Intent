@@ -1,18 +1,609 @@
 #include "intentdsl/exits/bangc/ir/Dialect.h"
 #include "Dialect.cpp.inc"
 #include "mlir/Bytecode/BytecodeOpInterface.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/OpImplementation.h"
+#include "mlir/Interfaces/InferIntRangeInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include <algorithm>
+#include <climits>
 #define GET_OP_CLASSES
 #include "Ops.h.inc"
 #define GET_OP_CLASSES
 #include "Ops.cpp.inc"
 
-void intentdsl::bangc_src::BangcSrcDialect::initialize() {
+using namespace mlir;
+using namespace intentdsl::bangc_src;
+
+namespace {
+using EffectList =
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>;
+
+void addRead(EffectList &effects, Operation *op, unsigned idx) {
+  if (idx < op->getNumOperands()) {
+    OpOperand &opnd = op->getOpOperand(idx);
+    if (isa<MemRefType>(opnd.get().getType()))
+      effects.emplace_back(MemoryEffects::Read::get(), &opnd);
+  }
+}
+
+void addWrite(EffectList &effects, Operation *op, unsigned idx) {
+  if (idx < op->getNumOperands()) {
+    OpOperand &opnd = op->getOpOperand(idx);
+    if (isa<MemRefType>(opnd.get().getType()))
+      effects.emplace_back(MemoryEffects::Write::get(), &opnd);
+  }
+}
+
+void addReadWrite(EffectList &effects, Operation *op, unsigned idx) {
+  addRead(effects, op, idx);
+  addWrite(effects, op, idx);
+}
+
+bool hasMemSpace(Value v, int64_t expected) {
+  auto m = dyn_cast<MemRefType>(v.getType());
+  if (!m)
+    return false;
+  auto attr = dyn_cast_or_null<IntegerAttr>(m.getMemorySpace());
+  int64_t space = attr ? attr.getInt() : 0;
+  return space == expected;
+}
+
+bool isMomentTupleType(Type t) {
+  auto tup = dyn_cast<TupleType>(t);
+  return tup && tup.size() == 3 && tup.getType(0).isInteger(32) &&
+         tup.getType(1).isF32() && tup.getType(2).isF32();
+}
+
+ConstantIntRanges nonNegRange64(int64_t lo, int64_t hi) {
+  APInt loVal(64, uint64_t(std::max<int64_t>(0, lo)), /*isSigned=*/true);
+  APInt hiVal(64, uint64_t(std::max<int64_t>(lo, hi)), /*isSigned=*/true);
+  return ConstantIntRanges(loVal, hiVal, loVal, hiVal);
+}
+
+template <typename ConcreteOp>
+struct F32AccContract
+    : public compilerinfra::ContractOpInterface::ExternalModel<
+          F32AccContract<ConcreteOp>, ConcreteOp> {
+  Type getAccumulatorType(Operation *op) const {
+    return Float32Type::get(op->getContext());
+  }
+};
+
+template <typename ConcreteOp>
+struct I32AccContract
+    : public compilerinfra::ContractOpInterface::ExternalModel<
+          I32AccContract<ConcreteOp>, ConcreteOp> {
+  Type getAccumulatorType(Operation *op) const {
+    return IntegerType::get(op->getContext(), 32);
+  }
+};
+
+template <typename ConcreteOp>
+struct I16AccContract
+    : public compilerinfra::ContractOpInterface::ExternalModel<
+          I16AccContract<ConcreteOp>, ConcreteOp> {
+  Type getAccumulatorType(Operation *op) const {
+    return IntegerType::get(op->getContext(), 16);
+  }
+};
+
+struct WramConvContract
+    : public compilerinfra::ContractOpInterface::ExternalModel<
+          WramConvContract, WramConvOp> {
+  Type getAccumulatorType(Operation *op) const {
+    auto mode = op->getAttrOfType<StringAttr>("mode");
+    if (mode && mode.getValue() == "i8")
+      return IntegerType::get(op->getContext(), 32);
+    return Float32Type::get(op->getContext());
+  }
+  LogicalResult verifyShapeAndTypes(Operation *op) const {
+    auto mode = op->getAttrOfType<StringAttr>("mode");
+    auto bn = op->getAttrOfType<IntegerAttr>("bn");
+    auto bk = op->getAttrOfType<IntegerAttr>("bk");
+    if (!mode || !bn || bn.getInt() != 64 || !bk || op->getNumOperands() != 4)
+      return failure();
+    if (mode == "i8") {
+      if (bk.getInt() > 1024)
+        return failure();
+      auto acc = dyn_cast<MemRefType>(op->getOperand(0).getType());
+      auto part = dyn_cast<MemRefType>(op->getOperand(1).getType());
+      auto lhs = dyn_cast<MemRefType>(op->getOperand(2).getType());
+      auto flt = dyn_cast<MemRefType>(op->getOperand(3).getType());
+      return success(acc && part && lhs && flt &&
+                     acc.getElementType().isInteger(32) &&
+                     part.getElementType().isF32() &&
+                     lhs.getElementType().getIntOrFloatBitWidth() == 8 &&
+                     flt.getElementType().getIntOrFloatBitWidth() == 8);
+    }
+    auto acc = dyn_cast<MemRefType>(op->getOperand(0).getType());
+    auto lhs = dyn_cast<MemRefType>(op->getOperand(1).getType());
+    auto flt = dyn_cast<MemRefType>(op->getOperand(2).getType());
+    if (!acc || !lhs || !flt || !acc.getElementType().isF32() ||
+        !op->getOperand(3).getType().isInteger(1))
+      return failure();
+    if (mode == "f16")
+      return success(lhs.getElementType().isF16() &&
+                     flt.getElementType().isF16());
+    if (mode == "bf16")
+      return success(lhs.getElementType().isBF16() &&
+                     flt.getElementType().isBF16());
+    return failure();
+  }
+  LogicalResult verifyLayoutAndAddressSpace(Operation *op) const {
+    auto mode = op->getAttrOfType<StringAttr>("mode");
+    if (!mode || op->getNumOperands() != 4)
+      return failure();
+    if (mode == "i8")
+      return success(hasMemSpace(op->getOperand(0), 1) &&
+                     hasMemSpace(op->getOperand(1), 1) &&
+                     hasMemSpace(op->getOperand(2), 1) &&
+                     hasMemSpace(op->getOperand(3), 3));
+    return success(hasMemSpace(op->getOperand(0), 1) &&
+                   hasMemSpace(op->getOperand(1), 1) &&
+                   hasMemSpace(op->getOperand(2), 3));
+  }
+};
+
+struct RowReduceContract
+    : public compilerinfra::ContractOpInterface::ExternalModel<
+          RowReduceContract, RowReduceOp> {
+  Type getAccumulatorType(Operation *op) const {
+    return Float32Type::get(op->getContext());
+  }
+  LogicalResult verifyLayoutAndAddressSpace(Operation *op) const {
+    return success((hasMemSpace(op->getOperand(0), 1) ||
+                    hasMemSpace(op->getOperand(0), 2)) &&
+                   hasMemSpace(op->getOperand(1), 1) &&
+                   hasMemSpace(op->getOperand(2), 1));
+  }
+};
+
+struct NarrowQuotientContract
+    : public compilerinfra::ContractOpInterface::ExternalModel<
+          NarrowQuotientContract, NarrowQuotientOp> {
+  Type getAccumulatorType(Operation *op) const {
+    return Float32Type::get(op->getContext());
+  }
+  LogicalResult verifyLayoutAndAddressSpace(Operation *op) const {
+    return success(hasMemSpace(op->getOperand(0), 1) &&
+                   hasMemSpace(op->getOperand(1), 1) &&
+                   hasMemSpace(op->getOperand(2), 1) &&
+                   hasMemSpace(op->getOperand(3), 1) &&
+                   (hasMemSpace(op->getOperand(4), 1) ||
+                    hasMemSpace(op->getOperand(4), 2)));
+  }
+};
+
+struct ScanSumContract
+    : public compilerinfra::ContractOpInterface::ExternalModel<ScanSumContract,
+                                                               ScanSumOp> {
+  Type getAccumulatorType(Operation *op) const {
+    auto dst = dyn_cast<MemRefType>(op->getOperand(0).getType());
+    return dst ? dst.getElementType() : Type{};
+  }
+};
+
+struct TileTransposeContract
+    : public compilerinfra::ContractOpInterface::ExternalModel<
+          TileTransposeContract, TileTransposeOp> {
+  LogicalResult verifyShapeAndTypes(Operation *op) const {
+    auto dst = dyn_cast<MemRefType>(op->getOperand(0).getType());
+    auto src = dyn_cast<MemRefType>(op->getOperand(1).getType());
+    if (!dst || !src || dst.getElementType() != src.getElementType())
+      return failure();
+    unsigned bits = dst.getElementTypeBitWidth();
+    return success(bits == 8 || bits == 16 || bits == 32);
+  }
+};
+
+struct SummaryReduceContract
+    : public compilerinfra::ContractOpInterface::ExternalModel<
+          SummaryReduceContract, SummaryReduceOp> {
+  Type getAccumulatorType(Operation *op) const {
+    return Float32Type::get(op->getContext());
+  }
+  LogicalResult verifyShapeAndTypes(Operation *op) const {
+    return success(isMomentTupleType(op->getResult(0).getType()));
+  }
+};
+
+struct SummaryMergeContract
+    : public compilerinfra::ContractOpInterface::ExternalModel<
+          SummaryMergeContract, SummaryMergeOp> {
+  Type getAccumulatorType(Operation *op) const {
+    return Float32Type::get(op->getContext());
+  }
+  LogicalResult verifyShapeAndTypes(Operation *op) const {
+    return success(isMomentTupleType(op->getOperand(0).getType()) &&
+                   isMomentTupleType(op->getOperand(1).getType()) &&
+                   isMomentTupleType(op->getResult(0).getType()));
+  }
+};
+} // namespace
+
+void NramBufferOp::getEffects(EffectList &effects) {
+  effects.emplace_back(MemoryEffects::Allocate::get(),
+                       getOperation()->getOpResult(0));
+}
+void WramBufferOp::getEffects(EffectList &effects) {
+  effects.emplace_back(MemoryEffects::Allocate::get(),
+                       getOperation()->getOpResult(0));
+}
+void NramAllocOp::getEffects(EffectList &effects) {
+  effects.emplace_back(MemoryEffects::Allocate::get(),
+                       getOperation()->getOpResult(0));
+}
+void LocalVarOp::getEffects(EffectList &effects) {
+  effects.emplace_back(MemoryEffects::Allocate::get(),
+                       getOperation()->getOpResult(0));
+}
+void MomentArrayOp::getEffects(EffectList &effects) {
+  effects.emplace_back(MemoryEffects::Allocate::get());
+}
+void MomentGetOp::getEffects(EffectList &effects) {
+  effects.emplace_back(MemoryEffects::Read::get());
+}
+void MomentSetOp::getEffects(EffectList &effects) {
+  effects.emplace_back(MemoryEffects::Write::get());
+}
+
+void WramConvOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  if (op->getNumOperands() == 4) {
+    if (getMode() == "i8") {
+      addReadWrite(effects, op, 0);
+      addWrite(effects, op, 1);
+      addRead(effects, op, 2);
+      addRead(effects, op, 3);
+    } else {
+      addReadWrite(effects, op, 0);
+      addRead(effects, op, 1);
+      addRead(effects, op, 2);
+    }
+  }
+}
+
+void CycleMulOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  addWrite(effects, op, 0);
+  addRead(effects, op, 1);
+  addRead(effects, op, 2);
+}
+
+void VecMinScalarOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  addWrite(effects, op, 0);
+  addReadWrite(effects, op, 1);
+  addRead(effects, op, 2);
+}
+
+void Bf16PanelGuardOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  addRead(effects, op, 0);
+  addReadWrite(effects, op, 1);
+  addReadWrite(effects, op, 2);
+}
+
+void Bf16IeeeDotOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  addReadWrite(effects, op, 0);
+  addRead(effects, op, 1);
+  addRead(effects, op, 2);
+}
+
+void Bf16AccNarrowOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  addWrite(effects, op, 0);
+  addRead(effects, op, 1);
+}
+
+void SummaryReduceOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  addRead(effects, op, 0);
+  addReadWrite(effects, op, 1);
+}
+
+void Memcpy1DOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  addWrite(effects, op, 0);
+  addRead(effects, op, 1);
+}
+
+void Memcpy2DOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  addWrite(effects, op, 0);
+  addRead(effects, op, 1);
+}
+
+void LoadScalarOp::getEffects(EffectList &effects) {
+  addRead(effects, getOperation(), 0);
+}
+
+void StoreScalarOp::getEffects(EffectList &effects) {
+  addWrite(effects, getOperation(), 0);
+}
+
+void SyncOp::getEffects(EffectList &effects) {
+  effects.emplace_back(MemoryEffects::Read::get());
+  effects.emplace_back(MemoryEffects::Write::get());
+}
+
+void FillOp::getEffects(EffectList &effects) {
+  addWrite(effects, getOperation(), 0);
+}
+
+void AtomicAddOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  addWrite(effects, op, 0);
+  addReadWrite(effects, op, 1);
+  addRead(effects, op, 2);
+}
+
+void VecBinaryOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  addWrite(effects, op, 0);
+  addRead(effects, op, 1);
+  addRead(effects, op, 2);
+}
+
+void VecScalarOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  addWrite(effects, op, 0);
+  addRead(effects, op, 1);
+}
+
+void VecCastOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  addWrite(effects, op, 0);
+  addRead(effects, op, 1);
+}
+
+void PositiveHalfOrNanOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  addWrite(effects, op, 0);
+  addRead(effects, op, 1);
+}
+
+void RowReduceOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  addWrite(effects, op, 0);
+  addReadWrite(effects, op, 1);
+  addRead(effects, op, 2);
+}
+
+void RowExpOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  addWrite(effects, op, 0);
+  addReadWrite(effects, op, 1);
+  addRead(effects, op, 2);
+}
+
+void RowExp2Op::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  addWrite(effects, op, 0);
+  addReadWrite(effects, op, 1);
+  addRead(effects, op, 2);
+}
+
+void Reduce32SumOp::getEffects(EffectList &effects) {
+  addReadWrite(effects, getOperation(), 0);
+}
+
+void SumpoolOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  addWrite(effects, op, 0);
+  addRead(effects, op, 1);
+}
+
+void TileTransposeOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  addWrite(effects, op, 0);
+  addRead(effects, op, 1);
+}
+
+void NarrowQuotientOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  addWrite(effects, op, 0);
+  addReadWrite(effects, op, 1);
+  addReadWrite(effects, op, 2);
+  addRead(effects, op, 3);
+  addRead(effects, op, 4);
+}
+
+void Bf16TileOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  unsigned nBufs = getBuffers().size();
+  if (nBufs >= 1)
+    addWrite(effects, op, 0);
+  if (nBufs >= 2)
+    addRead(effects, op, 1);
+  if (nBufs >= 3)
+    addReadWrite(effects, op, 2);
+}
+
+void Bf16ProductOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  addWrite(effects, op, 0);
+  addRead(effects, op, 1);
+  addRead(effects, op, 2);
+  addReadWrite(effects, op, 3);
+}
+
+void VecSqrtRnOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  addWrite(effects, op, 0);
+  addRead(effects, op, 1);
+  addReadWrite(effects, op, 2);
+}
+
+void VecDivRnOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  addWrite(effects, op, 0);
+  addRead(effects, op, 1);
+  addRead(effects, op, 2);
+  addReadWrite(effects, op, 3);
+}
+
+void ScanSumOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  addWrite(effects, op, 0);
+  addRead(effects, op, 1);
+  addReadWrite(effects, op, 2);
+}
+
+void PhiloxUniformOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  addWrite(effects, op, 0);
+  addReadWrite(effects, op, 1);
+}
+
+void SymbolOp::inferResultRanges(ArrayRef<ConstantIntRanges>,
+                                 SetIntRangeFn setResultRange) {
+  StringRef sym = getName();
+  Operation *self = getOperation();
+  if (auto mat = self->getParentOfType<MatrixProgramOp>()) {
+    if (sym == "BM") {
+      setResultRange(getValue(), nonNegRange64(mat.getTileM(), mat.getTileM()));
+      return;
+    }
+    if (sym == "BN") {
+      setResultRange(getValue(), nonNegRange64(mat.getTileN(), mat.getTileN()));
+      return;
+    }
+    if (sym == "BK") {
+      setResultRange(getValue(), nonNegRange64(mat.getTileK(), mat.getTileK()));
+      return;
+    }
+    if (auto tasks = mat->getAttrOfType<IntegerAttr>("participants");
+        tasks && tasks.getInt() > 0) {
+      if (sym == "taskId") {
+        setResultRange(getValue(), nonNegRange64(0, tasks.getInt() - 1));
+        return;
+      }
+      if (sym == "taskDim") {
+        setResultRange(getValue(), nonNegRange64(1, tasks.getInt()));
+        return;
+      }
+    }
+  }
+  if (auto ord = self->getParentOfType<OrderedProgramOp>()) {
+    int64_t tasks = ord.getParticipants();
+    if (tasks > 0) {
+      if (sym == "taskId") {
+        setResultRange(getValue(), nonNegRange64(0, tasks - 1));
+        return;
+      }
+      if (sym == "taskDim") {
+        setResultRange(getValue(), nonNegRange64(1, tasks));
+        return;
+      }
+    }
+  }
+  auto fn = self->getParentOfType<func::FuncOp>();
+  if (fn) {
+    auto configs = fn->getAttrOfType<ArrayAttr>("block.configs");
+    auto layout = fn->getAttrOfType<DictionaryAttr>("dsa.layout");
+    if (configs && layout && layout.getAs<ArrayAttr>("rows") &&
+        !layout.getAs<ArrayAttr>("rows").empty()) {
+      int64_t batch = layout.getAs<IntegerAttr>("batch")
+                          ? layout.getAs<IntegerAttr>("batch").getInt()
+                          : 1;
+      int64_t minR = 0, maxR = 0, minW = 0, maxW = 0, minP = 0, maxP = 0,
+              minB = 0, maxB = 0;
+      bool first = true;
+      for (auto a : layout.getAs<ArrayAttr>("rows")) {
+        auto alloc = cast<DictionaryAttr>(a);
+        auto id = alloc.getAs<IntegerAttr>("id");
+        auto p = alloc.getAs<IntegerAttr>("pitch").getInt();
+        auto bytes = alloc.getAs<IntegerAttr>("bytes").getInt();
+        for (auto ca : configs) {
+          auto row = cast<DictionaryAttr>(ca);
+          if (row.get("id") != id)
+            continue;
+          auto r = row.getAs<IntegerAttr>("rows").getInt();
+          auto w = row.getAs<IntegerAttr>("width").getInt();
+          if (first) {
+            minR = maxR = r;
+            minW = maxW = w;
+            minP = maxP = p;
+            minB = maxB = bytes;
+            first = false;
+          } else {
+            minR = std::min(minR, r);
+            maxR = std::max(maxR, r);
+            minW = std::min(minW, w);
+            maxW = std::max(maxW, w);
+            minP = std::min(minP, p);
+            maxP = std::max(maxP, p);
+            minB = std::min(minB, bytes);
+            maxB = std::max(maxB, bytes);
+          }
+        }
+      }
+      if (!first && maxR <= INT32_MAX / std::max<int64_t>(1, batch) &&
+          maxW <= INT32_MAX && maxP <= INT32_MAX && maxB <= INT32_MAX) {
+        if (sym == "R") {
+          setResultRange(getValue(), nonNegRange64(minR, maxR));
+          return;
+        }
+        if (sym == "B") {
+          setResultRange(getValue(), nonNegRange64(batch, batch));
+          return;
+        }
+        if (sym == "EB") {
+          setResultRange(getValue(),
+                         nonNegRange64(minR * batch, maxR * batch));
+          return;
+        }
+        if (sym == "W") {
+          setResultRange(getValue(), nonNegRange64(minW, maxW));
+          return;
+        }
+        if (sym == "P") {
+          setResultRange(getValue(), nonNegRange64(minP, maxP));
+          return;
+        }
+        if (sym == "BYTES") {
+          setResultRange(getValue(), nonNegRange64(minB, maxB));
+          return;
+        }
+      }
+    }
+  }
+  setResultRange(getValue(), ConstantIntRanges::maxRange(64));
+}
+
+void BangcSrcDialect::initialize() {
   addOperations<
 #define GET_OP_LIST
 #include "Ops.cpp.inc"
       >();
+  auto *ctx = getContext();
+  WramConvOp::attachInterface<WramConvContract>(*ctx);
+  CycleMulOp::attachInterface<F32AccContract<CycleMulOp>>(*ctx);
+  VecMinScalarOp::attachInterface<F32AccContract<VecMinScalarOp>>(*ctx);
+  Bf16PanelGuardOp::attachInterface<I16AccContract<Bf16PanelGuardOp>>(*ctx);
+  Bf16IeeeDotOp::attachInterface<F32AccContract<Bf16IeeeDotOp>>(*ctx);
+  Bf16AccNarrowOp::attachInterface<F32AccContract<Bf16AccNarrowOp>>(*ctx);
+  I32ToBf16Op::attachInterface<I32AccContract<I32ToBf16Op>>(*ctx);
+  RowReduceOp::attachInterface<RowReduceContract>(*ctx);
+  RowExpOp::attachInterface<F32AccContract<RowExpOp>>(*ctx);
+  RowExp2Op::attachInterface<F32AccContract<RowExp2Op>>(*ctx);
+  Reduce32SumOp::attachInterface<F32AccContract<Reduce32SumOp>>(*ctx);
+  SumpoolOp::attachInterface<F32AccContract<SumpoolOp>>(*ctx);
+  TileTransposeOp::attachInterface<TileTransposeContract>(*ctx);
+  NarrowQuotientOp::attachInterface<NarrowQuotientContract>(*ctx);
+  Bf16TileOp::attachInterface<F32AccContract<Bf16TileOp>>(*ctx);
+  Bf16ProductOp::attachInterface<F32AccContract<Bf16ProductOp>>(*ctx);
+  VecSqrtRnOp::attachInterface<F32AccContract<VecSqrtRnOp>>(*ctx);
+  VecDivRnOp::attachInterface<F32AccContract<VecDivRnOp>>(*ctx);
+  Bf16ScalarOp::attachInterface<F32AccContract<Bf16ScalarOp>>(*ctx);
+  ScanSumOp::attachInterface<ScanSumContract>(*ctx);
+  SummaryReduceOp::attachInterface<SummaryReduceContract>(*ctx);
+  SummaryMergeOp::attachInterface<SummaryMergeContract>(*ctx);
+  PhiloxUniformOp::attachInterface<I32AccContract<PhiloxUniformOp>>(*ctx);
+  PhiloxAtOp::attachInterface<I32AccContract<PhiloxAtOp>>(*ctx);
 }

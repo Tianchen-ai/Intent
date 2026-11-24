@@ -107,9 +107,16 @@ struct OrderedLowerer {
     st.addOperands(operands);
     st.addTypes(results);
     st.addAttributes(attrs);
-    if (!contract.empty())
+    if (!contract.empty()) {
       st.addAttribute("ci.implementation",
                       b.getStringAttr(("exits/bangc::" + contract).str()));
+      if (llvm::any_of(operands,
+                       [](Value v) { return isa<MemRefType>(v.getType()); }) &&
+          llvm::none_of(attrs, [](const NamedAttribute &na) {
+            return na.getName() == "alignment";
+          }))
+        st.addAttribute("alignment", b.getI64IntegerAttr(64));
+    }
     return b.create(st);
   }
 
@@ -410,18 +417,25 @@ struct OrderedLowerer {
     auto emitPanelProduct = [&](Value outF32, Value lhsHalf,
                                 Value rhsFilterMajor, int64_t Kdim,
                                 int64_t Cdim, bool accumulate) {
-      auto runWram = [&]() {
+      auto runWram = [&](bool guardedWindow) {
         StringRef mKind = halfTy.isBF16() ? "bf16" : "f16";
         StringRef cKey = halfTy.isBF16() ? "wram-conv-bf16" : "wram-conv-f16";
+        auto makeConvAttrs = [&](int64_t bmVal, int64_t bnVal, int64_t bkVal) {
+          SmallVector<NamedAttribute, 5> attrs{
+              b.getNamedAttr("bm", b.getI64IntegerAttr(bmVal)),
+              b.getNamedAttr("bn", b.getI64IntegerAttr(bnVal)),
+              b.getNamedAttr("bk", b.getI64IntegerAttr(bkVal)),
+              b.getNamedAttr("mode", b.getStringAttr(mKind))};
+          if (guardedWindow && halfTy.isBF16())
+            attrs.push_back(b.getNamedAttr("bangc.guarded_bf16_window",
+                                           b.getBoolAttr(true)));
+          return attrs;
+        };
         if (Cdim == 64) {
           sync("compute");
           memcpy1D(filter, rhsFilterMajor, cI64(64 * Kdim), "NRAM2WRAM");
           makeOp("wram_conv", {outF32, lhsHalf, filter, cI1(accumulate)}, {},
-                 {b.getNamedAttr("bm", b.getI64IntegerAttr(M)),
-                  b.getNamedAttr("bn", b.getI64IntegerAttr(64)),
-                  b.getNamedAttr("bk", b.getI64IntegerAttr(Kdim)),
-                  b.getNamedAttr("mode", b.getStringAttr(mKind))},
-                 cKey);
+                 makeConvAttrs(M, 64, Kdim), cKey);
           sync("compute");
         } else if (Cdim == 32) {
           Value padNram = nramPtr(storage, cI64(scratchOffs[2] + 512), halfTy);
@@ -431,11 +445,7 @@ struct OrderedLowerer {
           sync("io");
           memcpy1D(filter, padNram, cI64(64 * Kdim), "NRAM2WRAM");
           makeOp("wram_conv", {convTmp, lhsHalf, filter, cI1(false)}, {},
-                 {b.getNamedAttr("bm", b.getI64IntegerAttr(M)),
-                  b.getNamedAttr("bn", b.getI64IntegerAttr(64)),
-                  b.getNamedAttr("bk", b.getI64IntegerAttr(Kdim)),
-                  b.getNamedAttr("mode", b.getStringAttr(mKind))},
-                 cKey);
+                 makeConvAttrs(M, 64, Kdim), cKey);
           sync("compute");
           forLoop(cI64(0), cI64(M), cI64(1), [&](Value r) {
             Value dstRow = makeAddr(outF32, {r}, {cI64(32)}, 1);
@@ -453,11 +463,7 @@ struct OrderedLowerer {
             sync("compute");
             memcpy1D(filter, fltSrc, cI64(64 * Kdim), "NRAM2WRAM");
             makeOp("wram_conv", {convTmp, lhsHalf, filter, cI1(false)}, {},
-                   {b.getNamedAttr("bm", b.getI64IntegerAttr(M)),
-                    b.getNamedAttr("bn", b.getI64IntegerAttr(64)),
-                    b.getNamedAttr("bk", b.getI64IntegerAttr(Kdim)),
-                    b.getNamedAttr("mode", b.getStringAttr(mKind))},
-                   cKey);
+                   makeConvAttrs(M, 64, Kdim), cKey);
             sync("compute");
             forLoop(cI64(0), cI64(M), cI64(1), [&](Value r) {
               Value dstRow =
@@ -473,7 +479,8 @@ struct OrderedLowerer {
         }
       };
 
-      if (halfTy.isBF16()) {
+      if (halfTy.isBF16() &&
+          !compilerinfra::allowsSubnormalFlush(fn, profile.numerical)) {
         sync("compute");
         Value okL = makeOp("bf16_panel_ok",
                            {lhsHalf, magScratch, flagScratch, cI64(M * Kdim)},
@@ -485,17 +492,19 @@ struct OrderedLowerer {
                    {b.getI1Type()}, {}, "bf16-panel-guard")
                 ->getResult(0);
         Value bothOk = b.create<arith::AndIOp>(loc, okL, okR);
-        ifThenElse(bothOk, {}, runWram, [&]() {
-          if (!accumulate)
-            fillVec(outF32, cI64(M * Cdim), cF32(0.0f));
-          sync("compute");
-          makeOp("bf16_ieee_dot",
-                 {outF32, lhsHalf, rhsFilterMajor, cI64(M), cI64(Cdim),
-                  cI64(Kdim), cI64(Kdim), cI64(Cdim)},
-                 {}, {}, "bf16-ieee-dot");
-        });
+        ifThenElse(
+            bothOk, {}, [&]() { runWram(/*guardedWindow=*/true); },
+            [&]() {
+              if (!accumulate)
+                fillVec(outF32, cI64(M * Cdim), cF32(0.0f));
+              sync("compute");
+              makeOp("bf16_ieee_dot",
+                     {outF32, lhsHalf, rhsFilterMajor, cI64(M), cI64(Cdim),
+                      cI64(Kdim), cI64(Kdim), cI64(Cdim)},
+                     {}, {}, "bf16-ieee-dot");
+            });
       } else {
-        runWram();
+        runWram(/*guardedWindow=*/false);
       }
     };
 
@@ -2322,6 +2331,9 @@ LogicalResult lowerOrderedToCallable(ModuleOp m, const TargetProfile &profile) {
     return failure();
   fn->setAttr("bangc.entry", Builder(ctx).getStringAttr("intent_enqueue"));
   OrderedLowerer lowerer(fn, profile);
-  return lowerer.run(m);
+  if (failed(lowerer.run(m)))
+    return failure();
+  stampScfCarryIds(m);
+  return success();
 }
 } // namespace CI_UNIT_NAMESPACE

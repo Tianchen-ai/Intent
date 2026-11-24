@@ -3,11 +3,90 @@
 #include "intentdsl/levels/execution/block/decisions/Verify.h"
 #include "intentdsl/levels/storage/dsa/ir/Matrix.h"
 #include "intentdsl/levels/storage/dsa/ir/Supply.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include <set>
 
 namespace CI_UNIT_NAMESPACE {
 using namespace mlir;
 using namespace compilerinfra;
+
+void stampScfCarryIds(ModuleOp m) {
+  int64_t nextId = 0;
+  Builder b(m.getContext());
+  m.walk([&](Operation *op) {
+    if (!isa<scf::ForOp, scf::IfOp, scf::WhileOp>(op) ||
+        op->getNumResults() == 0)
+      return;
+    auto idAttr = b.getI64IntegerAttr(nextId++);
+    op->setAttr("bangc.carry_id", idAttr);
+    for (Region &reg : op->getRegions())
+      for (Block &blk : reg)
+        if (!blk.empty())
+          blk.back().setAttr("bangc.carry_id", idAttr);
+  });
+}
+
+LogicalResult verifyScfCarryIds(ModuleOp m) {
+  std::set<int64_t> seenIds;
+  bool bad = m.walk([&](Operation *op) {
+                if (isa<scf::ForOp, scf::IfOp, scf::WhileOp>(op)) {
+                  unsigned nRes = op->getNumResults();
+                  auto idAttr = op->getAttrOfType<IntegerAttr>("bangc.carry_id");
+                  if (nRes == 0) {
+                    if (idAttr) {
+                      op->emitError("unexpected bangc.carry_id on void scf op");
+                      return WalkResult::interrupt();
+                    }
+                    return WalkResult::advance();
+                  }
+                  if (!idAttr || idAttr.getInt() < 0 ||
+                      !seenIds.insert(idAttr.getInt()).second) {
+                    op->emitError(
+                        "missing or duplicate bangc.carry_id on value-carrying "
+                        "scf op");
+                    return WalkResult::interrupt();
+                  }
+                  for (Region &reg : op->getRegions()) {
+                    for (Block &blk : reg) {
+                      if (blk.empty() ||
+                          blk.back().getAttr("bangc.carry_id") != idAttr) {
+                        op->emitError(
+                            "scf region terminator disagrees with parent "
+                            "bangc.carry_id");
+                        return WalkResult::interrupt();
+                      }
+                    }
+                  }
+                  return WalkResult::advance();
+                }
+                if (isa<scf::YieldOp>(op) && op->getNumOperands() > 0) {
+                  auto *parent = op->getParentOp();
+                  if (!parent ||
+                      op->getAttr("bangc.carry_id") !=
+                          parent->getAttr("bangc.carry_id") ||
+                      !op->getAttrOfType<IntegerAttr>("bangc.carry_id")) {
+                    op->emitError(
+                        "value-carrying scf.yield missing verified "
+                        "bangc.carry_id");
+                    return WalkResult::interrupt();
+                  }
+                }
+                if (isa<scf::ConditionOp>(op) && op->getNumOperands() > 1) {
+                  auto *parent = op->getParentOp();
+                  if (!parent ||
+                      op->getAttr("bangc.carry_id") !=
+                          parent->getAttr("bangc.carry_id") ||
+                      !op->getAttrOfType<IntegerAttr>("bangc.carry_id")) {
+                    op->emitError(
+                        "value-carrying scf.condition missing verified "
+                        "bangc.carry_id");
+                    return WalkResult::interrupt();
+                  }
+                }
+                return WalkResult::advance();
+              }).wasInterrupted();
+  return success(!bad);
+}
 
 namespace {
 LogicalResult verifyAbi(func::FuncOp fn) {
@@ -152,6 +231,9 @@ LogicalResult verifyCallableRows(ModuleOp m, const TargetProfile &profile) {
   if (declaredResources != requiredResources)
     return prog.emitError(
         "runtime_source declarations disagree with bound implementations");
+
+  if (failed(verifyScfCarryIds(m)))
+    return failure();
 
   return rowPrinter().verify(m, profile);
 }
@@ -304,6 +386,9 @@ LogicalResult verifyCallableMatrix(ModuleOp m, const TargetProfile &profile) {
     return fn.emitError(
         "BANG C matrix package disagrees with verified ABI or tile row");
 
+  if (failed(verifyScfCarryIds(m)))
+    return failure();
+
   return rowPrinter().verify(m, profile);
 }
 
@@ -451,6 +536,9 @@ LogicalResult verifyCallableOrdered(ModuleOp m, const TargetProfile &profile) {
       package.getValue() != StringRef(expected.data(), expected.size()))
     return fn.emitError(
         "BANG C ordered package disagrees with verified ABI or launch row");
+
+  if (failed(verifyScfCarryIds(m)))
+    return failure();
 
   return rowPrinter().verify(m, profile);
 }

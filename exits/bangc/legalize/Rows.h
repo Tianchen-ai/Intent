@@ -7,6 +7,8 @@ namespace CI_UNIT_NAMESPACE {
 void rowContracts(compilerinfra::Unit &);
 void addressOptimization(compilerinfra::Unit &);
 bool canNarrowAddress(mlir::Operation &, mlir::func::FuncOp);
+void stampScfCarryIds(mlir::ModuleOp);
+mlir::LogicalResult verifyScfCarryIds(mlir::ModuleOp);
 mlir::LogicalResult lowerRowsToCallable(mlir::ModuleOp,
                                         const compilerinfra::TargetProfile &);
 mlir::LogicalResult verifyCallableRows(mlir::ModuleOp,

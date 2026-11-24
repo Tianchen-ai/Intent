@@ -258,9 +258,16 @@ struct RowLowerer {
     st.addOperands(operands);
     st.addTypes(results);
     st.addAttributes(attrs);
-    if (!contract.empty())
+    if (!contract.empty()) {
       st.addAttribute("ci.implementation",
                       b.getStringAttr(("exits/bangc::" + contract).str()));
+      if (llvm::any_of(operands,
+                       [](Value v) { return isa<MemRefType>(v.getType()); }) &&
+          llvm::none_of(attrs, [](const NamedAttribute &na) {
+            return na.getName() == "alignment";
+          }))
+        st.addAttribute("alignment", b.getI64IntegerAttr(64));
+    }
     return b.create(st);
   }
 
@@ -2571,6 +2578,7 @@ LogicalResult lowerRowsToCallable(ModuleOp m, const TargetProfile &profile) {
   RowLowerer lowerer(fn, profile);
   if (failed(lowerer.run()))
     return failure();
+  stampScfCarryIds(m);
   llvm::SmallVector<char> metadata;
   llvm::raw_svector_ostream os(metadata);
   if (auto err = describeRowArtifact(fn, os))

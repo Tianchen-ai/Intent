@@ -1,8 +1,10 @@
 #pragma once
+#include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/storage/dsa/ir/Matrix.h"
 namespace CI_UNIT_NAMESPACE {
 inline mlir::LogicalResult bindMatrix(mlir::func::FuncOp fn, unsigned phase,
-                                      bool write) {
+                                      bool write,
+                                      const compilerinfra::TargetProfile &profile) {
   using namespace mlir;
   intentdsl::block::MatrixAccess p(fn);
   auto &setup = p.fold.getRegion(0).front().front();
@@ -30,13 +32,14 @@ inline mlir::LogicalResult bindMatrix(mlir::func::FuncOp fn, unsigned phase,
         p.tile[1] != 64)
       return p.dot.emitError(
           "native filter copy implements one 64-channel weight bank");
-    if (type.isBF16() && !intentdsl::kir::allowsSubnormalFtz(&p.dot) &&
+    bool allowFtz =
+        compilerinfra::allowsSubnormalFlush(&p.dot, profile.numerical);
+    if (type.isBF16() && !allowFtz &&
         !field(p.dot, "bangc.bf16_arithmetic",
                b.getStringAttr("checked-conv-ieee-fallback")))
       return p.dot.emitError(
           "BF16 dot requires an IEEE path outside the native exponent window");
-    if (intentdsl::kir::allowsSubnormalFtz(&p.dot) &&
-        p.dot.hasAttr("bangc.bf16_arithmetic"))
+    if (allowFtz && p.dot.hasAttr("bangc.bf16_arithmetic"))
       return p.dot.emitError(
           "BF16 subnormal FTZ contraction must not attach strict fallback");
     if (primitive == "exact-i8-conv" && p.tile[2] > 1024)
