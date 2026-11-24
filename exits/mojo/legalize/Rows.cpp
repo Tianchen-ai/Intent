@@ -22,6 +22,86 @@ using namespace mlir;
 bool canNarrowMojoAddress(Operation &op);
 TerminalPrinter mojoMatrixPrinter();
 
+void lowerMojoScfIfs(Operation *rootOp) {
+  SmallVector<scf::IfOp, 16> ifs;
+  rootOp->walk<WalkOrder::PostOrder>(
+      [&](scf::IfOp ifOp) { ifs.push_back(ifOp); });
+  for (scf::IfOp ifOp : ifs) {
+    OpBuilder b(ifOp);
+    Location loc = ifOp.getLoc();
+    SmallVector<Value, 4> slots;
+    for (Value r : ifOp.getResults()) {
+      std::string tyStr;
+      if (auto sh = dyn_cast<ShapedType>(r.getType())) {
+        std::string dt = "DType.float32";
+        Type et = sh.getElementType();
+        if (et.isBF16())
+          dt = "DType.bfloat16";
+        else if (et.isF16())
+          dt = "DType.float16";
+        else if (et.isInteger(1))
+          dt = "DType.bool";
+        else if (et.isUnsignedInteger(64))
+          dt = "DType.uint64";
+        else if (et.isInteger(64))
+          dt = "DType.int64";
+        else if (et.isInteger(32))
+          dt = "DType.int32";
+        tyStr = "SIMD[" + dt + "," + std::to_string(sh.getDimSize(0)) + "]";
+      } else {
+        Type t = r.getType();
+        tyStr = t.isIndex()               ? "Int"
+                : t.isF16()               ? "Float16"
+                : t.isBF16()              ? "BFloat16"
+                : t.isF32()               ? "Float32"
+                : t.isInteger(1)          ? "Bool"
+                : t.isUnsignedInteger(64) ? "UInt64"
+                : t.isInteger(64)         ? "Int64"
+                                          : "Int32";
+      }
+      OperationState declSt(loc, "mojo_row.var_decl");
+      declSt.addAttribute("mojo_type", b.getStringAttr(tyStr));
+      declSt.addTypes(r.getType());
+      Value slot = b.create(declSt)->getResult(0);
+      r.replaceAllUsesWith(slot);
+      slots.push_back(slot);
+    }
+
+    bool hasElse = !ifOp.getElseRegion().empty();
+    OperationState newSt(loc, "mojo_row.if");
+    newSt.addOperands(ifOp.getCondition());
+    for (NamedAttribute attr : ifOp->getDiscardableAttrDictionary())
+      newSt.addAttribute(attr.getName(), attr.getValue());
+    newSt.addAttribute("has_else", b.getBoolAttr(hasElse));
+    newSt.addRegion();
+    newSt.addRegion();
+    Operation *newIf = b.create(newSt);
+
+    auto convertRegion = [&](Region &srcReg, Region &dstReg) {
+      dstReg.takeBody(srcReg);
+      Block &bb = dstReg.front();
+      if (auto yOp = dyn_cast<scf::YieldOp>(bb.getTerminator())) {
+        OpBuilder yb(yOp);
+        for (auto [slot, val] : llvm::zip(slots, yOp.getOperands())) {
+          OperationState asgSt(loc, "mojo_row.var_assign");
+          asgSt.addOperands({slot, val});
+          yb.create(asgSt);
+        }
+        yOp.erase();
+      }
+      OpBuilder eb = OpBuilder::atBlockEnd(&bb);
+      if (bb.empty())
+        eb.create(OperationState(loc, "mojo_row.pass"));
+      eb.create(OperationState(loc, "mojo_row.end"));
+    };
+
+    convertRegion(ifOp.getThenRegion(), newIf->getRegion(0));
+    if (hasElse)
+      convertRegion(ifOp.getElseRegion(), newIf->getRegion(1));
+    ifOp.erase();
+  }
+}
+
 namespace {
 std::string dtypeBare(Type t) {
   if (auto sh = dyn_cast<ShapedType>(t))
@@ -84,7 +164,7 @@ Value constF32(OpBuilder &b, Location loc, float v) {
 Value asInt(OpBuilder &b, Location loc, Value v) {
   if (v.getType().isIndex())
     return v;
-  return makeOp(b, loc, "as_int", {v}, {b.getIndexType()})->getResult(0);
+  return b.create<arith::IndexCastOp>(loc, b.getIndexType(), v);
 }
 
 Value makeStaticAddr(OpBuilder &b, Location loc, Value ptr, ValueRange coords,
@@ -217,7 +297,7 @@ struct RowLowerer {
       for (int64_t d = 0; d + 1 < R; ++d) {
         if (d != owner) {
           hoistedOwnerSizes[idx][d] = info.dimVals[d];
-          last = b.create<arith::FloorDivSIOp>(loc, last, info.dimVals[d]);
+          last = b.create<arith::DivSIOp>(loc, last, info.dimVals[d]);
         }
       }
       if (R - 1 != owner)
@@ -267,7 +347,7 @@ struct RowLowerer {
       }
       Value sz = hoistedOwnerSizes[idx][d];
       coords[d] = b.create<arith::RemSIOp>(loc, cur, sz);
-      cur = b.create<arith::FloorDivSIOp>(loc, cur, sz);
+      cur = b.create<arith::DivSIOp>(loc, cur, sz);
     }
     return coords;
   }
@@ -291,7 +371,7 @@ struct RowLowerer {
     for (int64_t d = R - 2; d >= 0; --d) {
       Value sz = slots[idx].dimVals[d];
       coords[d] = b.create<arith::RemSIOp>(loc, row, sz);
-      row = b.create<arith::FloorDivSIOp>(loc, row, sz);
+      row = b.create<arith::DivSIOp>(loc, row, sz);
     }
     return coords;
   }
@@ -688,9 +768,9 @@ struct RowLowerer {
                               ->getResult(0);
             Value uIdx = constIdx(b, loc, unit);
             Value bLo =
-                b.create<arith::FloorDivSIOp>(loc, asInt(b, loc, loRaw), uIdx);
+                b.create<arith::DivSIOp>(loc, asInt(b, loc, loRaw), uIdx);
             Value bHi =
-                b.create<arith::FloorDivSIOp>(loc, asInt(b, loc, hiRaw), uIdx);
+                b.create<arith::DivSIOp>(loc, asInt(b, loc, hiRaw), uIdx);
             auto *blkLoop =
                 makeOp(b, loc, "for_range", {bLo, bHi, c1}, {}, {}, 1);
             Block &blkBb = blkLoop->getRegion(0).emplaceBlock();
@@ -965,14 +1045,65 @@ struct RowLowerer {
       if (slots[idx].boundShape && slots[idx].boundStrides) {
         int64_t spanConst = std::max<int64_t>(1, slots[idx].boundShape[fast]);
         int64_t stepConst = slots[idx].boundStrides[fast];
-        compilerinfra::TailDimension td;
-        td.staticExtent = spanConst;
-        td.staticOffset = 0;
-        td.tileSize = w;
-        td.step = w;
-        auto tp = compilerinfra::proveTailAccess({td});
-        bool exactSpan =
-            tp.proven && tp.kind == compilerinfra::TailKind::ExactInBounds;
+        int64_t colsConst = 1;
+        for (int64_t ax = 0; ax < R; ++ax)
+          if (ax != *ownerAxis)
+            colsConst *= std::max<int64_t>(1, slots[idx].boundShape[ax]);
+        bool exactSpan = false;
+        int64_t fullStopConst = (colsConst / fullWidth) * fullWidth;
+        if (fullStopConst >= w && w > 0) {
+          OpBuilder sb(b.getContext());
+          Location sloc = b.getUnknownLoc();
+          OperationState scopeSt(sloc, "mojo_row.row_fn");
+          scopeSt.addAttribute("param_specs", sb.getArrayAttr({}));
+          scopeSt.addAttribute("uses_atomic", sb.getBoolAttr(false));
+          scopeSt.addAttribute("uses_stack", sb.getBoolAttr(false));
+          scopeSt.addAttribute("uses_memcpy", sb.getBoolAttr(false));
+          scopeSt.addAttribute("has_key_bounds", sb.getBoolAttr(false));
+          Block &sBb = scopeSt.addRegion()->emplaceBlock();
+          OwningOpRef<Operation *> scopeOp(Operation::create(scopeSt));
+          sb.setInsertionPointToEnd(&sBb);
+          Value z0 = constIdx(sb, sloc, 0),
+                ub = constIdx(sb, sloc, fullStopConst),
+                stW = constIdx(sb, sloc, w);
+          Operation *jLoop = makeOp(sb, sloc, "for_range", {z0, ub, stW}, {},
+                                    {}, 1);
+          makeOp(sb, sloc, "end");
+          Block &jBb = jLoop->getRegion(0).emplaceBlock();
+          Value jVar = jBb.addArgument(sb.getIndexType(), sloc);
+          sb.setInsertionPointToEnd(&jBb);
+          Value fastCoord = jVar;
+          if (colsConst != spanConst) {
+            if (spanConst % w == 0) {
+              Value stepIdx = sb.create<arith::DivSIOp>(sloc, jVar, stW);
+              Value spanSteps = constIdx(sb, sloc, spanConst / w);
+              Value remSteps =
+                  sb.create<arith::RemSIOp>(sloc, stepIdx, spanSteps);
+              fastCoord = sb.create<arith::MulIOp>(sloc, remSteps, stW);
+            } else {
+              fastCoord = sb.create<arith::RemSIOp>(
+                  sloc, jVar, constIdx(sb, sloc, spanConst));
+            }
+          }
+          Value probeAddr =
+              makeOp(sb, sloc, "address", {slots[idx].ptrVal, fastCoord},
+                     {sb.getIndexType()},
+                     {sb.getNamedAttr("strides",
+                                      sb.getDenseI64ArrayAttr({stepConst})),
+                      sb.getNamedAttr("index_bits", sb.getI32IntegerAttr(64)),
+                      sb.getNamedAttr("extents",
+                                      sb.getDenseI64ArrayAttr({spanConst}))})
+                  ->getResult(0);
+          Operation *probeLoad =
+              makeOp(sb, sloc, "load_slice", {slots[idx].ptrVal, probeAddr},
+                     {vecTy},
+                     {sb.getNamedAttr("width", sb.getI64IntegerAttr(w)),
+                      sb.getNamedAttr("slice_axis", sb.getI64IntegerAttr(0))});
+          makeOp(sb, sloc, "end");
+          auto tp = compilerinfra::proveTailAccess(probeLoad);
+          exactSpan =
+              tp.proven && tp.kind == compilerinfra::TailKind::ExactInBounds;
+        }
         if (exactSpan && stepConst == 1) {
           Value baseAddr = emitViewAddr(idx, buildOwnerCoords(idx, r, j));
           return makeOp(b, loc, "load_slice", {slots[idx].ptrVal, baseAddr},
@@ -2165,7 +2296,7 @@ struct RowLowerer {
           makeOp(b, loc, "end");
         }
         Value vecDone = b.create<arith::MulIOp>(
-            loc, b.create<arith::FloorDivSIOp>(loc, colsIdx, cVecW), cVecW);
+            loc, b.create<arith::DivSIOp>(loc, colsIdx, cVecW), cVecW);
         auto *wSca =
             makeOp(b, loc, "while_lt", {vecDone, colsIdx, c1}, {},
                    {b.getNamedAttr("check_step", b.getBoolAttr(false))}, 1);
@@ -2237,7 +2368,7 @@ struct RowLowerer {
 
     Value fullStop = b.create<arith::MulIOp>(
         loc,
-        b.create<arith::FloorDivSIOp>(loc, colsIdx, constIdx(b, loc, fullWidth)),
+        b.create<arith::DivSIOp>(loc, colsIdx, constIdx(b, loc, fullWidth)),
         constIdx(b, loc, fullWidth));
 
     if (isOwners) {
@@ -2642,7 +2773,7 @@ struct RowLowerer {
             Value cW2 = constIdx(b, loc, 2 * w), cW3 = constIdx(b, loc, 3 * w),
                   cW4 = constIdx(b, loc, 4 * w);
             Value unrollStop = b.create<arith::MulIOp>(
-                loc, b.create<arith::FloorDivSIOp>(loc, fullStop, cW4), cW4);
+                loc, b.create<arith::DivSIOp>(loc, fullStop, cW4), cW4);
             {
               auto *uLoop =
                   makeOp(b, loc, "for_range", {c0, unrollStop, cW4}, {}, {}, 1);
@@ -2704,7 +2835,7 @@ struct RowLowerer {
                              : 4;
               Value cStep = constIdx(b, loc, segK * w);
               Value unrollStop = b.create<arith::MulIOp>(
-                  loc, b.create<arith::FloorDivSIOp>(loc, fullStop, cStep),
+                  loc, b.create<arith::DivSIOp>(loc, fullStop, cStep),
                   cStep);
               auto loadOffF = [&](Value idxVal) {
                 Value a = emitViewAddr(offIdx, {idxVal});
@@ -2813,7 +2944,7 @@ struct RowLowerer {
           Value cW2 = constIdx(b, loc, 2 * w), cW3 = constIdx(b, loc, 3 * w),
                 cW4 = constIdx(b, loc, 4 * w);
           Value unrollStop = b.create<arith::MulIOp>(
-              loc, b.create<arith::FloorDivSIOp>(loc, fullStop, cW4), cW4);
+              loc, b.create<arith::DivSIOp>(loc, fullStop, cW4), cW4);
           {
             auto *uLoop =
                 makeOp(b, loc, "for_range", {c0, unrollStop, cW4}, {}, {}, 1);
@@ -3539,6 +3670,7 @@ LogicalResult lowerMojoRow(func::FuncOp fn, int64_t fullWidth) {
   }
   for (Operation *op : llvm::reverse(toErase))
     op->erase();
+  lowerMojoScfIfs(prog);
   return success();
 }
 

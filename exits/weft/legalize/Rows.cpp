@@ -1916,16 +1916,59 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
       int64_t tileW = task.getAttrOfType<IntegerAttr>("cpu.tile").getInt();
       int64_t tailVec =
           std::min<int64_t>(tileW, std::max<int64_t>(1, tailVecWidth));
-      compilerinfra::TailDimension tileTailDim;
-      tileTailDim.staticExtent = tileW;
-      tileTailDim.staticOffset = 0;
-      tileTailDim.tileSize = tailVec;
-      tileTailDim.step = tailVec;
-      auto tileTailProof = compilerinfra::proveTailAccess({tileTailDim});
-      bool exactTailVec =
-          tileTailProof.proven &&
-          tileTailProof.kind == compilerinfra::TailKind::ExactInBounds;
-      (void)exactTailVec;
+      int64_t staticCols = -1;
+      if (fn.getNumArguments() >= 1) {
+        if (auto *sh = facts.shapeOf(fn.getArgument(0));
+            sh && sh->size() == 2) {
+          if (auto cExt = (*sh)[1].getAsInteger(); cExt && *cExt > 0)
+            staticCols = *cExt;
+        }
+      }
+      bool exactFullTile = false;
+      bool exactTailVec = false;
+      if (staticCols > 0 && tileW > 0) {
+        auto proveStaticStep = [&](int64_t stepW) -> bool {
+          if (stepW <= 0)
+            return false;
+          OpBuilder sb(b.getContext());
+          Location sloc = b.getUnknownLoc();
+          OperationState scopeSt(sloc, "weft_host.task_kernel");
+          scopeSt.addAttribute("sym_name", sb.getStringAttr("tail_probe"));
+          scopeSt.addAttribute("source", sb.getStringAttr("tail_probe"));
+          scopeSt.addAttribute("view_types", sb.getArrayAttr({}));
+          scopeSt.addAttribute("strided_slots", sb.getDenseI64ArrayAttr({}));
+          Block &sBb = scopeSt.addRegion()->emplaceBlock();
+          Value dummySl = sBb.addArgument(sb.getIndexType(), sloc);
+          OwningOpRef<Operation *> scopeOp(Operation::create(scopeSt));
+          sb.setInsertionPointToEnd(&sBb);
+          Value z0 = sb.create<arith::ConstantIndexOp>(sloc, 0);
+          Value cCols = sb.create<arith::ConstantIndexOp>(sloc, staticCols);
+          Value cStep = sb.create<arith::ConstantIndexOp>(sloc, stepW);
+          Operation *pFor =
+              makeOp(sb, sloc, "task_for", {z0, cCols, cStep}, {},
+                     {sb.getNamedAttr("iter_types", sb.getArrayAttr({}))}, 1);
+          makeOp(sb, sloc, "end");
+          Block &pBb = pFor->getRegion(0).emplaceBlock();
+          Value pIv = pBb.addArgument(sb.getIndexType(), sloc);
+          sb.setInsertionPointToEnd(&pBb);
+          std::string vTy = regionType("value", elem, 1, int(stepW));
+          Operation *subOp = makeOp(
+              sb, sloc, "task_subview", {dummySl, pIv}, {sb.getIndexType()},
+              {sb.getNamedAttr("static_extent", sb.getI64IntegerAttr(stepW)),
+               sb.getNamedAttr("container_extent",
+                               sb.getI64IntegerAttr(staticCols)),
+               sb.getNamedAttr("slice_type", sb.getStringAttr(baseSlTy)),
+               sb.getNamedAttr("val_type", sb.getStringAttr(vTy)),
+               sb.getNamedAttr("admit", sb.getBoolAttr(true))});
+          makeOp(sb, sloc, "task_yield", {}, {},
+                 {sb.getNamedAttr("val_types", sb.getArrayAttr({}))});
+          auto tp = compilerinfra::proveTailAccess(subOp);
+          return tp.proven && tp.kind == compilerinfra::TailKind::ExactInBounds;
+        };
+        exactFullTile = proveStaticStep(tileW);
+        if (!exactFullTile && tailVec > 1 && (tileW % tailVec == 0))
+          exactTailVec = proveStaticStep(tailVec);
+      }
       TaskTerm tileTerm = rb.idx(tileW);
       TaskTerm tileCnt = rb.bin("div", rb.columns, tileTerm, "index");
       TaskTerm tileEnd = rb.bin("mul", tileCnt, tileTerm, "index");
@@ -1985,27 +2028,29 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
       };
 
       emitVecCopy(rb.zeroIdx, tileCnt, rb.oneIdx, int(tileW), true);
-      TaskTerm vecEnd = tileEnd;
-      if (tailVec > 1 && tailVec < tileW) {
-        TaskTerm rem = rb.bin("sub", rb.columns, tileEnd, "index");
-        TaskTerm vecStep = rb.idx(tailVec);
-        TaskTerm vecCnt = rb.bin("div", rem, vecStep, "index");
-        vecEnd = rb.bin("add", tileEnd,
-                        rb.bin("mul", vecCnt, vecStep, "index"), "index");
-        emitVecCopy(tileEnd, vecEnd, vecStep, int(tailVec), false);
-      }
-      {
-        Operation *sFor = makeOp(
-            b, loc, "task_for", {vecEnd.v, rb.columns.v, rb.oneIdx.v}, {},
-            {b.getNamedAttr("iter_types", b.getArrayAttr({}))}, 1);
-        Block &sBb = sFor->getRegion(0).emplaceBlock();
-        TaskTerm sIv{sBb.addArgument(b.getIndexType(), loc), "index"};
-        OpBuilder::InsertionGuard sg(b);
-        b.setInsertionPointToEnd(&sBb);
-        TaskTerm sc = rb.scalarSlice(tOp.getOperand(0), {rowIv, sIv}, true, sp);
-        rb.commitOp(sc, rb.scalarSlice(tOp.getOperand(1), {rowIv, sIv}, false));
-        makeOp(b, loc, "task_yield", {}, {},
-               {b.getNamedAttr("val_types", b.getArrayAttr({}))});
+      if (!exactFullTile) {
+        TaskTerm vecEnd = tileEnd;
+        if (tailVec > 1 && tailVec < tileW) {
+          TaskTerm rem = rb.bin("sub", rb.columns, tileEnd, "index");
+          TaskTerm vecStep = rb.idx(tailVec);
+          TaskTerm vecCnt = rb.bin("div", rem, vecStep, "index");
+          vecEnd = rb.bin("add", tileEnd,
+                          rb.bin("mul", vecCnt, vecStep, "index"), "index");
+          emitVecCopy(tileEnd, vecEnd, vecStep, int(tailVec), false);
+        }
+        if (!exactTailVec) {
+          Operation *sFor = makeOp(
+              b, loc, "task_for", {vecEnd.v, rb.columns.v, rb.oneIdx.v}, {},
+              {b.getNamedAttr("iter_types", b.getArrayAttr({}))}, 1);
+          Block &sBb = sFor->getRegion(0).emplaceBlock();
+          TaskTerm sIv{sBb.addArgument(b.getIndexType(), loc), "index"};
+          OpBuilder::InsertionGuard sg(b);
+          b.setInsertionPointToEnd(&sBb);
+          TaskTerm sc = rb.scalarSlice(tOp.getOperand(0), {rowIv, sIv}, true, sp);
+          rb.commitOp(sc, rb.scalarSlice(tOp.getOperand(1), {rowIv, sIv}, false));
+          makeOp(b, loc, "task_yield", {}, {},
+                 {b.getNamedAttr("val_types", b.getArrayAttr({}))});
+        }
       }
     } else if (intentdsl::cpu::atomicMembers(bb)) {
       auto &effects = bb.front().getRegion(0).front();
@@ -3534,15 +3579,54 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
   b.setInsertionPointToEnd(&hOuter);
   Operation *hFn = makeOp(
       b, loc, "host_row_fn", {}, {},
-      {b.getNamedAttr("params", b.getStringAttr(llvm::join(params, ", "))),
-       b.getNamedAttr("walk", b.getStringAttr(walk)),
-       b.getNamedAttr("member_tasks", b.getBoolAttr(members)),
-       b.getNamedAttr("single_dispatcher", b.getBoolAttr(singleDispatcher))},
+      {b.getNamedAttr("params", b.getStringAttr(llvm::join(params, ", ")))},
       1);
   makeOp(b, loc, "end");
 
   Block &hFnBb = hFn->getRegion(0).emplaceBlock();
   b.setInsertionPointToEnd(&hFnBb);
+  auto emitRowGuard = [&](StringRef cond, int32_t code) {
+    makeOp(b, loc, "host_guard_return", {}, {},
+           {b.getNamedAttr("cond", b.getStringAttr(cond)),
+            b.getNamedAttr("code", b.getI32IntegerAttr(code))});
+  };
+  auto emitRowLet = [&](StringRef name, StringRef expr, bool isMut = false) {
+    makeOp(b, loc, "host_let_i64", {}, {},
+           {b.getNamedAttr("name", b.getStringAttr(name)),
+            b.getNamedAttr("expr", b.getStringAttr(expr)),
+            b.getNamedAttr("is_mut", b.getBoolAttr(isMut))});
+  };
+  auto emitRowAssign = [&](StringRef dst, StringRef src, ValueRange vals = {}) {
+    makeOp(b, loc, "host_elem_op", vals, {},
+           {b.getNamedAttr("op", b.getStringAttr("assign")),
+            b.getNamedAttr("dst_expr", b.getStringAttr(dst)),
+            b.getNamedAttr("src_expr", b.getStringAttr(src)),
+            b.getNamedAttr("aux_expr", b.getStringAttr("")),
+            b.getNamedAttr("elem_bytes", b.getI64IntegerAttr(8))});
+  };
+  auto emitRowDef = [&](StringRef expr) -> Value {
+    return makeOp(b, loc, "host_def_i64", {}, {b.getIndexType()},
+                  {b.getNamedAttr("expr", b.getStringAttr(expr))})
+        ->getResult(0);
+  };
+  emitRowGuard("rows < 0 || cols < 0 || grain <= 0 || panel < 0 || workers <= 0",
+               1);
+  emitRowGuard("!rows", 0);
+  if (walk == "destination") {
+    emitRowLet("t_rows", "rows");
+    emitRowAssign("rows", "cols");
+    emitRowAssign("cols", "t_rows");
+    emitRowLet("t_a0s", "a0s0");
+    emitRowAssign("a0s0", "a0s1");
+    emitRowAssign("a0s1", "t_a0s");
+    emitRowLet("t_a1s", "a1s0");
+    emitRowAssign("a1s0", "a1s1");
+    emitRowAssign("a1s1", "t_a1s");
+  }
+  if (members)
+    emitRowAssign("rows", "cols");
+  if (singleDispatcher)
+    emitRowAssign("workers", "1");
 
   auto cPtrTypeFor = [&](unsigned i) -> std::string {
     const auto *a = abi[i].getAsObject();
@@ -3559,16 +3643,37 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
 
   if (walk == "tile") {
     int64_t tileW = task.getAttrOfType<IntegerAttr>("cpu.tile").getInt();
+    std::string st = std::to_string(tileW);
+    emitRowLet("nt", "(cols - 1) / " + st + " + 1");
+    emitRowLet("mt", "(rows - 1) / " + st + " + 1");
     Operation *pTiles =
-        makeOp(b, loc, "host_parallel_transpose_tiles", {}, {},
-               {b.getNamedAttr("tile", b.getI64IntegerAttr(tileW))}, 1);
+        makeOp(b, loc, "host_omp_for", {}, {},
+               {b.getNamedAttr("iv", b.getStringAttr("g")),
+                b.getNamedAttr("lb", b.getStringAttr("0")),
+                b.getNamedAttr("ub", b.getStringAttr("mt * nt")),
+                b.getNamedAttr("step", b.getStringAttr("1")),
+                b.getNamedAttr("parallel", b.getBoolAttr(true)),
+                b.getNamedAttr("simd", b.getBoolAttr(false)),
+                b.getNamedAttr("x86_simd", b.getBoolAttr(false)),
+                b.getNamedAttr("schedule", b.getStringAttr("static")),
+                b.getNamedAttr("num_threads", b.getStringAttr("workers")),
+                b.getNamedAttr("if_cond", b.getStringAttr("workers > 1"))},
+               1);
     makeOp(b, loc, "end");
     Block &pBb = pTiles->getRegion(0).emplaceBlock();
-    Value rV = pBb.addArgument(b.getIndexType(), loc);
-    Value cV = pBb.addArgument(b.getIndexType(), loc);
-    Value nrV = pBb.addArgument(b.getIndexType(), loc);
-    Value ncV = pBb.addArgument(b.getIndexType(), loc);
     b.setInsertionPointToEnd(&pBb);
+    Value rV = emitRowDef("(g / nt) * " + st);
+    Value cV = emitRowDef("(g % nt) * " + st);
+    Value nrV = makeOp(b, loc, "host_def_i64", {rV}, {b.getIndexType()},
+                       {b.getNamedAttr("expr",
+                                       b.getStringAttr("rows - $0 < " + st +
+                                                       " ? rows - $0 : " + st))})
+                    ->getResult(0);
+    Value ncV = makeOp(b, loc, "host_def_i64", {cV}, {b.getIndexType()},
+                       {b.getNamedAttr("expr",
+                                       b.getStringAttr("cols - $0 < " + st +
+                                                       " ? cols - $0 : " + st))})
+                    ->getResult(0);
 
     Value off0 =
         makeOp(b, loc, "host_row_offset", {rV, cV}, {b.getIndexType()},
@@ -3721,31 +3826,71 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
     };
 
     if (auto keysAttr = task.getAttrOfType<IntegerAttr>("cpu.key_extent")) {
-      Operation *pKeys = makeOp(
-          b, loc, "host_parallel_key_ranges", {}, {},
-          {b.getNamedAttr("key_extent", b.getI64IntegerAttr(keysAttr.getInt()))},
-          1);
+      int64_t keys = keysAttr.getInt();
+      emitRowLet("keys", std::to_string(keys));
+      emitRowLet("lines", "(keys + 15) / 16");
+      emitRowLet("n_thr", "workers < lines ? workers : lines");
+      Operation *pKeys =
+          makeOp(b, loc, "host_omp_for", {}, {},
+                 {b.getNamedAttr("iv", b.getStringAttr("b")),
+                  b.getNamedAttr("lb", b.getStringAttr("0")),
+                  b.getNamedAttr("ub", b.getStringAttr("n_thr")),
+                  b.getNamedAttr("step", b.getStringAttr("1")),
+                  b.getNamedAttr("parallel", b.getBoolAttr(true)),
+                  b.getNamedAttr("simd", b.getBoolAttr(false)),
+                  b.getNamedAttr("x86_simd", b.getBoolAttr(false)),
+                  b.getNamedAttr("schedule", b.getStringAttr("static")),
+                  b.getNamedAttr("num_threads", b.getStringAttr("n_thr")),
+                  b.getNamedAttr("if_cond", b.getStringAttr("n_thr > 1"))},
+                 1);
       makeOp(b, loc, "end");
       Block &pBb = pKeys->getRegion(0).emplaceBlock();
-      Value startV = pBb.addArgument(b.getIndexType(), loc);
-      Value countV = pBb.addArgument(b.getIndexType(), loc);
-      Value loV = pBb.addArgument(b.getIndexType(), loc);
-      Value hiV = pBb.addArgument(b.getIndexType(), loc);
       b.setInsertionPointToEnd(&pBb);
+      Value startV = emitRowDef("0");
+      Value countV = emitRowDef("rows");
+      Value loV = emitRowDef("16 * (lines * b / n_thr)");
+      Value hiV = emitRowDef("16 * (lines * (b + 1) / n_thr)");
       emitDispatchBody(startV, countV, loV, hiV);
     } else {
       std::string chunkExpr =
           projected ? ("a" + std::to_string(domainArg) + "d" +
                        std::to_string(slotFacts[domainArg].rank - 2))
                     : "rows";
-      Operation *pRows = makeOp(
-          b, loc, "host_parallel_row_intervals", {}, {},
-          {b.getNamedAttr("chunk_expr", b.getStringAttr(chunkExpr))}, 1);
+      emitRowLet("groups", "1 + (rows - 1) / grain");
+      emitRowLet("bins", "groups < workers ? groups : workers");
+      Operation *pRows =
+          makeOp(b, loc, "host_omp_for", {}, {},
+                 {b.getNamedAttr("iv", b.getStringAttr("b")),
+                  b.getNamedAttr("lb", b.getStringAttr("0")),
+                  b.getNamedAttr("ub", b.getStringAttr("bins")),
+                  b.getNamedAttr("step", b.getStringAttr("1")),
+                  b.getNamedAttr("parallel", b.getBoolAttr(true)),
+                  b.getNamedAttr("simd", b.getBoolAttr(false)),
+                  b.getNamedAttr("x86_simd", b.getBoolAttr(false)),
+                  b.getNamedAttr("schedule", b.getStringAttr("static")),
+                  b.getNamedAttr("num_threads", b.getStringAttr("bins")),
+                  b.getNamedAttr("if_cond", b.getStringAttr("bins > 1"))},
+                 1);
       makeOp(b, loc, "end");
       Block &pBb = pRows->getRegion(0).emplaceBlock();
-      Value startV = pBb.addArgument(b.getIndexType(), loc);
-      Value countV = pBb.addArgument(b.getIndexType(), loc);
       b.setInsertionPointToEnd(&pBb);
+      emitRowLet("group",
+                 "(groups / bins * b + (groups % bins * b) / bins) * grain");
+      emitRowLet(
+          "end",
+          "b + 1 == bins ? rows : (groups / bins * (b + 1) + (groups % bins * "
+          "(b + 1)) / bins) * grain");
+      emitRowLet("cur", "group", /*isMut=*/true);
+      Operation *wOp =
+          makeOp(b, loc, "host_while", {}, {},
+                 {b.getNamedAttr("cond", b.getStringAttr("cur < end"))}, 1);
+      makeOp(b, loc, "end");
+      Block &wBb = wOp->getRegion(0).emplaceBlock();
+      b.setInsertionPointToEnd(&wBb);
+      emitRowLet("rem", chunkExpr + " - cur % " + chunkExpr);
+      Value startV = emitRowDef("cur");
+      Value countV = emitRowDef("end - cur < rem ? end - cur : rem");
+      emitRowAssign("cur", "cur + $0", {countV});
       emitDispatchBody(startV, countV, {}, {});
     }
   }

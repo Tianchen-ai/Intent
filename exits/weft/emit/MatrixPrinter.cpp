@@ -146,14 +146,133 @@ TerminalPrinter weftTerminalPrinter() {
       PrintRule::format("const float $r0 = min_ieee($0, $1);");
   rules["math.exp"] = PrintRule::format("const float $r0 = expf($0);");
 
-  rules["weft_host.host_if"] =
-      PrintRule::regionFormat("if ({cond}) {{", "", "}}", "");
-  rules["weft_host.host_for"] = PrintRule::regionFormat(
-      "for (int64_t {iv}={lb}; {iv}<{ub}; {iv}+={step}) {{", "", "}}", "");
-  rules["weft_host.host_let_i64"] =
-      PrintRule::format("const int64_t {name} = {expr};");
-  rules["weft_host.host_ptr_offset"] = PrintRule::format(
-      "{c_type} *{name} = ({c_type}*)({base_expr}) + ({offset_expr});");
+  auto substVals = [](StringRef raw, const LocalOpView &view) -> std::string {
+    if (view.numOperands() == 0 || raw.find('$') == StringRef::npos)
+      return raw.str();
+    std::string out;
+    out.reserve(raw.size() + 16);
+    for (size_t i = 0; i < raw.size();) {
+      if (raw[i] == '$' && i + 1 < raw.size() &&
+          std::isdigit(static_cast<unsigned char>(raw[i + 1]))) {
+        size_t j = i + 1;
+        while (j < raw.size() &&
+               std::isdigit(static_cast<unsigned char>(raw[j])))
+          ++j;
+        unsigned idx = std::stoul(raw.substr(i + 1, j - (i + 1)).str());
+        out += view.operand(idx);
+        i = j;
+      } else {
+        out.push_back(raw[i++]);
+      }
+    }
+    return out;
+  };
+
+  rules["weft_host.host_guard_return"] =
+      PrintRule::format("if ({cond}) return {code};");
+
+  enterLocal("weft_host.host_guard_continue",
+             [substVals](const LocalOpView &view, PrintContext &c) -> llvm::Error {
+               c.line("if (" +
+                      substVals(view.attrOfType<StringAttr>("cond").getValue(),
+                                view) +
+                      ") continue;");
+               return llvm::Error::success();
+             });
+
+  rules["weft_host.host_if"] = PrintRule::local(
+      [substVals](const LocalOpView &view, PrintPoint at,
+                  PrintContext &c) -> llvm::Error {
+        if (at == PrintPoint::Enter)
+          c.line("if (" +
+                 substVals(view.attrOfType<StringAttr>("cond").getValue(),
+                           view) +
+                 ") {");
+        else if (at == PrintPoint::BeginBlock)
+          c.indent++;
+        else if (at == PrintPoint::EndBlock) {
+          c.indent--;
+          c.line("}");
+        }
+        return llvm::Error::success();
+      });
+
+  rules["weft_host.host_for"] = PrintRule::local(
+      [substVals](const LocalOpView &view, PrintPoint at,
+                  PrintContext &c) -> llvm::Error {
+        if (at == PrintPoint::Enter) {
+          std::string iv = view.attrOfType<StringAttr>("iv").str();
+          std::string lb =
+              substVals(view.attrOfType<StringAttr>("lb").getValue(), view);
+          std::string ub =
+              substVals(view.attrOfType<StringAttr>("ub").getValue(), view);
+          std::string st =
+              substVals(view.attrOfType<StringAttr>("step").getValue(), view);
+          c.line("for (int64_t " + iv + "=" + lb + "; " + iv + "<" + ub + "; " +
+                 iv + "+=" + st + ") {");
+        } else if (at == PrintPoint::BeginBlock) {
+          c.indent++;
+        } else if (at == PrintPoint::EndBlock) {
+          c.indent--;
+          c.line("}");
+        }
+        return llvm::Error::success();
+      });
+
+  rules["weft_host.host_while"] = PrintRule::local(
+      [substVals](const LocalOpView &view, PrintPoint at,
+                  PrintContext &c) -> llvm::Error {
+        if (at == PrintPoint::Enter)
+          c.line("while (" +
+                 substVals(view.attrOfType<StringAttr>("cond").getValue(),
+                           view) +
+                 ") {");
+        else if (at == PrintPoint::BeginBlock)
+          c.indent++;
+        else if (at == PrintPoint::EndBlock) {
+          c.indent--;
+          c.line("}");
+        }
+        return llvm::Error::success();
+      });
+
+  enterLocal("weft_host.host_let_i64",
+             [substVals](const LocalOpView &view, PrintContext &c) -> llvm::Error {
+               auto mut = view.attrOfType<BoolAttr>("is_mut");
+               std::string prefix =
+                   (mut && mut.getValue()) ? "int64_t " : "const int64_t ";
+               c.line(prefix + view.attrOfType<StringAttr>("name").str() +
+                      " = " +
+                      substVals(view.attrOfType<StringAttr>("expr").getValue(),
+                                view) +
+                      ";");
+               return llvm::Error::success();
+             });
+
+  enterLocal("weft_host.host_def_i64",
+             [substVals](const LocalOpView &view, PrintContext &c) -> llvm::Error {
+               auto mut = view.attrOfType<BoolAttr>("is_mut");
+               std::string prefix =
+                   (mut && mut.getValue()) ? "int64_t " : "const int64_t ";
+               c.line(prefix + view.result(0).str() + " = " +
+                      substVals(view.attrOfType<StringAttr>("expr").getValue(),
+                                view) +
+                      ";");
+               return llvm::Error::success();
+             });
+
+  enterLocal("weft_host.host_ptr_offset",
+             [substVals](const LocalOpView &view, PrintContext &c) -> llvm::Error {
+               std::string cTy = view.attrOfType<StringAttr>("c_type").str();
+               std::string name = view.attrOfType<StringAttr>("name").str();
+               std::string base = substVals(
+                   view.attrOfType<StringAttr>("base_expr").getValue(), view);
+               std::string off = substVals(
+                   view.attrOfType<StringAttr>("offset_expr").getValue(), view);
+               c.line(cTy + " *" + name + " = (" + cTy + "*)(" + base +
+                      ") + (" + off + ");");
+               return llvm::Error::success();
+             });
 
   // Strictly local rules (only LocalOpView, zero Operation& access).
   auto programRule = PrintRule::local(
@@ -818,16 +937,23 @@ TerminalPrinter weftTerminalPrinter() {
              });
 
   rules["weft_host.host_omp_for"] = PrintRule::local(
-      [](const LocalOpView &view, PrintPoint at, PrintContext &c) -> llvm::Error {
+      [substVals](const LocalOpView &view, PrintPoint at,
+                  PrintContext &c) -> llvm::Error {
         if (at == PrintPoint::Enter) {
           bool par = view.attrOfType<BoolAttr>("parallel").getValue();
           bool simd = view.attrOfType<BoolAttr>("simd").getValue();
           bool x86Simd = view.attrOfType<BoolAttr>("x86_simd").getValue();
-          std::string ic = view.attrOfType<StringAttr>("if_cond").str();
+          std::string sched = view.attrOfType<StringAttr>("schedule").str();
+          std::string nt = view.attrOfType<StringAttr>("num_threads").str();
+          std::string ic = substVals(
+              view.attrOfType<StringAttr>("if_cond").getValue(), view);
           std::string iv = view.attrOfType<StringAttr>("iv").str();
-          std::string lb = view.attrOfType<StringAttr>("lb").str();
-          std::string ub = view.attrOfType<StringAttr>("ub").str();
-          std::string st = view.attrOfType<StringAttr>("step").str();
+          std::string lb =
+              substVals(view.attrOfType<StringAttr>("lb").getValue(), view);
+          std::string ub =
+              substVals(view.attrOfType<StringAttr>("ub").getValue(), view);
+          std::string st =
+              substVals(view.attrOfType<StringAttr>("step").getValue(), view);
           if (simd) {
             if (x86Simd) {
               c.line("#if defined(__x86_64__)");
@@ -837,10 +963,17 @@ TerminalPrinter weftTerminalPrinter() {
               c.line("#pragma omp simd");
             }
           } else if (par) {
-            c.line("#pragma omp parallel for num_threads(workers) schedule(static)" +
-                   (ic.empty() ? "" : " if(" + ic + ")"));
+            std::string pragma = "#pragma omp parallel for";
+            if (!nt.empty())
+              pragma += " num_threads(" + nt + ")";
+            if (!sched.empty())
+              pragma += " schedule(" + sched + ")";
+            if (!ic.empty())
+              pragma += " if(" + ic + ")";
+            c.line(pragma);
           } else {
-            c.line("#pragma omp for schedule(static)");
+            c.line("#pragma omp for schedule(" +
+                   (sched.empty() ? std::string("static") : sched) + ")");
           }
           c.line("for (int64_t " + iv + "=" + lb + "; " + iv + "<" + ub + "; " +
                  iv + "+=" + st + ") {");
@@ -867,12 +1000,14 @@ TerminalPrinter weftTerminalPrinter() {
              });
 
   enterLocal("weft_host.host_span_op",
-             [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
+             [substVals](const LocalOpView &view, PrintContext &c) -> llvm::Error {
                auto kind = view.attrOfType<StringAttr>("op").getValue();
-               std::string dst = view.attrOfType<StringAttr>("dst_expr").str();
-               std::string src = view.attrOfType<StringAttr>("src_expr").str();
-               std::string cnt =
-                   view.attrOfType<StringAttr>("count_expr").str();
+               std::string dst = substVals(
+                   view.attrOfType<StringAttr>("dst_expr").getValue(), view);
+               std::string src = substVals(
+                   view.attrOfType<StringAttr>("src_expr").getValue(), view);
+               std::string cnt = substVals(
+                   view.attrOfType<StringAttr>("count_expr").getValue(), view);
                int64_t eb = view.attrOfType<IntegerAttr>("elem_bytes").getInt();
                if (kind == "widen_bf16")
                  c.line("widen_bf16_span(" + dst + ", " + src + ", " + cnt +
@@ -890,11 +1025,14 @@ TerminalPrinter weftTerminalPrinter() {
              });
 
   enterLocal("weft_host.host_elem_op",
-             [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
+             [substVals](const LocalOpView &view, PrintContext &c) -> llvm::Error {
                auto kind = view.attrOfType<StringAttr>("op").getValue();
-               std::string dst = view.attrOfType<StringAttr>("dst_expr").str();
-               std::string src = view.attrOfType<StringAttr>("src_expr").str();
-               std::string aux = view.attrOfType<StringAttr>("aux_expr").str();
+               std::string dst = substVals(
+                   view.attrOfType<StringAttr>("dst_expr").getValue(), view);
+               std::string src = substVals(
+                   view.attrOfType<StringAttr>("src_expr").getValue(), view);
+               std::string aux = substVals(
+                   view.attrOfType<StringAttr>("aux_expr").getValue(), view);
                int64_t eb = view.attrOfType<IntegerAttr>("elem_bytes").getInt();
                if (kind == "expand_bf")
                  c.line(dst + " = expand_bf(" + src + ");");
@@ -925,86 +1063,6 @@ TerminalPrinter weftTerminalPrinter() {
                c.line(dst + " = " + (wide ? "expand_bf(" + v + ")" : v) + ";");
                return llvm::Error::success();
              });
-
-  rules["weft_host.host_parallel_tiles"] = PrintRule::local(
-      [](const LocalOpView &view, PrintPoint at, PrintContext &c) -> llvm::Error {
-        if (at == PrintPoint::BeginBlock) {
-          auto bArgs = view.blockArguments();
-          bool grouped = view.attrOfType<BoolAttr>("grouped").getValue();
-          bool routed = view.attrOfType<BoolAttr>("routed").getValue();
-          bool windowed = view.attrOfType<BoolAttr>("windowed").getValue();
-          int64_t H = view.attrOfType<IntegerAttr>("head_extent").getInt();
-          int64_t chunks =
-              view.attrOfType<IntegerAttr>("chunk_extent").getInt();
-
-          c.line("if (jobs > 0) {");
-          c.indent++;
-          c.line("const int nt = jobs < workers ? (int)jobs : (int)workers;");
-          c.line("#pragma omp parallel for num_threads(nt) schedule(static) if(nt > 1)");
-          c.line("for (int64_t job=0; job<jobs; ++job) {");
-          c.indent++;
-          c.line("if (__atomic_load_n(&intent_status, __ATOMIC_RELAXED) != 0) continue;");
-          c.line("const int64_t " + bArgs[0] +
-                 " = job / (nc * mb), rem = job % (nc * mb);");
-          c.line("const int64_t " + bArgs[1] + " = (rem / mb) * nr;");
-          c.line("int64_t " + bArgs[2] + " = (rem % mb) * mr, end = M;");
-          if (windowed) {
-            const std::string &gN = bArgs[0];
-            c.line("const int64_t " + bArgs[7] + " = " + gN + "%" +
-                   std::to_string(H) + ", " + bArgs[6] + " = " + gN + "/" +
-                   std::to_string(H) + "%" + std::to_string(chunks) + ", " +
-                   bArgs[5] + " = " + gN + "/" + std::to_string(H) + "/" +
-                   std::to_string(chunks) + ";");
-          } else {
-            c.line("const int64_t " + bArgs[5] + " = 0, " + bArgs[6] +
-                   " = 0, " + bArgs[7] + " = 0;");
-            c.line("(void)" + bArgs[5] + "; (void)" + bArgs[6] + "; (void)" +
-                   bArgs[7] + ";");
-          }
-          if (grouped) {
-            int64_t oSlot =
-                view.attrOfType<IntegerAttr>("offsets_slot").getInt();
-            int64_t oSt =
-                view.attrOfType<IntegerAttr>("offsets_stride").getInt();
-            const std::string &gN = bArgs[0];
-            const std::string &rN = bArgs[2];
-            c.line(rN + " += ((const int32_t*)a" + std::to_string(oSlot) +
-                   ")[" + gN + "*" + std::to_string(oSt) + "LL];");
-            c.line("end = ((const int32_t*)a" + std::to_string(oSlot) + ")[(" +
-                   gN + "+1)*" + std::to_string(oSt) + "LL];");
-            c.line("if (" + rN + " >= end) continue;");
-          }
-          if (routed) {
-            int64_t rSlot =
-                view.attrOfType<IntegerAttr>("routes_slot").getInt();
-            int64_t rSt =
-                view.attrOfType<IntegerAttr>("routes_stride").getInt();
-            int64_t mult =
-                view.attrOfType<IntegerAttr>("multiplicity").getInt();
-            const std::string &rN = bArgs[2];
-            const std::string &destN = bArgs[4];
-            c.line("const int64_t " + destN + " = ((const int32_t*)a" +
-                   std::to_string(rSlot) + ")[" + rN + "*" +
-                   std::to_string(rSt) + "LL], " + bArgs[3] + " = " + destN +
-                   " / " + std::to_string(mult) + "LL;");
-          } else {
-            const std::string &rN = bArgs[2];
-            c.line("const int64_t " + bArgs[4] + " = " + rN + ", " + bArgs[3] +
-                   " = " + rN + ";");
-          }
-          const std::string &rN = bArgs[2];
-          const std::string &cN = bArgs[1];
-          c.line("const int64_t " + bArgs[8] + " = end - " + rN +
-                 " < mr ? end - " + rN + " : mr, " + bArgs[9] + " = N - " + cN +
-                 " < nr ? N - " + cN + " : nr;");
-        } else if (at == PrintPoint::EndBlock) {
-          c.indent--;
-          c.line("}");
-          c.indent--;
-          c.line("}");
-        }
-        return llvm::Error::success();
-      });
 
   enterLocal("weft_host.host_view_ptr",
              [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
@@ -1053,49 +1111,6 @@ TerminalPrinter weftTerminalPrinter() {
                return llvm::Error::success();
              });
 
-  enterLocal("weft_host.host_scatter_routed",
-             [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
-               std::string cVar = view.operand(0).str();
-               std::string rVar = view.operand(1).str();
-               std::string rowsVar = view.operand(2).str();
-               std::string colsVar = view.operand(3).str();
-
-               int64_t dstSlot =
-                   view.attrOfType<IntegerAttr>("dst_slot").getInt();
-               int64_t mult =
-                   view.attrOfType<IntegerAttr>("multiplicity").getInt();
-               auto st = view.attrOfType<DenseI64ArrayAttr>("dst_strides");
-               int64_t bytes =
-                   view.attrOfType<IntegerAttr>("elem_bytes").getInt();
-               int64_t rSlot =
-                   view.attrOfType<IntegerAttr>("routes_slot").getInt();
-               int64_t rSt =
-                   view.attrOfType<IntegerAttr>("routes_stride").getInt();
-               c.line("for (int64_t i=0; i<" + rowsVar + "; ++i) {");
-               c.line("  const int64_t d_i = ((const int32_t*)a" +
-                      std::to_string(rSlot) + ")[(" + rVar + "+i)*" +
-                      std::to_string(rSt) + "LL];");
-               c.line("  uint8_t *out = (uint8_t*)a" + std::to_string(dstSlot) +
-                      " + ((d_i/" + std::to_string(mult) + "LL)*" +
-                      std::to_string(st[0]) + "LL + (d_i%" +
-                      std::to_string(mult) + "LL)*" + std::to_string(st[1]) +
-                      "LL + " + cVar + "*" + std::to_string(st[2]) + "LL)*" +
-                      std::to_string(bytes) + "LL;");
-               c.line("  const uint8_t *from = routed_out + i*nr*" +
-                      std::to_string(bytes) + "LL;");
-               if (st[2] == 1)
-                 c.line("  memcpy(out, from, (size_t)(" + colsVar + "*" +
-                        std::to_string(bytes) + "LL));");
-               else
-                 c.line("  for (int64_t j=0; j<" + colsVar +
-                        "; ++j) memcpy(out+j*" +
-                        std::to_string(st[2] * bytes) + "LL, from+j*" +
-                        std::to_string(bytes) + "LL, " + std::to_string(bytes) +
-                        ");");
-               c.line("}");
-               return llvm::Error::success();
-             });
-
   enterLocal("weft_host.host_free",
              [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
                std::string name = view.attrOfType<StringAttr>("buf_name").str();
@@ -1116,100 +1131,10 @@ TerminalPrinter weftTerminalPrinter() {
           c.line("#include \"task_bridge.h\"");
           c.line("int32_t intent_entry(" +
                  view.attrOfType<StringAttr>("params").str() + ") {");
-          c.indent++;
-          c.line("if (rows < 0 || cols < 0 || grain <= 0 || panel < 0 || workers <= 0) return 1;");
-          c.line("if (!rows) return 0;");
-          auto walk = view.attrOfType<StringAttr>("walk").getValue();
-          if (walk == "destination") {
-            c.line("{ int64_t t = rows; rows = cols; cols = t; t = a0s0; a0s0 = a0s1; a0s1 = t; t = a1s0; a1s0 = a1s1; a1s1 = t; }");
-          }
-          if (view.attrOfType<BoolAttr>("member_tasks").getValue())
-            c.line("rows = cols;");
-          if (view.attrOfType<BoolAttr>("single_dispatcher").getValue())
-            c.line("workers = 1;");
-          c.indent--;
         } else if (at == PrintPoint::BeginBlock) {
           c.indent++;
         } else if (at == PrintPoint::EndBlock) {
           c.line("return 0;");
-          c.indent--;
-          c.line("}");
-        }
-        return llvm::Error::success();
-      });
-
-  rules["weft_host.host_parallel_transpose_tiles"] = PrintRule::local(
-      [](const LocalOpView &view, PrintPoint at, PrintContext &c) -> llvm::Error {
-        if (at == PrintPoint::BeginBlock) {
-          auto bArgs = view.blockArguments();
-          std::string st =
-              std::to_string(view.attrOfType<IntegerAttr>("tile").getInt());
-          const std::string &rN = bArgs[0];
-          const std::string &cN = bArgs[1];
-          const std::string &nrN = bArgs[2];
-          const std::string &ncN = bArgs[3];
-          c.line("const int64_t nt = (cols - 1) / " + st +
-                 " + 1, mt = (rows - 1) / " + st + " + 1;");
-          c.line("#pragma omp parallel for schedule(static) num_threads(workers) if(workers > 1)");
-          c.line("for (int64_t g = 0; g < mt * nt; ++g) {");
-          c.indent++;
-          c.line("const int64_t " + rN + " = (g / nt) * " + st + ", " + cN +
-                 " = (g % nt) * " + st + ";");
-          c.line("const int64_t " + nrN + " = rows - " + rN + " < " + st +
-                 " ? rows - " + rN + " : " + st + ", " + ncN + " = cols - " +
-                 cN + " < " + st + " ? cols - " + cN + " : " + st + ";");
-        } else if (at == PrintPoint::EndBlock) {
-          c.indent--;
-          c.line("}");
-        }
-        return llvm::Error::success();
-      });
-
-  rules["weft_host.host_parallel_key_ranges"] = PrintRule::local(
-      [](const LocalOpView &view, PrintPoint at, PrintContext &c) -> llvm::Error {
-        if (at == PrintPoint::BeginBlock) {
-          auto bArgs = view.blockArguments();
-          int64_t keys = view.attrOfType<IntegerAttr>("key_extent").getInt();
-          c.line("const int64_t keys = " + std::to_string(keys) +
-                 ", lines = (keys + 15) / 16, n_thr = workers < lines ? workers : lines;");
-          c.line("#pragma omp parallel for num_threads(n_thr) schedule(static) if(n_thr > 1)");
-          c.line("for (int64_t b = 0; b < n_thr; ++b) {");
-          c.indent++;
-          c.line("const int64_t " + bArgs[0] + " = 0, " + bArgs[1] +
-                 " = rows;");
-          c.line("const int64_t " + bArgs[2] +
-                 " = 16 * (lines * b / n_thr), " + bArgs[3] +
-                 " = 16 * (lines * (b + 1) / n_thr);");
-        } else if (at == PrintPoint::EndBlock) {
-          c.indent--;
-          c.line("}");
-        }
-        return llvm::Error::success();
-      });
-
-  rules["weft_host.host_parallel_row_intervals"] = PrintRule::local(
-      [](const LocalOpView &view, PrintPoint at, PrintContext &c) -> llvm::Error {
-        if (at == PrintPoint::BeginBlock) {
-          auto bArgs = view.blockArguments();
-          std::string chunk = view.attrOfType<StringAttr>("chunk_expr").str();
-          const std::string &stN = bArgs[0];
-          const std::string &ctN = bArgs[1];
-          c.line("const int64_t groups = 1 + (rows - 1) / grain;");
-          c.line("const int64_t bins = groups < workers ? groups : workers;");
-          c.line("#pragma omp parallel for num_threads(bins) schedule(static) if(bins > 1)");
-          c.line("for (int64_t b = 0; b < bins; ++b) {");
-          c.indent++;
-          c.line("const int64_t group = (groups / bins * b + (groups % bins * b) / bins) * grain;");
-          c.line("const int64_t end = b + 1 == bins ? rows : (groups / bins * (b + 1) + (groups % bins * (b + 1)) / bins) * grain;");
-          c.line("for (int64_t cur = group; cur < end;) {");
-          c.indent++;
-          c.line("const int64_t rem = " + chunk + " - cur % " + chunk + ";");
-          c.line("const int64_t " + stN + " = cur, " + ctN +
-                 " = end - cur < rem ? end - cur : rem;");
-          c.line("cur += " + ctN + ";");
-        } else if (at == PrintPoint::EndBlock) {
-          c.indent--;
-          c.line("}");
           c.indent--;
           c.line("}");
         }
@@ -1248,29 +1173,14 @@ TerminalPrinter weftTerminalPrinter() {
              });
 
   enterLocal("weft_host.host_call_row_task",
-             [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
+             [substVals](const LocalOpView &view, PrintContext &c) -> llvm::Error {
                SmallVector<std::string> args;
                for (Attribute a : view.attrOfType<ArrayAttr>("slot_args"))
                  args.push_back(cast<StringAttr>(a).str());
-               for (Attribute a : view.attrOfType<ArrayAttr>("shape_exprs")) {
-                 std::string raw = cast<StringAttr>(a).str();
-                 std::string expr;
-                 for (size_t i = 0; i < raw.size();) {
-                   if (raw[i] == '$' && i + 1 < raw.size() &&
-                       std::isdigit(static_cast<unsigned char>(raw[i + 1]))) {
-                     size_t j = i + 1;
-                     while (j < raw.size() &&
-                            std::isdigit(static_cast<unsigned char>(raw[j])))
-                       ++j;
-                     unsigned idx = std::stoul(raw.substr(i + 1, j - (i + 1)));
-                     expr += view.operand(idx);
-                     i = j;
-                   } else {
-                     expr.push_back(raw[i++]);
-                   }
-                 }
-                 args.push_back("(size_t)(" + expr + ")");
-               }
+               for (Attribute a : view.attrOfType<ArrayAttr>("shape_exprs"))
+                 args.push_back(
+                     "(size_t)(" +
+                     substVals(cast<StringAttr>(a).getValue(), view) + ")");
                for (Attribute a : view.attrOfType<ArrayAttr>("stride_exprs"))
                  args.push_back("(size_t)(" + cast<StringAttr>(a).str() + ")");
                c.line(view.attrOfType<StringAttr>("sym_name").str() +
@@ -1298,35 +1208,6 @@ TerminalPrinter weftTerminalPrinter() {
           c.indent++;
         } else if (at == PrintPoint::EndBlock) {
           c.line("return 0;");
-          c.indent--;
-          c.line("}");
-        }
-        return llvm::Error::success();
-      });
-
-  rules["weft_host.host_parallel_owners"] = PrintRule::local(
-      [](const LocalOpView &view, PrintPoint at, PrintContext &c) -> llvm::Error {
-        if (at == PrintPoint::BeginBlock) {
-          auto bArgs = view.blockArguments();
-          const std::string &loN = bArgs[0];
-          const std::string &hiN = bArgs[1];
-          auto dynAttr = view.attrOfType<BoolAttr>("dynamic");
-          if (dynAttr && dynAttr.getValue()) {
-            c.line("const int64_t chunks = (count + tile - 1) / tile;");
-            c.line("#pragma omp parallel for num_threads(workers) schedule(dynamic, 1) if(workers > 1 && chunks > 1)");
-            c.line("for (int64_t ch_i = 0; ch_i < chunks; ++ch_i) {");
-            c.indent++;
-            c.line("const int64_t lo_i = ch_i * tile;");
-            c.line("const int64_t " + loN + " = lo_i, " + hiN +
-                   " = count - lo_i < tile ? count : lo_i + tile;");
-          } else {
-            c.line("#pragma omp parallel for num_threads(workers) schedule(static, 1) if(workers > 1 && count > tile)");
-            c.line("for (int64_t lo_i = 0; lo_i < count; lo_i += tile) {");
-            c.indent++;
-            c.line("const int64_t " + loN + " = lo_i, " + hiN +
-                   " = count - lo_i < tile ? count : lo_i + tile;");
-          }
-        } else if (at == PrintPoint::EndBlock) {
           c.indent--;
           c.line("}");
         }

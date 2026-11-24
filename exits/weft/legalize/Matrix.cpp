@@ -1653,9 +1653,10 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
     else
       b.setInsertionPoint(&bb->back());
   };
-  auto openHostRegionOp = [&](StringRef name,
-                              ArrayRef<NamedAttribute> attrs) -> Block * {
+  auto openHostRegionOpWithVals = [&](StringRef name, ValueRange vals,
+                                      ArrayRef<NamedAttribute> attrs) -> Block * {
     OperationState s(loc, ("weft_host." + name).str());
+    s.addOperands(vals);
     s.addAttributes(attrs);
     Block &child = s.addRegion()->emplaceBlock();
     b.create(s);
@@ -1664,14 +1665,14 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
     makeOp(cb, loc, "end");
     return &child;
   };
-  auto makeHostIf = [&](StringRef cond) -> Block * {
-    return openHostRegionOp("host_if",
-                            {b.getNamedAttr("cond", b.getStringAttr(cond))});
+  auto makeHostIf = [&](StringRef cond, ValueRange vals = {}) -> Block * {
+    return openHostRegionOpWithVals(
+        "host_if", vals, {b.getNamedAttr("cond", b.getStringAttr(cond))});
   };
   auto makeHostFor = [&](StringRef iv, StringRef lb, StringRef ub,
-                         StringRef step) -> Block * {
-    return openHostRegionOp(
-        "host_for",
+                         StringRef step, ValueRange vals = {}) -> Block * {
+    return openHostRegionOpWithVals(
+        "host_for", vals,
         {b.getNamedAttr("iv", b.getStringAttr(iv)),
          b.getNamedAttr("lb", b.getStringAttr(lb)),
          b.getNamedAttr("ub", b.getStringAttr(ub)),
@@ -1679,9 +1680,11 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
   };
   auto makeHostOmpFor = [&](StringRef iv, StringRef lb, StringRef ub,
                             StringRef step, bool parallel, bool simd,
-                            bool x86Simd, StringRef ifCond) -> Block * {
-    return openHostRegionOp(
-        "host_omp_for",
+                            bool x86Simd, StringRef ifCond,
+                            StringRef schedule = "static",
+                            StringRef numThreads = "workers") -> Block * {
+    return openHostRegionOpWithVals(
+        "host_omp_for", {},
         {b.getNamedAttr("iv", b.getStringAttr(iv)),
          b.getNamedAttr("lb", b.getStringAttr(lb)),
          b.getNamedAttr("ub", b.getStringAttr(ub)),
@@ -1689,24 +1692,44 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
          b.getNamedAttr("parallel", b.getBoolAttr(parallel)),
          b.getNamedAttr("simd", b.getBoolAttr(simd)),
          b.getNamedAttr("x86_simd", b.getBoolAttr(x86Simd)),
+         b.getNamedAttr("schedule", b.getStringAttr(schedule)),
+         b.getNamedAttr("num_threads",
+                        b.getStringAttr(parallel ? numThreads : StringRef())),
          b.getNamedAttr("if_cond", b.getStringAttr(ifCond))});
   };
-  auto emitLet = [&](StringRef name, StringRef expr) {
-    makeOp(b, loc, "host_let_i64", {}, {},
+  auto emitLet = [&](StringRef name, StringRef expr, ValueRange vals = {},
+                     bool isMut = false) {
+    makeOp(b, loc, "host_let_i64", vals, {},
            {b.getNamedAttr("name", b.getStringAttr(name)),
-            b.getNamedAttr("expr", b.getStringAttr(expr))});
+            b.getNamedAttr("expr", b.getStringAttr(expr)),
+            b.getNamedAttr("is_mut", b.getBoolAttr(isMut))});
+  };
+  auto emitDef = [&](StringRef expr, int64_t maxBound, ValueRange vals = {},
+                     bool isMut = false) -> Value {
+    SmallVector<NamedAttribute, 3> attrs{
+        b.getNamedAttr("expr", b.getStringAttr(expr)),
+        b.getNamedAttr("is_mut", b.getBoolAttr(isMut))};
+    if (maxBound >= 0)
+      attrs.push_back(
+          b.getNamedAttr("max_bound", b.getI64IntegerAttr(maxBound)));
+    return makeOp(b, loc, "host_def_i64", vals, {b.getIndexType()}, attrs)
+        ->getResult(0);
+  };
+  auto emitGuardContinue = [&](StringRef cond, ValueRange vals = {}) {
+    makeOp(b, loc, "host_guard_continue", vals, {},
+           {b.getNamedAttr("cond", b.getStringAttr(cond))});
   };
   auto emitPtr = [&](StringRef cTy, StringRef name, StringRef base,
-                     StringRef off) {
-    makeOp(b, loc, "host_ptr_offset", {}, {},
+                     StringRef off, ValueRange vals = {}) {
+    makeOp(b, loc, "host_ptr_offset", vals, {},
            {b.getNamedAttr("c_type", b.getStringAttr(cTy)),
             b.getNamedAttr("name", b.getStringAttr(name)),
             b.getNamedAttr("base_expr", b.getStringAttr(base)),
             b.getNamedAttr("offset_expr", b.getStringAttr(off))});
   };
   auto emitSpan = [&](StringRef op, StringRef dstE, StringRef srcE,
-                      StringRef cntE, int64_t eb) {
-    makeOp(b, loc, "host_span_op", {}, {},
+                      StringRef cntE, int64_t eb, ValueRange vals = {}) {
+    makeOp(b, loc, "host_span_op", vals, {},
            {b.getNamedAttr("op", b.getStringAttr(op)),
             b.getNamedAttr("dst_expr", b.getStringAttr(dstE)),
             b.getNamedAttr("src_expr", b.getStringAttr(srcE)),
@@ -1714,8 +1737,8 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
             b.getNamedAttr("elem_bytes", b.getI64IntegerAttr(eb))});
   };
   auto emitElem = [&](StringRef op, StringRef dstE, StringRef srcE,
-                      StringRef auxE, int64_t eb) {
-    makeOp(b, loc, "host_elem_op", {}, {},
+                      StringRef auxE, int64_t eb, ValueRange vals = {}) {
+    makeOp(b, loc, "host_elem_op", vals, {},
            {b.getNamedAttr("op", b.getStringAttr(op)),
             b.getNamedAttr("dst_expr", b.getStringAttr(dstE)),
             b.getNamedAttr("src_expr", b.getStringAttr(srcE)),
@@ -2276,38 +2299,61 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
     chunkExt = std::max<int64_t>(1, outSh[1]);
   }
 
-  OperationState ptState(loc, "weft_host.host_parallel_tiles");
-  ptState.addAttribute("extents", extents);
-  ptState.addAttribute("tile", tile);
-  ptState.addAttribute("grouped", b.getBoolAttr(grouped));
-  ptState.addAttribute("routed", b.getBoolAttr(routed));
-  ptState.addAttribute("windowed", b.getBoolAttr(windowed));
-  ptState.addAttribute("head_extent", b.getI64IntegerAttr(headExt));
-  ptState.addAttribute("chunk_extent", b.getI64IntegerAttr(chunkExt));
-  ptState.addAttribute("multiplicity", b.getI64IntegerAttr(multiplicity));
-  ptState.addAttribute("offsets_slot", b.getI64IntegerAttr(offsetsSlot));
-  ptState.addAttribute("offsets_stride", b.getI64IntegerAttr(offsetsStride));
-  ptState.addAttribute("routes_slot", b.getI64IntegerAttr(routesSlot));
-  ptState.addAttribute("routes_stride", b.getI64IntegerAttr(routesStride));
+  b.setInsertionPointToEnd(&hBb);
+  auto extentHi = [](int64_t e) -> int64_t {
+    return e < 0 ? -1 : (e == 0 ? 0 : e - 1);
+  };
+  Block *jobsIfBb = makeHostIf("jobs > 0");
+  enterHostBlock(jobsIfBb);
+  emitLet("nt", "jobs < workers ? jobs : workers");
+  Block *ptBb = makeHostOmpFor("job", "0", "jobs", "1", true, false, false,
+                               "nt > 1", "static", "nt");
+  enterHostBlock(ptBb);
+  emitGuardContinue("__atomic_load_n(&intent_status, __ATOMIC_RELAXED) != 0");
+  Value vG = emitDef("job / (nc * mb)", extentHi(G));
+  emitLet("rem", "job % (nc * mb)");
+  Value vC = emitDef("(rem / mb) * nr", extentHi(N));
+  Value vR = emitDef("(rem % mb) * mr", grouped ? -1 : extentHi(M), {}, grouped);
+  emitLet("end", "M", {}, grouped);
 
-  Block &ptBb = ptState.addRegion()->emplaceBlock();
-  // (%g, %c, %r, %src, %dest, %batch, %chunk, %head, %R, %C)
-  Value vG = ptBb.addArgument(b.getIndexType(), loc);
-  Value vC = ptBb.addArgument(b.getIndexType(), loc);
-  Value vR = ptBb.addArgument(b.getIndexType(), loc);
-  Value vSrc = ptBb.addArgument(b.getIndexType(), loc);
-  Value vDest = ptBb.addArgument(b.getIndexType(), loc);
-  Value vBatch = ptBb.addArgument(b.getIndexType(), loc);
-  Value vChunk = ptBb.addArgument(b.getIndexType(), loc);
-  Value vHead = ptBb.addArgument(b.getIndexType(), loc);
-  Value vRows = ptBb.addArgument(b.getIndexType(), loc);
-  Value vCols = ptBb.addArgument(b.getIndexType(), loc);
-  b.create(ptState);
-
-  b.setInsertionPointToEnd(&ptBb);
   auto cIdx = [&](int64_t val) {
     return b.create<arith::ConstantIndexOp>(loc, val).getResult();
   };
+  Value vBatch, vChunk, vHead;
+  if (windowed) {
+    Value hCst = cIdx(std::max<int64_t>(1, headExt));
+    Value chCst = cIdx(std::max<int64_t>(1, chunkExt));
+    vHead = b.create<arith::RemSIOp>(loc, vG, hCst);
+    Value vGDivH = b.create<arith::DivSIOp>(loc, vG, hCst);
+    vChunk = b.create<arith::RemSIOp>(loc, vGDivH, chCst);
+    vBatch = b.create<arith::DivSIOp>(loc, vGDivH, chCst);
+  } else {
+    vBatch = vChunk = vHead = cIdx(0);
+  }
+  if (grouped) {
+    emitElem("assign", "$0",
+             "$0 + ((const int32_t*)a" + std::to_string(offsetsSlot) +
+                 ")[$1*" + std::to_string(offsetsStride) + "LL]",
+             "", 8, {vR, vG});
+    emitElem("assign", "end",
+             "((const int32_t*)a" + std::to_string(offsetsSlot) +
+                 ")[($0+1)*" + std::to_string(offsetsStride) + "LL]",
+             "", 8, {vG});
+    emitGuardContinue("$0 >= end", {vR});
+  }
+  Value vDest = vR, vSrc = vR;
+  if (routed) {
+    int64_t multBound = std::max<int64_t>(1, multiplicity);
+    vDest = emitDef("((const int32_t*)a" + std::to_string(routesSlot) +
+                        ")[$0*" + std::to_string(routesStride) + "LL]",
+                    -1, {vR});
+    vSrc = b.create<arith::DivSIOp>(loc, vDest, cIdx(multBound));
+  }
+  Value vRows = emitDef("end - $0 < mr ? end - $0 : mr",
+                        std::max<int64_t>(0, mr), {vR});
+  Value vCols = emitDef("N - $0 < nr ? N - $0 : nr",
+                        std::max<int64_t>(0, nr), {vC});
+
   auto resolveCoord = [&](CoordTag tag) -> Value {
     switch (tag) {
     case CoordTag::Zero:
@@ -2386,16 +2432,33 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
   if (routed) {
     int64_t dstBytes =
         cast<MemRefType>(dstArg.getType()).getElementTypeBitWidth() / 8;
-    makeOp(b, loc, "host_scatter_routed", {vC, vR, vRows, vCols}, {},
-           {b.getNamedAttr("dst_slot", b.getI64IntegerAttr(slotOf(dstArg))),
-            b.getNamedAttr("multiplicity", b.getI64IntegerAttr(multiplicity)),
-            b.getNamedAttr("dst_strides",
-                           b.getDenseI64ArrayAttr(origDstStrides)),
-            b.getNamedAttr("elem_bytes", b.getI64IntegerAttr(dstBytes)),
-            b.getNamedAttr("routes_slot", b.getI64IntegerAttr(routesSlot)),
-            b.getNamedAttr("routes_stride", b.getI64IntegerAttr(routesStride))});
+    int64_t dstSlotIdx = slotOf(dstArg);
+    Block *siBb = makeHostFor("i", "0", "$0", "1", {vRows});
+    enterHostBlock(siBb);
+    emitLet("d_i",
+            "((const int32_t*)a" + std::to_string(routesSlot) +
+                ")[($0+i)*" + std::to_string(routesStride) + "LL]",
+            {vR});
+    emitPtr("uint8_t", "out", "a" + std::to_string(dstSlotIdx),
+            "((d_i/" + std::to_string(multiplicity) + "LL)*" +
+                std::to_string(origDstStrides[0]) + "LL + (d_i%" +
+                std::to_string(multiplicity) + "LL)*" +
+                std::to_string(origDstStrides[1]) + "LL + $0*" +
+                std::to_string(origDstStrides[2]) + "LL)*" +
+                std::to_string(dstBytes) + "LL",
+            {vC});
+    emitPtr("const uint8_t", "from", "routed_out",
+            "i*nr*" + std::to_string(dstBytes) + "LL");
+    if (origDstStrides[2] == 1) {
+      emitSpan("memcpy", "out", "from", "$0", dstBytes, {vCols});
+    } else {
+      Block *sjBb = makeHostFor("j", "0", "$0", "1", {vCols});
+      enterHostBlock(sjBb);
+      emitElem("memcpy",
+               "out+j*" + std::to_string(origDstStrides[2] * dstBytes) + "LL",
+               "from+j*" + std::to_string(dstBytes) + "LL", "", dstBytes);
+    }
   }
-  makeOp(b, loc, "end");
 
   b.setInsertionPointToEnd(&hBb);
   for (Operation *rop : releaseOps) {

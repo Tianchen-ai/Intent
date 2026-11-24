@@ -38,6 +38,24 @@ std::string mojoDType(StringRef t) {
       .Default("float32");
 }
 
+Type mlirVecElemType(OpBuilder &b, StringRef dt) {
+  if (dt == "bf16" || dt == "bfloat16")
+    return b.getBF16Type();
+  if (dt == "f16" || dt == "float16")
+    return b.getF16Type();
+  if (dt == "i8" || dt == "int8")
+    return b.getI8Type();
+  if (dt == "u8" || dt == "uint8")
+    return IntegerType::get(b.getContext(), 8, IntegerType::Unsigned);
+  if (dt == "i32" || dt == "int32" || dt == "Int32")
+    return b.getI32Type();
+  return b.getF32Type();
+}
+
+VectorType mlirVecType(OpBuilder &b, int64_t width, StringRef dt) {
+  return VectorType::get({std::max<int64_t>(1, width)}, mlirVecElemType(b, dt));
+}
+
 std::string elemTypeName(Type t) {
   if (auto sh = dyn_cast<ShapedType>(t))
     t = sh.getElementType();
@@ -73,12 +91,23 @@ Value addOffset(OpBuilder &b, Location loc, Value base, int64_t delta) {
 }
 
 Value makeAddr(OpBuilder &b, Location loc, Value ptr, ValueRange indices,
-               ArrayRef<int64_t> strides) {
+               ArrayRef<int64_t> strides, ArrayRef<int64_t> extents = {},
+               ArrayRef<int64_t> tileAxes = {},
+               ArrayRef<int64_t> tileSizes = {}) {
   SmallVector<Value> args{ptr};
   args.append(indices.begin(), indices.end());
-  return makeOp(b, loc, "address", args, {b.getIndexType()},
-                {b.getNamedAttr("strides", b.getDenseI64ArrayAttr(strides)),
-                 b.getNamedAttr("index_bits", b.getI32IntegerAttr(64))})
+  SmallVector<NamedAttribute, 5> attrs{
+      b.getNamedAttr("strides", b.getDenseI64ArrayAttr(strides)),
+      b.getNamedAttr("index_bits", b.getI32IntegerAttr(64))};
+  if (!extents.empty())
+    attrs.push_back(b.getNamedAttr("extents", b.getDenseI64ArrayAttr(extents)));
+  if (!tileAxes.empty())
+    attrs.push_back(
+        b.getNamedAttr("tile_axes", b.getDenseI64ArrayAttr(tileAxes)));
+  if (!tileSizes.empty())
+    attrs.push_back(
+        b.getNamedAttr("tile_sizes", b.getDenseI64ArrayAttr(tileSizes)));
+  return makeOp(b, loc, "address", args, {b.getIndexType()}, attrs)
       ->getResult(0);
 }
 
@@ -100,22 +129,23 @@ Value emitEpilogue(OpBuilder &b, Location loc, Value accVal, Value colCoord,
                    bv.panelStrides);
       Value bVec =
           makeOp(b, loc, "load_vec", {panelPtrs[step.biasViewIdx], bAddr},
-                 {b.getIndexType()},
+                 {mlirVecType(b, width, bv.dtype)},
                  {b.getNamedAttr("dtype", b.getStringAttr(mojoDType(bv.dtype))),
                   b.getNamedAttr("width", b.getI64IntegerAttr(width)),
                   b.getNamedAttr("lane_stride",
                                  b.getI64IntegerAttr(bv.panelStrides.back()))})
               ->getResult(0);
-      cur = makeOp(b, loc, "epilogue_add", {cur, bVec}, {b.getIndexType()})
+      cur = makeOp(b, loc, "epilogue_add", {cur, bVec}, {cur.getType()})
                 ->getResult(0);
     } else {
+      Type dstVecTy = VectorType::get({std::max<int64_t>(1, width)}, step.toType);
       if (step.toType.isBF16() && step.fromType.isF32()) {
-        cur = makeOp(b, loc, "epilogue_round_bf16", {cur}, {b.getIndexType()},
+        cur = makeOp(b, loc, "epilogue_round_bf16", {cur}, {dstVecTy},
                      {b.getNamedAttr("width", b.getI64IntegerAttr(width))})
                   ->getResult(0);
       } else {
         cur = makeOp(
-                  b, loc, "epilogue_cast", {cur}, {b.getIndexType()},
+                  b, loc, "epilogue_cast", {cur}, {dstVecTy},
                   {b.getNamedAttr("dtype", b.getStringAttr(mojoDType(
                                                elemTypeName(step.toType))))})
                   ->getResult(0);
@@ -370,6 +400,7 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
   pfnState.addAttribute("uses_round_bf16", b.getBoolAttr(usesRoundBf16));
   pfnState.addAttribute("uses_vnni", b.getBoolAttr(usesVnni));
   pfnState.addAttribute("uses_stack", b.getBoolAttr(usesStack));
+  pfnState.addAttribute("tile_bounds", b.getDenseI64ArrayAttr({mr, nr}));
   pfnState.addRegion();
   Operation *pfnOp = b.create(pfnState);
   makeOp(b, loc, "end");
@@ -390,11 +421,19 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
   auto q4kStorageAttr = b.getNamedAttr(
       "kir.storage", TypeAttr::get(intentdsl::kir::Q4KType::get(fn.getContext())));
   auto implNamedAttr = b.getNamedAttr("ci.implementation", implAttr);
+  struct DeferredTailClamp {
+    Operation *kLoopOp;
+    Operation *accessOp;
+    Value nextP;
+    Value kTotal;
+  };
+  SmallVector<DeferredTailClamp, 4> tailClamps;
 
   if (implId == "exits/mojo::q4k-simd" || implId == "exits/mojo::q4k-vnni") {
     bool q4kVnni = implId == "exits/mojo::q4k-vnni";
+    auto f32Vec1Ty = mlirVecType(b, 1, "float32");
     Value c0 = constIdx(b, loc, 0);
-    Value rBound = makeOp(b, loc, "as_int", {argR}, {b.getIndexType()})->getResult(0);
+    Value rBound = b.create<arith::IndexCastOp>(loc, b.getIndexType(), argR);
     Value c1 = constIdx(b, loc, 1);
     OperationState rLoop(loc, "mojo_row.for_range");
     rLoop.addOperands({c0, rBound, c1});
@@ -404,7 +443,7 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
     b.setInsertionPointToEnd(&rBb);
 
     Value accSlot =
-        makeOp(b, loc, "acc_decl", {}, {b.getIndexType()},
+        makeOp(b, loc, "acc_decl", {}, {f32Vec1Ty},
                {b.getNamedAttr("dtype", b.getStringAttr("float32")),
                 b.getNamedAttr("width", b.getI64IntegerAttr(1))})
             ->getResult(0);
@@ -420,22 +459,22 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
                            views[0].panelStrides);
     Value sbTerm =
         makeOp(b, loc, "q4k_superblock",
-               {panelPtrs[0], panelPtrs[1], wBase, gIv}, {b.getIndexType()},
+               {panelPtrs[0], panelPtrs[1], wBase, gIv}, {f32Vec1Ty},
                {b.getNamedAttr("byte_stride",
                                b.getI64IntegerAttr(views[0].panelStrides[2])),
                 b.getNamedAttr("use_vnni", b.getBoolAttr(q4kVnni)),
                 q4kStorageAttr, implNamedAttr})
             ->getResult(0);
     Value prev =
-        makeOp(b, loc, "acc_read", {accSlot}, {b.getIndexType()})->getResult(0);
-    Value next = makeOp(b, loc, "epilogue_add", {prev, sbTerm}, {b.getIndexType()})
+        makeOp(b, loc, "acc_read", {accSlot}, {f32Vec1Ty})->getResult(0);
+    Value next = makeOp(b, loc, "epilogue_add", {prev, sbTerm}, {f32Vec1Ty})
                      ->getResult(0);
     makeOp(b, loc, "acc_write", {accSlot, next});
     makeOp(b, loc, "end");
 
     b.setInsertionPointToEnd(&rBb);
     Value finalAcc =
-        makeOp(b, loc, "acc_read", {accSlot}, {b.getIndexType()})->getResult(0);
+        makeOp(b, loc, "acc_read", {accSlot}, {f32Vec1Ty})->getResult(0);
     Value epi = emitEpilogue(b, loc, finalAcc, rIv, 1, epilogue, panelPtrs, views);
     emitStoreOut(b, loc, panelPtrs.back(), rIv, c0, epi, 1, views.back());
     makeOp(b, loc, "end");
@@ -446,7 +485,7 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
   } else if (implId == "exits/mojo::onednn-brgemm-u8s8") {
     Value c0 = constIdx(b, loc, 0);
     Value c1 = constIdx(b, loc, 1);
-    Value rBound = makeOp(b, loc, "as_int", {argR}, {b.getIndexType()})->getResult(0);
+    Value rBound = b.create<arith::IndexCastOp>(loc, b.getIndexType(), argR).getResult();
     Value u8Buf =
         makeOp(b, loc, "stack_alloc", {}, {b.getIndexType()},
                {b.getNamedAttr("dtype", b.getStringAttr("uint8")),
@@ -471,7 +510,7 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
       b.create(zLoop);
       b.setInsertionPointToEnd(&zBb);
       Value zVal =
-          makeOp(b, loc, "acc_decl", {}, {b.getIndexType()},
+          makeOp(b, loc, "acc_decl", {}, {mlirVecType(b, 1, "float32")},
                  {b.getNamedAttr("dtype", b.getStringAttr("float32")),
                   b.getNamedAttr("width", b.getI64IntegerAttr(1))})
               ->getResult(0);
@@ -614,7 +653,8 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
           Value cIdx = constIdx(b, loc, v * lanes);
           Value cAddr = makeAddr(b, loc, cBuf, {rIdx, cIdx}, {nr, 1});
           Value vec =
-              makeOp(b, loc, "load_vec", {cBuf, cAddr}, {b.getIndexType()},
+              makeOp(b, loc, "load_vec", {cBuf, cAddr},
+                     {mlirVecType(b, lanes, accDtype)},
                      {b.getNamedAttr("dtype", b.getStringAttr(accDtype)),
                       b.getNamedAttr("width", b.getI64IntegerAttr(lanes)),
                       b.getNamedAttr("lane_stride", b.getI64IntegerAttr(1))})
@@ -632,8 +672,8 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
     // Dynamic R x C tail epilogue (note: ldc == C on tail tiles!)
     Value c0 = constIdx(b, loc, 0);
     Value c1 = constIdx(b, loc, 1);
-    Value rBound = makeOp(b, loc, "as_int", {argR}, {b.getIndexType()})->getResult(0);
-    Value cBound = makeOp(b, loc, "as_int", {argC}, {b.getIndexType()})->getResult(0);
+    Value rBound = b.create<arith::IndexCastOp>(loc, b.getIndexType(), argR).getResult();
+    Value cBound = b.create<arith::IndexCastOp>(loc, b.getIndexType(), argC).getResult();
     OperationState rLoop(loc, "mojo_row.for_range");
     rLoop.addOperands({c0, rBound, c1});
     Block &rBb = rLoop.addRegion()->emplaceBlock();
@@ -655,7 +695,8 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
       Value flatIdx = b.create<arith::AddIOp>(loc, rowBase, cVecIv);
       Value cAddr = makeAddr(b, loc, cBuf, {flatIdx}, {1});
       Value vec =
-          makeOp(b, loc, "load_vec", {cBuf, cAddr}, {b.getIndexType()},
+          makeOp(b, loc, "load_vec", {cBuf, cAddr},
+                 {mlirVecType(b, lanes, accDtype)},
                  {b.getNamedAttr("dtype", b.getStringAttr(accDtype)),
                   b.getNamedAttr("width", b.getI64IntegerAttr(lanes)),
                   b.getNamedAttr("lane_stride", b.getI64IntegerAttr(1))})
@@ -682,7 +723,8 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
       Value flatIdx = b.create<arith::AddIOp>(loc, rowBase, cScaIv);
       Value cAddr = makeAddr(b, loc, cBuf, {flatIdx}, {1});
       Value sca =
-          makeOp(b, loc, "load_vec", {cBuf, cAddr}, {b.getIndexType()},
+          makeOp(b, loc, "load_vec", {cBuf, cAddr},
+                 {mlirVecType(b, 1, accDtype)},
                  {b.getNamedAttr("dtype", b.getStringAttr(accDtype)),
                   b.getNamedAttr("width", b.getI64IntegerAttr(1)),
                   b.getNamedAttr("lane_stride", b.getI64IntegerAttr(1))})
@@ -701,6 +743,16 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
   } else if (usesVnni) {
     // Native AVX-512 VNNI dot4 path
     int64_t vectors = nr / 16;
+    auto i32Vec16Ty = mlirVecType(b, 16, "int32");
+    auto u8Vec64Ty = mlirVecType(b, 64, "uint8");
+    auto s8Vec64Ty = mlirVecType(b, 64, "int8");
+    auto lhsStAttr =
+        b.getNamedAttr("lhs_strides", b.getDenseI64ArrayAttr(views[0].panelStrides));
+    auto rhsPackAttr =
+        b.getNamedAttr("rhs_packing", b.getStringAttr(packing));
+    auto rhsPanelWAttr =
+        b.getNamedAttr("rhs_panel_width", b.getI64IntegerAttr(nr));
+    auto kExtentAttr = b.getNamedAttr("k_extent", b.getI64IntegerAttr(K));
     auto emitVnniBody = [&](int64_t rows, Value rBase, Block *targetBb) {
       b.setInsertionPointToEnd(targetBb);
       SmallVector<Value> accs(rows * vectors);
@@ -708,14 +760,14 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
         Value corrIdx = constIdx(b, loc, K * nr + 64 * v);
         Value corrAddr = makeAddr(b, loc, panelPtrs[1], {corrIdx}, {1});
         Value corr = makeOp(b, loc, "load_bitcast_vec",
-                            {panelPtrs[1], corrAddr}, {b.getIndexType()},
+                            {panelPtrs[1], corrAddr}, {i32Vec16Ty},
                             {b.getNamedAttr("scalar_type",
                                             b.getStringAttr("Int32")),
                              b.getNamedAttr("width", b.getI64IntegerAttr(16))})
                          ->getResult(0);
         for (int64_t m = 0; m < rows; ++m)
           accs[m * vectors + v] =
-              makeOp(b, loc, "acc_decl", {corr}, {b.getIndexType()},
+              makeOp(b, loc, "acc_decl", {corr}, {i32Vec16Ty},
                      {b.getNamedAttr("dtype", b.getStringAttr("int32")),
                       b.getNamedAttr("width", b.getI64IntegerAttr(16))})
                   ->getResult(0);
@@ -735,7 +787,7 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
         Value bAddr = makeAddr(b, loc, panelPtrs[1], {kIv, vOff}, {nr, 1});
         bVecs[v] =
             makeOp(b, loc, "load_vec", {panelPtrs[1], bAddr},
-                   {b.getIndexType()},
+                   {s8Vec64Ty},
                    {b.getNamedAttr("dtype", b.getStringAttr("int8")),
                     b.getNamedAttr("width", b.getI64IntegerAttr(64)),
                     b.getNamedAttr("lane_stride", b.getI64IntegerAttr(1))})
@@ -747,14 +799,16 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
                                views[0].panelStrides);
         Value aVec =
             makeOp(b, loc, "load_i32_xor", {panelPtrs[0], aAddr},
-                   {b.getIndexType()})
+                   {u8Vec64Ty})
                 ->getResult(0);
         for (int64_t v = 0; v < vectors; ++v) {
           Value slot = accs[m * vectors + v];
-          Value cur = makeOp(b, loc, "acc_read", {slot}, {b.getIndexType()})
+          Value cur = makeOp(b, loc, "acc_read", {slot}, {i32Vec16Ty})
                           ->getResult(0);
           Value upd = makeOp(b, loc, "vnni_dot4", {cur, aVec, bVecs[v]},
-                             {b.getIndexType()}, {implNamedAttr})
+                             {i32Vec16Ty},
+                             {lhsStAttr, rhsPackAttr, rhsPanelWAttr,
+                              kExtentAttr, implNamedAttr})
                           ->getResult(0);
           makeOp(b, loc, "acc_write", {slot, upd});
         }
@@ -767,7 +821,7 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
           Value cCoord = constIdx(b, loc, v * 16);
           Value accVal =
               makeOp(b, loc, "acc_read", {accs[m * vectors + v]},
-                     {b.getIndexType()})
+                     {i32Vec16Ty})
                   ->getResult(0);
           Value epi = emitEpilogue(b, loc, accVal, cCoord, 16, epilogue,
                                    panelPtrs, views);
@@ -791,7 +845,7 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
       b.setInsertionPointToEnd(&pfnBb);
     }
     Value c0 = constIdx(b, loc, 0), c1 = constIdx(b, loc, 1);
-    Value rBound = makeOp(b, loc, "as_int", {argR}, {b.getIndexType()})->getResult(0);
+    Value rBound = b.create<arith::IndexCastOp>(loc, b.getIndexType(), argR).getResult();
     OperationState rLoop(loc, "mojo_row.for_range");
     rLoop.addOperands({c0, rBound, c1});
     Block &rBb = rLoop.addRegion()->emplaceBlock();
@@ -807,14 +861,19 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
     // Native SIMD FMA path
     bool isInt = views[0].dtype == "i8";
     StringRef accDtype = isInt ? "int32" : "float32";
+    auto lhsStAttr =
+        b.getNamedAttr("lhs_strides", b.getDenseI64ArrayAttr(views[0].panelStrides));
+    auto rhsStAttr =
+        b.getNamedAttr("rhs_strides", b.getDenseI64ArrayAttr(views[1].panelStrides));
     auto emitSimdBody = [&](int64_t w, int64_t rows, int64_t vectors,
                             Value rBase, Value cBase, Block *targetBb) {
       b.setInsertionPointToEnd(targetBb);
+      auto accVecTy = mlirVecType(b, w, accDtype);
       SmallVector<Value> accs(rows * vectors);
       for (int64_t r = 0; r < rows; ++r)
         for (int64_t v = 0; v < vectors; ++v)
           accs[r * vectors + v] =
-              makeOp(b, loc, "acc_decl", {}, {b.getIndexType()},
+              makeOp(b, loc, "acc_decl", {}, {accVecTy},
                      {b.getNamedAttr("dtype", b.getStringAttr(accDtype)),
                       b.getNamedAttr("width", b.getI64IntegerAttr(w))})
                   ->getResult(0);
@@ -822,7 +881,7 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
       Value c0 = constIdx(b, loc, 0), kTotal = constIdx(b, loc, K),
             kStep = constIdx(b, loc, depth), c1 = constIdx(b, loc, 1);
       Block *pBb = nullptr;
-      Value kLb = c0, kUb = kTotal;
+      Value kLb = c0, kUb = kTotal, nextPVal;
       if (K > depth) {
         OperationState pLoop(loc, "mojo_row.for_range");
         pLoop.addOperands({c0, kTotal, kStep});
@@ -831,33 +890,27 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
         b.create(pLoop);
         b.setInsertionPointToEnd(pBb);
         kLb = pIv;
-        Value nextP = b.create<arith::AddIOp>(loc, pIv, kStep);
-        compilerinfra::TailDimension kTailDim;
-        kTailDim.staticExtent = K;
-        kTailDim.staticOffset = 0;
-        kTailDim.tileSize = depth;
-        kTailDim.step = depth;
-        auto kTailProof = compilerinfra::proveTailAccess({kTailDim});
-        kUb = (kTailProof.proven &&
-               kTailProof.kind == compilerinfra::TailKind::ExactInBounds)
-                  ? nextP
-                  : b.create<arith::MinSIOp>(loc, nextP, kTotal).getResult();
+        nextPVal = b.create<arith::AddIOp>(loc, pIv, kStep);
+        kUb = nextPVal;
       }
       OperationState kLoop(loc, "mojo_row.for_range");
       kLoop.addOperands({kLb, kUb, c1});
       Block &kBb = kLoop.addRegion()->emplaceBlock();
       Value kIv = kBb.addArgument(b.getIndexType(), loc);
-      b.create(kLoop);
+      Operation *kLoopOp = b.create(kLoop);
       b.setInsertionPointToEnd(&kBb);
 
       SmallVector<Value> bVecs(vectors);
       for (int64_t v = 0; v < vectors; ++v) {
         Value cCoord = addOffset(b, loc, cBase, v * w);
-        Value bAddr = makeAddr(b, loc, panelPtrs[1], {kIv, cCoord},
-                               views[1].panelStrides);
+        Value bAddr =
+            makeAddr(b, loc, panelPtrs[1], {kIv, cCoord}, views[1].panelStrides,
+                     {K, N}, {0}, {1});
+        if (K > depth && v == 0)
+          tailClamps.push_back({kLoopOp, bAddr.getDefiningOp(), nextPVal, kTotal});
         Value raw =
             makeOp(b, loc, "load_vec", {panelPtrs[1], bAddr},
-                   {b.getIndexType()},
+                   {mlirVecType(b, w, views[1].dtype)},
                    {b.getNamedAttr("dtype",
                                    b.getStringAttr(mojoDType(views[1].dtype))),
                     b.getNamedAttr("width", b.getI64IntegerAttr(w)),
@@ -865,7 +918,7 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
                                    b.getI64IntegerAttr(views[1].panelStrides[1]))})
                 ->getResult(0);
         bVecs[v] =
-            makeOp(b, loc, "splat_cast", {raw}, {b.getIndexType()},
+            makeOp(b, loc, "splat_cast", {raw}, {accVecTy},
                    {b.getNamedAttr("dtype", b.getStringAttr(accDtype)),
                     b.getNamedAttr("width", b.getI64IntegerAttr(w)),
                     b.getNamedAttr("from_scalar", b.getBoolAttr(false))})
@@ -880,14 +933,15 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
             makeAddr(b, loc, panelPtrs[0], {rBase, kIv}, views[0].panelStrides);
         Value aRawCol =
             makeOp(b, loc, "load_vec", {panelPtrs[0], aColAddr},
-                   {b.getIndexType()},
+                   {mlirVecType(b, rows, views[0].dtype)},
                    {b.getNamedAttr("dtype",
                                    b.getStringAttr(mojoDType(views[0].dtype))),
                     b.getNamedAttr("width", b.getI64IntegerAttr(rows)),
                     b.getNamedAttr("lane_stride", b.getI64IntegerAttr(1))})
                 ->getResult(0);
         aColVec =
-            makeOp(b, loc, "splat_cast", {aRawCol}, {b.getIndexType()},
+            makeOp(b, loc, "splat_cast", {aRawCol},
+                   {mlirVecType(b, rows, accDtype)},
                    {b.getNamedAttr("dtype", b.getStringAttr(accDtype)),
                     b.getNamedAttr("width", b.getI64IntegerAttr(rows)),
                     b.getNamedAttr("from_scalar", b.getBoolAttr(false))})
@@ -897,7 +951,7 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
         Value aVec;
         if (contigLhsRows) {
           aVec =
-              makeOp(b, loc, "splat_lane", {aColVec}, {b.getIndexType()},
+              makeOp(b, loc, "splat_lane", {aColVec}, {accVecTy},
                      {b.getNamedAttr("dtype", b.getStringAttr(accDtype)),
                       b.getNamedAttr("width", b.getI64IntegerAttr(w)),
                       b.getNamedAttr("lane", b.getI64IntegerAttr(r))})
@@ -908,14 +962,14 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
                                  views[0].panelStrides);
           Value aSca =
               makeOp(b, loc, "load_vec", {panelPtrs[0], aAddr},
-                     {b.getIndexType()},
+                     {mlirVecType(b, 1, views[0].dtype)},
                      {b.getNamedAttr("dtype",
                                      b.getStringAttr(mojoDType(views[0].dtype))),
                       b.getNamedAttr("width", b.getI64IntegerAttr(1)),
                       b.getNamedAttr("lane_stride", b.getI64IntegerAttr(1))})
                   ->getResult(0);
           aVec =
-              makeOp(b, loc, "splat_cast", {aSca}, {b.getIndexType()},
+              makeOp(b, loc, "splat_cast", {aSca}, {accVecTy},
                      {b.getNamedAttr("dtype", b.getStringAttr(accDtype)),
                       b.getNamedAttr("width", b.getI64IntegerAttr(w)),
                       b.getNamedAttr("from_scalar", b.getBoolAttr(true))})
@@ -923,13 +977,13 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
         }
         for (int64_t v = 0; v < vectors; ++v) {
           Value slot = accs[r * vectors + v];
-          Value cur = makeOp(b, loc, "acc_read", {slot}, {b.getIndexType()})
+          Value cur = makeOp(b, loc, "acc_read", {slot}, {accVecTy})
                           ->getResult(0);
           Value upd =
               makeOp(b, loc, "simd_fma", {cur, aVec, bVecs[v]},
-                     {b.getIndexType()},
+                     {accVecTy},
                      {b.getNamedAttr("is_int", b.getBoolAttr(isInt)),
-                      implNamedAttr})
+                      lhsStAttr, rhsStAttr, implNamedAttr})
                   ->getResult(0);
           makeOp(b, loc, "acc_write", {slot, upd});
         }
@@ -947,7 +1001,7 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
           Value cCoord = addOffset(b, loc, cBase, v * w);
           Value accVal =
               makeOp(b, loc, "acc_read", {accs[r * vectors + v]},
-                     {b.getIndexType()})
+                     {accVecTy})
                   ->getResult(0);
           Value epi = emitEpilogue(b, loc, accVal, cCoord, w, epilogue,
                                    panelPtrs, views);
@@ -973,8 +1027,8 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
     }
 
     Value c0 = constIdx(b, loc, 0), c1 = constIdx(b, loc, 1);
-    Value rBound = makeOp(b, loc, "as_int", {argR}, {b.getIndexType()})->getResult(0);
-    Value cBound = makeOp(b, loc, "as_int", {argC}, {b.getIndexType()})->getResult(0);
+    Value rBound = b.create<arith::IndexCastOp>(loc, b.getIndexType(), argR).getResult();
+    Value cBound = b.create<arith::IndexCastOp>(loc, b.getIndexType(), argC).getResult();
     Value laneStep = constIdx(b, loc, lanes);
 
     OperationState rLoop(loc, "mojo_row.for_range");
@@ -1010,6 +1064,21 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
     makeOp(b, loc, "panel_return", {}, {},
            {b.getNamedAttr("code", b.getI32IntegerAttr(0))});
     makeOp(b, loc, "end");
+
+    if (!tailClamps.empty()) {
+      compilerinfra::IntegerRangeContext tailRanges(pfnOp);
+      for (auto &tc : tailClamps) {
+        auto kTailProof =
+            compilerinfra::proveTailAccess(tc.accessOp, &tailRanges);
+        if (!kTailProof.proven ||
+            kTailProof.kind != compilerinfra::TailKind::ExactInBounds) {
+          OpBuilder cb(tc.kLoopOp);
+          Value clamped =
+              cb.create<arith::MinSIOp>(tc.kLoopOp->getLoc(), tc.nextP, tc.kTotal);
+          tc.kLoopOp->setOperand(1, clamped);
+        }
+      }
+    }
   }
 
   // ---------------- Region 1: Host ("entry.c") ----------------

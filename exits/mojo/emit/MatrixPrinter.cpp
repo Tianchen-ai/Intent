@@ -1,7 +1,6 @@
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "llvm/ADT/StringExtras.h"
@@ -434,44 +433,23 @@ TerminalPrinter mojoMatrixPrinter() {
                return llvm::Error::success();
              });
 
-  // Explicit custom exemptions (only 2 upstream SCF ops requiring empty-branch
-  // pass inspection and parent scf.if SSA result assignment).
-  rules["scf.if"] = PrintRule::custom(
-      [](Operation &op, PrintPoint at, PrintContext &c) -> llvm::Error {
+  rules["mojo_row.var_decl"] = PrintRule::format("var $r0: {mojo_type}");
+  rules["mojo_row.var_assign"] = PrintRule::format("$0 = $1");
+  rules["mojo_row.pass"] = PrintRule::format("pass");
+  rules["mojo_row.if"] = PrintRule::local(
+      [](const LocalOpView &view, PrintPoint at, PrintContext &c) -> llvm::Error {
         if (at == PrintPoint::Enter) {
-          for (auto r : op.getResults()) {
-            std::string tyStr = mojoScalarType(r.getType());
-            if (auto sh = dyn_cast<ShapedType>(r.getType()))
-              tyStr = "SIMD[" + mojoDTypeName(sh) + "," +
-                      std::to_string(sh.getDimSize(0)) + "]";
-            c.line("var " + c.name(r) + ": " + tyStr);
-          }
-          c.line("if " + c.name(op.getOperand(0)) + ":");
+          c.line("if " + view.operand(0).str() + ":");
         } else if (at == PrintPoint::BeginRegion) {
-          if (c.region == 1 && !op.getRegion(1).empty())
+          if (c.region == 1 && view.attrOfType<BoolAttr>("has_else").getValue())
             c.line("else:");
         } else if (at == PrintPoint::BeginBlock) {
           c.indent++;
-          auto &bb = op.getRegion(c.region).front();
-          if (bb.without_terminator().empty() && op.getNumResults() == 0)
-            c.line("pass");
         } else if (at == PrintPoint::EndBlock) {
           c.indent--;
         }
         return llvm::Error::success();
-      },
-      "emits Mojo pass statement when an scf.if branch contains only scf.yield");
-
-  rules["scf.yield"] = PrintRule::custom(
-      [](Operation &op, PrintPoint at, PrintContext &c) -> llvm::Error {
-        if (at == PrintPoint::Enter && isa<scf::IfOp>(op.getParentOp())) {
-          for (auto [r, v] :
-               llvm::zip(op.getParentOp()->getResults(), op.getOperands()))
-            c.line(c.name(r) + " = " + c.name(v));
-        }
-        return llvm::Error::success();
-      },
-      "assigns yielded values to enclosing scf.if SSA result declarations");
+      });
 
   enterLocal("mojo_row.host_panel_yield",
              [](const LocalOpView &view, PrintContext &c) -> llvm::Error {

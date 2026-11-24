@@ -44,7 +44,7 @@ def EncodingDeclOp : Op<WeftHost_Dialect, "encoding_decl"> {
                        DenseI64ArrayAttr:$field_storage_bits);
 }
 
-def TaskKernelOp : Op<WeftHost_Dialect, "task_kernel"> {
+def TaskKernelOp : Op<WeftHost_Dialect, "task_kernel", [IsolatedFromAbove]> {
   let arguments = (ins StrAttr:$sym_name, StrAttr:$source,
                        ArrayAttr:$view_types, OptionalAttr<ArrayAttr>:$arg_writes,
                        OptionalAttr<ArrayAttr>:$arg_access,
@@ -74,6 +74,7 @@ def TaskSliceOp : Op<WeftHost_Dialect, "task_slice"> {
 def TaskSubviewOp : Op<WeftHost_Dialect, "task_subview"> {
   let arguments = (ins Variadic<Index>:$operands, I64Attr:$static_extent,
                        OptionalAttr<DenseI64ArrayAttr>:$static_extents,
+                       OptionalAttr<I64Attr>:$container_extent,
                        StrAttr:$slice_type, StrAttr:$val_type, BoolAttr:$admit);
   let results = (outs Index:$res);
 }
@@ -121,7 +122,7 @@ def TaskScanOp : Op<WeftHost_Dialect, "task_scan"> {
   let regions = (region AnyRegion:$combine);
 }
 
-def TaskScanYieldOp : Op<WeftHost_Dialect, "task_scan_yield", [Terminator]> {
+def TaskScanYieldOp : Op<WeftHost_Dialect, "task_scan_yield", [Pure, ReturnLike, Terminator]> {
   let arguments = (ins Index:$value, StrAttr:$val_type);
 }
 
@@ -186,7 +187,7 @@ def TaskIfOp : Op<WeftHost_Dialect, "task_if"> {
   let regions = (region AnyRegion:$thenRegion, AnyRegion:$elseRegion);
 }
 
-def TaskYieldOp : Op<WeftHost_Dialect, "task_yield", [Terminator]> {
+def TaskYieldOp : Op<WeftHost_Dialect, "task_yield", [Pure, ReturnLike, Terminator]> {
   let arguments = (ins Variadic<Index>:$values, ArrayAttr:$val_types);
 }
 
@@ -202,7 +203,7 @@ def TaskExtractOp : Op<WeftHost_Dialect, "task_extract"> {
   let results = (outs Index:$res);
 }
 
-def TaskHandoffOp : Op<WeftHost_Dialect, "task_handoff", [Terminator]> {
+def TaskHandoffOp : Op<WeftHost_Dialect, "task_handoff", [Pure, ReturnLike, Terminator]> {
   let arguments = (ins Index:$val_s, Index:$val_t);
 }
 
@@ -219,7 +220,7 @@ def AddressOp : Op<WeftHost_Dialect, "address"> {
   let results = (outs Index:$offset);
 }
 
-def HostFnOp : Op<WeftHost_Dialect, "host_fn"> {
+def HostFnOp : Op<WeftHost_Dialect, "host_fn", [IsolatedFromAbove]> {
   let arguments = (ins StrAttr:$params, DenseI64ArrayAttr:$extents,
                        DenseI64ArrayAttr:$tile, BoolAttr:$uses_q8k,
                        BoolAttr:$uses_bf16_math, BoolAttr:$uses_f16_math,
@@ -227,24 +228,8 @@ def HostFnOp : Op<WeftHost_Dialect, "host_fn"> {
   let regions = (region AnyRegion:$body);
 }
 
-def HostRowFnOp : Op<WeftHost_Dialect, "host_row_fn"> {
-  let arguments = (ins StrAttr:$params, StrAttr:$walk,
-                       BoolAttr:$member_tasks, BoolAttr:$single_dispatcher);
-  let regions = (region AnyRegion:$body);
-}
-
-def HostParallelTransposeTilesOp : Op<WeftHost_Dialect, "host_parallel_transpose_tiles"> {
-  let arguments = (ins I64Attr:$tile);
-  let regions = (region AnyRegion:$body);
-}
-
-def HostParallelKeyRangesOp : Op<WeftHost_Dialect, "host_parallel_key_ranges"> {
-  let arguments = (ins I64Attr:$key_extent);
-  let regions = (region AnyRegion:$body);
-}
-
-def HostParallelRowIntervalsOp : Op<WeftHost_Dialect, "host_parallel_row_intervals"> {
-  let arguments = (ins StrAttr:$chunk_expr);
+def HostRowFnOp : Op<WeftHost_Dialect, "host_row_fn", [IsolatedFromAbove]> {
+  let arguments = (ins StrAttr:$params);
   let regions = (region AnyRegion:$body);
 }
 
@@ -260,13 +245,8 @@ def HostCallRowTaskOp : Op<WeftHost_Dialect, "host_call_row_task"> {
                        ArrayAttr:$stride_exprs);
 }
 
-def HostOwnerFnOp : Op<WeftHost_Dialect, "host_owner_fn"> {
+def HostOwnerFnOp : Op<WeftHost_Dialect, "host_owner_fn", [IsolatedFromAbove]> {
   let arguments = (ins StrAttr:$params, I64Attr:$owners, I64Attr:$grain);
-  let regions = (region AnyRegion:$body);
-}
-
-def HostParallelOwnersOp : Op<WeftHost_Dialect, "host_parallel_owners"> {
-  let arguments = (ins OptionalAttr<BoolAttr>:$dynamic);
   let regions = (region AnyRegion:$body);
 }
 
@@ -283,24 +263,47 @@ def HostAllocOp : Op<WeftHost_Dialect, "host_alloc"> {
 }
 
 def HostIfOp : Op<WeftHost_Dialect, "host_if"> {
-  let arguments = (ins StrAttr:$cond);
+  let arguments = (ins Variadic<Index>:$vals, StrAttr:$cond);
   let regions = (region AnyRegion:$body);
 }
 
 def HostOmpForOp : Op<WeftHost_Dialect, "host_omp_for"> {
-  let arguments = (ins StrAttr:$iv, StrAttr:$lb, StrAttr:$ub, StrAttr:$step,
-                       BoolAttr:$parallel, BoolAttr:$simd, BoolAttr:$x86_simd,
-                       StrAttr:$if_cond);
+  let arguments = (ins Variadic<Index>:$vals, StrAttr:$iv, StrAttr:$lb,
+                       StrAttr:$ub, StrAttr:$step, BoolAttr:$parallel,
+                       BoolAttr:$simd, BoolAttr:$x86_simd, StrAttr:$schedule,
+                       StrAttr:$num_threads, StrAttr:$if_cond);
   let regions = (region AnyRegion:$body);
 }
 
 def HostForOp : Op<WeftHost_Dialect, "host_for"> {
-  let arguments = (ins StrAttr:$iv, StrAttr:$lb, StrAttr:$ub, StrAttr:$step);
+  let arguments = (ins Variadic<Index>:$vals, StrAttr:$iv, StrAttr:$lb,
+                       StrAttr:$ub, StrAttr:$step);
   let regions = (region AnyRegion:$body);
 }
 
+def HostWhileOp : Op<WeftHost_Dialect, "host_while"> {
+  let arguments = (ins Variadic<Index>:$vals, StrAttr:$cond);
+  let regions = (region AnyRegion:$body);
+}
+
+def HostGuardReturnOp : Op<WeftHost_Dialect, "host_guard_return"> {
+  let arguments = (ins StrAttr:$cond, I32Attr:$code);
+}
+
+def HostGuardContinueOp : Op<WeftHost_Dialect, "host_guard_continue"> {
+  let arguments = (ins Variadic<Index>:$vals, StrAttr:$cond);
+}
+
 def HostLetI64Op : Op<WeftHost_Dialect, "host_let_i64"> {
-  let arguments = (ins StrAttr:$name, StrAttr:$expr);
+  let arguments = (ins Variadic<Index>:$vals, StrAttr:$name, StrAttr:$expr,
+                       OptionalAttr<BoolAttr>:$is_mut);
+}
+
+def HostDefI64Op : Op<WeftHost_Dialect, "host_def_i64"> {
+  let arguments = (ins Variadic<Index>:$vals, StrAttr:$expr,
+                       OptionalAttr<BoolAttr>:$is_mut,
+                       OptionalAttr<I64Attr>:$max_bound);
+  let results = (outs Index:$val);
 }
 
 def HostLoadScalarOp : Op<WeftHost_Dialect, "host_load_scalar"> {
@@ -309,32 +312,24 @@ def HostLoadScalarOp : Op<WeftHost_Dialect, "host_load_scalar"> {
 }
 
 def HostPtrOffsetOp : Op<WeftHost_Dialect, "host_ptr_offset"> {
-  let arguments = (ins StrAttr:$c_type, StrAttr:$name, StrAttr:$base_expr,
-                       StrAttr:$offset_expr);
+  let arguments = (ins Variadic<Index>:$vals, StrAttr:$c_type, StrAttr:$name,
+                       StrAttr:$base_expr, StrAttr:$offset_expr);
 }
 
 def HostSpanOp : Op<WeftHost_Dialect, "host_span_op"> {
-  let arguments = (ins StrAttr:$op, StrAttr:$dst_expr, StrAttr:$src_expr,
-                       StrAttr:$count_expr, I64Attr:$elem_bytes);
+  let arguments = (ins Variadic<Index>:$vals, StrAttr:$op, StrAttr:$dst_expr,
+                       StrAttr:$src_expr, StrAttr:$count_expr,
+                       I64Attr:$elem_bytes);
 }
 
 def HostElemOp : Op<WeftHost_Dialect, "host_elem_op"> {
-  let arguments = (ins StrAttr:$op, StrAttr:$dst_expr, StrAttr:$src_expr,
-                       StrAttr:$aux_expr, I64Attr:$elem_bytes);
+  let arguments = (ins Variadic<Index>:$vals, StrAttr:$op, StrAttr:$dst_expr,
+                       StrAttr:$src_expr, StrAttr:$aux_expr,
+                       I64Attr:$elem_bytes);
 }
 
 def HostPanelYieldOp : Op<WeftHost_Dialect, "host_panel_yield"> {
   let arguments = (ins AnyType:$value, BoolAttr:$widen_bf16, StrAttr:$dst_expr);
-}
-
-def HostParallelTilesOp : Op<WeftHost_Dialect, "host_parallel_tiles"> {
-  let arguments = (ins DenseI64ArrayAttr:$extents, DenseI64ArrayAttr:$tile,
-                       BoolAttr:$grouped, BoolAttr:$routed, BoolAttr:$windowed,
-                       I64Attr:$head_extent, I64Attr:$chunk_extent,
-                       I64Attr:$multiplicity, I64Attr:$offsets_slot,
-                       I64Attr:$offsets_stride, I64Attr:$routes_slot,
-                       I64Attr:$routes_stride);
-  let regions = (region AnyRegion:$body);
 }
 
 def HostViewPtrOp : Op<WeftHost_Dialect, "host_view_ptr"> {
@@ -346,13 +341,6 @@ def HostViewPtrOp : Op<WeftHost_Dialect, "host_view_ptr"> {
 def HostCallTaskOp : Op<WeftHost_Dialect, "host_call_task"> {
   let arguments = (ins Index:$rows, Index:$cols, I64Attr:$arity,
                        DenseI64ArrayAttr:$strides);
-}
-
-def HostScatterRoutedOp : Op<WeftHost_Dialect, "host_scatter_routed"> {
-  let arguments = (ins Index:$c_coord, Index:$r_coord, Index:$rows_val,
-                       Index:$cols_val, I64Attr:$dst_slot, I64Attr:$multiplicity,
-                       DenseI64ArrayAttr:$dst_strides, I64Attr:$elem_bytes,
-                       I64Attr:$routes_slot, I64Attr:$routes_stride);
 }
 
 def HostFreeOp : Op<WeftHost_Dialect, "host_free"> {

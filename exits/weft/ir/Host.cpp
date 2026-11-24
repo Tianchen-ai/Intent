@@ -3,6 +3,7 @@
 #include "../legalize/Rows.h"
 #include "compilerinfra/Assembly.h"
 #include "compilerinfra/Contract.h"
+#include "compilerinfra/Proofs.h"
 #include "intentdsl/levels/algorithm/kir/ir/Performance.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
 #include "intentdsl/levels/execution/cpu/ir/Owners.h"
@@ -14,6 +15,7 @@
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
 #include "mlir/Interfaces/InferIntRangeInterface.h"
+#include "mlir/Interfaces/LoopLikeInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/Pass.h"
 #include <algorithm>
@@ -58,10 +60,10 @@ struct WeftTaskContractModel
   }
 };
 
-struct HostParallelTilesBranchModel
+template <typename ConcreteOp>
+struct WeftRegionBranchModel
     : public RegionBranchOpInterface::ExternalModel<
-          HostParallelTilesBranchModel,
-          intentdsl::wefthost::HostParallelTilesOp> {
+          WeftRegionBranchModel<ConcreteOp>, ConcreteOp> {
   OperandRange getEntrySuccessorOperands(Operation *op,
                                          RegionBranchPoint) const {
     return OperandRange(op->operand_end(), op->operand_end());
@@ -74,7 +76,9 @@ struct HostParallelTilesBranchModel
   void getSuccessorRegions(Operation *op, RegionBranchPoint point,
                            SmallVectorImpl<RegionSuccessor> &regions) const {
     if (point.isParent()) {
-      regions.emplace_back(&op->getRegion(0));
+      for (Region &r : op->getRegions())
+        if (!r.empty())
+          regions.emplace_back(&r);
       regions.emplace_back();
     } else {
       regions.emplace_back();
@@ -82,10 +86,9 @@ struct HostParallelTilesBranchModel
   }
 };
 
-struct HostParallelTilesRangeModel
+struct HostDefI64RangeModel
     : public InferIntRangeInterface::ExternalModel<
-          HostParallelTilesRangeModel,
-          intentdsl::wefthost::HostParallelTilesOp> {
+          HostDefI64RangeModel, intentdsl::wefthost::HostDefI64Op> {
   void inferResultRanges(Operation *op, ArrayRef<ConstantIntRanges> argRanges,
                          SetIntRangeFn setResultRanges) const {
     intrange::detail::defaultInferResultRangesFromOptional(
@@ -94,42 +97,150 @@ struct HostParallelTilesRangeModel
   void inferResultRangesFromOptional(Operation *op,
                                      ArrayRef<IntegerValueRange>,
                                      SetIntLatticeFn setResultRanges) const {
-    if (op->getNumRegions() == 0 || op->getRegion(0).empty())
+    auto mb = op->getAttrOfType<IntegerAttr>("max_bound");
+    if (!mb || mb.getInt() < 0) {
+      setResultRanges(op->getResult(0), ConstantIntRanges::maxRange(64));
       return;
-    Block &bb = op->getRegion(0).front();
-    if (bb.getNumArguments() < 10)
+    }
+    APInt loVal(64, 0, /*isSigned=*/true);
+    APInt hiVal(64, uint64_t(mb.getInt()), /*isSigned=*/true);
+    setResultRanges(op->getResult(0),
+                    ConstantIntRanges(loVal, hiVal, loVal, hiVal));
+  }
+};
+
+struct WeftTaskForLoopModel
+    : public LoopLikeOpInterface::ExternalModel<
+          WeftTaskForLoopModel, intentdsl::wefthost::TaskForOp> {
+  SmallVector<Region *> getLoopRegions(Operation *op) const {
+    return {&op->getRegion(0)};
+  }
+  std::optional<SmallVector<Value>> getLoopInductionVars(Operation *op) const {
+    if (op->getRegion(0).empty() ||
+        op->getRegion(0).front().getNumArguments() < 1)
+      return std::nullopt;
+    return SmallVector<Value>{op->getRegion(0).front().getArgument(0)};
+  }
+  std::optional<SmallVector<OpFoldResult>>
+  getLoopLowerBounds(Operation *op) const {
+    return SmallVector<OpFoldResult>{OpFoldResult(op->getOperand(0))};
+  }
+  std::optional<SmallVector<OpFoldResult>>
+  getLoopUpperBounds(Operation *op) const {
+    return SmallVector<OpFoldResult>{OpFoldResult(op->getOperand(1))};
+  }
+  std::optional<SmallVector<OpFoldResult>> getLoopSteps(Operation *op) const {
+    return SmallVector<OpFoldResult>{OpFoldResult(op->getOperand(2))};
+  }
+  OperandRange getInits(Operation *op) const {
+    return cast<intentdsl::wefthost::TaskForOp>(op).getInits();
+  }
+  Block::BlockArgListType getRegionIterArgs(Operation *op) const {
+    if (op->getRegion(0).empty() ||
+        op->getRegion(0).front().getNumArguments() < 1)
+      return {};
+    return op->getRegion(0).front().getArguments().drop_front(1);
+  }
+  std::optional<MutableArrayRef<OpOperand>>
+  getYieldedValuesMutable(Operation *op) const {
+    if (op->getRegion(0).empty() || op->getRegion(0).front().empty())
+      return std::nullopt;
+    Operation *term = op->getRegion(0).front().getTerminator();
+    if (!term || term->getName().getStringRef() != "weft_host.task_yield")
+      return std::nullopt;
+    return term->getOpOperands();
+  }
+};
+
+struct WeftTaskForRangeModel
+    : public InferIntRangeInterface::ExternalModel<
+          WeftTaskForRangeModel, intentdsl::wefthost::TaskForOp> {
+  void inferResultRanges(Operation *op, ArrayRef<ConstantIntRanges> argRanges,
+                         SetIntRangeFn setResultRanges) const {
+    intrange::detail::defaultInferResultRangesFromOptional(
+        cast<InferIntRangeInterface>(op), argRanges, setResultRanges);
+  }
+  void inferResultRangesFromOptional(Operation *op,
+                                     ArrayRef<IntegerValueRange> argRanges,
+                                     SetIntLatticeFn setResultRanges) const {
+    if (op->getNumRegions() == 0 || op->getRegion(0).empty() ||
+        op->getRegion(0).front().getNumArguments() < 1)
       return;
-    auto ext = op->getAttrOfType<DenseI64ArrayAttr>("extents");
-    auto tile = op->getAttrOfType<DenseI64ArrayAttr>("tile");
-    if (!ext || ext.size() < 4 || !tile || tile.size() < 2)
+    Value iv = op->getRegion(0).front().getArgument(0);
+    unsigned bw = ConstantIntRanges::getStorageBitwidth(iv.getType());
+    if (bw == 0)
       return;
-    int64_t M = ext[0], N = ext[1], G = ext[3];
-    int64_t mr = tile[0], nr = tile[1];
-    int64_t mult = std::max<int64_t>(
-        1, op->getAttrOfType<IntegerAttr>("multiplicity").getInt());
-    int64_t H = std::max<int64_t>(
-        1, op->getAttrOfType<IntegerAttr>("head_extent").getInt());
-    int64_t chunks = std::max<int64_t>(
-        1, op->getAttrOfType<IntegerAttr>("chunk_extent").getInt());
-    bool routed = op->getAttrOfType<BoolAttr>("routed").getValue();
-    auto setBound = [&](unsigned idx, int64_t hi) {
-      int64_t clampedHi = std::max<int64_t>(0, hi);
-      APInt loVal(64, 0, /*isSigned=*/true);
-      APInt hiVal(64, uint64_t(clampedHi), /*isSigned=*/true);
-      setResultRanges(bb.getArgument(idx),
-                      ConstantIntRanges(loVal, hiVal, loVal, hiVal));
-    };
-    auto extentHi = [](int64_t e) -> int64_t { return e <= 1 ? 0 : e - 1; };
-    setBound(0, extentHi(G));
-    setBound(1, extentHi(N));
-    setBound(2, extentHi(M));
-    setBound(3, extentHi(M));
-    setBound(4, extentHi(routed ? M * mult : M));
-    setBound(5, extentHi(std::max<int64_t>(1, G / (H * chunks))));
-    setBound(6, extentHi(chunks));
-    setBound(7, extentHi(H));
-    setBound(8, std::max<int64_t>(0, mr));
-    setBound(9, std::max<int64_t>(0, nr));
+    if (argRanges.size() < 3 || argRanges[0].isUninitialized() ||
+        argRanges[1].isUninitialized() || argRanges[2].isUninitialized()) {
+      setResultRanges(iv, ConstantIntRanges::maxRange(bw));
+      return;
+    }
+    const auto &lbR = argRanges[0].getValue();
+    const auto &ubR = argRanges[1].getValue();
+    const auto &stR = argRanges[2].getValue();
+    APInt lbLo = lbR.smin().sextOrTrunc(bw);
+    APInt lbHi = lbR.smax().sextOrTrunc(bw);
+    APInt ubHi = ubR.smax().sextOrTrunc(bw);
+    APInt stLo = stR.smin().sextOrTrunc(bw);
+    APInt stHi = stR.smax().sextOrTrunc(bw);
+    if (lbLo.isNegative() || !stLo.isStrictlyPositive()) {
+      setResultRanges(iv, ConstantIntRanges::maxRange(bw));
+      return;
+    }
+    if (ubHi.sle(lbLo)) {
+      setResultRanges(iv, ConstantIntRanges(lbLo, lbLo, lbLo, lbLo));
+      return;
+    }
+    APInt one(bw, 1, /*isSigned=*/true);
+    APInt hi = ubHi - one;
+    if (lbLo == lbHi && stLo == stHi) {
+      APInt trips = (ubHi - one - lbLo).sdiv(stLo);
+      hi = lbLo + trips * stLo;
+    }
+    setResultRanges(iv, ConstantIntRanges(lbLo, hi, lbLo, hi));
+  }
+};
+
+struct WeftTaskSubviewTiledAccessModel
+    : public compilerinfra::TiledAccessOpInterface::ExternalModel<
+          WeftTaskSubviewTiledAccessModel, intentdsl::wefthost::TaskSubviewOp> {
+  LogicalResult
+  getAccessedAxes(Operation *op,
+                  SmallVectorImpl<compilerinfra::AccessAxis> &axes) const {
+    if (op->getNumOperands() < 2)
+      return failure();
+    auto tileAttr = op->getAttrOfType<IntegerAttr>("static_extent");
+    auto extAttr = op->getAttrOfType<IntegerAttr>("container_extent");
+    if (!tileAttr || tileAttr.getInt() <= 0 || !extAttr || extAttr.getInt() <= 0)
+      return failure();
+    compilerinfra::AccessAxis ax;
+    ax.container = op->getOperand(0);
+    ax.containerDim = 0;
+    ax.staticExtent = extAttr.getInt();
+    ax.coord = op->getOperand(1);
+    ax.tileSize = tileAttr.getInt();
+    ax.step = 1;
+    axes.push_back(ax);
+    return success();
+  }
+};
+
+struct WeftAddressLinearModel
+    : public compilerinfra::AddressOpInterface::ExternalModel<
+          WeftAddressLinearModel, intentdsl::wefthost::AddressOp> {
+  LogicalResult
+  getLinearAddress(Operation *op,
+                   compilerinfra::LinearAddressDescriptor &out) const {
+    auto strides = op->getAttrOfType<DenseI64ArrayAttr>("strides");
+    auto indices = op->getOperands();
+    if (!strides || strides.size() != indices.size())
+      return failure();
+    out = compilerinfra::LinearAddressDescriptor{};
+    out.coordinates.assign(indices.begin(), indices.end());
+    out.staticStrides.assign(strides.asArrayRef().begin(),
+                             strides.asArrayRef().end());
+    out.constantOffset = 0;
+    return success();
   }
 };
 } // namespace
@@ -141,8 +252,28 @@ void intentdsl::wefthost::WeftHostDialect::initialize() {
       >();
   MLIRContext *ctx = getContext();
   TaskContractOp::attachInterface<WeftTaskContractModel>(*ctx);
-  HostParallelTilesOp::attachInterface<HostParallelTilesBranchModel>(*ctx);
-  HostParallelTilesOp::attachInterface<HostParallelTilesRangeModel>(*ctx);
+  MatrixProgramOp::attachInterface<WeftRegionBranchModel<MatrixProgramOp>>(
+      *ctx);
+  RowProgramOp::attachInterface<WeftRegionBranchModel<RowProgramOp>>(*ctx);
+  OwnerProgramOp::attachInterface<WeftRegionBranchModel<OwnerProgramOp>>(*ctx);
+  TaskKernelOp::attachInterface<WeftRegionBranchModel<TaskKernelOp>>(*ctx);
+  TaskScanOp::attachInterface<WeftRegionBranchModel<TaskScanOp>>(*ctx);
+  TaskForOp::attachInterface<WeftRegionBranchModel<TaskForOp>>(*ctx);
+  TaskForOp::attachInterface<WeftTaskForLoopModel>(*ctx);
+  TaskForOp::attachInterface<WeftTaskForRangeModel>(*ctx);
+  TaskIfOp::attachInterface<WeftRegionBranchModel<TaskIfOp>>(*ctx);
+  TaskSubquantLevelOp::attachInterface<
+      WeftRegionBranchModel<TaskSubquantLevelOp>>(*ctx);
+  TaskSubviewOp::attachInterface<WeftTaskSubviewTiledAccessModel>(*ctx);
+  AddressOp::attachInterface<WeftAddressLinearModel>(*ctx);
+  HostFnOp::attachInterface<WeftRegionBranchModel<HostFnOp>>(*ctx);
+  HostRowFnOp::attachInterface<WeftRegionBranchModel<HostRowFnOp>>(*ctx);
+  HostOwnerFnOp::attachInterface<WeftRegionBranchModel<HostOwnerFnOp>>(*ctx);
+  HostIfOp::attachInterface<WeftRegionBranchModel<HostIfOp>>(*ctx);
+  HostOmpForOp::attachInterface<WeftRegionBranchModel<HostOmpForOp>>(*ctx);
+  HostForOp::attachInterface<WeftRegionBranchModel<HostForOp>>(*ctx);
+  HostWhileOp::attachInterface<WeftRegionBranchModel<HostWhileOp>>(*ctx);
+  HostDefI64Op::attachInterface<HostDefI64RangeModel>(*ctx);
 }
 
 namespace CI_UNIT_NAMESPACE {

@@ -2897,16 +2897,61 @@ LogicalResult lowerWeftOrdered(func::FuncOp fn,
 
   Block &hFnBb = hFn->getRegion(0).emplaceBlock();
   b.setInsertionPointToEnd(&hFnBb);
-  Operation *pOwners = makeOp(
-      b, loc, "host_parallel_owners", {}, {},
-      {b.getNamedAttr("dynamic", b.getBoolAttr(lowerer.anyTightenedCausalLoop))},
-      1);
+  Operation *pOwners = nullptr;
+  if (lowerer.anyTightenedCausalLoop) {
+    makeOp(b, loc, "host_let_i64", {}, {},
+           {b.getNamedAttr("name", b.getStringAttr("chunks")),
+            b.getNamedAttr("expr",
+                           b.getStringAttr("(count + tile - 1) / tile"))});
+    pOwners = makeOp(
+        b, loc, "host_omp_for", {}, {},
+        {b.getNamedAttr("iv", b.getStringAttr("ch_i")),
+         b.getNamedAttr("lb", b.getStringAttr("0")),
+         b.getNamedAttr("ub", b.getStringAttr("chunks")),
+         b.getNamedAttr("step", b.getStringAttr("1")),
+         b.getNamedAttr("parallel", b.getBoolAttr(true)),
+         b.getNamedAttr("simd", b.getBoolAttr(false)),
+         b.getNamedAttr("x86_simd", b.getBoolAttr(false)),
+         b.getNamedAttr("schedule", b.getStringAttr("dynamic, 1")),
+         b.getNamedAttr("num_threads", b.getStringAttr("workers")),
+         b.getNamedAttr("if_cond",
+                        b.getStringAttr("workers > 1 && chunks > 1"))},
+        1);
+  } else {
+    pOwners = makeOp(
+        b, loc, "host_omp_for", {}, {},
+        {b.getNamedAttr("iv", b.getStringAttr("lo_i")),
+         b.getNamedAttr("lb", b.getStringAttr("0")),
+         b.getNamedAttr("ub", b.getStringAttr("count")),
+         b.getNamedAttr("step", b.getStringAttr("tile")),
+         b.getNamedAttr("parallel", b.getBoolAttr(true)),
+         b.getNamedAttr("simd", b.getBoolAttr(false)),
+         b.getNamedAttr("x86_simd", b.getBoolAttr(false)),
+         b.getNamedAttr("schedule", b.getStringAttr("static, 1")),
+         b.getNamedAttr("num_threads", b.getStringAttr("workers")),
+         b.getNamedAttr("if_cond",
+                        b.getStringAttr("workers > 1 && count > tile"))},
+        1);
+  }
   makeOp(b, loc, "end");
 
   Block &pBb = pOwners->getRegion(0).emplaceBlock();
-  Value loVal = pBb.addArgument(b.getIndexType(), loc);
-  Value hiVal = pBb.addArgument(b.getIndexType(), loc);
   b.setInsertionPointToEnd(&pBb);
+  if (lowerer.anyTightenedCausalLoop) {
+    makeOp(b, loc, "host_let_i64", {}, {},
+           {b.getNamedAttr("name", b.getStringAttr("lo_i")),
+            b.getNamedAttr("expr", b.getStringAttr("ch_i * tile"))});
+  }
+  Value loVal =
+      makeOp(b, loc, "host_def_i64", {}, {b.getIndexType()},
+             {b.getNamedAttr("expr", b.getStringAttr("lo_i"))})
+          ->getResult(0);
+  Value hiVal =
+      makeOp(b, loc, "host_def_i64", {}, {b.getIndexType()},
+             {b.getNamedAttr(
+                 "expr",
+                 b.getStringAttr("count - lo_i < tile ? count : lo_i + tile"))})
+          ->getResult(0);
   makeOp(b, loc, "host_call_owner_task", {loVal, hiVal}, {},
          {b.getNamedAttr("sym_name", b.getStringAttr("owner_task")),
           b.getNamedAttr("slot_args", b.getArrayAttr(slotArgs)),

@@ -1,4 +1,5 @@
 include "mlir/IR/OpBase.td"
+include "mlir/Interfaces/ControlFlowInterfaces.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 def RowMojo_Dialect : Dialect {let name="mojo_row"; let cppNamespace="::intentdsl::rowmojo";}
 class RowInst<string mnemonic,list<Trait> traits=[]> : Op<RowMojo_Dialect,mnemonic,traits>;
@@ -36,8 +37,8 @@ def RowMojo_Dialect_SumColumns : Op<RowMojo_Dialect,"sum_columns"> {
 def MojoMatrixProgram : RowInst<"matrix_program",[SingleBlock]> {
   let regions=(region AnyRegion:$panel, AnyRegion:$host);
 }
-def MojoPanelFn : RowInst<"panel_fn",[SingleBlock]> {
-  let arguments=(ins ArrayAttr:$param_dtypes, BoolAttr:$uses_brgemm, BoolAttr:$uses_round_bf16, BoolAttr:$uses_vnni, BoolAttr:$uses_stack);
+def MojoPanelFn : RowInst<"panel_fn",[SingleBlock, IsolatedFromAbove]> {
+  let arguments=(ins ArrayAttr:$param_dtypes, BoolAttr:$uses_brgemm, BoolAttr:$uses_round_bf16, BoolAttr:$uses_vnni, BoolAttr:$uses_stack, OptionalAttr<DenseI64ArrayAttr>:$tile_bounds);
   let regions=(region AnyRegion:$body);
 }
 def MojoIfFullTile : RowInst<"if_full_tile",[SingleBlock]> {
@@ -57,7 +58,7 @@ def MojoAsInt : RowInst<"as_int"> {
   let results=(outs Index:$result);
 }
 def MojoAddress : RowInst<"address"> {
-  let arguments=(ins AnyType:$base, Variadic<AnyType>:$indices, DenseI64ArrayAttr:$strides, I32Attr:$index_bits);
+  let arguments=(ins AnyType:$base, Variadic<AnyType>:$indices, DenseI64ArrayAttr:$strides, I32Attr:$index_bits, OptionalAttr<DenseI64ArrayAttr>:$extents, OptionalAttr<DenseI64ArrayAttr>:$tile_axes, OptionalAttr<DenseI64ArrayAttr>:$tile_sizes);
   let results=(outs Index:$offset);
 }
 def MojoStackAlloc : RowInst<"stack_alloc"> {
@@ -99,12 +100,23 @@ def MojoStoreVec : RowInst<"store_vec"> {
   let arguments=(ins AnyType:$ptr, Index:$offset, AnyType:$value, I64Attr:$width, I64Attr:$lane_stride);
 }
 def MojoSimdFma : RowInst<"simd_fma", [Pure]> {
-  let arguments=(ins AnyType:$acc, AnyType:$lhs, AnyType:$rhs, BoolAttr:$is_int);
-  let results=(outs AnyType:$result);
+  let arguments=(ins AnyFixedVectorOfNonZeroRank:$acc,
+                     AnyFixedVectorOfNonZeroRank:$lhs,
+                     AnyFixedVectorOfNonZeroRank:$rhs,
+                     BoolAttr:$is_int,
+                     DenseI64ArrayAttr:$lhs_strides,
+                     DenseI64ArrayAttr:$rhs_strides);
+  let results=(outs AnyFixedVectorOfNonZeroRank:$result);
 }
 def MojoVnniDot4 : RowInst<"vnni_dot4", [Pure]> {
-  let arguments=(ins AnyType:$acc, AnyType:$lhs, AnyType:$rhs);
-  let results=(outs AnyType:$result);
+  let arguments=(ins AnyFixedVectorOfNonZeroRank:$acc,
+                     AnyFixedVectorOfNonZeroRank:$lhs,
+                     AnyFixedVectorOfNonZeroRank:$rhs,
+                     DenseI64ArrayAttr:$lhs_strides,
+                     StrAttr:$rhs_packing,
+                     I64Attr:$rhs_panel_width,
+                     I64Attr:$k_extent);
+  let results=(outs AnyFixedVectorOfNonZeroRank:$result);
 }
 def MojoQ4KSuperblock : RowInst<"q4k_superblock", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let arguments=(ins AnyType:$w_ptr, AnyType:$q_ptr, Index:$w_base, Index:$group, I64Attr:$byte_stride, BoolAttr:$use_vnni);
@@ -142,7 +154,19 @@ def MojoEpilogueCast : RowInst<"epilogue_cast"> {
   let arguments=(ins AnyType:$input, StrAttr:$dtype);
   let results=(outs AnyType:$result);
 }
-def MojoEnd : RowInst<"end",[Terminator]> {}
+def MojoIf : RowInst<"if"> {
+  let arguments=(ins I1:$cond, BoolAttr:$has_else);
+  let regions=(region AnyRegion:$then_region, AnyRegion:$else_region);
+}
+def MojoVarDecl : RowInst<"var_decl"> {
+  let arguments=(ins StrAttr:$mojo_type);
+  let results=(outs AnyType:$slot);
+}
+def MojoVarAssign : RowInst<"var_assign"> {
+  let arguments=(ins AnyType:$slot, AnyType:$value);
+}
+def MojoPass : RowInst<"pass"> {}
+def MojoEnd : RowInst<"end",[Pure, ReturnLike, Terminator]> {}
 
 // Host C region ops (explicit loops, OpenMP, scratch, and atomic statements)
 def MojoHostFn : RowInst<"host_fn",[SingleBlock]> {
@@ -236,7 +260,7 @@ def MojoOrderedProgram : RowInst<"ordered_program",[SingleBlock]> {
   let regions=(region AnyRegion:$kernel, AnyRegion:$host);
 }
 def MojoOwnerFn : RowInst<"owner_fn",[SingleBlock]> {
-  let arguments=(ins ArrayAttr:$param_types, BoolAttr:$uses_stack);
+  let arguments=(ins ArrayAttr:$param_types, BoolAttr:$uses_stack, OptionalAttr<I64Attr>:$owners);
   let regions=(region AnyRegion:$body);
 }
 def MojoOwnerCoord : RowInst<"owner_coord"> {
@@ -255,7 +279,7 @@ def MojoStoreScalar : RowInst<"store_scalar"> {
   let arguments=(ins AnyType:$ptr, Index:$offset, AnyType:$value);
 }
 def MojoLoadSlice : RowInst<"load_slice"> {
-  let arguments=(ins AnyType:$ptr, Index:$offset, I64Attr:$width);
+  let arguments=(ins AnyType:$ptr, Index:$offset, I64Attr:$width, OptionalAttr<I64Attr>:$slice_axis);
   let results=(outs AnyType:$value);
 }
 def MojoStoreSlice : RowInst<"store_slice"> {

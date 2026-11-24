@@ -34,15 +34,21 @@ void registerMatrixContracts(Unit &u) {
       return llvm::Error::success();
     };
     c.verify = [](Operation *op) -> LogicalResult {
-      return success(op->getNumOperands() == 3 && op->getNumResults() == 1);
+      if (auto ci = dyn_cast<ContractOpInterface>(op))
+        return success(succeeded(ci.verifyShapeAndTypes()) &&
+                       succeeded(ci.verifyLayoutAndAddressSpace()));
+      return failure();
     };
     TypedContract tc;
     tc.shape.minOperands = 3;
     tc.shape.maxOperands = 3;
     tc.shape.minResults = 1;
     tc.shape.maxResults = 1;
-    tc.operandTypes = {ScalarTypeKind::Any};
-    tc.resultTypes = {ScalarTypeKind::Any};
+    tc.shape.operandRanks = {1, 1, 1};
+    tc.shape.resultRanks = {1};
+    tc.shape.sameFirstOperandAndResultShape = true;
+    tc.operandTypes = {ScalarTypeKind::F32, ScalarTypeKind::I32};
+    tc.resultTypes = {ScalarTypeKind::F32, ScalarTypeKind::I32};
     tc.accumulatorTypes = {ScalarTypeKind::F32, ScalarTypeKind::I32};
     tc.effects = EffectMask::None;
     c.typed = std::move(tc);
@@ -70,15 +76,22 @@ void registerMatrixContracts(Unit &u) {
       return llvm::Error::success();
     };
     c.verify = [](Operation *op) -> LogicalResult {
-      return success(op->getNumOperands() == 3 && op->getNumResults() == 1);
+      if (auto ci = dyn_cast<ContractOpInterface>(op))
+        return success(succeeded(ci.verifyShapeAndTypes()) &&
+                       succeeded(ci.verifyLayoutAndAddressSpace()));
+      return failure();
     };
     TypedContract tc;
     tc.shape.minOperands = 3;
     tc.shape.maxOperands = 3;
     tc.shape.minResults = 1;
     tc.shape.maxResults = 1;
-    tc.operandTypes = {ScalarTypeKind::Any};
-    tc.resultTypes = {ScalarTypeKind::Any};
+    tc.shape.operandRanks = {1, 1, 1};
+    tc.shape.resultRanks = {1};
+    tc.shape.sameFirstOperandAndResultShape = true;
+    tc.operandTypes = {ScalarTypeKind::I32, ScalarTypeKind::UI8,
+                       ScalarTypeKind::I8};
+    tc.resultTypes = {ScalarTypeKind::I32};
     tc.accumulatorTypes = {ScalarTypeKind::I32};
     tc.effects = EffectMask::None;
     c.typed = std::move(tc);
@@ -118,8 +131,9 @@ void registerMatrixContracts(Unit &u) {
     tc.shape.maxOperands = 4;
     tc.shape.minResults = 1;
     tc.shape.maxResults = 1;
-    tc.operandTypes = {ScalarTypeKind::Any};
-    tc.resultTypes = {ScalarTypeKind::Any};
+    tc.shape.resultRanks = {1};
+    tc.operandTypes = {ScalarTypeKind::Index};
+    tc.resultTypes = {ScalarTypeKind::F32};
     tc.accumulatorTypes = {ScalarTypeKind::I32};
     tc.effects = EffectMask::Read;
     c.typed = std::move(tc);
@@ -160,8 +174,9 @@ void registerMatrixContracts(Unit &u) {
     tc.shape.maxOperands = 4;
     tc.shape.minResults = 1;
     tc.shape.maxResults = 1;
-    tc.operandTypes = {ScalarTypeKind::Any};
-    tc.resultTypes = {ScalarTypeKind::Any};
+    tc.shape.resultRanks = {1};
+    tc.operandTypes = {ScalarTypeKind::Index};
+    tc.resultTypes = {ScalarTypeKind::F32};
     tc.accumulatorTypes = {ScalarTypeKind::I32};
     tc.effects = EffectMask::Read;
     c.typed = std::move(tc);
@@ -538,8 +553,10 @@ void registerMatrixContracts(Unit &u) {
     tc.shape.maxOperands = 2;
     tc.shape.minResults = 2;
     tc.shape.maxResults = 2;
-    tc.operandTypes = {ScalarTypeKind::Any};
-    tc.resultTypes = {ScalarTypeKind::Any};
+    tc.operandTypes = {ScalarTypeKind::F32, ScalarTypeKind::I32,
+                       ScalarTypeKind::I64};
+    tc.resultTypes = {ScalarTypeKind::F32, ScalarTypeKind::I32,
+                      ScalarTypeKind::I64};
     tc.accumulatorTypes = {ScalarTypeKind::F32, ScalarTypeKind::I32,
                            ScalarTypeKind::I64};
     tc.effects = EffectMask::None;

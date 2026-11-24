@@ -22,6 +22,7 @@ using namespace mlir;
 
 bool canNarrowMojoAddress(Operation &op);
 TerminalPrinter mojoMatrixPrinter();
+void lowerMojoScfIfs(Operation *rootOp);
 
 namespace {
 std::string scalarTypeStr(Type t) {
@@ -346,7 +347,7 @@ struct OrderedLowerer {
                        {b.getNamedAttr("lane", b.getI64IntegerAttr(l))})
                     ->getResult(0);
       if (origVal.getType().isIndex())
-        s = makeOp(b, loc, "as_int", {s}, {b.getIndexType()})->getResult(0);
+        s = b.create<arith::IndexCastOp>(loc, b.getIndexType(), s);
       lanes[l].map(origVal, s);
     }
   }
@@ -1412,8 +1413,7 @@ struct OrderedLowerer {
                                        {vAddrBuf, vOffAddr}, {b.getI64Type()})
                                     ->getResult(0);
                 Value vBase =
-                    makeOp(b, loc, "as_int", {vBase64}, {b.getIndexType()})
-                        ->getResult(0);
+                    b.create<arith::IndexCastOp>(loc, b.getIndexType(), vBase64).getResult();
                 WideViewRef vRef{tiledVPtr, vBase, tiledVElemTy, accExtent};
                 Value vChunks[4] = {
                     loadWideChunkF32(vRef, constIdx(b, loc, 0), 16),
@@ -1497,8 +1497,7 @@ struct OrderedLowerer {
                                        {vAddrBuf, vOffAddr}, {b.getI64Type()})
                                     ->getResult(0);
                 Value vBase =
-                    makeOp(b, loc, "as_int", {vBase64}, {b.getIndexType()})
-                        ->getResult(0);
+                    b.create<arith::IndexCastOp>(loc, b.getIndexType(), vBase64).getResult();
                 WideViewRef vRef{tiledVPtr, vBase, tiledVElemTy, accExtent};
                 Value vLo = loadWideChunkF32(vRef, cIdx, 16);
                 Value vHi = loadWideChunkF32(vRef, cIdxHi, 16);
@@ -2099,7 +2098,8 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn) {
   auto *ownerFn =
       makeOp(b, loc, "owner_fn", {}, {},
              {b.getNamedAttr("param_types", b.getArrayAttr(mojoParamTypes)),
-              b.getNamedAttr("uses_stack", b.getBoolAttr(usesStack))},
+              b.getNamedAttr("uses_stack", b.getBoolAttr(usesStack)),
+              b.getNamedAttr("owners", b.getI64IntegerAttr(owners))},
              1);
   makeOp(b, loc, "end");
 
@@ -2158,10 +2158,8 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn) {
             ->getResult(0);
   }
 
-  Value loInt =
-      makeOp(b, loc, "as_int", {loArg}, {b.getIndexType()})->getResult(0);
-  Value hiInt =
-      makeOp(b, loc, "as_int", {hiArg}, {b.getIndexType()})->getResult(0);
+  Value loInt = b.create<arith::IndexCastOp>(loc, b.getIndexType(), loArg);
+  Value hiInt = b.create<arith::IndexCastOp>(loc, b.getIndexType(), hiArg);
   auto *ownerLoop = makeOp(
       b, loc, "for_range", {loInt, hiInt, constIdx(b, loc, batch)}, {}, {}, 1);
   Block &oBb = ownerLoop->getRegion(0).emplaceBlock();
@@ -2180,11 +2178,16 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn) {
   for (unsigned ax : intentdsl::cpu::ownerRadices(space)) {
     int64_t ext = std::max<int64_t>(
         1, lowerer.argArray(space.getOperand(ax), "cpu.shape")[axes[ax]]);
+    Value base =
+        pitch == 1
+            ? owner
+            : b.create<arith::DivSIOp>(loc, owner, constIdx(b, loc, pitch))
+                  .getResult();
     Value coord =
-        makeOp(b, loc, "owner_coord", {owner}, {b.getIndexType()},
-               {b.getNamedAttr("pitch", b.getI64IntegerAttr(pitch)),
-                b.getNamedAttr("extent", b.getI64IntegerAttr(ext))})
-            ->getResult(0);
+        ext <= 1
+            ? constIdx(b, loc, 0)
+            : b.create<arith::RemSIOp>(loc, base, constIdx(b, loc, ext))
+                  .getResult();
     for (int64_t l = 0; l < batch; ++l) {
       Value laneCoord = coord;
       if (batch > 1 && pitch == 1 && innerAttr &&
@@ -2259,6 +2262,7 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn) {
   }
   for (Operation *op : llvm::reverse(toErase))
     op->erase();
+  lowerMojoScfIfs(prog);
   return success();
 }
 
@@ -2282,14 +2286,14 @@ LogicalResult verifyMojoOrdered(ModuleOp m, const TargetProfile &p,
 
   // Independently verify windowed score buffer, replay, and over-window
   // zero-read invariants on resume (parity with CPU verifyOwnerBuffers).
-  SmallVector<scf::IfOp, 2> guards, branches;
+  SmallVector<Operation *, 2> guards, branches;
   SmallVector<Value, 2> winBufs, addrBufs;
   m.walk([&](Operation *op) {
-    if (auto ifOp = dyn_cast<scf::IfOp>(op)) {
-      if (ifOp->hasAttr("mojo_row.window_guard"))
-        guards.push_back(ifOp);
-      if (ifOp->hasAttr("mojo_row.window_branch"))
-        branches.push_back(ifOp);
+    if (op->getName().getStringRef() == "mojo_row.if") {
+      if (op->hasAttr("mojo_row.window_guard"))
+        guards.push_back(op);
+      if (op->hasAttr("mojo_row.window_branch"))
+        branches.push_back(op);
     } else if (op->getName().getStringRef() == "mojo_row.stack_alloc") {
       if (auto role = op->getAttrOfType<StringAttr>("role")) {
         if (role.getValue() == "score_window")
@@ -2379,16 +2383,16 @@ LogicalResult verifyMojoOrdered(ModuleOp m, const TargetProfile &p,
              isSubOf(addrOp->getOperand(1), ivWant, loWant);
     };
 
-    auto gIf = guards[0], bIf = branches[0];
+    Operation *gIf = guards[0], *bIf = branches[0];
     Operation *loop1 = gIf->getParentOp();
     if (!loop1 || loop1->getName().getStringRef() != "mojo_row.for_range" ||
         !isConstIdx(loop1->getOperand(2), 1) ||
         loop1->getBlock() != bIf->getBlock() || !loop1->isBeforeInBlock(bIf) ||
-        !gIf.getElseRegion().empty() || bIf.getElseRegion().empty())
+        !gIf->getRegion(1).empty() || bIf->getRegion(1).empty())
       return prog.emitError("invalid Mojo windowed guard or branch structure");
     Value lo1 = loop1->getOperand(0), hi1 = loop1->getOperand(1),
           iv1 = loop1->getRegion(0).front().getArgument(0);
-    auto gCmp = gIf.getCondition().getDefiningOp<arith::CmpIOp>();
+    auto gCmp = gIf->getOperand(0).getDefiningOp<arith::CmpIOp>();
     bool validGuardCond =
         gCmp && ((gCmp.getPredicate() == arith::CmpIPredicate::slt &&
                   isSubOf(gCmp.getLhs(), iv1, lo1) &&
@@ -2397,7 +2401,7 @@ LogicalResult verifyMojoOrdered(ModuleOp m, const TargetProfile &p,
                   isConstIdx(gCmp.getLhs(), slots) &&
                   isSubOf(gCmp.getRhs(), iv1, lo1)));
     if (!validGuardCond)
-      return gIf.emitError(
+      return gIf->emitError(
           "Mojo window guard condition must compare (iv - lo) < window_slots");
 
     unsigned guardSliceStores = 0, guardScalarStores = 0;
@@ -2406,7 +2410,7 @@ LogicalResult verifyMojoOrdered(ModuleOp m, const TargetProfile &p,
     loop1->walk([&](Operation *op) {
       StringRef n = op->getName().getStringRef();
       if (n == "mojo_row.store_slice" || n == "mojo_row.store_scalar") {
-        bool inGuard = gIf.getThenRegion().isAncestor(op->getParentRegion());
+        bool inGuard = gIf->getRegion(0).isAncestor(op->getParentRegion());
         if (inGuard)
           if (auto *def = op->getOperand(0).getDefiningOp();
               def && def->getName().getStringRef() == "mojo_row.stack_alloc")
@@ -2431,10 +2435,10 @@ LogicalResult verifyMojoOrdered(ModuleOp m, const TargetProfile &p,
         ((guardSliceStores == 1 && guardScalarStores == 0) ||
          (guardSliceStores == 0 && guardScalarStores == batch));
     if (!validGuardStores)
-      return gIf.emitError(
+      return gIf->emitError(
           "Mojo window guard must contain the score_window store indexed at (iv - lo)");
 
-    auto bCmp = bIf.getCondition().getDefiningOp<arith::CmpIOp>();
+    auto bCmp = bIf->getOperand(0).getDefiningOp<arith::CmpIOp>();
     bool validBranchCond =
         bCmp && ((bCmp.getPredicate() == arith::CmpIPredicate::sle &&
                   isSubOf(bCmp.getLhs(), hi1, lo1) &&
@@ -2446,24 +2450,24 @@ LogicalResult verifyMojoOrdered(ModuleOp m, const TargetProfile &p,
                   isSubOf(bCmp.getLhs(), hi1, lo1) &&
                   isConstIdx(bCmp.getRhs(), slots + 1)));
     if (!validBranchCond)
-      return bIf.emitError(
+      return bIf->emitError(
           "Mojo window branch condition must compare (hi - lo) <= window_slots");
 
     SmallVector<Operation *, 2> thenLoops, elseLoops;
-    for (Operation &op : bIf.getThenRegion().front())
+    for (Operation &op : bIf->getRegion(0).front())
       if (op.getName().getStringRef() == "mojo_row.for_range" &&
           isConstIdx(op.getOperand(2), 1) &&
           sameBound(sameBound, op.getOperand(0), lo1) &&
           sameBound(sameBound, op.getOperand(1), hi1))
         thenLoops.push_back(&op);
-    for (Operation &op : bIf.getElseRegion().front())
+    for (Operation &op : bIf->getRegion(1).front())
       if (op.getName().getStringRef() == "mojo_row.for_range" &&
           isConstIdx(op.getOperand(2), 1) &&
           sameBound(sameBound, op.getOperand(0), lo1) &&
           sameBound(sameBound, op.getOperand(1), hi1))
         elseLoops.push_back(&op);
     if (thenLoops.size() != 1 || elseLoops.size() != 1)
-      return bIf.emitError(
+      return bIf->emitError(
           "Mojo window branch must wrap single replay and recompute folds over [lo, hi)");
 
     Operation *thenFor = thenLoops[0];
@@ -2487,11 +2491,11 @@ LogicalResult verifyMojoOrdered(ModuleOp m, const TargetProfile &p,
     if (!validThenLoadIdx ||
         !((thenSliceLoads == 1 && thenScalarLoads == 0) ||
           (thenSliceLoads == 0 && thenScalarLoads == batch)))
-      return bIf.emitError(
+      return bIf->emitError(
           "Mojo window replay branch must read score_window at (iv - lo)");
 
     bool elseTouchesWindow =
-        bIf.getElseRegion()
+        bIf->getRegion(1)
             .walk([&](Operation *op) {
               for (Value operand : op->getOperands())
                 if (operand == scoreBuf ||
@@ -2502,7 +2506,7 @@ LogicalResult verifyMojoOrdered(ModuleOp m, const TargetProfile &p,
             })
             .wasInterrupted();
     if (elseTouchesWindow)
-      return bIf.emitError(
+      return bIf->emitError(
           "Mojo over-window recomputation branch must not read score window");
   }
 
