@@ -197,11 +197,15 @@ TARGETS: dict[str, TargetSpec] = {
         base_python="/srv/rc/site-1/.venvs/intentdsl-cutile/bin/python",
         standalone_env=(
             ("PATH", "/srv/rc/site-1/.venvs/intentdsl-mojo/bin:/usr/local/bin:/usr/bin:/bin"),
+            ("ONEDNN_ROOT", "/opt/rc-dependencies/onednn-3.13.4"),
             ("LD_LIBRARY_PATH", "/opt/rc-dependencies/onednn-3.13.4/lib:/srv/rc/site-1/phdworks/intentdsl_bench/output/build/onednn-install/lib"),
         ),
         worker_env=(
             ("PATH", "/srv/rc/site-1/.venvs/intentdsl-mojo/bin:/usr/local/bin:/usr/bin:/bin"),
+            ("ONEDNN_ROOT", "/opt/rc-dependencies/onednn-3.13.4"),
             ("LD_LIBRARY_PATH", "/opt/rc-dependencies/onednn-3.13.4/lib:/srv/rc/site-1/phdworks/intentdsl_bench/output/build/onednn-install/lib"),
+            ("INTENT_CPU_THREADS", "8"),
+            ("OPENBLAS_NUM_THREADS", "1"),
         ),
         worker_launcher=("taskset", "-c", "0-7"),
         captures_layout="local_flat",
@@ -213,6 +217,16 @@ TARGETS: dict[str, TargetSpec] = {
         device_kind="cpu_x86",
         wheel_glob="intentdsl-2.0.0-*-linux_x86_64.whl",
         base_python="/srv/rc/site-1/phdworks/intentdsl_bench/output/work/v2-weft-env/bin/python",
+        standalone_env=(
+            ("ONEDNN_ROOT", "/opt/rc-dependencies/onednn-3.13.4"),
+            ("LD_LIBRARY_PATH", "/opt/rc-dependencies/onednn-3.13.4/lib"),
+        ),
+        worker_env=(
+            ("ONEDNN_ROOT", "/opt/rc-dependencies/onednn-3.13.4"),
+            ("LD_LIBRARY_PATH", "/opt/rc-dependencies/onednn-3.13.4/lib"),
+            ("INTENT_CPU_THREADS", "8"),
+            ("OPENBLAS_NUM_THREADS", "1"),
+        ),
         worker_launcher=("taskset", "-c", "0-7"),
         captures_layout="local_flat",
     ),
@@ -758,21 +772,169 @@ def run_single_workload(cfg: dict[str, Any]) -> int:
             print(f"[{target_name}] {work}: SKIPPED ({exc})", flush=True)
             return 0
 
-    heavy_catalog = work in (
-        "corpus/mojo/qkv_projection",
-        "corpus/triton/moe_expert_projection",
-        "corpus/mojo/paged_mla_decode_partials",
-        "corpus/cutile/grouped_flash_decode",
-        "corpus/triton/flash_attention_backward",
-    )
     if device_kind == "cpu_rvv" and work in ("corpus/mojo/qkv_projection", "corpus/triton/moe_expert_projection"):
         meas = Measurement(enabled=True, warmup=0, samples=1)
-    elif heavy_catalog or work in ("program/attention", "program/paged_decode", "corpus/weft/q4_k_projection"):
-        meas = Measurement(enabled=True, warmup=1, samples=3)
     else:
         meas = Measurement(enabled=True)
 
     anchor = f"intent-v2:{backends[0]}"
+    baseline_name = anchor if anchor in selected else None
+
+    # Child mode for per-(case, implementation) process isolation on multi-thread x86 CPU:
+    # avoids cross-runtime OpenMP/threadpool spin contention (libgomp vs libomp vs libiomp5).
+    if cfg.get("_isolated_impl"):
+        from dataclasses import asdict as _dc_asdict
+        from intent_bench.storage import write_tree
+
+        iso_case_name: str = cfg["_isolated_case"]
+        iso_impl: str = cfg["_isolated_impl"]
+        iso_actual_dir = Path(cfg["_isolated_actual_dir"])
+        iso_row_json = Path(cfg["_isolated_row_json"])
+        iso_work_dir = Path(cfg["_isolated_work_dir"])
+
+        def _capture_actual(actual, _expected):
+            write_tree(actual, iso_actual_dir)
+
+        w_iso = replace(
+            w,
+            cases=tuple(c for c in w.cases if c.name == iso_case_name),
+            oracle=lambda _c, _i: None,
+            check=_capture_actual,
+        )
+        with run_output(env, w.name, iso_work_dir, execution=True):
+            sub_rows = benchmark(
+                w_iso,
+                [iso_impl],
+                environment=env,
+                baseline=iso_impl,
+                measurement=meas,
+            )
+        iso_row_json.write_text(json.dumps([_dc_asdict(r) for r in sub_rows]) + "\n", encoding="utf-8")
+        return 0
+
+    if device_kind == "cpu_x86" and selected:
+        from intent_bench.engine import assign_speedups
+        from intent_bench.measurement import device_window, reset as _bench_reset, synchronize as _bench_sync
+        from intent_bench.model import DeviceBusy, Implementation
+        from intent_bench.storage import read_tree
+        from intent_bench.trees import assert_close, clone
+
+        clean_sub_env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "INTENTDSL_LIBRARY")}
+        all_rows: list[Result] = []
+        with run_output(env, w.name, out_folder, execution=True) as folder:
+            with tempfile.TemporaryDirectory(prefix="rc-cpu-iso-", dir=str(folder)) as iso_tmp_str:
+                iso_tmp = Path(iso_tmp_str)
+                for c_idx, case in enumerate(w.cases):
+                    case_rows: list[Result] = []
+                    captured_dirs: dict[int, Path] = {}
+                    for i_idx, impl_name in enumerate(selected):
+                        act_dir = iso_tmp / f"c{c_idx}-i{i_idx}-actual"
+                        row_json = iso_tmp / f"c{c_idx}-i{i_idx}-row.json"
+                        sub_out = iso_tmp / f"c{c_idx}-i{i_idx}-run"
+                        sub_cfg = {
+                            **cfg,
+                            "_isolated_case": case.name,
+                            "_isolated_impl": impl_name,
+                            "_isolated_actual_dir": str(act_dir),
+                            "_isolated_row_json": str(row_json),
+                            "_isolated_work_dir": str(sub_out),
+                        }
+                        sub_cfg_file = iso_tmp / f"cfg-{c_idx}-{i_idx}.json"
+                        sub_cfg_file.write_text(json.dumps(sub_cfg), encoding="utf-8")
+                        sub_proc = subprocess.run(
+                            [sys.executable, str(Path(__file__).resolve()), "--run-one", str(sub_cfg_file)],
+                            env=clean_sub_env,
+                        )
+                        if sub_proc.returncode == 0 and row_json.is_file():
+                            r_dict = json.loads(row_json.read_text(encoding="utf-8"))[0]
+                            r_obj = Result(**r_dict)
+                            r_obj.baseline = baseline_name
+                            r_obj.baseline_ms = None
+                            r_obj.speedup = None
+                            if (act_dir / "tree.json").is_file():
+                                captured_dirs[i_idx] = act_dir
+                        else:
+                            r_obj = Result(
+                                w.name,
+                                w.family,
+                                case.name,
+                                dict(case.parameters),
+                                impl_name,
+                                status="worker_failed",
+                                correctness="unchecked",
+                                stage="execute",
+                                device=env.device,
+                                baseline=baseline_name,
+                                error=f"isolated CPU worker exited with code {sub_proc.returncode}",
+                            )
+                        case_rows.append(r_obj)
+
+                    # Evaluate reference oracle once AFTER all timed subprocesses for this case have finished
+                    if w.oracle is not None and captured_dirs:
+                        expected = None
+                        oracle_error = None
+                        ref_call = None
+                        try:
+                            inp = w.inputs(case, 0)
+                            if w.prepare_inputs is not None:
+                                inp = w.prepare_inputs(case, inp, env)
+                            if isinstance(w.oracle, Implementation):
+                                ref_call = w.oracle.prepare(case, clone(inp), env)
+                                if ref_call.compile:
+                                    ref_call.compile()
+                                with device_window(ref_call.device):
+                                    _bench_reset(ref_call)
+                                    ref_call.launch()
+                                    _bench_sync(ref_call)
+                                    expected = clone(ref_call.result())
+                            else:
+                                expected = w.oracle(case, clone(inp))
+                        except Exception as exc:
+                            oracle_error = exc
+                        finally:
+                            if ref_call is not None and ref_call.close:
+                                try:
+                                    ref_call.close()
+                                except Exception as exc:
+                                    oracle_error = exc
+
+                        for i_idx, r_obj in enumerate(case_rows):
+                            if i_idx not in captured_dirs or r_obj.status != "passed":
+                                continue
+                            if isinstance(oracle_error, DeviceBusy):
+                                r_obj.status = "skipped_busy"
+                                r_obj.correctness = "unchecked"
+                                r_obj.stage = "correctness"
+                                r_obj.error = f"{type(oracle_error).__name__}: {oracle_error}"
+                            elif oracle_error is not None:
+                                r_obj.status = "reference_failed"
+                                r_obj.correctness = "reference_failed"
+                                r_obj.metadata["reference_error"] = f"{type(oracle_error).__name__}: {oracle_error}"
+                            else:
+                                try:
+                                    actual_val = read_tree(captured_dirs[i_idx], tensor_device=env.device)
+                                    if w.check:
+                                        w.check(actual_val, expected)
+                                    else:
+                                        assert_close(actual_val, expected, atol=w.atol, rtol=w.rtol)
+                                    r_obj.correctness = "passed"
+                                    r_obj.status = "passed"
+                                except AssertionError as err:
+                                    r_obj.correctness = "failed"
+                                    r_obj.status = "numerical_failed"
+                                    r_obj.error = str(err)
+
+                    assign_speedups(case_rows, baseline_name)
+                    all_rows.extend(case_rows)
+
+            for row in all_rows:
+                row.metadata["rc_target"] = target_name
+                row.metadata["skipped_implementations"] = skipped
+            save(all_rows, folder, command={"target": target_name, "workload": work, "skipped_implementations": skipped})
+            summary = [(r.implementation, r.case, r.status, round(r.median_ms * 1000, 2) if r.median_ms else None) for r in all_rows]
+            print(f"[{target_name}] {work}: {summary}", flush=True)
+        return 0
+
     with run_output(env, w.name, out_folder, execution=True) as folder:
         oracle_dir = (
             folder / "oracle"
@@ -783,7 +945,7 @@ def run_single_workload(cfg: dict[str, Any]) -> int:
             w,
             selected,
             environment=env,
-            baseline=anchor if anchor in selected else None,
+            baseline=baseline_name,
             measurement=meas,
             oracle_output=oracle_dir,
         )
@@ -1333,8 +1495,8 @@ def summarize_experiment(bench_root: Path, experiment_tag: str) -> tuple[dict[st
             prog_total = 0
             counts = {"generate": 0, "native_compile": 0, "execute": 0, "correctness": 0, "performance": 0}
 
-            v1_cmp = {"faster": 0, "tied": 0, "slower": 0, "no_comparable": 0, "ref_failed": 0}
-            mat_cmp = {"faster": 0, "tied": 0, "slower": 0, "no_comparable": 0, "ref_failed": 0, "semantic_diff": 0}
+            v1_cmp = {"faster": 0, "tied": 0, "slower": 0, "no_comparable": 0, "ref_failed": 0, "quantized_short_ties": 0}
+            mat_cmp = {"faster": 0, "tied": 0, "slower": 0, "no_comparable": 0, "ref_failed": 0, "semantic_diff": 0, "quantized_short_ties": 0}
 
             for (wname, cname), impl_map in sorted(by_work_case.items()):
                 if v2_key not in impl_map:
@@ -1399,22 +1561,35 @@ def summarize_experiment(bench_root: Path, experiment_tag: str) -> tuple[dict[st
                     v1_cmp["ref_failed"] += 1
                 else:
                     v1_ms = float(v1_row["median_ms"])
+                    v2_us = v2_ms * 1000.0
+                    v1_us = v1_ms * 1000.0
                     ratio = v2_ms / v1_ms
-                    if ratio < 0.95:
+                    # On 5090D (SM120), CUDAGraph CUDA Event hardware timer quantum is 2.048 us;
+                    # for short kernels (< 8 us), +-1 tick (<= 2.10 us) is single-quantum jitter.
+                    sm120_single_tick = (
+                        target_name == "5090d"
+                        and min(v2_us, v1_us) < 8.0
+                        and abs(v2_us - v1_us) <= 2.10
+                    )
+                    if sm120_single_tick:
+                        v1_cmp["tied"] += 1
+                        if ratio < 0.95 or ratio > 1.05:
+                            v1_cmp["quantized_short_ties"] += 1
+                    elif ratio < 0.95:
                         v1_cmp["faster"] += 1
                     elif ratio <= 1.05:
                         v1_cmp["tied"] += 1
                     else:
                         v1_cmp["slower"] += 1
-                    if ratio > 1.20:
+                    if ratio > 1.20 and not sm120_single_tick:
                         summary["slower_than_v1_over_1_2x"].append(
                             {
                                 "target": target_name,
                                 "backend": be,
                                 "workload": wname,
                                 "case": cname,
-                                "v2_us": round(v2_ms * 1000.0, 2),
-                                "v1_us": round(v1_ms * 1000.0, 2),
+                                "v2_us": round(v2_us, 2),
+                                "v1_us": round(v1_us, 2),
                                 "ratio": round(ratio, 3),
                                 "unit": responsible_unit(be, wname),
                             }
@@ -1450,8 +1625,19 @@ def summarize_experiment(bench_root: Path, experiment_tag: str) -> tuple[dict[st
                             mat_cmp["slower"] += 1
                     else:
                         best_name, best_ms = min(passing_mat, key=lambda x: x[1])
+                        v2_us = v2_ms * 1000.0
+                        best_us = best_ms * 1000.0
                         ratio_m = v2_ms / best_ms
-                        if ratio_m < 0.95:
+                        sm120_mat_tick = (
+                            target_name == "5090d"
+                            and min(v2_us, best_us) < 8.0
+                            and abs(v2_us - best_us) <= 2.10
+                        )
+                        if sm120_mat_tick:
+                            mat_cmp["tied"] += 1
+                            if ratio_m < 0.95 or ratio_m > 1.05:
+                                mat_cmp["quantized_short_ties"] += 1
+                        elif ratio_m < 0.95:
                             mat_cmp["faster"] += 1
                         elif ratio_m <= 1.05:
                             mat_cmp["tied"] += 1
@@ -1482,6 +1668,8 @@ def summarize_experiment(bench_root: Path, experiment_tag: str) -> tuple[dict[st
             "",
             "## 2. 性能计分板（完整调用热执行中位数，持平阈值 `0.95x–1.05x`）",
             "",
+            "> 注：`5090d`（SM120）上 `CUDAGraph` 内 CUDA Event 硬件计时步长为 `2.048 µs`；对 `< 8 µs` 的短 kernel，前后差 `≤ 1` 个硬件刻度（`≤ 2.048 µs`）属于量化步长内正常波动，按持平计入且不列入 `> 1.20x` 表。",
+            "",
             "| 设备目标 | 出口 | V2 对 V1（更快 / 持平 / 更慢 / V1失败或无对照） | V2 对成熟实现（更快 / 持平 / 更慢 / 无同合同或失败） |",
             "|---|---|---|---|",
         ]
@@ -1489,11 +1677,13 @@ def summarize_experiment(bench_root: Path, experiment_tag: str) -> tuple[dict[st
     for b in summary["backend_scoreboards"]:
         v1 = b["vs_v1"]
         mt = b["vs_mature"]
+        v1_qnote = f"（含 {v1['quantized_short_ties']} 项 `<8µs` 单刻度量化持平）" if v1.get("quantized_short_ties") else ""
         sem_note = f"（含 {mt['semantic_diff']} 项 f16 softmax 精确商语义差）" if mt["semantic_diff"] else ""
+        mt_qnote = f"（含 {mt['quantized_short_ties']} 项 `<8µs` 单刻度量化持平）" if mt.get("quantized_short_ties") else ""
         md.append(
             f"| `{b['target']}` | `{b['backend']}` | "
-            f"**{v1['faster']}** 快 / **{v1['tied']}** 平 / **{v1['slower']}** 慢（{v1['ref_failed']} 失败, {v1['no_comparable']} 无） | "
-            f"**{mt['faster']}** 快 / **{mt['tied']}** 平 / **{mt['slower']}** 慢（{mt['ref_failed']} 失败, {mt['no_comparable']} 无）{sem_note} |"
+            f"**{v1['faster']}** 快 / **{v1['tied']}** 平 / **{v1['slower']}** 慢（{v1['ref_failed']} 失败, {v1['no_comparable']} 无）{v1_qnote} | "
+            f"**{mt['faster']}** 快 / **{mt['tied']}** 平 / **{mt['slower']}** 慢（{mt['ref_failed']} 失败, {mt['no_comparable']} 无）{sem_note}{mt_qnote} |"
         )
 
     md.extend(
