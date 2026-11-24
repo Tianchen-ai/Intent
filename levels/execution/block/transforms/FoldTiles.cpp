@@ -418,6 +418,19 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
       if (!loop->hasAttr("block.repair_masked_nan")) {
         next.push_back(dot(w16, v, false, acc));
       } else {
+        Operation *valRead = operands.values.getDefiningOp();
+        bool canRereadV =
+            valRead && valRead->getName().stripDialect() == "slice_read" &&
+            llvm::all_of(valRead->getOperands().drop_front(), [&](Value cv) {
+              return cv == loop.getInductionVar() ||
+                     loop.isDefinedOutsideOfLoop(cv);
+            });
+        SmallVector<Value> vOuter;
+        if (canRereadV)
+          for (Value cv : valRead->getOperands().drop_front())
+            vOuter.push_back(cv == loop.getInductionVar()
+                                 ? Value()
+                                 : widen(coordinate(cv)));
         auto eTy = elem(v.getType());
         auto zElem = castElement(scalar(0), eTy);
         auto zW = broadcast(zElem, w16.getType());
@@ -453,14 +466,40 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
                                            tokAxis, like(j64, tokAxis.getType()));
         auto isJW = broadcast(isJ, live.getType(), 1);
         auto liveJ = reduce(b.create<arith::AndIOp>(loc, live, isJW), "max", 1);
-        auto wF32 = castElement(w16, b.getF32Type());
-        auto zWF32 = broadcast(scalar(0.f), wF32.getType());
-        auto wJ = reduce(select(isJW, wF32, zWF32), "sum", 1);
-        auto isJV = broadcast(
-            isJ, cast<RankedTensorType>(v.getType()).clone(b.getI1Type()), 0);
-        auto vF32 = castElement(v, b.getF32Type());
-        auto zVF32 = broadcast(scalar(0.f), vF32.getType());
-        auto vJ = reduce(select(isJV, vF32, zVF32), "sum", 0);
+        auto wJ = castElement(reduce(select(isJW, w16, zW), "sum", 1),
+                              b.getF32Type());
+        Value vJ;
+        if (canRereadV) {
+          Value view = valRead->getOperand(0);
+          int64_t ax = valRead->getAttrOfType<IntegerAttr>("axis").getInt();
+          int64_t n = shape(view)[ax];
+          int64_t padded = std::max<int64_t>(1, llvm::PowerOf2Ceil(n));
+          Value tokJ = b.create<arith::AddIOp>(loc, widen(base), j64);
+          SmallVector<Value> coordsJ;
+          SmallVector<int64_t> axesJ;
+          for (Value oc : vOuter) {
+            coordsJ.push_back(oc ? oc : tokJ);
+            axesJ.push_back(-1);
+          }
+          Value kAxis = lanes(padded);
+          coordsJ.insert(coordsJ.begin() + ax, kAxis);
+          axesJ.insert(axesJ.begin() + ax, 0);
+          Value anyJ = reduce(b.create<arith::AndIOp>(loc, any, isJ), "max", 0);
+          Value maskJ = broadcast(anyJ, shaped({padded}, b.getI1Type()));
+          if (padded != n) {
+            Value within = b.create<arith::CmpIOp>(
+                loc, arith::CmpIPredicate::slt, kAxis,
+                like(integer(n), kAxis.getType()));
+            maskJ = b.create<arith::AndIOp>(loc, maskJ, within);
+          }
+          vJ = castElement(read(view, address(view, coordsJ, axesJ), maskJ),
+                           b.getF32Type());
+        } else {
+          auto isJV = broadcast(
+              isJ, cast<RankedTensorType>(v.getType()).clone(b.getI1Type()), 0);
+          vJ = castElement(reduce(select(isJV, v, zV), "sum", 0),
+                           b.getF32Type());
+        }
         auto accMaskTy =
             cast<RankedTensorType>(cur.getType()).clone(b.getI1Type());
         auto classify = [&](Value vec, int axis) {
