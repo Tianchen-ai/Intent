@@ -17,15 +17,15 @@ std::string extent(Type t) {
 void registerColumnRules(TerminalPrinter &printer) {
   auto &rules = printer.operations;
   auto leaf = [&](std::string name, auto emit) {
-    rules[name] = [emit](Operation &op, PrintPoint at, PrintContext &p) {
+    rules[name] = PrintRule::custom([emit](Operation &op, PrintPoint at, PrintContext &p) {
       if (at == PrintPoint::Enter)
         emit(op, p);
       return llvm::Error::success();
-    };
+    }, "legacy_operation_rule");
   };
   leaf("func.return", [](auto &, auto &) {});
   leaf("triton_src.end", [](auto &, auto &) {});
-  rules["func.func"] = [](Operation &op, PrintPoint at,
+  rules["func.func"] = PrintRule::custom([](Operation &op, PrintPoint at,
                           PrintContext &p) -> llvm::Error {
     if (at == PrintPoint::Enter) {
       bool row = op.hasAttr("triton_src.min_width");
@@ -54,7 +54,7 @@ void registerColumnRules(TerminalPrinter &printer) {
     } else if (at == PrintPoint::Leave)
       --p.indent;
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
   leaf("triton_src.owner_space", [](Operation &op, PrintContext &p) {
     p.line(p.name(op.getRegion(0).front().getArgument(0)) +
            " = tl.program_id(0).to(tl.int64)");
@@ -73,7 +73,7 @@ void registerColumnRules(TerminalPrinter &printer) {
              ",tl.float32)");
     }
   });
-  rules["scf.for"] = [](Operation &op, PrintPoint at, PrintContext &p) {
+  rules["scf.for"] = PrintRule::custom([](Operation &op, PrintPoint at, PrintContext &p) {
     auto loop = cast<scf::ForOp>(op);
     if (at == PrintPoint::Enter) {
       for (auto [result, init] : llvm::zip(loop.getResults(), loop.getInitArgs()))
@@ -95,7 +95,7 @@ void registerColumnRules(TerminalPrinter &printer) {
     } else if (at == PrintPoint::Leave)
       --p.indent;
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
   leaf("scf.yield", [](Operation &op, PrintContext &p) {
     std::vector<std::string> lhs, rhs;
     for (auto [result, next] : llvm::zip(op.getParentOp()->getResults(), op.getOperands())) {

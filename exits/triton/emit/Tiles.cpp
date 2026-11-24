@@ -41,7 +41,7 @@ TerminalPrinter tilePrinter() {
   TerminalPrinter p;
   registerColumnRules(p);
   auto leaf = [&](StringRef name, auto rule) {
-    p.operations[name.str()] = [rule](Operation &op, PrintPoint at,
+    p.operations[name.str()] = PrintRule::custom([rule](Operation &op, PrintPoint at,
                                       PrintContext &c) {
       if (at != PrintPoint::Enter)
         return llvm::Error::success();
@@ -53,7 +53,7 @@ TerminalPrinter tilePrinter() {
         c.line(op.getNumResults() ? c.name(op.getResult(0)) + " = " + expr
                                   : expr);
       return llvm::Error::success();
-    };
+    }, "legacy_operation_rule");
   };
   leaf("triton_src.tile_program", [](auto &, auto &) { return std::string(); });
   leaf("triton_src.tile_axis", [](Operation &op, auto &) {
@@ -241,7 +241,7 @@ TerminalPrinter tilePrinter() {
   });
   leaf("arith.select",
        [](auto &, auto &a) { return "tl.where(" + llvm::join(a, ",") + ")"; });
-  p.operations["scf.if"] = [](Operation &op, PrintPoint at, PrintContext &c) {
+  p.operations["scf.if"] = PrintRule::custom([](Operation &op, PrintPoint at, PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("if " + c.name(op.getOperand(0)) + ":");
     if (at == PrintPoint::BeginRegion && !op.getRegion(c.region).empty()) {
@@ -251,7 +251,7 @@ TerminalPrinter tilePrinter() {
     } else if (at == PrintPoint::EndRegion && !op.getRegion(c.region).empty())
       --c.indent;
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
   for (auto name :
        {"arith.truncf", "arith.extf", "arith.extsi", "arith.sitofp",
         "arith.fptosi", "arith.index_cast", "arith.trunci", "arith.extui"})
@@ -271,7 +271,7 @@ void addRowRules(TerminalPrinter &);
 TerminalPrinter tritonPrinter() {
   auto printer = tilePrinter();
   addRowRules(printer);
-  printer.operations["builtin.module"] = [](Operation &, PrintPoint at,
+  printer.operations["builtin.module"] = PrintRule::custom([](Operation &, PrintPoint at,
                                             PrintContext &p) {
     if (at == PrintPoint::Enter) {
       p.file = "kernel.py";
@@ -280,9 +280,9 @@ TerminalPrinter tritonPrinter() {
       p.line("from triton.language.extra.cuda import libdevice");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
   printer.operations["triton_src.runtime_source"] =
-      [](Operation &op, PrintPoint at, PrintContext &p) -> llvm::Error {
+      PrintRule::custom([](Operation &op, PrintPoint at, PrintContext &p) -> llvm::Error {
     if (at == PrintPoint::Enter) {
       auto impl = op.getAttrOfType<StringAttr>("implementation");
       if (!impl)
@@ -293,7 +293,7 @@ TerminalPrinter tritonPrinter() {
       p.line(*helper);
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
   printer.package = [](DictionaryAttr attrs, const auto &files,
                        llvm::raw_pwrite_stream &os) -> llvm::Error {
     auto package = attrs.getAs<StringAttr>("triton_src.package");

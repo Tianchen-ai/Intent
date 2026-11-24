@@ -48,7 +48,7 @@ void rowRules(TerminalPrinter &);
 TerminalPrinter cutilePrinter() {
   TerminalPrinter p;
   auto rule = [&](StringRef name, auto format) {
-    p.operations[name.str()] = [format](Operation &op, PrintPoint at,
+    p.operations[name.str()] = PrintRule::custom([format](Operation &op, PrintPoint at,
                                         PrintContext &c) {
       if (at != PrintPoint::Enter)
         return llvm::Error::success();
@@ -60,21 +60,21 @@ TerminalPrinter cutilePrinter() {
         c.line(op.getNumResults() ? c.name(op.getResult(0)) + " = " + expr
                                   : expr);
       return llvm::Error::success();
-    };
+    }, "legacy_operation_rule");
   };
   for (auto n :
        {"func.return", "ct_src.tile_program", "ct_src.end"})
     rule(n, [](auto &, auto &) { return ""; });
-  p.operations["builtin.module"] = [](Operation &, PrintPoint at,
+  p.operations["builtin.module"] = PrintRule::custom([](Operation &, PrintPoint at,
                                       PrintContext &c) {
     if (at == PrintPoint::Enter) {
       c.file = "kernel.py";
       c.line("import cuda.tile as ct");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
   p.operations["ct_src.runtime_source"] =
-      [](Operation &op, PrintPoint at, PrintContext &c) -> llvm::Error {
+      PrintRule::custom([](Operation &op, PrintPoint at, PrintContext &c) -> llvm::Error {
     if (at == PrintPoint::Enter) {
       auto impl = op.getAttrOfType<StringAttr>("implementation");
       if (!impl)
@@ -85,8 +85,8 @@ TerminalPrinter cutilePrinter() {
       c.line(*helper);
     }
     return llvm::Error::success();
-  };
-  p.operations["func.func"] = [](Operation &op, PrintPoint at,
+  }, "legacy_operation_rule");
+  p.operations["func.func"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                  PrintContext &c) -> llvm::Error {
     if (at == PrintPoint::Enter) {
       c.line("@ct.kernel");
@@ -125,15 +125,15 @@ TerminalPrinter cutilePrinter() {
     } else if (at == PrintPoint::Leave)
       --c.indent;
     return llvm::Error::success();
-  };
-  p.operations["ct_src.owner_space"] = [](Operation &op, PrintPoint at,
+  }, "legacy_operation_rule");
+  p.operations["ct_src.owner_space"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                           PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line(c.name(op.getRegion(0).front().getArgument(0)) +
              " = ct.astype(ct.bid(0),ct.int64)");
     return llvm::Error::success();
-  };
-  p.operations["scf.for"] = [](Operation &op, PrintPoint at, PrintContext &c) {
+  }, "legacy_operation_rule");
+  p.operations["scf.for"] = PrintRule::custom([](Operation &op, PrintPoint at, PrintContext &c) {
     auto loop = cast<scf::ForOp>(op);
     auto narrow = [](Value v) {
       auto constant = v.getDefiningOp<arith::ConstantOp>();
@@ -184,8 +184,8 @@ TerminalPrinter cutilePrinter() {
       --c.indent;
     }
     return llvm::Error::success();
-  };
-  p.operations["scf.if"] = [](Operation &op, PrintPoint at, PrintContext &c) {
+  }, "legacy_operation_rule");
+  p.operations["scf.if"] = PrintRule::custom([](Operation &op, PrintPoint at, PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("if " + c.name(op.getOperand(0)) + ":");
     if (at == PrintPoint::BeginRegion && !op.getRegion(c.region).empty()) {
@@ -195,8 +195,8 @@ TerminalPrinter cutilePrinter() {
     } else if (at == PrintPoint::EndRegion && !op.getRegion(c.region).empty())
       --c.indent;
     return llvm::Error::success();
-  };
-  p.operations["scf.yield"] = [](Operation &op, PrintPoint at,
+  }, "legacy_operation_rule");
+  p.operations["scf.yield"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                  PrintContext &c) {
     if (at == PrintPoint::Enter && op.getNumOperands()) {
       SmallVector<std::string> lhs, rhs;
@@ -208,7 +208,7 @@ TerminalPrinter cutilePrinter() {
       c.line(llvm::join(lhs, ",") + " = " + llvm::join(rhs, ","));
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
   rule("ct_src.from_le_half", [](Operation &, auto &v) {
     return "ct.astype(ct.bitcast(ct.astype(" + v[0] + "|(" + v[1] +
            "<<8),ct.uint16),ct.float16),ct.float32)";

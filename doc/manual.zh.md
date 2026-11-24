@@ -9,9 +9,9 @@
 ```sh
 python -m venv .venv
 . .venv/bin/activate
-python -m pip install compilerinfra==0.5.0 intentdsl==2.0.0
+python -m pip install compilerinfra==0.5.1 intentdsl==2.0.0
 # 如需 CLI / MCP 编译器开发动作，额外安装：
-python -m pip install compilerinfra-agent==0.5.0
+python -m pip install compilerinfra-agent==0.5.1
 ```
 
 支持的原生二进制基线：
@@ -43,7 +43,7 @@ intentdsl manual --lang zh
 ### 从源码发布包 (`sdist`) 干净重建
 
 构建机需安装：
-- `CompilerInfra == 0.5.0` 原生 SDK 与 Python 包
+- `CompilerInfra == 0.5.1` 原生 SDK 与 Python 包
 - `LLVM / MLIR == 20.1.8`（静态库需带 `-fPIC`）
 - `CMake >= 3.22`、`Ninja`、支持 C++17 的 `GCC >= 11` 或 `Clang >= 16`、`Python >= 3.10`
 
@@ -51,8 +51,8 @@ intentdsl manual --lang zh
 unset PYTHONPATH INTENTDSL_LIBRARY
 python -m venv /tmp/intentdsl-build-env
 /tmp/intentdsl-build-env/bin/pip install --upgrade pip build
-/tmp/intentdsl-build-env/bin/pip install compilerinfra-0.5.0-*.whl
-CMAKE_PREFIX_PATH="/path/to/compilerinfra-0.5.0:/path/to/llvm-20" \
+/tmp/intentdsl-build-env/bin/pip install compilerinfra-0.5.1-*.whl
+CMAKE_PREFIX_PATH="/path/to/compilerinfra-0.5.1:/path/to/llvm-20" \
   /tmp/intentdsl-build-env/bin/pip wheel --no-build-isolation --no-deps \
   intentdsl-2.0.0.tar.gz -w /tmp/dist
 ```

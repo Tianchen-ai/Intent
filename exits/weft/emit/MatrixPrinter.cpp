@@ -82,10 +82,10 @@ TerminalPrinter weftTerminalPrinter() {
   auto noop = [](Operation &, PrintPoint, PrintContext &) {
     return llvm::Error::success();
   };
-  p.operations["builtin.module"] = noop;
-  p.operations["func.func"] = noop;
-  p.operations["func.return"] = noop;
-  p.operations["weft_host.end"] = noop;
+  p.operations["builtin.module"] = PrintRule::custom(noop, "legacy_operation_rule");
+  p.operations["func.func"] = PrintRule::custom(noop, "legacy_operation_rule");
+  p.operations["func.return"] = PrintRule::custom(noop, "legacy_operation_rule");
+  p.operations["weft_host.end"] = PrintRule::custom(noop, "legacy_operation_rule");
 
   auto programRule = [](Operation &, PrintPoint at, PrintContext &c) {
     if (at == PrintPoint::BeginRegion) {
@@ -99,19 +99,19 @@ TerminalPrinter weftTerminalPrinter() {
     }
     return llvm::Error::success();
   };
-  p.operations["weft_host.matrix_program"] = programRule;
-  p.operations["weft_host.row_program"] = programRule;
-  p.operations["weft_host.owner_program"] = programRule;
+  p.operations["weft_host.matrix_program"] = PrintRule::custom(programRule, "legacy_operation_rule");
+  p.operations["weft_host.row_program"] = PrintRule::custom(programRule, "legacy_operation_rule");
+  p.operations["weft_host.owner_program"] = PrintRule::custom(programRule, "legacy_operation_rule");
 
   // ---------------- Region 0 ("task.weftir") Ops ----------------
-  p.operations["weft_host.encoding_decl"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.encoding_decl"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                                PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line(formatEncodingDecl(op));
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.task_kernel"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.task_kernel"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                              PrintContext &c) {
     if (at == PrintPoint::Enter) {
       auto &bb = op.getRegion(0).front();
@@ -177,9 +177,9 @@ TerminalPrinter weftTerminalPrinter() {
       c.line("}):()->()");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.task_const"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.task_const"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                             PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -194,9 +194,9 @@ TerminalPrinter weftTerminalPrinter() {
       c.line(irId(c, op.getResult(0)) + "=\"weft_kernel.constant\"() <{value=" +
              lit + ":" + ty + "}>:()->" + ty);
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.task_new"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.task_new"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                           PrintContext &c) {
     if (at == PrintPoint::Enter) {
       c.line(irId(c, op.getResult(0)) + "=\"weft_kernel.new\"(" +
@@ -205,9 +205,9 @@ TerminalPrinter weftTerminalPrinter() {
              op.getAttrOfType<StringAttr>("val_type").str());
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.task_slice"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.task_slice"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                             PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -232,9 +232,9 @@ TerminalPrinter weftTerminalPrinter() {
       c.line(resId + "=\"weft_kernel.admit\"(" + slId + "):(" + slTy + ")->" +
              vlTy);
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.task_subview"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.task_subview"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                               PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -291,9 +291,9 @@ TerminalPrinter weftTerminalPrinter() {
       c.line(resId + "=\"weft_kernel.admit\"(" + subId + "):(" + outSlTy +
              ")->" + vlTy);
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.task_unary"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.task_unary"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                             PrintContext &c) {
     if (at == PrintPoint::Enter) {
       auto vTy = op.getAttrOfType<StringAttr>("val_type").str();
@@ -303,9 +303,9 @@ TerminalPrinter weftTerminalPrinter() {
              ")->" + vTy);
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.task_reduce"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.task_reduce"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                              PrintContext &c) {
     if (at == PrintPoint::Enter) {
       c.line(irId(c, op.getResult(0)) + "=\"weft_kernel.reduce\"(" +
@@ -316,9 +316,9 @@ TerminalPrinter weftTerminalPrinter() {
              op.getAttrOfType<StringAttr>("val_type").str());
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.task_scan"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.task_scan"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                            PrintContext &c) {
     auto &bb = op.getRegion(0).front();
     auto eTy = op.getAttrOfType<StringAttr>("elem_type").str();
@@ -338,18 +338,18 @@ TerminalPrinter weftTerminalPrinter() {
       c.line("}):(" + vTy + ")->" + vTy);
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.task_scan_yield"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.task_scan_yield"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                                  PrintContext &c) {
     if (at == PrintPoint::Enter) {
       c.line("\"weft_kernel.scan_yield\"(" + irId(c, op.getOperand(0)) + "):(" +
              op.getAttrOfType<StringAttr>("val_type").str() + ")->()");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.task_iota"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.task_iota"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                            PrintContext &c) {
     if (at == PrintPoint::Enter) {
       c.line(irId(c, op.getResult(0)) + "=\"weft_kernel.iota\"() <{end=" +
@@ -359,9 +359,9 @@ TerminalPrinter weftTerminalPrinter() {
              ":i64}>:()->" + op.getAttrOfType<StringAttr>("val_type").str());
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.task_local_alloc"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.task_local_alloc"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                                   PrintContext &c) {
     if (at == PrintPoint::Enter) {
       c.line(irId(c, op.getResult(0)) +
@@ -372,7 +372,7 @@ TerminalPrinter weftTerminalPrinter() {
              ":i64}>:()->" + op.getAttrOfType<StringAttr>("ptr_type").str());
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
   auto ptrIdxMaskTypes =
       [](StringRef vTy) -> std::pair<std::string, std::string> {
@@ -387,7 +387,7 @@ TerminalPrinter weftTerminalPrinter() {
     return {"si64", "i1"};
   };
 
-  p.operations["weft_host.task_ptr_load"] = [ptrIdxMaskTypes](Operation &op,
+  p.operations["weft_host.task_ptr_load"] = PrintRule::custom([ptrIdxMaskTypes](Operation &op,
                                                               PrintPoint at,
                                                               PrintContext &c) {
     if (at == PrintPoint::Enter) {
@@ -400,10 +400,10 @@ TerminalPrinter weftTerminalPrinter() {
              "):(" + pTy + "," + offTy + "," + mskTy + "," + vTy + ")->" + vTy);
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
   p.operations["weft_host.task_ptr_store"] =
-      [ptrIdxMaskTypes](Operation &op, PrintPoint at, PrintContext &c) {
+      PrintRule::custom([ptrIdxMaskTypes](Operation &op, PrintPoint at, PrintContext &c) {
         if (at == PrintPoint::Enter) {
           auto pTy = op.getAttrOfType<StringAttr>("ptr_type").str();
           auto vTy = op.getAttrOfType<StringAttr>("val_type").str();
@@ -414,9 +414,9 @@ TerminalPrinter weftTerminalPrinter() {
                  "):(" + pTy + "," + offTy + "," + mskTy + "," + vTy + ")->()");
         }
         return llvm::Error::success();
-      };
+      }, "legacy_operation_rule");
 
-  p.operations["weft_host.task_atomic_rmw"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.task_atomic_rmw"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                                  PrintContext &c) {
     if (at == PrintPoint::Enter) {
       auto vTy = op.getAttrOfType<StringAttr>("val_type").str();
@@ -429,9 +429,9 @@ TerminalPrinter weftTerminalPrinter() {
              "," + sTy + ")->" + vTy);
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.task_binary"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.task_binary"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                              PrintContext &c) {
     if (at == PrintPoint::Enter) {
       c.line(irId(c, op.getResult(0)) + "=\"weft_kernel.binary\"(" +
@@ -442,9 +442,9 @@ TerminalPrinter weftTerminalPrinter() {
              op.getAttrOfType<StringAttr>("val_type").str());
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.task_compare"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.task_compare"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                               PrintContext &c) {
     if (at == PrintPoint::Enter) {
       c.line(irId(c, op.getResult(0)) + "=\"weft_kernel.compare\"(" +
@@ -456,9 +456,9 @@ TerminalPrinter weftTerminalPrinter() {
              op.getAttrOfType<StringAttr>("val_type").str());
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.task_select"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.task_select"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                              PrintContext &c) {
     if (at == PrintPoint::Enter) {
       auto vTy = op.getAttrOfType<StringAttr>("val_type").str();
@@ -473,9 +473,9 @@ TerminalPrinter weftTerminalPrinter() {
              fTy + ")->" + vTy);
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.task_cast"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.task_cast"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                            PrintContext &c) {
     if (at == PrintPoint::Enter) {
       c.line(irId(c, op.getResult(0)) + "=\"weft_kernel." +
@@ -485,9 +485,9 @@ TerminalPrinter weftTerminalPrinter() {
              op.getAttrOfType<StringAttr>("val_type").str());
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.task_field"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.task_field"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                             PrintContext &c) {
     if (at == PrintPoint::Enter) {
       c.line(irId(c, op.getResult(0)) + "=\"weft_kernel.field\"(" +
@@ -497,9 +497,9 @@ TerminalPrinter weftTerminalPrinter() {
              op.getAttrOfType<StringAttr>("val_type").str());
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.task_fold2"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.task_fold2"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                             PrintContext &c) {
     if (at == PrintPoint::Enter) {
       c.line(irId(c, op.getResult(0)) + "=\"weft_kernel.fold2\"(" +
@@ -508,9 +508,9 @@ TerminalPrinter weftTerminalPrinter() {
              op.getAttrOfType<StringAttr>("val_type").str());
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.task_contract"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.task_contract"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                                PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -544,9 +544,9 @@ TerminalPrinter weftTerminalPrinter() {
            ") <{" + attrs + "}>:(" + cast<StringAttr>(inTys[0]).str() + "," +
            cast<StringAttr>(inTys[1]).str() + ")->" + vTy);
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.task_for"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.task_for"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                           PrintContext &c) {
     auto &bb = op.getRegion(0).front();
     auto iterTys = op.getAttrOfType<ArrayAttr>("iter_types");
@@ -588,9 +588,9 @@ TerminalPrinter weftTerminalPrinter() {
       }
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.task_if"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.task_if"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                          PrintContext &c) {
     auto resTys = op.getAttrOfType<ArrayAttr>("res_types");
     SmallVector<std::string> tys;
@@ -631,9 +631,9 @@ TerminalPrinter weftTerminalPrinter() {
       }
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.task_yield"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.task_yield"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                             PrintContext &c) {
     if (at != PrintPoint::Enter || op.getNumOperands() == 0)
       return llvm::Error::success();
@@ -644,9 +644,9 @@ TerminalPrinter weftTerminalPrinter() {
       tys.push_back(cast<StringAttr>(a).str());
     c.line("scf.yield " + llvm::join(vals, ",") + ":" + llvm::join(tys, ","));
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.task_subquant_level"] = [](Operation &op,
+  p.operations["weft_host.task_subquant_level"] = PrintRule::custom([](Operation &op,
                                                      PrintPoint at,
                                                      PrintContext &c) {
     std::string spec = "\"subquant.1\",1,0,3,\"blocks\",\"exact\"";
@@ -683,9 +683,9 @@ TerminalPrinter weftTerminalPrinter() {
              "_p#1," + base + "_z) <{kind=\"add\"}>:(si32,si32)->si32");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.task_extract"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.task_extract"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                               PrintContext &c) {
     if (at == PrintPoint::Enter) {
       c.line(irId(c, op.getResult(0)) + "=\"weft_kernel.extract\"(" +
@@ -697,18 +697,18 @@ TerminalPrinter weftTerminalPrinter() {
              op.getAttrOfType<StringAttr>("val_type").str());
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.task_handoff"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.task_handoff"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                               PrintContext &c) {
     if (at == PrintPoint::Enter) {
       c.line("\"weft_kernel.handoff\"(" + irId(c, op.getOperand(0)) + "," +
              irId(c, op.getOperand(1)) + "):(si32,si32)->()");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.task_commit"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.task_commit"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                              PrintContext &c) {
     if (at == PrintPoint::Enter) {
       c.line("\"weft_kernel.commit\"(" + irId(c, op.getOperand(0)) + "," +
@@ -717,10 +717,10 @@ TerminalPrinter weftTerminalPrinter() {
              op.getAttrOfType<StringAttr>("slice_type").str() + ")->()");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
   // ---------------- Region 1 ("host.c") Ops ----------------
-  p.operations["arith.constant"] = [](Operation &op, PrintPoint at,
+  p.operations["arith.constant"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                       PrintContext &c) -> llvm::Error {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -737,10 +737,10 @@ TerminalPrinter weftTerminalPrinter() {
              std::to_string(val) + "LL;");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
   auto hostBin = [&](StringRef opName, StringRef cSym, bool isFloat) {
-    p.operations[opName.str()] = [cSym, isFloat](Operation &op, PrintPoint at,
+    p.operations[opName.str()] = PrintRule::custom([cSym, isFloat](Operation &op, PrintPoint at,
                                                  PrintContext &c) {
       if (at == PrintPoint::Enter) {
         std::string cTy = isFloat ? "const float " : "const int64_t ";
@@ -749,7 +749,7 @@ TerminalPrinter weftTerminalPrinter() {
                c.name(op.getOperand(1)) + ";");
       }
       return llvm::Error::success();
-    };
+    }, "legacy_operation_rule");
   };
   hostBin("arith.addi", "+", false);
   hostBin("arith.subi", "-", false);
@@ -760,35 +760,35 @@ TerminalPrinter weftTerminalPrinter() {
   hostBin("arith.subf", "-", true);
   hostBin("arith.mulf", "*", true);
 
-  p.operations["arith.extf"] = [](Operation &op, PrintPoint at,
+  p.operations["arith.extf"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                   PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("const float " + c.name(op.getResult(0)) + " = expand_bf(" +
              c.name(op.getOperand(0)) + ");");
     return llvm::Error::success();
-  };
-  p.operations["arith.truncf"] = [](Operation &op, PrintPoint at,
+  }, "legacy_operation_rule");
+  p.operations["arith.truncf"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                     PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("const uint16_t " + c.name(op.getResult(0)) + " = narrow_bf(" +
              c.name(op.getOperand(0)) + ");");
     return llvm::Error::success();
-  };
-  p.operations["arith.minimumf"] = [](Operation &op, PrintPoint at,
+  }, "legacy_operation_rule");
+  p.operations["arith.minimumf"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                       PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("const float " + c.name(op.getResult(0)) + " = min_ieee(" +
              c.name(op.getOperand(0)) + ", " + c.name(op.getOperand(1)) + ");");
     return llvm::Error::success();
-  };
-  p.operations["math.exp"] = [](Operation &op, PrintPoint at, PrintContext &c) {
+  }, "legacy_operation_rule");
+  p.operations["math.exp"] = PrintRule::custom([](Operation &op, PrintPoint at, PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("const float " + c.name(op.getResult(0)) + " = expf(" +
              c.name(op.getOperand(0)) + ");");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.address"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.address"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                          PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -805,9 +805,9 @@ TerminalPrinter weftTerminalPrinter() {
     c.line("const " + cTy + " " + c.name(op.getResult(0)) + " = " +
            llvm::join(terms, " + ") + ";");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.host_fn"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.host_fn"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                          PrintContext &c) {
     if (at == PrintPoint::Enter) {
       c.line("#include <math.h>");
@@ -949,9 +949,9 @@ TerminalPrinter weftTerminalPrinter() {
       c.line("}");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.host_alloc"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.host_alloc"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                             PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -975,9 +975,9 @@ TerminalPrinter weftTerminalPrinter() {
       c.line("if (!" + name + ") { " + frees + "return 2; }");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.host_if"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.host_if"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                          PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("if (" + op.getAttrOfType<StringAttr>("cond").str() + ") {");
@@ -988,9 +988,9 @@ TerminalPrinter weftTerminalPrinter() {
       c.line("}");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.host_omp_for"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.host_omp_for"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                               PrintContext &c) {
     if (at == PrintPoint::Enter) {
       bool par = op.getAttrOfType<BoolAttr>("parallel").getValue();
@@ -1024,9 +1024,9 @@ TerminalPrinter weftTerminalPrinter() {
       c.line("}");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.host_for"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.host_for"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                           PrintContext &c) {
     if (at == PrintPoint::Enter) {
       std::string iv = op.getAttrOfType<StringAttr>("iv").str();
@@ -1042,17 +1042,17 @@ TerminalPrinter weftTerminalPrinter() {
       c.line("}");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.host_let_i64"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.host_let_i64"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                               PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("const int64_t " + op.getAttrOfType<StringAttr>("name").str() +
              " = " + op.getAttrOfType<StringAttr>("expr").str() + ";");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.host_load_scalar"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.host_load_scalar"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                                   PrintContext &c) {
     if (at == PrintPoint::Enter) {
       int64_t s = op.getAttrOfType<IntegerAttr>("slot").getInt();
@@ -1064,9 +1064,9 @@ TerminalPrinter weftTerminalPrinter() {
              cTy + "*)" + base + ")[" + idx + "];");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.host_ptr_offset"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.host_ptr_offset"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                                  PrintContext &c) {
     if (at == PrintPoint::Enter) {
       std::string cTy = op.getAttrOfType<StringAttr>("c_type").str();
@@ -1076,9 +1076,9 @@ TerminalPrinter weftTerminalPrinter() {
       c.line(cTy + " *" + nm + " = (" + cTy + "*)(" + bs + ") + (" + of + ");");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.host_span_op"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.host_span_op"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                               PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -1098,9 +1098,9 @@ TerminalPrinter weftTerminalPrinter() {
       c.line("memset(" + dst + ", 0, (size_t)(" + cnt + ") * " +
              std::to_string(eb) + "ULL);");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.host_elem_op"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.host_elem_op"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                               PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -1126,9 +1126,9 @@ TerminalPrinter weftTerminalPrinter() {
     else if (kind == "mx8_mul")
       c.line(dst + " = g_mx8_val[" + src + "] * " + aux + ";");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.host_panel_yield"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.host_panel_yield"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                                   PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -1137,9 +1137,9 @@ TerminalPrinter weftTerminalPrinter() {
     std::string v = c.name(op.getOperand(0));
     c.line(dst + " = " + (wide ? "expand_bf(" + v + ")" : v) + ";");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.host_parallel_tiles"] = [](Operation &op,
+  p.operations["weft_host.host_parallel_tiles"] = PrintRule::custom([](Operation &op,
                                                      PrintPoint at,
                                                      PrintContext &c) {
     if (at == PrintPoint::Enter) {
@@ -1216,9 +1216,9 @@ TerminalPrinter weftTerminalPrinter() {
       c.line("}");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.host_view_ptr"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.host_view_ptr"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                                PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -1243,9 +1243,9 @@ TerminalPrinter weftTerminalPrinter() {
     else
       c.line(ptrTy + "p" + std::to_string(idx) + " = " + rawBase + ";");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.host_call_task"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.host_call_task"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                                 PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -1265,9 +1265,9 @@ TerminalPrinter weftTerminalPrinter() {
     c.line("      memcpy(intent_err_buf, task_err, sizeof(intent_err_buf)); intent_err_buf[sizeof(intent_err_buf) - 1] = 0; }");
     c.line("    continue; } }");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.host_scatter_routed"] = [](Operation &op,
+  p.operations["weft_host.host_scatter_routed"] = PrintRule::custom([](Operation &op,
                                                      PrintPoint at,
                                                      PrintContext &c) {
     if (at != PrintPoint::Enter)
@@ -1304,9 +1304,9 @@ TerminalPrinter weftTerminalPrinter() {
              std::to_string(bytes) + "LL, " + std::to_string(bytes) + ");");
     c.line("}");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.host_free"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.host_free"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                            PrintContext &c) {
     if (at == PrintPoint::Enter) {
       std::string name = op.getAttrOfType<StringAttr>("buf_name").str();
@@ -1314,9 +1314,9 @@ TerminalPrinter weftTerminalPrinter() {
       c.line("intent_ws_release(" + std::to_string(wsSlot) + ", " + name + ");");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["weft_host.host_row_fn"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.host_row_fn"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                              PrintContext &c) {
     if (at == PrintPoint::Enter) {
       c.line("#include <stddef.h>");
@@ -1346,10 +1346,10 @@ TerminalPrinter weftTerminalPrinter() {
       c.line("}");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
   p.operations["weft_host.host_parallel_transpose_tiles"] =
-      [](Operation &op, PrintPoint at, PrintContext &c) {
+      PrintRule::custom([](Operation &op, PrintPoint at, PrintContext &c) {
         if (at == PrintPoint::Enter) {
           auto &bb = op.getRegion(0).front();
           std::string st =
@@ -1377,10 +1377,10 @@ TerminalPrinter weftTerminalPrinter() {
           c.line("}");
         }
         return llvm::Error::success();
-      };
+      }, "legacy_operation_rule");
 
   p.operations["weft_host.host_parallel_key_ranges"] =
-      [](Operation &op, PrintPoint at, PrintContext &c) {
+      PrintRule::custom([](Operation &op, PrintPoint at, PrintContext &c) {
         if (at == PrintPoint::Enter) {
           auto &bb = op.getRegion(0).front();
           int64_t keys = op.getAttrOfType<IntegerAttr>("key_extent").getInt();
@@ -1404,10 +1404,10 @@ TerminalPrinter weftTerminalPrinter() {
           c.line("}");
         }
         return llvm::Error::success();
-      };
+      }, "legacy_operation_rule");
 
   p.operations["weft_host.host_parallel_row_intervals"] =
-      [](Operation &op, PrintPoint at, PrintContext &c) {
+      PrintRule::custom([](Operation &op, PrintPoint at, PrintContext &c) {
         if (at == PrintPoint::Enter) {
           auto &bb = op.getRegion(0).front();
           std::string chunk =
@@ -1440,9 +1440,9 @@ TerminalPrinter weftTerminalPrinter() {
           c.line("}");
         }
         return llvm::Error::success();
-      };
+      }, "legacy_operation_rule");
 
-  p.operations["weft_host.host_row_offset"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.host_row_offset"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                                  PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -1470,10 +1470,10 @@ TerminalPrinter weftTerminalPrinter() {
       c.line("const int64_t " + outN + " = " + llvm::join(terms, " + ") + ";");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
   p.operations["weft_host.host_call_row_task"] =
-      [](Operation &op, PrintPoint at, PrintContext &c) {
+      PrintRule::custom([](Operation &op, PrintPoint at, PrintContext &c) {
         if (at != PrintPoint::Enter)
           return llvm::Error::success();
         SmallVector<std::string> args;
@@ -1503,9 +1503,9 @@ TerminalPrinter weftTerminalPrinter() {
         c.line(op.getAttrOfType<StringAttr>("sym_name").str() + "_instance(" +
                llvm::join(args, ", ") + ");");
         return llvm::Error::success();
-      };
+      }, "legacy_operation_rule");
 
-  p.operations["weft_host.host_owner_fn"] = [](Operation &op, PrintPoint at,
+  p.operations["weft_host.host_owner_fn"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                                PrintContext &c) {
     if (at == PrintPoint::Enter) {
       c.line("#include <stddef.h>");
@@ -1529,10 +1529,10 @@ TerminalPrinter weftTerminalPrinter() {
       c.line("}");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
   p.operations["weft_host.host_parallel_owners"] =
-      [](Operation &op, PrintPoint at, PrintContext &c) {
+      PrintRule::custom([](Operation &op, PrintPoint at, PrintContext &c) {
         if (at == PrintPoint::Enter) {
           auto &bb = op.getRegion(0).front();
           std::string loN = c.name(bb.getArgument(0));
@@ -1564,10 +1564,10 @@ TerminalPrinter weftTerminalPrinter() {
           c.line("}");
         }
         return llvm::Error::success();
-      };
+      }, "legacy_operation_rule");
 
   p.operations["weft_host.host_call_owner_task"] =
-      [](Operation &op, PrintPoint at, PrintContext &c) {
+      PrintRule::custom([](Operation &op, PrintPoint at, PrintContext &c) {
         if (at != PrintPoint::Enter)
           return llvm::Error::success();
         SmallVector<std::string> args;
@@ -1582,7 +1582,7 @@ TerminalPrinter weftTerminalPrinter() {
         c.line(op.getAttrOfType<StringAttr>("sym_name").str() + "_instance(" +
                llvm::join(args, ", ") + ");");
         return llvm::Error::success();
-      };
+      }, "legacy_operation_rule");
 
   p.package = [](DictionaryAttr attrs,
                  const std::map<std::string, std::string> &files,

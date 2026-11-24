@@ -577,6 +577,6 @@ void rowRules(TerminalPrinter &printer) {
                   "yield",
                   "output_partition",
                   "partition_end"})
-    printer.operations["ct_src." + std::string(op)] = rowRule;
+    printer.operations["ct_src." + std::string(op)] = PrintRule::custom(rowRule, "legacy_operation_rule");
 }
 } // namespace CI_UNIT_NAMESPACE

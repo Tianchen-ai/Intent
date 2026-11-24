@@ -52,10 +52,10 @@ TerminalPrinter mojoMatrixPrinter() {
   auto noop = [](Operation &, PrintPoint, PrintContext &) {
     return llvm::Error::success();
   };
-  p.operations["builtin.module"] = noop;
-  p.operations["func.func"] = noop;
-  p.operations["func.return"] = noop;
-  p.operations["mojo_row.end"] = noop;
+  p.operations["builtin.module"] = PrintRule::custom(noop, "legacy_operation_rule");
+  p.operations["func.func"] = PrintRule::custom(noop, "legacy_operation_rule");
+  p.operations["func.return"] = PrintRule::custom(noop, "legacy_operation_rule");
+  p.operations["mojo_row.end"] = PrintRule::custom(noop, "legacy_operation_rule");
 
   auto twoFileProgram = [](Operation &, PrintPoint at, PrintContext &c) {
     if (at == PrintPoint::BeginRegion) {
@@ -64,12 +64,12 @@ TerminalPrinter mojoMatrixPrinter() {
     }
     return llvm::Error::success();
   };
-  p.operations["mojo_row.matrix_program"] = twoFileProgram;
-  p.operations["mojo_row.ordered_program"] = twoFileProgram;
-  p.operations["mojo_row.row_program"] = twoFileProgram;
+  p.operations["mojo_row.matrix_program"] = PrintRule::custom(twoFileProgram, "legacy_operation_rule");
+  p.operations["mojo_row.ordered_program"] = PrintRule::custom(twoFileProgram, "legacy_operation_rule");
+  p.operations["mojo_row.row_program"] = PrintRule::custom(twoFileProgram, "legacy_operation_rule");
 
   p.operations["mojo_row.runtime_source"] =
-      [](Operation &op, PrintPoint at, PrintContext &c) -> llvm::Error {
+      PrintRule::custom([](Operation &op, PrintPoint at, PrintContext &c) -> llvm::Error {
     if (at == PrintPoint::Enter) {
       auto key = op.getAttrOfType<StringAttr>("implementation").getValue();
       auto src = c.source(key);
@@ -78,10 +78,10 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line(*src);
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
   // ---------------- Arithmetic & Index Ops ----------------
-  p.operations["arith.constant"] = [](Operation &op, PrintPoint at,
+  p.operations["arith.constant"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                       PrintContext &c) -> llvm::Error {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -129,10 +129,10 @@ TerminalPrinter mojoMatrixPrinter() {
     c.line("var " + c.name(op.getResult(0)) + " = " + mojoScalarType(t) + "(" +
            std::to_string(iAttr.getInt()) + ")");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
   auto binIdx = [&](StringRef opName, StringRef mojoSym, StringRef cSym) {
-    p.operations[opName.str()] = [mojoSym, cSym](Operation &op, PrintPoint at,
+    p.operations[opName.str()] = PrintRule::custom([mojoSym, cSym](Operation &op, PrintPoint at,
                                                  PrintContext &c) {
       if (at != PrintPoint::Enter)
         return llvm::Error::success();
@@ -145,7 +145,7 @@ TerminalPrinter mojoMatrixPrinter() {
         c.line("var " + res + " = (" + lhs + " " + mojoSym.str() + " " + rhs +
                ")");
       return llvm::Error::success();
-    };
+    }, "legacy_operation_rule");
   };
   binIdx("arith.addi", "+", "+");
   binIdx("arith.subi", "-", "-");
@@ -163,7 +163,7 @@ TerminalPrinter mojoMatrixPrinter() {
   binIdx("arith.shrsi", ">>", ">>");
   binIdx("arith.shrui", ">>", ">>");
 
-  p.operations["arith.andi"] = [](Operation &op, PrintPoint at,
+  p.operations["arith.andi"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                   PrintContext &c) {
     if (at == PrintPoint::Enter) {
       auto lhs = c.name(op.getOperand(0)), rhs = c.name(op.getOperand(1));
@@ -172,9 +172,9 @@ TerminalPrinter mojoMatrixPrinter() {
              " " + rhs + ")");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["arith.cmpf"] = [](Operation &op, PrintPoint at,
+  p.operations["arith.cmpf"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                   PrintContext &c) -> llvm::Error {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -212,26 +212,26 @@ TerminalPrinter mojoMatrixPrinter() {
            c.name(op.getOperand(0)) + " " + tok.str() + " " +
            c.name(op.getOperand(1)) + ")");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["arith.select"] = [](Operation &op, PrintPoint at,
+  p.operations["arith.select"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                     PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("var " + c.name(op.getResult(0)) + " = (" +
              c.name(op.getOperand(1)) + " if " + c.name(op.getOperand(0)) +
              " else " + c.name(op.getOperand(2)) + ")");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["arith.minsi"] = [](Operation &op, PrintPoint at,
+  p.operations["arith.minsi"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                    PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("var " + c.name(op.getResult(0)) + " = min(" +
              c.name(op.getOperand(0)) + ", " + c.name(op.getOperand(1)) + ")");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["arith.cmpi"] = [](Operation &op, PrintPoint at,
+  p.operations["arith.cmpi"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                   PrintContext &c) -> llvm::Error {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -265,18 +265,18 @@ TerminalPrinter mojoMatrixPrinter() {
            c.name(op.getOperand(0)) + " " + tok.str() + " " +
            c.name(op.getOperand(1)) + ")");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["arith.index_cast"] = [](Operation &op, PrintPoint at,
+  p.operations["arith.index_cast"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                         PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("var " + c.name(op.getResult(0)) + " = " +
              mojoScalarType(op.getResult(0).getType()) + "(" +
              c.name(op.getOperand(0)) + ")");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["arith.maxsi"] = [](Operation &op, PrintPoint at,
+  p.operations["arith.maxsi"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                    PrintContext &c) {
     if (at == PrintPoint::Enter) {
       auto lhs = c.name(op.getOperand(0)), rhs = c.name(op.getOperand(1));
@@ -284,9 +284,9 @@ TerminalPrinter mojoMatrixPrinter() {
              " > " + rhs + " else " + rhs + ")");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["arith.maxnumf"] = [](Operation &op, PrintPoint at,
+  p.operations["arith.maxnumf"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                      PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -301,10 +301,10 @@ TerminalPrinter mojoMatrixPrinter() {
              rhs + " if isnan(" + lhs + ") else max(" + lhs + ", " + rhs +
              "))");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
   // Scalar panel map ops in entry.c + Mojo casts/math in row.mojo
-  p.operations["arith.extf"] = [](Operation &op, PrintPoint at,
+  p.operations["arith.extf"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                   PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -321,8 +321,8 @@ TerminalPrinter mojoMatrixPrinter() {
                               c.name(op.getOperand(0)) + ")");
     c.line("var " + c.name(op.getResult(0)) + " = " + expr);
     return llvm::Error::success();
-  };
-  p.operations["arith.truncf"] = [](Operation &op, PrintPoint at,
+  }, "legacy_operation_rule");
+  p.operations["arith.truncf"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                     PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -339,15 +339,15 @@ TerminalPrinter mojoMatrixPrinter() {
                               c.name(op.getOperand(0)) + ")");
     c.line("var " + c.name(op.getResult(0)) + " = " + expr);
     return llvm::Error::success();
-  };
-  p.operations["arith.minimumf"] = [](Operation &op, PrintPoint at,
+  }, "legacy_operation_rule");
+  p.operations["arith.minimumf"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                       PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("const float " + c.name(op.getResult(0)) + " = min_ieee(" +
              c.name(op.getOperand(0)) + ", " + c.name(op.getOperand(1)) + ");");
     return llvm::Error::success();
-  };
-  p.operations["math.exp"] = [](Operation &op, PrintPoint at, PrintContext &c) {
+  }, "legacy_operation_rule");
+  p.operations["math.exp"] = PrintRule::custom([](Operation &op, PrintPoint at, PrintContext &c) {
     if (at == PrintPoint::Enter) {
       if (c.file == "entry.c")
         c.line("const float " + c.name(op.getResult(0)) + " = expf(" +
@@ -357,8 +357,8 @@ TerminalPrinter mojoMatrixPrinter() {
                c.name(op.getOperand(0)) + ")");
     }
     return llvm::Error::success();
-  };
-  p.operations["math.exp2"] = [](Operation &op, PrintPoint at,
+  }, "legacy_operation_rule");
+  p.operations["math.exp2"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                  PrintContext &c) {
     if (at == PrintPoint::Enter) {
       auto x = c.name(op.getOperand(0));
@@ -370,29 +370,29 @@ TerminalPrinter mojoMatrixPrinter() {
                ") else exp2(" + x + ")");
     }
     return llvm::Error::success();
-  };
-  p.operations["math.log"] = [](Operation &op, PrintPoint at, PrintContext &c) {
+  }, "legacy_operation_rule");
+  p.operations["math.log"] = PrintRule::custom([](Operation &op, PrintPoint at, PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("var " + c.name(op.getResult(0)) + " = log(" +
              c.name(op.getOperand(0)) + ")");
     return llvm::Error::success();
-  };
-  p.operations["math.sqrt"] = [](Operation &op, PrintPoint at,
+  }, "legacy_operation_rule");
+  p.operations["math.sqrt"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                  PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("var " + c.name(op.getResult(0)) + " = sqrt(" +
              c.name(op.getOperand(0)) + ")");
     return llvm::Error::success();
-  };
-  p.operations["math.rsqrt"] = [](Operation &op, PrintPoint at,
+  }, "legacy_operation_rule");
+  p.operations["math.rsqrt"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                   PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("var " + c.name(op.getResult(0)) + " = rsqrt(" +
              c.name(op.getOperand(0)) + ")");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["scf.if"] = [](Operation &op, PrintPoint at, PrintContext &c) {
+  p.operations["scf.if"] = PrintRule::custom([](Operation &op, PrintPoint at, PrintContext &c) {
     if (at == PrintPoint::Enter) {
       for (auto r : op.getResults()) {
         std::string tyStr = mojoScalarType(r.getType());
@@ -414,8 +414,8 @@ TerminalPrinter mojoMatrixPrinter() {
       c.indent--;
     }
     return llvm::Error::success();
-  };
-  p.operations["scf.yield"] = [](Operation &op, PrintPoint at,
+  }, "legacy_operation_rule");
+  p.operations["scf.yield"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                  PrintContext &c) {
     if (at == PrintPoint::Enter && isa<scf::IfOp>(op.getParentOp())) {
       for (auto [r, v] :
@@ -423,8 +423,8 @@ TerminalPrinter mojoMatrixPrinter() {
         c.line(c.name(r) + " = " + c.name(v));
     }
     return llvm::Error::success();
-  };
-  p.operations["mojo_row.host_panel_yield"] = [](Operation &op, PrintPoint at,
+  }, "legacy_operation_rule");
+  p.operations["mojo_row.host_panel_yield"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                                  PrintContext &c) {
     if (at == PrintPoint::Enter) {
       bool wide = op.getAttrOfType<BoolAttr>("widen_bf16").getValue();
@@ -433,10 +433,10 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line(dst + " = " + (wide ? "expand_bf(" + v + ")" : v) + ";");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
   // ---------------- Panel ("row.mojo") Ops ----------------
-  p.operations["mojo_row.panel_fn"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.panel_fn"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                          PrintContext &c) -> llvm::Error {
     if (at == PrintPoint::Enter) {
       c.line("from std.memory import bitcast");
@@ -484,9 +484,9 @@ TerminalPrinter mojoMatrixPrinter() {
       c.indent--;
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.if_full_tile"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.if_full_tile"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                              PrintContext &c) {
     if (at == PrintPoint::Enter) {
       std::string cond =
@@ -503,9 +503,9 @@ TerminalPrinter mojoMatrixPrinter() {
       c.indent--;
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.for_range"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.for_range"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                           PrintContext &c) {
     if (at == PrintPoint::Enter) {
       auto iv = c.name(op.getRegion(0).front().getArgument(0));
@@ -517,9 +517,9 @@ TerminalPrinter mojoMatrixPrinter() {
       c.indent--;
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.while_lt"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.while_lt"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                          PrintContext &c) {
     auto iv = c.name(op.getRegion(0).front().getArgument(0));
     if (at == PrintPoint::Enter) {
@@ -536,17 +536,17 @@ TerminalPrinter mojoMatrixPrinter() {
       c.indent--;
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.as_int"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.as_int"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                        PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("var " + c.name(op.getResult(0)) + " = Int(" +
              c.name(op.getOperand(0)) + ")");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.address"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.address"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                         PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -561,9 +561,9 @@ TerminalPrinter mojoMatrixPrinter() {
     c.line("var " + c.name(op.getResult(0)) + " = Int(" +
            llvm::join(terms, " + ") + ")");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.stack_alloc"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.stack_alloc"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                             PrintContext &c) {
     if (at == PrintPoint::Enter) {
       auto dt = op.getAttrOfType<StringAttr>("dtype").getValue();
@@ -572,9 +572,9 @@ TerminalPrinter mojoMatrixPrinter() {
              std::to_string(cnt) + ", Scalar[DType." + dt + "], alignment=64]()");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.acc_decl"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.acc_decl"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                          PrintContext &c) {
     if (at == PrintPoint::Enter) {
       auto dt = op.getAttrOfType<StringAttr>("dtype").getValue();
@@ -587,24 +587,24 @@ TerminalPrinter mojoMatrixPrinter() {
                std::to_string(w) + "](0)");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.acc_read"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.acc_read"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                          PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("var " + c.name(op.getResult(0)) + " = " +
              c.name(op.getOperand(0)));
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.acc_write"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.acc_write"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                           PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line(c.name(op.getOperand(0)) + " = " + c.name(op.getOperand(1)));
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.load_vec"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.load_vec"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                          PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -626,9 +626,9 @@ TerminalPrinter mojoMatrixPrinter() {
       c.indent--;
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.load_i32_xor"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.load_i32_xor"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                              PrintContext &c) {
     if (at == PrintPoint::Enter) {
       auto ptr = c.name(op.getOperand(0)), addr = c.name(op.getOperand(1));
@@ -638,9 +638,9 @@ TerminalPrinter mojoMatrixPrinter() {
              ").bitcast[Int32]().unsafe_load() ^ Int32(-2139062144)))");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.load_bitcast_vec"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.load_bitcast_vec"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                                  PrintContext &c) {
     if (at == PrintPoint::Enter) {
       auto ptr = c.name(op.getOperand(0)), addr = c.name(op.getOperand(1));
@@ -651,9 +651,9 @@ TerminalPrinter mojoMatrixPrinter() {
              "]().unsafe_load[width=" + std::to_string(w) + "]()");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.splat_cast"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.splat_cast"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                            PrintContext &c) {
     if (at == PrintPoint::Enter) {
       auto in = c.name(op.getOperand(0)), res = c.name(op.getResult(0));
@@ -666,9 +666,9 @@ TerminalPrinter mojoMatrixPrinter() {
         c.line("var " + res + " = " + in + ".cast[DType." + dt + "]()");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.splat_lane"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.splat_lane"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                            PrintContext &c) {
     if (at == PrintPoint::Enter) {
       auto in = c.name(op.getOperand(0)), res = c.name(op.getResult(0));
@@ -679,9 +679,9 @@ TerminalPrinter mojoMatrixPrinter() {
              "](" + in + "[" + std::to_string(lane) + "])");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.store_vec"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.store_vec"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                           PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -699,9 +699,9 @@ TerminalPrinter mojoMatrixPrinter() {
       c.indent--;
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.simd_fma"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.simd_fma"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                          PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -712,9 +712,9 @@ TerminalPrinter mojoMatrixPrinter() {
     else
       c.line("var " + res + " = fma(" + lhs + ", " + rhs + ", " + acc + ")");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.vnni_dot4"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.vnni_dot4"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                           PrintContext &c) {
     if (at == PrintPoint::Enter) {
       auto acc = c.name(op.getOperand(0)), lhs = c.name(op.getOperand(1)),
@@ -725,9 +725,9 @@ TerminalPrinter mojoMatrixPrinter() {
              acc + ", " + lhs + ", " + rhs + ")");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.q4k_superblock"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.q4k_superblock"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                                PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -833,18 +833,18 @@ TerminalPrinter mojoMatrixPrinter() {
     c.line("var " + res + " = SIMD[DType.float32,1](" + res + "_ds*(" + res +
            "_d*Float32(" + res + "_S)-" + res + "_dm*Float32(" + res + "_T)))");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.ptr_offset"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.ptr_offset"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                            PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("var " + c.name(op.getResult(0)) + " = " +
              c.name(op.getOperand(0)) + ".unsafe_offset(" +
              c.name(op.getOperand(1)) + ")");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.brgemm_call"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.brgemm_call"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                             PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("var " + c.name(op.getResult(0)) +
@@ -853,9 +853,9 @@ TerminalPrinter mojoMatrixPrinter() {
              c.name(op.getOperand(2)) + ", " + c.name(op.getOperand(3)) + ", " +
              c.name(op.getOperand(4)) + ")");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.check_status"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.check_status"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                              PrintContext &c) {
     if (at == PrintPoint::Enter) {
       auto st = c.name(op.getOperand(0));
@@ -865,18 +865,18 @@ TerminalPrinter mojoMatrixPrinter() {
       c.indent--;
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.panel_return"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.panel_return"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                              PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("return Int32(" +
              std::to_string(op.getAttrOfType<IntegerAttr>("code").getInt()) +
              ")");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.q4k_unpack_row"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.q4k_unpack_row"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                                PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -902,9 +902,9 @@ TerminalPrinter mojoMatrixPrinter() {
            "%2)))) & 15");
     c.line(ubuf + ".unsafe_offset(" + ri + "*32).unsafe_store(nib_u)");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.q4k_accum_row"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.q4k_accum_row"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                               PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -939,17 +939,17 @@ TerminalPrinter mojoMatrixPrinter() {
     c.line("var min_a = mn_a * (Int32(sums_a[unsafe_offset=0]) + Int32(sums_a[unsafe_offset=1]))");
     c.line(abuf + "[unsafe_offset=" + ri + "] += ds_a * (d_a * Float32(dot_a) - dm_a * Float32(min_a))");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.epilogue_add"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.epilogue_add"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                              PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("var " + c.name(op.getResult(0)) + " = " +
              c.name(op.getOperand(0)) + " + " + c.name(op.getOperand(1)));
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.epilogue_round_bf16"] = [](Operation &op,
+  p.operations["mojo_row.epilogue_round_bf16"] = PrintRule::custom([](Operation &op,
                                                     PrintPoint at,
                                                     PrintContext &c) {
     if (at == PrintPoint::Enter)
@@ -957,19 +957,19 @@ TerminalPrinter mojoMatrixPrinter() {
              std::to_string(op.getAttrOfType<IntegerAttr>("width").getInt()) +
              "](" + c.name(op.getOperand(0)) + ")");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.epilogue_cast"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.epilogue_cast"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                               PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("var " + c.name(op.getResult(0)) + " = " +
              c.name(op.getOperand(0)) + ".cast[DType." +
              op.getAttrOfType<StringAttr>("dtype").getValue() + "]()");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
   // ---------------- Host ("entry.c") Ops ----------------
-  p.operations["mojo_row.host_fn"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.host_fn"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                         PrintContext &c) {
     if (at == PrintPoint::Enter) {
       c.line("#include <stdint.h>");
@@ -1109,9 +1109,9 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line("}");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.host_alloc"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.host_alloc"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                            PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -1138,9 +1138,9 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line("if (!" + name + ") { " + frees + "return 2; }");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.host_if"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.host_if"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                         PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("if (" + op.getAttrOfType<StringAttr>("cond").str() + ") {");
@@ -1151,9 +1151,9 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line("}");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.host_omp_parallel"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.host_omp_parallel"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                                   PrintContext &c) {
     if (at == PrintPoint::Enter) {
       std::string nt = op.getAttrOfType<StringAttr>("num_threads").str();
@@ -1171,9 +1171,9 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line("}");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.host_omp_for"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.host_omp_for"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                              PrintContext &c) {
     if (at == PrintPoint::Enter) {
       bool par = op.getAttrOfType<BoolAttr>("parallel").getValue();
@@ -1201,9 +1201,9 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line("}");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.host_for"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.host_for"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                          PrintContext &c) {
     if (at == PrintPoint::Enter) {
       std::string iv = op.getAttrOfType<StringAttr>("iv").str();
@@ -1219,25 +1219,25 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line("}");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.host_guard_continue"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.host_guard_continue"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                                     PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("if (" + op.getAttrOfType<StringAttr>("cond").str() +
              ") continue;");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.host_let_i64"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.host_let_i64"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                              PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("const int64_t " + op.getAttrOfType<StringAttr>("name").str() +
              " = " + op.getAttrOfType<StringAttr>("expr").str() + ";");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.host_load_scalar"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.host_load_scalar"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                                  PrintContext &c) {
     if (at == PrintPoint::Enter) {
       int64_t s = op.getAttrOfType<IntegerAttr>("slot").getInt();
@@ -1249,9 +1249,9 @@ TerminalPrinter mojoMatrixPrinter() {
              " = ((const " + cTy + "*)" + base + ")[" + idx + "];");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.host_ptr_offset"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.host_ptr_offset"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                                 PrintContext &c) {
     if (at == PrintPoint::Enter) {
       std::string cTy = op.getAttrOfType<StringAttr>("c_type").str();
@@ -1261,9 +1261,9 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line(cTy + " *" + nm + " = (" + cTy + "*)(" + bs + ") + (" + of + ");");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.host_span_op"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.host_span_op"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                              PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -1283,9 +1283,9 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line("memset(" + dst + ", 0, (size_t)(" + cnt + ") * " +
              std::to_string(eb) + "ULL);");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.host_elem_op"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.host_elem_op"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                              PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -1317,9 +1317,9 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line("corr[j] -= (uint32_t)(((int)v0 + (int)v1 + (int)v2 + (int)v3) * 128);");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.host_brgemm_plan_decl"] = [](Operation &, PrintPoint at,
+  p.operations["mojo_row.host_brgemm_plan_decl"] = PrintRule::custom([](Operation &, PrintPoint at,
                                                       PrintContext &c) {
     if (at == PrintPoint::Enter) {
       c.line("const void *brg_plan[2*(mr+1)]; memset(brg_plan, 0, sizeof(brg_plan));");
@@ -1327,9 +1327,9 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line("uint8_t r_seen[mr+1]; memset(r_seen, 0, sizeof(r_seen));");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.host_brgemm_mark_rows"] = [](Operation &op,
+  p.operations["mojo_row.host_brgemm_mark_rows"] = PrintRule::custom([](Operation &op,
                                                       PrintPoint at,
                                                       PrintContext &c) {
     if (at == PrintPoint::Enter) {
@@ -1339,9 +1339,9 @@ TerminalPrinter mojoMatrixPrinter() {
              "r_seen[_len % mr] = 1; }");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.host_brgemm_lookup"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.host_brgemm_lookup"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                                    PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -1366,10 +1366,10 @@ TerminalPrinter mojoMatrixPrinter() {
     c.line("brg_plan[ci*(mr+1) + rt] = h;");
     c.line("if (sb > brg_scratch_bytes) brg_scratch_bytes = sb;");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
   p.operations["mojo_row.host_thread_scratch_alloc"] =
-      [](Operation &op, PrintPoint at, PrintContext &c) {
+      PrintRule::custom([](Operation &op, PrintPoint at, PrintContext &c) {
     if (at == PrintPoint::Enter) {
       int64_t sb = op.getAttrOfType<IntegerAttr>("stack_bytes").getInt();
       int64_t al = op.getAttrOfType<IntegerAttr>("alignment").getInt();
@@ -1384,40 +1384,40 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line("if (!thr_ok) rc |= 2;");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
   p.operations["mojo_row.host_thread_scratch_free"] =
-      [](Operation &, PrintPoint at, PrintContext &c) {
+      PrintRule::custom([](Operation &, PrintPoint at, PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("if (brg_scratch != (void*)brg_scratch_stk) free(brg_scratch);");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.host_brgemm_ctx_decl"] = [](Operation &, PrintPoint at,
+  p.operations["mojo_row.host_brgemm_ctx_decl"] = PrintRule::custom([](Operation &, PrintPoint at,
                                                      PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("const void *brg_active = NULL;");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
   p.operations["mojo_row.host_brgemm_ctx_switch"] =
-      [](Operation &, PrintPoint at, PrintContext &c) {
+      PrintRule::custom([](Operation &, PrintPoint at, PrintContext &c) {
     if (at == PrintPoint::Enter) {
       c.line("const void *bh = brg_plan[(C == nr ? 0 : 1)*(mr+1) + R];");
       c.line("if (bh != brg_active) { if (intent_brgemm_thread_enter(bh) != 0) "
              "{ rc |= 3; thr_ok = 0; continue; } brg_active = bh; }");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
   p.operations["mojo_row.host_brgemm_ctx_release"] =
-      [](Operation &, PrintPoint at, PrintContext &c) {
+      PrintRule::custom([](Operation &, PrintPoint at, PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("if (brg_active) intent_brgemm_thread_leave();");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.host_tile_coords"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.host_tile_coords"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                                  PrintContext &c) {
     if (at == PrintPoint::Enter) {
       c.line("const int64_t g = job / (nc * mb), rem = job % (nc * mb);");
@@ -1432,10 +1432,10 @@ TerminalPrinter mojoMatrixPrinter() {
       }
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
   p.operations["mojo_row.host_grouped_bounds"] =
-      [](Operation &op, PrintPoint at, PrintContext &c) {
+      PrintRule::custom([](Operation &op, PrintPoint at, PrintContext &c) {
     if (at == PrintPoint::Enter) {
       int64_t oSlot = op.getAttrOfType<IntegerAttr>("offsets_slot").getInt();
       int64_t oSt = op.getAttrOfType<IntegerAttr>("offsets_stride").getInt();
@@ -1445,9 +1445,9 @@ TerminalPrinter mojoMatrixPrinter() {
              std::to_string(oSt) + "LL];");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.host_route_coords"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.host_route_coords"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                                   PrintContext &c) {
     if (at == PrintPoint::Enter) {
       if (op.getAttrOfType<BoolAttr>("routed").getValue()) {
@@ -1463,9 +1463,9 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line("const int64_t R = end-r < mr ? end-r : mr, C = N-c < nr ? N-c : nr;");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.host_view_ptr"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.host_view_ptr"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                               PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -1479,9 +1479,9 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line("void *p" + std::to_string(idx) + " = (void*)(" + expr + ");");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.host_call_panel"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.host_call_panel"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                                 PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -1504,9 +1504,9 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line("if (panel_rc != 0) { rc |= (int)panel_rc; continue; }");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.host_free"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.host_free"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                           PrintContext &c) {
     if (at == PrintPoint::Enter) {
       std::string name = op.getAttrOfType<StringAttr>("buf_name").str();
@@ -1517,10 +1517,10 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line("intent_ws_release(" + std::to_string(wsSlot) + ", " + name + ");");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
   // ---------------- Ordered ("row.mojo" & "entry.c") Ops ----------------
-  p.operations["mojo_row.owner_fn"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.owner_fn"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                          PrintContext &c) {
     if (at == PrintPoint::Enter) {
       c.line("from std.math import exp, sqrt, rsqrt, exp2, log, max, isnan");
@@ -1545,9 +1545,9 @@ TerminalPrinter mojoMatrixPrinter() {
       c.indent--;
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.owner_coord"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.owner_coord"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                             PrintContext &c) {
     if (at == PrintPoint::Enter) {
       int64_t pitch = op.getAttrOfType<IntegerAttr>("pitch").getInt();
@@ -1560,9 +1560,9 @@ TerminalPrinter mojoMatrixPrinter() {
              std::to_string(ext));
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.scalar_decl"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.scalar_decl"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                             PrintContext &c) {
     if (at == PrintPoint::Enter) {
       auto st = op.getAttrOfType<StringAttr>("scalar_type").getValue();
@@ -1573,26 +1573,26 @@ TerminalPrinter mojoMatrixPrinter() {
         c.line("var " + c.name(op.getResult(0)) + ": " + st.str());
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.load_scalar"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.load_scalar"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                             PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("var " + c.name(op.getResult(0)) + " = " +
              c.name(op.getOperand(0)) + "[unsafe_offset=" +
              c.name(op.getOperand(1)) + "]");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.store_scalar"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.store_scalar"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                              PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line(c.name(op.getOperand(0)) + "[unsafe_offset=" +
              c.name(op.getOperand(1)) + "] = " + c.name(op.getOperand(2)));
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.load_slice"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.load_slice"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                            PrintContext &c) {
     if (at == PrintPoint::Enter) {
       int64_t w = op.getAttrOfType<IntegerAttr>("width").getInt();
@@ -1602,34 +1602,34 @@ TerminalPrinter mojoMatrixPrinter() {
              std::to_string(w) + "]()");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.store_slice"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.store_slice"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                             PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line(c.name(op.getOperand(0)) + ".unsafe_offset(" +
              c.name(op.getOperand(1)) + ").unsafe_store(" +
              c.name(op.getOperand(2)) + ")");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.acc_insert_lane"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.acc_insert_lane"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                                 PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line(c.name(op.getOperand(0)) + "[" + c.name(op.getOperand(1)) +
              "] = " + c.name(op.getOperand(2)));
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.extract_lane_dyn"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.extract_lane_dyn"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                                  PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("var " + c.name(op.getResult(0)) + " = " +
              c.name(op.getOperand(0)) + "[" + c.name(op.getOperand(1)) + "]");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.splat_scalar"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.splat_scalar"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                              PrintContext &c) {
     if (at == PrintPoint::Enter) {
       auto dt = op.getAttrOfType<StringAttr>("dtype").getValue();
@@ -1638,17 +1638,17 @@ TerminalPrinter mojoMatrixPrinter() {
              "," + std::to_string(w) + "](" + c.name(op.getOperand(0)) + ")");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.lane_sum"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.lane_sum"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                          PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("var " + c.name(op.getResult(0)) + " = " +
              c.name(op.getOperand(0)) + ".reduce_add()");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.lane_max"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.lane_max"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                          PrintContext &c) {
     if (at == PrintPoint::Enter) {
       auto in = c.name(op.getOperand(0)), res = c.name(op.getResult(0));
@@ -1657,9 +1657,9 @@ TerminalPrinter mojoMatrixPrinter() {
              in + ").reduce_or() else " + in + ".reduce_max()");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.reduce_sum_16x16"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.reduce_sum_16x16"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                                  PrintContext &c) {
     if (at == PrintPoint::Enter) {
       SmallVector<std::string, 16> args;
@@ -1669,9 +1669,9 @@ TerminalPrinter mojoMatrixPrinter() {
              llvm::join(args, ", ") + ")");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.simd_cmpi"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.simd_cmpi"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                           PrintContext &c) {
     if (at == PrintPoint::Enter) {
       auto pred = op.getAttrOfType<StringAttr>("pred").getValue().str();
@@ -1680,9 +1680,9 @@ TerminalPrinter mojoMatrixPrinter() {
              c.name(op.getOperand(1)) + ")");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.pack_apply"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.pack_apply"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                            PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -1702,9 +1702,9 @@ TerminalPrinter mojoMatrixPrinter() {
                          : (simd + ".cast[DType." + outDt + "]()");
     c.line("var " + c.name(op.getResult(0)) + " = " + expr);
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.extract_lane"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.extract_lane"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                              PrintContext &c) {
     if (at == PrintPoint::Enter) {
       int64_t lane = op.getAttrOfType<IntegerAttr>("lane").getInt();
@@ -1712,9 +1712,9 @@ TerminalPrinter mojoMatrixPrinter() {
              c.name(op.getOperand(0)) + "[" + std::to_string(lane) + "]");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.c_host_fn"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.c_host_fn"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                           PrintContext &c) {
     if (at == PrintPoint::Enter) {
       c.line("#include <stdint.h>");
@@ -1730,9 +1730,9 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line("}");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.c_omp_for"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.c_omp_for"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                           PrintContext &c) {
     int64_t count = op.getAttrOfType<IntegerAttr>("count").getInt();
     int64_t grain = op.getAttrOfType<IntegerAttr>("grain").getInt();
@@ -1757,9 +1757,9 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line("}");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.c_owner_call"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.c_owner_call"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                              PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -1777,10 +1777,10 @@ TerminalPrinter mojoMatrixPrinter() {
     c.line("owner_task(" + callArgs + (callArgs.empty() ? "" : ",") + loExpr +
            ", " + hiExpr + ");");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
   // ---------------- Row ("row.mojo" & "entry.c") Ops ----------------
-  p.operations["mojo_row.row_fn"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.row_fn"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                        PrintContext &c) {
     if (at == PrintPoint::Enter) {
       c.line("from std.math import exp, sqrt, rsqrt, max, isnan");
@@ -1807,9 +1807,9 @@ TerminalPrinter mojoMatrixPrinter() {
       c.indent--;
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.dyn_address"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.dyn_address"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                             PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -1822,19 +1822,19 @@ TerminalPrinter mojoMatrixPrinter() {
     c.line("var " + c.name(op.getResult(0)) + " = Int(" +
            llvm::join(parts, " + ") + ")");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
   p.operations["mojo_row.atomic_fetch_add_i32"] =
-      [](Operation &op, PrintPoint at, PrintContext &c) {
+      PrintRule::custom([](Operation &op, PrintPoint at, PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("var " + c.name(op.getResult(0)) +
              " = Atomic[DType.int32].fetch_add(" + c.name(op.getOperand(0)) +
              ".unsafe_offset(" + c.name(op.getOperand(1)) + "), " +
              c.name(op.getOperand(2)) + ")");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.memcpy_elems"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.memcpy_elems"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                              PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("unsafe_memcpy(dest=" + c.name(op.getOperand(0)) +
@@ -1843,9 +1843,9 @@ TerminalPrinter mojoMatrixPrinter() {
              c.name(op.getOperand(3)) + "), count=" + c.name(op.getOperand(4)) +
              ")");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.simd_iota_add"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.simd_iota_add"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                               PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -1863,26 +1863,26 @@ TerminalPrinter mojoMatrixPrinter() {
              llvm::join(seq, ",") + ")");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.simd_select"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.simd_select"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                             PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("var " + c.name(op.getResult(0)) + " = " +
              c.name(op.getOperand(0)) + ".select(" + c.name(op.getOperand(1)) +
              ", " + c.name(op.getOperand(2)) + ")");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.simd_cmp_gt"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.simd_cmp_gt"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                             PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("var " + c.name(op.getResult(0)) + " = " +
              c.name(op.getOperand(0)) + ".gt(" + c.name(op.getOperand(1)) + ")");
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.scalar_cast"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.scalar_cast"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                             PrintContext &c) {
     if (at == PrintPoint::Enter) {
       auto dt = op.getAttrOfType<StringAttr>("dtype").getValue().str();
@@ -1902,9 +1902,9 @@ TerminalPrinter mojoMatrixPrinter() {
       }
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.scalar_const"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.scalar_const"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                              PrintContext &c) {
     if (at == PrintPoint::Enter) {
       auto dt = op.getAttrOfType<StringAttr>("dtype").getValue().str();
@@ -1913,9 +1913,9 @@ TerminalPrinter mojoMatrixPrinter() {
              "](" + lit + ")");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.tuple_decl"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.tuple_decl"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                            PrintContext &c) {
     if (at == PrintPoint::Enter) {
       if (op.getNumOperands() == 3)
@@ -1927,24 +1927,24 @@ TerminalPrinter mojoMatrixPrinter() {
                c.name(op.getOperand(0)));
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.tuple_read"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.tuple_read"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                            PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line("var " + c.name(op.getResult(0)) + " = " +
              c.name(op.getOperand(0)));
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.tuple_write"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.tuple_write"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                             PrintContext &c) {
     if (at == PrintPoint::Enter)
       c.line(c.name(op.getOperand(0)) + " = " + c.name(op.getOperand(1)));
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.tuple_field"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.tuple_field"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                             PrintContext &c) {
     if (at == PrintPoint::Enter) {
       int64_t pos = op.getAttrOfType<IntegerAttr>("position").getInt();
@@ -1952,9 +1952,9 @@ TerminalPrinter mojoMatrixPrinter() {
              c.name(op.getOperand(0)) + "[" + std::to_string(pos) + "]");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.uniform"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.uniform"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                         PrintContext &c) {
     if (at == PrintPoint::Enter) {
       int64_t w = op.getAttrOfType<IntegerAttr>("width").getInt();
@@ -1972,9 +1972,9 @@ TerminalPrinter mojoMatrixPrinter() {
       }
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.welford_vec_step"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.welford_vec_step"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                                  PrintContext &c) {
     if (at == PrintPoint::Enter) {
       int64_t w = op.getAttrOfType<IntegerAttr>("width").getInt();
@@ -1986,9 +1986,9 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line("var " + r1 + " = " + r0 + "_p[1]");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.welford_vec_reduce"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.welford_vec_reduce"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                                    PrintContext &c) {
     if (at == PrintPoint::Enter) {
       int64_t w = op.getAttrOfType<IntegerAttr>("width").getInt();
@@ -1997,10 +1997,10 @@ TerminalPrinter mojoMatrixPrinter() {
              c.name(op.getOperand(1)) + ", " + c.name(op.getOperand(2)) + ")");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
   p.operations["mojo_row.welford_scalar_step"] =
-      [](Operation &op, PrintPoint at, PrintContext &c) {
+      PrintRule::custom([](Operation &op, PrintPoint at, PrintContext &c) {
     if (at == PrintPoint::Enter) {
       auto st = c.name(op.getOperand(0));
       c.line("var " + c.name(op.getResult(0)) + " = welford_scalar_step(" + st +
@@ -2008,9 +2008,9 @@ TerminalPrinter mojoMatrixPrinter() {
              ")");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.transpose_8x8"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.transpose_8x8"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                               PrintContext &c) {
     if (at == PrintPoint::Enter) {
       auto dt = op.getAttrOfType<StringAttr>("dtype").getValue().str();
@@ -2020,9 +2020,9 @@ TerminalPrinter mojoMatrixPrinter() {
              c.name(op.getOperand(4)) + ", " + c.name(op.getOperand(5)) + ")");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.simd_scan_sum"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.simd_scan_sum"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                               PrintContext &c) {
     if (at == PrintPoint::Enter) {
       auto dt = op.getAttrOfType<StringAttr>("dtype").getValue().str();
@@ -2038,9 +2038,9 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line("var " + r1 + " = " + r0 + "_p[1]");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.c_row_host_fn"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.c_row_host_fn"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                               PrintContext &c) {
     if (at == PrintPoint::Enter) {
       c.line("#include <stdint.h>");
@@ -2059,9 +2059,9 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line("}");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.c_row_prep"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.c_row_prep"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                            PrintContext &c) {
     if (at == PrintPoint::Enter) {
       if (op.getAttrOfType<BoolAttr>("single_dispatcher").getValue())
@@ -2075,9 +2075,9 @@ TerminalPrinter mojoMatrixPrinter() {
       }
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.c_key_omp_for"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.c_key_omp_for"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                               PrintContext &c) {
     int64_t keys = op.getAttrOfType<IntegerAttr>("key_extent").getInt();
     if (at == PrintPoint::Enter) {
@@ -2092,9 +2092,9 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line("}");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.c_tile_2d_omp"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.c_tile_2d_omp"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                               PrintContext &c) {
     int64_t step = op.getAttrOfType<IntegerAttr>("tile").getInt();
     std::string st = std::to_string(step) + "LL";
@@ -2114,9 +2114,9 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line("}");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.c_row_single_thread"] = [](Operation &, PrintPoint at,
+  p.operations["mojo_row.c_row_single_thread"] = PrintRule::custom([](Operation &, PrintPoint at,
                                                     PrintContext &c) {
     if (at == PrintPoint::Enter) {
       c.line("const int64_t groups = (rows - 1) / grain + 1;");
@@ -2131,9 +2131,9 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line("}");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.c_row_omp_parallel"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.c_row_omp_parallel"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                                    PrintContext &c) {
     bool dyn = op.getAttrOfType<StringAttr>("schedule").getValue() == "dynamic";
     int64_t chunk = op.getAttrOfType<IntegerAttr>("chunk_size").getInt();
@@ -2162,9 +2162,9 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line("}");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.c_flat_col_omp"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.c_flat_col_omp"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                                PrintContext &c) {
     int64_t cg = op.getAttrOfType<IntegerAttr>("col_grain").getInt();
     std::string cgs = std::to_string(cg) + "LL";
@@ -2185,9 +2185,9 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line("}");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.c_projected_while"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.c_projected_while"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                                   PrintContext &c) {
     int64_t pRank = op.getAttrOfType<IntegerAttr>("proj_rank").getInt();
     if (at == PrintPoint::Enter) {
@@ -2207,9 +2207,9 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line("}");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  p.operations["mojo_row.c_row_call"] = [](Operation &op, PrintPoint at,
+  p.operations["mojo_row.c_row_call"] = PrintRule::custom([](Operation &op, PrintPoint at,
                                            PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
@@ -2237,7 +2237,7 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line("intent_row_interval(" + pre + "start, stop, cols, columns);");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
   p.package = [](DictionaryAttr attrs,
                  const std::map<std::string, std::string> &files,

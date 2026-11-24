@@ -310,7 +310,7 @@ void addRowRules(TerminalPrinter &printer) {
   for (auto n : {"dimension", "expand", "splat", "range", "view_offset",
                  "read_at", "write_at", "bin_count", "fetch_add",
                  "extract_lane", "axis_reduce", "map"})
-    printer.operations["triton_src." + std::string(n)] = dynamicTile;
+    printer.operations["triton_src." + std::string(n)] = PrintRule::custom(dynamicTile, "legacy_operation_rule");
   for (auto n : {"tiles",
                  "output_partition",
                  "partition_end",
@@ -354,6 +354,6 @@ void addRowRules(TerminalPrinter &printer) {
                  "exp",
                  "rsqrt",
                  "cast"})
-    printer.operations["triton_src." + std::string(n)] = row;
+    printer.operations["triton_src." + std::string(n)] = PrintRule::custom(row, "legacy_operation_rule");
 }
 } // namespace CI_UNIT_NAMESPACE

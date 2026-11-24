@@ -111,30 +111,30 @@ TerminalPrinter rowPrinter() {
 
   auto enter = [&](StringRef name,
                    std::function<llvm::Error(Operation &, PrintContext &)> fn) {
-    rules[name.str()] = [fn = std::move(fn)](Operation &op, PrintPoint pt,
+    rules[name.str()] = PrintRule::custom([fn = std::move(fn)](Operation &op, PrintPoint pt,
                                              PrintContext &c) -> llvm::Error {
       if (pt != PrintPoint::Enter)
         return llvm::Error::success();
       return fn(op, c);
-    };
+    }, "legacy_operation_rule");
   };
 
-  rules["builtin.module"] = [](Operation &, PrintPoint, PrintContext &) {
+  rules["builtin.module"] = PrintRule::custom([](Operation &, PrintPoint, PrintContext &) {
     return llvm::Error::success();
-  };
-  rules["func.func"] = [](Operation &op, PrintPoint pt, PrintContext &c) {
+  }, "legacy_operation_rule");
+  rules["func.func"] = PrintRule::custom([](Operation &op, PrintPoint pt, PrintContext &c) {
     if (pt == PrintPoint::Enter) {
       c.file = "kernel.mlu";
       for (Value arg : cast<func::FuncOp>(op).getArguments())
         (void)c.name(arg);
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
   enter("func.return", [](Operation &, PrintContext &) {
     return llvm::Error::success();
   });
 
-  rules["bangc_src.row_program"] = [](Operation &op, PrintPoint pt,
+  rules["bangc_src.row_program"] = PrintRule::custom([](Operation &op, PrintPoint pt,
                                       PrintContext &c) {
     if (pt == PrintPoint::Enter) {
       c.line("#include <bang.h>");
@@ -146,9 +146,9 @@ TerminalPrinter rowPrinter() {
              "INTENT_TILE_BYTES;");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  rules["bangc_src.matrix_program"] = [](Operation &op, PrintPoint pt,
+  rules["bangc_src.matrix_program"] = PrintRule::custom([](Operation &op, PrintPoint pt,
                                          PrintContext &c) {
     if (pt == PrintPoint::Enter) {
       c.line("#include <bang.h>");
@@ -162,9 +162,9 @@ TerminalPrinter rowPrinter() {
              ", BK = " + std::to_string(bk) + ";");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  rules["bangc_src.ordered_program"] = [](Operation &, PrintPoint pt,
+  rules["bangc_src.ordered_program"] = PrintRule::custom([](Operation &, PrintPoint pt,
                                           PrintContext &c) {
     if (pt == PrintPoint::Enter) {
       c.line("#include <bang.h>");
@@ -172,7 +172,7 @@ TerminalPrinter rowPrinter() {
       c.line("#include <math.h>");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
   enter("bangc_src.runtime_source",
         [](Operation &op, PrintContext &c) -> llvm::Error {
@@ -184,7 +184,7 @@ TerminalPrinter rowPrinter() {
           return llvm::Error::success();
         });
 
-  rules["bangc_src.device_kernel"] = [](Operation &op, PrintPoint pt,
+  rules["bangc_src.device_kernel"] = PrintRule::custom([](Operation &op, PrintPoint pt,
                                         PrintContext &c) {
     if (pt == PrintPoint::Enter) {
       c.line("__mlu_global__ void tile(" + formatArgs(op, c, true) + ") {");
@@ -194,7 +194,7 @@ TerminalPrinter rowPrinter() {
       c.line("}");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
   enter("bangc_src.host_enqueue", [](Operation &op, PrintContext &c) {
     c.line("extern \"C\" int intent_enqueue(" + formatArgs(op, c, true) +
@@ -727,7 +727,7 @@ TerminalPrinter rowPrinter() {
   });
 
   // Standard SCF structured control-flow rules.
-  rules["scf.for"] = [](Operation &op, PrintPoint pt, PrintContext &c) {
+  rules["scf.for"] = PrintRule::custom([](Operation &op, PrintPoint pt, PrintContext &c) {
     auto loop = cast<scf::ForOp>(op);
     if (pt == PrintPoint::Enter) {
       for (auto [res, init] : llvm::zip(loop.getResults(), loop.getInitArgs()))
@@ -747,9 +747,9 @@ TerminalPrinter rowPrinter() {
       c.line("}");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  rules["scf.if"] = [](Operation &op, PrintPoint pt, PrintContext &c) {
+  rules["scf.if"] = PrintRule::custom([](Operation &op, PrintPoint pt, PrintContext &c) {
     if (pt == PrintPoint::Enter) {
       for (Value res : op.getResults())
         c.line(ctype(res.getType()) + " " + c.name(res) + ";");
@@ -768,9 +768,9 @@ TerminalPrinter rowPrinter() {
       }
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
-  rules["scf.while"] = [](Operation &op, PrintPoint pt, PrintContext &c) {
+  rules["scf.while"] = PrintRule::custom([](Operation &op, PrintPoint pt, PrintContext &c) {
     auto w = cast<scf::WhileOp>(op);
     if (pt == PrintPoint::Enter) {
       for (auto [res, init] : llvm::zip(w.getResults(), w.getInits()))
@@ -789,7 +789,7 @@ TerminalPrinter rowPrinter() {
       c.line("}");
     }
     return llvm::Error::success();
-  };
+  }, "legacy_operation_rule");
 
   enter("scf.condition", [](Operation &op, PrintContext &c) {
     auto *parent = op.getParentOp();
