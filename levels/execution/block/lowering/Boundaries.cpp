@@ -137,7 +137,17 @@ void bind(Unit &unit) {
               pm.addPass(std::make_unique<Form>());
             return llvm::Error::success();
           },
-          [phase](ModuleOp m, const TargetProfile &profile) {
+          [phase](ModuleOp m, const TargetProfile &profile) -> LogicalResult {
+            if (auto funcs = m.getOps<func::FuncOp>();
+                llvm::hasSingleElement(funcs)) {
+              auto fn = *funcs.begin();
+              if (auto num = fn->getAttr("kir.numerics")) {
+                auto s = dyn_cast<StringAttr>(num);
+                if (!s || (s.getValue() != "source" &&
+                           s.getValue() != "relaxed_normalization"))
+                  return fn.emitError("invalid kernel numerical permission");
+              }
+            }
             if (auto fn = *m.getOps<func::FuncOp>().begin();
                 intentdsl::kir::orderedOwners(fn))
               return intentdsl::block::verifyOwnerMap(fn, profile, "block",

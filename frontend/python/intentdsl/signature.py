@@ -1,15 +1,38 @@
 import ast
 
 
-def namespace(fn):
+def _kernel_decorator(fn):
     for decorator in fn.decorator_list:
         if (
             isinstance(decorator, ast.Attribute)
             and decorator.attr == "kernel"
             and isinstance(decorator.value, ast.Name)
         ):
-            return decorator.value.id
+            return decorator.value.id, "source"
+        if (
+            isinstance(decorator, ast.Call)
+            and isinstance(decorator.func, ast.Attribute)
+            and decorator.func.attr == "kernel"
+            and isinstance(decorator.func.value, ast.Name)
+        ):
+            if decorator.args or any(k.arg != "numerics" for k in decorator.keywords):
+                raise ValueError("kernel decorator accepts only keyword numerics")
+            kw = {k.arg: k.value for k in decorator.keywords}
+            if len(kw) != len(decorator.keywords):
+                raise ValueError("duplicate kernel decorator keyword")
+            val = ast.literal_eval(kw["numerics"]) if "numerics" in kw else "source"
+            if val not in ("source", "relaxed_normalization"):
+                raise ValueError(f"unsupported kernel numerics: {val}")
+            return decorator.func.value.id, val
     raise ValueError("expected a qualified kernel decorator")
+
+
+def namespace(fn):
+    return _kernel_decorator(fn)[0]
+
+
+def kernel_numerics(fn):
+    return _kernel_decorator(fn)[1]
 
 
 def spelling(node, owner):

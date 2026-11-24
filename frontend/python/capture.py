@@ -1,7 +1,7 @@
 import ast
 import json
 
-from .intentdsl.signature import argument_type, signature, spelling, namespace
+from .intentdsl.signature import argument_type, kernel_numerics, signature, spelling, namespace
 
 
 class Capture:
@@ -314,8 +314,10 @@ class Capture:
             raise ValueError("missing output definition")
         sig = ", ".join("%" + a["name"] + ": " + argument_type(a) for a in self.args)
         abi = json.dumps(json.dumps(self.args, separators=(",", ":")))
+        numerics = kernel_numerics(self.fn)
         return (
             f"module {{ func.func @{self.fn.name}({sig}) attributes {{kir.abi = {abi}"
+            + (f', kir.numerics = "{numerics}"' if numerics != "source" else "")
             + (f", kir.owner_axis = {axis} : i64" if self.owner_axis is not None else "")
             + "} {\n"
             + f'"kir.parallel"(%{owner["name"]}) ({{^bb0(%row: index):\n'

@@ -44,8 +44,14 @@ class Definition:
     source: bytes
 
 
-def kernel(fn):
-    return Definition(fn.__name__, dedent(getsource(fn)).encode())
+def kernel(fn=None, *, numerics="source"):
+    if numerics not in ("source", "relaxed_normalization"):
+        raise ValueError(f"unsupported kernel numerics: {numerics}")
+
+    def wrap(f):
+        return Definition(f.__name__, dedent(getsource(f)).encode())
+
+    return wrap if fn is None else wrap(fn)
 
 def program(fn):
     """Capture the author's ordered host operations without running their Python."""

@@ -347,6 +347,12 @@ LogicalResult verifyLogicalRows(ModuleOp module,StringRef dialect,bool canonical
   if (!llvm::hasSingleElement(funcs))
     return module.emitError("expected one author kernel");
   auto fn = *funcs.begin();
+  if (auto num = fn->getAttr("kir.numerics")) {
+    auto s = dyn_cast<StringAttr>(num);
+    if (!s || (s.getValue() != "source" &&
+               s.getValue() != "relaxed_normalization"))
+      return fn.emitError("invalid kernel numerical permission");
+  }
   if(kir::matrixDomain(fn))return kir::verifyMatrix(fn,dialect,canonical);
   if (kir::orderedOwners(fn))
     return kir::verifyOwners(fn, dialect);

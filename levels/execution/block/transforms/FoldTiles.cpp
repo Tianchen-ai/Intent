@@ -41,8 +41,12 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
   SmallVector<Type> types;
   if (online) {
     auto mTy = shaped({rows}, b.getF32Type());
+    auto seenTy = shaped({rows}, b.getI32Type());
     init.push_back(broadcast(scalar(-INFINITY), mTy));
     types.push_back(mTy);
+    init.push_back(
+        broadcast(b.create<arith::ConstantIntOp>(loc, 0, 32), seenTy));
+    types.push_back(seenTy);
   }
   for (auto v : loop.getInitArgs()) {
     auto t = lifted(v);
@@ -120,7 +124,7 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
   };
   llvm::SmallPtrSet<Operation *, 16> folded;
   Operation *onlineAnchor = nullptr;
-  Value onlineMNew, onlineAlpha;
+  Value onlineMNew, onlineSeenNew, onlineAlpha;
   if (online) {
     onlineAnchor = online->guardOp ? online->guardOp : online->expOp;
     folded.insert(online->subOp);
@@ -240,6 +244,15 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
         Value negInfTile = broadcast(scalar(-INFINITY), sTile.getType());
         Value sMasked = validMask ? select(validMask, sTile, negInfTile) : sTile;
         Value mPrev = l.getRegionIterArgs()[0];
+        Value seenPrev = l.getRegionIterArgs()[1];
+        Value rowValid =
+            validMask
+                ? broadcast(reduce(castElement(validMask, b.getI32Type()), "max",
+                                   paired ? 1 : 0),
+                            seenPrev.getType())
+                : broadcast(b.create<arith::ConstantIntOp>(loc, 1, 32),
+                            seenPrev.getType());
+        onlineSeenNew = b.create<arith::OrIOp>(loc, seenPrev, rowValid);
         Value mPanel =
             broadcast(reduce(sMasked, "max", paired ? 1 : 0), mPrev.getType());
         onlineMNew = b.create<arith::MaxNumFOp>(loc, mPrev, mPanel);
@@ -381,10 +394,12 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
   };
   (void)lowerFoldBlock(*loop.getBody());
   SmallVector<Value> next;
-  if (online)
+  if (online) {
     next.push_back(onlineMNew);
+    next.push_back(onlineSeenNew);
+  }
   auto accIterArgs =
-      l.getRegionIterArgs().drop_front(online ? 1 : 0);
+      l.getRegionIterArgs().drop_front(online ? 2 : 0);
   for (auto [ret, rawAcc] : llvm::zip(yielded, accIterArgs)) {
     Value acc = online
                     ? Value(b.create<arith::MulFOp>(
@@ -541,6 +556,27 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
   }
   b.create<scf::YieldOp>(loc, next);
   b.setInsertionPointAfter(l);
-  return SmallVector<Value>(l.getResults());
+  if (!online)
+    return SmallVector<Value>(l.getResults());
+  Value finalM = l.getResult(0);
+  Value finalSeen = l.getResult(1);
+  Value zeroSeen =
+      broadcast(b.create<arith::ConstantIntOp>(loc, 0, 32), finalSeen.getType());
+  Value negInfM = broadcast(scalar(-INFINITY), finalM.getType());
+  Value hasValid =
+      b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, finalSeen, zeroSeen);
+  Value mIsNegInf =
+      b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OEQ, finalM, negInfM);
+  Value allValidNegInf = b.create<arith::AndIOp>(loc, hasValid, mIsNegInf);
+  SmallVector<Value> outs{finalM};
+  for (Value res : l.getResults().drop_front(2)) {
+    auto resTy = cast<RankedTensorType>(res.getType());
+    Value nanMask = resTy.getRank() == 2
+                        ? broadcast(allValidNegInf, resTy.clone(b.getI1Type()), 0)
+                        : allValidNegInf;
+    outs.push_back(b.create<arith::SelectOp>(
+        loc, nanMask, broadcast(scalar(NAN), resTy), res));
+  }
+  return outs;
 }
 } // namespace intentdsl::block

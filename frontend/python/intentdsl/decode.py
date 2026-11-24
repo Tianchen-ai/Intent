@@ -3,7 +3,7 @@ import intentdsl as I
 from .attention import merge_splits
 
 
-@I.kernel
+@I.kernel(numerics="relaxed_normalization")
 def grouped_partials(q: I.In[I.bf16, ("B", "H", 1, "D")],
                      keys: I.In[I.bf16, ("B", "KV", "T", "D")],
                      values: I.In[I.bf16, ("B", "KV", "T", "V")],
@@ -61,7 +61,7 @@ def grouped_flash_decode(q, k, v, scale):
     return out
 
 
-@I.kernel
+@I.kernel(numerics="relaxed_normalization")
 def latent_partials(q: I.In[I.f16, ("B", "H", "C")], qr: I.In[I.f16, ("B", "H", "R")],
                     latent: I.In[I.f16, ("P", "PS", "KV", "C")], rope: I.In[I.f16, ("P", "PS", "KV", "R")],
                     pages: I.In[I.i32, ("BP",)], table: I.In[I.i32, ("Slots",)], lengths: I.In[I.i32, ("B",)],

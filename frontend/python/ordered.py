@@ -4,7 +4,7 @@ import ast
 import json
 from dataclasses import dataclass
 
-from .intentdsl.signature import argument_type, namespace, signature
+from .intentdsl.signature import argument_type, kernel_numerics, namespace, signature
 
 
 @dataclass(frozen=True)
@@ -351,10 +351,16 @@ class Ordered:
         self.statements(body)
         params = ", ".join(f'%{a["name"]}: {argument_type(a)}' for a in self.args)
         abi = json.dumps(json.dumps(self.args, separators=(",", ":")))
+        numerics = kernel_numerics(self.fn)
+        num_attr = (
+            f', kir.numerics="{numerics}"'
+            if numerics != "source"
+            else ""
+        )
         bounds = ", ".join("%" + s["name"] for s in views)
         types = ", ".join(argument_type(s) for s in views)
         return (
-            f"module {{func.func @{self.fn.name}({params}) attributes {{kir.abi={abi}}} {{\n"
+            f"module {{func.func @{self.fn.name}({params}) attributes {{kir.abi={abi}{num_attr}}} {{\n"
             f'"kir.owner_space"({bounds}) ({{\n^bb0('
             + ", ".join(ivs)
             + "):\n"

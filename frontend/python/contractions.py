@@ -2,7 +2,7 @@
 import ast
 import json
 
-from .intentdsl.signature import argument_type, element_type, namespace, signature, spelling
+from .intentdsl.signature import argument_type, element_type, kernel_numerics, namespace, signature, spelling
 
 
 def capture(fn):
@@ -109,6 +109,8 @@ def capture(fn):
             emit("publish_matrix",[view(target,"Out"),value],None)
     sig=", ".join(f'%{a["name"]}: {argument_type(a)}' for a in args)
     abi=json.dumps(json.dumps(args,separators=(",",":")))
-    return (f'module {{func.func @{fn.name}({sig}) attributes {{kir.abi={abi}}} {{\n'
+    numerics = kernel_numerics(fn)
+    num_attr = f', kir.numerics="{numerics}"' if numerics != "source" else ""
+    return (f'module {{func.func @{fn.name}({sig}) attributes {{kir.abi={abi}{num_attr}}} {{\n'
             f'"kir.matrix_domain"(%{out["name"]}) ({{\n'+'\n'.join(lines)+
             f'\n"kir.end"():()->()\n}}):({argument_type(out)})->()\nreturn\n}}}}').encode()

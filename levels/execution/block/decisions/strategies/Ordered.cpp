@@ -15,6 +15,12 @@ static bool legalWidth(IntegerAttr width, int64_t owners) {
 }
 LogicalResult verifyOwnerMap(func::FuncOp fn, const TargetProfile &p,
                              StringRef dialect, StringRef phase) {
+  if (auto num = fn->getAttr("kir.numerics")) {
+    auto s = dyn_cast<StringAttr>(num);
+    if (!s ||
+        (s.getValue() != "source" && s.getValue() != "relaxed_normalization"))
+      return fn.emitError("invalid kernel numerical permission");
+  }
   bool columns = fn.front().front().hasAttr("block.column_prefixes");
   if (columns) {
     if (phase == "formed" || phase == "decided")

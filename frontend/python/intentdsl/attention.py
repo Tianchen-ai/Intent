@@ -3,7 +3,7 @@
 import intentdsl as I
 
 
-@I.kernel
+@I.kernel(numerics="relaxed_normalization")
 def attention(
     q: I.In[I.bf16, ("B", "HQ", "Q", "D")],
     k: I.In[I.bf16, ("B", "HK", "K", "D")],
@@ -75,7 +75,7 @@ def merge_log2_splits(
             y[b, h, :] = I.cast(vector * (I.f32(1) / mass), I.f16)
 
 
-@I.kernel
+@I.kernel(numerics="relaxed_normalization")
 def paged_partials(
     q: I.In[I.f16, ("B", "H", "D")],
     keys: I.In[I.f16, ("P", "PS", "KV", "D")],

@@ -171,6 +171,9 @@ SmallVector<Value> OwnerTiles::serialLoop(scf::ForOp loop, const Values &parent,
 }
 std::optional<OwnerTiles::OnlinePanelFusion>
 OwnerTiles::matchOnlinePanelPair(scf::ForOp maxLoop, scf::ForOp sumLoop) {
+  auto num = fn->getAttrOfType<StringAttr>("kir.numerics");
+  if (!num || num.getValue() != "relaxed_normalization")
+    return std::nullopt;
   if (!maxLoop->hasAttr("kir.reassociate") ||
       !sumLoop->hasAttr("kir.reassociate") ||
       maxLoop->getAttr("block.contribution_width") !=
