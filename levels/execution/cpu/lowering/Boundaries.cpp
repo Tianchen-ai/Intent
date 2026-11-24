@@ -22,7 +22,7 @@ LogicalResult verifyTask(ModuleOp m, const TargetProfile &profile,
                                 : verifyOwnerBuffers(fn, profile);
   if (matrixTask(fn))
     return storage == "pending" ? verifyMatrixTask(fn, profile, storage)
-                                : verifyMatrixBuffers(fn, profile);
+                                : verifyMatrixBuffers(fn, profile, storage);
   if (fn.empty() || fn.front().getOperations().size() != 3)
     return fn.emitError("expected task, join, return");
   if(failed(intentdsl::verifyDomain(fn)))return failure();

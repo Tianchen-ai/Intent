@@ -1,8 +1,11 @@
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
+#include <algorithm>
+#include <cmath>
+
 namespace CI_UNIT_NAMESPACE {
 void nativePanelCost(compilerinfra::Unit &u) {
   u.costModels.push_back(
-      {{"native-panels", "levels/execution/cpu::matrix-partition", "1",
+      {{"native-panels", "levels/execution/cpu::matrix-partition", "2",
         [](mlir::Operation *op, const compilerinfra::StructuralCandidate &c,
            compilerinfra::CostContext &ctx)
             -> llvm::Expected<compilerinfra::CostEstimate> {
@@ -10,7 +13,7 @@ void nativePanelCost(compilerinfra::Unit &u) {
           auto &dot = intentdsl::cpu::calculation(*op);
           compilerinfra::CostEstimate e;
           e.scope = "one native task";
-          e.bottleneck = "task operand supply";
+          e.bottleneck = "SIMD/RVV register file and local array supply";
           if (dot.getName().stripDialect() == "q4k_dot")
             return e;
           auto g = intentdsl::kir::contractionShape(
@@ -19,19 +22,182 @@ void nativePanelCost(compilerinfra::Unit &u) {
           if (!g)
             return g.takeError();
           auto machine = ctx.target.services.get<intentdsl::cpu::RowMachine>();
-          bool blocked = !machine->boundWidening && !g->grouped &&
-                         g->m % t[0] == 0 && (g->n <= t[1] || g->n % t[1] == 0);
-          double rows = blocked ? std::min<int64_t>(t[0], 4) : 1;
+          int64_t workers = machine->workers;
+          double columns = std::ceil(double(t[1]) / t[3]);
+          int64_t vecRegs = machine->boundWidening ? 32 : (t[3] == 16 ? 32 : 16);
+          double live = t[0] * columns + columns + 2.0;
+          double spill = std::max(0.0, live - vecRegs) * t[3] * 4.0 * 2.0 * g->k;
+
+          int64_t packCode = t.size() > 4 ? t[4] : 0;
+          double rawElemBytes =
+              dot.getName().stripDialect() == "scaled_contract"
+                  ? 4.0
+                  : double(mlir::cast<mlir::MemRefType>(
+                               dot.getOperand(0).getType())
+                               .getElementTypeBitWidth()) /
+                        8.0;
+          double inBytes = (packCode == 3 ||
+                            (dot.getName().stripDialect() == "window_contract" &&
+                             packCode == 1))
+                               ? 4.0
+                               : rawElemBytes;
+          bool inF32 = (inBytes == 4.0 &&
+                        !mlir::cast<mlir::MemRefType>(dot.getOperand(0).getType())
+                             .getElementType()
+                             .isInteger(32));
+
+          double simultaneousRows =
+              inF32 ? std::min<double>(t[0], 4.0)
+                    : (machine->boundWidening ? 1.0
+                                              : std::min<double>(t[0], 4.0));
           double reloads =
-              (std::ceil(t[0] / rows) - 1) * t[1] * g->k *
-              mlir::cast<mlir::MemRefType>(dot.getOperand(0).getType())
-                  .getElementTypeBitWidth() /
-              8;
-          e.terms["native_simultaneous_rows"] = {rows, "count"};
+              (std::ceil(double(t[0]) / simultaneousRows) - 1.0) * t[1] * g->k *
+              inBytes;
+
+          // On x86, Weft native outer_contract materializes local ArrayStorage +
+          // validity masks for admitted operands and output; on RVV, tiles stream
+          // directly into vector registers.
+          double arrayCopyBytes =
+              machine->boundWidening
+                  ? 0.0
+                  : ((double(t[0]) + double(t[1])) * g->k * (inBytes + 1.0) +
+                     double(t[0]) * t[1] * 5.0);
+
+          double inLoopWiden =
+              !inF32 ? double(g->k) * (columns + t[0]) *
+                           (machine->boundWidening ? 1.5 : 1.0)
+                     : 0.0;
+          double l1Loads = double(g->k) * (t[0] + columns);
+
+          e.terms["native_simultaneous_rows"] = {simultaneousRows, "count"};
           e.terms["rhs_reloads"] = {reloads, "B"};
-          auto bw = intentdsl::quantity(ctx, "read_1_private_bw", "B/ns");
-          if (bw)
-            e.timeNs = reloads / *bw;
+          e.terms["local_array_bytes"] = {arrayCopyBytes, "B"};
+          e.terms["spill_bytes_per_task"] = {spill, "B"};
+          auto bw = intentdsl::quantity(ctx, "read_1_private_bw", "B/ns"),
+               writeBw = intentdsl::quantity(ctx, "write_1_private_bw", "B/ns"),
+               rate = intentdsl::quantity(ctx, "vector", "FLOP/ns");
+          if (bw && writeBw && rate) {
+            double widths = workers * t[3];
+            e.timeNs = reloads / *bw +
+                       ((spill + arrayCopyBytes) / 2.0) * workers *
+                           (1.0 / *bw + 1.0 / *writeBw) +
+                       ((l1Loads * 0.6 + inLoopWiden) * widths) / *rate;
+          } else if (bw) {
+            e.timeNs = (reloads + arrayCopyBytes) / *bw;
+          }
+          return e;
+        }},
+       COMPILERINFRA_SOURCE});
+
+  u.costModels.push_back(
+      {{"q4k-panels", "levels/execution/cpu::matrix-partition", "1",
+        [](mlir::Operation *op, const compilerinfra::StructuralCandidate &c,
+           compilerinfra::CostContext &ctx)
+            -> llvm::Expected<compilerinfra::CostEstimate> {
+          const auto t = mlir::cast<mlir::DenseI64ArrayAttr>(c.value);
+          auto &dot = intentdsl::cpu::calculation(*op);
+          auto g = intentdsl::kir::contractionShape(
+              dot, op->getOperand(0),
+              *ctx.target.services.get<intentdsl::CallFacts>());
+          if (!g)
+            return g.takeError();
+          compilerinfra::CostEstimate e;
+          e.scope = "one native Q4_K task";
+          e.bottleneck = "Q4_K subgroup unpack, widen, and SIMD dot";
+          double subgroups = double(g->k) / 32.0;
+          double ops = double(t[0]) * subgroups * 128.0;
+          auto *machine =
+              ctx.target.services.get<intentdsl::cpu::RowMachine>();
+          double localBytes =
+              machine->boundWidening ? 0.0 : double(t[0]) * g->k * 2.5;
+          e.terms["subgroup_ops"] = {ops, "FLOP"};
+          e.terms["local_array_bytes"] = {localBytes, "B"};
+          auto read = intentdsl::quantity(ctx, "read_1_private_bw", "B/ns"),
+               write = intentdsl::quantity(ctx, "write_1_private_bw", "B/ns"),
+               rate = intentdsl::quantity(ctx, "vector", "FLOP/ns");
+          if (rate) {
+            auto workers = machine->workers;
+            double memNs =
+                (read && write && localBytes > 0.0)
+                    ? (localBytes / 2.0) * workers * (1.0 / *read + 1.0 / *write)
+                    : 0.0;
+            e.timeNs = memNs + (ops * workers) / *rate;
+          }
+          return e;
+        }},
+       COMPILERINFRA_SOURCE});
+
+  u.costModels.push_back(
+      {{"brgemm-panels", "levels/execution/cpu::matrix-partition", "1",
+        [](mlir::Operation *op, const compilerinfra::StructuralCandidate &c,
+           compilerinfra::CostContext &ctx)
+            -> llvm::Expected<compilerinfra::CostEstimate> {
+          const auto t = mlir::cast<mlir::DenseI64ArrayAttr>(c.value);
+          auto *caps = ctx.target.services.get<intentdsl::cpu::MatrixMachine>();
+          const auto &impl = caps->contracts[t[5]];
+          auto &dot = intentdsl::cpu::calculation(*op);
+          auto g = intentdsl::kir::contractionShape(
+              dot, op->getOperand(0),
+              *ctx.target.services.get<intentdsl::CallFacts>());
+          if (!g)
+            return g.takeError();
+          compilerinfra::CostEstimate e;
+          e.scope = "one Weft zero-copy BRGeMM task";
+          auto read = intentdsl::quantity(ctx, "read_1_private_bw", "B/ns"),
+               write = intentdsl::quantity(ctx, "write_1_private_bw", "B/ns"),
+               rate = intentdsl::quantity(ctx, "vector", "FLOP/ns");
+          auto workers =
+              ctx.target.services.get<intentdsl::cpu::RowMachine>()->workers;
+          double jobs = std::ceil(double(g->m) / t[0]) *
+                        std::ceil(double(g->n) / t[1]) * g->batches;
+          double waves = std::max(1.0, std::ceil(jobs / workers));
+          constexpr double kTlsLookupNs = 8.0;
+
+          if (impl.dtype == "q4k") {
+            e.bottleneck = "multi-row Q4_K subgroup AMX/VNNI BRGeMM";
+            double subgroups = double(g->k) / 32.0;
+            double nibbleBytes = double(t[0]) * g->k;
+            e.terms["subgroup_ukernel_calls"] = {subgroups, "count"};
+            if (read && write && rate) {
+              double ops = double(t[0]) * subgroups * 16.0;
+              e.timeNs = subgroups * kTlsLookupNs +
+                         (nibbleBytes / 2.0) * workers *
+                             (1.0 / *read + 1.0 / *write) +
+                         (ops * workers) / *rate;
+            }
+            return e;
+          }
+
+          if (impl.dtype == "bf16" || impl.dtype == "s8") {
+            e.bottleneck = "AMX zero-copy pack32 BRGeMM";
+            double columns = std::ceil(double(t[1]) / t[3]);
+            double tileOutBytes = double(t[0]) * t[1] * 4.0;
+            e.terms["tile_output_bytes"] = {tileOutBytes, "B"};
+            if (write && rate) {
+              double widths = workers * t[3];
+              e.timeNs = kTlsLookupNs + 120.0 / waves +
+                         (tileOutBytes * workers) / *write +
+                         (double(t[0]) * columns * widths * 0.25) / *rate;
+            }
+            return e;
+          }
+
+          e.bottleneck = "zero-copy JIT AVX-512 BRGeMM microkernel";
+          double columns = std::ceil(double(t[1]) / t[3]);
+          double live = t[0] * columns + columns + 2.0;
+          double spill =
+              std::max(0.0, live - (t[3] == 16 ? 32.0 : 16.0)) * t[3] * 4.0 *
+              2.0 * g->k;
+          double l1Loads = double(g->k) * (t[0] + columns);
+          double tileOutBytes = double(t[0]) * t[1] * 4.0;
+          e.terms["live_vectors"] = {live, "count"};
+          if (read && write && rate) {
+            double widths = workers * t[3];
+            e.timeNs = kTlsLookupNs +
+                       (spill / 2.0) * workers * (1.0 / *read + 1.0 / *write) +
+                       (tileOutBytes * workers) / *write +
+                       (l1Loads * 0.25 * widths) / *rate;
+          }
           return e;
         }},
        COMPILERINFRA_SOURCE});

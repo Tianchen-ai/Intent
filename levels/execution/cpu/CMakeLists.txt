@@ -1,5 +1,5 @@
 compilerinfra_target(kir levels/algorithm/kir)
-compilerinfra_unit(SOURCES decisions/MatrixPanels.cpp decisions/MatrixBuffers.cpp decisions/Matrix.cpp cost/Ordered.cpp decisions/Ordered.cpp cost/Contraction.cpp cost/Vector.cpp cost/Traversal.cpp decisions/Pointwise.cpp decisions/RowTasks.cpp decisions/RowReduction.cpp decisions/TupleReduction.cpp decisions/PanelReduction.cpp decisions/Scan.cpp decisions/Indirect.cpp decisions/Segment.cpp decisions/KeyReduction.cpp decisions/PrefixScatter.cpp decisions/Atomics.cpp ir/Dialect.cpp lowering/Boundaries.cpp
+compilerinfra_unit(SOURCES decisions/MatrixBuffers.cpp decisions/Matrix.cpp cost/Ordered.cpp decisions/Ordered.cpp cost/Contraction.cpp cost/Vector.cpp cost/Traversal.cpp decisions/Pointwise.cpp decisions/RowTasks.cpp decisions/RowReduction.cpp decisions/TupleReduction.cpp decisions/PanelReduction.cpp decisions/Scan.cpp decisions/Indirect.cpp decisions/Segment.cpp decisions/KeyReduction.cpp decisions/PrefixScatter.cpp decisions/Atomics.cpp ir/Dialect.cpp lowering/Boundaries.cpp
   decisions/OwnerTraversal.cpp
   LINK_LIBRARIES ${kir}
   TABLEGEN

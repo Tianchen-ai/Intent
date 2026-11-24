@@ -19,7 +19,8 @@ int64_t clampCount(int64_t a, int64_t b, int64_t c = 1, int64_t d = 1) {
 }
 } // namespace
 
-llvm::Error materializeMatrixBuffers(func::FuncOp fn, RewriterBase &rw) {
+llvm::Error materializeMatrixBuffers(func::FuncOp fn, RewriterBase &rw,
+                                     StringRef realization) {
   auto *task = findMatrixTask(fn);
   if (!task)
     return llvm::createStringError("missing cpu.matrix_task");
@@ -206,7 +207,7 @@ llvm::Error materializeMatrixBuffers(func::FuncOp fn, RewriterBase &rw) {
     if (attr.getName() != "cpu.storage")
       newTaskState.addAttribute(attr.getName(), attr.getValue());
   newTaskState.addAttribute("cpu.realization",
-                            rw.getStringAttr("private-values"));
+                            rw.getStringAttr(realization));
   newTaskState.addRegion()->takeBody(task->getRegion(0));
   auto *newTask = rw.create(newTaskState);
 
@@ -223,7 +224,8 @@ llvm::Error materializeMatrixBuffers(func::FuncOp fn, RewriterBase &rw) {
   return llvm::Error::success();
 }
 
-LogicalResult verifyMatrixBuffers(func::FuncOp fn, const TargetProfile &p) {
+LogicalResult verifyMatrixBuffers(func::FuncOp fn, const TargetProfile &p,
+                                  StringRef realization) {
   auto *task = findMatrixTask(fn);
   if (!task)
     return fn.emitError("missing cpu.matrix_task at cpu@buffers");
@@ -235,7 +237,7 @@ LogicalResult verifyMatrixBuffers(func::FuncOp fn, const TargetProfile &p) {
       failed(kir::verifyMatrixBody(fn, region, "cpu", true)) ||
       failed(verifyMatrixPartition(fn, region, p)))
     return failure();
-  if (task->getAttrOfType<StringAttr>("cpu.realization") != "private-values" ||
+  if (task->getAttrOfType<StringAttr>("cpu.realization") != realization ||
       task->hasAttr("cpu.storage"))
     return task->emitError("invalid matrix buffer realization state");
 

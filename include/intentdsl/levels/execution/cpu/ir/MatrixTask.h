@@ -26,9 +26,12 @@ mlir::Operation &calculation(mlir::Operation &domain);
 mlir::LogicalResult verifyMatrixTask(mlir::func::FuncOp,
                                      const compilerinfra::TargetProfile &,
                                      llvm::StringRef storage);
-llvm::Error materializeMatrixBuffers(mlir::func::FuncOp, mlir::RewriterBase &);
-mlir::LogicalResult verifyMatrixBuffers(mlir::func::FuncOp,
-                                        const compilerinfra::TargetProfile &);
+llvm::Error materializeMatrixBuffers(
+    mlir::func::FuncOp, mlir::RewriterBase &,
+    llvm::StringRef realization = "private-values");
+mlir::LogicalResult verifyMatrixBuffers(
+    mlir::func::FuncOp, const compilerinfra::TargetProfile &,
+    llvm::StringRef realization = "private-values");
 // Host ABI follows runtime/cpu's typed slot order for CPU containers.
 std::string matrixHostParams(mlir::func::FuncOp);
 } // namespace intentdsl::cpu

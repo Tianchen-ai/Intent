@@ -8,6 +8,7 @@ from runtime.weft.launch.native import Artifact
 
 @lru_cache(maxsize=16)
 def discover(scope):
+    import weft_core
     from triton.cpu import target
     from triton.backends.weft.target import native_capabilities
 
@@ -32,10 +33,16 @@ def discover(scope):
             raise ValueError("choose a homogeneous CPU set for native Weft")
         if ids:
             core_id = "/".join(ids.pop())
+    weft_ver = str(facts.get("weft_version") or getattr(weft_core, "__version__", ""))
+    isa = frozenset(facts.get("available_isa_extensions") or facts.get("isa_extensions") or ())
+    brg = dict(facts.get("onednn_brgemm") or {})
     return (
         cpu,
         core_id,
         int(t["vector_bits"] if cpu.arch == "x86_64" else t["vlen_bits"]),
+        weft_ver,
+        isa,
+        brg,
     )
 
 
@@ -54,11 +61,28 @@ class Target:
 
     def options(self, key):
         scope, self.workers = key
-        self.info, core, bits = discover(scope)
+        self.info, core, bits, weft_ver, isa, brg = discover(scope)
+        ver_nums = brg.get("version") or ()
         return dict(
-            vector_bits=bits, workers=self.workers, core=core, arch=self.info.arch,
-            grouped_i8=self.info.arch=="x86_64" and "+avx512vnni" in self.info.march,
-            calibration=calibration(scope,self.workers,bits)
+            vector_bits=bits,
+            workers=self.workers,
+            core=core,
+            arch=self.info.arch,
+            grouped_i8=self.info.arch == "x86_64" and "+avx512vnni" in self.info.march,
+            avx512_vnni="avx512vnni" in isa,
+            avx512_fp16="avx512fp16" in isa,
+            amx_bf16="amx-bf16" in isa,
+            amx_int8="amx-int8" in isa,
+            weft_version=weft_ver,
+            weft_brgemm_available=bool(brg.get("available")),
+            weft_brgemm_runtime=str(brg.get("runtime", "")),
+            weft_brgemm_version=".".join(str(x) for x in ver_nums),
+            weft_brgemm_f32=bool(brg.get("f32")),
+            weft_brgemm_f16=bool(brg.get("f16")),
+            weft_brgemm_bf16=bool(brg.get("bf16")),
+            weft_brgemm_s8=bool(brg.get("s8")),
+            weft_brgemm_u8s8=bool(brg.get("u8s8")),
+            calibration=calibration(scope, self.workers, bits),
         )
 
     def materialize(self, data):
