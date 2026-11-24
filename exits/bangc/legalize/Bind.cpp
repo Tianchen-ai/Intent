@@ -216,6 +216,8 @@ LogicalResult offsets(func::FuncOp f, bool install) {
            resTy.getElementType().isBF16()) ||
           (code == "block.div" && resTy && resTy.getRank() == 2 &&
            resTy.getElementType().isF32() && !narrowedQuotient(&o)) ||
+          (code == "block.sqrt" && resTy && resTy.getRank() == 2 &&
+           resTy.getElementType().isF32()) ||
           (code == "block.exp" && resTy && resTy.getRank() == 2 &&
            resTy.getElementType().isF32()) ||
           code == "block.summary_reduce" ||

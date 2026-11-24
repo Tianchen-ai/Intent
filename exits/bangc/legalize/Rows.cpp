@@ -946,7 +946,7 @@ struct RowLowerer {
         hasTransposeStore |= pr.starts_with("transpose_store");
         StringRef cn = inst.getName().stripDialect();
         needsFullPitch |= cn == "reduce" || cn == "exp" || cn == "div" ||
-                          pr == "certified_half_quotient" ||
+                          cn == "sqrt" || pr == "certified_half_quotient" ||
                           pr == "bf16_product" || pr == "bf16_round";
       }
       Value members = cI64(1);
@@ -1872,7 +1872,18 @@ struct RowLowerer {
             }
             if (n == "sqrt" && dstElem.isF32() &&
                 rankOf(inst.getOperand(0).getType()) == 2) {
-              makeOp("vec_sqrt_rn", {dst, getVal(inst.getOperand(0)), lanes},
+              Value scratch = nramAt(
+                  b.getF32Type(),
+                  phaseByteOffset(
+                      inst.getAttrOfType<DenseI64ArrayAttr>("bangc.scratch")));
+              Value oneRow = b.create<arith::CmpIOp>(
+                  loc, arith::CmpIPredicate::eq, members, cI64(1));
+              Value activeElems = b.create<arith::SelectOp>(
+                  loc, oneRow, live,
+                  b.create<arith::MulIOp>(loc, members, symP));
+              makeOp("vec_sqrt_rn",
+                     {dst, getVal(inst.getOperand(0)), scratch, activeElems,
+                      lanes},
                      {}, {}, "ieee-sqrt-rn");
               continue;
             }

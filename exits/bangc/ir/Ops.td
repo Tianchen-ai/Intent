@@ -260,7 +260,8 @@ def Bf16ProductOp : BangcOp<"bf16_product"> {
 }
 
 def VecSqrtRnOp : BangcOp<"vec_sqrt_rn"> {
-  let arguments = (ins AnyMemRef:$dst, AnyMemRef:$src, I64:$lanes);
+  let arguments = (ins AnyMemRef:$dst, AnyMemRef:$src, AnyMemRef:$scratch,
+                       I64:$live, I64:$lanes);
 }
 
 def VecDivRnOp : BangcOp<"vec_div_rn"> {

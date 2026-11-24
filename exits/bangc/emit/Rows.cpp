@@ -663,8 +663,9 @@ TerminalPrinter rowPrinter() {
 
   enter("bangc_src.vec_sqrt_rn", [](Operation &op, PrintContext &c) {
     c.line("vec_sqrt_rn(" + c.name(op.getOperand(0)) + ", " +
-           c.name(op.getOperand(1)) + ", (int)(" + c.name(op.getOperand(2)) +
-           "));");
+           c.name(op.getOperand(1)) + ", " + c.name(op.getOperand(2)) +
+           ", (int)(" + c.name(op.getOperand(3)) + "), (int)(" +
+           c.name(op.getOperand(4)) + "));");
     return llvm::Error::success();
   });
 

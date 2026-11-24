@@ -431,17 +431,24 @@ void rowContracts(Unit &unit) {
       });
 
   add("ieee-sqrt-rn", "vec_sqrt_rn", "vec_sqrt_rn", "ieee_math.mlu",
-      "NRAM f32 destination and NRAM f32 input",
-      "64-lane aligned NRAM vector fragment", "f32",
-      "writes NRAM f32 destination tile",
-      "correctly rounded IEEE-754 binary32 round-to-nearest-even (0 ULP)",
+      "NRAM f32 destination, NRAM f32 input and NRAM f32 scratch",
+      "64-lane aligned NRAM vector fragment with 6x lanes f32 scratch", "f32",
+      "writes NRAM f32 scratch and correctly rounded NRAM f32 square root",
+      "correctly rounded IEEE-754 binary32 round-to-nearest-even (0 ULP): "
+      "48-bit Veltkamp-Dekker/TwoDiff square residual + runtime-certified "
+      "reciprocal + endpoint certification + exact integer RN-even fallback",
       [](Operation *op) {
+        if (op->getNumOperands() != 5)
+          return failure();
         auto dst = dyn_cast<MemRefType>(op->getOperand(0).getType());
         auto src = dyn_cast<MemRefType>(op->getOperand(1).getType());
+        auto sc = dyn_cast<MemRefType>(op->getOperand(2).getType());
         return success(isSpace(op->getOperand(0), 1) &&
                        isSpace(op->getOperand(1), 1) &&
+                       isSpace(op->getOperand(2), 1) &&
                        dst.getElementType().isF32() &&
-                       src.getElementType().isF32());
+                       src.getElementType().isF32() &&
+                       sc.getElementType().isF32());
       });
 
   add("ieee-div-rn", "vec_div_rn",
@@ -524,11 +531,11 @@ void rowContracts(Unit &unit) {
       });
 
   add("moments-reduce", "summary_reduce", "welford_row", "moments.mlu",
-      "NRAM f32 row fragment, NRAM f32 sumpool scratch and active count",
+      "NRAM f32 row fragment, NRAM f32 transpose/tree scratch and active count",
       "contiguous NRAM row", "f32",
       "writes NRAM f32 scratch and returns Moment tuple (n, mean, m2)",
-      "vectorized two-pass sumpool Welford moment accumulation with RN f32 "
-      "division and sequential non-finite fallback",
+      "vectorized 5-level binary tree of KIR adjacent merge_moments summaries "
+      "with sequential merge_moments block/tail/non-normal fallback",
       [](Operation *op) {
         auto inTy = dyn_cast<MemRefType>(op->getOperand(0).getType());
         auto scTy = dyn_cast<MemRefType>(op->getOperand(1).getType());

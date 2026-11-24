@@ -14,34 +14,85 @@ __mlu_func__ Moment merge_moments(Moment a, Moment b) {
   return Moment{n, a.mean + change, a.m2 + b.m2 + delta * (float)a.n * change};
 }
 
+// Vectorized adjacent-summary reduction adhering strictly to KIR's merge_moments
+// formula (doc/design/kir.md:235-240):
+// Each contiguous 32-element block [32*b .. 32*b + 31] is reduced by a 5-level
+// binary tree of adjacent equal-count merge_moments calls (m = 1, 2, 4, 8, 16;
+// n = 2*m, where (delta * m) / (2*m) == delta * 0.5f bit-for-bit in IEEE-754
+// binary32). When all inputs are 0.0f or have |x| in [2^-35, 2^55], every
+// nonzero intermediate has magnitude >= 2^-125 (above subnormal FTZ and below
+// overflow). Block summaries and any tail [full .. live) are then merged in
+// adjacent source order via merge_moments.
 __mlu_func__ Moment welford_row(const float *samples, float *scratch,
                                 int live) {
-  int full = (live / 32) * 32;
-  if (full >= 32) {
-    float *red = scratch + full;
-    __bang_sumpool(red, samples, 32, full / 32, 1, full / 32, 1, 1, 1);
-    __bang_reduce_sum(red, red, 32);
-    __sync_compute();
-    float sum = ((volatile float *)red)[0];
-    float mean = __cn_scalar_div_f32_rn(sum, (float)full);
-    union {
-      float f;
-      unsigned u;
-    } mu;
-    mu.f = mean;
-    if ((mu.u & 0x7fffffffU) < 0x7f800000U) {
-      __bang_add_scalar(scratch, samples, -mean, full);
-      __bang_mul(scratch, scratch, scratch, full);
-      __bang_sumpool(red, scratch, 32, full / 32, 1, full / 32, 1, 1, 1);
-      __bang_reduce_sum(red, red, 32);
+  int blocks = (live / 512) * 16;
+  int full = blocks * 32;
+  if (blocks >= 16) {
+    float *s0 = scratch;
+    float *s1 = scratch + full;
+    __bang_band_scalar((int *)s0, (const int *)samples, 0x7fffffff, full);
+    __bang_ge_scalar((int *)s1, (const int *)s0, 1, full);
+    __bang_lt_scalar((int *)s0, (const int *)s0, 0x2e000000, full);
+    __bang_band((char *)s1, (const char *)s1, (const char *)s0, full * 4);
+    __bang_band_scalar((int *)s0, (const int *)samples, 0x7fffffff, full);
+    __bang_ge_scalar((int *)s0, (const int *)s0, 0x5b000001, full);
+    __bang_bor((char *)s1, (const char *)s1, (const char *)s0, full * 4);
+    __bang_int322float(s0, (const int *)s1, full, 0);
+    if (__bang_count(s0, full) == 0) {
+      float *mean_buf = scratch;
+      float *m2_buf = scratch + full;
+      float *delta = m2_buf + 16 * blocks;
+      float *change = delta + blocks;
+      float *term = change + blocks;
+
+      // Transpose [blocks, 32] -> [32, blocks] so row r holds sample 32*b + r.
+      __bang_transpose(mean_buf, samples, blocks, 32);
+
+      // Level 0 (m = 1, n = 2): merge adjacent pairs (2*r, 2*r + 1) -> r.
+      for (int r = 0; r < 16; ++r) {
+        float *ma = mean_buf + (2 * r) * blocks;
+        float *mb = mean_buf + (2 * r + 1) * blocks;
+        float *mdst = mean_buf + r * blocks;
+        float *m2dst = m2_buf + r * blocks;
+        __bang_sub(delta, mb, ma, blocks);
+        __bang_mul_scalar(change, delta, 0.5f, blocks);
+        __bang_add(mdst, ma, change, blocks);
+        __bang_mul(m2dst, delta, change, blocks);
+      }
+
+      // Levels 1..4 (m = 2, 4, 8, 16; n = 2*m): merge adjacent pairs (2*r, 2*r+1).
+      int pairs = 8;
+      for (int m = 2; m <= 16; m <<= 1, pairs >>= 1) {
+        float fm = (float)m;
+        for (int r = 0; r < pairs; ++r) {
+          float *ma = mean_buf + (2 * r) * blocks;
+          float *mb = mean_buf + (2 * r + 1) * blocks;
+          float *mdst = mean_buf + r * blocks;
+          float *v2a = m2_buf + (2 * r) * blocks;
+          float *v2b = m2_buf + (2 * r + 1) * blocks;
+          float *v2dst = m2_buf + r * blocks;
+          __bang_sub(delta, mb, ma, blocks);
+          __bang_mul_scalar(change, delta, 0.5f, blocks);
+          __bang_add(mdst, ma, change, blocks);
+          __bang_mul_scalar(term, delta, fm, blocks);
+          __bang_mul(term, term, change, blocks);
+          __bang_add(v2dst, v2a, v2b, blocks);
+          __bang_add(v2dst, v2dst, term, blocks);
+        }
+      }
+
       __sync_compute();
-      float m2 = ((volatile float *)red)[0];
-      Moment acc = {full, mean, m2};
+      Moment acc = {0, 0.0f, 0.0f};
+      for (int b = 0; b < blocks; ++b)
+        acc = merge_moments(
+            acc, Moment{32, ((const volatile float *)mean_buf)[b],
+                        ((const volatile float *)m2_buf)[b]});
       for (int k = full; k < live; ++k)
         acc = merge_moments(acc, Moment{1, samples[k], 0.0f});
       return acc;
     }
   }
+  __sync_compute();
   Moment acc = {0, 0.0f, 0.0f};
   for (int k = 0; k < live; ++k)
     acc = merge_moments(acc, Moment{1, samples[k], 0.0f});

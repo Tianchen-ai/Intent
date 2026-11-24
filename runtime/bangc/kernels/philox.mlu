@@ -50,18 +50,48 @@ __mlu_func__ void philox4x32_linear(float *out, unsigned *scratch,
     unsigned *vah = scratch + 1536;
     unsigned *vch = scratch + 1792;
     unsigned lo0 = (unsigned)q0, hi0 = (unsigned)(q0 >> 32);
-    for (int q = 0; q < 64; ++q)
-      va[q] = lo0 + (unsigned)q;
-    __sync();
+
+    // Construct va[0..63] = lo0 + [0..63] purely on NRAM move/compute engines
+    // using __sync_move()/__sync_compute() only (never global __sync(), so
+    // cross-op async GDRAM DMAs remain undisturbed).
+    __bang_write_value(vleft + 0, 32, 1U);
+    __bang_write_value(vleft + 32, 32, 2U);
+    __bang_write_value(vleft + 64, 32, 4U);
+    __bang_write_value(vleft + 96, 32, 8U);
+    __bang_write_value(vleft + 128, 32, 16U);
+    __bang_write_value(vah, 64, 0U);
+    __bang_write_value(vch, 64, 0U);
+    __bang_write_value(vb, 64, 0U);
+    __bang_write_value(vc, 64, 0U);
+    __bang_write_value(vd, 64, 0U);
+    __bang_write_value(va, 32, lo0);
+    __bang_write_value(va + 32, 32, lo0 + 32U);
+    __sync_move();
+    __sync_compute();
+    __memcpy(vah + 1, vleft + 0, 4, NRAM2NRAM, 8, 4, 31);
+    __memcpy(vch + 2, vleft + 32, 8, NRAM2NRAM, 16, 8, 15);
+    __memcpy(vb + 4, vleft + 64, 16, NRAM2NRAM, 32, 16, 7);
+    __memcpy(vc + 8, vleft + 96, 32, NRAM2NRAM, 64, 32, 3);
+    __memcpy(vd + 16, vleft + 128, 64, NRAM2NRAM, 128, 64, 1);
+    __sync_move();
+    __bang_add(va, va, vah, 64);
+    __bang_add(va, va, vch, 64);
+    __bang_add(va, va, vb, 64);
+    __bang_add(va, va, vc, 64);
+    __bang_add(va, va, vd, 64);
+
     if (qCnt >= 128)
       __bang_add_scalar(va + 64, va, 64U, 64);
     if (qCnt == 256)
       __bang_add_scalar(va + 128, va, 128U, 128);
     else if (qCnt == 192)
       __bang_add_scalar(va + 128, va, 128U, 64);
+    __sync_compute();
     __bang_write_value(vb, qCnt, hi0);
     __bang_write_value(vc, qCnt, 0U);
     __bang_write_value(vd, qCnt, 0U);
+    __sync_move();
+
     unsigned k0 = (unsigned)seed, k1 = (unsigned)(seed >> 32);
     for (int round = 0; round < 10; ++round) {
       __bang_mul_scalar(vleft, va, m0, qCnt);

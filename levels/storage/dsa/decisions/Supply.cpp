@@ -60,6 +60,9 @@ struct Footprint {
             f.collectiveBytes = std::max<int64_t>(f.collectiveBytes,
                                                   6 * int64_t(sizeof(float)));
         }
+        if (t.getRank() == 2 && code == "sqrt" && t.getElementType().isF32())
+          f.collectiveBytes = std::max<int64_t>(f.collectiveBytes,
+                                                6 * int64_t(sizeof(float)));
         // Rank-one calculation results in the block contract are per-row
         // summaries. Projected coordinates have no local storage; copied
         // fragments do.
