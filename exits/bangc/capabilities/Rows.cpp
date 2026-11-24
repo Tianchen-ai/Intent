@@ -48,7 +48,7 @@ capabilities(const llvm::json::Object &opts) {
   });
   matrices->estimate="exits/bangc::matrix-transfer";
   if(auto e=profile.services.provide<intentdsl::dsa::MatrixStorage>(
-      std::make_shared<intentdsl::dsa::MatrixStorage>(intentdsl::dsa::MatrixStorage{matrixPrivateBytes})))return e;
+      std::make_shared<intentdsl::dsa::MatrixStorage>(intentdsl::dsa::MatrixStorage{matrixPrivateBytes, wram.value_or(0)})))return e;
   if(auto e=profile.services.provide<intentdsl::block::MatrixTarget>(matrices))return e;
   if(auto error=caps->bind(opts))return error;
   caps->storeSectorBytes = 128;

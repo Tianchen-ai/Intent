@@ -260,6 +260,11 @@ struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
   void runOnOperation() final {
     auto f = *getOperation().getOps<func::FuncOp>().begin();
     if(intentdsl::kir::matrixDomain(f)){
+      if (phase == 2) {
+        if (failed(lowerMatrixToCallable(getOperation(), target)))
+          signalPassFailure();
+        return;
+      }
       if(failed(bindMatrix(f,phase,true)))signalPassFailure();
       return;
     }
@@ -384,9 +389,15 @@ LogicalResult verify(ModuleOp m, const TargetProfile &p, unsigned stage) {
   if (!llvm::hasSingleElement(funcs))
     return failure();
   auto fn = *funcs.begin();
-  if (stage == 2 && !intentdsl::kir::matrixDomain(fn) &&
-      !intentdsl::kir::orderedOwners(fn))
-    return verifyCallableRows(m, p);
+  if (stage == 2 && !fn.empty() && !fn.front().empty()) {
+    auto top = fn.front().front().getName().getStringRef();
+    if (top == "bangc_src.matrix_program")
+      return verifyCallableMatrix(m, p);
+    if (top == "bangc_src.row_program")
+      return verifyCallableRows(m, p);
+  }
+  if (stage == 2 && !intentdsl::kir::orderedOwners(fn))
+    return failure();
   if (failed(intentdsl::dsa::verifyProgram(m, p, true)))
     return failure();
   if(intentdsl::kir::matrixDomain(fn))return bindMatrix(fn,stage,false);

@@ -1,6 +1,7 @@
 #include "Rows.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/execution/block/decisions/Verify.h"
+#include "intentdsl/levels/storage/dsa/ir/Matrix.h"
 #include "intentdsl/levels/storage/dsa/ir/Supply.h"
 #include <set>
 
@@ -151,6 +152,157 @@ LogicalResult verifyCallableRows(ModuleOp m, const TargetProfile &profile) {
   if (declaredResources != requiredResources)
     return prog.emitError(
         "runtime_source declarations disagree with bound implementations");
+
+  return rowPrinter().verify(m, profile);
+}
+
+LogicalResult verifyCallableMatrix(ModuleOp m, const TargetProfile &profile) {
+  auto funcs = m.getOps<func::FuncOp>();
+  if (!llvm::hasSingleElement(funcs))
+    return m.emitError("requires one matrix function");
+  auto fn = *funcs.begin();
+  if (failed(intentdsl::verifyDomain(fn)))
+    return failure();
+  if (fn->getAttrOfType<StringAttr>("bangc.entry") != "intent_enqueue")
+    return fn.emitError("missing published matrix queue entry");
+  if (fn.empty() || !llvm::hasSingleElement(fn.getBody()) ||
+      fn.front().getOperations().size() != 2)
+    return fn.emitError("expected lowered bangc_src.matrix_program and return");
+  auto &prog = fn.front().front();
+  if (prog.getName().getStringRef() != "bangc_src.matrix_program" ||
+      fn.front().back().getName().getStringRef() != "func.return")
+    return fn.emitError("expected terminal bangc_src.matrix_program");
+
+  auto bm = prog.getAttrOfType<IntegerAttr>("tile_m");
+  auto bn = prog.getAttrOfType<IntegerAttr>("tile_n");
+  auto bk = prog.getAttrOfType<IntegerAttr>("tile_k");
+  auto extents = prog.getAttrOfType<DenseI64ArrayAttr>("extents");
+  auto tasks = prog.getAttrOfType<IntegerAttr>("participants");
+  auto scratch = prog.getAttrOfType<IntegerAttr>("scratch_bytes");
+  auto capacity = profile.services.get<intentdsl::dsa::LocalSupply>();
+  if (!bm || !bn || !bk || !extents || extents.size() != 4 || !tasks ||
+      !scratch || !capacity || tasks.getInt() < 1 ||
+      tasks.getInt() > capacity->consumers ||
+      scratch.getInt() > std::min(capacity->budget, capacity->capacity))
+    return prog.emitError("invalid matrix tile, participants or NRAM budget");
+
+  auto ms = profile.services.get<intentdsl::dsa::MatrixStorage>();
+  int64_t wramLimit = ms ? ms->wramBytes : 0;
+
+  int64_t totalNram = 0, totalWram = 0;
+  std::set<std::string> declaredResources, requiredResources;
+  bool walkFailed = m.walk([&](Operation *op) {
+                       auto ns = op->getName().getDialectNamespace();
+                       if (ns != "builtin" && ns != "func" &&
+                           ns != "bangc_src" && ns != "scf" && ns != "arith") {
+                         op->emitError("unlowered non-terminal operation in "
+                                       "bangc@callable");
+                         return WalkResult::interrupt();
+                       }
+                       auto fullName = op->getName().getStringRef();
+                       if (fullName == "bangc_src.nram_buffer") {
+                         auto elems =
+                             op->getAttrOfType<IntegerAttr>("elements");
+                         auto ty =
+                             dyn_cast<MemRefType>(op->getResult(0).getType());
+                         if (!elems || !ty)
+                           return WalkResult::interrupt();
+                         int64_t elemB =
+                             llvm::divideCeil(ty.getElementTypeBitWidth(), 8u);
+                         totalNram +=
+                             llvm::alignTo(elems.getInt() * elemB, 128);
+                       }
+                       if (fullName == "bangc_src.wram_buffer") {
+                         auto elems =
+                             op->getAttrOfType<IntegerAttr>("elements");
+                         auto ty =
+                             dyn_cast<MemRefType>(op->getResult(0).getType());
+                         if (!elems || !ty)
+                           return WalkResult::interrupt();
+                         int64_t elemB =
+                             llvm::divideCeil(ty.getElementTypeBitWidth(), 8u);
+                         totalWram += elems.getInt() * elemB;
+                       }
+                       if (fullName == "bangc_src.address") {
+                         auto bits =
+                             op->getAttrOfType<IntegerAttr>("index_bits");
+                         if (!bits ||
+                             (bits.getInt() != 64 &&
+                              (bits.getInt() != 32 ||
+                               !canNarrowAddress(*op, fn)))) {
+                           op->emitError("address requires i64 or proven i32 "
+                                         "signed bounds");
+                           return WalkResult::interrupt();
+                         }
+                       }
+                       if (fullName == "bangc_src.runtime_source") {
+                         auto key =
+                             op->getAttrOfType<StringAttr>("implementation");
+                         if (!key)
+                           return WalkResult::interrupt();
+                         auto it = profile.implementations.find(
+                             key.getValue().str());
+                         if (it == profile.implementations.end() ||
+                             it->second.source !=
+                                 ImplementationSource::Runtime ||
+                             !declaredResources.insert(it->second.resource)
+                                  .second) {
+                           op->emitError(
+                               "invalid or duplicate runtime_source binding");
+                           return WalkResult::interrupt();
+                         }
+                       }
+                       if (auto impl =
+                               op->getAttrOfType<StringAttr>("ci.implementation")) {
+                         auto it = profile.implementations.find(
+                             impl.getValue().str());
+                         if (it != profile.implementations.end() &&
+                             it->second.source == ImplementationSource::Runtime)
+                           requiredResources.insert(it->second.resource);
+                       }
+                       return WalkResult::advance();
+                     }).wasInterrupted();
+  if (walkFailed)
+    return failure();
+
+  if (totalNram > std::min(capacity->budget, capacity->capacity))
+    return prog.emitError("matrix NRAM buffers exceed private capacity");
+  if (totalWram > 0 && wramLimit > 0 && totalWram > wramLimit)
+    return prog.emitError("matrix WRAM buffers exceed filter capacity");
+  if (declaredResources != requiredResources)
+    return prog.emitError(
+        "runtime_source declarations disagree with bound implementations");
+
+  auto abiJson =
+      llvm::json::parse(fn->getAttrOfType<StringAttr>("kir.abi").getValue());
+  if (!abiJson)
+    return llvm::consumeError(abiJson.takeError()),
+           fn.emitError("invalid matrix ABI JSON");
+  uint64_t grid =
+      llvm::divideCeil(uint64_t(extents[0]), uint64_t(bm.getInt())) *
+      llvm::divideCeil(uint64_t(extents[1]), uint64_t(bn.getInt())) *
+      uint64_t(extents[3]);
+  llvm::SmallVector<char> expected;
+  llvm::raw_svector_ostream os(expected);
+  os << llvm::json::Value(llvm::json::Object{
+      {"version", 2},
+      {"source", ""},
+      {"abi", std::move(*abiJson)},
+      {"domain", intentdsl::publishDomain(fn)},
+      {"grid", llvm::json::Array{int64_t(grid), 1, 1}},
+      {"guard", llvm::json::Object{{"min_width", 0}, {"max_width", nullptr}}},
+      {"rows",
+       llvm::json::Array{llvm::json::Object{{"id", 0},
+                                            {"rows", bm.getInt()},
+                                            {"width", bn.getInt()},
+                                            {"pitch", bk.getInt()},
+                                            {"bytes", scratch.getInt()},
+                                            {"tasks", tasks.getInt()}}}}});
+  auto package = m->getAttrOfType<StringAttr>("bangc_src.package");
+  if (!package ||
+      package.getValue() != StringRef(expected.data(), expected.size()))
+    return fn.emitError(
+        "BANG C matrix package disagrees with verified ABI or tile row");
 
   return rowPrinter().verify(m, profile);
 }

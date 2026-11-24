@@ -14,6 +14,62 @@ def RowProgramOp : BangcOp<"row_program", [NoTerminator]> {
   let regions = (region AnyRegion:$sources, AnyRegion:$device, AnyRegion:$host);
 }
 
+def MatrixProgramOp : BangcOp<"matrix_program", [NoTerminator]> {
+  let arguments = (ins I64Attr:$tile_m, I64Attr:$tile_n, I64Attr:$tile_k);
+  let regions = (region AnyRegion:$sources, AnyRegion:$device, AnyRegion:$host);
+}
+
+def NramBufferOp : BangcOp<"nram_buffer"> {
+  let arguments = (ins I64Attr:$elements);
+  let results = (outs AnyMemRef:$buffer);
+}
+
+def WramBufferOp : BangcOp<"wram_buffer"> {
+  let arguments = (ins I64Attr:$elements);
+  let results = (outs AnyMemRef:$buffer);
+}
+
+def WramConvOp : BangcOp<"wram_conv"> {
+  let arguments = (ins Variadic<AnyType>:$inputs, I64Attr:$bm, I64Attr:$bn,
+                       I64Attr:$bk, StrAttr:$mode);
+}
+
+def CycleMulOp : BangcOp<"cycle_mul"> {
+  let arguments = (ins AnyMemRef:$dst, AnyMemRef:$src, AnyMemRef:$cycle,
+                       I64:$lanes, I64:$period);
+}
+
+def VecMinScalarOp : BangcOp<"vec_min_scalar"> {
+  let arguments = (ins AnyMemRef:$dst, AnyMemRef:$scratch, AnyMemRef:$src,
+                       F32:$bound, I64:$live, I64:$lanes);
+}
+
+def Bf16PanelGuardOp : BangcOp<"bf16_panel_ok"> {
+  let arguments = (ins AnyMemRef:$panel, AnyMemRef:$mag_scratch,
+                       AnyMemRef:$flag_scratch, I64:$elements);
+  let results = (outs I1:$ok);
+}
+
+def Bf16IeeeDotOp : BangcOp<"bf16_ieee_dot"> {
+  let arguments = (ins AnyMemRef:$acc, AnyMemRef:$lhs, AnyMemRef:$rhs_t,
+                       I64:$nr, I64:$nc, I64:$nk, I64:$bk, I64:$bn);
+}
+
+def Bf16AccNarrowOp : BangcOp<"bf16_acc_narrow"> {
+  let arguments = (ins AnyMemRef:$dst, AnyMemRef:$acc, I64:$elements,
+                       I1:$strict);
+}
+
+def I32ToBf16Op : BangcOp<"i32_to_bf16"> {
+  let arguments = (ins I32:$value);
+  let results = (outs BF16:$result);
+}
+
+def FromLeHalfOp : BangcOp<"from_le_half"> {
+  let arguments = (ins I32:$lo, I32:$hi);
+  let results = (outs F32:$result);
+}
+
 def RuntimeSourceOp : BangcOp<"runtime_source"> {
   let arguments = (ins StrAttr:$implementation);
 }

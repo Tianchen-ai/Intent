@@ -1,0 +1,238 @@
+__mlu_func__ unsigned char ordinary_panel(const unsigned short *v, int n,
+                                          unsigned short *mag,
+                                          unsigned short *flag) {
+  for (int i = 0; i < n; i += 4096) {
+    int count = n - i < 4096 ? n - i : 4096;
+    __bang_band_scalar(mag, v + i, (unsigned short)0x7fff, count);
+    __bang_sub_scalar(flag, mag, (unsigned short)((127 - 48) << 7), count);
+    __bang_ge_scalar(flag, flag, (unsigned short)(95 << 7), count);
+    __bang_mul(flag, mag, flag, count);
+    if (__bang_count(flag, count) != 0)
+      return 0;
+  }
+  return 1;
+}
+
+__mlu_func__ unsigned sticky_u32(unsigned v, int n) {
+  if (n == 0)
+    return v;
+  if (n >= 32)
+    return v != 0;
+  return (v >> n) | ((v << (32 - n)) != 0);
+}
+
+__mlu_func__ int high_bit_u32(unsigned v) {
+  int top = 0;
+  if (v >> 16) {
+    top = 16;
+    v >>= 16;
+  }
+  if (v >> 8) {
+    top += 8;
+    v >>= 8;
+  }
+  if (v >> 4) {
+    top += 4;
+    v >>= 4;
+  }
+  if (v >> 2) {
+    top += 2;
+    v >>= 2;
+  }
+  return top + (int)(v >> 1);
+}
+
+__mlu_func__ unsigned multiply_bf16_ieee(unsigned a, unsigned b) {
+  unsigned sign = ((a ^ b) & 0x8000u) << 16;
+  unsigned x = a & 32767u, y = b & 32767u, ae = x >> 7, be = y >> 7;
+  if (x > 0x7f80u || y > 0x7f80u || (x == 0x7f80u && !y) ||
+      (!x && y == 0x7f80u))
+    return 0x7fc00000u;
+  if (ae == 255 || be == 255)
+    return sign | 0x7f800000u;
+  if (!x || !y)
+    return sign;
+  unsigned v = ((x & 127u) + (ae ? 128u : 0u)) * ((y & 127u) + (be ? 128u : 0u));
+  int offset = (int)(ae ? ae : 1) + (int)(be ? be : 1) - 268;
+  int top = high_bit_u32(v), exponent = offset + top + 127;
+  if (exponent >= 255)
+    return sign | 0x7f800000u;
+  if (exponent > 0)
+    return sign | ((unsigned)exponent << 23) | ((v << (23 - top)) & 0x7fffffu);
+  int shift = -(offset + 149);
+  if (shift <= 0)
+    return sign | (v << (-shift));
+  if (shift > 16)
+    return sign;
+  unsigned q = v >> shift, tail = v & ((1u << shift) - 1u),
+           halfway = 1u << (shift - 1);
+  return sign | (q + (tail > halfway || (tail == halfway && (q & 1u))));
+}
+
+__mlu_func__ unsigned add_binary32_ieee(unsigned a, unsigned b) {
+  unsigned x = a & 0x7fffffffu, y = b & 0x7fffffffu;
+  if (x < y) {
+    unsigned z = x;
+    x = y;
+    y = z;
+    z = a;
+    a = b;
+    b = z;
+  }
+  if (x >= 0x7f800000u) {
+    if (x > 0x7f800000u || (y == x && ((a ^ b) >> 31)))
+      return 0x7fc00000u;
+    return a;
+  }
+  if (!y)
+    return x ? a : (a & b);
+  int e = (int)(x >> 23), f = (int)(y >> 23);
+  unsigned m = ((x & 0x7fffffu) | (e ? 1u << 23 : 0u)) << 3;
+  unsigned n = ((y & 0x7fffffu) | (f ? 1u << 23 : 0u)) << 3;
+  if (!e)
+    e = 1;
+  if (!f)
+    f = 1;
+  n = sticky_u32(n, e - f);
+  if ((a ^ b) >> 31) {
+    m -= n;
+    if (!m)
+      return 0u;
+    int shift = 26 - high_bit_u32(m);
+    if (shift > e - 1)
+      shift = e - 1;
+    m <<= shift;
+    e -= shift;
+  } else {
+    m += n;
+    if (m & (1u << 27)) {
+      m = sticky_u32(m, 1);
+      ++e;
+    }
+  }
+  unsigned tail = m & 7u;
+  m = (m >> 3) + (tail > 4u || (tail == 4u && (m & 8u)));
+  if (m & (1u << 24)) {
+    m >>= 1;
+    ++e;
+  }
+  if (e >= 255)
+    return (a & 0x80000000u) | 0x7f800000u;
+  return (a & 0x80000000u) |
+         (m < (1u << 23) ? m : ((unsigned)e << 23) | (m & 0x7fffffu));
+}
+
+__mlu_func__ void bf16_ieee_dot_panel(float *acc, const unsigned short *lhs,
+                                      const unsigned short *rhs_t, int nr,
+                                      int nc, int nk, int bk, int bn) {
+  unsigned *acc_bits = (unsigned *)acc;
+  for (int i = 0; i < nr; ++i) {
+    for (int j = 0; j < nc; ++j) {
+      unsigned z = acc_bits[i * bn + j];
+      for (int k = 0; k < nk; ++k)
+        z = add_binary32_ieee(
+            z, multiply_bf16_ieee(lhs[i * bk + k], rhs_t[j * bk + k]));
+      acc_bits[i * bn + j] = z;
+    }
+  }
+}
+
+__mlu_func__ unsigned short narrow_bf16_bits(unsigned w) {
+  if ((w & 0x7fffffffu) > 0x7f800000u)
+    return (unsigned short)((w >> 16) | 0x40u);
+  return (unsigned short)((w + 0x7fffu + ((w >> 16) & 1u)) >> 16);
+}
+
+__mlu_func__ void bf16_acc_narrow(unsigned short *dst, float *acc, int count,
+                                  unsigned char strict) {
+  if (strict) {
+    const unsigned *bits = (const unsigned *)acc;
+    for (int i = 0; i < count; ++i)
+      dst[i] = narrow_bf16_bits(bits[i]);
+  } else {
+    __bang_float2bfloat16_rn((bfloat16_t *)dst, acc, count);
+  }
+}
+
+__mlu_func__ unsigned short signed_to_bf16(int x) {
+  unsigned mag = x < 0 ? 0u - (unsigned)x : (unsigned)x;
+  if (!mag)
+    return 0u;
+  int exponent = 0;
+  for (unsigned v = mag; v > 1u; v >>= 1)
+    ++exponent;
+  int shift = exponent - 7;
+  unsigned sig = shift > 0 ? mag >> shift : mag << (-shift);
+  if (shift > 0) {
+    unsigned midpoint = 1u << (shift - 1), discarded = mag & ((1u << shift) - 1u);
+    if (discarded > midpoint || (discarded == midpoint && (sig & 1u)))
+      ++sig;
+  }
+  return (unsigned short)((x < 0 ? 32768u : 0u) |
+                          (((unsigned)(exponent + 126) << 7) + sig));
+}
+
+__mlu_func__ void vec_min_scalar_ieee(float *dst, float *scratch,
+                                      const float *src, float bound, int live,
+                                      int lanes) {
+  union {
+    float f;
+    unsigned u;
+  } bu, s0;
+  bu.f = bound;
+  bool finite = (bu.u & 0x7fffffffU) < 0x7f800000U;
+  if (finite && live >= 4) {
+    s0.f = src[0];
+    if ((s0.u & 0x7fffffffU) <= 0x7f800000U) {
+      __bang_abs(scratch, src, lanes);
+      int full = (live / 32) * 32;
+      if (full >= 64) {
+        __bang_maxpool(scratch, scratch, 32, full / 32, 1, full / 32, 1, 1, 1);
+        __bang_argmax(scratch, scratch, 32);
+      } else {
+        __bang_argmax(scratch, scratch, live);
+      }
+      __sync_compute();
+      union {
+        float f;
+        unsigned u;
+      } peak;
+      peak.f = ((volatile float *)scratch)[0];
+      bool ok = (peak.u & 0x7fffffffU) < 0x7f800000U;
+      for (int k = (full >= 64 ? full : live); ok && k < live; ++k) {
+        union {
+          float f;
+          unsigned u;
+        } tk;
+        tk.f = src[k];
+        if ((tk.u & 0x7fffffffU) >= 0x7f800000U)
+          ok = false;
+      }
+      if (ok) {
+        __bang_lt_scalar(scratch, src, bound, lanes);
+        if (bu.u == 0U) {
+          __bang_mul(dst, src, scratch, lanes);
+        } else {
+          __bang_mul(dst, src, scratch, lanes);
+          __bang_mul_scalar(scratch, scratch, -bound, lanes);
+          __bang_add_scalar(scratch, scratch, bound, lanes);
+          __bang_add(dst, dst, scratch, lanes);
+        }
+        return;
+      }
+    }
+  }
+  for (int k = 0; k < live; ++k) {
+    union {
+      float f;
+      unsigned u;
+    } su;
+    su.f = src[k];
+    if ((su.u & 0x7fffffffU) > 0x7f800000U)
+      dst[k] = su.f;
+    else if ((bu.u & 0x7fffffffU) > 0x7f800000U)
+      dst[k] = bu.f;
+    else
+      dst[k] = fminf(su.f, bu.f);
+  }
+}

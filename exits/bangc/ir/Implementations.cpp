@@ -1,4 +1,5 @@
 #include "compilerinfra/Assembly.h"
+#include "intentdsl/levels/storage/dsa/ir/Matrix.h"
 #include "intentdsl/levels/storage/dsa/ir/Supply.h"
 #include "mlir/IR/BuiltinTypes.h"
 
@@ -29,6 +30,13 @@ void rowContracts(Unit &unit) {
       return llvm::createStringError("missing MLU370 NRAM supply capabilities");
     return llvm::Error::success();
   };
+  auto hasWram = [](const TargetProfile &p) -> llvm::Error {
+    auto ms = p.services.get<intentdsl::dsa::MatrixStorage>();
+    if (!p.services.get<intentdsl::dsa::LocalSupply>() || !ms ||
+        ms->wramBytes <= 0)
+      return llvm::createStringError("missing MLU370 NRAM/WRAM capabilities");
+    return llvm::Error::success();
+  };
   auto add = [&](StringRef name, StringRef op, StringRef symbol,
                  StringRef resource, StringRef operands, StringRef layout,
                  StringRef acc, StringRef effects, StringRef numerical,
@@ -51,6 +59,210 @@ void rowContracts(Unit &unit) {
     c.verify = std::move(verify);
     unit.implementations.push_back({std::move(c), COMPILERINFRA_SOURCE});
   };
+  auto addBuiltin = [&](StringRef name, StringRef op, StringRef symbol,
+                        StringRef estimator, StringRef operands,
+                        StringRef layout, StringRef acc, StringRef effects,
+                        StringRef numerical,
+                        std::function<llvm::Error(const TargetProfile &)> avail,
+                        std::function<LogicalResult(Operation *)> verify) {
+    ImplementationContract c;
+    c.name = name.str();
+    c.operation = ("bangc_src." + op).str();
+    c.symbol = symbol.str();
+    c.source = ImplementationSource::Builtin;
+    c.minimum = Reuse::Native;
+    c.operands = operands.str();
+    c.layout = layout.str();
+    c.accumulator = acc.str();
+    c.effects = effects.str();
+    c.numerical = numerical.str();
+    c.estimator = estimator.str();
+    c.costParameters = {"m", "n", "k"};
+    c.available = std::move(avail);
+    c.verify = std::move(verify);
+    unit.implementations.push_back({std::move(c), COMPILERINFRA_SOURCE});
+  };
+
+  addBuiltin(
+      "wram-conv-f16", "wram_conv", "__bang_conv/__bang_conv_partial",
+      "exits/bangc::matrix-transfer",
+      "NRAM f32[BM, BN] accumulator, NRAM f16[BM, BK] input, WRAM f16[BN, BK] "
+      "filter and i1 accumulate flag",
+      "NRAM row-major [BM, BK] x WRAM 64-channel filter [BN=64, BK]", "f32",
+      "writes NRAM f32[BM, BN] accumulator",
+      "MLU370 matrix-engine FP16xFP16 contraction accumulated in FP32", hasWram,
+      [](Operation *op) {
+        auto mode = op->getAttrOfType<StringAttr>("mode");
+        auto bn = op->getAttrOfType<IntegerAttr>("bn");
+        if (!mode || mode != "f16" || !bn || bn.getInt() != 64 ||
+            op->getNumOperands() != 4)
+          return failure();
+        auto acc = dyn_cast<MemRefType>(op->getOperand(0).getType());
+        auto lhs = dyn_cast<MemRefType>(op->getOperand(1).getType());
+        auto flt = dyn_cast<MemRefType>(op->getOperand(2).getType());
+        return success(isSpace(op->getOperand(0), 1) &&
+                       isSpace(op->getOperand(1), 1) &&
+                       isSpace(op->getOperand(2), 3) &&
+                       acc.getElementType().isF32() &&
+                       lhs.getElementType().isF16() &&
+                       flt.getElementType().isF16() &&
+                       op->getOperand(3).getType().isInteger(1));
+      });
+
+  addBuiltin(
+      "wram-conv-bf16", "wram_conv", "__bang_conv/__bang_conv_partial",
+      "exits/bangc::matrix-transfer",
+      "NRAM f32[BM, BN] accumulator, NRAM bf16[BM, BK] input, WRAM bf16[BN, "
+      "BK] filter and i1 accumulate flag",
+      "NRAM row-major [BM, BK] x WRAM 64-channel filter [BN=64, BK]", "f32",
+      "writes NRAM f32[BM, BN] accumulator",
+      "MLU370 matrix-engine BF16xBF16 contraction accumulated in FP32 over "
+      "verified finite normal exponent window or kir.allow_subnormal_ftz",
+      hasWram, [](Operation *op) {
+        auto mode = op->getAttrOfType<StringAttr>("mode");
+        auto bn = op->getAttrOfType<IntegerAttr>("bn");
+        if (!mode || mode != "bf16" || !bn || bn.getInt() != 64 ||
+            op->getNumOperands() != 4)
+          return failure();
+        auto acc = dyn_cast<MemRefType>(op->getOperand(0).getType());
+        auto lhs = dyn_cast<MemRefType>(op->getOperand(1).getType());
+        auto flt = dyn_cast<MemRefType>(op->getOperand(2).getType());
+        return success(isSpace(op->getOperand(0), 1) &&
+                       isSpace(op->getOperand(1), 1) &&
+                       isSpace(op->getOperand(2), 3) &&
+                       acc.getElementType().isF32() &&
+                       lhs.getElementType().isBF16() &&
+                       flt.getElementType().isBF16() &&
+                       op->getOperand(3).getType().isInteger(1));
+      });
+
+  addBuiltin(
+      "wram-conv-i8", "wram_conv",
+      "__bang_conv+__bang_float2int32_rn+__bang_add",
+      "exits/bangc::matrix-transfer",
+      "NRAM i32[BM, BN] accumulator, NRAM f32[BM, BN] partial scratch, NRAM "
+      "i8[BM, BK] input and WRAM i8[BN, BK] filter",
+      "NRAM row-major [BM, BK] x WRAM 64-channel filter [BN=64, BK<=1024]",
+      "i32", "writes NRAM f32 partial scratch and NRAM i32[BM, BN] accumulator",
+      "exact signed int8xint8 contraction (BK <= 1024 keeps |partial| <= 2^24 "
+      "exact in binary32) accumulated in i32",
+      hasWram, [](Operation *op) {
+        auto mode = op->getAttrOfType<StringAttr>("mode");
+        auto bn = op->getAttrOfType<IntegerAttr>("bn");
+        auto bk = op->getAttrOfType<IntegerAttr>("bk");
+        if (!mode || mode != "i8" || !bn || bn.getInt() != 64 || !bk ||
+            bk.getInt() > 1024 || op->getNumOperands() != 4)
+          return failure();
+        auto acc = dyn_cast<MemRefType>(op->getOperand(0).getType());
+        auto part = dyn_cast<MemRefType>(op->getOperand(1).getType());
+        auto lhs = dyn_cast<MemRefType>(op->getOperand(2).getType());
+        auto flt = dyn_cast<MemRefType>(op->getOperand(3).getType());
+        return success(isSpace(op->getOperand(0), 1) &&
+                       isSpace(op->getOperand(1), 1) &&
+                       isSpace(op->getOperand(2), 1) &&
+                       isSpace(op->getOperand(3), 3) &&
+                       acc.getElementType().isInteger(32) &&
+                       part.getElementType().isF32() &&
+                       lhs.getElementType().getIntOrFloatBitWidth() == 8 &&
+                       flt.getElementType().getIntOrFloatBitWidth() == 8);
+      });
+
+  addBuiltin("cycle-mul", "cycle_mul", "__bang_cycle_mul",
+             "exits/bangc::matrix-transfer",
+             "NRAM f32 destination, NRAM f32 source and NRAM f32 cyclic vector",
+             "contiguous NRAM f32 tile with periodic 1D multiplier", "f32",
+             "writes NRAM f32 destination tile",
+             "IEEE-754 binary32 elementwise cyclic product", hasNram,
+             [](Operation *op) {
+               auto dst = dyn_cast<MemRefType>(op->getOperand(0).getType());
+               auto src = dyn_cast<MemRefType>(op->getOperand(1).getType());
+               auto cyc = dyn_cast<MemRefType>(op->getOperand(2).getType());
+               return success(isSpace(op->getOperand(0), 1) &&
+                              isSpace(op->getOperand(1), 1) &&
+                              isSpace(op->getOperand(2), 1) &&
+                              dst.getElementType().isF32() &&
+                              src.getElementType().isF32() &&
+                              cyc.getElementType().isF32());
+             });
+
+  add("ieee-vec-min", "vec_min_scalar", "vec_min_scalar_ieee", "matrix.mlu",
+      "NRAM f32 destination, NRAM f32 scratch, NRAM f32 input and scalar f32 "
+      "bound",
+      "64-lane aligned NRAM vector fragment", "f32",
+      "writes NRAM f32 scratch and clamped NRAM f32 destination",
+      "IEEE-754 minimumf(x, bound) preserving NaN propagation",
+      [](Operation *op) {
+        auto dst = dyn_cast<MemRefType>(op->getOperand(0).getType());
+        auto sc = dyn_cast<MemRefType>(op->getOperand(1).getType());
+        auto src = dyn_cast<MemRefType>(op->getOperand(2).getType());
+        return success(isSpace(op->getOperand(0), 1) &&
+                       isSpace(op->getOperand(1), 1) &&
+                       isSpace(op->getOperand(2), 1) &&
+                       dst.getElementType().isF32() &&
+                       sc.getElementType().isF32() &&
+                       src.getElementType().isF32() &&
+                       op->getOperand(3).getType().isF32());
+      });
+
+  add("bf16-panel-guard", "bf16_panel_ok", "ordinary_panel", "matrix.mlu",
+      "NRAM bf16 panel and two NRAM u16 scratch buffers",
+      "contiguous NRAM bf16 panel", "u16",
+      "writes NRAM u16 scratch buffers and returns i1 finite-normal predicate",
+      "certifies every BF16 element is zero or has normal exponent in "
+      "[127-48, 127+46] so products avoid binary32 subnormals and overflow",
+      [](Operation *op) {
+        auto p = dyn_cast<MemRefType>(op->getOperand(0).getType());
+        auto m = dyn_cast<MemRefType>(op->getOperand(1).getType());
+        auto f = dyn_cast<MemRefType>(op->getOperand(2).getType());
+        return success(isSpace(op->getOperand(0), 1) &&
+                       isSpace(op->getOperand(1), 1) &&
+                       isSpace(op->getOperand(2), 1) &&
+                       p.getElementType().getIntOrFloatBitWidth() == 16 &&
+                       m.getElementType().getIntOrFloatBitWidth() == 16 &&
+                       f.getElementType().getIntOrFloatBitWidth() == 16 &&
+                       op->getResult(0).getType().isInteger(1));
+      });
+
+  add("bf16-ieee-dot", "bf16_ieee_dot", "bf16_ieee_dot_panel", "matrix.mlu",
+      "NRAM f32[BM, BN] accumulator, NRAM bf16[BM, BK] lhs and NRAM bf16[BN, "
+      "BK] transposed rhs",
+      "pitched NRAM tiles [BM, BK] and [BN, BK]", "f32",
+      "updates NRAM f32[BM, BN] accumulator in place",
+      "exact IEEE-754 binary32 BF16 multiply-add preserving subnormals, signed "
+      "zeros, Inf and NaN",
+      [](Operation *op) {
+        auto acc = dyn_cast<MemRefType>(op->getOperand(0).getType());
+        auto lhs = dyn_cast<MemRefType>(op->getOperand(1).getType());
+        auto rhs = dyn_cast<MemRefType>(op->getOperand(2).getType());
+        return success(isSpace(op->getOperand(0), 1) &&
+                       isSpace(op->getOperand(1), 1) &&
+                       isSpace(op->getOperand(2), 1) &&
+                       acc.getElementType().isF32() &&
+                       lhs.getElementType().isBF16() &&
+                       rhs.getElementType().isBF16());
+      });
+
+  add("bf16-acc-narrow", "bf16_acc_narrow", "bf16_acc_narrow", "matrix.mlu",
+      "NRAM bf16 destination, NRAM f32 accumulator and i1 strict flag",
+      "contiguous NRAM tile", "f32", "writes NRAM bf16 destination",
+      "round-to-nearest-even f32->bf16 preserving NaN payloads on strict path",
+      [](Operation *op) {
+        auto dst = dyn_cast<MemRefType>(op->getOperand(0).getType());
+        auto acc = dyn_cast<MemRefType>(op->getOperand(1).getType());
+        return success(isSpace(op->getOperand(0), 1) &&
+                       isSpace(op->getOperand(1), 1) &&
+                       dst.getElementType().isBF16() &&
+                       acc.getElementType().isF32() &&
+                       op->getOperand(3).getType().isInteger(1));
+      });
+
+  add("i32-to-bf16", "i32_to_bf16", "signed_to_bf16", "matrix.mlu",
+      "scalar i32 value", "scalar value", "i32", "pure scalar bf16 result",
+      "correctly rounded IEEE round-to-nearest-even signed i32 to bf16",
+      [](Operation *op) {
+        return success(op->getOperand(0).getType().isInteger(32) &&
+                       op->getResult(0).getType().isBF16());
+      });
 
   add("row-reduce", "row_reduce", "group_sum/group_max_num", "reduce.mlu",
       "NRAM f32 pitched input, NRAM f32 scratch, per-member f32 output",
@@ -103,7 +315,7 @@ void rowContracts(Unit &unit) {
             dstTy.getElementType() != srcTy.getElementType())
           return failure();
         unsigned bits = dstTy.getElementTypeBitWidth();
-        return success(bits == 16 || bits == 32);
+        return success(bits == 8 || bits == 16 || bits == 32);
       });
 
   add("certified-half-quotient", "narrow_quotient", "group_narrow_quotient",

@@ -22,7 +22,9 @@ std::string ctype(Type t) {
     return "unsigned short";
   if (t.isInteger(1))
     return "unsigned char";
-  if (t.isInteger(8))
+  if (t.isSignedInteger(8))
+    return "signed char";
+  if (t.isInteger(8) || isa<Float8E4M3FNType>(t))
     return "unsigned char";
   if (t.isInteger(32))
     return "int";
@@ -89,6 +91,11 @@ void loadRuntimeSources(TerminalPrinter &p) {
       {"exits/bangc::moments-merge", "runtime/bangc/kernels/moments.mlu"},
       {"exits/bangc::philox4x32-linear", "runtime/bangc/kernels/philox.mlu"},
       {"exits/bangc::philox4x32-element", "runtime/bangc/kernels/philox.mlu"},
+      {"exits/bangc::ieee-vec-min", "runtime/bangc/kernels/matrix.mlu"},
+      {"exits/bangc::bf16-panel-guard", "runtime/bangc/kernels/matrix.mlu"},
+      {"exits/bangc::bf16-ieee-dot", "runtime/bangc/kernels/matrix.mlu"},
+      {"exits/bangc::bf16-acc-narrow", "runtime/bangc/kernels/matrix.mlu"},
+      {"exits/bangc::i32-to-bf16", "runtime/bangc/kernels/matrix.mlu"},
   };
   for (auto [key, res] : bindings)
     if (auto txt = ks->getString(res))
@@ -140,6 +147,22 @@ TerminalPrinter rowPrinter() {
     return llvm::Error::success();
   };
 
+  rules["bangc_src.matrix_program"] = [](Operation &op, PrintPoint pt,
+                                         PrintContext &c) {
+    if (pt == PrintPoint::Enter) {
+      c.line("#include <bang.h>");
+      c.line("#include <cnrt.h>");
+      c.line("#include <math.h>");
+      auto bm = op.getAttrOfType<IntegerAttr>("tile_m").getInt();
+      auto bn = op.getAttrOfType<IntegerAttr>("tile_n").getInt();
+      auto bk = op.getAttrOfType<IntegerAttr>("tile_k").getInt();
+      c.line("constexpr int BM = " + std::to_string(bm) +
+             ", BN = " + std::to_string(bn) +
+             ", BK = " + std::to_string(bk) + ";");
+    }
+    return llvm::Error::success();
+  };
+
   enter("bangc_src.runtime_source",
         [](Operation &op, PrintContext &c) -> llvm::Error {
           auto key = op.getAttrOfType<StringAttr>("implementation").getValue();
@@ -179,6 +202,22 @@ TerminalPrinter rowPrinter() {
   enter("bangc_src.nram_alloc", [](Operation &op, PrintContext &c) {
     c.line("__nram__ unsigned char " + c.name(op.getResult(0)) +
            "[BYTES] __attribute__((aligned(128)));");
+    return llvm::Error::success();
+  });
+
+  enter("bangc_src.nram_buffer", [](Operation &op, PrintContext &c) {
+    auto t = ctype(op.getResult(0).getType());
+    auto elems = op.getAttrOfType<IntegerAttr>("elements").getInt();
+    c.line("__nram__ " + t + " " + c.name(op.getResult(0)) + "[" +
+           std::to_string(elems) + "] __attribute__((aligned(128)));");
+    return llvm::Error::success();
+  });
+
+  enter("bangc_src.wram_buffer", [](Operation &op, PrintContext &c) {
+    auto t = ctype(op.getResult(0).getType());
+    auto elems = op.getAttrOfType<IntegerAttr>("elements").getInt();
+    c.line("__wram__ " + t + " " + c.name(op.getResult(0)) + "[" +
+           std::to_string(elems) + "] __attribute__((aligned(128)));");
     return llvm::Error::success();
   });
 
@@ -294,24 +333,26 @@ TerminalPrinter rowPrinter() {
   enter("bangc_src.memcpy_1d", [](Operation &op, PrintContext &c) {
     bool async = op.getAttrOfType<BoolAttr>("async").getValue();
     auto dir = op.getAttrOfType<StringAttr>("direction").str();
+    auto elemTy = ctype(op.getOperand(0).getType());
     auto dst = c.name(op.getOperand(0)), src = c.name(op.getOperand(1)),
          cnt = c.name(op.getOperand(2));
     c.line(std::string(async ? "__memcpy_async" : "__memcpy") + "(" + dst +
-           ", " + src + ", (int)(" + cnt + ") * sizeof(*" + dst + "), " + dir +
-           ");");
+           ", " + src + ", (int)(" + cnt + ") * (int)sizeof(" + elemTy + "), " +
+           dir + ");");
     return llvm::Error::success();
   });
 
   enter("bangc_src.memcpy_2d", [](Operation &op, PrintContext &c) {
     bool async = op.getAttrOfType<BoolAttr>("async").getValue();
     auto dir = op.getAttrOfType<StringAttr>("direction").str();
+    auto elemTy = ctype(op.getOperand(0).getType());
     auto dst = c.name(op.getOperand(0)), src = c.name(op.getOperand(1)),
          w = c.name(op.getOperand(2)), ds = c.name(op.getOperand(3)),
          ss = c.name(op.getOperand(4)), seg = c.name(op.getOperand(5));
     c.line(std::string(async ? "__memcpy_async" : "__memcpy") + "(" + dst +
-           ", " + src + ", (int)(" + w + ") * sizeof(*" + dst + "), " + dir +
-           ", (int)(" + ds + ") * sizeof(*" + dst + "), (int)(" + ss +
-           ") * sizeof(*" + dst + "), (int)(" + seg + "));");
+           ", " + src + ", (int)(" + w + ") * (int)sizeof(" + elemTy + "), " +
+           dir + ", (int)(" + ds + ") * (int)sizeof(" + elemTy + "), (int)(" +
+           ss + ") * (int)sizeof(" + elemTy + "), (int)(" + seg + "));");
     return llvm::Error::success();
   });
 
@@ -409,7 +450,15 @@ TerminalPrinter rowPrinter() {
       expr = "(1.0f / sqrtf(" + a0 + "))";
     else if (k == "exp")
       expr = "expf(" + a0 + ")";
-    else if (k == "max_num")
+    else if (k == "fabs")
+      expr = "fabsf(" + a0 + ")";
+    else if (k == "floor")
+      expr = "floorf(" + a0 + ")";
+    else if (k == "min_ieee") {
+      auto a1 = c.name(op.getOperand(1));
+      expr = "(isnan((float)(" + a0 + ")) ? (" + a0 + ") : (isnan((float)(" +
+             a1 + ")) ? (" + a1 + ") : fminf(" + a0 + ", " + a1 + ")))";
+    } else if (k == "max_num")
       expr = "fmaxf(" + a0 + ", " + c.name(op.getOperand(1)) + ")";
     else if (k == "maximum_nan") {
       auto a1 = c.name(op.getOperand(1));
@@ -442,12 +491,102 @@ TerminalPrinter rowPrinter() {
 
   enter("bangc_src.tile_transpose", [](Operation &op, PrintContext &c) {
     auto ty = cast<MemRefType>(op.getOperand(0).getType());
-    std::string fnName = ty.getElementTypeBitWidth() == 16
-                             ? "transpose_tile_b16"
-                             : "transpose_tile_b32";
+    unsigned bits = ty.getElementTypeBitWidth();
+    std::string fnName = bits == 8    ? "transpose_tile_b8"
+                         : bits == 16 ? "transpose_tile_b16"
+                                      : "transpose_tile_b32";
     c.line(fnName + "(" + c.name(op.getOperand(0)) + ", " +
            c.name(op.getOperand(1)) + ", (int)(" + c.name(op.getOperand(2)) +
            "), (int)(" + c.name(op.getOperand(3)) + "));");
+    return llvm::Error::success();
+  });
+
+  enter("bangc_src.wram_conv", [](Operation &op, PrintContext &c) {
+    auto mode = op.getAttrOfType<StringAttr>("mode").getValue();
+    auto bm = std::to_string(op.getAttrOfType<IntegerAttr>("bm").getInt());
+    auto bn = std::to_string(op.getAttrOfType<IntegerAttr>("bn").getInt());
+    auto bk = std::to_string(op.getAttrOfType<IntegerAttr>("bk").getInt());
+    if (mode == "i8") {
+      auto acc = c.name(op.getOperand(0)), part = c.name(op.getOperand(1)),
+           lhs = c.name(op.getOperand(2)), flt = c.name(op.getOperand(3));
+      c.line("__bang_conv(" + part + ", (signed char *)" + lhs +
+             ", (signed char *)" + flt + ", " + bk + ", " + bm +
+             ", 1, 1, 1, 1, 1, " + bn + ", 0);");
+      c.line("__bang_float2int32_rn((int *)" + part + ", " + part + ", " + bm +
+             " * " + bn + ", 0);");
+      c.line("__bang_add(" + acc + ", " + acc + ", (int *)" + part + ", " + bm +
+             " * " + bn + ");");
+      return llvm::Error::success();
+    }
+    auto acc = c.name(op.getOperand(0)), lhs = c.name(op.getOperand(1)),
+         flt = c.name(op.getOperand(2)), accum = c.name(op.getOperand(3));
+    std::string ptrTy = mode == "bf16" ? "bfloat16_t" : "half";
+    c.line("if (" + accum + ") __bang_conv_partial(" + acc + ", (" + ptrTy +
+           " *)" + lhs + ", (" + ptrTy + " *)" + flt + ", " + acc + ", " + bk +
+           ", " + bm + ", 1, 1, 1, 1, 1, " + bn +
+           "); else __bang_conv(" + acc + ", (" + ptrTy + " *)" + lhs + ", (" +
+           ptrTy + " *)" + flt + ", " + bk + ", " + bm + ", 1, 1, 1, 1, 1, " +
+           bn + ");");
+    return llvm::Error::success();
+  });
+
+  enter("bangc_src.cycle_mul", [](Operation &op, PrintContext &c) {
+    c.line("__bang_cycle_mul(" + c.name(op.getOperand(0)) + ", " +
+           c.name(op.getOperand(1)) + ", " + c.name(op.getOperand(2)) +
+           ", (int)(" + c.name(op.getOperand(3)) + "), (int)(" +
+           c.name(op.getOperand(4)) + "));");
+    return llvm::Error::success();
+  });
+
+  enter("bangc_src.vec_min_scalar", [](Operation &op, PrintContext &c) {
+    c.line("vec_min_scalar_ieee(" + c.name(op.getOperand(0)) + ", " +
+           c.name(op.getOperand(1)) + ", " + c.name(op.getOperand(2)) + ", " +
+           c.name(op.getOperand(3)) + ", (int)(" + c.name(op.getOperand(4)) +
+           "), (int)(" + c.name(op.getOperand(5)) + "));");
+    return llvm::Error::success();
+  });
+
+  enter("bangc_src.bf16_panel_ok", [](Operation &op, PrintContext &c) {
+    c.line("unsigned char " + c.name(op.getResult(0)) +
+           " = ordinary_panel((const unsigned short *)" +
+           c.name(op.getOperand(0)) + ", (int)(" + c.name(op.getOperand(3)) +
+           "), (unsigned short *)" + c.name(op.getOperand(1)) +
+           ", (unsigned short *)" + c.name(op.getOperand(2)) + ");");
+    return llvm::Error::success();
+  });
+
+  enter("bangc_src.bf16_ieee_dot", [](Operation &op, PrintContext &c) {
+    c.line("bf16_ieee_dot_panel(" + c.name(op.getOperand(0)) +
+           ", (const unsigned short *)" + c.name(op.getOperand(1)) +
+           ", (const unsigned short *)" + c.name(op.getOperand(2)) +
+           ", (int)(" + c.name(op.getOperand(3)) + "), (int)(" +
+           c.name(op.getOperand(4)) + "), (int)(" + c.name(op.getOperand(5)) +
+           "), (int)(" + c.name(op.getOperand(6)) + "), (int)(" +
+           c.name(op.getOperand(7)) + "));");
+    return llvm::Error::success();
+  });
+
+  enter("bangc_src.bf16_acc_narrow", [](Operation &op, PrintContext &c) {
+    c.line("bf16_acc_narrow((unsigned short *)" + c.name(op.getOperand(0)) +
+           ", " + c.name(op.getOperand(1)) + ", (int)(" +
+           c.name(op.getOperand(2)) + "), " + c.name(op.getOperand(3)) + ");");
+    return llvm::Error::success();
+  });
+
+  enter("bangc_src.i32_to_bf16", [](Operation &op, PrintContext &c) {
+    c.line("unsigned short " + c.name(op.getResult(0)) + " = signed_to_bf16(" +
+           c.name(op.getOperand(0)) + ");");
+    return llvm::Error::success();
+  });
+
+  enter("bangc_src.from_le_half", [](Operation &op, PrintContext &c) {
+    auto res = c.name(op.getResult(0));
+    auto lo = c.name(op.getOperand(0)), hi = c.name(op.getOperand(1));
+    c.line("float " + res +
+           "; { union { unsigned short u; half h; } _h; _h.u = (unsigned "
+           "short)(((unsigned)(" +
+           lo + ") & 0xffu) | (((unsigned)(" + hi + ") & 0xffu) << 8)); " +
+           res + " = (float)_h.h; }");
     return llvm::Error::success();
   });
 
@@ -638,7 +777,12 @@ TerminalPrinter rowPrinter() {
         lit = ia.getValue().isZero() ? "0" : "1";
       else if (resTy.isUnsignedInteger(64))
         lit = std::to_string(ia.getUInt()) + "ULL";
-      else if (resTy.isInteger(32)) {
+      else if (resTy.isSignedInteger()) {
+        int64_t val = ia.getSInt();
+        lit = std::to_string(val);
+      } else if (resTy.isInteger(8)) {
+        lit = std::to_string(ia.getInt());
+      } else if (resTy.isInteger(32)) {
         int64_t val = ia.getInt();
         lit = val == INT32_MIN ? "(-2147483647 - 1)" : std::to_string(val);
       } else {
@@ -648,7 +792,7 @@ TerminalPrinter rowPrinter() {
       }
     } else {
       auto fa = cast<FloatAttr>(v);
-      if (resTy.isBF16()) {
+      if (resTy.isBF16() || isa<Float8E4M3FNType>(resTy)) {
         lit = std::to_string(fa.getValue().bitcastToAPInt().getZExtValue()) +
               "U";
       } else if (fa.getValue().isInfinity()) {
@@ -682,6 +826,7 @@ TerminalPrinter rowPrinter() {
   for (auto [opName, tok] : {std::pair{"arith.divsi", "/"},
                              {"arith.remsi", "%"},
                              {"arith.andi", "&"},
+                             {"arith.ori", "|"},
                              {"arith.xori", "^"},
                              {"arith.addf", "+"},
                              {"arith.subf", "-"},
@@ -710,6 +855,26 @@ TerminalPrinter rowPrinter() {
     auto t = ctype(op.getResult(0).getType());
     c.line(t + " " + c.name(op.getResult(0)) + " = (" + c.name(op.getOperand(0)) +
            ") >> (" + c.name(op.getOperand(1)) + ");");
+    return llvm::Error::success();
+  });
+
+  enter("arith.shrui", [](Operation &op, PrintContext &c) {
+    auto resTy = op.getResult(0).getType();
+    auto t = ctype(resTy);
+    std::string u = resTy.isInteger(32) ? "unsigned" : "unsigned long long";
+    c.line(t + " " + c.name(op.getResult(0)) + " = (" + t + ")((" + u + ")(" +
+           c.name(op.getOperand(0)) + ") >> (" + c.name(op.getOperand(1)) +
+           "));");
+    return llvm::Error::success();
+  });
+
+  enter("arith.bitcast", [](Operation &op, PrintContext &c) {
+    auto fromT = ctype(op.getOperand(0).getType());
+    auto toT = ctype(op.getResult(0).getType());
+    auto res = c.name(op.getResult(0));
+    c.line(toT + " " + res + "; { union { " + fromT + " a; " + toT +
+           " b; } _bc; _bc.a = " + c.name(op.getOperand(0)) + "; " + res +
+           " = _bc.b; }");
     return llvm::Error::success();
   });
 
@@ -749,10 +914,39 @@ TerminalPrinter rowPrinter() {
 
   enter("arith.cmpf", [](Operation &op, PrintContext &c) {
     auto pred = cast<arith::CmpFOp>(op).getPredicate();
-    auto a = c.name(op.getOperand(0)), b = c.name(op.getOperand(1));
-    std::string expr = pred == arith::CmpFPredicate::UNE
-                           ? "((float)(" + a + ") != (float)(" + b + "))"
-                           : "((float)(" + a + ") > (float)(" + b + "))";
+    auto a = "((float)(" + c.name(op.getOperand(0)) + "))";
+    auto b = "((float)(" + c.name(op.getOperand(1)) + "))";
+    std::string expr;
+    switch (pred) {
+    case arith::CmpFPredicate::OEQ:
+      expr = "(" + a + " == " + b + ")";
+      break;
+    case arith::CmpFPredicate::ONE:
+      expr = "(!isnan(" + a + ") && !isnan(" + b + ") && " + a + " != " + b +
+             ")";
+      break;
+    case arith::CmpFPredicate::OGT:
+      expr = "(" + a + " > " + b + ")";
+      break;
+    case arith::CmpFPredicate::OGE:
+      expr = "(" + a + " >= " + b + ")";
+      break;
+    case arith::CmpFPredicate::OLT:
+      expr = "(" + a + " < " + b + ")";
+      break;
+    case arith::CmpFPredicate::OLE:
+      expr = "(" + a + " <= " + b + ")";
+      break;
+    case arith::CmpFPredicate::UNE:
+      expr = "(" + a + " != " + b + ")";
+      break;
+    case arith::CmpFPredicate::UNO:
+      expr = "(isnan(" + a + ") || isnan(" + b + "))";
+      break;
+    default:
+      expr = "(" + a + " > " + b + ")";
+      break;
+    }
     c.line("unsigned char " + c.name(op.getResult(0)) + " = " + expr + ";");
     return llvm::Error::success();
   });
@@ -775,7 +969,7 @@ TerminalPrinter rowPrinter() {
       if (llvm::StringRef(castOp) == "arith.extui" ||
           llvm::StringRef(castOp) == "arith.uitofp") {
         auto inTy = op.getOperand(0).getType();
-        if (inTy.isInteger(1))
+        if (inTy.isInteger(1) || inTy.isInteger(8))
           src = "(unsigned char)(" + src + ")";
         else if (inTy.isInteger(32))
           src = "(unsigned int)(" + src + ")";
