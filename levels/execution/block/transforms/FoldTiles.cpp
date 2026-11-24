@@ -9,7 +9,8 @@ struct Fragment {
 };
 } // namespace
 SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
-                                         Value mask) {
+                                         Value mask,
+                                         const OnlinePanelFusion *online) {
   int64_t span =
       loop->getAttrOfType<IntegerAttr>("block.contribution_width").getInt();
   bool paired = space.hasAttr("block.pair_axis");
@@ -38,6 +39,11 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
                  loc, b.create<arith::FloorDivSIOp>(loc, lo, width), width));
   SmallVector<Value> init;
   SmallVector<Type> types;
+  if (online) {
+    auto mTy = shaped({rows}, b.getF32Type());
+    init.push_back(broadcast(scalar(-INFINITY), mTy));
+    types.push_back(mTy);
+  }
   for (auto v : loop.getInitArgs()) {
     auto t = lifted(v);
     init.push_back(broadcast(at(v, parent), t));
@@ -46,11 +52,24 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
   Value begin = start, end = hi, stride = width;
   bool counted = loop->hasAttr("block.counted_panels");
   if (counted) {
-    begin = b.create<arith::TruncIOp>(
-        loc, b.getI32Type(), b.create<arith::DivUIOp>(loc, start, width));
-    auto last = b.create<arith::AddIOp>(loc, hi, integer(span - 1));
-    end = b.create<arith::TruncIOp>(loc, b.getI32Type(),
-                                    b.create<arith::DivUIOp>(loc, last, width));
+    auto constI64 = [](Value v) -> std::optional<int64_t> {
+      if (auto c = v.getDefiningOp<arith::ConstantOp>())
+        if (auto ia = dyn_cast<IntegerAttr>(c.getValue()))
+          return ia.getInt();
+      return std::nullopt;
+    };
+    if (auto cs = constI64(start))
+      begin = b.create<arith::ConstantIntOp>(loc, *cs / span, 32);
+    else
+      begin = b.create<arith::TruncIOp>(
+          loc, b.getI32Type(), b.create<arith::DivUIOp>(loc, start, width));
+    if (auto ch = constI64(hi))
+      end = b.create<arith::ConstantIntOp>(loc, (*ch + span - 1) / span, 32);
+    else {
+      auto last = b.create<arith::AddIOp>(loc, hi, integer(span - 1));
+      end = b.create<arith::TruncIOp>(
+          loc, b.getI32Type(), b.create<arith::DivUIOp>(loc, last, width));
+    }
     stride = b.create<arith::ConstantIntOp>(loc, 1, 32);
   }
   auto l = b.create<scf::ForOp>(loc, begin, end, stride, init);
@@ -100,6 +119,14 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
     return x.axis == Axis::Owner ? uniform(x.value) : x.value;
   };
   llvm::SmallPtrSet<Operation *, 16> folded;
+  Operation *onlineAnchor = nullptr;
+  Value onlineMNew, onlineAlpha;
+  if (online) {
+    onlineAnchor = online->guardOp ? online->guardOp : online->expOp;
+    folded.insert(online->subOp);
+    if (onlineAnchor != online->expOp)
+      folded.insert(online->expOp);
+  }
   auto yielded = loop.getBody()->getTerminator()->getOperands();
   for (Value r : yielded) {
     auto *comb = r.getDefiningOp();
@@ -110,8 +137,12 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
       for (Value input : product->getOperands())
         if (auto *op = input.getDefiningOp();
             op && op->getName().stripDialect() == "lane_splat" &&
-            input.hasOneUse())
+            input.hasOneUse()) {
           folded.insert(op);
+          if (auto *ext = op->getOperand(0).getDefiningOp();
+              ext && isa<arith::ExtFOp>(ext) && op->getOperand(0).hasOneUse())
+            folded.insert(ext);
+        }
     }
   }
   for (auto &o : *loop.getBody())
@@ -135,126 +166,231 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
           ->getResult(0);
     return uniform(x.value);
   };
-  for (auto &old : loop.getBody()->without_terminator()) {
-    if (folded.contains(&old))
-      continue;
-    auto code = old.getName().stripDialect();
-    auto out = old.getResult(0);
-    auto operand = [&](int i) { return value(old.getOperand(i)); };
-    Fragment result;
-    if (auto c = dyn_cast<arith::ConstantOp>(old))
-      result = {constant(c), Axis::Scalar};
-    else if (code == "slice_read" || isa<memref::LoadOp>(old)) {
-      auto view = old.getOperand(0);
-      SmallVector<Value> coords;
-      SmallVector<int64_t> axes;
-      for (auto v : old.getOperands().drop_front()) {
-        auto ix = widen(coordinate(v));
-        coords.push_back(broadcast(ix, tokenType));
-        axes.push_back(0);
-      }
-      if (code == "slice_read" && access.panel) {
-        SmallVector<Value> outer;
-        for (auto v : old.getOperands().drop_front())
-          outer.push_back(widen(coordinate(v)));
-        auto n = shape(view)[old.getAttrOfType<IntegerAttr>("axis").getInt()];
-        if (Value tile = access.panel(*this, old, outer, base, span, n)) {
-          auto zero = castElement(scalar(0), elem(tile.getType()));
-          auto maskType =
-              cast<RankedTensorType>(tile.getType()).clone(b.getI1Type());
-          local[out] = {full ? tile
-                             : select(broadcast(any, maskType, 0), tile,
-                                      broadcast(zero, tile.getType())),
-                        Axis::Token};
-          continue;
+  auto combineRole = [](ArrayRef<Fragment> inputs) {
+    Axis role = Axis::Scalar;
+    for (const auto &in : inputs)
+      if (in.axis != Axis::Scalar && in.axis != role)
+        role = role == Axis::Scalar ? in.axis : Axis::Both;
+    return role;
+  };
+  BlockArgument pairOwner;
+  if (auto pairAttr = space.getAttrOfType<IntegerAttr>("block.pair_axis"))
+    pairOwner = space.getRegion(0).front().getArgument(pairAttr.getInt());
+  auto promoteInputs = [&](ArrayRef<Fragment> inputs, Value out, Axis &role,
+                           Type &dst) {
+    bool sharedIdx =
+        paired && out.getType().isIndex() &&
+        intentdsl::block::sharedCoordinate(out, pairOwner, loop, logical);
+    SmallVector<Value> args;
+    for (auto x : inputs) {
+      auto arg = x.value;
+      if (!paired) {
+        arg = singleMember(x);
+        if (isa<RankedTensorType>(out.getType())) {
+          auto n = std::max<int64_t>(
+              1, llvm::PowerOf2Ceil(
+                     intentdsl::kir::memberExtent(fn, out, "block.shape")));
+          arg = broadcast(arg, shaped({span, n}, elem(arg.getType())),
+                          x.axis == Axis::Token ? 0 : 1);
         }
-      }
-      Value accessMask = any;
-      if (code == "slice_read") {
-        auto ax = old.getAttrOfType<IntegerAttr>("axis").getInt(),
-             n = shape(view)[ax];
-        int64_t padded = std::max<int64_t>(1, llvm::PowerOf2Ceil(n));
-        Value k = lanes(padded);
-        coords.insert(coords.begin() + ax, k);
-        axes.insert(axes.begin() + ax, 1);
-        auto m = shaped({span, padded}, b.getI1Type());
-        accessMask = broadcast(any, m, 0);
-        if (padded != n) {
-          auto within = b.create<arith::CmpIOp>(
-              loc, arith::CmpIPredicate::slt, k, like(integer(n), k.getType()));
-          accessMask =
-              b.create<arith::AndIOp>(loc, accessMask, broadcast(within, m, 1));
-        }
-      }
-      bool whole =
-          full && (code != "slice_read" ||
-                   llvm::isPowerOf2_64(shape(
-                       view)[old.getAttrOfType<IntegerAttr>("axis").getInt()]));
-      result = {
-          read(view, address(view, coords, axes), whole ? Value() : accessMask),
-          Axis::Token};
-    } else if (old.hasAttr("block.pair_dot")) {
-      auto operands = *intentdsl::block::tileDot(&old, loop);
-      result = {
-          dot(value(operands.rows).value, value(operands.tokens).value, true),
-          Axis::Both};
-    } else if (code == "lane_splat") {
-      auto x = operand(0);
-      int64_t n =
-          std::max<int64_t>(1, llvm::PowerOf2Ceil(intentdsl::kir::memberExtent(
-                                   fn, out, "block.shape")));
-      result = {
-          broadcast(singleMember(x), shaped({span, n}, elem(out.getType())), 0),
-          Axis::Token};
-    } else if (code == "lane_sum")
-      result = {reduce(operand(0).value, "sum", 1), Axis::Token};
-    else {
-      SmallVector<Fragment> inputs;
-      for (Value v : old.getOperands())
-        inputs.push_back(value(v));
-      Axis role = inputs.front().axis;
-      if (inputs.size() == 2 && inputs[1].axis != Axis::Scalar &&
-          inputs[1].axis != role)
-        role = role == Axis::Scalar ? inputs[1].axis : Axis::Both;
-      SmallVector<Value> args;
-      Type dst;
-      for (auto x : inputs) {
-        auto arg = x.value;
-        if (!paired) {
-          arg = singleMember(x);
-          role = Axis::Token;
-          // A single owner's member vector is broadcast across token rows.
-          if (isa<RankedTensorType>(old.getResult(0).getType())) {
-            auto n = std::max<int64_t>(
-                1, llvm::PowerOf2Ceil(
-                       intentdsl::kir::memberExtent(fn, out, "block.shape")));
-            arg = broadcast(arg, shaped({span, n}, elem(arg.getType())),
-                            x.axis == Axis::Token ? 0 : 1);
-          }
-        } else if (out.getType().isIndex()) {
-          if (x.axis == Axis::Owner)
-            arg = uniform(arg);
-          role = llvm::any_of(inputs,
-                              [](Fragment f) { return f.axis == Axis::Token; })
-                     ? Axis::Token
-                     : Axis::Scalar;
-        } else if (role == Axis::Both)
-          arg = plane(x);
-        args.push_back(arg);
-        if (!dst || isa<RankedTensorType>(arg.getType()))
-          dst = arg.getType();
-      }
-      auto ty = elem(out.getType());
-      if (ty.isIndex())
-        ty = b.getI64Type();
-      if (auto s = dyn_cast<RankedTensorType>(dst))
-        ty = s.clone(ty);
-      result = {apply(old, args, ty), role};
+      } else if (sharedIdx) {
+        if (x.axis == Axis::Owner)
+          arg = uniform(arg);
+        role = llvm::any_of(inputs,
+                            [](Fragment f) { return f.axis == Axis::Token; })
+                   ? Axis::Token
+                   : Axis::Scalar;
+      } else if (role == Axis::Both)
+        arg = plane(x);
+      args.push_back(arg);
+      if (auto rt = dyn_cast<RankedTensorType>(arg.getType());
+          rt && (!dst || !isa<RankedTensorType>(dst) ||
+                 rt.getRank() > cast<RankedTensorType>(dst).getRank()))
+        dst = rt;
+      else if (!dst)
+        dst = arg.getType();
     }
-    local[out] = result;
-  }
+    if (!paired)
+      role = isa<RankedTensorType>(dst) ? Axis::Token : Axis::Scalar;
+    return args;
+  };
+  std::function<SmallVector<Fragment>(Block &)> lowerFoldBlock =
+      [&](Block &blk) -> SmallVector<Fragment> {
+    for (auto &old : blk.without_terminator()) {
+      if (folded.contains(&old))
+        continue;
+      if (&old == onlineAnchor) {
+        Value sTile = paired ? plane(value(online->scoreVal))
+                             : singleMember(value(online->scoreVal));
+        if (!isa<RankedTensorType>(sTile.getType()))
+          sTile = broadcast(sTile, shaped({span}, b.getF32Type()));
+        Value validMask;
+        if (online->condVal) {
+          Value cTile = paired ? plane(value(online->condVal))
+                               : singleMember(value(online->condVal));
+          validMask = broadcast(
+              cTile, cast<RankedTensorType>(sTile.getType()).clone(b.getI1Type()));
+        }
+        if (!full) {
+          Value domMask = paired ? live : any;
+          validMask = validMask
+                          ? Value(b.create<arith::AndIOp>(loc, validMask, domMask))
+                          : domMask;
+        }
+        Value negInfTile = broadcast(scalar(-INFINITY), sTile.getType());
+        Value sMasked = validMask ? select(validMask, sTile, negInfTile) : sTile;
+        Value mPrev = l.getRegionIterArgs()[0];
+        Value mPanel =
+            broadcast(reduce(sMasked, "max", paired ? 1 : 0), mPrev.getType());
+        onlineMNew = b.create<arith::MaxNumFOp>(loc, mPrev, mPanel);
+        Value negInfRow = broadcast(scalar(-INFINITY), onlineMNew.getType());
+        Value zeroRow = broadcast(scalar(0.f), onlineMNew.getType());
+        Value allMasked = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OEQ,
+                                                  onlineMNew, negInfRow);
+        Value mSafe = select(allMasked, zeroRow, onlineMNew);
+        Value mDiff = b.create<arith::SubFOp>(loc, mPrev, mSafe);
+        onlineAlpha = online->isExp2
+                          ? Value(b.create<math::Exp2Op>(loc, mDiff))
+                          : Value(b.create<math::ExpOp>(loc, mDiff));
+        Value mSafeTile =
+            paired ? plane({mSafe, Axis::Owner})
+                   : broadcast(singleMember({mSafe, Axis::Owner}), sTile.getType());
+        Value sShift = b.create<arith::SubFOp>(loc, sTile, mSafeTile);
+        Value wRaw = online->isExp2
+                         ? Value(b.create<math::Exp2Op>(loc, sShift))
+                         : Value(b.create<math::ExpOp>(loc, sShift));
+        Value zeroTile = broadcast(scalar(0.f), sTile.getType());
+        Value wTile = validMask ? select(validMask, wRaw, zeroTile) : wRaw;
+        local[online->weightVal] = {wTile, paired ? Axis::Both : Axis::Token};
+        continue;
+      }
+      if (auto br = dyn_cast<scf::IfOp>(old)) {
+        auto cFrag = value(br.getCondition());
+        auto yes = lowerFoldBlock(*br.thenBlock());
+        auto no = lowerFoldBlock(*br.elseBlock());
+        for (auto [res, tFrag, fFrag] :
+             llvm::zip(br.getResults(), yes, no)) {
+          SmallVector<Fragment, 3> tri{cFrag, tFrag, fFrag};
+          Axis role = combineRole(tri);
+          Type dst;
+          auto args = promoteInputs(tri, res, role, dst);
+          auto ty = elem(res.getType());
+          if (ty.isIndex())
+            ty = b.getI64Type();
+          if (auto s = dyn_cast<RankedTensorType>(dst))
+            ty = s.clone(ty);
+          local[res] = {
+              select(args[0], broadcast(args[1], ty), broadcast(args[2], ty)),
+              role};
+        }
+        continue;
+      }
+      auto code = old.getName().stripDialect();
+      auto out = old.getResult(0);
+      auto operand = [&](int i) { return value(old.getOperand(i)); };
+      Fragment result;
+      if (auto c = dyn_cast<arith::ConstantOp>(old))
+        result = {constant(c), Axis::Scalar};
+      else if (code == "slice_read" || isa<memref::LoadOp>(old)) {
+        auto view = old.getOperand(0);
+        SmallVector<Value> coords;
+        SmallVector<int64_t> axes;
+        for (auto v : old.getOperands().drop_front()) {
+          auto ix = widen(coordinate(v));
+          coords.push_back(broadcast(ix, tokenType));
+          axes.push_back(0);
+        }
+        if (code == "slice_read" && access.panel) {
+          SmallVector<Value> outer;
+          for (auto v : old.getOperands().drop_front())
+            outer.push_back(widen(coordinate(v)));
+          auto n = shape(view)[old.getAttrOfType<IntegerAttr>("axis").getInt()];
+          if (Value tile = access.panel(*this, old, outer, base, span, n)) {
+            auto zero = castElement(scalar(0), elem(tile.getType()));
+            auto maskType =
+                cast<RankedTensorType>(tile.getType()).clone(b.getI1Type());
+            local[out] = {full ? tile
+                               : select(broadcast(any, maskType, 0), tile,
+                                        broadcast(zero, tile.getType())),
+                          Axis::Token};
+            continue;
+          }
+        }
+        Value accessMask = any;
+        if (code == "slice_read") {
+          auto ax = old.getAttrOfType<IntegerAttr>("axis").getInt(),
+               n = shape(view)[ax];
+          int64_t padded = std::max<int64_t>(1, llvm::PowerOf2Ceil(n));
+          Value k = lanes(padded);
+          coords.insert(coords.begin() + ax, k);
+          axes.insert(axes.begin() + ax, 1);
+          auto m = shaped({span, padded}, b.getI1Type());
+          accessMask = broadcast(any, m, 0);
+          if (padded != n) {
+            auto within = b.create<arith::CmpIOp>(
+                loc, arith::CmpIPredicate::slt, k,
+                like(integer(n), k.getType()));
+            accessMask = b.create<arith::AndIOp>(loc, accessMask,
+                                                 broadcast(within, m, 1));
+          }
+        }
+        bool whole = full && (code != "slice_read" ||
+                              llvm::isPowerOf2_64(shape(view)[
+                                  old.getAttrOfType<IntegerAttr>("axis")
+                                      .getInt()]));
+        result = {read(view, address(view, coords, axes),
+                       whole ? Value() : accessMask),
+                  Axis::Token};
+      } else if (old.hasAttr("block.pair_dot")) {
+        auto operands = *intentdsl::block::tileDot(&old, loop);
+        result = {
+            dot(value(operands.rows).value, value(operands.tokens).value, true),
+            Axis::Both};
+      } else if (code == "lane_splat") {
+        auto x = operand(0);
+        int64_t n = std::max<int64_t>(
+            1, llvm::PowerOf2Ceil(
+                   intentdsl::kir::memberExtent(fn, out, "block.shape")));
+        result = {
+            broadcast(singleMember(x), shaped({span, n}, elem(out.getType())),
+                      0),
+            Axis::Token};
+      } else if (code == "lane_sum")
+        result = {reduce(operand(0).value, "sum", 1), Axis::Token};
+      else {
+        SmallVector<Fragment> inputs;
+        for (Value v : old.getOperands())
+          inputs.push_back(value(v));
+        Axis role = combineRole(inputs);
+        Type dst;
+        auto args = promoteInputs(inputs, out, role, dst);
+        auto ty = elem(out.getType());
+        if (ty.isIndex())
+          ty = b.getI64Type();
+        if (auto s = dyn_cast<RankedTensorType>(dst))
+          ty = s.clone(ty);
+        result = {apply(old, args, ty), role};
+      }
+      local[out] = result;
+    }
+    SmallVector<Fragment> outs;
+    if (&blk != loop.getBody())
+      for (Value yv : blk.getTerminator()->getOperands())
+        outs.push_back(value(yv));
+    return outs;
+  };
+  (void)lowerFoldBlock(*loop.getBody());
   SmallVector<Value> next;
-  for (auto [ret, acc] : llvm::zip(yielded, l.getRegionIterArgs())) {
+  if (online)
+    next.push_back(onlineMNew);
+  auto accIterArgs =
+      l.getRegionIterArgs().drop_front(online ? 1 : 0);
+  for (auto [ret, rawAcc] : llvm::zip(yielded, accIterArgs)) {
+    Value acc = online
+                    ? Value(b.create<arith::MulFOp>(
+                          loc, rawAcc,
+                          broadcast(onlineAlpha, rawAcc.getType(), 0)))
+                    : rawAcc;
     auto *comb = ret.getDefiningOp();
     auto rhs = comb->getOperand(1);
     if (paired && comb->hasAttr("block.masked_dot_update")) {
@@ -390,8 +526,10 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
       Value keep = paired ? live : any;
       if (!isa<RankedTensorType>(x.getType()))
         x = broadcast(x, shaped({span}, elem(x.getType())));
-      Value term = select(
-          keep, x, broadcast(scalar(max ? -INFINITY : 0.f), x.getType()));
+      Value term =
+          full ? x
+               : select(keep, x,
+                        broadcast(scalar(max ? -INFINITY : 0.f), x.getType()));
       auto partial = reduce(term, max ? "max" : "sum", paired ? 1 : 0);
       if (!paired && isa<ShapedType>(rhs.getType()))
         partial = broadcast(partial, acc.getType(), 1);

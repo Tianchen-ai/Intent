@@ -202,8 +202,6 @@ include "intentdsl/levels/algorithm/kir/ir/Matrix.td"
 defm Matrix : MatrixExpressions<Itsrc_Dialect>;
 include "intentdsl/levels/algorithm/kir/ir/Ordered.td"
 defm Ordered : OrderedOwners<Itsrc_Dialect>;
-include "intentdsl/levels/execution/block/ir/ScorePanel.td"
-defm Score : ScoreTiles<Itsrc_Dialect>;
 include "intentdsl/levels/execution/block/ir/Columns.td"
 defm Columns : ColumnTiles<Itsrc_Dialect>;
 defm NativePanels : MatrixPanelLoop<Itsrc_Dialect>;

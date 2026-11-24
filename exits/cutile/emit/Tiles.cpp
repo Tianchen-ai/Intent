@@ -149,7 +149,10 @@ TerminalPrinter cutilePrinter() {
       for (auto [dst, src] : llvm::zip(loop.getResults(), loop.getInitArgs()))
         c.line(c.name(dst) + " = " + c.name(src));
       if (native) {
-        auto i32 = [&](Value v) {
+        auto i32 = [&](Value v) -> std::string {
+          if (auto cst = v.getDefiningOp<arith::ConstantOp>())
+            if (auto ia = dyn_cast<IntegerAttr>(cst.getValue()))
+              return std::to_string(ia.getInt());
           return "ct.astype(" + c.name(v) + ",ct.int32)";
         };
         c.line("for " + index + " in range(" + i32(loop.getLowerBound()) + "," +
@@ -378,6 +381,8 @@ TerminalPrinter cutilePrinter() {
            (pred == arith::CmpIPredicate::eq    ? "=="
             : pred == arith::CmpIPredicate::ne  ? "!="
             : pred == arith::CmpIPredicate::sge ? ">="
+            : pred == arith::CmpIPredicate::sle ? "<="
+            : pred == arith::CmpIPredicate::sgt ? ">"
                                                 : "<") +
            v[1];
   });

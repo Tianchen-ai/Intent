@@ -112,8 +112,6 @@ include "intentdsl/levels/algorithm/kir/ir/Matrix.td"
 defm Matrix : MatrixExpressions<TileSource>;
 include "intentdsl/levels/algorithm/kir/ir/Ordered.td"
 defm Ordered : OrderedOwners<TileSource>;
-include "intentdsl/levels/execution/block/ir/ScorePanel.td"
-defm Score : ScoreTiles<TileSource>;
 include "intentdsl/levels/execution/block/ir/Columns.td"
 defm Columns : ColumnTiles<TileSource>;
 defm NativePanels : MatrixPanelLoop<TileSource>;

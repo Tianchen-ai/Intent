@@ -3,7 +3,6 @@
 #include "intentdsl/levels/execution/block/ir/FoldIssue.h"
 #include "intentdsl/levels/execution/block/ir/FoldPanel.h"
 #include "intentdsl/levels/execution/block/ir/Owners.h"
-#include "intentdsl/levels/execution/block/ir/ScorePanel.h"
 #include "intentdsl/levels/execution/block/ir/SharedReads.h"
 #include "mlir/IR/PatternMatch.h"
 using namespace mlir;
@@ -17,11 +16,7 @@ static bool legalWidth(IntegerAttr width, int64_t owners) {
 LogicalResult verifyOwnerMap(func::FuncOp fn, const TargetProfile &p,
                              StringRef dialect, StringRef phase) {
   bool columns = fn.front().front().hasAttr("block.column_prefixes");
-  if (fn.front().front().hasAttr("block.score_panel")) {
-    if (phase == "formed" || phase == "decided" ||
-        failed(verifyScoreTile(fn, dialect, p)))
-      return failure();
-  } else if (columns) {
+  if (columns) {
     if (phase == "formed" || phase == "decided")
       return fn.emitError("unexpected realized columns");
     if (failed(verifyColumns(fn, dialect)))
@@ -130,20 +125,12 @@ LogicalResult verifyOwnerMap(func::FuncOp fn, const TargetProfile &p,
   }
   if (phase == "formed")
     return success(!tile && !choice);
-  auto scoreChoice = [&](DictionaryAttr d) {
-    auto w = d ? d.getAs<IntegerAttr>("width") : IntegerAttr();
-    if (!w || d.getAs<StringAttr>("memory") != "score")
-      return false;
-    auto panel = scorePanel(&space, p);
-    return panel && fitsScoreTile(*panel, w.getInt(), p);
-  };
   if (phase == "decided")
     return success(
         !tile && choice &&
         legalWidth(choice.getAs<IntegerAttr>("width"), owners) &&
         choice.getAs<StringAttr>("memory") &&
         (choice.getAs<StringAttr>("memory") == "direct" ||
-         scoreChoice(choice) ||
          (choice.getAs<StringAttr>("memory") == "matrix-fold" &&
           validPair(choice.getAs<IntegerAttr>("width"),
                     choice.getAs<IntegerAttr>("span"),
@@ -252,12 +239,6 @@ void registerOrdered(Unit &u) {
         d.getAs<IntegerAttr>("span") &&
         block::panelFolds(o, p, d.getAs<IntegerAttr>("span").getInt()))
       return llvm::Error::success();
-    if (d && d.getAs<StringAttr>("memory") == "score") {
-      auto panel = block::scorePanel(o, p);
-      auto w = d.getAs<IntegerAttr>("width");
-      if (panel && w && block::fitsScoreTile(*panel, w.getInt(), p))
-        return llvm::Error::success();
-    }
     if (count < 0 || !d || !d.getAs<StringAttr>("memory") ||
         !block::legalWidth(d.getAs<IntegerAttr>("width"), count) ||
         !(d.getAs<StringAttr>("memory") == "direct" ||
@@ -302,19 +283,16 @@ void registerOrdered(Unit &u) {
       return llvm::createStringError("invalid fold candidate");
     }
     bool forward = d.getAs<StringAttr>("memory") == "forward";
-    bool score = d.getAs<StringAttr>("memory") == "score";
     bool shared = d.getAs<StringAttr>("memory") == "shared";
     bool columns = d && d.getAs<StringAttr>("memory") == "columns";
     auto fetch = d ? d.getAs<IntegerAttr>("prefetch") : IntegerAttr();
     if (!w ||
         c.topology != (fetch     ? "grouped-reads"
-                       : score   ? "resident-score-panel"
                        : shared  ? "shared-owner-reads"
                        : columns ? "column-prefix"
                        : forward ? "resident-owner-slab"
                                  : "ordered-owner-tile") ||
         c.id != (fetch     ? "prefetch" + std::to_string(fetch.getInt()) + "-"
-                 : score   ? "score-"
                  : shared  ? "shared-"
                  : columns ? "columns-"
                  : forward ? "resident-"
@@ -430,9 +408,6 @@ void registerOrdered(Unit &u) {
           }
         }
     }
-    if (d.getAs<StringAttr>("memory") == "score")
-      block::realizeScoreTile(o, *block::scorePanel(o, p),
-                              d.getAs<IntegerAttr>("width").getInt());
     if (d.getAs<StringAttr>("memory") == "shared") {
       auto reads = block::sharedReads(o, *f);
       o->setAttr("block.group_axis", d.get("axis"));

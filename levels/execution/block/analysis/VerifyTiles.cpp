@@ -177,6 +177,8 @@ verifyTileProgram(func::FuncOp fn, const TargetProfile &profile,
         cmp && cmp.getPredicate() != arith::CmpIPredicate::eq &&
         cmp.getPredicate() != arith::CmpIPredicate::ne &&
         cmp.getPredicate() != arith::CmpIPredicate::sge &&
+        cmp.getPredicate() != arith::CmpIPredicate::sle &&
+        cmp.getPredicate() != arith::CmpIPredicate::sgt &&
         cmp.getPredicate() != arith::CmpIPredicate::slt)
       return op->emitError("unsupported tile comparison"),
              WalkResult::interrupt();

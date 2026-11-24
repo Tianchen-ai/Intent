@@ -1,6 +1,5 @@
 #include "intentdsl/levels/execution/block/ir/FoldIssue.h"
 #include "intentdsl/levels/execution/block/ir/FoldPanel.h"
-#include "intentdsl/levels/execution/block/ir/ScorePanel.h"
 #include "intentdsl/levels/execution/block/ir/SharedReads.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -40,19 +39,6 @@ void registerMixedOwners(Unit &u) {
                               d,
                               {"disjoint-owners"}});
       }
-    if (auto panel = intentdsl::block::scorePanel(o, p)) {
-      for (int w : {16, 32, 64}) {
-        if (!intentdsl::block::fitsScoreTile(*panel, w, p))
-          continue;
-        auto d = b.getDictionaryAttr(
-            {b.getNamedAttr("memory", b.getStringAttr("score")),
-             b.getNamedAttr("width", b.getI64IntegerAttr(w))});
-        candidates.push_back({"score-" + std::to_string(w),
-                              "resident-score-panel",
-                              d,
-                              {"disjoint-owners"}});
-      }
-    }
     auto facts = p.services.get<intentdsl::CallFacts>();
     auto reads = intentdsl::block::sharedReads(o, *facts);
     if (!reads)

@@ -25,9 +25,22 @@ struct OwnerTiles : Tiles {
   Value slice(Operation &old, ArrayRef<Value> coords, Value mask,
               Value stored = {});
   Value at(Value old, const Values &env);
+  struct OnlinePanelFusion {
+    scf::ForOp maxLoop;
+    Value scoreVal;
+    Value condVal;
+    Operation *subOp = nullptr;
+    Operation *expOp = nullptr;
+    Operation *guardOp = nullptr;
+    Value weightVal;
+    bool isExp2 = false;
+  };
+  std::optional<OnlinePanelFusion> matchOnlinePanelPair(scf::ForOp maxLoop,
+                                                        scf::ForOp sumLoop);
   SmallVector<Value> lowerBody(Block &body, Values env, Value mask);
   SmallVector<Value> serialLoop(scf::ForOp loop, const Values &env, Value mask);
-  SmallVector<Value> panelLoop(scf::ForOp loop, const Values &env, Value mask);
+  SmallVector<Value> panelLoop(scf::ForOp loop, const Values &env, Value mask,
+                               const OnlinePanelFusion *online = nullptr);
   LogicalResult build();
 };
 } // namespace intentdsl::block

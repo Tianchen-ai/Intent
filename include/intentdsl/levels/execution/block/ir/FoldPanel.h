@@ -15,6 +15,57 @@ inline bool rectangularTokenLoad(mlir::Operation &op, mlir::scf::ForOp loop) {
     return loop.isDefinedOutsideOfLoop(v);
   });
 }
+inline bool supportedPanelCmpI(mlir::arith::CmpIOp cmp) {
+  using P = mlir::arith::CmpIPredicate;
+  switch (cmp.getPredicate()) {
+  case P::eq:
+  case P::ne:
+  case P::slt:
+  case P::sle:
+  case P::sgt:
+  case P::sge:
+    return true;
+  default:
+    return false;
+  }
+}
+inline bool panelFoldBlock(mlir::Block &block, bool topLevel) {
+  for (auto &v : block.without_terminator()) {
+    if (auto br = mlir::dyn_cast<mlir::scf::IfOp>(v)) {
+      if (br.getNumResults() == 0 || br.getElseRegion().empty() ||
+          !panelFoldBlock(*br.thenBlock(), false) ||
+          !panelFoldBlock(*br.elseBlock(), false))
+        return false;
+      continue;
+    }
+    if (v.getNumRegions() != 0)
+      return false;
+    auto kind = v.getName().stripDialect();
+    if (topLevel && (kind == "slice_read" || kind == "lane_sum" ||
+                     llvm::StringSwitch<bool>(v.getName().getStringRef())
+                         .Cases("memref.load", "arith.floordivsi",
+                                "arith.remsi", true)
+                         .Default(false)))
+      continue;
+    if (auto cmp = mlir::dyn_cast<mlir::arith::CmpIOp>(v)) {
+      if (!supportedPanelCmpI(cmp))
+        return false;
+      continue;
+    }
+    if (kind != "lane_splat" &&
+        !llvm::StringSwitch<bool>(v.getName().getStringRef())
+             .Cases("arith.index_cast", "arith.constant", true)
+             .Cases("arith.extf", "arith.truncf", "arith.maxnumf", true)
+             .Cases("arith.minnumf", "arith.minimumf", "arith.minsi", true)
+             .Cases("arith.addf", "arith.mulf", "arith.subf", true)
+             .Cases("arith.addi", "arith.subi", "arith.muli", true)
+             .Cases("arith.andi", "arith.ori", "arith.xori", true)
+             .Cases("arith.select", "math.exp", "math.exp2", "math.absf", true)
+             .Default(false))
+      return false;
+  }
+  return true;
+}
 inline bool panelFolds(mlir::Operation *o,
                        const compilerinfra::TargetProfile &p, int64_t panel) {
   auto machine = p.services.get<OwnerMachine>();
@@ -28,11 +79,6 @@ inline bool panelFolds(mlir::Operation *o,
       continue;
     if (!mlir::matchPattern(loop.getStep(), mlir::m_One()))
       return false;
-    // Branches can guard per-token loads. Their values and effects require a
-    // separate predicated tile lowering; leave such folds on the owner path.
-    if (llvm::any_of(*loop.getBody(),
-                     [](mlir::Operation &v) { return v.getNumRegions() != 0; }))
-      return false;
     for (auto [idx, v] :
          llvm::enumerate(loop.getBody()->getTerminator()->getOperands())) {
       auto *op = v.getDefiningOp();
@@ -40,19 +86,8 @@ inline bool panelFolds(mlir::Operation *o,
           op->getOperand(0) != loop.getRegionIterArgs()[idx])
         return false;
     }
-    for (auto &v : loop.getBody()->without_terminator()) {
-      auto kind = v.getName().stripDialect();
-      if (kind != "slice_read" && kind != "lane_splat" && kind != "lane_sum" &&
-          !llvm::StringSwitch<bool>(v.getName().getStringRef())
-               .Cases("memref.load", "arith.index_cast", "arith.constant", true)
-               .Cases("arith.extf", "arith.truncf", "arith.maxnumf", true)
-               .Cases("arith.addf", "arith.mulf", "arith.subf", true)
-               .Cases("arith.addi", "arith.subi", "arith.muli", true)
-               .Cases("arith.floordivsi", "arith.remsi", "math.exp",
-                      "math.exp2", true)
-               .Default(false))
-        return false;
-    }
+    if (!panelFoldBlock(*loop.getBody(), true))
+      return false;
     matched = true;
   }
   return matched;

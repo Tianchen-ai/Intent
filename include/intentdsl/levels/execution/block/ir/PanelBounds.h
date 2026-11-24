@@ -33,6 +33,14 @@ inline std::optional<int64_t> panelBound(mlir::Value v, mlir::Operation &space,
     return {};
   }
   auto *p = v.getDefiningOp();
+  if (auto br = dyn_cast_if_present<scf::IfOp>(p);
+      br && br.getNumResults() == 1 && !br.getElseRegion().empty()) {
+    auto a = panelBound(br.thenYield().getOperand(0), space, facts),
+         b = panelBound(br.elseYield().getOperand(0), space, facts);
+    if (a && b)
+      return std::max(*a, *b);
+    return {};
+  }
   if (!p ||
       !isa<arith::AddIOp, arith::MulIOp, arith::FloorDivSIOp, arith::MinSIOp>(
           p))

@@ -169,8 +169,221 @@ SmallVector<Value> OwnerTiles::serialLoop(scf::ForOp loop, const Values &parent,
   b.setInsertionPointAfter(l);
   return SmallVector<Value>(l.getResults());
 }
+std::optional<OwnerTiles::OnlinePanelFusion>
+OwnerTiles::matchOnlinePanelPair(scf::ForOp maxLoop, scf::ForOp sumLoop) {
+  if (!maxLoop->hasAttr("kir.reassociate") ||
+      !sumLoop->hasAttr("kir.reassociate") ||
+      maxLoop->getAttr("block.contribution_width") !=
+          sumLoop->getAttr("block.contribution_width") ||
+      maxLoop->hasAttr("block.uniform_tokens") !=
+          sumLoop->hasAttr("block.uniform_tokens") ||
+      maxLoop->hasAttr("block.full_panels") !=
+          sumLoop->hasAttr("block.full_panels") ||
+      maxLoop->hasAttr("block.counted_panels") !=
+          sumLoop->hasAttr("block.counted_panels") ||
+      maxLoop->hasAttr("block.repair_masked_nan") ||
+      sumLoop->hasAttr("block.repair_masked_nan"))
+    return std::nullopt;
+  auto sameBound = [](Value a, Value b) {
+    if (a == b)
+      return true;
+    if (auto c1 = a.getDefiningOp<arith::ConstantOp>(),
+             c2 = b.getDefiningOp<arith::ConstantOp>();
+        c1 && c2)
+      return c1.getValue() == c2.getValue();
+    auto d1 = a.getDefiningOp<memref::DimOp>(),
+         d2 = b.getDefiningOp<memref::DimOp>();
+    return d1 && d2 && d1.getSource() == d2.getSource() &&
+           d1.getConstantIndex() &&
+           d1.getConstantIndex() == d2.getConstantIndex();
+  };
+  if (!sameBound(maxLoop.getLowerBound(), sumLoop.getLowerBound()) ||
+      !sameBound(maxLoop.getUpperBound(), sumLoop.getUpperBound()))
+    return std::nullopt;
+  auto floatIs = [](Value v, llvm::function_ref<bool(const APFloat &)> pred) {
+    auto c = v ? v.getDefiningOp<arith::ConstantOp>() : arith::ConstantOp();
+    auto f = c ? dyn_cast<FloatAttr>(c.getValue()) : FloatAttr();
+    return f && f.getType().isF32() && pred(f.getValue());
+  };
+  auto isNegInf = [&](Value v) {
+    return floatIs(
+        v, [](const APFloat &x) { return x.isInfinity() && x.isNegative(); });
+  };
+  auto isPosZero = [&](Value v) {
+    return floatIs(
+        v, [](const APFloat &x) { return x.isZero() && !x.isNegative(); });
+  };
+  if (maxLoop.getNumResults() != 1 || !isNegInf(maxLoop.getInitArgs()[0]) ||
+      sumLoop.getNumResults() == 0)
+    return std::nullopt;
+  Value maxY = maxLoop.getBody()->getTerminator()->getOperand(0);
+  auto maxComb = maxY.getDefiningOp<arith::MaxNumFOp>();
+  if (!maxComb || maxComb.getLhs() != maxLoop.getRegionIterArgs()[0])
+    return std::nullopt;
+  Value maxCand = maxComb.getRhs();
+  Value score1 = maxCand, cond1;
+  if (auto br1 = maxCand.getDefiningOp<scf::IfOp>()) {
+    if (br1.getNumResults() != 1 || br1.getElseRegion().empty() ||
+        !br1.thenBlock()->without_terminator().empty() ||
+        !isNegInf(br1.elseBlock()->getTerminator()->getOperand(0)))
+      return std::nullopt;
+    cond1 = br1.getCondition();
+    score1 = br1.thenBlock()->getTerminator()->getOperand(0);
+  } else if (auto sel1 = maxCand.getDefiningOp<arith::SelectOp>()) {
+    if (!isNegInf(sel1.getFalseValue()))
+      return std::nullopt;
+    cond1 = sel1.getCondition();
+    score1 = sel1.getTrueValue();
+  }
+  if (!score1.getType().isF32())
+    return std::nullopt;
+  for (Value initV : sumLoop.getInitArgs()) {
+    if (isPosZero(initV))
+      continue;
+    auto *sp = initV.getDefiningOp();
+    if (!sp || sp->getName().stripDialect() != "lane_splat" ||
+        !isPosZero(sp->getOperand(0)))
+      return std::nullopt;
+  }
+  bool paired = space.hasAttr("block.pair_axis");
+  Value wVal;
+  llvm::SmallPtrSet<Operation *, 8> allowedWUsers;
+  for (auto [idx, y] :
+       llvm::enumerate(sumLoop.getBody()->getTerminator()->getOperands())) {
+    auto add = y.getDefiningOp<arith::AddFOp>();
+    if (!add || add.getLhs() != sumLoop.getRegionIterArgs()[idx])
+      return std::nullopt;
+    Value rhs = add.getRhs();
+    if (!isa<ShapedType>(rhs.getType())) {
+      if (!rhs.getType().isF32() || (wVal && wVal != rhs))
+        return std::nullopt;
+      wVal = rhs;
+      allowedWUsers.insert(add);
+    } else if (paired && add->hasAttr("block.masked_dot_update")) {
+      auto accOps = intentdsl::block::tileAccumulate(rhs, sumLoop);
+      if (!accOps)
+        return std::nullopt;
+      auto tr = accOps->weights.getDefiningOp<arith::TruncFOp>();
+      if (!tr || !accOps->weights.hasOneUse())
+        return std::nullopt;
+      allowedWUsers.insert(tr);
+      Value wSrc = tr.getIn();
+      if (wVal && wVal != wSrc)
+        return std::nullopt;
+      wVal = wSrc;
+    } else if (!paired) {
+      auto mul = rhs.getDefiningOp<arith::MulFOp>();
+      if (!mul || !rhs.hasOneUse())
+        return std::nullopt;
+      Value foundW;
+      for (int s : {0, 1}) {
+        auto *sp = mul->getOperand(s).getDefiningOp();
+        if (!sp || sp->getName().stripDialect() != "lane_splat" ||
+            !mul->getOperand(s).hasOneUse())
+          continue;
+        Value ws = sp->getOperand(0);
+        if (auto ext = ws.getDefiningOp<arith::ExtFOp>();
+            ext && ws.hasOneUse()) {
+          if (auto tr = ext.getIn().getDefiningOp<arith::TruncFOp>();
+              tr && ext.getIn().hasOneUse()) {
+            allowedWUsers.insert(tr);
+            foundW = tr.getIn();
+            break;
+          }
+        }
+        allowedWUsers.insert(sp);
+        foundW = ws;
+        break;
+      }
+      if (!foundW || (wVal && wVal != foundW))
+        return std::nullopt;
+      wVal = foundW;
+    } else {
+      return std::nullopt;
+    }
+  }
+  if (!wVal || !wVal.getType().isF32())
+    return std::nullopt;
+  for (Operation *u : wVal.getUsers())
+    if (!allowedWUsers.contains(u))
+      return std::nullopt;
+  Value peakRes = maxLoop.getResult(0);
+  Operation *guardOp = nullptr;
+  Value expOut = wVal, cond2;
+  if (auto br2 = wVal.getDefiningOp<scf::IfOp>()) {
+    if (!cond1 || br2.getNumResults() != 1 || br2.getElseRegion().empty() ||
+        !isPosZero(br2.elseBlock()->getTerminator()->getOperand(0)))
+      return std::nullopt;
+    cond2 = br2.getCondition();
+    expOut = br2.thenBlock()->getTerminator()->getOperand(0);
+    guardOp = br2;
+    for (Operation &inner : br2.thenBlock()->without_terminator())
+      if (&inner != expOut.getDefiningOp() &&
+          (!expOut.getDefiningOp() ||
+           &inner != expOut.getDefiningOp()->getOperand(0).getDefiningOp()))
+        return std::nullopt;
+  } else if (auto sel2 = wVal.getDefiningOp<arith::SelectOp>()) {
+    if (!cond1 || !isPosZero(sel2.getFalseValue()))
+      return std::nullopt;
+    cond2 = sel2.getCondition();
+    expOut = sel2.getTrueValue();
+    guardOp = sel2;
+  } else if (cond1) {
+    return std::nullopt;
+  }
+  Operation *expOp = expOut.getDefiningOp();
+  if (!expOp || !isa<math::ExpOp, math::Exp2Op>(expOp) ||
+      (guardOp && !expOut.hasOneUse()))
+    return std::nullopt;
+  auto subOp = expOp->getOperand(0).getDefiningOp<arith::SubFOp>();
+  if (!subOp || !expOp->getOperand(0).hasOneUse() || subOp.getRhs() != peakRes)
+    return std::nullopt;
+  Value score2 = subOp.getLhs();
+  if (guardOp && score2.getDefiningOp() &&
+      guardOp->isProperAncestor(score2.getDefiningOp()))
+    return std::nullopt;
+  for (OpOperand &use : peakRes.getUses())
+    if (sumLoop->isProperAncestor(use.getOwner()) && use.getOwner() != subOp)
+      return std::nullopt;
+  llvm::DenseMap<std::pair<Value, Value>, bool> memo;
+  std::function<bool(Value, Value)> sameVal = [&](Value a, Value b) -> bool {
+    if (a.getType() != b.getType())
+      return false;
+    if (auto it = memo.find({a, b}); it != memo.end())
+      return it->second;
+    bool ok = false;
+    if (a == maxLoop.getInductionVar() || b == sumLoop.getInductionVar()) {
+      ok = (a == maxLoop.getInductionVar() && b == sumLoop.getInductionVar());
+    } else if (maxLoop.isDefinedOutsideOfLoop(a) &&
+               sumLoop.isDefinedOutsideOfLoop(b)) {
+      ok = sameBound(a, b);
+    } else {
+      Operation *da = a.getDefiningOp(), *db = b.getDefiningOp();
+      if (da && db && da->getBlock() == maxLoop.getBody() &&
+          db->getBlock() == sumLoop.getBody() &&
+          da->getName() == db->getName() &&
+          da->getResultTypes() == db->getResultTypes() &&
+          da->getNumOperands() == db->getNumOperands() &&
+          da->getNumRegions() == 0 &&
+          da->getAttrDictionary() == db->getAttrDictionary() &&
+          cast<OpResult>(a).getResultNumber() ==
+              cast<OpResult>(b).getResultNumber()) {
+        ok = true;
+        for (unsigned i = 0; i < da->getNumOperands() && ok; ++i)
+          ok = sameVal(da->getOperand(i), db->getOperand(i));
+      }
+    }
+    memo[{a, b}] = ok;
+    return ok;
+  };
+  if (!sameVal(score1, score2) || (cond1 && !sameVal(cond1, cond2)))
+    return std::nullopt;
+  return OnlinePanelFusion{maxLoop, score2,  cond2, subOp,
+                           expOp,   guardOp, wVal,  isa<math::Exp2Op>(expOp)};
+}
 SmallVector<Value> OwnerTiles::lowerBody(Block &body, Values env, Value mask) {
-  for (Operation &op : body) {
+  for (auto it = body.begin(); it != body.end(); ++it) {
+    Operation &op = *it;
     auto code = op.getName().stripDialect();
     auto arg = [&](unsigned i) { return at(op.getOperand(i), env); };
     Value v;
@@ -197,6 +410,45 @@ SmallVector<Value> OwnerTiles::lowerBody(Block &body, Values env, Value mask) {
     else if (auto d = dyn_cast<memref::DimOp>(op))
       v = integer(shape(d.getSource())[*d.getConstantIndex()]);
     else if (auto loop = dyn_cast<scf::ForOp>(op)) {
+      if (op.hasAttr("block.contribution_width")) {
+        SmallVector<Operation *, 4> midOps;
+        auto scan = std::next(it);
+        bool canScan = true;
+        while (scan != body.end() && !isa<scf::ForOp>(*scan)) {
+          auto mCode = scan->getName().stripDialect();
+          if ((!isa<arith::ConstantOp, memref::DimOp>(*scan) &&
+               mCode != "lane_splat") ||
+              llvm::any_of(scan->getOperands(), [&](Value opnd) {
+                return llvm::is_contained(loop.getResults(), opnd);
+              })) {
+            canScan = false;
+            break;
+          }
+          midOps.push_back(&*scan);
+          ++scan;
+        }
+        if (canScan && scan != body.end())
+          if (auto sumLoop = dyn_cast<scf::ForOp>(*scan))
+            if (auto online = matchOnlinePanelPair(loop, sumLoop)) {
+              for (Operation *mid : midOps) {
+                if (auto mc = dyn_cast<arith::ConstantOp>(*mid))
+                  env[mid->getResult(0)] = constant(mc);
+                else if (auto md = dyn_cast<memref::DimOp>(*mid))
+                  env[mid->getResult(0)] =
+                      integer(shape(md.getSource())[*md.getConstantIndex()]);
+                else
+                  env[mid->getResult(0)] = broadcast(
+                      at(mid->getOperand(0), env), lifted(mid->getResult(0)));
+              }
+              auto fused = panelLoop(sumLoop, env, mask, &*online);
+              env[loop.getResult(0)] = fused.front();
+              for (auto [old, val] : llvm::zip(
+                       sumLoop.getResults(), ArrayRef<Value>(fused).drop_front()))
+                env[old] = val;
+              it = scan;
+              continue;
+            }
+      }
       auto values = op.hasAttr("block.contribution_width")
                         ? panelLoop(loop, env, mask)
                         : serialLoop(loop, env, mask);

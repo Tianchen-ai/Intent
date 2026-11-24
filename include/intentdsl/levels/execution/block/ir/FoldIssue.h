@@ -15,6 +15,8 @@ std::optional<unsigned> issueAxis(mlir::Operation *,
                                   const compilerinfra::TargetProfile &, int64_t,
                                   int64_t);
 bool fullFoldPanels(mlir::scf::ForOp,const CallFacts &,int64_t span);
+bool sharedCoordinate(mlir::Value, mlir::BlockArgument, mlir::scf::ForOp,
+                      int64_t);
 bool sharedBounds(mlir::scf::ForOp, unsigned, int64_t);
 int64_t alignedPageExtent(mlir::Operation &, mlir::scf::ForOp,
                           const CallFacts &, int64_t);

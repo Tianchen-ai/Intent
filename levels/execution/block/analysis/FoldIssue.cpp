@@ -7,6 +7,7 @@ Value widened(Value v) {
   auto cast = v.getDefiningOp<arith::ExtFOp>();
   return cast ? cast.getIn() : Value();
 }
+} // namespace
 bool sharedCoordinate(Value v, BlockArgument owner, scf::ForOp loop,
                       int64_t width) {
   if (v == owner)
@@ -40,7 +41,6 @@ bool sharedCoordinate(Value v, BlockArgument owner, scf::ForOp loop,
     return sharedCoordinate(u, owner, loop, width);
   });
 }
-} // namespace
 int64_t alignedPageExtent(Operation &read, scf::ForOp loop,
                           const CallFacts &facts, int64_t span) {
   if (read.getName().stripDialect() != "slice_read" ||
@@ -117,6 +117,8 @@ bool fullFoldPanels(scf::ForOp loop,const CallFacts &facts,int64_t span) {
     if(auto m=v.getDefiningOp<arith::MulIOp>())return multiple(m.getLhs())||multiple(m.getRhs());
     if(auto a=v.getDefiningOp<arith::AddIOp>())return multiple(a.getLhs())&&multiple(a.getRhs());
     if(auto m=v.getDefiningOp<arith::MinSIOp>())return multiple(m.getLhs())&&multiple(m.getRhs());
+    if(auto br=v.getDefiningOp<scf::IfOp>(); br && br.getNumResults()==1 && !br.getElseRegion().empty())
+      return multiple(br.thenYield().getOperand(0))&&multiple(br.elseYield().getOperand(0));
     return false;
   };
   return multiple(loop.getLowerBound()) && multiple(loop.getUpperBound());

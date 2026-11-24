@@ -1,6 +1,5 @@
 #include "intentdsl/levels/execution/block/ir/FoldIssue.h"
 #include "intentdsl/levels/execution/block/ir/Owners.h"
-#include "intentdsl/levels/execution/block/ir/ScorePanel.h"
 #include "intentdsl/levels/execution/block/ir/SharedReads.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -101,7 +100,12 @@ void orderedCost(Unit &u) {
           }
           if (sweepBytesPerOwner)
             e.terms["sweep_bytes_per_owner"] = {sweepBytesPerOwner, "B"};
-          double panelBytes = sweepBytesPerOwner * n, spillBytes = 0;
+          bool isSharedMode = choice.getAs<mlir::StringAttr>("memory") == "shared";
+          bool isMatrixFold =
+              choice.getAs<mlir::StringAttr>("memory") == "matrix-fold";
+          double panelBytes =
+              sweepBytesPerOwner * ((isSharedMode || isMatrixFold) ? blocks : n),
+                 spillBytes = 0;
           if (span) {
             auto lanesPerPanel = span.getInt() * lanes;
             // Independent contributions issue as a tile. Working sets wider
@@ -115,7 +119,9 @@ void orderedCost(Unit &u) {
               double live = physicalRows * lanes +
                             double(span.getInt()) * lanes +
                             physicalRows * span.getInt();
-              panelBytes = blocks * sweepBytesPerOwner;
+              double effectiveBlocks = std::max<double>(
+                  blocks, std::max<int64_t>(1, f->participants));
+              panelBytes = effectiveBlocks * sweepBytesPerOwner;
               dependency =
                   (1. + std::max(0., live / 32768. - 1.)) / span.getInt();
               // Independent matrix updates compete for resident accumulator
@@ -204,16 +210,6 @@ void orderedCost(Unit &u) {
               e.terms["shared_panel_read_bytes"] = {panelBytes, "B"};
             }
           }
-          if (auto panel = intentdsl::block::scorePanel(op, ctx.target)) {
-            auto resident = choice.getAs<mlir::StringAttr>("memory") == "score";
-            auto steps = resident ? 1. : 2. * panel->keys;
-            dependency *= steps;
-            if (resident)
-              issueGroups =
-                  std::ceil(w / 16.) * std::ceil(panel->keys / 64.) *
-                  std::ceil(std::max(panel->depth, panel->features) / 32.);
-            e.terms["sequential_key_steps"] = {steps, "count"};
-          }
           if (intentdsl::block::canForwardOwners(op, ctx.target)) {
             auto sh = f->shapeOf(op->getOperand(0));
             auto n = (*sh)[sh->size() - 1].getAsInteger().value_or(1);
@@ -241,8 +237,11 @@ void orderedCost(Unit &u) {
           }
           double readCost = 0;
           if (auto r = intentdsl::block::sharedReads(op, *f)) {
-            auto shared = choice.getAs<mlir::StringAttr>("memory") == "shared";
+            auto shared = isSharedMode || isMatrixFold;
             for (auto *load : r->slices) {
+              auto loop = load->getParentOfType<mlir::scf::ForOp>();
+              if (loop && loop->hasAttr("kir.reassociate") && sweepBytesPerOwner)
+                continue;
               auto v = load->getResult(0);
               auto axis = intentdsl::kir::memberAxis(v);
               const auto *shape = f->shapeOf(axis->first);
@@ -250,7 +249,6 @@ void orderedCost(Unit &u) {
                            mlir::cast<mlir::ShapedType>(v.getType())
                                .getElementTypeBitWidth() /
                            8.;
-              auto loop = load->getParentOfType<mlir::scf::ForOp>();
               auto bound =
                   loop.getUpperBound().getDefiningOp<mlir::memref::DimOp>();
               if (bound && bound.getConstantIndex())

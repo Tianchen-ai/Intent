@@ -185,9 +185,11 @@ TerminalPrinter tilePrinter() {
   leaf("arith.cmpi", [](Operation &op, auto &a) {
     auto pred = cast<arith::CmpIOp>(op).getPredicate();
     auto token = pred == arith::CmpIPredicate::sge  ? ">="
-                 : pred == arith::CmpIPredicate::eq ? "=="
-                 : pred == arith::CmpIPredicate::ne ? "!="
-                                                    : "<";
+                 : pred == arith::CmpIPredicate::sle ? "<="
+                 : pred == arith::CmpIPredicate::sgt ? ">"
+                 : pred == arith::CmpIPredicate::eq  ? "=="
+                 : pred == arith::CmpIPredicate::ne  ? "!="
+                                                     : "<";
     return a[0] + token + a[1];
   });
   leaf("arith.cmpf", [](Operation &op, auto &a) {
