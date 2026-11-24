@@ -27,17 +27,20 @@ Value load(Tiles &t, Value base, ValueRange at, ArrayRef<int64_t> shape,
 }
 bool rectangle(Tiles &t, Operation &op, ArrayRef<Value> coords, int64_t rows,
                Value stored, Value &result) {
-  if (!op.hasAttr("ct_src.owner_rectangle"))
+  auto rectAxis = op.getAttrOfType<IntegerAttr>("ct_src.owner_rectangle");
+  if (!rectAxis)
     return false;
+  int64_t pos = rectAxis.getInt();
   auto base = op.getOperand(stored ? 1 : 0);
   int64_t width = t.shape(base).asArrayRef().back();
   SmallVector<Value> at;
-  for (Value outer : coords.drop_back())
-    at.push_back(scalarIndex(t, outer));
-  at.push_back(blockIndex(t, scalarIndex(t, coords.back()), rows));
+  for (auto [idx, coord] : llvm::enumerate(coords)) {
+    Value sc = scalarIndex(t, coord);
+    at.push_back(int64_t(idx) == pos ? blockIndex(t, sc, rows) : sc);
+  }
   at.push_back(t.integer(0));
   SmallVector<int64_t> dims(at.size(), 1);
-  dims[dims.size() - 2] = rows;
+  dims[pos] = rows;
   dims.back() = width;
   if (stored) {
     SmallVector<Value> args{base, reshape(t, stored, dims)};

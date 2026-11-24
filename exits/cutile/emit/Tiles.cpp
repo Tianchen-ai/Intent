@@ -262,9 +262,12 @@ TerminalPrinter cutilePrinter() {
   rule("ct_src.tile_address", [](Operation &o, auto &v) {
     auto axes = o.getAttrOfType<DenseI64ArrayAttr>("projection");
     auto type = dyn_cast<RankedTensorType>(o.getResult(0).getType());
+    StringRef idxTy =
+        o.getAttrOfType<IntegerAttr>("index_bits").getInt() == 32 ? "ct.int32"
+                                                                  : "ct.int64";
     SmallVector<std::string> coords;
     for (auto [i, a] : llvm::enumerate(axes.asArrayRef())) {
-      std::string n = "ct.astype(" + v[i + 1] + ",ct.int64)";
+      std::string n = ("ct.astype(" + v[i + 1] + "," + idxTy + ")").str();
       if (type && type.getRank() == 2 && a >= 0)
         n = expand(n, 1 - a);
       coords.push_back(n);

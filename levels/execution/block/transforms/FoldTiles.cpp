@@ -134,9 +134,24 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
     return Fragment{x, isa<RankedTensorType>(x.getType()) ? Axis::Owner
                                                           : Axis::Scalar};
   };
+  llvm::DenseMap<Value, Value> hoistedUniforms;
+  auto hoistedUniform = [&](Value v) -> Value {
+    if (!isa<RankedTensorType>(v.getType()))
+      return v;
+    if (auto it = hoistedUniforms.find(v); it != hoistedUniforms.end())
+      return it->second;
+    OpBuilder::InsertionGuard guard(b);
+    bool outside = l.isDefinedOutsideOfLoop(v);
+    if (outside)
+      b.setInsertionPoint(l);
+    Value u = uniform(v);
+    if (outside)
+      hoistedUniforms[v] = u;
+    return u;
+  };
   auto coordinate = [&](Value v) {
     auto x = value(v);
-    return x.axis == Axis::Owner ? uniform(x.value) : x.value;
+    return x.axis == Axis::Owner ? hoistedUniform(x.value) : x.value;
   };
   llvm::SmallPtrSet<Operation *, 16> folded;
   Operation *onlineAnchor = nullptr;
@@ -215,7 +230,7 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
         }
       } else if (sharedIdx) {
         if (x.axis == Axis::Owner)
-          arg = uniform(arg);
+          arg = hoistedUniform(arg);
         role = llvm::any_of(inputs,
                             [](Fragment f) { return f.axis == Axis::Token; })
                    ? Axis::Token

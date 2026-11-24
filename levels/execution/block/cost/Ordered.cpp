@@ -55,6 +55,31 @@ void orderedCost(Unit &u) {
               auto sh = f->shapeOf(inst.getOperand(0));
               if (!sh)
                 continue;
+              if (slice) {
+                if (int64_t page =
+                        intentdsl::block::alignedPageExtent(inst, loop, *f, 1)) {
+                  int64_t depth =
+                      (*sh)[inst.getAttrOfType<mlir::IntegerAttr>("axis")
+                                .getInt()]
+                          .getAsInteger()
+                          .value_or(1);
+                  tokenBytes +=
+                      depth *
+                      mlir::cast<mlir::MemRefType>(inst.getOperand(0).getType())
+                          .getElementTypeBitWidth() /
+                      8.;
+                  int64_t batches =
+                      (*f->shapeOf(op->getOperand(0)))[0]
+                          .getAsInteger()
+                          .value_or(1);
+                  extent = std::max(
+                      extent,
+                      std::max<int64_t>(
+                          1, (*sh)[0].getAsInteger().value_or(0) * page /
+                                 std::max<int64_t>(1, batches)));
+                  continue;
+                }
+              }
               unsigned at = 0;
               for (mlir::Value index : inst.getOperands().drop_front()) {
                 if (slice &&
@@ -137,17 +162,23 @@ void orderedCost(Unit &u) {
               // fragments and exchange score columns between issue groups.
               unsigned carries = 0, projections = 0;
               double operandWords = 1.;
+              bool indirectSlice = false;
               for (auto loop :
                    op->getRegion(0).front().getOps<mlir::scf::ForOp>()) {
                 if (!loop->hasAttr("kir.reassociate"))
                   continue;
                 for (auto &inst : loop.getBody()->without_terminator())
-                  if (inst.getName().stripDialect() == "slice_read")
+                  if (inst.getName().stripDialect() == "slice_read") {
                     operandWords = std::min(
                         operandWords,
                         mlir::cast<mlir::MemRefType>(inst.getOperand(0).getType())
                                 .getElementTypeBitWidth() /
                             32.);
+                    if (!intentdsl::block::rectangularTokenLoad(inst, loop) &&
+                        !intentdsl::block::alignedPageExtent(inst, loop, *f,
+                                                             span.getInt()))
+                      indirectSlice = true;
+                  }
                 carries = std::max<unsigned>(
                     carries,
                     llvm::count_if(loop.getResultTypes(), [](mlir::Type t) {
@@ -184,7 +215,8 @@ void orderedCost(Unit &u) {
                     operandWords * operandStreams *
                         (physicalRows + span.getInt()) * lanes +
                     scoreSlots * physicalRows * span.getInt() +
-                    carries * physicalRows * lanes;
+                    carries * physicalRows * lanes +
+                    (indirectSlice ? double(span.getInt()) * lanes : 0.);
                 auto file =
                     ctx.target.services.facts.find("register_file")
                         ? intentdsl::quantity(ctx, "register_file", "reg32")

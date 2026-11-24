@@ -35,36 +35,171 @@ bool nativeMatrixWrite(intentdsl::block::Tiles &,
 LogicalResult verifyArrayGeometry(func::FuncOp,const TargetProfile &);
 intentdsl::block::OwnerAccess nativeOwnerViews();
 namespace {
-bool ownerRectangle(Operation *op, func::FuncOp fn) {
+std::optional<int64_t> ownerRectangleAxis(Operation *op, func::FuncOp fn) {
   auto kind = op->getName().stripDialect();
   if (kind != "slice_read" && kind != "slice_write")
-    return false;
+    return std::nullopt;
   auto &space = fn.front().front();
   auto pair = space.getAttrOfType<IntegerAttr>("block.pair_axis");
   if (!pair || space.hasAttr("ct_src.matrix_rows") ||
       op->getParentOp() != &space)
-    return false;
+    return std::nullopt;
   auto &bb = space.getRegion(0).front();
   auto coords = op->getOperands().drop_front(kind == "slice_write" ? 2 : 1);
   if (coords.empty() ||
       op->getAttrOfType<IntegerAttr>("axis").getInt() !=
-          int64_t(coords.size()) ||
-      coords.back() != bb.getArgument(pair.getInt()))
-    return false;
+          int64_t(coords.size()))
+    return std::nullopt;
+  Value pairArg = bb.getArgument(pair.getInt());
+  int64_t pairPos = -1;
+  llvm::SmallDenseSet<Value, 4> seen;
+  for (auto [idx, v] : llvm::enumerate(coords)) {
+    auto arg = dyn_cast<BlockArgument>(v);
+    if (!arg || arg.getOwner() != &bb || !seen.insert(v).second)
+      return std::nullopt;
+    if (v == pairArg)
+      pairPos = idx;
+  }
+  if (pairPos < 0)
+    return std::nullopt;
   auto view =
       cast<BlockArgument>(op->getOperand(kind == "slice_write" ? 1 : 0));
   auto shape = fn.getArgAttrOfType<DenseI64ArrayAttr>(view.getArgNumber(),
                                                       "block.shape");
-  return shape &&
-         shape[shape.size() - 2] %
-                 space.getAttrOfType<IntegerAttr>("block.owner_tile")
-                     .getInt() ==
-             0 &&
-         llvm::isPowerOf2_64(shape.asArrayRef().back()) &&
-         llvm::all_of(coords.drop_back(), [&](Value v) {
-           auto arg = dyn_cast<BlockArgument>(v);
-           return arg && arg.getOwner() == &bb && arg != coords.back();
-         });
+  if (!shape || shape.size() != coords.size() + 1 ||
+      shape[pairPos] %
+              space.getAttrOfType<IntegerAttr>("block.owner_tile").getInt() !=
+          0 ||
+      !llvm::isPowerOf2_64(shape.asArrayRef().back()))
+    return std::nullopt;
+  return pairPos;
+}
+struct SignedSpan {
+  int64_t lo, hi;
+};
+bool canNarrowCutileAddress(Operation &op) {
+  auto strides = op.getAttrOfType<DenseI64ArrayAttr>("strides");
+  if (!strides || llvm::any_of(strides.asArrayRef(), [](int64_t s) {
+        return s < 0 || s > INT32_MAX;
+      }))
+    return false;
+  llvm::DenseMap<Value, std::optional<SignedSpan>> memo;
+  auto fit64 = [](__int128 lo, __int128 hi) -> std::optional<SignedSpan> {
+    if (lo > hi || lo < INT64_MIN || hi > INT64_MAX)
+      return std::nullopt;
+    return SignedSpan{int64_t(lo), int64_t(hi)};
+  };
+  auto floorDiv = [](__int128 a, __int128 d) -> __int128 {
+    __int128 q = a / d, r = a % d;
+    return (r != 0 && ((r < 0) != (d < 0))) ? q - 1 : q;
+  };
+  std::function<std::optional<SignedSpan>(Value)> range =
+      [&](Value v) -> std::optional<SignedSpan> {
+    if (auto it = memo.find(v); it != memo.end())
+      return it->second;
+    memo[v] = std::nullopt;
+    std::optional<SignedSpan> res;
+    Type elemTy = getElementTypeOrSelf(v.getType());
+    if (auto it = dyn_cast<IntegerType>(elemTy);
+        it && it.isSignless() && it.getWidth() > 0 && it.getWidth() <= 32) {
+      unsigned w = it.getWidth();
+      res = SignedSpan{-(int64_t(1) << (w - 1)), (int64_t(1) << (w - 1)) - 1};
+      memo[v] = res;
+      return res;
+    }
+    if (auto arg = dyn_cast<BlockArgument>(v)) {
+      if (auto loop = dyn_cast_or_null<scf::ForOp>(arg.getOwner()->getParentOp());
+          loop && loop.getInductionVar() == v) {
+        auto lb = range(loop.getLowerBound()), ub = range(loop.getUpperBound()),
+             st = range(loop.getStep());
+        if (lb && ub && st && st->lo > 0 && lb->lo < ub->hi)
+          res = fit64(lb->lo, static_cast<__int128>(ub->hi) - 1);
+      }
+      memo[v] = res;
+      return res;
+    }
+    Operation *def = v.getDefiningOp();
+    if (!def)
+      return std::nullopt;
+    if (auto c = dyn_cast<arith::ConstantOp>(def)) {
+      if (auto ia = dyn_cast<IntegerAttr>(c.getValue());
+          ia && ia.getValue().getBitWidth() <= 64) {
+        int64_t val = ia.getValue().getSExtValue();
+        res = SignedSpan{val, val};
+      } else if (auto da = dyn_cast<DenseIntElementsAttr>(c.getValue());
+                 da && da.isSplat() &&
+                 da.getElementType().getIntOrFloatBitWidth() <= 64) {
+        int64_t val = da.getSplatValue<APInt>().getSExtValue();
+        res = SignedSpan{val, val};
+      }
+      memo[v] = res;
+      return res;
+    }
+    StringRef n = def->getName().getStringRef();
+    if (n == "ct_src.tile_axis") {
+      int64_t sz = cast<RankedTensorType>(v.getType()).getDimSize(0);
+      if (sz > 0)
+        res = SignedSpan{0, sz - 1};
+    } else if (n == "ct_src.tile_pid") {
+      res = SignedSpan{0, INT32_MAX};
+    } else if (n == "ct_src.tile_broadcast" || n == "ct_src.tile_prefix" ||
+               n == "ct_src.drop_unit_owner" || n == "ct_src.reshape" ||
+               isa<arith::IndexCastOp, arith::ExtSIOp>(def)) {
+      res = range(def->getOperand(0));
+    } else if (auto eu = dyn_cast<arith::ExtUIOp>(def)) {
+      if (auto it = dyn_cast<IntegerType>(getElementTypeOrSelf(eu.getIn().getType()));
+          it && it.getWidth() > 0 && it.getWidth() < 32)
+        res = SignedSpan{0, (int64_t(1) << it.getWidth()) - 1};
+    } else if (n == "ct_src.tile_reduce") {
+      auto alg = def->getAttrOfType<StringAttr>("algebra");
+      if (alg && (alg.getValue() == "min" || alg.getValue() == "max"))
+        res = range(def->getOperand(0));
+    } else if (isa<arith::RemSIOp>(def)) {
+      auto b = range(def->getOperand(1));
+      if (b && b->lo > 0 && b->lo == b->hi && range(def->getOperand(0)))
+        res = SignedSpan{-(b->lo - 1), b->lo - 1};
+    } else if (isa<arith::RemUIOp>(def)) {
+      auto a = range(def->getOperand(0)), b = range(def->getOperand(1));
+      if (a && b && a->lo >= 0 && b->lo > 0 && b->lo == b->hi)
+        res = SignedSpan{0, b->lo - 1};
+    } else if (isa<arith::DivUIOp>(def)) {
+      auto a = range(def->getOperand(0)), b = range(def->getOperand(1));
+      if (a && b && a->lo >= 0 && b->lo > 0 && b->lo == b->hi)
+        res = SignedSpan{a->lo / b->lo, a->hi / b->lo};
+    } else if (isa<arith::FloorDivSIOp>(def)) {
+      auto a = range(def->getOperand(0)), b = range(def->getOperand(1));
+      if (a && b && b->lo > 0 && b->lo == b->hi)
+        res = fit64(floorDiv(a->lo, b->lo), floorDiv(a->hi, b->lo));
+    } else if (auto sel = dyn_cast<arith::SelectOp>(def)) {
+      auto a = range(sel.getTrueValue()), b = range(sel.getFalseValue());
+      if (a && b)
+        res = SignedSpan{std::min(a->lo, b->lo), std::max(a->hi, b->hi)};
+    } else if (isa<arith::AddIOp, arith::SubIOp, arith::MulIOp,
+                   arith::MinSIOp>(def)) {
+      auto a = range(def->getOperand(0)), b = range(def->getOperand(1));
+      if (a && b) {
+        __int128 al = a->lo, ah = a->hi, bl = b->lo, bh = b->hi;
+        if (isa<arith::MinSIOp>(def))
+          res = fit64(std::min(al, bl), std::min(ah, bh));
+        else if (isa<arith::AddIOp>(def))
+          res = fit64(al + bl, ah + bh);
+        else if (isa<arith::SubIOp>(def))
+          res = fit64(al - bh, ah - bl);
+        else {
+          auto ex = std::minmax({al * bl, al * bh, ah * bl, ah * bh});
+          res = fit64(ex.first, ex.second);
+        }
+      }
+    }
+    memo[v] = res;
+    return res;
+  };
+  for (Value coord : op.getOperands().drop_front()) {
+    auto r = range(coord);
+    if (!r || r->lo < INT32_MIN || r->hi > INT32_MAX)
+      return false;
+  }
+  return true;
 }
 DenseI64ArrayAttr adjacentScaleGroups(Operation *op,func::FuncOp fn){
   SmallVector<int64_t> slots;
@@ -245,8 +380,9 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
                   ->getAttrOfType<IntegerAttr>("block.contribution_width")
                   .getInt() <= 64)
         s.addAttribute("ct_src.panel_tma", b.getUnitAttr());
-      if (ownerRectangle(op, fn))
-        s.addAttribute("ct_src.owner_rectangle", b.getUnitAttr());
+      if (auto rectAxis = ownerRectangleAxis(op, fn))
+        s.addAttribute("ct_src.owner_rectangle",
+                       b.getI64IntegerAttr(*rectAxis));
       if(code=="scaled_contract"){
         s.addAttribute("ct_src.flat_groups",adjacentScaleGroups(op,fn));
       }
@@ -452,6 +588,12 @@ struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
     });
     fn->setAttr("ct_src.entry", b.getStringAttr("kernel"));
     fn->setAttr("ct_src.index_bits", b.getI32IntegerAttr(bits));
+    if (bits == 32)
+      fn.walk([&](Operation *op) {
+        if (op->getName().getStringRef() == "ct_src.tile_address" &&
+            canNarrowCutileAddress(*op))
+          op->setAttr("index_bits", b.getI32IntegerAttr(32));
+      });
     const auto *facts = profile.services.get<intentdsl::CallFacts>();
     fn.walk([&](Operation *op){
       if(op->getName().getDialectNamespace()!="ct_src")return;
@@ -540,7 +682,10 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
   if(!arrayCap || matrix->hasAttr("ct_src.tma")!=arrayCap->permitTma)return matrix.emitError("invalid array transfer capability");
   if(matrix.front().front().getName().getStringRef()=="ct_src.tile_program"){
     if(!callable || failed(verifyArrayGeometry(matrix,profile)))return failure();
-    return intentdsl::block::verifyTileProgram(matrix,profile,[](Operation &){return false;});
+    return intentdsl::block::verifyTileProgram(
+        matrix, profile, [&](Operation &op) {
+          return arrayCap->bits == 32 && canNarrowCutileAddress(op);
+        });
   }
   if (intentdsl::kir::orderedOwners(matrix)) {
     {
@@ -573,7 +718,10 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
                       "compatible array layout");
         return WalkResult::interrupt();
       }
-      if (op->hasAttr("ct_src.owner_rectangle") != ownerRectangle(op, matrix)) {
+      Attribute expectedRect;
+      if (auto rectAxis = ownerRectangleAxis(op, matrix))
+        expectedRect = Builder(matrix.getContext()).getI64IntegerAttr(*rectAxis);
+      if (op->getAttr("ct_src.owner_rectangle") != expectedRect) {
         op->emitError("owner rectangle requires an aligned full group and "
                       "contiguous logical axes");
         return WalkResult::interrupt();
