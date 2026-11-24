@@ -370,7 +370,7 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
     cols = -2;
 
   bool isQ4k = (kind == "q4k_dot");
-  bool useEncodedRecords = !emptyRed && isQ4k && boundWidening &&
+  bool useEncodedRecords = !emptyRed && isQ4k &&
                            shortImpl == "weft-q4k-dot" &&
                            nativeQ4KStrides(fn, dot);
 
@@ -1180,9 +1180,14 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
     bool isInt = slots[0].t.carrier == "i8";
     std::string accCarrier = isInt ? "i32" : "f32";
     std::string accElem = isInt ? "si32" : "f32";
+    int64_t staticCols = slots.back().t.dims[1];
+    int64_t vecLanes = std::max<int64_t>(1, tile[3]);
+    int64_t colGroups =
+        staticCols > 0 ? (staticCols + vecLanes - 1) / vecLanes : 99;
     bool canUseOuterContract =
         !boundWidening ||
-        (slots[0].t.carrier == "f32" && slots.back().t.carrier == "f32");
+        (slots[0].t.carrier == "f32" && slots.back().t.carrier == "f32" &&
+         staticCols > 0 && mr * colGroups <= 16);
 
     if (canUseOuterContract) {
       SmallVector<std::optional<Value>> aSel(slots[0].t.dims.size(),
@@ -1234,8 +1239,8 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
       WeftTypeSpec vecSpec{accCarrier, {outColDim}, {2}};
       std::string vecTy = vecSpec.format("value");
       int64_t regRows =
-          (slots[0].t.carrier == "f32" && !grouped && M % 2 == 0 &&
-           (N <= nr || N % nr == 0))
+          ((slots[0].t.carrier == "f32" || slots[0].t.carrier == "i8") &&
+           !grouped && M % 2 == 0 && outColDim > 0)
               ? std::min<int64_t>(mr, 2)
               : 1;
       auto stepR = tb.idx(regRows);

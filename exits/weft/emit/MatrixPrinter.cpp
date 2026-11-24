@@ -341,24 +341,17 @@ TerminalPrinter weftMatrixPrinter() {
       c.line("}");
       if (op.getNumResults() > 1) {
         std::string tup = irId(c, op.getResult(0)) + "_t";
-        auto zeroLit = [](StringRef t) -> std::string {
-          return t == "si32" ? "0" : "0.0";
-        };
         for (unsigned i = 0; i < op.getNumResults(); ++i) {
           std::string t = cast<StringAttr>(iterTys[i]).str();
           std::string zId = irId(c, op.getResult(i)) + "_z";
-          if (t == "si32" || t == "f32") {
-            c.line(zId + "=\"weft_kernel.constant\"() <{value=" + zeroLit(t) +
-                   ":" + t + "}>:()->" + t);
-            c.line(irId(c, op.getResult(i)) + "=\"weft_kernel.binary\"(" + tup +
-                   "#" + std::to_string(i) + "," + zId + ") <{kind=\"add\"}>:(" +
-                   t + "," + t + ")->" + t);
-          } else {
-            c.line(zId + "=\"weft_kernel.constant\"() <{value=0:si32}>:()->si32");
-            c.line(irId(c, op.getResult(i)) + "=\"weft_kernel.binary\"(" + tup +
-                   "#" + std::to_string(i) + "," + zId + ") <{kind=\"add\"}>:(" +
-                   t + ",si32)->" + t);
-          }
+          std::string scTy =
+              t.find("f32") != std::string::npos ? "f32" : "si32";
+          std::string zLit = scTy == "f32" ? "0.0" : "0";
+          c.line(zId + "=\"weft_kernel.constant\"() <{value=" + zLit + ":" +
+                 scTy + "}>:()->" + scTy);
+          c.line(irId(c, op.getResult(i)) + "=\"weft_kernel.binary\"(" + tup +
+                 "#" + std::to_string(i) + "," + zId + ") <{kind=\"add\"}>:(" +
+                 t + "," + scTy + ")->" + t);
         }
       }
     }
@@ -607,7 +600,9 @@ TerminalPrinter weftMatrixPrinter() {
         c.line("  out->d=extreme==0.0f ? 0.0f : 1.0f/inv;");
         c.line("  for (int group=0; group<16; ++group) {");
         c.line("    int sum=0;");
+        c.line("#if defined(__x86_64__)");
         c.line("    #pragma omp simd reduction(+:sum)");
+        c.line("#endif");
         c.line("    for (int64_t k=16*group; k<16*group+16; ++k) {");
         c.line("      float v=x[k*stride]*inv; int q=(int)v; float fraction=fabsf(v-(float)q);");
         c.line("      if (fraction>0.5f || (fraction==0.5f && (q&1))) q+=v<0 ? -1 : 1;");
@@ -966,7 +961,9 @@ TerminalPrinter weftMatrixPrinter() {
              std::to_string(stS[1]) + "LL]];");
       c.line("    const uint8_t *src_g = src_r + g*" + std::to_string(stA[1]) + "LL;");
       c.line("    float *dst_g = dst_r + g*32;");
+      c.line("#if defined(__x86_64__)");
       c.line("    #pragma omp simd");
+      c.line("#endif");
       c.line("    for (int t=0; t<32; ++t) dst_g[t] = g_mx8_val[src_g[t*" +
              std::to_string(stA[2]) + "LL]] * factor;");
       c.line("  }");
@@ -996,7 +993,9 @@ TerminalPrinter weftMatrixPrinter() {
              "LL + t*" + std::to_string(stB[1]) + "LL + c0*" +
              std::to_string(stB[2]) + "LL;");
       c.line("      float *dst_gt = " + dst + " + (g*32 + t)*N + c0;");
+      c.line("#if defined(__x86_64__)");
       c.line("      #pragma omp simd");
+      c.line("#endif");
       c.line("      for (int64_t jc=0; jc<blk; ++jc) dst_gt[jc] = g_mx8_val[src_gt[jc*" +
              std::to_string(stB[2]) + "LL]] * sc_blk[jc];");
       c.line("    }");

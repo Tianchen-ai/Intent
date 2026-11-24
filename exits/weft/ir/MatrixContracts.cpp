@@ -230,10 +230,13 @@ void populateWeftMatrixContracts(intentdsl::cpu::MatrixMachine &m, int64_t v,
           false);
   }
 
-  // Native SIMD / RVV candidates (available on both x86 and RVV)
-  for (auto [r, c, d] :
-       std::initializer_list<std::tuple<int64_t, int64_t, int64_t>>{
-           {4, 2 * v, 64}, {8, 4 * v, 128}, {8, 3 * v, 64}, {2, v, 32}}) {
+  // Native SIMD / RVV candidates (power-of-two RVV vector widths fit 32 RVV regs)
+  auto nativeShapes =
+      isRvv ? std::vector<std::tuple<int64_t, int64_t, int64_t>>{
+                  {4, 4 * v, 64}, {4, 2 * v, 64}, {8, 2 * v, 64}, {2, v, 32}}
+            : std::vector<std::tuple<int64_t, int64_t, int64_t>>{
+                  {4, 2 * v, 64}, {8, 4 * v, 128}, {8, 3 * v, 64}, {2, v, 32}};
+  for (auto [r, c, d] : nativeShapes) {
     add(r, c, d, v, "weft-simd-fma", "native-panels", "any");
     add(r, c, d, v, "weft-f32-panel-fma", "native-panels", "f32");
   }

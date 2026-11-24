@@ -105,23 +105,14 @@ void nativePanelCost(compilerinfra::Unit &u) {
           e.scope = "one native Q4_K task";
           e.bottleneck = "Q4_K subgroup unpack, widen, and SIMD dot";
           double subgroups = double(g->k) / 32.0;
-          double ops = double(t[0]) * subgroups * 128.0;
+          double ops = double(t[0]) * subgroups * 64.0;
           auto *machine =
               ctx.target.services.get<intentdsl::cpu::RowMachine>();
-          double localBytes =
-              machine->boundWidening ? 0.0 : double(t[0]) * g->k * 2.5;
           e.terms["subgroup_ops"] = {ops, "FLOP"};
-          e.terms["local_array_bytes"] = {localBytes, "B"};
-          auto read = intentdsl::quantity(ctx, "read_1_private_bw", "B/ns"),
-               write = intentdsl::quantity(ctx, "write_1_private_bw", "B/ns"),
-               rate = intentdsl::quantity(ctx, "vector", "FLOP/ns");
+          auto rate = intentdsl::quantity(ctx, "vector", "FLOP/ns");
           if (rate) {
             auto workers = machine->workers;
-            double memNs =
-                (read && write && localBytes > 0.0)
-                    ? (localBytes / 2.0) * workers * (1.0 / *read + 1.0 / *write)
-                    : 0.0;
-            e.timeNs = memNs + (ops * workers) / *rate;
+            e.timeNs = (ops * workers) / *rate;
           }
           return e;
         }},
@@ -154,14 +145,24 @@ void nativePanelCost(compilerinfra::Unit &u) {
           constexpr double kTlsLookupNs = 8.0;
 
           if (impl.dtype == "q4k") {
-            e.bottleneck = "multi-row Q4_K subgroup AMX/VNNI BRGeMM";
+            bool amx = ctx.target.features.count("amx_int8") > 0 && t[0] >= 16;
+            auto launch = intentdsl::quantity(ctx, "launch", "ns"),
+                 sync = intentdsl::quantity(ctx, "sync", "ns");
+            double amxEnterLeaveNs =
+                (launch ? *launch * 4.0 : 11000.0) +
+                (sync ? *sync * 2.0 : 1400.0);
+            double planNs = sync ? *sync * 1.5 : 1000.0;
+            double amxCtx = amx ? amxEnterLeaveNs : planNs;
+            e.bottleneck = "per-subgroup ukernel call, 16-col padding, and nibble unpack";
             double subgroups = double(g->k) / 32.0;
-            double nibbleBytes = double(t[0]) * g->k;
+            double unpackBytes = double(t[0]) * g->k * 2.0;
             e.terms["subgroup_ukernel_calls"] = {subgroups, "count"};
+            e.terms["nibble_stack_bytes"] = {unpackBytes, "B"};
             if (read && write && rate) {
+              double callCost = launch ? std::min(*launch * 0.05, 25.0) : 20.0;
               double ops = double(t[0]) * subgroups * 16.0;
-              e.timeNs = subgroups * kTlsLookupNs +
-                         (nibbleBytes / 2.0) * workers *
+              e.timeNs = amxCtx / waves + subgroups * callCost +
+                         (unpackBytes / 2.0) * workers *
                              (1.0 / *read + 1.0 / *write) +
                          (ops * workers) / *rate;
             }
@@ -189,6 +190,10 @@ void nativePanelCost(compilerinfra::Unit &u) {
               std::max(0.0, live - (t[3] == 16 ? 32.0 : 16.0)) * t[3] * 4.0 *
               2.0 * g->k;
           double l1Loads = double(g->k) * (t[0] + columns);
+          double inTileConvert =
+              (impl.dtype == "f16" && !ctx.target.features.count("amx_fp16"))
+                  ? double(g->k) * (t[0] + columns)
+                  : 0.0;
           double tileOutBytes = double(t[0]) * t[1] * 4.0;
           e.terms["live_vectors"] = {live, "count"};
           if (read && write && rate) {
@@ -196,7 +201,7 @@ void nativePanelCost(compilerinfra::Unit &u) {
             e.timeNs = kTlsLookupNs +
                        (spill / 2.0) * workers * (1.0 / *read + 1.0 / *write) +
                        (tileOutBytes * workers) / *write +
-                       (l1Loads * 0.25 * widths) / *rate;
+                       ((l1Loads * 0.25 + inTileConvert) * widths) / *rate;
           }
           return e;
         }},
