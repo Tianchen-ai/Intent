@@ -107,5 +107,121 @@ mlir::Value nativeMatrixRead(Tiles &t, intentdsl::block::MatrixAccess &p,
   }
   return value;
 }
+mlir::Value nativeWindowPanels(Tiles &t, intentdsl::block::MatrixAccess &p,
+                               Value &batch, Value &chunk, Value &head) {
+  auto x = p.dot.getOperand(0), basis = p.dot.getOperand(1),
+       dt = p.dot.getOperand(2), decay = p.dot.getOperand(3);
+  int64_t bm = p.tile[0], bn = p.tile[1], bk = p.tile[2], k = p.shape[2];
+  if (p.rank(x) != 4 || p.rank(basis) != 4 || p.rank(dt) != 4 ||
+      p.rank(decay) != 4 || p.shape[0] <= 0 || p.shape[1] <= 0 || k <= 0 ||
+      k % bk != 0)
+    return {};
+  auto &b = t.b;
+  auto loc = t.loc;
+  int64_t heads = std::max<int64_t>(1, t.shape(dt)[1]),
+          chunks = std::max<int64_t>(1, t.shape(dt)[2]),
+          panelsPerChunk = k / bk;
+  Value gp = t.pid(2);
+  Value headIndex = b.create<arith::DivUIOp>(loc, gp, t.integer(heads));
+  head = b.create<arith::RemUIOp>(loc, gp, t.integer(heads));
+  batch = b.create<arith::DivUIOp>(loc, headIndex, t.integer(chunks));
+  chunk = b.create<arith::RemUIOp>(loc, headIndex, t.integer(chunks));
+  Value group =
+      b.create<arith::DivUIOp>(loc, head, t.integer(p.axis("head_group")));
+  Value last = t.read(
+      decay,
+      t.address(decay, {batch, head, chunk, t.integer(k - 1)}, {-1, -1, -1, -1}));
+  bool tma = t.fn->hasAttr("ct_src.tma");
+  auto accTy = t.shaped({bm, bn}, b.getF32Type());
+  Value init = t.like(t.scalar(0), accTy);
+  Value chunkBase =
+      b.create<arith::MulIOp>(loc, chunk, t.integer(panelsPerChunk));
+  auto lo = b.create<arith::ConstantIndexOp>(loc, 0),
+       hi = b.create<arith::ConstantIndexOp>(loc, panelsPerChunk),
+       one = b.create<arith::ConstantIndexOp>(loc, 1);
+  auto loop = b.create<scf::ForOp>(loc, lo, hi, one, ValueRange{init});
+  loop->setAttr(t.symbol("runtime_range"), b.getUnitAttr());
+  b.setInsertionPointToStart(loop.getBody());
+  Value it =
+      b.create<arith::IndexCastOp>(loc, b.getI64Type(), loop.getInductionVar());
+  Value seqPanel = b.create<arith::AddIOp>(loc, chunkBase, it);
+  Value xTile = reshape(
+      t, load(t, x, {batch, seqPanel, head, t.pid(0)}, {1, bk, 1, bm}, tma),
+      {bk, bm});
+  Value lhs =
+      t.op("transpose", xTile, t.shaped({bm, bk}, t.elem(xTile.getType())))
+          ->getResult(0);
+  Value rhs = reshape(
+      t, load(t, basis, {batch, seqPanel, group, t.pid(1)}, {1, bk, 1, bn}, tma),
+      {bk, bn});
+  Value dtVec = reshape(
+      t, load(t, dt, {batch, head, chunk, it}, {1, 1, 1, bk}, false), {bk});
+  Value decVec = reshape(
+      t, load(t, decay, {batch, head, chunk, it}, {1, 1, 1, bk}, false), {bk});
+  auto &body = p.dot.getRegion(0).front();
+  IRMapping mapping;
+  auto ty = cast<RankedTensorType>(rhs.getType());
+  for (auto [arg, val] :
+       llvm::zip(body.getArguments(),
+                 SmallVector<Value>{rhs, dtVec, decVec, last}))
+    mapping.map(arg, t.like(val, ty.clone(t.elem(val.getType())),
+                            isa<ShapedType>(val.getType()) ? 0 : -1));
+  for (auto &old : body.without_terminator()) {
+    Value v;
+    if (auto lit = dyn_cast<arith::ConstantOp>(old))
+      v = t.like(b.create<arith::ConstantOp>(loc, lit.getValue()),
+                 ty.clone(lit.getType()));
+    else {
+      OperationState state(loc, old.getName());
+      for (auto arg : old.getOperands())
+        state.addOperands(mapping.lookup(arg));
+      state.addTypes(ty.clone(old.getResult(0).getType()));
+      state.addAttributes(old.getAttrs());
+      v = b.create(state)->getResult(0);
+    }
+    mapping.map(old.getResult(0), v);
+  }
+  Value rhsOut = mapping.lookup(body.back().getOperand(0));
+  if (p.shape[1] % bn != 0) {
+    Value col =
+        t.stepped(b.create<arith::MulIOp>(loc, t.pid(1), t.integer(bn)), bn);
+    Value validCol = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt,
+                                             col,
+                                             t.like(t.integer(p.shape[1]), col.getType()));
+    Value guard = t.like(validCol, ty.clone(b.getI1Type()), 1);
+    Value zeroRhs = t.like(
+        b.create<arith::ConstantOp>(loc, b.getZeroAttr(ty.getElementType())),
+        ty);
+    rhsOut = b.create<arith::SelectOp>(loc, guard, rhsOut, zeroRhs);
+  }
+  Value next = t.dot(lhs, rhsOut, false, loop.getRegionIterArgs()[0]);
+  b.create<scf::YieldOp>(loc, next);
+  b.setInsertionPointAfter(loop);
+  return loop.getResult(0);
+}
+bool nativeMatrixWrite(Tiles &t, intentdsl::block::MatrixAccess &p, Value y,
+                       Value val, ArrayRef<Value> batchCoords) {
+  auto arg = dyn_cast<BlockArgument>(y);
+  if (!arg || arg.getOwner() != &t.fn.front() || p.shape[0] <= 0 ||
+      p.shape[1] <= 0 || p.shape[0] % p.tile[0] != 0 ||
+      p.shape[1] % p.tile[1] != 0)
+    return false;
+  int rank = p.rank(y);
+  if (rank < 2 || batchCoords.size() + 2 != size_t(rank))
+    return false;
+  Value shaped = val;
+  if (rank > 2) {
+    SmallVector<int64_t> dims(batchCoords.size(), 1);
+    dims.push_back(p.tile[0]);
+    dims.push_back(p.tile[1]);
+    shaped = reshape(t, val, dims);
+  }
+  SmallVector<Value> args{y, shaped};
+  llvm::append_range(args, batchCoords);
+  args.push_back(t.pid(0));
+  args.push_back(t.pid(1));
+  t.op("rect_write", args);
+  return true;
+}
 intentdsl::block::OwnerAccess nativeOwnerViews() { return {rectangle, panel}; }
 } // namespace CI_UNIT_NAMESPACE

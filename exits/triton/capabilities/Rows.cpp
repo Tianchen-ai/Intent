@@ -29,7 +29,8 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
                               {64,128,64,R"({"num_warps":8,"num_stages":3})"}};
   else matrix->tiles={{16,32,32,R"({"num_warps":4,"num_stages":2})"},
                       {32,64,32,R"({"num_warps":4,"num_stages":2})"},
-                      {64,64,64,R"({"num_warps":4,"num_stages":2})"}};
+                      {64,64,64,R"({"num_warps":4,"num_stages":2})"},
+                      {64,128,64,R"({"num_warps":8,"num_stages":2})"}};
   if(auto err=profile.services.provide<intentdsl::block::MatrixTarget>(matrix))return std::move(err);
   caps->storeSectorBytes = 32;
   caps->nativePrivateHistogram=true;

@@ -26,6 +26,12 @@ TerminalPrinter cutilePrinter();
 void registerContracts(Unit &);
 Value nativeMatrixRead(intentdsl::block::Tiles &,
                        intentdsl::block::MatrixAccess &, bool, Value, Value);
+Value nativeWindowPanels(intentdsl::block::Tiles &,
+                         intentdsl::block::MatrixAccess &, Value &, Value &,
+                         Value &);
+bool nativeMatrixWrite(intentdsl::block::Tiles &,
+                       intentdsl::block::MatrixAccess &, Value, Value,
+                       ArrayRef<Value>);
 LogicalResult verifyArrayGeometry(func::FuncOp,const TargetProfile &);
 intentdsl::block::OwnerAccess nativeOwnerViews();
 namespace {
@@ -429,7 +435,9 @@ struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
         fn->setAttr("ct_src.native_views",b.getStringAttr(llvm::formatv("{0}",llvm::json::Value(std::move(views))).str()));
       }
       intentdsl::block::expandMatrixProgram(fn, "exits/cutile", scaledPanels,
-                                            nativeMatrixRead);
+                                            nativeMatrixRead,
+                                            nativeWindowPanels,
+                                            nativeMatrixWrite);
     }
     else fn.walk<WalkOrder::PostOrder>([](Operation *op){
       if(op->getName().getDialectNamespace()!="ct_src") return;

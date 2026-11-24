@@ -383,14 +383,21 @@ struct Panel {
                        false, carry);
         });
   }
-  void run(ScaledPanelLowering native) {
+  void run(ScaledPanelLowering native, WindowPanelLowering windowNative,
+           MatrixPanelWrite writeNative) {
     bool records = p.dot.getName().stripDialect() == "q4k_dot";
     bool hasWindow = p.dot.getName().stripDialect() == "window_contract";
     Value batch, chunk, head;
-    Value acc = records     ? record()
-                : hasWindow ? window(batch, chunk, head)
-                : native    ? native(t, p)
-                            : scaled();
+    Value acc;
+    if (records)
+      acc = record();
+    else if (hasWindow) {
+      if (windowNative)
+        acc = windowNative(t, p, batch, chunk, head);
+      if (!acc)
+        acc = window(batch, chunk, head);
+    } else
+      acc = native ? native(t, p) : scaled();
     IRMapping map;
     map.map(p.fold.getResult(0), acc);
     for (auto &op : p.domain.getRegion(0).front()) {
@@ -411,6 +418,11 @@ struct Panel {
                              v, to));
       } else if (code == "publish_matrix") {
         auto y = op.getOperand(0), value = map.lookup(op.getOperand(1));
+        SmallVector<Value, 3> batches;
+        if (hasWindow)
+          batches.assign({batch, chunk, head});
+        if (!records && writeNative && writeNative(t, p, y, value, batches))
+          continue;
         auto ptr = records     ? t.address(y, row, {0})
                    : hasWindow ? t.address(y, {batch, chunk, head, row, col},
                                            {-1, -1, -1, 0, 1})
@@ -423,7 +435,8 @@ struct Panel {
 };
 } // namespace
 void encodedTiles(Tiles &t, intentdsl::block::MatrixAccess &access,
-                  ScaledPanelLowering native) {
-  Panel(t, access).run(native);
+                  ScaledPanelLowering native, WindowPanelLowering windowNative,
+                  MatrixPanelWrite writeNative) {
+  Panel(t, access).run(native, windowNative, writeNative);
 }
 } // namespace intentdsl::block

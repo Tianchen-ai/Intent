@@ -5,12 +5,13 @@
 namespace intentdsl::block {
 using namespace mlir;
 
-void encodedTiles(Tiles &, MatrixAccess &, ScaledPanelLowering);
+void encodedTiles(Tiles &, MatrixAccess &, ScaledPanelLowering,
+                  WindowPanelLowering, MatrixPanelWrite);
 namespace {
 // Lower the chosen panel loop with a loop-carried accumulator. The pointers
 // for both transposed and contiguous operands use their verified ABI strides.
 void matrixTiles(Tiles &t, intentdsl::block::MatrixAccess &p,
-                 MatrixPanelRead native) {
+                 MatrixPanelRead native, MatrixPanelWrite writeNative) {
   auto &b = t.b;
   auto loc = t.loc;
   auto [m, n, k] = std::tuple{p.shape[0], p.shape[1], p.shape[2]};
@@ -134,7 +135,13 @@ void matrixTiles(Tiles &t, intentdsl::block::MatrixAccess &p,
       }
       map.map(op.getResult(0), v);
     } else if (name == "publish_matrix") {
-      auto y = op.getOperand(0);
+      auto y = op.getOperand(0), v = map.lookup(op.getOperand(1));
+      SmallVector<Value, 1> batches;
+      if (!segmented && !p.routed() && p.rank(y) == 3)
+        batches.push_back(gp);
+      if (!segmented && !p.routed() && writeNative &&
+          writeNative(t, p, y, v, batches))
+        continue;
       Value addr;
       if (p.routed()) {
         Value a = b.create<arith::DivUIOp>(loc, dst, multiplicity),
@@ -144,8 +151,7 @@ void matrixTiles(Tiles &t, intentdsl::block::MatrixAccess &p,
         addr = t.address(y, {gp, dst, col}, {-1, 0, 1});
       else
         addr = t.address(y, {dst, col}, {0, 1});
-      t.write(y, addr, map.lookup(op.getOperand(1)),
-              mask(validRow, validCol, bm, bn));
+      t.write(y, addr, v, mask(validRow, validCol, bm, bn));
     }
   }
   if (active)
@@ -154,7 +160,8 @@ void matrixTiles(Tiles &t, intentdsl::block::MatrixAccess &p,
 
 } // namespace
 void expandMatrixProgram(func::FuncOp fn, StringRef unit,
-                         ScaledPanelLowering scaled, MatrixPanelRead native) {
+                         ScaledPanelLowering scaled, MatrixPanelRead native,
+                         WindowPanelLowering window, MatrixPanelWrite write) {
   fn.getContext()
       ->loadDialect<arith::ArithDialect, scf::SCFDialect, math::MathDialect>();
   auto &root = fn.front().front();
@@ -162,9 +169,9 @@ void expandMatrixProgram(func::FuncOp fn, StringRef unit,
     intentdsl::block::MatrixAccess p(fn);
     Tiles tiles(fn, "matrix", unit);
     if (p.dot.getName().stripDialect() == "contract")
-      matrixTiles(tiles, p, native);
+      matrixTiles(tiles, p, native, write);
     else
-      encodedTiles(tiles, p, scaled);
+      encodedTiles(tiles, p, scaled, window, write);
     tiles.op("end");
     root.erase();
   }
