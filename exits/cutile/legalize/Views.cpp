@@ -654,15 +654,67 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
          convOp->getResult(0).getType()!=RankedTensorType::get({stepVal},cast<MemRefType>(src.getType()).getElementType().isInteger(64)?IntegerType::get(fn.getContext(),64):IntegerType::get(fn.getContext(),32)) ||
          readOp->getResult(0).getType()!=RankedTensorType::get({stepVal},cast<MemRefType>(src.getType()).getElementType()))
         return op->emitError("invalid count panel or atomic update"),WalkResult::interrupt();
+      auto isPid0 = [](Value v) -> bool {
+        auto *d = v.getDefiningOp();
+        return d && d->getName().getStringRef() == "ct_src.tile_pid" &&
+               d->getAttrOfType<IntegerAttr>("axis").getInt() == 0;
+      };
+      auto isIv64 = [&](Value v) -> bool {
+        auto *d = isMap(v, "i64");
+        return d && d->getOperand(0) == loop.getArgument(0);
+      };
+      auto isBinsDim = [&](Value v) -> bool {
+        auto *d = v.getDefiningOp();
+        return d && d->getName().getStringRef() == "ct_src.array_dim" &&
+               d->getOperand(0) == dst &&
+               d->getAttrOfType<IntegerAttr>("axis").getInt() ==
+                   (swapVal ? 0 : 1);
+      };
+      auto *panelAdd = isMap(readOp->getOperand(1), "add");
+      auto *panelMul =
+          panelAdd ? isMap(panelAdd->getOperand(0), "mul") : nullptr;
+      bool panelIdxOk = panelAdd && panelMul && isPid0(panelMul->getOperand(0)) &&
+                        isConst(panelMul->getOperand(1), panelsVal) &&
+                        isIv64(panelAdd->getOperand(1));
       auto *sel = isMap(atomOp->getOperand(1), "select");
       auto *incCast = isMap(atomOp->getOperand(2), "i32");
       auto *validOp = (sel && incCast && sel->getOperand(0) == incCast->getOperand(0))
                           ? isMap(sel->getOperand(0), "and")
                           : nullptr;
       auto *inExtOp = validOp ? isMap(validOp->getOperand(0), "lt") : nullptr;
+      auto *posAdd = inExtOp ? isMap(inExtOp->getOperand(0), "add") : nullptr;
+      auto *baseAdd = posAdd ? isMap(posAdd->getOperand(0), "add") : nullptr;
+      auto *partMul = baseAdd ? isMap(baseAdd->getOperand(0), "mul") : nullptr;
+      auto *stepMul = baseAdd ? isMap(baseAdd->getOperand(1), "mul") : nullptr;
+      auto *lanesOp = posAdd ? posAdd->getOperand(1).getDefiningOp() : nullptr;
+      bool posOk = posAdd && baseAdd && partMul && stepMul && lanesOp &&
+                   isPid0(partMul->getOperand(0)) &&
+                   isConst(partMul->getOperand(1), spanVal) &&
+                   isIv64(stepMul->getOperand(0)) &&
+                   isConst(stepMul->getOperand(1), stepVal) &&
+                   lanesOp->getName().getStringRef() == "ct_src.range" &&
+                   lanesOp->getAttrOfType<IntegerAttr>("size").getInt() == stepVal;
       auto *inBinsOp = validOp ? isMap(validOp->getOperand(1), "and") : nullptr;
-      if (!sel || sel->getOperand(1) != convOp->getResult(0) || !isConst(sel->getOperand(2), 0) ||
-          !inExtOp || !isConst(inExtOp->getOperand(1), extentVal) || !inBinsOp)
+      auto *ge0Op = inBinsOp ? isMap(inBinsOp->getOperand(0), "ge") : nullptr;
+      auto *ltBinsOp = inBinsOp ? isMap(inBinsOp->getOperand(1), "lt") : nullptr;
+      bool wideKey =
+          cast<MemRefType>(src.getType()).getElementType().isInteger(64);
+      bool binsBoundOk = false;
+      if (ltBinsOp) {
+        if (wideKey) {
+          binsBoundOk = isBinsDim(ltBinsOp->getOperand(1));
+        } else if (auto *binsI32 = isMap(ltBinsOp->getOperand(1), "i32")) {
+          binsBoundOk = isBinsDim(binsI32->getOperand(0));
+        }
+      }
+      bool inBinsOk = ge0Op && ltBinsOp &&
+                      ge0Op->getOperand(0) == convOp->getResult(0) &&
+                      isConst(ge0Op->getOperand(1), 0) &&
+                      ltBinsOp->getOperand(0) == convOp->getResult(0) &&
+                      binsBoundOk;
+      if (!panelIdxOk || !sel || sel->getOperand(1) != convOp->getResult(0) ||
+          !isConst(sel->getOperand(2), 0) || !inExtOp || !posOk ||
+          !isConst(inExtOp->getOperand(1), extentVal) || !inBinsOk)
         return atomOp->emitError("atomic_bins requires verified extent and bin range masks"), WalkResult::interrupt();
     }
     if(ok && (n=="gather_slab" || n=="scatter_slab"))
