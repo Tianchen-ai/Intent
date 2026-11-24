@@ -906,8 +906,6 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
         Value bAddr =
             makeAddr(b, loc, panelPtrs[1], {kIv, cCoord}, views[1].panelStrides,
                      {K, N}, {0}, {1});
-        if (K > depth && v == 0)
-          tailClamps.push_back({kLoopOp, bAddr.getDefiningOp(), nextPVal, kTotal});
         Value raw =
             makeOp(b, loc, "load_vec", {panelPtrs[1], bAddr},
                    {mlirVecType(b, w, views[1].dtype)},
@@ -917,6 +915,8 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
                     b.getNamedAttr("lane_stride",
                                    b.getI64IntegerAttr(views[1].panelStrides[1]))})
                 ->getResult(0);
+        if (K > depth && v == 0)
+          tailClamps.push_back({kLoopOp, raw.getDefiningOp(), nextPVal, kTotal});
         bVecs[v] =
             makeOp(b, loc, "splat_cast", {raw}, {accVecTy},
                    {b.getNamedAttr("dtype", b.getStringAttr(accDtype)),

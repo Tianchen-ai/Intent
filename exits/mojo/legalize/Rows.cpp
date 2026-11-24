@@ -1025,6 +1025,71 @@ struct RowLowerer {
         ->getResult(0);
   }
 
+  bool proveOwnerFastSpan(unsigned idx, int64_t fast, int64_t w, bool isWrite) {
+    if (!slots[idx].boundShape || !slots[idx].boundStrides || w <= 0)
+      return false;
+    int64_t R = slots[idx].rank;
+    int64_t spanConst = std::max<int64_t>(1, slots[idx].boundShape[fast]);
+    int64_t stepConst = slots[idx].boundStrides[fast];
+    int64_t colsConst = 1;
+    for (int64_t ax = 0; ax < R; ++ax)
+      if (ax != *ownerAxis)
+        colsConst *= std::max<int64_t>(1, slots[idx].boundShape[ax]);
+    int64_t fullStopConst = (colsConst / fullWidth) * fullWidth;
+    if (fullStopConst < w)
+      return false;
+    OpBuilder sb(b.getContext());
+    Location sloc = b.getUnknownLoc();
+    OperationState scopeSt(sloc, "mojo_row.row_fn");
+    scopeSt.addAttribute("param_specs", sb.getArrayAttr({}));
+    scopeSt.addAttribute("uses_atomic", sb.getBoolAttr(false));
+    scopeSt.addAttribute("uses_stack", sb.getBoolAttr(false));
+    scopeSt.addAttribute("uses_memcpy", sb.getBoolAttr(false));
+    scopeSt.addAttribute("has_key_bounds", sb.getBoolAttr(false));
+    Block &sBb = scopeSt.addRegion()->emplaceBlock();
+    Value ptrArg = sBb.addArgument(slots[idx].ptrVal.getType(), sloc);
+    auto vecTy = VectorType::get({w}, slots[idx].elemTy);
+    Value valArg = isWrite ? sBb.addArgument(vecTy, sloc) : Value{};
+    OwningOpRef<Operation *> scopeOp(Operation::create(scopeSt));
+    sb.setInsertionPointToEnd(&sBb);
+    Value z0 = constIdx(sb, sloc, 0), ub = constIdx(sb, sloc, fullStopConst),
+          stW = constIdx(sb, sloc, w);
+    Operation *jLoop =
+        makeOp(sb, sloc, "for_range", {z0, ub, stW}, {}, {}, 1);
+    makeOp(sb, sloc, "end");
+    Block &jBb = jLoop->getRegion(0).emplaceBlock();
+    Value jVar = jBb.addArgument(sb.getIndexType(), sloc);
+    sb.setInsertionPointToEnd(&jBb);
+    Value fastCoord = jVar;
+    if (colsConst != spanConst) {
+      if (spanConst % w == 0) {
+        Value stepIdx = sb.create<arith::DivSIOp>(sloc, jVar, stW);
+        Value spanSteps = constIdx(sb, sloc, spanConst / w);
+        Value remSteps = sb.create<arith::RemSIOp>(sloc, stepIdx, spanSteps);
+        fastCoord = sb.create<arith::MulIOp>(sloc, remSteps, stW);
+      } else {
+        fastCoord =
+            sb.create<arith::RemSIOp>(sloc, jVar, constIdx(sb, sloc, spanConst));
+      }
+    }
+    Value probeAddr =
+        makeOp(sb, sloc, "address", {ptrArg, fastCoord}, {sb.getIndexType()},
+               {sb.getNamedAttr("strides", sb.getDenseI64ArrayAttr({stepConst})),
+                sb.getNamedAttr("index_bits", sb.getI32IntegerAttr(64)),
+                sb.getNamedAttr("extents", sb.getDenseI64ArrayAttr({spanConst}))})
+            ->getResult(0);
+    Operation *probeMem =
+        isWrite
+            ? makeOp(sb, sloc, "store_slice", {ptrArg, probeAddr, valArg}, {},
+                     {sb.getNamedAttr("slice_axis", sb.getI64IntegerAttr(0))})
+            : makeOp(sb, sloc, "load_slice", {ptrArg, probeAddr}, {vecTy},
+                     {sb.getNamedAttr("width", sb.getI64IntegerAttr(w)),
+                      sb.getNamedAttr("slice_axis", sb.getI64IntegerAttr(0))});
+    makeOp(sb, sloc, "end");
+    auto tp = compilerinfra::proveTailAccess(probeMem);
+    return tp.proven && tp.kind == compilerinfra::TailKind::ExactInBounds;
+  }
+
   Value emitSweepRead(Operation &op, Value r, Value j, int64_t w) {
     unsigned idx = slotIndex(op.getOperand(0));
     bool swap = op.hasAttr("axes");
@@ -1043,67 +1108,8 @@ struct RowLowerer {
       int64_t R = slots[idx].rank;
       int64_t fast = R - 1 - (*ownerAxis == R - 1 ? 1 : 0);
       if (slots[idx].boundShape && slots[idx].boundStrides) {
-        int64_t spanConst = std::max<int64_t>(1, slots[idx].boundShape[fast]);
         int64_t stepConst = slots[idx].boundStrides[fast];
-        int64_t colsConst = 1;
-        for (int64_t ax = 0; ax < R; ++ax)
-          if (ax != *ownerAxis)
-            colsConst *= std::max<int64_t>(1, slots[idx].boundShape[ax]);
-        bool exactSpan = false;
-        int64_t fullStopConst = (colsConst / fullWidth) * fullWidth;
-        if (fullStopConst >= w && w > 0) {
-          OpBuilder sb(b.getContext());
-          Location sloc = b.getUnknownLoc();
-          OperationState scopeSt(sloc, "mojo_row.row_fn");
-          scopeSt.addAttribute("param_specs", sb.getArrayAttr({}));
-          scopeSt.addAttribute("uses_atomic", sb.getBoolAttr(false));
-          scopeSt.addAttribute("uses_stack", sb.getBoolAttr(false));
-          scopeSt.addAttribute("uses_memcpy", sb.getBoolAttr(false));
-          scopeSt.addAttribute("has_key_bounds", sb.getBoolAttr(false));
-          Block &sBb = scopeSt.addRegion()->emplaceBlock();
-          OwningOpRef<Operation *> scopeOp(Operation::create(scopeSt));
-          sb.setInsertionPointToEnd(&sBb);
-          Value z0 = constIdx(sb, sloc, 0),
-                ub = constIdx(sb, sloc, fullStopConst),
-                stW = constIdx(sb, sloc, w);
-          Operation *jLoop = makeOp(sb, sloc, "for_range", {z0, ub, stW}, {},
-                                    {}, 1);
-          makeOp(sb, sloc, "end");
-          Block &jBb = jLoop->getRegion(0).emplaceBlock();
-          Value jVar = jBb.addArgument(sb.getIndexType(), sloc);
-          sb.setInsertionPointToEnd(&jBb);
-          Value fastCoord = jVar;
-          if (colsConst != spanConst) {
-            if (spanConst % w == 0) {
-              Value stepIdx = sb.create<arith::DivSIOp>(sloc, jVar, stW);
-              Value spanSteps = constIdx(sb, sloc, spanConst / w);
-              Value remSteps =
-                  sb.create<arith::RemSIOp>(sloc, stepIdx, spanSteps);
-              fastCoord = sb.create<arith::MulIOp>(sloc, remSteps, stW);
-            } else {
-              fastCoord = sb.create<arith::RemSIOp>(
-                  sloc, jVar, constIdx(sb, sloc, spanConst));
-            }
-          }
-          Value probeAddr =
-              makeOp(sb, sloc, "address", {slots[idx].ptrVal, fastCoord},
-                     {sb.getIndexType()},
-                     {sb.getNamedAttr("strides",
-                                      sb.getDenseI64ArrayAttr({stepConst})),
-                      sb.getNamedAttr("index_bits", sb.getI32IntegerAttr(64)),
-                      sb.getNamedAttr("extents",
-                                      sb.getDenseI64ArrayAttr({spanConst}))})
-                  ->getResult(0);
-          Operation *probeLoad =
-              makeOp(sb, sloc, "load_slice", {slots[idx].ptrVal, probeAddr},
-                     {vecTy},
-                     {sb.getNamedAttr("width", sb.getI64IntegerAttr(w)),
-                      sb.getNamedAttr("slice_axis", sb.getI64IntegerAttr(0))});
-          makeOp(sb, sloc, "end");
-          auto tp = compilerinfra::proveTailAccess(probeLoad);
-          exactSpan =
-              tp.proven && tp.kind == compilerinfra::TailKind::ExactInBounds;
-        }
+        bool exactSpan = proveOwnerFastSpan(idx, fast, w, /*isWrite=*/false);
         if (exactSpan && stepConst == 1) {
           Value baseAddr = emitViewAddr(idx, buildOwnerCoords(idx, r, j));
           return makeOp(b, loc, "load_slice", {slots[idx].ptrVal, baseAddr},
@@ -1288,8 +1294,8 @@ struct RowLowerer {
       int64_t R = slots[idx].rank;
       int64_t fast = R - 1 - (*ownerAxis == R - 1 ? 1 : 0);
       if (slots[idx].boundShape && slots[idx].boundStrides &&
-          std::max<int64_t>(1, slots[idx].boundShape[fast]) % w == 0 &&
-          slots[idx].boundStrides[fast] == 1) {
+          slots[idx].boundStrides[fast] == 1 &&
+          proveOwnerFastSpan(idx, fast, w, /*isWrite=*/true)) {
         Value baseAddr = emitViewAddr(idx, buildOwnerCoords(idx, r, j));
         makeOp(b, loc, "store_slice", {slots[idx].ptrVal, baseAddr, val});
         return;

@@ -1,3 +1,4 @@
+#include "compilerinfra/Proofs.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
 #include "intentdsl/levels/execution/cpu/ir/Owners.h"
 #include "intentdsl/levels/execution/cpu/ir/ScoreCache.h"
@@ -78,6 +79,25 @@ LogicalResult verifyOwnerGrain(func::FuncOp fn, Operation &space,
         grain.getInt() % w || reuse->group % w || reuse->extent % w)
       return space.emitError("shared interval must project identical input "
                              "coordinates across independent owners");
+    if (space.getRegion(0).hasOneBlock() && axis.getInt() >= 0 &&
+        static_cast<unsigned>(axis.getInt()) <
+            space.getRegion(0).front().getNumArguments()) {
+      Value innerArg = space.getRegion(0).front().getArgument(axis.getInt());
+      compilerinfra::IntegerRangeContext tailRanges(fn.getOperation());
+      auto badTail = space.walk([&](Operation *op) {
+        if (!isa<compilerinfra::TiledAccessOpInterface>(op) ||
+            !llvm::is_contained(op->getOperands(), innerArg))
+          return WalkResult::advance();
+        auto tp = compilerinfra::proveTailAccess(op, &tailRanges);
+        return (tp.proven &&
+                tp.kind == compilerinfra::TailKind::ExactInBounds)
+                   ? WalkResult::advance()
+                   : WalkResult::interrupt();
+      });
+      if (badTail.wasInterrupted())
+        return space.emitError(
+            "packed cpu.owner_batch tile exceeds proven owner-axis extent");
+    }
     auto bad = space.walk([&](Operation *op) {
       return op->hasAttr("cpu.owner_common") !=
                      (op->getNumResults() == 1 &&
@@ -873,15 +893,23 @@ void ownerTasks(Unit &u) {
       return llvm::createStringError("unrepresentable ordered task range");
     auto fn = o->getParentOfType<func::FuncOp>();
     for (auto arg : fn.getArguments())
-      if (isa<MemRefType>(arg.getType()))
+      if (isa<MemRefType>(arg.getType())) {
+        if (arg.getArgNumber() >= f->arguments.size())
+          return llvm::createStringError("missing bound argument facts");
+        const auto *obj = f->arguments[arg.getArgNumber()].getAsObject();
+        if (!obj)
+          return llvm::createStringError("expected view object for memref argument");
         for (auto key : {"shape", "strides"}) {
+          const auto *arr = obj->getArray(key);
+          if (!arr)
+            return llvm::createStringError("missing shape or strides on memref argument");
           SmallVector<int64_t> values;
-          for (auto &v :
-               *f->arguments[arg.getArgNumber()].getAsObject()->getArray(key))
+          for (auto &v : *arr)
             values.push_back(*v.getAsInteger());
           fn.setArgAttr(arg.getArgNumber(), std::string("cpu.") + key,
                         b.getDenseI64ArrayAttr(values));
         }
+      }
     o->removeAttr("cpu.owner_choice");
     int64_t ownerBatch = 1;
     if (auto d = dyn_cast<DictionaryAttr>(a)) {

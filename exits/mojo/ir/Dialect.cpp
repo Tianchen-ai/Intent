@@ -643,6 +643,107 @@ struct MojoLoadSliceTiledAccessModel
     return success();
   }
 };
+
+struct MojoStoreSliceTiledAccessModel
+    : public compilerinfra::TiledAccessOpInterface::ExternalModel<
+          MojoStoreSliceTiledAccessModel, MojoStoreSlice> {
+  LogicalResult
+  getAccessedAxes(Operation *op,
+                  SmallVectorImpl<compilerinfra::AccessAxis> &axes) const {
+    if (op->getNumOperands() < 3)
+      return failure();
+    Operation *addrOp = op->getOperand(1).getDefiningOp();
+    auto vt = dyn_cast<ShapedType>(op->getOperand(2).getType());
+    if (!addrOp || addrOp->getName().getStringRef() != "mojo_row.address" ||
+        !vt || vt.getRank() != 1 || vt.getDimSize(0) <= 0)
+      return failure();
+    auto coords = addrOp->getOperands().drop_front();
+    auto extents = addrOp->getAttrOfType<DenseI64ArrayAttr>("extents");
+    if (coords.empty() || !extents || extents.size() != coords.size())
+      return failure();
+    int64_t sliceAxis = static_cast<int64_t>(coords.size()) - 1;
+    if (auto sa = op->getAttrOfType<IntegerAttr>("slice_axis"))
+      sliceAxis = sa.getInt();
+    if (sliceAxis < 0 || static_cast<size_t>(sliceAxis) >= coords.size())
+      return failure();
+    for (size_t d = 0; d < coords.size(); ++d) {
+      compilerinfra::AccessAxis ax;
+      ax.container = addrOp->getOperand(0);
+      ax.containerDim = static_cast<unsigned>(d);
+      if (extents[d] >= 0)
+        ax.staticExtent = extents[d];
+      ax.coord = coords[d];
+      ax.tileSize =
+          (static_cast<int64_t>(d) == sliceAxis) ? vt.getDimSize(0) : 1;
+      ax.step = 1;
+      axes.push_back(ax);
+    }
+    return success();
+  }
+};
+
+template <typename ConcreteOp>
+struct MojoVecAccessModel
+    : public compilerinfra::TiledAccessOpInterface::ExternalModel<
+          MojoVecAccessModel<ConcreteOp>, ConcreteOp> {
+  LogicalResult
+  getAccessedAxes(Operation *op,
+                  SmallVectorImpl<compilerinfra::AccessAxis> &axes) const {
+    if (op->getNumOperands() < 2)
+      return failure();
+    auto addrOp = op->getOperand(1).getDefiningOp<MojoAddress>();
+    if (!addrOp)
+      return failure();
+    if (auto tiled = dyn_cast<compilerinfra::TiledAccessOpInterface>(
+            addrOp.getOperation());
+        addrOp->hasAttr("tile_axes") && addrOp->hasAttr("tile_sizes"))
+      return tiled.getAccessedAxes(axes);
+    auto coords = addrOp->getOperands().drop_front();
+    auto extents = addrOp->getAttrOfType<DenseI64ArrayAttr>("extents");
+    auto widthAttr = op->getAttrOfType<IntegerAttr>("width");
+    auto stepAttr = op->getAttrOfType<IntegerAttr>("lane_stride");
+    if (coords.empty() || !extents || extents.size() != coords.size() ||
+        !widthAttr || widthAttr.getInt() <= 0 || !stepAttr ||
+        stepAttr.getInt() <= 0)
+      return failure();
+    for (size_t d = 0; d < coords.size(); ++d) {
+      compilerinfra::AccessAxis ax;
+      ax.container = addrOp->getOperand(0);
+      ax.containerDim = static_cast<unsigned>(d);
+      if (extents[d] >= 0)
+        ax.staticExtent = extents[d];
+      ax.coord = coords[d];
+      bool isLaneAxis = (d + 1 == coords.size());
+      ax.tileSize = isLaneAxis ? widthAttr.getInt() : 1;
+      ax.step = isLaneAxis ? stepAttr.getInt() : 1;
+      axes.push_back(ax);
+    }
+    return success();
+  }
+};
+
+struct MojoDynAddressLinearModel
+    : public compilerinfra::AddressOpInterface::ExternalModel<
+          MojoDynAddressLinearModel, MojoDynAddress> {
+  LogicalResult
+  getLinearAddress(Operation *op,
+                   compilerinfra::LinearAddressDescriptor &out) const {
+    auto termsAttr = op->getAttrOfType<IntegerAttr>("terms");
+    if (!termsAttr || termsAttr.getInt() < 0)
+      return failure();
+    size_t n = static_cast<size_t>(termsAttr.getInt());
+    if (op->getNumOperands() != 1 + 2 * n)
+      return failure();
+    out = compilerinfra::LinearAddressDescriptor{};
+    out.baseContainer = op->getOperand(0);
+    out.constantOffset = 0;
+    for (size_t i = 0; i < n; ++i) {
+      out.coordinates.push_back(op->getOperand(1 + i));
+      out.dynamicStrides.push_back(op->getOperand(1 + n + i));
+    }
+    return success();
+  }
+};
 } // namespace
 
 void MojoQ4KSuperblock::getEffects(EffectList &effects) {
@@ -703,5 +804,9 @@ void intentdsl::rowmojo::RowMojoDialect::initialize() {
   MojoAddress::attachInterface<MojoAddressLinearModel>(*ctx);
   MojoAddress::attachInterface<MojoAddressRangeModel>(*ctx);
   MojoAddress::attachInterface<MojoAddressTiledAccessModel>(*ctx);
+  MojoDynAddress::attachInterface<MojoDynAddressLinearModel>(*ctx);
   MojoLoadSlice::attachInterface<MojoLoadSliceTiledAccessModel>(*ctx);
+  MojoStoreSlice::attachInterface<MojoStoreSliceTiledAccessModel>(*ctx);
+  MojoLoadVec::attachInterface<MojoVecAccessModel<MojoLoadVec>>(*ctx);
+  MojoStoreVec::attachInterface<MojoVecAccessModel<MojoStoreVec>>(*ctx);
 }

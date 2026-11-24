@@ -19,7 +19,8 @@ Operation *findIsolatedScope(Operation *op) {
 } // namespace
 
 bool canNarrowMojoAddress(Operation &op) {
-  if (op.getName().getStringRef() != "mojo_row.address")
+  StringRef n = op.getName().getStringRef();
+  if (n != "mojo_row.address" && n != "mojo_row.dyn_address")
     return false;
   compilerinfra::AddressProofOptions opts;
   opts.targetBitwidth = 32;
@@ -41,7 +42,8 @@ struct NarrowMojo : PassWrapper<NarrowMojo, OperationPass<ModuleOp>> {
     opts.isSigned = true;
     Builder b(&getContext());
     m.walk([&](Operation *op) {
-      if (op->getName().getStringRef() != "mojo_row.address")
+      StringRef n = op->getName().getStringRef();
+      if (n != "mojo_row.address" && n != "mojo_row.dyn_address")
         return;
       Operation *scope = findIsolatedScope(op);
       if (!scope)

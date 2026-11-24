@@ -283,7 +283,7 @@ def MojoLoadSlice : RowInst<"load_slice"> {
   let results=(outs AnyType:$value);
 }
 def MojoStoreSlice : RowInst<"store_slice"> {
-  let arguments=(ins AnyType:$ptr, Index:$offset, AnyType:$value);
+  let arguments=(ins AnyType:$ptr, Index:$offset, AnyType:$value, OptionalAttr<I64Attr>:$slice_axis);
 }
 def MojoAccInsertLane : RowInst<"acc_insert_lane"> {
   let arguments=(ins AnyType:$slot, AnyType:$lane, AnyType:$scalar);
