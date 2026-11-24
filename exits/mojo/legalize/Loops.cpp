@@ -204,7 +204,7 @@ public:
            src.getElementType() == dst.getElementType();
   }
   Columns(Operation *op) : b(op), task(op), loc(op->getLoc()) {}
-  void run(int64_t lanes) {
+  void run(int64_t lanes, int64_t knownCols = -1) {
     auto &bb = task->getRegion(0).front();
     SmallVector<Operation *> original;
     for (auto &op : bb.without_terminator())
@@ -392,17 +392,23 @@ public:
           }
           cachedCut.push_back(v);
         }
-        if (!validCut || cachedCut.empty() || cachedCut.size() > 4)
+        if (!validCut || cachedCut.empty() || cachedCut.size() > 4 ||
+            knownCols > 8192)
           cachedCut.clear();
       }
     }
 
     if (!cachedCut.empty()) {
+      int64_t cacheCap =
+          (knownCols > 0 && knownCols <= 8192)
+              ? llvm::alignTo(std::max<int64_t>(knownCols, 64), 64)
+              : 8192;
       SmallVector<Attribute, 4> cacheTypes;
       for (Value cv : cachedCut)
         cacheTypes.push_back(
             TypeAttr::get(cast<ShapedType>(cv.getType()).getElementType()));
       task->setAttr("mojo_row.row_cache", b.getArrayAttr(cacheTypes));
+      task->setAttr("mojo_row.row_cache_cap", b.getI64IntegerAttr(cacheCap));
 
       for (StringRef mode : {StringRef("cached"), StringRef("uncached")}) {
         reduced.clear();
@@ -555,7 +561,26 @@ struct Realize : PassWrapper<Realize, OperationPass<ModuleOp>> {
           !intentdsl::cpu::formReservations(body) &&
           !intentdsl::cpu::atomicMembers(body) &&
           !intentdsl::cpu::formAtomicMembers(body)) {
-        Columns(op).run(effLanes);
+        int64_t knownCols = -1;
+        auto walkAttr = op->getAttrOfType<StringAttr>("cpu.walk");
+        if ((!walkAttr || walkAttr.getValue() == "source") &&
+            !op->hasAttr("cpu.member_tasks")) {
+          if (auto domAttr = op->getAttrOfType<IntegerAttr>("domain_arg")) {
+            unsigned domIdx = domAttr.getInt();
+            if (domIdx < fn.getNumArguments()) {
+              if (auto *sh = facts.shapeOf(fn.getArgument(domIdx));
+                  sh && !sh->empty()) {
+                if (auto c = (*sh)[sh->size() - 1].getAsInteger())
+                  knownCols = *c;
+              }
+            }
+          }
+        }
+        if (knownCols > 0)
+          op->setAttr("mojo_row.known_cols",
+                      IntegerAttr::get(IntegerType::get(&getContext(), 64),
+                                       knownCols));
+        Columns(op).run(effLanes, knownCols);
       }
     }
     if (failed(lowerMojoRow(fn, effLanes)))

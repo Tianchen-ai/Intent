@@ -2636,7 +2636,9 @@ LogicalResult lowerMojoRow(func::FuncOp fn, int64_t fullWidth) {
   }
   lowerer.precomputeOwnerSizes();
 
-  constexpr int64_t kMaxRowCacheCols = 8192;
+  int64_t rowCacheCap = 8192;
+  if (auto capAttr = task.getAttrOfType<IntegerAttr>("mojo_row.row_cache_cap"))
+    rowCacheCap = capAttr.getInt();
   if (rowCacheAttr) {
     for (Attribute ta : rowCacheAttr) {
       Type et = cast<TypeAttr>(ta).getValue();
@@ -2644,7 +2646,7 @@ LogicalResult lowerMojoRow(func::FuncOp fn, int64_t fullWidth) {
       lowerer.rowCacheBufs.push_back(
           makeOp(b, loc, "stack_alloc", {}, {b.getIndexType()},
                  {b.getNamedAttr("dtype", b.getStringAttr(dtypeBare(et))),
-                  b.getNamedAttr("count", b.getI64IntegerAttr(kMaxRowCacheCols))})
+                  b.getNamedAttr("count", b.getI64IntegerAttr(rowCacheCap))})
               ->getResult(0));
     }
   }
@@ -2740,7 +2742,7 @@ LogicalResult lowerMojoRow(func::FuncOp fn, int64_t fullWidth) {
     if (rowCacheAttr) {
       Value fitsCache = b.create<arith::CmpIOp>(
           loc, arith::CmpIPredicate::sle, lowerer.colsIdx,
-          constIdx(b, loc, kMaxRowCacheCols));
+          constIdx(b, loc, rowCacheCap));
       auto ifCache = b.create<scf::IfOp>(loc, TypeRange{}, fitsCache, true);
       {
         OpBuilder::InsertionGuard tg(b);
@@ -2918,32 +2920,37 @@ LogicalResult lowerMojoRow(func::FuncOp fn, int64_t fullWidth) {
               b.getNamedAttr("member_tasks", b.getBoolAttr(memberTasks)),
               b.getNamedAttr("swap_dest", b.getBoolAttr(swapDest))});
     }
+    auto emitDispatchBody = [&](Block &dstBb) {
+      OpBuilder::InsertionGuard dg(b);
+      b.setInsertionPointToEnd(&dstBb);
+      if (lowerer.projectedRank) {
+        auto *wLoop = makeOp(
+            b, loc, "c_projected_while", {}, {},
+            {b.getNamedAttr("proj_rank",
+                            b.getI64IntegerAttr(lowerer.projectedRank))},
+            1);
+        makeOp(b, loc, "end");
+        Block &wBb = wLoop->getRegion(0).emplaceBlock();
+        b.setInsertionPointToEnd(&wBb);
+        makeOp(b, loc, "c_row_call", {}, {},
+               {b.getNamedAttr("mode", b.getStringAttr("projected")),
+                b.getNamedAttr("call_args", b.getStringAttr(joinedCallArgs)),
+                b.getNamedAttr("elem_bytes", b.getI64IntegerAttr(0))});
+        makeOp(b, loc, "end");
+      } else {
+        makeOp(b, loc, "c_row_call", {}, {},
+               {b.getNamedAttr("mode", b.getStringAttr(memberTasks ? "members"
+                                                                   : "standard")),
+                b.getNamedAttr("call_args", b.getStringAttr(joinedCallArgs)),
+                b.getNamedAttr("elem_bytes", b.getI64IntegerAttr(0))});
+        makeOp(b, loc, "end");
+      }
+    };
+    auto *sGuard = makeOp(b, loc, "c_row_single_thread", {}, {}, {}, 1);
+    emitDispatchBody(sGuard->getRegion(0).emplaceBlock());
     auto *rOmp = makeOp(b, loc, "c_row_omp_parallel", {}, {}, {}, 1);
     makeOp(b, loc, "end");
-    Block &rOmpBb = rOmp->getRegion(0).emplaceBlock();
-    b.setInsertionPointToEnd(&rOmpBb);
-    if (lowerer.projectedRank) {
-      auto *wLoop = makeOp(
-          b, loc, "c_projected_while", {}, {},
-          {b.getNamedAttr("proj_rank",
-                          b.getI64IntegerAttr(lowerer.projectedRank))},
-          1);
-      makeOp(b, loc, "end");
-      Block &wBb = wLoop->getRegion(0).emplaceBlock();
-      b.setInsertionPointToEnd(&wBb);
-      makeOp(b, loc, "c_row_call", {}, {},
-             {b.getNamedAttr("mode", b.getStringAttr("projected")),
-              b.getNamedAttr("call_args", b.getStringAttr(joinedCallArgs)),
-              b.getNamedAttr("elem_bytes", b.getI64IntegerAttr(0))});
-      makeOp(b, loc, "end");
-    } else {
-      makeOp(b, loc, "c_row_call", {}, {},
-             {b.getNamedAttr("mode", b.getStringAttr(memberTasks ? "members"
-                                                                 : "standard")),
-              b.getNamedAttr("call_args", b.getStringAttr(joinedCallArgs)),
-              b.getNamedAttr("elem_bytes", b.getI64IntegerAttr(0))});
-      makeOp(b, loc, "end");
-    }
+    emitDispatchBody(rOmp->getRegion(0).emplaceBlock());
   }
 
   SmallVector<Operation *> toErase;

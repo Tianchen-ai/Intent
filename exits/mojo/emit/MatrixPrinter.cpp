@@ -2056,12 +2056,27 @@ TerminalPrinter mojoMatrixPrinter() {
     return llvm::Error::success();
   };
 
-  p.operations["mojo_row.c_row_omp_parallel"] = [](Operation &, PrintPoint at,
-                                                   PrintContext &c) {
+  p.operations["mojo_row.c_row_single_thread"] = [](Operation &, PrintPoint at,
+                                                    PrintContext &c) {
     if (at == PrintPoint::Enter) {
       c.line("const int64_t groups = (rows - 1) / grain + 1;");
       c.line("const int64_t threads = groups < workers ? groups : workers;");
-      c.line("#pragma omp parallel num_threads(threads) if(threads>1)");
+      c.line("if (threads <= 1) {");
+    } else if (at == PrintPoint::BeginBlock) {
+      c.indent++;
+      c.line("int64_t start = 0, stop = rows;");
+    } else if (at == PrintPoint::EndBlock) {
+      c.line("return 0;");
+      c.indent--;
+      c.line("}");
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["mojo_row.c_row_omp_parallel"] = [](Operation &, PrintPoint at,
+                                                   PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      c.line("#pragma omp parallel num_threads(threads)");
       c.line("{");
     } else if (at == PrintPoint::BeginBlock) {
       c.indent++;

@@ -400,6 +400,9 @@ def MojoCTile2DOmp : RowInst<"c_tile_2d_omp",[SingleBlock]> {
   let arguments=(ins I64Attr:$tile);
   let regions=(region AnyRegion:$body);
 }
+def MojoCRowSingleThread : RowInst<"c_row_single_thread",[SingleBlock]> {
+  let regions=(region AnyRegion:$body);
+}
 def MojoCRowOmpParallel : RowInst<"c_row_omp_parallel",[SingleBlock]> {
   let regions=(region AnyRegion:$body);
 }
