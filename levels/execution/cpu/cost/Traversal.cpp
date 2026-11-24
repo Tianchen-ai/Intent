@@ -138,7 +138,11 @@ void registerCost(Unit &u) {
               double groups =
                   walk == "tile"
                       ? std::ceil(n / 32.) * std::ceil(m / 32.)
-                      : std::ceil((walk == "destination" ? n : m) / grain);
+                      : std::ceil(((walk == "destination" ||
+                                    d.contains("member_tasks"))
+                                       ? n
+                                       : m) /
+                                  grain);
               double active = std::min(groups, double(facts->participants));
               RowPrediction pred;
               pred.terms = e.terms;

@@ -8,8 +8,24 @@ void registerPointwise(Unit &u,StringRef family) {
   bool indirect=family=="indirect";
   strategy.name = indirect?"indexed-rows":family=="permutation"?"rectangular-copy":"pointwise";
   strategy.family = u.qualify(indirect?"partition":family);
-  auto propose = [indirect](Operation *op, const TargetProfile &p,
-                        AnalysisManager &) -> llvm::Expected<Attribute> {
+  auto isRank1Independent = [indirect](Operation *op) {
+    if (indirect ||
+        cast<MemRefType>(op->getOperand(0).getType()).getRank() != 1 ||
+        op->getParentOfType<func::FuncOp>()->hasAttr("kir.owner_axis"))
+      return false;
+    bool hasCrossMember = false;
+    op->walk([&](Operation *o) {
+      auto n = o->getName().stripDialect();
+      hasCrossMember |= n == "atomic_add" || n == "unique_put" ||
+                        n == "pack_members" || n == "fill_ranges" ||
+                        n == "reserve_tickets" || n == "distribute_tickets" ||
+                        n == "write_offsets";
+    });
+    return !hasCrossMember;
+  };
+  auto propose = [indirect, isRank1Independent](
+                     Operation *op, const TargetProfile &p,
+                     AnalysisManager &) -> llvm::Expected<Attribute> {
     bool hasWrite = false, hasSummary = false, hasGather=false;
     op->walk([&](Operation *o) {
       auto n = o->getName().stripDialect();
@@ -34,18 +50,25 @@ void registerPointwise(Unit &u,StringRef family) {
       widens |= from && to &&
                 from.getElementTypeBitWidth() < to.getElementTypeBitWidth();
     });
-    if ((needsCoordinates || (m->boundWidening && (widens || writes > 1))) &&
-        m->wideningPanel)
+    bool widen = (needsCoordinates || (m->boundWidening && (widens || writes > 1))) &&
+                 m->wideningPanel;
+    if (isRank1Independent(op))
+      return Attribute(m->memberConfigurations(op->getContext(), widen));
+    if (widen)
       return Attribute(m->wideningConfigurations(op->getContext()));
     return Attribute(m->configurations(op->getContext(), m->structuredRows));
   };
-  strategy.enumerate=[propose](Operation *op,const TargetProfile &p,AnalysisManager &a)->llvm::Expected<std::vector<StructuralCandidate>>{
+  strategy.enumerate=[propose, isRank1Independent](Operation *op,const TargetProfile &p,AnalysisManager &a)->llvm::Expected<std::vector<StructuralCandidate>>{
     auto rows=propose(op,p,a);if(!rows)return rows.takeError();
     std::vector<StructuralCandidate> cs;if(!*rows)return cs;
     Builder b(op->getContext());
+    bool memberTasks = isRank1Independent(op);
     for(auto walk:{"source","destination","tile"}){
       if(StringRef(walk)!="source" && !intentdsl::cpu::rectangularCopy(op))continue;
-      cs.push_back({walk,walk,intentdsl::cpu::partition(b,walk,cast<ArrayAttr>(*rows)),{StringRef(walk)=="source"?"row-independent":"bijective-rectangular-copy"}});
+      NamedAttrList layout(intentdsl::cpu::partition(b,walk,cast<ArrayAttr>(*rows)));
+      if(memberTasks && StringRef(walk)=="source")
+        layout.set("member_tasks",b.getUnitAttr());
+      cs.push_back({walk,walk,layout.getDictionary(op->getContext()),{StringRef(walk)=="source"?"row-independent":"bijective-rectangular-copy"}});
     }
     return cs;
   };

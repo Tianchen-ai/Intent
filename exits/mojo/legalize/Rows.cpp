@@ -1648,8 +1648,12 @@ struct RowLowerer {
         Type targetTy = w == 1 && isa<ShapedType>(origResTy) ? elemResTy
                                                              : origResTy;
         if (opKind == "ordinal") {
-          Value baseIdx = b.create<arith::AddIOp>(
-              loc, b.create<arith::MulIOp>(loc, r, colsIdx), j);
+          Value baseIdx =
+              (flatDomain && memberTasks)
+                  ? b.create<arith::AddIOp>(loc, r, j).getResult()
+                  : b.create<arith::AddIOp>(
+                        loc, b.create<arith::MulIOp>(loc, r, colsIdx), j)
+                        .getResult();
           if (w >= 4 && w % 4 == 0 && !op.getResult(0).use_empty() &&
               llvm::all_of(op.getResult(0).getUsers(), [](Operation *u) {
                 auto uk = u->getAttrOfType<StringAttr>("kind");
@@ -2569,6 +2573,13 @@ LogicalResult lowerMojoRow(func::FuncOp fn, int64_t fullWidth) {
   b.setInsertionPointToEnd(&hOuter);
 
   bool memberTasks = task.hasAttr("cpu.member_tasks");
+  bool hasSeg = task.walk([](Operation *o) {
+                  auto n = o->getName().stripDialect();
+                  return (n == "ordered_sum" || n == "segment_fold" ||
+                          n == "segment_size")
+                             ? WalkResult::interrupt()
+                             : WalkResult::advance();
+                }).wasInterrupted();
   auto walkAttr = task.getAttrOfType<StringAttr>("cpu.walk");
   StringRef walk = walkAttr ? walkAttr.getValue() : "source";
   int64_t domSlot = task.getAttrOfType<IntegerAttr>("domain_arg").getInt();
@@ -2584,7 +2595,8 @@ LogicalResult lowerMojoRow(func::FuncOp fn, int64_t fullWidth) {
         off += "+c" + std::to_string(ax) + "*" + n + "s" + std::to_string(ax);
       callNames.push_back("(char*)" + n + "+(" + off + ")*" +
                           std::to_string(view.getElementTypeBitWidth() / 8));
-    } else if (memberTasks && view && int64_t(i) == domSlot) {
+    } else if (memberTasks && view &&
+               (hasSeg ? int64_t(i) == domSlot : view.getRank() == 1)) {
       callNames.push_back("(char*)" + n + "+start*" + n + "s0*" +
                           std::to_string(view.getElementTypeBitWidth() / 8));
     } else if (flatColParallel && view) {

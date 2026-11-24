@@ -14,6 +14,8 @@ struct RowMachine {
   int64_t wideningPanel =
       0; // Fixed-width panels supported for mixed-width live values.
   mlir::ArrayAttr wideningConfigurations(mlir::MLIRContext *ctx) const;
+  mlir::ArrayAttr memberConfigurations(mlir::MLIRContext *ctx,
+                                       bool widenOnly = false) const;
   mlir::ArrayAttr configurations(mlir::MLIRContext *, bool whole) const;
   bool accepts(mlir::ArrayAttr) const;
 };

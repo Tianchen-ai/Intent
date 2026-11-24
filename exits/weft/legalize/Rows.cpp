@@ -422,9 +422,12 @@ struct RowTaskBuilder {
         if (dim <= 0 || !startOff)
           return op.emitError(
               "absolute lane coordinates require static panels");
-        TaskTerm rGlob = bin("add", row, origin, "index");
-        TaskTerm off = bin("mul", rGlob, columns, "index");
-        off = bin("add", off, *startOff, "index");
+        TaskTerm off =
+            task.hasAttr("cpu.member_tasks")
+                ? bin("add", origin, *startOff, "index")
+                : bin("add", bin("mul", bin("add", row, origin, "index"),
+                                 columns, "index"),
+                      *startOff, "index");
         std::string elem = wide ? "ui64" : "ui32";
         std::string ixTy = regionType("value", elem, 1, dim);
         TaskTerm offElem = castOp(off, elem);
@@ -2188,7 +2191,7 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
         SmallVector<Value, 1> ptrOff;
         if (slotFacts[i].tableRows || !slotFacts[i].indirectExtents.empty()) {
           // Base pointer unshifted
-        } else if ((members && int64_t(i) == domainArg) ||
+        } else if ((members && slotFacts[i].rank == 1) ||
                    slotFacts[i].taskIndices) {
           Value off =
               makeOp(b, loc, "host_row_offset", {startV}, {b.getIndexType()},

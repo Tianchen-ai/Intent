@@ -24,6 +24,24 @@ ArrayAttr RowMachine::wideningConfigurations(MLIRContext *ctx) const {
            b.getNamedAttr("columns", b.getI64IntegerAttr(wideningPanel))}));
   return b.getArrayAttr(values);
 }
+ArrayAttr RowMachine::memberConfigurations(MLIRContext *ctx,
+                                           bool widenOnly) const {
+  Builder b(ctx);
+  SmallVector<Attribute> values;
+  llvm::SmallDenseSet<Attribute> seen;
+  for (auto [r, c] : rows) {
+    int64_t col = (widenOnly && wideningPanel > 0) ? wideningPanel
+                                                   : std::max<int64_t>(1, c);
+    int64_t raw = r * std::max<int64_t>(1, c);
+    int64_t elemGrain = std::max<int64_t>(1, raw / col) * col;
+    auto entry = b.getDictionaryAttr(
+        {b.getNamedAttr("grain", b.getI64IntegerAttr(elemGrain)),
+         b.getNamedAttr("columns", b.getI64IntegerAttr(col))});
+    if (seen.insert(entry).second)
+      values.push_back(entry);
+  }
+  return b.getArrayAttr(values);
+}
 bool RowMachine::accepts(ArrayAttr values) const {
   if (!values || values.empty())
     return false;
@@ -34,12 +52,25 @@ bool RowMachine::accepts(ArrayAttr values) const {
   bool whole = column.getInt() == 0;
   if (whole && !structuredRows)
     return false;
-  auto allowed = configurations(values.getContext(), whole);
-  auto fixed = wideningConfigurations(values.getContext());
+  auto *ctx = values.getContext();
+  auto allowed = configurations(ctx, whole);
+  auto fixed = wideningConfigurations(ctx);
+  auto members = memberConfigurations(ctx, false);
+  auto widenMembers = memberConfigurations(ctx, true);
   if (!fixed.empty() && llvm::all_of(values, [&](Attribute row) {
         return llvm::is_contained(fixed, row);
       }))
     allowed = fixed;
+  else if (!whole && !members.empty() &&
+           llvm::all_of(values, [&](Attribute row) {
+             return llvm::is_contained(members, row);
+           }))
+    allowed = members;
+  else if (!whole && !widenMembers.empty() &&
+           llvm::all_of(values, [&](Attribute row) {
+             return llvm::is_contained(widenMembers, row);
+           }))
+    allowed = widenMembers;
   llvm::SmallDenseSet<Attribute> seen;
   return llvm::all_of(values, [&](Attribute row) {
     return llvm::is_contained(allowed, row) && seen.insert(row).second;
@@ -106,10 +137,28 @@ void registerPartition(Unit &u,bool permuted) {
           return llvm::createStringError("keyed dispatch requires disjoint buffers");
       }
     }
-    if(d && d.get("member_tasks") &&
-       (cast<MemRefType>(op->getOperand(0).getType()).getRank()!=1 ||
-       !op->walk([](Operation *v){return v->getName().stripDialect()=="ordered_sum"?WalkResult::interrupt():WalkResult::advance();}).wasInterrupted()))
-      return llvm::createStringError("flat segment partition needs independent segment outputs");
+    if (d && d.get("member_tasks")) {
+      bool rank1 =
+          cast<MemRefType>(op->getOperand(0).getType()).getRank() == 1 &&
+          !op->getParentOfType<func::FuncOp>()->hasAttr("kir.owner_axis");
+      bool hasOrderedSum = false, hasWrite = false, hasDisallowed = false;
+      op->walk([&](Operation *v) {
+        auto n = v->getName().stripDialect();
+        hasOrderedSum |= n == "ordered_sum";
+        hasWrite |= n == "write";
+        hasDisallowed |= n == "sum" || n == "max_num" || n == "welford" ||
+                         n == "scan_sum" || n == "count_keys" ||
+                         n == "column_sum" || n == "gather_row" ||
+                         n == "atomic_add" || n == "unique_put" ||
+                         n == "pack_members" || n == "fill_ranges" ||
+                         n == "reserve_tickets" || n == "distribute_tickets" ||
+                         n == "write_offsets";
+      });
+      if (!rank1 || walk != "source" ||
+          (!hasOrderedSum && (!hasWrite || hasDisallowed)))
+        return llvm::createStringError(
+            "flat member partition needs independent rank-1 member outputs");
+    }
     if (!walk || (walk!="source" && ( (walk!="destination" && walk!="tile") || !intentdsl::cpu::rectangularCopy(op))) || !d.getAs<IntegerAttr>("tile") || d.getAs<IntegerAttr>("tile").getInt()!=(walk=="tile"?32:1) || !machine || !machine->accepts(d.getAs<ArrayAttr>("rows")))
       return llvm::createStringError("illegal CPU work partition");
     return llvm::Error::success();
