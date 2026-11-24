@@ -94,11 +94,15 @@ struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
         state.addAttribute("triton_src.view_strides", fn.getArgAttr(slot, "block.strides"));
         state.addAttribute("address_bits", b.getI32IntegerAttr(64));
       }
-      if(code=="key_counts" || code=="sum_columns"){
-        auto count=op->getAttrOfType<IntegerAttr>(code=="key_counts"?"span":"extent").getInt();
-        uint64_t width=std::min<uint64_t>(code=="key_counts"?8192:128,llvm::PowerOf2Ceil(std::max<int64_t>(1,count)));
-        state.addAttribute("native_panel",b.getI64IntegerAttr(width));
-        state.addAttribute("address_bits",b.getI32IntegerAttr(64));
+      if (code == "key_counts" || code == "sum_columns") {
+        auto count = op->getAttrOfType<IntegerAttr>(
+                           code == "key_counts" ? "span" : "extent")
+                         .getInt();
+        uint64_t width =
+            std::min<uint64_t>(code == "key_counts" ? 8192 : 256,
+                               llvm::PowerOf2Ceil(std::max<int64_t>(1, count)));
+        state.addAttribute("native_panel", b.getI64IntegerAttr(width));
+        state.addAttribute("address_bits", b.getI32IntegerAttr(64));
       }
       if (code == "load" || code == "store") {
         OperationState offset(op->getLoc(), "triton_src.offsets");

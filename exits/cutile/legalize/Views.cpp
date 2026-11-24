@@ -314,6 +314,48 @@ bool alignedProjectedView(Value viewArg, func::FuncOp fn,
   }
   return true;
 }
+bool panelPermitsTma(Operation *op, func::FuncOp fn,
+                     const intentdsl::CallFacts &facts, bool permitTma) {
+  if (!op->hasAttr("block.rectangular_tokens"))
+    return false;
+  auto *parent = op->getParentOp();
+  auto span =
+      parent ? parent->getAttrOfType<IntegerAttr>("block.contribution_width")
+             : IntegerAttr();
+  if (!span || span.getInt() <= 0 ||
+      !alignedProjectedView(op->getOperand(0), fn, facts, permitTma))
+    return false;
+  auto view = cast<MemRefType>(op->getOperand(0).getType());
+  int64_t elemBytes = llvm::divideCeil(view.getElementTypeBitWidth(), 8);
+  auto arg = cast<BlockArgument>(op->getOperand(0));
+  auto shape =
+      fn.getArgAttrOfType<DenseI64ArrayAttr>(arg.getArgNumber(), "block.shape");
+  if (!shape || shape.empty())
+    return false;
+  int64_t depth = shape.asArrayRef().back();
+  return depth > 0 && llvm::isPowerOf2_64(depth) &&
+         span.getInt() * depth * elemBytes <= 16384;
+}
+bool ownerRectPermitsTma(Operation *op, func::FuncOp fn,
+                         const intentdsl::CallFacts &facts, bool permitTma) {
+  if (op->getName().stripDialect() != "slice_read" ||
+      !ownerRectangleAxis(op, fn) ||
+      !alignedProjectedView(op->getOperand(0), fn, facts, permitTma))
+    return false;
+  auto rows = fn.front().front().getAttrOfType<IntegerAttr>("block.owner_tile");
+  if (!rows || rows.getInt() < 32)
+    return false;
+  auto view = cast<MemRefType>(op->getOperand(0).getType());
+  int64_t elemBytes = llvm::divideCeil(view.getElementTypeBitWidth(), 8);
+  auto arg = cast<BlockArgument>(op->getOperand(0));
+  auto shape =
+      fn.getArgAttrOfType<DenseI64ArrayAttr>(arg.getArgNumber(), "block.shape");
+  if (!shape || shape.empty())
+    return false;
+  int64_t depth = shape.asArrayRef().back();
+  return depth > 0 && llvm::isPowerOf2_64(depth) &&
+         rows.getInt() * depth * elemBytes <= 16384;
+}
 bool tileLoadStorePermitsTma(Value viewArg, func::FuncOp fn,
                              const intentdsl::CallFacts &facts,
                              bool permitTma) {
@@ -408,21 +450,23 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
       s.addAttributes(op->getAttrs());
       if (tma && op->hasAttr("block.page_extent"))
         s.addAttribute("ct_src.page_tma", b.getUnitAttr());
-      if (tma && op->hasAttr("block.rectangular_tokens") &&
-          op->getParentOp()->hasAttr("block.uniform_tokens") &&
-          op->getParentOp()
-                  ->getAttrOfType<IntegerAttr>("block.contribution_width")
-                  .getInt() <= 64)
+      if (panelPermitsTma(op, fn, facts, tma))
         s.addAttribute("ct_src.panel_tma", b.getUnitAttr());
-      if (auto rectAxis = ownerRectangleAxis(op, fn))
+      if (auto rectAxis = ownerRectangleAxis(op, fn)) {
         s.addAttribute("ct_src.owner_rectangle",
                        b.getI64IntegerAttr(*rectAxis));
-      if(code=="scaled_contract"){
-        s.addAttribute("ct_src.flat_groups",adjacentScaleGroups(op,fn));
+        if (ownerRectPermitsTma(op, fn, facts, tma))
+          s.addAttribute("ct_src.owner_tma", b.getUnitAttr());
       }
-      if(code=="sum_columns"){
-        auto extent=op->getAttrOfType<IntegerAttr>("extent").getInt();
-        s.addAttribute("native_panel",b.getI64IntegerAttr(std::min<uint64_t>(128,llvm::PowerOf2Ceil(std::max<int64_t>(1,extent)))));
+      if (code == "scaled_contract") {
+        s.addAttribute("ct_src.flat_groups", adjacentScaleGroups(op, fn));
+      }
+      if (code == "sum_columns") {
+        auto extent = op->getAttrOfType<IntegerAttr>("extent").getInt();
+        s.addAttribute(
+            "native_panel",
+            b.getI64IntegerAttr(std::min<uint64_t>(
+                256, llvm::PowerOf2Ceil(std::max<int64_t>(1, extent)))));
       }
       if (slab && rectangularSlab(op, fn)) {
         s.addAttribute("ct_src.rectangular", b.getUnitAttr());
@@ -731,19 +775,20 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
       if (owner.hasAttr("block.pair_axis") && rows && rows.getInt() < 16)
         expected = Builder(matrix.getContext()).getI64IntegerAttr(16);
       if (owner.getAttr("ct_src.matrix_rows") != expected)
-        return matrix.emitError("invalid native matrix fragment height"), failure();
+        return matrix.emitError("invalid native matrix fragment height"),
+               failure();
     }
-    if (failed(intentdsl::block::verifyOwnerMap(matrix, profile, "ct_src",
+    const auto *facts = profile.services.get<intentdsl::CallFacts>();
+    if (!facts ||
+        failed(intentdsl::specializeProjectedLayout(matrix, *facts, "ct_src",
+                                                    false)) ||
+        failed(intentdsl::block::verifyOwnerMap(matrix, profile, "ct_src",
                                                 "realized")))
       return failure();
     auto result = matrix.walk([&](Operation *op) {
       auto cap = profile.services.get<intentdsl::cutile::ArrayIndices>();
       if (op->hasAttr("ct_src.panel_tma") !=
-          (op->hasAttr("block.rectangular_tokens") && cap->permitTma &&
-           op->getParentOp()->hasAttr("block.uniform_tokens") &&
-           op->getParentOp()
-                   ->getAttrOfType<IntegerAttr>("block.contribution_width")
-                   .getInt() <= 64)) {
+          panelPermitsTma(op, matrix, *facts, cap->permitTma)) {
         op->emitError(
             "rectangular transfer requires a compatible array layout");
         return WalkResult::interrupt();
@@ -756,8 +801,11 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
       }
       Attribute expectedRect;
       if (auto rectAxis = ownerRectangleAxis(op, matrix))
-        expectedRect = Builder(matrix.getContext()).getI64IntegerAttr(*rectAxis);
-      if (op->getAttr("ct_src.owner_rectangle") != expectedRect) {
+        expectedRect =
+            Builder(matrix.getContext()).getI64IntegerAttr(*rectAxis);
+      if (op->getAttr("ct_src.owner_rectangle") != expectedRect ||
+          op->hasAttr("ct_src.owner_tma") !=
+              ownerRectPermitsTma(op, matrix, *facts, cap->permitTma)) {
         op->emitError("owner rectangle requires an aligned full group and "
                       "contiguous logical axes");
         return WalkResult::interrupt();
@@ -766,8 +814,13 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
     });
     return success(!result.wasInterrupted());
   }
-  if(intentdsl::kir::matrixDomain(matrix)){
-    if(failed(intentdsl::block::verifyScaleDispatch(matrix,profile,"ct_src",profile.services.get<intentdsl::cutile::ArrayIndices>()->scaledMma?"mx":"bf16")))return failure();
+  if (intentdsl::kir::matrixDomain(matrix)) {
+    if (failed(intentdsl::block::verifyScaleDispatch(
+            matrix, profile, "ct_src",
+            profile.services.get<intentdsl::cutile::ArrayIndices>()->scaledMma
+                ? "mx"
+                : "bf16")))
+      return failure();
     if(callable && matrix->getAttr("ct_src.index_bits")!=Builder(matrix.getContext()).getI32IntegerAttr(profile.services.get<intentdsl::cutile::ArrayIndices>()->bits))
       return matrix.emitError("matrix index width disagrees with the target");
     return success(!matrix.walk([&](Operation *op){
@@ -1052,6 +1105,15 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
       ok = op->hasAttr("ct_src.rectangular") == rect &&
            op->hasAttr("ct_src.broadcast_inner") == bcast &&
            op->hasAttr("ct_src.slab_tma") == slabTma;
+    }
+    if (ok && n == "sum_columns") {
+      auto panel = op->getAttrOfType<IntegerAttr>("native_panel");
+      auto extent = op->getAttrOfType<IntegerAttr>("extent");
+      int64_t expected = extent ? int64_t(std::min<uint64_t>(
+                                      256, llvm::PowerOf2Ceil(std::max<int64_t>(
+                                               1, extent.getInt()))))
+                                : 0;
+      ok = !callable && panel && panel.getInt() == expected;
     }
     if (ok && n == "stripe_loop")
       ok = !callable;

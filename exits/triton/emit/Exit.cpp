@@ -271,6 +271,19 @@ static LogicalResult verifyBoundary(ModuleOp m, const TargetProfile &profile,
              op->emitError("key partition addressing requires i64");
              return WalkResult::interrupt();
            }
+           if (n == "triton_src.sum_columns") {
+             auto panel = op->getAttrOfType<IntegerAttr>("native_panel");
+             auto extent = op->getAttrOfType<IntegerAttr>("extent");
+             int64_t expected =
+                 extent ? int64_t(std::min<uint64_t>(
+                              256, llvm::PowerOf2Ceil(
+                                       std::max<int64_t>(1, extent.getInt()))))
+                        : 0;
+             if (!panel || panel.getInt() != expected) {
+               op->emitError("invalid sum_columns native panel width");
+               return WalkResult::interrupt();
+             }
+           }
          }
          return WalkResult::advance();
        }).wasInterrupted())

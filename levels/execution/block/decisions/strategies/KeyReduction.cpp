@@ -31,19 +31,44 @@ void registerKeyReduction(compilerinfra::Unit &unit) {
   using namespace mlir;
   using namespace compilerinfra;
   Strategy s;s.name="column-panels";s.family=unit.qualify("structure");
-  s.enumerate=[](Operation *op,const TargetProfile &p,AnalysisManager &)->llvm::Expected<std::vector<StructuralCandidate>>{
+  s.enumerate = [](Operation *op, const TargetProfile &p, AnalysisManager &)
+      -> llvm::Expected<std::vector<StructuralCandidate>> {
     std::vector<StructuralCandidate> cs;
-    auto caps=p.services.get<intentdsl::RowCapacity>();
-    if(!contains(op,{"column_sum"}) || !caps || caps->independentWidths.empty())return cs;
+    auto caps = p.services.get<intentdsl::RowCapacity>();
+    if (!contains(op, {"column_sum"}) || !caps ||
+        caps->independentWidths.empty())
+      return cs;
     Builder b(op->getContext());
-    for(auto width:caps->independentWidths){
+    unsigned elemBytes = 0;
+    op->walk([&](Operation *k) {
+      if (k->getName().stripDialect() == "column_sum") {
+        auto ty = cast<MemRefType>(k->getOperand(0).getType());
+        elemBytes = std::max<unsigned>(
+            elemBytes, llvm::divideCeil(ty.getElementTypeBitWidth(), 8));
+      }
+    });
+    for (unsigned width : {2u, 4u, 8u, 16u, 32u, 64u, 128u}) {
+      if (elemBytes && width * elemBytes < caps->storeSectorBytes)
+        continue;
       SmallVector<Attribute> rows;
-      for(auto &r:caps->rows)if(r.width==width && r.rows==1)
-        rows.push_back(b.getDictionaryAttr({b.getNamedAttr("id",b.getI32IntegerAttr(r.id)),b.getNamedAttr("width",b.getI32IntegerAttr(r.width)),b.getNamedAttr("rows",b.getI32IntegerAttr(1)),b.getNamedAttr("payload",b.getStringAttr(r.payload))}));
-      if(rows.empty())continue;
-      auto d=b.getDictionaryAttr({b.getNamedAttr("rows",b.getArrayAttr(rows)),b.getNamedAttr("walk",b.getStringAttr("column-panels")),
-          b.getNamedAttr("topology",b.getStringAttr("stream")),b.getNamedAttr("guard",b.getDenseI64ArrayAttr({0,-1}))});
-      cs.push_back({"column-panels-"+std::to_string(width),"column-panels",d,{"independent-bins"}});
+      for (auto &r : caps->rows)
+        if (r.width == width && r.rows == 1)
+          rows.push_back(b.getDictionaryAttr(
+              {b.getNamedAttr("id", b.getI32IntegerAttr(r.id)),
+               b.getNamedAttr("width", b.getI32IntegerAttr(r.width)),
+               b.getNamedAttr("rows", b.getI32IntegerAttr(1)),
+               b.getNamedAttr("payload", b.getStringAttr(r.payload))}));
+      if (rows.empty())
+        continue;
+      auto d = b.getDictionaryAttr(
+          {b.getNamedAttr("rows", b.getArrayAttr(rows)),
+           b.getNamedAttr("walk", b.getStringAttr("column-panels")),
+           b.getNamedAttr("topology", b.getStringAttr("stream")),
+           b.getNamedAttr("guard", b.getDenseI64ArrayAttr({0, -1}))});
+      cs.push_back({"column-panels-" + std::to_string(width),
+                    "column-panels",
+                    d,
+                    {"independent-bins"}});
     }
     return cs;
   };

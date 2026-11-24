@@ -46,8 +46,10 @@ bool rectangle(Tiles &t, Operation &op, ArrayRef<Value> coords, int64_t rows,
     SmallVector<Value> args{base, reshape(t, stored, dims)};
     llvm::append_range(args, at);
     t.op("rect_write", args);
-  } else
-    result = reshape(t, load(t, base, at, dims, false), {rows, width});
+  } else {
+    bool tma = op.hasAttr("ct_src.owner_tma");
+    result = reshape(t, load(t, base, at, dims, tma), {rows, width});
+  }
   return true;
 }
 Value panel(Tiles &t, Operation &op, ArrayRef<Value> coords, Value start,
