@@ -1,4 +1,5 @@
 #include "compilerinfra/Assembly.h"
+#include "compilerinfra/Proofs.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
@@ -831,7 +832,14 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
         b.setInsertionPointToEnd(pBb);
         kLb = pIv;
         Value nextP = b.create<arith::AddIOp>(loc, pIv, kStep);
-        kUb = (K % depth == 0)
+        compilerinfra::TailDimension kTailDim;
+        kTailDim.staticExtent = K;
+        kTailDim.staticOffset = 0;
+        kTailDim.tileSize = depth;
+        kTailDim.step = depth;
+        auto kTailProof = compilerinfra::proveTailAccess({kTailDim});
+        kUb = (kTailProof.proven &&
+               kTailProof.kind == compilerinfra::TailKind::ExactInBounds)
                   ? nextP
                   : b.create<arith::MinSIOp>(loc, nextP, kTotal).getResult();
       }

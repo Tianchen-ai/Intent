@@ -257,6 +257,32 @@ void bind(Unit &u) {
   sharedOwnerTraversal(u);
   ownerCost(u);
   matrixCost(u);
+  for (auto [name, cat, summary] :
+       {std::tuple{"simd-matrix-contraction", "contraction",
+                   "Register-blocked SIMD/RVV FMA and packed panel matrix contraction"},
+        {"vendor-brgemm-contraction", "contraction",
+         "oneDNN BRGeMM / AMX / VNNI hardware microkernel matrix contraction"},
+        {"vnni-int8-contraction", "contraction",
+         "Packed signed/unsigned INT8 dot4 VNNI matrix contraction"},
+        {"q4k-packed-contraction", "contraction",
+         "Sub-byte GGUF Q4_K x Q8_K super-block contraction"},
+        {"ordered-owner-pairing", "ordered",
+         "Multi-owner attention/recurrence panel pairing, score replay, and SIMD inner reduction"},
+        {"row-reduction-and-scan", "collective",
+         "Vectorized row reductions, inclusive prefix scan, and Welford moments"},
+        {"keyed-ticket-reservation", "collective",
+         "Private range reservations, sharded key owners, and single-owner atomic elision"},
+        {"tile-2d-transpose", "memory",
+         "Cache-blocked 2D rectangular tile and destination-walk permutation"},
+        {"counter-philox-rng", "random",
+         "Counter-based 10-round Philox-4x32 uniform random generation with 4-lane reuse"},
+        {"narrow-i32-addressing", "addressing",
+         "Statically proven 32-bit signed coordinate and offset narrowing"},
+        {"riscv-vector-execution", "target",
+         "RISC-V RVV 1.0 vector and panel execution across VLEN 128..1024"}}) {
+    u.capabilities.push_back(
+        {CapabilityDeclaration{name, cat, summary}, COMPILERINFRA_SOURCE});
+  }
   u.dialects = [](DialectRegistry &r) {
     r.insert<intentdsl::cpu::CpuDialect>();
   };

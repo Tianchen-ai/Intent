@@ -1,4 +1,6 @@
 include "mlir/IR/OpBase.td"
+include "mlir/Interfaces/ControlFlowInterfaces.td"
+include "mlir/Interfaces/SideEffectInterfaces.td"
 
 def WeftHost_Dialect : Dialect {
   let name = "weft_host";
@@ -28,7 +30,7 @@ def OwnerProgramOp : Op<WeftHost_Dialect, "owner_program"> {
   let regions = (region AnyRegion:$task, AnyRegion:$host);
 }
 
-def EndOp : Op<WeftHost_Dialect, "end", [Terminator]> {}
+def EndOp : Op<WeftHost_Dialect, "end", [Pure, ReturnLike, Terminator]> {}
 
 // ---------------- Region 0 ("task.weftir") Terminal Ops ----------------
 
@@ -163,7 +165,7 @@ def TaskFold2Op : Op<WeftHost_Dialect, "task_fold2"> {
   let results = (outs Index:$res);
 }
 
-def TaskContractOp : Op<WeftHost_Dialect, "task_contract"> {
+def TaskContractOp : Op<WeftHost_Dialect, "task_contract", [Pure]> {
   let arguments = (ins Variadic<Index>:$inputs, StrAttr:$kind,
                        DenseI64ArrayAttr:$over, StrAttr:$acc_type,
                        StrAttr:$engine, BoolAttr:$allow_subnormal_ftz,
@@ -347,7 +349,8 @@ def HostCallTaskOp : Op<WeftHost_Dialect, "host_call_task"> {
 }
 
 def HostScatterRoutedOp : Op<WeftHost_Dialect, "host_scatter_routed"> {
-  let arguments = (ins I64Attr:$dst_slot, I64Attr:$multiplicity,
+  let arguments = (ins Index:$c_coord, Index:$r_coord, Index:$rows_val,
+                       Index:$cols_val, I64Attr:$dst_slot, I64Attr:$multiplicity,
                        DenseI64ArrayAttr:$dst_strides, I64Attr:$elem_bytes,
                        I64Attr:$routes_slot, I64Attr:$routes_stride);
 }

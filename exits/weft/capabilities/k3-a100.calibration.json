@@ -1,0 +1,857 @@
+{
+  "version": "4",
+  "facts": {
+    "write_1_private_bw": {
+      "value": 14.26358482,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/write_1_private_bw",
+        "error": "range [7.73183, 20.938], n=8"
+      }
+    },
+    "read_1_private_bw": {
+      "value": 16.962075249999998,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/read_1_private_bw",
+        "error": "range [15.4589, 18.4375], n=8"
+      }
+    },
+    "write_16_private_bw": {
+      "value": 1.3324513850000002,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/write_16_private_bw",
+        "error": "range [0.458319, 1.36068], n=8"
+      }
+    },
+    "read_16_private_bw": {
+      "value": 0.18999266850000002,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/read_16_private_bw",
+        "error": "range [0.188898, 0.190453], n=8"
+      }
+    },
+    "write_1_mid_bw": {
+      "value": 18.2475638,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/write_1_mid_bw",
+        "error": "range [8.91625, 23.0819], n=8"
+      }
+    },
+    "read_1_mid_bw": {
+      "value": 19.51491095,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/read_1_mid_bw",
+        "error": "range [18.4922, 19.6054], n=8"
+      }
+    },
+    "write_16_mid_bw": {
+      "value": 1.43537578,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/write_16_mid_bw",
+        "error": "range [1.33843, 1.44993], n=8"
+      }
+    },
+    "read_16_mid_bw": {
+      "value": 0.190906527,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/read_16_mid_bw",
+        "error": "range [0.189664, 0.192118], n=8"
+      }
+    },
+    "write_1_shared_bw": {
+      "value": 8.922003735,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/write_1_shared_bw",
+        "error": "range [7.43301, 8.9895], n=8"
+      }
+    },
+    "read_1_shared_bw": {
+      "value": 11.3588865,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/read_1_shared_bw",
+        "error": "range [10.5162, 11.7026], n=8"
+      }
+    },
+    "write_16_shared_bw": {
+      "value": 0.6843098700000001,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/write_16_shared_bw",
+        "error": "range [0.596578, 0.707999], n=8"
+      }
+    },
+    "read_16_shared_bw": {
+      "value": 0.186119275,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/read_16_shared_bw",
+        "error": "range [0.113757, 0.188358], n=8"
+      }
+    },
+    "write_1_dram_bw": {
+      "value": 8.601607965,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/write_1_dram_bw",
+        "error": "range [7.19219, 8.67312], n=8"
+      }
+    },
+    "read_1_dram_bw": {
+      "value": 10.8936545,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/read_1_dram_bw",
+        "error": "range [9.8466, 10.9625], n=8"
+      }
+    },
+    "write_16_dram_bw": {
+      "value": 0.6803164255,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/write_16_dram_bw",
+        "error": "range [0.664654, 0.68584], n=8"
+      }
+    },
+    "read_16_dram_bw": {
+      "value": 0.187914619,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/read_16_dram_bw",
+        "error": "range [0.181071, 0.188807], n=8"
+      }
+    },
+    "panel_gather_32_bw": {
+      "value": 0.09358813865,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/panel_gather_32_bw",
+        "error": "range [0.0814114, 0.0940341], n=8"
+      }
+    },
+    "panel_scatter_32_bw": {
+      "value": 0.156306124,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/panel_scatter_32_bw",
+        "error": "range [0.152203, 0.162957], n=8"
+      }
+    },
+    "panel_gather_128_bw": {
+      "value": 0.09254905885,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/panel_gather_128_bw",
+        "error": "range [0.0919024, 0.093331], n=8"
+      }
+    },
+    "panel_scatter_128_bw": {
+      "value": 0.121934998,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/panel_scatter_128_bw",
+        "error": "range [0.120527, 0.122994], n=8"
+      }
+    },
+    "panel_gather_512_bw": {
+      "value": 0.08589332625,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/panel_gather_512_bw",
+        "error": "range [0.0851516, 0.0863647], n=8"
+      }
+    },
+    "panel_scatter_512_bw": {
+      "value": 0.09647149205,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/panel_scatter_512_bw",
+        "error": "range [0.0942805, 0.0977038], n=8"
+      }
+    },
+    "span_gather_31_32_bw": {
+      "value": 0.08614587425,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_31_32_bw",
+        "error": "range [0.0857253, 0.0864276], n=8"
+      }
+    },
+    "span_scatter_31_32_bw": {
+      "value": 0.19931085850000002,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_31_32_bw",
+        "error": "range [0.181847, 0.201052], n=8"
+      }
+    },
+    "span_gather_31_256_bw": {
+      "value": 0.0880369547,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_31_256_bw",
+        "error": "range [0.0812906, 0.0885572], n=8"
+      }
+    },
+    "span_scatter_31_256_bw": {
+      "value": 0.210703371,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_31_256_bw",
+        "error": "range [0.193792, 0.212154], n=8"
+      }
+    },
+    "span_gather_31_1024_bw": {
+      "value": 0.08599909659999999,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_31_1024_bw",
+        "error": "range [0.0854308, 0.0861669], n=8"
+      }
+    },
+    "span_scatter_31_1024_bw": {
+      "value": 0.210184347,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_31_1024_bw",
+        "error": "range [0.20571, 0.211269], n=8"
+      }
+    },
+    "span_gather_32_32_bw": {
+      "value": 0.07509848245,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_32_32_bw",
+        "error": "range [0.0738284, 0.0754634], n=8"
+      }
+    },
+    "span_scatter_32_32_bw": {
+      "value": 0.2647629365,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_32_32_bw",
+        "error": "range [0.237699, 0.267476], n=8"
+      }
+    },
+    "span_gather_32_256_bw": {
+      "value": 0.08801254205,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_32_256_bw",
+        "error": "range [0.0876889, 0.0889566], n=8"
+      }
+    },
+    "span_scatter_32_256_bw": {
+      "value": 0.3003758165,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_32_256_bw",
+        "error": "range [0.264887, 0.301997], n=8"
+      }
+    },
+    "span_gather_32_1024_bw": {
+      "value": 0.08782169249999999,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_32_1024_bw",
+        "error": "range [0.0876715, 0.0885825], n=8"
+      }
+    },
+    "span_scatter_32_1024_bw": {
+      "value": 0.3020907385,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_32_1024_bw",
+        "error": "range [0.270632, 0.304006], n=8"
+      }
+    },
+    "span_gather_127_32_bw": {
+      "value": 0.08648071735,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_127_32_bw",
+        "error": "range [0.0847394, 0.0867004], n=8"
+      }
+    },
+    "span_scatter_127_32_bw": {
+      "value": 0.160434242,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_127_32_bw",
+        "error": "range [0.159474, 0.161064], n=8"
+      }
+    },
+    "span_gather_127_256_bw": {
+      "value": 0.0857838724,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_127_256_bw",
+        "error": "range [0.0851768, 0.0862069], n=8"
+      }
+    },
+    "span_scatter_127_256_bw": {
+      "value": 0.152008751,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_127_256_bw",
+        "error": "range [0.147953, 0.152575], n=8"
+      }
+    },
+    "span_gather_127_1024_bw": {
+      "value": 0.08248781075,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_127_1024_bw",
+        "error": "range [0.0818611, 0.0828094], n=8"
+      }
+    },
+    "span_scatter_127_1024_bw": {
+      "value": 0.151982312,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_127_1024_bw",
+        "error": "range [0.147456, 0.15282], n=8"
+      }
+    },
+    "span_gather_128_32_bw": {
+      "value": 0.08715466095,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_128_32_bw",
+        "error": "range [0.0869665, 0.0872772], n=8"
+      }
+    },
+    "span_scatter_128_32_bw": {
+      "value": 0.144960362,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_128_32_bw",
+        "error": "range [0.140508, 0.145858], n=8"
+      }
+    },
+    "span_gather_128_256_bw": {
+      "value": 0.0864399929,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_128_256_bw",
+        "error": "range [0.0855475, 0.0871736], n=8"
+      }
+    },
+    "span_scatter_128_256_bw": {
+      "value": 0.1455011955,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_128_256_bw",
+        "error": "range [0.137985, 0.146221], n=8"
+      }
+    },
+    "span_gather_128_1024_bw": {
+      "value": 0.0867230614,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_128_1024_bw",
+        "error": "range [0.0860671, 0.0872516], n=8"
+      }
+    },
+    "span_scatter_128_1024_bw": {
+      "value": 0.145646254,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_128_1024_bw",
+        "error": "range [0.137571, 0.146079], n=8"
+      }
+    },
+    "span_gather_511_32_bw": {
+      "value": 0.0895137214,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_511_32_bw",
+        "error": "range [0.0882903, 0.0898407], n=8"
+      }
+    },
+    "span_scatter_511_32_bw": {
+      "value": 0.130216574,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_511_32_bw",
+        "error": "range [0.124318, 0.131026], n=8"
+      }
+    },
+    "span_gather_511_256_bw": {
+      "value": 0.08880974894999999,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_511_256_bw",
+        "error": "range [0.0881922, 0.0893302], n=8"
+      }
+    },
+    "span_scatter_511_256_bw": {
+      "value": 0.125354429,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_511_256_bw",
+        "error": "range [0.120276, 0.126298], n=8"
+      }
+    },
+    "span_gather_511_1024_bw": {
+      "value": 0.08647066875000001,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_511_1024_bw",
+        "error": "range [0.0841792, 0.0869426], n=8"
+      }
+    },
+    "span_scatter_511_1024_bw": {
+      "value": 0.125058061,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_511_1024_bw",
+        "error": "range [0.118817, 0.12569], n=8"
+      }
+    },
+    "span_gather_512_32_bw": {
+      "value": 0.0897572347,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_512_32_bw",
+        "error": "range [0.0894326, 0.0900834], n=8"
+      }
+    },
+    "span_scatter_512_32_bw": {
+      "value": 0.1141000405,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_512_32_bw",
+        "error": "range [0.112713, 0.114667], n=8"
+      }
+    },
+    "span_gather_512_256_bw": {
+      "value": 0.0903219319,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_512_256_bw",
+        "error": "range [0.0900505, 0.0906498], n=8"
+      }
+    },
+    "span_scatter_512_256_bw": {
+      "value": 0.1112096435,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_512_256_bw",
+        "error": "range [0.10814, 0.111974], n=8"
+      }
+    },
+    "span_gather_512_1024_bw": {
+      "value": 0.07190711625,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_512_1024_bw",
+        "error": "range [0.0708681, 0.072401], n=8"
+      }
+    },
+    "span_scatter_512_1024_bw": {
+      "value": 0.114026567,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_512_1024_bw",
+        "error": "range [0.108844, 0.114654], n=8"
+      }
+    },
+    "copy_gather_1_bw": {
+      "value": 0.7045182575,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/copy_gather_1_bw",
+        "error": "range [0.58129, 0.898044], n=8"
+      }
+    },
+    "copy_scatter_1_bw": {
+      "value": 0.3601461575,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/copy_scatter_1_bw",
+        "error": "range [0.35354, 0.362535], n=8"
+      }
+    },
+    "copy_gather_16_bw": {
+      "value": 0.09174128784999999,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/copy_gather_16_bw",
+        "error": "range [0.0766753, 0.0937437], n=8"
+      }
+    },
+    "copy_scatter_16_bw": {
+      "value": 0.0952283388,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/copy_scatter_16_bw",
+        "error": "range [0.0895326, 0.09618], n=8"
+      }
+    },
+    "copy_gather_256_bw": {
+      "value": 0.08991937794999999,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/copy_gather_256_bw",
+        "error": "range [0.0813585, 0.0903815], n=8"
+      }
+    },
+    "copy_scatter_256_bw": {
+      "value": 0.13655417949999998,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/copy_scatter_256_bw",
+        "error": "range [0.124514, 0.138225], n=8"
+      }
+    },
+    "launch": {
+      "value": 6979.5,
+      "unit": "ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/launch",
+        "error": "range [6042, 10375], n=8"
+      }
+    },
+    "sync": {
+      "value": 1087.021,
+      "unit": "ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/sync",
+        "error": "range [1029.58, 1143.67], n=8"
+      }
+    },
+    "vector": {
+      "value": 2.75811333,
+      "unit": "FLOP/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/vector",
+        "error": "range [2.72569, 2.81338], n=8"
+      }
+    },
+    "read_1": {
+      "value": 10.8936545,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/read_1",
+        "error": "range [9.8466, 10.9625], n=8"
+      }
+    },
+    "read_16": {
+      "value": 0.187914619,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/read_16",
+        "error": "range [0.181071, 0.188807], n=8"
+      }
+    },
+    "write_1": {
+      "value": 8.601607965,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/write_1",
+        "error": "range [7.19219, 8.67312], n=8"
+      }
+    },
+    "write_16": {
+      "value": 0.6803164255,
+      "unit": "B/ns",
+      "source": {
+        "device": "Spacemit(R) A100",
+        "isa": "riscv64 -march=rv64gcv -mabi=lp64d",
+        "toolchain": "cc (Ubuntu 16-20260226-1ubuntu1) 16.0.1 20260226 (experimental) [trunk r16-7708-gf8380ded1f6]",
+        "conditions": "affinity=[8], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 256 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 1048576 bytes",
+        "benchmark": "intent_bench.calibration/write_16",
+        "error": "range [0.664654, 0.68584], n=8"
+      }
+    }
+  }
+}

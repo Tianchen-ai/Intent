@@ -1,4 +1,5 @@
 #include "compilerinfra/Assembly.h"
+#include "compilerinfra/Proofs.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/algorithm/kir/ir/Literal.h"
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
@@ -964,14 +965,22 @@ struct RowLowerer {
       if (slots[idx].boundShape && slots[idx].boundStrides) {
         int64_t spanConst = std::max<int64_t>(1, slots[idx].boundShape[fast]);
         int64_t stepConst = slots[idx].boundStrides[fast];
-        if (spanConst % w == 0 && stepConst == 1) {
+        compilerinfra::TailDimension td;
+        td.staticExtent = spanConst;
+        td.staticOffset = 0;
+        td.tileSize = w;
+        td.step = w;
+        auto tp = compilerinfra::proveTailAccess({td});
+        bool exactSpan =
+            tp.proven && tp.kind == compilerinfra::TailKind::ExactInBounds;
+        if (exactSpan && stepConst == 1) {
           Value baseAddr = emitViewAddr(idx, buildOwnerCoords(idx, r, j));
           return makeOp(b, loc, "load_slice", {slots[idx].ptrVal, baseAddr},
                         {vecTy},
                         {b.getNamedAttr("width", b.getI64IntegerAttr(w))})
               ->getResult(0);
         }
-        if (spanConst % w == 0 && stepConst == 0) {
+        if (exactSpan && stepConst == 0) {
           Value baseAddr = emitViewAddr(idx, buildOwnerCoords(idx, r, j));
           Value sc = makeOp(b, loc, "load_scalar",
                             {slots[idx].ptrVal, baseAddr}, {elemTy})

@@ -36,6 +36,17 @@ void registerMatrixContracts(Unit &u) {
     c.verify = [](Operation *op) -> LogicalResult {
       return success(op->getNumOperands() == 3 && op->getNumResults() == 1);
     };
+    TypedContract tc;
+    tc.shape.minOperands = 3;
+    tc.shape.maxOperands = 3;
+    tc.shape.minResults = 1;
+    tc.shape.maxResults = 1;
+    tc.operandTypes = {ScalarTypeKind::Any};
+    tc.resultTypes = {ScalarTypeKind::Any};
+    tc.accumulatorTypes = {ScalarTypeKind::F32, ScalarTypeKind::I32};
+    tc.effects = EffectMask::None;
+    c.typed = std::move(tc);
+    populateTypedContractSummaries(c);
     add(std::move(c));
   }
 
@@ -61,6 +72,17 @@ void registerMatrixContracts(Unit &u) {
     c.verify = [](Operation *op) -> LogicalResult {
       return success(op->getNumOperands() == 3 && op->getNumResults() == 1);
     };
+    TypedContract tc;
+    tc.shape.minOperands = 3;
+    tc.shape.maxOperands = 3;
+    tc.shape.minResults = 1;
+    tc.shape.maxResults = 1;
+    tc.operandTypes = {ScalarTypeKind::Any};
+    tc.resultTypes = {ScalarTypeKind::Any};
+    tc.accumulatorTypes = {ScalarTypeKind::I32};
+    tc.effects = EffectMask::None;
+    c.typed = std::move(tc);
+    populateTypedContractSummaries(c);
     add(std::move(c));
   }
 
@@ -91,6 +113,17 @@ void registerMatrixContracts(Unit &u) {
           op->getAttr("kir.storage") ==
               TypeAttr::get(intentdsl::kir::Q4KType::get(op->getContext())));
     };
+    TypedContract tc;
+    tc.shape.minOperands = 4;
+    tc.shape.maxOperands = 4;
+    tc.shape.minResults = 1;
+    tc.shape.maxResults = 1;
+    tc.operandTypes = {ScalarTypeKind::Any};
+    tc.resultTypes = {ScalarTypeKind::Any};
+    tc.accumulatorTypes = {ScalarTypeKind::I32};
+    tc.effects = EffectMask::Read;
+    c.typed = std::move(tc);
+    populateTypedContractSummaries(c);
     add(std::move(c));
   }
 
@@ -122,11 +155,23 @@ void registerMatrixContracts(Unit &u) {
           op->getAttr("kir.storage") ==
               TypeAttr::get(intentdsl::kir::Q4KType::get(op->getContext())));
     };
+    TypedContract tc;
+    tc.shape.minOperands = 4;
+    tc.shape.maxOperands = 4;
+    tc.shape.minResults = 1;
+    tc.shape.maxResults = 1;
+    tc.operandTypes = {ScalarTypeKind::Any};
+    tc.resultTypes = {ScalarTypeKind::Any};
+    tc.accumulatorTypes = {ScalarTypeKind::I32};
+    tc.effects = EffectMask::Read;
+    c.typed = std::move(tc);
+    populateTypedContractSummaries(c);
     add(std::move(c));
   }
 
   auto makeBrgemm = [&](StringRef name, StringRef operands, StringRef layout,
                         StringRef acc, StringRef numerical, bool requiresFtz,
+                        ScalarTypeKind accKind,
                         std::function<llvm::Error(const TargetProfile &)> avail) {
     ImplementationContract c;
     c.name = name.str();
@@ -161,6 +206,19 @@ void registerMatrixContracts(Unit &u) {
         return failure();
       return success();
     };
+    TypedContract tc;
+    tc.shape.minOperands = 5;
+    tc.shape.maxOperands = 5;
+    tc.shape.minResults = 1;
+    tc.shape.maxResults = 1;
+    tc.operandTypes = {ScalarTypeKind::Any};
+    tc.resultTypes = {ScalarTypeKind::I32};
+    tc.accumulatorTypes = {accKind};
+    tc.effects = EffectMask::ReadWrite;
+    tc.numerical.requireInputSubnormalFlush = requiresFtz;
+    tc.numerical.requireOutputSubnormalFlush = requiresFtz;
+    c.typed = std::move(tc);
+    populateTypedContractSummaries(c);
     add(std::move(c));
   };
 
@@ -169,7 +227,7 @@ void registerMatrixContracts(Unit &u) {
       "LHS row-major (unit K stride), RHS row-major or [K, nr] panels",
       "f32 ZMM registers written to tile stack buffer",
       "IEEE-754 f32 FMA preserving subnormals, signed zero, Inf, and qNaN",
-      false,
+      false, ScalarTypeKind::F32,
       [](const TargetProfile &p) -> llvm::Error {
         if (!p.features.count("avx2") && !p.features.count("avx512f"))
           return llvm::createStringError("oneDNN f32 BRGeMM requires AVX2 or AVX-512");
@@ -181,7 +239,7 @@ void registerMatrixContracts(Unit &u) {
       "LHS row-major (unit K stride), RHS row-major or [K, nr] panels",
       "f32 ZMM registers written to tile stack buffer",
       "IEEE-754 f16 widened to f32 FMA preserving f16 subnormals, Inf, and qNaN",
-      false,
+      false, ScalarTypeKind::F32,
       [](const TargetProfile &p) -> llvm::Error {
         if (!p.features.count("avx512_fp16") && !p.features.count("avx512f"))
           return llvm::createStringError("oneDNN f16 BRGeMM requires AVX-512");
@@ -193,7 +251,7 @@ void registerMatrixContracts(Unit &u) {
       "LHS row-major (unit K stride, K%2==0), RHS VNNI pack32 [K/2, nr, 2]",
       "f32 AMX/AVX-512 BF16 dot-pair accumulator",
       "AMX/AVX512-BF16 dot2 to f32; may flush input, intermediate, and output subnormals to zero (requires allow_subnormal_ftz)",
-      true,
+      true, ScalarTypeKind::F32,
       [](const TargetProfile &p) -> llvm::Error {
         if (!p.features.count("amx_bf16") && !p.features.count("avx512_bf16"))
           return llvm::createStringError(
@@ -206,7 +264,7 @@ void registerMatrixContracts(Unit &u) {
       "LHS row-major (unit K stride, K%4==0), RHS VNNI pack32 [K/4, nr, 4]",
       "s32 AMX/VNNI tile accumulator",
       "exact two's-complement s8*s8->s32 accumulation",
-      false,
+      false, ScalarTypeKind::I32,
       [](const TargetProfile &p) -> llvm::Error {
         if (!p.features.count("amx_int8") && !p.features.count("avx512_vnni"))
           return llvm::createStringError(
@@ -219,7 +277,7 @@ void registerMatrixContracts(Unit &u) {
       "LHS unpacked u8[R, 32] nibbles, RHS Q8_K s8[32] subgroup",
       "s32 subgroup accumulator",
       "exact u8*s8->s32 32-element subgroup dot preserving Q4_K super-block R32 contract",
-      false,
+      false, ScalarTypeKind::I32,
       [](const TargetProfile &p) -> llvm::Error {
         if (!p.features.count("amx_int8") && !p.features.count("avx512_vnni"))
           return llvm::createStringError(
@@ -270,6 +328,17 @@ void registerMatrixContracts(Unit &u) {
                      out.getElementType().isF32() &&
                      pos.getShape() == out.getShape());
     };
+    TypedContract tc;
+    tc.shape.minOperands = 2;
+    tc.shape.maxOperands = 2;
+    tc.shape.minResults = 1;
+    tc.shape.maxResults = 1;
+    tc.operandTypes = {ScalarTypeKind::I64};
+    tc.resultTypes = {ScalarTypeKind::F32};
+    tc.accumulatorTypes = {ScalarTypeKind::I32};
+    tc.effects = EffectMask::None;
+    c.typed = std::move(tc);
+    populateTypedContractSummaries(c);
     add(std::move(c));
   }
 
@@ -296,6 +365,17 @@ void registerMatrixContracts(Unit &u) {
       return success(out && out.getRank() == 1 && out.getDimSize(0) == 16 &&
                      out.getElementType().isF32());
     };
+    TypedContract tc;
+    tc.shape.minOperands = 16;
+    tc.shape.maxOperands = 16;
+    tc.shape.minResults = 1;
+    tc.shape.maxResults = 1;
+    tc.operandTypes = {ScalarTypeKind::F32};
+    tc.resultTypes = {ScalarTypeKind::F32};
+    tc.accumulatorTypes = {ScalarTypeKind::F32};
+    tc.effects = EffectMask::None;
+    c.typed = std::move(tc);
+    populateTypedContractSummaries(c);
     add(std::move(c));
   }
 
@@ -319,6 +399,17 @@ void registerMatrixContracts(Unit &u) {
       return success(op->getNumOperands() == 4 && op->getNumResults() == 2 &&
                      op->getOperand(3).getType().isInteger(32));
     };
+    TypedContract tc;
+    tc.shape.minOperands = 4;
+    tc.shape.maxOperands = 4;
+    tc.shape.minResults = 2;
+    tc.shape.maxResults = 2;
+    tc.operandTypes = {ScalarTypeKind::F32, ScalarTypeKind::I32};
+    tc.resultTypes = {ScalarTypeKind::F32};
+    tc.accumulatorTypes = {ScalarTypeKind::F32};
+    tc.effects = EffectMask::None;
+    c.typed = std::move(tc);
+    populateTypedContractSummaries(c);
     add(std::move(c));
   }
 
@@ -342,6 +433,17 @@ void registerMatrixContracts(Unit &u) {
       return success(op->getNumOperands() == 3 && op->getNumResults() == 1 &&
                      isa<TupleType>(op->getResult(0).getType()));
     };
+    TypedContract tc;
+    tc.shape.minOperands = 3;
+    tc.shape.maxOperands = 3;
+    tc.shape.minResults = 1;
+    tc.shape.maxResults = 1;
+    tc.operandTypes = {ScalarTypeKind::I32, ScalarTypeKind::F32};
+    tc.resultTypes = {ScalarTypeKind::Any};
+    tc.accumulatorTypes = {ScalarTypeKind::F32};
+    tc.effects = EffectMask::None;
+    c.typed = std::move(tc);
+    populateTypedContractSummaries(c);
     add(std::move(c));
   }
 
@@ -367,6 +469,17 @@ void registerMatrixContracts(Unit &u) {
                      op->getOperand(1).getType().isF32() &&
                      isa<TupleType>(op->getResult(0).getType()));
     };
+    TypedContract tc;
+    tc.shape.minOperands = 2;
+    tc.shape.maxOperands = 2;
+    tc.shape.minResults = 1;
+    tc.shape.maxResults = 1;
+    tc.operandTypes = {ScalarTypeKind::Any};
+    tc.resultTypes = {ScalarTypeKind::Any};
+    tc.accumulatorTypes = {ScalarTypeKind::F32};
+    tc.effects = EffectMask::None;
+    c.typed = std::move(tc);
+    populateTypedContractSummaries(c);
     add(std::move(c));
   }
 
@@ -389,6 +502,15 @@ void registerMatrixContracts(Unit &u) {
     c.verify = [](Operation *op) -> LogicalResult {
       return success(op->getNumOperands() == 6 && op->getNumResults() == 0);
     };
+    TypedContract tc;
+    tc.shape.minOperands = 6;
+    tc.shape.maxOperands = 6;
+    tc.shape.minResults = 0;
+    tc.shape.maxResults = 0;
+    tc.operandTypes = {ScalarTypeKind::Any};
+    tc.effects = EffectMask::ReadWrite;
+    c.typed = std::move(tc);
+    populateTypedContractSummaries(c);
     add(std::move(c));
   }
 
@@ -411,6 +533,18 @@ void registerMatrixContracts(Unit &u) {
     c.verify = [](Operation *op) -> LogicalResult {
       return success(op->getNumOperands() == 2 && op->getNumResults() == 2);
     };
+    TypedContract tc;
+    tc.shape.minOperands = 2;
+    tc.shape.maxOperands = 2;
+    tc.shape.minResults = 2;
+    tc.shape.maxResults = 2;
+    tc.operandTypes = {ScalarTypeKind::Any};
+    tc.resultTypes = {ScalarTypeKind::Any};
+    tc.accumulatorTypes = {ScalarTypeKind::F32, ScalarTypeKind::I32,
+                           ScalarTypeKind::I64};
+    tc.effects = EffectMask::None;
+    c.typed = std::move(tc);
+    populateTypedContractSummaries(c);
     add(std::move(c));
   }
 }

@@ -1,0 +1,857 @@
+{
+  "version": "4",
+  "facts": {
+    "write_1_private_bw": {
+      "value": 169.076574,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/write_1_private_bw",
+        "error": "range [146.306, 186.744], n=8"
+      }
+    },
+    "read_1_private_bw": {
+      "value": 100.51345705,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/read_1_private_bw",
+        "error": "range [94.7229, 112.532], n=8"
+      }
+    },
+    "write_16_private_bw": {
+      "value": 12.32726525,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/write_16_private_bw",
+        "error": "range [10.1685, 13.8729], n=8"
+      }
+    },
+    "read_16_private_bw": {
+      "value": 22.84574475,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/read_16_private_bw",
+        "error": "range [15.8913, 25.9544], n=8"
+      }
+    },
+    "write_1_mid_bw": {
+      "value": 59.7296245,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/write_1_mid_bw",
+        "error": "range [51.5579, 60.1294], n=8"
+      }
+    },
+    "read_1_mid_bw": {
+      "value": 118.217913,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/read_1_mid_bw",
+        "error": "range [105.193, 121.136], n=8"
+      }
+    },
+    "write_16_mid_bw": {
+      "value": 3.74688919,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/write_16_mid_bw",
+        "error": "range [3.26116, 3.77429], n=8"
+      }
+    },
+    "read_16_mid_bw": {
+      "value": 12.10168215,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/read_16_mid_bw",
+        "error": "range [10.5963, 12.2007], n=8"
+      }
+    },
+    "write_1_shared_bw": {
+      "value": 21.9911584,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/write_1_shared_bw",
+        "error": "range [17.4331, 26.4026], n=8"
+      }
+    },
+    "read_1_shared_bw": {
+      "value": 28.911927849999998,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/read_1_shared_bw",
+        "error": "range [24.58, 32.1622], n=8"
+      }
+    },
+    "write_16_shared_bw": {
+      "value": 1.6827115300000002,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/write_16_shared_bw",
+        "error": "range [1.58974, 1.68951], n=8"
+      }
+    },
+    "read_16_shared_bw": {
+      "value": 2.02286167,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/read_16_shared_bw",
+        "error": "range [1.97933, 2.04466], n=8"
+      }
+    },
+    "write_1_dram_bw": {
+      "value": 8.045882214999999,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/write_1_dram_bw",
+        "error": "range [7.52024, 8.0839], n=8"
+      }
+    },
+    "read_1_dram_bw": {
+      "value": 11.278280299999999,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/read_1_dram_bw",
+        "error": "range [11.1707, 11.3613], n=8"
+      }
+    },
+    "write_16_dram_bw": {
+      "value": 0.5024330745000001,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/write_16_dram_bw",
+        "error": "range [0.500567, 0.503753], n=8"
+      }
+    },
+    "read_16_dram_bw": {
+      "value": 0.710696298,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/read_16_dram_bw",
+        "error": "range [0.707677, 0.716494], n=8"
+      }
+    },
+    "panel_gather_32_bw": {
+      "value": 1.58250097,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/panel_gather_32_bw",
+        "error": "range [1.42526, 1.75981], n=8"
+      }
+    },
+    "panel_scatter_32_bw": {
+      "value": 1.07777451,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/panel_scatter_32_bw",
+        "error": "range [1.01498, 1.16343], n=8"
+      }
+    },
+    "panel_gather_128_bw": {
+      "value": 0.9200956140000001,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/panel_gather_128_bw",
+        "error": "range [0.857138, 0.930421], n=8"
+      }
+    },
+    "panel_scatter_128_bw": {
+      "value": 0.46031935850000005,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/panel_scatter_128_bw",
+        "error": "range [0.445598, 0.466955], n=8"
+      }
+    },
+    "panel_gather_512_bw": {
+      "value": 0.910125651,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/panel_gather_512_bw",
+        "error": "range [0.868742, 0.918998], n=8"
+      }
+    },
+    "panel_scatter_512_bw": {
+      "value": 0.3910668625,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/panel_scatter_512_bw",
+        "error": "range [0.387357, 0.394485], n=8"
+      }
+    },
+    "span_gather_31_32_bw": {
+      "value": 5.125343604999999,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_31_32_bw",
+        "error": "range [4.91148, 5.52703], n=8"
+      }
+    },
+    "span_scatter_31_32_bw": {
+      "value": 4.331806925,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_31_32_bw",
+        "error": "range [3.85951, 4.68581], n=8"
+      }
+    },
+    "span_gather_31_256_bw": {
+      "value": 7.28615656,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_31_256_bw",
+        "error": "range [7.10426, 7.35589], n=8"
+      }
+    },
+    "span_scatter_31_256_bw": {
+      "value": 5.8100049899999995,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_31_256_bw",
+        "error": "range [5.63283, 5.85416], n=8"
+      }
+    },
+    "span_gather_31_1024_bw": {
+      "value": 4.974162805000001,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_31_1024_bw",
+        "error": "range [4.90291, 5.00151], n=8"
+      }
+    },
+    "span_scatter_31_1024_bw": {
+      "value": 1.834603225,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_31_1024_bw",
+        "error": "range [1.79378, 1.83872], n=8"
+      }
+    },
+    "span_gather_32_32_bw": {
+      "value": 5.554102095,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_32_32_bw",
+        "error": "range [5.47632, 5.6381], n=8"
+      }
+    },
+    "span_scatter_32_32_bw": {
+      "value": 5.1581541600000005,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_32_32_bw",
+        "error": "range [5.06914, 5.22726], n=8"
+      }
+    },
+    "span_gather_32_256_bw": {
+      "value": 7.2012667,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_32_256_bw",
+        "error": "range [6.60278, 7.24997], n=8"
+      }
+    },
+    "span_scatter_32_256_bw": {
+      "value": 5.666008005,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_32_256_bw",
+        "error": "range [5.61743, 5.70699], n=8"
+      }
+    },
+    "span_gather_32_1024_bw": {
+      "value": 4.824045185,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_32_1024_bw",
+        "error": "range [4.47726, 4.84642], n=8"
+      }
+    },
+    "span_scatter_32_1024_bw": {
+      "value": 1.77481781,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_32_1024_bw",
+        "error": "range [1.75883, 1.77882], n=8"
+      }
+    },
+    "span_gather_127_32_bw": {
+      "value": 5.601956165,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_127_32_bw",
+        "error": "range [5.55842, 5.6603], n=8"
+      }
+    },
+    "span_scatter_127_32_bw": {
+      "value": 4.04282198,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_127_32_bw",
+        "error": "range [3.9614, 4.05679], n=8"
+      }
+    },
+    "span_gather_127_256_bw": {
+      "value": 7.28812493,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_127_256_bw",
+        "error": "range [6.9735, 7.38229], n=8"
+      }
+    },
+    "span_scatter_127_256_bw": {
+      "value": 3.933450935,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_127_256_bw",
+        "error": "range [3.84332, 3.95403], n=8"
+      }
+    },
+    "span_gather_127_1024_bw": {
+      "value": 4.7772524999999995,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_127_1024_bw",
+        "error": "range [4.67429, 4.78629], n=8"
+      }
+    },
+    "span_scatter_127_1024_bw": {
+      "value": 1.626583905,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_127_1024_bw",
+        "error": "range [1.60879, 1.62836], n=8"
+      }
+    },
+    "span_gather_128_32_bw": {
+      "value": 5.2325994,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_128_32_bw",
+        "error": "range [4.8185, 5.26265], n=8"
+      }
+    },
+    "span_scatter_128_32_bw": {
+      "value": 4.457999965,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_128_32_bw",
+        "error": "range [4.34768, 4.49954], n=8"
+      }
+    },
+    "span_gather_128_256_bw": {
+      "value": 3.1656919400000003,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_128_256_bw",
+        "error": "range [3.09312, 3.18174], n=8"
+      }
+    },
+    "span_scatter_128_256_bw": {
+      "value": 1.1110245,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_128_256_bw",
+        "error": "range [1.09748, 1.1342], n=8"
+      }
+    },
+    "span_gather_128_1024_bw": {
+      "value": 2.98082833,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_128_1024_bw",
+        "error": "range [2.85008, 2.99491], n=8"
+      }
+    },
+    "span_scatter_128_1024_bw": {
+      "value": 1.1305618549999998,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_128_1024_bw",
+        "error": "range [1.10576, 1.13191], n=8"
+      }
+    },
+    "span_gather_511_32_bw": {
+      "value": 5.817385445,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_511_32_bw",
+        "error": "range [4.96802, 5.88754], n=8"
+      }
+    },
+    "span_scatter_511_32_bw": {
+      "value": 3.69328883,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_511_32_bw",
+        "error": "range [3.61281, 3.70216], n=8"
+      }
+    },
+    "span_gather_511_256_bw": {
+      "value": 7.672375775,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_511_256_bw",
+        "error": "range [7.33452, 7.77046], n=8"
+      }
+    },
+    "span_scatter_511_256_bw": {
+      "value": 3.630356775,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_511_256_bw",
+        "error": "range [3.55647, 3.66204], n=8"
+      }
+    },
+    "span_gather_511_1024_bw": {
+      "value": 5.584239345,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_511_1024_bw",
+        "error": "range [5.33905, 5.61978], n=8"
+      }
+    },
+    "span_scatter_511_1024_bw": {
+      "value": 1.519504295,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_511_1024_bw",
+        "error": "range [1.38689, 1.52369], n=8"
+      }
+    },
+    "span_gather_512_32_bw": {
+      "value": 5.4438443450000005,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_512_32_bw",
+        "error": "range [5.26884, 5.47491], n=8"
+      }
+    },
+    "span_scatter_512_32_bw": {
+      "value": 4.256816000000001,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_512_32_bw",
+        "error": "range [4.19628, 4.33464], n=8"
+      }
+    },
+    "span_gather_512_256_bw": {
+      "value": 2.953708795,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_512_256_bw",
+        "error": "range [2.905, 2.97097], n=8"
+      }
+    },
+    "span_scatter_512_256_bw": {
+      "value": 0.7911111845000001,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_512_256_bw",
+        "error": "range [0.78243, 0.791618], n=8"
+      }
+    },
+    "span_gather_512_1024_bw": {
+      "value": 2.787596535,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_gather_512_1024_bw",
+        "error": "range [2.74818, 2.80296], n=8"
+      }
+    },
+    "span_scatter_512_1024_bw": {
+      "value": 0.7673672185,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/span_scatter_512_1024_bw",
+        "error": "range [0.747876, 0.768268], n=8"
+      }
+    },
+    "copy_gather_1_bw": {
+      "value": 6.43324417,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/copy_gather_1_bw",
+        "error": "range [5.61686, 7.90042], n=8"
+      }
+    },
+    "copy_scatter_1_bw": {
+      "value": 5.386538645,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/copy_scatter_1_bw",
+        "error": "range [4.51244, 6.36095], n=8"
+      }
+    },
+    "copy_gather_16_bw": {
+      "value": 1.598086085,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/copy_gather_16_bw",
+        "error": "range [1.27077, 1.82657], n=8"
+      }
+    },
+    "copy_scatter_16_bw": {
+      "value": 1.11456519,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/copy_scatter_16_bw",
+        "error": "range [0.881917, 1.31981], n=8"
+      }
+    },
+    "copy_gather_256_bw": {
+      "value": 0.34289310949999996,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/copy_gather_256_bw",
+        "error": "range [0.277285, 0.390437], n=8"
+      }
+    },
+    "copy_scatter_256_bw": {
+      "value": 0.2764131655,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/copy_scatter_256_bw",
+        "error": "range [0.195712, 0.303634], n=8"
+      }
+    },
+    "launch": {
+      "value": 371.0,
+      "unit": "ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/launch",
+        "error": "range [284, 559], n=8"
+      }
+    },
+    "sync": {
+      "value": 111.2375,
+      "unit": "ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/sync",
+        "error": "range [110.801, 132.184], n=8"
+      }
+    },
+    "vector": {
+      "value": 58.23238645,
+      "unit": "FLOP/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/vector",
+        "error": "range [48.2784, 78.3821], n=8"
+      }
+    },
+    "read_1": {
+      "value": 11.278280299999999,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/read_1",
+        "error": "range [11.1707, 11.3613], n=8"
+      }
+    },
+    "read_16": {
+      "value": 0.710696298,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/read_16",
+        "error": "range [0.707677, 0.716494], n=8"
+      }
+    },
+    "write_1": {
+      "value": 8.045882214999999,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/write_1",
+        "error": "range [7.52024, 8.0839], n=8"
+      }
+    },
+    "write_16": {
+      "value": 0.5024330745000001,
+      "unit": "B/ns",
+      "source": {
+        "device": "Intel(R) Xeon(R) Platinum 8470Q",
+        "isa": "x86_64 -march=native",
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+        "conditions": "affinity=[52], threads=1, FP32; private 16 KiB, mid 512 KiB, shared 16 MiB, DRAM 1024 MiB; paired copy uses binary16 32 MiB sparse footprint; unmanaged clocks; last level cache 110100480 bytes",
+        "benchmark": "intent_bench.calibration/write_16",
+        "error": "range [0.500567, 0.503753], n=8"
+      }
+    }
+  }
+}

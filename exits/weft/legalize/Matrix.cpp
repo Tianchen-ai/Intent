@@ -2386,7 +2386,7 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
   if (routed) {
     int64_t dstBytes =
         cast<MemRefType>(dstArg.getType()).getElementTypeBitWidth() / 8;
-    makeOp(b, loc, "host_scatter_routed", {}, {},
+    makeOp(b, loc, "host_scatter_routed", {vC, vR, vRows, vCols}, {},
            {b.getNamedAttr("dst_slot", b.getI64IntegerAttr(slotOf(dstArg))),
             b.getNamedAttr("multiplicity", b.getI64IntegerAttr(multiplicity)),
             b.getNamedAttr("dst_strides",

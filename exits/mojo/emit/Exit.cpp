@@ -12,10 +12,20 @@ void publishABI(OpPassManager &);
 LogicalResult verifyLoops(ModuleOp, const TargetProfile &, bool callable);
 void realize(OpPassManager &, int64_t, const intentdsl::CallFacts &);
 namespace {
+std::string probeHostMojoCalibration() {
+#if defined(__x86_64__) || defined(_M_X64)
+  return "x86";
+#else
+  return "";
+#endif
+}
+
 llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
   TargetProfile p;
-  if (options.empty())
+  if (options.empty()) {
+    p.services.calibrationProfile = probeHostMojoCalibration();
     return p;
+  }
   auto bits = options.getInteger("vector_bits"),
        workers = options.getInteger("workers");
   if (!bits || !workers || *workers <= 0 ||
@@ -78,6 +88,80 @@ void bind(Unit &u) {
   registerOneDNN(u);
   registerMatrixContracts(u);
   registerMojoAddressOptimization(u);
+  auto addParity = [&](ParityDeclaration d) {
+    u.parity.push_back({std::move(d), COMPILERINFRA_SOURCE});
+  };
+  addParity({"levels/execution/cpu::simd-matrix-contraction",
+             "x86",
+             ParityStatus::Implemented,
+             {"exits/mojo::simd-fma", "levels/execution/cpu::contract-blocks",
+              "levels/execution/cpu::matrix-partition"},
+             "Register-blocked Mojo SIMD FMA and host-packed panel contraction"});
+  addParity({"levels/execution/cpu::vendor-brgemm-contraction",
+             "x86",
+             ParityStatus::Implemented,
+             {"exits/mojo::onednn-brgemm-f32", "exits/mojo::onednn-brgemm-f16",
+              "exits/mojo::onednn-brgemm-bf16", "exits/mojo::onednn-brgemm-s8",
+              "exits/mojo::onednn-brgemm-u8s8",
+              "levels/execution/cpu::contract-blocks"},
+             "oneDNN 3.13+ BRGeMM / AMX / VNNI ukernel contraction"});
+  addParity({"levels/execution/cpu::vnni-int8-contraction",
+             "x86",
+             ParityStatus::Implemented,
+             {"exits/mojo::vnni-dot4", "exits/mojo::onednn-brgemm-s8",
+              "levels/execution/cpu::contract-blocks"},
+             "AVX-512 VNNI vpdpbusd signed-dot4 and AMX-INT8 BRGeMM contraction"});
+  addParity({"levels/execution/cpu::q4k-packed-contraction",
+             "x86",
+             ParityStatus::Implemented,
+             {"exits/mojo::q4k-vnni", "exits/mojo::q4k-simd",
+              "exits/mojo::onednn-brgemm-u8s8",
+              "levels/execution/cpu::contract-blocks"},
+             "GGUF Q4_K x Q8_K super-block VNNI, SIMD, and u8s8 BRGeMM contraction"});
+  addParity({"levels/execution/cpu::ordered-owner-pairing",
+             "x86",
+             ParityStatus::Implemented,
+             {"exits/mojo::simd-reduce-16x16",
+              "levels/execution/cpu::shared-intervals",
+              "levels/execution/cpu::ordered-owners"},
+             "16-owner BRGeMM/SIMD QK/PV pairing, proven score replay, and SIMD inner-loop reduction"});
+  addParity({"levels/execution/cpu::row-reduction-and-scan",
+             "x86",
+             ParityStatus::Implemented,
+             {"exits/mojo::simd-scan-sum", "exits/mojo::welford-step",
+              "exits/mojo::welford-reduce", "exits/mojo::welford-combine",
+              "levels/execution/cpu::row-reduction",
+              "levels/execution/cpu::row-scan"},
+             "SIMD row reductions, Hillis-Steele scan, Welford moments, and L1d row caching"});
+  addParity({"levels/execution/cpu::keyed-ticket-reservation",
+             "x86",
+             ParityStatus::Implemented,
+             {"levels/execution/cpu::key-reduction",
+              "levels/execution/cpu::keyed-atomics"},
+             "Private stack bin tallying, sharded key owners, and single-owner atomic elision"});
+  addParity({"levels/execution/cpu::tile-2d-transpose",
+             "x86",
+             ParityStatus::Implemented,
+             {"exits/mojo::simd-transpose-8x8",
+              "levels/execution/cpu::rectangular-copy",
+              "levels/execution/cpu::permutation"},
+             "In-register 8x8 SIMD butterfly transpose within 32x32 tiles and destination walks"});
+  addParity({"levels/execution/cpu::counter-philox-rng",
+             "x86",
+             ParityStatus::Implemented,
+             {"exits/mojo::philox-uniform", "levels/execution/cpu::pointwise",
+              "levels/execution/cpu::allocate"},
+             "10-round Philox-4x32 SIMD uniform microkernel with 4-lane contiguous reuse"});
+  addParity({"levels/execution/cpu::narrow-i32-addressing",
+             "x86",
+             ParityStatus::Implemented,
+             {"exits/mojo::narrow-proven-addresses"},
+             "proveNarrowAddress-backed 32-bit signed coordinate and offset narrowing"});
+  addParity({"levels/execution/cpu::riscv-vector-execution",
+             "riscv64",
+             ParityStatus::Unsupported,
+             {},
+             "Modular Mojo compiler toolchain only targets x86_64/aarch64; RISC-V RVV targets are served by exits/weft"});
   u.dialects = dialect;
   for (StringRef phase : {"legal", "realized", "callable"})
     u.boundaries.push_back(

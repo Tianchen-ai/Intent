@@ -87,6 +87,17 @@ void registerWeftMatrixContracts(Unit &u) {
                          acc.getValue() == "f32");
       return failure();
     };
+    TypedContract tc;
+    tc.shape.minOperands = 2;
+    tc.shape.maxOperands = 3;
+    tc.shape.minResults = 1;
+    tc.shape.maxResults = 1;
+    tc.operandTypes = {ScalarTypeKind::Index};
+    tc.resultTypes = {ScalarTypeKind::Index};
+    tc.accumulatorTypes = {ScalarTypeKind::F32, ScalarTypeKind::I32};
+    tc.effects = EffectMask::None;
+    c.typed = std::move(tc);
+    populateTypedContractSummaries(c);
     add(std::move(c));
   }
 
@@ -136,6 +147,17 @@ void registerWeftMatrixContracts(Unit &u) {
       return success(
           checkMatrixProgram(op, "exits/weft::weft-f32-panel-fma", false));
     };
+    TypedContract tc;
+    tc.shape.minOperands = 2;
+    tc.shape.maxOperands = 3;
+    tc.shape.minResults = 1;
+    tc.shape.maxResults = 1;
+    tc.operandTypes = {ScalarTypeKind::Index};
+    tc.resultTypes = {ScalarTypeKind::Index};
+    tc.accumulatorTypes = {ScalarTypeKind::F32};
+    tc.effects = EffectMask::None;
+    c.typed = std::move(tc);
+    populateTypedContractSummaries(c);
     add(std::move(c));
   }
 
@@ -174,6 +196,17 @@ void registerWeftMatrixContracts(Unit &u) {
         return failure();
       return success(checkMatrixProgram(op, "exits/weft::weft-q4k-dot", false));
     };
+    TypedContract tc;
+    tc.shape.minOperands = 2;
+    tc.shape.maxOperands = 2;
+    tc.shape.minResults = 1;
+    tc.shape.maxResults = 1;
+    tc.operandTypes = {ScalarTypeKind::Index};
+    tc.resultTypes = {ScalarTypeKind::Index};
+    tc.accumulatorTypes = {ScalarTypeKind::I32};
+    tc.effects = EffectMask::None;
+    c.typed = std::move(tc);
+    populateTypedContractSummaries(c);
     add(std::move(c));
   }
 
@@ -273,6 +306,20 @@ void registerWeftMatrixContracts(Unit &u) {
         return failure();
       return success();
     };
+    TypedContract tc;
+    tc.shape.minOperands = 2;
+    tc.shape.maxOperands = 2;
+    tc.shape.minResults = 1;
+    tc.shape.maxResults = 1;
+    tc.operandTypes = {ScalarTypeKind::Index};
+    tc.resultTypes = {ScalarTypeKind::Index};
+    tc.accumulatorTypes = {expectedAcc == "f32" ? ScalarTypeKind::F32
+                                                : ScalarTypeKind::I32};
+    tc.effects = EffectMask::None;
+    tc.numerical.requireInputSubnormalFlush = requiresFtz;
+    tc.numerical.requireOutputSubnormalFlush = requiresFtz;
+    c.typed = std::move(tc);
+    populateTypedContractSummaries(c);
     add(std::move(c));
   };
 

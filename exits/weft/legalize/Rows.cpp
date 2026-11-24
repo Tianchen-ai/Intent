@@ -1,4 +1,5 @@
 #include "Rows.h"
+#include "compilerinfra/Proofs.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/algorithm/kir/ir/ProjectedLayout.h"
 #include "intentdsl/levels/execution/cpu/ir/IndexedEffects.h"
@@ -1915,6 +1916,16 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
       int64_t tileW = task.getAttrOfType<IntegerAttr>("cpu.tile").getInt();
       int64_t tailVec =
           std::min<int64_t>(tileW, std::max<int64_t>(1, tailVecWidth));
+      compilerinfra::TailDimension tileTailDim;
+      tileTailDim.staticExtent = tileW;
+      tileTailDim.staticOffset = 0;
+      tileTailDim.tileSize = tailVec;
+      tileTailDim.step = tailVec;
+      auto tileTailProof = compilerinfra::proveTailAccess({tileTailDim});
+      bool exactTailVec =
+          tileTailProof.proven &&
+          tileTailProof.kind == compilerinfra::TailKind::ExactInBounds;
+      (void)exactTailVec;
       TaskTerm tileTerm = rb.idx(tileW);
       TaskTerm tileCnt = rb.bin("div", rb.columns, tileTerm, "index");
       TaskTerm tileEnd = rb.bin("mul", tileCnt, tileTerm, "index");

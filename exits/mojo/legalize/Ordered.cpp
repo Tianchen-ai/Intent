@@ -2247,7 +2247,9 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn) {
   b.setInsertionPointToEnd(&ompBb);
   makeOp(b, loc, "c_owner_call", {}, {},
          {b.getNamedAttr("call_args", b.getStringAttr(llvm::join(callArgs, ","))),
-          b.getNamedAttr("cyclic", b.getBoolAttr(false))});
+          b.getNamedAttr("cyclic", b.getBoolAttr(false)),
+          b.getNamedAttr("count", b.getI64IntegerAttr(owners)),
+          b.getNamedAttr("grain", b.getI64IntegerAttr(grain))});
   makeOp(b, loc, "end");
 
   SmallVector<Operation *> toErase;

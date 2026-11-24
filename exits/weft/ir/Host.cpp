@@ -2,6 +2,7 @@
 #include "../legalize/Ordered.h"
 #include "../legalize/Rows.h"
 #include "compilerinfra/Assembly.h"
+#include "compilerinfra/Contract.h"
 #include "intentdsl/levels/algorithm/kir/ir/Performance.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
 #include "intentdsl/levels/execution/cpu/ir/Owners.h"
@@ -11,7 +12,12 @@
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/OpImplementation.h"
+#include "mlir/Interfaces/ControlFlowInterfaces.h"
+#include "mlir/Interfaces/InferIntRangeInterface.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/Pass.h"
+#include <algorithm>
+#include <climits>
 
 #include "Dialect.h.inc"
 #include "Dialect.cpp.inc"
@@ -21,11 +27,122 @@
 #include "Ops.cpp.inc"
 
 using namespace mlir;
+
+namespace {
+struct WeftTaskContractModel
+    : public compilerinfra::ContractOpInterface::ExternalModel<
+          WeftTaskContractModel, intentdsl::wefthost::TaskContractOp> {
+  Type getAccumulatorType(Operation *op) const {
+    auto acc = op->getAttrOfType<StringAttr>("acc_type");
+    if (!acc)
+      return {};
+    if (acc.getValue() == "f32")
+      return Float32Type::get(op->getContext());
+    if (acc.getValue() == "si32" || acc.getValue() == "i32")
+      return IntegerType::get(op->getContext(), 32);
+    return {};
+  }
+  LogicalResult verifyShapeAndTypes(Operation *op) const {
+    if ((op->getNumOperands() != 2 && op->getNumOperands() != 3) ||
+        op->getNumResults() != 1)
+      return failure();
+    auto kind = op->getAttrOfType<StringAttr>("kind");
+    auto inTys = op->getAttrOfType<ArrayAttr>("in_types");
+    auto valTy = op->getAttrOfType<StringAttr>("val_type");
+    if (!kind || !inTys || inTys.size() != op->getNumOperands() || !valTy)
+      return failure();
+    if (op->getNumOperands() == 3)
+      return success(kind.getValue() == "fma");
+    return success(kind.getValue() == "outer_contract" ||
+                   kind.getValue() == "contract");
+  }
+};
+
+struct HostParallelTilesBranchModel
+    : public RegionBranchOpInterface::ExternalModel<
+          HostParallelTilesBranchModel,
+          intentdsl::wefthost::HostParallelTilesOp> {
+  OperandRange getEntrySuccessorOperands(Operation *op,
+                                         RegionBranchPoint) const {
+    return OperandRange(op->operand_end(), op->operand_end());
+  }
+  void getEntrySuccessorRegions(
+      Operation *op, ArrayRef<Attribute>,
+      SmallVectorImpl<RegionSuccessor> &regions) const {
+    getSuccessorRegions(op, RegionBranchPoint::parent(), regions);
+  }
+  void getSuccessorRegions(Operation *op, RegionBranchPoint point,
+                           SmallVectorImpl<RegionSuccessor> &regions) const {
+    if (point.isParent()) {
+      regions.emplace_back(&op->getRegion(0));
+      regions.emplace_back();
+    } else {
+      regions.emplace_back();
+    }
+  }
+};
+
+struct HostParallelTilesRangeModel
+    : public InferIntRangeInterface::ExternalModel<
+          HostParallelTilesRangeModel,
+          intentdsl::wefthost::HostParallelTilesOp> {
+  void inferResultRanges(Operation *op, ArrayRef<ConstantIntRanges> argRanges,
+                         SetIntRangeFn setResultRanges) const {
+    intrange::detail::defaultInferResultRangesFromOptional(
+        cast<InferIntRangeInterface>(op), argRanges, setResultRanges);
+  }
+  void inferResultRangesFromOptional(Operation *op,
+                                     ArrayRef<IntegerValueRange>,
+                                     SetIntLatticeFn setResultRanges) const {
+    if (op->getNumRegions() == 0 || op->getRegion(0).empty())
+      return;
+    Block &bb = op->getRegion(0).front();
+    if (bb.getNumArguments() < 10)
+      return;
+    auto ext = op->getAttrOfType<DenseI64ArrayAttr>("extents");
+    auto tile = op->getAttrOfType<DenseI64ArrayAttr>("tile");
+    if (!ext || ext.size() < 4 || !tile || tile.size() < 2)
+      return;
+    int64_t M = ext[0], N = ext[1], G = ext[3];
+    int64_t mr = tile[0], nr = tile[1];
+    int64_t mult = std::max<int64_t>(
+        1, op->getAttrOfType<IntegerAttr>("multiplicity").getInt());
+    int64_t H = std::max<int64_t>(
+        1, op->getAttrOfType<IntegerAttr>("head_extent").getInt());
+    int64_t chunks = std::max<int64_t>(
+        1, op->getAttrOfType<IntegerAttr>("chunk_extent").getInt());
+    bool routed = op->getAttrOfType<BoolAttr>("routed").getValue();
+    auto setBound = [&](unsigned idx, int64_t hi) {
+      int64_t clampedHi = std::max<int64_t>(0, hi);
+      APInt loVal(64, 0, /*isSigned=*/true);
+      APInt hiVal(64, uint64_t(clampedHi), /*isSigned=*/true);
+      setResultRanges(bb.getArgument(idx),
+                      ConstantIntRanges(loVal, hiVal, loVal, hiVal));
+    };
+    auto extentHi = [](int64_t e) -> int64_t { return e <= 1 ? 0 : e - 1; };
+    setBound(0, extentHi(G));
+    setBound(1, extentHi(N));
+    setBound(2, extentHi(M));
+    setBound(3, extentHi(M));
+    setBound(4, extentHi(routed ? M * mult : M));
+    setBound(5, extentHi(std::max<int64_t>(1, G / (H * chunks))));
+    setBound(6, extentHi(chunks));
+    setBound(7, extentHi(H));
+    setBound(8, std::max<int64_t>(0, mr));
+    setBound(9, std::max<int64_t>(0, nr));
+  }
+};
+} // namespace
+
 void intentdsl::wefthost::WeftHostDialect::initialize() {
   addOperations<
 #define GET_OP_LIST
 #include "Ops.cpp.inc"
       >();
+  MLIRContext *ctx = getContext();
+  TaskContractOp::attachInterface<WeftTaskContractModel>(*ctx);
+  HostParallelTilesOp::attachInterface<HostParallelTilesBranchModel>(*ctx);
+  HostParallelTilesOp::attachInterface<HostParallelTilesRangeModel>(*ctx);
 }
 
 namespace CI_UNIT_NAMESPACE {

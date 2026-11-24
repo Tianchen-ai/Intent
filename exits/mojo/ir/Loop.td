@@ -1,4 +1,5 @@
 include "mlir/IR/OpBase.td"
+include "mlir/Interfaces/SideEffectInterfaces.td"
 def RowMojo_Dialect : Dialect {let name="mojo_row"; let cppNamespace="::intentdsl::rowmojo";}
 class RowInst<string mnemonic,list<Trait> traits=[]> : Op<RowMojo_Dialect,mnemonic,traits>;
 def ScanColumns : RowInst<"sweep",[SingleBlock]> {
@@ -97,15 +98,15 @@ def MojoSplatLane : RowInst<"splat_lane"> {
 def MojoStoreVec : RowInst<"store_vec"> {
   let arguments=(ins AnyType:$ptr, Index:$offset, AnyType:$value, I64Attr:$width, I64Attr:$lane_stride);
 }
-def MojoSimdFma : RowInst<"simd_fma"> {
+def MojoSimdFma : RowInst<"simd_fma", [Pure]> {
   let arguments=(ins AnyType:$acc, AnyType:$lhs, AnyType:$rhs, BoolAttr:$is_int);
   let results=(outs AnyType:$result);
 }
-def MojoVnniDot4 : RowInst<"vnni_dot4"> {
+def MojoVnniDot4 : RowInst<"vnni_dot4", [Pure]> {
   let arguments=(ins AnyType:$acc, AnyType:$lhs, AnyType:$rhs);
   let results=(outs AnyType:$result);
 }
-def MojoQ4KSuperblock : RowInst<"q4k_superblock"> {
+def MojoQ4KSuperblock : RowInst<"q4k_superblock", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let arguments=(ins AnyType:$w_ptr, AnyType:$q_ptr, Index:$w_base, Index:$group, I64Attr:$byte_stride, BoolAttr:$use_vnni);
   let results=(outs AnyType:$result);
 }
@@ -113,7 +114,7 @@ def MojoPtrOffset : RowInst<"ptr_offset"> {
   let arguments=(ins AnyType:$ptr, Index:$offset);
   let results=(outs Index:$shifted);
 }
-def MojoBrgemmCall : RowInst<"brgemm_call"> {
+def MojoBrgemmCall : RowInst<"brgemm_call", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let arguments=(ins AnyType:$handle, AnyType:$a_ptr, AnyType:$b_ptr, AnyType:$c_ptr, AnyType:$scratch, BoolAttr:$allow_subnormal_ftz);
   let results=(outs I32:$status);
 }
@@ -279,7 +280,7 @@ def MojoLaneMax : RowInst<"lane_max"> {
   let arguments=(ins AnyType:$input, I64Attr:$width);
   let results=(outs F32:$result);
 }
-def MojoReduceSum16x16 : RowInst<"reduce_sum_16x16"> {
+def MojoReduceSum16x16 : RowInst<"reduce_sum_16x16", [Pure]> {
   let arguments=(ins Variadic<AnyType>:$inputs);
   let results=(outs AnyType:$result);
 }
@@ -304,7 +305,7 @@ def MojoCOmpFor : RowInst<"c_omp_for",[SingleBlock]> {
   let regions=(region AnyRegion:$body);
 }
 def MojoCOwnerCall : RowInst<"c_owner_call"> {
-  let arguments=(ins StrAttr:$call_args, BoolAttr:$cyclic);
+  let arguments=(ins StrAttr:$call_args, BoolAttr:$cyclic, I64Attr:$count, I64Attr:$grain);
 }
 
 // Terminal row operations (v0.4)
@@ -365,27 +366,27 @@ def MojoTupleField : RowInst<"tuple_field"> {
   let arguments=(ins AnyType:$tuple_val, I64Attr:$position);
   let results=(outs AnyType:$field);
 }
-def MojoUniform : RowInst<"uniform"> {
+def MojoUniform : RowInst<"uniform", [Pure]> {
   let arguments=(ins UI64:$seed, AnyType:$counter, I64Attr:$width);
   let results=(outs AnyType:$samples);
 }
-def MojoWelfordVecStep : RowInst<"welford_vec_step"> {
+def MojoWelfordVecStep : RowInst<"welford_vec_step", [Pure]> {
   let arguments=(ins AnyType:$x, AnyType:$mean, AnyType:$m2, I32:$step_n, I64Attr:$width);
   let results=(outs AnyType:$next_mean, AnyType:$next_m2);
 }
-def MojoWelfordVecReduce : RowInst<"welford_vec_reduce"> {
+def MojoWelfordVecReduce : RowInst<"welford_vec_reduce", [Pure]> {
   let arguments=(ins I32:$step_n, AnyType:$mean, AnyType:$m2, I64Attr:$width);
   let results=(outs AnyType:$summary);
 }
-def MojoWelfordScalarStep : RowInst<"welford_scalar_step"> {
+def MojoWelfordScalarStep : RowInst<"welford_scalar_step", [Pure]> {
   let arguments=(ins AnyType:$state, F32:$sample);
   let results=(outs AnyType:$summary);
 }
-def MojoTranspose8x8 : RowInst<"transpose_8x8"> {
+def MojoTranspose8x8 : RowInst<"transpose_8x8", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let arguments=(ins AnyType:$src, Index:$src_off, Index:$src_s0,
                      AnyType:$dst, Index:$dst_off, Index:$dst_s0, StrAttr:$dtype);
 }
-def MojoSimdScanSum : RowInst<"simd_scan_sum"> {
+def MojoSimdScanSum : RowInst<"simd_scan_sum", [Pure]> {
   let arguments=(ins AnyType:$input, AnyType:$carry, StrAttr:$dtype, I64Attr:$width);
   let results=(outs AnyType:$prefix, AnyType:$next_carry);
 }
