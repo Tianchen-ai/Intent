@@ -252,3 +252,111 @@ def MojoCOmpFor : RowInst<"c_omp_for",[SingleBlock]> {
 def MojoCOwnerCall : RowInst<"c_owner_call"> {
   let arguments=(ins StrAttr:$call_args, BoolAttr:$cyclic);
 }
+
+// Terminal row operations (v0.4)
+def MojoRowProgram : RowInst<"row_program",[SingleBlock]> {
+  let regions=(region AnyRegion:$kernel, AnyRegion:$host);
+}
+def MojoRuntimeSource : RowInst<"runtime_source"> {
+  let arguments=(ins StrAttr:$implementation);
+}
+def MojoRowFn : RowInst<"row_fn",[SingleBlock]> {
+  let arguments=(ins ArrayAttr:$param_specs, BoolAttr:$uses_atomic, BoolAttr:$uses_stack,
+                     BoolAttr:$uses_memcpy, BoolAttr:$has_key_bounds);
+  let regions=(region AnyRegion:$body);
+}
+def MojoDynAddress : RowInst<"dyn_address"> {
+  let arguments=(ins AnyType:$base, Variadic<AnyType>:$coords_and_strides, I64Attr:$terms, I32Attr:$index_bits);
+  let results=(outs Index:$offset);
+}
+def MojoAtomicFetchAddI32 : RowInst<"atomic_fetch_add_i32"> {
+  let arguments=(ins AnyType:$ptr, Index:$offset, I32:$delta);
+  let results=(outs I32:$old_value);
+}
+def MojoMemcpyElems : RowInst<"memcpy_elems"> {
+  let arguments=(ins AnyType:$dst, Index:$dst_off, AnyType:$src, Index:$src_off, Index:$count);
+}
+def MojoSimdIotaAdd : RowInst<"simd_iota_add"> {
+  let arguments=(ins AnyType:$base_idx, StrAttr:$dtype, I64Attr:$width);
+  let results=(outs AnyType:$result);
+}
+def MojoSimdSelect : RowInst<"simd_select"> {
+  let arguments=(ins AnyType:$cond, AnyType:$on_true, AnyType:$on_false);
+  let results=(outs AnyType:$result);
+}
+def MojoSimdCmpGt : RowInst<"simd_cmp_gt"> {
+  let arguments=(ins AnyType:$lhs, AnyType:$rhs);
+  let results=(outs AnyType:$result);
+}
+def MojoScalarCast : RowInst<"scalar_cast"> {
+  let arguments=(ins AnyType:$input, StrAttr:$dtype);
+  let results=(outs AnyType:$result);
+}
+def MojoScalarConst : RowInst<"scalar_const"> {
+  let arguments=(ins StrAttr:$dtype, StrAttr:$literal);
+  let results=(outs AnyType:$result);
+}
+def MojoTupleDecl : RowInst<"tuple_decl"> {
+  let arguments=(ins Variadic<AnyType>:$init);
+  let results=(outs AnyType:$slot);
+}
+def MojoTupleRead : RowInst<"tuple_read"> {
+  let arguments=(ins AnyType:$slot);
+  let results=(outs AnyType:$value);
+}
+def MojoTupleWrite : RowInst<"tuple_write"> {
+  let arguments=(ins AnyType:$slot, AnyType:$value);
+}
+def MojoTupleField : RowInst<"tuple_field"> {
+  let arguments=(ins AnyType:$tuple_val, I64Attr:$position);
+  let results=(outs AnyType:$field);
+}
+def MojoUniform : RowInst<"uniform"> {
+  let arguments=(ins UI64:$seed, AnyType:$counter, I64Attr:$width);
+  let results=(outs AnyType:$samples);
+}
+def MojoWelfordVecStep : RowInst<"welford_vec_step"> {
+  let arguments=(ins AnyType:$x, AnyType:$mean, AnyType:$m2, I32:$step_n, I64Attr:$width);
+  let results=(outs AnyType:$next_mean, AnyType:$next_m2);
+}
+def MojoWelfordVecReduce : RowInst<"welford_vec_reduce"> {
+  let arguments=(ins I32:$step_n, AnyType:$mean, AnyType:$m2, I64Attr:$width);
+  let results=(outs AnyType:$summary);
+}
+def MojoWelfordScalarStep : RowInst<"welford_scalar_step"> {
+  let arguments=(ins AnyType:$state, F32:$sample);
+  let results=(outs AnyType:$summary);
+}
+def MojoTranspose8x8 : RowInst<"transpose_8x8"> {
+  let arguments=(ins AnyType:$src, Index:$src_off, Index:$src_s0,
+                     AnyType:$dst, Index:$dst_off, Index:$dst_s0, StrAttr:$dtype);
+}
+def MojoSimdScanSum : RowInst<"simd_scan_sum"> {
+  let arguments=(ins AnyType:$input, AnyType:$carry, StrAttr:$dtype, I64Attr:$width);
+  let results=(outs AnyType:$prefix, AnyType:$next_carry);
+}
+def MojoCRowHostFn : RowInst<"c_row_host_fn",[SingleBlock]> {
+  let arguments=(ins StrAttr:$params, StrAttr:$extern_decl);
+  let regions=(region AnyRegion:$body);
+}
+def MojoCRowPrep : RowInst<"c_row_prep"> {
+  let arguments=(ins BoolAttr:$single_dispatcher, BoolAttr:$member_tasks, BoolAttr:$swap_dest);
+}
+def MojoCKeyOmpFor : RowInst<"c_key_omp_for",[SingleBlock]> {
+  let arguments=(ins I64Attr:$key_extent);
+  let regions=(region AnyRegion:$body);
+}
+def MojoCTile2DOmp : RowInst<"c_tile_2d_omp",[SingleBlock]> {
+  let arguments=(ins I64Attr:$tile);
+  let regions=(region AnyRegion:$body);
+}
+def MojoCRowOmpParallel : RowInst<"c_row_omp_parallel",[SingleBlock]> {
+  let regions=(region AnyRegion:$body);
+}
+def MojoCProjectedWhile : RowInst<"c_projected_while",[SingleBlock]> {
+  let arguments=(ins I64Attr:$proj_rank);
+  let regions=(region AnyRegion:$body);
+}
+def MojoCRowCall : RowInst<"c_row_call"> {
+  let arguments=(ins StrAttr:$mode, StrAttr:$call_args, I64Attr:$elem_bytes);
+}

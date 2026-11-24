@@ -171,6 +171,163 @@ void registerMatrixContracts(Unit &u) {
               "oneDNN u8s8 BRGeMM requires AMX-INT8 or AVX512-VNNI");
         return llvm::Error::success();
       });
+
+  auto requireSimd = [](const TargetProfile &p) -> llvm::Error {
+    auto *rm = p.services.get<intentdsl::cpu::RowMachine>();
+    if (!rm || rm->vectorBits < 128)
+      return llvm::createStringError("requires >=128-bit CPU SIMD");
+    return llvm::Error::success();
+  };
+
+  {
+    ImplementationContract c;
+    c.name = "philox-uniform";
+    c.operation = "mojo_row.uniform";
+    c.symbol = "uniform_at";
+    c.source = ImplementationSource::Runtime;
+    c.resource = "runtime/mojo/kernels/philox.mojo";
+    c.minimum = Reuse::Native;
+    c.operands = "ui64 seed x ui64[W] counter -> f32[W]";
+    c.layout = "SIMD register lanes";
+    c.accumulator = "u32x4[W] 10-round Philox-4x32 state";
+    c.effects = "pure register arithmetic";
+    c.numerical = "10-round Philox-4x32 upper-24-bit mantissa * 2^-24 in [0, 1)";
+    c.estimator = u.qualify("simd-row-primitive");
+    c.costParameters = {"vector_bits", "workers"};
+    c.available = requireSimd;
+    c.verify = [](Operation *op) -> LogicalResult {
+      if (op->getNumOperands() != 2 || op->getNumResults() != 1 ||
+          !op->getOperand(0).getType().isUnsignedInteger(64))
+        return failure();
+      auto wAttr = op->getAttrOfType<IntegerAttr>("width");
+      if (!wAttr || wAttr.getInt() < 1)
+        return failure();
+      if (wAttr.getInt() == 1 && op->getOperand(1).getType().isUnsignedInteger(64) &&
+          op->getResult(0).getType().isF32())
+        return success();
+      auto pos = dyn_cast<ShapedType>(op->getOperand(1).getType());
+      auto out = dyn_cast<ShapedType>(op->getResult(0).getType());
+      return success(pos && out && pos.getElementType().isUnsignedInteger(64) &&
+                     out.getElementType().isF32() &&
+                     pos.getShape() == out.getShape());
+    };
+    add(std::move(c));
+  }
+
+  {
+    ImplementationContract c;
+    c.name = "welford-step";
+    c.operation = "mojo_row.welford_vec_step";
+    c.symbol = "welford_vec_step";
+    c.source = ImplementationSource::Runtime;
+    c.resource = "runtime/mojo/kernels/moments.mojo";
+    c.minimum = Reuse::Native;
+    c.operands = "f32[W] samples, f32[W] mean, f32[W] m2, i32 step_n -> (f32[W], f32[W])";
+    c.layout = "SIMD register lanes";
+    c.accumulator = "f32[W] running mean and M2 vectors";
+    c.effects = "pure register arithmetic";
+    c.numerical = "IEEE-754 f32 per-lane Welford step with shared reciprocal 1/step_n";
+    c.estimator = u.qualify("simd-row-primitive");
+    c.costParameters = {"vector_bits", "workers"};
+    c.available = requireSimd;
+    c.verify = [](Operation *op) -> LogicalResult {
+      return success(op->getNumOperands() == 4 && op->getNumResults() == 2 &&
+                     op->getOperand(3).getType().isInteger(32));
+    };
+    add(std::move(c));
+  }
+
+  {
+    ImplementationContract c;
+    c.name = "welford-reduce";
+    c.operation = "mojo_row.welford_vec_reduce";
+    c.symbol = "welford_vec_reduce";
+    c.source = ImplementationSource::Runtime;
+    c.resource = "runtime/mojo/kernels/moments.mojo";
+    c.minimum = Reuse::Native;
+    c.operands = "i32 step_n, f32[W] mean, f32[W] m2 -> tuple<i32, f32, f32>";
+    c.layout = "SIMD register lanes";
+    c.accumulator = "f32 pairwise Chan Welford tree merge";
+    c.effects = "pure register arithmetic";
+    c.numerical = "exact power-of-two pairwise Chan Welford merge across W lanes";
+    c.estimator = u.qualify("simd-row-primitive");
+    c.costParameters = {"vector_bits", "workers"};
+    c.available = requireSimd;
+    c.verify = [](Operation *op) -> LogicalResult {
+      return success(op->getNumOperands() == 3 && op->getNumResults() == 1 &&
+                     isa<TupleType>(op->getResult(0).getType()));
+    };
+    add(std::move(c));
+  }
+
+  {
+    ImplementationContract c;
+    c.name = "welford-combine";
+    c.operation = "mojo_row.welford_scalar_step";
+    c.symbol = "welford_scalar_step";
+    c.source = ImplementationSource::Runtime;
+    c.resource = "runtime/mojo/kernels/moments.mojo";
+    c.minimum = Reuse::Native;
+    c.operands = "tuple<i32, f32, f32> state, f32 sample -> tuple<i32, f32, f32>";
+    c.layout = "scalar registers";
+    c.accumulator = "(i32 count, f32 mean, f32 m2) scalar summary";
+    c.effects = "pure register arithmetic";
+    c.numerical = "IEEE-754 f32 scalar Welford step";
+    c.estimator = u.qualify("simd-row-primitive");
+    c.costParameters = {"vector_bits", "workers"};
+    c.available = requireSimd;
+    c.verify = [](Operation *op) -> LogicalResult {
+      return success(op->getNumOperands() == 2 && op->getNumResults() == 1 &&
+                     isa<TupleType>(op->getOperand(0).getType()) &&
+                     op->getOperand(1).getType().isF32() &&
+                     isa<TupleType>(op->getResult(0).getType()));
+    };
+    add(std::move(c));
+  }
+
+  {
+    ImplementationContract c;
+    c.name = "simd-transpose-8x8";
+    c.operation = "mojo_row.transpose_8x8";
+    c.symbol = "transpose_tile_8x8";
+    c.source = ImplementationSource::Runtime;
+    c.resource = "runtime/mojo/kernels/transpose.mojo";
+    c.minimum = Reuse::Native;
+    c.operands = "src ptr, src_off, src_s0, dst ptr, dst_off, dst_s0";
+    c.layout = "8x8 contiguous-row sub-block within 32x32 matrix tile";
+    c.accumulator = "8x SIMD[dt, 8] register rows";
+    c.effects = "reads 8x8 source block and writes transposed 8x8 destination block";
+    c.numerical = "bitwise exact element permutation";
+    c.estimator = u.qualify("simd-tile-transpose");
+    c.costParameters = {"vector_bits", "workers"};
+    c.available = requireSimd;
+    c.verify = [](Operation *op) -> LogicalResult {
+      return success(op->getNumOperands() == 6 && op->getNumResults() == 0);
+    };
+    add(std::move(c));
+  }
+
+  {
+    ImplementationContract c;
+    c.name = "simd-scan-sum";
+    c.operation = "mojo_row.simd_scan_sum";
+    c.symbol = "simd_scan_sum";
+    c.source = ImplementationSource::Runtime;
+    c.resource = "runtime/mojo/kernels/scan.mojo";
+    c.minimum = Reuse::Native;
+    c.operands = "T[W] input, T carry -> (T[W] prefix, T next_carry)";
+    c.layout = "SIMD register lanes";
+    c.accumulator = "T[W] inclusive Hillis-Steele prefix sum";
+    c.effects = "pure register arithmetic";
+    c.numerical = "log2(W) SIMD shift-add inclusive prefix with interval carry";
+    c.estimator = u.qualify("simd-row-primitive");
+    c.costParameters = {"vector_bits", "workers"};
+    c.available = requireSimd;
+    c.verify = [](Operation *op) -> LogicalResult {
+      return success(op->getNumOperands() == 2 && op->getNumResults() == 2);
+    };
+    add(std::move(c));
+  }
 }
 
 void populateMojoMatrixContracts(intentdsl::cpu::MatrixMachine &m, int64_t v) {

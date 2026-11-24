@@ -18,6 +18,7 @@ using namespace mlir;
 namespace CI_UNIT_NAMESPACE {
 LogicalResult lowerMojoMatrix(func::FuncOp);
 LogicalResult lowerMojoOrdered(func::FuncOp);
+LogicalResult lowerMojoRow(func::FuncOp, int64_t);
 void dialect(DialectRegistry &r) {
   r.insert<intentdsl::rowmojo::RowMojoDialect, mlir::arith::ArithDialect,
            mlir::math::MathDialect, mlir::scf::SCFDialect>();
@@ -223,16 +224,35 @@ struct Realize : PassWrapper<Realize, OperationPass<ModuleOp>> {
     });
     if(failed(intentdsl::specializeProjectedLayout(*getOperation().getOps<func::FuncOp>().begin(),facts,"mojo_row",true))){signalPassFailure();return;}
     getContext().getOrLoadDialect<intentdsl::rowmojo::RowMojoDialect>();
-    getOperation().walk([&](Operation *op) {
-      if (op->getName().getStringRef() == "cpu.task"){
-        auto &body=op->getRegion(0).front();
-        if(failed(intentdsl::cpu::packMemberLoop(body))){signalPassFailure();return;}
-        if(intentdsl::cpu::packed(body) || intentdsl::cpu::formReservations(body) || intentdsl::cpu::formAtomicMembers(body)){
-          Builder b(&getContext());op->setAttr("mojo_row.schedule",b.getStringAttr("static-row-groups"));
-          op->setAttr("mojo_row.lanes",b.getI64IntegerAttr(laneCount(op,lanes)));
-        }else Columns(op).run(laneCount(op,lanes));
+    getContext().getOrLoadDialect<mlir::arith::ArithDialect>();
+    getContext().getOrLoadDialect<mlir::math::MathDialect>();
+    getContext().getOrLoadDialect<mlir::scf::SCFDialect>();
+    auto fn = *getOperation().getOps<func::FuncOp>().begin();
+    auto *op = &fn.front().front();
+    if (op->getName().getStringRef() != "cpu.task") {
+      op->emitError("expected cpu.task for Mojo row realization");
+      signalPassFailure();
+      return;
+    }
+    int64_t effLanes = laneCount(op, lanes);
+    auto &body = op->getRegion(0).front();
+    bool isTile = !body.without_terminator().empty() &&
+                  body.front().getName().getStringRef() == "cpu.transpose_tile";
+    if (!isTile) {
+      if (failed(intentdsl::cpu::packMemberLoop(body))) {
+        signalPassFailure();
+        return;
       }
-    });
+      if (!intentdsl::cpu::packed(body) &&
+          !intentdsl::cpu::reservations(body) &&
+          !intentdsl::cpu::formReservations(body) &&
+          !intentdsl::cpu::atomicMembers(body) &&
+          !intentdsl::cpu::formAtomicMembers(body)) {
+        Columns(op).run(effLanes);
+      }
+    }
+    if (failed(lowerMojoRow(fn, effLanes)))
+      signalPassFailure();
   }
 };
 } // namespace

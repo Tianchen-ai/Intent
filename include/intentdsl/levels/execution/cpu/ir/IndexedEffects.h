@@ -28,6 +28,8 @@ inline Reservations matchReservations(mlir::Block &body){
 inline bool reservations(mlir::Block &b){return !b.empty() && b.front().getName().getStringRef()=="cpu.tally_keys";}
 inline bool formReservations(mlir::Block &bb) {
   using namespace mlir;
+  if (reservations(bb))
+    return true;
   auto keys=bb.getParentOp()->getAttrOfType<IntegerAttr>("cpu.batch_extent");
   if(!keys)return false;
   auto m=matchReservations(bb);if(!m.update)return false;
@@ -70,6 +72,8 @@ inline bool atomicMembers(mlir::Block &bb){
 }
 inline bool formAtomicMembers(mlir::Block &bb){
   using namespace mlir;
+  if (atomicMembers(bb))
+    return true;
   if(!llvm::any_of(bb,[](Operation &op){auto n=op.getName().stripDialect();return n=="atomic_add" || n=="write_offsets" || n=="fill_ranges";}))return false;
   OpBuilder b(bb.getTerminator());OperationState state(bb.front().getLoc(),"cpu.atomic_members");state.addRegion();
   auto *loop=b.create(state);auto &body=loop->getRegion(0).emplaceBlock();

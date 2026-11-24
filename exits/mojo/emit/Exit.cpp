@@ -1,20 +1,16 @@
-#include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/algorithm/kir/ir/Performance.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
+#include <algorithm>
 using namespace compilerinfra;
 using namespace mlir;
 namespace CI_UNIT_NAMESPACE {
 void dialect(DialectRegistry &);
-bool hasMojoMatrixProgram(ModuleOp);
-bool hasMojoOrderedProgram(ModuleOp);
 TerminalPrinter mojoMatrixPrinter();
 void populateMojoMatrixContracts(intentdsl::cpu::MatrixMachine &, int64_t);
-std::string hostSource(func::FuncOp);
 void publishABI(OpPassManager &);
 LogicalResult verifyLoops(ModuleOp, const TargetProfile &, bool callable);
 void realize(OpPassManager &, int64_t, const intentdsl::CallFacts &);
-llvm::Expected<std::string> mojoSource(Operation *);
 namespace {
 llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
   TargetProfile p;
@@ -64,32 +60,6 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
     return e;
   return p;
 }
-llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
-  if (hasMojoMatrixProgram(m) || hasMojoOrderedProgram(m))
-    return mojoMatrixPrinter().emit(m, out);
-  auto fn = *m.getOps<func::FuncOp>().begin();
-  auto abi = llvm::json::parse(fn->getAttrOfType<StringAttr>("kir.abi"));
-  if (!abi)
-    return abi.takeError();
-  auto &task = fn.front().front();
-  llvm::json::Array rows;
-  for (auto a : task.getAttrOfType<ArrayAttr>("rows")) {
-    auto row = cast<DictionaryAttr>(a);
-    rows.push_back(llvm::json::Object{
-        {"grain", row.getAs<IntegerAttr>("grain").getInt()},
-        {"columns", row.getAs<IntegerAttr>("columns").getInt()}});
-  }
-  auto program = mojoSource(&task);
-  if (!program)
-    return program.takeError();
-  llvm::json::Object fields{{"source", *program}, {"host", hostSource(fn)}};
-  fields["version"] = 2;
-  fields["domain"] = intentdsl::publishDomain(fn);
-  fields["abi"] = std::move(*abi);
-  fields["rows"] = std::move(rows);
-  out << llvm::json::Value(std::move(fields));
-  return llvm::Error::success();
-}
 } // namespace
 void registerBlockCost(Unit &);
 void registerOneDNN(Unit &);
@@ -122,7 +92,7 @@ void bind(Unit &u) {
           }},
          COMPILERINFRA_SOURCE});
   ExitImplementation exit;
-  exit.emit = emit;
+  exit.terminal = mojoMatrixPrinter();
   exit.capabilities = capabilities;
   u.exit = Located<ExitImplementation>{std::move(exit), COMPILERINFRA_SOURCE};
 }

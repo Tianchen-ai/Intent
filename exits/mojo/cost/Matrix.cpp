@@ -190,5 +190,63 @@ void registerBlockCost(compilerinfra::Unit &u) {
           return e;
         }},
        COMPILERINFRA_SOURCE});
+
+  u.costModels.push_back(
+      {{"simd-row-primitive", "levels/execution/cpu::partition", "1",
+        [](mlir::Operation *op, const compilerinfra::StructuralCandidate &c,
+           compilerinfra::CostContext &ctx)
+            -> llvm::Expected<compilerinfra::CostEstimate> {
+          auto [m, n] =
+              ctx.target.services.get<intentdsl::CallFacts>()->geometry(op);
+          auto d = mlir::cast<mlir::DictionaryAttr>(c.value);
+          if (d.getAs<mlir::StringAttr>("walk") == "destination")
+            std::swap(m, n);
+          double lanes =
+              ctx.target.services.get<intentdsl::cpu::RowMachine>()->vectorBits /
+              32.;
+          double sweeps = m * std::ceil(n / lanes);
+          double treeDepth = std::log2(std::max(1., lanes));
+          unsigned uniforms = 0, moments = 0, scans = 0;
+          op->walk([&](mlir::Operation *i) {
+            auto k = i->getName().stripDialect();
+            uniforms += (k == "uniform");
+            moments += (k == "welford");
+            scans += (k == "scan_sum");
+          });
+          compilerinfra::CostEstimate e;
+          e.scope = "row task";
+          e.bottleneck = "SIMD microkernel issue";
+          double vecSteps =
+              sweeps * (10. * uniforms + 4. * moments + treeDepth * scans) +
+              m * treeDepth * moments;
+          e.terms["vector_steps"] = {vecSteps, "instruction"};
+          if (auto rate = intentdsl::quantity(ctx, "vector", "FLOP/ns"))
+            e.timeNs = (vecSteps * lanes) / *rate;
+          return e;
+        }},
+       COMPILERINFRA_SOURCE});
+
+  u.costModels.push_back(
+      {{"simd-tile-transpose", "levels/execution/cpu::permutation", "1",
+        [](mlir::Operation *op, const compilerinfra::StructuralCandidate &c,
+           compilerinfra::CostContext &ctx)
+            -> llvm::Expected<compilerinfra::CostEstimate> {
+          auto [m, n] =
+              ctx.target.services.get<intentdsl::CallFacts>()->geometry(op);
+          auto d = mlir::cast<mlir::DictionaryAttr>(c.value);
+          compilerinfra::CostEstimate e;
+          e.scope = "tile transpose";
+          e.bottleneck = "SIMD shuffle network";
+          double blocks8x8 = d.getAs<mlir::StringAttr>("walk") == "tile"
+                                 ? std::ceil(m / 8.) * std::ceil(n / 8.)
+                                 : 0.;
+          double shuffles = blocks8x8 * 24.;
+          e.terms["subblock_8x8_count"] = {blocks8x8, "count"};
+          e.terms["register_shuffles"] = {shuffles, "instruction"};
+          if (auto rate = intentdsl::quantity(ctx, "vector", "FLOP/ns"))
+            e.timeNs = (shuffles * 8.) / *rate;
+          return e;
+        }},
+       COMPILERINFRA_SOURCE});
 }
 } // namespace CI_UNIT_NAMESPACE

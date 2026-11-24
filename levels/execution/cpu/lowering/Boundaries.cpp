@@ -2,8 +2,10 @@
 #include "intentdsl/levels/algorithm/kir/ir/Permutation.h"
 #include "intentdsl/levels/algorithm/kir/ir/RowSemantics.h"
 #include "intentdsl/levels/execution/cpu/ir/Dialect.h"
+#include "intentdsl/levels/execution/cpu/ir/IndexedEffects.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
 #include "intentdsl/levels/execution/cpu/ir/Owners.h"
+#include "intentdsl/levels/execution/cpu/ir/Pack.h"
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/Pass.h"
@@ -48,17 +50,30 @@ LogicalResult verifyTask(ModuleOp m, const TargetProfile &profile,
     if(fn.getNumArguments()!=2 || body.getNumArguments()!=3 ||
        llvm::any_of(fn.getArgumentTypes(),[](Type t){auto m=dyn_cast<MemRefType>(t);return !m || m.getRank()!=2;}))
       return task.emitError("permuted tasks require two matrix views");
-    unsigned writes=0;
-    auto accesses=task.walk([&](Operation *o){
-      auto n=o->getName().stripDialect();
-      if(n!="write" && n!="write_panel")return WalkResult::advance();
-      ++writes;auto *read=o->getOperands().back().getDefiningOp();
-      auto axes=o->getAttrOfType<DenseI64ArrayAttr>("axes");
-      return (!axes || axes.asArrayRef()!=ArrayRef<int64_t>({1,0}) ||
-        o->getOperand(0)!=body.getArgument(2) || !read || (read->getName().stripDialect()!="read" && read->getName().stripDialect()!="read_panel") ||
-        read->getOperand(0)!=body.getArgument(1)) ? WalkResult::interrupt() : WalkResult::advance();
-    });
-    if(accesses.wasInterrupted() || !writes)return task.emitError("permutation must copy input members to reversed output coordinates");
+    if (storage != "pending" && walk == "tile" && logicalBody) {
+      if (!llvm::hasSingleElement(body.without_terminator()))
+        return task.emitError("expected materialized cpu.transpose_tile");
+      auto &tOp = body.front();
+      if (tOp.getName().getStringRef() != "cpu.transpose_tile" ||
+          tOp.getOperand(0) != body.getArgument(1) ||
+          tOp.getOperand(1) != body.getArgument(2) ||
+          tOp.getAttrOfType<IntegerAttr>("tile").getInt() != 32)
+        return tOp.emitError("invalid cpu.transpose_tile operands or tile size");
+    } else if (logicalBody ||
+               !llvm::hasSingleElement(body.without_terminator()) ||
+               body.front().getName().getStringRef() != "cpu.transpose_tile") {
+      unsigned writes=0;
+      auto accesses=task.walk([&](Operation *o){
+        auto n=o->getName().stripDialect();
+        if(n!="write" && n!="write_panel")return WalkResult::advance();
+        ++writes;auto *read=o->getOperands().back().getDefiningOp();
+        auto axes=o->getAttrOfType<DenseI64ArrayAttr>("axes");
+        return (!axes || axes.asArrayRef()!=ArrayRef<int64_t>({1,0}) ||
+          o->getOperand(0)!=body.getArgument(2) || !read || (read->getName().stripDialect()!="read" && read->getName().stripDialect()!="read_panel") ||
+          read->getOperand(0)!=body.getArgument(1)) ? WalkResult::interrupt() : WalkResult::advance();
+      });
+      if(accesses.wasInterrupted() || !writes)return task.emitError("permutation must copy input members to reversed output coordinates");
+    }
   }
   auto domain = task.getAttrOfType<IntegerAttr>("domain_arg").getInt();
   if (domain < 0 || domain >= int64_t(fn.getNumArguments()) ||
@@ -74,9 +89,40 @@ LogicalResult verifyTask(ModuleOp m, const TargetProfile &profile,
     return task.emitError("invalid storage handoff");
   if (body.empty() || body.back().getName().getStringRef() != "cpu.end")
     return task.emitError("missing task completion");
-  if (logicalBody)
+  if (logicalBody) {
+    if (storage != "pending") {
+      if (walk == "tile")
+        return success();
+      if (packed(body))
+        return verifyPack(body);
+      if (reservations(body))
+        return verifyReservations(body, *profile.services.get<CallFacts>());
+      if (atomicMembers(body))
+        return intentdsl::verifyRowComputation(
+            fn, body.front().getRegion(0).front(),
+            body.getArguments().drop_front(), domain, "cpu", true);
+      bool badWelford =
+          body.walk([](Operation *w) {
+                auto wn = w->getName().getStringRef();
+                if (wn == "cpu.welford") {
+                  auto tt = dyn_cast<TupleType>(w->getResult(0).getType());
+                  if (!tt || tt.size() != 3 || !tt.getType(0).isInteger(32) ||
+                      !tt.getType(1).isF32() || !tt.getType(2).isF32())
+                    return WalkResult::interrupt();
+                } else if (wn == "cpu.field") {
+                  auto pos = w->getAttrOfType<IntegerAttr>("position");
+                  if (!pos || pos.getInt() < 0 || pos.getInt() >= 3)
+                    return WalkResult::interrupt();
+                }
+                return WalkResult::advance();
+              })
+              .wasInterrupted();
+      if (badWelford)
+        return task.emitError("invalid CPU Welford summary tuple structure");
+    }
     return intentdsl::verifyRowComputation(
         fn, body, body.getArguments().drop_front(), domain, "cpu", true);
+  }
   return success();
 }
 llvm::Error realizeLocalValues(Operation *op, Attribute value,
@@ -89,6 +135,25 @@ llvm::Error realizeLocalValues(Operation *op, Attribute value,
     return materializeOwnerBuffers(op->getParentOfType<func::FuncOp>(), rw);
   op->setAttr("cpu.realization", value);
   op->removeAttr("cpu.storage");
+  auto &body = op->getRegion(0).front();
+  if (op->getAttrOfType<StringAttr>("cpu.walk") == "tile") {
+    SmallVector<Operation *> oldOps;
+    for (Operation &m : body.without_terminator())
+      oldOps.push_back(&m);
+    OpBuilder::InsertionGuard g(rw);
+    rw.setInsertionPoint(body.getTerminator());
+    OperationState ts(op->getLoc(), "cpu.transpose_tile");
+    ts.addOperands({body.getArgument(1), body.getArgument(2)});
+    ts.addAttribute("tile", rw.getI64IntegerAttr(32));
+    rw.create(ts);
+    for (Operation *m : llvm::reverse(oldOps))
+      rw.eraseOp(m);
+    return llvm::Error::success();
+  }
+  if (failed(packMemberLoop(body)))
+    return llvm::createStringError("failed to materialize CPU member compaction");
+  if (!packed(body) && !formReservations(body))
+    formAtomicMembers(body);
   return llvm::Error::success();
 }
 } // namespace intentdsl::cpu

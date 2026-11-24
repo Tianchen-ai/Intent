@@ -165,3 +165,6 @@ def Cpu_BufferLoad : Inst<"buffer_load"> {
 def Cpu_BufferStore : Inst<"buffer_store"> {
   let arguments=(ins AnyType:$value, AnyMemRef:$buffer, Variadic<Index>:$indices);
 }
+def Cpu_TransposeTile : Inst<"transpose_tile"> {
+  let arguments=(ins AnyMemRef:$input, AnyMemRef:$output, I64Attr:$tile);
+}

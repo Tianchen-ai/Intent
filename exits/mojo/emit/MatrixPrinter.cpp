@@ -66,6 +66,19 @@ TerminalPrinter mojoMatrixPrinter() {
   };
   p.operations["mojo_row.matrix_program"] = twoFileProgram;
   p.operations["mojo_row.ordered_program"] = twoFileProgram;
+  p.operations["mojo_row.row_program"] = twoFileProgram;
+
+  p.operations["mojo_row.runtime_source"] =
+      [](Operation &op, PrintPoint at, PrintContext &c) -> llvm::Error {
+    if (at == PrintPoint::Enter) {
+      auto key = op.getAttrOfType<StringAttr>("implementation").getValue();
+      auto src = c.source(key);
+      if (!src)
+        return src.takeError();
+      c.line(*src);
+    }
+    return llvm::Error::success();
+  };
 
   // ---------------- Arithmetic & Index Ops ----------------
   p.operations["arith.constant"] = [](Operation &op, PrintPoint at,
@@ -144,6 +157,71 @@ TerminalPrinter mojoMatrixPrinter() {
   binIdx("arith.subf", "-", "-");
   binIdx("arith.mulf", "*", "*");
   binIdx("arith.divf", "/", "/");
+  binIdx("arith.xori", "^", "^");
+  binIdx("arith.ori", "|", "|");
+  binIdx("arith.shli", "<<", "<<");
+  binIdx("arith.shrsi", ">>", ">>");
+  binIdx("arith.shrui", ">>", ">>");
+
+  p.operations["arith.andi"] = [](Operation &op, PrintPoint at,
+                                  PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      auto lhs = c.name(op.getOperand(0)), rhs = c.name(op.getOperand(1));
+      std::string opSym = op.getResult(0).getType().isInteger(1) ? "and" : "&";
+      c.line("var " + c.name(op.getResult(0)) + " = (" + lhs + " " + opSym +
+             " " + rhs + ")");
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["arith.cmpf"] = [](Operation &op, PrintPoint at,
+                                  PrintContext &c) -> llvm::Error {
+    if (at != PrintPoint::Enter)
+      return llvm::Error::success();
+    auto cmp = cast<arith::CmpFOp>(op);
+    StringRef tok;
+    switch (cmp.getPredicate()) {
+    case arith::CmpFPredicate::OEQ:
+    case arith::CmpFPredicate::UEQ:
+      tok = "==";
+      break;
+    case arith::CmpFPredicate::ONE:
+    case arith::CmpFPredicate::UNE:
+      tok = "!=";
+      break;
+    case arith::CmpFPredicate::OLT:
+    case arith::CmpFPredicate::ULT:
+      tok = "<";
+      break;
+    case arith::CmpFPredicate::OLE:
+    case arith::CmpFPredicate::ULE:
+      tok = "<=";
+      break;
+    case arith::CmpFPredicate::OGT:
+    case arith::CmpFPredicate::UGT:
+      tok = ">";
+      break;
+    case arith::CmpFPredicate::OGE:
+    case arith::CmpFPredicate::UGE:
+      tok = ">=";
+      break;
+    default:
+      return llvm::createStringError("unsupported arith.cmpf predicate");
+    }
+    c.line("var " + c.name(op.getResult(0)) + " = (" +
+           c.name(op.getOperand(0)) + " " + tok.str() + " " +
+           c.name(op.getOperand(1)) + ")");
+    return llvm::Error::success();
+  };
+
+  p.operations["arith.select"] = [](Operation &op, PrintPoint at,
+                                    PrintContext &c) {
+    if (at == PrintPoint::Enter)
+      c.line("var " + c.name(op.getResult(0)) + " = (" +
+             c.name(op.getOperand(1)) + " if " + c.name(op.getOperand(0)) +
+             " else " + c.name(op.getOperand(2)) + ")");
+    return llvm::Error::success();
+  };
 
   p.operations["arith.minsi"] = [](Operation &op, PrintPoint at,
                                    PrintContext &c) {
@@ -195,6 +273,16 @@ TerminalPrinter mojoMatrixPrinter() {
       c.line("var " + c.name(op.getResult(0)) + " = " +
              mojoScalarType(op.getResult(0).getType()) + "(" +
              c.name(op.getOperand(0)) + ")");
+    return llvm::Error::success();
+  };
+
+  p.operations["arith.maxsi"] = [](Operation &op, PrintPoint at,
+                                   PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      auto lhs = c.name(op.getOperand(0)), rhs = c.name(op.getOperand(1));
+      c.line("var " + c.name(op.getResult(0)) + " = (" + lhs + " if " + lhs +
+             " > " + rhs + " else " + rhs + ")");
+    }
     return llvm::Error::success();
   };
 
@@ -296,11 +384,23 @@ TerminalPrinter mojoMatrixPrinter() {
              c.name(op.getOperand(0)) + ")");
     return llvm::Error::success();
   };
+  p.operations["math.rsqrt"] = [](Operation &op, PrintPoint at,
+                                  PrintContext &c) {
+    if (at == PrintPoint::Enter)
+      c.line("var " + c.name(op.getResult(0)) + " = rsqrt(" +
+             c.name(op.getOperand(0)) + ")");
+    return llvm::Error::success();
+  };
 
   p.operations["scf.if"] = [](Operation &op, PrintPoint at, PrintContext &c) {
     if (at == PrintPoint::Enter) {
-      for (auto r : op.getResults())
-        c.line("var " + c.name(r) + ": " + mojoScalarType(r.getType()));
+      for (auto r : op.getResults()) {
+        std::string tyStr = mojoScalarType(r.getType());
+        if (auto sh = dyn_cast<ShapedType>(r.getType()))
+          tyStr = "SIMD[" + mojoDTypeName(sh) + "," +
+                  std::to_string(sh.getDimSize(0)) + "]";
+        c.line("var " + c.name(r) + ": " + tyStr);
+      }
       c.line("if " + c.name(op.getOperand(0)) + ":");
     } else if (at == PrintPoint::BeginRegion) {
       if (c.region == 1 && !op.getRegion(1).empty())
@@ -1762,6 +1862,406 @@ TerminalPrinter mojoMatrixPrinter() {
                          std::to_string(grain) + "LL)";
     c.line("owner_task(" + callArgs + (callArgs.empty() ? "" : ",") + loExpr +
            ", " + hiExpr + ");");
+    return llvm::Error::success();
+  };
+
+  // ---------------- Row ("row.mojo" & "entry.c") Ops ----------------
+  p.operations["mojo_row.row_fn"] = [](Operation &op, PrintPoint at,
+                                       PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      c.line("from std.math import exp, sqrt, rsqrt, max, isnan");
+      c.line("from std.memory import bitcast");
+      if (op.getAttrOfType<BoolAttr>("uses_atomic").getValue())
+        c.line("from std.atomic import Atomic");
+      if (op.getAttrOfType<BoolAttr>("uses_stack").getValue())
+        c.line("from std.memory import unsafe_stack_allocation");
+      if (op.getAttrOfType<BoolAttr>("uses_memcpy").getValue())
+        c.line("from std.memory import unsafe_memcpy");
+      auto &bb = op.getRegion(0).front();
+      auto specs = op.getAttrOfType<ArrayAttr>("param_specs");
+      SmallVector<std::string> params;
+      for (size_t i = 0; i < specs.size(); ++i) {
+        params.push_back(c.name(bb.getArgument(i)) + ": " +
+                         cast<StringAttr>(specs[i]).getValue().str());
+      }
+      c.line("@export(\"intent_row_interval\")");
+      c.line("def intent_row_interval(" + llvm::join(params, ", ") +
+             ") abi(\"C\"):");
+    } else if (at == PrintPoint::BeginBlock) {
+      c.indent++;
+    } else if (at == PrintPoint::EndBlock) {
+      c.indent--;
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["mojo_row.dyn_address"] = [](Operation &op, PrintPoint at,
+                                            PrintContext &c) {
+    if (at != PrintPoint::Enter)
+      return llvm::Error::success();
+    int64_t terms = op.getAttrOfType<IntegerAttr>("terms").getInt();
+    SmallVector<std::string> parts{"Int64(0)"};
+    for (int64_t i = 0; i < terms; ++i) {
+      parts.push_back("Int64(" + c.name(op.getOperand(1 + i)) + ") * Int64(" +
+                      c.name(op.getOperand(1 + terms + i)) + ")");
+    }
+    c.line("var " + c.name(op.getResult(0)) + " = Int(" +
+           llvm::join(parts, " + ") + ")");
+    return llvm::Error::success();
+  };
+
+  p.operations["mojo_row.atomic_fetch_add_i32"] =
+      [](Operation &op, PrintPoint at, PrintContext &c) {
+    if (at == PrintPoint::Enter)
+      c.line("var " + c.name(op.getResult(0)) +
+             " = Atomic[DType.int32].fetch_add(" + c.name(op.getOperand(0)) +
+             ".unsafe_offset(" + c.name(op.getOperand(1)) + "), " +
+             c.name(op.getOperand(2)) + ")");
+    return llvm::Error::success();
+  };
+
+  p.operations["mojo_row.memcpy_elems"] = [](Operation &op, PrintPoint at,
+                                             PrintContext &c) {
+    if (at == PrintPoint::Enter)
+      c.line("unsafe_memcpy(dest=" + c.name(op.getOperand(0)) +
+             ".unsafe_offset(" + c.name(op.getOperand(1)) + "), src=" +
+             c.name(op.getOperand(2)) + ".unsafe_offset(" +
+             c.name(op.getOperand(3)) + "), count=" + c.name(op.getOperand(4)) +
+             ")");
+    return llvm::Error::success();
+  };
+
+  p.operations["mojo_row.simd_iota_add"] = [](Operation &op, PrintPoint at,
+                                              PrintContext &c) {
+    if (at != PrintPoint::Enter)
+      return llvm::Error::success();
+    auto dt = op.getAttrOfType<StringAttr>("dtype").getValue().str();
+    int64_t w = op.getAttrOfType<IntegerAttr>("width").getInt();
+    auto base = c.name(op.getOperand(0)), res = c.name(op.getResult(0));
+    if (w == 1) {
+      c.line("var " + res + " = Scalar[DType." + dt + "](" + base + ")");
+    } else {
+      SmallVector<std::string> seq;
+      for (int64_t i = 0; i < w; ++i)
+        seq.push_back(std::to_string(i));
+      std::string sTy = "SIMD[DType." + dt + "," + std::to_string(w) + "]";
+      c.line("var " + res + " = " + sTy + "(" + base + ") + " + sTy + "(" +
+             llvm::join(seq, ",") + ")");
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["mojo_row.simd_select"] = [](Operation &op, PrintPoint at,
+                                            PrintContext &c) {
+    if (at == PrintPoint::Enter)
+      c.line("var " + c.name(op.getResult(0)) + " = " +
+             c.name(op.getOperand(0)) + ".select(" + c.name(op.getOperand(1)) +
+             ", " + c.name(op.getOperand(2)) + ")");
+    return llvm::Error::success();
+  };
+
+  p.operations["mojo_row.simd_cmp_gt"] = [](Operation &op, PrintPoint at,
+                                            PrintContext &c) {
+    if (at == PrintPoint::Enter)
+      c.line("var " + c.name(op.getResult(0)) + " = " +
+             c.name(op.getOperand(0)) + ".gt(" + c.name(op.getOperand(1)) + ")");
+    return llvm::Error::success();
+  };
+
+  p.operations["mojo_row.scalar_cast"] = [](Operation &op, PrintPoint at,
+                                            PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      auto dt = op.getAttrOfType<StringAttr>("dtype").getValue().str();
+      auto in = c.name(op.getOperand(0)), res = c.name(op.getResult(0));
+      Type inTy = op.getOperand(0).getType(), outTy = op.getResult(0).getType();
+      if (isa<ShapedType>(outTy)) {
+        c.line("var " + res + " = " + in + ".cast[DType." + dt + "]()");
+      } else if (outTy.isInteger(1)) {
+        c.line("var " + res + " = Bool(" + in + " != 0)");
+      } else if (inTy.isInteger(1)) {
+        c.line("var " + res + " = Scalar[DType." + dt + "](1) if " + in +
+               " else Scalar[DType." + dt + "](0)");
+      } else if (inTy.isIndex()) {
+        c.line("var " + res + " = Int64(" + in + ").cast[DType." + dt + "]()");
+      } else {
+        c.line("var " + res + " = " + in + ".cast[DType." + dt + "]()");
+      }
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["mojo_row.scalar_const"] = [](Operation &op, PrintPoint at,
+                                             PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      auto dt = op.getAttrOfType<StringAttr>("dtype").getValue().str();
+      auto lit = op.getAttrOfType<StringAttr>("literal").getValue().str();
+      c.line("var " + c.name(op.getResult(0)) + " = Scalar[DType." + dt +
+             "](" + lit + ")");
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["mojo_row.tuple_decl"] = [](Operation &op, PrintPoint at,
+                                           PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      if (op.getNumOperands() == 3)
+        c.line("var " + c.name(op.getResult(0)) + " = (" +
+               c.name(op.getOperand(0)) + ", " + c.name(op.getOperand(1)) +
+               ", " + c.name(op.getOperand(2)) + ")");
+      else
+        c.line("var " + c.name(op.getResult(0)) + " = " +
+               c.name(op.getOperand(0)));
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["mojo_row.tuple_read"] = [](Operation &op, PrintPoint at,
+                                           PrintContext &c) {
+    if (at == PrintPoint::Enter)
+      c.line("var " + c.name(op.getResult(0)) + " = " +
+             c.name(op.getOperand(0)));
+    return llvm::Error::success();
+  };
+
+  p.operations["mojo_row.tuple_write"] = [](Operation &op, PrintPoint at,
+                                            PrintContext &c) {
+    if (at == PrintPoint::Enter)
+      c.line(c.name(op.getOperand(0)) + " = " + c.name(op.getOperand(1)));
+    return llvm::Error::success();
+  };
+
+  p.operations["mojo_row.tuple_field"] = [](Operation &op, PrintPoint at,
+                                            PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      int64_t pos = op.getAttrOfType<IntegerAttr>("position").getInt();
+      c.line("var " + c.name(op.getResult(0)) + " = " +
+             c.name(op.getOperand(0)) + "[" + std::to_string(pos) + "]");
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["mojo_row.uniform"] = [](Operation &op, PrintPoint at,
+                                        PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      int64_t w = op.getAttrOfType<IntegerAttr>("width").getInt();
+      std::string pos =
+          w == 1 ? ("SIMD[DType.uint64,1](" + c.name(op.getOperand(1)) + ")")
+                 : c.name(op.getOperand(1));
+      c.line("var " + c.name(op.getResult(0)) + " = uniform_at[" +
+             std::to_string(w) + "](" + c.name(op.getOperand(0)) + ", " + pos +
+             ")");
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["mojo_row.welford_vec_step"] = [](Operation &op, PrintPoint at,
+                                                 PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      int64_t w = op.getAttrOfType<IntegerAttr>("width").getInt();
+      auto r0 = c.name(op.getResult(0)), r1 = c.name(op.getResult(1));
+      c.line("var " + r0 + "_p = welford_vec_step[" + std::to_string(w) + "](" +
+             c.name(op.getOperand(0)) + ", " + c.name(op.getOperand(1)) + ", " +
+             c.name(op.getOperand(2)) + ", " + c.name(op.getOperand(3)) + ")");
+      c.line("var " + r0 + " = " + r0 + "_p[0]");
+      c.line("var " + r1 + " = " + r0 + "_p[1]");
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["mojo_row.welford_vec_reduce"] = [](Operation &op, PrintPoint at,
+                                                   PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      int64_t w = op.getAttrOfType<IntegerAttr>("width").getInt();
+      c.line("var " + c.name(op.getResult(0)) + " = welford_vec_reduce[" +
+             std::to_string(w) + "](" + c.name(op.getOperand(0)) + ", " +
+             c.name(op.getOperand(1)) + ", " + c.name(op.getOperand(2)) + ")");
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["mojo_row.welford_scalar_step"] =
+      [](Operation &op, PrintPoint at, PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      auto st = c.name(op.getOperand(0));
+      c.line("var " + c.name(op.getResult(0)) + " = welford_scalar_step(" + st +
+             "[0], " + st + "[1], " + st + "[2], " + c.name(op.getOperand(1)) +
+             ")");
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["mojo_row.transpose_8x8"] = [](Operation &op, PrintPoint at,
+                                              PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      auto dt = op.getAttrOfType<StringAttr>("dtype").getValue().str();
+      c.line("transpose_tile_8x8[DType." + dt + "](" +
+             c.name(op.getOperand(0)) + ", " + c.name(op.getOperand(1)) + ", " +
+             c.name(op.getOperand(2)) + ", " + c.name(op.getOperand(3)) + ", " +
+             c.name(op.getOperand(4)) + ", " + c.name(op.getOperand(5)) + ")");
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["mojo_row.simd_scan_sum"] = [](Operation &op, PrintPoint at,
+                                              PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      auto dt = op.getAttrOfType<StringAttr>("dtype").getValue().str();
+      int64_t w = op.getAttrOfType<IntegerAttr>("width").getInt();
+      auto r0 = c.name(op.getResult(0)), r1 = c.name(op.getResult(1));
+      std::string inExpr = w == 1 ? ("SIMD[DType." + dt + ",1](" +
+                                     c.name(op.getOperand(0)) + ")")
+                                  : c.name(op.getOperand(0));
+      c.line("var " + r0 + "_p = simd_scan_sum[DType." + dt + "," +
+             std::to_string(w) + "](" + inExpr + ", Scalar[DType." + dt + "](" +
+             c.name(op.getOperand(1)) + "))");
+      c.line("var " + r0 + " = " + (w == 1 ? (r0 + "_p[0][0]") : (r0 + "_p[0]")));
+      c.line("var " + r1 + " = " + r0 + "_p[1]");
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["mojo_row.c_row_host_fn"] = [](Operation &op, PrintPoint at,
+                                              PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      c.line("#include <stdint.h>");
+      c.line("#include <omp.h>");
+      c.line(op.getAttrOfType<StringAttr>("extern_decl").str());
+      c.line("int intent_entry(" +
+             op.getAttrOfType<StringAttr>("params").str() + ") {");
+      c.indent++;
+      c.line("if (rows == 0) return 0;");
+      c.indent--;
+    } else if (at == PrintPoint::BeginBlock) {
+      c.indent++;
+    } else if (at == PrintPoint::EndBlock) {
+      c.line("return 0;");
+      c.indent--;
+      c.line("}");
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["mojo_row.c_row_prep"] = [](Operation &op, PrintPoint at,
+                                           PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      if (op.getAttrOfType<BoolAttr>("single_dispatcher").getValue())
+        c.line("workers = 1;");
+      if (op.getAttrOfType<BoolAttr>("member_tasks").getValue())
+        c.line("rows = cols;");
+      if (op.getAttrOfType<BoolAttr>("swap_dest").getValue()) {
+        c.line("int64_t t = rows; rows = cols; cols = t;");
+        c.line("t = a0s0; a0s0 = a0s1; a0s1 = t;");
+        c.line("t = a1s0; a1s0 = a1s1; a1s1 = t;");
+      }
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["mojo_row.c_key_omp_for"] = [](Operation &op, PrintPoint at,
+                                              PrintContext &c) {
+    int64_t keys = op.getAttrOfType<IntegerAttr>("key_extent").getInt();
+    if (at == PrintPoint::Enter) {
+      c.line("const int64_t keys = " + std::to_string(keys) +
+             "LL, lines = (keys + 15) / 16, n = workers < lines ? workers : lines;");
+      c.line("#pragma omp parallel for num_threads(n) schedule(static) if(n>1)");
+      c.line("for (int64_t b = 0; b < n; ++b) {");
+    } else if (at == PrintPoint::BeginBlock) {
+      c.indent++;
+    } else if (at == PrintPoint::EndBlock) {
+      c.indent--;
+      c.line("}");
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["mojo_row.c_tile_2d_omp"] = [](Operation &op, PrintPoint at,
+                                              PrintContext &c) {
+    int64_t step = op.getAttrOfType<IntegerAttr>("tile").getInt();
+    std::string st = std::to_string(step) + "LL";
+    if (at == PrintPoint::Enter) {
+      c.line("const int64_t nt = (cols - 1) / " + st +
+             " + 1, mt = (rows - 1) / " + st + " + 1;");
+      c.line("#pragma omp parallel for schedule(static) num_threads(workers) "
+             "if(workers>1)");
+      c.line("for (int64_t g = 0; g < mt * nt; ++g) {");
+    } else if (at == PrintPoint::BeginBlock) {
+      c.indent++;
+      c.line("const int64_t r = (g / nt) * " + st + ", c = (g % nt) * " + st + ";");
+      c.line("const int64_t nr = rows - r < " + st + " ? rows - r : " + st +
+             ", nc = cols - c < " + st + " ? cols - c : " + st + ";");
+    } else if (at == PrintPoint::EndBlock) {
+      c.indent--;
+      c.line("}");
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["mojo_row.c_row_omp_parallel"] = [](Operation &, PrintPoint at,
+                                                   PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      c.line("const int64_t groups = (rows - 1) / grain + 1;");
+      c.line("const int64_t threads = groups < workers ? groups : workers;");
+      c.line("#pragma omp parallel num_threads(threads) if(threads>1)");
+      c.line("{");
+    } else if (at == PrintPoint::BeginBlock) {
+      c.indent++;
+      c.line("int64_t b = omp_get_thread_num(), nt = omp_get_num_threads();");
+      c.line("int64_t q = groups / nt, rem = groups % nt;");
+      c.line("int64_t start = (q * b + (b < rem ? b : rem)) * grain;");
+      c.line("int64_t stop = b + 1 == nt ? rows : start + (q + (b < rem)) * grain;");
+    } else if (at == PrintPoint::EndBlock) {
+      c.indent--;
+      c.line("}");
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["mojo_row.c_projected_while"] = [](Operation &op, PrintPoint at,
+                                                  PrintContext &c) {
+    int64_t pRank = op.getAttrOfType<IntegerAttr>("proj_rank").getInt();
+    if (at == PrintPoint::Enter) {
+      c.line("while (start < stop) {");
+    } else if (at == PrintPoint::BeginBlock) {
+      c.indent++;
+      c.line("int64_t outer = start;");
+      for (int64_t ax = pRank - 2; ax >= 0; --ax)
+        c.line("int64_t c" + std::to_string(ax) + " = outer % a0d" +
+               std::to_string(ax) + "; outer /= a0d" + std::to_string(ax) + ";");
+      c.line("int64_t span = a0d" + std::to_string(pRank - 2) + " - c" +
+             std::to_string(pRank - 2) + ";");
+      c.line("int64_t end = stop - start < span ? stop : start + span;");
+    } else if (at == PrintPoint::EndBlock) {
+      c.line("start = end;");
+      c.indent--;
+      c.line("}");
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["mojo_row.c_row_call"] = [](Operation &op, PrintPoint at,
+                                           PrintContext &c) {
+    if (at != PrintPoint::Enter)
+      return llvm::Error::success();
+    auto mode = op.getAttrOfType<StringAttr>("mode").getValue();
+    auto args = op.getAttrOfType<StringAttr>("call_args").str();
+    int64_t bytes = op.getAttrOfType<IntegerAttr>("elem_bytes").getInt();
+    std::string pre = args.empty() ? "" : (args + ", ");
+    if (mode == "key") {
+      c.line("intent_row_interval(" + pre +
+             "0, rows, cols, columns, 16*(lines*b/n), 16*(lines*(b+1)/n));");
+    } else if (mode == "tile") {
+      std::string bs = std::to_string(bytes) + "LL";
+      c.line("intent_row_interval((char*)a0+(r*a0s0+c*a0s1)*" + bs +
+             ", a0s0, a0s1, (char*)a1+(c*a1s0+r*a1s1)*" + bs +
+             ", a1s0, a1s1, 0, nr, nc, columns);");
+    } else if (mode == "projected") {
+      c.line("intent_row_interval(" + pre + "start, end, cols, columns);");
+    } else if (mode == "members") {
+      c.line("intent_row_interval(" + pre +
+             "start, start + 1, stop - start, columns);");
+    } else {
+      c.line("intent_row_interval(" + pre + "start, stop, cols, columns);");
+    }
     return llvm::Error::success();
   };
 
