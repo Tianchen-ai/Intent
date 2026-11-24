@@ -174,8 +174,17 @@ void matrixCost(Unit &u) {
               double prepTime = 0.;
               if (packBytes > 0.) {
                 auto writeBw = intentdsl::quantity(ctx, "write_1", "B/ns");
+                auto writeMidBw =
+                    intentdsl::quantity(ctx, "write_1_mid_bw", "B/ns");
                 double copyBw =
                     writeBw ? (2. / (1. / *bw + 1. / *writeBw)) : *bw;
+                double midCopyBw =
+                    (midBw && writeMidBw)
+                        ? (2. / (1. / *midBw + 1. / *writeMidBw))
+                        : copyBw;
+                double effParBw =
+                    packBytes <= double(workers) * kPrivateL2Bytes ? midCopyBw
+                                                                   : copyBw;
                 double oneCoreBw =
                     midBw ? std::min(copyBw,
                                      *midBw / std::max<int64_t>(1, workers))
@@ -185,14 +194,16 @@ void matrixCost(Unit &u) {
                         ? (lhsBanks * double(g->m) + rhsBanks * double(g->n)) *
                               g->k
                         : 0.;
+                double syncSteps = (!g->routed && prepSteps >= 2.)
+                                       ? (prepSteps - 1.)
+                                       : std::max(1., prepSteps);
                 double seqPrep =
-                    (syncNs ? prepSteps * *syncNs * 0.5 : 0.) +
+                    (syncNs ? syncSteps * *syncNs * 0.5 : 0.) +
                     packBytes / std::max(1., oneCoreBw) +
                     (rate ? widenElems * 2. * workers / *rate : 0.);
                 double parPrep =
-                    prepSteps * ((launchNs ? *launchNs : 0.) +
-                                 (syncNs ? *syncNs : 0.)) +
-                    packBytes / copyBw +
+                    syncSteps * (syncNs ? *syncNs : 0.) +
+                    packBytes / std::max(1., effParBw) +
                     (rate ? widenElems * 2. / *rate : 0.);
                 prepTime = std::min(seqPrep, parPrep);
               }

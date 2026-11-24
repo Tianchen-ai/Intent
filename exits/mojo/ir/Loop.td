@@ -404,6 +404,7 @@ def MojoCRowSingleThread : RowInst<"c_row_single_thread",[SingleBlock]> {
   let regions=(region AnyRegion:$body);
 }
 def MojoCRowOmpParallel : RowInst<"c_row_omp_parallel",[SingleBlock]> {
+  let arguments=(ins OptionalAttr<BoolAttr>:$dynamic_chunks);
   let regions=(region AnyRegion:$body);
 }
 def MojoCFlatColOmp : RowInst<"c_flat_col_omp",[SingleBlock]> {

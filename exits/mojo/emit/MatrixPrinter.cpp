@@ -2073,17 +2073,30 @@ TerminalPrinter mojoMatrixPrinter() {
     return llvm::Error::success();
   };
 
-  p.operations["mojo_row.c_row_omp_parallel"] = [](Operation &, PrintPoint at,
+  p.operations["mojo_row.c_row_omp_parallel"] = [](Operation &op, PrintPoint at,
                                                    PrintContext &c) {
+    bool dyn = false;
+    if (auto attr = op.getAttrOfType<BoolAttr>("dynamic_chunks"))
+      dyn = attr.getValue();
     if (at == PrintPoint::Enter) {
-      c.line("#pragma omp parallel num_threads(threads)");
-      c.line("{");
+      if (dyn) {
+        c.line("#pragma omp parallel for num_threads(threads) schedule(dynamic, groups > 256 ? 8 : 1)");
+        c.line("for (int64_t g = 0; g < groups; ++g) {");
+      } else {
+        c.line("#pragma omp parallel num_threads(threads)");
+        c.line("{");
+      }
     } else if (at == PrintPoint::BeginBlock) {
       c.indent++;
-      c.line("int64_t b = omp_get_thread_num(), nt = omp_get_num_threads();");
-      c.line("int64_t q = groups / nt, rem = groups % nt;");
-      c.line("int64_t start = (q * b + (b < rem ? b : rem)) * grain;");
-      c.line("int64_t stop = b + 1 == nt ? rows : start + (q + (b < rem)) * grain;");
+      if (dyn) {
+        c.line("int64_t start = g * grain;");
+        c.line("int64_t stop = start + grain < rows ? start + grain : rows;");
+      } else {
+        c.line("int64_t b = omp_get_thread_num(), nt = omp_get_num_threads();");
+        c.line("int64_t q = groups / nt, rem = groups % nt;");
+        c.line("int64_t start = (q * b + (b < rem ? b : rem)) * grain;");
+        c.line("int64_t stop = b + 1 == nt ? rows : start + (q + (b < rem)) * grain;");
+      }
     } else if (at == PrintPoint::EndBlock) {
       c.indent--;
       c.line("}");

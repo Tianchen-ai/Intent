@@ -58,7 +58,7 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
   populateMojoMatrixContracts(*matrix, v);
   if (auto e = p.services.provide<intentdsl::cpu::MatrixMachine>(matrix))
     return e;
-  caps->rows = {{1, 64}, {4, *bits == 512 ? 128 : 64}, {32, 256}, {64, 128}};
+  caps->rows = {{1, 64}, {4, *bits == 512 ? 128 : 64}, {8, 256}, {32, 128}};
   if (auto e = p.services.provide<intentdsl::cpu::RowMachine>(caps))
     return e;
   return p;

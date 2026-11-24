@@ -818,17 +818,23 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
 
       Value c0 = constIdx(b, loc, 0), kTotal = constIdx(b, loc, K),
             kStep = constIdx(b, loc, depth), c1 = constIdx(b, loc, 1);
-      OperationState pLoop(loc, "mojo_row.for_range");
-      pLoop.addOperands({c0, kTotal, kStep});
-      Block &pBb = pLoop.addRegion()->emplaceBlock();
-      Value pIv = pBb.addArgument(b.getIndexType(), loc);
-      b.create(pLoop);
-      b.setInsertionPointToEnd(&pBb);
-
-      Value pEnd = b.create<arith::MinSIOp>(
-          loc, b.create<arith::AddIOp>(loc, pIv, kStep), kTotal);
+      Block *pBb = nullptr;
+      Value kLb = c0, kUb = kTotal;
+      if (K > depth) {
+        OperationState pLoop(loc, "mojo_row.for_range");
+        pLoop.addOperands({c0, kTotal, kStep});
+        pBb = &pLoop.addRegion()->emplaceBlock();
+        Value pIv = pBb->addArgument(b.getIndexType(), loc);
+        b.create(pLoop);
+        b.setInsertionPointToEnd(pBb);
+        kLb = pIv;
+        Value nextP = b.create<arith::AddIOp>(loc, pIv, kStep);
+        kUb = (K % depth == 0)
+                  ? nextP
+                  : b.create<arith::MinSIOp>(loc, nextP, kTotal).getResult();
+      }
       OperationState kLoop(loc, "mojo_row.for_range");
-      kLoop.addOperands({pIv, pEnd, c1});
+      kLoop.addOperands({kLb, kUb, c1});
       Block &kBb = kLoop.addRegion()->emplaceBlock();
       Value kIv = kBb.addArgument(b.getIndexType(), loc);
       b.create(kLoop);
@@ -887,8 +893,10 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
         }
       }
       makeOp(b, loc, "end");
-      b.setInsertionPointToEnd(&pBb);
-      makeOp(b, loc, "end");
+      if (pBb) {
+        b.setInsertionPointToEnd(pBb);
+        makeOp(b, loc, "end");
+      }
       b.setInsertionPointToEnd(targetBb);
 
       for (int64_t r = 0; r < rows; ++r) {
@@ -1168,7 +1176,8 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
        b.getNamedAttr("if_cond", b.getStringAttr("nt > 1")),
        b.getNamedAttr("reduce_rc", b.getBoolAttr(true))});
 
-  for (Operation *pop : prepOps) {
+  for (auto [popIdx, pop] : llvm::enumerate(prepOps)) {
+    bool hasNextPrep = popIdx + 1 < prepOps.size();
     OpBuilder::InsertionGuard prepGuard(b);
     enterBlock(parBb);
     StringRef pk = pop->getAttrOfType<StringAttr>("kind").getValue();
@@ -1269,8 +1278,8 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
       int64_t chunks = std::max<int64_t>(1, outSh[1]);
       auto st = argStrides(opSlots[0]);
       emitLet("k_tiles", "(K + 7) / 8");
-      Block *pBb =
-          makeHostOmpFor("p_wl", "0", "G*k_tiles", "1", false, false, false, "");
+      Block *pBb = makeHostOmpFor("p_wl", "0", "G*k_tiles", "1", false,
+                                  hasNextPrep, false, "");
       enterBlock(pBb);
       emitLet("g", "k_tiles ? p_wl / k_tiles : 0");
       emitLet("kb", "(k_tiles ? p_wl % k_tiles : 0) * 8");
@@ -1304,7 +1313,7 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
         ++am;
       std::string banks = ab < 0 ? "1LL" : "G";
       Block *rBb = makeHostOmpFor("row", "0", "(" + banks + ")*M", "1", false,
-                                  false, false, "");
+                                  hasNextPrep, false, "");
       enterBlock(rBb);
       emitLet("g", "M ? row / M : 0");
       emitLet("m", "M ? row % M : 0");
@@ -1491,8 +1500,8 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
     } else if (pk == "decode-mx8-lhs") {
       auto stA = argStrides(opSlots[0]);
       auto stS = argStrides(opSlots[1]);
-      Block *rBb =
-          makeHostOmpFor("r", "0", "M", "1", false, false, false, "");
+      Block *rBb = makeHostOmpFor("r", "0", "M", "1", false, hasNextPrep,
+                                  false, "");
       enterBlock(rBb);
       Block *gBb = makeHostFor("g", "0", "K/32", "1");
       enterBlock(gBb);
