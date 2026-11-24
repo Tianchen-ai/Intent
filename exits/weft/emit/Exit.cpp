@@ -2,6 +2,7 @@
 #include "intentdsl/levels/algorithm/kir/ir/Performance.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
+#include <algorithm>
 
 using namespace compilerinfra;
 using namespace mlir;
@@ -14,7 +15,8 @@ void populateWeftMatrixContracts(intentdsl::cpu::MatrixMachine &, int64_t,
                                  bool);
 void registerWeftAddressOptimization(Unit &);
 void publishWeftABI(OpPassManager &);
-void lower(OpPassManager &, StringRef, const intentdsl::CallFacts &, bool);
+void lower(OpPassManager &, StringRef, const intentdsl::CallFacts &, bool,
+           int64_t);
 LogicalResult verifyHost(ModuleOp, const TargetProfile &, StringRef);
 
 namespace {
@@ -79,6 +81,8 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
   caps->workers = *workers;
   caps->wideningPanel = *bits / 32;
   caps->boundWidening = isRvv;
+  if (!isRvv && *bits >= 256)
+    caps->packedOwners = std::clamp<int64_t>(*bits / 32, 4, 16);
 
   int64_t v = *bits / 32;
   auto matrix = std::make_shared<intentdsl::cpu::MatrixMachine>();
@@ -95,10 +99,11 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
 
   // Locally reported mvendorid/marchid for the V100 core.
   bool v100 = options.getString("core") == "0x710/0x8000000058000002";
-  int64_t columns = *bits == 128 ? 32 : *bits == 1024 ? 128 : 64;
+  int64_t columns =
+      isRvv ? std::max<int64_t>(32, 4 * v) : (*bits == 128 ? 32 : 64);
   caps->rows = {
       {1, columns},
-      {(*bits == 1024 || (*bits == 256 && v100)) ? 2 : 4, 2 * columns}};
+      {(*bits == 1024 || (*bits == 256 && v100)) ? 2 : 4, columns}};
   if (auto e = p.services.provide<intentdsl::cpu::RowMachine>(caps))
     return e;
   return p;
@@ -123,8 +128,11 @@ void bind(Unit &u) {
     u.boundaries.push_back(
         {{phase.str(),
           [phase](OpPassManager &pm, const TargetProfile &p) {
+            int64_t tailVec = 1;
+            if (auto *rm = p.services.get<intentdsl::cpu::RowMachine>())
+              tailVec = std::max<int64_t>(1, rm->wideningPanel);
             lower(pm, phase, *p.services.get<intentdsl::CallFacts>(),
-                  p.services.get<RecordFields>()->grouped);
+                  p.services.get<RecordFields>()->grouped, tailVec);
             if (phase == "callable")
               publishWeftABI(pm);
             return llvm::Error::success();

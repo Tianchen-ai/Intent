@@ -19,8 +19,9 @@ void emitTupleUnpack(PrintContext &c, Operation &op, StringRef tup,
     std::string zId = irId(c, op.getResult(i)) + "_z";
     if (t == "index") {
       c.line(zId + "=arith.constant 0:index");
-      c.line(irId(c, op.getResult(i)) + "=arith.addi " + tup.str() + "#" +
-             std::to_string(i) + "," + zId + ":index");
+      c.line(irId(c, op.getResult(i)) + "=\"weft_kernel.binary\"(" + tup.str() +
+             "#" + std::to_string(i) + "," + zId +
+             ") <{kind=\"add\"}>:(index,index)->index");
       continue;
     }
     std::string scTy = t.find("f32") != std::string::npos    ? "f32"
@@ -196,6 +197,9 @@ TerminalPrinter weftTerminalPrinter() {
     auto ty = op.getAttrOfType<StringAttr>("val_type").str();
     if (ty == "index")
       c.line(irId(c, op.getResult(0)) + "=arith.constant " + lit + ":index");
+    else if (ty == "i1" && (lit == "true" || lit == "false"))
+      c.line(irId(c, op.getResult(0)) + "=\"weft_kernel.constant\"() <{value=" +
+             lit + "}>:()->i1");
     else
       c.line(irId(c, op.getResult(0)) + "=\"weft_kernel.constant\"() <{value=" +
              lit + ":" + ty + "}>:()->" + ty);
@@ -1657,7 +1661,7 @@ TerminalPrinter weftTerminalPrinter() {
           std::string loN = c.name(bb.getArgument(0));
           std::string hiN = c.name(bb.getArgument(1));
           c.line("#pragma omp parallel for num_threads(workers) "
-                 "schedule(static) if(workers > 1 && count > tile)");
+                 "schedule(static, 1) if(workers > 1 && count > tile)");
           c.line("for (int64_t lo_i = 0; lo_i < count; lo_i += tile) {");
           c.indent++;
           c.line("const int64_t " + loN + " = lo_i, " + hiN +

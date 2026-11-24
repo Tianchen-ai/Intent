@@ -30,7 +30,12 @@ void ownerCost(Unit &u) {
                        waves * (1 + std::min(w, n)) * workers / *rate +
                        tasks / *rate;
           if (auto panel = intentdsl::cpu::reusableScores(o, ctx.target)) {
-            bool retained = cache && cache.get("scores");
+            bool retained =
+                cache &&
+                (cache.get("scores") ||
+                 (cache.get("window") &&
+                  panel->keys <=
+                      cache.getAs<mlir::IntegerAttr>("window").getInt()));
             double dots = double(n) * panel->keys * (retained ? 1 : 2);
             e.terms["score_dot_products"] = {dots, "count"};
             auto bandwidth = intentdsl::quantity(ctx, "read_1", "B/ns");

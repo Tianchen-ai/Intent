@@ -465,6 +465,124 @@ struct RowTaskBuilder {
         continue;
       }
 
+      if (code == "segment_length" || code == "ordered_sum") {
+        if (!startOff)
+          return op.emitError("vector segment sweep requires panel offsets");
+        TaskTerm owner = bin("add", origin, row, "index");
+        auto readScalar = [&](Value src, ArrayRef<TaskTerm> coords) {
+          auto vt = cast<MemRefType>(src.getType());
+          return scalarSlice(src, coords, true,
+                             weftSpelling(vt.getElementType()));
+        };
+        TaskTerm lo = castOp(readScalar(op.getOperand(0), {owner}), "index");
+        TaskTerm next = bin("add", owner, oneIdx, "index");
+        TaskTerm hi = castOp(readScalar(op.getOperand(0), {next}), "index");
+        std::string vTy = regionType("value", "f32", 1, dim);
+        auto splatF32 = [&](TaskTerm sc) -> TaskTerm {
+          Value sp =
+              makeOp(b, loc, "task_new", {sc.v}, {b.getIndexType()},
+                     {b.getNamedAttr("in_type", b.getStringAttr(sc.type)),
+                      b.getNamedAttr("val_type", b.getStringAttr(vTy))})
+                  ->getResult(0);
+          return {sp, vTy};
+        };
+        if (code == "segment_length") {
+          TaskTerm lenSc = castOp(bin("sub", hi, lo, "index"), "f32");
+          localMap[op.getResult(0)] = splatF32(lenSc);
+          continue;
+        }
+        TaskTerm zVec = splatF32(lit("0.0", "f32"));
+        Operation *segFor = makeOp(
+            b, loc, "task_for", {lo.v, hi.v, oneIdx.v, zVec.v},
+            {b.getIndexType()},
+            {b.getNamedAttr("iter_types",
+                            b.getArrayAttr({b.getStringAttr(vTy)}))},
+            1);
+        Block &sBb = segFor->getRegion(0).emplaceBlock();
+        TaskTerm segMem{sBb.addArgument(b.getIndexType(), loc), "index"};
+        TaskTerm segCarry{sBb.addArgument(b.getIndexType(), loc), vTy};
+        auto &segBb = op.getRegion(0).front();
+        localMap[segBb.getArgument(0)] = segMem;
+        {
+          OpBuilder::InsertionGuard sg(b);
+          b.setInsertionPointToEnd(&sBb);
+          for (Operation &scOp : segBb) {
+            StringRef scCode = scOp.getName().stripDialect();
+            if (scCode == "member_load") {
+              Value src = scOp.getOperand(0);
+              auto vt = cast<MemRefType>(src.getType());
+              std::string e = weftSpelling(vt.getElementType());
+              if (scOp.getOperands().back() == segBb.getArgument(1)) {
+                unsigned slot = cast<BlockArgument>(src).getArgNumber() - 1;
+                int fullCols = int(slotFacts[slot].indirectExtents.back());
+                TaskTerm viewTerm = lookup(src);
+                TaskTerm rCoord = lookup(scOp.getOperand(1));
+                if (rCoord.type != "index")
+                  rCoord = castOp(rCoord, "index");
+                std::string baseSlTy = regionType("slice", e, 1, fullCols);
+                Value sl =
+                    makeOp(
+                        b, loc, "task_slice", {viewTerm.v, rCoord.v},
+                        {b.getIndexType()},
+                        {b.getNamedAttr("view_type",
+                                        b.getStringAttr(viewTerm.type)),
+                         b.getNamedAttr("selectors",
+                                        b.getArrayAttr({b.getStringAttr("index"),
+                                                        b.getStringAttr("all")})),
+                         b.getNamedAttr("slice_type",
+                                        b.getStringAttr(baseSlTy)),
+                         b.getNamedAttr("val_type", b.getStringAttr(baseSlTy)),
+                         b.getNamedAttr("admit", b.getBoolAttr(false))})
+                        ->getResult(0);
+                std::string ldTy = regionType("value", e, 1, dim);
+                SmallVector<Value, 3> subOps{sl, startOff->v};
+                if (dim <= 0)
+                  subOps.push_back(activeExt.v);
+                Value val =
+                    makeOp(b, loc, "task_subview", subOps, {b.getIndexType()},
+                           {b.getNamedAttr("static_extent",
+                                           b.getI64IntegerAttr(dim)),
+                            b.getNamedAttr("slice_type",
+                                           b.getStringAttr(baseSlTy)),
+                            b.getNamedAttr("val_type", b.getStringAttr(ldTy)),
+                            b.getNamedAttr("admit", b.getBoolAttr(true))})
+                        ->getResult(0);
+                TaskTerm loaded{val, ldTy};
+                localMap[scOp.getResult(0)] =
+                    (e == "f32") ? loaded : castOp(loaded, vTy);
+              } else {
+                SmallVector<TaskTerm, 4> coords;
+                for (Value ci : scOp.getOperands().drop_front()) {
+                  TaskTerm ct = lookup(ci);
+                  coords.push_back(ct.type == "index" ? ct
+                                                      : castOp(ct, "index"));
+                }
+                TaskTerm sc = readScalar(src, coords);
+                localMap[scOp.getResult(0)] =
+                    (sc.type == "f32") ? sc : castOp(sc, "f32");
+              }
+            } else if (scCode == "term") {
+              TaskTerm termVal = lookup(scOp.getOperand(0));
+              TaskTerm total = bin("add", segCarry, termVal, vTy);
+              makeOp(b, loc, "task_yield", {total.v}, {},
+                     {b.getNamedAttr("val_types",
+                                     b.getArrayAttr({b.getStringAttr(vTy)}))});
+            } else if (scCode == "mul" || scCode == "add") {
+              TaskTerm lhs = lookup(scOp.getOperand(0));
+              TaskTerm rhs = lookup(scOp.getOperand(1));
+              std::string rTy =
+                  (lhs.type == vTy || rhs.type == vTy) ? vTy : "f32";
+              localMap[scOp.getResult(0)] = bin(scCode, lhs, rhs, rTy);
+            } else {
+              return scOp.emitError("illegal ordered member operation ")
+                     << scCode;
+            }
+          }
+        }
+        localMap[op.getResult(0)] = {segFor->getResult(0), vTy};
+        continue;
+      }
+
       if (code == "uniform") {
         localMap[op.getResult(0)] =
             emitUniform(lookup(op.getOperand(0)), lookup(op.getOperand(1)), dim);
@@ -830,9 +948,60 @@ struct RowTaskBuilder {
     return success();
   }
 };
+bool dependsOn(Value v, Value target) {
+  if (v == target)
+    return true;
+  if (Operation *def = v.getDefiningOp()) {
+    for (Value opnd : def->getOperands())
+      if (dependsOn(opnd, target))
+        return true;
+  }
+  return false;
+}
+
+bool canVectorizeSegmentSweep(Operation &task, ArrayRef<Operation *> ops) {
+  int64_t domArg = task.getAttrOfType<IntegerAttr>("domain_arg").getInt();
+  if (cast<MemRefType>(task.getOperand(domArg).getType()).getRank() < 2)
+    return false;
+  for (Operation *opPtr : ops) {
+    if (opPtr->getName().stripDialect() != "ordered_sum")
+      continue;
+    if (opPtr->getNumRegions() != 1 || opPtr->getRegion(0).empty())
+      return false;
+    Block &segBb = opPtr->getRegion(0).front();
+    if (segBb.getNumArguments() != 2)
+      return false;
+    Value colArg = segBb.getArgument(1);
+    for (Operation *user : colArg.getUsers())
+      if (user->getBlock() != &segBb ||
+          user->getName().stripDialect() != "member_load")
+        return false;
+    for (Operation &scOp : segBb) {
+      if (scOp.getName().stripDialect() != "member_load")
+        continue;
+      auto vt = cast<MemRefType>(scOp.getOperand(0).getType());
+      auto coords = scOp.getOperands().drop_front();
+      if (coords.empty())
+        return false;
+      if (coords.back() == colArg) {
+        if (vt.getRank() != 2)
+          return false;
+        for (Value c : coords.drop_back())
+          if (dependsOn(c, colArg))
+            return false;
+      } else {
+        for (Value c : coords)
+          if (dependsOn(c, colArg))
+            return false;
+      }
+    }
+  }
+  return true;
+}
 } // namespace
 
-LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts) {
+LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
+                           int64_t tailVecWidth) {
   auto &task = fn.front().front();
   Location loc = fn.getLoc();
   OpBuilder b(&task);
@@ -934,16 +1103,14 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts) {
   if (badFacts)
     return failure();
 
-  bool hasOrderedSum =
-      task.walk([](Operation *v) {
-            return v->getName().stripDialect() == "ordered_sum"
-                       ? WalkResult::interrupt()
-                       : WalkResult::advance();
-          })
-          .wasInterrupted();
-  if (hasOrderedSum) {
+  std::optional<int64_t> ownerAxis;
+  if (auto oa = fn->getAttrOfType<IntegerAttr>("kir.owner_axis"))
+    ownerAxis = oa.getInt();
+  StringRef walkEarly = task.getAttrOfType<StringAttr>("cpu.walk").getValue();
+  if (!ownerAxis && walkEarly != "tile" && walkEarly != "destination") {
     for (unsigned i = 0; i < fn.getNumArguments(); ++i) {
-      if (!isa<MemRefType>(fn.getArgument(i).getType()))
+      if (!isa<MemRefType>(fn.getArgument(i).getType()) ||
+          slotFacts[i].swapAxes || slotFacts[i].rank > 2)
         continue;
       auto *a = facts.arguments[i].getAsObject();
       auto *shape = a->getArray("shape"), *strides = a->getArray("strides");
@@ -952,8 +1119,7 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts) {
       if (dense) {
         for (int k = int(shape->size()) - 1; k >= 0; --k) {
           auto n = (*shape)[k].getAsInteger(), s = (*strides)[k].getAsInteger();
-          if (!n || !s || *n < 0 || (*n > 1 && *s != step) ||
-              (*n && step > INT64_MAX / *n)) {
+          if (!n || !s || *n <= 0 || *s != step || step > INT64_MAX / *n) {
             dense = false;
             break;
           }
@@ -963,10 +1129,6 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts) {
       slotFacts[i].contiguous = dense;
     }
   }
-
-  std::optional<int64_t> ownerAxis;
-  if (auto oa = fn->getAttrOfType<IntegerAttr>("kir.owner_axis"))
-    ownerAxis = oa.getInt();
   int64_t domainArg = task.getAttrOfType<IntegerAttr>("domain_arg").getInt();
   int64_t rankDomain = slotFacts[domainArg].rank;
   bool ownedKeys = task.hasAttr("cpu.key_extent");
@@ -1285,11 +1447,15 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts) {
           cast<MemRefType>(tOp.getOperand(0).getType()).getElementType());
       std::string baseSlTy = regionType("slice", elem, 1, -2);
       auto emitTilePass = [&](bool tail) {
+        int64_t tailVec =
+            fixed > 0 ? std::min<int64_t>(fixed, std::max<int64_t>(1, tailVecWidth))
+                      : 1;
         TaskTerm lb = tail ? tailStart : rb.zeroIdx;
         TaskTerm ub = tail ? rb.columns : panelCount;
-        int dim = tail ? 1 : (fixed ? int(fixed) : -3);
+        TaskTerm step = tail ? rb.idx(tailVec) : rb.oneIdx;
+        int dim = tail ? int(tailVec) : (fixed ? int(fixed) : -3);
         Operation *pFor = makeOp(
-            b, loc, "task_for", {lb.v, ub.v, rb.oneIdx.v}, {},
+            b, loc, "task_for", {lb.v, ub.v, step.v}, {},
             {b.getNamedAttr("iter_types", b.getArrayAttr({}))}, 1);
         Block &pBb = pFor->getRegion(0).emplaceBlock();
         TaskTerm pIv{pBb.addArgument(b.getIndexType(), loc), "index"};
@@ -1803,7 +1969,10 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts) {
                      {b.getNamedAttr("val_types", b.getArrayAttr({}))});
             }
           }
-        } else if (scalarMembers || sw.prefixCarry || sw.segmentLoop) {
+        } else if (scalarMembers || sw.prefixCarry ||
+                   (sw.segmentLoop &&
+                    (whole || sw.combine != "store" ||
+                     !canVectorizeSegmentSweep(task, subOps)))) {
           if (!rb.zeroF32.v) {
             rb.zeroCount = rb.lit("0", "si32");
             rb.oneCount = rb.lit("1", "si32");
@@ -1817,12 +1986,17 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts) {
           TaskTerm prev;
           if (!isStore)
             prev = rb.lit(sw.combine == "sum" ? "0.0" : "0xFF800000", "f32");
+          int64_t tailVec =
+              fixed > 0
+                  ? std::min<int64_t>(fixed, std::max<int64_t>(1, tailVecWidth))
+                  : std::max<int64_t>(1, tailVecWidth);
 
           for (bool tail : {false, true}) {
             TaskTerm lb = tail ? tailStart : rb.zeroIdx;
             TaskTerm ub = tail ? rb.columns : panelCount;
-            int dim = tail ? 1 : (fixed ? int(fixed) : -3);
-            SmallVector<Value, 4> fOps{lb.v, ub.v, rb.oneIdx.v};
+            TaskTerm step = tail ? rb.idx(tailVec) : rb.oneIdx;
+            int dim = tail ? int(tailVec) : (fixed ? int(fixed) : -3);
+            SmallVector<Value, 4> fOps{lb.v, ub.v, step.v};
             SmallVector<Attribute, 1> iterTys;
             SmallVector<Type, 1> resTys;
             if (!isStore) {

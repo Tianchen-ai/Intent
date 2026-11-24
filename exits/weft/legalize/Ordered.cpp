@@ -9,6 +9,7 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/JSON.h"
 #include <map>
@@ -74,6 +75,181 @@ std::string stripTypeSuffix(Attribute valAttr) {
   return s;
 }
 
+struct TightenedLoopBound {
+  Value cmpResult;
+  Value boundVal;
+  bool inclusive = false;
+  bool hasBufferStore = false;
+};
+
+std::optional<int64_t> staticIndexVal(func::FuncOp fn, Value v) {
+  if (auto c = v.getDefiningOp<arith::ConstantOp>())
+    if (auto ia = dyn_cast<IntegerAttr>(c.getValue()))
+      return ia.getInt();
+  if (auto d = v.getDefiningOp<memref::DimOp>())
+    if (auto idx = d.getConstantIndex())
+      if (auto ba = dyn_cast<BlockArgument>(d.getSource()))
+        return fn.getArgAttrOfType<DenseI64ArrayAttr>(ba.getArgNumber(),
+                                                      "cpu.shape")[*idx];
+  return std::nullopt;
+}
+
+bool isNegInfConst(Value v) {
+  auto cst = v.getDefiningOp<arith::ConstantOp>();
+  if (!cst)
+    return false;
+  if (auto fa = dyn_cast<FloatAttr>(cst.getValue()))
+    return fa.getValue().isNegative() && fa.getValue().isInfinity();
+  return false;
+}
+
+bool isNegInfWhenFalse(Value v, Value cond) {
+  if (auto sel = v.getDefiningOp<arith::SelectOp>())
+    return sel.getCondition() == cond && isNegInfConst(sel.getFalseValue());
+  if (auto ifOp = v.getDefiningOp<scf::IfOp>())
+    if (ifOp.getCondition() == cond && !ifOp.getElseRegion().empty() &&
+        ifOp.getNumResults() == 1)
+      return isNegInfConst(ifOp.elseYield().getOperand(0));
+  return false;
+}
+
+bool isZeroWhenFalse(Value v, Value cond) {
+  if (auto cst = v.getDefiningOp<arith::ConstantOp>()) {
+    if (auto fa = dyn_cast<FloatAttr>(cst.getValue()))
+      return fa.getValue().isZero();
+    return false;
+  }
+  if (auto sel = v.getDefiningOp<arith::SelectOp>())
+    return sel.getCondition() == cond &&
+           isZeroWhenFalse(sel.getFalseValue(), cond);
+  if (auto ifOp = v.getDefiningOp<scf::IfOp>())
+    if (ifOp.getCondition() == cond && !ifOp.getElseRegion().empty() &&
+        ifOp.getNumResults() == 1)
+      return isZeroWhenFalse(ifOp.elseYield().getOperand(0), cond);
+  if (auto ext = v.getDefiningOp<arith::ExtFOp>())
+    return isZeroWhenFalse(ext.getIn(), cond);
+  if (auto tr = v.getDefiningOp<arith::TruncFOp>())
+    return isZeroWhenFalse(tr.getIn(), cond);
+  if (Operation *def = v.getDefiningOp()) {
+    if (def->getName().stripDialect() == "lane_splat")
+      return isZeroWhenFalse(def->getOperand(0), cond);
+    if (auto mul = dyn_cast<arith::MulFOp>(def))
+      return isZeroWhenFalse(mul.getLhs(), cond) ||
+             isZeroWhenFalse(mul.getRhs(), cond);
+  }
+  return false;
+}
+
+bool preservesIterArgWhenFalse(Value yielded, Value iterArg, Value cond) {
+  if (yielded == iterArg)
+    return true;
+  if (auto sel = yielded.getDefiningOp<arith::SelectOp>())
+    if (sel.getCondition() == cond && sel.getFalseValue() == iterArg)
+      return true;
+  if (auto ifOp = yielded.getDefiningOp<scf::IfOp>()) {
+    if (ifOp.getCondition() == cond && !ifOp.getElseRegion().empty()) {
+      for (auto [res, elseVal] :
+           llvm::zip(ifOp.getResults(), ifOp.elseYield().getOperands()))
+        if (res == yielded && elseVal == iterArg)
+          return true;
+    }
+  }
+  if (Operation *def = yielded.getDefiningOp()) {
+    StringRef n = def->getName().getStringRef();
+    if (n == "arith.maximumf" || n == "arith.maxnumf") {
+      if (def->getOperand(0) == iterArg &&
+          isNegInfWhenFalse(def->getOperand(1), cond))
+        return true;
+      if (def->getOperand(1) == iterArg &&
+          isNegInfWhenFalse(def->getOperand(0), cond))
+        return true;
+    }
+    if (n == "arith.addf") {
+      if (def->getOperand(0) == iterArg &&
+          isZeroWhenFalse(def->getOperand(1), cond))
+        return true;
+      if (def->getOperand(1) == iterArg &&
+          isZeroWhenFalse(def->getOperand(0), cond))
+        return true;
+    }
+  }
+  return false;
+}
+
+std::optional<TightenedLoopBound> analyzeCausalLoop(func::FuncOp fn,
+                                                    scf::ForOp loop) {
+  if (staticIndexVal(fn, loop.getStep()) != 1 || loop.getInitArgs().empty())
+    return std::nullopt;
+  bool hasBufStore = false;
+  bool unsafeEffect =
+      loop.getBody()
+          ->walk([&](Operation *op) {
+            if (op == loop.getBody()->getTerminator())
+              return WalkResult::advance();
+            StringRef n = op->getName().getStringRef();
+            if (isa<scf::ForOp>(op))
+              return WalkResult::interrupt();
+            if (isa<scf::IfOp, scf::YieldOp>(op))
+              return WalkResult::advance();
+            if (n == "cpu.buffer_store") {
+              hasBufStore = true;
+              return WalkResult::advance();
+            }
+            if (n == "cpu.buffer_load" || isa<memref::LoadOp, memref::DimOp>(op) ||
+                op->getName().stripDialect() == "slice_read" ||
+                isMemoryEffectFree(op))
+              return WalkResult::advance();
+            return WalkResult::interrupt();
+          })
+          .wasInterrupted();
+  if (unsafeEffect)
+    return std::nullopt;
+
+  Value iv = loop.getInductionVar();
+  auto yieldOp = cast<scf::YieldOp>(loop.getBody()->getTerminator());
+  auto isLoopInvariant = [&](Value v) {
+    if (auto ba = dyn_cast<BlockArgument>(v))
+      return ba.getOwner() != loop.getBody();
+    if (Operation *def = v.getDefiningOp())
+      return !loop->isProperAncestor(def);
+    return false;
+  };
+
+  for (auto cmpOp : loop.getBody()->getOps<arith::CmpIOp>()) {
+    Value boundVal;
+    bool inclusive = false;
+    auto pred = cmpOp.getPredicate();
+    if (cmpOp.getLhs() == iv && isLoopInvariant(cmpOp.getRhs())) {
+      if (pred == arith::CmpIPredicate::sle) {
+        boundVal = cmpOp.getRhs();
+        inclusive = true;
+      } else if (pred == arith::CmpIPredicate::slt) {
+        boundVal = cmpOp.getRhs();
+        inclusive = false;
+      }
+    } else if (cmpOp.getRhs() == iv && isLoopInvariant(cmpOp.getLhs())) {
+      if (pred == arith::CmpIPredicate::sge) {
+        boundVal = cmpOp.getLhs();
+        inclusive = true;
+      }
+    }
+    if (!boundVal || !boundVal.getType().isIndex())
+      continue;
+    bool allPreserved = true;
+    for (auto [yVal, iterArg] :
+         llvm::zip(yieldOp.getOperands(), loop.getRegionIterArgs())) {
+      if (!preservesIterArgWhenFalse(yVal, iterArg, cmpOp.getResult())) {
+        allPreserved = false;
+        break;
+      }
+    }
+    if (allPreserved)
+      return TightenedLoopBound{cmpOp.getResult(), boundVal, inclusive,
+                                hasBufStore};
+  }
+  return std::nullopt;
+}
+
 struct OrderedLowerer {
   func::FuncOp fn;
   Operation &space;
@@ -84,6 +260,10 @@ struct OrderedLowerer {
   SmallVector<llvm::DenseMap<Value, TaskTerm>, 16> lanes;
   SmallVector<TaskTerm, 16> localBufs;
   TaskTerm scoreMask, scoreZero;
+  llvm::DenseSet<Value> knownTrueConds;
+  bool allowBufferStoreTightening = true;
+  bool anyTightenedCausalLoop = false;
+  bool isRvv = false;
 
   OrderedLowerer(func::FuncOp fn, Operation &space, OpBuilder &b, Location loc,
                  int64_t batch)
@@ -154,6 +334,18 @@ struct OrderedLowerer {
                       b.getNamedAttr("rhs_type", b.getStringAttr(rhs.type)),
                       b.getNamedAttr("val_type", b.getStringAttr(resTy))})
                   ->getResult(0);
+    return {v, resTy.str()};
+  }
+
+  TaskTerm sel(TaskTerm cond, TaskTerm tVal, TaskTerm fVal, StringRef resTy) {
+    Value v =
+        makeOp(b, loc, "task_select", {cond.v, tVal.v, fVal.v},
+               {b.getIndexType()},
+               {b.getNamedAttr("cond_type", b.getStringAttr(cond.type)),
+                b.getNamedAttr("true_type", b.getStringAttr(tVal.type)),
+                b.getNamedAttr("false_type", b.getStringAttr(fVal.type)),
+                b.getNamedAttr("val_type", b.getStringAttr(resTy))})
+            ->getResult(0);
     return {v, resTy.str()};
   }
 
@@ -251,9 +443,40 @@ struct OrderedLowerer {
       }
 
       if (auto loop = dyn_cast<scf::ForOp>(op)) {
-        Value lb = lanes[laneStart].at(loop.getLowerBound()).v;
-        Value ub = lanes[laneStart].at(loop.getUpperBound()).v;
+        TaskTerm lbTerm = lanes[laneStart].at(loop.getLowerBound());
+        TaskTerm ubTerm = lanes[laneStart].at(loop.getUpperBound());
+        Value lb = lbTerm.v;
+        Value ub = ubTerm.v;
         Value st = lanes[laneStart].at(loop.getStep()).v;
+
+        Value simplifiedCmp;
+        if (auto tight = analyzeCausalLoop(fn, loop)) {
+          bool ok = (!tight->hasBufferStore || allowBufferStoreTightening) &&
+                    lanes[laneStart].count(tight->boundVal);
+          if (ok) {
+            Value b0 = lanes[laneStart].at(tight->boundVal).v;
+            for (int64_t l = laneStart + 1; l < laneStart + activeLanes; ++l)
+              if (!lanes[l].count(tight->boundVal) ||
+                  lanes[l].at(tight->boundVal).v != b0)
+                ok = false;
+          }
+          if (ok) {
+            TaskTerm lb64 = castOp(lbTerm, "si64");
+            TaskTerm ub64 = castOp(ubTerm, "si64");
+            TaskTerm lim64 = castOp(lanes[laneStart].at(tight->boundVal), "si64");
+            if (tight->inclusive)
+              lim64 = bin("add", lim64, lit("1", "si64"), "si64");
+            TaskTerm clampedLo =
+                sel(cmp("gt", lim64, lb64, "i1"), lim64, lb64, "si64");
+            TaskTerm clampedUb =
+                sel(cmp("lt", clampedLo, ub64, "i1"), clampedLo, ub64, "si64");
+            ub = castOp(clampedUb, "index").v;
+            simplifiedCmp = tight->cmpResult;
+            knownTrueConds.insert(simplifiedCmp);
+            anyTightenedCausalLoop = true;
+          }
+        }
+
         SmallVector<Value> forOps{lb, ub, st};
         SmallVector<Attribute> iterTys;
         SmallVector<Type> resTypes;
@@ -280,7 +503,10 @@ struct OrderedLowerer {
         }
         OpBuilder::InsertionGuard g(b);
         b.setInsertionPointToEnd(&fBb);
-        if (failed(lowerBlock(*loop.getBody(), activeLanes, laneStart)))
+        LogicalResult bodyRes = lowerBlock(*loop.getBody(), activeLanes, laneStart);
+        if (simplifiedCmp)
+          knownTrueConds.erase(simplifiedCmp);
+        if (failed(bodyRes))
           return failure();
         if (fBb.empty() ||
             fBb.back().getName().getStringRef() != "weft_host.task_yield") {
@@ -299,6 +525,73 @@ struct OrderedLowerer {
       }
 
       if (auto branch = dyn_cast<scf::IfOp>(op)) {
+        if (knownTrueConds.contains(branch.getCondition())) {
+          auto yieldOp = branch.thenYield();
+          yieldOp->remove();
+          LogicalResult st =
+              lowerBlock(*branch.thenBlock(), activeLanes, laneStart);
+          branch.thenBlock()->push_back(yieldOp);
+          if (failed(st))
+            return failure();
+          for (int64_t l = laneStart; l < laneStart + activeLanes; ++l) {
+            for (auto [ret, yVal] :
+                 llvm::zip(branch.getResults(), yieldOp.getOperands())) {
+              lanes[l][ret] = lanes[l].at(yVal);
+            }
+          }
+          continue;
+        }
+        if (branch->hasAttr("cpu.window_guard")) {
+          if (auto pLoop = branch->getParentOfType<scf::ForOp>()) {
+            auto loC = staticIndexVal(fn, pLoop.getLowerBound());
+            auto hiC = staticIndexVal(fn, pLoop.getUpperBound());
+            std::optional<int64_t> winC;
+            if (auto cmpOp = branch.getCondition().getDefiningOp<arith::CmpIOp>())
+              winC = staticIndexVal(fn, cmpOp.getRhs());
+            if (loC && hiC && winC && (*hiC - *loC) <= *winC) {
+              for (Operation &inner : branch.thenBlock()->without_terminator()) {
+                if (inner.getName().getStringRef() == "cpu.buffer_store") {
+                  for (int64_t l = laneStart; l < laneStart + activeLanes; ++l) {
+                    TaskTerm val = lanes[l].at(inner.getOperand(0));
+                    TaskTerm off = castOp(lanes[l].at(inner.getOperand(2)), "si64");
+                    makeOp(b, loc, "task_ptr_store",
+                           {localBufs[l].v, off.v, scoreMask.v, val.v}, {},
+                           {b.getNamedAttr(
+                                "ptr_type",
+                                b.getStringAttr("!weft_kernel.pointer<f32>")),
+                            b.getNamedAttr("val_type", b.getStringAttr("f32"))});
+                  }
+                }
+              }
+              continue;
+            }
+          }
+        }
+        if (branch->hasAttr("cpu.window_branch")) {
+          if (auto cmpOp = branch.getCondition().getDefiningOp<arith::CmpIOp>()) {
+            if (auto subOp = cmpOp.getLhs().getDefiningOp<arith::SubIOp>()) {
+              auto hiC = staticIndexVal(fn, subOp.getLhs());
+              auto loC = staticIndexVal(fn, subOp.getRhs());
+              auto winC = staticIndexVal(fn, cmpOp.getRhs());
+              if (loC && hiC && winC && (*hiC - *loC) <= *winC) {
+                auto yieldOp = branch.thenYield();
+                yieldOp->remove();
+                LogicalResult st =
+                    lowerBlock(*branch.thenBlock(), activeLanes, laneStart);
+                branch.thenBlock()->push_back(yieldOp);
+                if (failed(st))
+                  return failure();
+                for (int64_t l = laneStart; l < laneStart + activeLanes; ++l) {
+                  for (auto [ret, yVal] :
+                       llvm::zip(branch.getResults(), yieldOp.getOperands())) {
+                    lanes[l][ret] = lanes[l].at(yVal);
+                  }
+                }
+                continue;
+              }
+            }
+          }
+        }
         bool sharedCond = activeLanes > 1;
         Value c0 = lanes[laneStart].at(branch.getCondition()).v;
         for (int64_t l = laneStart + 1; l < laneStart + activeLanes; ++l)
@@ -482,8 +775,11 @@ struct OrderedLowerer {
         continue;
       }
 
+      bool isCommonQuotient = isa<arith::FloorDivSIOp>(op) &&
+                              op.hasAttr("cpu.owner_common") &&
+                              activeLanes == batch;
       bool emitOnce = activeLanes > 1 && op.hasAttr("cpu.owner_common") &&
-                      operandsUniform(op);
+                      (operandsUniform(op) || isCommonQuotient);
       int64_t count = emitOnce ? 1 : activeLanes;
       for (int64_t stepIdx = 0; stepIdx < count; ++stepIdx) {
         int64_t l = laneStart + stepIdx;
@@ -539,19 +835,25 @@ struct OrderedLowerer {
         } else if (name == "arith.minnumf" || name == "arith.minimumf") {
           res = bin("min", val(0), val(1), val(0).type);
         } else if (name == "arith.select") {
-          TaskTerm cT = val(0), tT = val(1), fT = val(2);
-          std::string dstTy = isa<RankedTensorType>(op.getResult(0).getType())
-                                  ? vectorType(op.getResult(0))
-                                  : scalarType(op.getResult(0).getType());
+          if (knownTrueConds.contains(op.getOperand(0))) {
+            res = val(1);
+          } else {
+            TaskTerm cT = val(0), tT = val(1), fT = val(2);
+            std::string dstTy = isa<RankedTensorType>(op.getResult(0).getType())
+                                    ? vectorType(op.getResult(0))
+                                    : scalarType(op.getResult(0).getType());
+            res = sel(cT, tT, fT, dstTy);
+          }
+        } else if (name == "math.exp2" && !isRvv) {
+          TaskTerm in = val(0);
+          TaskTerm scaled =
+              bin("mul", in, lit("0.693147182", "f32"), in.type);
           Value v =
-              makeOp(b, loc, "task_select", {cT.v, tT.v, fT.v},
-                     {b.getIndexType()},
-                     {b.getNamedAttr("cond_type", b.getStringAttr(cT.type)),
-                      b.getNamedAttr("true_type", b.getStringAttr(tT.type)),
-                      b.getNamedAttr("false_type", b.getStringAttr(fT.type)),
-                      b.getNamedAttr("val_type", b.getStringAttr(dstTy))})
+              makeOp(b, loc, "task_unary", {scaled.v}, {b.getIndexType()},
+                     {b.getNamedAttr("kind", b.getStringAttr("exp")),
+                      b.getNamedAttr("val_type", b.getStringAttr(in.type))})
                   ->getResult(0);
-          res = {v, dstTy};
+          res = {v, in.type};
         } else if (name == "math.exp" || name == "math.sqrt" ||
                    name == "math.rsqrt" || name == "math.exp2" ||
                    name == "math.log") {
@@ -563,39 +865,43 @@ struct OrderedLowerer {
                   ->getResult(0);
           res = {v, in.type};
         } else if (auto cmpOp = dyn_cast<arith::CmpIOp>(op)) {
-          TaskTerm a = val(0), r = val(1);
-          auto p = cmpOp.getPredicate();
-          if (a.type == "index" && p != arith::CmpIPredicate::eq &&
-              p != arith::CmpIPredicate::ne) {
-            a = castOp(a, "si64");
-            r = castOp(r, "si64");
+          if (knownTrueConds.contains(op.getResult(0))) {
+            res = lit("true", "i1");
+          } else {
+            TaskTerm a = val(0), r = val(1);
+            auto p = cmpOp.getPredicate();
+            if (a.type == "index" && p != arith::CmpIPredicate::eq &&
+                p != arith::CmpIPredicate::ne) {
+              a = castOp(a, "si64");
+              r = castOp(r, "si64");
+            }
+            StringRef pred = "eq";
+            switch (p) {
+            case arith::CmpIPredicate::eq:
+              pred = "eq";
+              break;
+            case arith::CmpIPredicate::ne:
+              pred = "ne";
+              break;
+            case arith::CmpIPredicate::slt:
+            case arith::CmpIPredicate::ult:
+              pred = "lt";
+              break;
+            case arith::CmpIPredicate::sle:
+            case arith::CmpIPredicate::ule:
+              pred = "le";
+              break;
+            case arith::CmpIPredicate::sgt:
+            case arith::CmpIPredicate::ugt:
+              pred = "gt";
+              break;
+            case arith::CmpIPredicate::sge:
+            case arith::CmpIPredicate::uge:
+              pred = "ge";
+              break;
+            }
+            res = cmp(pred, a, r, "i1");
           }
-          StringRef pred = "eq";
-          switch (p) {
-          case arith::CmpIPredicate::eq:
-            pred = "eq";
-            break;
-          case arith::CmpIPredicate::ne:
-            pred = "ne";
-            break;
-          case arith::CmpIPredicate::slt:
-          case arith::CmpIPredicate::ult:
-            pred = "lt";
-            break;
-          case arith::CmpIPredicate::sle:
-          case arith::CmpIPredicate::ule:
-            pred = "le";
-            break;
-          case arith::CmpIPredicate::sgt:
-          case arith::CmpIPredicate::ugt:
-            pred = "gt";
-            break;
-          case arith::CmpIPredicate::sge:
-          case arith::CmpIPredicate::uge:
-            pred = "ge";
-            break;
-          }
-          res = cmp(pred, a, r, "i1");
         } else if (auto fcmp = dyn_cast<arith::CmpFOp>(op)) {
           StringRef pred = "eq";
           switch (fcmp.getPredicate()) {
@@ -674,7 +980,8 @@ LogicalResult bindWeftMemberStores(Operation &task, bool rvv, bool assign) {
   return success(!result.wasInterrupted());
 }
 
-LogicalResult lowerWeftOrdered(func::FuncOp fn) {
+LogicalResult lowerWeftOrdered(func::FuncOp fn,
+                               const intentdsl::CallFacts &facts, bool rvv) {
   auto &task = fn.front().front();
   auto &space = task.getRegion(0).front().front();
   Location loc = fn.getLoc();
@@ -689,11 +996,54 @@ LogicalResult lowerWeftOrdered(func::FuncOp fn) {
   int64_t owners = space.getAttrOfType<IntegerAttr>("cpu.owners").getInt();
   int64_t grain = space.getAttrOfType<IntegerAttr>("cpu.grain").getInt();
   int64_t batch = 1;
-  if (auto bAttr = space.getAttrOfType<IntegerAttr>("cpu.owner_batch"))
+  if (auto bAttr = space.getAttrOfType<IntegerAttr>("cpu.owner_batch")) {
     batch = bAttr.getInt();
+  } else if (!rvv) {
+    if (auto scAttr = space.getAttrOfType<IntegerAttr>("cpu.score_cache")) {
+      if (auto reuse = intentdsl::cpu::sharedInterval(&space, facts)) {
+        int64_t scSlots = scAttr.getInt();
+        for (int64_t cand : {4, 2}) {
+          if (reuse->group % cand == 0 && reuse->extent % cand == 0 &&
+              grain % cand == 0 && owners % cand == 0 &&
+              cand * scSlots * 4 <= 32768) {
+            batch = cand;
+            space.setAttr("cpu.innermost_owner",
+                          b.getI64IntegerAttr(reuse->axis));
+            space.walk([&](Operation *op) {
+              if (op->getNumResults() == 1 &&
+                  intentdsl::cpu::invariantOwnerValue(op->getResult(0), space,
+                                                      *reuse))
+                op->setAttr("cpu.owner_common", b.getUnitAttr());
+            });
+            break;
+          }
+        }
+      }
+    }
+  }
 
   OrderedLowerer lowerer{fn, space, b, loc, batch};
+  lowerer.isRvv = rvv;
   lowerer.lanes.resize(batch);
+  {
+    std::optional<TightenedLoopBound> stBound;
+    space.walk([&](scf::ForOp loop) {
+      auto t = analyzeCausalLoop(fn, loop);
+      if (t && t->hasBufferStore)
+        stBound = t;
+    });
+    if (stBound) {
+      space.walk([&](Operation *op) {
+        if (op->getName().getStringRef() != "cpu.buffer_load")
+          return;
+        auto ldLoop = op->getParentOfType<scf::ForOp>();
+        auto ldTight = ldLoop ? analyzeCausalLoop(fn, ldLoop) : std::nullopt;
+        if (!ldTight || ldTight->boundVal != stBound->boundVal ||
+            ldTight->inclusive != stBound->inclusive)
+          lowerer.allowBufferStoreTightening = false;
+      });
+    }
+  }
 
   SmallVector<Attribute> viewTypes, argAccess, shapeSyms, slotArgs, strideExprs;
   SmallVector<int64_t> argAliases, stridedSlots, contiguousSlots, taskRanks;
@@ -717,6 +1067,20 @@ LogicalResult lowerWeftOrdered(func::FuncOp fn) {
                                                          : "read"));
     std::string ty = elem;
     if (rank) {
+      auto shAttr = fn.getArgAttrOfType<DenseI64ArrayAttr>(i, "cpu.shape");
+      auto stAttr = fn.getArgAttrOfType<DenseI64ArrayAttr>(i, "cpu.strides");
+      bool dense = shAttr && stAttr && shAttr.size() == stAttr.size();
+      int64_t step = 1;
+      if (dense) {
+        for (int k = int(shAttr.size()) - 1; k >= 0; --k) {
+          int64_t n = shAttr[k], s = stAttr[k];
+          if (n <= 0 || (n > 1 && s != step) || step > INT64_MAX / n) {
+            dense = false;
+            break;
+          }
+          step *= n;
+        }
+      }
       SmallVector<std::string> shape, axes;
       std::map<std::string, unsigned> occurrences;
       auto *labels = abi[i].getAsObject()->getArray("dims");
@@ -730,13 +1094,17 @@ LogicalResult lowerWeftOrdered(func::FuncOp fn) {
         emptyExtent |= extent == 0;
         shape.push_back(extent ? std::to_string(extent) : "-3");
         axes.push_back(std::to_string(it->second));
-        strideExprs.push_back(
-            b.getStringAttr(aName + "s" + std::to_string(j)));
+        if (!dense)
+          strideExprs.push_back(
+              b.getStringAttr(aName + "s" + std::to_string(j)));
       }
       ty = "!weft_kernel.view<!weft_kernel.encoding<\"" + elem +
            "\",\"dense\",\"dense." + elem + "\",[]>,[" +
            llvm::join(shape, ",") + "],[" + llvm::join(axes, ",") + "]>";
-      stridedSlots.push_back(int64_t(i));
+      if (dense)
+        contiguousSlots.push_back(int64_t(i));
+      else
+        stridedSlots.push_back(int64_t(i));
     }
     viewTypes.push_back(b.getStringAttr(ty));
     viewTypeStrs.push_back(ty);
@@ -852,6 +1220,10 @@ LogicalResult lowerWeftOrdered(func::FuncOp fn) {
   b.setInsertionPointToEnd(&tkBb);
   makeOp(b, loc, "end");
 
+  int64_t hostGrain =
+      (lowerer.anyTightenedCausalLoop && grain > 16 && 16 % batch == 0)
+          ? int64_t(16)
+          : grain;
   // Region 1: host.c
   Block &hOuter = prog->getRegion(1).emplaceBlock();
   b.setInsertionPointToEnd(&hOuter);
@@ -860,7 +1232,7 @@ LogicalResult lowerWeftOrdered(func::FuncOp fn) {
       {b.getNamedAttr("params",
                       b.getStringAttr(intentdsl::cpu::matrixHostParams(fn))),
        b.getNamedAttr("owners", b.getI64IntegerAttr(owners)),
-       b.getNamedAttr("grain", b.getI64IntegerAttr(grain))},
+       b.getNamedAttr("grain", b.getI64IntegerAttr(hostGrain))},
       1);
   makeOp(b, loc, "end");
 

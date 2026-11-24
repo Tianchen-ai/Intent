@@ -5,7 +5,8 @@
 
 namespace CI_UNIT_NAMESPACE {
 mlir::LogicalResult lowerWeftRow(mlir::func::FuncOp fn,
-                                 const intentdsl::CallFacts &facts);
+                                 const intentdsl::CallFacts &facts,
+                                 int64_t tailVecWidth = 1);
 bool hasWeftRowProgram(mlir::ModuleOp m);
 llvm::Error describeWeftRowPackage(mlir::func::FuncOp fn, mlir::Operation &prog,
                                    llvm::raw_ostream &os);
