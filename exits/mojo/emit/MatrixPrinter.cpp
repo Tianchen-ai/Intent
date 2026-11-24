@@ -569,7 +569,7 @@ TerminalPrinter mojoMatrixPrinter() {
       auto dt = op.getAttrOfType<StringAttr>("dtype").getValue();
       auto cnt = op.getAttrOfType<IntegerAttr>("count").getInt();
       c.line("var " + c.name(op.getResult(0)) + " = unsafe_stack_allocation[" +
-             std::to_string(cnt) + ", Scalar[DType." + dt + "]]()");
+             std::to_string(cnt) + ", Scalar[DType." + dt + "], alignment=64]()");
     }
     return llvm::Error::success();
   };

@@ -2492,21 +2492,63 @@ struct RowLowerer {
         forceUnitStride = unitFast;
         if (allowUnroll4 && w > 1 && isStore && !hasSweepUniform && !ownerAxis) {
           Operation *singleFeatSeg = nullptr;
-          int segOps = 0, statefulOps = 0;
+          int segOps = 0, statefulOps = 0, bodyOps = 0;
           for (Operation &sop : loop.getRegion(0).front()) {
+            ++bodyOps;
             auto sc = sop.getName().stripDialect();
             if (sc == "segment_fold") {
               ++segOps;
               if (sop.hasAttr("feature_vector"))
                 singleFeatSeg = &sop;
-            } else if (sc == "key_counts" || sc == "sum_columns" ||
-                       sc == "row_cache_store") {
+            } else if (sc == "segment_size" || sc == "indexed_read" ||
+                       sc == "owner_write" || sc == "key_counts" ||
+                       sc == "sum_columns" || sc == "row_cache_store") {
               ++statefulOps;
             } else if (sc == "apply" &&
                        sop.getAttrOfType<StringAttr>("kind").getValue() ==
                            "scan_sum") {
               ++statefulOps;
             }
+          }
+          if (segOps == 0 && statefulOps == 0 && bodyOps <= 24) {
+            Value cW2 = constIdx(b, loc, 2 * w), cW3 = constIdx(b, loc, 3 * w),
+                  cW4 = constIdx(b, loc, 4 * w);
+            Value unrollStop = b.create<arith::MulIOp>(
+                loc, b.create<arith::FloorDivSIOp>(loc, fullStop, cW4), cW4);
+            {
+              auto *uLoop =
+                  makeOp(b, loc, "for_range", {c0, unrollStop, cW4}, {}, {}, 1);
+              Block &uBb = uLoop->getRegion(0).emplaceBlock();
+              Value j0 = uBb.addArgument(b.getIndexType(), loc);
+              OpBuilder::InsertionGuard ug(b);
+              b.setInsertionPointToEnd(&uBb);
+              if (failed(emitInnerColStep(j0)) ||
+                  failed(emitInnerColStep(
+                      b.create<arith::AddIOp>(loc, j0, cW))) ||
+                  failed(emitInnerColStep(
+                      b.create<arith::AddIOp>(loc, j0, cW2))) ||
+                  failed(emitInnerColStep(
+                      b.create<arith::AddIOp>(loc, j0, cW3)))) {
+                forceUnitStride = prevFast;
+                return failure();
+              }
+              makeOp(b, loc, "end");
+            }
+            {
+              auto *rLoop = makeOp(b, loc, "for_range",
+                                   {unrollStop, fullStop, cW}, {}, {}, 1);
+              Block &rBb = rLoop->getRegion(0).emplaceBlock();
+              Value j = rBb.addArgument(b.getIndexType(), loc);
+              OpBuilder::InsertionGuard rg(b);
+              b.setInsertionPointToEnd(&rBb);
+              if (failed(emitInnerColStep(j))) {
+                forceUnitStride = prevFast;
+                return failure();
+              }
+              makeOp(b, loc, "end");
+            }
+            forceUnitStride = prevFast;
+            return success();
           }
           if (segOps == 1 && singleFeatSeg && statefulOps == 0) {
             auto &terms = singleFeatSeg->getRegion(0).front();
