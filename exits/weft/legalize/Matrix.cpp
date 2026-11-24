@@ -719,7 +719,159 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
     auto q4StorageAttr = b.getNamedAttr(
         "kir.storage", TypeAttr::get(intentdsl::kir::Q4KType::get(fn.getContext())));
     int64_t ng = K / 256;
-    if (useEncodedRecords) {
+    if (useEncodedRecords && !boundWidening) {
+      // x86 encoded Q4_K x Q8_K: static [8, 32] subgroup gather + SIMD VNNI
+      // contract in ZMM registers (avoids dynamic subquant_level stack spills).
+      auto z = tb.idx(0), one = tb.idx(1), endG = tb.idx(ng);
+      auto fz = tb.lit("0.0", "f32");
+      std::string gIdxTy = "!weft_kernel.value<ui8,[8],[15]>";
+      std::string kIdxTy = "!weft_kernel.value<ui8,[32],[16]>";
+      std::string coordTy = "!weft_kernel.value<ui8,[8,32],[15,16]>";
+      std::string mIdxTy = "!weft_kernel.value<ui32,[8],[17]>";
+      Value grpIota =
+          makeOp(b, loc, "task_iota", {}, {b.getIndexType()},
+                 {b.getNamedAttr("start", b.getI64IntegerAttr(0)),
+                  b.getNamedAttr("end", b.getI64IntegerAttr(8)),
+                  b.getNamedAttr("val_type", b.getStringAttr(gIdxTy))})
+              ->getResult(0);
+      Value laneIota =
+          makeOp(b, loc, "task_iota", {}, {b.getIndexType()},
+                 {b.getNamedAttr("start", b.getI64IntegerAttr(0)),
+                  b.getNamedAttr("end", b.getI64IntegerAttr(32)),
+                  b.getNamedAttr("val_type", b.getStringAttr(kIdxTy))})
+              ->getResult(0);
+      TaskTerm grpBase =
+          tb.bin("mul", {grpIota, gIdxTy}, tb.lit("32", "ui8"), gIdxTy);
+      TaskTerm coord2d = tb.bin("add", grpBase, {laneIota, kIdxTy}, coordTy);
+      Value minIota =
+          makeOp(b, loc, "task_iota", {}, {b.getIndexType()},
+                 {b.getNamedAttr("start", b.getI64IntegerAttr(0)),
+                  b.getNamedAttr("end", b.getI64IntegerAttr(8)),
+                  b.getNamedAttr("val_type", b.getStringAttr(mIdxTy))})
+              ->getResult(0);
+
+      OperationState rFor(loc, "weft_host.task_for");
+      rFor.addOperands({z.v, symR, one.v});
+      rFor.addAttribute("iter_types", b.getArrayAttr({}));
+      Block &rBb = rFor.addRegion()->emplaceBlock();
+      Value rIv = rBb.addArgument(b.getIndexType(), loc);
+      b.create(rFor);
+      b.setInsertionPointToEnd(&rBb);
+
+      OperationState gFor(loc, "weft_host.task_for");
+      gFor.addOperands({z.v, endG.v, one.v, fz.v});
+      gFor.addTypes({b.getIndexType()});
+      gFor.addAttribute("iter_types", b.getArrayAttr({b.getStringAttr("f32")}));
+      Block &gBb = gFor.addRegion()->emplaceBlock();
+      Value gIv = gBb.addArgument(b.getIndexType(), loc);
+      Value gAcc = gBb.addArgument(b.getIndexType(), loc);
+      Operation *gLoopOp = b.create(gFor);
+      b.setInsertionPointToEnd(&gBb);
+
+      TaskTerm w =
+          tb.sliceSlot(viewArgs[0], slots[0].t, {rIv, gIv, std::nullopt}, true);
+      TaskTerm x =
+          tb.sliceSlot(viewArgs[1], slots[1].t, {gIv, std::nullopt}, true);
+      auto field = [&](TaskTerm rec, StringRef name, StringRef elem,
+                       int n = 1) -> TaskTerm {
+        std::string fTy =
+            n == 1 ? elem.str()
+                   : ("!weft_kernel.value<" + elem.str() + ",[" +
+                      std::to_string(n) + "],[3]>");
+        Value fv =
+            makeOp(b, loc, "task_field", {rec.v}, {b.getIndexType()},
+                   {b.getNamedAttr("field_name", b.getStringAttr(name)),
+                    b.getNamedAttr("in_type", b.getStringAttr(rec.type)),
+                    b.getNamedAttr("val_type", b.getStringAttr(fTy))})
+                ->getResult(0);
+        return {fv, fTy};
+      };
+      auto gather = [&](TaskTerm src, Value idxV, StringRef idxTy,
+                        StringRef outTy) -> TaskTerm {
+        Value gv =
+            makeOp(b, loc, "task_extract", {src.v, idxV}, {b.getIndexType()},
+                   {b.getNamedAttr("selector", b.getStringAttr("gather")),
+                    b.getNamedAttr("in_type", b.getStringAttr(src.type)),
+                    b.getNamedAttr("point_type", b.getStringAttr(idxTy)),
+                    b.getNamedAttr("val_type", b.getStringAttr(outTy))})
+                ->getResult(0);
+        return {gv, outTy.str()};
+      };
+
+      std::string wq2dTy = "!weft_kernel.value<ui4,[8,32],[15,16]>";
+      std::string xq2dTy = "!weft_kernel.value<si8,[8,32],[15,16]>";
+      std::string dot8Ty = "!weft_kernel.value<si32,[8],[15]>";
+      TaskTerm wq2d = gather(field(w, "q", "ui4", 256), coord2d.v, coordTy, wq2dTy);
+      TaskTerm xq2d = gather(field(x, "q", "si8", 256), coord2d.v, coordTy, xq2dTy);
+      Value dot8Val =
+          makeOp(b, loc, "task_contract", {wq2d.v, xq2d.v}, {b.getIndexType()},
+                 {b.getNamedAttr("kind", b.getStringAttr("contract")),
+                  b.getNamedAttr("over", b.getDenseI64ArrayAttr({16})),
+                  b.getNamedAttr("acc_type", b.getStringAttr("si32")),
+                  b.getNamedAttr("engine", b.getStringAttr("auto")),
+                  b.getNamedAttr("allow_subnormal_ftz", b.getBoolAttr(false)),
+                  b.getNamedAttr(
+                      "in_types",
+                      b.getArrayAttr(
+                          {b.getStringAttr(wq2dTy), b.getStringAttr(xq2dTy)})),
+                  b.getNamedAttr("val_type", b.getStringAttr(dot8Ty)),
+                  implNamedAttr, q4StorageAttr})
+              ->getResult(0);
+
+      TaskTerm scGather = gather(field(w, "sc", "ui6", 8), grpIota, gIdxTy,
+                                 "!weft_kernel.value<ui6,[8],[15]>");
+      TaskTerm scW = tb.castOp("widen", scGather, dot8Ty);
+      TaskTerm scaledDots = tb.bin("mul", {dot8Val, dot8Ty}, scW, dot8Ty);
+      Value posSumV =
+          makeOp(b, loc, "task_reduce", {scaledDots.v}, {b.getIndexType()},
+                 {b.getNamedAttr("kind", b.getStringAttr("add")),
+                  b.getNamedAttr("axis", b.getI64IntegerAttr(0)),
+                  b.getNamedAttr("in_type", b.getStringAttr(dot8Ty)),
+                  b.getNamedAttr("val_type", b.getStringAttr("si32"))})
+              ->getResult(0);
+
+      TaskTerm bsum = field(x, "bsum", "si16", 16);
+      std::string grp3Ty = WeftTypeSpec{"i32", {8}, {3}}.format("value");
+      Value sumsVal =
+          makeOp(b, loc, "task_fold2", {bsum.v}, {b.getIndexType()},
+                 {b.getNamedAttr("in_type", b.getStringAttr(bsum.type)),
+                  b.getNamedAttr("val_type", b.getStringAttr(grp3Ty))})
+              ->getResult(0);
+      std::string min8Ty = "!weft_kernel.value<si32,[8],[17]>";
+      TaskTerm sums8 = gather({sumsVal, grp3Ty}, minIota, mIdxTy, min8Ty);
+      TaskTerm mnGather = gather(field(w, "m", "ui6", 8), minIota, mIdxTy,
+                                 "!weft_kernel.value<ui6,[8],[17]>");
+      TaskTerm mnW = tb.castOp("widen", mnGather, min8Ty);
+      TaskTerm scaledMin = tb.bin("mul", sums8, mnW, min8Ty);
+      Value negSumV =
+          makeOp(b, loc, "task_reduce", {scaledMin.v}, {b.getIndexType()},
+                 {b.getNamedAttr("kind", b.getStringAttr("add")),
+                  b.getNamedAttr("axis", b.getI64IntegerAttr(0)),
+                  b.getNamedAttr("in_type", b.getStringAttr(min8Ty)),
+                  b.getNamedAttr("val_type", b.getStringAttr("si32"))})
+              ->getResult(0);
+
+      TaskTerm d = tb.castOp("cast", field(w, "d", "f16"), "f32");
+      TaskTerm dm = tb.castOp("cast", field(w, "dmin", "f16"), "f32");
+      TaskTerm pos =
+          tb.bin("mul", d, tb.castOp("cast", {posSumV, "si32"}, "f32"), "f32");
+      TaskTerm neg =
+          tb.bin("mul", dm, tb.castOp("cast", {negSumV, "si32"}, "f32"), "f32");
+      TaskTerm vrec = tb.bin("mul", field(x, "ds", "f32"),
+                             tb.bin("sub", pos, neg, "f32"), "f32");
+      TaskTerm nAcc = tb.bin("add", {gAcc, "f32"}, vrec, "f32");
+      makeOp(b, loc, "task_yield", {nAcc.v}, {},
+             {b.getNamedAttr("val_types", b.getArrayAttr({b.getStringAttr("f32")}))});
+
+      b.setInsertionPointToEnd(&rBb);
+      TaskTerm finalRow =
+          applyEpilogue({gLoopOp->getResult(0), "f32"}, {}, {}, rIv);
+      tb.commit(finalRow,
+                tb.sliceSlot(viewArgs.back(), slots.back().t, {rIv}, false));
+      makeOp(b, loc, "task_yield", {}, {},
+             {b.getNamedAttr("val_types", b.getArrayAttr({}))});
+      b.setInsertionPointToEnd(&tkBb);
+    } else if (useEncodedRecords) {
       auto z = tb.idx(0), one = tb.idx(1), endG = tb.idx(ng);
       auto fz = tb.lit("0.0", "f32"), iz = tb.lit("0", "si32");
       OperationState rFor(loc, "weft_host.task_for");

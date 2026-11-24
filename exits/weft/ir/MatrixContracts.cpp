@@ -1,6 +1,7 @@
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include <cstdlib>
 
 namespace CI_UNIT_NAMESPACE {
@@ -111,7 +112,7 @@ void registerWeftMatrixContracts(Unit &u) {
   // Downstream builtins provided by triton-weft >= 0.2.0 (tier: vendor)
   auto makeBrgemm = [&](StringRef name, StringRef featKey, StringRef operands,
                         StringRef layout, StringRef acc, StringRef numerical,
-                        bool isQ4k = false) {
+                        bool requiresFtz = false, bool isQ4k = false) {
     ImplementationContract c;
     c.name = name.str();
     c.operation = "weft_host.task_contract";
@@ -137,11 +138,19 @@ void registerWeftMatrixContracts(Unit &u) {
             contractName + " is unavailable on probed triton-weft oneDNN SEQ runtime");
       return llvm::Error::success();
     };
-    c.verify = [isQ4k](Operation *op) -> LogicalResult {
+    c.verify = [requiresFtz, isQ4k](Operation *op) -> LogicalResult {
       if (op->getNumOperands() != 2 || op->getNumResults() != 1)
         return failure();
       auto eng = op->getAttrOfType<StringAttr>("engine");
       if (!eng || !eng.getValue().starts_with("onednn-brgemm"))
+        return failure();
+      auto ftz = op->getAttrOfType<BoolAttr>("allow_subnormal_ftz");
+      if (!ftz || ftz.getValue() != requiresFtz)
+        return failure();
+      auto fn = op->getParentOfType<func::FuncOp>();
+      if (!fn)
+        return failure();
+      if (requiresFtz && !fn->getAttrOfType<UnitAttr>("kir.allow_subnormal_ftz"))
         return failure();
       if (isQ4k &&
           op->getAttr("kir.storage") !=
@@ -168,7 +177,8 @@ void registerWeftMatrixContracts(Unit &u) {
       "onednn-brgemm-bf16", "weft_brgemm_bf16", "bf16 x bf16 -> f32",
       "LHS 3D view [R, K/2, 2] (unit K stride, K%2==0), RHS zero-copy VNNI pack32 [K/2, nr, 2]",
       "f32 AMX-BF16 dot2 tile accumulator",
-      "AMX-BF16 dot2 to f32; flushes BF16 subnormals to zero (requires allow_subnormal_ftz)");
+      "AMX-BF16 dot2 to f32; flushes BF16 subnormals to zero (requires allow_subnormal_ftz)",
+      /*requiresFtz=*/true);
 
   makeBrgemm(
       "onednn-brgemm-s8", "weft_brgemm_s8", "s8 x s8 -> s32",
@@ -182,7 +192,7 @@ void registerWeftMatrixContracts(Unit &u) {
       "multi-row unpacked u8[R, 32] nibbles x Q8_K s8[32] subgroup",
       "s32 AMX-INT8/VNNI subgroup accumulator",
       "exact u8*s8->s32 32-element subgroup dot preserving Q4_K super-block R32 contract",
-      /*isQ4k=*/true);
+      /*requiresFtz=*/false, /*isQ4k=*/true);
 }
 
 void populateWeftMatrixContracts(intentdsl::cpu::MatrixMachine &m, int64_t v,

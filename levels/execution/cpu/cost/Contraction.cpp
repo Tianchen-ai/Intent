@@ -232,6 +232,8 @@ void matrixCost(Unit &u) {
             e.terms.insert(local->terms.begin(), local->terms.end());
             if (local->timeNs && e.timeNs)
               *e.timeNs += waves * *local->timeNs;
+            else if (local->timeNs)
+              e.timeNs = waves * *local->timeNs;
           }
           return e;
         }},

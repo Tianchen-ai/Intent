@@ -114,12 +114,24 @@ void nativePanelCost(compilerinfra::Unit &u) {
           double ops = double(t[0]) * subgroups * 64.0;
           auto *machine =
               ctx.target.services.get<intentdsl::cpu::RowMachine>();
+          int64_t workers = machine->workers;
+          double jobs = std::ceil(double(g->m) / t[0]) *
+                        std::ceil(double(g->n) / t[1]) * g->batches;
+          double waves = std::max(1.0, std::ceil(jobs / workers));
           e.terms["subgroup_ops"] = {ops, "FLOP"};
           auto rate = intentdsl::quantity(ctx, "vector", "FLOP/ns");
+          double effRate =
+              rate ? (*rate / workers) : (double(machine->vectorBits) / 8.0);
+          double dispatchNs = 25.0;
+          // Cost Estimate returns per-task time (multiplied by jobs/workers ~= waves
+          // by the CPU matrix partition selector, or directly if task-scoped).
+          // Wait: check how CPU matrix partition scales e.timeNs!
+          e.timeNs = dispatchNs + ops / effRate;
           if (rate) {
-            auto workers = machine->workers;
-            e.timeNs = (ops * workers) / *rate;
+            // Preserve calibrated per-task time + per-task dispatch amortized
+            e.timeNs = dispatchNs + (ops * workers) / *rate;
           }
+          (void)waves;
           return e;
         }},
        COMPILERINFRA_SOURCE});
@@ -171,6 +183,13 @@ void nativePanelCost(compilerinfra::Unit &u) {
                          (unpackBytes / 2.0) * workers *
                              (1.0 / *read + 1.0 / *write) +
                          (ops * workers) / *rate;
+            } else {
+              auto *machine =
+                  ctx.target.services.get<intentdsl::cpu::RowMachine>();
+              double effRate = double(machine->vectorBits) / 8.0;
+              double ops = double(t[0]) * subgroups * 16.0;
+              e.timeNs = amxCtx / waves + subgroups * 20.0 +
+                         unpackBytes / 32.0 + ops / effRate;
             }
             return e;
           }
