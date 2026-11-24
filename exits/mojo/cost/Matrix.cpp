@@ -40,7 +40,7 @@ void registerBlockCost(compilerinfra::Unit &u) {
             needsWiden = inBytes < 4;
           }
           double conversions =
-              needsWiden ? double(g->k) * (columns + double(t[0])) : 0.;
+              needsWiden ? double(g->k) * (columns + double(t[0]) / t[3]) : 0.;
           auto tail = g->m % t[0];
           double fringe =
               tail ? (tail - 1) * columns * g->k /
