@@ -108,11 +108,9 @@ LogicalResult verifyOwnerGrain(func::FuncOp fn, Operation &space,
       (!repeat || window.getInt() != batchScoreSlots / batch.getInt()))
     return space.emitError("invalid private score window");
   Operation *expectedRecord =
-      panel ? panel->maxScore.getDefiningOp()
-            : (window && repeat ? repeat->record : nullptr);
+      panel ? panel->record : (window && repeat ? repeat->record : nullptr);
   Operation *expectedReplay =
-      panel ? panel->weightScore.getDefiningOp()
-            : (window && repeat ? repeat->replay : nullptr);
+      panel ? panel->replay : (window && repeat ? repeat->replay : nullptr);
   auto marks = space.walk([&](Operation *v) {
     if (v->hasAttr("cpu.record_score") != (v == expectedRecord) ||
         v->hasAttr("cpu.replay_score") != (v == expectedReplay))
@@ -354,27 +352,136 @@ LogicalResult verifyOwnerBuffers(func::FuncOp fn, const TargetProfile &p,
         stores != 1 || loads != 1)
       return space.emitError("missing materialized local score buffer, store, or load");
     if (window) {
-      bool hasGuard = false, hasBranch = false;
-      for (auto ifOp : space.getRegion(0).front().getOps<scf::IfOp>()) {
-        if (ifOp->hasAttr("cpu.window_branch")) {
-          hasBranch = !ifOp.getElseRegion().empty();
-          unsigned elseLoads = 0;
-          ifOp.getElseRegion().walk([&](Operation *o) {
-            if (o->getName().getStringRef() == "cpu.buffer_load")
-              ++elseLoads;
-          });
-          if (elseLoads != 0)
-            return ifOp.emitError(
-                "over-window recomputation branch must not read score window");
-        }
-      }
+      int64_t slots = window.getInt();
+      auto isConstIdx = [](Value v, int64_t want) {
+        auto cst = v ? v.getDefiningOp<arith::ConstantIndexOp>()
+                     : arith::ConstantIndexOp();
+        return cst && cst.value() == want;
+      };
+      auto sameBound = [&](auto &self, Value x, Value y) -> bool {
+        if (x == y)
+          return true;
+        auto *px = x ? x.getDefiningOp() : nullptr;
+        auto *py = y ? y.getDefiningOp() : nullptr;
+        if (!px || !py || px->getName() != py->getName() ||
+            px->getNumRegions() != 0 || py->getNumRegions() != 0 ||
+            px->getNumResults() != 1 || py->getNumResults() != 1 ||
+            x.getType() != y.getType() ||
+            px->getPropertiesAsAttribute() != py->getPropertiesAsAttribute() ||
+            px->getNumOperands() != py->getNumOperands())
+          return false;
+        return llvm::all_of(
+            llvm::zip(px->getOperands(), py->getOperands()), [&](auto pair) {
+              return self(self, std::get<0>(pair), std::get<1>(pair));
+            });
+      };
+      auto isSubOf = [&](Value v, Value lhsWant, Value rhsWant) {
+        auto sub = v ? v.getDefiningOp<arith::SubIOp>() : arith::SubIOp();
+        return sub && sameBound(sameBound, sub.getLhs(), lhsWant) &&
+               sameBound(sameBound, sub.getRhs(), rhsWant);
+      };
+
+      SmallVector<scf::IfOp, 2> guards, branches;
       space.walk([&](scf::IfOp ifOp) {
         if (ifOp->hasAttr("cpu.window_guard"))
-          hasGuard = true;
+          guards.push_back(ifOp);
+        if (ifOp->hasAttr("cpu.window_branch"))
+          branches.push_back(ifOp);
       });
-      if (!hasGuard || !hasBranch)
+      if (guards.size() != 1 || branches.size() != 1)
         return space.emitError(
-            "windowed owner task requires explicit store guard and recompute branch");
+            "windowed owner task requires unique store guard and recompute branch");
+
+      scf::IfOp guardIf = guards[0], branchIf = branches[0];
+      auto loop1 = dyn_cast_or_null<scf::ForOp>(guardIf->getParentOp());
+      if (!loop1 || loop1->getBlock() != &space.getRegion(0).front() ||
+          branchIf->getBlock() != &space.getRegion(0).front() ||
+          !loop1->isBeforeInBlock(branchIf) ||
+          !guardIf.getElseRegion().empty() || branchIf.getElseRegion().empty())
+        return space.emitError("invalid windowed fold or branch placement");
+
+      auto thenLoops =
+          llvm::to_vector(branchIf.getThenRegion().front().getOps<scf::ForOp>());
+      auto elseLoops =
+          llvm::to_vector(branchIf.getElseRegion().front().getOps<scf::ForOp>());
+      if (thenLoops.size() != 1 || elseLoops.size() != 1)
+        return branchIf.emitError(
+            "window branch must wrap single replay and recompute folds");
+      scf::ForOp thenLoop = thenLoops[0], elseLoop = elseLoops[0];
+      Value lo = loop1.getLowerBound(), hi = loop1.getUpperBound();
+      if (!matchPattern(loop1.getStep(), m_One()) ||
+          !matchPattern(thenLoop.getStep(), m_One()) ||
+          !matchPattern(elseLoop.getStep(), m_One()) ||
+          !sameBound(sameBound, lo, thenLoop.getLowerBound()) ||
+          !sameBound(sameBound, lo, elseLoop.getLowerBound()) ||
+          !sameBound(sameBound, hi, thenLoop.getUpperBound()) ||
+          !sameBound(sameBound, hi, elseLoop.getUpperBound()))
+        return branchIf.emitError(
+            "windowed folds must share identical [lo, hi) iteration bounds");
+
+      // Verify guard predicate: (iv1 - lo) < slots
+      auto gCmp = guardIf.getCondition().getDefiningOp<arith::CmpIOp>();
+      bool validGuardCond =
+          gCmp &&
+          ((gCmp.getPredicate() == arith::CmpIPredicate::slt &&
+            isSubOf(gCmp.getLhs(), loop1.getInductionVar(), lo) &&
+            isConstIdx(gCmp.getRhs(), slots)) ||
+           (gCmp.getPredicate() == arith::CmpIPredicate::sgt &&
+            isConstIdx(gCmp.getLhs(), slots) &&
+            isSubOf(gCmp.getRhs(), loop1.getInductionVar(), lo)));
+      if (!validGuardCond)
+        return guardIf.emitError(
+            "window guard condition must compare (iv - lo) < window slots");
+
+      unsigned guardStores = 0;
+      bool validStoreIdx = true;
+      guardIf.getThenRegion().walk([&](Operation *o) {
+        if (o->getName().getStringRef() == "cpu.buffer_store") {
+          ++guardStores;
+          validStoreIdx &=
+              isSubOf(o->getOperand(2), loop1.getInductionVar(), lo);
+        }
+      });
+      if (guardStores != 1 || !validStoreIdx)
+        return guardIf.emitError(
+            "window guard must contain the buffer_store indexed at (iv - lo)");
+
+      // Verify replay/recompute predicate: (hi - lo) <= slots
+      auto bCmp = branchIf.getCondition().getDefiningOp<arith::CmpIOp>();
+      bool validBranchCond =
+          bCmp &&
+          ((bCmp.getPredicate() == arith::CmpIPredicate::sle &&
+            isSubOf(bCmp.getLhs(), hi, lo) &&
+            isConstIdx(bCmp.getRhs(), slots)) ||
+           (bCmp.getPredicate() == arith::CmpIPredicate::sge &&
+            isConstIdx(bCmp.getLhs(), slots) &&
+            isSubOf(bCmp.getRhs(), hi, lo)) ||
+           (bCmp.getPredicate() == arith::CmpIPredicate::slt &&
+            isSubOf(bCmp.getLhs(), hi, lo) &&
+            isConstIdx(bCmp.getRhs(), slots + 1)));
+      if (!validBranchCond)
+        return branchIf.emitError(
+            "window branch condition must compare (hi - lo) <= window slots");
+
+      unsigned thenLoads = 0, elseLoads = 0;
+      bool validLoadIdx = true;
+      thenLoop.getBody()->walk([&](Operation *o) {
+        if (o->getName().getStringRef() == "cpu.buffer_load") {
+          ++thenLoads;
+          validLoadIdx &=
+              isSubOf(o->getOperand(1), thenLoop.getInductionVar(), lo);
+        }
+      });
+      branchIf.getElseRegion().walk([&](Operation *o) {
+        if (o->getName().getStringRef() == "cpu.buffer_load")
+          ++elseLoads;
+      });
+      if (thenLoads != 1 || !validLoadIdx)
+        return branchIf.emitError(
+            "window replay branch must read score window at (iv - lo)");
+      if (elseLoads != 0)
+        return branchIf.emitError(
+            "over-window recomputation branch must not read score window");
     }
   } else if (localBuf || stores || loads) {
     return space.emitError("unexpected local buffer in unbuffered owner task");
@@ -538,10 +645,8 @@ void ownerTasks(Unit &u) {
       } else {
         auto s = cpu::reusableScores(o, p);
         o->setAttr("cpu.score_cache", d.get("scores"));
-        s->maxScore.getDefiningOp()->setAttr("cpu.record_score",
-                                             b.getUnitAttr());
-        s->weightScore.getDefiningOp()->setAttr("cpu.replay_score",
-                                                b.getUnitAttr());
+        s->record->setAttr("cpu.record_score", b.getUnitAttr());
+        s->replay->setAttr("cpu.replay_score", b.getUnitAttr());
       }
       a = d.get("grain");
     }

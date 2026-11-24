@@ -3,6 +3,7 @@
 #include "intentdsl/levels/algorithm/kir/ir/Ordered.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
 #include "intentdsl/levels/execution/cpu/ir/OwnerTraversal.h"
+#include "intentdsl/levels/execution/cpu/ir/RepeatedScore.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Math/IR/Math.h"
@@ -357,281 +358,6 @@ struct OrderedLowerer {
     makeOp(b, loc, "end");
   }
 
-  void emitCausalMicrotile(ArrayRef<Value> paramArgs, Value loArg, Value hiArg) {
-    auto tileAttr =
-        space.getAttrOfType<DenseI64ArrayAttr>("mojo_row.score_microtile");
-    int64_t rTile = tileAttr[0];
-    int64_t gTile = tileAttr[1];
-    int64_t panel = rTile * gTile;
-
-    auto qShape = fn.getArgAttrOfType<DenseI64ArrayAttr>(0, "cpu.shape");
-    auto kShape = fn.getArgAttrOfType<DenseI64ArrayAttr>(1, "cpu.shape");
-    auto vShape = fn.getArgAttrOfType<DenseI64ArrayAttr>(2, "cpu.shape");
-    auto qStrides = fn.getArgAttrOfType<DenseI64ArrayAttr>(0, "cpu.strides");
-    auto kStrides = fn.getArgAttrOfType<DenseI64ArrayAttr>(1, "cpu.strides");
-    auto vStrides = fn.getArgAttrOfType<DenseI64ArrayAttr>(2, "cpu.strides");
-    auto yStrides = fn.getArgAttrOfType<DenseI64ArrayAttr>(3, "cpu.strides");
-
-    int64_t batches = std::max<int64_t>(1, qShape[0]);
-    int64_t heads = qShape[1];
-    int64_t queries = qShape[2];
-    int64_t cols = qShape[3];
-    int64_t kvHeads = kShape[1];
-    int64_t keys = kShape[2];
-    int64_t features = vShape[3];
-    int64_t group = heads / kvHeads;
-    int64_t qBlocks = queries / rTile;
-    int64_t hBlocks = heads / gTile;
-
-    SmallVector<Value, 4> weights;
-    for (int64_t r = 0; r < rTile; ++r) {
-      weights.push_back(
-          makeOp(b, loc, "stack_alloc", {}, {b.getIndexType()},
-                 {b.getNamedAttr("dtype", b.getStringAttr("float32")),
-                  b.getNamedAttr("count", b.getI64IntegerAttr(keys))})
-              ->getResult(0));
-    }
-
-    Value loInt =
-        makeOp(b, loc, "as_int", {loArg}, {b.getIndexType()})->getResult(0);
-    Value hiInt =
-        makeOp(b, loc, "as_int", {hiArg}, {b.getIndexType()})->getResult(0);
-    auto *ownerLoop = makeOp(
-        b, loc, "for_range", {loInt, hiInt, constIdx(b, loc, panel)}, {}, {}, 1);
-    Block &oBb = ownerLoop->getRegion(0).emplaceBlock();
-    Value owner = oBb.addArgument(b.getIndexType(), loc);
-
-    OpBuilder::InsertionGuard guard(b);
-    b.setInsertionPointToEnd(&oBb);
-
-    Value rb =
-        makeOp(b, loc, "owner_coord", {owner}, {b.getIndexType()},
-               {b.getNamedAttr("pitch", b.getI64IntegerAttr(panel)),
-                b.getNamedAttr("extent", b.getI64IntegerAttr(qBlocks))})
-            ->getResult(0);
-    Value hb =
-        makeOp(b, loc, "owner_coord", {owner}, {b.getIndexType()},
-               {b.getNamedAttr("pitch", b.getI64IntegerAttr(panel * qBlocks)),
-                b.getNamedAttr("extent", b.getI64IntegerAttr(hBlocks))})
-            ->getResult(0);
-    Value batchIdx =
-        makeOp(b, loc, "owner_coord", {owner}, {b.getIndexType()},
-               {b.getNamedAttr("pitch",
-                               b.getI64IntegerAttr(panel * qBlocks * hBlocks)),
-                b.getNamedAttr("extent", b.getI64IntegerAttr(batches))})
-            ->getResult(0);
-
-    Value row = b.create<arith::MulIOp>(loc, rb, constIdx(b, loc, rTile));
-    Value hBase = b.create<arith::MulIOp>(loc, hb, constIdx(b, loc, gTile));
-    Value kv = b.create<arith::FloorDivSIOp>(loc, hBase, constIdx(b, loc, group));
-    Value factor = b.create<arith::MulFOp>(
-        loc, paramArgs[4], constF32(b, loc, 1.4426950408889634f));
-    Value neginf = constF32(b, loc, -INFINITY);
-    Value zeroIdx = constIdx(b, loc, 0);
-    Value oneIdx = constIdx(b, loc, 1);
-    Value sixteenIdx = constIdx(b, loc, 16);
-    Value keysIdx = constIdx(b, loc, keys);
-    Value oneF32 = constF32(b, loc, 1.0f);
-
-    auto qF32Ty = RankedTensorType::get({cols}, b.getF32Type());
-    auto vF32Ty = RankedTensorType::get({features}, b.getF32Type());
-    auto w16F32Ty = RankedTensorType::get({16}, b.getF32Type());
-    auto w16Bf16Ty = RankedTensorType::get({16}, b.getBF16Type());
-
-    SmallVector<Value, 4> rCoords, actives, aligneds;
-    for (int64_t r = 0; r < rTile; ++r) {
-      rCoords.push_back(addIdx(b, loc, row, r));
-      Value active =
-          b.create<arith::MinSIOp>(loc, addIdx(b, loc, row, r + 1), keysIdx);
-      Value aligned = b.create<arith::MulIOp>(
-          loc,
-          b.create<arith::FloorDivSIOp>(loc, addIdx(b, loc, active, 15),
-                                        sixteenIdx),
-          sixteenIdx);
-      actives.push_back(active);
-      aligneds.push_back(aligned);
-    }
-    Value limit =
-        b.create<arith::MinSIOp>(loc, addIdx(b, loc, row, rTile), keysIdx);
-
-    auto *gLoop = makeOp(b, loc, "for_range",
-                         {zeroIdx, constIdx(b, loc, gTile), oneIdx}, {}, {}, 1);
-    Block &gBb = gLoop->getRegion(0).emplaceBlock();
-    Value gIdx = gBb.addArgument(b.getIndexType(), loc);
-    {
-      OpBuilder::InsertionGuard gg(b);
-      b.setInsertionPointToEnd(&gBb);
-      Value hCur = b.create<arith::AddIOp>(loc, hBase, gIdx);
-
-      SmallVector<Value, 4> qVecs;
-      for (int64_t r = 0; r < rTile; ++r) {
-        Value qAddr = makeAddr(b, loc, paramArgs[0],
-                               {batchIdx, hCur, rCoords[r]},
-                               qStrides.asArrayRef().take_front(3));
-        Value qRaw =
-            loadContiguousSlice(paramArgs[0], qAddr, b.getBF16Type(), cols);
-        qVecs.push_back(b.create<arith::ExtFOp>(loc, qF32Ty, qRaw));
-      }
-
-      {
-        auto *kLoop =
-            makeOp(b, loc, "for_range", {zeroIdx, limit, oneIdx}, {}, {}, 1);
-        Block &kBb = kLoop->getRegion(0).emplaceBlock();
-        Value t = kBb.addArgument(b.getIndexType(), loc);
-        OpBuilder::InsertionGuard kg(b);
-        b.setInsertionPointToEnd(&kBb);
-        Value kAddr = makeAddr(b, loc, paramArgs[1], {batchIdx, kv, t},
-                               kStrides.asArrayRef().take_front(3));
-        Value kRaw =
-            loadContiguousSlice(paramArgs[1], kAddr, b.getBF16Type(), cols);
-        Value keyVec = b.create<arith::ExtFOp>(loc, qF32Ty, kRaw);
-        for (int64_t r = 0; r < rTile; ++r) {
-          Value prod = b.create<arith::MulFOp>(loc, qVecs[r], keyVec);
-          Value dot =
-              makeOp(b, loc, "lane_sum", {prod}, {b.getF32Type()})->getResult(0);
-          Value sc = b.create<arith::MulFOp>(loc, dot, factor);
-          Value wAddr = makeAddr(b, loc, weights[r], {t}, {1});
-          makeOp(b, loc, "store_scalar", {weights[r], wAddr, sc});
-        }
-        makeOp(b, loc, "end");
-      }
-
-      SmallVector<Value, 4> invs, outSlots;
-      for (int64_t r = 0; r < rTile; ++r) {
-        Value active = actives[r];
-        Value aligned = aligneds[r];
-        {
-          auto *padLoop = makeOp(b, loc, "for_range", {active, aligned, oneIdx},
-                                 {}, {}, 1);
-          Block &pBb = padLoop->getRegion(0).emplaceBlock();
-          Value t = pBb.addArgument(b.getIndexType(), loc);
-          OpBuilder::InsertionGuard pg(b);
-          b.setInsertionPointToEnd(&pBb);
-          Value wAddr = makeAddr(b, loc, weights[r], {t}, {1});
-          makeOp(b, loc, "store_scalar", {weights[r], wAddr, neginf});
-          makeOp(b, loc, "end");
-        }
-
-        Value initPeaks =
-            makeOp(b, loc, "splat_scalar", {neginf}, {w16F32Ty},
-                   {b.getNamedAttr("dtype", b.getStringAttr("float32")),
-                    b.getNamedAttr("width", b.getI64IntegerAttr(16))})
-                ->getResult(0);
-        Value peaksSlot =
-            makeOp(b, loc, "acc_decl", {initPeaks}, {w16F32Ty},
-                   {b.getNamedAttr("dtype", b.getStringAttr("float32")),
-                    b.getNamedAttr("width", b.getI64IntegerAttr(16))})
-                ->getResult(0);
-        {
-          auto *maxLoop = makeOp(b, loc, "for_range",
-                                 {zeroIdx, aligned, sixteenIdx}, {}, {}, 1);
-          Block &mBb = maxLoop->getRegion(0).emplaceBlock();
-          Value t = mBb.addArgument(b.getIndexType(), loc);
-          OpBuilder::InsertionGuard mg(b);
-          b.setInsertionPointToEnd(&mBb);
-          Value wAddr = makeAddr(b, loc, weights[r], {t}, {1});
-          Value wVec = loadContiguousSlice(weights[r], wAddr, b.getF32Type(), 16);
-          Value curP = readSlot(peaksSlot);
-          Value nextP = b.create<arith::MaxNumFOp>(loc, curP, wVec);
-          writeSlot(peaksSlot, nextP);
-          makeOp(b, loc, "end");
-        }
-        Value peak =
-            makeOp(b, loc, "lane_max", {readSlot(peaksSlot)}, {b.getF32Type()},
-                   {b.getNamedAttr("width", b.getI64IntegerAttr(16))})
-                ->getResult(0);
-        Value peakVec =
-            makeOp(b, loc, "splat_scalar", {peak}, {w16F32Ty},
-                   {b.getNamedAttr("dtype", b.getStringAttr("float32")),
-                    b.getNamedAttr("width", b.getI64IntegerAttr(16))})
-                ->getResult(0);
-
-        Value zSlot =
-            makeOp(b, loc, "acc_decl", {}, {w16F32Ty},
-                   {b.getNamedAttr("dtype", b.getStringAttr("float32")),
-                    b.getNamedAttr("width", b.getI64IntegerAttr(16))})
-                ->getResult(0);
-        {
-          auto *expLoop = makeOp(b, loc, "for_range",
-                                 {zeroIdx, aligned, sixteenIdx}, {}, {}, 1);
-          Block &eBb = expLoop->getRegion(0).emplaceBlock();
-          Value t = eBb.addArgument(b.getIndexType(), loc);
-          OpBuilder::InsertionGuard eg(b);
-          b.setInsertionPointToEnd(&eBb);
-          Value wAddr = makeAddr(b, loc, weights[r], {t}, {1});
-          Value wVec = loadContiguousSlice(weights[r], wAddr, b.getF32Type(), 16);
-          Value diffVec = b.create<arith::SubFOp>(loc, wVec, peakVec);
-          Value expVec = b.create<math::Exp2Op>(loc, diffVec);
-          Value pVec = makeOp(b, loc, "mask_prefix_zero",
-                              {expVec, t, active}, {w16F32Ty})
-                           ->getResult(0);
-          writeSlot(zSlot, b.create<arith::AddFOp>(loc, readSlot(zSlot), pVec));
-          Value pBf16 = b.create<arith::TruncFOp>(loc, w16Bf16Ty, pVec);
-          Value pRounded = b.create<arith::ExtFOp>(loc, w16F32Ty, pBf16);
-          makeOp(b, loc, "store_slice", {weights[r], wAddr, pRounded});
-          makeOp(b, loc, "end");
-        }
-        Value zSum =
-            makeOp(b, loc, "lane_sum", {readSlot(zSlot)}, {b.getF32Type()})
-                ->getResult(0);
-        invs.push_back(b.create<arith::DivFOp>(loc, oneF32, zSum));
-        outSlots.push_back(
-            makeOp(b, loc, "acc_decl", {}, {vF32Ty},
-                   {b.getNamedAttr("dtype", b.getStringAttr("float32")),
-                    b.getNamedAttr("width", b.getI64IntegerAttr(features))})
-                ->getResult(0));
-      }
-
-      {
-        auto *vLoop =
-            makeOp(b, loc, "for_range", {zeroIdx, limit, oneIdx}, {}, {}, 1);
-        Block &vBb = vLoop->getRegion(0).emplaceBlock();
-        Value t = vBb.addArgument(b.getIndexType(), loc);
-        OpBuilder::InsertionGuard vg(b);
-        b.setInsertionPointToEnd(&vBb);
-        Value vAddr = makeAddr(b, loc, paramArgs[2], {batchIdx, kv, t},
-                               vStrides.asArrayRef().take_front(3));
-        Value vRaw =
-            loadContiguousSlice(paramArgs[2], vAddr, b.getBF16Type(), features);
-        Value valVec = b.create<arith::ExtFOp>(loc, vF32Ty, vRaw);
-        for (int64_t r = 0; r < rTile; ++r) {
-          Value wAddr = makeAddr(b, loc, weights[r], {t}, {1});
-          Value wj = makeOp(b, loc, "load_scalar", {weights[r], wAddr},
-                            {b.getF32Type()})
-                         ->getResult(0);
-          Value wjVec =
-              makeOp(b, loc, "splat_scalar", {wj}, {vF32Ty},
-                     {b.getNamedAttr("dtype", b.getStringAttr("float32")),
-                      b.getNamedAttr("width", b.getI64IntegerAttr(features))})
-                  ->getResult(0);
-          Value prodVal = b.create<arith::MulFOp>(loc, valVec, wjVec);
-          Value sumVal =
-              b.create<arith::AddFOp>(loc, readSlot(outSlots[r]), prodVal);
-          writeSlot(outSlots[r], sumVal);
-        }
-        makeOp(b, loc, "end");
-      }
-
-      for (int64_t r = 0; r < rTile; ++r) {
-        Value invVec =
-            makeOp(b, loc, "splat_scalar", {invs[r]}, {vF32Ty},
-                   {b.getNamedAttr("dtype", b.getStringAttr("float32")),
-                    b.getNamedAttr("width", b.getI64IntegerAttr(features))})
-                ->getResult(0);
-        Value scaled =
-            b.create<arith::MulFOp>(loc, readSlot(outSlots[r]), invVec);
-        auto outBf16Ty = RankedTensorType::get({features}, b.getBF16Type());
-        Value outBf16 = b.create<arith::TruncFOp>(loc, outBf16Ty, scaled);
-        Value yAddr = makeAddr(b, loc, paramArgs[3],
-                               {batchIdx, hCur, rCoords[r]},
-                               yStrides.asArrayRef().take_front(3));
-        makeOp(b, loc, "store_slice", {paramArgs[3], yAddr, outBf16});
-      }
-      makeOp(b, loc, "end");
-    }
-    makeOp(b, loc, "end");
-  }
-
   LogicalResult lowerSingleOp(Operation &op, unsigned laneIdx,
                               IRMapping &map) {
     auto n = op.getName().getStringRef();
@@ -869,8 +595,25 @@ struct OrderedLowerer {
                 loop->getParentRegion() == &parentIf.getThenRegion()) {
               bool bodyOk = true;
               for (Operation &bop : loop.getBody()->without_terminator()) {
-                if (bop.getNumRegions() != 0)
-                  bodyOk = false;
+                if (bop.getNumRegions() != 0) {
+                  bool nestedWideOrWrite =
+                      llvm::any_of(bop.getResults(),
+                                   [&](Value v) { return isWideVal(v); }) ||
+                      bop.walk([&](Operation *inner) {
+                           if (inner == &bop)
+                             return WalkResult::advance();
+                           if (llvm::any_of(inner->getResults(),
+                                            [&](Value v) { return isWideVal(v); }) ||
+                               llvm::any_of(inner->getOperands(),
+                                            [&](Value v) { return isWideVal(v); }) ||
+                               !isMemoryEffectFree(inner))
+                             return WalkResult::interrupt();
+                           return WalkResult::advance();
+                         })
+                          .wasInterrupted();
+                  if (nestedWideOrWrite)
+                    bodyOk = false;
+                }
                 if (bop.getName().stripDialect() == "slice_read" &&
                     isWideVal(bop.getResult(0))) {
                   ++wideReads;
@@ -1051,6 +794,10 @@ struct OrderedLowerer {
         if (sharedCond) {
           auto newIf = b.create<scf::IfOp>(
               loc, TypeRange{}, lanes[0].lookup(branch.getCondition()), hasElse);
+          if (branch->hasAttr("cpu.window_guard"))
+            newIf->setAttr("mojo_row.window_guard", b.getUnitAttr());
+          if (branch->hasAttr("cpu.window_branch"))
+            newIf->setAttr("mojo_row.window_branch", b.getUnitAttr());
           {
             OpBuilder::InsertionGuard tg(b);
             auto &tBb = newIf.getThenRegion().front();
@@ -1402,11 +1149,7 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn) {
   int64_t batch = 1;
   if (auto bAttr = space.getAttrOfType<IntegerAttr>("cpu.owner_batch"))
     batch = bAttr.getInt();
-  auto microtileAttr =
-      space.getAttrOfType<DenseI64ArrayAttr>("mojo_row.score_microtile");
-  bool isMicrotile = static_cast<bool>(microtileAttr);
-  int64_t hostGrain =
-      isMicrotile ? (microtileAttr[0] * microtileAttr[1]) : grain;
+  auto windowAttr = space.getAttrOfType<IntegerAttr>("cpu.batch_score_window");
 
   Operation *foundLocalBuf = nullptr;
   for (Operation &op : space.getRegion(0).front()) {
@@ -1417,16 +1160,18 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn) {
   }
 
   OrderedLowerer lowerer{fn, space, b, loc, batch};
-  if (!isMicrotile) {
-    lowerer.analyzeChunkableWideMode();
-    lowerer.wideViews.resize(batch);
-    lowerer.wideSplats.resize(batch);
-  }
-  bool usesStack = isMicrotile || foundLocalBuf != nullptr ||
-                   lowerer.invFloatsPerLane > 0 || lowerer.accExtent > 0;
+  lowerer.analyzeChunkableWideMode();
+  lowerer.wideViews.resize(batch);
+  lowerer.wideSplats.resize(batch);
+  bool usesStack = foundLocalBuf != nullptr || lowerer.invFloatsPerLane > 0 ||
+                   lowerer.accExtent > 0;
 
   OperationState progState(loc, "mojo_row.ordered_program");
   progState.addAttribute("grain", b.getI64IntegerAttr(grain));
+  if (windowAttr) {
+    progState.addAttribute("owner_batch", b.getI64IntegerAttr(batch));
+    progState.addAttribute("window_slots", windowAttr);
+  }
   progState.addRegion();
   progState.addRegion();
   Operation *prog = b.create(progState);
@@ -1466,85 +1211,81 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn) {
 
   b.setInsertionPointToEnd(&fnBb);
 
-  if (isMicrotile) {
-    lowerer.emitCausalMicrotile(paramVals, loArg, hiArg);
-  } else {
-    if (foundLocalBuf) {
-      int64_t slots =
-          foundLocalBuf->getAttrOfType<IntegerAttr>("elements").getInt();
-      lowerer.localStackBuf =
+  if (foundLocalBuf) {
+    int64_t slots =
+        foundLocalBuf->getAttrOfType<IntegerAttr>("elements").getInt();
+    lowerer.localStackBuf =
+        makeOp(b, loc, "stack_alloc", {}, {b.getIndexType()},
+               {b.getNamedAttr("dtype", b.getStringAttr("float32")),
+                b.getNamedAttr("count", b.getI64IntegerAttr(batch * slots))})
+            ->getResult(0);
+    if (lowerer.chunkedMode && lowerer.accExtent >= 32 &&
+        lowerer.accExtent % 32 == 0) {
+      lowerer.vAddrBuf =
           makeOp(b, loc, "stack_alloc", {}, {b.getIndexType()},
-                 {b.getNamedAttr("dtype", b.getStringAttr("float32")),
-                  b.getNamedAttr("count", b.getI64IntegerAttr(batch * slots))})
-              ->getResult(0);
-      if (lowerer.chunkedMode && lowerer.accExtent >= 32 &&
-          lowerer.accExtent % 32 == 0) {
-        lowerer.vAddrBuf =
-            makeOp(b, loc, "stack_alloc", {}, {b.getIndexType()},
-                   {b.getNamedAttr("dtype", b.getStringAttr("int64")),
-                    b.getNamedAttr("count", b.getI64IntegerAttr(slots))})
-                ->getResult(0);
-      }
-    }
-    if (lowerer.invStride > 0) {
-      lowerer.invPrepackBuf =
-          makeOp(b, loc, "stack_alloc", {}, {b.getIndexType()},
-                 {b.getNamedAttr("dtype", b.getStringAttr("float32")),
-                  b.getNamedAttr(
-                      "count",
-                      b.getI64IntegerAttr(batch * lowerer.invStride))})
+                 {b.getNamedAttr("dtype", b.getStringAttr("int64")),
+                  b.getNamedAttr("count", b.getI64IntegerAttr(slots))})
               ->getResult(0);
     }
-    if (lowerer.accStride > 0) {
-      lowerer.wideAccBuf =
-          makeOp(b, loc, "stack_alloc", {}, {b.getIndexType()},
-                 {b.getNamedAttr("dtype", b.getStringAttr("float32")),
-                  b.getNamedAttr("count",
-                                 b.getI64IntegerAttr(batch * lowerer.accStride))})
-              ->getResult(0);
-    }
-
-    Value loInt =
-        makeOp(b, loc, "as_int", {loArg}, {b.getIndexType()})->getResult(0);
-    Value hiInt =
-        makeOp(b, loc, "as_int", {hiArg}, {b.getIndexType()})->getResult(0);
-    auto *ownerLoop = makeOp(
-        b, loc, "for_range", {loInt, hiInt, constIdx(b, loc, batch)}, {}, {}, 1);
-    Block &oBb = ownerLoop->getRegion(0).emplaceBlock();
-    Value owner = oBb.addArgument(b.getIndexType(), loc);
-
-    b.setInsertionPointToEnd(&oBb);
-    SmallVector<IRMapping, 16> lanes(batch);
-    for (auto [origArg, newParam] : llvm::zip(fn.getArguments(), paramVals))
-      for (auto &m : lanes)
-        m.map(origArg, newParam);
-
-    auto &srcBody = space.getRegion(0).front();
-    auto axes = space.getAttrOfType<DenseI64ArrayAttr>("axes");
-    auto innerAttr = space.getAttrOfType<IntegerAttr>("cpu.innermost_owner");
-    int64_t pitch = 1;
-    for (unsigned ax : intentdsl::cpu::ownerRadices(space)) {
-      int64_t ext = std::max<int64_t>(
-          1, lowerer.argArray(space.getOperand(ax), "cpu.shape")[axes[ax]]);
-      Value coord =
-          makeOp(b, loc, "owner_coord", {owner}, {b.getIndexType()},
-                 {b.getNamedAttr("pitch", b.getI64IntegerAttr(pitch)),
-                  b.getNamedAttr("extent", b.getI64IntegerAttr(ext))})
-              ->getResult(0);
-      for (int64_t l = 0; l < batch; ++l) {
-        Value laneCoord = coord;
-        if (batch > 1 && pitch == 1 && innerAttr &&
-            unsigned(innerAttr.getInt()) == ax && l > 0)
-          laneCoord = addIdx(b, loc, coord, l);
-        lanes[l].map(srcBody.getArgument(ax), laneCoord);
-      }
-      pitch *= ext;
-    }
-
-    if (failed(lowerer.lowerBlock(srcBody, lanes)))
-      return failure();
-    makeOp(b, loc, "end");
   }
+  if (lowerer.invStride > 0) {
+    lowerer.invPrepackBuf =
+        makeOp(b, loc, "stack_alloc", {}, {b.getIndexType()},
+               {b.getNamedAttr("dtype", b.getStringAttr("float32")),
+                b.getNamedAttr(
+                    "count",
+                    b.getI64IntegerAttr(batch * lowerer.invStride))})
+            ->getResult(0);
+  }
+  if (lowerer.accStride > 0) {
+    lowerer.wideAccBuf =
+        makeOp(b, loc, "stack_alloc", {}, {b.getIndexType()},
+               {b.getNamedAttr("dtype", b.getStringAttr("float32")),
+                b.getNamedAttr("count",
+                               b.getI64IntegerAttr(batch * lowerer.accStride))})
+            ->getResult(0);
+  }
+
+  Value loInt =
+      makeOp(b, loc, "as_int", {loArg}, {b.getIndexType()})->getResult(0);
+  Value hiInt =
+      makeOp(b, loc, "as_int", {hiArg}, {b.getIndexType()})->getResult(0);
+  auto *ownerLoop = makeOp(
+      b, loc, "for_range", {loInt, hiInt, constIdx(b, loc, batch)}, {}, {}, 1);
+  Block &oBb = ownerLoop->getRegion(0).emplaceBlock();
+  Value owner = oBb.addArgument(b.getIndexType(), loc);
+
+  b.setInsertionPointToEnd(&oBb);
+  SmallVector<IRMapping, 16> lanes(batch);
+  for (auto [origArg, newParam] : llvm::zip(fn.getArguments(), paramVals))
+    for (auto &m : lanes)
+      m.map(origArg, newParam);
+
+  auto &srcBody = space.getRegion(0).front();
+  auto axes = space.getAttrOfType<DenseI64ArrayAttr>("axes");
+  auto innerAttr = space.getAttrOfType<IntegerAttr>("cpu.innermost_owner");
+  int64_t pitch = 1;
+  for (unsigned ax : intentdsl::cpu::ownerRadices(space)) {
+    int64_t ext = std::max<int64_t>(
+        1, lowerer.argArray(space.getOperand(ax), "cpu.shape")[axes[ax]]);
+    Value coord =
+        makeOp(b, loc, "owner_coord", {owner}, {b.getIndexType()},
+               {b.getNamedAttr("pitch", b.getI64IntegerAttr(pitch)),
+                b.getNamedAttr("extent", b.getI64IntegerAttr(ext))})
+            ->getResult(0);
+    for (int64_t l = 0; l < batch; ++l) {
+      Value laneCoord = coord;
+      if (batch > 1 && pitch == 1 && innerAttr &&
+          unsigned(innerAttr.getInt()) == ax && l > 0)
+        laneCoord = addIdx(b, loc, coord, l);
+      lanes[l].map(srcBody.getArgument(ax), laneCoord);
+    }
+    pitch *= ext;
+  }
+
+  if (failed(lowerer.lowerBlock(srcBody, lanes)))
+    return failure();
+  makeOp(b, loc, "end");
   b.setInsertionPointToEnd(&fnBb);
   makeOp(b, loc, "end");
 
@@ -1567,8 +1308,8 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn) {
   auto *ompFor = makeOp(
       b, loc, "c_omp_for", {}, {},
       {b.getNamedAttr("count", b.getI64IntegerAttr(owners)),
-       b.getNamedAttr("grain", b.getI64IntegerAttr(hostGrain)),
-       b.getNamedAttr("cyclic", b.getBoolAttr(isMicrotile))},
+       b.getNamedAttr("grain", b.getI64IntegerAttr(grain)),
+       b.getNamedAttr("cyclic", b.getBoolAttr(false))},
       1);
   makeOp(b, loc, "end");
 
@@ -1576,7 +1317,7 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn) {
   b.setInsertionPointToEnd(&ompBb);
   makeOp(b, loc, "c_owner_call", {}, {},
          {b.getNamedAttr("call_args", b.getStringAttr(llvm::join(callArgs, ","))),
-          b.getNamedAttr("cyclic", b.getBoolAttr(isMicrotile))});
+          b.getNamedAttr("cyclic", b.getBoolAttr(false))});
   makeOp(b, loc, "end");
 
   SmallVector<Operation *> toErase;
@@ -1606,6 +1347,86 @@ LogicalResult verifyMojoOrdered(ModuleOp m, const TargetProfile &p,
   if (prog.getNumRegions() != 2 || prog.getRegion(0).empty() ||
       prog.getRegion(1).empty())
     return prog.emitError("incomplete mojo_row.ordered_program regions");
+
+  // Independently verify windowed score replay/recompute threshold on resume
+  SmallVector<scf::IfOp, 2> guards, branches;
+  m.walk([&](scf::IfOp ifOp) {
+    if (ifOp->hasAttr("mojo_row.window_guard"))
+      guards.push_back(ifOp);
+    if (ifOp->hasAttr("mojo_row.window_branch"))
+      branches.push_back(ifOp);
+  });
+  auto winAttr = prog.getAttrOfType<IntegerAttr>("window_slots");
+  auto batchAttr = prog.getAttrOfType<IntegerAttr>("owner_batch");
+  if (winAttr || batchAttr || !guards.empty() || !branches.empty()) {
+    if (!winAttr || !batchAttr || batchAttr.getInt() <= 0 ||
+        winAttr.getInt() !=
+            intentdsl::cpu::batchScoreSlots / batchAttr.getInt() ||
+        guards.size() != 1 || branches.size() != 1)
+      return prog.emitError(
+          "invalid or incomplete Mojo windowed score metadata");
+    int64_t slots = winAttr.getInt();
+    auto isConstIdx = [](Value v, int64_t want) {
+      auto cst = v ? v.getDefiningOp<arith::ConstantIndexOp>()
+                   : arith::ConstantIndexOp();
+      return cst && cst.value() == want;
+    };
+    auto sameBound = [&](auto &self, Value x, Value y) -> bool {
+      if (x == y)
+        return true;
+      auto *px = x ? x.getDefiningOp() : nullptr;
+      auto *py = y ? y.getDefiningOp() : nullptr;
+      if (!px || !py || px->getName() != py->getName() ||
+          px->getNumRegions() != 0 || py->getNumRegions() != 0 ||
+          px->getNumResults() != 1 || py->getNumResults() != 1 ||
+          x.getType() != y.getType() ||
+          px->getPropertiesAsAttribute() != py->getPropertiesAsAttribute() ||
+          px->getNumOperands() != py->getNumOperands())
+        return false;
+      return llvm::all_of(
+          llvm::zip(px->getOperands(), py->getOperands()),
+          [&](auto pair) { return self(self, std::get<0>(pair), std::get<1>(pair)); });
+    };
+    auto gIf = guards[0], bIf = branches[0];
+    Operation *loop1 = gIf->getParentOp();
+    if (!loop1 || loop1->getName().getStringRef() != "mojo_row.for_range" ||
+        !gIf.getElseRegion().empty() || bIf.getElseRegion().empty())
+      return prog.emitError("invalid Mojo windowed guard or branch structure");
+    Value lo1 = loop1->getOperand(0), hi1 = loop1->getOperand(1),
+          iv1 = loop1->getRegion(0).front().getArgument(0);
+    auto gCmp = gIf.getCondition().getDefiningOp<arith::CmpIOp>();
+    auto gSub = gCmp ? gCmp.getLhs().getDefiningOp<arith::SubIOp>()
+                     : arith::SubIOp();
+    if (!gCmp || gCmp.getPredicate() != arith::CmpIPredicate::slt || !gSub ||
+        gSub.getLhs() != iv1 || !sameBound(sameBound, gSub.getRhs(), lo1) ||
+        !isConstIdx(gCmp.getRhs(), slots))
+      return gIf.emitError(
+          "Mojo window guard condition must compare (iv - lo) < window_slots");
+
+    Operation *thenFor = nullptr, *elseFor = nullptr;
+    for (Operation &op : bIf.getThenRegion().front())
+      if (op.getName().getStringRef() == "mojo_row.for_range" &&
+          isConstIdx(op.getOperand(2), 1) && !thenFor)
+        thenFor = &op;
+    for (Operation &op : bIf.getElseRegion().front())
+      if (op.getName().getStringRef() == "mojo_row.for_range" &&
+          isConstIdx(op.getOperand(2), 1) && !elseFor)
+        elseFor = &op;
+    auto bCmp = bIf.getCondition().getDefiningOp<arith::CmpIOp>();
+    auto bSub = bCmp ? bCmp.getLhs().getDefiningOp<arith::SubIOp>()
+                     : arith::SubIOp();
+    if (!thenFor || !elseFor || !bCmp ||
+        bCmp.getPredicate() != arith::CmpIPredicate::sle || !bSub ||
+        !sameBound(sameBound, bSub.getLhs(), hi1) ||
+        !sameBound(sameBound, bSub.getRhs(), lo1) ||
+        !sameBound(sameBound, thenFor->getOperand(0), lo1) ||
+        !sameBound(sameBound, thenFor->getOperand(1), hi1) ||
+        !sameBound(sameBound, elseFor->getOperand(0), lo1) ||
+        !sameBound(sameBound, elseFor->getOperand(1), hi1) ||
+        !isConstIdx(bCmp.getRhs(), slots))
+      return bIf.emitError(
+          "Mojo window branch condition must compare (hi - lo) <= window_slots");
+  }
 
   bool badAddr =
       m.walk([&](Operation *op) {

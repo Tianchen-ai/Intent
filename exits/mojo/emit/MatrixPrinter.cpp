@@ -1599,19 +1599,6 @@ TerminalPrinter mojoMatrixPrinter() {
     return llvm::Error::success();
   };
 
-  p.operations["mojo_row.mask_prefix_zero"] = [](Operation &op, PrintPoint at,
-                                                 PrintContext &c) {
-    if (at == PrintPoint::Enter) {
-      auto in = c.name(op.getOperand(0)), tb = c.name(op.getOperand(1)),
-           lim = c.name(op.getOperand(2)), res = c.name(op.getResult(0));
-      c.line("var " + res +
-             " = (SIMD[DType.int64,16](0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15)"
-             " + Int64(" + tb + ")).lt(Int64(" + lim + ")).select(" + in +
-             ", 0)");
-    }
-    return llvm::Error::success();
-  };
-
   p.operations["mojo_row.pack_apply"] = [](Operation &op, PrintPoint at,
                                            PrintContext &c) {
     if (at != PrintPoint::Enter)
@@ -1626,8 +1613,9 @@ TerminalPrinter mojoMatrixPrinter() {
                        std::to_string(args.size()) + "](" +
                        llvm::join(args, ", ") + ")";
     std::string expr =
-        kind == "exp" ? ("exp(" + simd + ")")
-                      : (simd + ".cast[DType." + outDt + "]()" );
+        kind == "exp"    ? ("exp(" + simd + ")")
+        : kind == "exp2" ? ("exp2(" + simd + ")")
+                         : (simd + ".cast[DType." + outDt + "]()");
     c.line("var " + c.name(op.getResult(0)) + " = " + expr);
     return llvm::Error::success();
   };

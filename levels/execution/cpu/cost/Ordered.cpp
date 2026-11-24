@@ -31,17 +31,20 @@ void ownerCost(Unit &u) {
                        tasks / *rate;
           if (auto panel = intentdsl::cpu::reusableScores(o, ctx.target)) {
             bool retained =
-                cache &&
-                (cache.get("scores") ||
-                 (cache.get("window") &&
-                  panel->keys <=
-                      cache.getAs<mlir::IntegerAttr>("window").getInt()));
+                cache && (cache.get("scores") ||
+                          (cache.get("window") &&
+                           cache.getAs<mlir::IntegerAttr>("window").getInt() >=
+                               panel->keys));
             double dots = double(n) * panel->keys * (retained ? 1 : 2);
             e.terms["score_dot_products"] = {dots, "count"};
             auto bandwidth = intentdsl::quantity(ctx, "read_1", "B/ns");
-            if (e.timeNs && bandwidth && rate)
-              *e.timeNs += 2. * dots * panel->depth / *rate +
-                           (retained ? 8. * n * panel->keys / *bandwidth : 0.);
+            if (e.timeNs && bandwidth && rate) {
+              *e.timeNs += 2. * dots * panel->depth / *rate;
+              if (!intentdsl::cpu::sharedInterval(o, *f))
+                *e.timeNs += ((retained ? 0. : panel->readBytes) +
+                              (retained ? 1. : 0.)) *
+                             n * panel->keys / *bandwidth;
+            }
           }
           if (auto shared = intentdsl::cpu::sharedInterval(o, *f)) {
             bool together = cache && cache.get("inner");

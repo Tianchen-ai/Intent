@@ -273,10 +273,6 @@ def MojoLaneMax : RowInst<"lane_max"> {
   let arguments=(ins AnyType:$input, I64Attr:$width);
   let results=(outs F32:$result);
 }
-def MojoMaskPrefixZero : RowInst<"mask_prefix_zero"> {
-  let arguments=(ins AnyType:$input, Index:$t_base, Index:$active_limit);
-  let results=(outs AnyType:$masked);
-}
 def MojoPackApply : RowInst<"pack_apply"> {
   let arguments=(ins Variadic<AnyType>:$scalars, StrAttr:$in_dtype, StrAttr:$out_dtype, StrAttr:$kind);
   let results=(outs AnyType:$packed);
