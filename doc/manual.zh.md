@@ -114,14 +114,16 @@ compilerinfra-dev --library "$LIB" --workspace "$REPO" --output-dir /tmp/ci-dev 
 compilerinfra-dev --library "$LIB" --workspace "$REPO" --output-dir /tmp/ci-dev \
   read-skill '{"name":"agent/skills/intentdsl-development.md"}'
 
-# 2. 在同一持久开发会话中派生候选（derive）、解释（explain）并交给独立 Bench 测量（measure）
+# 2. 在同一持久开发会话中派生候选（derive）、编译观测（compile / explain）并交给独立 Bench 测量（measure）
 compilerinfra-dev --library "$LIB" --workspace "$REPO" --output-dir /tmp/ci-dev << 'EOF'
 {"action":"derive","arguments":{"configuration":{"exits":{"bangc":{"options":{"isa":372,"nram_bytes":786432,"wram_bytes":524288,"clusters":4,"cores":4,"calibration":"mlu370"}}}}}}
 {"action":"doctor","arguments":{"compiler":"base"}}
 EOF
 
-# 若已安装独立 intent_bench，可在同一会话对候选执行端到端数值与性能测量：
-# {"action":"measure","arguments":{"compiler":"<candidate_id>","output_dir":"/tmp/bench-out","workload":{"name":"program/softmax","implementations":["intent-v2:bangc"]}}}
+# 在交互会话中基于返回句柄 <cid> 执行编译解释与独立 Bench 端到端测量：
+# {"action":"compile","arguments":{"compiler":"<cid>","input":"softmax.py","exit":"triton","author_input":true}}
+# {"action":"explain","arguments":{"compilation_id":"<compilation_id>"}}
+# {"action":"measure","arguments":{"compiler":"<cid>","output_dir":"/tmp/bench-out","workload":{"name":"program/softmax","cases":[],"implementations":["intent-v2:triton"]}}}
 
 # 3. 生成 Codex 与 Claude 的 stdio MCP 配置（共享同一动作目录与 skills）
 compilerinfra-dev host-config -- \

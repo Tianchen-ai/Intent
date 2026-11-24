@@ -114,14 +114,16 @@ compilerinfra-dev --library "$LIB" --workspace "$REPO" --output-dir /tmp/ci-dev 
 compilerinfra-dev --library "$LIB" --workspace "$REPO" --output-dir /tmp/ci-dev \
   read-skill '{"name":"agent/skills/intentdsl-development.md"}'
 
-# 2. Derive a candidate, inspect doctor probes, explain decisions, and measure in a persistent session
+# 2. Derive a candidate, inspect doctor probes, compile/explain decisions, and measure in a persistent session
 compilerinfra-dev --library "$LIB" --workspace "$REPO" --output-dir /tmp/ci-dev << 'EOF'
 {"action":"derive","arguments":{"configuration":{"exits":{"bangc":{"options":{"isa":372,"nram_bytes":786432,"wram_bytes":524288,"clusters":4,"cores":4,"calibration":"mlu370"}}}}}}
 {"action":"doctor","arguments":{"compiler":"base"}}
 EOF
 
-# With external intent_bench installed, measure end-to-end correctness & latency on the candidate:
-# {"action":"measure","arguments":{"compiler":"<candidate_id>","output_dir":"/tmp/bench-out","workload":{"name":"program/softmax","implementations":["intent-v2:bangc"]}}}
+# Using the returned handle <cid>, compile, explain decisions, and run external Bench measurement:
+# {"action":"compile","arguments":{"compiler":"<cid>","input":"softmax.py","exit":"triton","author_input":true}}
+# {"action":"explain","arguments":{"compilation_id":"<compilation_id>"}}
+# {"action":"measure","arguments":{"compiler":"<cid>","output_dir":"/tmp/bench-out","workload":{"name":"program/softmax","cases":[],"implementations":["intent-v2:triton"]}}}
 
 # 3. Generate Codex and Claude stdio MCP configurations exposing the exact same action catalog
 compilerinfra-dev host-config -- \
