@@ -3,8 +3,57 @@ import os
 import subprocess
 import threading
 from time import perf_counter
-from runtime.cpu.binding.frame import HostVariants
+from runtime.cpu.binding.frame import HostVariants, NativeBinding
 from runtime.cpu.cache.files import build_directory
+
+
+_WEFT_STATUS_NAMES = {
+    1: "invalid-argument",
+    2: "io-error",
+    3: "abi-error",
+    4: "target-error",
+    5: "unsupported",
+    6: "resource-error",
+}
+
+
+class WeftBinding(NativeBinding):
+    def __init__(self, function, last_error, frame, extra, validate, status_type):
+        super().__init__(function, frame, extra, validate, status_type)
+        self._last_error = last_error
+
+    def check_status(self, status, arguments=None):
+        if status:
+            code = int(status)
+            actual = self.arguments if arguments is None else arguments
+            geometry = tuple(x.value for x in actual[self.geometry_offset :])
+            detail = ""
+            if self._last_error is not None:
+                raw = self._last_error()
+                if raw:
+                    detail = raw.decode("utf-8", errors="replace")
+            label = _WEFT_STATUS_NAMES.get(code, "error")
+            suffix = f": {detail}" if detail else ""
+            raise RuntimeError(
+                f"{self.function.__name__} failed with native status {code} "
+                f"(weft_status={label}), shape, grain, columns and workers={geometry}{suffix}"
+            )
+
+
+class WeftHostVariants(HostVariants):
+    def bind_rows(self, fn, bound):
+        last_error = self.artifact.last_error_fn()
+        return [
+            WeftBinding(
+                fn,
+                last_error,
+                bound,
+                (*bound.shape, r["grain"], r["columns"], self.artifact.workers),
+                lambda: self.artifact.validate(self.scope),
+                self.artifact.status_type,
+            )
+            for r in self.artifact.data["rows"]
+        ]
 
 
 class Artifact:
@@ -16,6 +65,7 @@ class Artifact:
         self.winners = {}
         self.lock = threading.RLock()
         self.library = None
+        self._last_error = None
         self.compilations = []
 
     def accepts(self, shape):
@@ -23,7 +73,7 @@ class Artifact:
 
     def bind(self, values, outputs, device, shape, key):
         scope, _ = key
-        return HostVariants(self, values, outputs, scope, shape)
+        return WeftHostVariants(self, values, outputs, scope, shape)
 
     def validate(self, scope):
         if tuple(sorted(os.sched_getaffinity(0))) != scope:
@@ -34,19 +84,25 @@ class Artifact:
         ):
             raise ValueError("CPU budget changed; prepare a new call")
 
+    def last_error_fn(self):
+        self.function()
+        return self._last_error
+
     def function(self):
         with self.lock:
             if self.library is None:
                 start = perf_counter()
                 import triton
                 from dataclasses import asdict
+                from weft_core.compiler import identity as weft_compiler_identity
                 from triton.backends.weft.toolchain import Toolchain
 
                 toolchain = Toolchain.resolve({}, self.info).to_dict()
                 identity = [
-                    "typed-host-with-runtime",
+                    "typed-host-with-runtime-v2",
                     asdict(self.info),
                     triton.__version__,
+                    weft_compiler_identity(),
                     toolchain,
                     self.data,
                 ]
@@ -60,6 +116,11 @@ class Artifact:
                     )
                 ]
                 self.library = ct.CDLL(str(path / "host.so"))
+                if hasattr(self.library, "intent_last_error"):
+                    err_fn = self.library.intent_last_error
+                    err_fn.argtypes = []
+                    err_fn.restype = ct.c_char_p
+                    self._last_error = err_fn
             return self.library.intent_entry
 
     def build(self, path):
@@ -117,7 +178,9 @@ class Artifact:
         name = "task_" + native.hash + ".so"
         (path / "task/kernel.so").rename(path / "task" / name)
         (path / "task_bridge.h").write_text(
-            "#include <stddef.h>\n" + abi["declaration"] + "\n"
+            "#include <stddef.h>\n"
+            + abi["declaration"]
+            + "\nint weft_kernel_take_status(char *error, size_t error_size);\n"
         )
         (path / "host.c").write_text(self.data["host"])
         # Use the local C toolchain to type-check the bridge against the actual exported prototype.

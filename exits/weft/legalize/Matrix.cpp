@@ -1798,24 +1798,50 @@ LogicalResult verifyWeftMatrix(ModuleOp m, const TargetProfile &p,
       prog.getRegion(1).empty())
     return prog.emitError("incomplete weft_host.matrix_program regions");
 
-  bool badAddr = m.walk([&](Operation *op) {
-                    if (op->getName().getStringRef() != "weft_host.address")
-                      return WalkResult::advance();
-                    auto bits = op->getAttrOfType<IntegerAttr>("index_bits");
-                    if (!bits || (bits.getInt() != 32 && bits.getInt() != 64)) {
-                      op->emitError(
-                          "weft_host.address requires i32 or i64 index_bits");
-                      return WalkResult::interrupt();
-                    }
-                    if (bits.getInt() == 32 && !canNarrowWeftAddress(*op)) {
-                      op->emitError(
-                          "32-bit Weft matrix address lacks a proven signed i32 range");
-                      return WalkResult::interrupt();
-                    }
-                    return WalkResult::advance();
-                  }).wasInterrupted();
-  if (badAddr)
+  auto progImpl = prog.getAttrOfType<StringAttr>("implementation");
+  auto usesBrg = prog.getAttrOfType<BoolAttr>("uses_brgemm");
+  auto extents = prog.getAttrOfType<DenseI64ArrayAttr>("extents");
+  if (!progImpl || !usesBrg || !extents || extents.size() != 4)
+    return prog.emitError("missing matrix_program implementation or extents");
+  if (auto err = p.checkImplementation(progImpl.getValue()))
+    return prog.emitError() << llvm::toString(std::move(err)), failure();
+  if (usesBrg.getValue() !=
+      progImpl.getValue().starts_with("exits/weft::onednn-brgemm-"))
+    return prog.emitError(
+        "matrix_program uses_brgemm disagrees with bound implementation");
+
+  bool sawContract = false;
+  bool badWalk =
+      m.walk([&](Operation *op) {
+         auto name = op->getName().getStringRef();
+         if (name == "weft_host.address") {
+           auto bits = op->getAttrOfType<IntegerAttr>("index_bits");
+           if (!bits || (bits.getInt() != 32 && bits.getInt() != 64)) {
+             op->emitError(
+                 "weft_host.address requires i32 or i64 index_bits");
+             return WalkResult::interrupt();
+           }
+           if (bits.getInt() == 32 && !canNarrowWeftAddress(*op)) {
+             op->emitError(
+                 "32-bit Weft matrix address lacks a proven signed i32 range");
+             return WalkResult::interrupt();
+           }
+         } else if (name == "weft_host.task_contract") {
+           sawContract = true;
+           auto ciImpl = op->getAttrOfType<StringAttr>("ci.implementation");
+           if (!ciImpl || ciImpl != progImpl) {
+             op->emitError(
+                 "task_contract ci.implementation disagrees with matrix_program");
+             return WalkResult::interrupt();
+           }
+         }
+         return WalkResult::advance();
+       }).wasInterrupted();
+  if (badWalk)
     return failure();
+  if (extents[2] > 0 && !sawContract)
+    return prog.emitError(
+        "non-empty matrix reduction requires a bound weft_host.task_contract");
 
   if (failed(weftMatrixPrinter().verify(m, p)))
     return failure();

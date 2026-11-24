@@ -27,6 +27,19 @@ void registerWeftMatrixContracts(Unit &u) {
     u.implementations.push_back({std::move(c), COMPILERINFRA_SOURCE});
   };
 
+  auto checkMatrixProgram = [](Operation *op, StringRef expectedId,
+                               bool expectedBrgemm) -> bool {
+    for (Operation *p = op->getParentOp(); p; p = p->getParentOp()) {
+      if (p->getName().getStringRef() == "weft_host.matrix_program") {
+        auto impl = p->getAttrOfType<StringAttr>("implementation");
+        auto brg = p->getAttrOfType<BoolAttr>("uses_brgemm");
+        return impl && impl.getValue() == expectedId && brg &&
+               brg.getValue() == expectedBrgemm;
+      }
+    }
+    return false;
+  };
+
   {
     ImplementationContract c;
     c.name = "weft-simd-fma";
@@ -48,9 +61,23 @@ void registerWeftMatrixContracts(Unit &u) {
         return llvm::createStringError("Weft SIMD contraction requires >=128-bit vector width");
       return llvm::Error::success();
     };
-    c.verify = [](Operation *op) -> LogicalResult {
-      return success((op->getNumOperands() == 2 || op->getNumOperands() == 3) &&
-                     op->getNumResults() == 1);
+    c.verify = [checkMatrixProgram](Operation *op) -> LogicalResult {
+      if ((op->getNumOperands() != 2 && op->getNumOperands() != 3) ||
+          op->getNumResults() != 1)
+        return failure();
+      auto eng = op->getAttrOfType<StringAttr>("engine");
+      auto ftz = op->getAttrOfType<BoolAttr>("allow_subnormal_ftz");
+      auto kind = op->getAttrOfType<StringAttr>("kind");
+      auto acc = op->getAttrOfType<StringAttr>("acc_type");
+      if (!eng || eng.getValue() != "auto" || !ftz || ftz.getValue() ||
+          op->hasAttr("kir.storage") || !kind || !acc)
+        return failure();
+      if ((op->getNumOperands() == 2 && kind.getValue() != "outer_contract") ||
+          (op->getNumOperands() == 3 && kind.getValue() != "fma"))
+        return failure();
+      if (acc.getValue() != "f32" && acc.getValue() != "si32")
+        return failure();
+      return success(checkMatrixProgram(op, "exits/weft::weft-simd-fma", false));
     };
     add(std::move(c));
   }
@@ -75,9 +102,31 @@ void registerWeftMatrixContracts(Unit &u) {
         return llvm::createStringError("Weft f32 panel FMA requires >=128-bit vector width");
       return llvm::Error::success();
     };
-    c.verify = [](Operation *op) -> LogicalResult {
-      return success((op->getNumOperands() == 2 || op->getNumOperands() == 3) &&
-                     op->getNumResults() == 1);
+    c.verify = [checkMatrixProgram](Operation *op) -> LogicalResult {
+      if ((op->getNumOperands() != 2 && op->getNumOperands() != 3) ||
+          op->getNumResults() != 1)
+        return failure();
+      auto eng = op->getAttrOfType<StringAttr>("engine");
+      auto ftz = op->getAttrOfType<BoolAttr>("allow_subnormal_ftz");
+      auto kind = op->getAttrOfType<StringAttr>("kind");
+      auto acc = op->getAttrOfType<StringAttr>("acc_type");
+      auto inTys = op->getAttrOfType<ArrayAttr>("in_types");
+      if (!eng || eng.getValue() != "auto" || !ftz || ftz.getValue() ||
+          op->hasAttr("kir.storage") || !kind || !acc ||
+          acc.getValue() != "f32" || !inTys ||
+          inTys.size() != op->getNumOperands())
+        return failure();
+      if ((op->getNumOperands() == 2 && kind.getValue() != "outer_contract") ||
+          (op->getNumOperands() == 3 && kind.getValue() != "fma"))
+        return failure();
+      for (Attribute a : inTys) {
+        auto s = dyn_cast<StringAttr>(a);
+        if (!s || (s.getValue() != "f32" &&
+                   !s.getValue().starts_with("!weft_kernel.value<f32,[")))
+          return failure();
+      }
+      return success(
+          checkMatrixProgram(op, "exits/weft::weft-f32-panel-fma", false));
     };
     add(std::move(c));
   }
@@ -103,19 +152,29 @@ void registerWeftMatrixContracts(Unit &u) {
         return llvm::createStringError("Weft Q4_K contraction requires >=128-bit vector width");
       return llvm::Error::success();
     };
-    c.verify = [](Operation *op) -> LogicalResult {
-      return success(
-          op->getNumOperands() == 2 && op->getNumResults() == 1 &&
-          op->getAttr("kir.storage") ==
-              TypeAttr::get(intentdsl::kir::Q4KType::get(op->getContext())));
+    c.verify = [checkMatrixProgram](Operation *op) -> LogicalResult {
+      auto eng = op->getAttrOfType<StringAttr>("engine");
+      auto ftz = op->getAttrOfType<BoolAttr>("allow_subnormal_ftz");
+      auto kind = op->getAttrOfType<StringAttr>("kind");
+      auto acc = op->getAttrOfType<StringAttr>("acc_type");
+      if (op->getNumOperands() != 2 || op->getNumResults() != 1 || !eng ||
+          eng.getValue() != "auto" || !ftz || ftz.getValue() || !kind ||
+          kind.getValue() != "contract" || !acc || acc.getValue() != "si32")
+        return failure();
+      if (op->getAttr("kir.storage") !=
+          TypeAttr::get(intentdsl::kir::Q4KType::get(op->getContext())))
+        return failure();
+      return success(checkMatrixProgram(op, "exits/weft::weft-q4k-dot", false));
     };
     add(std::move(c));
   }
 
   // Downstream builtins provided by triton-weft >= 0.2.0 (tier: vendor)
-  auto makeBrgemm = [&](StringRef name, StringRef featKey, StringRef operands,
-                        StringRef layout, StringRef acc, StringRef numerical,
-                        bool requiresFtz = false, bool isQ4k = false) {
+  auto makeBrgemm = [&](StringRef name, StringRef featKey, StringRef lhsElem,
+                        StringRef rhsElem, StringRef accElem, int64_t vnniPack,
+                        StringRef operands, StringRef layout, StringRef acc,
+                        StringRef numerical, bool requiresFtz = false,
+                        bool isQ4k = false) {
     ImplementationContract c;
     c.name = name.str();
     c.operation = "weft_host.task_contract";
@@ -132,6 +191,10 @@ void registerWeftMatrixContracts(Unit &u) {
     c.costParameters = {"vector_bits", "workers"};
     std::string reqFeat = featKey.str();
     std::string contractName = name.str();
+    std::string expectedLhs = lhsElem.str();
+    std::string expectedRhs = rhsElem.str();
+    std::string expectedAcc = accElem.str();
+    std::string qualifiedId = ("exits/weft::" + name).str();
     c.available = [reqFeat, contractName](const TargetProfile &p) -> llvm::Error {
       if (!p.features.count("triton_weft_v0_2"))
         return llvm::createStringError(
@@ -141,11 +204,51 @@ void registerWeftMatrixContracts(Unit &u) {
             contractName + " is unavailable on probed triton-weft oneDNN SEQ runtime");
       return llvm::Error::success();
     };
-    c.verify = [requiresFtz, isQ4k](Operation *op) -> LogicalResult {
+    c.verify = [checkMatrixProgram, contractName, qualifiedId, expectedLhs,
+                expectedRhs, expectedAcc, vnniPack, requiresFtz,
+                isQ4k](Operation *op) -> LogicalResult {
       if (op->getNumOperands() != 2 || op->getNumResults() != 1)
         return failure();
       auto eng = op->getAttrOfType<StringAttr>("engine");
-      if (!eng || !eng.getValue().starts_with("onednn-brgemm"))
+      if (!eng || eng.getValue() != contractName)
+        return failure();
+      auto kind = op->getAttrOfType<StringAttr>("kind");
+      if (!kind || kind.getValue() != (isQ4k ? "contract" : "outer_contract"))
+        return failure();
+      auto over = op->getAttrOfType<DenseI64ArrayAttr>("over");
+      const int64_t singleAxis[] = {3};
+      const int64_t packAxes[] = {3, 4};
+      ArrayRef<int64_t> expectedOver =
+          vnniPack > 1 ? ArrayRef<int64_t>(packAxes)
+                       : ArrayRef<int64_t>(singleAxis);
+      if (!over || over.asArrayRef() != expectedOver)
+        return failure();
+      auto accAttr = op->getAttrOfType<StringAttr>("acc_type");
+      if (!accAttr || accAttr.getValue() != expectedAcc)
+        return failure();
+      auto inTys = op->getAttrOfType<ArrayAttr>("in_types");
+      auto valTy = op->getAttrOfType<StringAttr>("val_type");
+      if (!inTys || inTys.size() != 2 || !valTy)
+        return failure();
+      auto lhsTy = dyn_cast<StringAttr>(inTys[0]);
+      auto rhsTy = dyn_cast<StringAttr>(inTys[1]);
+      if (!lhsTy || !rhsTy ||
+          !lhsTy.getValue().starts_with("!weft_kernel.value<" + expectedLhs +
+                                        ",[") ||
+          !rhsTy.getValue().starts_with("!weft_kernel.value<" + expectedRhs +
+                                        ",[") ||
+          !valTy.getValue().starts_with("!weft_kernel.value<" + expectedAcc +
+                                        ",["))
+        return failure();
+      if (vnniPack > 1) {
+        std::string packSuffix = "," + std::to_string(vnniPack) + "],[";
+        if (!lhsTy.getValue().contains(packSuffix) ||
+            !rhsTy.getValue().contains(packSuffix))
+          return failure();
+      }
+      if (isQ4k &&
+          (lhsTy.getValue() != "!weft_kernel.value<ui8,[-1,32],[1,3]>" ||
+           rhsTy.getValue() != "!weft_kernel.value<si8,[32],[3]>"))
         return failure();
       auto ftz = op->getAttrOfType<BoolAttr>("allow_subnormal_ftz");
       if (!ftz || ftz.getValue() != requiresFtz)
@@ -155,9 +258,12 @@ void registerWeftMatrixContracts(Unit &u) {
         return failure();
       if (requiresFtz && !fn->getAttrOfType<UnitAttr>("kir.allow_subnormal_ftz"))
         return failure();
-      if (isQ4k &&
-          op->getAttr("kir.storage") !=
-              TypeAttr::get(intentdsl::kir::Q4KType::get(op->getContext())))
+      auto q4kAttr =
+          TypeAttr::get(intentdsl::kir::Q4KType::get(op->getContext()));
+      if (isQ4k ? (op->getAttr("kir.storage") != q4kAttr)
+                : op->hasAttr("kir.storage"))
+        return failure();
+      if (!checkMatrixProgram(op, qualifiedId, true))
         return failure();
       return success();
     };
@@ -165,32 +271,36 @@ void registerWeftMatrixContracts(Unit &u) {
   };
 
   makeBrgemm(
-      "onednn-brgemm-f32", "weft_brgemm_f32", "f32 x f32 -> f32",
+      "onednn-brgemm-f32", "weft_brgemm_f32", "f32", "f32", "f32", 1,
+      "f32 x f32 -> f32",
       "LHS row-major (unit K stride), RHS row-major or [K, nr] panels",
       "f32 ZMM BRGeMM accumulator",
       "IEEE-754 f32 FMA preserving subnormals, signed zero, Inf, and qNaN");
 
   makeBrgemm(
-      "onednn-brgemm-f16", "weft_brgemm_f16", "f16 x f16 -> f32",
+      "onednn-brgemm-f16", "weft_brgemm_f16", "f16", "f16", "f32", 1,
+      "f16 x f16 -> f32",
       "LHS row-major (unit K stride), RHS row-major or [K, nr] panels",
       "f32 AVX-512 FP16/FMA BRGeMM accumulator",
       "IEEE-754 f16 widened to f32 FMA preserving f16 subnormals, Inf, and qNaN");
 
   makeBrgemm(
-      "onednn-brgemm-bf16", "weft_brgemm_bf16", "bf16 x bf16 -> f32",
+      "onednn-brgemm-bf16", "weft_brgemm_bf16", "bf16", "bf16", "f32", 2,
+      "bf16 x bf16 -> f32",
       "LHS 3D view [R, K/2, 2] (unit K stride, K%2==0), RHS zero-copy VNNI pack32 [K/2, nr, 2]",
       "f32 AMX-BF16 dot2 tile accumulator",
       "AMX-BF16 dot2 to f32; flushes BF16 subnormals to zero (requires allow_subnormal_ftz)",
       /*requiresFtz=*/true);
 
   makeBrgemm(
-      "onednn-brgemm-s8", "weft_brgemm_s8", "s8 x s8 -> s32",
+      "onednn-brgemm-s8", "weft_brgemm_s8", "si8", "si8", "si32", 4,
+      "s8 x s8 -> s32",
       "LHS 3D view [R, K/4, 4] (unit K stride, K%4==0), RHS zero-copy VNNI pack32 [K/4, nr, 4]",
       "s32 AMX-INT8/VNNI tile accumulator",
       "exact two's-complement s8*s8->s32 accumulation");
 
   makeBrgemm(
-      "onednn-brgemm-u8s8", "weft_brgemm_u8s8",
+      "onednn-brgemm-u8s8", "weft_brgemm_u8s8", "ui8", "si8", "si32", 1,
       "u8[R, 32] x s8[32] -> s32 (Q4_K subgroup)",
       "multi-row unpacked u8[R, 32] nibbles x Q8_K s8[32] subgroup",
       "s32 AMX-INT8/VNNI subgroup accumulator",

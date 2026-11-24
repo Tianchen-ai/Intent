@@ -887,6 +887,8 @@ TerminalPrinter weftTerminalPrinter() {
 
       auto ext = op.getAttrOfType<DenseI64ArrayAttr>("extents");
       auto tl = op.getAttrOfType<DenseI64ArrayAttr>("tile");
+      c.line("static _Thread_local char g_intent_last_error[512];");
+      c.line("const char *intent_last_error(void) { return g_intent_last_error; }");
       c.line("int32_t intent_entry(" +
              op.getAttrOfType<StringAttr>("params").str() + ") {");
       c.indent++;
@@ -896,6 +898,9 @@ TerminalPrinter weftTerminalPrinter() {
       c.line("const int64_t mr=" + std::to_string(tl[0]) +
              ", nr=" + std::to_string(tl[1]) + ";");
       c.line("const int64_t mb=mr>0?(M+mr-1)/mr:0, nc=nr>0?(N+nr-1)/nr:0, jobs=G*mb*nc;");
+      c.line("int32_t intent_status = 0;");
+      c.line("char intent_err_buf[512]; intent_err_buf[0] = 0;");
+      c.line("g_intent_last_error[0] = 0;");
       c.line("(void)rows; (void)columns; (void)grain; (void)panel;");
       if (op.getAttrOfType<BoolAttr>("uses_mx8_math").getValue())
         c.line("ensure_mx8_tables();");
@@ -903,7 +908,8 @@ TerminalPrinter weftTerminalPrinter() {
     } else if (at == PrintPoint::BeginBlock) {
       c.indent++;
     } else if (at == PrintPoint::EndBlock) {
-      c.line("return 0;");
+      c.line("if (intent_status != 0) { memcpy(g_intent_last_error, intent_err_buf, sizeof(g_intent_last_error)); g_intent_last_error[sizeof(g_intent_last_error) - 1] = 0; }");
+      c.line("return intent_status;");
       c.indent--;
       c.line("}");
     }
@@ -1295,6 +1301,7 @@ TerminalPrinter weftTerminalPrinter() {
       c.line("#pragma omp parallel for num_threads(nt) schedule(static) if(nt > 1)");
       c.line("for (int64_t job=0; job<jobs; ++job) {");
       c.indent++;
+      c.line("if (__atomic_load_n(&intent_status, __ATOMIC_RELAXED) != 0) continue;");
       c.line("const int64_t " + c.name(bb.getArgument(0)) +
              " = job / (nc * mb), rem = job % (nc * mb);");
       c.line("const int64_t " + c.name(bb.getArgument(1)) +
@@ -1397,6 +1404,11 @@ TerminalPrinter weftTerminalPrinter() {
          op.getAttrOfType<DenseI64ArrayAttr>("strides").asArrayRef())
       args.push_back("(size_t)" + std::to_string(st) + "ULL");
     c.line("matrix_panel_instance(" + llvm::join(args, ", ") + ");");
+    c.line("{ char task_err[512]; int32_t task_st = (int32_t)weft_kernel_take_status(task_err, sizeof(task_err));");
+    c.line("  if (task_st != 0) { int32_t expected_st = 0;");
+    c.line("    if (__atomic_compare_exchange_n(&intent_status, &expected_st, task_st, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {");
+    c.line("      memcpy(intent_err_buf, task_err, sizeof(intent_err_buf)); intent_err_buf[sizeof(intent_err_buf) - 1] = 0; }");
+    c.line("    continue; } }");
     return llvm::Error::success();
   };
 
