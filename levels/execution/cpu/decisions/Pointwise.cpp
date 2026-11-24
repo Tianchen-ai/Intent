@@ -3,6 +3,7 @@
 namespace CI_UNIT_NAMESPACE {
 using namespace mlir;
 using namespace compilerinfra;
+bool supportsSweepUnroll(Operation *op);
 void registerPointwise(Unit &u,StringRef family) {
   Strategy strategy;
   bool indirect=family=="indirect";
@@ -58,13 +59,35 @@ void registerPointwise(Unit &u,StringRef family) {
       return Attribute(m->wideningConfigurations(op->getContext()));
     return Attribute(m->configurations(op->getContext(), m->structuredRows));
   };
-  strategy.enumerate=[propose, isRank1Independent](Operation *op,const TargetProfile &p,AnalysisManager &a)->llvm::Expected<std::vector<StructuralCandidate>>{
+  strategy.enumerate=[propose, isRank1Independent, indirect, permuted = (family == "permutation")](Operation *op,const TargetProfile &p,AnalysisManager &a)->llvm::Expected<std::vector<StructuralCandidate>>{
     auto rows=propose(op,p,a);if(!rows)return rows.takeError();
     std::vector<StructuralCandidate> cs;if(!*rows)return cs;
     Builder b(op->getContext());
     bool memberTasks = isRank1Independent(op);
+    auto *m = p.services.get<intentdsl::cpu::RowMachine>();
+    bool canUnroll = !indirect && !permuted && supportsSweepUnroll(op);
     for(auto walk:{"source","destination","tile"}){
       if(StringRef(walk)!="source" && !intentdsl::cpu::rectangularCopy(op))continue;
+      if (StringRef(walk) == "source" && m && !permuted && !indirect) {
+        for (int64_t uf : m->unrollFactors) {
+          if (uf > 1 && !canUnroll)
+            continue;
+          NamedAttrList layout(
+              intentdsl::cpu::partition(b, walk, cast<ArrayAttr>(*rows)));
+          if (memberTasks)
+            layout.set("member_tasks", b.getUnitAttr());
+          if (m->unrollFactors.size() > 1 || uf > 1)
+            layout.set("unroll", b.getI64IntegerAttr(uf));
+          std::string id =
+              uf > 1 ? (std::string(walk) + "-unroll" + std::to_string(uf))
+                     : std::string(walk);
+          cs.push_back({id,
+                        walk,
+                        layout.getDictionary(op->getContext()),
+                        {"row-independent"}});
+        }
+        continue;
+      }
       NamedAttrList layout(intentdsl::cpu::partition(b,walk,cast<ArrayAttr>(*rows)));
       if(memberTasks && StringRef(walk)=="source")
         layout.set("member_tasks",b.getUnitAttr());

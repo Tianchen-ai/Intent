@@ -2589,8 +2589,12 @@ struct RowLowerer {
                3 * deferredPerLane + overlapLanes * std::max<int64_t>(1, lanePeak);
       };
       const int64_t archVecRegs = fullWidth >= 16 ? 32 : 16;
+      int64_t chosenUnroll = 4;
+      if (auto uAttr = task.getAttrOfType<IntegerAttr>("cpu.unroll"))
+        chosenUnroll = uAttr.getInt();
       auto emitBlockedFullLoop = [&](bool unitFast,
                                      bool allowUnroll4) -> LogicalResult {
+        allowUnroll4 = allowUnroll4 && (chosenUnroll >= 4);
         bool prevFast = forceUnitStride;
         forceUnitStride = unitFast;
         if (allowUnroll4 && w > 1 && isStore && !hasSweepUniform && !ownerAxis) {

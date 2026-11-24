@@ -9,6 +9,8 @@ struct RowMachine {
   int64_t vectorBits, workers;
   unsigned packedOwners = 0;
   llvm::SmallVector<RowConfig> rows;
+  llvm::SmallVector<int64_t, 2> unrollFactors = {1};
+  std::string estimate;
   bool structuredRows = false;
   bool boundWidening = false;
   int64_t wideningPanel =
@@ -18,6 +20,9 @@ struct RowMachine {
                                        bool widenOnly = false) const;
   mlir::ArrayAttr configurations(mlir::MLIRContext *, bool whole) const;
   bool accepts(mlir::ArrayAttr) const;
+  bool acceptsUnroll(int64_t factor) const {
+    return llvm::is_contained(unrollFactors, factor);
+  }
 };
 mlir::LogicalResult verifyTask(mlir::ModuleOp,
                                const compilerinfra::TargetProfile &,

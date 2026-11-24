@@ -1,4 +1,6 @@
 #pragma once
+#include "compilerinfra/Proofs.h"
+#include "mlir/Analysis/AliasAnalysis/LocalAliasAnalysis.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -327,50 +329,54 @@ inline std::optional<RepeatedScore> repeatedScore(mlir::Operation &space) {
       if (localReadBuf)
         continue;
 
-      auto canAliasScoreRead = [&](Value writtenView) -> bool {
-        if (rawReadViews.contains(writtenView))
-          return true;
-        if (!hasAbiFacts || !allReadsResolved)
-          return true;
-        auto wIdx = resolveFuncArg(resolveFuncArg, writtenView);
-        if (!wIdx || *wIdx >= argDirection.size() ||
-            argDirection[*wIdx] != "Out")
-          return true;
-        for (unsigned rIdx : scoreReadArgs) {
-          if (rIdx == *wIdx || rIdx >= argDirection.size() ||
-              argDirection[rIdx] != "In" ||
-              argPublicSlot[rIdx] == argPublicSlot[*wIdx])
-            return true;
-        }
-        return false;
+      auto disjointPublicAbiArgs = [&](Value lhs, Value rhs) -> bool {
+        if (!hasAbiFacts || !lhs || !rhs || lhs == rhs)
+          return false;
+        auto lIdx = resolveFuncArg(resolveFuncArg, lhs);
+        auto rIdx = resolveFuncArg(resolveFuncArg, rhs);
+        if (!lIdx || !rIdx || *lIdx == *rIdx || *lIdx >= argDirection.size() ||
+            *rIdx >= argDirection.size() ||
+            argPublicSlot[*lIdx] == argPublicSlot[*rIdx])
+          return false;
+        const auto &ld = argDirection[*lIdx], &rd = argDirection[*rIdx];
+        return (ld == "In" && rd == "Out") || (ld == "Out" && rd == "In");
       };
 
-      bool interveningOrAliasedWrite = false;
-      for (Operation *op = a; op != nullptr; op = op->getNextNode()) {
-        if (op->walk([&](Operation *v) {
-                if (v->getNumRegions() != 0)
-                  return isa<scf::ForOp, scf::IfOp>(v)
-                             ? WalkResult::advance()
-                             : WalkResult::interrupt();
-                if (isPureOrRead(v))
-                  return WalkResult::advance();
-                Value writtenView;
-                if (auto st = dyn_cast<memref::StoreOp>(v))
-                  writtenView = st.getMemref();
-                else if (v->getName().stripDialect() == "slice_write" &&
-                         v->getNumOperands() >= 2)
-                  writtenView = v->getOperand(1);
-                if (!writtenView || canAliasScoreRead(writtenView))
-                  return WalkResult::interrupt();
-                return WalkResult::advance();
-              }).wasInterrupted()) {
-          interveningOrAliasedWrite = true;
-          break;
+      struct PublicAbiAliasModel {
+        std::function<bool(Value, Value)> disjoint;
+        AliasResult alias(Value lhs, Value rhs) {
+          return disjoint(lhs, rhs) ? AliasResult::NoAlias
+                                    : AliasResult::MayAlias;
         }
-        if (op == b)
-          break;
-      }
-      if (interveningOrAliasedWrite)
+        ModRefResult getModRef(Operation *op, Value location) {
+          auto mem = dyn_cast<MemoryEffectOpInterface>(op);
+          if (!mem)
+            return ModRefResult::getModAndRef();
+          SmallVector<MemoryEffects::EffectInstance, 4> effects;
+          mem.getEffects(effects);
+          ModRefResult res = ModRefResult::getNoModRef();
+          for (const auto &e : effects) {
+            Value v = e.getValue();
+            if (!v || !disjoint(v, location)) {
+              if (isa<MemoryEffects::Write, MemoryEffects::Free,
+                      MemoryEffects::Allocate>(e.getEffect()))
+                res = res.merge(ModRefResult::getMod());
+              if (isa<MemoryEffects::Read>(e.getEffect()))
+                res = res.merge(ModRefResult::getRef());
+            }
+          }
+          return res;
+        }
+      };
+
+      AliasAnalysis aa(&space);
+      aa.addAnalysisImplementation(LocalAliasAnalysis());
+      aa.addAnalysisImplementation(PublicAbiAliasModel{disjointPublicAbiArgs});
+      SmallVector<Value, 8> readLocations(rawReadViews.begin(),
+                                          rawReadViews.end());
+      if (!compilerinfra::proveValueReplay(producer, matchedReplay,
+                                           readLocations, &aa)
+               .proven)
         continue;
 
       return RepeatedScore{a, b, producer, matchedReplay};

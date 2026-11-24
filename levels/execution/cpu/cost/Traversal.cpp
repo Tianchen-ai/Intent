@@ -1,5 +1,6 @@
 #include "intentdsl/levels/algorithm/kir/ir/Traffic.h"
 #include "intentdsl/levels/algorithm/kir/ir/Permutation.h"
+#include "intentdsl/levels/execution/cpu/ir/Task.h"
 namespace CI_UNIT_NAMESPACE {
 using namespace compilerinfra;
 using namespace mlir;
@@ -29,9 +30,9 @@ void registerCost(Unit &u) {
   for (bool permuted : {false, true})
     u.costModels.push_back(
         {{permuted ? "permutation-time" : "task-time",
-          u.qualify(permuted ? "permutation" : "partition"), "1",
-          [](Operation *op, const StructuralCandidate &c,
-             CostContext &ctx) -> llvm::Expected<CostEstimate> {
+          u.qualify(permuted ? "permutation" : "partition"), "2",
+          [permuted](Operation *op, const StructuralCandidate &c,
+                     CostContext &ctx) -> llvm::Expected<CostEstimate> {
             auto *facts = ctx.target.services.get<intentdsl::CallFacts>();
             auto [m, n] = facts->geometry(op);
             auto d = cast<DictionaryAttr>(c.value);
@@ -158,6 +159,17 @@ void registerCost(Unit &u) {
               }
             });
             auto vecRate = intentdsl::quantity(ctx, "vector", "FLOP/ns");
+            std::optional<double> localRowNs;
+            if (!permuted) {
+              auto *rm = ctx.target.services.get<intentdsl::cpu::RowMachine>();
+              if (rm && !rm->estimate.empty()) {
+                auto local = ctx.local(rm->estimate);
+                if (!local)
+                  return local.takeError();
+                e.terms.insert(local->terms.begin(), local->terms.end());
+                localRowNs = local->timeNs;
+              }
+            }
             e.timeNs.reset();
             for (auto [i, row] : llvm::enumerate(rows)) {
               auto grain = cast<DictionaryAttr>(row)
@@ -189,6 +201,9 @@ void registerCost(Unit &u) {
                          : work * (groups ? std::ceil(groups / participants) *
                                                 participants / groups
                                           : 0.));
+                if (localRowNs)
+                  *pred.timeNs +=
+                      *localRowNs / std::max(1., singleDisp ? 1. : active);
                 if (sharedLines) {
                   bool sharded = d.contains("key_extent");
                   double writers =
@@ -265,6 +280,9 @@ void registerCost(Unit &u) {
                     work * (groups ? std::ceil(groups / facts->participants) *
                                          facts->participants / groups
                                    : 0.);
+                if (localRowNs)
+                  *pred.timeNs +=
+                      *localRowNs / std::max(1., singleDisp ? 1. : active);
                 if (!e.timeNs || *pred.timeNs < *e.timeNs)
                   e.timeNs = pred.timeNs;
               }

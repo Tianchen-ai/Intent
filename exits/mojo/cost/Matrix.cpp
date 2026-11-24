@@ -205,7 +205,7 @@ void registerBlockCost(compilerinfra::Unit &u) {
        COMPILERINFRA_SOURCE});
 
   u.costModels.push_back(
-      {{"simd-row-primitive", "levels/execution/cpu::partition", "1",
+      {{"simd-row-primitive", "levels/execution/cpu::partition", "2",
         [](mlir::Operation *op, const compilerinfra::StructuralCandidate &c,
            compilerinfra::CostContext &ctx)
             -> llvm::Expected<compilerinfra::CostEstimate> {
@@ -214,27 +214,75 @@ void registerBlockCost(compilerinfra::Unit &u) {
           auto d = mlir::cast<mlir::DictionaryAttr>(c.value);
           if (d.getAs<mlir::StringAttr>("walk") == "destination")
             std::swap(m, n);
+          if (d.contains("member_tasks")) {
+            n = m * n;
+            m = 1.;
+          }
           double lanes =
               ctx.target.services.get<intentdsl::cpu::RowMachine>()->vectorBits /
               32.;
+          int64_t unroll = d.getAs<mlir::IntegerAttr>("unroll")
+                               ? d.getAs<mlir::IntegerAttr>("unroll").getInt()
+                               : 1;
           double sweeps = m * std::ceil(n / lanes);
           double treeDepth = std::log2(std::max(1., lanes));
-          unsigned uniforms = 0, moments = 0, scans = 0;
+          unsigned uniforms = 0, moments = 0, scans = 0, reds = 0, exps = 0,
+                   divs = 0, reads = 0, writes = 0, bodyValues = 0;
           op->walk([&](mlir::Operation *i) {
             auto k = i->getName().stripDialect();
             uniforms += (k == "uniform");
             moments += (k == "welford");
             scans += (k == "scan_sum");
+            reds += (k == "sum" || k == "max_num");
+            exps += (k == "exp");
+            divs += (k == "div" || k == "sqrt" || k == "rsqrt");
+            reads += (k == "read" || k == "read_owner");
+            writes += (k == "write");
+            if (i != op && k != "end" && k != "constant" &&
+                i->getNumResults() == 1)
+              ++bodyValues;
           });
+          double archVecRegs = lanes >= 16. ? 32. : 16.;
+          double polyRegs = exps > 0 ? 6. : 0.;
+          double opScratch = exps > 0 ? 2. : (divs > 0 ? 1. : 0.);
+          double lanePeak = std::min<double>(
+              10., std::max<double>(1., double(reads) + opScratch +
+                                            0.25 * double(bodyValues)));
+          double overlap =
+              unroll > 1 ? (reds > 0 ? 2. : 4.) : 1.;
+          double liveVecs =
+              polyRegs + double(unroll) * double(reds) + overlap * lanePeak;
+          double spillVecs = std::max(0., liveVecs - archVecRegs);
+          double spillBytes = spillVecs * lanes * 4. * 2. * sweeps;
+          double unrolledBlocks =
+              m * std::floor(n / (lanes * double(unroll)));
+          double remBlocks =
+              sweeps - unrolledBlocks * double(unroll);
+          double chainSteps =
+              (unrolledBlocks + remBlocks) * (4. * double(reds) + 1.5) +
+              (unroll > 1 && unrolledBlocks == 0. && sweeps > 0. ? m * 4. : 0.);
           compilerinfra::CostEstimate e;
           e.scope = "row task";
-          e.bottleneck = "SIMD microkernel issue";
+          e.bottleneck = spillBytes > 0. ? "SIMD register spill"
+                                         : "SIMD microkernel and loop issue";
           double vecSteps =
               sweeps * (10. * uniforms + 4. * moments + treeDepth * scans) +
-              m * treeDepth * moments;
+              m * treeDepth * moments + chainSteps;
+          e.terms["unroll_factor"] = {double(unroll), "count"};
+          e.terms["live_vectors"] = {liveVecs, "count"};
+          e.terms["spill_bytes"] = {spillBytes, "B"};
+          e.terms["reduction_and_loop_steps"] = {chainSteps, "instruction"};
           e.terms["vector_steps"] = {vecSteps, "instruction"};
-          if (auto rate = intentdsl::quantity(ctx, "vector", "FLOP/ns"))
-            e.timeNs = (vecSteps * lanes) / *rate;
+          auto rate = intentdsl::quantity(ctx, "vector", "FLOP/ns"),
+               rdPriv = intentdsl::quantity(ctx, "read_1_private_bw", "B/ns"),
+               wrPriv = intentdsl::quantity(ctx, "write_1_private_bw", "B/ns");
+          double effRate = rate.value_or(std::max(1., lanes * 2.));
+          double t = (vecSteps * lanes) / effRate;
+          if (spillBytes > 0. && rdPriv && wrPriv)
+            t += (spillBytes / 2.) * (1. / *rdPriv + 1. / *wrPriv);
+          else if (spillBytes > 0.)
+            t += spillBytes / 16.;
+          e.timeNs = t;
           return e;
         }},
        COMPILERINFRA_SOURCE});

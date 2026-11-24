@@ -88,23 +88,64 @@ void registerKeyReduction(Unit &);
 void registerAtomics(Unit &);
 void registerPrefixScatter(Unit &);
 void registerPointwise(Unit &,StringRef);
-llvm::Expected<Attribute> proposeRows(Operation *op,const TargetProfile &profile,bool structured){
-  auto *machine=profile.services.get<intentdsl::cpu::RowMachine>();
-  if(!machine)return llvm::createStringError("missing CPU capacity");
-  bool reduces=false, ordinal=false, widens=false;
-  op->walk([&](Operation *v){auto n=v->getName().getStringRef();reduces |= n=="cpu.sum" || n=="cpu.max_num";
-    ordinal |= n=="cpu.ordinal";
-    if(n=="cpu.cast"){
-      auto from=dyn_cast<RankedTensorType>(v->getOperand(0).getType());
-      auto to=dyn_cast<RankedTensorType>(v->getResult(0).getType());
-      widens |= from && to && from.getElementTypeBitWidth()<to.getElementTypeBitWidth();
-    }});
-  if(!reduces)return Attribute{};
+bool supportsSweepUnroll(Operation *op) {
+  auto fn = op->getParentOfType<func::FuncOp>();
+  if (fn && fn->hasAttr("kir.owner_axis"))
+    return false;
+  bool blocked = false;
+  op->walk([&](Operation *v) {
+    auto n = v->getName().stripDialect();
+    blocked |= n == "welford" || n == "scan_sum" || n == "uniform" ||
+               n == "count_keys" || n == "column_sum" || n == "ordered_sum" ||
+               n == "atomic_add" || n == "fill_ranges" || n == "unique_put" ||
+               n == "write_offsets" || n == "prefix_scatter";
+  });
+  return !blocked;
+}
+llvm::Expected<std::vector<StructuralCandidate>>
+enumerateReductionRows(Operation *op, const TargetProfile &profile,
+                       bool structured, llvm::StringRef strategyId) {
+  auto *machine = profile.services.get<intentdsl::cpu::RowMachine>();
+  if (!machine)
+    return llvm::createStringError("missing CPU capacity");
+  bool reduces = false, ordinal = false, widens = false;
+  op->walk([&](Operation *v) {
+    auto n = v->getName().getStringRef();
+    reduces |= n == "cpu.sum" || n == "cpu.max_num";
+    ordinal |= n == "cpu.ordinal";
+    if (n == "cpu.cast") {
+      auto from = dyn_cast<RankedTensorType>(v->getOperand(0).getType());
+      auto to = dyn_cast<RankedTensorType>(v->getResult(0).getType());
+      widens |=
+          from && to && from.getElementTypeBitWidth() < to.getElementTypeBitWidth();
+    }
+  });
+  std::vector<StructuralCandidate> out;
+  if (!reduces)
+    return out;
   Builder b(op->getContext());
-  if ((ordinal || (widens && machine->boundWidening)) && machine->wideningPanel)
-    return Attribute(intentdsl::cpu::partition(b,"source",machine->wideningConfigurations(op->getContext())));
-  bool projectedOwner = op->getParentOfType<func::FuncOp>()->hasAttr("kir.owner_axis");
-  return Attribute(intentdsl::cpu::partition(b,"source",machine->configurations(op->getContext(),structured && machine->structuredRows && !projectedOwner)));
+  ArrayAttr rows =
+      ((ordinal || (widens && machine->boundWidening)) && machine->wideningPanel)
+          ? machine->wideningConfigurations(op->getContext())
+          : machine->configurations(
+                op->getContext(),
+                structured && machine->structuredRows &&
+                    !op->getParentOfType<func::FuncOp>()->hasAttr(
+                        "kir.owner_axis"));
+  bool canUnroll = supportsSweepUnroll(op);
+  for (int64_t u : machine->unrollFactors) {
+    if (u > 1 && !canUnroll)
+      continue;
+    NamedAttrList layout(intentdsl::cpu::partition(b, "source", rows));
+    if (machine->unrollFactors.size() > 1 || u > 1)
+      layout.set("unroll", b.getI64IntegerAttr(u));
+    std::string id =
+        u > 1 ? (strategyId.str() + "-unroll" + std::to_string(u))
+              : strategyId.str();
+    out.push_back(
+        {id, strategyId.str(), layout.getDictionary(op->getContext()), {}});
+  }
+  return out;
 }
 void registerPartition(Unit &u,bool permuted) {
   DecisionFamily partition;
@@ -159,24 +200,39 @@ void registerPartition(Unit &u,bool permuted) {
         return llvm::createStringError(
             "flat member partition needs independent rank-1 member outputs");
     }
+    int64_t unroll = 1;
+    if (d && d.get("unroll")) {
+      auto uAttr = d.getAs<IntegerAttr>("unroll");
+      if (!uAttr || !machine || !machine->acceptsUnroll(uAttr.getInt()) ||
+          (uAttr.getInt() > 1 &&
+           (walk != "source" || !supportsSweepUnroll(op))))
+        return llvm::createStringError("illegal CPU sweep unroll factor");
+      unroll = uAttr.getInt();
+    }
     if (!walk || (walk!="source" && ( (walk!="destination" && walk!="tile") || !intentdsl::cpu::rectangularCopy(op))) || !d.getAs<IntegerAttr>("tile") || d.getAs<IntegerAttr>("tile").getInt()!=(walk=="tile"?32:1) || !machine || !machine->accepts(d.getAs<ArrayAttr>("rows")))
       return llvm::createStringError("illegal CPU work partition");
     return llvm::Error::success();
   };
   partition.verifyCandidate=[](Operation *op,const StructuralCandidate &c,const TargetProfile &)->llvm::Error{
-    auto walk=cast<DictionaryAttr>(c.value).getAs<StringAttr>("walk");
+    auto d=cast<DictionaryAttr>(c.value);
+    auto walk=d.getAs<StringAttr>("walk");
+    int64_t unroll = d.getAs<IntegerAttr>("unroll")
+                         ? d.getAs<IntegerAttr>("unroll").getInt()
+                         : 1;
+    std::string suffix =
+        unroll > 1 ? ("-unroll" + std::to_string(unroll)) : "";
     if(c.id=="range-reservations" && c.topology==c.id && c.preconditions==std::vector<std::string>{"independent-relaxed-unit-tickets"} &&
-       cast<DictionaryAttr>(c.value).getAs<IntegerAttr>("batch_extent"))return llvm::Error::success();
+       d.getAs<IntegerAttr>("batch_extent"))return llvm::Error::success();
     if(c.id=="key-owners" && c.topology==c.id && walk=="source" && c.preconditions==std::vector<std::string>{"disjoint-key-ranges"} &&
-       cast<DictionaryAttr>(c.value).getAs<IntegerAttr>("key_extent") && cast<DictionaryAttr>(c.value).getAs<IntegerAttr>("key_extent").getInt()>0)
+       d.getAs<IntegerAttr>("key_extent") && d.getAs<IntegerAttr>("key_extent").getInt()>0)
       return llvm::Error::success();
-    if(c.id=="serial-tickets" && c.topology==c.id && walk=="source" && cast<DictionaryAttr>(c.value).contains("single_dispatcher") &&
+    if(c.id=="serial-tickets" && c.topology==c.id && walk=="source" && d.contains("single_dispatcher") &&
        c.preconditions==std::vector<std::string>{"relaxed-keyed-updates"} &&
        op->walk([](Operation *v){return v->getName().stripDialect()=="atomic_add"?WalkResult::interrupt():WalkResult::advance();}).wasInterrupted())return llvm::Error::success();
     if(c.id=="levels/execution/cpu::row-scan" && c.topology==c.id && walk=="source" && c.preconditions.empty() &&
        op->walk([](Operation *v){return v->getName().getStringRef()=="cpu.scan_sum"?WalkResult::interrupt():WalkResult::advance();}).wasInterrupted())return llvm::Error::success();
-    if(c.id==c.topology && c.topology==walk.getValue() && c.preconditions==std::vector<std::string>{walk=="source"?"row-independent":"bijective-rectangular-copy"})return llvm::Error::success();
-    if(c.id==c.topology && c.id.find("reduction")!=std::string::npos && walk=="source" && c.preconditions.empty())return llvm::Error::success();
+    if(c.topology==walk.getValue() && c.id==(walk.str()+suffix) && c.preconditions==std::vector<std::string>{walk=="source"?"row-independent":"bijective-rectangular-copy"})return llvm::Error::success();
+    if(c.topology.find("reduction")!=std::string::npos && c.id==(c.topology+suffix) && walk=="source" && c.preconditions.empty())return llvm::Error::success();
     return llvm::createStringError("CPU topology disagrees with its parameter domain");};
   u.families.push_back(
       {{partition, "cpu@formed", "cpu@formed"}, COMPILERINFRA_SOURCE});
@@ -190,6 +246,7 @@ void registerPartition(Unit &u,bool permuted) {
           if(d.get("single_dispatcher"))op->setAttr("cpu.single_dispatcher",d.get("single_dispatcher"));
           if(auto keys=d.get("key_extent"))op->setAttr("cpu.key_extent",keys);
           if(auto bins=d.get("batch_extent"))op->setAttr("cpu.batch_extent",bins);
+          if(auto unroll=d.get("unroll"))op->setAttr("cpu.unroll",unroll);
           op->setAttr("cpu.row_groups",d.get("rows"));op->setAttr("cpu.walk",d.get("walk"));op->setAttr("cpu.tile",d.get("tile"));
           op->removeAttr(carrier);
           return llvm::Error::success();

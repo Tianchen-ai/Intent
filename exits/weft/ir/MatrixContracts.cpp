@@ -1,5 +1,6 @@
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/Storage.h"
+#include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include <cstdlib>
@@ -260,7 +261,8 @@ void registerWeftMatrixContracts(Unit &u) {
       auto ftz = op->getAttrOfType<BoolAttr>("allow_subnormal_ftz");
       if (!ftz || ftz.getValue() != requiresFtz)
         return failure();
-      if (!op->getParentOfType<func::FuncOp>())
+      auto fn = op->getParentOfType<func::FuncOp>();
+      if (!fn || (requiresFtz && !intentdsl::kir::allowsSubnormalFtz(fn)))
         return failure();
       auto q4kAttr =
           TypeAttr::get(intentdsl::kir::Q4KType::get(op->getContext()));

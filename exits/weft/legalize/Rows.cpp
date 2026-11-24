@@ -252,9 +252,10 @@ struct RowTaskBuilder {
     return scalarSlice(view, coords, admit, admitTy);
   }
 
-  TaskTerm emitUniform(TaskTerm seed, TaskTerm position, int dim,
-                       int axisId = 2) {
-    std::string vecU64 = regionType("value", "ui64", 1, dim, axisId);
+  std::array<TaskTerm, 4> emitPhilox4x32Words(TaskTerm seed, TaskTerm base,
+                                              int width, int axisId) {
+    std::string vecU64 = regionType("value", "ui64", 1, width, axisId);
+    (void)vecU64;
     auto c64 = [&](uint64_t val) {
       return lit(std::to_string(val), "ui64");
     };
@@ -262,7 +263,6 @@ struct RowTaskBuilder {
       return bin(kind, lhs, rhs, lhs.type);
     };
     TaskTerm mask = c64(UINT32_MAX), bits = c64(32), zero = c64(0);
-    TaskTerm base = b64("shr", position, c64(2));
     TaskTerm a = b64("and", base, mask), rb = b64("shr", base, bits);
     TaskTerm c = b64("and", base, zero), d = c;
     TaskTerm lo = b64("and", seed, mask), hi = b64("shr", seed, bits);
@@ -277,6 +277,20 @@ struct RowTaskBuilder {
       lo = b64("and", b64("add", lo, incA), mask);
       hi = b64("and", b64("add", hi, incB), mask);
     }
+    return {a, rb, c, d};
+  }
+
+  TaskTerm emitUniform(TaskTerm seed, TaskTerm position, int dim,
+                       int axisId = 2) {
+    std::string vecU64 = regionType("value", "ui64", 1, dim, axisId);
+    auto c64 = [&](uint64_t val) {
+      return lit(std::to_string(val), "ui64");
+    };
+    auto b64 = [&](StringRef kind, TaskTerm lhs, TaskTerm rhs) {
+      return bin(kind, lhs, rhs, lhs.type);
+    };
+    TaskTerm base = b64("shr", position, c64(2));
+    auto [a, rb, c, d] = emitPhilox4x32Words(seed, base, dim, axisId);
     TaskTerm word = b64("and", position, c64(3));
     std::string vecI1 = regionType("value", "i1", 1, dim, axisId);
     for (auto [index, val] :
@@ -287,6 +301,90 @@ struct RowTaskBuilder {
     std::string vecF32 = regionType("value", "f32", 1, dim, axisId);
     TaskTerm f = castOp(b64("shr", d, c64(8)), vecF32);
     return bin("mul", f, lit("0x33800000", "f32"), vecF32);
+  }
+
+  TaskTerm emitContiguousUniform(TaskTerm seed, TaskTerm startIdx, int dim,
+                                 int axisId = 2) {
+    int qDim = dim / 4;
+    int qAxisId = axisId + 40;
+    std::string vecF32 = regionType("value", "f32", 1, dim, axisId);
+    TaskTerm startU64 = castOp(startIdx, "ui64");
+    TaskTerm rem = bin("and", startU64, lit("3", "ui64"), "ui64");
+    TaskTerm aligned = cmp("eq", rem, lit("0", "ui64"), "i1");
+    Operation *ifOp =
+        makeOp(b, loc, "task_if", {aligned.v}, {b.getIndexType()},
+               {b.getNamedAttr("res_types",
+                               b.getArrayAttr({b.getStringAttr(vecF32)}))},
+               2);
+    Block &thenBb = ifOp->getRegion(0).emplaceBlock();
+    Block &elseBb = ifOp->getRegion(1).emplaceBlock();
+    {
+      OpBuilder::InsertionGuard tg(b);
+      b.setInsertionPointToEnd(&thenBb);
+      std::string qU64 = regionType("value", "ui64", 1, qDim, qAxisId);
+      std::string qF32 = regionType("value", "f32", 1, qDim, qAxisId);
+      TaskTerm qStart = bin("shr", startU64, lit("2", "ui64"), "ui64");
+      Value qIota =
+          makeOp(b, loc, "task_iota", {}, {b.getIndexType()},
+                 {b.getNamedAttr("start", b.getI64IntegerAttr(0)),
+                  b.getNamedAttr("end", b.getI64IntegerAttr(qDim)),
+                  b.getNamedAttr("val_type", b.getStringAttr(qU64))})
+              ->getResult(0);
+      TaskTerm qBase = bin("add", {qIota, qU64}, qStart, qU64);
+      auto words = emitPhilox4x32Words(seed, qBase, qDim, qAxisId);
+      TaskTerm scale = lit("0x33800000", "f32");
+      TaskTerm eight = lit("8", "ui64");
+      std::string idxTy = regionType("value", "ui32", 1, dim, axisId);
+      std::string vecI1 = regionType("value", "i1", 1, dim, axisId);
+      Value fullIota =
+          makeOp(b, loc, "task_iota", {}, {b.getIndexType()},
+                 {b.getNamedAttr("start", b.getI64IntegerAttr(0)),
+                  b.getNamedAttr("end", b.getI64IntegerAttr(dim)),
+                  b.getNamedAttr("val_type", b.getStringAttr(idxTy))})
+              ->getResult(0);
+      TaskTerm blkIdx = bin("shr", {fullIota, idxTy}, lit("2", "ui32"), idxTy);
+      TaskTerm wordIdx = bin("and", {fullIota, idxTy}, lit("3", "ui32"), idxTy);
+      std::array<TaskTerm, 4> gathered;
+      for (unsigned w = 0; w < 4; ++w) {
+        TaskTerm fQuarter = bin(
+            "mul", castOp(bin("shr", words[w], eight, qU64), qF32), scale, qF32);
+        Value gv =
+            makeOp(b, loc, "task_extract", {fQuarter.v, blkIdx.v},
+                   {b.getIndexType()},
+                   {b.getNamedAttr("selector", b.getStringAttr("gather")),
+                    b.getNamedAttr("in_type", b.getStringAttr(qF32)),
+                    b.getNamedAttr("point_type", b.getStringAttr(idxTy)),
+                    b.getNamedAttr("val_type", b.getStringAttr(vecF32))})
+                ->getResult(0);
+        gathered[w] = {gv, vecF32};
+      }
+      TaskTerm out = gathered[3];
+      for (int w : {2, 1, 0}) {
+        TaskTerm active =
+            cmp("eq", wordIdx, lit(std::to_string(w), "ui32"), vecI1);
+        out = sel(active, gathered[w], out, vecF32);
+      }
+      makeOp(b, loc, "task_yield", {out.v}, {},
+             {b.getNamedAttr("val_types",
+                             b.getArrayAttr({b.getStringAttr(vecF32)}))});
+    }
+    {
+      OpBuilder::InsertionGuard eg(b);
+      b.setInsertionPointToEnd(&elseBb);
+      std::string vecU64 = regionType("value", "ui64", 1, dim, axisId);
+      Value uIota =
+          makeOp(b, loc, "task_iota", {}, {b.getIndexType()},
+                 {b.getNamedAttr("start", b.getI64IntegerAttr(0)),
+                  b.getNamedAttr("end", b.getI64IntegerAttr(dim)),
+                  b.getNamedAttr("val_type", b.getStringAttr(vecU64))})
+              ->getResult(0);
+      TaskTerm pos = bin("add", {uIota, vecU64}, startU64, vecU64);
+      TaskTerm out = emitUniform(seed, pos, dim, axisId);
+      makeOp(b, loc, "task_yield", {out.v}, {},
+             {b.getNamedAttr("val_types",
+                             b.getArrayAttr({b.getStringAttr(vecF32)}))});
+    }
+    return {ifOp->getResult(0), vecF32};
   }
 
   void collectSubgraph(Operation *root,
@@ -321,6 +419,7 @@ struct RowTaskBuilder {
       return terms.lookup(v);
     };
 
+    llvm::DenseMap<Value, TaskTerm> ordinalStarts;
     for (Operation *opPtr : ops) {
       Operation &op = *opPtr;
       StringRef code = op.getName().stripDialect();
@@ -465,6 +564,13 @@ struct RowTaskBuilder {
                 : bin("add", bin("mul", bin("add", row, origin, "index"),
                                  columns, "index"),
                       *startOff, "index");
+        if (wide && dim >= 4 && (dim % 4) == 0) {
+          ordinalStarts[op.getResult(0)] = off;
+          if (llvm::all_of(op.getResult(0).getUsers(), [](Operation *u) {
+                return u->getName().stripDialect() == "uniform";
+              }))
+            continue;
+        }
         std::string elem = wide ? "ui64" : "ui32";
         std::string ixTy = regionType("value", elem, 1, dim, vecAxisId);
         TaskTerm offElem = castOp(off, elem);
@@ -619,8 +725,15 @@ struct RowTaskBuilder {
       }
 
       if (code == "uniform") {
-        localMap[op.getResult(0)] = emitUniform(
-            lookup(op.getOperand(0)), lookup(op.getOperand(1)), dim, vecAxisId);
+        auto startIt = ordinalStarts.find(op.getOperand(1));
+        if (startIt != ordinalStarts.end() && dim >= 4 && (dim % 4) == 0) {
+          localMap[op.getResult(0)] = emitContiguousUniform(
+              lookup(op.getOperand(0)), startIt->second, dim, vecAxisId);
+        } else {
+          localMap[op.getResult(0)] = emitUniform(
+              lookup(op.getOperand(0)), lookup(op.getOperand(1)), dim,
+              vecAxisId);
+        }
         continue;
       }
 
@@ -2032,18 +2145,27 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
               b.setInsertionPointToEnd(guardThenBb);
             }
             if (n == "atomic_add") {
-              TaskTerm dst = rb.scalarSlice(v.getOperand(0), {index}, false);
               TaskTerm delta = a(v, 2);
-              Value rmw =
-                  makeOp(b, loc, "task_atomic_rmw", {delta.v, dst.v},
-                         {b.getIndexType()},
-                         {b.getNamedAttr("kind", b.getStringAttr("add")),
-                          b.getNamedAttr("ordering", b.getStringAttr("relaxed")),
-                          b.getNamedAttr("val_type", b.getStringAttr("si32")),
-                          b.getNamedAttr("slice_type",
-                                         b.getStringAttr(dst.type))})
-                      ->getResult(0);
-              rhs = {rmw, "si32"};
+              if (ownedKeys || rb.task.hasAttr("cpu.single_dispatcher")) {
+                TaskTerm prev =
+                    rb.scalarSlice(v.getOperand(0), {index}, true, "si32");
+                TaskTerm next = rb.bin("add", prev, delta, "si32");
+                rb.commitOp(next, rb.scalarSlice(v.getOperand(0), {index}, false));
+                rhs = prev;
+              } else {
+                TaskTerm dst = rb.scalarSlice(v.getOperand(0), {index}, false);
+                Value rmw =
+                    makeOp(b, loc, "task_atomic_rmw", {delta.v, dst.v},
+                           {b.getIndexType()},
+                           {b.getNamedAttr("kind", b.getStringAttr("add")),
+                            b.getNamedAttr("ordering",
+                                           b.getStringAttr("relaxed")),
+                            b.getNamedAttr("val_type", b.getStringAttr("si32")),
+                            b.getNamedAttr("slice_type",
+                                           b.getStringAttr(dst.type))})
+                        ->getResult(0);
+                rhs = {rmw, "si32"};
+              }
             } else if (n == "unique_put") {
               rb.commitOp(a(v, 2),
                           rb.scalarSlice(v.getOperand(0), {index}, false));

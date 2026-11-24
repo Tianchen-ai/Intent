@@ -7,12 +7,12 @@ multiclass OrderedOwners<Dialect d> {
     let arguments=(ins Variadic<AnyMemRef>:$views,DenseI64ArrayAttr:$axes);
     let regions=(region AnyRegion:$body);
   }
-  def SliceRead : Op<d,"slice_read",[MemoryEffects<[MemRead]>]> {
-    let arguments=(ins AnyMemRef:$view,Variadic<Index>:$indices,I64Attr:$axis);
+  def SliceRead : Op<d,"slice_read"> {
+    let arguments=(ins Arg<AnyMemRef, "", [MemRead]>:$view,Variadic<Index>:$indices,I64Attr:$axis);
     let results=(outs AnyRankedTensor:$values);
   }
-  def SliceWrite : Op<d,"slice_write",[MemoryEffects<[MemWrite]>]> {
-    let arguments=(ins AnyRankedTensor:$values,AnyMemRef:$view,Variadic<Index>:$indices,I64Attr:$axis);
+  def SliceWrite : Op<d,"slice_write"> {
+    let arguments=(ins AnyRankedTensor:$values,Arg<AnyMemRef, "", [MemWrite]>:$view,Variadic<Index>:$indices,I64Attr:$axis);
   }
   def LaneSplat : Op<d,"lane_splat",[Pure]> {
     let arguments=(ins AnyType:$scalar,AnyMemRef:$shapeView,I64Attr:$axis);

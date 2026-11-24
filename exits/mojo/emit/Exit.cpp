@@ -62,6 +62,8 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
                 {2, *bits == 512 ? 128 : 64},
                 {4, *bits == 512 ? 128 : 64},
                 {8, 256}};
+  caps->unrollFactors = {1, 4};
+  caps->estimate = "exits/mojo::simd-row-primitive";
   if (auto e = p.services.provide<intentdsl::cpu::RowMachine>(caps))
     return e;
   return p;
