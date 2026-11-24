@@ -267,18 +267,6 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
       if (!loop->hasAttr("block.repair_masked_nan")) {
         next.push_back(dot(w16, v, false, acc));
       } else {
-        auto *vOp = operands.values.getDefiningOp();
-        Value vView = vOp->getOperand(0);
-        int64_t vAx = vOp->getAttrOfType<IntegerAttr>("axis").getInt();
-        int64_t vN = shape(vView)[vAx];
-        int64_t vPad = std::max<int64_t>(1, llvm::PowerOf2Ceil(vN));
-        SmallVector<Value> vOuter;
-        SmallVector<bool> vIsIv;
-        for (Value cv : vOp->getOperands().drop_front()) {
-          vIsIv.push_back(cv == loop.getInductionVar());
-          vOuter.push_back(cv == loop.getInductionVar() ? Value()
-                                                        : widen(coordinate(cv)));
-        }
         auto eTy = elem(v.getType());
         auto zElem = castElement(scalar(0), eTy);
         auto zW = broadcast(zElem, w16.getType());
@@ -309,33 +297,19 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
         Value cur = fixLoop.getRegionIterArgs()[0];
         Value j64 = b.create<arith::ExtSIOp>(loc, b.getI64Type(),
                                              fixLoop.getInductionVar());
-        Value tJ = b.create<arith::AddIOp>(loc, base, j64);
         auto tokAxis = lanes(span);
         auto isJ = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
                                            tokAxis, like(j64, tokAxis.getType()));
         auto isJW = broadcast(isJ, live.getType(), 1);
         auto liveJ = reduce(b.create<arith::AndIOp>(loc, live, isJW), "max", 1);
-        auto wJ = castElement(reduce(select(isJW, w16, zW), "sum", 1),
-                              b.getF32Type());
-        SmallVector<Value> vCoords;
-        SmallVector<int64_t> vAxes;
-        for (auto [idxC, oc] : llvm::enumerate(vOuter)) {
-          vCoords.push_back(vIsIv[idxC] ? tJ : oc);
-          vAxes.push_back(-1);
-        }
-        Value kAxis = lanes(vPad);
-        vCoords.insert(vCoords.begin() + vAx, kAxis);
-        vAxes.insert(vAxes.begin() + vAx, 0);
-        Value anyJ = reduce(b.create<arith::AndIOp>(loc, any, isJ), "max", 0);
-        Value vMask = broadcast(anyJ, shaped({vPad}, b.getI1Type()));
-        if (vPad != vN) {
-          auto within = b.create<arith::CmpIOp>(
-              loc, arith::CmpIPredicate::slt, kAxis,
-              like(integer(vN), kAxis.getType()));
-          vMask = b.create<arith::AndIOp>(loc, vMask, within);
-        }
-        auto vJ = castElement(read(vView, address(vView, vCoords, vAxes), vMask),
-                              b.getF32Type());
+        auto wF32 = castElement(w16, b.getF32Type());
+        auto zWF32 = broadcast(scalar(0.f), wF32.getType());
+        auto wJ = reduce(select(isJW, wF32, zWF32), "sum", 1);
+        auto isJV = broadcast(
+            isJ, cast<RankedTensorType>(v.getType()).clone(b.getI1Type()), 0);
+        auto vF32 = castElement(v, b.getF32Type());
+        auto zVF32 = broadcast(scalar(0.f), vF32.getType());
+        auto vJ = reduce(select(isJV, vF32, zVF32), "sum", 0);
         auto accMaskTy =
             cast<RankedTensorType>(cur.getType()).clone(b.getI1Type());
         auto classify = [&](Value vec, int axis) {

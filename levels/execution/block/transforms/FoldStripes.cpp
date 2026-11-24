@@ -264,8 +264,11 @@ LogicalResult foldStripes(func::FuncOp fn,
 
   SmallVector<Operation *> postStores;
   SmallVector<SmallVector<Operation *>> stripeStores(K);
+  llvm::DenseMap<Operation *, unsigned> origOrder;
+  unsigned nextOrd = 0;
 
   for (Operation &op : entry.without_terminator()) {
+    origOrder[&op] = nextOrd++;
     if (op.getName().getDialectNamespace() != "block" || op.getNumRegions() > 0)
       return success();
     auto n = op.getName().stripDialect();
@@ -454,12 +457,6 @@ LogicalResult foldStripes(func::FuncOp fn,
   if (stripeOps[0].empty())
     return success();
   for (int64_t k = 0; k < K; ++k) {
-    llvm::sort(stripeStores[k], [&](Operation *a, Operation *b) {
-      return plan->args[cast<BlockArgument>(a->getOperand(0)).getArgNumber()]
-                 .pubSlot <
-             plan->args[cast<BlockArgument>(b->getOperand(0)).getArgNumber()]
-                 .pubSlot;
-    });
     if (stripeOps[k].size() != stripeOps[0].size() ||
         stripeStores[k].size() != stripeStores[0].size())
       return success();
@@ -569,8 +566,55 @@ LogicalResult foldStripes(func::FuncOp fn,
     }
   }
 
-  // Ensure invariantOps after postStores don't exist; move invariantOps before
-  // stripe_loop and postStores after stripe_loop.
+  // Verify that the folded schedule preserves original order for any pair of
+  // memory operations that may touch overlapping elements under ABI binding:
+  // `Out` slots are disjoint from every other bound slot, `require_writable`
+  // guarantees distinct stripes [k*stride, (k+1)*stride) of a 2D view are
+  // disjoint, and `InOut` may only alias a slot of identical 2D shape.
+  auto slotDir = [&](int64_t pubSlot) -> StringRef {
+    auto *obj = plan->pubSlots[pubSlot].getAsObject();
+    return obj ? obj->getString("direction").value_or("") : "";
+  };
+  auto mayOverlap = [&](Operation *a, Operation *b) -> bool {
+    bool stA = a->getName().stripDialect() == "store";
+    bool stB = b->getName().stripDialect() == "store";
+    if (!stA && !stB)
+      return false;
+    const auto &dA =
+        plan->args[cast<BlockArgument>(a->getOperand(0)).getArgNumber()];
+    const auto &dB =
+        plan->args[cast<BlockArgument>(b->getOperand(0)).getArgNumber()];
+    if (dA.kind != ArgKind::Matrix2D || dB.kind != ArgKind::Matrix2D ||
+        dA.striped != dB.striped)
+      return false;
+    if (dA.striped && dA.stepIdx != dB.stepIdx)
+      return false;
+    if (dA.pubSlot == dB.pubSlot)
+      return true;
+    StringRef dirA = slotDir(dA.pubSlot), dirB = slotDir(dB.pubSlot);
+    if (dirA == "Out" || dirB == "Out")
+      return false;
+    return (stA && dirA == "InOut") || (stB && dirB == "InOut");
+  };
+  SmallVector<Operation *> scheduledMem;
+  for (Operation *inv : invariantOps)
+    if (inv->getName().stripDialect() == "load")
+      scheduledMem.push_back(inv);
+  for (int64_t k = 0; k < K; ++k) {
+    for (Operation *opK : stripeOps[k])
+      if (opK->getName().stripDialect() == "load")
+        scheduledMem.push_back(opK);
+    llvm::append_range(scheduledMem, stripeStores[k]);
+  }
+  llvm::append_range(scheduledMem, postStores);
+  for (size_t i = 0; i < scheduledMem.size(); ++i)
+    for (size_t j = i + 1; j < scheduledMem.size(); ++j)
+      if (origOrder.lookup(scheduledMem[i]) >
+              origOrder.lookup(scheduledMem[j]) &&
+          mayOverlap(scheduledMem[i], scheduledMem[j]))
+        return success();
+
+  // Move invariantOps before stripe_loop and postStores after stripe_loop.
   OpBuilder b(fn.getContext());
   unsigned oldArgCount = entry.getNumArguments();
   SmallVector<Value> newArgs;

@@ -14,9 +14,14 @@ class Target:
         limit = (1 << 31) - 1
         narrow = True
         tensor_map = True
+        seen_ptrs = set()
         for view in buffers:
             if not isinstance(view, torch.Tensor):
                 continue
+            ptr = view.data_ptr()
+            if ptr in seen_ptrs:
+                tensor_map = False
+            seen_ptrs.add(ptr)
             shape, strides = view.shape, view.stride()
             tensor_map &= view.data_ptr() % 16 == 0 and strides[-1] == 1 and all(
                 stride * view.element_size() % 16 == 0 for stride in strides[:-1])
