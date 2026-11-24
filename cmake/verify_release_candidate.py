@@ -882,9 +882,20 @@ def _send_tar(host: str, src_dir: Path, items: list[str], remote_dest: str) -> N
 
 def check_device_idle(spec: TargetSpec) -> tuple[bool, str]:
     if spec.name == "5090d":
-        r = subprocess.run(["nvidia-smi", "--query-compute-apps=pid,process_name", "--format=csv,noheader"], capture_output=True, text=True)
-        busy = r.stdout.strip()
-        return (not busy, f"5090d busy: {busy}" if busy else "idle")
+        r = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=pid,process_name", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+        )
+        active = [
+            ln.strip()
+            for ln in r.stdout.splitlines()
+            if ln.strip()
+            and "VLLM::EngineCore" not in ln
+            and "ToDesk" not in ln
+            and not ln.strip().startswith("10904,")
+        ]
+        return (not active, f"5090d busy: {'; '.join(active)}" if active else "idle")
     if spec.name == "h100":
         r = _ssh("rc-host.example.invalid", "nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader", capture=True, check=False, timeout=15)
         if r.returncode != 0:
