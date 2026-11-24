@@ -73,7 +73,7 @@ capabilities(const llvm::json::Object &options) {
           occupancies.push_back(4u);
       } else {
         occupancies.push_back(std::min(rows, 2u));
-        if (rows == 1 && width >= 1024)
+        if (rows == 1 && width >= 256)
           occupancies.push_back(2u);
       }
       for (auto [idx, occupancy] : llvm::enumerate(occupancies)) {
