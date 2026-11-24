@@ -371,10 +371,14 @@ llvm::Error materializeOwnerBuffers(func::FuncOp fn, RewriterBase &rw,
       if (canTighten) {
         Value lo0 = topLoops.front().getLowerBound();
         Value hi0 = topLoops.front().getUpperBound();
-        Value clamped =
-            maybeMarkCommon(rw.create<arith::MaxSIOp>(loc, lo0, exclusive));
-        Value tightHi =
-            maybeMarkCommon(rw.create<arith::MinSIOp>(loc, hi0, clamped));
+        Value gtLo = maybeMarkCommon(rw.create<arith::CmpIOp>(
+            loc, arith::CmpIPredicate::sgt, exclusive, lo0));
+        Value clamped = maybeMarkCommon(
+            rw.create<arith::SelectOp>(loc, gtLo, exclusive, lo0));
+        Value ltHi = maybeMarkCommon(rw.create<arith::CmpIOp>(
+            loc, arith::CmpIPredicate::slt, clamped, hi0));
+        Value tightHi = maybeMarkCommon(
+            rw.create<arith::SelectOp>(loc, ltHi, clamped, hi0));
         for (scf::ForOp lp : topLoops) {
           lp.getLowerBoundMutable().assign(lo0);
           lp.getUpperBoundMutable().assign(tightHi);
