@@ -108,8 +108,14 @@ def MojoPtrOffset : RowInst<"ptr_offset"> {
   let results=(outs Index:$shifted);
 }
 def MojoBrgemmCall : RowInst<"brgemm_call"> {
-  let arguments=(ins AnyType:$handle, AnyType:$a_ptr, AnyType:$b_ptr, AnyType:$c_ptr, AnyType:$scratch);
+  let arguments=(ins AnyType:$handle, AnyType:$a_ptr, AnyType:$b_ptr, AnyType:$c_ptr, AnyType:$scratch, BoolAttr:$allow_subnormal_ftz);
   let results=(outs I32:$status);
+}
+def MojoCheckStatus : RowInst<"check_status"> {
+  let arguments=(ins I32:$status);
+}
+def MojoPanelReturn : RowInst<"panel_return"> {
+  let arguments=(ins I32Attr:$code);
 }
 def MojoQ4KUnpackRow : RowInst<"q4k_unpack_row"> {
   let arguments=(ins AnyType:$w_ptr, Index:$w_base, AnyType:$u8_buf, Index:$row_idx, Index:$sub, I64Attr:$byte_stride);
@@ -131,7 +137,7 @@ def MojoEpilogueCast : RowInst<"epilogue_cast"> {
 }
 def MojoEnd : RowInst<"end",[Terminator]> {}
 
-// Host C region ops
+// Host C region ops (explicit loops, OpenMP, scratch, and atomic statements)
 def MojoHostFn : RowInst<"host_fn",[SingleBlock]> {
   let arguments=(ins StrAttr:$params, DenseI64ArrayAttr:$extents, DenseI64ArrayAttr:$tile,
                      BoolAttr:$uses_brgemm, BoolAttr:$uses_q8k, BoolAttr:$uses_bf16_math,
@@ -142,39 +148,77 @@ def MojoHostAlloc : RowInst<"host_alloc"> {
   let arguments=(ins StrAttr:$buf_name, StrAttr:$placement, StrAttr:$c_type,
                      StrAttr:$count_expr, I64Attr:$elem_bytes, ArrayAttr:$cleanup);
 }
-def MojoHostPrep : RowInst<"host_prep"> {
-  let arguments=(ins StrAttr:$kind, ArrayAttr:$cleanup);
-  let regions=(region VariadicRegion<AnyRegion>:$map);
-}
-def MojoHostColLoop : RowInst<"host_col_loop",[SingleBlock]> {
+def MojoHostIf : RowInst<"host_if",[SingleBlock]> {
+  let arguments=(ins StrAttr:$cond);
   let regions=(region AnyRegion:$body);
 }
-def MojoHostPanelYield : RowInst<"host_panel_yield",[Terminator]> {
-  let arguments=(ins AnyType:$value);
+def MojoHostOmpParallel : RowInst<"host_omp_parallel",[SingleBlock]> {
+  let arguments=(ins StrAttr:$num_threads, StrAttr:$if_cond, BoolAttr:$reduce_rc);
+  let regions=(region AnyRegion:$body);
 }
-def MojoHostBrgemmPlan : RowInst<"host_brgemm_plan"> {
+def MojoHostOmpFor : RowInst<"host_omp_for",[SingleBlock]> {
+  let arguments=(ins StrAttr:$iv, StrAttr:$lb, StrAttr:$ub, StrAttr:$step,
+                     BoolAttr:$parallel, BoolAttr:$nowait, BoolAttr:$simd, StrAttr:$if_cond);
+  let regions=(region AnyRegion:$body);
+}
+def MojoHostFor : RowInst<"host_for",[SingleBlock]> {
+  let arguments=(ins StrAttr:$iv, StrAttr:$lb, StrAttr:$ub, StrAttr:$step);
+  let regions=(region AnyRegion:$body);
+}
+def MojoHostGuardContinue : RowInst<"host_guard_continue"> {
+  let arguments=(ins StrAttr:$cond);
+}
+def MojoHostLetI64 : RowInst<"host_let_i64"> {
+  let arguments=(ins StrAttr:$name, StrAttr:$expr);
+}
+def MojoHostLoadScalar : RowInst<"host_load_scalar"> {
+  let arguments=(ins I64Attr:$slot, StrAttr:$c_type, StrAttr:$index_expr);
+  let results=(outs AnyType:$val);
+}
+def MojoHostPtrOffset : RowInst<"host_ptr_offset"> {
+  let arguments=(ins StrAttr:$c_type, StrAttr:$name, StrAttr:$base_expr, StrAttr:$offset_expr);
+}
+def MojoHostSpanOp : RowInst<"host_span_op"> {
+  let arguments=(ins StrAttr:$op, StrAttr:$dst_expr, StrAttr:$src_expr, StrAttr:$count_expr, I64Attr:$elem_bytes);
+}
+def MojoHostElemOp : RowInst<"host_elem_op"> {
+  let arguments=(ins StrAttr:$op, StrAttr:$dst_expr, StrAttr:$src_expr, StrAttr:$aux_expr, I64Attr:$elem_bytes);
+}
+def MojoHostPanelYield : RowInst<"host_panel_yield"> {
+  let arguments=(ins AnyType:$value, BoolAttr:$widen_bf16, StrAttr:$dst_expr);
+}
+def MojoHostBrgemmPlanDecl : RowInst<"host_brgemm_plan_decl"> {}
+def MojoHostBrgemmMarkRows : RowInst<"host_brgemm_mark_rows"> {
+  let arguments=(ins StrAttr:$len_expr);
+}
+def MojoHostBrgemmLookup : RowInst<"host_brgemm_lookup"> {
   let arguments=(ins I64Attr:$a_dt, I64Attr:$b_dt, I64Attr:$c_dt,
-                     StrAttr:$lda_expr, StrAttr:$ldb_expr, BoolAttr:$is_q4k,
-                     BoolAttr:$grouped, I64Attr:$offsets_slot, I64Attr:$offsets_stride,
+                     StrAttr:$lda_expr, StrAttr:$ldb_expr, StrAttr:$n_expr, StrAttr:$k_expr,
                      ArrayAttr:$cleanup);
 }
-def MojoHostParallelTiles : RowInst<"host_parallel_tiles",[SingleBlock]> {
-  let arguments=(ins BoolAttr:$grouped, BoolAttr:$routed, BoolAttr:$windowed,
-                     I64Attr:$head_extent, I64Attr:$chunk_extent, I64Attr:$multiplicity,
-                     I64Attr:$offsets_slot, I64Attr:$offsets_stride,
-                     I64Attr:$routes_slot, I64Attr:$routes_stride,
-                     BoolAttr:$uses_brgemm, BoolAttr:$is_q4k);
-  let regions=(region AnyRegion:$body);
+def MojoHostThreadScratchAlloc : RowInst<"host_thread_scratch_alloc"> {
+  let arguments=(ins I64Attr:$stack_bytes, I64Attr:$alignment, StrAttr:$size_var);
+}
+def MojoHostThreadScratchFree : RowInst<"host_thread_scratch_free"> {
+  let arguments=(ins I64Attr:$stack_bytes);
+}
+def MojoHostBrgemmCtxDecl : RowInst<"host_brgemm_ctx_decl"> {}
+def MojoHostBrgemmCtxSwitch : RowInst<"host_brgemm_ctx_switch"> {}
+def MojoHostBrgemmCtxRelease : RowInst<"host_brgemm_ctx_release"> {}
+def MojoHostTileCoords : RowInst<"host_tile_coords"> {
+  let arguments=(ins BoolAttr:$windowed, I64Attr:$head_extent, I64Attr:$chunk_extent);
+}
+def MojoHostGroupedBounds : RowInst<"host_grouped_bounds"> {
+  let arguments=(ins I64Attr:$offsets_slot, I64Attr:$offsets_stride);
+}
+def MojoHostRouteCoords : RowInst<"host_route_coords"> {
+  let arguments=(ins BoolAttr:$routed, I64Attr:$routes_slot, I64Attr:$routes_stride, I64Attr:$multiplicity);
 }
 def MojoHostViewPtr : RowInst<"host_view_ptr"> {
   let arguments=(ins I64Attr:$index, StrAttr:$source_kind, StrAttr:$expr);
 }
 def MojoHostCallPanel : RowInst<"host_call_panel"> {
   let arguments=(ins I64Attr:$arity, BoolAttr:$uses_brgemm);
-}
-def MojoHostScatterRouted : RowInst<"host_scatter_routed"> {
-  let arguments=(ins I64Attr:$dst_slot, I64Attr:$multiplicity, DenseI64ArrayAttr:$dst_strides,
-                     I64Attr:$elem_bytes, I64Attr:$routes_slot, I64Attr:$routes_stride);
 }
 def MojoHostFree : RowInst<"host_free"> {
   let arguments=(ins StrAttr:$buf_name);

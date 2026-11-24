@@ -155,6 +155,8 @@ llvm::Error describeMojoMatrixPackage(func::FuncOp fn, Operation &prog,
       {"host", ""},
       {"returns_status", true},
       {"onednn", usesBrgemm},
+      {"allow_subnormal_ftz",
+       bool(fn->getAttrOfType<UnitAttr>("kir.allow_subnormal_ftz"))},
       {"domain", intentdsl::publishDomain(fn)},
       {"abi", std::move(*abi)},
       {"rows", llvm::json::Array{llvm::json::Object{{"grain", tile[0]},
@@ -179,6 +181,11 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
   StringRef packing = packingAttr ? packingAttr.getValue() : StringRef();
   bool routed = domain.hasAttr("cpu.route_storage");
   bool usesBrgemm = implId.contains("onednn-brgemm");
+  bool allowSubnormalFtz =
+      bool(dot.getAttrOfType<UnitAttr>("kir.allow_subnormal_ftz"));
+  bool emitFtz = implId == "exits/mojo::onednn-brgemm-bf16";
+  if (emitFtz && !allowSubnormalFtz)
+    return dot.emitError("onednn-brgemm-bf16 requires kir.allow_subnormal_ftz");
 
   int64_t M = extents[0], N = extents[1], K = extents[2], G = extents[3];
   int64_t mr = tile[0], nr = tile[1], depth = tile[2], lanes = tile[3];
@@ -430,6 +437,8 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
     emitStoreOut(b, loc, panelPtrs.back(), rIv, c0, epi, 1, views.back());
     makeOp(b, loc, "end");
     b.setInsertionPointToEnd(&pfnBb);
+    makeOp(b, loc, "panel_return", {}, {},
+           {b.getNamedAttr("code", b.getI32IntegerAttr(0))});
     makeOp(b, loc, "end");
   } else if (implId == "exits/mojo::onednn-brgemm-u8s8") {
     Value c0 = constIdx(b, loc, 0);
@@ -512,8 +521,13 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
     Value qSubPtr =
         makeOp(b, loc, "ptr_offset", {panelPtrs[1], qOff}, {b.getIndexType()})
             ->getResult(0);
-    makeOp(b, loc, "brgemm_call", {argBrgH, u8Buf, qSubPtr, s32Buf, argBrgS},
-           {b.getI32Type()}, {implNamedAttr});
+    Value subSt =
+        makeOp(b, loc, "brgemm_call",
+               {argBrgH, u8Buf, qSubPtr, s32Buf, argBrgS}, {b.getI32Type()},
+               {b.getNamedAttr("allow_subnormal_ftz", b.getBoolAttr(false)),
+                implNamedAttr})
+            ->getResult(0);
+    makeOp(b, loc, "check_status", {subSt});
     // Accumulate scaled subgroup for ri in 0..R-1
     {
       OperationState aLoop(loc, "mojo_row.for_range");
@@ -559,6 +573,8 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
       makeOp(b, loc, "end");
       b.setInsertionPointToEnd(&pfnBb);
     }
+    makeOp(b, loc, "panel_return", {}, {},
+           {b.getNamedAttr("code", b.getI32IntegerAttr(0))});
     makeOp(b, loc, "end");
   } else if (usesBrgemm) {
     // BRGeMM tile path (f32, f16, bf16, s8)
@@ -569,9 +585,14 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
                {b.getNamedAttr("dtype", b.getStringAttr(accDtype)),
                 b.getNamedAttr("count", b.getI64IntegerAttr(mr * nr))})
             ->getResult(0);
-    makeOp(b, loc, "brgemm_call",
-           {argBrgH, panelPtrs[0], panelPtrs[1], cBuf, argBrgS},
-           {b.getI32Type()}, {implNamedAttr});
+    Value tileSt =
+        makeOp(b, loc, "brgemm_call",
+               {argBrgH, panelPtrs[0], panelPtrs[1], cBuf, argBrgS},
+               {b.getI32Type()},
+               {b.getNamedAttr("allow_subnormal_ftz", b.getBoolAttr(emitFtz)),
+                implNamedAttr})
+            ->getResult(0);
+    makeOp(b, loc, "check_status", {tileSt});
 
     // Fast full-tile epilogue when R == mr and C == nr
     {
@@ -671,6 +692,8 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
     b.setInsertionPointToEnd(&rBb);
     makeOp(b, loc, "end");
     b.setInsertionPointToEnd(&pfnBb);
+    makeOp(b, loc, "panel_return", {}, {},
+           {b.getNamedAttr("code", b.getI32IntegerAttr(0))});
     makeOp(b, loc, "end");
   } else if (usesVnni) {
     // Native AVX-512 VNNI dot4 path
@@ -774,6 +797,8 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
     emitVnniBody(1, rIv, &rBb);
     makeOp(b, loc, "end");
     b.setInsertionPointToEnd(&pfnBb);
+    makeOp(b, loc, "panel_return", {}, {},
+           {b.getNamedAttr("code", b.getI32IntegerAttr(0))});
     makeOp(b, loc, "end");
   } else {
     // Native SIMD FMA path
@@ -932,6 +957,8 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
     b.setInsertionPointToEnd(&rBb);
     makeOp(b, loc, "end");
     b.setInsertionPointToEnd(&pfnBb);
+    makeOp(b, loc, "panel_return", {}, {},
+           {b.getNamedAttr("code", b.getI32IntegerAttr(0))});
     makeOp(b, loc, "end");
   }
 
@@ -964,10 +991,82 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
   makeOp(b, loc, "end");
   Block &hBb = hfnOp->getRegion(0).emplaceBlock();
   b.setInsertionPointToEnd(&hBb);
+  makeOp(b, loc, "end");
+
+  auto openHostBlock = [&](StringRef opName,
+                           ArrayRef<NamedAttribute> attrs) -> Block * {
+    OperationState s(loc, ("mojo_row." + opName).str());
+    s.addAttributes(attrs);
+    Block &bb = s.addRegion()->emplaceBlock();
+    b.create(s);
+    OpBuilder::InsertionGuard g(b);
+    b.setInsertionPointToEnd(&bb);
+    makeOp(b, loc, "end");
+    return &bb;
+  };
+  auto enterBlock = [&](Block *bb) { b.setInsertionPoint(bb->getTerminator()); };
+  auto emitLet = [&](StringRef name, StringRef expr) {
+    makeOp(b, loc, "host_let_i64", {}, {},
+           {b.getNamedAttr("name", b.getStringAttr(name)),
+            b.getNamedAttr("expr", b.getStringAttr(expr))});
+  };
+  auto emitPtr = [&](StringRef cTy, StringRef name, StringRef base,
+                     StringRef off) {
+    makeOp(b, loc, "host_ptr_offset", {}, {},
+           {b.getNamedAttr("c_type", b.getStringAttr(cTy)),
+            b.getNamedAttr("name", b.getStringAttr(name)),
+            b.getNamedAttr("base_expr", b.getStringAttr(base)),
+            b.getNamedAttr("offset_expr", b.getStringAttr(off))});
+  };
+  auto emitSpan = [&](StringRef opKind, StringRef dstE, StringRef srcE,
+                      StringRef cntE, int64_t eb) {
+    makeOp(b, loc, "host_span_op", {}, {},
+           {b.getNamedAttr("op", b.getStringAttr(opKind)),
+            b.getNamedAttr("dst_expr", b.getStringAttr(dstE)),
+            b.getNamedAttr("src_expr", b.getStringAttr(srcE)),
+            b.getNamedAttr("count_expr", b.getStringAttr(cntE)),
+            b.getNamedAttr("elem_bytes", b.getI64IntegerAttr(eb))});
+  };
+  auto emitElem = [&](StringRef opKind, StringRef dstE, StringRef srcE,
+                      StringRef auxE, int64_t eb) {
+    makeOp(b, loc, "host_elem_op", {}, {},
+           {b.getNamedAttr("op", b.getStringAttr(opKind)),
+            b.getNamedAttr("dst_expr", b.getStringAttr(dstE)),
+            b.getNamedAttr("src_expr", b.getStringAttr(srcE)),
+            b.getNamedAttr("aux_expr", b.getStringAttr(auxE)),
+            b.getNamedAttr("elem_bytes", b.getI64IntegerAttr(eb))});
+  };
+  auto makeHostIf = [&](StringRef cond) {
+    return openHostBlock("host_if",
+                         {b.getNamedAttr("cond", b.getStringAttr(cond))});
+  };
+  auto makeHostFor = [&](StringRef iv, StringRef lb, StringRef ub,
+                         StringRef step) {
+    return openHostBlock("host_for",
+                         {b.getNamedAttr("iv", b.getStringAttr(iv)),
+                          b.getNamedAttr("lb", b.getStringAttr(lb)),
+                          b.getNamedAttr("ub", b.getStringAttr(ub)),
+                          b.getNamedAttr("step", b.getStringAttr(step))});
+  };
+  auto makeHostOmpFor = [&](StringRef iv, StringRef lb, StringRef ub,
+                            StringRef step, bool parallel, bool nowait,
+                            bool simd, StringRef ifCond) {
+    return openHostBlock(
+        "host_omp_for",
+        {b.getNamedAttr("iv", b.getStringAttr(iv)),
+         b.getNamedAttr("lb", b.getStringAttr(lb)),
+         b.getNamedAttr("ub", b.getStringAttr(ub)),
+         b.getNamedAttr("step", b.getStringAttr(step)),
+         b.getNamedAttr("parallel", b.getBoolAttr(parallel)),
+         b.getNamedAttr("nowait", b.getBoolAttr(nowait)),
+         b.getNamedAttr("simd", b.getBoolAttr(simd)),
+         b.getNamedAttr("if_cond", b.getStringAttr(ifCond))});
+  };
 
   llvm::DenseMap<Value, std::string> bufNames;
   SmallVector<Attribute> activeHeap;
   int bufCounter = 0;
+  enterBlock(&hBb);
   for (Operation *aop : allocOps) {
     StringRef role = aop->getAttrOfType<StringAttr>("role").getValue();
     StringRef place = aop->getAttrOfType<StringAttr>("placement").getValue();
@@ -997,78 +1096,422 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
   }
 
   for (Operation *pop : prepOps) {
+    OpBuilder::InsertionGuard prepGuard(b);
+    enterBlock(&hBb);
     StringRef pk = pop->getAttrOfType<StringAttr>("kind").getValue();
-    SmallVector<NamedAttribute> attrs{
-        b.getNamedAttr("kind", b.getStringAttr(pk)),
-        b.getNamedAttr("cleanup", b.getArrayAttr(activeHeap))};
-    for (auto na : pop->getAttrs())
-      if (na.getName() != "kind")
-        attrs.push_back(na);
-
     SmallVector<int64_t> opSlots;
     for (Value v : pop->getOperands().drop_back())
       opSlots.push_back(slotOf(v));
-    attrs.push_back(
-        b.getNamedAttr("src_slots", b.getDenseI64ArrayAttr(opSlots)));
-    for (auto [idx, s] : llvm::enumerate(opSlots)) {
-      attrs.push_back(b.getNamedAttr("src_strides_" + std::to_string(idx),
-                                     argStrides(s)));
-      attrs.push_back(b.getNamedAttr(
-          "src_dtype_" + std::to_string(idx), b.getStringAttr(argDtype(s))));
-    }
-    attrs.push_back(b.getNamedAttr(
-        "dst_buf", b.getStringAttr(bufNames[pop->getOperands().back()])));
-    if (kind == "window_contract") {
-      auto outSh = argShape(slotOf(dstArg));
-      attrs.push_back(b.getNamedAttr(
-          "head_extent", b.getI64IntegerAttr(std::max<int64_t>(1, outSh[2]))));
-      attrs.push_back(b.getNamedAttr(
-          "chunk_extent", b.getI64IntegerAttr(std::max<int64_t>(1, outSh[1]))));
-    }
+    std::string dst = bufNames[pop->getOperands().back()];
 
-    OperationState ps(loc, "mojo_row.host_prep");
-    ps.addAttributes(attrs);
-    if (!pop->getRegions().empty() && !pop->getRegion(0).empty()) {
-      // Split map region into outer row-invariant block and nested per-column
-      // loop region based on SSA dependence on argument 0.
-      Region *invReg = ps.addRegion();
-      Block &invBb = invReg->emplaceBlock();
+    if (pk == "map-window-rhs-f32" || pk == "map-window-rhs-bf16") {
+      auto outSh = argShape(slotOf(dstArg));
+      int64_t H = std::max<int64_t>(1, outSh[2]);
+      int64_t chunks = std::max<int64_t>(1, outSh[1]);
+      int64_t hg = pop->getAttrOfType<IntegerAttr>("head_group").getInt();
+      auto idxExpr = [&](unsigned idx, ArrayRef<std::string> coords) {
+        auto st = argStrides(opSlots[idx]);
+        std::string s = "0";
+        for (auto [ax, e] : llvm::enumerate(coords))
+          s += "+(" + e + ")*" + std::to_string(st[ax]) + "LL";
+        return s;
+      };
+      Block *pBb = makeHostOmpFor("p", "0", "G*K", "1", true, false, false,
+                                  "G*K>1");
+      enterBlock(pBb);
+      emitLet("g", "p/K");
+      emitLet("k", "p%K");
+      emitLet("head", "g%" + std::to_string(H));
+      emitLet("chunk",
+              "g/" + std::to_string(H) + "%" + std::to_string(chunks));
+      emitLet("batch",
+              "g/" + std::to_string(H) + "/" + std::to_string(chunks));
+      emitLet("group", "head/" + std::to_string(hg));
+
       auto &srcBb = pop->getRegion(0).front();
       IRMapping mapping;
-      for (unsigned ai = 1; ai < srcBb.getNumArguments(); ++ai)
-        mapping.map(srcBb.getArgument(ai),
-                    invBb.addArgument(srcBb.getArgument(ai).getType(), loc));
+      Value ld1 =
+          makeOp(b, loc, "host_load_scalar", {}, {srcBb.getArgument(1).getType()},
+                 {b.getNamedAttr("slot", b.getI64IntegerAttr(opSlots[1])),
+                  b.getNamedAttr("c_type", b.getStringAttr("float")),
+                  b.getNamedAttr("index_expr",
+                                 b.getStringAttr(
+                                     idxExpr(1, {"batch", "head", "chunk", "k"})))})
+              ->getResult(0);
+      Value ld2 =
+          makeOp(b, loc, "host_load_scalar", {}, {srcBb.getArgument(2).getType()},
+                 {b.getNamedAttr("slot", b.getI64IntegerAttr(opSlots[2])),
+                  b.getNamedAttr("c_type", b.getStringAttr("float")),
+                  b.getNamedAttr("index_expr",
+                                 b.getStringAttr(
+                                     idxExpr(2, {"batch", "head", "chunk", "k"})))})
+              ->getResult(0);
+      Value ld3 =
+          makeOp(b, loc, "host_load_scalar", {}, {srcBb.getArgument(3).getType()},
+                 {b.getNamedAttr("slot", b.getI64IntegerAttr(opSlots[2])),
+                  b.getNamedAttr("c_type", b.getStringAttr("float")),
+                  b.getNamedAttr("index_expr",
+                                 b.getStringAttr(idxExpr(
+                                     2, {"batch", "head", "chunk", "K-1"})))})
+              ->getResult(0);
+      mapping.map(srcBb.getArgument(1), ld1);
+      mapping.map(srcBb.getArgument(2), ld2);
+      mapping.map(srcBb.getArgument(3), ld3);
+
       llvm::DenseSet<Value> dependsOnCol{srcBb.getArgument(0)};
-      OpBuilder ib(fn.getContext());
-      ib.setInsertionPointToEnd(&invBb);
       for (auto &mop : srcBb.without_terminator()) {
-        if (llvm::any_of(mop.getOperands(), [&](Value v) {
-              return dependsOnCol.contains(v);
-            })) {
+        if (llvm::any_of(mop.getOperands(),
+                         [&](Value v) { return dependsOnCol.contains(v); }))
           dependsOnCol.insert(mop.getResult(0));
-        } else {
-          ib.clone(mop, mapping);
-        }
+        else
+          b.clone(mop, mapping);
       }
-      OperationState colState(loc, "mojo_row.host_col_loop");
-      colState.addRegion();
-      Operation *colLoop = ib.create(colState);
-      makeOp(ib, loc, "end");
-      Block &varBb = colLoop->getRegion(0).emplaceBlock();
-      Value colArg = varBb.addArgument(srcBb.getArgument(0).getType(), loc);
-      mapping.map(srcBb.getArgument(0), colArg);
-      OpBuilder vb(fn.getContext());
-      vb.setInsertionPointToEnd(&varBb);
+
+      Block *nBb =
+          makeHostOmpFor("n", "0", "N", "1", false, false, true, "");
+      enterBlock(nBb);
+      Value ld0 =
+          makeOp(b, loc, "host_load_scalar", {}, {srcBb.getArgument(0).getType()},
+                 {b.getNamedAttr("slot", b.getI64IntegerAttr(opSlots[0])),
+                  b.getNamedAttr("c_type", b.getStringAttr("uint16_t")),
+                  b.getNamedAttr(
+                      "index_expr",
+                      b.getStringAttr(
+                          idxExpr(0, {"batch", "chunk*K+k", "group", "n"})))})
+              ->getResult(0);
+      mapping.map(srcBb.getArgument(0), ld0);
       for (auto &mop : srcBb.without_terminator()) {
         if (dependsOnCol.contains(mop.getResult(0)))
-          vb.clone(mop, mapping);
+          b.clone(mop, mapping);
       }
       Operation *term = srcBb.getTerminator();
-      makeOp(vb, loc, "host_panel_yield", {mapping.lookup(term->getOperand(0))});
+      makeOp(b, loc, "host_panel_yield", {mapping.lookup(term->getOperand(0))},
+             {},
+             {b.getNamedAttr("widen_bf16",
+                             b.getBoolAttr(pk == "map-window-rhs-f32")),
+              b.getNamedAttr("dst_expr",
+                             b.getStringAttr(dst + "[p*N+n]"))});
+    } else if (pk == "widen-window-lhs") {
+      auto outSh = argShape(slotOf(dstArg));
+      int64_t H = std::max<int64_t>(1, outSh[2]);
+      int64_t chunks = std::max<int64_t>(1, outSh[1]);
+      auto st = argStrides(opSlots[0]);
+      Block *gBb =
+          makeHostOmpFor("g", "0", "G", "1", true, false, false, "G>1");
+      enterBlock(gBb);
+      emitLet("batch",
+              "g/" + std::to_string(H) + "/" + std::to_string(chunks));
+      emitLet("chunk",
+              "g/" + std::to_string(H) + "%" + std::to_string(chunks));
+      emitLet("head", "g%" + std::to_string(H));
+      Block *mBb = makeHostFor("m", "0", "M", "1");
+      enterBlock(mBb);
+      Block *kBb = makeHostFor("k", "0", "K", "1");
+      enterBlock(kBb);
+      std::string srcE = "((const uint16_t*)a" + std::to_string(opSlots[0]) +
+                         ")[batch*" + std::to_string(st[0]) + "LL+(chunk*K+k)*" +
+                         std::to_string(st[1]) + "LL+head*" +
+                         std::to_string(st[2]) + "LL+m*" +
+                         std::to_string(st[3]) + "LL]";
+      emitElem("expand_bf", dst + "[(g*M+m)*K+k]", srcE, "", 4);
+    } else if (pk == "widen-lhs-f32") {
+      auto st = argStrides(opSlots[0]);
+      std::string dt = argDtype(opSlots[0]);
+      int64_t ak = pop->getAttrOfType<IntegerAttr>("lhs_k").getInt();
+      int64_t ab = pop->getAttrOfType<IntegerAttr>("lhs_batch").getInt();
+      int64_t am = 0;
+      while (am == ak || am == ab)
+        ++am;
+      std::string banks = ab < 0 ? "1LL" : "G";
+      Block *rBb = makeHostOmpFor("row", "0", "(" + banks + ")*M", "1", true,
+                                  false, false, "(" + banks + ")*M*K > 131072");
+      enterBlock(rBb);
+      emitLet("g", "M ? row / M : 0");
+      emitLet("m", "M ? row % M : 0");
+      emitPtr("const uint16_t", "src", "a" + std::to_string(opSlots[0]),
+              "g*" + std::to_string(ab < 0 ? 0 : st[ab]) + "LL + m*" +
+                  std::to_string(st[am]) + "LL");
+      emitPtr("float", "out", dst, "row*K");
+      if (st[ak] == 1) {
+        emitSpan(dt == "bf16" ? "widen_bf16" : "widen_f16", "out", "src", "K", 4);
+      } else {
+        Block *kBb = makeHostFor("k", "0", "K", "1");
+        enterBlock(kBb);
+        emitElem(dt == "bf16" ? "expand_bf" : "expand_f16", "out[k]",
+                 "src[k*" + std::to_string(st[ak]) + "LL]", "", 4);
+      }
+    } else if (pk == "widen-pack-rhs-f32") {
+      auto st = argStrides(opSlots[0]);
+      std::string dt = argDtype(opSlots[0]);
+      int64_t bk = pop->getAttrOfType<IntegerAttr>("rhs_k").getInt();
+      int64_t bb = pop->getAttrOfType<IntegerAttr>("rhs_batch").getInt();
+      int64_t bn = 0;
+      while (bn == bk || bn == bb)
+        ++bn;
+      std::string banks = bb < 0 ? "1LL" : "G";
+      Block *pBb = makeHostOmpFor(
+          "p", "0", "(" + banks + ")*nc", "1", true, false, false,
+          "(" + banks + ")*nc*K*nr > 131072 && (" + banks + ")*nc >= 4");
+      enterBlock(pBb);
+      emitLet("g", "nc ? p / nc : 0");
+      emitLet("c", "(nc ? p % nc : 0)*nr");
+      emitLet("valid", "N-c < nr ? N-c : nr");
+      Block *kBb = makeHostFor("k", "0", "K", "1");
+      enterBlock(kBb);
+      emitPtr("const uint16_t", "src", "a" + std::to_string(opSlots[0]),
+              "g*" + std::to_string(bb < 0 ? 0 : st[bb]) + "LL + k*" +
+                  std::to_string(st[bk]) + "LL + c*" + std::to_string(st[bn]) +
+                  "LL");
+      emitPtr("float", "out", dst, "(p*K + k)*nr");
+      if (st[bn] == 1) {
+        emitSpan(dt == "bf16" ? "widen_bf16" : "widen_f16", "out", "src",
+                 "valid", 4);
+      } else {
+        Block *jBb = makeHostFor("j", "0", "valid", "1");
+        enterBlock(jBb);
+        emitElem(dt == "bf16" ? "expand_bf" : "expand_f16", "out[j]",
+                 "src[j*" + std::to_string(st[bn]) + "LL]", "", 4);
+        enterBlock(kBb);
+      }
+      Block *zIf = makeHostIf("valid < nr");
+      enterBlock(zIf);
+      emitSpan("zero", "out + valid", "", "nr - valid", 4);
+    } else if (pk == "pack-rhs-panels") {
+      auto st = argStrides(opSlots[0]);
+      std::string dt = argDtype(opSlots[0]);
+      int64_t bytes =
+          dt == "f32" || dt == "i32" ? 4 : dt == "i8" || dt == "u8" ? 1 : 2;
+      int64_t bk = pop->getAttrOfType<IntegerAttr>("rhs_k").getInt();
+      int64_t bb = pop->getAttrOfType<IntegerAttr>("rhs_batch").getInt();
+      int64_t bn = 0;
+      while (bn == bk || bn == bb)
+        ++bn;
+      std::string banks = bb < 0 ? "1LL" : "G";
+      Block *pBb = makeHostOmpFor(
+          "p", "0", "(" + banks + ")*nc", "1", true, false, false,
+          "(" + banks + ")*nc*K*nr > 131072 && (" + banks + ")*nc >= 4");
+      enterBlock(pBb);
+      emitLet("g", "nc ? p / nc : 0");
+      emitLet("c", "(nc ? p % nc : 0)*nr");
+      emitLet("valid", "N-c < nr ? N-c : nr");
+      Block *kBb = makeHostFor("k", "0", "K", "1");
+      enterBlock(kBb);
+      emitPtr("unsigned char", "out", dst,
+              "(p*K + k)*nr*" + std::to_string(bytes) + "LL");
+      emitPtr("const unsigned char", "src", "a" + std::to_string(opSlots[0]),
+              "(g*" + std::to_string(bb < 0 ? 0 : st[bb]) + "LL + k*" +
+                  std::to_string(st[bk]) + "LL + c*" + std::to_string(st[bn]) +
+                  "LL)*" + std::to_string(bytes) + "LL");
+      if (st[bn] == 1) {
+        emitSpan("memcpy", "out", "src", "valid", bytes);
+      } else {
+        Block *jBb = makeHostFor("j", "0", "valid", "1");
+        enterBlock(jBb);
+        emitElem("memcpy", "out+j*" + std::to_string(bytes) + "LL",
+                 "src+j*" + std::to_string(st[bn] * bytes) + "LL", "", bytes);
+        enterBlock(kBb);
+      }
+      Block *zIf = makeHostIf("valid < nr");
+      enterBlock(zIf);
+      emitSpan("zero", "out + valid*" + std::to_string(bytes) + "LL", "",
+               "nr - valid", bytes);
+    } else if (pk == "pack-signed-dot4") {
+      auto st = argStrides(opSlots[0]);
+      int64_t bk = pop->getAttrOfType<IntegerAttr>("rhs_k").getInt();
+      int64_t bb = pop->getAttrOfType<IntegerAttr>("rhs_batch").getInt();
+      int64_t bn = 0;
+      while (bn == bk || bn == bb)
+        ++bn;
+      std::string banks = bb < 0 ? "1LL" : "G";
+      Block *pBb = makeHostOmpFor(
+          "p", "0", "(" + banks + ")*nc", "1", true, false, false,
+          "(" + banks + ")*nc*K*nr > 131072 && (" + banks + ")*nc >= 4");
+      enterBlock(pBb);
+      emitLet("g", "nc ? p / nc : 0");
+      emitLet("c", "(nc ? p % nc : 0)*nr");
+      emitPtr("unsigned char", "out", dst, "p*nr*(K+4)");
+      emitPtr("uint32_t", "corr", "out + K*nr", "0");
+      emitSpan("zero", "corr", "", "nr", 4);
+      Block *kBb = makeHostFor("k", "0", "K", "4");
+      enterBlock(kBb);
+      emitPtr("const int8_t", "base", "a" + std::to_string(opSlots[0]),
+              "g*" + std::to_string(bb < 0 ? 0 : st[bb]) + "LL + c*" +
+                  std::to_string(st[bn]) + "LL + k*" + std::to_string(st[bk]) +
+                  "LL");
+      emitPtr("unsigned char", "dst_k", "out", "k*nr");
+      Block *jBb = makeHostOmpFor("j", "0", "nr", "1", false, false, true, "");
+      enterBlock(jBb);
+      emitElem("dot4_quad", "dst_k", "base",
+               std::to_string(st[bn]) + "LL," + std::to_string(st[bk]) + "LL",
+               1);
+    } else if (pk == "pack-vnni") {
+      auto st = argStrides(opSlots[0]);
+      int64_t kBlk = pop->getAttrOfType<IntegerAttr>("k_block").getInt();
+      int64_t bytes = kBlk == 4 ? 1 : 2;
+      std::string cTy = bytes == 1 ? "uint8_t" : "uint16_t";
+      std::string kBlkS = std::to_string(kBlk);
+      int64_t bk = pop->getAttrOfType<IntegerAttr>("rhs_k").getInt();
+      int64_t bb = pop->getAttrOfType<IntegerAttr>("rhs_batch").getInt();
+      int64_t bn = 0;
+      while (bn == bk || bn == bb)
+        ++bn;
+      std::string banks = bb < 0 ? "1LL" : "G";
+      Block *pBb = makeHostOmpFor(
+          "p", "0", "(" + banks + ")*nc", "1", true, false, false,
+          "(" + banks + ")*nc*K*nr > 131072 && (" + banks + ")*nc >= 4");
+      enterBlock(pBb);
+      emitLet("g", "nc ? p / nc : 0");
+      emitLet("c", "(nc ? p % nc : 0)*nr");
+      emitLet("valid", "N-c < nr ? N-c : nr");
+      emitLet("kPad", "((K+" + std::to_string(kBlk - 1) + ")/" + kBlkS + ")*" +
+                          kBlkS);
+      emitLet("kFull", "(K/" + kBlkS + ")*" + kBlkS);
+      emitPtr(cTy, "out", dst, "p*kPad*nr");
+      {
+        Block *zIf = makeHostIf("valid < nr || kPad > K");
+        enterBlock(zIf);
+        emitSpan("zero", "out", "", "kPad*nr", bytes);
+      }
+      enterBlock(pBb);
+      {
+        Block *kbBb = makeHostFor("kb", "0", "kFull", kBlkS);
+        enterBlock(kbBb);
+        emitPtr("const " + cTy, "base", "a" + std::to_string(opSlots[0]),
+                "g*" + std::to_string(bb < 0 ? 0 : st[bb]) + "LL + c*" +
+                    std::to_string(st[bn]) + "LL + kb*" +
+                    std::to_string(st[bk]) + "LL");
+        emitPtr(cTy, "dst_k", "out", "(kb/" + kBlkS + ")*nr*" + kBlkS);
+        Block *jBb =
+            makeHostOmpFor("j", "0", "valid", "1", false, false, true, "");
+        enterBlock(jBb);
+        Block *lBb = makeHostFor("lane", "0", kBlkS, "1");
+        enterBlock(lBb);
+        emitElem("assign", "dst_k[j*" + kBlkS + " + lane]",
+                 "base[j*" + std::to_string(st[bn]) + "LL + lane*" +
+                     std::to_string(st[bk]) + "LL]",
+                 "", bytes);
+      }
+      enterBlock(pBb);
+      {
+        Block *kbTail = makeHostFor("kb", "kFull", "K", kBlkS);
+        enterBlock(kbTail);
+        emitPtr("const " + cTy, "base", "a" + std::to_string(opSlots[0]),
+                "g*" + std::to_string(bb < 0 ? 0 : st[bb]) + "LL + c*" +
+                    std::to_string(st[bn]) + "LL + kb*" +
+                    std::to_string(st[bk]) + "LL");
+        Block *jBb = makeHostFor("j", "0", "valid", "1");
+        enterBlock(jBb);
+        Block *lBb = makeHostFor("lane", "0", kBlkS, "1");
+        enterBlock(lBb);
+        Block *inIf = makeHostIf("kb+lane < K");
+        enterBlock(inIf);
+        emitElem("assign",
+                 "out[(kb/" + kBlkS + ")*nr*" + kBlkS + " + j*" + kBlkS +
+                     " + lane]",
+                 "base[j*" + std::to_string(st[bn]) + "LL + lane*" +
+                     std::to_string(st[bk]) + "LL]",
+                 "", bytes);
+      }
+    } else if (pk == "decode-mx8-lhs") {
+      auto stA = argStrides(opSlots[0]);
+      auto stS = argStrides(opSlots[1]);
+      Block *rBb =
+          makeHostOmpFor("r", "0", "M", "1", true, false, false, "M*K>4096");
+      enterBlock(rBb);
+      Block *gBb = makeHostFor("g", "0", "K/32", "1");
+      enterBlock(gBb);
+      emitLet("sc", "((const uint8_t*)a" + std::to_string(opSlots[1]) + ")[r*" +
+                        std::to_string(stS[0]) + "LL + g*" +
+                        std::to_string(stS[1]) + "LL]");
+      Block *tBb = makeHostFor("t", "0", "32", "1");
+      enterBlock(tBb);
+      emitElem("decode_mx8", dst + "[r*K + g*32 + t]",
+               "((const uint8_t*)a" + std::to_string(opSlots[0]) + ")[r*" +
+                   std::to_string(stA[0]) + "LL + g*" + std::to_string(stA[1]) +
+                   "LL + t*" + std::to_string(stA[2]) + "LL]",
+               "(unsigned)sc", 4);
+    } else if (pk == "decode-mx8-rhs") {
+      auto stB = argStrides(opSlots[0]);
+      auto stS = argStrides(opSlots[1]);
+      int64_t colAx =
+          pop->getAttrOfType<IntegerAttr>("scale_column_axis").getInt();
+      std::string scIdx = colAx == 0
+                              ? ("c*" + std::to_string(stS[0]) + "LL + g*" +
+                                 std::to_string(stS[1]) + "LL")
+                              : ("g*" + std::to_string(stS[0]) + "LL + c*" +
+                                 std::to_string(stS[1]) + "LL");
+      Block *gBb =
+          makeHostOmpFor("g", "0", "K/32", "1", true, false, false, "N*K>4096");
+      enterBlock(gBb);
+      Block *tBb = makeHostFor("t", "0", "32", "1");
+      enterBlock(tBb);
+      Block *cBb = makeHostFor("c", "0", "N", "1");
+      enterBlock(cBb);
+      emitElem("decode_mx8", dst + "[(g*32+t)*N + c]",
+               "((const uint8_t*)a" + std::to_string(opSlots[0]) + ")[g*" +
+                   std::to_string(stB[0]) + "LL + t*" + std::to_string(stB[1]) +
+                   "LL + c*" + std::to_string(stB[2]) + "LL]",
+               "((const uint8_t*)a" + std::to_string(opSlots[1]) + ")[" +
+                   scIdx + "]",
+               4);
+    } else if (pk == "encode-q8k") {
+      auto st = argStrides(opSlots[0]);
+      Block *gBb = makeHostFor("g", "0", "K/256", "1");
+      enterBlock(gBb);
+      emitElem("pack_q8k", "&" + dst + "[g]",
+               "(const float*)a" + std::to_string(opSlots[0]) + " + g*" +
+                   std::to_string(st[0]) + "LL",
+               std::to_string(st[1]) + "LL", 1);
+    } else if (pk == "gather-routed-lhs" ||
+               pk == "gather-widen-routed-lhs-f32") {
+      auto stA = argStrides(opSlots[0]);
+      auto stO = argStrides(opSlots[1]);
+      auto stR = argStrides(opSlots[2]);
+      std::string dt = argDtype(opSlots[0]);
+      int64_t ak = pop->getAttrOfType<IntegerAttr>("lhs_k").getInt();
+      int64_t mult = pop->getAttrOfType<IntegerAttr>("multiplicity").getInt();
+      bool wide = pk == "gather-widen-routed-lhs-f32";
+      emitLet("active_begin",
+              "((const int32_t*)a" + std::to_string(opSlots[1]) + ")[0]");
+      emitLet("active_end", "((const int32_t*)a" + std::to_string(opSlots[1]) +
+                                ")[G*" + std::to_string(stO[0]) + "LL]");
+      Block *rBb = makeHostOmpFor("r", "active_begin", "active_end", "1", true,
+                                  false, false, "active_end > active_begin + 1");
+      enterBlock(rBb);
+      emitLet("src", "((const int32_t*)a" + std::to_string(opSlots[2]) +
+                         ")[r*" + std::to_string(stR[0]) + "LL] / " +
+                         std::to_string(mult) + "LL");
+      if (wide) {
+        emitPtr("const uint16_t", "from", "a" + std::to_string(opSlots[0]),
+                "src*" + std::to_string(stA[1 - ak]) + "LL");
+        emitPtr("float", "to", dst, "r*K");
+        Block *kBb = makeHostFor("k", "0", "K", "1");
+        enterBlock(kBb);
+        emitElem(dt == "bf16" ? "expand_bf" : "expand_f16", "to[k]",
+                 "from[k*" + std::to_string(stA[ak]) + "LL]", "", 4);
+      } else {
+        int64_t bytes =
+            dt == "f32" || dt == "i32" ? 4 : dt == "i8" || dt == "u8" ? 1 : 2;
+        emitPtr("const unsigned char", "from", "a" + std::to_string(opSlots[0]),
+                "src*" + std::to_string(stA[1 - ak] * bytes) + "LL");
+        emitPtr("unsigned char", "to", dst,
+                "r*K*" + std::to_string(bytes) + "LL");
+        if (stA[ak] == 1) {
+          emitSpan("memcpy", "to", "from", "K", bytes);
+        } else {
+          Block *kBb = makeHostFor("k", "0", "K", "1");
+          enterBlock(kBb);
+          emitElem("memcpy", "to+k*" + std::to_string(bytes) + "LL",
+                   "from+k*" + std::to_string(stA[ak] * bytes) + "LL", "",
+                   bytes);
+        }
+      }
+    } else {
+      return pop->emitError("unsupported matrix preparation kind ") << pk;
     }
-    b.create(ps);
   }
 
+  enterBlock(&hBb);
   if (usesBrgemm) {
     bool isQ4k = implId == "exits/mojo::onednn-brgemm-u8s8";
     int64_t aDt = implId == "exits/mojo::onednn-brgemm-f32"    ? 0
@@ -1078,22 +1521,49 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
                                                                : 4;
     int64_t bDt = isQ4k ? 3 : aDt;
     int64_t cDt = (aDt == 3 || isQ4k) ? 5 : 0;
-    std::string ldaExpr = isQ4k ? "32" : std::to_string(views[0].panelStrides[0]);
-    std::string ldbExpr = isQ4k ? "1" : std::to_string(views[1].panelStrides[0]);
-    makeOp(b, loc, "host_brgemm_plan", {}, {},
+    std::string ldaExpr =
+        isQ4k ? "32" : std::to_string(views[0].panelStrides[0]);
+    std::string ldbExpr =
+        isQ4k ? "1" : std::to_string(views[1].panelStrides[0]);
+    makeOp(b, loc, "host_brgemm_plan_decl");
+    Block *planIf = makeHostIf("jobs > 0 && K > 0");
+    enterBlock(planIf);
+    if (grouped) {
+      Block *gBb = makeHostFor("g", "0", "G", "1");
+      enterBlock(gBb);
+      std::string lenE =
+          "((const int32_t*)a" + std::to_string(offsetsSlot) + ")[(g+1)*" +
+          std::to_string(offsetsStride) + "LL] - ((const int32_t*)a" +
+          std::to_string(offsetsSlot) + ")[g*" + std::to_string(offsetsStride) +
+          "LL]";
+      makeOp(b, loc, "host_brgemm_mark_rows", {}, {},
+             {b.getNamedAttr("len_expr", b.getStringAttr(lenE))});
+      enterBlock(planIf);
+    } else {
+      makeOp(b, loc, "host_brgemm_mark_rows", {}, {},
+             {b.getNamedAttr("len_expr", b.getStringAttr("M"))});
+    }
+    Block *ciBb = makeHostFor("ci", "0", "2", "1");
+    enterBlock(ciBb);
+    emitLet("c_val", "ci == 0 ? (N >= nr ? nr : 0) : (N % nr)");
+    Block *cPosIf = makeHostIf("c_val > 0");
+    enterBlock(cPosIf);
+    Block *rtBb = makeHostFor("rt", "1", "mr + 1", "1");
+    enterBlock(rtBb);
+    Block *seenIf = makeHostIf("r_seen[rt]");
+    enterBlock(seenIf);
+    makeOp(b, loc, "host_brgemm_lookup", {}, {},
            {b.getNamedAttr("a_dt", b.getI64IntegerAttr(aDt)),
             b.getNamedAttr("b_dt", b.getI64IntegerAttr(bDt)),
             b.getNamedAttr("c_dt", b.getI64IntegerAttr(cDt)),
             b.getNamedAttr("lda_expr", b.getStringAttr(ldaExpr)),
             b.getNamedAttr("ldb_expr", b.getStringAttr(ldbExpr)),
-            b.getNamedAttr("is_q4k", b.getBoolAttr(isQ4k)),
-            b.getNamedAttr("grouped", b.getBoolAttr(grouped)),
-            b.getNamedAttr("offsets_slot", b.getI64IntegerAttr(offsetsSlot)),
-            b.getNamedAttr("offsets_stride",
-                           b.getI64IntegerAttr(offsetsStride)),
+            b.getNamedAttr("n_expr", b.getStringAttr(isQ4k ? "1" : "c_val")),
+            b.getNamedAttr("k_expr", b.getStringAttr(isQ4k ? "32" : "K")),
             b.getNamedAttr("cleanup", b.getArrayAttr(activeHeap))});
   }
 
+  enterBlock(&hBb);
   bool windowed = kind == "window_contract";
   int64_t headExt = 1, chunkExt = 1;
   if (windowed) {
@@ -1101,23 +1571,47 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
     headExt = std::max<int64_t>(1, outSh[2]);
     chunkExt = std::max<int64_t>(1, outSh[1]);
   }
-  OperationState ptState(loc, "mojo_row.host_parallel_tiles");
-  ptState.addAttribute("grouped", b.getBoolAttr(grouped));
-  ptState.addAttribute("routed", b.getBoolAttr(routed));
-  ptState.addAttribute("windowed", b.getBoolAttr(windowed));
-  ptState.addAttribute("head_extent", b.getI64IntegerAttr(headExt));
-  ptState.addAttribute("chunk_extent", b.getI64IntegerAttr(chunkExt));
-  ptState.addAttribute("multiplicity", b.getI64IntegerAttr(multiplicity));
-  ptState.addAttribute("offsets_slot", b.getI64IntegerAttr(offsetsSlot));
-  ptState.addAttribute("offsets_stride", b.getI64IntegerAttr(offsetsStride));
-  ptState.addAttribute("routes_slot", b.getI64IntegerAttr(routesSlot));
-  ptState.addAttribute("routes_stride", b.getI64IntegerAttr(routesStride));
-  ptState.addAttribute("uses_brgemm", b.getBoolAttr(usesBrgemm));
-  ptState.addAttribute("is_q4k",
-                       b.getBoolAttr(implId == "exits/mojo::onednn-brgemm-u8s8"));
-  Block &ptBb = ptState.addRegion()->emplaceBlock();
-  b.create(ptState);
-  b.setInsertionPointToEnd(&ptBb);
+  Block *jobsIf = makeHostIf("jobs > 0");
+  enterBlock(jobsIf);
+  emitLet("nt", "jobs < workers ? jobs : workers");
+  Block *parBb = openHostBlock(
+      "host_omp_parallel",
+      {b.getNamedAttr("num_threads", b.getStringAttr("(int)nt")),
+       b.getNamedAttr("if_cond", b.getStringAttr("nt > 1")),
+       b.getNamedAttr("reduce_rc", b.getBoolAttr(true))});
+  enterBlock(parBb);
+  if (usesBrgemm) {
+    makeOp(b, loc, "host_thread_scratch_alloc", {}, {},
+           {b.getNamedAttr("stack_bytes", b.getI64IntegerAttr(8192)),
+            b.getNamedAttr("alignment", b.getI64IntegerAttr(64)),
+            b.getNamedAttr("size_var", b.getStringAttr("brg_scratch_bytes"))});
+    makeOp(b, loc, "host_brgemm_ctx_decl");
+  }
+  Block *ptBb = makeHostOmpFor("job", "0", "jobs", "1", /*parallel=*/false,
+                               /*nowait=*/usesBrgemm, /*simd=*/false, "");
+  enterBlock(ptBb);
+  if (usesBrgemm)
+    makeOp(b, loc, "host_guard_continue", {}, {},
+           {b.getNamedAttr("cond", b.getStringAttr("!thr_ok"))});
+  makeOp(b, loc, "host_tile_coords", {}, {},
+         {b.getNamedAttr("windowed", b.getBoolAttr(windowed)),
+          b.getNamedAttr("head_extent", b.getI64IntegerAttr(headExt)),
+          b.getNamedAttr("chunk_extent", b.getI64IntegerAttr(chunkExt))});
+  if (grouped) {
+    makeOp(b, loc, "host_grouped_bounds", {}, {},
+           {b.getNamedAttr("offsets_slot", b.getI64IntegerAttr(offsetsSlot)),
+            b.getNamedAttr("offsets_stride",
+                           b.getI64IntegerAttr(offsetsStride))});
+    makeOp(b, loc, "host_guard_continue", {}, {},
+           {b.getNamedAttr("cond", b.getStringAttr("r >= end"))});
+  }
+  makeOp(b, loc, "host_route_coords", {}, {},
+         {b.getNamedAttr("routed", b.getBoolAttr(routed)),
+          b.getNamedAttr("routes_slot", b.getI64IntegerAttr(routesSlot)),
+          b.getNamedAttr("routes_stride", b.getI64IntegerAttr(routesStride)),
+          b.getNamedAttr("multiplicity", b.getI64IntegerAttr(multiplicity))});
+  if (usesBrgemm)
+    makeOp(b, loc, "host_brgemm_ctx_switch");
 
   for (auto [i, v] : llvm::enumerate(views)) {
     int64_t argElemBytes =
@@ -1183,24 +1677,42 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
   if (routed) {
     int64_t dstBytes =
         cast<MemRefType>(dstArg.getType()).getElementTypeBitWidth() / 8;
-    makeOp(b, loc, "host_scatter_routed", {}, {},
-           {b.getNamedAttr("dst_slot", b.getI64IntegerAttr(slotOf(dstArg))),
-            b.getNamedAttr("multiplicity", b.getI64IntegerAttr(multiplicity)),
-            b.getNamedAttr("dst_strides",
-                           b.getDenseI64ArrayAttr(origDstStrides)),
-            b.getNamedAttr("elem_bytes", b.getI64IntegerAttr(dstBytes)),
-            b.getNamedAttr("routes_slot", b.getI64IntegerAttr(routesSlot)),
-            b.getNamedAttr("routes_stride", b.getI64IntegerAttr(routesStride))});
+    Block *sBb = makeHostFor("i", "0", "R", "1");
+    enterBlock(sBb);
+    emitLet("d_i", "((const int32_t*)a" + std::to_string(routesSlot) +
+                       ")[(r+i)*" + std::to_string(routesStride) + "LL]");
+    emitPtr("unsigned char", "out", "a" + std::to_string(slotOf(dstArg)),
+            "((d_i/" + std::to_string(multiplicity) + "LL)*" +
+                std::to_string(origDstStrides[0]) + "LL + (d_i%" +
+                std::to_string(multiplicity) + "LL)*" +
+                std::to_string(origDstStrides[1]) + "LL + c*" +
+                std::to_string(origDstStrides[2]) + "LL)*" +
+                std::to_string(dstBytes) + "LL");
+    emitPtr("const unsigned char", "from", "routed_out",
+            "i*nr*" + std::to_string(dstBytes) + "LL");
+    if (origDstStrides[2] == 1) {
+      emitSpan("memcpy", "out", "from", "C", dstBytes);
+    } else {
+      Block *jBb = makeHostFor("j", "0", "C", "1");
+      enterBlock(jBb);
+      emitElem("memcpy", "out+j*" + std::to_string(origDstStrides[2] * dstBytes) + "LL",
+               "from+j*" + std::to_string(dstBytes) + "LL", "", dstBytes);
+    }
   }
-  makeOp(b, loc, "end");
 
-  b.setInsertionPointToEnd(&hBb);
+  if (usesBrgemm) {
+    enterBlock(parBb);
+    makeOp(b, loc, "host_brgemm_ctx_release");
+    makeOp(b, loc, "host_thread_scratch_free", {}, {},
+           {b.getNamedAttr("stack_bytes", b.getI64IntegerAttr(8192))});
+  }
+
+  enterBlock(&hBb);
   for (Operation *rop : releaseOps) {
     makeOp(b, loc, "host_free", {}, {},
            {b.getNamedAttr("buf_name",
                            b.getStringAttr(bufNames[rop->getOperand(0)]))});
   }
-  makeOp(b, loc, "end");
 
   // Erase old cpu@buffers ops (keep prog and func.return)
   SmallVector<Operation *> toErase;
@@ -1232,24 +1744,85 @@ LogicalResult verifyMojoMatrix(ModuleOp m, const TargetProfile &p,
       prog.getRegion(1).empty())
     return prog.emitError("incomplete mojo_row.matrix_program regions");
 
-  // Full-module address width check (including checkpoints resumed after mojo@callable)
-  bool badAddr = m.walk([&](Operation *op) {
-                    if (op->getName().getStringRef() != "mojo_row.address")
-                      return WalkResult::advance();
-                    auto bits = op->getAttrOfType<IntegerAttr>("index_bits");
-                    if (!bits || (bits.getInt() != 32 && bits.getInt() != 64)) {
-                      op->emitError("mojo_row.address requires i32 or i64 index_bits");
-                      return WalkResult::interrupt();
-                    }
-                    if (bits.getInt() == 32 && !canNarrowMojoAddress(*op)) {
-                      op->emitError(
-                          "32-bit matrix address lacks a proven signed i32 range");
-                      return WalkResult::interrupt();
-                    }
-                    return WalkResult::advance();
-                  }).wasInterrupted();
-  if (badAddr)
+  bool fnAllowsFtz = bool(fn->getAttrOfType<UnitAttr>("kir.allow_subnormal_ftz"));
+  bool usesBrgemm = prog.getAttrOfType<BoolAttr>("uses_brgemm").getValue();
+  bool sawBrgemmCall = false;
+
+  bool badWalk =
+      m.walk([&](Operation *op) {
+         auto name = op->getName().getStringRef();
+         if (name == "mojo_row.address") {
+           auto bits = op->getAttrOfType<IntegerAttr>("index_bits");
+           if (!bits || (bits.getInt() != 32 && bits.getInt() != 64)) {
+             op->emitError("mojo_row.address requires i32 or i64 index_bits");
+             return WalkResult::interrupt();
+           }
+           if (bits.getInt() == 32 && !canNarrowMojoAddress(*op)) {
+             op->emitError(
+                 "32-bit matrix address lacks a proven signed i32 range");
+             return WalkResult::interrupt();
+           }
+         } else if (name == "mojo_row.brgemm_call") {
+           sawBrgemmCall = true;
+           auto ftz = op->getAttrOfType<BoolAttr>("allow_subnormal_ftz");
+           auto impl = op->getAttrOfType<StringAttr>("ci.implementation");
+           if (!ftz || !impl) {
+             op->emitError(
+                 "brgemm_call requires allow_subnormal_ftz and ci.implementation");
+             return WalkResult::interrupt();
+           }
+           bool isBf16 = impl.getValue() == "exits/mojo::onednn-brgemm-bf16";
+           if (ftz.getValue() != isBf16) {
+             op->emitError(
+                 "brgemm_call allow_subnormal_ftz disagrees with implementation contract");
+             return WalkResult::interrupt();
+           }
+           if (ftz.getValue() && !fnAllowsFtz) {
+             op->emitError(
+                 "brgemm_call sets allow_subnormal_ftz without author kir.allow_subnormal_ftz");
+             return WalkResult::interrupt();
+           }
+           Operation *next = op->getNextNode();
+           if (!next || next->getName().getStringRef() != "mojo_row.check_status" ||
+               next->getOperand(0) != op->getResult(0)) {
+             op->emitError(
+                 "brgemm_call status must be immediately checked by mojo_row.check_status");
+             return WalkResult::interrupt();
+           }
+         }
+         return WalkResult::advance();
+       }).wasInterrupted();
+  if (badWalk)
     return failure();
+
+  if (usesBrgemm != sawBrgemmCall)
+    return prog.emitError("matrix_program uses_brgemm disagrees with panel body");
+
+  if (usesBrgemm) {
+    bool sawScratchAlloc = false, sawScratchFree = false, sawNowait = false,
+         sawCtxSwitch = false, sawCtxRelease = false;
+    prog.getRegion(1).walk([&](Operation *op) {
+      auto n = op->getName().getStringRef();
+      if (n == "mojo_row.host_thread_scratch_alloc") {
+        auto sb = op->getAttrOfType<IntegerAttr>("stack_bytes");
+        auto al = op->getAttrOfType<IntegerAttr>("alignment");
+        sawScratchAlloc = sb && sb.getInt() > 0 && al && al.getInt() == 64;
+      } else if (n == "mojo_row.host_thread_scratch_free") {
+        sawScratchFree = true;
+      } else if (n == "mojo_row.host_omp_for" &&
+                 op->getAttrOfType<BoolAttr>("nowait").getValue()) {
+        sawNowait = true;
+      } else if (n == "mojo_row.host_brgemm_ctx_switch") {
+        sawCtxSwitch = true;
+      } else if (n == "mojo_row.host_brgemm_ctx_release") {
+        sawCtxRelease = true;
+      }
+    });
+    if (!sawScratchAlloc || !sawScratchFree || !sawNowait || !sawCtxSwitch ||
+        !sawCtxRelease)
+      return prog.emitError(
+          "BRGeMM host region lacks explicit scratch, nowait, or context IR");
+  }
 
   if (failed(mojoMatrixPrinter().verify(m, p)))
     return failure();

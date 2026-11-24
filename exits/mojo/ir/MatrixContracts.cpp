@@ -1,6 +1,7 @@
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 
 namespace CI_UNIT_NAMESPACE {
 using namespace compilerinfra;
@@ -91,7 +92,7 @@ void registerMatrixContracts(Unit &u) {
   }
 
   auto makeBrgemm = [&](StringRef name, StringRef operands, StringRef layout,
-                        StringRef acc, StringRef numerical,
+                        StringRef acc, StringRef numerical, bool requiresFtz,
                         std::function<llvm::Error(const TargetProfile &)> avail) {
     ImplementationContract c;
     c.name = name.str();
@@ -108,8 +109,19 @@ void registerMatrixContracts(Unit &u) {
     c.costParameters = {"vector_bits", "workers"};
     c.dependencies = {"onednn"};
     c.available = std::move(avail);
-    c.verify = [](Operation *op) -> LogicalResult {
-      return success(op->getNumOperands() == 5 && op->getNumResults() == 1);
+    c.verify = [requiresFtz](Operation *op) -> LogicalResult {
+      if (op->getNumOperands() != 5 || op->getNumResults() != 1 ||
+          !op->getResult(0).getType().isInteger(32))
+        return failure();
+      auto ftz = op->getAttrOfType<BoolAttr>("allow_subnormal_ftz");
+      if (!ftz || ftz.getValue() != requiresFtz)
+        return failure();
+      auto fn = op->getParentOfType<func::FuncOp>();
+      if (!fn)
+        return failure();
+      if (requiresFtz && !fn->getAttrOfType<UnitAttr>("kir.allow_subnormal_ftz"))
+        return failure();
+      return success();
     };
     add(std::move(c));
   };
@@ -119,6 +131,7 @@ void registerMatrixContracts(Unit &u) {
       "LHS row-major (unit K stride), RHS row-major or [K, nr] panels",
       "f32 ZMM registers written to tile stack buffer",
       "IEEE-754 f32 FMA preserving subnormals, signed zero, Inf, and qNaN",
+      false,
       [](const TargetProfile &p) -> llvm::Error {
         if (!p.features.count("avx2") && !p.features.count("avx512f"))
           return llvm::createStringError("oneDNN f32 BRGeMM requires AVX2 or AVX-512");
@@ -130,6 +143,7 @@ void registerMatrixContracts(Unit &u) {
       "LHS row-major (unit K stride), RHS row-major or [K, nr] panels",
       "f32 ZMM registers written to tile stack buffer",
       "IEEE-754 f16 widened to f32 FMA preserving f16 subnormals, Inf, and qNaN",
+      false,
       [](const TargetProfile &p) -> llvm::Error {
         if (!p.features.count("avx512_fp16") && !p.features.count("avx512f"))
           return llvm::createStringError("oneDNN f16 BRGeMM requires AVX-512");
@@ -141,6 +155,7 @@ void registerMatrixContracts(Unit &u) {
       "LHS row-major (unit K stride, K%2==0), RHS VNNI pack32 [K/2, nr, 2]",
       "f32 AMX/AVX-512 BF16 dot-pair accumulator",
       "AMX/AVX512-BF16 dot2 to f32; may flush input, intermediate, and output subnormals to zero (requires allow_subnormal_ftz)",
+      true,
       [](const TargetProfile &p) -> llvm::Error {
         if (!p.features.count("amx_bf16") && !p.features.count("avx512_bf16"))
           return llvm::createStringError(
@@ -153,6 +168,7 @@ void registerMatrixContracts(Unit &u) {
       "LHS row-major (unit K stride, K%4==0), RHS VNNI pack32 [K/4, nr, 4]",
       "s32 AMX/VNNI tile accumulator",
       "exact two's-complement s8*s8->s32 accumulation",
+      false,
       [](const TargetProfile &p) -> llvm::Error {
         if (!p.features.count("amx_int8") && !p.features.count("avx512_vnni"))
           return llvm::createStringError(
@@ -165,6 +181,7 @@ void registerMatrixContracts(Unit &u) {
       "LHS unpacked u8[R, 32] nibbles, RHS Q8_K s8[32] subgroup",
       "s32 subgroup accumulator",
       "exact u8*s8->s32 32-element subgroup dot preserving Q4_K super-block R32 contract",
+      false,
       [](const TargetProfile &p) -> llvm::Error {
         if (!p.features.count("amx_int8") && !p.features.count("avx512_vnni"))
           return llvm::createStringError(

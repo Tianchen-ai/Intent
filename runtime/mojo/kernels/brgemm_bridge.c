@@ -1,3 +1,4 @@
+#include <limits.h>
 #include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -23,6 +24,7 @@ typedef struct IntentBrgemmEntry {
 #define INTENT_BRGEMM_BUCKETS 256
 static IntentBrgemmEntry *g_buckets[INTENT_BRGEMM_BUCKETS];
 static pthread_rwlock_t g_lock = PTHREAD_RWLOCK_INITIALIZER;
+static uint64_t g_epoch = 1;
 
 static dnnl_data_type_t map_dtype(int32_t code) {
   switch (code) {
@@ -65,19 +67,29 @@ const void *intent_brgemm_get(int64_t M, int64_t N, int64_t K, int64_t lda,
                               int32_t b_dt, int32_t c_dt) {
   static __thread const IntentBrgemmEntry *tls_cache[4];
   static __thread unsigned tls_slot;
+  static __thread uint64_t tls_epoch;
   if (M <= 0 || N <= 0 || K <= 0)
     return NULL;
   IntentBrgemmKey key = {M, N, K, lda, ldb, ldc, a_dt, b_dt, c_dt};
-  for (unsigned i = 0; i < 4; ++i) {
-    const IntentBrgemmEntry *ce = tls_cache[i];
-    if (ce && same_key(&ce->key, &key))
-      return ce;
+  uint64_t cur_epoch = __atomic_load_n(&g_epoch, __ATOMIC_ACQUIRE);
+  if (tls_epoch != cur_epoch) {
+    for (unsigned i = 0; i < 4; ++i)
+      tls_cache[i] = NULL;
+    tls_epoch = cur_epoch;
+  } else {
+    for (unsigned i = 0; i < 4; ++i) {
+      const IntentBrgemmEntry *ce = tls_cache[i];
+      if (ce && same_key(&ce->key, &key))
+        return ce;
+    }
   }
   size_t idx = (size_t)(hash_key(&key) & (INTENT_BRGEMM_BUCKETS - 1));
   pthread_rwlock_rdlock(&g_lock);
+  cur_epoch = g_epoch;
   for (IntentBrgemmEntry *e = g_buckets[idx]; e; e = e->next) {
     if (same_key(&e->key, &key)) {
       pthread_rwlock_unlock(&g_lock);
+      tls_epoch = cur_epoch;
       tls_cache[tls_slot++ & 3u] = e;
       return e;
     }
@@ -85,9 +97,11 @@ const void *intent_brgemm_get(int64_t M, int64_t N, int64_t K, int64_t lda,
   pthread_rwlock_unlock(&g_lock);
 
   pthread_rwlock_wrlock(&g_lock);
+  cur_epoch = g_epoch;
   for (IntentBrgemmEntry *e = g_buckets[idx]; e; e = e->next) {
     if (same_key(&e->key, &key)) {
       pthread_rwlock_unlock(&g_lock);
+      tls_epoch = cur_epoch;
       tls_cache[tls_slot++ & 3u] = e;
       return e;
     }
@@ -103,8 +117,13 @@ const void *intent_brgemm_get(int64_t M, int64_t N, int64_t K, int64_t lda,
     return NULL;
   }
   size_t scratch = 0;
-  dnnl_brgemm_get_scratchpad_size(brg, &scratch);
-  scratch = scratch < 64 ? 64 : ((scratch + 63) & ~(size_t)63);
+  if (dnnl_brgemm_get_scratchpad_size(brg, &scratch) != dnnl_success ||
+      scratch > (size_t)INT64_MAX - 64u) {
+    dnnl_brgemm_destroy(brg);
+    pthread_rwlock_unlock(&g_lock);
+    return NULL;
+  }
+  scratch = scratch < 64u ? 64u : ((scratch + 63u) & ~(size_t)63u);
   IntentBrgemmEntry *entry =
       (IntentBrgemmEntry *)calloc(1, sizeof(IntentBrgemmEntry));
   if (!entry) {
@@ -118,13 +137,35 @@ const void *intent_brgemm_get(int64_t M, int64_t N, int64_t K, int64_t lda,
   entry->next = g_buckets[idx];
   g_buckets[idx] = entry;
   pthread_rwlock_unlock(&g_lock);
+  tls_epoch = cur_epoch;
   tls_cache[tls_slot++ & 3u] = entry;
   return entry;
 }
 
+void intent_brgemm_cache_clear(void) {
+  pthread_rwlock_wrlock(&g_lock);
+  __atomic_add_fetch(&g_epoch, 1, __ATOMIC_RELEASE);
+  for (size_t i = 0; i < INTENT_BRGEMM_BUCKETS; ++i) {
+    IntentBrgemmEntry *e = g_buckets[i];
+    g_buckets[i] = NULL;
+    while (e) {
+      IntentBrgemmEntry *next = e->next;
+      if (e->brg)
+        dnnl_brgemm_destroy(e->brg);
+      free(e);
+      e = next;
+    }
+  }
+  pthread_rwlock_unlock(&g_lock);
+}
+
+static void __attribute__((destructor)) intent_brgemm_fini(void) {
+  intent_brgemm_cache_clear();
+}
+
 int64_t intent_brgemm_scratch_bytes(const void *handle) {
   if (!handle)
-    return 0;
+    return -1;
   return (int64_t)((const IntentBrgemmEntry *)handle)->scratch_bytes;
 }
 
@@ -141,7 +182,7 @@ void intent_brgemm_thread_leave(void) { dnnl_brgemm_release_hw_context(); }
 
 int32_t intent_brgemm_tile(const void *handle, const void *A, const void *B,
                            void *C, void *scratch) {
-  if (!handle)
+  if (!handle || !A || !B || !C || !scratch)
     return 4;
   const dnnl_dim_t offs[2] = {0, 0};
   return dnnl_brgemm_execute(((const IntentBrgemmEntry *)handle)->brg, A, B,

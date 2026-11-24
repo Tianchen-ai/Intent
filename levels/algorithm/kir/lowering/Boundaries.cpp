@@ -381,13 +381,21 @@ struct Canonicalize : PassWrapper<Canonicalize, OperationPass<ModuleOp>> {
       fn->setAttr("kir.domain_arg", IntegerAttr::get(IntegerType::get(&getContext(),64),owner));
       if(intentdsl::kir::matrixDomain(fn)){
         auto &body=fn.front().front().getRegion(0).front();
+        bool ftz = false;
         for(auto &op:llvm::make_early_inc_range(llvm::reverse(body))){
           // KIR's contraction expressions read immutable inputs. Only the
           // publication writes, and its complete operand chain is live.
           if (auto type = intentdsl::kir::storageFormat(op))
             op.setAttr("kir.storage", TypeAttr::get(type));
-          if(op.getNumResults()==1 && op.getResult(0).use_empty())op.erase();
+          if(op.getNumResults()==1 && op.getResult(0).use_empty()){op.erase();continue;}
+          if (op.getName().getStringRef() == "kir.contract" &&
+              op.getAttrOfType<UnitAttr>("kir.allow_subnormal_ftz"))
+            ftz = true;
         }
+        if (ftz)
+          fn->setAttr("kir.allow_subnormal_ftz", UnitAttr::get(&getContext()));
+        else
+          fn->removeAttr("kir.allow_subnormal_ftz");
       }
     }
     getOperation().walk([](Operation *op) {

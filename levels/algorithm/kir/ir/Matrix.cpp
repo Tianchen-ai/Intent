@@ -25,6 +25,9 @@ LogicalResult verifyMatrixBody(func::FuncOp fn, Operation &domain,
       domain.getName().getDialectNamespace() != dialect ||
       !llvm::hasSingleElement(domain.getRegion(0)))
     return fn.emitError("expected a verified contraction body");
+  if (domain.hasAttr("kir.allow_subnormal_ftz"))
+    return domain.emitError(
+        "subnormal flush-to-zero permission belongs on contract, not matrix_domain");
   auto abi = fn->getAttrOfType<StringAttr>("kir.abi");
   if (!abi)
     return fn.emitError("missing contraction signature");
@@ -75,6 +78,7 @@ LogicalResult verifyMatrixBody(func::FuncOp fn, Operation &domain,
     return fn.emitError("missing output buffer");
   auto &body = domain.getRegion(0).front();
   unsigned dots = 0, stores = 0;
+  bool contractFtz = false;
   auto dtype = [&](Value v) {
     return (*args)[cast<BlockArgument>(v).getArgNumber()]
         .getAsObject()
@@ -134,6 +138,7 @@ LogicalResult verifyMatrixBody(func::FuncOp fn, Operation &domain,
            dtype(a) == "i8"))
         return op.emitError(
             "subnormal flush-to-zero permission requires floating-point operands");
+      contractFtz = op.hasAttr("kir.allow_subnormal_ftz");
       auto free = [](const Shape &s, int64_t k, int64_t batch) {
         for (size_t i = 0; i < s.size(); ++i)
           if (int64_t(i) != k && int64_t(i) != batch)
@@ -265,6 +270,11 @@ LogicalResult verifyMatrixBody(func::FuncOp fn, Operation &domain,
       body.back().getName().stripDialect() != "end")
     return domain.emitError(
         "expected one complete contraction and publication");
+  if (canonical &&
+      bool(fn->getAttrOfType<UnitAttr>("kir.allow_subnormal_ftz")) !=
+          contractFtz)
+    return fn.emitError(
+        "function FTZ permission disagrees with canonical contraction");
   return success();
 }
 } // namespace intentdsl::kir
