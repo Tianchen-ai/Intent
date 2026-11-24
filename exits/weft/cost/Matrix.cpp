@@ -26,9 +26,12 @@ void nativePanelCost(compilerinfra::Unit &u) {
           auto *rf = ctx.target.services.get<RecordFields>();
           int64_t workers = machine->workers;
           double columns = std::ceil(double(t[1]) / t[3]);
-          int64_t vecRegs =
+          int64_t rawVecRegs =
               rf ? rf->vectorRegisters
                  : (machine->boundWidening ? 32 : (t[3] == 16 ? 32 : 16));
+          int64_t vecRegs = machine->boundWidening
+                                ? std::max<int64_t>(8, rawVecRegs - 4)
+                                : rawVecRegs;
           mlir::Type outElem =
               mlir::cast<mlir::MemRefType>(op->getOperand(0).getType())
                   .getElementType();

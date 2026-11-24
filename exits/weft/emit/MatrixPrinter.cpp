@@ -1666,13 +1666,23 @@ TerminalPrinter weftTerminalPrinter() {
         for (Attribute a : op.getAttrOfType<ArrayAttr>("slot_args"))
           args.push_back(cast<StringAttr>(a).str());
         for (Attribute a : op.getAttrOfType<ArrayAttr>("shape_exprs")) {
-          std::string expr = cast<StringAttr>(a).str();
-          if (!expr.empty() && expr[0] == '$') {
-            unsigned idx = std::stoul(expr.substr(1));
-            args.push_back("(size_t)(" + c.name(op.getOperand(idx)) + ")");
-          } else {
-            args.push_back("(size_t)(" + expr + ")");
+          std::string raw = cast<StringAttr>(a).str();
+          std::string expr;
+          for (size_t i = 0; i < raw.size();) {
+            if (raw[i] == '$' && i + 1 < raw.size() &&
+                std::isdigit(static_cast<unsigned char>(raw[i + 1]))) {
+              size_t j = i + 1;
+              while (j < raw.size() &&
+                     std::isdigit(static_cast<unsigned char>(raw[j])))
+                ++j;
+              unsigned idx = std::stoul(raw.substr(i + 1, j - (i + 1)));
+              expr += c.name(op.getOperand(idx));
+              i = j;
+            } else {
+              expr.push_back(raw[i++]);
+            }
           }
+          args.push_back("(size_t)(" + expr + ")");
         }
         for (Attribute a : op.getAttrOfType<ArrayAttr>("stride_exprs"))
           args.push_back("(size_t)(" + cast<StringAttr>(a).str() + ")");

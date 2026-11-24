@@ -44,12 +44,14 @@ def discover(scope):
     )
     lmul_list = list(caps.get("legal_lmul_eighths") or ())
     max_lmul_eighths = int(max(lmul_list)) if lmul_list else (64 if cpu.arch == "riscv64" else 8)
+    private_stack_bytes = int(caps.get("private_stack_bytes") or 65536)
     return (
         cpu,
         core_id,
         bits,
         vec_regs,
         max_lmul_eighths,
+        private_stack_bytes,
         weft_ver,
         isa,
         brg,
@@ -71,12 +73,13 @@ class Target:
 
     def options(self, key):
         scope, self.workers = key
-        self.info, core, bits, vec_regs, max_lmul_eighths, weft_ver, isa, brg = discover(scope)
+        self.info, core, bits, vec_regs, max_lmul_eighths, private_stack_bytes, weft_ver, isa, brg = discover(scope)
         ver_nums = brg.get("version") or ()
         return dict(
             vector_bits=bits,
             vector_registers=vec_regs,
             max_lmul_eighths=max_lmul_eighths,
+            private_stack_bytes=private_stack_bytes,
             workers=self.workers,
             core=core,
             arch=self.info.arch,

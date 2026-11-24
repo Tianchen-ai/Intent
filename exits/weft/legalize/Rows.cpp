@@ -1072,7 +1072,8 @@ bool canVectorizeSegmentSweep(Operation &task, ArrayRef<Operation *> ops) {
 } // namespace
 
 LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
-                           int64_t tailVecWidth) {
+                           bool grouped, int64_t tailVecWidth,
+                           int64_t privateStackBytes) {
   auto &task = fn.front().front();
   Location loc = fn.getLoc();
   OpBuilder b(&task);
@@ -1566,7 +1567,7 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
     }
   } else {
     SmallVector<Operation *> allOps, writes, ownedWrites;
-    bool hasUniform = false, hasSpecialSweep = false;
+    bool hasSpecialSweep = false;
     for (Operation &op : bb.without_terminator()) {
       allOps.push_back(&op);
       StringRef n = op.getName().stripDialect();
@@ -1574,8 +1575,6 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
         writes.push_back(&op);
       else if (n == "write_owner")
         ownedWrites.push_back(&op);
-      else if (n == "uniform")
-        hasUniform = true;
       else if (n == "ordered_sum" || n == "segment_length" ||
                n == "scan_sum" || n == "count_keys" || n == "column_sum" ||
                n == "gather_row")
@@ -1619,9 +1618,10 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
           return false;
         };
         SmallVector<Operation *, 4> stage{op};
-        constexpr size_t kMaxFusedReds = 4;
+        const size_t maxFusedReds =
+            (grouped && allOps.size() > 32) ? 2 : 4;
         for (Operation *cand : allOps) {
-          if (stage.size() >= kMaxFusedReds)
+          if (stage.size() >= maxFusedReds)
             break;
           if (cand == op || cand->getName().stripDialect() != kind ||
               scheduledReds.contains(cand))
@@ -1635,30 +1635,42 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
       }
     }
 
-    constexpr int64_t kMaxRowCacheCols = 8192;
+    int64_t maxRowCacheCols = 8192;
     SmallVector<Value, 4> cachedCut;
     SmallVector<Value, 4> cachePtrs;
     SmallVector<std::string, 4> cacheElemSps;
     if (!isTransposeTile && !intentdsl::cpu::atomicMembers(bb) &&
         !intentdsl::cpu::packed(bb) && !ownerAxis && !whole && fixed > 0 &&
-        hasUniform && !hasSpecialSweep && redStages.size() == 1 &&
-        redStages[0].front()->getName().stripDialect() != "welford" &&
+        !hasSpecialSweep &&
+        (redStages.size() == 1 || redStages.size() == 2) &&
+        llvm::none_of(redStages,
+                      [](const auto &st) {
+                        return st.front()->getName().stripDialect() ==
+                               "welford";
+                      }) &&
         !writes.empty() && ownedWrites.empty()) {
+      llvm::DenseSet<Operation *> priorReds;
+      for (size_t sIdx = 0; sIdx + 1 < redStages.size(); ++sIdx)
+        for (Operation *ro : redStages[sIdx])
+          priorReds.insert(ro);
+      const auto &lastStage = redStages.back();
       llvm::DenseSet<Operation *> s1Ops, s2Ops, storeDirect;
       {
         SmallVector<Operation *, 16> work;
-        for (Operation *ro : redStages[0])
+        for (Operation *ro : lastStage)
           if (auto *def = ro->getOperand(0).getDefiningOp();
-              def && def->getBlock() == &bb)
+              def && def->getBlock() == &bb && !priorReds.contains(def))
             work.push_back(def);
         while (!work.empty()) {
           Operation *cur = work.pop_back_val();
           if (!s1Ops.insert(cur).second)
             continue;
-          if (cur->getName().stripDialect() == "read_owner")
+          if (cur->getName().stripDialect() == "read_owner" ||
+              priorReds.contains(cur))
             continue;
           for (Value in : cur->getOperands())
-            if (auto *def = in.getDefiningOp(); def && def->getBlock() == &bb)
+            if (auto *def = in.getDefiningOp();
+                def && def->getBlock() == &bb && !priorReds.contains(def))
               work.push_back(def);
         }
       }
@@ -1712,8 +1724,11 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
         }
       }
       bool validCut = true;
+      int64_t bytesPerCol = 0;
       for (Operation *op : allOps) {
+        StringRef opKind = op->getName().stripDialect();
         if (!s1Ops.contains(op) || forcedRecompute.contains(op) ||
+            opKind == "uniform" || opKind == "read" || opKind == "constant" ||
             op->getNumResults() != 1 ||
             !isa<ShapedType>(op->getResult(0).getType()))
           continue;
@@ -1733,9 +1748,18 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
           validCut = false;
           break;
         }
+        bytesPerCol += std::max<int64_t>(1, rt.getElementTypeBitWidth() / 8);
         cachedCut.push_back(v);
       }
-      if (!validCut || cachedCut.empty() || cachedCut.size() > 4) {
+      int64_t maxCacheBytes =
+          std::max<int64_t>(16384, (privateStackBytes * 3) / 4);
+      maxRowCacheCols =
+          bytesPerCol > 0
+              ? std::min<int64_t>(8192,
+                                  (maxCacheBytes / bytesPerCol) & ~int64_t(63))
+              : 0;
+      if (!validCut || cachedCut.empty() || cachedCut.size() > 4 ||
+          maxRowCacheCols < std::max<int64_t>(64, fixed)) {
         cachedCut.clear();
       } else {
         for (Value cv : cachedCut) {
@@ -1746,7 +1770,7 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
                               {b.getIndexType()},
                               {b.getNamedAttr("elements",
                                               b.getI64IntegerAttr(
-                                                  kMaxRowCacheCols)),
+                                                  maxRowCacheCols)),
                                b.getNamedAttr("alignment",
                                               b.getI64IntegerAttr(64)),
                                b.getNamedAttr("ptr_type",
@@ -1771,17 +1795,19 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
       Operation &tOp = bb.front();
       TaskTerm inView = rb.terms.lookup(tOp.getOperand(0));
       TaskTerm outView = rb.terms.lookup(tOp.getOperand(1));
-      std::string elem = printMlirType(
-          cast<MemRefType>(tOp.getOperand(0).getType()).getElementType());
+      Type rawElemTy = cast<MemRefType>(tOp.getOperand(0).getType()).getElementType();
+      std::string elem = printMlirType(rawElemTy);
+      std::string sp = weftSpelling(rawElemTy);
       std::string baseSlTy = regionType("slice", elem, 1, -2);
-      auto emitTilePass = [&](bool tail) {
-        int64_t tailVec =
-            fixed > 0 ? std::min<int64_t>(fixed, std::max<int64_t>(1, tailVecWidth))
-                      : 1;
-        TaskTerm lb = tail ? tailStart : rb.zeroIdx;
-        TaskTerm ub = tail ? rb.columns : panelCount;
-        TaskTerm step = tail ? rb.idx(tailVec) : rb.oneIdx;
-        int dim = tail ? int(tailVec) : (fixed ? int(fixed) : -3);
+      int64_t tileW = task.getAttrOfType<IntegerAttr>("cpu.tile").getInt();
+      int64_t tailVec =
+          std::min<int64_t>(tileW, std::max<int64_t>(1, tailVecWidth));
+      TaskTerm tileTerm = rb.idx(tileW);
+      TaskTerm tileCnt = rb.bin("div", rb.columns, tileTerm, "index");
+      TaskTerm tileEnd = rb.bin("mul", tileCnt, tileTerm, "index");
+
+      auto emitVecCopy = [&](TaskTerm lb, TaskTerm ub, TaskTerm step, int dim,
+                             bool mulTile) {
         Operation *pFor = makeOp(
             b, loc, "task_for", {lb.v, ub.v, step.v}, {},
             {b.getNamedAttr("iter_types", b.getArrayAttr({}))}, 1);
@@ -1790,7 +1816,7 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
         OpBuilder::InsertionGuard pg(b);
         b.setInsertionPointToEnd(&pBb);
         TaskTerm off =
-            tail ? pIv : rb.bin("mul", pIv, rb.panelWidth, "index");
+            mulTile ? rb.bin("mul", pIv, tileTerm, "index") : pIv;
         Value inSl =
             makeOp(b, loc, "task_slice", {inView.v, rowIv.v},
                    {b.getIndexType()},
@@ -1803,11 +1829,8 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
                     b.getNamedAttr("admit", b.getBoolAttr(false))})
                 ->getResult(0);
         std::string vTy = regionType("value", elem, 1, dim);
-        SmallVector<Value, 3> inSub{inSl, off.v};
-        if (dim <= 0)
-          inSub.push_back(rb.panelWidth.v);
         Value val =
-            makeOp(b, loc, "task_subview", inSub, {b.getIndexType()},
+            makeOp(b, loc, "task_subview", {inSl, off.v}, {b.getIndexType()},
                    {b.getNamedAttr("static_extent", b.getI64IntegerAttr(dim)),
                     b.getNamedAttr("slice_type", b.getStringAttr(baseSlTy)),
                     b.getNamedAttr("val_type", b.getStringAttr(vTy)),
@@ -1825,11 +1848,8 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
                     b.getNamedAttr("admit", b.getBoolAttr(false))})
                 ->getResult(0);
         std::string outSubSlTy = regionType("slice", elem, 1, dim);
-        SmallVector<Value, 3> outSub{outSl, off.v};
-        if (dim <= 0)
-          outSub.push_back(rb.panelWidth.v);
         Value win =
-            makeOp(b, loc, "task_subview", outSub, {b.getIndexType()},
+            makeOp(b, loc, "task_subview", {outSl, off.v}, {b.getIndexType()},
                    {b.getNamedAttr("static_extent", b.getI64IntegerAttr(dim)),
                     b.getNamedAttr("slice_type", b.getStringAttr(baseSlTy)),
                     b.getNamedAttr("val_type", b.getStringAttr(outSubSlTy)),
@@ -1839,8 +1859,30 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
         makeOp(b, loc, "task_yield", {}, {},
                {b.getNamedAttr("val_types", b.getArrayAttr({}))});
       };
-      emitTilePass(false);
-      emitTilePass(true);
+
+      emitVecCopy(rb.zeroIdx, tileCnt, rb.oneIdx, int(tileW), true);
+      TaskTerm vecEnd = tileEnd;
+      if (tailVec > 1 && tailVec < tileW) {
+        TaskTerm rem = rb.bin("sub", rb.columns, tileEnd, "index");
+        TaskTerm vecStep = rb.idx(tailVec);
+        TaskTerm vecCnt = rb.bin("div", rem, vecStep, "index");
+        vecEnd = rb.bin("add", tileEnd,
+                        rb.bin("mul", vecCnt, vecStep, "index"), "index");
+        emitVecCopy(tileEnd, vecEnd, vecStep, int(tailVec), false);
+      }
+      {
+        Operation *sFor = makeOp(
+            b, loc, "task_for", {vecEnd.v, rb.columns.v, rb.oneIdx.v}, {},
+            {b.getNamedAttr("iter_types", b.getArrayAttr({}))}, 1);
+        Block &sBb = sFor->getRegion(0).emplaceBlock();
+        TaskTerm sIv{sBb.addArgument(b.getIndexType(), loc), "index"};
+        OpBuilder::InsertionGuard sg(b);
+        b.setInsertionPointToEnd(&sBb);
+        TaskTerm sc = rb.scalarSlice(tOp.getOperand(0), {rowIv, sIv}, true, sp);
+        rb.commitOp(sc, rb.scalarSlice(tOp.getOperand(1), {rowIv, sIv}, false));
+        makeOp(b, loc, "task_yield", {}, {},
+               {b.getNamedAttr("val_types", b.getArrayAttr({}))});
+      }
     } else if (intentdsl::cpu::atomicMembers(bb)) {
       auto &effects = bb.front().getRegion(0).front();
       TaskTerm zeroI32 = rb.lit("0", "si32");
@@ -2263,17 +2305,35 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
           fixed > 0 ? std::min<int64_t>(fixed, std::max<int64_t>(1, tailVecWidth))
                     : std::max<int64_t>(1, tailVecWidth);
 
+      auto canScalarEvalOps = [](ArrayRef<Operation *> ops,
+                                 const llvm::DenseSet<Operation *> *skipSet =
+                                     nullptr) {
+        return llvm::all_of(ops, [&](Operation *opPtr) {
+          if (skipSet && skipSet->contains(opPtr))
+            return true;
+          StringRef k = opPtr->getName().stripDialect();
+          return k == "write" || k == "write_owner" || k == "read" ||
+                 k == "read_owner" || k == "field" || k == "constant" ||
+                 k == "cast" || k == "rsqrt" || k == "exp" || k == "sqrt" ||
+                 k == "select" || k == "gt" || k == "ne" || k == "mul" ||
+                 k == "add" || k == "div" || k == "sub" || k == "maximum" ||
+                 k == "xor" || k == "and" || k == "shl" || k == "shr";
+        });
+      };
+
       auto evalScalarAt = [&](ArrayRef<Operation *> ops,
                               ArrayRef<TaskTerm> prefixCoords, TaskTerm colIv,
                               Operation *stopOp,
-                              llvm::DenseMap<Value, TaskTerm> &localMap)
+                              llvm::DenseMap<Value, TaskTerm> &localMap,
+                              const llvm::DenseSet<Operation *> *skipSet =
+                                  nullptr)
           -> LogicalResult {
         auto lookup = [&](Value v) -> TaskTerm {
           auto it = localMap.find(v);
           return it != localMap.end() ? it->second : rb.terms.lookup(v);
         };
         for (Operation *opPtr : ops) {
-          if (opPtr == stopOp)
+          if (opPtr == stopOp || (skipSet && skipSet->contains(opPtr)))
             continue;
           Operation &op = *opPtr;
           StringRef n = op.getName().stripDialect();
@@ -2294,6 +2354,8 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
           } else if (n == "read_owner") {
             localMap[resVal] = rb.memberSlice(op.getOperand(0), rowIv, {}, true,
                                               true, ty);
+          } else if (n == "uniform") {
+            localMap[resVal] = lookup(op.getOperand(0));
           } else if (n == "field") {
             auto saved = rb.records.find(op.getOperand(0));
             if (saved == rb.records.end())
@@ -2690,7 +2752,20 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
             return success();
           }
 
-          SmallVector<Value, 8> tOps{tStart.v, colCnt.v, rb.idx(tailVec).v};
+          bool scalarTail = (grouped && subOps.size() >= 64);
+          bool splitScalarRem =
+              grouped && !scalarTail && tailVec > 1 &&
+              canScalarEvalOps(subOps, &skipReds);
+          TaskTerm vecTailEnd = colCnt;
+          if (splitScalarRem) {
+            TaskTerm rem = rb.bin("sub", colCnt, tStart, "index");
+            TaskTerm vStep = rb.idx(tailVec);
+            TaskTerm vCnt = rb.bin("div", rem, vStep, "index");
+            vecTailEnd = rb.bin("add", tStart,
+                                rb.bin("mul", vCnt, vStep, "index"), "index");
+          }
+          TaskTerm tStep = scalarTail ? rb.oneIdx : rb.idx(tailVec);
+          SmallVector<Value, 8> tOps{tStart.v, vecTailEnd.v, tStep.v};
           SmallVector<Attribute, 4> tIterTys;
           SmallVector<Type, 4> tResTys(m, b.getIndexType());
           for (size_t k = 0; k < m; ++k) {
@@ -2709,22 +2784,65 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
             OpBuilder::InsertionGuard tg(b);
             b.setInsertionPointToEnd(&tBb);
             llvm::DenseMap<Value, TaskTerm> localMap;
-            if (failed(rb.emitVectorPanelOps(subOps, {}, rowIv, prefix, tIv,
-                                             rb.panelWidth, int(tailVec),
-                                             baseDim, axId, false, localMap,
-                                             nullptr)))
-              return failure();
             SmallVector<Value, 4> yVals;
-            for (size_t k = 0; k < m; ++k) {
-              TaskTerm part = localMap.at(stage[k]->getResult(0));
-              TaskTerm nextSc = rb.bin(bKind, accScs[k], part, "f32");
-              yVals.push_back(nextSc.v);
+            if (scalarTail) {
+              if (failed(evalScalarAt(subOps, prefix, tIv, nullptr, localMap,
+                                      &skipReds)))
+                return failure();
+              for (size_t k = 0; k < m; ++k) {
+                TaskTerm part = localMap.at(stage[k]->getOperand(0));
+                TaskTerm nextSc = rb.bin(bKind, accScs[k], part, "f32");
+                yVals.push_back(nextSc.v);
+              }
+            } else {
+              if (failed(rb.emitVectorPanelOps(subOps, {}, rowIv, prefix, tIv,
+                                               rb.panelWidth, int(tailVec),
+                                               baseDim, axId, false, localMap,
+                                               nullptr)))
+                return failure();
+              for (size_t k = 0; k < m; ++k) {
+                TaskTerm part = localMap.at(stage[k]->getResult(0));
+                TaskTerm nextSc = rb.bin(bKind, accScs[k], part, "f32");
+                yVals.push_back(nextSc.v);
+              }
             }
             makeOp(b, loc, "task_yield", yVals, {},
                    {b.getNamedAttr("val_types", b.getArrayAttr(tIterTys))});
           }
-          for (size_t k = 0; k < m; ++k)
-            outTailScs.push_back({tFor->getResult(k), "f32"});
+          if (splitScalarRem) {
+            SmallVector<Value, 8> rOps{vecTailEnd.v, colCnt.v, rb.oneIdx.v};
+            for (size_t k = 0; k < m; ++k)
+              rOps.push_back(tFor->getResult(k));
+            Operation *rFor = makeOp(
+                b, loc, "task_for", rOps, tResTys,
+                {b.getNamedAttr("iter_types", b.getArrayAttr(tIterTys))}, 1);
+            Block &rBb = rFor->getRegion(0).emplaceBlock();
+            TaskTerm rIv{rBb.addArgument(b.getIndexType(), loc), "index"};
+            SmallVector<TaskTerm, 4> rAccs;
+            for (size_t k = 0; k < m; ++k)
+              rAccs.push_back({rBb.addArgument(b.getIndexType(), loc), "f32"});
+            {
+              OpBuilder::InsertionGuard rg(b);
+              b.setInsertionPointToEnd(&rBb);
+              llvm::DenseMap<Value, TaskTerm> localMap;
+              if (failed(evalScalarAt(subOps, prefix, rIv, nullptr, localMap,
+                                      &skipReds)))
+                return failure();
+              SmallVector<Value, 4> yVals;
+              for (size_t k = 0; k < m; ++k) {
+                TaskTerm part = localMap.at(stage[k]->getOperand(0));
+                TaskTerm nextSc = rb.bin(bKind, rAccs[k], part, "f32");
+                yVals.push_back(nextSc.v);
+              }
+              makeOp(b, loc, "task_yield", yVals, {},
+                     {b.getNamedAttr("val_types", b.getArrayAttr(tIterTys))});
+            }
+            for (size_t k = 0; k < m; ++k)
+              outTailScs.push_back({rFor->getResult(k), "f32"});
+          } else {
+            for (size_t k = 0; k < m; ++k)
+              outTailScs.push_back({tFor->getResult(k), "f32"});
+          }
           return success();
         };
 
@@ -2734,14 +2852,28 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
           if (failed(emitRedInner({rowIv}, rb.columns, panelCount, tailStart,
                                   initVecs, initScs, finVecs, finTailScs)))
             return failure();
-        } else {
-          SmallVector<Value, 12> oOps{rb.zeroIdx.v, outerTotal.v, rb.oneIdx.v};
-          SmallVector<Attribute, 8> oTys;
-          SmallVector<Type, 8> oResTys(2 * m, b.getIndexType());
           for (size_t k = 0; k < m; ++k) {
-            oOps.push_back(initVec.v);
-            oTys.push_back(b.getStringAttr(vecF32Ty));
+            Value redV =
+                makeOp(b, loc, "task_reduce", {finVecs[k].v},
+                       {b.getIndexType()},
+                       {b.getNamedAttr("kind", b.getStringAttr(rKind)),
+                        b.getNamedAttr("axis", b.getI64IntegerAttr(0)),
+                        b.getNamedAttr("in_type", b.getStringAttr(vecF32Ty)),
+                        b.getNamedAttr("val_type", b.getStringAttr("f32"))})
+                    ->getResult(0);
+            TaskTerm total =
+                onlyFullPanels
+                    ? TaskTerm{redV, "f32"}
+                    : rb.bin(bKind, {redV, "f32"}, finTailScs[k], "f32");
+            rb.terms[stage[k]->getResult(0)] = total;
+            summaryValues.insert(stage[k]->getResult(0));
           }
+        } else {
+          // Carry only scalar f32 accumulators across outerIv so vector
+          // accumulators never cross inner scf.for control boundaries.
+          SmallVector<Value, 8> oOps{rb.zeroIdx.v, outerTotal.v, rb.oneIdx.v};
+          SmallVector<Attribute, 4> oTys;
+          SmallVector<Type, 4> oResTys(m, b.getIndexType());
           for (size_t k = 0; k < m; ++k) {
             oOps.push_back(initSc.v);
             oTys.push_back(b.getStringAttr("f32"));
@@ -2751,48 +2883,43 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
               {b.getNamedAttr("iter_types", b.getArrayAttr(oTys))}, 1);
           Block &oBb = oFor->getRegion(0).emplaceBlock();
           TaskTerm outerIv{oBb.addArgument(b.getIndexType(), loc), "index"};
-          SmallVector<TaskTerm, 4> cVecs, cScs;
-          for (size_t k = 0; k < m; ++k)
-            cVecs.push_back({oBb.addArgument(b.getIndexType(), loc), vecF32Ty});
+          SmallVector<TaskTerm, 4> cScs;
           for (size_t k = 0; k < m; ++k)
             cScs.push_back({oBb.addArgument(b.getIndexType(), loc), "f32"});
           {
             OpBuilder::InsertionGuard og(b);
             b.setInsertionPointToEnd(&oBb);
             auto prefix = buildOwnerPrefix(outerIv);
-            SmallVector<TaskTerm, 4> stepVecs, stepScs;
+            SmallVector<TaskTerm, 4> zVecs(m, initVec), zScs(m, initSc),
+                stepVecs, stepScs;
             if (failed(emitRedInner(prefix, innerCols, innerPanelCount,
-                                    innerTailStart, cVecs, cScs, stepVecs,
+                                    innerTailStart, zVecs, zScs, stepVecs,
                                     stepScs)))
               return failure();
-            SmallVector<Value, 8> yVals;
-            for (const TaskTerm &tv : stepVecs)
-              yVals.push_back(tv.v);
-            for (const TaskTerm &ts : stepScs)
-              yVals.push_back(ts.v);
+            SmallVector<Value, 4> yVals;
+            for (size_t k = 0; k < m; ++k) {
+              Value redV =
+                  makeOp(b, loc, "task_reduce", {stepVecs[k].v},
+                         {b.getIndexType()},
+                         {b.getNamedAttr("kind", b.getStringAttr(rKind)),
+                          b.getNamedAttr("axis", b.getI64IntegerAttr(0)),
+                          b.getNamedAttr("in_type", b.getStringAttr(vecF32Ty)),
+                          b.getNamedAttr("val_type", b.getStringAttr("f32"))})
+                      ->getResult(0);
+              TaskTerm sliceTotal =
+                  onlyFullPanels
+                      ? TaskTerm{redV, "f32"}
+                      : rb.bin(bKind, {redV, "f32"}, stepScs[k], "f32");
+              TaskTerm nextSc = rb.bin(bKind, cScs[k], sliceTotal, "f32");
+              yVals.push_back(nextSc.v);
+            }
             makeOp(b, loc, "task_yield", yVals, {},
                    {b.getNamedAttr("val_types", b.getArrayAttr(oTys))});
           }
           for (size_t k = 0; k < m; ++k) {
-            finVecs.push_back({oFor->getResult(k), vecF32Ty});
-            finTailScs.push_back({oFor->getResult(m + k), "f32"});
+            rb.terms[stage[k]->getResult(0)] = {oFor->getResult(k), "f32"};
+            summaryValues.insert(stage[k]->getResult(0));
           }
-        }
-
-        for (size_t k = 0; k < m; ++k) {
-          Value redV =
-              makeOp(b, loc, "task_reduce", {finVecs[k].v}, {b.getIndexType()},
-                     {b.getNamedAttr("kind", b.getStringAttr(rKind)),
-                      b.getNamedAttr("axis", b.getI64IntegerAttr(0)),
-                      b.getNamedAttr("in_type", b.getStringAttr(vecF32Ty)),
-                      b.getNamedAttr("val_type", b.getStringAttr("f32"))})
-                  ->getResult(0);
-          TaskTerm total = onlyFullPanels
-                               ? TaskTerm{redV, "f32"}
-                               : rb.bin(bKind, {redV, "f32"}, finTailScs[k],
-                                        "f32");
-          rb.terms[stage[k]->getResult(0)] = total;
-          summaryValues.insert(stage[k]->getResult(0));
         }
         return success();
       };
@@ -2961,57 +3088,118 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
           for (bool tail : {false, true}) {
             if (tail && onlyFullPanels)
               continue;
+            bool scalarTail =
+                tail && ((grouped && subOps.size() >= 64) || sw.segmentLoop);
+            bool splitScalarRem =
+                tail && grouped && !scalarTail && tailVec > 1 &&
+                canScalarEvalOps(subOps);
+            TaskTerm vecTailEnd = colCnt;
+            if (splitScalarRem) {
+              TaskTerm rem = rb.bin("sub", colCnt, tStart, "index");
+              TaskTerm vStep = rb.idx(tailVec);
+              TaskTerm vCnt = rb.bin("div", rem, vStep, "index");
+              vecTailEnd = rb.bin("add", tStart,
+                                  rb.bin("mul", vCnt, vStep, "index"), "index");
+            }
             TaskTerm lb = tail ? tStart : rb.zeroIdx;
-            TaskTerm ub = tail ? colCnt : pCnt;
-            TaskTerm step = tail ? rb.idx(tailVec) : rb.oneIdx;
+            TaskTerm ub = tail ? vecTailEnd : pCnt;
+            TaskTerm step =
+                tail ? (scalarTail ? rb.oneIdx : rb.idx(tailVec)) : rb.oneIdx;
             int dim = tail ? int(tailVec) : (fixed ? int(fixed) : -3);
             Operation *pFor = makeOp(
                 b, loc, "task_for", {lb.v, ub.v, step.v}, {},
                 {b.getNamedAttr("iter_types", b.getArrayAttr({}))}, 1);
             Block &pBb = pFor->getRegion(0).emplaceBlock();
             TaskTerm pIv{pBb.addArgument(b.getIndexType(), loc), "index"};
-            OpBuilder::InsertionGuard pg(b);
-            b.setInsertionPointToEnd(&pBb);
-            TaskTerm off =
-                tail ? pIv : rb.bin("mul", pIv, rb.panelWidth, "index");
-            llvm::DenseMap<Value, TaskTerm> localMap;
-            if (!tail && !cacheReadVals.empty()) {
-              std::string u64Ty = regionType("value", "ui64", 1, dim, axId);
-              std::string ixTy = regionType("value", "si64", 1, dim, axId);
-              std::string mskTy = regionType("value", "i1", 1, dim, axId);
-              Value lanesV =
-                  makeOp(b, loc, "task_iota", {}, {b.getIndexType()},
-                         {b.getNamedAttr("start", b.getI64IntegerAttr(0)),
-                          b.getNamedAttr("end", b.getI64IntegerAttr(dim)),
-                          b.getNamedAttr("val_type", b.getStringAttr(u64Ty))})
-                      ->getResult(0);
-              TaskTerm addr64 =
-                  rb.bin("add", rb.castOp({lanesV, u64Ty}, ixTy),
-                         rb.castOp(off, "si64"), ixTy);
-              TaskTerm trueVec = rb.splatOp(rb.lit("true", "i1"), mskTy);
-              for (auto [cIdx, cv] : llvm::enumerate(cacheReadVals)) {
-                std::string eSp = cacheElemSps[cIdx];
-                std::string pTy = "!weft_kernel.pointer<" + eSp + ">";
-                std::string cValTy = regionType("value", eSp, 1, dim, axId);
-                TaskTerm zVec = rb.splatOp(rb.lit("0.0", eSp), cValTy);
-                Value ldV =
-                    makeOp(b, loc, "task_ptr_load",
-                           {cachePtrs[cIdx], addr64.v, trueVec.v, zVec.v},
-                           {b.getIndexType()},
-                           {b.getNamedAttr("ptr_type", b.getStringAttr(pTy)),
-                            b.getNamedAttr("val_type",
-                                           b.getStringAttr(cValTy))})
-                        ->getResult(0);
-                localMap[cv] = {ldV, cValTy};
+            {
+              OpBuilder::InsertionGuard pg(b);
+              b.setInsertionPointToEnd(&pBb);
+              TaskTerm off =
+                  tail ? pIv : rb.bin("mul", pIv, rb.panelWidth, "index");
+              llvm::DenseMap<Value, TaskTerm> localMap;
+              if (scalarTail && !sw.segmentLoop) {
+                if (failed(evalScalarAt(subOps, prefix, pIv, nullptr, localMap)))
+                  return failure();
+                for (Operation *wPtr : sw.writes) {
+                  auto vt = cast<MemRefType>(wPtr->getOperand(0).getType());
+                  SmallVector<TaskTerm, 4> coords;
+                  if (vt.getRank() >= 2)
+                    coords.append(prefix.begin(), prefix.end());
+                  coords.push_back(pIv);
+                  TaskTerm val =
+                      localMap.count(wPtr->getOperand(2))
+                          ? localMap.at(wPtr->getOperand(2))
+                          : rb.terms.lookup(wPtr->getOperand(2));
+                  rb.commitOp(val, rb.scalarSlice(wPtr->getOperand(0), coords,
+                                                  false));
+                }
+              } else {
+                if (!tail && !cacheReadVals.empty()) {
+                  std::string u64Ty = regionType("value", "ui64", 1, dim, axId);
+                  std::string ixTy = regionType("value", "si64", 1, dim, axId);
+                  std::string mskTy = regionType("value", "i1", 1, dim, axId);
+                  Value lanesV =
+                      makeOp(b, loc, "task_iota", {}, {b.getIndexType()},
+                             {b.getNamedAttr("start", b.getI64IntegerAttr(0)),
+                              b.getNamedAttr("end", b.getI64IntegerAttr(dim)),
+                              b.getNamedAttr("val_type", b.getStringAttr(u64Ty))})
+                          ->getResult(0);
+                  TaskTerm addr64 =
+                      rb.bin("add", rb.castOp({lanesV, u64Ty}, ixTy),
+                             rb.castOp(off, "si64"), ixTy);
+                  TaskTerm trueVec = rb.splatOp(rb.lit("true", "i1"), mskTy);
+                  for (auto [cIdx, cv] : llvm::enumerate(cacheReadVals)) {
+                    std::string eSp = cacheElemSps[cIdx];
+                    std::string pTy = "!weft_kernel.pointer<" + eSp + ">";
+                    std::string cValTy = regionType("value", eSp, 1, dim, axId);
+                    TaskTerm zVec = rb.splatOp(rb.lit("0.0", eSp), cValTy);
+                    Value ldV =
+                        makeOp(b, loc, "task_ptr_load",
+                               {cachePtrs[cIdx], addr64.v, trueVec.v, zVec.v},
+                               {b.getIndexType()},
+                               {b.getNamedAttr("ptr_type", b.getStringAttr(pTy)),
+                                b.getNamedAttr("val_type",
+                                               b.getStringAttr(cValTy))})
+                            ->getResult(0);
+                    localMap[cv] = {ldV, cValTy};
+                  }
+                }
+                if (failed(rb.emitVectorPanelOps(
+                        subOps, sw.writes, rowIv, prefix, off, rb.panelWidth,
+                        scalarTail ? 1 : dim, baseDim, axId, !tail && fixed > 0,
+                        localMap)))
+                  return failure();
               }
+              makeOp(b, loc, "task_yield", {}, {},
+                     {b.getNamedAttr("val_types", b.getArrayAttr({}))});
             }
-            if (failed(rb.emitVectorPanelOps(subOps, sw.writes, rowIv, prefix,
-                                             off, rb.panelWidth, dim, baseDim,
-                                             axId, !tail && fixed > 0,
-                                             localMap)))
-              return failure();
-            makeOp(b, loc, "task_yield", {}, {},
-                   {b.getNamedAttr("val_types", b.getArrayAttr({}))});
+            if (splitScalarRem) {
+              Operation *rFor = makeOp(
+                  b, loc, "task_for", {vecTailEnd.v, colCnt.v, rb.oneIdx.v}, {},
+                  {b.getNamedAttr("iter_types", b.getArrayAttr({}))}, 1);
+              Block &rBb = rFor->getRegion(0).emplaceBlock();
+              TaskTerm rIv{rBb.addArgument(b.getIndexType(), loc), "index"};
+              OpBuilder::InsertionGuard rg(b);
+              b.setInsertionPointToEnd(&rBb);
+              llvm::DenseMap<Value, TaskTerm> localMap;
+              if (failed(evalScalarAt(subOps, prefix, rIv, nullptr, localMap)))
+                return failure();
+              for (Operation *wPtr : sw.writes) {
+                auto vt = cast<MemRefType>(wPtr->getOperand(0).getType());
+                SmallVector<TaskTerm, 4> coords;
+                if (vt.getRank() >= 2)
+                  coords.append(prefix.begin(), prefix.end());
+                coords.push_back(rIv);
+                TaskTerm val =
+                    localMap.count(wPtr->getOperand(2))
+                        ? localMap.at(wPtr->getOperand(2))
+                        : rb.terms.lookup(wPtr->getOperand(2));
+                rb.commitOp(val,
+                            rb.scalarSlice(wPtr->getOperand(0), coords, false));
+              }
+              makeOp(b, loc, "task_yield", {}, {},
+                     {b.getNamedAttr("val_types", b.getArrayAttr({}))});
+            }
           }
           return success();
         };
@@ -3038,8 +3226,14 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
       };
 
       if (!cachedCut.empty()) {
+        for (size_t sIdx = 0; sIdx + 1 < redStages.size(); ++sIdx) {
+          if (failed(emitReductionStage(redStages[sIdx], {}, false)) ||
+              failed(emitAvailableScalars()))
+            return failure();
+        }
+        const auto &lastStage = redStages.back();
         TaskTerm fitsLen =
-            rb.cmp("le", rb.columns, rb.idx(kMaxRowCacheCols), "i1");
+            rb.cmp("le", rb.columns, rb.idx(maxRowCacheCols), "i1");
         TaskTerm exactPanels = rb.cmp("eq", tailStart, rb.columns, "i1");
         TaskTerm canCache = rb.bin("and", fitsLen, exactPanels, "i1");
         auto savedTerms = rb.terms;
@@ -3054,7 +3248,7 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
         {
           OpBuilder::InsertionGuard tg(b);
           b.setInsertionPointToEnd(&thenBb);
-          if (failed(emitReductionStage(redStages[0], cachedCut, true)) ||
+          if (failed(emitReductionStage(lastStage, cachedCut, true)) ||
               failed(emitAvailableScalars()) ||
               failed(emitStoreSubset(writes, true, cachedCut, true)))
             return failure();
@@ -3067,7 +3261,7 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
         {
           OpBuilder::InsertionGuard eg(b);
           b.setInsertionPointToEnd(&elseBb);
-          if (failed(emitReductionStage(redStages[0], {}, false)) ||
+          if (failed(emitReductionStage(lastStage, {}, false)) ||
               failed(emitAvailableScalars()) ||
               failed(emitStoreSubset(writes, true, {}, false)))
             return failure();
@@ -3100,7 +3294,10 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
           return true;
         };
 
-        constexpr size_t kMaxFusedStores = 4;
+        const size_t maxFusedStores =
+            allOps.size() > 128
+                ? 1
+                : ((grouped && allOps.size() > 32) ? 2 : 4);
         for (size_t sIdx = 0; sIdx < redStages.size(); ++sIdx) {
           const auto &stage = redStages[sIdx];
           if (failed(emitReductionStage(stage, {}, false)) ||
@@ -3109,7 +3306,7 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
           for (Operation *ro : stage)
             doneReds.insert(ro);
 
-          if (redStages.size() > 1 && writes.size() > kMaxFusedStores &&
+          if (redStages.size() > 1 && writes.size() > maxFusedStores &&
               !hasSpecialSweep) {
             SmallVector<Operation *, 4> ready;
             for (Operation *w : writes) {
@@ -3119,9 +3316,9 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
               if (writeReadyAndUsesRed(w, usesRed) && usesRed)
                 ready.push_back(w);
             }
-            for (size_t i = 0; i < ready.size(); i += kMaxFusedStores) {
+            for (size_t i = 0; i < ready.size(); i += maxFusedStores) {
               auto chunk = ArrayRef<Operation *>(ready).slice(
-                  i, std::min(kMaxFusedStores, ready.size() - i));
+                  i, std::min(maxFusedStores, ready.size() - i));
               if (failed(emitStoreSubset(chunk, false, {}, false)))
                 return failure();
               for (Operation *cw : chunk)
@@ -3137,15 +3334,15 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
         if (remWrites.empty()) {
           if (failed(emitStoreSubset({}, true, {}, false)))
             return failure();
-        } else if (remWrites.size() <= kMaxFusedStores || hasSpecialSweep) {
+        } else if (remWrites.size() <= maxFusedStores || hasSpecialSweep) {
           if (failed(emitStoreSubset(remWrites, true, {}, false)))
             return failure();
         } else {
           if (failed(emitStoreSubset({}, true, {}, false)))
             return failure();
-          for (size_t i = 0; i < remWrites.size(); i += kMaxFusedStores) {
+          for (size_t i = 0; i < remWrites.size(); i += maxFusedStores) {
             auto chunk = ArrayRef<Operation *>(remWrites).slice(
-                i, std::min(kMaxFusedStores, remWrites.size() - i));
+                i, std::min(maxFusedStores, remWrites.size() - i));
             if (failed(emitStoreSubset(chunk, false, {}, false)))
               return failure();
           }
@@ -3274,7 +3471,7 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
             b.getNamedAttr(
                 "shape_exprs",
                 b.getArrayAttr({b.getStringAttr("$0"), b.getStringAttr("$1"),
-                                b.getStringAttr("panel ? panel : nc")})),
+                                b.getStringAttr("panel ? panel : $1")})),
             b.getNamedAttr(
                 "stride_exprs",
                 b.getArrayAttr(

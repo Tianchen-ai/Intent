@@ -47,8 +47,11 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
   intentdsl::CallFacts facts;
   bool grouped;
   int64_t tailVecWidth;
-  Lower(StringRef p, const intentdsl::CallFacts &f, bool g, int64_t tv)
-      : phase(p.str()), facts(f), grouped(g), tailVecWidth(tv) {}
+  int64_t privateStackBytes;
+  Lower(StringRef p, const intentdsl::CallFacts &f, bool g, int64_t tv,
+        int64_t ps)
+      : phase(p.str()), facts(f), grouped(g), tailVecWidth(tv),
+        privateStackBytes(ps) {}
   void runOnOperation() final {
     ModuleOp m = getOperation();
     if (hasWeftMatrixProgram(m) || hasWeftRowProgram(m) ||
@@ -74,7 +77,8 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
       if (failed(lowerWeftOrdered(f, facts, grouped)))
         signalPassFailure();
     } else {
-      if (failed(lowerWeftRow(f, facts, tailVecWidth)))
+      if (failed(
+              lowerWeftRow(f, facts, grouped, tailVecWidth, privateStackBytes)))
         signalPassFailure();
     }
   }
@@ -110,8 +114,9 @@ struct PublishWeftRowAndOrderedABI
 
 void lower(OpPassManager &pm, StringRef phase,
            const intentdsl::CallFacts &facts, bool grouped,
-           int64_t tailVecWidth) {
-  pm.addPass(std::make_unique<Lower>(phase, facts, grouped, tailVecWidth));
+           int64_t tailVecWidth, int64_t privateStackBytes) {
+  pm.addPass(std::make_unique<Lower>(phase, facts, grouped, tailVecWidth,
+                                     privateStackBytes));
 }
 
 void publishWeftABI(OpPassManager &pm) {

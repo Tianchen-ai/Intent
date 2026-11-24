@@ -16,7 +16,7 @@ void populateWeftMatrixContracts(intentdsl::cpu::MatrixMachine &, int64_t,
 void registerWeftAddressOptimization(Unit &);
 void publishWeftABI(OpPassManager &);
 void lower(OpPassManager &, StringRef, const intentdsl::CallFacts &, bool,
-           int64_t);
+           int64_t, int64_t);
 LogicalResult verifyHost(ModuleOp, const TargetProfile &, StringRef);
 
 namespace {
@@ -80,8 +80,10 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
                         .value_or((isRvv || *bits >= 512) ? 32 : 16);
   int64_t maxLmul8 =
       options.getInteger("max_lmul_eighths").value_or(isRvv ? 64 : 8);
+  int64_t privStack =
+      options.getInteger("private_stack_bytes").value_or(65536);
   bool hasZvfbfmin = options.getBoolean("zvfbfmin").value_or(false);
-  if (vecRegs <= 0 || maxLmul8 <= 0)
+  if (vecRegs <= 0 || maxLmul8 <= 0 || privStack <= 0)
     return llvm::createStringError("invalid probed vector register budget");
 
   auto caps = std::make_shared<intentdsl::cpu::RowMachine>();
@@ -116,7 +118,8 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
   if (auto e = p.services.provide<intentdsl::cpu::MatrixMachine>(matrix))
     return e;
   if (auto e = p.services.provide<RecordFields>(std::make_shared<RecordFields>(
-          RecordFields{caps->boundWidening, vecRegs, maxLmul8, hasZvfbfmin})))
+          RecordFields{caps->boundWidening, vecRegs, maxLmul8, hasZvfbfmin,
+                       privStack})))
     return e;
 
   // Locally reported mvendorid/marchid for the V100 core.
@@ -152,8 +155,9 @@ void bind(Unit &u) {
             int64_t tailVec = 1;
             if (auto *rm = p.services.get<intentdsl::cpu::RowMachine>())
               tailVec = std::max<int64_t>(1, rm->vectorBits / 32);
+            const auto *rf = p.services.get<RecordFields>();
             lower(pm, phase, *p.services.get<intentdsl::CallFacts>(),
-                  p.services.get<RecordFields>()->grouped, tailVec);
+                  rf->grouped, tailVec, rf->privateStackBytes);
             if (phase == "callable")
               publishWeftABI(pm);
             return llvm::Error::success();
