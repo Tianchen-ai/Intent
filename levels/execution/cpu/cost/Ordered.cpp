@@ -14,8 +14,8 @@ void ownerCost(Unit &u) {
           auto w = mlir::cast<mlir::IntegerAttr>(cache ? cache.get("grain")
                                                        : c.value)
                        .getInt();
-          auto workers =
-              ctx.target.services.get<intentdsl::cpu::RowMachine>()->workers;
+          auto rm = ctx.target.services.get<intentdsl::cpu::RowMachine>();
+          auto workers = rm->workers;
           double tasks = llvm::divideCeil(n, w),
                  waves = std::ceil(tasks / workers);
           CostEstimate e;
@@ -23,13 +23,19 @@ void ownerCost(Unit &u) {
           e.bottleneck = "owner task granularity";
           e.terms["native_tasks"] = {tasks, "count"};
           e.terms["worker_waves"] = {waves, "count"};
-          auto launch = intentdsl::quantity(ctx, "launch", "ns"),
-               rate = intentdsl::quantity(ctx, "vector", "FLOP/ns");
-          if (launch && rate)
-            e.timeNs = *launch +
-                       waves * (1 + std::min(w, n)) * workers / *rate +
-                       tasks / *rate;
-          if (auto panel = intentdsl::cpu::reusableScores(o, ctx.target)) {
+          double launchVal =
+              intentdsl::quantity(ctx, "launch", "ns").value_or(4000.);
+          double rateVal = intentdsl::quantity(ctx, "vector", "FLOP/ns")
+                               .value_or(std::max(1., (rm->vectorBits / 32.) *
+                                                          2. * workers));
+          double bwVal = intentdsl::quantity(ctx, "read_1", "B/ns")
+                             .value_or(std::max(8., 8. * workers));
+          e.timeNs = launchVal +
+                     waves * (1 + std::min(w, n)) * workers / rateVal +
+                     tasks / rateVal;
+          auto panel = intentdsl::cpu::reusableScores(o, ctx.target);
+          auto shared = intentdsl::cpu::sharedInterval(o, *f);
+          if (panel) {
             bool retained =
                 cache && (cache.get("scores") ||
                           (cache.get("window") &&
@@ -37,29 +43,31 @@ void ownerCost(Unit &u) {
                                panel->keys));
             double dots = double(n) * panel->keys * (retained ? 1 : 2);
             e.terms["score_dot_products"] = {dots, "count"};
-            auto bandwidth = intentdsl::quantity(ctx, "read_1", "B/ns");
-            if (e.timeNs && bandwidth && rate) {
-              *e.timeNs += 2. * dots * panel->depth / *rate;
-              if (!intentdsl::cpu::sharedInterval(o, *f))
-                *e.timeNs += ((retained ? 0. : panel->readBytes) +
-                              (retained ? 1. : 0.)) *
-                             n * panel->keys / *bandwidth;
-            }
+            *e.timeNs += 2. * dots * panel->depth / rateVal;
+            if (!shared)
+              *e.timeNs += ((retained ? 0. : panel->readBytes) +
+                            (retained ? 8. : 0.)) *
+                           n * panel->keys / bwVal;
           }
-          if (auto shared = intentdsl::cpu::sharedInterval(o, *f)) {
+          if (shared) {
             bool together = cache && cache.get("inner");
             auto ownersPerLoad =
                 together ? cache.getAs<mlir::IntegerAttr>("batch").getInt()
                          : int64_t(1);
-            auto bytes = shared->readBytes * n / ownersPerLoad;
+            double trip = panel ? double(panel->keys) : 1.;
+            auto bytes = shared->readBytes * trip * n / ownersPerLoad;
             // One of the two projections is replaced by a private FP32
             // store/load pair for the score of each owner.
-            if (together && cache.get("window"))
-              bytes = bytes * .5 + 8. * n;
+            if (together && cache.get("window")) {
+              double savedPerStep =
+                  panel ? std::min(shared->readBytes, panel->readBytes)
+                        : shared->readBytes * .5;
+              bytes = (shared->readBytes - savedPerStep) * trip * n /
+                          ownersPerLoad +
+                      8. * trip * n;
+            }
             e.terms["common_input_bytes_per_member"] = {bytes, "B"};
-            if (auto bw = intentdsl::quantity(ctx, "read_1", "B/ns");
-                e.timeNs && bw)
-              *e.timeNs += bytes / *bw;
+            *e.timeNs += bytes / bwVal;
           }
           return e;
         }},

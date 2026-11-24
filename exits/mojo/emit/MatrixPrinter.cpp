@@ -1463,7 +1463,7 @@ TerminalPrinter mojoMatrixPrinter() {
   p.operations["mojo_row.owner_fn"] = [](Operation &op, PrintPoint at,
                                          PrintContext &c) {
     if (at == PrintPoint::Enter) {
-      c.line("from std.math import exp, sqrt, exp2, log, isnan");
+      c.line("from std.math import exp, sqrt, rsqrt, exp2, log, max, isnan");
       c.line("from std.memory import bitcast");
       if (op.getAttrOfType<BoolAttr>("uses_stack").getValue())
         c.line("from std.memory import unsafe_stack_allocation");
@@ -1599,6 +1599,29 @@ TerminalPrinter mojoMatrixPrinter() {
     return llvm::Error::success();
   };
 
+  p.operations["mojo_row.reduce_sum_16x16"] = [](Operation &op, PrintPoint at,
+                                                 PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      SmallVector<std::string, 16> args;
+      for (Value v : op.getOperands())
+        args.push_back(c.name(v));
+      c.line("var " + c.name(op.getResult(0)) + " = reduce_sum_16x16(" +
+             llvm::join(args, ", ") + ")");
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["mojo_row.simd_cmpi"] = [](Operation &op, PrintPoint at,
+                                          PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      auto pred = op.getAttrOfType<StringAttr>("pred").getValue().str();
+      c.line("var " + c.name(op.getResult(0)) + " = " +
+             c.name(op.getOperand(0)) + "." + pred + "(" +
+             c.name(op.getOperand(1)) + ")");
+    }
+    return llvm::Error::success();
+  };
+
   p.operations["mojo_row.pack_apply"] = [](Operation &op, PrintPoint at,
                                            PrintContext &c) {
     if (at != PrintPoint::Enter)
@@ -1613,7 +1636,8 @@ TerminalPrinter mojoMatrixPrinter() {
                        std::to_string(args.size()) + "](" +
                        llvm::join(args, ", ") + ")";
     std::string expr =
-        kind == "exp"    ? ("exp(" + simd + ")")
+        kind == "id"     ? simd
+        : kind == "exp"  ? ("exp(" + simd + ")")
         : kind == "exp2" ? ("exp2(" + simd + ")")
                          : (simd + ".cast[DType." + outDt + "]()");
     c.line("var " + c.name(op.getResult(0)) + " = " + expr);
@@ -1874,12 +1898,18 @@ TerminalPrinter mojoMatrixPrinter() {
                                         PrintContext &c) {
     if (at == PrintPoint::Enter) {
       int64_t w = op.getAttrOfType<IntegerAttr>("width").getInt();
-      std::string pos =
-          w == 1 ? ("SIMD[DType.uint64,1](" + c.name(op.getOperand(1)) + ")")
-                 : c.name(op.getOperand(1));
-      c.line("var " + c.name(op.getResult(0)) + " = uniform_at[" +
-             std::to_string(w) + "](" + c.name(op.getOperand(0)) + ", " + pos +
-             ")");
+      if (w > 1 && !isa<ShapedType>(op.getOperand(1).getType())) {
+        c.line("var " + c.name(op.getResult(0)) + " = uniform_contiguous[" +
+               std::to_string(w) + "](" + c.name(op.getOperand(0)) + ", " +
+               c.name(op.getOperand(1)) + ")");
+      } else {
+        std::string pos =
+            w == 1 ? ("SIMD[DType.uint64,1](" + c.name(op.getOperand(1)) + ")")
+                   : c.name(op.getOperand(1));
+        c.line("var " + c.name(op.getResult(0)) + " = uniform_at[" +
+               std::to_string(w) + "](" + c.name(op.getOperand(0)) + ", " +
+               pos + ")");
+      }
     }
     return llvm::Error::success();
   };

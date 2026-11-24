@@ -14,6 +14,7 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/StringExtras.h"
 #include <cmath>
+#include <set>
 
 namespace CI_UNIT_NAMESPACE {
 using namespace compilerinfra;
@@ -110,6 +111,10 @@ struct OrderedLowerer {
   Location loc;
   int64_t batch = 1;
   Value localStackBuf;
+  bool batchSimd = false;
+  bool usesReduce16x16 = false;
+  llvm::DenseMap<Value, Value> batchVecs;
+  llvm::DenseMap<Value, Value> wideBatchSplats;
 
   // Chunked L1-resident slice lowering state (active when chunkedMode == true)
   bool chunkedMode = false;
@@ -268,6 +273,266 @@ struct OrderedLowerer {
     makeOp(b, loc, "acc_write", {slot, val});
   }
 
+  bool canBatchVecType(Type t) const {
+    return batchSimd &&
+           (t.isF32() || t.isBF16() || t.isF16() || t.isIndex() ||
+            t.isInteger(1) || t.isInteger(32) || t.isInteger(64) ||
+            t.isUnsignedInteger(64));
+  }
+
+  Type vecElemType(Type t) const {
+    return t.isIndex() ? b.getI64Type() : t;
+  }
+
+  RankedTensorType batchVecType(Type origTy) const {
+    return RankedTensorType::get({batch}, vecElemType(origTy));
+  }
+
+  Value declBatchVecSlot(RankedTensorType vecTy, Value initVal) {
+    SmallVector<Value, 1> inits;
+    if (initVal)
+      inits.push_back(initVal);
+    return makeOp(b, loc, "acc_decl", inits, {vecTy},
+                  {b.getNamedAttr("dtype", b.getStringAttr(dtypeBare(vecTy))),
+                   b.getNamedAttr("width", b.getI64IntegerAttr(batch))})
+        ->getResult(0);
+  }
+
+  Value getBatchVec(Value origVal, ArrayRef<IRMapping> lanes) {
+    if (auto it = batchVecs.find(origVal); it != batchVecs.end() && it->second)
+      return it->second;
+    Type origTy = origVal.getType();
+    Type elemTy = vecElemType(origTy);
+    auto vecTy = RankedTensorType::get({batch}, elemTy);
+    bool allSame = llvm::all_of(lanes, [&](const IRMapping &m) {
+      return m.lookup(origVal) == lanes[0].lookup(origVal);
+    });
+    if (allSame) {
+      Value s0 = lanes[0].lookup(origVal);
+      if (origTy.isIndex())
+        s0 = b.create<arith::IndexCastOp>(loc, b.getI64Type(), s0);
+      return makeOp(b, loc, "splat_scalar", {s0}, {vecTy},
+                    {b.getNamedAttr("dtype", b.getStringAttr(dtypeBare(elemTy))),
+                     b.getNamedAttr("width", b.getI64IntegerAttr(batch))})
+          ->getResult(0);
+    }
+    SmallVector<Value, 16> scalars;
+    for (const auto &m : lanes) {
+      Value sl = m.lookup(origVal);
+      if (origTy.isIndex())
+        sl = b.create<arith::IndexCastOp>(loc, b.getI64Type(), sl);
+      scalars.push_back(sl);
+    }
+    return makeOp(b, loc, "pack_apply", scalars, {vecTy},
+                  {b.getNamedAttr("in_dtype", b.getStringAttr(dtypeBare(elemTy))),
+                   b.getNamedAttr("out_dtype",
+                                  b.getStringAttr(dtypeBare(elemTy))),
+                   b.getNamedAttr("kind", b.getStringAttr("id"))})
+        ->getResult(0);
+  }
+
+  void materializeScalarLanes(Value origVal,
+                              SmallVectorImpl<IRMapping> &lanes) {
+    if (lanes.empty() || lanes[0].contains(origVal))
+      return;
+    auto it = batchVecs.find(origVal);
+    if (it == batchVecs.end() || !it->second)
+      return;
+    Value vec = it->second;
+    Type elemTy = cast<ShapedType>(vec.getType()).getElementType();
+    for (size_t l = 0; l < lanes.size(); ++l) {
+      Value s = makeOp(b, loc, "extract_lane", {vec}, {elemTy},
+                       {b.getNamedAttr("lane", b.getI64IntegerAttr(l))})
+                    ->getResult(0);
+      if (origVal.getType().isIndex())
+        s = makeOp(b, loc, "as_int", {s}, {b.getIndexType()})->getResult(0);
+      lanes[l].map(origVal, s);
+    }
+  }
+
+  bool hasWideSplat(unsigned laneIdx, Value v) const {
+    return wideSplats[laneIdx].count(v) || wideBatchSplats.count(v);
+  }
+
+  Value getWideSplatScalar(unsigned laneIdx, Value v) {
+    if (auto it = wideSplats[laneIdx].find(v);
+        it != wideSplats[laneIdx].end())
+      return it->second;
+    Value vec = wideBatchSplats.lookup(v);
+    Type elemTy = cast<ShapedType>(vec.getType()).getElementType();
+    return makeOp(b, loc, "extract_lane", {vec}, {elemTy},
+                  {b.getNamedAttr("lane", b.getI64IntegerAttr(laneIdx))})
+        ->getResult(0);
+  }
+
+  bool tryLowerBatchVecOp(Operation &op, SmallVectorImpl<IRMapping> &lanes) {
+    if (!batchSimd || lanes.size() != size_t(batch) ||
+        op.hasAttr("cpu.owner_common"))
+      return false;
+    auto n = op.getName().getStringRef();
+    auto kind = op.getName().stripDialect();
+    if (n == "cpu.buffer_store") {
+      Value offOrig = op.getOperand(2);
+      if (!lanes[0].contains(offOrig) ||
+          !canBatchVecType(op.getOperand(0).getType()) ||
+          !llvm::all_of(lanes, [&](const IRMapping &m) {
+            return m.lookupOrNull(offOrig) == lanes[0].lookup(offOrig);
+          }))
+        return false;
+      Value addr =
+          makeAddr(b, loc, localStackBuf, {lanes[0].lookup(offOrig)}, {batch});
+      makeOp(b, loc, "store_slice",
+             {localStackBuf, addr, getBatchVec(op.getOperand(0), lanes)});
+      return true;
+    }
+    if (n == "cpu.buffer_load") {
+      Value offOrig = op.getOperand(1);
+      Type resTy = op.getResult(0).getType();
+      if (!lanes[0].contains(offOrig) || !canBatchVecType(resTy) ||
+          !llvm::all_of(lanes, [&](const IRMapping &m) {
+            return m.lookupOrNull(offOrig) == lanes[0].lookup(offOrig);
+          }))
+        return false;
+      Value addr =
+          makeAddr(b, loc, localStackBuf, {lanes[0].lookup(offOrig)}, {batch});
+      batchVecs[op.getResult(0)] =
+          loadContiguousSlice(localStackBuf, addr, vecElemType(resTy), batch);
+      return true;
+    }
+    if (kind == "lane_splat" && isWideVal(op.getResult(0)) &&
+        canBatchVecType(op.getOperand(0).getType())) {
+      wideBatchSplats[op.getResult(0)] = getBatchVec(op.getOperand(0), lanes);
+      return true;
+    }
+    if (op.getNumResults() != 1 || isa<ShapedType>(op.getResult(0).getType()) ||
+        !canBatchVecType(op.getResult(0).getType()))
+      return false;
+    Type resTy = op.getResult(0).getType();
+    if (isa<arith::ConstantOp, arith::ConstantIndexOp>(op))
+      return false;
+    if (isa<arith::AddFOp, arith::SubFOp, arith::MulFOp, arith::DivFOp,
+            arith::MaxNumFOp, arith::AddIOp, arith::SubIOp, arith::MulIOp,
+            arith::AndIOp, arith::OrIOp, arith::XOrIOp>(op)) {
+      if (!canBatchVecType(op.getOperand(0).getType()) ||
+          !canBatchVecType(op.getOperand(1).getType()))
+        return false;
+      OperationState st(loc, n);
+      st.addOperands({getBatchVec(op.getOperand(0), lanes),
+                      getBatchVec(op.getOperand(1), lanes)});
+      st.addTypes({batchVecType(resTy)});
+      batchVecs[op.getResult(0)] = b.create(st)->getResult(0);
+      return true;
+    }
+    if (isa<math::ExpOp, math::Exp2Op, math::LogOp, math::SqrtOp,
+            math::RsqrtOp, arith::ExtFOp, arith::TruncFOp>(op)) {
+      if (!canBatchVecType(op.getOperand(0).getType()))
+        return false;
+      OperationState st(loc, n);
+      st.addOperands({getBatchVec(op.getOperand(0), lanes)});
+      st.addTypes({batchVecType(resTy)});
+      batchVecs[op.getResult(0)] = b.create(st)->getResult(0);
+      return true;
+    }
+    if (isa<arith::IndexCastOp>(op)) {
+      if (!canBatchVecType(op.getOperand(0).getType()))
+        return false;
+      Value inVec = getBatchVec(op.getOperand(0), lanes);
+      auto outVecTy = batchVecType(resTy);
+      batchVecs[op.getResult(0)] =
+          (inVec.getType() == outVecTy)
+              ? inVec
+              : makeOp(b, loc, "scalar_cast", {inVec}, {outVecTy},
+                       {b.getNamedAttr("dtype",
+                                       b.getStringAttr(dtypeBare(outVecTy)))})
+                    ->getResult(0);
+      return true;
+    }
+    if (auto cmp = dyn_cast<arith::CmpIOp>(op)) {
+      if (!canBatchVecType(cmp.getLhs().getType()))
+        return false;
+      StringRef pred;
+      switch (cmp.getPredicate()) {
+      case arith::CmpIPredicate::eq:
+        pred = "eq";
+        break;
+      case arith::CmpIPredicate::ne:
+        pred = "ne";
+        break;
+      case arith::CmpIPredicate::slt:
+        pred = "lt";
+        break;
+      case arith::CmpIPredicate::sle:
+        pred = "le";
+        break;
+      case arith::CmpIPredicate::sgt:
+        pred = "gt";
+        break;
+      case arith::CmpIPredicate::sge:
+        pred = "ge";
+        break;
+      default:
+        return false;
+      }
+      batchVecs[op.getResult(0)] =
+          makeOp(b, loc, "simd_cmpi",
+                 {getBatchVec(cmp.getLhs(), lanes),
+                  getBatchVec(cmp.getRhs(), lanes)},
+                 {batchVecType(b.getI1Type())},
+                 {b.getNamedAttr("pred", b.getStringAttr(pred))})
+              ->getResult(0);
+      return true;
+    }
+    if (auto cmp = dyn_cast<arith::CmpFOp>(op)) {
+      if (!canBatchVecType(cmp.getLhs().getType()))
+        return false;
+      StringRef pred;
+      switch (cmp.getPredicate()) {
+      case arith::CmpFPredicate::OEQ:
+        pred = "eq";
+        break;
+      case arith::CmpFPredicate::ONE:
+        pred = "ne";
+        break;
+      case arith::CmpFPredicate::OLT:
+        pred = "lt";
+        break;
+      case arith::CmpFPredicate::OLE:
+        pred = "le";
+        break;
+      case arith::CmpFPredicate::OGT:
+        pred = "gt";
+        break;
+      case arith::CmpFPredicate::OGE:
+        pred = "ge";
+        break;
+      default:
+        return false;
+      }
+      batchVecs[op.getResult(0)] =
+          makeOp(b, loc, "simd_cmpi",
+                 {getBatchVec(cmp.getLhs(), lanes),
+                  getBatchVec(cmp.getRhs(), lanes)},
+                 {batchVecType(b.getI1Type())},
+                 {b.getNamedAttr("pred", b.getStringAttr(pred))})
+              ->getResult(0);
+      return true;
+    }
+    if (auto sel = dyn_cast<arith::SelectOp>(op)) {
+      if (!sel.getCondition().getType().isInteger(1) ||
+          !canBatchVecType(sel.getTrueValue().getType()))
+        return false;
+      batchVecs[op.getResult(0)] =
+          makeOp(b, loc, "simd_select",
+                 {getBatchVec(sel.getCondition(), lanes),
+                  getBatchVec(sel.getTrueValue(), lanes),
+                  getBatchVec(sel.getFalseValue(), lanes)},
+                 {batchVecType(resTy)})
+              ->getResult(0);
+      return true;
+    }
+    return false;
+  }
+
   void emitZeroWideAccBuf() {
     auto f32x16 = RankedTensorType::get({16}, b.getF32Type());
     Value zeroF = constF32(b, loc, 0.0f);
@@ -299,7 +564,16 @@ struct OrderedLowerer {
 
   Value loadWideChunkF32(const WideViewRef &ref, Value cIdx, int64_t chunk) {
     auto f32Ty = RankedTensorType::get({chunk}, b.getF32Type());
-    Value addr = makeAddr(b, loc, ref.ptr, {ref.baseAddr, cIdx}, {1, 1});
+    Value addr;
+    auto baseCst = ref.baseAddr.getDefiningOp<arith::ConstantIndexOp>();
+    auto cCst = cIdx.getDefiningOp<arith::ConstantIndexOp>();
+    if (baseCst && cCst)
+      addr = makeAddr(b, loc, ref.ptr,
+                      {constIdx(b, loc, baseCst.value() + cCst.value())}, {1});
+    else if (cCst && cCst.value() == 0)
+      addr = makeAddr(b, loc, ref.ptr, {ref.baseAddr}, {1});
+    else
+      addr = makeAddr(b, loc, ref.ptr, {ref.baseAddr, cIdx}, {1, 1});
     if (ref.rawElemType.isF32())
       return loadContiguousSlice(ref.ptr, addr, b.getF32Type(), chunk);
     Value raw = loadContiguousSlice(ref.ptr, addr, ref.rawElemType, chunk);
@@ -477,13 +751,13 @@ struct OrderedLowerer {
         Value scaleScalar;
         if (auto mul = srcVal.getDefiningOp<arith::MulFOp>()) {
           if (wideBufValues.contains(mul.getLhs()) &&
-              wideSplats[laneIdx].count(mul.getRhs())) {
+              hasWideSplat(laneIdx, mul.getRhs())) {
             srcVal = mul.getLhs();
-            scaleScalar = wideSplats[laneIdx][mul.getRhs()];
+            scaleScalar = getWideSplatScalar(laneIdx, mul.getRhs());
           } else if (wideBufValues.contains(mul.getRhs()) &&
-                     wideSplats[laneIdx].count(mul.getLhs())) {
+                     hasWideSplat(laneIdx, mul.getLhs())) {
             srcVal = mul.getRhs();
-            scaleScalar = wideSplats[laneIdx][mul.getLhs()];
+            scaleScalar = getWideSplatScalar(laneIdx, mul.getLhs());
           }
         }
         auto f32x16 = RankedTensorType::get({16}, b.getF32Type());
@@ -495,28 +769,46 @@ struct OrderedLowerer {
                       b.getNamedAttr("width", b.getI64IntegerAttr(16))})
                   ->getResult(0);
         }
-        auto *wLoop = makeOp(
-            b, loc, "for_range",
-            {constIdx(b, loc, 0), constIdx(b, loc, k), constIdx(b, loc, 16)},
-            {}, {}, 1);
-        Block &wBb = wLoop->getRegion(0).emplaceBlock();
-        Value cIdx = wBb.addArgument(b.getIndexType(), loc);
-        OpBuilder::InsertionGuard wg(b);
-        b.setInsertionPointToEnd(&wBb);
-        Value bufAddr = makeAddr(
-            b, loc, wideAccBuf,
-            {constIdx(b, loc, int64_t(laneIdx) * accStride), cIdx}, {1, 1});
-        Value chunkVal =
-            loadContiguousSlice(wideAccBuf, bufAddr, b.getF32Type(), 16);
-        if (scaleVec)
-          chunkVal = b.create<arith::MulFOp>(loc, chunkVal, scaleVec);
-        if (!elemTy.isF32()) {
-          auto outTy = RankedTensorType::get({16}, elemTy);
-          chunkVal = b.create<arith::TruncFOp>(loc, outTy, chunkVal);
+        auto emitWriteChunk = [&](Value cIdx) {
+          auto cCst = cIdx.getDefiningOp<arith::ConstantIndexOp>();
+          Value bufAddr =
+              cCst ? makeAddr(b, loc, wideAccBuf,
+                              {constIdx(b, loc,
+                                        int64_t(laneIdx) * accStride +
+                                            cCst.value())},
+                              {1})
+                   : makeAddr(b, loc, wideAccBuf,
+                              {constIdx(b, loc, int64_t(laneIdx) * accStride),
+                               cIdx},
+                              {1, 1});
+          Value chunkVal =
+              loadContiguousSlice(wideAccBuf, bufAddr, b.getF32Type(), 16);
+          if (scaleVec)
+            chunkVal = b.create<arith::MulFOp>(loc, chunkVal, scaleVec);
+          if (!elemTy.isF32()) {
+            auto outTy = RankedTensorType::get({16}, elemTy);
+            chunkVal = b.create<arith::TruncFOp>(loc, outTy, chunkVal);
+          }
+          Value dstAddr = (cCst && cCst.value() == 0)
+                              ? makeAddr(b, loc, ptr, {addr}, {1})
+                              : makeAddr(b, loc, ptr, {addr, cIdx}, {1, 1});
+          makeOp(b, loc, "store_slice", {ptr, dstAddr, chunkVal});
+        };
+        if (k <= 128) {
+          for (int64_t cOff = 0; cOff < k; cOff += 16)
+            emitWriteChunk(constIdx(b, loc, cOff));
+        } else {
+          auto *wLoop = makeOp(
+              b, loc, "for_range",
+              {constIdx(b, loc, 0), constIdx(b, loc, k), constIdx(b, loc, 16)},
+              {}, {}, 1);
+          Block &wBb = wLoop->getRegion(0).emplaceBlock();
+          Value cIdx = wBb.addArgument(b.getIndexType(), loc);
+          OpBuilder::InsertionGuard wg(b);
+          b.setInsertionPointToEnd(&wBb);
+          emitWriteChunk(cIdx);
+          makeOp(b, loc, "end");
         }
-        Value dstAddr = makeAddr(b, loc, ptr, {addr, cIdx}, {1, 1});
-        makeOp(b, loc, "store_slice", {ptr, dstAddr, chunkVal});
-        makeOp(b, loc, "end");
         return success();
       }
 
@@ -563,24 +855,39 @@ struct OrderedLowerer {
   }
 
   LogicalResult lowerBlock(Block &srcBb, SmallVectorImpl<IRMapping> &lanes) {
+    const bool vecActive = batchSimd && lanes.size() == size_t(batch);
     for (Operation &op : srcBb.without_terminator()) {
       if (auto loop = dyn_cast<scf::ForOp>(op)) {
+        materializeScalarLanes(loop.getLowerBound(), lanes);
+        materializeScalarLanes(loop.getUpperBound(), lanes);
+        materializeScalarLanes(loop.getStep(), lanes);
         unsigned numIter = loop.getNumRegionIterArgs();
         SmallVector<SmallVector<Value, 4>, 16> slots(lanes.size());
+        SmallVector<Value, 4> vecSlots(numIter, Value{});
         bool hasWideIter = false;
-        for (size_t l = 0; l < lanes.size(); ++l) {
-          for (unsigned k = 0; k < numIter; ++k) {
-            Value initOrig = loop.getInitArgs()[k];
-            if (isWideVal(initOrig)) {
-              hasWideIter = true;
-              wideBufValues.insert(loop.getRegionIterArgs()[k]);
-              wideBufValues.insert(loop.getResult(k));
+        for (unsigned k = 0; k < numIter; ++k) {
+          Value initOrig = loop.getInitArgs()[k];
+          Type resTy = loop.getResult(k).getType();
+          if (isWideVal(initOrig)) {
+            hasWideIter = true;
+            wideBufValues.insert(loop.getRegionIterArgs()[k]);
+            wideBufValues.insert(loop.getResult(k));
+            for (size_t l = 0; l < lanes.size(); ++l)
               slots[l].push_back(Value{});
-              continue;
-            }
+            continue;
+          }
+          if (vecActive && !isa<ShapedType>(resTy) && canBatchVecType(resTy) &&
+              !resTy.isInteger(1)) {
+            vecSlots[k] = declBatchVecSlot(batchVecType(resTy),
+                                           getBatchVec(initOrig, lanes));
+            for (size_t l = 0; l < lanes.size(); ++l)
+              slots[l].push_back(Value{});
+            continue;
+          }
+          materializeScalarLanes(initOrig, lanes);
+          for (size_t l = 0; l < lanes.size(); ++l) {
             Value init = lanes[l].lookup(initOrig);
-            slots[l].push_back(
-                declSlot(loop.getResult(k).getType(), init, initOrig));
+            slots[l].push_back(declSlot(resTy, init, initOrig));
           }
         }
         // Check if this is a window-replay loop eligible for register-tiled
@@ -647,28 +954,43 @@ struct OrderedLowerer {
         {
           OpBuilder::InsertionGuard fg(b);
           b.setInsertionPointToEnd(&fBb);
-          for (size_t l = 0; l < lanes.size(); ++l) {
-            lanes[l].map(loop.getInductionVar(), iv);
+          SmallVector<IRMapping, 16> bodyLanes(lanes.begin(), lanes.end());
+          for (size_t l = 0; l < bodyLanes.size(); ++l) {
+            bodyLanes[l].map(loop.getInductionVar(), iv);
             for (unsigned k = 0; k < numIter; ++k)
               if (slots[l][k])
-                lanes[l].map(loop.getRegionIterArgs()[k], readSlot(slots[l][k]));
+                bodyLanes[l].map(loop.getRegionIterArgs()[k],
+                                 readSlot(slots[l][k]));
           }
+          for (unsigned k = 0; k < numIter; ++k)
+            if (vecSlots[k])
+              batchVecs[loop.getRegionIterArgs()[k]] = readSlot(vecSlots[k]);
           bool prevTiled = inTiledReplayPassA;
           Operation *prevVRead = tiledVReadOp;
           if (canTileReplay) {
             inTiledReplayPassA = true;
             tiledVReadOp = candVRead;
           }
-          if (failed(lowerBlock(*loop.getBody(), lanes)))
+          if (failed(lowerBlock(*loop.getBody(), bodyLanes)))
             return failure();
           inTiledReplayPassA = prevTiled;
           tiledVReadOp = prevVRead;
           auto *term = loop.getBody()->getTerminator();
-          for (size_t l = 0; l < lanes.size(); ++l) {
+          SmallVector<Value, 4> nextVecVals(numIter, Value{});
+          for (unsigned k = 0; k < numIter; ++k) {
+            if (vecSlots[k])
+              nextVecVals[k] = getBatchVec(term->getOperand(k), bodyLanes);
+            else if (slots[0][k])
+              materializeScalarLanes(term->getOperand(k), bodyLanes);
+          }
+          for (unsigned k = 0; k < numIter; ++k)
+            if (vecSlots[k])
+              writeSlot(vecSlots[k], nextVecVals[k]);
+          for (size_t l = 0; l < bodyLanes.size(); ++l) {
             SmallVector<Value, 4> nextVals(numIter, Value{});
             for (unsigned k = 0; k < numIter; ++k)
               if (slots[l][k])
-                nextVals[k] = lanes[l].lookup(term->getOperand(k));
+                nextVals[k] = bodyLanes[l].lookup(term->getOperand(k));
             for (unsigned k = 0; k < numIter; ++k)
               if (slots[l][k])
                 writeSlot(slots[l][k], nextVals[k]);
@@ -676,94 +998,177 @@ struct OrderedLowerer {
           makeOp(b, loc, "end");
         }
         if (canTileReplay) {
-          // Pass B: column-outer register-blocked accumulation [8 heads x 32 cols]
           Value span = b.create<arith::SubIOp>(loc, ub, lb);
           auto f32x16 = RankedTensorType::get({16}, b.getF32Type());
-          for (size_t sub = 0; sub < lanes.size(); sub += 8) {
-            size_t subEnd = std::min<size_t>(lanes.size(), sub + 8);
-            size_t subLen = subEnd - sub;
-            auto *cOuter = makeOp(
-                b, loc, "for_range",
-                {constIdx(b, loc, 0), constIdx(b, loc, accExtent),
-                 constIdx(b, loc, 32)},
-                {}, {}, 1);
-            Block &cBb = cOuter->getRegion(0).emplaceBlock();
-            Value cIdx = cBb.addArgument(b.getIndexType(), loc);
-            OpBuilder::InsertionGuard cg(b);
-            b.setInsertionPointToEnd(&cBb);
-            Value cIdxHi = addIdx(b, loc, cIdx, 16);
-            SmallVector<Value, 8> accLo, accHi;
-            for (size_t s = 0; s < subLen; ++s) {
-              accLo.push_back(
-                  makeOp(b, loc, "acc_decl", {}, {f32x16},
-                         {b.getNamedAttr("dtype", b.getStringAttr("float32")),
-                          b.getNamedAttr("width", b.getI64IntegerAttr(16))})
-                      ->getResult(0));
-              accHi.push_back(
-                  makeOp(b, loc, "acc_decl", {}, {f32x16},
-                         {b.getNamedAttr("dtype", b.getStringAttr("float32")),
-                          b.getNamedAttr("width", b.getI64IntegerAttr(16))})
-                      ->getResult(0));
-            }
-            {
-              auto *tInner = makeOp(
-                  b, loc, "for_range",
-                  {constIdx(b, loc, 0), span, constIdx(b, loc, 1)}, {}, {}, 1);
-              Block &tBb = tInner->getRegion(0).emplaceBlock();
-              Value off = tBb.addArgument(b.getIndexType(), loc);
-              OpBuilder::InsertionGuard tg(b);
-              b.setInsertionPointToEnd(&tBb);
-              Value vOffAddr = makeAddr(b, loc, vAddrBuf, {off}, {1});
-              Value vBase64 = makeOp(b, loc, "load_scalar",
-                                     {vAddrBuf, vOffAddr}, {b.getI64Type()})
-                                  ->getResult(0);
-              Value vBase =
-                  makeOp(b, loc, "as_int", {vBase64}, {b.getIndexType()})
-                      ->getResult(0);
-              WideViewRef vRef{tiledVPtr, vBase, tiledVElemTy, accExtent};
-              Value vLo = loadWideChunkF32(vRef, cIdx, 16);
-              Value vHi = loadWideChunkF32(vRef, cIdxHi, 16);
-              for (size_t s = 0; s < subLen; ++s) {
-                Value wAddr = makeAddr(b, loc, localStackBuf,
-                                       {off, constIdx(b, loc, sub + s)},
-                                       {batch, 1});
-                Value wScalar = makeOp(b, loc, "load_scalar",
-                                       {localStackBuf, wAddr}, {b.getF32Type()})
+          if (accExtent == 64 && lanes.size() == 16) {
+            // [6, 6, 4] x 64-col full-width register-blocked accumulation
+            // (24, 24, 16 ZMM accumulators: 3 passes instead of 4, 50% fewer w loads)
+            const size_t starts[3] = {0, 6, 12};
+            const size_t lens[3] = {6, 6, 4};
+            for (int grp = 0; grp < 3; ++grp) {
+              size_t sub = starts[grp], subLen = lens[grp];
+              SmallVector<std::array<Value, 4>, 6> accs(subLen);
+              for (size_t s = 0; s < subLen; ++s)
+                for (int c = 0; c < 4; ++c)
+                  accs[s][c] =
+                      makeOp(b, loc, "acc_decl", {}, {f32x16},
+                             {b.getNamedAttr("dtype",
+                                             b.getStringAttr("float32")),
+                              b.getNamedAttr("width",
+                                             b.getI64IntegerAttr(16))})
+                          ->getResult(0);
+              {
+                auto *tInner = makeOp(
+                    b, loc, "for_range",
+                    {constIdx(b, loc, 0), span, constIdx(b, loc, 1)}, {}, {},
+                    1);
+                Block &tBb = tInner->getRegion(0).emplaceBlock();
+                Value off = tBb.addArgument(b.getIndexType(), loc);
+                OpBuilder::InsertionGuard tg(b);
+                b.setInsertionPointToEnd(&tBb);
+                Value vOffAddr = makeAddr(b, loc, vAddrBuf, {off}, {1});
+                Value vBase64 = makeOp(b, loc, "load_scalar",
+                                       {vAddrBuf, vOffAddr}, {b.getI64Type()})
                                     ->getResult(0);
-                Value wVec =
-                    makeOp(b, loc, "splat_scalar", {wScalar}, {f32x16},
+                Value vBase =
+                    makeOp(b, loc, "as_int", {vBase64}, {b.getIndexType()})
+                        ->getResult(0);
+                WideViewRef vRef{tiledVPtr, vBase, tiledVElemTy, accExtent};
+                Value vChunks[4] = {
+                    loadWideChunkF32(vRef, constIdx(b, loc, 0), 16),
+                    loadWideChunkF32(vRef, constIdx(b, loc, 16), 16),
+                    loadWideChunkF32(vRef, constIdx(b, loc, 32), 16),
+                    loadWideChunkF32(vRef, constIdx(b, loc, 48), 16)};
+                for (size_t s = 0; s < subLen; ++s) {
+                  Value wAddr = makeAddr(b, loc, localStackBuf,
+                                         {off, constIdx(b, loc, sub + s)},
+                                         {batch, 1});
+                  Value wScalar =
+                      makeOp(b, loc, "load_scalar", {localStackBuf, wAddr},
+                             {b.getF32Type()})
+                          ->getResult(0);
+                  Value wVec =
+                      makeOp(b, loc, "splat_scalar", {wScalar}, {f32x16},
+                             {b.getNamedAttr("dtype",
+                                             b.getStringAttr("float32")),
+                              b.getNamedAttr("width",
+                                             b.getI64IntegerAttr(16))})
+                          ->getResult(0);
+                  for (int c = 0; c < 4; ++c)
+                    writeSlot(
+                        accs[s][c],
+                        b.create<arith::AddFOp>(
+                            loc, readSlot(accs[s][c]),
+                            b.create<arith::MulFOp>(loc, vChunks[c], wVec)));
+                }
+                makeOp(b, loc, "end");
+              }
+              for (size_t s = 0; s < subLen; ++s) {
+                int64_t laneBase = int64_t(sub + s) * accStride;
+                for (int c = 0; c < 4; ++c) {
+                  Value dstAddr = makeAddr(
+                      b, loc, wideAccBuf,
+                      {constIdx(b, loc, laneBase + c * 16)}, {1});
+                  makeOp(b, loc, "store_slice",
+                         {wideAccBuf, dstAddr, readSlot(accs[s][c])});
+                }
+              }
+            }
+          } else {
+            // General Pass B: column-outer register-blocked accumulation [8 heads x 32 cols]
+            for (size_t sub = 0; sub < lanes.size(); sub += 8) {
+              size_t subEnd = std::min<size_t>(lanes.size(), sub + 8);
+              size_t subLen = subEnd - sub;
+              auto *cOuter = makeOp(
+                  b, loc, "for_range",
+                  {constIdx(b, loc, 0), constIdx(b, loc, accExtent),
+                   constIdx(b, loc, 32)},
+                  {}, {}, 1);
+              Block &cBb = cOuter->getRegion(0).emplaceBlock();
+              Value cIdx = cBb.addArgument(b.getIndexType(), loc);
+              OpBuilder::InsertionGuard cg(b);
+              b.setInsertionPointToEnd(&cBb);
+              Value cIdxHi = addIdx(b, loc, cIdx, 16);
+              SmallVector<Value, 8> accLo, accHi;
+              for (size_t s = 0; s < subLen; ++s) {
+                accLo.push_back(
+                    makeOp(b, loc, "acc_decl", {}, {f32x16},
                            {b.getNamedAttr("dtype", b.getStringAttr("float32")),
                             b.getNamedAttr("width", b.getI64IntegerAttr(16))})
+                        ->getResult(0));
+                accHi.push_back(
+                    makeOp(b, loc, "acc_decl", {}, {f32x16},
+                           {b.getNamedAttr("dtype", b.getStringAttr("float32")),
+                            b.getNamedAttr("width", b.getI64IntegerAttr(16))})
+                        ->getResult(0));
+              }
+              {
+                auto *tInner = makeOp(
+                    b, loc, "for_range",
+                    {constIdx(b, loc, 0), span, constIdx(b, loc, 1)}, {}, {},
+                    1);
+                Block &tBb = tInner->getRegion(0).emplaceBlock();
+                Value off = tBb.addArgument(b.getIndexType(), loc);
+                OpBuilder::InsertionGuard tg(b);
+                b.setInsertionPointToEnd(&tBb);
+                Value vOffAddr = makeAddr(b, loc, vAddrBuf, {off}, {1});
+                Value vBase64 = makeOp(b, loc, "load_scalar",
+                                       {vAddrBuf, vOffAddr}, {b.getI64Type()})
+                                    ->getResult(0);
+                Value vBase =
+                    makeOp(b, loc, "as_int", {vBase64}, {b.getIndexType()})
                         ->getResult(0);
-                writeSlot(
-                    accLo[s],
-                    b.create<arith::AddFOp>(
-                        loc, readSlot(accLo[s]),
-                        b.create<arith::MulFOp>(loc, vLo, wVec)));
-                writeSlot(
-                    accHi[s],
-                    b.create<arith::AddFOp>(
-                        loc, readSlot(accHi[s]),
-                        b.create<arith::MulFOp>(loc, vHi, wVec)));
+                WideViewRef vRef{tiledVPtr, vBase, tiledVElemTy, accExtent};
+                Value vLo = loadWideChunkF32(vRef, cIdx, 16);
+                Value vHi = loadWideChunkF32(vRef, cIdxHi, 16);
+                for (size_t s = 0; s < subLen; ++s) {
+                  Value wAddr = makeAddr(b, loc, localStackBuf,
+                                         {off, constIdx(b, loc, sub + s)},
+                                         {batch, 1});
+                  Value wScalar =
+                      makeOp(b, loc, "load_scalar", {localStackBuf, wAddr},
+                             {b.getF32Type()})
+                          ->getResult(0);
+                  Value wVec =
+                      makeOp(b, loc, "splat_scalar", {wScalar}, {f32x16},
+                             {b.getNamedAttr("dtype",
+                                             b.getStringAttr("float32")),
+                              b.getNamedAttr("width",
+                                             b.getI64IntegerAttr(16))})
+                          ->getResult(0);
+                  writeSlot(
+                      accLo[s],
+                      b.create<arith::AddFOp>(
+                          loc, readSlot(accLo[s]),
+                          b.create<arith::MulFOp>(loc, vLo, wVec)));
+                  writeSlot(
+                      accHi[s],
+                      b.create<arith::AddFOp>(
+                          loc, readSlot(accHi[s]),
+                          b.create<arith::MulFOp>(loc, vHi, wVec)));
+                }
+                makeOp(b, loc, "end");
+              }
+              for (size_t s = 0; s < subLen; ++s) {
+                int64_t laneBase = int64_t(sub + s) * accStride;
+                Value addrLo = makeAddr(
+                    b, loc, wideAccBuf, {constIdx(b, loc, laneBase), cIdx},
+                    {1, 1});
+                Value addrHi = makeAddr(
+                    b, loc, wideAccBuf, {constIdx(b, loc, laneBase), cIdxHi},
+                    {1, 1});
+                makeOp(b, loc, "store_slice",
+                       {wideAccBuf, addrLo, readSlot(accLo[s])});
+                makeOp(b, loc, "store_slice",
+                       {wideAccBuf, addrHi, readSlot(accHi[s])});
               }
               makeOp(b, loc, "end");
             }
-            for (size_t s = 0; s < subLen; ++s) {
-              int64_t laneBase = int64_t(sub + s) * accStride;
-              Value addrLo = makeAddr(
-                  b, loc, wideAccBuf, {constIdx(b, loc, laneBase), cIdx},
-                  {1, 1});
-              Value addrHi = makeAddr(
-                  b, loc, wideAccBuf, {constIdx(b, loc, laneBase), cIdxHi},
-                  {1, 1});
-              makeOp(b, loc, "store_slice",
-                     {wideAccBuf, addrLo, readSlot(accLo[s])});
-              makeOp(b, loc, "store_slice",
-                     {wideAccBuf, addrHi, readSlot(accHi[s])});
-            }
-            makeOp(b, loc, "end");
           }
         }
+        for (unsigned k = 0; k < numIter; ++k)
+          if (vecSlots[k])
+            batchVecs[loop.getResult(k)] = readSlot(vecSlots[k]);
         for (size_t l = 0; l < lanes.size(); ++l)
           for (unsigned k = 0; k < numIter; ++k)
             if (slots[l][k])
@@ -772,25 +1177,34 @@ struct OrderedLowerer {
       }
 
       if (auto branch = dyn_cast<scf::IfOp>(op)) {
+        materializeScalarLanes(branch.getCondition(), lanes);
         unsigned numRes = branch.getNumResults();
         bool hasElse = !branch.getElseRegion().empty();
-        SmallVector<SmallVector<Value, 4>, 16> resSlots(lanes.size());
-        for (size_t l = 0; l < lanes.size(); ++l) {
-          for (unsigned k = 0; k < numRes; ++k) {
-            Value origRef = branch.thenYield().getOperand(k);
-            if (isWideVal(origRef)) {
-              wideBufValues.insert(branch.getResult(k));
-              resSlots[l].push_back(Value{});
-              continue;
-            }
-            resSlots[l].push_back(
-                declSlot(branch.getResult(k).getType(), Value{}, origRef));
-          }
-        }
         bool sharedCond = llvm::all_of(lanes, [&](IRMapping &m) {
           return m.lookup(branch.getCondition()) ==
                  lanes[0].lookup(branch.getCondition());
         });
+        SmallVector<SmallVector<Value, 4>, 16> resSlots(lanes.size());
+        SmallVector<Value, 4> vecResSlots(numRes, Value{});
+        for (unsigned k = 0; k < numRes; ++k) {
+          Value origRef = branch.thenYield().getOperand(k);
+          Type resTy = branch.getResult(k).getType();
+          if (isWideVal(origRef)) {
+            wideBufValues.insert(branch.getResult(k));
+            for (size_t l = 0; l < lanes.size(); ++l)
+              resSlots[l].push_back(Value{});
+            continue;
+          }
+          if (sharedCond && vecActive && !isa<ShapedType>(resTy) &&
+              canBatchVecType(resTy) && !resTy.isInteger(1)) {
+            vecResSlots[k] = declBatchVecSlot(batchVecType(resTy), Value{});
+            for (size_t l = 0; l < lanes.size(); ++l)
+              resSlots[l].push_back(Value{});
+            continue;
+          }
+          for (size_t l = 0; l < lanes.size(); ++l)
+            resSlots[l].push_back(declSlot(resTy, Value{}, origRef));
+        }
         if (sharedCond) {
           auto newIf = b.create<scf::IfOp>(
               loc, TypeRange{}, lanes[0].lookup(branch.getCondition()), hasElse);
@@ -802,29 +1216,51 @@ struct OrderedLowerer {
             OpBuilder::InsertionGuard tg(b);
             auto &tBb = newIf.getThenRegion().front();
             b.setInsertionPointToStart(&tBb);
-            if (failed(lowerBlock(branch.getThenRegion().front(), lanes)))
+            SmallVector<IRMapping, 16> thenLanes(lanes.begin(), lanes.end());
+            if (failed(lowerBlock(branch.getThenRegion().front(), thenLanes)))
               return failure();
             auto *tTerm = branch.getThenRegion().front().getTerminator();
-            for (size_t l = 0; l < lanes.size(); ++l)
+            for (unsigned k = 0; k < numRes; ++k) {
+              if (vecResSlots[k])
+                writeSlot(vecResSlots[k],
+                          getBatchVec(tTerm->getOperand(k), thenLanes));
+              else if (resSlots[0][k])
+                materializeScalarLanes(tTerm->getOperand(k), thenLanes);
+            }
+            for (size_t l = 0; l < thenLanes.size(); ++l)
               for (unsigned k = 0; k < numRes; ++k)
                 if (resSlots[l][k])
                   writeSlot(resSlots[l][k],
-                            lanes[l].lookup(tTerm->getOperand(k)));
+                            thenLanes[l].lookup(tTerm->getOperand(k)));
           }
           if (hasElse) {
             OpBuilder::InsertionGuard eg(b);
             auto &eBb = newIf.getElseRegion().front();
             b.setInsertionPointToStart(&eBb);
-            if (failed(lowerBlock(branch.getElseRegion().front(), lanes)))
+            SmallVector<IRMapping, 16> elseLanes(lanes.begin(), lanes.end());
+            if (failed(lowerBlock(branch.getElseRegion().front(), elseLanes)))
               return failure();
             auto *eTerm = branch.getElseRegion().front().getTerminator();
-            for (size_t l = 0; l < lanes.size(); ++l)
+            for (unsigned k = 0; k < numRes; ++k) {
+              if (vecResSlots[k])
+                writeSlot(vecResSlots[k],
+                          getBatchVec(eTerm->getOperand(k), elseLanes));
+              else if (resSlots[0][k])
+                materializeScalarLanes(eTerm->getOperand(k), elseLanes);
+            }
+            for (size_t l = 0; l < elseLanes.size(); ++l)
               for (unsigned k = 0; k < numRes; ++k)
                 if (resSlots[l][k])
                   writeSlot(resSlots[l][k],
-                            lanes[l].lookup(eTerm->getOperand(k)));
+                            elseLanes[l].lookup(eTerm->getOperand(k)));
           }
         } else {
+          branch.walk([&](Operation *inner) {
+            for (Value operand : inner->getOperands())
+              if (!branch->isProperAncestor(
+                      operand.getParentRegion()->getParentOp()))
+                materializeScalarLanes(operand, lanes);
+          });
           for (size_t l = 0; l < lanes.size(); ++l) {
             SmallVector<IRMapping, 1> single{lanes[l]};
             auto newIf = b.create<scf::IfOp>(
@@ -854,6 +1290,9 @@ struct OrderedLowerer {
             }
           }
         }
+        for (unsigned k = 0; k < numRes; ++k)
+          if (vecResSlots[k])
+            batchVecs[branch.getResult(k)] = readSlot(vecResSlots[k]);
         for (size_t l = 0; l < lanes.size(); ++l)
           for (unsigned k = 0; k < numRes; ++k)
             if (resSlots[l][k])
@@ -880,54 +1319,106 @@ struct OrderedLowerer {
                      wideViews[0][lhsOrig].baseAddr;
             });
         auto f32x16 = RankedTensorType::get({16}, b.getF32Type());
+        SmallVector<Value, 16> scalarDots;
         for (size_t sub = 0; sub < lanes.size(); sub += 16) {
           size_t subEnd = std::min(lanes.size(), sub + 16);
-          SmallVector<Value, 16> accSlots;
-          for (size_t l = sub; l < subEnd; ++l) {
-            accSlots.push_back(
-                makeOp(b, loc, "acc_decl", {}, {f32x16},
-                       {b.getNamedAttr("dtype", b.getStringAttr("float32")),
-                        b.getNamedAttr("width", b.getI64IntegerAttr(16))})
-                    ->getResult(0));
-          }
-          auto *cLoop = makeOp(
-              b, loc, "for_range",
-              {constIdx(b, loc, 0), constIdx(b, loc, kExt),
-               constIdx(b, loc, 16)},
-              {}, {}, 1);
-          Block &cBb = cLoop->getRegion(0).emplaceBlock();
-          Value cIdx = cBb.addArgument(b.getIndexType(), loc);
-          {
-            OpBuilder::InsertionGuard cg(b);
-            b.setInsertionPointToEnd(&cBb);
-            Value sharedRhs =
-                rhsCommon ? loadWideChunkF32(wideViews[0][rhsOrig], cIdx, 16)
-                          : Value{};
-            Value sharedLhs =
-                (!rhsCommon && lhsCommon)
-                    ? loadWideChunkF32(wideViews[0][lhsOrig], cIdx, 16)
-                    : Value{};
-            for (size_t l = sub; l < subEnd; ++l) {
-              Value lv = sharedLhs
-                             ? sharedLhs
-                             : loadWideChunkF32(wideViews[l][lhsOrig], cIdx, 16);
-              Value rv = sharedRhs
-                             ? sharedRhs
-                             : loadWideChunkF32(wideViews[l][rhsOrig], cIdx, 16);
-              Value prod = b.create<arith::MulFOp>(loc, lv, rv);
-              Value sum =
-                  b.create<arith::AddFOp>(loc, readSlot(accSlots[l - sub]), prod);
-              writeSlot(accSlots[l - sub], sum);
+          size_t subLen = subEnd - sub;
+          SmallVector<Value, 16> accVecs(subLen);
+          if (kExt <= 128) {
+            for (int64_t cOff = 0; cOff < kExt; cOff += 16) {
+              Value cIdx = constIdx(b, loc, cOff);
+              Value sharedRhs =
+                  rhsCommon ? loadWideChunkF32(wideViews[0][rhsOrig], cIdx, 16)
+                            : Value{};
+              Value sharedLhs =
+                  (!rhsCommon && lhsCommon)
+                      ? loadWideChunkF32(wideViews[0][lhsOrig], cIdx, 16)
+                      : Value{};
+              for (size_t l = sub; l < subEnd; ++l) {
+                Value lv =
+                    sharedLhs ? sharedLhs
+                              : loadWideChunkF32(wideViews[l][lhsOrig], cIdx, 16);
+                Value rv =
+                    sharedRhs ? sharedRhs
+                              : loadWideChunkF32(wideViews[l][rhsOrig], cIdx, 16);
+                Value prod = b.create<arith::MulFOp>(loc, lv, rv);
+                accVecs[l - sub] =
+                    (cOff == 0)
+                        ? prod
+                        : b.create<arith::AddFOp>(loc, accVecs[l - sub], prod);
+              }
             }
-            makeOp(b, loc, "end");
+          } else {
+            SmallVector<Value, 16> accSlots;
+            for (size_t l = sub; l < subEnd; ++l) {
+              accSlots.push_back(
+                  makeOp(b, loc, "acc_decl", {}, {f32x16},
+                         {b.getNamedAttr("dtype", b.getStringAttr("float32")),
+                          b.getNamedAttr("width", b.getI64IntegerAttr(16))})
+                      ->getResult(0));
+            }
+            auto *cLoop = makeOp(
+                b, loc, "for_range",
+                {constIdx(b, loc, 0), constIdx(b, loc, kExt),
+                 constIdx(b, loc, 16)},
+                {}, {}, 1);
+            Block &cBb = cLoop->getRegion(0).emplaceBlock();
+            Value cIdx = cBb.addArgument(b.getIndexType(), loc);
+            {
+              OpBuilder::InsertionGuard cg(b);
+              b.setInsertionPointToEnd(&cBb);
+              Value sharedRhs =
+                  rhsCommon ? loadWideChunkF32(wideViews[0][rhsOrig], cIdx, 16)
+                            : Value{};
+              Value sharedLhs =
+                  (!rhsCommon && lhsCommon)
+                      ? loadWideChunkF32(wideViews[0][lhsOrig], cIdx, 16)
+                      : Value{};
+              for (size_t l = sub; l < subEnd; ++l) {
+                Value lv =
+                    sharedLhs ? sharedLhs
+                              : loadWideChunkF32(wideViews[l][lhsOrig], cIdx, 16);
+                Value rv =
+                    sharedRhs ? sharedRhs
+                              : loadWideChunkF32(wideViews[l][rhsOrig], cIdx, 16);
+                Value prod = b.create<arith::MulFOp>(loc, lv, rv);
+                Value sum = b.create<arith::AddFOp>(
+                    loc, readSlot(accSlots[l - sub]), prod);
+                writeSlot(accSlots[l - sub], sum);
+              }
+              makeOp(b, loc, "end");
+            }
+            for (size_t l = sub; l < subEnd; ++l)
+              accVecs[l - sub] = readSlot(accSlots[l - sub]);
           }
-          for (size_t l = sub; l < subEnd; ++l) {
-            Value dot =
-                makeOp(b, loc, "lane_sum", {readSlot(accSlots[l - sub])},
-                       {b.getF32Type()})
+          if (vecActive && lanes.size() == 16 && subLen == 16) {
+            usesReduce16x16 = true;
+            batchVecs[op.getResult(0)] =
+                makeOp(b, loc, "reduce_sum_16x16", accVecs, {f32x16},
+                       {b.getNamedAttr(
+                           "ci.implementation",
+                           b.getStringAttr("exits/mojo::simd-reduce-16x16"))})
                     ->getResult(0);
-            lanes[l].map(op.getResult(0), dot);
+          } else {
+            for (size_t l = sub; l < subEnd; ++l) {
+              Value dot =
+                  makeOp(b, loc, "lane_sum", {accVecs[l - sub]},
+                         {b.getF32Type()})
+                      ->getResult(0);
+              lanes[l].map(op.getResult(0), dot);
+              scalarDots.push_back(dot);
+            }
           }
+        }
+        if (vecActive && lanes.size() < 16 &&
+            scalarDots.size() == lanes.size()) {
+          batchVecs[op.getResult(0)] =
+              makeOp(b, loc, "pack_apply", scalarDots,
+                     {RankedTensorType::get({batch}, b.getF32Type())},
+                     {b.getNamedAttr("in_dtype", b.getStringAttr("float32")),
+                      b.getNamedAttr("out_dtype", b.getStringAttr("float32")),
+                      b.getNamedAttr("kind", b.getStringAttr("id"))})
+                  ->getResult(0);
         }
         continue;
       }
@@ -941,12 +1432,12 @@ struct OrderedLowerer {
             return true;
           if (auto m = v.getDefiningOp<arith::MulFOp>()) {
             if (wideBufValues.contains(m.getLhs()) &&
-                wideSplats[0].count(m.getRhs())) {
+                hasWideSplat(0, m.getRhs())) {
               alphaOrig = m.getRhs();
               return true;
             }
             if (wideBufValues.contains(m.getRhs()) &&
-                wideSplats[0].count(m.getLhs())) {
+                hasWideSplat(0, m.getLhs())) {
               alphaOrig = m.getLhs();
               return true;
             }
@@ -971,11 +1462,17 @@ struct OrderedLowerer {
           Value lb = lanes[0].lookup(loop.getLowerBound());
           Value iv = lanes[0].lookup(loop.getInductionVar());
           Value off = b.create<arith::SubIOp>(loc, iv, lb);
-          for (size_t l = 0; l < lanes.size(); ++l) {
-            Value wAddr = makeAddr(b, loc, localStackBuf,
-                                   {off, constIdx(b, loc, l)}, {batch, 1});
-            makeOp(b, loc, "store_scalar",
-                   {localStackBuf, wAddr, wideSplats[l][betaOrig]});
+          if (vecActive && wideBatchSplats.count(betaOrig)) {
+            Value wAddr = makeAddr(b, loc, localStackBuf, {off}, {batch});
+            makeOp(b, loc, "store_slice",
+                   {localStackBuf, wAddr, wideBatchSplats[betaOrig]});
+          } else {
+            for (size_t l = 0; l < lanes.size(); ++l) {
+              Value wAddr = makeAddr(b, loc, localStackBuf,
+                                     {off, constIdx(b, loc, l)}, {batch, 1});
+              makeOp(b, loc, "store_scalar",
+                     {localStackBuf, wAddr, getWideSplatScalar(l, betaOrig)});
+            }
           }
           wideBufValues.insert(add.getResult());
           continue;
@@ -994,14 +1491,14 @@ struct OrderedLowerer {
           for (size_t l = sub; l < subEnd; ++l) {
             if (alphaOrig) {
               alphaVecs.push_back(
-                  makeOp(b, loc, "splat_scalar", {wideSplats[l][alphaOrig]},
-                         {f32x16},
+                  makeOp(b, loc, "splat_scalar",
+                         {getWideSplatScalar(l, alphaOrig)}, {f32x16},
                          {b.getNamedAttr("dtype", b.getStringAttr("float32")),
                           b.getNamedAttr("width", b.getI64IntegerAttr(16))})
                       ->getResult(0));
             }
             betaVecs.push_back(
-                makeOp(b, loc, "splat_scalar", {wideSplats[l][betaOrig]},
+                makeOp(b, loc, "splat_scalar", {getWideSplatScalar(l, betaOrig)},
                        {f32x16},
                        {b.getNamedAttr("dtype", b.getStringAttr("float32")),
                         b.getNamedAttr("width", b.getI64IntegerAttr(16))})
@@ -1042,6 +1539,12 @@ struct OrderedLowerer {
         continue;
       }
 
+      if (tryLowerBatchVecOp(op, lanes))
+        continue;
+
+      for (Value operand : op.getOperands())
+        materializeScalarLanes(operand, lanes);
+
       if (batch > 1 && op.hasAttr("mojo_row.pack_scalars")) {
         SmallVector<Value, 16> scalars;
         for (auto &m : lanes)
@@ -1068,7 +1571,8 @@ struct OrderedLowerer {
       }
 
       for (size_t l = 0; l < lanes.size(); ++l) {
-        if (l > 0 && op.hasAttr("cpu.owner_common")) {
+        if (l > 0 && (op.hasAttr("cpu.owner_common") ||
+                      isa<arith::ConstantOp, arith::ConstantIndexOp>(op))) {
           if (op.getNumResults() == 1 && isWideVal(op.getResult(0))) {
             if (wideViews[0].count(op.getResult(0)))
               wideViews[l][op.getResult(0)] = wideViews[0][op.getResult(0)];
@@ -1088,24 +1592,39 @@ struct OrderedLowerer {
         Value origVec = op.getResult(0);
         int64_t kExt = memberLen(origVec);
         int64_t invOff = invReadOffset[&op];
-        auto *pLoop = makeOp(
-            b, loc, "for_range",
-            {constIdx(b, loc, 0), constIdx(b, loc, kExt), constIdx(b, loc, 16)},
-            {}, {}, 1);
-        Block &pBb = pLoop->getRegion(0).emplaceBlock();
-        Value cIdx = pBb.addArgument(b.getIndexType(), loc);
-        {
-          OpBuilder::InsertionGuard pg(b);
-          b.setInsertionPointToEnd(&pBb);
-          for (size_t l = 0; l < lanes.size(); ++l) {
-            Value v16 = loadWideChunkF32(wideViews[l][origVec], cIdx, 16);
-            Value dstAddr = makeAddr(
-                b, loc, invPrepackBuf,
-                {constIdx(b, loc, int64_t(l) * invStride + invOff), cIdx},
-                {1, 1});
-            makeOp(b, loc, "store_slice", {invPrepackBuf, dstAddr, v16});
+        if (kExt <= 128) {
+          for (int64_t cOff = 0; cOff < kExt; cOff += 16) {
+            Value cIdx = constIdx(b, loc, cOff);
+            for (size_t l = 0; l < lanes.size(); ++l) {
+              Value v16 = loadWideChunkF32(wideViews[l][origVec], cIdx, 16);
+              Value dstAddr = makeAddr(
+                  b, loc, invPrepackBuf,
+                  {constIdx(b, loc, int64_t(l) * invStride + invOff + cOff)},
+                  {1});
+              makeOp(b, loc, "store_slice", {invPrepackBuf, dstAddr, v16});
+            }
           }
-          makeOp(b, loc, "end");
+        } else {
+          auto *pLoop = makeOp(
+              b, loc, "for_range",
+              {constIdx(b, loc, 0), constIdx(b, loc, kExt),
+               constIdx(b, loc, 16)},
+              {}, {}, 1);
+          Block &pBb = pLoop->getRegion(0).emplaceBlock();
+          Value cIdx = pBb.addArgument(b.getIndexType(), loc);
+          {
+            OpBuilder::InsertionGuard pg(b);
+            b.setInsertionPointToEnd(&pBb);
+            for (size_t l = 0; l < lanes.size(); ++l) {
+              Value v16 = loadWideChunkF32(wideViews[l][origVec], cIdx, 16);
+              Value dstAddr = makeAddr(
+                  b, loc, invPrepackBuf,
+                  {constIdx(b, loc, int64_t(l) * invStride + invOff), cIdx},
+                  {1, 1});
+              makeOp(b, loc, "store_slice", {invPrepackBuf, dstAddr, v16});
+            }
+            makeOp(b, loc, "end");
+          }
         }
         for (size_t l = 0; l < lanes.size(); ++l) {
           wideViews[l][origVec] = WideViewRef{
@@ -1160,6 +1679,7 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn) {
   }
 
   OrderedLowerer lowerer{fn, space, b, loc, batch};
+  lowerer.batchSimd = batch >= 2 && llvm::isPowerOf2_64(uint64_t(batch));
   lowerer.analyzeChunkableWideMode();
   lowerer.wideViews.resize(batch);
   lowerer.wideSplats.resize(batch);
@@ -1214,17 +1734,21 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn) {
   if (foundLocalBuf) {
     int64_t slots =
         foundLocalBuf->getAttrOfType<IntegerAttr>("elements").getInt();
+    // Pad stack buffers by odd cache-line multiples to prevent 4 KiB page-offset
+    // memory disambiguation aliasing across localStackBuf, vAddrBuf, and wideAccBuf.
+    int64_t paddedScoreCount = batch * slots + ((batch * slots * 4) % 4096 == 0 ? 32 : 0);
     lowerer.localStackBuf =
         makeOp(b, loc, "stack_alloc", {}, {b.getIndexType()},
                {b.getNamedAttr("dtype", b.getStringAttr("float32")),
-                b.getNamedAttr("count", b.getI64IntegerAttr(batch * slots))})
+                b.getNamedAttr("count", b.getI64IntegerAttr(paddedScoreCount))})
             ->getResult(0);
     if (lowerer.chunkedMode && lowerer.accExtent >= 32 &&
         lowerer.accExtent % 32 == 0) {
+      int64_t paddedAddrCount = slots + ((slots * 8) % 4096 == 0 ? 24 : 0);
       lowerer.vAddrBuf =
           makeOp(b, loc, "stack_alloc", {}, {b.getIndexType()},
                  {b.getNamedAttr("dtype", b.getStringAttr("int64")),
-                  b.getNamedAttr("count", b.getI64IntegerAttr(slots))})
+                  b.getNamedAttr("count", b.getI64IntegerAttr(paddedAddrCount))})
               ->getResult(0);
     }
   }
@@ -1280,6 +1804,16 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn) {
         laneCoord = addIdx(b, loc, coord, l);
       lanes[l].map(srcBody.getArgument(ax), laneCoord);
     }
+    if (lowerer.batchSimd && pitch == 1 && innerAttr &&
+        unsigned(innerAttr.getInt()) == ax) {
+      Value baseI64 = b.create<arith::IndexCastOp>(loc, b.getI64Type(), coord);
+      auto i64VecTy = RankedTensorType::get({batch}, b.getI64Type());
+      lowerer.batchVecs[srcBody.getArgument(ax)] =
+          makeOp(b, loc, "simd_iota_add", {baseI64}, {i64VecTy},
+                 {b.getNamedAttr("dtype", b.getStringAttr("int64")),
+                  b.getNamedAttr("width", b.getI64IntegerAttr(batch))})
+              ->getResult(0);
+    }
     pitch *= ext;
   }
 
@@ -1288,6 +1822,13 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn) {
   makeOp(b, loc, "end");
   b.setInsertionPointToEnd(&fnBb);
   makeOp(b, loc, "end");
+  if (lowerer.usesReduce16x16) {
+    OpBuilder::InsertionGuard rg(b);
+    b.setInsertionPointToStart(&kOuter);
+    makeOp(b, loc, "runtime_source", {}, {},
+           {b.getNamedAttr("implementation",
+                           b.getStringAttr("exits/mojo::simd-reduce-16x16"))});
+  }
 
   // Region 1: entry.c (structured C host function + OpenMP loop + kernel call)
   Block &hBb = prog->getRegion(1).emplaceBlock();
@@ -1428,8 +1969,29 @@ LogicalResult verifyMojoOrdered(ModuleOp m, const TargetProfile &p,
           "Mojo window branch condition must compare (hi - lo) <= window_slots");
   }
 
+  std::set<std::string> emittedResources;
+  for (Operation &op : prog.getRegion(0).front()) {
+    if (op.getName().getStringRef() == "mojo_row.runtime_source") {
+      auto impl = op.getAttrOfType<StringAttr>("implementation");
+      if (!impl || !p.implementations.count(impl.getValue().str()))
+        return op.emitError("unknown runtime_source implementation");
+      emittedResources.insert(
+          p.implementations.at(impl.getValue().str()).resource);
+    }
+  }
+
   bool badAddr =
       m.walk([&](Operation *op) {
+         if (auto bind = op->getAttrOfType<StringAttr>("ci.implementation")) {
+           auto it = p.implementations.find(bind.getValue().str());
+           if (it != p.implementations.end() &&
+               it->second.source == ImplementationSource::Runtime &&
+               !emittedResources.count(it->second.resource)) {
+             op->emitError("missing runtime_source declaration for ")
+                 << bind.getValue();
+             return WalkResult::interrupt();
+           }
+         }
          if (op->getName().getStringRef() != "mojo_row.address")
            return WalkResult::advance();
          auto bits = op->getAttrOfType<IntegerAttr>("index_bits");

@@ -130,6 +130,9 @@ struct RowLowerer {
   unsigned projectedRank = 0;
   std::optional<int64_t> ownerAxis;
   SmallVector<SmallVector<Value, 4>> hoistedOwnerSizes;
+  SmallVector<Value, 4> rowCacheBufs;
+  SmallVector<Type, 4> rowCacheElemTypes;
+  bool forceUnitStride = false;
 
   unsigned slotIndex(Value taskCapture) {
     return cast<BlockArgument>(taskCapture).getArgNumber() - 1;
@@ -918,6 +921,12 @@ struct RowLowerer {
 
     int64_t R = slots[idx].rank;
     int64_t fastAxis = R == 2 && swap ? 0 : R - 1;
+    if (forceUnitStride) {
+      Value baseAddr = emitViewAddr(idx, buildStandardCoords(idx, r, j, swap));
+      return makeOp(b, loc, "load_slice", {slots[idx].ptrVal, baseAddr},
+                    {vecTy}, {b.getNamedAttr("width", b.getI64IntegerAttr(w))})
+          ->getResult(0);
+    }
     if (slots[idx].boundStrides) {
       int64_t stepConst = slots[idx].boundStrides[fastAxis];
       if (stepConst == 1) {
@@ -1052,7 +1061,8 @@ struct RowLowerer {
 
     int64_t R = slots[idx].rank;
     int64_t fastAxis = R == 2 && swap ? 0 : R - 1;
-    if (slots[idx].boundStrides && slots[idx].boundStrides[fastAxis] == 1) {
+    if (forceUnitStride ||
+        (slots[idx].boundStrides && slots[idx].boundStrides[fastAxis] == 1)) {
       Value baseAddr = emitViewAddr(idx, buildStandardCoords(idx, r, j, swap));
       makeOp(b, loc, "store_slice", {slots[idx].ptrVal, baseAddr, val});
       return;
@@ -1086,19 +1096,47 @@ struct RowLowerer {
   LogicalResult lowerSweepBody(Block &bb, Value r, Value j, int64_t w,
                                IRMapping &map,
                                llvm::DenseMap<int64_t, Value> &scanCarries,
-                               Value &yieldedVal) {
+                               SmallVectorImpl<Value> &yieldedVals) {
     Value c0 = constIdx(b, loc, 0), c1 = constIdx(b, loc, 1),
           cW = constIdx(b, loc, w);
     int64_t domArg = task.getAttrOfType<IntegerAttr>("domain_arg").getInt();
     bool flatDomain = cast<MemRefType>(fn.getArgument(domArg).getType()).getRank() == 1;
     bool memberTasks = task.hasAttr("cpu.member_tasks");
+    llvm::DenseMap<Value, Value> ordinalScalarBases;
 
     for (Operation &op : bb) {
       auto code = op.getName().stripDialect();
       if (code == "yield") {
-        if (op.getNumOperands() > 0)
-          yieldedVal = map.lookup(op.getOperand(0));
+        for (Value yv : op.getOperands())
+          yieldedVals.push_back(map.lookup(yv));
         return success();
+      }
+      if (code == "row_cache_load") {
+        unsigned cSlot = op.getAttrOfType<IntegerAttr>("slot").getInt();
+        Value buf = rowCacheBufs[cSlot];
+        Type elemTy = rowCacheElemTypes[cSlot];
+        Value addr = makeStaticAddr(b, loc, buf, {j}, {1});
+        Value res =
+            w == 1
+                ? makeOp(b, loc, "load_scalar", {buf, addr}, {elemTy})
+                      ->getResult(0)
+                : makeOp(b, loc, "load_slice", {buf, addr},
+                         {VectorType::get({w}, elemTy)},
+                         {b.getNamedAttr("width", b.getI64IntegerAttr(w))})
+                      ->getResult(0);
+        map.map(op.getResult(0), res);
+        continue;
+      }
+      if (code == "row_cache_store") {
+        unsigned cSlot = op.getAttrOfType<IntegerAttr>("slot").getInt();
+        Value buf = rowCacheBufs[cSlot];
+        Value val = map.lookup(op.getOperand(1));
+        Value addr = makeStaticAddr(b, loc, buf, {j}, {1});
+        if (w == 1)
+          makeOp(b, loc, "store_scalar", {buf, addr, val});
+        else
+          makeOp(b, loc, "store_slice", {buf, addr, val});
+        continue;
       }
       if (code == "sum_columns") {
         unsigned sIdx = slotIndex(op.getOperand(0));
@@ -1451,6 +1489,20 @@ struct RowLowerer {
         if (opKind == "ordinal") {
           Value baseIdx = b.create<arith::AddIOp>(
               loc, b.create<arith::MulIOp>(loc, r, colsIdx), j);
+          if (w >= 4 && w % 4 == 0 && !op.getResult(0).use_empty() &&
+              llvm::all_of(op.getResult(0).getUsers(), [](Operation *u) {
+                auto uk = u->getAttrOfType<StringAttr>("kind");
+                return u->getName().getStringRef() == "mojo_row.apply" && uk &&
+                       uk.getValue() == "uniform";
+              })) {
+            Value baseU64 =
+                makeOp(b, loc, "scalar_cast", {baseIdx},
+                       {b.getIntegerType(64, false)},
+                       {b.getNamedAttr("dtype", b.getStringAttr("uint64"))})
+                    ->getResult(0);
+            ordinalScalarBases[op.getResult(0)] = baseU64;
+            continue;
+          }
           Value res =
               makeOp(b, loc, "simd_iota_add", {baseIdx}, {targetTy},
                      {b.getNamedAttr("dtype",
@@ -1495,10 +1547,13 @@ struct RowLowerer {
           continue;
         }
         if (opKind == "uniform") {
+          auto itOrd = ordinalScalarBases.find(op.getOperand(1));
+          Value cntOperand = itOrd != ordinalScalarBases.end()
+                                 ? itOrd->second
+                                 : map.lookup(op.getOperand(1));
           Value res =
               makeOp(b, loc, "uniform",
-                     {map.lookup(op.getOperand(0)),
-                      map.lookup(op.getOperand(1))},
+                     {map.lookup(op.getOperand(0)), cntOperand},
                      {targetTy},
                      {b.getNamedAttr("width", b.getI64IntegerAttr(w)),
                       b.getNamedAttr("ci.implementation",
@@ -1777,15 +1832,17 @@ struct RowLowerer {
         constIdx(b, loc, fullWidth));
 
     if (isOwners) {
-      Value dummyVal;
+      SmallVector<Value, 1> dummyVals;
       IRMapping bodyMap = rowMap;
       bodyMap.map(loop.getRegion(0).front().getArgument(0), c0);
       return lowerSweepBody(loop.getRegion(0).front(), r, c0, 1, bodyMap,
-                            scanCarries, dummyVal);
+                            scanCarries, dummyVals);
     }
 
     // Declare reduction accumulators
-    Value accSlot, welfordNSlot, welfordMSlot, welfordS2Slot, welfordTupleSlot;
+    unsigned numReds = loop.getNumResults();
+    SmallVector<Value, 4> accSlots;
+    Value welfordNSlot, welfordMSlot, welfordS2Slot, welfordTupleSlot;
     auto vecF32Ty = VectorType::get({w}, b.getF32Type());
     if (isMoments) {
       if (!isTail) {
@@ -1809,15 +1866,18 @@ struct RowLowerer {
                       b.getNamedAttr("width", b.getI64IntegerAttr(w))})
                   ->getResult(0);
         }
-        accSlot = declVecSlot(vecF32Ty, w, initVal);
+        for (unsigned k = 0; k < numReds; ++k)
+          accSlots.push_back(declVecSlot(vecF32Ty, w, initVal));
       } else {
-        Value prevVal = rowMap.lookup(loop.getOperand(0));
-        accSlot = declScalarSlot(b.getF32Type(), prevVal);
+        for (unsigned k = 0; k < numReds; ++k) {
+          Value prevVal = rowMap.lookup(loop.getOperand(k));
+          accSlots.push_back(declScalarSlot(b.getF32Type(), prevVal));
+        }
       }
     }
 
     auto emitInnerColStep = [&](Value j) -> LogicalResult {
-      Value yielded;
+      SmallVector<Value, 4> yielded;
       IRMapping bodyMap = rowMap;
       bodyMap.map(loop.getRegion(0).front().getArgument(0), j);
       if (failed(lowerSweepBody(loop.getRegion(0).front(), r, j, w, bodyMap,
@@ -1832,8 +1892,8 @@ struct RowLowerer {
           writeScalarSlot(welfordNSlot, nextN);
           auto *stepOp = makeOp(
               b, loc, "welford_vec_step",
-              {yielded, readVecSlot(welfordMSlot), readVecSlot(welfordS2Slot),
-               nextN},
+              {yielded[0], readVecSlot(welfordMSlot),
+               readVecSlot(welfordS2Slot), nextN},
               {vecF32Ty, vecF32Ty},
               {b.getNamedAttr("width", b.getI64IntegerAttr(w)),
                b.getNamedAttr("ci.implementation",
@@ -1846,7 +1906,7 @@ struct RowLowerer {
                      {welfordTupleSlot.getType()})
                   ->getResult(0);
           Value nextT =
-              makeOp(b, loc, "welford_scalar_step", {curT, yielded},
+              makeOp(b, loc, "welford_scalar_step", {curT, yielded[0]},
                      {welfordTupleSlot.getType()},
                      {b.getNamedAttr(
                          "ci.implementation",
@@ -1855,17 +1915,23 @@ struct RowLowerer {
           makeOp(b, loc, "tuple_write", {welfordTupleSlot, nextT});
         }
       } else if (!isTail) {
-        Value cur = readVecSlot(accSlot);
-        Value next = isSum
-                         ? b.create<arith::AddFOp>(loc, cur, yielded).getResult()
-                         : b.create<arith::MaxNumFOp>(loc, cur, yielded).getResult();
-        writeVecSlot(accSlot, next);
+        for (unsigned k = 0; k < numReds; ++k) {
+          Value cur = readVecSlot(accSlots[k]);
+          Value next =
+              isSum
+                  ? b.create<arith::AddFOp>(loc, cur, yielded[k]).getResult()
+                  : b.create<arith::MaxNumFOp>(loc, cur, yielded[k]).getResult();
+          writeVecSlot(accSlots[k], next);
+        }
       } else {
-        Value cur = readScalarSlot(accSlot);
-        Value next = isSum
-                         ? b.create<arith::AddFOp>(loc, cur, yielded).getResult()
-                         : b.create<arith::MaxNumFOp>(loc, cur, yielded).getResult();
-        writeScalarSlot(accSlot, next);
+        for (unsigned k = 0; k < numReds; ++k) {
+          Value cur = readScalarSlot(accSlots[k]);
+          Value next =
+              isSum
+                  ? b.create<arith::AddFOp>(loc, cur, yielded[k]).getResult()
+                  : b.create<arith::MaxNumFOp>(loc, cur, yielded[k]).getResult();
+          writeScalarSlot(accSlots[k], next);
+        }
       }
       return success();
     };
@@ -1878,24 +1944,76 @@ struct RowLowerer {
               b.create<arith::FloorDivSIOp>(loc, colBlockIdx,
                                             constIdx(b, loc, w))),
           constIdx(b, loc, w));
-      auto *bLoop = makeOp(b, loc, "for_range", {c0, fullStop, stepBlock}, {},
-                           {}, 1);
-      Block &bBb = bLoop->getRegion(0).emplaceBlock();
-      Value base = bBb.addArgument(b.getIndexType(), loc);
-      OpBuilder::InsertionGuard bg(b);
-      b.setInsertionPointToEnd(&bBb);
-      Value jStop = b.create<arith::MinSIOp>(
-          loc, b.create<arith::AddIOp>(loc, base, stepBlock), fullStop);
-      auto *jLoop = makeOp(b, loc, "for_range",
-                           {base, jStop, constIdx(b, loc, w)}, {}, {}, 1);
-      Block &jBb = jLoop->getRegion(0).emplaceBlock();
-      Value j = jBb.addArgument(b.getIndexType(), loc);
-      b.setInsertionPointToEnd(&jBb);
-      if (failed(emitInnerColStep(j)))
-        return failure();
-      makeOp(b, loc, "end");
-      b.setInsertionPointToEnd(&bBb);
-      makeOp(b, loc, "end");
+      auto emitBlockedFullLoop = [&](bool unitFast) -> LogicalResult {
+        bool prevFast = forceUnitStride;
+        forceUnitStride = unitFast;
+        auto *bLoop = makeOp(b, loc, "for_range", {c0, fullStop, stepBlock}, {},
+                             {}, 1);
+        Block &bBb = bLoop->getRegion(0).emplaceBlock();
+        Value base = bBb.addArgument(b.getIndexType(), loc);
+        OpBuilder::InsertionGuard bg(b);
+        b.setInsertionPointToEnd(&bBb);
+        Value jStop = b.create<arith::MinSIOp>(
+            loc, b.create<arith::AddIOp>(loc, base, stepBlock), fullStop);
+        auto *jLoop = makeOp(b, loc, "for_range",
+                             {base, jStop, constIdx(b, loc, w)}, {}, {}, 1);
+        Block &jBb = jLoop->getRegion(0).emplaceBlock();
+        Value j = jBb.addArgument(b.getIndexType(), loc);
+        b.setInsertionPointToEnd(&jBb);
+        if (failed(emitInnerColStep(j))) {
+          forceUnitStride = prevFast;
+          return failure();
+        }
+        makeOp(b, loc, "end");
+        b.setInsertionPointToEnd(&bBb);
+        makeOp(b, loc, "end");
+        forceUnitStride = prevFast;
+        return success();
+      };
+
+      SmallVector<std::pair<unsigned, int64_t>, 8> dynFastAxes;
+      if (!ownerAxis) {
+        for (Operation &sop : loop.getRegion(0).front()) {
+          auto scode = sop.getName().stripDialect();
+          if (scode != "read" && scode != "write")
+            continue;
+          unsigned idx = slotIndex(sop.getOperand(0));
+          if (slots[idx].boundStrides || slots[idx].rank < 1)
+            continue;
+          bool swap = sop.hasAttr("axes");
+          int64_t fAx =
+              slots[idx].rank == 2 && swap ? 0 : int64_t(slots[idx].rank) - 1;
+          std::pair<unsigned, int64_t> key{idx, fAx};
+          if (!llvm::is_contained(dynFastAxes, key))
+            dynFastAxes.push_back(key);
+        }
+      }
+
+      if (!dynFastAxes.empty()) {
+        Value allUnit;
+        for (auto [idx, fAx] : dynFastAxes) {
+          Value eq1 = b.create<arith::CmpIOp>(
+              loc, arith::CmpIPredicate::eq, slots[idx].strideVals[fAx], c1);
+          allUnit = allUnit ? b.create<arith::AndIOp>(loc, allUnit, eq1).getResult()
+                            : eq1;
+        }
+        auto ifUnit = b.create<scf::IfOp>(loc, TypeRange{}, allUnit, true);
+        {
+          OpBuilder::InsertionGuard tg(b);
+          b.setInsertionPointToStart(&ifUnit.getThenRegion().front());
+          if (failed(emitBlockedFullLoop(true)))
+            return failure();
+        }
+        {
+          OpBuilder::InsertionGuard eg(b);
+          b.setInsertionPointToStart(&ifUnit.getElseRegion().front());
+          if (failed(emitBlockedFullLoop(false)))
+            return failure();
+        }
+      } else {
+        if (failed(emitBlockedFullLoop(false)))
+          return failure();
+      }
     } else {
       auto *jLoop =
           makeOp(b, loc, "for_range", {fullStop, colsIdx, c1}, {}, {}, 1);
@@ -1931,17 +2049,20 @@ struct RowLowerer {
           rowMap.map(loop.getResult(0), finalT);
         }
       } else if (!isTail) {
-        Value vecVal = readVecSlot(accSlot);
-        Value red =
-            isSum
-                ? makeOp(b, loc, "lane_sum", {vecVal}, {b.getF32Type()})
-                      ->getResult(0)
-                : makeOp(b, loc, "lane_max", {vecVal}, {b.getF32Type()},
-                         {b.getNamedAttr("width", b.getI64IntegerAttr(w))})
-                      ->getResult(0);
-        rowMap.map(loop.getResult(0), red);
+        for (unsigned k = 0; k < numReds; ++k) {
+          Value vecVal = readVecSlot(accSlots[k]);
+          Value red =
+              isSum
+                  ? makeOp(b, loc, "lane_sum", {vecVal}, {b.getF32Type()})
+                        ->getResult(0)
+                  : makeOp(b, loc, "lane_max", {vecVal}, {b.getF32Type()},
+                           {b.getNamedAttr("width", b.getI64IntegerAttr(w))})
+                        ->getResult(0);
+          rowMap.map(loop.getResult(k), red);
+        }
       } else {
-        rowMap.map(loop.getResult(0), readScalarSlot(accSlot));
+        for (unsigned k = 0; k < numReds; ++k)
+          rowMap.map(loop.getResult(k), readScalarSlot(accSlots[k]));
       }
     }
     return success();
@@ -2002,7 +2123,8 @@ LogicalResult lowerMojoRow(func::FuncOp fn, int64_t fullWidth) {
         usesScan = true;
     }
   });
-  bool usesStack = isReservations;
+  auto rowCacheAttr = task.getAttrOfType<ArrayAttr>("mojo_row.row_cache");
+  bool usesStack = isReservations || static_cast<bool>(rowCacheAttr);
 
   auto rowsAttr = task.getAttrOfType<ArrayAttr>("rows");
   OperationState progState(loc, "mojo_row.row_program");
@@ -2129,6 +2251,19 @@ LogicalResult lowerMojoRow(func::FuncOp fn, int64_t fullWidth) {
   }
   lowerer.precomputeOwnerSizes();
 
+  constexpr int64_t kMaxRowCacheCols = 8192;
+  if (rowCacheAttr) {
+    for (Attribute ta : rowCacheAttr) {
+      Type et = cast<TypeAttr>(ta).getValue();
+      lowerer.rowCacheElemTypes.push_back(et);
+      lowerer.rowCacheBufs.push_back(
+          makeOp(b, loc, "stack_alloc", {}, {b.getIndexType()},
+                 {b.getNamedAttr("dtype", b.getStringAttr(dtypeBare(et))),
+                  b.getNamedAttr("count", b.getI64IntegerAttr(kMaxRowCacheCols))})
+              ->getResult(0));
+    }
+  }
+
   if (isTileTranspose) {
     lowerer.emitTransposeTile();
   } else if (isReservations) {
@@ -2164,18 +2299,49 @@ LogicalResult lowerMojoRow(func::FuncOp fn, int64_t fullWidth) {
               ->getResult(0);
       scanCarries[cId] = lowerer.declScalarSlot(elemTy, z);
     });
-    for (Operation &step : body.without_terminator()) {
-      auto sn = step.getName().getStringRef();
-      if (sn == "cpu.pack_members") {
-        lowerer.emitPackMembers(step, r);
-      } else if (step.getName().stripDialect() == "atomic_members") {
-        if (failed(lowerer.emitAtomicMembers(step, r)))
-          return failure();
-      } else if (sn == "mojo_row.sweep") {
-        if (failed(lowerer.emitSweep(step, r, rowMap, scanCarries)))
-          return failure();
-      } else {
-        return step.emitError("unexpected row task step ") << sn;
+    if (rowCacheAttr) {
+      Value fitsCache = b.create<arith::CmpIOp>(
+          loc, arith::CmpIPredicate::sle, lowerer.colsIdx,
+          constIdx(b, loc, kMaxRowCacheCols));
+      auto ifCache = b.create<scf::IfOp>(loc, TypeRange{}, fitsCache, true);
+      {
+        OpBuilder::InsertionGuard tg(b);
+        b.setInsertionPointToStart(&ifCache.getThenRegion().front());
+        IRMapping cachedMap = rowMap;
+        for (Operation &step : body.without_terminator()) {
+          auto mode = step.getAttrOfType<StringAttr>("cache_mode");
+          if (!mode || mode.getValue() != "cached")
+            continue;
+          if (failed(lowerer.emitSweep(step, r, cachedMap, scanCarries)))
+            return failure();
+        }
+      }
+      {
+        OpBuilder::InsertionGuard eg(b);
+        b.setInsertionPointToStart(&ifCache.getElseRegion().front());
+        IRMapping uncachedMap = rowMap;
+        for (Operation &step : body.without_terminator()) {
+          auto mode = step.getAttrOfType<StringAttr>("cache_mode");
+          if (!mode || mode.getValue() != "uncached")
+            continue;
+          if (failed(lowerer.emitSweep(step, r, uncachedMap, scanCarries)))
+            return failure();
+        }
+      }
+    } else {
+      for (Operation &step : body.without_terminator()) {
+        auto sn = step.getName().getStringRef();
+        if (sn == "cpu.pack_members") {
+          lowerer.emitPackMembers(step, r);
+        } else if (step.getName().stripDialect() == "atomic_members") {
+          if (failed(lowerer.emitAtomicMembers(step, r)))
+            return failure();
+        } else if (sn == "mojo_row.sweep") {
+          if (failed(lowerer.emitSweep(step, r, rowMap, scanCarries)))
+            return failure();
+        } else {
+          return step.emitError("unexpected row task step ") << sn;
+        }
       }
     }
     b.setInsertionPointToEnd(&rBb);

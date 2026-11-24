@@ -7,6 +7,8 @@ def ScanColumns : RowInst<"sweep",[SingleBlock]> {
 }
 def LaneRead : RowInst<"read"> {let arguments=(ins AnyMemRef:$source,Index:$row,Index:$column);let results=(outs AnyFixedVectorOfNonZeroRank:$result);}
 def LaneWrite : RowInst<"write"> {let arguments=(ins AnyMemRef:$dest,Index:$row,Index:$column,AnyFixedVectorOfNonZeroRank:$value);}
+def RowCacheStore : RowInst<"row_cache_store"> {let arguments=(ins Index:$column,AnyType:$value,I64Attr:$slot);}
+def RowCacheLoad : RowInst<"row_cache_load"> {let arguments=(ins Index:$column,I64Attr:$slot);let results=(outs AnyType:$value);}
 def ValueExpr : RowInst<"apply"> {let arguments=(ins Variadic<AnyType>:$inputs,StrAttr:$kind);let results=(outs AnyType:$result);}
 def StepYield : RowInst<"yield",[Terminator]> {let arguments=(ins Variadic<AnyType>:$values);}
 def OwnerRead : RowInst<"owner_read"> {let arguments=(ins AnyMemRef:$source,Index:$row);let results=(outs AnyType:$value);}
@@ -272,6 +274,14 @@ def MojoLaneSum : RowInst<"lane_sum"> {
 def MojoLaneMax : RowInst<"lane_max"> {
   let arguments=(ins AnyType:$input, I64Attr:$width);
   let results=(outs F32:$result);
+}
+def MojoReduceSum16x16 : RowInst<"reduce_sum_16x16"> {
+  let arguments=(ins Variadic<AnyType>:$inputs);
+  let results=(outs AnyType:$result);
+}
+def MojoSimdCmpI : RowInst<"simd_cmpi"> {
+  let arguments=(ins AnyType:$lhs, AnyType:$rhs, StrAttr:$pred);
+  let results=(outs AnyType:$result);
 }
 def MojoPackApply : RowInst<"pack_apply"> {
   let arguments=(ins Variadic<AnyType>:$scalars, StrAttr:$in_dtype, StrAttr:$out_dtype, StrAttr:$kind);

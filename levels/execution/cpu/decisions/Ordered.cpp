@@ -135,6 +135,254 @@ llvm::Error materializeOwnerBuffers(func::FuncOp fn, RewriterBase &rw,
 
   auto cached = space.getAttrOfType<IntegerAttr>("cpu.score_cache");
   auto window = space.getAttrOfType<IntegerAttr>("cpu.batch_score_window");
+  auto batchAttr = space.getAttrOfType<IntegerAttr>("cpu.owner_batch");
+  auto innerAttr = space.getAttrOfType<IntegerAttr>("cpu.innermost_owner");
+
+  auto isCommonVal = [&](Value v) -> bool {
+    if (!batchAttr)
+      return false;
+    if (auto ba = dyn_cast<BlockArgument>(v)) {
+      if (ba.getOwner() == &body)
+        return !innerAttr || int64_t(ba.getArgNumber()) != innerAttr.getInt();
+      if (auto lp = dyn_cast<scf::ForOp>(ba.getOwner()->getParentOp()))
+        return v == lp.getInductionVar();
+      return true;
+    }
+    auto *def = v.getDefiningOp();
+    return def && def->hasAttr("cpu.owner_common");
+  };
+
+  // 1. Flatten side-effect-free scalar scf.if inside owner folds into arith.select
+  for (auto loop : body.getOps<scf::ForOp>()) {
+    SmallVector<scf::IfOp, 4> candIfs;
+    for (auto ifOp : loop.getBody()->getOps<scf::IfOp>()) {
+      if (ifOp.getElseRegion().empty() || ifOp.getNumResults() == 0)
+        continue;
+      if (!llvm::all_of(ifOp.getResultTypes(), [](Type t) {
+            return isa<FloatType, IntegerType, IndexType>(t);
+          }))
+        continue;
+      auto safeRegion = [](Region &reg) {
+        for (Operation &op : reg.front().without_terminator()) {
+          if (op.getNumRegions() != 0 || !isMemoryEffectFree(&op) ||
+              isa<arith::DivSIOp, arith::DivUIOp, arith::FloorDivSIOp,
+                  arith::CeilDivSIOp, arith::RemSIOp, arith::RemUIOp>(&op))
+            return false;
+        }
+        return true;
+      };
+      if (safeRegion(ifOp.getThenRegion()) && safeRegion(ifOp.getElseRegion()))
+        candIfs.push_back(ifOp);
+    }
+    for (scf::IfOp ifOp : candIfs) {
+      for (Region *reg : {&ifOp.getThenRegion(), &ifOp.getElseRegion()}) {
+        SmallVector<Operation *, 8> toMove;
+        for (Operation &op : reg->front().without_terminator())
+          toMove.push_back(&op);
+        for (Operation *op : toMove)
+          op->moveBefore(ifOp);
+      }
+      rw.setInsertionPoint(ifOp);
+      auto *tTerm = ifOp.getThenRegion().front().getTerminator();
+      auto *eTerm = ifOp.getElseRegion().front().getTerminator();
+      SmallVector<Value, 4> selects;
+      for (unsigned k = 0; k < ifOp.getNumResults(); ++k) {
+        Value tVal = tTerm->getOperand(k), eVal = eTerm->getOperand(k);
+        auto sel = rw.create<arith::SelectOp>(ifOp.getLoc(),
+                                              ifOp.getCondition(), tVal, eVal);
+        if (isCommonVal(ifOp.getCondition()) && isCommonVal(tVal) &&
+            isCommonVal(eVal))
+          sel->setAttr("cpu.owner_common", rw.getUnitAttr());
+        selects.push_back(sel.getResult());
+      }
+      rw.replaceOp(ifOp, selects);
+    }
+  }
+
+  // 2. Tighten associative fold upper bounds under monotonic prefix predicates
+  {
+    auto topLoops = llvm::to_vector(body.getOps<scf::ForOp>());
+    auto isFloatConst = [](Value v, bool wantNegInf, bool wantZero) {
+      auto cst = v ? v.getDefiningOp<arith::ConstantOp>() : arith::ConstantOp();
+      auto fa = cst ? dyn_cast<FloatAttr>(cst.getValue()) : FloatAttr();
+      if (!fa)
+        return false;
+      return (wantNegInf && fa.getValue().isNegInfinity()) ||
+             (wantZero && fa.getValue().isPosZero());
+    };
+    auto sameTopExpr = [&](auto &self, Value x, Value y) -> bool {
+      if (x == y)
+        return true;
+      auto *px = x ? x.getDefiningOp() : nullptr;
+      auto *py = y ? y.getDefiningOp() : nullptr;
+      if (!px || !py || px->getBlock() != &body || py->getBlock() != &body ||
+          px->getName() != py->getName() || px->getNumRegions() != 0 ||
+          px->getNumResults() != 1 || x.getType() != y.getType() ||
+          px->getPropertiesAsAttribute() != py->getPropertiesAsAttribute() ||
+          px->getNumOperands() != py->getNumOperands())
+        return false;
+      return llvm::all_of(
+          llvm::zip(px->getOperands(), py->getOperands()),
+          [&](auto pair) { return self(self, std::get<0>(pair), std::get<1>(pair)); });
+    };
+    auto isTopLevelVal = [&](Value v) {
+      if (auto ba = dyn_cast<BlockArgument>(v))
+        return ba.getOwner() == &body || ba.getOwner() == &fn.front();
+      auto *def = v.getDefiningOp();
+      return def && def->getBlock() == &body &&
+             def->isBeforeInBlock(topLoops.front());
+    };
+    auto extractPrefixBound = [&](Value cond, Value iv,
+                                  bool &inPrefixWhenTrue) -> Value {
+      auto cmp = cond ? cond.getDefiningOp<arith::CmpIOp>() : arith::CmpIOp();
+      if (!cmp)
+        return {};
+      auto pred = cmp.getPredicate();
+      if (pred == arith::CmpIPredicate::sge && cmp.getRhs() == iv &&
+          isTopLevelVal(cmp.getLhs())) {
+        inPrefixWhenTrue = true;
+        return cmp.getLhs();
+      }
+      if (pred == arith::CmpIPredicate::sle && cmp.getLhs() == iv &&
+          isTopLevelVal(cmp.getRhs())) {
+        inPrefixWhenTrue = true;
+        return cmp.getRhs();
+      }
+      return {};
+    };
+    auto zeroOutOfPrefix = [&](auto &self, Value v, Value iv,
+                               Value &boundOut) -> bool {
+      if (auto sel = v.getDefiningOp<arith::SelectOp>()) {
+        bool inTrue = false;
+        Value bnd = extractPrefixBound(sel.getCondition(), iv, inTrue);
+        if (!bnd)
+          return false;
+        Value outVal = inTrue ? sel.getFalseValue() : sel.getTrueValue();
+        if (!isFloatConst(outVal, false, true))
+          return false;
+        if (boundOut && !sameTopExpr(sameTopExpr, boundOut, bnd))
+          return false;
+        boundOut = bnd;
+        return true;
+      }
+      auto *def = v.getDefiningOp();
+      if (!def)
+        return false;
+      if (isa<arith::TruncFOp, arith::ExtFOp>(def) ||
+          def->getName().stripDialect() == "lane_splat")
+        return self(self, def->getOperand(0), iv, boundOut);
+      if (auto mul = dyn_cast<arith::MulFOp>(def))
+        return self(self, mul.getLhs(), iv, boundOut) ||
+               self(self, mul.getRhs(), iv, boundOut);
+      return false;
+    };
+
+    bool allBounded = !topLoops.empty();
+    Value commonBound;
+    for (size_t li = 0; li < topLoops.size() && allBounded; ++li) {
+      scf::ForOp lp = topLoops[li];
+      if (!lp->hasAttr("kir.reassociate") ||
+          !matchPattern(lp.getStep(), m_One()) || lp.getNumResults() == 0) {
+        allBounded = false;
+        break;
+      }
+      if (li > 0 &&
+          (!sameTopExpr(sameTopExpr, topLoops[0].getLowerBound(),
+                        lp.getLowerBound()) ||
+           !sameTopExpr(sameTopExpr, topLoops[0].getUpperBound(),
+                        lp.getUpperBound()))) {
+        allBounded = false;
+        break;
+      }
+      Value iv = lp.getInductionVar();
+      auto *term = lp.getBody()->getTerminator();
+      for (unsigned k = 0; k < lp.getNumResults(); ++k) {
+        Value initArg = lp.getInitArgs()[k];
+        Value iterArg = lp.getRegionIterArgs()[k];
+        Value yVal = term->getOperand(k);
+        if (auto mx = yVal.getDefiningOp<arith::MaxNumFOp>()) {
+          if (!isFloatConst(initArg, true, false)) {
+            allBounded = false;
+            break;
+          }
+          Value stepVal =
+              mx.getLhs() == iterArg
+                  ? mx.getRhs()
+                  : (mx.getRhs() == iterArg ? mx.getLhs() : Value{});
+          auto sel =
+              stepVal ? stepVal.getDefiningOp<arith::SelectOp>() : arith::SelectOp();
+          bool inTrue = false;
+          Value bnd =
+              sel ? extractPrefixBound(sel.getCondition(), iv, inTrue) : Value{};
+          Value outVal =
+              sel ? (inTrue ? sel.getFalseValue() : sel.getTrueValue()) : Value{};
+          if (!bnd || !isFloatConst(outVal, true, false) ||
+              (commonBound && !sameTopExpr(sameTopExpr, commonBound, bnd))) {
+            allBounded = false;
+            break;
+          }
+          commonBound = bnd;
+        } else if (auto ad = yVal.getDefiningOp<arith::AddFOp>()) {
+          Value delta =
+              ad.getLhs() == iterArg
+                  ? ad.getRhs()
+                  : (ad.getRhs() == iterArg ? ad.getLhs() : Value{});
+          if (!delta || !zeroOutOfPrefix(zeroOutOfPrefix, delta, iv, commonBound)) {
+            allBounded = false;
+            break;
+          }
+        } else {
+          allBounded = false;
+          break;
+        }
+      }
+    }
+
+    if (allBounded && commonBound) {
+      int64_t B = batchAttr ? batchAttr.getInt() : 1;
+      bool canTighten = false;
+      rw.setInsertionPoint(topLoops.front());
+      auto maybeMarkCommon = [&](Operation *op) -> Value {
+        if (B > 1)
+          op->setAttr("cpu.owner_common", rw.getUnitAttr());
+        return op->getResult(0);
+      };
+      Value exclusive;
+      if (B == 1) {
+        Value c1 = rw.create<arith::ConstantIndexOp>(loc, 1);
+        exclusive = rw.create<arith::AddIOp>(loc, commonBound, c1);
+        canTighten = true;
+      } else if (isCommonVal(commonBound)) {
+        Value c1 = maybeMarkCommon(rw.create<arith::ConstantIndexOp>(loc, 1));
+        exclusive =
+            maybeMarkCommon(rw.create<arith::AddIOp>(loc, commonBound, c1));
+        canTighten = true;
+      } else if (innerAttr &&
+                 commonBound == body.getArgument(innerAttr.getInt())) {
+        Value cB = maybeMarkCommon(rw.create<arith::ConstantIndexOp>(loc, B));
+        Value c1 = maybeMarkCommon(rw.create<arith::ConstantIndexOp>(loc, 1));
+        Value qGrp = maybeMarkCommon(
+            rw.create<arith::FloorDivSIOp>(loc, commonBound, cB));
+        Value nextGrp =
+            maybeMarkCommon(rw.create<arith::AddIOp>(loc, qGrp, c1));
+        exclusive = maybeMarkCommon(rw.create<arith::MulIOp>(loc, nextGrp, cB));
+        canTighten = true;
+      }
+      if (canTighten) {
+        Value lo0 = topLoops.front().getLowerBound();
+        Value hi0 = topLoops.front().getUpperBound();
+        Value clamped =
+            maybeMarkCommon(rw.create<arith::MaxSIOp>(loc, lo0, exclusive));
+        Value tightHi =
+            maybeMarkCommon(rw.create<arith::MinSIOp>(loc, hi0, clamped));
+        for (scf::ForOp lp : topLoops) {
+          lp.getLowerBoundMutable().assign(lo0);
+          lp.getUpperBoundMutable().assign(tightHi);
+        }
+      }
+    }
+  }
+
   if (!cached && !window)
     return llvm::Error::success();
 

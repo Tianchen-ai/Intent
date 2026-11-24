@@ -222,11 +222,41 @@ void registerMatrixContracts(Unit &u) {
       if (wAttr.getInt() == 1 && op->getOperand(1).getType().isUnsignedInteger(64) &&
           op->getResult(0).getType().isF32())
         return success();
-      auto pos = dyn_cast<ShapedType>(op->getOperand(1).getType());
       auto out = dyn_cast<ShapedType>(op->getResult(0).getType());
+      if (op->getOperand(1).getType().isUnsignedInteger(64))
+        return success(out && out.getElementType().isF32() &&
+                       out.getRank() == 1 &&
+                       out.getDimSize(0) == wAttr.getInt());
+      auto pos = dyn_cast<ShapedType>(op->getOperand(1).getType());
       return success(pos && out && pos.getElementType().isUnsignedInteger(64) &&
                      out.getElementType().isF32() &&
                      pos.getShape() == out.getShape());
+    };
+    add(std::move(c));
+  }
+
+  {
+    ImplementationContract c;
+    c.name = "simd-reduce-16x16";
+    c.operation = "mojo_row.reduce_sum_16x16";
+    c.symbol = "reduce_sum_16x16";
+    c.source = ImplementationSource::Runtime;
+    c.resource = "runtime/mojo/kernels/ordered_reduce.mojo";
+    c.minimum = Reuse::Native;
+    c.operands = "16 x f32[16] -> f32[16]";
+    c.layout = "16 SIMD width-16 vectors reduced pairwise into 1 width-16 vector";
+    c.accumulator = "f32 pairwise butterfly tree sum";
+    c.effects = "pure register arithmetic";
+    c.numerical = "exact IEEE-754 height-4 balanced pairwise binary tree sum";
+    c.estimator = u.qualify("simd-row-primitive");
+    c.costParameters = {"vector_bits", "workers"};
+    c.available = requireSimd;
+    c.verify = [](Operation *op) -> LogicalResult {
+      if (op->getNumOperands() != 16 || op->getNumResults() != 1)
+        return failure();
+      auto out = dyn_cast<ShapedType>(op->getResult(0).getType());
+      return success(out && out.getRank() == 1 && out.getDimSize(0) == 16 &&
+                     out.getElementType().isF32());
     };
     add(std::move(c));
   }

@@ -3,10 +3,11 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include <numeric>
 using namespace mlir;
 namespace intentdsl::cpu {
 static bool sameInterval(Value v, BlockArgument head, Value projected) {
-  if (v == projected)
+  if (projected && v == projected)
     return true;
   if (v == head)
     return false;
@@ -50,17 +51,23 @@ std::optional<OwnerReuse> sharedInterval(Operation *space,
   });
   if (unsafe.wasInterrupted())
     return {};
-  for (auto d : body.getOps<arith::FloorDivSIOp>()) {
-    auto h = dyn_cast<BlockArgument>(d.getLhs());
-    auto group = d.getRhs().getDefiningOp<arith::ConstantIndexOp>();
-    if (!h || h.getOwner() != &body || !group || group.value() < 2 ||
-        h.getArgNumber() + 1 >= body.getNumArguments())
-      continue;
+
+  auto evaluateCandidate = [&](BlockArgument h, int64_t groupVal,
+                               Value quotient) -> std::optional<OwnerReuse> {
+    if (groupVal < 2)
+      return {};
+    auto axis = h.getArgNumber();
+    auto *shape = facts.shapeOf(space->getOperand(axis));
+    if (!shape)
+      return {};
+    auto extent = (*shape)[axes[axis]].getAsInteger();
+    if (!extent || *extent < 2)
+      return {};
     double bytes = 0;
     for (auto loop : body.getOps<scf::ForOp>()) {
-      if (!sameInterval(loop.getLowerBound(), h, d) ||
-          !sameInterval(loop.getUpperBound(), h, d) ||
-          !sameInterval(loop.getStep(), h, d)) {
+      if (!sameInterval(loop.getLowerBound(), h, quotient) ||
+          !sameInterval(loop.getUpperBound(), h, quotient) ||
+          !sameInterval(loop.getStep(), h, quotient)) {
         bytes = 0;
         break;
       }
@@ -68,8 +75,10 @@ std::optional<OwnerReuse> sharedInterval(Operation *space,
         if (read.getName().stripDialect() != "slice_read")
           continue;
         auto cs = read.getOperands().drop_front();
-        if (!llvm::is_contained(cs, d.getResult()) ||
-            !llvm::all_of(cs, [&](Value v) { return sameInterval(v, h, d); }))
+        if (quotient && !llvm::is_contained(cs, quotient))
+          continue;
+        if (!llvm::all_of(
+                cs, [&](Value v) { return sameInterval(v, h, quotient); }))
           continue;
         auto *s = facts.shapeOf(read.getOperand(0));
         if (!s)
@@ -82,15 +91,50 @@ std::optional<OwnerReuse> sharedInterval(Operation *space,
                  8.;
       }
     }
-    auto axis = h.getArgNumber();
-    auto shape = facts.shapeOf(space->getOperand(axis));
-    if (bytes > 0 && shape) {
-      auto extent = (*shape)[axes[axis]].getAsInteger();
-      if (extent && *extent > 0)
-        return OwnerReuse{axis, group.value(), *extent, bytes, d};
+    if (bytes <= 0)
+      return {};
+    return OwnerReuse{axis, groupVal, *extent, bytes, quotient};
+  };
+
+  auto scoreOf = [](const OwnerReuse &r) -> double {
+    int64_t bestBatch = 1;
+    for (int64_t w : {2, 4, 8, 16})
+      if (r.group % w == 0 && r.extent % w == 0)
+        bestBatch = w;
+    return bestBatch > 1 ? double(bestBatch) * r.readBytes : 0.0;
+  };
+
+  std::optional<OwnerReuse> best;
+  double bestScore = 0.0;
+  for (auto d : body.getOps<arith::FloorDivSIOp>()) {
+    auto h = dyn_cast<BlockArgument>(d.getLhs());
+    auto group = d.getRhs().getDefiningOp<arith::ConstantIndexOp>();
+    if (!h || h.getOwner() != &body || !group || group.value() < 2)
+      continue;
+    if (auto cand = evaluateCandidate(h, group.value(), d.getResult())) {
+      double sc = scoreOf(*cand);
+      if (sc > bestScore) {
+        bestScore = sc;
+        best = cand;
+      }
     }
   }
-  return {};
+  for (BlockArgument h : body.getArguments()) {
+    auto *shape = facts.shapeOf(space->getOperand(h.getArgNumber()));
+    if (!shape)
+      continue;
+    auto ext = (*shape)[axes[h.getArgNumber()]].getAsInteger();
+    if (!ext || *ext < 2)
+      continue;
+    if (auto cand = evaluateCandidate(h, *ext, Value{})) {
+      double sc = scoreOf(*cand);
+      if (sc > bestScore) {
+        bestScore = sc;
+        best = cand;
+      }
+    }
+  }
+  return best;
 }
 llvm::SmallVector<unsigned> ownerRadices(Operation &space) {
   auto group = space.getAttrOfType<IntegerAttr>("cpu.innermost_owner");
@@ -119,7 +163,7 @@ void sharedOwnerTraversal(compilerinfra::Unit &u) {
       return cs;
     Builder b(op->getContext());
     bool repeat = bool(intentdsl::cpu::repeatedScore(*op));
-    for (int grain : {8, 32, 128, 256})
+    for (int grain : {8, 16, 32, 128, 256})
       for (unsigned batch : {2u, 4u, 8u, 16u}) {
         if (batch > maximum || grain % batch || reuse->group % batch ||
             reuse->extent % batch)
