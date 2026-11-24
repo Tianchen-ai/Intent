@@ -33,7 +33,9 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
         {32, 64, 32, R"({"num_warps":4,"num_stages":3})"},
         {32, 64, 64, R"({"num_warps":4,"num_stages":3})", "contract"},
         {64, 64, 32, R"({"num_warps":4,"num_stages":3})"},
-        {64, 128, 64, R"({"num_warps":8,"num_stages":3})"}};
+        {64, 128, 64, R"({"num_warps":8,"num_stages":3})"},
+        {128, 128, 64, R"({"num_warps":8,"num_stages":3})", "contract"},
+        {128, 256, 64, R"({"num_warps":8,"num_stages":3})", "contract", 2}};
   else
     matrix->tiles = {
         {2, 32, 256, R"({"num_warps":2,"num_stages":2})", "q4k_dot"},

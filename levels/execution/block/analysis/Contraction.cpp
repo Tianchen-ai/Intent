@@ -1,15 +1,32 @@
 #include "intentdsl/levels/execution/block/ir/Contraction.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/TypeUtilities.h"
 
 using namespace mlir;
 namespace intentdsl::block {
+static int64_t contractionOperandBytes(Operation *domain) {
+  int64_t maxBytes = 0;
+  domain->walk([&](Operation *op) {
+    if (!kir::isContraction(op->getName().stripDialect()))
+      return;
+    for (unsigned i = 0; i < std::min(2u, op->getNumOperands()); ++i) {
+      Type elem = getElementTypeOrSelf(op->getOperand(i).getType());
+      if (elem.isIntOrFloat())
+        maxBytes = std::max<int64_t>(
+            maxBytes, llvm::divideCeil(elem.getIntOrFloatBitWidth(), 8));
+    }
+  });
+  return maxBytes;
+}
 bool supportsMatrixTile(Operation *domain, Attribute choice,
                         const compilerinfra::TargetProfile &profile) {
   auto dims = dyn_cast_or_null<DenseI64ArrayAttr>(choice);
   auto target = profile.services.get<MatrixTarget>();
+  int64_t operandBytes = contractionOperandBytes(domain);
   return dims && dims.size() == 3 && target &&
          llvm::any_of(target->tiles, [&](const MatrixTile &t) {
            return dims.asArrayRef() == ArrayRef<int64_t>{t.m, t.n, t.k} &&
+                  (!t.maxOperandBytes || operandBytes <= t.maxOperandBytes) &&
                   (t.operation.empty() ||
                    domain
                        ->walk([&](Operation *op) {
@@ -76,10 +93,12 @@ LogicalResult verifyTiledMatrix(func::FuncOp fn,
     return fn.emitError() << llvm::toString(actual.takeError());
   auto target = p.services.get<MatrixTarget>();
   auto native = op->getAttrOfType<StringAttr>("block.native_row");
+  int64_t operandBytes = contractionOperandBytes(op);
   if (!tile || tile.size() != 3 || !target || !native ||
       !llvm::any_of(target->tiles, [&](auto &t) {
         if (tile.asArrayRef() != ArrayRef<int64_t>{t.m, t.n, t.k} ||
-            native.getValue() != t.native)
+            native.getValue() != t.native ||
+            (t.maxOperandBytes && operandBytes > t.maxOperandBytes))
           return false;
         return t.operation.empty() ||
                op->walk([&](Operation *child) {

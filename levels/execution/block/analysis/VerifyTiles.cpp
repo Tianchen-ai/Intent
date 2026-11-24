@@ -43,12 +43,25 @@ verifyTileProgram(func::FuncOp fn, const TargetProfile &profile,
     auto tile = sp.getAttrOfType<DenseI64ArrayAttr>("block.output_tile");
     auto native = sp.getAttrOfType<StringAttr>("block.native_row");
     auto caps = profile.services.get<intentdsl::block::MatrixTarget>();
+    int64_t dotElemBytes = 0;
+    sp.walk([&](Operation *inst) {
+      auto k = inst->getName().stripDialect();
+      if (k != "tile_dot" && k != "mma")
+        return;
+      for (unsigned i = 0; i < std::min(2u, inst->getNumOperands()); ++i) {
+        Type elem = getElementTypeOrSelf(inst->getOperand(i).getType());
+        if (elem.isIntOrFloat())
+          dotElemBytes = std::max<int64_t>(
+              dotElemBytes, llvm::divideCeil(elem.getIntOrFloatBitWidth(), 8));
+      }
+    });
     if (!dims || dims.size() != 4 ||
         llvm::any_of(dims.asArrayRef(), [](auto i) { return i < 0; }) ||
         !tile || tile.size() != 3 || !native || !caps ||
         !llvm::any_of(caps->tiles, [&](auto &t) {
           return tile.asArrayRef() == ArrayRef<int64_t>{t.m, t.n, t.k} &&
-                 native == t.native;
+                 native == t.native &&
+                 (!t.maxOperandBytes || dotElemBytes <= t.maxOperandBytes);
         }))
       return sp.emitError(
           "invalid installed contraction grid or native parameter row");

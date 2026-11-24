@@ -53,15 +53,13 @@ void registerContraction(Unit &u) {
         llvm::append_range(implementations, found->second);
     }
     for (auto &t : caps->tiles) {
-      if (!t.operation.empty() &&
-          llvm::none_of(op->getRegion(0).front(), [&](Operation &entry) {
-            return entry.getName().stripDialect() == t.operation;
-          }))
+      auto choice = b.getDenseI64ArrayAttr({t.m, t.n, t.k});
+      if (!block::supportsMatrixTile(op, choice, p))
         continue;
       rows.push_back({std::to_string(t.m) + "x" + std::to_string(t.n) + "x" +
                           std::to_string(t.k),
                       "output-stationary",
-                      b.getDenseI64ArrayAttr({t.m, t.n, t.k}),
+                      choice,
                       {"independent-output-tiles"},
                       implementations});
     }

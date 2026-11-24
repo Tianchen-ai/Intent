@@ -99,30 +99,33 @@ capabilities(const llvm::json::Object &options) {
   // single streamed 4096-wide row with 16 reductions; expanding that body
   // over two rows exceeded the native compilation budget on both targets.
   table->maxExpandedReductionLanes = 65536;
-  table->independentWidths = {8, 16, 32, 64};
-  if(auto error=table->bind(options))return error;
+  table->independentWidths = {8, 16, 32, 64, 128};
+  if (auto error = table->bind(options))
+    return error;
   // Wide rectangular transfers amortize a large resident tile. For generic
   // strided loads a smaller table also bounds native compile-time expansion.
   const unsigned maxWidth = indices->permitTma ? 4096 : 256;
   for (unsigned width = 1; width <= maxWidth; width *= 2) {
     for (unsigned rows : {1u, 2u, 8u, 16u}) {
-      if(rows>2 && width>128) continue;
+      if (rows > 2 && width > 128)
+        continue;
       llvm::SmallVector<unsigned, 2> occupancies;
       if (*architecture == 90) {
         occupancies.push_back(2u);
-        if (rows == 1 && width >= 1024)
+        if (rows == 1 && ((width >= 32 && width <= 128) || width >= 1024))
           occupancies.push_back(4u);
       } else {
-        occupancies.push_back(std::min(rows, 2u));
-        if (rows == 1 && width >= 256)
-          occupancies.push_back(2u);
+        occupancies.push_back(
+            rows == 1 && width >= 32 && width <= 128 ? 2u : std::min(rows, 2u));
+        if (rows == 1 && ((width >= 32 && width <= 128) || width >= 256))
+          occupancies.push_back(rows == 1 && width >= 32 && width <= 128 ? 4u
+                                                                         : 2u);
       }
       for (auto [idx, occupancy] : llvm::enumerate(occupancies)) {
         std::string rowOptions;
         llvm::raw_string_ostream(rowOptions) << llvm::json::Value(
-            llvm::json::Object{{"num_ctas", 1},
-                               {"occupancy", occupancy},
-                               {"opt_level", 3}});
+            llvm::json::Object{
+                {"num_ctas", 1}, {"occupancy", occupancy}, {"opt_level", 3}});
         auto baseId = rows <= 2 ? 2 * width + rows : 65536u + 32 * width + rows;
         auto id = idx == 0 ? baseId : 131072u + baseId;
         table->rows.push_back({id, rows, width, rowOptions});

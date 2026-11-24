@@ -9,6 +9,7 @@ struct MatrixTile {
   int64_t m, n, k;
   std::string native;
   std::string operation = {};
+  int64_t maxOperandBytes = 0;
 };
 struct MatrixTarget {
   std::vector<MatrixTile> tiles;

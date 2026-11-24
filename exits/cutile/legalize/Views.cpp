@@ -315,8 +315,15 @@ bool alignedProjectedView(Value viewArg, func::FuncOp fn,
   return true;
 }
 bool tileLoadStorePermitsTma(Value viewArg, func::FuncOp fn,
-                             const intentdsl::CallFacts &facts, bool permitTma) {
+                             const intentdsl::CallFacts &facts,
+                             bool permitTma) {
   if (!permitTma)
+    return false;
+  auto configs = fn->getAttrOfType<ArrayAttr>("block.configs");
+  if (configs && !configs.empty() && llvm::all_of(configs, [](Attribute row) {
+        return cast<DictionaryAttr>(row).getAs<IntegerAttr>("rows").getInt() ==
+               1;
+      }))
     return false;
   auto arg = dyn_cast<BlockArgument>(viewArg);
   if (!arg || arg.getOwner() != &fn.front())
