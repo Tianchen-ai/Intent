@@ -80,6 +80,103 @@ bool rectangularSlab(Operation *op,func::FuncOp fn){
       return llvm::isPowerOf2_64(cast<DictionaryAttr>(row).getAs<IntegerAttr>("width").getInt());
     });
 }
+bool broadcastInner(Value viewArg, func::FuncOp fn) {
+  auto arg = dyn_cast<BlockArgument>(viewArg);
+  if (!arg || arg.getOwner() != &fn.front())
+    return false;
+  auto strides =
+      fn.getArgAttrOfType<DenseI64ArrayAttr>(arg.getArgNumber(), "ct_src.strides");
+  auto shape =
+      fn.getArgAttrOfType<DenseI64ArrayAttr>(arg.getArgNumber(), "ct_src.shape");
+  return strides && shape && !strides.empty() &&
+         strides.size() == shape.size() && strides.asArrayRef().back() == 0 &&
+         shape.asArrayRef().back() > 0;
+}
+bool alignedProjectedView(Value viewArg, func::FuncOp fn,
+                          const intentdsl::CallFacts &facts, bool permitTma) {
+  if (!permitTma)
+    return false;
+  auto arg = dyn_cast<BlockArgument>(viewArg);
+  if (!arg || arg.getOwner() != &fn.front())
+    return false;
+  auto view = cast<MemRefType>(arg.getType());
+  int64_t elemBytes = llvm::divideCeil(view.getElementTypeBitWidth(), 8);
+  unsigned slot = arg.getArgNumber();
+  if (auto map = fn.getArgAttrOfType<AffineMapAttr>(slot, "kir.indexing")) {
+    auto strides = fn.getArgAttrOfType<DenseI64ArrayAttr>(slot, "ct_src.strides");
+    auto shape = fn.getArgAttrOfType<DenseI64ArrayAttr>(slot, "ct_src.shape");
+    auto src = fn.getArgAttrOfType<IntegerAttr>(slot, "kir.source");
+    if (!strides || !shape || strides.size() != size_t(view.getRank()) ||
+        shape.size() != strides.size() || strides.empty() ||
+        strides.asArrayRef().back() != 1 || !src || src.getInt() < 0 ||
+        size_t(src.getInt()) >= facts.arguments.size())
+      return false;
+    for (int64_t st : strides.asArrayRef().drop_back())
+      if (st <= 0 || (st * elemBytes) % 16 != 0)
+        return false;
+    auto *srcObj = facts.arguments[src.getInt()].getAsObject();
+    auto *srcStrides = srcObj ? srcObj->getArray("strides") : nullptr;
+    if (!srcStrides || srcStrides->size() != map.getValue().getNumResults())
+      return false;
+    int64_t offsetElems = 0;
+    for (auto [i, expr] : llvm::enumerate(map.getValue().getResults())) {
+      SmallVector<int64_t> factors(map.getValue().getNumDims() + 1, 0);
+      auto st = (*srcStrides)[i].getAsInteger();
+      if (!st || !intentdsl::coefficients(expr, factors))
+        return false;
+      int64_t term = 0;
+      if (__builtin_mul_overflow(factors.back(), *st, &term) ||
+          __builtin_add_overflow(offsetElems, term, &offsetElems))
+        return false;
+    }
+    return offsetElems >= 0 && (offsetElems * elemBytes) % 16 == 0;
+  }
+  if (slot >= facts.arguments.size())
+    return false;
+  auto *obj = facts.arguments[slot].getAsObject();
+  auto *strides = obj ? obj->getArray("strides") : nullptr;
+  if (!strides || strides->size() != size_t(view.getRank()) || strides->empty())
+    return false;
+  if ((*strides)[strides->size() - 1].getAsInteger() != 1)
+    return false;
+  for (size_t i = 0; i + 1 < strides->size(); ++i) {
+    auto st = (*strides)[i].getAsInteger();
+    if (!st || *st <= 0 || (*st * elemBytes) % 16 != 0)
+      return false;
+  }
+  return true;
+}
+bool tileLoadStorePermitsTma(Value viewArg, func::FuncOp fn,
+                             const intentdsl::CallFacts &facts, bool permitTma) {
+  if (!permitTma)
+    return false;
+  auto arg = dyn_cast<BlockArgument>(viewArg);
+  if (!arg || arg.getOwner() != &fn.front())
+    return false;
+  int rank = cast<MemRefType>(arg.getType()).getRank();
+  unsigned slot = arg.getArgNumber();
+  if (rank <= 2 && !fn.getArgAttr(slot, "kir.indexing"))
+    return true;
+  if (!alignedProjectedView(viewArg, fn, facts, permitTma))
+    return false;
+  if (rank > 2) {
+    std::optional<int64_t> rowDim;
+    if (auto shape = fn.getArgAttrOfType<DenseI64ArrayAttr>(slot, "ct_src.shape");
+        shape && shape.size() == size_t(rank))
+      rowDim = shape[rank - 2];
+    else if (auto *sh = facts.shapeOf(arg); sh && sh->size() == size_t(rank))
+      rowDim = (*sh)[rank - 2].getAsInteger();
+    auto configs = fn->getAttrOfType<ArrayAttr>("block.configs");
+    if (!rowDim || *rowDim <= 0 || !configs)
+      return false;
+    for (Attribute row : configs)
+      if (*rowDim %
+              cast<DictionaryAttr>(row).getAs<IntegerAttr>("rows").getInt() !=
+          0)
+        return false;
+  }
+  return true;
+}
 struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(Lower)
   bool tma, scaledMma;
@@ -148,15 +245,28 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
         auto extent=op->getAttrOfType<IntegerAttr>("extent").getInt();
         s.addAttribute("native_panel",b.getI64IntegerAttr(std::min<uint64_t>(128,llvm::PowerOf2Ceil(std::max<int64_t>(1,extent)))));
       }
-      if(slab && rectangularSlab(op,fn))s.addAttribute("ct_src.rectangular",b.getUnitAttr());
+      if (slab && rectangularSlab(op, fn)) {
+        s.addAttribute("ct_src.rectangular", b.getUnitAttr());
+        bool bcast = code == "load" && broadcastInner(op->getOperand(0), fn);
+        if (bcast)
+          s.addAttribute("ct_src.broadcast_inner", b.getUnitAttr());
+        else if (alignedProjectedView(op->getOperand(0), fn, facts, tma))
+          s.addAttribute("ct_src.slab_tma", b.getUnitAttr());
+      }
       if (access && !slab) {
         auto view = op->getOperand(0);
         auto axes = intentdsl::block::projection(view.getType());
         auto *r = op->getOperand(1).getDefiningOp(),
              *c = op->getOperand(2).getDefiningOp();
+        bool bcast = code == "load" && broadcastInner(view, fn);
+        if (bcast)
+          s.addAttribute("ct_src.broadcast_inner", b.getUnitAttr());
         // normalized verified a rectangular active domain and both coordinates.
         s.addOperands({view, r->getOperand(0), c->getOperand(0)});
-        s.addAttribute("allow_tma", b.getBoolAttr(tma && cast<MemRefType>(view.getType()).getRank() <= 2));
+        s.addAttribute(
+            "allow_tma",
+            b.getBoolAttr(!bcast &&
+                          tileLoadStorePermitsTma(view, fn, facts, tma)));
         s.addAttribute(
             "matrix",
             b.getBoolAttr(*axes == intentdsl::block::RowProjection::Matrix));
@@ -715,8 +825,23 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
           !isConst(inExtOp->getOperand(1), extentVal) || !inBinsOk)
         return atomOp->emitError("atomic_bins requires verified extent and bin range masks"), WalkResult::interrupt();
     }
-    if(ok && (n=="gather_slab" || n=="scatter_slab"))
-      ok=op->hasAttr("ct_src.rectangular")==rectangularSlab(op,fn);
+    if (ok && op->hasAttr("ct_src.slab_tma") && n != "gather_slab" &&
+        n != "scatter_slab")
+      ok = false;
+    if (ok && op->hasAttr("ct_src.broadcast_inner") && n != "gather_slab" &&
+        n != "tile_load")
+      ok = false;
+    if (ok && (n == "gather_slab" || n == "scatter_slab")) {
+      bool rect = rectangularSlab(op, fn);
+      bool bcast =
+          n == "gather_slab" && rect && broadcastInner(op->getOperand(0), fn);
+      bool slabTma = rect && !bcast && factsPtr &&
+                     alignedProjectedView(op->getOperand(0), fn, *factsPtr,
+                                          indices->permitTma);
+      ok = op->hasAttr("ct_src.rectangular") == rect &&
+           op->hasAttr("ct_src.broadcast_inner") == bcast &&
+           op->hasAttr("ct_src.slab_tma") == slabTma;
+    }
     if (ok && n == "stripe_loop")
       ok = !callable;
     if (ok && (n == "stripe_tile_load" || n == "stripe_tile_store" ||
@@ -779,8 +904,12 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
       auto *pid = op->getOperand(1).getDefiningOp(),
            *col = op->getOperand(2).getDefiningOp();
       auto ind = dyn_cast<BlockArgument>(op->getOperand(2));
-      ok = op->getAttrOfType<BoolAttr>("allow_tma").getValue() ==
-               (indices->permitTma && cast<MemRefType>(arg.getType()).getRank() <= 2) &&
+      bool bcast = n == "tile_load" && broadcastInner(arg, fn);
+      bool allowTma =
+          !bcast && factsPtr &&
+          tileLoadStorePermitsTma(arg, fn, *factsPtr, indices->permitTma);
+      ok = op->hasAttr("ct_src.broadcast_inner") == bcast &&
+           op->getAttrOfType<BoolAttr>("allow_tma").getValue() == allowTma &&
            succeeded(axes) &&
            op->getAttrOfType<BoolAttr>("matrix").getValue() ==
                (*axes == intentdsl::block::RowProjection::Matrix) &&

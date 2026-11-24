@@ -264,17 +264,29 @@ llvm::Error rowRule(Operation &op, PrintPoint at, PrintContext &c) {
       auto coord = owner.getInt() == 0
                        ? "(" + row + "," + major + "," + minor + ")"
                        : "(" + major + "," + row + "," + minor + ")";
+      bool bcast = op.hasAttr("ct_src.broadcast_inner");
+      std::string slabHint =
+          op.hasAttr("ct_src.slab_tma") ? "" : ",allow_tma=False";
       if (code == "scatter_slab") {
         auto v = arg(4);
         auto shaped =
             "ct.reshape(" + v + ",(R," + segments + "," + inner + "))";
         if (owner.getInt() != 0)
           shaped = "ct.permute(" + shaped + ",(1,0,2))";
-        line("ct.store(" + base + "," + coord + "," + shaped +
-             ",allow_tma=False)");
+        line("ct.store(" + base + "," + coord + "," + shaped + slabHint + ")");
       } else {
-        auto v = "ct.load(" + base + "," + coord + ",shape=" + shape +
-                 ",padding_mode=ct.PaddingMode.ZERO,allow_tma=False)";
+        auto loadShape =
+            owner.getInt() == 0
+                ? "(R," + segments + "," + (bcast ? "1" : inner) + ")"
+                : "(" + segments + ",R," + (bcast ? "1" : inner) + ")";
+        auto loadCoord =
+            owner.getInt() == 0
+                ? "(" + row + "," + major + "," + (bcast ? "0" : minor) + ")"
+                : "(" + major + "," + row + "," + (bcast ? "0" : minor) + ")";
+        auto v = "ct.load(" + base + "," + loadCoord + ",shape=" + loadShape +
+                 ",padding_mode=ct.PaddingMode.ZERO" + slabHint + ")";
+        if (bcast)
+          v = "ct.broadcast_to(" + v + "," + shape + ")";
         if (owner.getInt() != 0)
           v = "ct.permute(" + v + ",(1,0,2))";
         auto id = result();
@@ -388,14 +400,15 @@ llvm::Error rowRule(Operation &op, PrintPoint at, PrintContext &c) {
            ".shape[1])";
   else if (code == "tile_load" || code == "tile_store") {
     int rank = cast<MemRefType>(op.getOperand(0).getType()).getRank();
+    bool bcast = op.hasAttr("ct_src.broadcast_inner");
     std::string hint = op.getAttrOfType<BoolAttr>("allow_tma").getValue()
                            ? ""
                            : ", allow_tma=False";
     if (rank > 2) {
       auto array = arg(0), row = arg(1);
       SmallVector<std::string> indices(rank), shape(rank, "1");
-      indices.back() = arg(2);
-      shape.back() = "W";
+      indices.back() = bcast ? "0" : arg(2);
+      shape.back() = bcast ? "1" : "W";
       shape[rank - 2] = "R";
       for (int j = rank - 2; j >= 0; --j) {
         auto span = "D" + std::to_string(j);
@@ -411,14 +424,19 @@ llvm::Error rowRule(Operation &op, PrintPoint at, PrintContext &c) {
              tile + ")" + hint + ")");
       else {
         auto id = result();
-        line(id + " = ct.reshape(ct.load(" + array + "," + coord + ",shape=" +
-             tile + ",padding_mode=ct.PaddingMode.ZERO" + hint + "),(R,W))");
+        std::string loaded = "ct.load(" + array + "," + coord + ",shape=" +
+                             tile + ",padding_mode=ct.PaddingMode.ZERO" + hint +
+                             ")";
+        line(id + " = " +
+             (bcast ? "ct.broadcast_to(ct.reshape(" + loaded + ",(R,1)),(R,W))"
+                    : "ct.reshape(" + loaded + ",(R,W))"));
       }
       return llvm::Error::success();
     }
     bool matrix = op.getAttrOfType<BoolAttr>("matrix").getValue();
     std::string index =
-        matrix ? "(" + arg(1) + ", " + arg(2) + ")" : "(" + arg(2) + ",)";
+        matrix ? "(" + arg(1) + ", " + (bcast ? "0" : arg(2)) + ")"
+               : "(" + (bcast ? "0" : arg(2)) + ",)";
     if (code == "tile_store") {
       auto axes = op.getAttrOfType<DenseI64ArrayAttr>("block.member_axes");
       bool swap = axes && axes.size() == 2 && axes[0] == 1;
@@ -432,10 +450,13 @@ llvm::Error rowRule(Operation &op, PrintPoint at, PrintContext &c) {
       return llvm::Error::success();
     }
     expr = "ct.load(" + arg(0) + ", " + index +
-           ", shape=" + (matrix ? "(R,W)" : "(W,)") +
+           ", shape=" +
+           (matrix ? (bcast ? "(R,1)" : "(R,W)") : (bcast ? "(1,)" : "(W,)")) +
            ", padding_mode=ct.PaddingMode.ZERO" + hint + ")";
     if (!matrix)
       expr = "ct.broadcast_to(ct.expand_dims(" + expr + ",0),(R,W))";
+    else if (bcast)
+      expr = "ct.broadcast_to(" + expr + ",(R,W))";
   } else if (code == "reduce")
     expr = std::string(sum ? "ct.sum" : "ct.max") + "(ct.where(" + arg(1) +
            ", " + arg(0) + ", " + (sum ? "0.0" : "-float('inf')") +
