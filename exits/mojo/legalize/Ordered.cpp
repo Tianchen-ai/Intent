@@ -941,10 +941,304 @@ struct OrderedLowerer {
     return op.emitError("unsupported Mojo ordered instruction ") << n;
   }
 
+  bool tryLowerVectorizedInnerLoop(scf::ForOp loop, IRMapping &lane0) {
+    auto stepCst = loop.getStep().getDefiningOp<arith::ConstantIndexOp>();
+    if (!stepCst || stepCst.value() != 1 || loop.getNumRegionIterArgs() > 1)
+      return false;
+
+    const bool isRed = loop.getNumRegionIterArgs() == 1;
+    bool isAdd = false;
+    Operation *redOp = nullptr;
+    Value iterArg, stepTerm;
+    if (isRed) {
+      if (!loop->hasAttr("kir.reassociate") ||
+          !loop.getResult(0).getType().isF32())
+        return false;
+      iterArg = loop.getRegionIterArgs()[0];
+      if (!iterArg.hasOneUse())
+        return false;
+      Value yVal = loop.getBody()->getTerminator()->getOperand(0);
+      redOp = yVal.getDefiningOp();
+      if (!redOp || redOp->getBlock() != loop.getBody())
+        return false;
+      if (auto add = dyn_cast<arith::AddFOp>(redOp)) {
+        isAdd = true;
+        stepTerm = add.getLhs() == iterArg
+                       ? add.getRhs()
+                       : (add.getRhs() == iterArg ? add.getLhs() : Value{});
+      } else if (auto mx = dyn_cast<arith::MaxNumFOp>(redOp)) {
+        isAdd = false;
+        stepTerm = mx.getLhs() == iterArg
+                       ? mx.getRhs()
+                       : (mx.getRhs() == iterArg ? mx.getLhs() : Value{});
+      } else {
+        return false;
+      }
+      if (!stepTerm || stepTerm == iterArg)
+        return false;
+    }
+
+    auto vecElemOk = [&](Type t) {
+      return t.isF32() || t.isBF16() || t.isF16() || t.isIndex() ||
+             t.isInteger(1) || t.isInteger(32) || t.isInteger(64) ||
+             t.isUnsignedInteger(64);
+    };
+
+    Value ivOrig = loop.getInductionVar();
+    llvm::DenseSet<Value> writtenViews;
+    for (Operation &bop : loop.getBody()->without_terminator()) {
+      if (auto st = dyn_cast<memref::StoreOp>(bop)) {
+        if (isRed)
+          return false;
+        writtenViews.insert(st.getMemref());
+      }
+    }
+    if (!isRed && writtenViews.empty())
+      return false;
+
+    llvm::DenseSet<Value> dependsOnIv{ivOrig};
+    bool hasContigMem = false;
+    for (Operation &bop : loop.getBody()->without_terminator()) {
+      if (&bop == redOp)
+        continue;
+      if (bop.getNumRegions() != 0)
+        return false;
+      if (isRed && llvm::is_contained(bop.getOperands(), iterArg))
+        return false;
+      if (auto ld = dyn_cast<memref::LoadOp>(bop)) {
+        if (writtenViews.contains(ld.getMemref()))
+          return false;
+        bool anyIv = llvm::any_of(
+            ld.getIndices(), [&](Value v) { return dependsOnIv.contains(v); });
+        if (!anyIv)
+          continue;
+        auto strides = argArray(ld.getMemref(), "cpu.strides");
+        if (ld.getIndices().empty() || ld.getIndices().back() != ivOrig ||
+            strides.empty() || strides[strides.size() - 1] != 1 ||
+            !vecElemOk(ld.getResult().getType()) ||
+            llvm::any_of(ld.getIndices().drop_back(),
+                         [&](Value v) { return dependsOnIv.contains(v); }))
+          return false;
+        hasContigMem = true;
+        dependsOnIv.insert(ld.getResult());
+        continue;
+      }
+      if (auto st = dyn_cast<memref::StoreOp>(bop)) {
+        auto strides = argArray(st.getMemref(), "cpu.strides");
+        if (st.getIndices().empty() || st.getIndices().back() != ivOrig ||
+            strides.empty() || strides[strides.size() - 1] != 1 ||
+            !vecElemOk(st.getValue().getType()) ||
+            llvm::any_of(st.getIndices().drop_back(),
+                         [&](Value v) { return dependsOnIv.contains(v); }))
+          return false;
+        hasContigMem = true;
+        continue;
+      }
+      if (isa<memref::DimOp, arith::ConstantOp, arith::ConstantIndexOp>(bop))
+        continue;
+      if (bop.getNumResults() != 1 ||
+          isa<ShapedType>(bop.getResult(0).getType()) ||
+          !vecElemOk(bop.getResult(0).getType()))
+        return false;
+      bool anyIv = llvm::any_of(
+          bop.getOperands(), [&](Value v) { return dependsOnIv.contains(v); });
+      if (!anyIv)
+        continue;
+      bool opOk = false;
+      if (isa<arith::AddFOp, arith::SubFOp, arith::MulFOp, arith::DivFOp,
+              arith::MaxNumFOp, arith::AddIOp, arith::SubIOp, arith::MulIOp,
+              arith::AndIOp, arith::OrIOp, arith::XOrIOp>(bop)) {
+        opOk = vecElemOk(bop.getOperand(0).getType()) &&
+               vecElemOk(bop.getOperand(1).getType());
+      } else if (isa<math::ExpOp, math::Exp2Op, math::LogOp, math::SqrtOp,
+                     math::RsqrtOp, arith::ExtFOp, arith::TruncFOp,
+                     arith::IndexCastOp, arith::SIToFPOp,
+                     arith::FPToSIOp>(bop)) {
+        opOk = vecElemOk(bop.getOperand(0).getType());
+      } else if (auto ci = dyn_cast<arith::CmpIOp>(bop)) {
+        auto p = ci.getPredicate();
+        opOk = vecElemOk(ci.getLhs().getType()) &&
+               (p == arith::CmpIPredicate::eq ||
+                p == arith::CmpIPredicate::ne ||
+                p == arith::CmpIPredicate::slt ||
+                p == arith::CmpIPredicate::sle ||
+                p == arith::CmpIPredicate::sgt ||
+                p == arith::CmpIPredicate::sge);
+      } else if (auto cf = dyn_cast<arith::CmpFOp>(bop)) {
+        auto p = cf.getPredicate();
+        opOk = vecElemOk(cf.getLhs().getType()) &&
+               (p == arith::CmpFPredicate::OEQ ||
+                p == arith::CmpFPredicate::ONE ||
+                p == arith::CmpFPredicate::OLT ||
+                p == arith::CmpFPredicate::OLE ||
+                p == arith::CmpFPredicate::OGT ||
+                p == arith::CmpFPredicate::OGE);
+      } else if (auto sel = dyn_cast<arith::SelectOp>(bop)) {
+        opOk = sel.getCondition().getType().isInteger(1) &&
+               vecElemOk(sel.getTrueValue().getType());
+      }
+      if (!opOk)
+        return false;
+      dependsOnIv.insert(bop.getResult(0));
+    }
+    if (!hasContigMem)
+      return false;
+
+    constexpr int64_t W = 16;
+    Value lb = lane0.lookup(loop.getLowerBound());
+    Value ub = lane0.lookup(loop.getUpperBound());
+    Value c0 = constIdx(b, loc, 0), c1 = constIdx(b, loc, 1),
+          cW = constIdx(b, loc, W);
+    Value span = b.create<arith::SubIOp>(loc, ub, lb);
+    Value geW =
+        b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge, span, cW);
+    Value aligned =
+        b.create<arith::MulIOp>(loc, b.create<arith::DivSIOp>(loc, span, cW), cW);
+    Value vecSpan = b.create<arith::SelectOp>(loc, geW, aligned, c0);
+    Value vecEnd = b.create<arith::AddIOp>(loc, lb, vecSpan);
+
+    auto f32xW = RankedTensorType::get({W}, b.getF32Type());
+    Value scalarSlot, vAccSlot;
+    if (isRed) {
+      Value initOrig = loop.getInitArgs()[0];
+      scalarSlot = declSlot(b.getF32Type(), lane0.lookup(initOrig), initOrig);
+      Value identScalar =
+          isAdd ? constF32(b, loc, 0.0f)
+                : b.create<arith::ConstantOp>(
+                       loc, b.getF32Type(),
+                       b.getFloatAttr(b.getF32Type(),
+                                      llvm::APFloat::getInf(
+                                          llvm::APFloat::IEEEsingle(),
+                                          /*Negative=*/true)))
+                      ->getResult(0);
+      Value identVec =
+          makeOp(b, loc, "splat_scalar", {identScalar}, {f32xW},
+                 {b.getNamedAttr("dtype", b.getStringAttr("float32")),
+                  b.getNamedAttr("width", b.getI64IntegerAttr(W))})
+              ->getResult(0);
+      vAccSlot =
+          makeOp(b, loc, "acc_decl", {identVec}, {f32xW},
+                 {b.getNamedAttr("dtype", b.getStringAttr("float32")),
+                  b.getNamedAttr("width", b.getI64IntegerAttr(W))})
+              ->getResult(0);
+    }
+
+    int64_t savedBatch = batch;
+    bool savedBatchSimd = batchSimd;
+    BlockArgument savedInner = innerOwnerArg;
+    auto savedBatchVecs = std::move(batchVecs);
+    batch = W;
+    batchSimd = true;
+    innerOwnerArg = BlockArgument();
+    if (auto ba = dyn_cast<BlockArgument>(ivOrig))
+      innerOwnerArg = ba;
+    batchVecs.clear();
+
+    auto *vLoop = makeOp(b, loc, "for_range", {lb, vecEnd, cW}, {}, {}, 1);
+    Block &vBb = vLoop->getRegion(0).emplaceBlock();
+    Value ivVec = vBb.addArgument(b.getIndexType(), loc);
+    {
+      OpBuilder::InsertionGuard vg(b);
+      b.setInsertionPointToEnd(&vBb);
+      SmallVector<IRMapping, 16> vecLanes(W, lane0);
+      for (int64_t l = 0; l < W; ++l)
+        vecLanes[l].map(ivOrig, ivVec);
+      Value ivI64 = b.create<arith::IndexCastOp>(loc, b.getI64Type(), ivVec);
+      batchVecs[ivOrig] =
+          makeOp(b, loc, "simd_iota_add", {ivI64},
+                 {RankedTensorType::get({W}, b.getI64Type())},
+                 {b.getNamedAttr("dtype", b.getStringAttr("int64")),
+                  b.getNamedAttr("width", b.getI64IntegerAttr(W))})
+              ->getResult(0);
+      for (Operation &bop : loop.getBody()->without_terminator()) {
+        if (&bop == redOp)
+          continue;
+        bool dep = isa<memref::StoreOp>(bop) ||
+                   (bop.getNumResults() == 1 &&
+                    dependsOnIv.contains(bop.getResult(0)));
+        if (!dep) {
+          if (failed(lowerSingleOp(bop, 0, vecLanes[0]))) {
+            batch = savedBatch;
+            batchSimd = savedBatchSimd;
+            innerOwnerArg = savedInner;
+            batchVecs = std::move(savedBatchVecs);
+            return false;
+          }
+          if (bop.getNumResults() == 1)
+            for (int64_t l = 1; l < W; ++l)
+              vecLanes[l].map(bop.getResult(0),
+                              vecLanes[0].lookup(bop.getResult(0)));
+          continue;
+        }
+        bool okVec = tryLowerBatchVecOp(bop, vecLanes);
+        (void)okVec;
+      }
+      if (isRed) {
+        Value stepVec = getBatchVec(stepTerm, vecLanes);
+        Value curAcc = readSlot(vAccSlot);
+        Value nextAcc =
+            isAdd ? b.create<arith::AddFOp>(loc, curAcc, stepVec)->getResult(0)
+                  : b.create<arith::MaxNumFOp>(loc, curAcc, stepVec)
+                        ->getResult(0);
+        writeSlot(vAccSlot, nextAcc);
+      }
+      makeOp(b, loc, "end");
+    }
+
+    batch = savedBatch;
+    batchSimd = savedBatchSimd;
+    innerOwnerArg = savedInner;
+    batchVecs = std::move(savedBatchVecs);
+
+    if (isRed) {
+      auto redIf = b.create<scf::IfOp>(loc, TypeRange{}, geW, false);
+      OpBuilder::InsertionGuard rg(b);
+      b.setInsertionPointToStart(&redIf.getThenRegion().front());
+      Value vFinal = readSlot(vAccSlot);
+      Value vRed =
+          isAdd ? makeOp(b, loc, "lane_sum", {vFinal}, {b.getF32Type()})
+                      ->getResult(0)
+                : makeOp(b, loc, "lane_max", {vFinal}, {b.getF32Type()},
+                         {b.getNamedAttr("width", b.getI64IntegerAttr(W))})
+                      ->getResult(0);
+      Value curS = readSlot(scalarSlot);
+      Value nextS =
+          isAdd ? b.create<arith::AddFOp>(loc, curS, vRed)->getResult(0)
+                : b.create<arith::MaxNumFOp>(loc, curS, vRed)->getResult(0);
+      writeSlot(scalarSlot, nextS);
+    }
+
+    auto *tLoop = makeOp(b, loc, "for_range", {vecEnd, ub, c1}, {}, {}, 1);
+    Block &tBb = tLoop->getRegion(0).emplaceBlock();
+    Value ivTail = tBb.addArgument(b.getIndexType(), loc);
+    {
+      OpBuilder::InsertionGuard tg(b);
+      b.setInsertionPointToEnd(&tBb);
+      SmallVector<IRMapping, 1> tailLanes{lane0};
+      tailLanes[0].map(ivOrig, ivTail);
+      if (isRed)
+        tailLanes[0].map(iterArg, readSlot(scalarSlot));
+      if (failed(lowerBlock(*loop.getBody(), tailLanes)))
+        return false;
+      if (isRed) {
+        Value nextTail =
+            tailLanes[0].lookup(loop.getBody()->getTerminator()->getOperand(0));
+        writeSlot(scalarSlot, nextTail);
+      }
+      makeOp(b, loc, "end");
+    }
+    if (isRed)
+      lane0.map(loop.getResult(0), readSlot(scalarSlot));
+    return true;
+  }
+
   LogicalResult lowerBlock(Block &srcBb, SmallVectorImpl<IRMapping> &lanes) {
     const bool vecActive = batchSimd && lanes.size() == size_t(batch);
     for (Operation &op : srcBb.without_terminator()) {
       if (auto loop = dyn_cast<scf::ForOp>(op)) {
+        if (!vecActive && lanes.size() == 1 &&
+            tryLowerVectorizedInnerLoop(loop, lanes[0]))
+          continue;
         materializeScalarLanes(loop.getLowerBound(), lanes);
         materializeScalarLanes(loop.getUpperBound(), lanes);
         materializeScalarLanes(loop.getStep(), lanes);
