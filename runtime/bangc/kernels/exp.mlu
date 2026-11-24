@@ -3,8 +3,8 @@ __mlu_func__ void row_exp(float *out, float *scratch, const float *in, int live,
   bool repair = true;
   int full = (live / 32) * 32;
   if (full >= 32) {
-    __bang_abs(out, in, lanes);
-    __bang_maxpool(scratch, out, 32, full / 32, 1, full / 32, 1, 1, 1);
+    __bang_abs(scratch, in, lanes);
+    __bang_maxpool(scratch, scratch, 32, full / 32, 1, full / 32, 1, 1, 1);
     __bang_argmax(scratch, scratch, 32);
     __sync_compute();
     repair = !(((volatile float *)scratch)[0] <= 80.0f);
@@ -14,18 +14,59 @@ __mlu_func__ void row_exp(float *out, float *scratch, const float *in, int live,
         repair = true;
     }
   } else if (live >= 4) {
-    __bang_abs(out, in, lanes);
-    __bang_argmax(out, out, live);
+    __bang_abs(scratch, in, lanes);
+    __bang_argmax(scratch, scratch, live);
     __sync_compute();
-    repair = !(((volatile float *)out)[0] <= 80.0f);
+    repair = !(((volatile float *)scratch)[0] <= 80.0f);
+  }
+  if (repair) {
+    for (int k = 0; k < live; ++k)
+      scratch[k] = in[k];
   }
   __bang_active_exphp(out, in, lanes);
   if (repair) {
     __sync_compute();
     for (int k = 0; k < live; ++k) {
-      float x = in[k];
+      float x = scratch[k];
       if (x < -80.0f || x > 80.0f)
         out[k] = x == -INFINITY ? 0.0f : (x == INFINITY ? INFINITY : expf(x));
+    }
+  }
+}
+
+__mlu_func__ void row_exp2(float *out, float *scratch, const float *in,
+                           int live, int lanes) {
+  bool repair = true;
+  int full = (live / 32) * 32;
+  if (full >= 32) {
+    __bang_abs(scratch, in, lanes);
+    __bang_maxpool(scratch, scratch, 32, full / 32, 1, full / 32, 1, 1, 1);
+    __bang_argmax(scratch, scratch, 32);
+    __sync_compute();
+    repair = !(((volatile float *)scratch)[0] <= 115.0f);
+    for (int k = full; !repair && k < live; ++k) {
+      float x = in[k];
+      if (!(x >= -115.0f && x <= 115.0f))
+        repair = true;
+    }
+  } else if (live >= 4) {
+    __bang_abs(scratch, in, lanes);
+    __bang_argmax(scratch, scratch, live);
+    __sync_compute();
+    repair = !(((volatile float *)scratch)[0] <= 115.0f);
+  }
+  if (repair) {
+    for (int k = 0; k < live; ++k)
+      scratch[k] = in[k];
+  }
+  __bang_mul_scalar(out, in, 0.6931471805599453f, lanes);
+  __bang_active_exphp(out, out, lanes);
+  if (repair) {
+    __sync_compute();
+    for (int k = 0; k < live; ++k) {
+      float x = scratch[k];
+      if (!(x >= -115.0f && x <= 115.0f))
+        out[k] = x == -INFINITY ? 0.0f : (x == INFINITY ? INFINITY : exp2f(x));
     }
   }
 }

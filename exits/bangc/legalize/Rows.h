@@ -15,6 +15,10 @@ mlir::LogicalResult lowerMatrixToCallable(mlir::ModuleOp,
                                           const compilerinfra::TargetProfile &);
 mlir::LogicalResult verifyCallableMatrix(mlir::ModuleOp,
                                          const compilerinfra::TargetProfile &);
+mlir::LogicalResult lowerOrderedToCallable(mlir::ModuleOp,
+                                           const compilerinfra::TargetProfile &);
+mlir::LogicalResult verifyCallableOrdered(mlir::ModuleOp,
+                                          const compilerinfra::TargetProfile &);
 llvm::Error describeRowArtifact(mlir::func::FuncOp, llvm::raw_pwrite_stream &);
 compilerinfra::TerminalPrinter rowPrinter();
 } // namespace CI_UNIT_NAMESPACE

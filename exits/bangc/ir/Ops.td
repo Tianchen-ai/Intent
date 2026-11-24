@@ -19,6 +19,12 @@ def MatrixProgramOp : BangcOp<"matrix_program", [NoTerminator]> {
   let regions = (region AnyRegion:$sources, AnyRegion:$device, AnyRegion:$host);
 }
 
+def OrderedProgramOp : BangcOp<"ordered_program", [NoTerminator]> {
+  let arguments = (ins I64Attr:$owner_tile, I64Attr:$owners,
+                       I64Attr:$participants, I64Attr:$owner_bytes);
+  let regions = (region AnyRegion:$sources, AnyRegion:$device, AnyRegion:$host);
+}
+
 def NramBufferOp : BangcOp<"nram_buffer"> {
   let arguments = (ins I64Attr:$elements);
   let results = (outs AnyMemRef:$buffer);
@@ -216,6 +222,21 @@ def RowReduceOp : BangcOp<"row_reduce"> {
 def RowExpOp : BangcOp<"row_exp"> {
   let arguments = (ins AnyMemRef:$out, AnyMemRef:$scratch, AnyMemRef:$input,
                        I64:$active, I64:$lanes);
+}
+
+def RowExp2Op : BangcOp<"row_exp2"> {
+  let arguments = (ins AnyMemRef:$out, AnyMemRef:$scratch, AnyMemRef:$input,
+                       I64:$active, I64:$lanes);
+}
+
+def Reduce32SumOp : BangcOp<"reduce32_sum"> {
+  let arguments = (ins AnyMemRef:$buffer);
+  let results = (outs F32:$sum);
+}
+
+def SumpoolOp : BangcOp<"sumpool"> {
+  let arguments = (ins AnyMemRef:$dst, AnyMemRef:$src, I64:$channel,
+                       I64:$height);
 }
 
 def TileTransposeOp : BangcOp<"tile_transpose"> {

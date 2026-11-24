@@ -13,7 +13,6 @@ using namespace mlir;
 namespace CI_UNIT_NAMESPACE {
 using namespace compilerinfra;
 llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &);
-llvm::Error emit(ModuleOp, llvm::raw_pwrite_stream &);
 namespace {
 // A preceding collective releases its scratch before the division. A second
 // consumer of the FP32 quotient would require a separately rounded FP32 value.
@@ -269,16 +268,12 @@ struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
       return;
     }
     if (intentdsl::kir::orderedOwners(f)) {
-      auto &space = f.front().front();
-      if (space.hasAttr("block.score_panel") && phase >= 1) {
-        auto *q = &space.getRegion(0).front().front(),
-             *v = q->getNextNode()->getNextNode();
-        OpBuilder b(&space);
-        q->setAttr("bangc.microkernel", b.getStringAttr("checked-bf16-conv"));
-        q->setAttr("bangc.filter", b.getStringAttr("direct"));
-        v->setAttr("bangc.microkernel", b.getStringAttr("checked-bf16-conv"));
-        v->setAttr("bangc.filter", b.getStringAttr("transpose"));
+      if (phase == 2) {
+        if (failed(lowerOrderedToCallable(getOperation(), target)))
+          signalPassFailure();
+        return;
       }
+      auto &space = f.front().front();
       space.setAttr(
           "bangc.workers",
           Builder(f.getContext()).getI64IntegerAttr(supply.consumers));
@@ -395,8 +390,11 @@ LogicalResult verify(ModuleOp m, const TargetProfile &p, unsigned stage) {
       return verifyCallableMatrix(m, p);
     if (top == "bangc_src.row_program")
       return verifyCallableRows(m, p);
+    if (top == "bangc_src.ordered_program")
+      return verifyCallableOrdered(m, p);
+    return failure();
   }
-  if (stage == 2 && !intentdsl::kir::orderedOwners(fn))
+  if (stage == 2)
     return failure();
   if (failed(intentdsl::dsa::verifyProgram(m, p, true)))
     return failure();
@@ -410,16 +408,6 @@ LogicalResult verify(ModuleOp m, const TargetProfile &p, unsigned stage) {
                             std::min(supply->budget, supply->capacity))))
       return failure();
     auto &space = fn.front().front();
-    if (space.hasAttr("block.score_panel") && stage >= 1) {
-      auto *q = &space.getRegion(0).front().front(),
-           *v = q->getNextNode()->getNextNode();
-      if (q->getAttrOfType<StringAttr>("bangc.microkernel") !=
-              "checked-bf16-conv" ||
-          v->getAttr("bangc.microkernel") != q->getAttr("bangc.microkernel") ||
-          q->getAttrOfType<StringAttr>("bangc.filter") != "direct" ||
-          v->getAttrOfType<StringAttr>("bangc.filter") != "transpose")
-        return space.emitError("invalid mixed contraction or filter supply");
-    }
     auto n = p.services.get<intentdsl::dsa::LocalSupply>()->consumers;
     if (space.getAttrOfType<StringAttr>("bangc.owner_memory") !=
         (space.getAttrOfType<IntegerAttr>("dsa.owner_bytes").getInt()
@@ -510,7 +498,9 @@ void bind(Unit &u) {
          COMPILERINFRA_SOURCE});
     ++stage;
   }
-  u.exit =
-      Located<ExitImplementation>{{emit, capabilities}, COMPILERINFRA_SOURCE};
+  ExitImplementation exit;
+  exit.capabilities = capabilities;
+  exit.terminal = rowPrinter();
+  u.exit = Located<ExitImplementation>{std::move(exit), COMPILERINFRA_SOURCE};
 }
 } // namespace CI_UNIT_NAMESPACE

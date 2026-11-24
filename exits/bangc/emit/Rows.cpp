@@ -78,6 +78,7 @@ void loadRuntimeSources(TerminalPrinter &p) {
   static const std::pair<const char *, const char *> bindings[] = {
       {"exits/bangc::row-reduce", "runtime/bangc/kernels/reduce.mlu"},
       {"exits/bangc::validated-exp", "runtime/bangc/kernels/exp.mlu"},
+      {"exits/bangc::validated-exp2", "runtime/bangc/kernels/exp.mlu"},
       {"exits/bangc::nram-transpose", "runtime/bangc/kernels/transpose.mlu"},
       {"exits/bangc::certified-half-quotient",
        "runtime/bangc/kernels/quotient.mlu"},
@@ -159,6 +160,16 @@ TerminalPrinter rowPrinter() {
       c.line("constexpr int BM = " + std::to_string(bm) +
              ", BN = " + std::to_string(bn) +
              ", BK = " + std::to_string(bk) + ";");
+    }
+    return llvm::Error::success();
+  };
+
+  rules["bangc_src.ordered_program"] = [](Operation &, PrintPoint pt,
+                                          PrintContext &c) {
+    if (pt == PrintPoint::Enter) {
+      c.line("#include <bang.h>");
+      c.line("#include <cnrt.h>");
+      c.line("#include <math.h>");
     }
     return llvm::Error::success();
   };
@@ -450,6 +461,10 @@ TerminalPrinter rowPrinter() {
       expr = "(1.0f / sqrtf(" + a0 + "))";
     else if (k == "exp")
       expr = "expf(" + a0 + ")";
+    else if (k == "exp2")
+      expr = "exp2f(" + a0 + ")";
+    else if (k == "log")
+      expr = "logf(" + a0 + ")";
     else if (k == "fabs")
       expr = "fabsf(" + a0 + ")";
     else if (k == "floor")
@@ -486,6 +501,31 @@ TerminalPrinter rowPrinter() {
            c.name(op.getOperand(1)) + ", " + c.name(op.getOperand(2)) +
            ", (int)(" + c.name(op.getOperand(3)) + "), (int)(" +
            c.name(op.getOperand(4)) + "));");
+    return llvm::Error::success();
+  });
+
+  enter("bangc_src.row_exp2", [](Operation &op, PrintContext &c) {
+    c.line("row_exp2(" + c.name(op.getOperand(0)) + ", " +
+           c.name(op.getOperand(1)) + ", " + c.name(op.getOperand(2)) +
+           ", (int)(" + c.name(op.getOperand(3)) + "), (int)(" +
+           c.name(op.getOperand(4)) + "));");
+    return llvm::Error::success();
+  });
+
+  enter("bangc_src.reduce32_sum", [](Operation &op, PrintContext &c) {
+    auto buf = c.name(op.getOperand(0));
+    c.line("__bang_reduce_sum(" + buf + ", " + buf + ", 32);");
+    c.line("__sync_compute();");
+    c.line("float " + c.name(op.getResult(0)) + " = ((volatile float *)" + buf +
+           ")[0];");
+    return llvm::Error::success();
+  });
+
+  enter("bangc_src.sumpool", [](Operation &op, PrintContext &c) {
+    auto dst = c.name(op.getOperand(0)), src = c.name(op.getOperand(1)),
+         ch = c.name(op.getOperand(2)), h = c.name(op.getOperand(3));
+    c.line("__bang_sumpool(" + dst + ", " + src + ", (int)(" + ch +
+           "), (int)(" + h + "), 1, (int)(" + h + "), 1, 1, 1);");
     return llvm::Error::success();
   });
 

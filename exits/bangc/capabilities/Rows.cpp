@@ -3,7 +3,6 @@
 #include "intentdsl/levels/execution/block/ir/Contraction.h"
 #include "intentdsl/levels/execution/block/ir/Owners.h"
 #include "intentdsl/levels/storage/dsa/ir/Matrix.h"
-#include "intentdsl/levels/storage/dsa/ir/ScoreSupply.h"
 #include "intentdsl/levels/storage/dsa/ir/Supply.h"
 
 namespace CI_UNIT_NAMESPACE {
@@ -73,27 +72,6 @@ capabilities(const llvm::json::Object &opts) {
   if (auto e = profile.services.provide<intentdsl::RowCapacity>(caps))
     return e;
   if (auto e = profile.services.provide<intentdsl::dsa::LocalSupply>(resource))
-    return e;
-  auto supports = [local = resource->budget, filter = wram.value_or(0)](
-                      const intentdsl::block::ScorePanel &s, int64_t m,
-                      const intentdsl::CallFacts &facts) {
-    intentdsl::dsa::ScoreSupply plan{m, s.keys, s.depth, s.features};
-    if (s.keys % 32 || s.depth % 32 || s.features % 32 ||
-        plan.localBytes() > local || plan.filterBytes() > filter)
-      return false;
-    for (auto view : {s.q, s.k, s.v, s.y}) {
-      auto idx = mlir::cast<mlir::BlockArgument>(view).getArgNumber();
-      auto *strides = facts.arguments[idx].getAsObject()->getArray("strides");
-      auto *dims = facts.shapeOf(view);
-      if (!strides || (*strides)[3].getAsInteger() != 1 ||
-          (*strides)[2] != (*dims)[3])
-        return false;
-    }
-    return true;
-  };
-  if (auto e = profile.services.provide<intentdsl::block::ScoreResources>(
-          std::make_shared<intentdsl::block::ScoreResources>(
-              intentdsl::block::ScoreResources{supports})))
     return e;
   return profile;
 }

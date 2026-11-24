@@ -302,6 +302,50 @@ void rowContracts(Unit &unit) {
                        inTy.getElementType().isF32());
       });
 
+  add("validated-exp2", "row_exp2", "row_exp2", "exp.mlu",
+      "NRAM f32 input, NRAM f32 maxpool scratch and NRAM f32 output over "
+      "[members, pitch]",
+      "128-byte aligned NRAM vector lanes", "f32",
+      "writes NRAM f32 scratch and output buffer",
+      "ln(2) scaling + __bang_active_exphp in [-115, 115] with exact scalar "
+      "exp2f repair outside",
+      [](Operation *op) {
+        auto outTy = dyn_cast<MemRefType>(op->getOperand(0).getType());
+        auto scTy = dyn_cast<MemRefType>(op->getOperand(1).getType());
+        auto inTy = dyn_cast<MemRefType>(op->getOperand(2).getType());
+        return success(isSpace(op->getOperand(0), 1) &&
+                       isSpace(op->getOperand(1), 1) &&
+                       isSpace(op->getOperand(2), 1) &&
+                       outTy.getElementType().isF32() &&
+                       scTy.getElementType().isF32() &&
+                       inTy.getElementType().isF32());
+      });
+
+  addBuiltin("reduce32-sum", "reduce32_sum", "__bang_reduce_sum",
+             "exits/bangc::dma", "32-lane NRAM f32 buffer",
+             "32-element aligned NRAM f32 vector", "f32",
+             "reduces NRAM buffer in place and returns scalar f32 sum",
+             "32-lane hardware tree sum in FP32", hasNram, [](Operation *op) {
+               auto ty = dyn_cast<MemRefType>(op->getOperand(0).getType());
+               return success(isSpace(op->getOperand(0), 1) &&
+                              ty.getElementType().isF32() &&
+                              op->getResult(0).getType().isF32());
+             });
+
+  addBuiltin("nram-sumpool", "sumpool", "__bang_sumpool", "exits/bangc::dma",
+             "NRAM f32 destination [channel] and NRAM f32 source "
+             "[height, channel]",
+             "channel-last NRAM 2D f32 tile", "f32",
+             "writes NRAM f32 channel sums",
+             "batched NRAM column sumpool in FP32", hasNram, [](Operation *op) {
+               auto dst = dyn_cast<MemRefType>(op->getOperand(0).getType());
+               auto src = dyn_cast<MemRefType>(op->getOperand(1).getType());
+               return success(isSpace(op->getOperand(0), 1) &&
+                              isSpace(op->getOperand(1), 1) &&
+                              dst.getElementType().isF32() &&
+                              src.getElementType().isF32());
+             });
+
   add("nram-transpose", "tile_transpose",
       "transpose_tile_b16/transpose_tile_b32", "transpose.mlu",
       "NRAM source tile [rows, cols] and NRAM destination tile [cols, rows]",

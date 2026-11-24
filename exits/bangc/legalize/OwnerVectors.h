@@ -2,13 +2,23 @@
 #include "intentdsl/levels/storage/dsa/ir/Owners.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+
 namespace CI_UNIT_NAMESPACE {
 inline mlir::LogicalResult ownerVectors(mlir::func::FuncOp fn, bool assign,
                                         int64_t budget) {
   using namespace mlir;
   auto &space = fn.front().front();
+  auto trAttr = space.getAttrOfType<StringAttr>("dsa.transfers");
+  if (trAttr && trAttr.getValue() == "panel-fold") {
+    auto zero = IntegerAttr::get(IntegerType::get(fn.getContext(), 64), 0);
+    if (assign)
+      space.setAttr("bangc.deferred_bytes", zero);
+    return success(space.getAttr("bangc.deferred_bytes") == zero);
+  }
   auto streamBytes = space.getAttrOfType<IntegerAttr>("dsa.stream_bytes");
   auto memberBytes = space.getAttrOfType<IntegerAttr>("dsa.member_bytes");
+  auto packAttr = space.getAttrOfType<IntegerAttr>("dsa.owner_pack");
+  int64_t pack = packAttr ? packAttr.getInt() : 1;
   int64_t available = budget - (streamBytes ? streamBytes.getInt() : 0) -
                       (memberBytes ? memberBytes.getInt() : 0);
   llvm::SmallDenseSet<Operation *> deferred;
@@ -26,9 +36,15 @@ inline mlir::LogicalResult ownerVectors(mlir::func::FuncOp fn, bool assign,
         continue;
       auto k =
           intentdsl::kir::memberExtent(fn, sum->getOperand(0), "block.shape");
-      int64_t size = 0;
-      if (k != 32 || transfer[2] % 32 || transfer[2] > 2048 ||
-          __builtin_mul_overflow(transfer[2], 8 * k, &size) || size > available)
+      int64_t totalRows = transfer[2] * pack;
+      int64_t chunkRows =
+          pack > 1 ? std::min<int64_t>(transfer[2], 128) * pack : totalRows;
+      int64_t defBytes = 0, workBytes = 0, size = 0;
+      if (k != 32 || totalRows % 32 || totalRows > 2048 ||
+          __builtin_mul_overflow(totalRows, 4 * k, &defBytes) ||
+          __builtin_mul_overflow(chunkRows, 4 * k, &workBytes) ||
+          __builtin_add_overflow(defBytes, workBytes, &size) ||
+          size > available)
         continue;
       deferred.insert(st);
       deferred.insert(sum);
@@ -51,7 +67,7 @@ inline mlir::LogicalResult ownerVectors(mlir::func::FuncOp fn, bool assign,
             32 &&
         available - scratch >= 128)
       mode = "pool-members";
-    if (name == "lane_sum" && op->getOperand(0).hasOneUse() &&
+    if (name == "lane_sum" && pack == 1 && op->getOperand(0).hasOneUse() &&
         op->getOperand(0).getDefiningOp() &&
         op->getOperand(0).getDefiningOp()->getName().getStringRef() ==
             "arith.mulf" &&
@@ -65,7 +81,10 @@ inline mlir::LogicalResult ownerVectors(mlir::func::FuncOp fn, bool assign,
             "arith.mulf" &&
         intentdsl::kir::memberExtent(fn, op->getResult(0), "block.shape") %
                 32 ==
-            0)
+            0 &&
+        (pack == 1 || !intentdsl::dsa::ownerValueDependsOn(
+                          op->getOperand(0),
+                          space.getRegion(0).front().getArguments().back())))
       mode = "broadcast-multiplier";
     if (name == "extf" && isa<RankedTensorType>(op->getOperand(0).getType()) &&
         cast<RankedTensorType>(op->getOperand(0).getType())
