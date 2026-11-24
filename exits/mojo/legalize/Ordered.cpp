@@ -1737,18 +1737,25 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn) {
     // Pad stack buffers by odd cache-line multiples to prevent 4 KiB page-offset
     // memory disambiguation aliasing across localStackBuf, vAddrBuf, and wideAccBuf.
     int64_t paddedScoreCount = batch * slots + ((batch * slots * 4) % 4096 == 0 ? 32 : 0);
+    SmallVector<NamedAttribute, 3> scoreAllocAttrs{
+        b.getNamedAttr("dtype", b.getStringAttr("float32")),
+        b.getNamedAttr("count", b.getI64IntegerAttr(paddedScoreCount))};
+    if (auto roleAttr = foundLocalBuf->getAttrOfType<StringAttr>("role"))
+      scoreAllocAttrs.push_back(b.getNamedAttr("role", roleAttr));
     lowerer.localStackBuf =
-        makeOp(b, loc, "stack_alloc", {}, {b.getIndexType()},
-               {b.getNamedAttr("dtype", b.getStringAttr("float32")),
-                b.getNamedAttr("count", b.getI64IntegerAttr(paddedScoreCount))})
+        makeOp(b, loc, "stack_alloc", {}, {b.getIndexType()}, scoreAllocAttrs)
             ->getResult(0);
     if (lowerer.chunkedMode && lowerer.accExtent >= 32 &&
         lowerer.accExtent % 32 == 0) {
       int64_t paddedAddrCount = slots + ((slots * 8) % 4096 == 0 ? 24 : 0);
+      SmallVector<NamedAttribute, 3> addrAllocAttrs{
+          b.getNamedAttr("dtype", b.getStringAttr("int64")),
+          b.getNamedAttr("count", b.getI64IntegerAttr(paddedAddrCount))};
+      if (windowAttr)
+        addrAllocAttrs.push_back(
+            b.getNamedAttr("role", b.getStringAttr("window_addrs")));
       lowerer.vAddrBuf =
-          makeOp(b, loc, "stack_alloc", {}, {b.getIndexType()},
-                 {b.getNamedAttr("dtype", b.getStringAttr("int64")),
-                  b.getNamedAttr("count", b.getI64IntegerAttr(paddedAddrCount))})
+          makeOp(b, loc, "stack_alloc", {}, {b.getIndexType()}, addrAllocAttrs)
               ->getResult(0);
     }
   }
@@ -1889,24 +1896,53 @@ LogicalResult verifyMojoOrdered(ModuleOp m, const TargetProfile &p,
       prog.getRegion(1).empty())
     return prog.emitError("incomplete mojo_row.ordered_program regions");
 
-  // Independently verify windowed score replay/recompute threshold on resume
+  // Independently verify windowed score buffer, replay, and over-window
+  // zero-read invariants on resume (parity with CPU verifyOwnerBuffers).
   SmallVector<scf::IfOp, 2> guards, branches;
-  m.walk([&](scf::IfOp ifOp) {
-    if (ifOp->hasAttr("mojo_row.window_guard"))
-      guards.push_back(ifOp);
-    if (ifOp->hasAttr("mojo_row.window_branch"))
-      branches.push_back(ifOp);
+  SmallVector<Value, 2> winBufs, addrBufs;
+  m.walk([&](Operation *op) {
+    if (auto ifOp = dyn_cast<scf::IfOp>(op)) {
+      if (ifOp->hasAttr("mojo_row.window_guard"))
+        guards.push_back(ifOp);
+      if (ifOp->hasAttr("mojo_row.window_branch"))
+        branches.push_back(ifOp);
+    } else if (op->getName().getStringRef() == "mojo_row.stack_alloc") {
+      if (auto role = op->getAttrOfType<StringAttr>("role")) {
+        if (role.getValue() == "score_window")
+          winBufs.push_back(op->getResult(0));
+        else if (role.getValue() == "window_addrs")
+          addrBufs.push_back(op->getResult(0));
+      }
+    }
   });
   auto winAttr = prog.getAttrOfType<IntegerAttr>("window_slots");
   auto batchAttr = prog.getAttrOfType<IntegerAttr>("owner_batch");
-  if (winAttr || batchAttr || !guards.empty() || !branches.empty()) {
-    if (!winAttr || !batchAttr || batchAttr.getInt() <= 0 ||
+  if (winAttr || batchAttr || !guards.empty() || !branches.empty() ||
+      !winBufs.empty() || !addrBufs.empty()) {
+    if (!winAttr || !batchAttr || batchAttr.getInt() < 2 ||
         winAttr.getInt() !=
             intentdsl::cpu::batchScoreSlots / batchAttr.getInt() ||
-        guards.size() != 1 || branches.size() != 1)
+        guards.size() != 1 || branches.size() != 1 || winBufs.size() != 1 ||
+        addrBufs.size() > 1)
       return prog.emitError(
           "invalid or incomplete Mojo windowed score metadata");
-    int64_t slots = winAttr.getInt();
+    int64_t slots = winAttr.getInt(), batch = batchAttr.getInt();
+    Value scoreBuf = winBufs[0];
+    Operation *scoreAlloc = scoreBuf.getDefiningOp();
+    auto scoreDt = scoreAlloc->getAttrOfType<StringAttr>("dtype");
+    auto scoreCnt = scoreAlloc->getAttrOfType<IntegerAttr>("count");
+    if (!scoreDt || scoreDt.getValue() != "float32" || !scoreCnt ||
+        scoreCnt.getInt() < batch * slots)
+      return scoreAlloc->emitError("invalid Mojo score_window stack buffer");
+    if (!addrBufs.empty()) {
+      Operation *addrAlloc = addrBufs[0].getDefiningOp();
+      auto addrDt = addrAlloc->getAttrOfType<StringAttr>("dtype");
+      auto addrCnt = addrAlloc->getAttrOfType<IntegerAttr>("count");
+      if (!addrDt || addrDt.getValue() != "int64" || !addrCnt ||
+          addrCnt.getInt() < slots)
+        return addrAlloc->emitError("invalid Mojo window_addrs stack buffer");
+    }
+
     auto isConstIdx = [](Value v, int64_t want) {
       auto cst = v ? v.getDefiningOp<arith::ConstantIndexOp>()
                    : arith::ConstantIndexOp();
@@ -1928,45 +1964,162 @@ LogicalResult verifyMojoOrdered(ModuleOp m, const TargetProfile &p,
           llvm::zip(px->getOperands(), py->getOperands()),
           [&](auto pair) { return self(self, std::get<0>(pair), std::get<1>(pair)); });
     };
+    auto isSubOf = [&](Value v, Value lhsWant, Value rhsWant) {
+      auto sub = v ? v.getDefiningOp<arith::SubIOp>() : arith::SubIOp();
+      return sub && sameBound(sameBound, sub.getLhs(), lhsWant) &&
+             sameBound(sameBound, sub.getRhs(), rhsWant);
+    };
+    auto isWindowIndexAt = [&](Operation *memOp, Value buf, Value ivWant,
+                               Value loWant, bool isSlice) {
+      if (memOp->getNumOperands() < 2 || memOp->getOperand(0) != buf)
+        return false;
+      Operation *addrOp = memOp->getOperand(1).getDefiningOp();
+      if (!addrOp || addrOp->getName().getStringRef() != "mojo_row.address" ||
+          addrOp->getOperand(0) != buf)
+        return false;
+      auto strides = addrOp->getAttrOfType<DenseI64ArrayAttr>("strides");
+      if (isSlice) {
+        if (addrOp->getNumOperands() != 2 || !strides || strides.size() != 1 ||
+            strides[0] != batch ||
+            !isSubOf(addrOp->getOperand(1), ivWant, loWant))
+          return false;
+        if (memOp->getName().getStringRef() == "mojo_row.load_slice") {
+          auto w = memOp->getAttrOfType<IntegerAttr>("width");
+          return w && w.getInt() == batch;
+        }
+        auto st = dyn_cast<ShapedType>(memOp->getOperand(2).getType());
+        return st && st.getNumElements() == batch;
+      }
+      return addrOp->getNumOperands() == 3 && strides && strides.size() == 2 &&
+             strides[0] == batch && strides[1] == 1 &&
+             isSubOf(addrOp->getOperand(1), ivWant, loWant);
+    };
+
     auto gIf = guards[0], bIf = branches[0];
     Operation *loop1 = gIf->getParentOp();
     if (!loop1 || loop1->getName().getStringRef() != "mojo_row.for_range" ||
+        !isConstIdx(loop1->getOperand(2), 1) ||
+        loop1->getBlock() != bIf->getBlock() || !loop1->isBeforeInBlock(bIf) ||
         !gIf.getElseRegion().empty() || bIf.getElseRegion().empty())
       return prog.emitError("invalid Mojo windowed guard or branch structure");
     Value lo1 = loop1->getOperand(0), hi1 = loop1->getOperand(1),
           iv1 = loop1->getRegion(0).front().getArgument(0);
     auto gCmp = gIf.getCondition().getDefiningOp<arith::CmpIOp>();
-    auto gSub = gCmp ? gCmp.getLhs().getDefiningOp<arith::SubIOp>()
-                     : arith::SubIOp();
-    if (!gCmp || gCmp.getPredicate() != arith::CmpIPredicate::slt || !gSub ||
-        gSub.getLhs() != iv1 || !sameBound(sameBound, gSub.getRhs(), lo1) ||
-        !isConstIdx(gCmp.getRhs(), slots))
+    bool validGuardCond =
+        gCmp && ((gCmp.getPredicate() == arith::CmpIPredicate::slt &&
+                  isSubOf(gCmp.getLhs(), iv1, lo1) &&
+                  isConstIdx(gCmp.getRhs(), slots)) ||
+                 (gCmp.getPredicate() == arith::CmpIPredicate::sgt &&
+                  isConstIdx(gCmp.getLhs(), slots) &&
+                  isSubOf(gCmp.getRhs(), iv1, lo1)));
+    if (!validGuardCond)
       return gIf.emitError(
           "Mojo window guard condition must compare (iv - lo) < window_slots");
 
-    Operation *thenFor = nullptr, *elseFor = nullptr;
-    for (Operation &op : bIf.getThenRegion().front())
-      if (op.getName().getStringRef() == "mojo_row.for_range" &&
-          isConstIdx(op.getOperand(2), 1) && !thenFor)
-        thenFor = &op;
-    for (Operation &op : bIf.getElseRegion().front())
-      if (op.getName().getStringRef() == "mojo_row.for_range" &&
-          isConstIdx(op.getOperand(2), 1) && !elseFor)
-        elseFor = &op;
+    unsigned guardSliceStores = 0, guardScalarStores = 0;
+    bool badLoop1Buf = false;
+    llvm::SmallPtrSet<Value, 4> guardWrittenBufs;
+    loop1->walk([&](Operation *op) {
+      StringRef n = op->getName().getStringRef();
+      if (n == "mojo_row.store_slice" || n == "mojo_row.store_scalar") {
+        bool inGuard = gIf.getThenRegion().isAncestor(op->getParentRegion());
+        if (inGuard)
+          if (auto *def = op->getOperand(0).getDefiningOp();
+              def && def->getName().getStringRef() == "mojo_row.stack_alloc")
+            guardWrittenBufs.insert(op->getOperand(0));
+        if (op->getOperand(0) == scoreBuf) {
+          bool isSlice = (n == "mojo_row.store_slice");
+          if (!inGuard || !isWindowIndexAt(op, scoreBuf, iv1, lo1, isSlice))
+            badLoop1Buf = true;
+          else if (isSlice)
+            ++guardSliceStores;
+          else
+            ++guardScalarStores;
+        }
+      } else if ((n == "mojo_row.load_slice" || n == "mojo_row.load_scalar") &&
+                 op->getOperand(0) == scoreBuf) {
+        badLoop1Buf = true;
+      }
+    });
+    bool validGuardStores =
+        !badLoop1Buf && guardWrittenBufs.size() == 1 &&
+        guardWrittenBufs.contains(scoreBuf) &&
+        ((guardSliceStores == 1 && guardScalarStores == 0) ||
+         (guardSliceStores == 0 && guardScalarStores == batch));
+    if (!validGuardStores)
+      return gIf.emitError(
+          "Mojo window guard must contain the score_window store indexed at (iv - lo)");
+
     auto bCmp = bIf.getCondition().getDefiningOp<arith::CmpIOp>();
-    auto bSub = bCmp ? bCmp.getLhs().getDefiningOp<arith::SubIOp>()
-                     : arith::SubIOp();
-    if (!thenFor || !elseFor || !bCmp ||
-        bCmp.getPredicate() != arith::CmpIPredicate::sle || !bSub ||
-        !sameBound(sameBound, bSub.getLhs(), hi1) ||
-        !sameBound(sameBound, bSub.getRhs(), lo1) ||
-        !sameBound(sameBound, thenFor->getOperand(0), lo1) ||
-        !sameBound(sameBound, thenFor->getOperand(1), hi1) ||
-        !sameBound(sameBound, elseFor->getOperand(0), lo1) ||
-        !sameBound(sameBound, elseFor->getOperand(1), hi1) ||
-        !isConstIdx(bCmp.getRhs(), slots))
+    bool validBranchCond =
+        bCmp && ((bCmp.getPredicate() == arith::CmpIPredicate::sle &&
+                  isSubOf(bCmp.getLhs(), hi1, lo1) &&
+                  isConstIdx(bCmp.getRhs(), slots)) ||
+                 (bCmp.getPredicate() == arith::CmpIPredicate::sge &&
+                  isConstIdx(bCmp.getLhs(), slots) &&
+                  isSubOf(bCmp.getRhs(), hi1, lo1)) ||
+                 (bCmp.getPredicate() == arith::CmpIPredicate::slt &&
+                  isSubOf(bCmp.getLhs(), hi1, lo1) &&
+                  isConstIdx(bCmp.getRhs(), slots + 1)));
+    if (!validBranchCond)
       return bIf.emitError(
           "Mojo window branch condition must compare (hi - lo) <= window_slots");
+
+    SmallVector<Operation *, 2> thenLoops, elseLoops;
+    for (Operation &op : bIf.getThenRegion().front())
+      if (op.getName().getStringRef() == "mojo_row.for_range" &&
+          isConstIdx(op.getOperand(2), 1) &&
+          sameBound(sameBound, op.getOperand(0), lo1) &&
+          sameBound(sameBound, op.getOperand(1), hi1))
+        thenLoops.push_back(&op);
+    for (Operation &op : bIf.getElseRegion().front())
+      if (op.getName().getStringRef() == "mojo_row.for_range" &&
+          isConstIdx(op.getOperand(2), 1) &&
+          sameBound(sameBound, op.getOperand(0), lo1) &&
+          sameBound(sameBound, op.getOperand(1), hi1))
+        elseLoops.push_back(&op);
+    if (thenLoops.size() != 1 || elseLoops.size() != 1)
+      return bIf.emitError(
+          "Mojo window branch must wrap single replay and recompute folds over [lo, hi)");
+
+    Operation *thenFor = thenLoops[0];
+    Value thenLo = thenFor->getOperand(0),
+          thenIv = thenFor->getRegion(0).front().getArgument(0);
+    unsigned thenSliceLoads = 0, thenScalarLoads = 0;
+    bool validThenLoadIdx = true;
+    thenFor->getRegion(0).walk([&](Operation *op) {
+      StringRef n = op->getName().getStringRef();
+      if ((n == "mojo_row.load_slice" || n == "mojo_row.load_scalar") &&
+          op->getOperand(0) == scoreBuf) {
+        bool isSlice = (n == "mojo_row.load_slice");
+        validThenLoadIdx &=
+            isWindowIndexAt(op, scoreBuf, thenIv, thenLo, isSlice);
+        if (isSlice)
+          ++thenSliceLoads;
+        else
+          ++thenScalarLoads;
+      }
+    });
+    if (!validThenLoadIdx ||
+        !((thenSliceLoads == 1 && thenScalarLoads == 0) ||
+          (thenSliceLoads == 0 && thenScalarLoads == batch)))
+      return bIf.emitError(
+          "Mojo window replay branch must read score_window at (iv - lo)");
+
+    bool elseTouchesWindow =
+        bIf.getElseRegion()
+            .walk([&](Operation *op) {
+              for (Value operand : op->getOperands())
+                if (operand == scoreBuf ||
+                    (!addrBufs.empty() && operand == addrBufs[0]) ||
+                    guardWrittenBufs.contains(operand))
+                  return WalkResult::interrupt();
+              return WalkResult::advance();
+            })
+            .wasInterrupted();
+    if (elseTouchesWindow)
+      return bIf.emitError(
+          "Mojo over-window recomputation branch must not read score window");
   }
 
   std::set<std::string> emittedResources;

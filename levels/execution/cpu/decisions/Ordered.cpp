@@ -87,25 +87,29 @@ LogicalResult verifyOwnerGrain(func::FuncOp fn, Operation &space,
     });
     if (bad.wasInterrupted())
       return space.emitError("invalid common value for packed owners");
-  } else if (space.hasAttr("cpu.owner_batch") ||
-             space
-                 .walk([](Operation *op) {
-                   return op->hasAttr("cpu.owner_common")
-                              ? WalkResult::interrupt()
-                              : WalkResult::advance();
-                 })
-                 .wasInterrupted())
-    return space.emitError(
-        "packed owner annotations require a shared interval");
+  } else {
+    auto batch = space.getAttrOfType<IntegerAttr>("cpu.owner_batch");
+    if (!batch || batch.getInt() != 1 ||
+        space
+            .walk([](Operation *op) {
+              return op->hasAttr("cpu.owner_common") ? WalkResult::interrupt()
+                                                     : WalkResult::advance();
+            })
+            .wasInterrupted())
+      return space.emitError(
+          "unpacked owner space requires cpu.owner_batch = 1 without common marks");
+  }
   auto panel = cached ? reusableScores(&space, p) : std::nullopt;
   if (cached && (!panel || cached.getInt() != panel->keys))
     return space.emitError(
         "score cache requires two equivalent contractions over the key axis");
   auto batch = space.getAttrOfType<IntegerAttr>("cpu.owner_batch");
-  auto repeat = batch ? repeatedScore(space) : std::nullopt;
+  auto repeat =
+      (batch && batch.getInt() > 1) ? repeatedScore(space) : std::nullopt;
   auto window = space.getAttrOfType<IntegerAttr>("cpu.batch_score_window");
   if (window &&
-      (!repeat || window.getInt() != batchScoreSlots / batch.getInt()))
+      (!batch || batch.getInt() < 2 || !repeat ||
+       window.getInt() != batchScoreSlots / batch.getInt()))
     return space.emitError("invalid private score window");
   Operation *expectedRecord =
       panel ? panel->record : (window && repeat ? repeat->record : nullptr);
@@ -139,7 +143,7 @@ llvm::Error materializeOwnerBuffers(func::FuncOp fn, RewriterBase &rw,
   auto innerAttr = space.getAttrOfType<IntegerAttr>("cpu.innermost_owner");
 
   auto isCommonVal = [&](Value v) -> bool {
-    if (!batchAttr)
+    if (!batchAttr || batchAttr.getInt() <= 1)
       return false;
     if (auto ba = dyn_cast<BlockArgument>(v)) {
       if (ba.getOwner() == &body)
@@ -557,7 +561,8 @@ LogicalResult verifyOwnerBuffers(func::FuncOp fn, const TargetProfile &p,
   auto cached = space.getAttrOfType<IntegerAttr>("cpu.score_cache");
   auto window = space.getAttrOfType<IntegerAttr>("cpu.batch_score_window");
   auto batch = space.getAttrOfType<IntegerAttr>("cpu.owner_batch");
-  if (window && (!batch || window.getInt() != batchScoreSlots / batch.getInt()))
+  if (window && (!batch || batch.getInt() < 2 ||
+                 window.getInt() != batchScoreSlots / batch.getInt()))
     return space.emitError("invalid materialized score window");
 
   Operation *localBuf = nullptr;
@@ -878,10 +883,11 @@ void ownerTasks(Unit &u) {
                         b.getDenseI64ArrayAttr(values));
         }
     o->removeAttr("cpu.owner_choice");
+    int64_t ownerBatch = 1;
     if (auto d = dyn_cast<DictionaryAttr>(a)) {
       if (auto axis = d.getAs<IntegerAttr>("inner")) {
         o->setAttr("cpu.innermost_owner", axis);
-        o->setAttr("cpu.owner_batch", d.get("batch"));
+        ownerBatch = d.getAs<IntegerAttr>("batch").getInt();
         if (auto win = d.get("window")) {
           o->setAttr("cpu.batch_score_window", win);
           auto rep = *cpu::repeatedScore(*o);
@@ -902,6 +908,7 @@ void ownerTasks(Unit &u) {
       }
       a = d.get("grain");
     }
+    o->setAttr("cpu.owner_batch", b.getI64IntegerAttr(ownerBatch));
     o->setAttr("cpu.grain", a);
     o->setAttr("cpu.owners", b.getI64IntegerAttr(count));
     return llvm::Error::success();

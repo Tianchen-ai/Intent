@@ -163,7 +163,7 @@ void sharedOwnerTraversal(compilerinfra::Unit &u) {
       return cs;
     Builder b(op->getContext());
     bool repeat = bool(intentdsl::cpu::repeatedScore(*op));
-    for (int grain : {8, 16, 32, 128, 256})
+    for (int grain : {2, 4, 8, 16, 32, 128, 256})
       for (unsigned batch : {2u, 4u, 8u, 16u}) {
         if (batch > maximum || grain % batch || reuse->group % batch ||
             reuse->extent % batch)

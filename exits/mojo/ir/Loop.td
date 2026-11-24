@@ -60,7 +60,7 @@ def MojoAddress : RowInst<"address"> {
   let results=(outs Index:$offset);
 }
 def MojoStackAlloc : RowInst<"stack_alloc"> {
-  let arguments=(ins StrAttr:$dtype, I64Attr:$count);
+  let arguments=(ins StrAttr:$dtype, I64Attr:$count, OptionalAttr<StrAttr>:$role);
   let results=(outs Index:$buffer);
 }
 def MojoAccDecl : RowInst<"acc_decl"> {

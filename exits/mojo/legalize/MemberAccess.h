@@ -5,11 +5,10 @@ namespace CI_UNIT_NAMESPACE {
 inline mlir::LogicalResult memberAccesses(mlir::func::FuncOp fn, bool assign) {
   using namespace mlir;
   auto &space = fn.front().front().getRegion(0).front().front();
-  if (space.hasAttr("mojo_row.score_microtile"))
-    return space.emitError("unexpected legacy score_microtile attribute");
+  auto bAttr = space.getAttrOfType<IntegerAttr>("cpu.owner_batch");
   auto result = fn.walk([&](Operation *op) {
     auto kind = op->getName().stripDialect();
-    bool across = space.hasAttr("cpu.owner_batch") &&
+    bool across = bAttr && bAttr.getInt() > 1 &&
                   !op->hasAttr("cpu.owner_common") && op->getParentOp() &&
                   isa<scf::ForOp>(op->getParentOp()) &&
                   op->getNumResults() == 1 &&
