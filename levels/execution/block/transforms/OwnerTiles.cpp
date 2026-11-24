@@ -250,7 +250,11 @@ bool OwnerTiles::canVectorizeIndependentLoop(scf::ForOp loop) {
 
 void OwnerTiles::vectorizedLoop(scf::ForOp loop, const Values &parent,
                                 Value mask) {
-  int64_t W = std::max<int64_t>(16, 512 / rows);
+  int64_t baseSpan =
+      space.hasAttr("block.token_span")
+          ? space.getAttrOfType<IntegerAttr>("block.token_span").getInt()
+          : 512;
+  int64_t W = std::max<int64_t>(16, std::min<int64_t>(4096, baseSpan) / rows);
   Value rawHi = widen(at(loop.getUpperBound(), parent));
   Value hiScalar = isa<RankedTensorType>(rawHi.getType())
                        ? reduce(rawHi, "max", 0)
@@ -356,11 +360,158 @@ void OwnerTiles::vectorizedLoop(scf::ForOp loop, const Values &parent,
   b.setInsertionPointAfter(l);
 }
 
+SmallVector<Value> OwnerTiles::selectionLoop(scf::ForOp loop,
+                                             const OrderedSelectionInfo &sel,
+                                             const Values &parent, Value mask) {
+  Value rawHi = widen(at(loop.getUpperBound(), parent));
+  Value hiScalar = isa<RankedTensorType>(rawHi.getType())
+                       ? reduce(rawHi, "max", 0)
+                       : rawHi;
+  int64_t W = 1024;
+  if (auto c = hiScalar.getDefiningOp<arith::ConstantOp>())
+    if (auto ia = dyn_cast<IntegerAttr>(c.getValue()))
+      if (ia.getInt() > 0)
+        W = std::clamp<int64_t>(llvm::PowerOf2Ceil(ia.getInt()), 64, 1024);
+  unsigned k = sel.k;
+  Type v1Ty = shaped({1}, b.getF32Type());
+  Type i1Ty = shaped({1}, b.getI32Type());
+  Type v2Ty = shaped({1, W}, b.getF32Type());
+  Type i2Ty = shaped({1, W}, b.getI32Type());
+  Type b1Ty = shaped({1}, b.getI1Type());
+  Type b2Ty = shaped({1, W}, b.getI1Type());
+
+  Value negInf1D = broadcast(scalar(-INFINITY), v1Ty);
+  Value negInf2D = broadcast(scalar(-INFINITY), v2Ty);
+  Value negOne1D = broadcast(b.create<arith::ConstantIntOp>(loc, -1, 32), i1Ty);
+  Value intMax2D =
+      broadcast(b.create<arith::ConstantIntOp>(loc, INT32_MAX, 32), i2Ty);
+
+  SmallVector<Value> init;
+  for (unsigned s = 0; s < k; ++s)
+    init.push_back(negInf1D);
+  for (unsigned s = 0; s < k; ++s)
+    init.push_back(negOne1D);
+
+  auto l = b.create<scf::ForOp>(loc, integer(0), hiScalar, integer(W), init);
+  l->setAttr(symbol("runtime_range"), b.getUnitAttr());
+  b.setInsertionPointToStart(l.getBody());
+
+  Value base = l.getInductionVar();
+  Value colVec = stepped(base, W);
+  Value inBounds = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt,
+                                           colVec, like(hiScalar, colVec.getType()));
+  Value valid2D = b.create<arith::AndIOp>(loc, broadcast(mask, b2Ty, 0),
+                                          broadcast(inBounds, b2Ty, 1));
+  Value iv = loop.getInductionVar();
+  llvm::DenseMap<Value, Value> vecEnv;
+  auto lift2D = [&](Value orig) -> Value {
+    if (orig == iv)
+      return broadcast(colVec, shaped({1, W}, b.getI64Type()), 1);
+    if (auto it = vecEnv.find(orig); it != vecEnv.end())
+      return it->second;
+    Value pv = at(orig, parent);
+    Type e = elem(pv.getType());
+    if (e.isIndex())
+      e = b.getI64Type();
+    if (elem(pv.getType()) != e)
+      pv = castElement(pv, e);
+    return broadcast(pv, shaped({1, W}, e), 0);
+  };
+  for (Operation &inst : loop.getBody()->without_terminator()) {
+    if (sel.chainOps.contains(&inst))
+      continue;
+    if (auto c = dyn_cast<arith::ConstantOp>(inst)) {
+      Value cv = constant(c);
+      vecEnv[inst.getResult(0)] =
+          broadcast(cv, shaped({1, W}, elem(cv.getType())), 0);
+      continue;
+    }
+    if (auto ld = dyn_cast<memref::LoadOp>(inst)) {
+      Value view = ld.getMemRef();
+      SmallVector<Value, 4> coords;
+      SmallVector<int64_t, 4> axes;
+      for (Value idx : ld.getIndices().drop_back()) {
+        coords.push_back(
+            broadcast(widen(at(idx, parent)), shaped({1}, b.getI64Type())));
+        axes.push_back(0);
+      }
+      coords.push_back(colVec);
+      axes.push_back(1);
+      vecEnv[ld.getResult()] = read(view, address(view, coords, axes), valid2D);
+      continue;
+    }
+    SmallVector<Value, 3> args;
+    for (Value opnd : inst.getOperands())
+      args.push_back(lift2D(opnd));
+    Type e = elem(inst.getResult(0).getType());
+    if (e.isIndex())
+      e = b.getI64Type();
+    vecEnv[inst.getResult(0)] = apply(inst, args, shaped({1, W}, e));
+  }
+
+  Value xPanel = lift2D(sel.candidateVal);
+  Value finiteGtNegInf =
+      b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OGT, xPanel, negInf2D);
+  Value validElem = b.create<arith::AndIOp>(loc, valid2D, finiteGtNegInf);
+  Value curX = select(validElem, xPanel, negInf2D);
+  Value colI32_1D = b.create<arith::TruncIOp>(
+      loc, RankedTensorType::get({W}, b.getI32Type()), colVec);
+  Value colI32 = broadcast(colI32_1D, i2Ty, 1);
+
+  SmallVector<Value, 16> runV, runI;
+  for (unsigned s = 0; s < k; ++s) {
+    runV.push_back(l.getRegionIterArgs()[s]);
+    runI.push_back(l.getRegionIterArgs()[k + s]);
+  }
+
+  for (unsigned r = 0; r < k; ++r) {
+    Value mx = reduce(curX, "max", 1);
+    Value hasValid =
+        b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OGT, mx, negInf1D);
+    Value isMax = b.create<arith::AndIOp>(
+        loc, broadcast(hasValid, b2Ty, 0),
+        b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OEQ, curX,
+                                broadcast(mx, v2Ty, 0)));
+    Value winIdx = reduce(select(isMax, colI32, intMax2D), "min", 1);
+    if (r + 1 < k) {
+      Value isWin = b.create<arith::CmpIOp>(
+          loc, arith::CmpIPredicate::eq, colI32, broadcast(winIdx, i2Ty, 0));
+      curX = select(isWin, negInf2D, curX);
+    }
+    Value candV = mx;
+    Value candI = winIdx;
+    for (unsigned s = r; s < k; ++s) {
+      Value cmp = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OGT, candV,
+                                          runV[s]);
+      Value nv = select(cmp, candV, runV[s]);
+      Value ni = select(cmp, candI, runI[s]);
+      if (s + 1 < k) {
+        candV = select(cmp, runV[s], candV);
+        candI = select(cmp, runI[s], candI);
+      }
+      runV[s] = nv;
+      runI[s] = ni;
+    }
+  }
+
+  SmallVector<Value> yielded;
+  yielded.append(runV.begin(), runV.end());
+  yielded.append(runI.begin(), runI.end());
+  b.create<scf::YieldOp>(loc, yielded);
+  b.setInsertionPointAfter(l);
+  return SmallVector<Value>(l.getResults());
+}
+
 SmallVector<Value> OwnerTiles::serialLoop(scf::ForOp loop, const Values &parent,
                                           Value mask) {
   if (canVectorizeIndependentLoop(loop)) {
     vectorizedLoop(loop, parent, mask);
     return {};
+  }
+  if (rows == 1) {
+    OrderedSelectionInfo sel;
+    if (matchOrderedSelectionChain(loop, &sel))
+      return selectionLoop(loop, sel, parent, mask);
   }
   auto lo = at(loop.getLowerBound(), parent),
        hi = at(loop.getUpperBound(), parent), step = at(loop.getStep(), parent);

@@ -1,6 +1,7 @@
 #include "intentdsl/levels/execution/block/ir/OwnerProgram.h"
 #pragma once
 #include "intentdsl/levels/execution/block/ir/FoldIssue.h"
+#include "intentdsl/levels/execution/block/ir/FoldPanel.h"
 #include "intentdsl/levels/execution/block/ir/TileBuilder.h"
 
 namespace intentdsl::block {
@@ -45,6 +46,9 @@ struct OwnerTiles : Tiles {
   };
   bool canVectorizeIndependentLoop(scf::ForOp loop);
   void vectorizedLoop(scf::ForOp loop, const Values &env, Value mask);
+  SmallVector<Value> selectionLoop(scf::ForOp loop,
+                                   const OrderedSelectionInfo &sel,
+                                   const Values &env, Value mask);
   std::optional<OnlinePanelFusion> matchOnlinePanelPair(scf::ForOp maxLoop,
                                                         scf::ForOp sumLoop);
   SmallVector<Value> lowerBody(Block &body, Values env, Value mask);

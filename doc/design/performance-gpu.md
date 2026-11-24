@@ -8,7 +8,7 @@ GPU 执行性能由三层显式决定共同支配：
 
 1. **CTA 数据归属与片上复用**：
    - 矩阵收缩按输出驻留块 `(BM, BN, BK)` 切分，配合硬件异步 2D/ND 张量描述符搬运（Triton `tl.make_tensor_descriptor` 与 cuTile `ct.load/ct.store(..., allow_tma=True)`）直接喂入 Tensor Core（`tl.dot` / `tl.dot_scaled`、`ct.mma` / `ct.mma_scaled`）。
-   - 有序与注意力类程序在 `block.owner_space` 中区分单 owner 向量化面板（`tokens-S`）、多 owner 协同矩阵面板（`pair-WxS`）及无跨迭代依赖尾轴写循环分条向量化；在线 `(max, sum)` 单趟重缩放在满足 `reassoc` 授权与 `proveValueReplay` 无写冲突证明时消去二次全局读。
+   - 有序与注意力类程序在 `block.owner_space` 中区分单 owner 向量化面板（`tokens-S`，标量折叠扩展至 `4096`）、多 owner 协同矩阵面板（`pair-WxS`）、有序 Top-K 插入链面板并行选优归约（`matchOrderedSelectionChain`）及无跨迭代依赖尾轴写循环分条向量化；在线 `(max, sum)` 单趟重缩放在满足 `reassoc` 授权与 `proveValueReplay` 无写冲突证明时消去二次全局读。
    - 行与集体归约在满足寄存器文件与片上容量预算时优先采用 `resident-R` 整行驻留（复用跨行广播权重与位置编码），超预算时切为 `stream-R` 分片归约；直方图在 Triton 上优先走片上 `private-merge`（`tl.histogram`），在无片上原子原语的 `tileiras` 上走 `global-atomic` 分区工作集。
 2. **数值合同与硬件快路守卫**：
    - 算术与超越函数遵循 MLIR `FastMathFlags` 与函数级 `denormal-fp-math` 属性：默认严格走 `div_rn` / `sqrt_rn` / IEEE `exp` 及被掩码通道非有限值修复（`block.repair_masked_nan`）；当作者显式授予 `afn` / `arcp` / `nsz` 时，出口发射 SFU `exp2`、近似倒数及无冗余掩码的 TMA→MMA 直连路径。
@@ -30,7 +30,7 @@ GPU 执行性能由三层显式决定共同支配：
 - **节点级代价模型**：
   - `levels/execution/block::tile-time`：计入有效读写字节（扣除跨 `R` 行广播输入的片上复用）、并发上限下的波次量化（`waveQuant >= 1`）、尾块扇区利用率、子 CTA 线程束欠饱和惩罚、原子冲突与前缀交换步数。
   - `levels/execution/block::matrix-time`：结合矩阵块在 `M/N` 上的尾块浪费、驻留波次与出口矩阵发射估算。
-  - `levels/execution/block::owner-issue`：比较单 owner 与协同 `pair-WxS` 的面板共享访存、片上缓存容量与 CTA 寄存器溢出字节。
+  - `levels/execution/block::owner-issue`：将折叠体内实际向量宽度（`foldBodyLanes`）与循环外整行切片解耦，比较单 owner 宽面板（`tokens-S`）、有序选择链并行归约、按实占 32 位寄存器字数计价的循环预取（`prefetch{4,16}-W`）及协同 `pair-WxS` 的面板共享访存与溢出字节。
 - **出口局部估算器**：
   - `exits/triton::matrix-issues` / `exits/cutile::matrix-issues`：按 Tensor Core 指令粒度估算收缩发射步数。
   - `exits/triton::collective-steps` / `exits/cutile::collective-steps`：估算跨线程束归约、前缀扫描与直方图合并代价。

@@ -28,7 +28,7 @@ void registerMixedOwners(Unit &u) {
                d,
                {"disjoint-owners"}});
         }
-    for (int span : {16, 32, 64, 128, 256, 512})
+    for (int span : {16, 32, 64, 128, 256, 512, 1024, 2048, 4096})
       if (intentdsl::block::panelFolds(o, p, span)) {
         auto d = b.getDictionaryAttr(
             {b.getNamedAttr("memory", b.getStringAttr("token")),

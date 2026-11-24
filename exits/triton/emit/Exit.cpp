@@ -113,14 +113,39 @@ llvm::Error describeArtifact(func::FuncOp fn, llvm::raw_pwrite_stream &out) {
               llvm::json::Object{{"num_warps", 4}, {"num_stages", 3}},
               llvm::json::Object{{"num_warps", 8}, {"num_stages", 2}}},
           2, out);
+    int64_t warps = 4;
+    if (auto ts = entry.getAttrOfType<IntegerAttr>("block.token_span");
+        ts && ts.getInt() >= 1024)
+      warps = 8;
+    else {
+      entry.walk([&](Operation *op) {
+        if (op->getName().stripDialect() == "tile_axis")
+          if (auto rt = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+              rt && rt.getRank() == 1 && rt.getDimSize(0) >= 1024)
+            warps = 8;
+      });
+    }
     return intentdsl::block::emitOwnerArtifact(
-        fn, "", llvm::json::Object{{"num_warps", 4}, {"num_stages", 1}}, 2,
+        fn, "", llvm::json::Object{{"num_warps", warps}, {"num_stages", 1}}, 2,
         out);
   }
-  if (intentdsl::kir::orderedOwners(fn))
+  if (intentdsl::kir::orderedOwners(fn)) {
+    int64_t warps = 4;
+    if (auto ts = entry.getAttrOfType<IntegerAttr>("block.token_span");
+        ts && ts.getInt() >= 1024)
+      warps = 8;
+    else {
+      entry.walk([&](Operation *op) {
+        if (op->getName().stripDialect() == "tile_axis")
+          if (auto rt = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+              rt && rt.getRank() == 1 && rt.getDimSize(0) >= 1024)
+            warps = 8;
+      });
+    }
     return intentdsl::block::emitOwnerArtifact(
-        fn, "", llvm::json::Object{{"num_warps", 4}, {"num_stages", 1}}, 2,
+        fn, "", llvm::json::Object{{"num_warps", warps}, {"num_stages", 1}}, 2,
         out);
+  }
   auto args = llvm::json::parse(fn->getAttrOfType<StringAttr>("kir.abi"));
   if (!args)
     return args.takeError();

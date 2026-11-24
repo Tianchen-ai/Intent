@@ -1,4 +1,5 @@
 #include "intentdsl/levels/execution/block/ir/FoldIssue.h"
+#include "intentdsl/levels/execution/block/ir/FoldPanel.h"
 #include "intentdsl/levels/execution/block/ir/Owners.h"
 #include "intentdsl/levels/execution/block/ir/SharedReads.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -24,6 +25,7 @@ void orderedCost(Unit &u) {
                       lanes, (*sh)[axis->second].getAsInteger().value_or(1));
               }
           });
+          int64_t foldLanes = intentdsl::block::foldBodyLanes(op, *f);
           auto issue = caps ? caps->parallelMembers : 1;
           double blocks = llvm::divideCeil(n, w),
                  waves =
@@ -35,9 +37,13 @@ void orderedCost(Unit &u) {
           e.terms["issue_waves"] = {waves, "count"};
           auto launch = intentdsl::quantity(ctx, "launch", "ns"),
                sync = intentdsl::quantity(ctx, "sync", "ns");
-          double issueGroups = std::ceil(double(w) * lanes / issue);
-          double dependency = 1;
           auto span = choice.getAs<mlir::IntegerAttr>("span");
+          bool isMatrixFoldEarly =
+              choice.getAs<mlir::StringAttr>("memory") == "matrix-fold";
+          double issueGroups = std::ceil(
+              double(w) * (span && !isMatrixFoldEarly ? foldLanes : lanes) /
+              issue);
+          double dependency = 1;
           // A slice indexed by the fold induction variable is loaded once per
           // visited token per tile of owners. Use its actual access dimension,
           // not the number of tokens in a single issue packet.
@@ -139,7 +145,7 @@ void orderedCost(Unit &u) {
               sweepBytesPerOwner * ((isSharedMode || isMatrixFold) ? blocks : n),
                  spillBytes = 0;
           if (span) {
-            auto lanesPerPanel = span.getInt() * lanes;
+            auto lanesPerPanel = span.getInt() * foldLanes;
             // Independent contributions issue as a tile. Working sets wider
             // than a warp's register budget add register-pressure cost.
             dependency *=
@@ -271,19 +277,28 @@ void orderedCost(Unit &u) {
           if (intentdsl::block::canGroupReads(op, ctx.target, 4)) {
             auto fetch = choice.getAs<mlir::IntegerAttr>("prefetch");
             double span = fetch ? fetch.getInt() : 1;
-            double independentLoads = 0, elementsPerStep = 0;
-            op->walk([&](mlir::Operation *v) {
-              if (v->getName().stripDialect() == "slice_read") {
-                ++independentLoads;
-                elementsPerStep += lanes;
-              } else if (v->getName().getStringRef() == "memref.load") {
-                ++independentLoads;
-                elementsPerStep += 1;
-              }
-            });
-            double live = span * w * elementsPerStep;
+            double independentLoads = 0, wordsPerStep = 0;
+            for (auto loop :
+                 op->getRegion(0).front().getOps<mlir::scf::ForOp>()) {
+              loop.walk([&](mlir::Operation *v) {
+                if (v->getName().stripDialect() == "slice_read") {
+                  ++independentLoads;
+                  double elemWords =
+                      mlir::cast<mlir::ShapedType>(v->getResult(0).getType())
+                          .getElementTypeBitWidth() /
+                      32.0;
+                  wordsPerStep += lanes * elemWords;
+                } else if (v->getName().getStringRef() == "memref.load") {
+                  ++independentLoads;
+                  double elemWords =
+                      v->getResult(0).getType().getIntOrFloatBitWidth() / 32.0;
+                  wordsPerStep += elemWords;
+                }
+              });
+            }
+            double live = span * w * wordsPerStep;
             dependency = (1 + independentLoads / span) *
-                         (1 + std::max(0., live - 4096) / 4096);
+                         (1 + std::max(0., live - 6144) / 6144);
             e.terms["grouped_read_elements"] = {live, "count"};
           }
           double readCost = 0;
@@ -314,6 +329,27 @@ void orderedCost(Unit &u) {
           double waveSetup = 0;
           if (!span && choice.getAs<mlir::StringAttr>("memory") == "direct") {
             dependency *= 1. + std::max(0., double(w) * lanes / 4096. - 1.);
+            for (auto loop :
+                 op->getRegion(0).front().getOps<mlir::scf::ForOp>()) {
+              intentdsl::block::OrderedSelectionInfo selInfo;
+              if (intentdsl::block::matchOrderedSelectionChain(loop,
+                                                               &selInfo)) {
+                int64_t ext = 1024;
+                if (auto d =
+                        loop.getUpperBound().getDefiningOp<mlir::memref::DimOp>();
+                    d && d.getConstantIndex())
+                  if (auto *sh = f->shapeOf(d.getSource()))
+                    ext = (*sh)[*d.getConstantIndex()]
+                              .getAsInteger()
+                              .value_or(1024);
+                int64_t panelW = std::clamp<int64_t>(
+                    llvm::PowerOf2Ceil(std::max<int64_t>(1, ext)), 64, 1024);
+                if (w == 1)
+                  dependency *= std::max<double>(1.0, 2.0 * selInfo.k) / panelW;
+                else
+                  dependency *= std::max<double>(1.0, double(ext) / 16.0);
+              }
+            }
             waveSetup = waves;
           }
           if (launch && sync)
