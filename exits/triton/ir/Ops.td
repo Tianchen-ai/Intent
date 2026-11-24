@@ -46,11 +46,11 @@ def Itsrc_neutralize : Inst<"neutralize"> {
   let arguments = (ins AnyTensor:$value, AnyTensor:$mask, StrAttr:$algebra);
   let results = (outs AnyTensor:$result);
 }
-def Itsrc_uniform : Inst<"uniform"> {
+def Itsrc_uniform : Inst<"uniform", [Pure]> {
   let arguments = (ins UI64:$key, RankedTensorOf<[UI64]>:$position);
   let results = (outs RankedTensorOf<[F32]>:$value);
 }
-def Itsrc_reduce : Inst<"reduce"> {
+def Itsrc_reduce : Inst<"reduce", [Pure]> {
   let arguments = (ins AnyTensor:$value, StrAttr:$algebra);
   let results = (outs AnyType:$result);
 }
@@ -146,16 +146,16 @@ def Itsrc_sqrt : Inst<"sqrt"> { let arguments=(ins AnyType:$input); let results=
 def Itsrc_Dialect_summary_fieldOp : Op<Itsrc_Dialect,"summary_field"> {
   let arguments = (ins AnyTuple:$state, I64Attr:$position); let results = (outs AnyRankedTensor:$element);
 }
-def Itsrc_Dialect_summary_reduceOp : Op<Itsrc_Dialect,"summary_reduce"> {
+def Itsrc_Dialect_summary_reduceOp : Op<Itsrc_Dialect,"summary_reduce", [Pure]> {
   let arguments = (ins AnyRankedTensor:$samples, I1Tensor:$mask); let results = (outs AnyTuple:$summary);
 }
-def Itsrc_Dialect_summary_identityOp : Op<Itsrc_Dialect,"summary_identity"> {
+def Itsrc_Dialect_summary_identityOp : Op<Itsrc_Dialect,"summary_identity", [Pure]> {
   let arguments = (ins StrAttr:$algebra); let results = (outs AnyTuple:$summary);
 }
-def Itsrc_Dialect_summary_mergeOp : Op<Itsrc_Dialect,"summary_merge"> {
+def Itsrc_Dialect_summary_mergeOp : Op<Itsrc_Dialect,"summary_merge", [Pure]> {
   let arguments = (ins AnyTuple:$left, AnyTuple:$right, StrAttr:$algebra); let results = (outs AnyTuple:$summary);
 }
-def Itsrc_Dialect_ScanSum : Op<Itsrc_Dialect, "scan_sum", [SameOperandsAndResultType]> {
+def Itsrc_Dialect_ScanSum : Op<Itsrc_Dialect, "scan_sum", [Pure, SameOperandsAndResultType]> {
   let arguments=(ins AnyRankedTensor:$input); let results=(outs AnyRankedTensor:$prefix);
 }
 def Itsrc_Dialect_IndexedTileRead : Op<Itsrc_Dialect,"indexed_tile_read"> {

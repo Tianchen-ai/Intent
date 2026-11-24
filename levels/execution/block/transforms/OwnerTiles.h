@@ -34,6 +34,9 @@ struct OwnerTiles : Tiles {
     Operation *guardOp = nullptr;
     Value weightVal;
     bool isExp2 = false;
+    arith::FastMathFlags maxFlags = arith::FastMathFlags::none;
+    arith::FastMathFlags subFlags = arith::FastMathFlags::none;
+    arith::FastMathFlags expFlags = arith::FastMathFlags::none;
     Value causalUpper;
     bool causalInclusive = false;
   };

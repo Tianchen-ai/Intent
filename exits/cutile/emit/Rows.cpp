@@ -1,5 +1,6 @@
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
+#include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
 #include "intentdsl/levels/algorithm/kir/ir/Literal.h"
 #include "intentdsl/levels/algorithm/kir/ir/Ordered.h"
 #include "intentdsl/levels/execution/block/ir/Contraction.h"
@@ -477,9 +478,16 @@ llvm::Error rowRule(Operation &op, PrintPoint at, PrintContext &c) {
             : code == "sub" ? " - "
                             : " + ") +
            arg(1);
-  else if (code == "div")
+  else if (code == "div") {
+    bool approx = intentdsl::kir::hasAnyFastMath(
+        &op, arith::FastMathFlags::arcp | arith::FastMathFlags::afn);
+    bool ftz = intentdsl::kir::hasFastMath(&op, arith::FastMathFlags::nsz) ||
+               intentdsl::kir::allowsSubnormalFtz(&op);
     expr = "ct.truediv(" + arg(0) + ", " + arg(1) +
-           ", rounding_mode=ct.RoundingMode.RN)";
+           (ftz ? ", flush_to_zero=True" : "") +
+           ", rounding_mode=ct.RoundingMode." + (approx ? "APPROX" : "RN") +
+           ")";
+  }
   else if (code == "sqrt" || code == "exp" || code == "rsqrt")
     expr = "ct." + code.str() + "(" + arg(0) + ")";
   else if (code == "cast") {

@@ -155,8 +155,7 @@ llvm::Error describeMojoMatrixPackage(func::FuncOp fn, Operation &prog,
       {"host", ""},
       {"returns_status", true},
       {"onednn", usesBrgemm},
-      {"allow_subnormal_ftz",
-       bool(fn->getAttrOfType<UnitAttr>("kir.allow_subnormal_ftz"))},
+      {"allow_subnormal_ftz", intentdsl::kir::allowsSubnormalFtz(fn)},
       {"domain", intentdsl::publishDomain(fn)},
       {"abi", std::move(*abi)},
       {"rows", llvm::json::Array{llvm::json::Object{{"grain", tile[0]},
@@ -181,11 +180,11 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
   StringRef packing = packingAttr ? packingAttr.getValue() : StringRef();
   bool routed = domain.hasAttr("cpu.route_storage");
   bool usesBrgemm = implId.contains("onednn-brgemm");
-  bool allowSubnormalFtz =
-      bool(dot.getAttrOfType<UnitAttr>("kir.allow_subnormal_ftz"));
+  bool allowSubnormalFtz = intentdsl::kir::allowsSubnormalFtz(&dot);
   bool emitFtz = implId == "exits/mojo::onednn-brgemm-bf16";
   if (emitFtz && !allowSubnormalFtz)
-    return dot.emitError("onednn-brgemm-bf16 requires kir.allow_subnormal_ftz");
+    return dot.emitError(
+        "onednn-brgemm-bf16 requires non-ieee denormal-fp-math");
 
   int64_t M = extents[0], N = extents[1], K = extents[2], G = extents[3];
   int64_t mr = tile[0], nr = tile[1], depth = tile[2], lanes = tile[3];
@@ -1924,7 +1923,6 @@ LogicalResult verifyMojoMatrix(ModuleOp m, const TargetProfile &p,
       prog.getRegion(1).empty())
     return prog.emitError("incomplete mojo_row.matrix_program regions");
 
-  bool fnAllowsFtz = bool(fn->getAttrOfType<UnitAttr>("kir.allow_subnormal_ftz"));
   bool usesBrgemm = prog.getAttrOfType<BoolAttr>("uses_brgemm").getValue();
   bool sawBrgemmCall = false;
 
@@ -1955,11 +1953,6 @@ LogicalResult verifyMojoMatrix(ModuleOp m, const TargetProfile &p,
            if (ftz.getValue() != isBf16) {
              op->emitError(
                  "brgemm_call allow_subnormal_ftz disagrees with implementation contract");
-             return WalkResult::interrupt();
-           }
-           if (ftz.getValue() && !fnAllowsFtz) {
-             op->emitError(
-                 "brgemm_call sets allow_subnormal_ftz without author kir.allow_subnormal_ftz");
              return WalkResult::interrupt();
            }
            Operation *next = op->getNextNode();

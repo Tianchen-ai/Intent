@@ -26,8 +26,8 @@ def Load : Inst<"tile_load",(ins AnyMemRef:$array,Index:$rowBlock,Index:$columnB
 def Store : Inst<"tile_store",(ins AnyMemRef:$array,Index:$rowBlock,Index:$columnBlock,AnyTensor:$values,BoolAttr:$matrix,BoolAttr:$allow_tma),(outs)>;
 def SlabRead : Inst<"gather_slab",(ins AnyMemRef:$array,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active),(outs AnyTensor:$values)>;
 def SlabWrite : Inst<"scatter_slab",(ins AnyMemRef:$array,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active,AnyTensor:$values),(outs)>;
-def Reduce : Inst<"reduce",(ins AnyTensor:$values,I1Tensor:$mask,StrAttr:$algebra),(outs AnyTensor:$summary)>;
-def Uniform : Inst<"uniform",(ins UI64:$key,RankedTensorOf<[UI64]>:$position),(outs RankedTensorOf<[F32]>:$value)>;
+def Reduce : Inst<"reduce",(ins AnyTensor:$values,I1Tensor:$mask,StrAttr:$algebra),(outs AnyTensor:$summary),[Pure]>;
+def Uniform : Inst<"uniform",(ins UI64:$key,RankedTensorOf<[UI64]>:$position),(outs RankedTensorOf<[F32]>:$value),[Pure]>;
 def Identity : Inst<"identity",(ins StrAttr:$algebra),(outs AnyType:$result)>;
 def Combine : Inst<"combine",(ins AnyType:$lhs,AnyType:$rhs,StrAttr:$algebra),(outs AnyType:$result)>;
 def Sweep : Inst<"tiles",(ins MemRefRankOf<[AnyType],[1,2,3,4]>:$domain,Variadic<AnyType>:$initial),(outs Variadic<AnyType>:$summary)> {let regions=(region AnyRegion:$body);}
@@ -57,16 +57,16 @@ def Tile_linear_index : Op<TileSource,"linear_index"> {
 def TileSource_summary_fieldOp : Op<TileSource,"summary_field"> {
   let arguments = (ins AnyTuple:$state, I64Attr:$position); let results = (outs AnyRankedTensor:$element);
 }
-def TileSource_summary_reduceOp : Op<TileSource,"summary_reduce"> {
+def TileSource_summary_reduceOp : Op<TileSource,"summary_reduce", [Pure]> {
   let arguments = (ins AnyRankedTensor:$samples, I1Tensor:$mask); let results = (outs AnyTuple:$summary);
 }
-def TileSource_summary_identityOp : Op<TileSource,"summary_identity"> {
+def TileSource_summary_identityOp : Op<TileSource,"summary_identity", [Pure]> {
   let arguments = (ins StrAttr:$algebra); let results = (outs AnyTuple:$summary);
 }
-def TileSource_summary_mergeOp : Op<TileSource,"summary_merge"> {
+def TileSource_summary_mergeOp : Op<TileSource,"summary_merge", [Pure]> {
   let arguments = (ins AnyTuple:$left, AnyTuple:$right, StrAttr:$algebra); let results = (outs AnyTuple:$summary);
 }
-def TileSource_ScanSum : Op<TileSource, "scan_sum", [SameOperandsAndResultType]> {
+def TileSource_ScanSum : Op<TileSource, "scan_sum", [Pure, SameOperandsAndResultType]> {
   let arguments=(ins AnyRankedTensor:$input); let results=(outs AnyRankedTensor:$prefix);
 }
 def TileSource_IndexedTileRead : Op<TileSource,"indexed_tile_read"> {

@@ -28,7 +28,7 @@ def key_value_grad(q: I.In[I.f16, ("B","H","Q","D")], k: I.In[I.f16, ("B","H","K
                 for t in I.fold(row,q.dim(2)):
                     query = I.cast(q[b,h,t,:], I.f32)
                     grad = I.cast(dy[b,h,t,:], I.f32)
-                    p = I.exp2(I.sum(key * query) * factor - lse[b,h,t] * I.f32(1.4426950408889634))
+                    p = I.exp2(I.sum(key * query) * factor - lse[b,h,t] * I.f32(1.4426950408889634), approximate=True, flush_to_zero=True)
                     ds = p * (I.sum(val * grad) - delta[b,h,t])
                     grad_k = grad_k + query * I.cast(I.cast(ds,I.f16),I.f32)
                     grad_v = grad_v + grad * I.cast(I.cast(p,I.f16),I.f32)
@@ -53,7 +53,7 @@ def query_grad(q: I.In[I.f16, ("B","H","Q","D")], k: I.In[I.f16, ("B","H","K","D
                 for t in I.fold(end):
                     key = I.cast(k[b,h,t,:],I.f32)
                     val = I.cast(v[b,h,t,:],I.f32)
-                    p = I.exp2(I.sum(query * key) * (scale * I.f32(1.4426950408889634)) - normalizer)
+                    p = I.exp2(I.sum(query * key) * (scale * I.f32(1.4426950408889634)) - normalizer, approximate=True, flush_to_zero=True)
                     ds = p * (I.sum(grad * val) - adjustment)
                     result = result + key * I.cast(I.cast(ds,I.f16),I.f32)
                 dq[b,h,row,:] = I.cast(result * scale,I.f16)

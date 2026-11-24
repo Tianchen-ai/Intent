@@ -95,7 +95,7 @@ def causal_convolution(
         for c in I.parallel(x.dim(1)):
             for s in I.parallel(x.dim(2)):
                 total = I.f32(0)
-                for tap in I.ordered(w.dim(1)):
+                for tap in I.fold(w.dim(1)):
                     pos = s + tap + 1 - w.dim(1)
                     sample = I.cast(x[b, c, pos], I.f32) if pos >= 0 else I.f32(0)
                     total = total + sample * I.cast(w[c, tap], I.f32)

@@ -138,14 +138,14 @@ def capture_program(fn):
 
 
 class ProgramKernel:
-    def __init__(self, compiler, definition, backend):
+    def __init__(self, compiler, definition, backend, *, math_options=None):
         from .compiler import Kernel
 
         self.definition = definition
         self.views = compiler.runtime("kir", "binding.views")
         self.sequence = compiler.runtime("kir", "binding.sequence")
         self.submit = compiler.runtime(backend, "binding.target").Target.submit
-        self.kernels = {s[1]: Kernel(compiler, s[1], backend)
+        self.kernels = {s[1]: Kernel(compiler, s[1], backend, math_options=math_options)
                         for s in definition.steps if s[0] == "call"}
 
     def bind(self, *args, **kwargs):

@@ -155,10 +155,7 @@ void registerMatrixContracts(Unit &u) {
       auto ftz = op->getAttrOfType<BoolAttr>("allow_subnormal_ftz");
       if (!ftz || ftz.getValue() != requiresFtz)
         return failure();
-      auto fn = op->getParentOfType<func::FuncOp>();
-      if (!fn)
-        return failure();
-      if (requiresFtz && !fn->getAttrOfType<UnitAttr>("kir.allow_subnormal_ftz"))
+      if (!op->getParentOfType<func::FuncOp>())
         return failure();
       return success();
     };

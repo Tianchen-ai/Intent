@@ -1,6 +1,9 @@
 import ast
 
 
+_DENORMAL_MODES = ("ieee", "preserve-sign", "positive-zero", "dynamic")
+
+
 def _kernel_decorator(fn):
     for decorator in fn.decorator_list:
         if (
@@ -8,22 +11,35 @@ def _kernel_decorator(fn):
             and decorator.attr == "kernel"
             and isinstance(decorator.value, ast.Name)
         ):
-            return decorator.value.id, "source"
+            return decorator.value.id, ("source", False, "ieee")
         if (
             isinstance(decorator, ast.Call)
             and isinstance(decorator.func, ast.Attribute)
             and decorator.func.attr == "kernel"
             and isinstance(decorator.func.value, ast.Name)
         ):
-            if decorator.args or any(k.arg != "numerics" for k in decorator.keywords):
-                raise ValueError("kernel decorator accepts only keyword numerics")
+            allowed = {"numerics", "fast_math", "denormal_fp_math"}
+            if decorator.args or any(k.arg not in allowed for k in decorator.keywords):
+                raise ValueError(
+                    "kernel decorator accepts only numerics, fast_math, and denormal_fp_math"
+                )
             kw = {k.arg: k.value for k in decorator.keywords}
             if len(kw) != len(decorator.keywords):
                 raise ValueError("duplicate kernel decorator keyword")
             val = ast.literal_eval(kw["numerics"]) if "numerics" in kw else "source"
             if val not in ("source", "relaxed_normalization"):
                 raise ValueError(f"unsupported kernel numerics: {val}")
-            return decorator.func.value.id, val
+            fm = ast.literal_eval(kw["fast_math"]) if "fast_math" in kw else False
+            if type(fm) is not bool:
+                raise ValueError("fast_math must be a boolean literal")
+            dm = (
+                ast.literal_eval(kw["denormal_fp_math"])
+                if "denormal_fp_math" in kw
+                else ("preserve-sign" if fm else "ieee")
+            )
+            if dm not in _DENORMAL_MODES:
+                raise ValueError(f"unsupported denormal_fp_math: {dm}")
+            return decorator.func.value.id, (val, fm, dm)
     raise ValueError("expected a qualified kernel decorator")
 
 
@@ -32,7 +48,43 @@ def namespace(fn):
 
 
 def kernel_numerics(fn):
-    return _kernel_decorator(fn)[1]
+    return _kernel_decorator(fn)[1][0]
+
+
+def kernel_math_policy(fn):
+    numerics, fast_math, denormal = _kernel_decorator(fn)[1]
+    flags = ()
+    if fast_math:
+        flags = ("fast",)
+    elif numerics == "relaxed_normalization":
+        flags = ("reassoc", "afn")
+    return flags, denormal
+
+
+def format_fastmath_attr(flags):
+    if not flags:
+        return ""
+    if "fast" in flags:
+        return "#arith.fastmath<fast>"
+    ordered = [
+        f
+        for f in ("reassoc", "nnan", "ninf", "nsz", "arcp", "contract", "afn")
+        if f in flags
+    ]
+    return f'#arith.fastmath<{",".join(ordered)}>' if ordered else ""
+
+
+def format_fastmath_inline(flags):
+    if not flags:
+        return ""
+    if "fast" in flags:
+        return " fastmath<fast>"
+    ordered = [
+        f
+        for f in ("reassoc", "nnan", "ninf", "nsz", "arcp", "contract", "afn")
+        if f in flags
+    ]
+    return f' fastmath<{",".join(ordered)}>' if ordered else ""
 
 
 def spelling(node, owner):

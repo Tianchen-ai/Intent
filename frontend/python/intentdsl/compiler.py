@@ -8,7 +8,7 @@ from .completion import Completion
 
 
 class Kernel:
-    def __init__(self, compiler, definition, backend):
+    def __init__(self, compiler, definition, backend, *, math_options=None):
         self.compiler = compiler
         self.source = definition.source
         self.root = None
@@ -17,6 +17,7 @@ class Kernel:
         self.domain = compiler.runtime("kir", "binding.domain")
         self.target = compiler.runtime(backend, "binding.target").Target()
         self.backend = backend
+        self.math_options = dict(math_options or {})
         self.artifacts = {}
         self.lock = RLock()
 
@@ -28,7 +29,7 @@ class Kernel:
         return self._target_compiler(key, facts)
 
     def _target_compiler(self, key, facts):
-        options = dict(self.target.options(key), arguments=facts)
+        options = dict(self.target.options(key), **self.math_options, arguments=facts)
         return self.compiler.derive({"exits": {self.backend: {"options": options}}})
 
     def prepare(self, *inputs, outputs=None, artifact_file=None):

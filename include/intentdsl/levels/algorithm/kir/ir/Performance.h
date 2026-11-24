@@ -1,6 +1,7 @@
 #pragma once
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
+#include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
 #include <cmath>
 namespace intentdsl {
 // Effective input facts for the current JIT specialization.
@@ -94,6 +95,12 @@ inline llvm::Error bindPerformance(compilerinfra::TargetProfile &p,
   const auto *arguments = options.getArray("arguments");
   if (!arguments)
     return llvm::createStringError("missing bound argument facts");
+  auto fmPolicy = kir::parseFastMathPolicy(options);
+  if (!fmPolicy)
+    return fmPolicy.takeError();
+  if (auto err = p.services.provide<kir::FastMathPolicy>(
+          std::make_shared<kir::FastMathPolicy>(std::move(*fmPolicy))))
+    return err;
   p.services.calibrationProfile = calibration;
   if (auto err = p.services.facts.query(
           "participants", {participants, "count", "runtime",

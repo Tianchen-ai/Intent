@@ -1,5 +1,6 @@
 #include "../ir/TileShape.h"
 #include "compilerinfra/Assembly.h"
+#include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
 #include "intentdsl/levels/algorithm/kir/ir/Literal.h"
 #include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -180,6 +181,10 @@ TerminalPrinter tilePrinter() {
       if (op.hasAttr("triton_src.round_nearest"))
         return "libdevice." + op.getName().stripDialect().drop_back().str() +
                "_rn(" + llvm::join(v, ",") + ")";
+      if (op.getName().getStringRef() == "arith.divf" &&
+          !intentdsl::kir::hasAnyFastMath(
+              &op, arith::FastMathFlags::arcp | arith::FastMathFlags::afn))
+        return "tl.div_rn(" + llvm::join(v, ",") + ")";
       return v[0] + token + v[1];
     });
   leaf("arith.cmpi", [](Operation &op, auto &a) {
@@ -228,7 +233,12 @@ TerminalPrinter tilePrinter() {
     leaf("math." + std::string(name), [name](auto &, auto &a) {
       return "tl." + std::string(name) + "(" + a[0] + ")";
     });
-  leaf("math.sqrt", [](auto &, auto &a) { return "tl.sqrt_rn(" + a[0] + ")"; });
+  leaf("math.sqrt", [](Operation &op, auto &a) {
+    return intentdsl::kir::hasFastMath(&op, arith::FastMathFlags::afn) &&
+                   !op.hasAttr("triton_src.round_nearest")
+               ? "tl.sqrt(" + a[0] + ")"
+               : "tl.sqrt_rn(" + a[0] + ")";
+  });
   leaf("arith.select",
        [](auto &, auto &a) { return "tl.where(" + llvm::join(a, ",") + ")"; });
   p.operations["scf.if"] = [](Operation &op, PrintPoint at, PrintContext &c) {

@@ -4,7 +4,14 @@ import ast
 import json
 from dataclasses import dataclass
 
-from .intentdsl.signature import argument_type, kernel_numerics, namespace, signature
+from .intentdsl.signature import (
+    argument_type,
+    format_fastmath_attr,
+    format_fastmath_inline,
+    kernel_math_policy,
+    namespace,
+    signature,
+)
 
 
 @dataclass(frozen=True)
@@ -17,6 +24,7 @@ class Ordered:
     def __init__(self, fn):
         self.fn = fn
         self.ns = namespace(fn)
+        self.default_flags, self.denormal_mode = kernel_math_policy(fn)
         self.args = signature(fn)
         self.slots = {a["name"]: a for a in self.args}
         self.env = {
@@ -25,6 +33,20 @@ class Ordered:
         self.lines = []
         self.seq = 0
         self.lanes = {}
+        self.fold_carries = set()
+        self.ordered_carries = set()
+
+    def fm_inline(self, extra=(), *, strip_reassoc=False):
+        flags = [*self.default_flags, *extra]
+        if strip_reassoc:
+            if "fast" in flags:
+                flags = ["nnan", "ninf", "nsz", "arcp", "contract", "afn"]
+            else:
+                flags = [f for f in flags if f != "reassoc"]
+        return format_fastmath_inline(flags)
+
+    def fm_attr(self, extra=()):
+        return format_fastmath_attr((*self.default_flags, *extra))
 
     def fresh(self):
         self.seq += 1
@@ -67,8 +89,13 @@ class Ordered:
             raise ValueError("ordered access requires one index per axis")
         return slot, indices, slices
 
-    def member_op(self, op, args, result, axis=None):
-        attrs = "" if axis is None else f" {{axis={axis}:i64}}"
+    def member_op(self, op, args, result, axis=None, fastmath=""):
+        items = []
+        if axis is not None:
+            items.append(f"axis={axis}:i64")
+        if fastmath:
+            items.append(f"fastmath={fastmath}")
+        attrs = f' {{{", ".join(items)}}}' if items else ""
         text = (
             f'"kir.{op}"('
             + ", ".join(a.name for a in args)
@@ -138,7 +165,15 @@ class Ordered:
             op = ops.get(type(node.op))
             if not op:
                 raise ValueError("unsupported arithmetic on " + a.type)
-            result = self.emit(f"arith.{op} {a.name}, {b.name} : {a.type}", a.type)
+            fm = ""
+            if not integer:
+                is_fold_carry = a in self.fold_carries
+                is_ordered_carry = a in self.ordered_carries
+                fm = self.fm_inline(
+                    ("reassoc",) if is_fold_carry and op == "addf" else (),
+                    strip_reassoc=is_ordered_carry,
+                )
+            result = self.emit(f"arith.{op} {a.name}, {b.name}{fm} : {a.type}", a.type)
             if a in self.lanes:
                 av, ax = self.lanes[a]
                 bv, bx = self.lanes[b]
@@ -181,11 +216,36 @@ class Ordered:
                 and ast.unparse(node.args[1]) == self.ns + ".f32"
             ):
                 return self.splat(self.literal(0.0, "f32"), *self.dim(node.args[0]))
-            if name == "sum" and len(node.args) == 1:
+            if name == "sum" and len(node.args) == 1 and not node.keywords:
                 a = self.expr(node.args[0])
                 if a.type != "tensor<?xf32>":
                     raise ValueError("expected f32 members")
-                return self.member_op("lane_sum", [a], "f32")
+                return self.member_op(
+                    "lane_sum", [a], "f32", fastmath=self.fm_attr(("reassoc",))
+                )
+            if name == "fdiv" and len(node.args) == 2:
+                kw = {k.arg: k.value for k in node.keywords}
+                if len(kw) != len(node.keywords) or kw.keys() - {"approximate", "flush_to_zero"}:
+                    raise ValueError("fdiv accepts only approximate and flush_to_zero")
+                approx = ast.literal_eval(kw["approximate"]) if "approximate" in kw else False
+                ftz = ast.literal_eval(kw["flush_to_zero"]) if "flush_to_zero" in kw else False
+                if type(approx) is not bool or type(ftz) is not bool:
+                    raise ValueError("fdiv flags must be boolean literals")
+                a, b = self.expr(node.args[0]), self.expr(node.args[1])
+                if a in self.lanes and b not in self.lanes:
+                    b = self.splat(b, *self.lanes[a])
+                if b in self.lanes and a not in self.lanes:
+                    a = self.splat(a, *self.lanes[b])
+                if a.type != b.type or a.type in ("index", "i32", "i64"):
+                    raise ValueError("fdiv requires matching floating operands")
+                extra = (*(("afn", "arcp") if approx else ()), *(("nsz",) if ftz else ()))
+                result = self.emit(
+                    f"arith.divf {a.name}, {b.name}{self.fm_inline(extra)} : {a.type}",
+                    a.type,
+                )
+                if a in self.lanes:
+                    self.lanes[result] = self.lanes[a]
+                return result
             if name in ("f32", "i32") and len(node.args) == 1:
                 value = ast.literal_eval(node.args[0])
                 return self.literal(float(value) if name == "f32" else int(value), name)
@@ -211,16 +271,30 @@ class Ordered:
                 if a in self.lanes:
                     self.lanes[result] = self.lanes[a]
                 return result
-            if name == "maximum_num" and len(node.args) == 2:
+            if name == "maximum_num" and len(node.args) == 2 and not node.keywords:
                 a, b = (self.expr(arg) for arg in node.args)
                 if a.type != "f32" or b.type != "f32":
                     raise ValueError("maximum_num requires f32 scalar operands")
-                return self.emit(f"arith.maxnumf {a.name}, {b.name} : f32", "f32")
+                fm = self.fm_inline(
+                    ("reassoc",) if a in self.fold_carries else (),
+                    strip_reassoc=(a in self.ordered_carries),
+                )
+                return self.emit(f"arith.maxnumf {a.name}, {b.name}{fm} : f32", "f32")
             if name in {"sqrt", "exp", "exp2", "log"} and len(node.args) == 1:
+                kw = {k.arg: k.value for k in node.keywords}
+                if len(kw) != len(node.keywords) or kw.keys() - {"approximate", "flush_to_zero"}:
+                    raise ValueError(f"unsupported keywords for {name}")
+                approx = ast.literal_eval(kw["approximate"]) if "approximate" in kw else False
+                ftz = ast.literal_eval(kw["flush_to_zero"]) if "flush_to_zero" in kw else False
+                if type(approx) is not bool or type(ftz) is not bool:
+                    raise ValueError("math flags must be boolean literals")
                 a = self.expr(node.args[0])
                 if a.type != "f32":
                     raise ValueError("expected f32 operand")
-                return self.emit(f"math.{name} {a.name} : f32", "f32")
+                extra = (*(("afn",) if approx else ()), *(("nsz",) if ftz else ()))
+                return self.emit(
+                    f"math.{name} {a.name}{self.fm_inline(extra)} : f32", "f32"
+                )
         raise ValueError("unsupported ordered expression: " + ast.unparse(node))
 
     def statements(self, stmts):
@@ -281,12 +355,17 @@ class Ordered:
         self.env[stmt.target.id] = Value(iv, "index")
         args = []
         types = []
+        is_fold = ast.unparse(it.func) == self.ns + ".fold"
+        saved_fold = self.fold_carries.copy()
+        saved_ord = self.ordered_carries.copy()
         for k in carry:
             v = saved[k]
             name = self.fresh()
-            self.env[k] = Value(name, v.type)
+            arg_val = Value(name, v.type)
+            self.env[k] = arg_val
             if v in self.lanes:
-                self.lanes[self.env[k]] = self.lanes[v]
+                self.lanes[arg_val] = self.lanes[v]
+            (self.fold_carries if is_fold else self.ordered_carries).add(arg_val)
             args.append(name + " = " + v.name)
             types.append(v.type)
         results = [self.fresh() for k in carry]
@@ -301,6 +380,8 @@ class Ordered:
             + " {"
         )
         self.statements(stmt.body)
+        self.fold_carries = saved_fold
+        self.ordered_carries = saved_ord
         if any(self.env[k].type != saved[k].type for k in carry):
             raise ValueError("loop carry type changed")
         if carry:
@@ -310,7 +391,7 @@ class Ordered:
                 + " : "
                 + ", ".join(types)
             )
-        self.lines.append("} {kir.reassociate}" if ast.unparse(it.func) == self.ns + ".fold" else "}")
+        self.lines.append("} {kir.reassociate}" if is_fold else "}")
         self.env = saved.copy()
         self.env.update((k, Value(r, t)) for k, r, t in zip(carry, results, types))
         for k in carry:
@@ -351,16 +432,10 @@ class Ordered:
         self.statements(body)
         params = ", ".join(f'%{a["name"]}: {argument_type(a)}' for a in self.args)
         abi = json.dumps(json.dumps(self.args, separators=(",", ":")))
-        numerics = kernel_numerics(self.fn)
-        num_attr = (
-            f', kir.numerics="{numerics}"'
-            if numerics != "source"
-            else ""
-        )
         bounds = ", ".join("%" + s["name"] for s in views)
         types = ", ".join(argument_type(s) for s in views)
         return (
-            f"module {{func.func @{self.fn.name}({params}) attributes {{kir.abi={abi}{num_attr}}} {{\n"
+            f'module {{func.func @{self.fn.name}({params}) attributes {{kir.abi={abi}, "denormal-fp-math"="{self.denormal_mode}"}} {{\n'
             f'"kir.owner_space"({bounds}) ({{\n^bb0('
             + ", ".join(ivs)
             + "):\n"

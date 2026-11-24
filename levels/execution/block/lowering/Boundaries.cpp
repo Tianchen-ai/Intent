@@ -167,11 +167,10 @@ void bind(Unit &unit) {
             if (auto funcs = m.getOps<func::FuncOp>();
                 llvm::hasSingleElement(funcs)) {
               auto fn = *funcs.begin();
-              if (auto num = fn->getAttr("kir.numerics")) {
-                auto s = dyn_cast<StringAttr>(num);
-                if (!s || (s.getValue() != "source" &&
-                           s.getValue() != "relaxed_normalization"))
-                  return fn.emitError("invalid kernel numerical permission");
+              if (auto dm = fn->getAttr("denormal-fp-math")) {
+                auto s = dyn_cast<StringAttr>(dm);
+                if (!s || !intentdsl::kir::validDenormalMode(s.getValue()))
+                  return fn.emitError("invalid denormal-fp-math mode");
               }
             }
             if (auto fn = *m.getOps<func::FuncOp>().begin();

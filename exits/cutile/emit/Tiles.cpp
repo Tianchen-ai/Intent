@@ -1,5 +1,6 @@
 #include "compilerinfra/Terminal.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
+#include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
 #include "intentdsl/levels/algorithm/kir/ir/Literal.h"
 #include "intentdsl/levels/algorithm/kir/ir/Ordered.h"
 #include "intentdsl/levels/algorithm/kir/ir/StorageLayout.h"
@@ -348,14 +349,28 @@ TerminalPrinter cutilePrinter() {
                           {"shrui", ">>"}})
     rule("arith." + std::string(n),
          [token](auto &, auto &v) { return v[0] + token + v[1]; });
-  for (auto [n, method] : {std::pair{"mulf", "mul"},
-                           {"subf", "sub"},
-                           {"addf", "add"},
-                           {"divf", "truediv"}})
-    rule("arith." + std::string(n), [method](Operation &, auto &v) {
+  for (auto [n, method, tok] : {std::tuple{"mulf", "mul", "*"},
+                                {"subf", "sub", "-"},
+                                {"addf", "add", "+"}})
+    rule("arith." + std::string(n), [method, tok](Operation &o, auto &v) {
+      if (!o.hasAttr("ct_src.round_nearest") &&
+          intentdsl::kir::hasAnyFastMath(
+              &o, arith::FastMathFlags::contract |
+                      arith::FastMathFlags::reassoc |
+                      arith::FastMathFlags::afn))
+        return v[0] + tok + v[1];
       return "ct." + std::string(method) + "(" + llvm::join(v, ",") +
              ",rounding_mode=ct.RoundingMode.RN)";
     });
+  rule("arith.divf", [](Operation &o, auto &v) {
+    bool approx = intentdsl::kir::hasAnyFastMath(
+        &o, arith::FastMathFlags::arcp | arith::FastMathFlags::afn);
+    bool ftz = intentdsl::kir::hasFastMath(&o, arith::FastMathFlags::nsz) ||
+               intentdsl::kir::allowsSubnormalFtz(&o);
+    return "ct.truediv(" + llvm::join(v, ",") +
+           (ftz ? ",flush_to_zero=True" : "") +
+           ",rounding_mode=ct.RoundingMode." + (approx ? "APPROX" : "RN") + ")";
+  });
   for (auto n : {"extf", "truncf", "extsi", "extui", "index_cast", "trunci",
                  "sitofp", "fptosi"})
     rule("arith." + std::string(n), [](Operation &o, auto &v) {
@@ -373,6 +388,9 @@ TerminalPrinter cutilePrinter() {
     rule(n, [method](Operation &o, auto &v) {
       auto nan = o.getName().getStringRef() == "arith.minimumf"
                      ? ",propagate_nan=True"
+                 : (o.getName().getStringRef() == "math.exp2" &&
+                    intentdsl::kir::hasFastMath(&o, arith::FastMathFlags::nsz))
+                     ? ",flush_to_zero=True"
                      : "";
       return "ct." + std::string(method) + "(" + llvm::join(v, ",") + nan + ")";
     });

@@ -286,23 +286,28 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
         onlineSeenNew = b.create<arith::OrIOp>(loc, seenPrev, rowValid);
         Value mPanel =
             broadcast(reduce(sMasked, "max", paired ? 1 : 0), mPrev.getType());
-        onlineMNew = b.create<arith::MaxNumFOp>(loc, mPrev, mPanel);
+        onlineMNew =
+            b.create<arith::MaxNumFOp>(loc, mPrev, mPanel, online->maxFlags);
         Value negInfRow = broadcast(scalar(-INFINITY), onlineMNew.getType());
         Value zeroRow = broadcast(scalar(0.f), onlineMNew.getType());
         Value allMasked = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OEQ,
                                                   onlineMNew, negInfRow);
         Value mSafe = select(allMasked, zeroRow, onlineMNew);
-        Value mDiff = b.create<arith::SubFOp>(loc, mPrev, mSafe);
-        onlineAlpha = online->isExp2
-                          ? Value(b.create<math::Exp2Op>(loc, mDiff))
-                          : Value(b.create<math::ExpOp>(loc, mDiff));
+        Value mDiff =
+            b.create<arith::SubFOp>(loc, mPrev, mSafe, online->subFlags);
+        onlineAlpha =
+            online->isExp2
+                ? Value(b.create<math::Exp2Op>(loc, mDiff, online->expFlags))
+                : Value(b.create<math::ExpOp>(loc, mDiff, online->expFlags));
         Value mSafeTile =
             paired ? plane({mSafe, Axis::Owner})
                    : broadcast(singleMember({mSafe, Axis::Owner}), sTile.getType());
-        Value sShift = b.create<arith::SubFOp>(loc, sTile, mSafeTile);
-        Value wRaw = online->isExp2
-                         ? Value(b.create<math::Exp2Op>(loc, sShift))
-                         : Value(b.create<math::ExpOp>(loc, sShift));
+        Value sShift =
+            b.create<arith::SubFOp>(loc, sTile, mSafeTile, online->subFlags);
+        Value wRaw =
+            online->isExp2
+                ? Value(b.create<math::Exp2Op>(loc, sShift, online->expFlags))
+                : Value(b.create<math::ExpOp>(loc, sShift, online->expFlags));
         Value zeroTile = broadcast(scalar(0.f), sTile.getType());
         Value wTile = validMask ? select(validMask, wRaw, zeroTile) : wRaw;
         local[online->weightVal] = {wTile, paired ? Axis::Both : Axis::Token};
@@ -432,12 +437,13 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
   auto accIterArgs =
       l.getRegionIterArgs().drop_front(online ? 2 : 0);
   for (auto [ret, rawAcc] : llvm::zip(yielded, accIterArgs)) {
-    Value acc = online
-                    ? Value(b.create<arith::MulFOp>(
-                          loc, rawAcc,
-                          broadcast(onlineAlpha, rawAcc.getType(), 0)))
-                    : rawAcc;
     auto *comb = ret.getDefiningOp();
+    auto combFlags = intentdsl::kir::getFastMathFlags(comb);
+    Value acc =
+        online ? Value(b.create<arith::MulFOp>(
+                     loc, rawAcc, broadcast(onlineAlpha, rawAcc.getType(), 0),
+                     combFlags & (online->subFlags | online->expFlags)))
+               : rawAcc;
     auto rhs = comb->getOperand(1);
     if (paired && comb->hasAttr("block.masked_dot_update")) {
       auto operands = *intentdsl::block::tileAccumulate(rhs, loop);
@@ -620,8 +626,9 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
         partial = broadcast(partial, acc.getType(), 1);
       else
         partial = broadcast(partial, acc.getType());
-      next.push_back(max ? Value(b.create<arith::MaxNumFOp>(loc, acc, partial))
-                         : Value(b.create<arith::AddFOp>(loc, acc, partial)));
+      next.push_back(
+          max ? Value(b.create<arith::MaxNumFOp>(loc, acc, partial, combFlags))
+              : Value(b.create<arith::AddFOp>(loc, acc, partial, combFlags)));
     }
   }
   b.create<scf::YieldOp>(loc, next);

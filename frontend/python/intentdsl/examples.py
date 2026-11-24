@@ -112,7 +112,7 @@ def csr_spmv(offsets:I.In[I.i32,(32769,)], indices:I.In[I.i32,("Z",)], data:I.In
 @I.kernel
 def jagged_mean(values:I.In[I.f32,("T","D")], offsets:I.In[I.i32,(513,)], output:I.Out[I.f32,(512,"D")]):
     for row in I.parallel(output.dim(0)):
-        total = I.ordered_sum(I.segment(offsets,row),lambda p:values[p,:])
+        total = I.segment_sum(I.segment(offsets,row),lambda p:values[p,:])
         output[row,:] = total / I.segment_length(offsets,row)
 
 
@@ -332,7 +332,9 @@ def swiglu(
     for row in I.parallel(gate.dim(0)):
         x = I.cast(gate[row, :], I.f32)
         one = I.cast(1.0, I.f32)
-        sigmoid = one / (one + I.exp(I.cast(0.0, I.f32) - x))
+        sigmoid = I.fdiv(
+            one, one + I.exp(I.cast(0.0, I.f32) - x), approximate=True, flush_to_zero=True
+        )
         rounded = I.cast(x * sigmoid, I.bf16)
         out[row, :] = rounded * up[row, :]
 

@@ -2,16 +2,58 @@
 #include "intentdsl/levels/execution/block/ir/Contraction.h"
 #include "intentdsl/levels/execution/block/ir/Owners.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 
 namespace CI_UNIT_NAMESPACE {
 using namespace mlir;
 using namespace compilerinfra;
 namespace {
+bool validMomentTuple(Type t, ArrayRef<int64_t> expectedRow = {}) {
+  auto tuple = dyn_cast<TupleType>(t);
+  if (!tuple || tuple.size() != 3)
+    return false;
+  auto c = dyn_cast<RankedTensorType>(tuple.getType(0));
+  auto m1 = dyn_cast<RankedTensorType>(tuple.getType(1));
+  auto m2 = dyn_cast<RankedTensorType>(tuple.getType(2));
+  if (!c || !m1 || !m2 || c.getRank() != 1 || m1.getRank() != 1 ||
+      m2.getRank() != 1 || !c.getElementType().isInteger(32) ||
+      !m1.getElementType().isF32() || !m2.getElementType().isF32() ||
+      c.getShape() != m1.getShape() || m1 != m2)
+    return false;
+  return expectedRow.empty() || c.getShape() == expectedRow;
+}
+
+bool validReducedShape(RankedTensorType input, int64_t axis, Type resultType) {
+  if (getElementTypeOrSelf(resultType) != input.getElementType())
+    return false;
+  if (axis == -1)
+    return !isa<ShapedType>(resultType);
+  if (axis < 0 || axis >= input.getRank())
+    return false;
+  SmallVector<int64_t> dims(input.getShape());
+  dims.erase(dims.begin() + axis);
+  if (dims.empty())
+    return !isa<ShapedType>(resultType);
+  auto out = dyn_cast<RankedTensorType>(resultType);
+  return out && out.getShape() == ArrayRef<int64_t>(dims);
+}
+
+bool validCollectiveElement(Type elem) {
+  return elem.isInteger(1) || elem.isInteger(32) || elem.isInteger(64) ||
+         elem.isF16() || elem.isBF16() || elem.isF32();
+}
+
 LogicalResult dotSignature(Operation *op) {
+  if (!isMemoryEffectFree(op) || op->getNumResults() != 1 ||
+      (op->getNumOperands() != 2 && op->getNumOperands() != 3))
+    return failure();
+  auto trAttr = op->getAttrOfType<BoolAttr>("transpose_rhs");
+  if (!trAttr)
+    return failure();
   auto l = shape(op->getOperand(0).getType()),
        r = shape(op->getOperand(1).getType()),
        m = shape(op->getResult(0).getType());
-  bool tr = op->getAttrOfType<BoolAttr>("transpose_rhs").getValue();
+  bool tr = trAttr.getValue();
   auto element = getElementTypeOrSelf(op->getOperand(0).getType());
   auto acc = getElementTypeOrSelf(op->getResult(0).getType());
   bool type = element.isInteger(8)
@@ -22,23 +64,29 @@ LogicalResult dotSignature(Operation *op) {
   return success(
       type && element == getElementTypeOrSelf(op->getOperand(1).getType()) &&
       l.size() == 2 && r.size() == 2 && m.size() == 2 &&
-      l[1] == r[tr ? 1 : 0] && m[0] == l[0] && m[1] == r[tr ? 0 : 1] &&
-      l[0] >= 16 && l[1] >= 16 && m[1] >= 16 &&
+      !ShapedType::isDynamic(l[0]) && !ShapedType::isDynamic(l[1]) &&
+      !ShapedType::isDynamic(m[1]) && l[1] == r[tr ? 1 : 0] && m[0] == l[0] &&
+      m[1] == r[tr ? 0 : 1] && l[0] >= 16 && l[1] >= 16 && m[1] >= 16 &&
       (op->getNumOperands() == 2 ||
        op->getOperand(2).getType() == op->getResult(0).getType()));
 }
+
 LogicalResult collectiveSignature(Operation *op) {
-  auto input = op->getOperand(0).getType(), result = op->getResult(0).getType();
-  SmallVector<int64_t> dims(shape(input));
-  auto axis = op->getAttrOfType<IntegerAttr>("axis").getInt();
-  auto alg = op->getAttrOfType<StringAttr>("algebra");
-  if (axis < 0 || size_t(axis) >= dims.size() ||
-      !llvm::isPowerOf2_64(dims[axis]))
+  if (!isMemoryEffectFree(op) || op->getNumOperands() != 1 ||
+      op->getNumResults() != 1)
     return failure();
-  dims.erase(dims.begin() + axis);
-  return success(ArrayRef<int64_t>(dims) == shape(result) &&
-                 getElementTypeOrSelf(input) == getElementTypeOrSelf(result) &&
-                 (alg == "sum" || alg == "min" || alg == "max"));
+  auto input = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
+  auto axisAttr = op->getAttrOfType<IntegerAttr>("axis");
+  auto alg = op->getAttrOfType<StringAttr>("algebra");
+  if (!input || !axisAttr || !alg ||
+      !validCollectiveElement(input.getElementType()))
+    return failure();
+  int64_t axis = axisAttr.getInt();
+  if (axis < 0 || axis >= input.getRank() || input.getDimSize(axis) <= 0 ||
+      !llvm::isPowerOf2_64(input.getDimSize(axis)))
+    return failure();
+  return success((alg == "sum" || alg == "min" || alg == "max") &&
+                 validReducedShape(input, axis, op->getResult(0).getType()));
 }
 } // namespace
 void tileContracts(Unit &unit) {
@@ -73,28 +121,70 @@ void tileContracts(Unit &unit) {
         return llvm::createStringError("missing CUDA execution facts");
       return llvm::Error::success();
     };
-    c.verify = [](Operation *o) {
-      if (o->getName().stripDialect() == "summary_merge") {
-        auto tuple = dyn_cast<TupleType>(o->getOperand(0).getType());
-        if (!tuple || tuple.size() != 3 ||
-            tuple != o->getOperand(1).getType() ||
-            tuple != o->getResult(0).getType())
-          return failure();
-        return success(getElementTypeOrSelf(tuple.getType(0)).isInteger(32) &&
-                       getElementTypeOrSelf(tuple.getType(1)).isF32() &&
-                       tuple.getType(1) == tuple.getType(2));
-      }
-      if (!isa<RankedTensorType>(o->getOperand(0).getType()))
+    c.verify = [](Operation *o) -> LogicalResult {
+      if (!isMemoryEffectFree(o) || o->getNumResults() != 1)
         return failure();
-      if (o->getName().stripDialect() == "axis_reduce") {
-        auto a = o->getAttrOfType<IntegerAttr>("axis").getInt();
-        auto kind = o->getAttrOfType<StringAttr>("algebra");
-        return success(
-            a >= -1 &&
-            a < cast<RankedTensorType>(o->getOperand(0).getType()).getRank() &&
-            (kind == "max" || kind == "sum"));
+      auto kind = o->getName().stripDialect();
+      if (kind == "summary_merge") {
+        auto alg = o->getAttrOfType<StringAttr>("algebra");
+        if (o->getNumOperands() != 2 || !alg || alg.getValue() != "welford")
+          return failure();
+        Type t = o->getResult(0).getType();
+        return success(validMomentTuple(t) && o->getOperand(0).getType() == t &&
+                       o->getOperand(1).getType() == t);
       }
-      return success();
+      if (kind == "summary_reduce") {
+        if (o->getNumOperands() != 2)
+          return failure();
+        auto samples = dyn_cast<RankedTensorType>(o->getOperand(0).getType());
+        auto mask = dyn_cast<RankedTensorType>(o->getOperand(1).getType());
+        if (!samples || !mask || samples.getRank() != 2 ||
+            !samples.getElementType().isF32() || !mask.getElementType().isInteger(1) ||
+            samples.getShape() != mask.getShape())
+          return failure();
+        return success(
+            validMomentTuple(o->getResult(0).getType(), samples.getShape().take_front(1)));
+      }
+      if (o->getNumOperands() != 1)
+        return failure();
+      auto input = dyn_cast<RankedTensorType>(o->getOperand(0).getType());
+      if (!input || input.getRank() < 1)
+        return failure();
+      if (kind == "bin_count") {
+        auto out = dyn_cast<RankedTensorType>(o->getResult(0).getType());
+        return success(input.getRank() == 1 &&
+                       (input.getElementType().isInteger(32) ||
+                        input.getElementType().isInteger(64)) &&
+                       out && out.getRank() == 1 &&
+                       out.getElementType().isInteger(32));
+      }
+      if (kind == "scan_sum") {
+        return success(input.getRank() == 2 &&
+                       o->getResult(0).getType() == input &&
+                       (input.getElementType().isInteger(32) ||
+                        input.getElementType().isF32()));
+      }
+      if (kind == "reduce") {
+        auto alg = o->getAttrOfType<StringAttr>("algebra");
+        auto out = dyn_cast<RankedTensorType>(o->getResult(0).getType());
+        return success(alg && (alg == "sum" || alg == "max_num") &&
+                       input.getRank() == 2 && out && out.getRank() == 1 &&
+                       out.getDimSize(0) == input.getDimSize(0) &&
+                       out.getElementType() == input.getElementType() &&
+                       input.getElementType().isF32());
+      }
+      if (kind == "axis_reduce") {
+        auto axisAttr = o->getAttrOfType<IntegerAttr>("axis");
+        auto alg = o->getAttrOfType<StringAttr>("algebra");
+        if (!axisAttr || !alg ||
+            !validCollectiveElement(input.getElementType()) ||
+            !(alg == "max" || alg == "sum" || alg == "min"))
+          return failure();
+        int64_t axis = axisAttr.getInt();
+        return success(axis >= -1 && axis < input.getRank() &&
+                       validReducedShape(input, axis, o->getResult(0).getType()));
+      }
+      return failure();
     };
     unit.implementations.push_back({std::move(c), COMPILERINFRA_SOURCE});
   }

@@ -1,4 +1,5 @@
 #include "OwnerTiles.h"
+#include "intentdsl/levels/execution/block/ir/FoldPanel.h"
 using namespace mlir;
 namespace intentdsl::block {
 namespace {
@@ -171,9 +172,6 @@ SmallVector<Value> OwnerTiles::serialLoop(scf::ForOp loop, const Values &parent,
 }
 std::optional<OwnerTiles::OnlinePanelFusion>
 OwnerTiles::matchOnlinePanelPair(scf::ForOp maxLoop, scf::ForOp sumLoop) {
-  auto num = fn->getAttrOfType<StringAttr>("kir.numerics");
-  if (!num || num.getValue() != "relaxed_normalization")
-    return std::nullopt;
   if (!maxLoop->hasAttr("kir.reassociate") ||
       !sumLoop->hasAttr("kir.reassociate") ||
       maxLoop->getAttr("block.contribution_width") !=
@@ -221,7 +219,8 @@ OwnerTiles::matchOnlinePanelPair(scf::ForOp maxLoop, scf::ForOp sumLoop) {
     return std::nullopt;
   Value maxY = maxLoop.getBody()->getTerminator()->getOperand(0);
   auto maxComb = maxY.getDefiningOp<arith::MaxNumFOp>();
-  if (!maxComb || maxComb.getLhs() != maxLoop.getRegionIterArgs()[0])
+  if (!maxComb || maxComb.getLhs() != maxLoop.getRegionIterArgs()[0] ||
+      !intentdsl::kir::hasFastMath(maxComb, arith::FastMathFlags::reassoc))
     return std::nullopt;
   Value maxCand = maxComb.getRhs();
   Value score1 = maxCand, cond1;
@@ -254,7 +253,8 @@ OwnerTiles::matchOnlinePanelPair(scf::ForOp maxLoop, scf::ForOp sumLoop) {
   for (auto [idx, y] :
        llvm::enumerate(sumLoop.getBody()->getTerminator()->getOperands())) {
     auto add = y.getDefiningOp<arith::AddFOp>();
-    if (!add || add.getLhs() != sumLoop.getRegionIterArgs()[idx])
+    if (!add || add.getLhs() != sumLoop.getRegionIterArgs()[idx] ||
+        !intentdsl::kir::hasFastMath(add, arith::FastMathFlags::reassoc))
       return std::nullopt;
     Value rhs = add.getRhs();
     if (!isa<ShapedType>(rhs.getType())) {
@@ -336,10 +336,12 @@ OwnerTiles::matchOnlinePanelPair(scf::ForOp maxLoop, scf::ForOp sumLoop) {
   }
   Operation *expOp = expOut.getDefiningOp();
   if (!expOp || !isa<math::ExpOp, math::Exp2Op>(expOp) ||
-      (guardOp && !expOut.hasOneUse()))
+      (guardOp && !expOut.hasOneUse()) ||
+      !intentdsl::kir::hasFastMath(expOp, arith::FastMathFlags::reassoc))
     return std::nullopt;
   auto subOp = expOp->getOperand(0).getDefiningOp<arith::SubFOp>();
-  if (!subOp || !expOp->getOperand(0).hasOneUse() || subOp.getRhs() != peakRes)
+  if (!subOp || !expOp->getOperand(0).hasOneUse() || subOp.getRhs() != peakRes ||
+      !intentdsl::kir::hasFastMath(subOp, arith::FastMathFlags::reassoc))
     return std::nullopt;
   Value score2 = subOp.getLhs();
   if (guardOp && score2.getDefiningOp() &&
@@ -383,10 +385,19 @@ OwnerTiles::matchOnlinePanelPair(scf::ForOp maxLoop, scf::ForOp sumLoop) {
     return std::nullopt;
   bool causalInclusive = false;
   Value causalUpper = causalMaskOwner(sumLoop, &causalInclusive);
-  return OnlinePanelFusion{maxLoop,         score2,      cond2,
-                           subOp,           expOp,       guardOp,
-                           wVal,            isa<math::Exp2Op>(expOp),
-                           causalUpper,     causalInclusive};
+  return OnlinePanelFusion{maxLoop,
+                           score2,
+                           cond2,
+                           subOp,
+                           expOp,
+                           guardOp,
+                           wVal,
+                           isa<math::Exp2Op>(expOp),
+                           intentdsl::kir::getFastMathFlags(maxComb),
+                           intentdsl::kir::getFastMathFlags(subOp),
+                           intentdsl::kir::getFastMathFlags(expOp),
+                           causalUpper,
+                           causalInclusive};
 }
 SmallVector<Value> OwnerTiles::lowerBody(Block &body, Values env, Value mask) {
   for (auto it = body.begin(); it != body.end(); ++it) {
@@ -543,8 +554,7 @@ LogicalResult OwnerTiles::build() {
   if (auto pair = space.getAttrOfType<IntegerAttr>("block.pair_axis")) {
     auto &bb = space.getRegion(0).front();
     auto pairArg = bb.getArgument(pair.getInt());
-    auto num = fn->getAttrOfType<StringAttr>("kir.numerics");
-    bool relaxed = num && num.getValue() == "relaxed_normalization";
+    bool relaxed = hasReassociativeNormalization(space);
     bool suffix = false, prefix = false;
     for (auto loop : bb.getOps<scf::ForOp>())
       if (loop->hasAttr("kir.reassociate")) {

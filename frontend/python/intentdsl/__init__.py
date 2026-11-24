@@ -44,9 +44,17 @@ class Definition:
     source: bytes
 
 
-def kernel(fn=None, *, numerics="source"):
+_DENORMAL_MODES = ("ieee", "preserve-sign", "positive-zero", "dynamic")
+_FPMATH_MODES = ("strict", "relaxed", "bf16", "fast")
+
+
+def kernel(fn=None, *, numerics="source", fast_math=False, denormal_fp_math="ieee"):
     if numerics not in ("source", "relaxed_normalization"):
         raise ValueError(f"unsupported kernel numerics: {numerics}")
+    if type(fast_math) is not bool:
+        raise ValueError("fast_math must be a boolean")
+    if denormal_fp_math not in _DENORMAL_MODES:
+        raise ValueError(f"unsupported denormal_fp_math: {denormal_fp_math}")
 
     def wrap(f):
         return Definition(f.__name__, dedent(getsource(f)).encode())
@@ -122,16 +130,34 @@ def skills(*, library=None):
     return read_skills(library=library)
 
 
-def jit(definition, *, backend, library=None, configuration=None):
+def jit(
+    definition,
+    *,
+    backend,
+    library=None,
+    configuration=None,
+    fpmath_mode="strict",
+    fast_math=False,
+    denormal_fp_math=None,
+):
     from compilerinfra import Compiler
 
     from .compiler import Kernel
 
+    if fpmath_mode not in _FPMATH_MODES:
+        raise ValueError(f"unsupported fpmath_mode: {fpmath_mode}")
+    if type(fast_math) is not bool:
+        raise ValueError("fast_math must be a boolean")
+    if denormal_fp_math is not None and denormal_fp_math not in _DENORMAL_MODES:
+        raise ValueError(f"unsupported denormal_fp_math: {denormal_fp_math}")
+    math_options = {"fpmath_mode": fpmath_mode, "fast_math": fast_math}
+    if denormal_fp_math is not None:
+        math_options["denormal_fp_math"] = denormal_fp_math
     path = library_path(library)
     compiler = Compiler(path, configuration)
     if backend not in compiler.describe()["exits"]:
         raise ValueError(f"unknown exit: {backend}")
     from .composition import Program, ProgramKernel
     if isinstance(definition, Program):
-        return ProgramKernel(compiler, definition, backend)
-    return Kernel(compiler, definition, backend)
+        return ProgramKernel(compiler, definition, backend, math_options=math_options)
+    return Kernel(compiler, definition, backend, math_options=math_options)

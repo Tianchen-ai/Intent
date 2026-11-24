@@ -15,11 +15,10 @@ static bool legalWidth(IntegerAttr width, int64_t owners) {
 }
 LogicalResult verifyOwnerMap(func::FuncOp fn, const TargetProfile &p,
                              StringRef dialect, StringRef phase) {
-  if (auto num = fn->getAttr("kir.numerics")) {
-    auto s = dyn_cast<StringAttr>(num);
-    if (!s ||
-        (s.getValue() != "source" && s.getValue() != "relaxed_normalization"))
-      return fn.emitError("invalid kernel numerical permission");
+  if (auto dm = fn->getAttr("denormal-fp-math")) {
+    auto s = dyn_cast<StringAttr>(dm);
+    if (!s || !intentdsl::kir::validDenormalMode(s.getValue()))
+      return fn.emitError("invalid denormal-fp-math mode");
   }
   bool columns = fn.front().front().hasAttr("block.column_prefixes");
   if (columns) {

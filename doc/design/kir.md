@@ -155,9 +155,16 @@ GroupNorm 反向的第一个调用按 batch 和 group 归约空间成员，第�
 
 **imported → canonical。** 入口校验签名和基本类型、有限的纯 helper 调用关系、SSA/region 合法性、源位置。规范化将整轴切片/索引简写变为同一成员 relation，将 Python 循环变量变为 region arguments，补齐隐式合法广播与 promotion，规范化可证明等价的控制和无副作用表达式。canonical verifier 要求无待解释的 Python 语法或设备属性，所有动态等式均有来源或显式 guard。它给出可证明的 alias/effect 信息，未知须保守建模。两种作者写法若仍有不同的舍入边界、alias 或 effects，保留差异。
 
-**数值许可。** 默认 source。cast 明示目的格式；f16/bf16 普通窄化 RN-even。max 与 max_num 分开；argmax 的 NaN/tie 和空域合同属于操作本身。普通 source 浮点表达式仅沿用 V1 已允许的乘加融合，不混入任意重结合、TF32 或隐式 FTZ。`contract(..., allow_subnormal_ftz=True)`（默认 `False`）是附着在收缩操作上的显式次正规数冲零许可，表示允许将输入、累加中间值或抵消产生的次正规数冲零；未开启时必须保留 IEEE 次正规数语义。由操作选择 reduce/scan/region 的代数自由度；quant record 内指定独立 R32 的步骤不得跨越。近似指令许可附着在对应操作，调用级在线归约许可附着在 kernel 数值属性，记录适用对象和有限输入等前提。允许重写 ≠ 选择重写。KIR 单元提供唯一的匹配、数值前提检查和替换构造。block/cpu 的入口在降低 KIR 前据实际成本选择是否调用同一接口；匹配或许可不满足就保留源表达式。改写结果仍须通过 KIR verifier，且保持作者的 kernel 边界。
+**数值标志模型（FastMath 与 Denormal 模式）。** 参照 LLVM 指令级 fast-math flags、MLIR `arith.fastmath` 属性、CUDA `-ftz/-prec-div/-prec-sqrt/-fmad` 与 oneDNN `fpmath_mode`，KIR 将数值代数自由度直接表达在操作与函数属性上，而非自造恢复期的许可溯源机制：
 
-具体保留 V1 的 `source` 与 `relaxed_normalization` 区别。后一模式仅许可合格的 max/mass/weighted-moment 按连续段重缩放；要求有效 score 及实际参与加权收缩的 value 有限。它不能泛化为所有 softmax 或其他浮点运算的 fast-math 开关。设备无关的必要前提由用户显式选择模式承担，前端不额外扫描 tensor。相同输入下用哪一种合法实现由子节点决定。
+- **操作级 `arith.fastmath` 标志**：直接附着在 MLIR `arith`/`math` 与 `kir.*` 浮点运算上（`reassoc`、`contract`、`afn`、`arcp`、`nsz`、`nnan`、`ninf`）。
+  - **默认语义**：逐元素运算与除法、开方（`add`、`sub`、`mul`、`div`、`sqrt`、`rsqrt`、`exp`、`exp2`、`log`）默认严格（`none`，对应 CUDA 默认开启 `prec-div`/`prec-sqrt`，保留 IEEE RN-even 与 NaN/Inf 传播）；`I.fold` 循环归约合并器、`I.sum`、`I.segment_sum`、`I.reduce(..., max_num)` 默认携带 `reassoc`（对应 Triton `tl.sum`/`tl.max` 与 XLA 归约重结合）；矩阵收缩（`contract`/`scaled_contract`/`window_contract`/`q4k_dot`）默认携带 `reassoc,contract`；只有作者显式使用有序原语（`I.ordered`、`I.ordered_sum`）时才保留 `none` 严格顺序。
+  - **操作级显式近似原语**：`I.fdiv(lhs, rhs, approximate=True, flush_to_zero=True)` 在该除法上附着 `afn,arcp`（及 `nsz`）；`I.exp`/`I.exp2(..., approximate=True, flush_to_zero=True)` 附着 `afn`（及 `nsz`）。各出口按操作自身标志选择近似微核/指令（如 `/`、`ct.RoundingMode.APPROX`）或 IEEE RN 实现（如 `tl.div_rn`、0-ULP 认证微核）。
+  - **在线重缩放与重写规则**：`@I.kernel(numerics="relaxed_normalization")` 将 `reassoc,afn` 降级为内核内浮点运算上的 `fastmath` 标志（有序循环 carry 仍保留非 `reassoc`）。Block 的在线 `(max, sum)` 面板重缩放在改写前仅检查参与改写的 `maxnumf`、`subf`、`exp`/`exp2` 与累加 `addf` 是否均携带 `reassoc`，改写生成的新重缩放指令继承原操作上的 `fastmath` 标志。
+- **函数与收缩级次正规数属性 `"denormal-fp-math"`**：默认 `"ieee"`（禁止隐式冲零次正规数）；当作者声明 `contract(..., allow_subnormal_ftz=True)` 或 `@I.kernel(denormal_fp_math="preserve-sign")` 时，对应 `kir.contract` 与 `func.func` 标记 `"denormal-fp-math" = "preserve-sign"`，供 AMX BF16 等硬件快路在选型与合法化前读取。
+- **全局编译选项**：`I.jit(..., fpmath_mode="strict"|"relaxed"|"bf16"|"fast", fast_math=False, denormal_fp_math=...)` 通过目标编译选项在 `kir@canonical` 统一为浮点操作补齐默认 `fastmath` 标志与函数 `"denormal-fp-math"` 模式（显式 `I.ordered` 与 `I.ordered_sum` 的顺序约束不受 `reassoc` 覆盖）。
+- **验证器职责边界**：各层与检查点恢复 verifier 只检查当前 IR 的良构性（如属性类型合法、微核调用自身属性与契约一致），绝不追溯“历史改写是否曾获上层授权”。
+- **作者意图对齐原则**：作者程序只应在算法确实依赖固定顺序时使用 `I.ordered` / `I.ordered_sum`（如 `csr_spmv`、`cholesky`、状态递推）；无顺序依赖的分段或窗口求和（如 `jagged_mean` 的 `I.segment_sum`、`causal_convolution` 与 split-K `merge_splits`/`merge_grouped` 的 `I.fold`）使用可重结合原语，V1 作者显式声明的 `approximate=True` / `flush_to_zero=True`（如 `swiglu` 与注意力归一化商/指数）直接用 `I.fdiv` / `I.exp2` 标志表达，未声明者（如 `softmax`、`adamw`）保持默认严格语义。
 
 ## 访问、成员与 effects 的验证合同
 

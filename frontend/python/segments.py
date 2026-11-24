@@ -12,12 +12,12 @@ def bounds(c, call):
     return [c.values[offsets],("%row","index")]
 
 
-def fold(c, call):
+def fold(c, call, *, reassoc=False):
     if len(call.args)!=2 or call.keywords or not isinstance(call.args[1],ast.Lambda):
-        raise ValueError("ordered_sum takes a segment and a pure member expression")
+        raise ValueError("segment reduction takes a segment and a pure member expression")
     domain,body=call.args
     if not isinstance(domain,ast.Call) or ast.unparse(domain.func)!=c.namespace+".segment":
-        raise ValueError("ordered_sum requires an offset-defined domain")
+        raise ValueError("segment reduction requires an offset-defined domain")
     keys=bounds(c,domain)
     if len(body.args.args)!=1:raise ValueError("expected one absolute member coordinate")
     member=body.args.args[0].arg
@@ -28,7 +28,12 @@ def fold(c, call):
         if isinstance(node,ast.BinOp) and isinstance(node.op,(ast.Mult,ast.Add)):
             a,b=expression(node.left),expression(node.right)
             if a[1]!=b[1] or a[1]!="f32":raise ValueError("fold arithmetic needs two f32 members")
-            return c.emit("mul" if isinstance(node.op,ast.Mult) else "add",[a,b],"f32")
+            return c.emit(
+                "mul" if isinstance(node.op, ast.Mult) else "add",
+                [a, b],
+                "f32",
+                c.fm_attr(("reassoc", "contract") if reassoc else ()),
+            )
         if not isinstance(node,ast.Subscript) or not isinstance(node.value,ast.Name):raise ValueError("expected a member load")
         name=node.value.id
         slot=next(a for a in c.args if a["name"]==name)
@@ -46,4 +51,8 @@ def fold(c, call):
         if term[1]!="f32":raise ValueError("ordered sum requires f32 terms")
         c.emit("term",[term]);region='\n'.join(c.ops)
     finally:c.ops=outer
-    return c.emit("ordered_sum",keys,"tensor<?xf32>","({^bb0(%member:index,%feature:index):\n"+region+"\n})")
+    region_attr = "({^bb0(%member:index,%feature:index):\n" + region + "\n})"
+    if reassoc:
+        fm = c.fm_attr(("reassoc",))
+        region_attr += f" {fm}"
+    return c.emit("ordered_sum", keys, "tensor<?xf32>", region_attr)

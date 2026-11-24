@@ -140,7 +140,8 @@ private:
       state.addOperands({op->getOperand(0),rows,cols,active});
       state.addTypes(vector(rw.getF32Type(),2));
       if (fold) {
-        state.addAttribute("strict",rw.getUnitAttr());
+        if (!intentdsl::kir::hasFastMath(op, arith::FastMathFlags::reassoc))
+          state.addAttribute("strict", rw.getUnitAttr());
         if(batch)state.addAttribute("member_batch",batch);
         IRMapping capture;
         op->getRegion(0).cloneInto(state.addRegion(),capture);

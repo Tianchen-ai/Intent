@@ -1,5 +1,7 @@
 #pragma once
+#include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
 #include "intentdsl/levels/execution/block/ir/Owners.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Matchers.h"
 namespace intentdsl::block {
@@ -91,5 +93,33 @@ inline bool panelFolds(mlir::Operation *o,
     matched = true;
   }
   return matched;
+}
+inline bool hasReassociativeNormalization(mlir::Operation &space) {
+  if (space.getNumRegions() == 0 || space.getRegion(0).empty())
+    return false;
+  using FMF = mlir::arith::FastMathFlags;
+  unsigned reassocLoops = 0;
+  bool hasReassocExpShift = false;
+  for (auto loop : space.getRegion(0).front().getOps<mlir::scf::ForOp>()) {
+    if (!loop->hasAttr("kir.reassociate"))
+      continue;
+    bool combinersReassoc = llvm::all_of(
+        loop.getBody()->getTerminator()->getOperands(), [](mlir::Value y) {
+          auto *comb = y.getDefiningOp();
+          return comb && intentdsl::kir::hasFastMath(comb, FMF::reassoc);
+        });
+    if (!combinersReassoc)
+      continue;
+    ++reassocLoops;
+    loop.walk([&](mlir::Operation *op) {
+      if (!mlir::isa<mlir::math::ExpOp, mlir::math::Exp2Op>(op) ||
+          !intentdsl::kir::hasFastMath(op, FMF::reassoc))
+        return;
+      if (auto sub = op->getOperand(0).getDefiningOp<mlir::arith::SubFOp>();
+          sub && intentdsl::kir::hasFastMath(sub, FMF::reassoc))
+        hasReassocExpShift = true;
+    });
+  }
+  return reassocLoops >= 2 && hasReassocExpShift;
 }
 } // namespace intentdsl::block

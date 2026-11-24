@@ -1,4 +1,5 @@
 #include "compilerinfra/Terminal.h"
+#include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
 #include "intentdsl/levels/algorithm/kir/ir/Literal.h"
 #include "intentdsl/levels/execution/block/ir/Grid.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -193,9 +194,14 @@ llvm::Error row(Operation &op, PrintPoint point, PrintContext &c) {
   else if (n == "add" || n == "sub" || n == "mul")
     e = arg(0) + (n == "add" ? " + " : n == "sub" ? " - " : " * ") + arg(1);
   else if (n == "div")
-    e = "tl.div_rn(" + arg(0) + ", " + arg(1) + ")";
+    e = intentdsl::kir::hasAnyFastMath(
+            &op, arith::FastMathFlags::arcp | arith::FastMathFlags::afn)
+            ? arg(0) + " / " + arg(1)
+            : "tl.div_rn(" + arg(0) + ", " + arg(1) + ")";
   else if (n == "sqrt")
-    e = "tl.sqrt_rn(" + arg(0) + ")";
+    e = intentdsl::kir::hasFastMath(&op, arith::FastMathFlags::afn)
+            ? "tl.sqrt(" + arg(0) + ")"
+            : "tl.sqrt_rn(" + arg(0) + ")";
   else if (n == "exp" || n == "rsqrt")
     e = "tl." + n.str() + "(" + arg(0) + ")";
   else if (n == "cast") {

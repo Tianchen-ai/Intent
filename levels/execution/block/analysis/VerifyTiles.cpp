@@ -14,11 +14,10 @@ static llvm::ArrayRef<int64_t> shape(Type t) {
 LogicalResult
 verifyTileProgram(func::FuncOp fn, const TargetProfile &profile,
                   llvm::function_ref<bool(Operation &)> canNarrowAddress) {
-  if (auto num = fn->getAttr("kir.numerics")) {
-    auto s = dyn_cast<StringAttr>(num);
-    if (!s ||
-        (s.getValue() != "source" && s.getValue() != "relaxed_normalization"))
-      return fn.emitError("invalid kernel numerical permission");
+  if (auto dm = fn->getAttr("denormal-fp-math")) {
+    auto s = dyn_cast<StringAttr>(dm);
+    if (!s || !intentdsl::kir::validDenormalMode(s.getValue()))
+      return fn.emitError("invalid denormal-fp-math mode");
   }
   if (!llvm::hasSingleElement(fn.getBody()) ||
       fn.front().getOperations().size() != 2 ||

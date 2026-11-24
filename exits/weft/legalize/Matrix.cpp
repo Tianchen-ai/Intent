@@ -421,8 +421,8 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
   StringRef packing = packingAttr ? packingAttr.getValue() : StringRef();
   bool routed = domain.hasAttr("cpu.route_storage");
   bool usesBrgemm = shortImpl.starts_with("onednn-brgemm");
-  bool allowSubnormalFtz = dot.hasAttr("kir.allow_subnormal_ftz") ||
-                           domain.hasAttr("kir.allow_subnormal_ftz");
+  bool allowSubnormalFtz = intentdsl::kir::allowsSubnormalFtz(&dot) ||
+                           intentdsl::kir::allowsSubnormalFtz(&domain);
 
   int64_t M = extents[0], N = extents[1], K = extents[2], G = extents[3];
   int64_t mr = tile[0], nr = tile[1];

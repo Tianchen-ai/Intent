@@ -1,13 +1,21 @@
 import ast
 import json
 
-from .intentdsl.signature import argument_type, kernel_numerics, signature, spelling, namespace
+from .intentdsl.signature import (
+    argument_type,
+    format_fastmath_attr,
+    kernel_math_policy,
+    namespace,
+    signature,
+    spelling,
+)
 
 
 class Capture:
     def __init__(self, fn):
         self.fn = fn
         self.namespace = namespace(fn)
+        self.default_flags, self.denormal_mode = kernel_math_policy(fn)
         self.args = signature(fn)
         self.values = {
             a["name"]: ("%" + a["name"], argument_type(a)) for a in self.args
@@ -16,6 +24,10 @@ class Capture:
         self.updated=set()
         self.serial = 0
         self.line = fn.lineno
+
+    def fm_attr(self, extra=()):
+        fm = format_fastmath_attr((*self.default_flags, *extra))
+        return f"{{fastmath = {fm}}}" if fm else ""
 
     def emit(self, op, args, ty=None, attrs=""):
         self.serial += 1
@@ -111,7 +123,9 @@ class Capture:
                 ast.RShift: "shr",
             }[type(n.op)]
             ty = next((t for _, t in args if t.startswith("tensor")), args[0][1])
-            return self.emit(op, args, ty)
+            elem = ty.removeprefix("tensor<?x").removesuffix(">")
+            is_fp = elem in ("f16", "bf16", "f32")
+            return self.emit(op, args, ty, self.fm_attr() if is_fp else "")
         if isinstance(n, ast.Call):
             fn = spelling(n.func, self.namespace)
             if fn in ("atomic_add", "gather"):
@@ -124,9 +138,9 @@ class Capture:
                 return capture(self,n)
             if fn=="sum_columns" and len(n.args)==1 and not n.keywords:
                 return self.emit("column_sum",[self.values[n.args[0].id],("%row","index")],"tensor<?xi32>")
-            if fn=="ordered_sum":
+            if fn in ("ordered_sum", "segment_sum"):
                 from .segments import fold
-                return fold(self,n)
+                return fold(self, n, reassoc=(fn == "segment_sum"))
             if fn=="segment_length":
                 from .segments import bounds
                 return self.emit("segment_length",bounds(self,n),"tensor<?xf32>")
@@ -198,8 +212,20 @@ class Capture:
                 return self.emit(
                     "constant", [], ty, f"{{value={float(lit):.17e} : {ty}}}"
                 )
+            if fn == "fdiv" and len(n.args) == 2:
+                kw = {k.arg: k.value for k in n.keywords}
+                if len(kw) != len(n.keywords) or kw.keys() - {"approximate", "flush_to_zero"}:
+                    raise ValueError("fdiv accepts only approximate and flush_to_zero")
+                approx = ast.literal_eval(kw["approximate"]) if "approximate" in kw else False
+                ftz = ast.literal_eval(kw["flush_to_zero"]) if "flush_to_zero" in kw else False
+                if type(approx) is not bool or type(ftz) is not bool:
+                    raise ValueError("fdiv flags must be boolean literals")
+                args = [self.expr(v) for v in n.args]
+                ty = next((t for _, t in args if t.startswith("tensor")), args[0][1])
+                extra = (*(("afn", "arcp") if approx else ()), *(("nsz",) if ftz else ()))
+                return self.emit("div", args, ty, self.fm_attr(extra))
             count = 2 if fn == "cast" else 1
-            if len(n.args) != count or (fn not in ("sum", "reduce") and n.keywords):
+            if len(n.args) != count or (fn not in ("sum", "reduce", "exp") and n.keywords):
                 raise ValueError(f"unsupported arguments for {fn}")
             v = self.expr(n.args[0])
             if fn in ("sum", "reduce"):
@@ -220,7 +246,12 @@ class Capture:
                     or spelling(kw["acc"], self.namespace) != "f32"
                 ):
                     raise ValueError("expected an explicit f32 accumulator")
-                return self.emit("sum" if fn == "sum" else "max_num", [v], "f32")
+                return self.emit(
+                    "sum" if fn == "sum" else "max_num",
+                    [v],
+                    "f32",
+                    self.fm_attr(("reassoc",)),
+                )
             if fn == "cast":
                 dst = spelling(n.args[1], self.namespace)
                 return self.emit(
@@ -229,7 +260,15 @@ class Capture:
                     f"tensor<?x{dst}>" if v[1].startswith("tensor") else dst,
                 )
             if fn in ("exp", "rsqrt", "sqrt"):
-                return self.emit(fn, [v], v[1])
+                kw = {k.arg: k.value for k in n.keywords}
+                if len(kw) != len(n.keywords) or kw.keys() - {"approximate", "flush_to_zero"}:
+                    raise ValueError(f"unsupported keywords for {fn}")
+                approx = ast.literal_eval(kw["approximate"]) if "approximate" in kw else False
+                ftz = ast.literal_eval(kw["flush_to_zero"]) if "flush_to_zero" in kw else False
+                if type(approx) is not bool or type(ftz) is not bool:
+                    raise ValueError("math flags must be boolean literals")
+                extra = (*(("afn",) if approx else ()), *(("nsz",) if ftz else ()))
+                return self.emit(fn, [v], v[1], self.fm_attr(extra))
         raise ValueError(
             f"unsupported author expression at line {n.lineno}: {ast.unparse(n)}"
         )
@@ -314,10 +353,8 @@ class Capture:
             raise ValueError("missing output definition")
         sig = ", ".join("%" + a["name"] + ": " + argument_type(a) for a in self.args)
         abi = json.dumps(json.dumps(self.args, separators=(",", ":")))
-        numerics = kernel_numerics(self.fn)
         return (
-            f"module {{ func.func @{self.fn.name}({sig}) attributes {{kir.abi = {abi}"
-            + (f', kir.numerics = "{numerics}"' if numerics != "source" else "")
+            f'module {{ func.func @{self.fn.name}({sig}) attributes {{kir.abi = {abi}, "denormal-fp-math" = "{self.denormal_mode}"'
             + (f", kir.owner_axis = {axis} : i64" if self.owner_axis is not None else "")
             + "} {\n"
             + f'"kir.parallel"(%{owner["name"]}) ({{^bb0(%row: index):\n'

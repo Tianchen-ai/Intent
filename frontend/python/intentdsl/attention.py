@@ -27,11 +27,11 @@ def attention(
                 for token in I.fold(k.dim(2)):
                     key = I.cast(k[batch, kv, token, :], I.f32)
                     score = I.sum(query_vector * key) * log2_scale
-                    weight = I.exp2(score - peak) if query >= token else I.f32(0)
+                    weight = I.exp2(score - peak, approximate=True, flush_to_zero=True) if query >= token else I.f32(0)
                     mass = mass + weight
                     factor = I.cast(I.cast(weight, I.bf16), I.f32)
                     weighted = weighted + I.cast(v[batch, kv, token, :], I.f32) * factor
-                inverse = I.f32(0) if k.dim(2) == 0 else I.f32(1) / mass
+                inverse = I.f32(0) if k.dim(2) == 0 else I.fdiv(I.f32(1), mass, approximate=True, flush_to_zero=True)
                 y[batch, head, query, :] = I.cast(weighted * inverse, I.bf16)
 
 
@@ -44,15 +44,15 @@ def merge_splits(
     for batch in I.parallel(lse.dim(0)):
         for head in I.parallel(lse.dim(1)):
             peak = -I.inf
-            for split in I.ordered(lse.dim(2)):
+            for split in I.fold(lse.dim(2)):
                 peak = I.maximum_num(peak, lse[batch, head, split])
             weighted = I.zeros(partial.dim(3), I.f32)
             mass = I.f32(0)
-            for split in I.ordered(lse.dim(2)):
+            for split in I.fold(lse.dim(2)):
                 weight = I.exp(lse[batch, head, split] - peak)
                 weighted = weighted + partial[batch, head, split, :] * weight
                 mass = mass + weight
-            y[batch, head, :] = I.cast(weighted * (I.f32(1) / mass), I.f16)
+            y[batch, head, :] = I.cast(weighted * I.fdiv(I.f32(1), mass, approximate=True, flush_to_zero=True), I.f16)
 
 
 @I.kernel
@@ -69,10 +69,10 @@ def merge_log2_splits(
             mass = I.f32(0)
             vector = I.zeros(partial.dim(3), I.f32)
             for s in I.fold(lse.dim(2)):
-                weight = I.exp2(lse[b, h, s] - peak)
+                weight = I.exp2(lse[b, h, s] - peak, approximate=True, flush_to_zero=True)
                 mass = mass + weight
                 vector = vector + partial[b, h, s, :] * weight
-            y[b, h, :] = I.cast(vector * (I.f32(1) / mass), I.f16)
+            y[b, h, :] = I.cast(vector * I.fdiv(I.f32(1), mass, approximate=True, flush_to_zero=True), I.f16)
 
 
 @I.kernel(numerics="relaxed_normalization")
@@ -111,7 +111,7 @@ def paged_partials(
                 for pos in I.fold(start, stop):
                     page = I.cast(table[origin + pos // page_size], I.index)
                     key = I.cast(keys[page, pos % page_size, kv, :], I.f32)
-                    weight = I.exp2(I.sum(query * key) * log2_scale - peak)
+                    weight = I.exp2(I.sum(query * key) * log2_scale - peak, approximate=True, flush_to_zero=True)
                     mass = mass + weight
                     value = I.cast(values[page, pos % page_size, kv, :], I.f32)
                     weighted = weighted + I.cast(I.cast(weight, I.f16), I.f32) * value

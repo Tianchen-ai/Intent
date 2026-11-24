@@ -262,6 +262,7 @@ struct Row {
           cols = expand(cols, 0);
         }
       }
+      bool strict = old.hasAttr("strict");
       auto &body = old.getRegion(0).front();
       IRMapping mapping;
       mapping.map(body.getArgument(0), pos);
@@ -274,15 +275,24 @@ struct Row {
         Value val =
             code == "member_load"
                 ? read(args.front(), ArrayRef<Value>(args).drop_front(), live)
-                : map(code == "mul" ? "mul_rn" : "add_rn", args, f32);
+                : map(code == "mul" ? (strict ? "mul_rn" : "mul")
+                                    : (strict ? "add_rn" : "add"),
+                      args, f32);
         mapping.map(term.getResult(0), val);
       }
       auto value = mapping.lookup(body.back().getOperand(0));
       auto add = [&](Value prev, Value delta, Value valid) {
-        return map("select", {valid, binary("add_rn", prev, delta), prev}, f32);
+        return map("select",
+                   {valid, binary(strict ? "add_rn" : "add", prev, delta), prev},
+                   f32);
       };
       if (!panel)
         return add(acc, value, live);
+      if (!strict) {
+        auto masked = map("select", {live, value, zero}, f32);
+        return binary("add", acc,
+                      reduce("sum", masked, batchAxis, tile(2, f32)));
+      }
       return loop(
           constant(w), acc,
           [&](Value lane, Value prev) {

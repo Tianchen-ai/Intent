@@ -2,11 +2,21 @@
 import ast
 import json
 
-from .intentdsl.signature import argument_type, element_type, kernel_numerics, namespace, signature, spelling
+from .intentdsl.signature import (
+    argument_type,
+    element_type,
+    format_fastmath_attr,
+    kernel_math_policy,
+    namespace,
+    signature,
+    spelling,
+)
 
 
 def capture(fn):
     api = namespace(fn)
+    default_flags, denormal_mode = kernel_math_policy(fn)
+    contract_ftz = [False]
     args = signature(fn)
     slots = {a["name"]: a for a in args}
     outputs = [a for a in args if a["direction"] == "Out"]
@@ -62,21 +72,24 @@ def capture(fn):
             inputs=[view(a) for a in node.args]
             ssa=f"%v{len(lines)}";result=tensor(rank,"f32")
             region=capture_value_map(kw["rhs"],api)
+            wfm = format_fastmath_attr((*default_flags, "reassoc", "contract"))
             lines.append(f'{ssa} = "kir.window_contract"('+', '.join(a for a,_ in inputs)+') ({'+region+
-                f'}}) {{head_group={group}:i64}} : ('+', '.join(t for _,t in inputs)+f')->{result}')
+                f'}}) {{fastmath={wfm}, head_group={group}:i64}} : ('+', '.join(t for _,t in inputs)+f')->{result}')
             return ssa,result
         if name == "q4k_dot" and len(node.args) == 2 and not kw:
-            return emit("q4k_dot", [view(node.args[0]), expr(node.args[1])], tensor(rank, "f32"))
+            qfm = format_fastmath_attr((*default_flags, "reassoc", "contract"))
+            return emit("q4k_dot", [view(node.args[0]), expr(node.args[1])], tensor(rank, "f32"), f"{{fastmath={qfm}}}")
         if name == "scaled_contract" and len(node.args) == 4 and set(kw) == {"acc"}:
+            sfm = format_fastmath_attr((*default_flags, "reassoc", "contract"))
             transpose = node.args[3]
             if isinstance(transpose,ast.Subscript):
-                return emit("scaled_contract",[view(a) for a in node.args],tensor(rank,spelling(kw["acc"],api)))
+                return emit("scaled_contract",[view(a) for a in node.args],tensor(rank,spelling(kw["acc"],api)),f"{{fastmath={sfm}}}")
             if (not isinstance(transpose, ast.Call) or spelling(transpose.func, api) != "transpose" or
                     len(transpose.args) != 2 or transpose.keywords or ast.literal_eval(transpose.args[1]) != (1, 0)):
                 raise ValueError("right scale requires an explicit [G,N] to [N,G] transpose")
             scale = emit("transpose_scale", [view(transpose.args[0])], tensor(2, "u8"))
             return emit("scaled_contract", [view(a) for a in node.args[:3]] + [scale],
-                        tensor(rank, spelling(kw["acc"], api)))
+                        tensor(rank, spelling(kw["acc"], api)), f"{{fastmath={sfm}}}")
         if name != "contract" or len(node.args) != 2 or not {"axes","acc"} <= kw.keys() or kw.keys()-{"axes","acc","batch","offsets","routes","allow_subnormal_ftz"}:
             raise ValueError("expected contract(lhs, rhs, axes=..., acc=...)")
         lhs, rhs = (view(a) for a in node.args)
@@ -93,10 +106,20 @@ def capture(fn):
                      lhs_batch=next(iter(batch[0]),-1), rhs_batch=next(iter(batch[1]),-1))
         if any(type(x) is not int for x in attrs.values()):
             raise ValueError("axis indices must be integers")
-        attr_items = (["kir.allow_subnormal_ftz"] if ftz else []) + [f"{k}={v}:i64" for k,v in attrs.items()]
+        acc_ty = spelling(kw["acc"], api)
+        attr_items = []
+        if ftz:
+            if acc_ty == "i32":
+                raise ValueError("allow_subnormal_ftz requires floating-point operands")
+            contract_ftz[0] = True
+            attr_items.append('"denormal-fp-math"="preserve-sign"')
+        if acc_ty != "i32":
+            cfm = format_fastmath_attr((*default_flags, "reassoc", "contract", *(("nsz",) if ftz else ())))
+            attr_items.append(f"fastmath={cfm}")
+        attr_items.extend(f"{k}={v}:i64" for k, v in attrs.items())
         attr = "{"+", ".join(attr_items)+"}"
         extras = [view(kw[k]) for k in ("offsets","routes") if k in kw]
-        return emit("contract",[lhs,rhs,*extras],tensor(rank,spelling(kw["acc"],api)),attr)
+        return emit("contract",[lhs,rhs,*extras],tensor(rank,acc_ty),attr)
 
     for stmt in fn.body:
         if not isinstance(stmt,ast.Assign) or len(stmt.targets)!=1:
@@ -109,8 +132,7 @@ def capture(fn):
             emit("publish_matrix",[view(target,"Out"),value],None)
     sig=", ".join(f'%{a["name"]}: {argument_type(a)}' for a in args)
     abi=json.dumps(json.dumps(args,separators=(",",":")))
-    numerics = kernel_numerics(fn)
-    num_attr = f', kir.numerics="{numerics}"' if numerics != "source" else ""
-    return (f'module {{func.func @{fn.name}({sig}) attributes {{kir.abi={abi}{num_attr}}} {{\n'
+    fn_denorm = "preserve-sign" if contract_ftz[0] and denormal_mode == "ieee" else denormal_mode
+    return (f'module {{func.func @{fn.name}({sig}) attributes {{kir.abi={abi}, "denormal-fp-math"="{fn_denorm}"}} {{\n'
             f'"kir.matrix_domain"(%{out["name"]}) ({{\n'+'\n'.join(lines)+
             f'\n"kir.end"():()->()\n}}):({argument_type(out)})->()\nreturn\n}}}}').encode()
