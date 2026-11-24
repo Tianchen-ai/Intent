@@ -477,6 +477,25 @@ void SymbolOp::inferResultRanges(ArrayRef<ConstantIntRanges>,
       setResultRange(getValue(), nonNegRange64(mat.getTileK(), mat.getTileK()));
       return;
     }
+    if (sym == "grid") {
+      if (auto extAttr = mat->getAttrOfType<DenseI64ArrayAttr>("extents")) {
+        auto ext = extAttr.asArrayRef();
+        if (ext.size() >= 4 && mat.getTileM() > 0 && mat.getTileN() > 0 &&
+            ext[0] >= 0 && ext[1] >= 0 && ext[3] >= 0) {
+          __int128 gm = llvm::divideCeil(uint64_t(ext[0]),
+                                         uint64_t(mat.getTileM()));
+          __int128 gn = llvm::divideCeil(uint64_t(ext[1]),
+                                         uint64_t(mat.getTileN()));
+          __int128 g = gm * gn * __int128(ext[3]);
+          if (g >= 0 && g <= INT64_MAX) {
+            setResultRange(getValue(),
+                           nonNegRange64(static_cast<int64_t>(g),
+                                         static_cast<int64_t>(g)));
+            return;
+          }
+        }
+      }
+    }
     if (auto tasks = mat->getAttrOfType<IntegerAttr>("participants");
         tasks && tasks.getInt() > 0) {
       if (sym == "taskId") {
@@ -490,6 +509,12 @@ void SymbolOp::inferResultRanges(ArrayRef<ConstantIntRanges>,
     }
   }
   if (auto ord = self->getParentOfType<OrderedProgramOp>()) {
+    if (sym == "grid" && ord.getOwnerTile() > 0 && ord.getOwners() >= 0) {
+      int64_t g = static_cast<int64_t>(llvm::divideCeil(
+          uint64_t(ord.getOwners()), uint64_t(ord.getOwnerTile())));
+      setResultRange(getValue(), nonNegRange64(g, g));
+      return;
+    }
     int64_t tasks = ord.getParticipants();
     if (tasks > 0) {
       if (sym == "taskId") {

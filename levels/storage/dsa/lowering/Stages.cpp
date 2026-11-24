@@ -313,6 +313,18 @@ void bind(Unit &u) {
   matrixSupplyCost(u);
   ownerSupply(u);
   ownerSupplyCost(u);
+  for (auto [name, cat, summary] :
+       {std::tuple{"double-buffered-dma", "memory",
+                   "Double-buffered asynchronous NRAM/GDRAM DMA staging and writeback overlap"},
+        {"wram-filter-staging", "contraction",
+         "Explicit WRAM 64-channel filter bank staging and layout transposition"},
+        {"certified-ieee-math", "numerics",
+         "Unconditional endpoint-certified 0-ULP IEEE-754 div/sqrt and validated exp/exp2"},
+        {"hardware-vector-gather-dma", "memory",
+         "Hardware 64-bit indirect index vector gather DMA"}}) {
+    u.capabilities.push_back(
+        {CapabilityDeclaration{name, cat, summary}, COMPILERINFRA_SOURCE});
+  }
   u.dialects = dialect;
   supply(u);
   for (bool ready : {false, true})

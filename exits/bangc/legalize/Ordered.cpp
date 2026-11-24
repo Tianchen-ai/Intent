@@ -32,6 +32,11 @@ struct OrderedLowerer {
   Operation *constAnchor = nullptr;
   llvm::DenseMap<int64_t, Value> constI64Map;
   Value symGrid, symTaskId, symTaskDim;
+  struct PendingOrderedTailGuard {
+    Operation *guardIf;
+    compilerinfra::TailDimension dim;
+  };
+  SmallVector<PendingOrderedTailGuard, 8> orderedTailGuards;
 
   OrderedLowerer(func::FuncOp f, const TargetProfile &prof)
       : fn(f), profile(prof), space(f.front().front()), b(f.getContext()),
@@ -214,8 +219,8 @@ struct OrderedLowerer {
         });
   }
 
-  void ifThen(Value cond, llvm::function_ref<void()> thenFn) {
-    b.create<scf::IfOp>(loc, cond, [&](OpBuilder &nb, Location l) {
+  scf::IfOp ifThen(Value cond, llvm::function_ref<void()> thenFn) {
+    return b.create<scf::IfOp>(loc, cond, [&](OpBuilder &nb, Location l) {
       OpBuilder::InsertionGuard g(b);
       b.restoreInsertionPoint(nb.saveInsertionPoint());
       thenFn();
@@ -386,17 +391,21 @@ struct OrderedLowerer {
     };
 
     auto stageRows = [&](Value dstNram, Value view, Value ptr, Value nRows,
-                         int64_t maxRows, int64_t cols, bool zeroTail) {
+                         int64_t maxRows, int64_t cols, bool zeroTail)
+        -> Operation * {
       int64_t rank = cast<MemRefType>(view.getType()).getRank();
       int64_t rowStride = dimAttr(view, "block.strides", rank - 2);
+      Operation *tailIf = nullptr;
       if (zeroTail) {
-        ifThen(
-            b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, nRows,
-                                    cI64(maxRows)),
-            [&]() {
-              fillVec(dstNram, cI64(maxRows * cols),
-                      b.create<arith::ConstantOp>(loc, b.getZeroAttr(halfTy)));
-            });
+        tailIf = ifThen(
+                     b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt,
+                                             nRows, cI64(maxRows)),
+                     [&]() {
+                       fillVec(dstNram, cI64(maxRows * cols),
+                               b.create<arith::ConstantOp>(
+                                   loc, b.getZeroAttr(halfTy)));
+                     })
+                     .getOperation();
       }
       if (rowStride == cols) {
         memcpy1D(dstNram, ptr, b.create<arith::MulIOp>(loc, nRows, cI64(cols)),
@@ -412,6 +421,7 @@ struct OrderedLowerer {
                        "GDRAM2NRAM");
             });
       }
+      return tailIf;
     };
 
     auto emitPanelProduct = [&](Value outF32, Value lhsHalf,
@@ -1007,9 +1017,17 @@ struct OrderedLowerer {
                         for (Value c : bop.getOperands().drop_front().drop_back())
                           prefix.push_back(loopScalars.lookup(c));
                         Value kSlot = slotAt(&bop, 0, halfTy);
-                        stageRows(kSlot, kView,
-                                  sliceBasePtr(kView, prefix, t0), nt, S,
-                                  kFeat, true);
+                        if (Operation *tailIf = stageRows(
+                                kSlot, kView, sliceBasePtr(kView, prefix, t0),
+                                nt, S, kFeat, true)) {
+                          compilerinfra::TailDimension stripDim;
+                          stripDim.staticExtent = K;
+                          stripDim.dynamicOffset = t0;
+                          stripDim.tileSize = S;
+                          stripDim.tileAlignment = S;
+                          orderedTailGuards.push_back(
+                              PendingOrderedTailGuard{tailIf, stripDim});
+                        }
                         sync("io");
                         slotEnv[bop.getResult(0)] = kSlot;
                         panelFeat[bop.getResult(0)] = kFeat;
@@ -2283,6 +2301,21 @@ struct OrderedLowerer {
       return llvm::consumeError(abiJson.takeError()), failure();
 
     space.erase();
+
+    if (!orderedTailGuards.empty()) {
+      compilerinfra::IntegerRangeContext tailRanges(fn.getOperation());
+      for (auto &tg : orderedTailGuards) {
+        compilerinfra::TailDimension dims[1] = {tg.dim};
+        if (compilerinfra::proveTailAccess(dims, &tailRanges).kind ==
+            compilerinfra::TailKind::ExactInBounds) {
+          Value cond = tg.guardIf->getOperand(0);
+          tg.guardIf->erase();
+          if (cond.use_empty())
+            if (Operation *def = cond.getDefiningOp())
+              def->erase();
+        }
+      }
+    }
 
     llvm::SmallVector<char> metadata;
     llvm::raw_svector_ostream os(metadata);

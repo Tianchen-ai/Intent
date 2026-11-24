@@ -505,6 +505,92 @@ void bind(Unit &u) {
   panelCost(u);
   rowContracts(u);
   addressOptimization(u);
+  auto addParity = [&](ParityDeclaration p) {
+    u.parity.push_back({std::move(p), COMPILERINFRA_SOURCE});
+  };
+  addParity({"levels/execution/block::matrix-contraction",
+             "*",
+             ParityStatus::Implemented,
+             {"levels/execution/block::contraction",
+              "levels/storage/dsa::panel-supply", "exits/bangc::wram-conv-f16",
+              "exits/bangc::wram-conv-bf16", "exits/bangc::wram-conv-i8",
+              "exits/bangc::bf16-ieee-dot"},
+             "MLU370 WRAM 64-channel matrix-engine contraction with NRAM IEEE BF16 guard/fallback"});
+  addParity({"levels/execution/block::block-scaled-fp8-contraction",
+             "*",
+             ParityStatus::Unsupported,
+             {},
+             "MLU370 (mtp_372) lacks native MX8/E8M0 block-scaled FP8 matrix instructions; BANG C decodes E4M3FN and E8M0 on NRAM"});
+  addParity({"levels/execution/block::q4k-packed-contraction",
+             "*",
+             ParityStatus::Implemented,
+             {"levels/execution/block::contraction",
+              "levels/storage/dsa::panel-supply", "exits/bangc::wram-conv-i8",
+              "exits/bangc::reduce32-sum"},
+             "GGUF Q4_K x Q8_K super-block subgroup unpacking with FP32 scale accumulation on NRAM"});
+  addParity({"levels/execution/block::ordered-owner-pairing",
+             "*",
+             ParityStatus::Implemented,
+             {"levels/execution/block::ordered-owners",
+              "levels/storage/dsa::ordered-supply",
+              "exits/bangc::wram-conv-f16", "exits/bangc::wram-conv-bf16",
+              "exits/bangc::nram-sumpool"},
+             "DSA cooperative panel-fold QK/PV WRAM contraction and packed owner streams"});
+  addParity({"levels/execution/block::row-reduction-and-scan",
+             "*",
+             ParityStatus::Implemented,
+             {"levels/execution/block::structure",
+              "levels/storage/dsa::supply", "exits/bangc::row-reduce",
+              "exits/bangc::inclusive-scan", "exits/bangc::moments-reduce",
+              "exits/bangc::moments-merge"},
+             "NRAM sumpool/maxpool row reductions, Hillis-Steele inclusive scan, and binary-tree Welford moments"});
+  addParity({"levels/execution/block::shared-private-histogram",
+             "*",
+             ParityStatus::Implemented,
+             {"levels/execution/block::structure",
+              "levels/storage/dsa::supply"},
+             "Per-core NRAM private bin histogram accumulation before global merge"});
+  addParity({"levels/execution/block::counter-philox-rng",
+             "*",
+             ParityStatus::Implemented,
+             {"levels/execution/block::structure",
+              "exits/bangc::philox4x32-linear",
+              "exits/bangc::philox4x32-element"},
+             "Vectorized NRAM 10-round Philox-4x32 uniform random generator"});
+  addParity({"levels/execution/block::bulk-tma-transfer",
+             "*",
+             ParityStatus::Unsupported,
+             {},
+             "TMA tensor descriptor engines are NVIDIA Hopper/Blackwell specific; MLU370 uses explicit 1D/2D __memcpy/__memcpy_async DMA"});
+  addParity({"levels/execution/block::narrow-i32-addressing",
+             "*",
+             ParityStatus::Implemented,
+             {"exits/bangc::narrow-proven-addresses"},
+             "Statically proven 32-bit signed coordinate*stride address narrowing via CompilerInfra proveNarrowAddress"});
+  addParity({"levels/storage/dsa::double-buffered-dma",
+             "*",
+             ParityStatus::Implemented,
+             {"levels/storage/dsa::supply", "exits/bangc::dma"},
+             "Double-buffered __memcpy_async NRAM/GDRAM input prefetch and writeback overlap"});
+  addParity({"levels/storage/dsa::wram-filter-staging",
+             "*",
+             ParityStatus::Implemented,
+             {"levels/storage/dsa::panel-supply", "exits/bangc::nram-transpose",
+              "exits/bangc::wram-conv-f16", "exits/bangc::wram-conv-bf16",
+              "exits/bangc::wram-conv-i8"},
+             "Explicit NRAM transpose and 64-channel WRAM filter bank staging"});
+  addParity({"levels/storage/dsa::certified-ieee-math",
+             "*",
+             ParityStatus::Implemented,
+             {"exits/bangc::ieee-div-rn", "exits/bangc::ieee-sqrt-rn",
+              "exits/bangc::certified-half-quotient",
+              "exits/bangc::validated-exp", "exits/bangc::validated-exp2"},
+             "Unconditional symmetric endpoint-certified 0-ULP f32 div/sqrt, f16 quotient, and validated exp/exp2"});
+  addParity({"levels/storage/dsa::hardware-vector-gather-dma",
+             "*",
+             ParityStatus::Unsupported,
+             {},
+             "MLU370 (mtp_372) lacks 64-bit hardware vector gather DMA; indexed_dma stages i64 indices into NRAM and issues per-member async DMA"});
   u.dialects = [](DialectRegistry &r) {
     r.insert<intentdsl::bangc_src::BangcSrcDialect, scf::SCFDialect,
              arith::ArithDialect>();

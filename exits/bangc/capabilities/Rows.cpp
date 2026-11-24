@@ -17,6 +17,8 @@ static int64_t matrixPrivateBytes(int64_t rows, int64_t columns, int64_t depth,
 llvm::Expected<compilerinfra::TargetProfile>
 capabilities(const llvm::json::Object &opts) {
   compilerinfra::TargetProfile profile;
+  profile.services.calibrationProfile =
+      opts.getString("calibration").value_or("mlu370").str();
   if (opts.empty())
     return profile;
   auto isa = opts.getInteger("isa"),

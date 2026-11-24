@@ -177,6 +177,7 @@ LogicalResult verifyCallableRows(ModuleOp m, const TargetProfile &profile) {
     return fn.emitError(
         "BANG C package disagrees with verified ABI or specialization rows");
 
+  compilerinfra::IntegerRangeContext rangeCtx(fn.getOperation());
   std::set<std::string> declaredResources, requiredResources;
   bool walkFailed = m.walk([&](Operation *op) {
                        auto ns = op->getName().getDialectNamespace();
@@ -192,7 +193,7 @@ LogicalResult verifyCallableRows(ModuleOp m, const TargetProfile &profile) {
                          if (!bits ||
                              (bits.getInt() != 64 &&
                               (bits.getInt() != 32 ||
-                               !canNarrowAddress(*op, fn)))) {
+                               !canNarrowAddress(*op, fn, &rangeCtx)))) {
                            op->emitError("address requires i64 or proven i32 "
                                          "signed bounds");
                            return WalkResult::interrupt();
@@ -271,6 +272,7 @@ LogicalResult verifyCallableMatrix(ModuleOp m, const TargetProfile &profile) {
   auto ms = profile.services.get<intentdsl::dsa::MatrixStorage>();
   int64_t wramLimit = ms ? ms->wramBytes : 0;
 
+  compilerinfra::IntegerRangeContext rangeCtx(fn.getOperation());
   int64_t totalNram = 0, totalWram = 0;
   std::set<std::string> declaredResources, requiredResources;
   bool walkFailed = m.walk([&](Operation *op) {
@@ -311,7 +313,7 @@ LogicalResult verifyCallableMatrix(ModuleOp m, const TargetProfile &profile) {
                          if (!bits ||
                              (bits.getInt() != 64 &&
                               (bits.getInt() != 32 ||
-                               !canNarrowAddress(*op, fn)))) {
+                               !canNarrowAddress(*op, fn, &rangeCtx)))) {
                            op->emitError("address requires i64 or proven i32 "
                                          "signed bounds");
                            return WalkResult::interrupt();
@@ -424,6 +426,7 @@ LogicalResult verifyCallableOrdered(ModuleOp m, const TargetProfile &profile) {
   auto ms = profile.services.get<intentdsl::dsa::MatrixStorage>();
   int64_t wramLimit = ms ? ms->wramBytes : 0;
 
+  compilerinfra::IntegerRangeContext rangeCtx(fn.getOperation());
   int64_t totalNram = 0, totalWram = 0;
   std::set<std::string> declaredResources, requiredResources;
   bool walkFailed = m.walk([&](Operation *op) {
@@ -464,7 +467,7 @@ LogicalResult verifyCallableOrdered(ModuleOp m, const TargetProfile &profile) {
                          if (!bits ||
                              (bits.getInt() != 64 &&
                               (bits.getInt() != 32 ||
-                               !canNarrowAddress(*op, fn)))) {
+                               !canNarrowAddress(*op, fn, &rangeCtx)))) {
                            op->emitError("address requires i64 or proven i32 "
                                          "signed bounds");
                            return WalkResult::interrupt();

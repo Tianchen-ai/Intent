@@ -33,6 +33,11 @@ struct MatrixLowerer {
   llvm::DenseMap<int32_t, Value> constI32Map;
   Value symGrid, symTaskId, symTaskDim, symBM, symBN, symBK;
   SmallVector<std::string> argDtypes;
+  struct PendingTailGuard {
+    Operation *guardIf;
+    SmallVector<compilerinfra::TailDimension, 2> dims;
+  };
+  SmallVector<PendingTailGuard, 8> tailGuards;
 
   MatrixLowerer(func::FuncOp f, const TargetProfile &prof)
       : fn(f), profile(prof), p(f), b(f.getContext()), loc(f.getLoc()) {
@@ -233,8 +238,8 @@ struct MatrixLowerer {
         });
   }
 
-  void ifThen(Value cond, llvm::function_ref<void()> thenFn) {
-    b.create<scf::IfOp>(loc, cond, [&](OpBuilder &nb, Location l) {
+  scf::IfOp ifThen(Value cond, llvm::function_ref<void()> thenFn) {
+    return b.create<scf::IfOp>(loc, cond, [&](OpBuilder &nb, Location l) {
       OpBuilder::InsertionGuard g(b);
       b.restoreInsertionPoint(nb.saveInsertionPoint());
       thenFn();
@@ -944,7 +949,19 @@ struct MatrixLowerer {
           loc,
           b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, nc, cI64(bn)),
           b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, nk, cI64(bk)));
-      ifThen(partial, [&]() { fillVec(trans, cI64(bk * bn), zeroElem); });
+      auto guardIf =
+          ifThen(partial, [&]() { fillVec(trans, cI64(bk * bn), zeroElem); });
+      compilerinfra::TailDimension dimC, dimK;
+      dimC.staticExtent = p.shape[1];
+      dimC.dynamicOffset = c;
+      dimC.tileSize = bn;
+      dimC.tileAlignment = bn;
+      dimK.staticExtent = p.shape[2];
+      dimK.dynamicOffset = kk;
+      dimK.tileSize = bk;
+      dimK.tileAlignment = bk;
+      tailGuards.push_back(
+          PendingTailGuard{guardIf.getOperation(), {dimC, dimK}});
       Value base = termPtr(v, kAx, bAx, c, kk, gVal);
       ifThenElse(
           b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, nc, cI64(1)),
@@ -967,7 +984,21 @@ struct MatrixLowerer {
                                 cI64(outerCap)),
         b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, inner,
                                 cI64(pitch)));
-    ifThen(partial, [&]() { fillVec(buf, cI64(outerCap * pitch), zeroElem); });
+    auto guardIf = ifThen(
+        partial, [&]() { fillVec(buf, cI64(outerCap * pitch), zeroElem); });
+    if (!lhs || (!p.routed() && p.dot.getNumOperands() <= 2)) {
+      compilerinfra::TailDimension dimOut, dimIn;
+      dimOut.staticExtent = lhs ? p.shape[0] : p.shape[2];
+      dimOut.dynamicOffset = lhs ? r : kk;
+      dimOut.tileSize = outerCap;
+      dimOut.tileAlignment = outerCap;
+      dimIn.staticExtent = lhs ? p.shape[2] : p.shape[1];
+      dimIn.dynamicOffset = lhs ? kk : c;
+      dimIn.tileSize = pitch;
+      dimIn.tileAlignment = pitch;
+      tailGuards.push_back(
+          PendingTailGuard{guardIf.getOperation(), {dimOut, dimIn}});
+    }
 
     if (mode == "routed-row-dma") {
       forLoop(cI64(0), nr, cI64(1), [&](Value i) {
@@ -1476,6 +1507,20 @@ struct MatrixLowerer {
       return llvm::consumeError(abiJson.takeError()), failure();
 
     p.domain.erase();
+
+    if (!tailGuards.empty()) {
+      compilerinfra::IntegerRangeContext tailRanges(fn.getOperation());
+      for (auto &tg : tailGuards) {
+        if (compilerinfra::proveTailAccess(tg.dims, &tailRanges).kind ==
+            compilerinfra::TailKind::ExactInBounds) {
+          Value cond = tg.guardIf->getOperand(0);
+          tg.guardIf->erase();
+          if (cond.use_empty())
+            if (Operation *def = cond.getDefiningOp())
+              def->erase();
+        }
+      }
+    }
 
     llvm::SmallVector<char> metadata;
     llvm::raw_svector_ostream os(metadata);

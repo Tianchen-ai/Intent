@@ -1,5 +1,8 @@
 #include "intentdsl/levels/storage/dsa/ir/Owners.h"
+#include "compilerinfra/Proofs.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
+#include "mlir/Analysis/AliasAnalysis.h"
+#include "mlir/Analysis/AliasAnalysis/LocalAliasAnalysis.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -1041,6 +1044,103 @@ std::optional<PanelFoldSupply> panelFoldSupply(
 
   if (!hasContraction || !halfTy || wramBytes <= 0 || wramBytes > ms->wramBytes)
     return {};
+
+  // Verify via CompilerInfra proveValueReplay that every resident owner_slice
+  // and replayed strip view has no intervening aliasing writes across passes.
+  {
+    auto abiSpec = fn->getAttrOfType<StringAttr>("kir.abi");
+    if (!abiSpec)
+      return {};
+    auto abiParsed = llvm::json::parse(abiSpec.getValue());
+    if (!abiParsed || !abiParsed->getAsArray() ||
+        abiParsed->getAsArray()->size() != fn.getNumArguments()) {
+      if (!abiParsed)
+        llvm::consumeError(abiParsed.takeError());
+      return {};
+    }
+    const auto &abiArr = *abiParsed->getAsArray();
+    struct PublicAbiAliasModel {
+      Block *entryBlock;
+      const llvm::json::Array &abi;
+      bool isDisjoint(Value a, Value b) const {
+        auto ba = dyn_cast<BlockArgument>(a), bbArg = dyn_cast<BlockArgument>(b);
+        if (!ba || !bbArg || ba.getOwner() != entryBlock ||
+            bbArg.getOwner() != entryBlock)
+          return false;
+        if (ba == bbArg)
+          return false;
+        auto *da = abi[ba.getArgNumber()].getAsObject();
+        auto *db = abi[bbArg.getArgNumber()].getAsObject();
+        if (!da || !db)
+          return false;
+        auto dirA = da->getString("direction").value_or("");
+        auto dirB = db->getString("direction").value_or("");
+        // Distinct In and Out public buffers never alias; InOut may alias.
+        return (dirA == "In" && dirB == "Out") ||
+               (dirA == "Out" && dirB == "In") ||
+               (dirA == "In" && dirB == "In");
+      }
+      AliasResult alias(Value lhs, Value rhs) {
+        if (lhs == rhs)
+          return AliasResult::MustAlias;
+        if (isDisjoint(lhs, rhs))
+          return AliasResult::NoAlias;
+        return AliasResult::MayAlias;
+      }
+      ModRefResult getModRef(Operation *op, Value location) {
+        auto iface = dyn_cast<MemoryEffectOpInterface>(op);
+        if (!iface)
+          return op->hasTrait<OpTrait::HasRecursiveMemoryEffects>()
+                     ? ModRefResult::getNoModRef()
+                     : ModRefResult::getModAndRef();
+        SmallVector<MemoryEffects::EffectInstance, 4> effects;
+        iface.getEffects(effects);
+        ModRefResult res = ModRefResult::getNoModRef();
+        for (const auto &e : effects) {
+          Value v = e.getValue();
+          if (!v || !isDisjoint(v, location)) {
+            if (isa<MemoryEffects::Write, MemoryEffects::Free,
+                    MemoryEffects::Allocate>(e.getEffect()))
+              res = res.merge(ModRefResult::getMod());
+            if (isa<MemoryEffects::Read>(e.getEffect()))
+              res = res.merge(ModRefResult::getRef());
+          }
+        }
+        return res;
+      }
+    };
+    AliasAnalysis aa(&space);
+    aa.addAnalysisImplementation(LocalAliasAnalysis());
+    aa.addAnalysisImplementation(PublicAbiAliasModel{&fn.front(), abiArr});
+
+    for (const auto &rs : roleSpecs) {
+      if (rs.role != "owner_slice")
+        continue;
+      Value view = rs.op->getOperand(0);
+      Operation *lastTopUse = nullptr;
+      SmallVector<Value, 8> wl = {rs.op->getResult(0)};
+      llvm::DenseSet<Value> seen = {rs.op->getResult(0)};
+      while (!wl.empty()) {
+        Value cur = wl.pop_back_val();
+        for (Operation *u : cur.getUsers()) {
+          Operation *top = u;
+          while (top->getBlock() != &bb && top->getParentOp())
+            top = top->getParentOp();
+          if (top->getBlock() == &bb && top != rs.op &&
+              (!lastTopUse || lastTopUse->isBeforeInBlock(top)))
+            lastTopUse = top;
+          if (u->getBlock() == &bb)
+            for (Value r : u->getResults())
+              if (seen.insert(r).second)
+                wl.push_back(r);
+        }
+      }
+      if (lastTopUse &&
+          !compilerinfra::proveValueReplay(rs.op, lastTopUse, {view}, &aa)
+               .proven)
+        return {};
+    }
+  }
 
   // Assign real NRAM fragment slots by interval liveness over actual SSA uses.
   llvm::DenseMap<Operation *, unsigned> startOrd, endOrd;
