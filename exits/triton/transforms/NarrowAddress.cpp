@@ -101,6 +101,12 @@ bool canNarrowAddressWithContext(
   auto indices = op.getOperands().drop_front();
   if (!strides || strides.size() != indices.size())
     return false;
+  if (llvm::none_of(indices, [](Value v) { return isa<ShapedType>(v.getType()); })) {
+    compilerinfra::AddressProofOptions opts;
+    opts.targetBitwidth = 32;
+    opts.isSigned = true;
+    return compilerinfra::proveNarrowAddress(&op, opts, &ranges).proven;
+  }
   llvm::DenseMap<Value, Range> memo;
   Interval sum{0, 0};
   for (auto [v, stride] : llvm::zip(indices, strides.asArrayRef())) {

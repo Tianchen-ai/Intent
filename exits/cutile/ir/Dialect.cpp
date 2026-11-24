@@ -221,6 +221,140 @@ struct CutileSliceTiledAccessModel
     return success();
   }
 };
+
+struct CutileTileAxisRangeModel
+    : public InferIntRangeInterface::ExternalModel<CutileTileAxisRangeModel,
+                                                   intentdsl::cutile::TileAxis> {
+  void inferResultRanges(Operation *op, ArrayRef<ConstantIntRanges> argRanges,
+                         SetIntRangeFn setResultRanges) const {
+    intrange::detail::defaultInferResultRangesFromOptional(
+        cast<InferIntRangeInterface>(op), argRanges, setResultRanges);
+  }
+  void inferResultRangesFromOptional(Operation *op,
+                                     ArrayRef<IntegerValueRange>,
+                                     SetIntLatticeFn setResultRanges) const {
+    auto rt = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+    auto it = rt ? dyn_cast<IntegerType>(rt.getElementType()) : IntegerType{};
+    if (!rt || rt.getRank() != 1 || rt.getDimSize(0) <= 0 || !it ||
+        it.getWidth() == 0 || it.getWidth() > 64)
+      return;
+    unsigned bw = it.getWidth();
+    APInt lo(bw, 0), hi(bw, static_cast<uint64_t>(rt.getDimSize(0) - 1));
+    setResultRanges(op->getResult(0),
+                    ConstantIntRanges::fromSigned(lo, hi).intersection(
+                        ConstantIntRanges::fromUnsigned(lo, hi)));
+  }
+};
+
+struct CutileTileAddressModel
+    : public compilerinfra::AddressOpInterface::ExternalModel<
+          CutileTileAddressModel, intentdsl::cutile::TileAddr> {
+  LogicalResult
+  getLinearAddress(Operation *op,
+                   compilerinfra::LinearAddressDescriptor &out) const {
+    auto strides = op->getAttrOfType<DenseI64ArrayAttr>("strides");
+    auto coords = op->getOperands().drop_front();
+    if (op->getNumOperands() < 1 || !strides ||
+        strides.size() != coords.size())
+      return failure();
+    out = compilerinfra::LinearAddressDescriptor{};
+    out.baseContainer = op->getOperand(0);
+    out.coordinates.assign(coords.begin(), coords.end());
+    out.staticStrides.assign(strides.asArrayRef().begin(),
+                             strides.asArrayRef().end());
+    out.constantOffset = 0;
+    return success();
+  }
+};
+
+struct CutileStripeLoopIndexedRegionModel
+    : public compilerinfra::IndexedRegionOpInterface::ExternalModel<
+          CutileStripeLoopIndexedRegionModel, intentdsl::cutile::StripeLoop> {
+  LogicalResult getRegionArgBounds(Operation *op, BlockArgument arg,
+                                   compilerinfra::RegionIndexBounds &out) const {
+    if (op->getNumRegions() != 1 || !op->getRegion(0).hasOneBlock() ||
+        arg.getOwner() != &op->getRegion(0).front() || arg.getArgNumber() != 0)
+      return failure();
+    auto count = op->getAttrOfType<IntegerAttr>("count");
+    if (!count || count.getInt() <= 0)
+      return failure();
+    out = compilerinfra::RegionIndexBounds{};
+    out.staticLower = 0;
+    out.staticUpperExclusive = count.getInt();
+    out.staticStep = 1;
+    return success();
+  }
+};
+
+struct CutileBinPanelsIndexedRegionModel
+    : public compilerinfra::IndexedRegionOpInterface::ExternalModel<
+          CutileBinPanelsIndexedRegionModel, intentdsl::cutile::BinPanels> {
+  LogicalResult getRegionArgBounds(Operation *op, BlockArgument arg,
+                                   compilerinfra::RegionIndexBounds &out) const {
+    if (op->getNumRegions() != 1 || !op->getRegion(0).hasOneBlock() ||
+        arg.getOwner() != &op->getRegion(0).front() ||
+        arg.getArgNumber() != 0 || op->getNumOperands() != 1)
+      return failure();
+    out = compilerinfra::RegionIndexBounds{};
+    out.staticLower = 0;
+    out.dynamicUpperExclusive = op->getOperand(0);
+    out.staticStep = 1;
+    return success();
+  }
+};
+
+struct CutilePanelFoldIndexedRegionModel
+    : public compilerinfra::IndexedRegionOpInterface::ExternalModel<
+          CutilePanelFoldIndexedRegionModel,
+          intentdsl::cutile::NativePanelsFold> {
+  LogicalResult getRegionArgBounds(Operation *op, BlockArgument arg,
+                                   compilerinfra::RegionIndexBounds &out) const {
+    if (op->getNumRegions() != 1 || !op->getRegion(0).hasOneBlock() ||
+        arg.getOwner() != &op->getRegion(0).front() ||
+        arg.getArgNumber() != 0 ||
+        !isa<IndexType, IntegerType>(arg.getType()))
+      return failure();
+    auto bound = op->getAttrOfType<IntegerAttr>("bound");
+    auto step = op->getAttrOfType<IntegerAttr>("step");
+    if (!bound || !step || bound.getInt() <= 0 || step.getInt() <= 0)
+      return failure();
+    out = compilerinfra::RegionIndexBounds{};
+    out.staticLower = 0;
+    out.staticUpperExclusive = bound.getInt();
+    out.staticStep = step.getInt();
+    return success();
+  }
+};
+
+struct CutileMemberLoadAccessModel
+    : public compilerinfra::TiledAccessOpInterface::ExternalModel<
+          CutileMemberLoadAccessModel, intentdsl::cutile::MemberLoad> {
+  LogicalResult
+  getAccessedAxes(Operation *op,
+                  SmallVectorImpl<compilerinfra::AccessAxis> &axes) const {
+    if (op->getNumOperands() < 2)
+      return failure();
+    Value view = op->getOperand(0);
+    auto mt = dyn_cast<MemRefType>(view.getType());
+    auto coords = op->getOperands().drop_front(1);
+    if (!mt || coords.size() != static_cast<size_t>(mt.getRank()))
+      return failure();
+    for (auto [d, c] : llvm::enumerate(coords)) {
+      if (!isa<IndexType, IntegerType>(c.getType()))
+        return failure();
+      compilerinfra::AccessAxis ax;
+      ax.container = view;
+      ax.containerDim = static_cast<unsigned>(d);
+      ax.staticExtent =
+          resolveCutileViewExtent(op, view, static_cast<int64_t>(d));
+      ax.coord = c;
+      ax.tileSize = 1;
+      ax.step = 1;
+      axes.push_back(ax);
+    }
+    return success();
+  }
+};
 } // namespace
 
 void intentdsl::cutile::TileSource::initialize() {
@@ -242,12 +376,18 @@ void intentdsl::cutile::TileSource::initialize() {
       *ctx);
   Uniform::attachInterface<CutilePureContractModel<Uniform>>(*ctx);
   TilePid::attachInterface<CutileTilePidRangeModel>(*ctx);
+  TileAxis::attachInterface<CutileTileAxisRangeModel>(*ctx);
   TileRead::attachInterface<CutileTileReadRangeModel>(*ctx);
+  TileAddr::attachInterface<CutileTileAddressModel>(*ctx);
   OrderedOwnerSpace::attachInterface<CutileOwnerSpaceIndexedRegionModel>(*ctx);
+  StripeLoop::attachInterface<CutileStripeLoopIndexedRegionModel>(*ctx);
+  BinPanels::attachInterface<CutileBinPanelsIndexedRegionModel>(*ctx);
+  NativePanelsFold::attachInterface<CutilePanelFoldIndexedRegionModel>(*ctx);
   OrderedSliceRead::attachInterface<
       CutileSliceTiledAccessModel<OrderedSliceRead, false>>(*ctx);
   OrderedSliceWrite::attachInterface<
       CutileSliceTiledAccessModel<OrderedSliceWrite, true>>(*ctx);
+  MemberLoad::attachInterface<CutileMemberLoadAccessModel>(*ctx);
 }
 
 namespace CI_UNIT_NAMESPACE {

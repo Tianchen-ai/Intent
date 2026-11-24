@@ -302,6 +302,142 @@ struct TritonDescTiledAccessModel
     return success();
   }
 };
+
+struct TritonTileAxisRangeModel
+    : public InferIntRangeInterface::ExternalModel<TritonTileAxisRangeModel,
+                                                   intentdsl::itsrc::TileAxis> {
+  void inferResultRanges(Operation *op, ArrayRef<ConstantIntRanges> argRanges,
+                         SetIntRangeFn setResultRanges) const {
+    intrange::detail::defaultInferResultRangesFromOptional(
+        cast<InferIntRangeInterface>(op), argRanges, setResultRanges);
+  }
+  void inferResultRangesFromOptional(Operation *op,
+                                     ArrayRef<IntegerValueRange>,
+                                     SetIntLatticeFn setResultRanges) const {
+    auto rt = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+    auto it = rt ? dyn_cast<IntegerType>(rt.getElementType()) : IntegerType{};
+    if (!rt || rt.getRank() != 1 || rt.getDimSize(0) <= 0 || !it ||
+        it.getWidth() == 0 || it.getWidth() > 64)
+      return;
+    unsigned bw = it.getWidth();
+    APInt lo(bw, 0), hi(bw, static_cast<uint64_t>(rt.getDimSize(0) - 1));
+    setResultRanges(op->getResult(0),
+                    ConstantIntRanges::fromSigned(lo, hi).intersection(
+                        ConstantIntRanges::fromUnsigned(lo, hi)));
+  }
+};
+
+struct TritonTileAddressModel
+    : public compilerinfra::AddressOpInterface::ExternalModel<
+          TritonTileAddressModel, intentdsl::itsrc::TileAddr> {
+  LogicalResult
+  getLinearAddress(Operation *op,
+                   compilerinfra::LinearAddressDescriptor &out) const {
+    auto strides = op->getAttrOfType<DenseI64ArrayAttr>("strides");
+    auto coords = op->getOperands().drop_front();
+    if (op->getNumOperands() < 1 || !strides ||
+        strides.size() != coords.size())
+      return failure();
+    out = compilerinfra::LinearAddressDescriptor{};
+    out.baseContainer = op->getOperand(0);
+    out.coordinates.assign(coords.begin(), coords.end());
+    out.staticStrides.assign(strides.asArrayRef().begin(),
+                             strides.asArrayRef().end());
+    out.constantOffset = 0;
+    return success();
+  }
+};
+
+struct TritonStripeLoopIndexedRegionModel
+    : public compilerinfra::IndexedRegionOpInterface::ExternalModel<
+          TritonStripeLoopIndexedRegionModel, intentdsl::itsrc::stripe_loop> {
+  LogicalResult getRegionArgBounds(Operation *op, BlockArgument arg,
+                                   compilerinfra::RegionIndexBounds &out) const {
+    if (op->getNumRegions() != 1 || !op->getRegion(0).hasOneBlock() ||
+        arg.getOwner() != &op->getRegion(0).front() || arg.getArgNumber() != 0)
+      return failure();
+    auto count = op->getAttrOfType<IntegerAttr>("count");
+    if (!count || count.getInt() <= 0)
+      return failure();
+    out = compilerinfra::RegionIndexBounds{};
+    out.staticLower = 0;
+    out.staticUpperExclusive = count.getInt();
+    out.staticStep = 1;
+    return success();
+  }
+};
+
+struct TritonBinPanelsIndexedRegionModel
+    : public compilerinfra::IndexedRegionOpInterface::ExternalModel<
+          TritonBinPanelsIndexedRegionModel, intentdsl::itsrc::BinPanels> {
+  LogicalResult getRegionArgBounds(Operation *op, BlockArgument arg,
+                                   compilerinfra::RegionIndexBounds &out) const {
+    if (op->getNumRegions() != 1 || !op->getRegion(0).hasOneBlock() ||
+        arg.getOwner() != &op->getRegion(0).front() || arg.getArgNumber() != 0)
+      return failure();
+    auto count = op->getAttrOfType<IntegerAttr>("count");
+    if (!count || count.getInt() <= 0)
+      return failure();
+    out = compilerinfra::RegionIndexBounds{};
+    out.staticLower = 0;
+    out.staticUpperExclusive = count.getInt();
+    out.staticStep = 1;
+    return success();
+  }
+};
+
+struct TritonPanelFoldIndexedRegionModel
+    : public compilerinfra::IndexedRegionOpInterface::ExternalModel<
+          TritonPanelFoldIndexedRegionModel,
+          intentdsl::itsrc::NativePanelsFold> {
+  LogicalResult getRegionArgBounds(Operation *op, BlockArgument arg,
+                                   compilerinfra::RegionIndexBounds &out) const {
+    if (op->getNumRegions() != 1 || !op->getRegion(0).hasOneBlock() ||
+        arg.getOwner() != &op->getRegion(0).front() ||
+        arg.getArgNumber() != 0 ||
+        !isa<IndexType, IntegerType>(arg.getType()))
+      return failure();
+    auto bound = op->getAttrOfType<IntegerAttr>("bound");
+    auto step = op->getAttrOfType<IntegerAttr>("step");
+    if (!bound || !step || bound.getInt() <= 0 || step.getInt() <= 0)
+      return failure();
+    out = compilerinfra::RegionIndexBounds{};
+    out.staticLower = 0;
+    out.staticUpperExclusive = bound.getInt();
+    out.staticStep = step.getInt();
+    return success();
+  }
+};
+
+struct TritonMemberLoadAccessModel
+    : public compilerinfra::TiledAccessOpInterface::ExternalModel<
+          TritonMemberLoadAccessModel, intentdsl::itsrc::Dialect_MemberLoad> {
+  LogicalResult
+  getAccessedAxes(Operation *op,
+                  SmallVectorImpl<compilerinfra::AccessAxis> &axes) const {
+    if (op->getNumOperands() < 2)
+      return failure();
+    Value view = op->getOperand(0);
+    auto mt = dyn_cast<MemRefType>(view.getType());
+    auto coords = op->getOperands().drop_front(1);
+    if (!mt || coords.size() != static_cast<size_t>(mt.getRank()))
+      return failure();
+    for (auto [d, c] : llvm::enumerate(coords)) {
+      if (!isa<IndexType, IntegerType>(c.getType()))
+        return failure();
+      compilerinfra::AccessAxis ax;
+      ax.container = view;
+      ax.containerDim = static_cast<unsigned>(d);
+      ax.staticExtent =
+          resolveTritonViewExtent(op, view, static_cast<int64_t>(d));
+      ax.coord = c;
+      ax.tileSize = 1;
+      ax.step = 1;
+      axes.push_back(ax);
+    }
+    return success();
+  }
+};
 } // namespace
 
 void intentdsl::itsrc::ItsrcDialect::initialize() {
@@ -323,12 +459,18 @@ void intentdsl::itsrc::ItsrcDialect::initialize() {
   Dialect_summary_mergeOp::attachInterface<
       TritonPureContractModel<Dialect_summary_mergeOp>>(*ctx);
   TilePid::attachInterface<TritonTilePidRangeModel>(*ctx);
+  TileAxis::attachInterface<TritonTileAxisRangeModel>(*ctx);
   TileRead::attachInterface<TritonTileReadRangeModel>(*ctx);
+  TileAddr::attachInterface<TritonTileAddressModel>(*ctx);
   OrderedOwnerSpace::attachInterface<TritonOwnerSpaceIndexedRegionModel>(*ctx);
+  stripe_loop::attachInterface<TritonStripeLoopIndexedRegionModel>(*ctx);
+  BinPanels::attachInterface<TritonBinPanelsIndexedRegionModel>(*ctx);
+  NativePanelsFold::attachInterface<TritonPanelFoldIndexedRegionModel>(*ctx);
   OrderedSliceRead::attachInterface<
       TritonSliceTiledAccessModel<OrderedSliceRead, false>>(*ctx);
   OrderedSliceWrite::attachInterface<
       TritonSliceTiledAccessModel<OrderedSliceWrite, true>>(*ctx);
   DescRead::attachInterface<TritonDescTiledAccessModel<DescRead, false>>(*ctx);
   DescWrite::attachInterface<TritonDescTiledAccessModel<DescWrite, true>>(*ctx);
+  Dialect_MemberLoad::attachInterface<TritonMemberLoadAccessModel>(*ctx);
 }

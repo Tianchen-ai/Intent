@@ -137,6 +137,78 @@ struct SliceTiledAccessModel
     return success();
   }
 };
+
+struct StripeLoopIndexedRegionModel
+    : public compilerinfra::IndexedRegionOpInterface::ExternalModel<
+          StripeLoopIndexedRegionModel, stripe_loop> {
+  LogicalResult getRegionArgBounds(Operation *op, BlockArgument arg,
+                                   compilerinfra::RegionIndexBounds &out) const {
+    if (op->getNumRegions() != 1 || !op->getRegion(0).hasOneBlock() ||
+        arg.getOwner() != &op->getRegion(0).front() || arg.getArgNumber() != 0)
+      return failure();
+    auto count = op->getAttrOfType<IntegerAttr>("count");
+    if (!count || count.getInt() <= 0)
+      return failure();
+    out = compilerinfra::RegionIndexBounds{};
+    out.staticLower = 0;
+    out.staticUpperExclusive = count.getInt();
+    out.staticStep = 1;
+    return success();
+  }
+};
+
+struct PanelFoldIndexedRegionModel
+    : public compilerinfra::IndexedRegionOpInterface::ExternalModel<
+          PanelFoldIndexedRegionModel, MatrixPanelFold> {
+  LogicalResult getRegionArgBounds(Operation *op, BlockArgument arg,
+                                   compilerinfra::RegionIndexBounds &out) const {
+    if (op->getNumRegions() != 1 || !op->getRegion(0).hasOneBlock() ||
+        arg.getOwner() != &op->getRegion(0).front() ||
+        arg.getArgNumber() != 0 ||
+        !isa<IndexType, IntegerType>(arg.getType()))
+      return failure();
+    auto bound = op->getAttrOfType<IntegerAttr>("bound");
+    auto step = op->getAttrOfType<IntegerAttr>("step");
+    if (!bound || !step || bound.getInt() <= 0 || step.getInt() <= 0)
+      return failure();
+    out = compilerinfra::RegionIndexBounds{};
+    out.staticLower = 0;
+    out.staticUpperExclusive = bound.getInt();
+    out.staticStep = step.getInt();
+    return success();
+  }
+};
+
+template <typename ConcreteOp, bool IsWrite>
+struct ScalarElementAccessModel
+    : public compilerinfra::TiledAccessOpInterface::ExternalModel<
+          ScalarElementAccessModel<ConcreteOp, IsWrite>, ConcreteOp> {
+  LogicalResult
+  getAccessedAxes(Operation *op,
+                  SmallVectorImpl<compilerinfra::AccessAxis> &axes) const {
+    if (op->getNumOperands() < 2)
+      return failure();
+    Value view = op->getOperand(0);
+    auto mt = dyn_cast<MemRefType>(view.getType());
+    auto coords = IsWrite ? op->getOperands().drop_front(1).drop_back(1)
+                          : op->getOperands().drop_front(1);
+    if (!mt || coords.size() != static_cast<size_t>(mt.getRank()))
+      return failure();
+    for (auto [d, c] : llvm::enumerate(coords)) {
+      if (!isa<IndexType, IntegerType>(c.getType()))
+        return failure();
+      compilerinfra::AccessAxis ax;
+      ax.container = view;
+      ax.containerDim = static_cast<unsigned>(d);
+      ax.staticExtent = resolveViewExtent(op, view, static_cast<int64_t>(d));
+      ax.coord = c;
+      ax.tileSize = 1;
+      ax.step = 1;
+      axes.push_back(ax);
+    }
+    return success();
+  }
+};
 } // namespace
 
 void intentdsl::iblock::IblockDialect::initialize() {
@@ -146,8 +218,17 @@ void intentdsl::iblock::IblockDialect::initialize() {
       >();
   auto *ctx = getContext();
   OrderedOwnerSpace::attachInterface<OwnerSpaceIndexedRegionModel>(*ctx);
+  stripe_loop::attachInterface<StripeLoopIndexedRegionModel>(*ctx);
+  MatrixPanelFold::attachInterface<PanelFoldIndexedRegionModel>(*ctx);
   OrderedSliceRead::attachInterface<
       SliceTiledAccessModel<OrderedSliceRead, false>>(*ctx);
   OrderedSliceWrite::attachInterface<
       SliceTiledAccessModel<OrderedSliceWrite, true>>(*ctx);
+  read::attachInterface<ScalarElementAccessModel<read, false>>(*ctx);
+  OwnerReadOp::attachInterface<ScalarElementAccessModel<OwnerReadOp, false>>(
+      *ctx);
+  OwnerWriteOp::attachInterface<ScalarElementAccessModel<OwnerWriteOp, true>>(
+      *ctx);
+  Dialect_MemberLoad::attachInterface<
+      ScalarElementAccessModel<Dialect_MemberLoad, false>>(*ctx);
 }

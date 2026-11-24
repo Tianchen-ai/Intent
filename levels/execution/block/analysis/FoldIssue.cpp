@@ -128,25 +128,37 @@ bool fullFoldPanels(scf::ForOp loop, const CallFacts &facts, int64_t span) {
     return true;
   if (!hiCst || *hiCst < span)
     return false;
-  Operation *scope = loop->getParentOfType<func::FuncOp>();
-  if (!scope)
-    scope = loop->getParentOp();
-  compilerinfra::IntegerRangeContext ranges(scope);
-  compilerinfra::TailDimension dim;
-  dim.staticExtent = *hiCst;
-  dim.tileSize = span;
-  dim.step = 1;
-  dim.tileAlignment = span;
-  if (loCst) {
-    if (*loCst < 0 || *loCst > *hiCst - span || *loCst % span != 0)
-      return false;
-    int64_t numPanels = llvm::divideCeil(*hiCst - *loCst, span);
-    dim.staticOffset = *loCst + (numPanels - 1) * span;
-  } else {
-    dim.dynamicOffset = loop.getLowerBound();
+  if (loCst && (*loCst < 0 || *loCst > *hiCst - span))
+    return false;
+  auto *ctx = loop->getContext();
+  ctx->getOrLoadDialect<arith::ArithDialect>();
+  ctx->getOrLoadDialect<memref::MemRefDialect>();
+  ctx->getOrLoadDialect<scf::SCFDialect>();
+  OpBuilder b(loop);
+  Location loc = loop.getLoc();
+  auto buf = b.create<memref::AllocOp>(
+      loc, MemRefType::get({*hiCst}, b.getI8Type()));
+  Value loIdx = loop.getLowerBound();
+  Operation *loCast = nullptr;
+  if (!loIdx.getType().isIndex()) {
+    loIdx = b.create<arith::IndexCastOp>(loc, b.getIndexType(), loIdx);
+    loCast = loIdx.getDefiningOp();
   }
-  auto proof =
-      compilerinfra::proveTailAccess({dim}, ranges.valid() ? &ranges : nullptr);
+  Value cHi = b.create<arith::ConstantIndexOp>(loc, *hiCst);
+  Value cSpan = b.create<arith::ConstantIndexOp>(loc, span);
+  auto probeLoop = b.create<scf::ForOp>(loc, loIdx, cHi, cSpan);
+  b.setInsertionPointToStart(probeLoop.getBody());
+  auto sub = b.create<memref::SubViewOp>(
+      loc, buf, ArrayRef<OpFoldResult>{probeLoop.getInductionVar()},
+      ArrayRef<OpFoldResult>{b.getIndexAttr(span)},
+      ArrayRef<OpFoldResult>{b.getIndexAttr(1)});
+  auto proof = compilerinfra::proveTailAccess(sub.getOperation());
+  probeLoop.erase();
+  cSpan.getDefiningOp()->erase();
+  cHi.getDefiningOp()->erase();
+  if (loCast)
+    loCast->erase();
+  buf.erase();
   return proof.proven && proof.kind == compilerinfra::TailKind::ExactInBounds;
 }
 bool overlappingWindowBound(Value v, BlockArgument owner, scf::ForOp loop,

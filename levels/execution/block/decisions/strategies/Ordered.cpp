@@ -393,6 +393,9 @@ void registerOrdered(Unit &u) {
                         b.getI64IntegerAttr(*ag));
       }
     auto d = cast<DictionaryAttr>(a);
+    o->removeAttr("block.owner_choice");
+    o->setAttr("block.owner_tile", d.getAs<IntegerAttr>("width"));
+    o->setAttr("block.owners", b.getI64IntegerAttr(block::ownerCount(o, *f)));
     if (d.getAs<StringAttr>("memory") == "matrix-fold")
       o->setAttr("block.pair_axis", d.get("axis"));
     if (d.getAs<StringAttr>("memory") == "token" ||
@@ -453,9 +456,6 @@ void registerOrdered(Unit &u) {
     }
     if (auto group = d.getAs<IntegerAttr>("prefetch"))
       block::groupReads(fn, group.getInt());
-    o->removeAttr("block.owner_choice");
-    o->setAttr("block.owner_tile", d.getAs<IntegerAttr>("width"));
-    o->setAttr("block.owners", b.getI64IntegerAttr(block::ownerCount(o, *f)));
     return llvm::Error::success();
   };
   u.realizers.push_back({std::move(r), COMPILERINFRA_SOURCE});

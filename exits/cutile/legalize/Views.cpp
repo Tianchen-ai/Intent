@@ -15,6 +15,7 @@
 #include "intentdsl/levels/execution/block/ir/Grid.h"
 #include "intentdsl/levels/execution/block/ir/Owners.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Pass/Pass.h"
 #include <set>
 
@@ -207,6 +208,9 @@ bool canNarrowCutileAddress(Operation &op) {
   compilerinfra::AddressProofOptions narrowOpts;
   narrowOpts.targetBitwidth = 32;
   narrowOpts.isSigned = true;
+  if (llvm::none_of(op.getOperands().drop_front(),
+                    [](Value v) { return isa<ShapedType>(v.getType()); }))
+    return compilerinfra::proveNarrowAddress(&op, narrowOpts, &intRanges).proven;
   for (Value coord : op.getOperands().drop_front()) {
     if (!isa<ShapedType>(coord.getType())) {
       if (!compilerinfra::proveNarrowAddress(coord, narrowOpts, &intRanges)
@@ -432,21 +436,48 @@ bool tileLoadStorePermitsTma(Value viewArg, func::FuncOp fn,
     auto configs = fn->getAttrOfType<ArrayAttr>("block.configs");
     if (!rowDim || *rowDim <= 0 || !configs)
       return false;
+    fn.getContext()
+        ->getOrLoadDialect<arith::ArithDialect>();
+    fn.getContext()
+        ->getOrLoadDialect<memref::MemRefDialect>();
+    fn.getContext()
+        ->getOrLoadDialect<scf::SCFDialect>();
+    OpBuilder b(&fn.front().front());
+    Location loc = fn.getLoc();
+    auto buf = b.create<memref::AllocOp>(
+        loc, MemRefType::get({*rowDim}, b.getI8Type()));
+    Value c0 = b.create<arith::ConstantIndexOp>(loc, 0);
+    Value cHi = b.create<arith::ConstantIndexOp>(loc, *rowDim);
+    bool allExact = true;
     for (Attribute row : configs) {
       int64_t r =
           cast<DictionaryAttr>(row).getAs<IntegerAttr>("rows").getInt();
-      if (r <= 0 || *rowDim < r)
-        return false;
-      compilerinfra::TailDimension td;
-      td.staticExtent = *rowDim;
-      td.staticOffset = (llvm::divideCeil(*rowDim, r) - 1) * r;
-      td.tileSize = r;
-      td.step = 1;
-      td.tileAlignment = r;
-      auto tp = compilerinfra::proveTailAccess({td});
-      if (!tp.proven || tp.kind != compilerinfra::TailKind::ExactInBounds)
-        return false;
+      if (r <= 0 || *rowDim < r) {
+        allExact = false;
+        break;
+      }
+      OpBuilder::InsertionGuard g(b);
+      b.setInsertionPointAfter(cHi.getDefiningOp());
+      Value cStep = b.create<arith::ConstantIndexOp>(loc, r);
+      auto loop = b.create<scf::ForOp>(loc, c0, cHi, cStep);
+      b.setInsertionPointToStart(loop.getBody());
+      auto sub = b.create<memref::SubViewOp>(
+          loc, buf, ArrayRef<OpFoldResult>{loop.getInductionVar()},
+          ArrayRef<OpFoldResult>{b.getIndexAttr(r)},
+          ArrayRef<OpFoldResult>{b.getIndexAttr(1)});
+      auto tp = compilerinfra::proveTailAccess(sub.getOperation());
+      loop.erase();
+      cStep.getDefiningOp()->erase();
+      if (!tp.proven || tp.kind != compilerinfra::TailKind::ExactInBounds) {
+        allExact = false;
+        break;
+      }
     }
+    cHi.getDefiningOp()->erase();
+    c0.getDefiningOp()->erase();
+    buf.erase();
+    if (!allExact)
+      return false;
   }
   return true;
 }
