@@ -144,8 +144,6 @@ void orderedCost(Unit &u) {
                     llvm::count_if(loop.getResultTypes(), [](mlir::Type t) {
                       return mlir::isa<mlir::ShapedType>(t);
                     }));
-                if (!caps->operandGroupRows)
-                  continue;
                 llvm::SmallPtrSet<mlir::Operation *, 4> scores;
                 for (auto &s : loop.getBody()->without_terminator()) {
                   if (s.getName().stripDialect() != "lane_sum")
@@ -160,17 +158,23 @@ void orderedCost(Unit &u) {
                 }
                 projections = std::max<unsigned>(projections, scores.size());
               }
-              auto streams = caps->operandGroupRows ? projections : carries;
+              auto streams = caps->operandGroupRows
+                                 ? projections
+                                 : std::max(carries, projections);
               if (sweepBytesPerOwner) {
                 // An operand issue group streams both score products through
-                // the same staging area. Independent accumulator streams
-                // otherwise retain their own pair of fragments.
+                // the same staging area. Independent register-fed streams
+                // otherwise retain their own pair of operand fragments and
+                // narrowed weight fragment.
                 double operandStreams =
-                    caps->operandGroupRows ? 1. : std::max(1u, carries);
+                    caps->operandGroupRows ? 1. : std::max(1u, streams);
+                double scoreSlots = (!caps->operandGroupRows && projections > 1)
+                                        ? double(projections + 1u)
+                                        : double(std::max(2u, carries));
                 double slots =
                     operandWords * operandStreams *
                         (physicalRows + span.getInt()) * lanes +
-                    std::max(2u, carries) * physicalRows * span.getInt() +
+                    scoreSlots * physicalRows * span.getInt() +
                     carries * physicalRows * lanes;
                 auto file =
                     ctx.target.services.facts.find("register_file")
