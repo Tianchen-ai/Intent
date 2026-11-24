@@ -5,7 +5,7 @@ IntentDSL compiles typed Python author kernels (`@intentdsl.kernel`) and static 
 ## Install / 安装
 
 ```sh
-python -m pip install compilerinfra==0.4.1 intentdsl==2.0.0
+python -m pip install compilerinfra==0.4.2 intentdsl==2.0.0
 intentdsl doctor
 ```
 
@@ -41,4 +41,4 @@ intentdsl manual components --lang zh
 
 - Architecture & Compilation Tree: [doc/architecture.md](doc/architecture.md)
 - Agent & Component Development Rules: [AGENTS.md](AGENTS.md) and `agent/skills/intentdsl-development.md`
-- Install `compilerinfra-agent==0.4.1` and run `compilerinfra-dev --library "$(python -c 'import intentdsl; print(intentdsl.library_path())')" --workspace . inspect` to inspect units, derive candidates, and connect to Bench.
+- Install `compilerinfra-agent==0.4.2` and run `compilerinfra-dev --library "$(python -c 'import intentdsl; print(intentdsl.library_path())')" --workspace . inspect` to inspect units, derive candidates, and connect to Bench.
