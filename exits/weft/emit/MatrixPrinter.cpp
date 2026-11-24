@@ -1603,7 +1603,7 @@ TerminalPrinter weftTerminalPrinter() {
           c.line("const int64_t groups = 1 + (rows - 1) / grain;");
           c.line("const int64_t bins = groups < workers ? groups : workers;");
           c.line("#pragma omp parallel for num_threads(bins) schedule(static) "
-                 "if(workers > 1)");
+                 "if(bins > 1)");
           c.line("for (int64_t b = 0; b < bins; ++b) {");
           c.indent++;
           c.line("const int64_t group = (groups / bins * b + (groups % bins * "

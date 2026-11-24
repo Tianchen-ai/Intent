@@ -54,7 +54,7 @@ void registerWeftMatrixContracts(Unit &u) {
     c.numerical =
         "IEEE-754 f32 FMA preserving subnormals, Inf, and qNaN; exact si32 MAC";
     c.estimator = u.qualify("native-panels");
-    c.costParameters = {"vector_bits", "workers"};
+    c.costParameters = {"vector_bits", "vector_registers", "workers"};
     c.available = [](const TargetProfile &p) -> llvm::Error {
       auto *rm = p.services.get<intentdsl::cpu::RowMachine>();
       if (!rm || rm->vectorBits < 128)
@@ -102,7 +102,7 @@ void registerWeftMatrixContracts(Unit &u) {
     c.effects = "pure local value contraction inside task.weftir";
     c.numerical = "IEEE-754 f32 FMA preserving subnormals, Inf, and qNaN";
     c.estimator = u.qualify("native-panels");
-    c.costParameters = {"vector_bits", "workers"};
+    c.costParameters = {"vector_bits", "vector_registers", "workers"};
     c.available = [](const TargetProfile &p) -> llvm::Error {
       auto *rm = p.services.get<intentdsl::cpu::RowMachine>();
       if (!rm || rm->vectorBits < 128)

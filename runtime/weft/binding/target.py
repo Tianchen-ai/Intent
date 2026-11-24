@@ -36,10 +36,20 @@ def discover(scope):
     weft_ver = str(facts.get("weft_version") or getattr(weft_core, "__version__", ""))
     isa = frozenset(facts.get("available_isa_extensions") or facts.get("isa_extensions") or ())
     brg = dict(facts.get("onednn_brgemm") or {})
+    caps = dict(facts.get("capabilities") or {})
+    bits = int(t["vector_bits"] if cpu.arch == "x86_64" else t["vlen_bits"])
+    vec_regs = int(
+        caps.get("vector_registers")
+        or (32 if cpu.arch == "riscv64" else (32 if bits >= 512 else 16))
+    )
+    lmul_list = list(caps.get("legal_lmul_eighths") or ())
+    max_lmul_eighths = int(max(lmul_list)) if lmul_list else (64 if cpu.arch == "riscv64" else 8)
     return (
         cpu,
         core_id,
-        int(t["vector_bits"] if cpu.arch == "x86_64" else t["vlen_bits"]),
+        bits,
+        vec_regs,
+        max_lmul_eighths,
         weft_ver,
         isa,
         brg,
@@ -61,13 +71,16 @@ class Target:
 
     def options(self, key):
         scope, self.workers = key
-        self.info, core, bits, weft_ver, isa, brg = discover(scope)
+        self.info, core, bits, vec_regs, max_lmul_eighths, weft_ver, isa, brg = discover(scope)
         ver_nums = brg.get("version") or ()
         return dict(
             vector_bits=bits,
+            vector_registers=vec_regs,
+            max_lmul_eighths=max_lmul_eighths,
             workers=self.workers,
             core=core,
             arch=self.info.arch,
+            zvfbfmin="zvfbfmin" in isa,
             grouped_i8=self.info.arch == "x86_64" and "+avx512vnni" in self.info.march,
             avx512_vnni="avx512vnni" in isa,
             avx512_fp16="avx512fp16" in isa,

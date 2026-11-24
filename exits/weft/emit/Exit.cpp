@@ -75,16 +75,38 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
     }
   }
 
+  int64_t v = *bits / 32;
+  int64_t vecRegs = options.getInteger("vector_registers")
+                        .value_or((isRvv || *bits >= 512) ? 32 : 16);
+  int64_t maxLmul8 =
+      options.getInteger("max_lmul_eighths").value_or(isRvv ? 64 : 8);
+  bool hasZvfbfmin = options.getBoolean("zvfbfmin").value_or(false);
+  if (vecRegs <= 0 || maxLmul8 <= 0)
+    return llvm::createStringError("invalid probed vector register budget");
+
   auto caps = std::make_shared<intentdsl::cpu::RowMachine>();
   caps->vectorBits = *bits;
-  caps->structuredRows = true;
+  caps->structuredRows = false;
   caps->workers = *workers;
-  caps->wideningPanel = *bits / 32;
+  if (isRvv) {
+    // Software f32->bf16 RNE requires (4 * groups + 1) <= vector_registers.
+    int64_t maxCastGroups =
+        hasZvfbfmin ? (vecRegs / 2) : std::max<int64_t>(1, (vecRegs - 1) / 4);
+    int64_t maxLmulGroups = std::max<int64_t>(1, maxLmul8 / 8);
+    int64_t limitGroups =
+        std::min({int64_t(4), maxCastGroups, maxLmulGroups,
+                  std::max<int64_t>(1, int64_t(64) / v)});
+    int64_t p2Groups = 1;
+    while (p2Groups * 2 <= limitGroups)
+      p2Groups *= 2;
+    caps->wideningPanel = p2Groups * v;
+  } else {
+    caps->wideningPanel = v;
+  }
   caps->boundWidening = isRvv;
   if (!isRvv && *bits >= 256)
     caps->packedOwners = std::clamp<int64_t>(*bits / 32, 4, 16);
 
-  int64_t v = *bits / 32;
   auto matrix = std::make_shared<intentdsl::cpu::MatrixMachine>();
   matrix->choices = {
       {2, v, 32, v}, {4, 2 * v, 64, v}, {8, 4 * v, 128, v}, {8, 3 * v, 64, v}};
@@ -93,17 +115,16 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
   populateWeftMatrixContracts(*matrix, v, isRvv);
   if (auto e = p.services.provide<intentdsl::cpu::MatrixMachine>(matrix))
     return e;
-  if (auto e = p.services.provide<RecordFields>(
-          std::make_shared<RecordFields>(RecordFields{caps->boundWidening})))
+  if (auto e = p.services.provide<RecordFields>(std::make_shared<RecordFields>(
+          RecordFields{caps->boundWidening, vecRegs, maxLmul8, hasZvfbfmin})))
     return e;
 
   // Locally reported mvendorid/marchid for the V100 core.
   bool v100 = options.getString("core") == "0x710/0x8000000058000002";
   int64_t columns =
       isRvv ? std::max<int64_t>(32, 4 * v) : (*bits == 128 ? 32 : 64);
-  caps->rows = {
-      {1, columns},
-      {(*bits == 1024 || (*bits == 256 && v100)) ? 2 : 4, columns}};
+  int64_t midGrain = (*bits == 1024 || (*bits == 256 && v100)) ? 2 : 4;
+  caps->rows = {{1, columns}, {midGrain, columns}, {32, columns}};
   if (auto e = p.services.provide<intentdsl::cpu::RowMachine>(caps))
     return e;
   return p;
@@ -130,7 +151,7 @@ void bind(Unit &u) {
           [phase](OpPassManager &pm, const TargetProfile &p) {
             int64_t tailVec = 1;
             if (auto *rm = p.services.get<intentdsl::cpu::RowMachine>())
-              tailVec = std::max<int64_t>(1, rm->wideningPanel);
+              tailVec = std::max<int64_t>(1, rm->vectorBits / 32);
             lower(pm, phase, *p.services.get<intentdsl::CallFacts>(),
                   p.services.get<RecordFields>()->grouped, tailVec);
             if (phase == "callable")

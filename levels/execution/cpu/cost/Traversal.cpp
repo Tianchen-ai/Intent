@@ -72,8 +72,9 @@ void registerCost(Unit &u) {
               else
                 writeStep = step;
               double traffic = m * n * bytes;
-              lines +=
-                  std::ceil(traffic * std::min(std::max(step, 1.), 16.) / 64.);
+              double effStep =
+                  walk == "tile" ? 1. : std::min(std::max(step, 1.), 16.);
+              lines += std::ceil(traffic * effStep / 64.);
               if (k == "read") {
                 read += traffic;
                 if (rd && rs)
@@ -171,6 +172,15 @@ void registerCost(Unit &u) {
                     *pred.timeNs+=traffic;
                   }
                 }
+                if (!e.timeNs || *pred.timeNs < *e.timeNs)
+                  e.timeNs = pred.timeNs;
+              } else {
+                double work = std::max(lines * 4.0, arithmetic.value_or(0.0));
+                pred.timeNs =
+                    200.0 +
+                    work * (groups ? std::ceil(groups / facts->participants) *
+                                         facts->participants / groups
+                                   : 0.);
                 if (!e.timeNs || *pred.timeNs < *e.timeNs)
                   e.timeNs = pred.timeNs;
               }

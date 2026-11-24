@@ -1,3 +1,4 @@
+#include "../legalize/Matrix.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
 #include <algorithm>
 #include <cmath>
@@ -22,32 +23,51 @@ void nativePanelCost(compilerinfra::Unit &u) {
           if (!g)
             return g.takeError();
           auto machine = ctx.target.services.get<intentdsl::cpu::RowMachine>();
+          auto *rf = ctx.target.services.get<RecordFields>();
           int64_t workers = machine->workers;
           double columns = std::ceil(double(t[1]) / t[3]);
           int64_t vecRegs =
-              machine->boundWidening ? 28 : (t[3] == 16 ? 32 : 16);
+              rf ? rf->vectorRegisters
+                 : (machine->boundWidening ? 32 : (t[3] == 16 ? 32 : 16));
+          mlir::Type outElem =
+              mlir::cast<mlir::MemRefType>(op->getOperand(0).getType())
+                  .getElementType();
+          mlir::Type lhsElem =
+              mlir::cast<mlir::MemRefType>(dot.getOperand(0).getType())
+                  .getElementType();
+          bool rvvSoftBf16Out =
+              machine->boundWidening && outElem.isBF16() &&
+              !(rf && rf->zvfbfmin);
+          bool rvvSoftBf16In =
+              machine->boundWidening && lhsElem.isBF16() &&
+              !(rf && rf->zvfbfmin);
+          double epilogueCastGroups =
+              rvvSoftBf16Out ? (4.0 * columns + 1.0) : 0.0;
+          double inCastExtra = rvvSoftBf16In ? columns : 0.0;
           double live =
-              t[0] * columns +
-              (machine->boundWidening ? 3.0 * columns + 4.0 : columns + 2.0);
+              std::max(epilogueCastGroups,
+                       t[0] * columns +
+                           (machine->boundWidening
+                                ? 3.0 * columns + 4.0 + inCastExtra
+                                : columns + 2.0));
           double spill = std::max(0.0, live - vecRegs) * t[3] * 4.0 * 2.0 * g->k;
+
+          // When N > tile_n and N % tile_n != 0, Weft task.weftir emits a
+          // dynamic [-2] column slice whose K-loop accumulator materializes
+          // in local stack storage rather than staying in vector registers.
+          bool dynamicColTail = (g->n > t[1]) && (g->n % t[1] != 0);
 
           int64_t packCode = t.size() > 4 ? t[4] : 0;
           double rawElemBytes =
               dot.getName().stripDialect() == "scaled_contract"
                   ? 4.0
-                  : double(mlir::cast<mlir::MemRefType>(
-                               dot.getOperand(0).getType())
-                               .getElementTypeBitWidth()) /
-                        8.0;
+                  : double(lhsElem.getIntOrFloatBitWidth()) / 8.0;
           double inBytes = (packCode == 3 ||
                             (dot.getName().stripDialect() == "window_contract" &&
                              packCode == 1))
                                ? 4.0
                                : rawElemBytes;
-          bool inF32 = (inBytes == 4.0 &&
-                        !mlir::cast<mlir::MemRefType>(dot.getOperand(0).getType())
-                             .getElementType()
-                             .isInteger(32));
+          bool inF32 = (inBytes == 4.0 && !lhsElem.isInteger(32));
 
           double maxLiveRows = std::max(1.0, std::floor(16.0 / std::max(1.0, columns)));
           double simultaneousRows =
@@ -61,11 +81,13 @@ void nativePanelCost(compilerinfra::Unit &u) {
               inBytes;
 
           // On x86, Weft native outer_contract materializes local ArrayStorage +
-          // validity masks for admitted operands and output; on RVV, tiles stream
-          // directly into vector registers.
+          // validity masks for admitted operands and output; on RVV, static tiles
+          // stream directly into vector registers while dynamic [-2] column tails
+          // spill the f32 accumulator array per K step.
           double arrayCopyBytes =
               machine->boundWidening
-                  ? 0.0
+                  ? (dynamicColTail ? 2.0 * double(t[0]) * t[1] * 4.0 * g->k
+                                    : 0.0)
                   : ((double(t[0]) + double(t[1])) * g->k * (inBytes + 1.0) +
                      double(t[0]) * t[1] * 5.0);
 
@@ -75,6 +97,7 @@ void nativePanelCost(compilerinfra::Unit &u) {
                      : 0.0;
           double l1Loads = double(g->k) * (t[0] + columns);
 
+          e.terms["vector_register_budget"] = {double(vecRegs), "count"};
           e.terms["native_simultaneous_rows"] = {simultaneousRows, "count"};
           e.terms["rhs_reloads"] = {reloads, "B"};
           e.terms["local_array_bytes"] = {arrayCopyBytes, "B"};
@@ -89,7 +112,11 @@ void nativePanelCost(compilerinfra::Unit &u) {
                            (1.0 / *bw + 1.0 / *writeBw) +
                        ((l1Loads * 0.6 + inLoopWiden) * widths) / *rate;
           } else if (bw) {
-            e.timeNs = (reloads + arrayCopyBytes) / *bw;
+            e.timeNs = (reloads + spill + arrayCopyBytes) / *bw;
+          } else {
+            double effRate = std::max(1.0, double(machine->vectorBits) / 16.0);
+            e.timeNs = (reloads + spill + arrayCopyBytes) / 16.0 +
+                       ((l1Loads * 0.6 + inLoopWiden) * t[3]) / effRate;
           }
           return e;
         }},

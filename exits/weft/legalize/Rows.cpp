@@ -1,5 +1,6 @@
 #include "Rows.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
+#include "intentdsl/levels/algorithm/kir/ir/ProjectedLayout.h"
 #include "intentdsl/levels/execution/cpu/ir/IndexedEffects.h"
 #include "intentdsl/levels/execution/cpu/ir/Pack.h"
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
@@ -55,9 +56,10 @@ std::string weftSpelling(Type t) {
 }
 
 std::string regionType(StringRef kind, StringRef element, int rank,
-                       int columnDim = -2) {
-  std::string shape =
-      rank == 2 ? "[-1,-2],[1,2]" : "[" + std::to_string(columnDim) + "],[2]";
+                       int columnDim = -2, int axisId = 2) {
+  std::string shape = rank == 2 ? "[-1,-2],[1,2]"
+                                : "[" + std::to_string(columnDim) + "],[" +
+                                      std::to_string(axisId) + "]";
   if (kind == "value")
     return "!weft_kernel.value<" + element.str() + "," + shape + ">";
   std::string family = element == "si64"   ? "i64"
@@ -88,11 +90,13 @@ struct SlotFacts {
   SmallVector<int64_t, 4> indirectExtents;
   bool contiguous = false;
   bool swapAxes = false;
+  bool zeroInnerStride = false;
 };
 
 struct SweepDesc {
   std::string combine; // "store", "publish", "sum", "max_num", "welford"
   Operation *anchor = nullptr;
+  SmallVector<Operation *, 4> anchors;
   SmallVector<Operation *> writes;
   bool privateBins = false;
   bool verticalSum = false;
@@ -184,6 +188,14 @@ struct RowTaskBuilder {
     return {v, in.type};
   }
 
+  TaskTerm splatOp(TaskTerm sc, StringRef vTy) {
+    Value sp = makeOp(b, loc, "task_new", {sc.v}, {b.getIndexType()},
+                      {b.getNamedAttr("in_type", b.getStringAttr(sc.type)),
+                       b.getNamedAttr("val_type", b.getStringAttr(vTy))})
+                   ->getResult(0);
+    return {sp, vTy.str()};
+  }
+
   void commitOp(TaskTerm val, TaskTerm slice) {
     makeOp(b, loc, "task_commit", {val.v, slice.v}, {},
            {b.getNamedAttr("val_type", b.getStringAttr(val.type)),
@@ -240,8 +252,9 @@ struct RowTaskBuilder {
     return scalarSlice(view, coords, admit, admitTy);
   }
 
-  TaskTerm emitUniform(TaskTerm seed, TaskTerm position, int dim) {
-    std::string vecU64 = regionType("value", "ui64", 1, dim);
+  TaskTerm emitUniform(TaskTerm seed, TaskTerm position, int dim,
+                       int axisId = 2) {
+    std::string vecU64 = regionType("value", "ui64", 1, dim, axisId);
     auto c64 = [&](uint64_t val) {
       return lit(std::to_string(val), "ui64");
     };
@@ -265,13 +278,13 @@ struct RowTaskBuilder {
       hi = b64("and", b64("add", hi, incB), mask);
     }
     TaskTerm word = b64("and", position, c64(3));
-    std::string vecI1 = regionType("value", "i1", 1, dim);
+    std::string vecI1 = regionType("value", "i1", 1, dim, axisId);
     for (auto [index, val] :
          {std::pair{2, c}, std::pair{1, rb}, std::pair{0, a}}) {
       TaskTerm active = cmp("eq", word, c64(index), vecI1);
       d = sel(active, val, d, vecU64);
     }
-    std::string vecF32 = regionType("value", "f32", 1, dim);
+    std::string vecF32 = regionType("value", "f32", 1, dim, axisId);
     TaskTerm f = castOp(b64("shr", d, c64(8)), vecF32);
     return bin("mul", f, lit("0x33800000", "f32"), vecF32);
   }
@@ -280,7 +293,10 @@ struct RowTaskBuilder {
                        const llvm::DenseSet<Value> &summarySet,
                        llvm::DenseSet<Operation *> &visited,
                        SmallVectorImpl<Operation *> &order) {
-    if (!root || !visited.insert(root).second)
+    if (!root ||
+        (root->getNumResults() == 1 &&
+         summarySet.contains(root->getResult(0))) ||
+        !visited.insert(root).second)
       return;
     for (Value opnd : root->getOperands()) {
       if (summarySet.contains(opnd))
@@ -292,11 +308,12 @@ struct RowTaskBuilder {
     order.push_back(root);
   }
 
-  LogicalResult emitVectorPanelOps(ArrayRef<Operation *> ops,
-                                   ArrayRef<Operation *> writes, TaskTerm row,
-                                   std::optional<TaskTerm> startOff,
-                                   TaskTerm activeExt, int dim,
-                                   llvm::DenseMap<Value, TaskTerm> &localMap) {
+  LogicalResult emitVectorPanelOps(
+      ArrayRef<Operation *> ops, ArrayRef<Operation *> writes, TaskTerm row,
+      ArrayRef<TaskTerm> prefixCoords, std::optional<TaskTerm> startOff,
+      TaskTerm activeExt, int dim, int baseColDim, int vecAxisId,
+      bool isFullPanel, llvm::DenseMap<Value, TaskTerm> &localMap,
+      const llvm::DenseSet<Operation *> *skipReduceOps = nullptr) {
     auto lookup = [&](Value v) -> TaskTerm {
       auto it = localMap.find(v);
       if (it != localMap.end())
@@ -307,8 +324,16 @@ struct RowTaskBuilder {
     for (Operation *opPtr : ops) {
       Operation &op = *opPtr;
       StringRef code = op.getName().stripDialect();
-      if (code == "write")
+      if (code == "write" || code == "write_owner")
         continue;
+      if (skipReduceOps && skipReduceOps->contains(opPtr))
+        continue;
+      if (code == "read_owner") {
+        localMap[op.getResult(0)] = memberSlice(
+            op.getOperand(0), row, {}, true, true,
+            weftSpelling(op.getResult(0).getType()));
+        continue;
+      }
       if (code == "gather_row") {
         TaskTerm keys = lookup(op.getOperand(1));
         TaskTerm table = lookup(op.getOperand(0));
@@ -317,13 +342,12 @@ struct RowTaskBuilder {
         std::string kSp = kElem == "i64" ? "si64" : "si32";
         TaskTerm keyVal = scalarSlice(op.getOperand(1), {row}, true, kSp);
         TaskTerm srcIdx = castOp(keyVal, "index");
-        std::string dElem = printMlirType(
-            cast<MemRefType>(op.getOperand(0).getType()).getElementType());
         std::string dSp = weftSpelling(
             cast<MemRefType>(op.getOperand(0).getType()).getElementType());
-        std::string baseSlTy = regionType("slice", dSp, 1, -2);
+        std::string baseSlTy =
+            regionType("slice", dSp, 1, baseColDim, vecAxisId);
         if (!startOff) {
-          std::string vTy = regionType("value", dSp, 1, -2);
+          std::string vTy = regionType("value", dSp, 1, baseColDim, vecAxisId);
           Value sl =
               makeOp(b, loc, "task_slice", {table.v, srcIdx.v},
                      {b.getIndexType()},
@@ -348,7 +372,7 @@ struct RowTaskBuilder {
                       b.getNamedAttr("val_type", b.getStringAttr(baseSlTy)),
                       b.getNamedAttr("admit", b.getBoolAttr(false))})
                   ->getResult(0);
-          std::string vTy = regionType("value", dSp, 1, dim);
+          std::string vTy = regionType("value", dSp, 1, dim, vecAxisId);
           SmallVector<Value> subOps{sl, startOff->v};
           if (dim <= 0)
             subOps.push_back(activeExt.v);
@@ -368,17 +392,30 @@ struct RowTaskBuilder {
       if (code == "read") {
         Value view = op.getOperand(0);
         auto vt = cast<MemRefType>(view.getType());
-        std::string e = printMlirType(vt.getElementType());
+        unsigned slot = cast<BlockArgument>(view).getArgNumber() - 1;
+        std::string eSp = weftSpelling(vt.getElementType());
+        std::string vTy = regionType("value", eSp, 1, dim, vecAxisId);
+        if (isFullPanel && dim > 0 && slotFacts[slot].zeroInnerStride) {
+          SmallVector<TaskTerm, 4> scCoords;
+          if (vt.getRank() >= 2)
+            scCoords.append(prefixCoords.begin(), prefixCoords.end());
+          scCoords.push_back(zeroIdx);
+          TaskTerm sc = scalarSlice(view, scCoords, true, eSp);
+          localMap[op.getResult(0)] = splatOp(sc, vTy);
+          continue;
+        }
         TaskTerm viewTerm = lookup(view);
         SmallVector<Value> slOps{viewTerm.v};
         SmallVector<Attribute> sels;
         if (vt.getRank() >= 2) {
-          slOps.push_back(row.v);
-          sels.push_back(b.getStringAttr("index"));
+          for (const TaskTerm &c : prefixCoords) {
+            slOps.push_back(c.v);
+            sels.push_back(b.getStringAttr("index"));
+          }
         }
         sels.push_back(b.getStringAttr("all"));
-        std::string baseSlTy = regionType("slice", e, 1, -2);
-        std::string vTy = regionType("value", e, 1, dim);
+        std::string baseSlTy =
+            regionType("slice", eSp, 1, baseColDim, vecAxisId);
         if (!startOff) {
           Value val =
               makeOp(b, loc, "task_slice", slOps, {b.getIndexType()},
@@ -429,7 +466,7 @@ struct RowTaskBuilder {
                                  columns, "index"),
                       *startOff, "index");
         std::string elem = wide ? "ui64" : "ui32";
-        std::string ixTy = regionType("value", elem, 1, dim);
+        std::string ixTy = regionType("value", elem, 1, dim, vecAxisId);
         TaskTerm offElem = castOp(off, elem);
         Value lanesV =
             makeOp(b, loc, "task_iota", {}, {b.getIndexType()},
@@ -439,7 +476,9 @@ struct RowTaskBuilder {
                 ->getResult(0);
         TaskTerm idxVec = bin("add", {lanesV, ixTy}, offElem, ixTy);
         localMap[op.getResult(0)] =
-            wide ? idxVec : castOp(idxVec, regionType("value", "si32", 1, dim));
+            wide ? idxVec
+                 : castOp(idxVec,
+                          regionType("value", "si32", 1, dim, vecAxisId));
         continue;
       }
 
@@ -480,21 +519,13 @@ struct RowTaskBuilder {
         TaskTerm lo = castOp(readScalar(op.getOperand(0), {owner}), "index");
         TaskTerm next = bin("add", owner, oneIdx, "index");
         TaskTerm hi = castOp(readScalar(op.getOperand(0), {next}), "index");
-        std::string vTy = regionType("value", "f32", 1, dim);
-        auto splatF32 = [&](TaskTerm sc) -> TaskTerm {
-          Value sp =
-              makeOp(b, loc, "task_new", {sc.v}, {b.getIndexType()},
-                     {b.getNamedAttr("in_type", b.getStringAttr(sc.type)),
-                      b.getNamedAttr("val_type", b.getStringAttr(vTy))})
-                  ->getResult(0);
-          return {sp, vTy};
-        };
+        std::string vTy = regionType("value", "f32", 1, dim, vecAxisId);
         if (code == "segment_length") {
           TaskTerm lenSc = castOp(bin("sub", hi, lo, "index"), "f32");
-          localMap[op.getResult(0)] = splatF32(lenSc);
+          localMap[op.getResult(0)] = splatOp(lenSc, vTy);
           continue;
         }
-        TaskTerm zVec = splatF32(lit("0.0", "f32"));
+        TaskTerm zVec = splatOp(lit("0.0", "f32"), vTy);
         Operation *segFor = makeOp(
             b, loc, "task_for", {lo.v, hi.v, oneIdx.v, zVec.v},
             {b.getIndexType()},
@@ -522,7 +553,8 @@ struct RowTaskBuilder {
                 TaskTerm rCoord = lookup(scOp.getOperand(1));
                 if (rCoord.type != "index")
                   rCoord = castOp(rCoord, "index");
-                std::string baseSlTy = regionType("slice", e, 1, fullCols);
+                std::string baseSlTy =
+                    regionType("slice", e, 1, fullCols, vecAxisId);
                 Value sl =
                     makeOp(
                         b, loc, "task_slice", {viewTerm.v, rCoord.v},
@@ -537,7 +569,7 @@ struct RowTaskBuilder {
                          b.getNamedAttr("val_type", b.getStringAttr(baseSlTy)),
                          b.getNamedAttr("admit", b.getBoolAttr(false))})
                         ->getResult(0);
-                std::string ldTy = regionType("value", e, 1, dim);
+                std::string ldTy = regionType("value", e, 1, dim, vecAxisId);
                 SmallVector<Value, 3> subOps{sl, startOff->v};
                 if (dim <= 0)
                   subOps.push_back(activeExt.v);
@@ -587,8 +619,8 @@ struct RowTaskBuilder {
       }
 
       if (code == "uniform") {
-        localMap[op.getResult(0)] =
-            emitUniform(lookup(op.getOperand(0)), lookup(op.getOperand(1)), dim);
+        localMap[op.getResult(0)] = emitUniform(
+            lookup(op.getOperand(0)), lookup(op.getOperand(1)), dim, vecAxisId);
         continue;
       }
 
@@ -619,10 +651,10 @@ struct RowTaskBuilder {
       Type resType = op.getResult(0).getType();
       std::string outTy =
           isa<RankedTensorType>(resType)
-              ? regionType(
-                    "value",
-                    weftSpelling(cast<RankedTensorType>(resType).getElementType()),
-                    1, dim)
+              ? regionType("value",
+                           weftSpelling(
+                               cast<RankedTensorType>(resType).getElementType()),
+                           1, dim, vecAxisId)
               : weftSpelling(resType);
 
       if (code == "max_num" || code == "sum") {
@@ -638,9 +670,22 @@ struct RowTaskBuilder {
                 ->getResult(0);
         localMap[op.getResult(0)] = {v, outTy};
       } else if (code == "cast") {
-        localMap[op.getResult(0)] = castOp(lookup(op.getOperand(0)), outTy);
+        TaskTerm in = lookup(op.getOperand(0));
+        if (!StringRef(in.type).starts_with("!weft_kernel.value<") &&
+            StringRef(outTy).starts_with("!weft_kernel.value<")) {
+          std::string scOut = weftSpelling(
+              cast<RankedTensorType>(resType).getElementType());
+          TaskTerm scCast = (in.type == scOut) ? in : castOp(in, scOut);
+          localMap[op.getResult(0)] = splatOp(scCast, outTy);
+        } else {
+          localMap[op.getResult(0)] = castOp(in, outTy);
+        }
       } else if (code == "sqrt" || code == "rsqrt" || code == "exp") {
-        localMap[op.getResult(0)] = unaryOp(code, lookup(op.getOperand(0)));
+        TaskTerm in = lookup(op.getOperand(0));
+        if (!StringRef(in.type).starts_with("!weft_kernel.value<") &&
+            StringRef(outTy).starts_with("!weft_kernel.value<"))
+          in = splatOp(in, outTy);
+        localMap[op.getResult(0)] = unaryOp(code, in);
       } else if (code == "select") {
         localMap[op.getResult(0)] =
             sel(lookup(op.getOperand(0)), lookup(op.getOperand(1)),
@@ -662,17 +707,25 @@ struct RowTaskBuilder {
     for (Operation *wPtr : writes) {
       Value view = wPtr->getOperand(0);
       auto vt = cast<MemRefType>(view.getType());
-      std::string e = printMlirType(vt.getElementType());
+      std::string eSp = weftSpelling(vt.getElementType());
       TaskTerm viewTerm = lookup(view);
       SmallVector<Value> slOps{viewTerm.v};
       SmallVector<Attribute> sels;
       if (vt.getRank() >= 2) {
-        slOps.push_back(row.v);
-        sels.push_back(b.getStringAttr("index"));
+        for (const TaskTerm &c : prefixCoords) {
+          slOps.push_back(c.v);
+          sels.push_back(b.getStringAttr("index"));
+        }
       }
       sels.push_back(b.getStringAttr("all"));
-      std::string baseSlTy = regionType("slice", e, 1, -2);
+      std::string baseSlTy =
+          regionType("slice", eSp, 1, baseColDim, vecAxisId);
       TaskTerm valTerm = lookup(wPtr->getOperand(wPtr->getNumOperands() - 1));
+      if (!StringRef(valTerm.type).starts_with("!weft_kernel.value<")) {
+        int vDim = startOff ? dim : baseColDim;
+        valTerm = splatOp(valTerm,
+                          regionType("value", valTerm.type, 1, vDim, vecAxisId));
+      }
       if (!startOff) {
         Value sl =
             makeOp(b, loc, "task_slice", slOps, {b.getIndexType()},
@@ -692,7 +745,7 @@ struct RowTaskBuilder {
                     b.getNamedAttr("val_type", b.getStringAttr(baseSlTy)),
                     b.getNamedAttr("admit", b.getBoolAttr(false))})
                 ->getResult(0);
-        std::string subSlTy = regionType("slice", e, 1, dim);
+        std::string subSlTy = regionType("slice", eSp, 1, dim, vecAxisId);
         SmallVector<Value> subOps{sl, startOff->v};
         if (dim <= 0)
           subOps.push_back(activeExt.v);
@@ -728,6 +781,14 @@ struct RowTaskBuilder {
     if (!scanInits.empty() && sw.combine != "store")
       return task.emitError("prefix sweep requires a store consumer");
 
+    SmallVector<Operation *, 4> redOps;
+    if (scalarRed) {
+      if (!sw.anchors.empty())
+        redOps.assign(sw.anchors.begin(), sw.anchors.end());
+      else if (sw.anchor)
+        redOps.push_back(sw.anchor);
+    }
+
     Operation *forOp = nullptr;
     TaskTerm memberIdx;
     SmallVector<TaskTerm, 4> iterArgs;
@@ -741,9 +802,12 @@ struct RowTaskBuilder {
                         b.getStringAttr("f32")});
         resTypes.append(3, b.getIndexType());
       } else if (scalarRed) {
-        forOperands.push_back(sw.combine == "sum" ? zeroF32.v : minusInfF32.v);
-        iterTys.push_back(b.getStringAttr("f32"));
-        resTypes.push_back(b.getIndexType());
+        Value initV = (sw.combine == "sum") ? zeroF32.v : minusInfF32.v;
+        for (size_t k = 0; k < redOps.size(); ++k) {
+          forOperands.push_back(initV);
+          iterTys.push_back(b.getStringAttr("f32"));
+          resTypes.push_back(b.getIndexType());
+        }
       } else if (!scanInits.empty()) {
         for (const TaskTerm &c : scanInits) {
           forOperands.push_back(c.v);
@@ -859,7 +923,7 @@ struct RowTaskBuilder {
             bin("add", iterArgs[scanCursor++], lookup(op.getOperand(0)), ty);
         nextCarries.push_back(nextC);
         localMap[resVal] = nextC;
-      } else if (scalarRed && n == sw.combine) {
+      } else if (scalarRed && llvm::is_contained(redOps, opPtr)) {
         localMap[resVal] = lookup(op.getOperand(0));
       } else if (n == "field") {
         auto saved = records.find(op.getOperand(0));
@@ -930,14 +994,18 @@ struct RowTaskBuilder {
                                           {forOp->getResult(1), "f32"},
                                           {forOp->getResult(2), "f32"}};
     } else if (scalarRed) {
-      TaskTerm acc = iterArgs[0];
-      TaskTerm val = lookup(sw.anchor->getResult(0));
-      TaskTerm next =
-          bin(sw.combine == "sum" ? "add" : "max", acc, val, "f32");
-      makeOp(b, loc, "task_yield", {next.v}, {},
-             {b.getNamedAttr("val_types",
-                             b.getArrayAttr({b.getStringAttr("f32")}))});
-      terms[sw.anchor->getResult(0)] = {forOp->getResult(0), "f32"};
+      SmallVector<Value, 4> yVals;
+      for (size_t k = 0; k < redOps.size(); ++k) {
+        TaskTerm acc = iterArgs[k];
+        TaskTerm val = lookup(redOps[k]->getResult(0));
+        TaskTerm next =
+            bin(sw.combine == "sum" ? "add" : "max", acc, val, "f32");
+        yVals.push_back(next.v);
+      }
+      makeOp(b, loc, "task_yield", yVals, {},
+             {b.getNamedAttr("val_types", b.getArrayAttr(iterTys))});
+      for (size_t k = 0; k < redOps.size(); ++k)
+        terms[redOps[k]->getResult(0)] = {forOp->getResult(k), "f32"};
     } else if (!nextCarries.empty()) {
       SmallVector<Value, 4> yVals;
       for (const TaskTerm &c : nextCarries)
@@ -1022,6 +1090,12 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
       slotFacts[i].rank = view.getRank();
   }
 
+  auto factSlot = [&](unsigned slot) -> unsigned {
+    if (auto src = fn.getArgAttrOfType<IntegerAttr>(slot, "kir.source"))
+      return unsigned(src.getInt());
+    return slot;
+  };
+
   bool absolute = false;
   bool badFacts = false;
   task.walk([&](Operation *o) {
@@ -1032,7 +1106,8 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
     if (n == "write_offsets" || n == "fill_ranges") {
       for (Value v : o->getOperands().take_front(n == "write_offsets" ? 2 : 1)) {
         unsigned i = cast<BlockArgument>(v).getArgNumber() - 1;
-        auto *shape = facts.arguments[i].getAsObject()->getArray("shape");
+        auto *shape =
+            facts.arguments[factSlot(i)].getAsObject()->getArray("shape");
         slotFacts[i].indirectExtents = {*shape->front().getAsInteger()};
       }
     }
@@ -1047,7 +1122,8 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
       }
       for (Value v : shared) {
         unsigned i = cast<BlockArgument>(v).getArgNumber() - 1;
-        auto *shape = facts.arguments[i].getAsObject()->getArray("shape");
+        auto *shape =
+            facts.arguments[factSlot(i)].getAsObject()->getArray("shape");
         slotFacts[i].indirectExtents = {*shape->front().getAsInteger()};
       }
     }
@@ -1068,7 +1144,7 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
         return;
       }
       unsigned slot = argument.getArgNumber() - 1;
-      auto *record = facts.arguments[slot].getAsObject();
+      auto *record = facts.arguments[factSlot(slot)].getAsObject();
       auto *shape = record ? record->getArray("shape") : nullptr;
       SmallVector<int64_t, 4> dims;
       if (shape)
@@ -1087,7 +1163,7 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
     if (o->getName().getStringRef() == "cpu.gather_row") {
       unsigned table = cast<BlockArgument>(o->getOperand(0)).getArgNumber() - 1;
       unsigned ids = cast<BlockArgument>(o->getOperand(1)).getArgNumber() - 1;
-      auto *slot = facts.arguments[table].getAsObject();
+      auto *slot = facts.arguments[factSlot(table)].getAsObject();
       auto *shape = slot ? slot->getArray("shape") : nullptr;
       if (!shape || shape->size() != 2 || !shape->front().getAsInteger()) {
         o->emitError("missing indexed table height");
@@ -1109,24 +1185,63 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
   std::optional<int64_t> ownerAxis;
   if (auto oa = fn->getAttrOfType<IntegerAttr>("kir.owner_axis"))
     ownerAxis = oa.getInt();
+  for (unsigned i = 0; i < fn.getNumArguments(); ++i) {
+    if (!isa<MemRefType>(fn.getArgument(i).getType()) ||
+        slotFacts[i].swapAxes || fn.getArgAttr(i, "kir.owner_projection"))
+      continue;
+    if (auto mapAttr = fn.getArgAttrOfType<AffineMapAttr>(i, "kir.indexing")) {
+      AffineMap m = mapAttr.getValue();
+      if (m.getNumDims() >= 2 &&
+          llvm::none_of(m.getResults(), [&](AffineExpr e) {
+            return e.isFunctionOfDim(m.getNumDims() - 1);
+          }))
+        slotFacts[i].zeroInnerStride = true;
+    }
+  }
   StringRef walkEarly = task.getAttrOfType<StringAttr>("cpu.walk").getValue();
   if (!ownerAxis && walkEarly != "tile" && walkEarly != "destination") {
+    bool hasPublicAbi = fn->hasAttr("kir.public_abi");
     for (unsigned i = 0; i < fn.getNumArguments(); ++i) {
       if (!isa<MemRefType>(fn.getArgument(i).getType()) ||
           slotFacts[i].swapAxes || slotFacts[i].rank > 2)
         continue;
-      auto *a = facts.arguments[i].getAsObject();
-      auto *shape = a->getArray("shape"), *strides = a->getArray("strides");
-      bool dense = shape && strides && shape->size() == strides->size();
+      SmallVector<int64_t, 4> dims, st;
+      bool haveLayout = false;
+      if (fn.getArgAttr(i, "kir.indexing")) {
+        auto pShape = intentdsl::projectedLayout(fn, i, facts, true);
+        auto pStrides = intentdsl::projectedLayout(fn, i, facts, false);
+        if (pShape && pStrides && pShape.size() == pStrides.size()) {
+          dims.assign(pShape.asArrayRef().begin(), pShape.asArrayRef().end());
+          st.assign(pStrides.asArrayRef().begin(), pStrides.asArrayRef().end());
+          haveLayout = true;
+        }
+      } else if (!hasPublicAbi && i < facts.arguments.size()) {
+        auto *a = facts.arguments[i].getAsObject();
+        auto *shape = a ? a->getArray("shape") : nullptr;
+        auto *strides = a ? a->getArray("strides") : nullptr;
+        if (shape && strides && shape->size() == strides->size()) {
+          haveLayout = true;
+          for (size_t k = 0; k < shape->size(); ++k) {
+            auto n = (*shape)[k].getAsInteger(),
+                 s = (*strides)[k].getAsInteger();
+            if (!n || !s) {
+              haveLayout = false;
+              break;
+            }
+            dims.push_back(*n);
+            st.push_back(*s);
+          }
+        }
+      }
+      bool dense = haveLayout;
       int64_t step = 1;
       if (dense) {
-        for (int k = int(shape->size()) - 1; k >= 0; --k) {
-          auto n = (*shape)[k].getAsInteger(), s = (*strides)[k].getAsInteger();
-          if (!n || !s || *n <= 0 || *s != step || step > INT64_MAX / *n) {
+        for (int k = int(dims.size()) - 1; k >= 0; --k) {
+          if (dims[k] <= 0 || st[k] != step || step > INT64_MAX / dims[k]) {
             dense = false;
             break;
           }
-          step *= *n;
+          step *= dims[k];
         }
       }
       slotFacts[i].contiguous = dense;
@@ -1189,11 +1304,12 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
     }
     if (ownerAxis && rank) {
       int fullRank = a->getArray("dims")->size();
+      int d0SymIdx = 3 + (absolute ? 1 : 0) + (ownedKeys ? 2 : 0);
       SmallVector<std::string, 4> shape, axes;
       for (int j = 0; j < fullRank; ++j) {
         shape.push_back(j == *ownerAxis || fullRank == 1
                             ? "-1"
-                            : std::to_string(-4 - absolute - j));
+                            : std::to_string(-(1 + d0SymIdx + j)));
         axes.push_back(std::to_string(j + 1));
       }
       t = "!weft_kernel.view<!weft_kernel.encoding<\"" + elem +
@@ -1273,17 +1389,10 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
   b.setInsertionPointToEnd(&tkBb);
   rb.zeroIdx = rb.idx(0);
   rb.oneIdx = rb.idx(1);
-
-  bool hasWelford = llvm::any_of(bb, [](Operation &op) {
-    return op.getName().stripDialect() == "welford";
-  });
-  bool scalarMembers = ownerAxis.has_value() || hasWelford;
-  if (scalarMembers) {
-    rb.zeroCount = rb.lit("0", "si32");
-    rb.oneCount = rb.lit("1", "si32");
-    rb.zeroF32 = rb.lit("0.0", "f32");
-    rb.minusInfF32 = rb.lit("0xFF800000", "f32");
-  }
+  rb.zeroCount = rb.lit("0", "si32");
+  rb.oneCount = rb.lit("1", "si32");
+  rb.zeroF32 = rb.lit("0.0", "f32");
+  rb.minusInfF32 = rb.lit("0xFF800000", "f32");
 
   int64_t firstCols =
       cast<DictionaryAttr>(rowsAttr[0]).getAs<IntegerAttr>("columns").getInt();
@@ -1295,6 +1404,29 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
                    .getInt() == fixed;
       }))
     fixed = 0;
+
+  bool vecOwnerInner = false;
+  if (ownerAxis && *ownerAxis >= 0 && *ownerAxis < rankDomain - 1 && !whole &&
+      fixed > 0) {
+    vecOwnerInner = true;
+    for (Operation &op : bb.without_terminator()) {
+      StringRef n = op.getName().stripDialect();
+      if (n == "read" || n == "write") {
+        auto vt = cast<MemRefType>(op.getOperand(0).getType());
+        if (vt.getRank() != rankDomain) {
+          vecOwnerInner = false;
+          break;
+        }
+      } else if (n == "gather_row" || n == "ordered_sum" ||
+                 n == "segment_length" || n == "scan_sum" ||
+                 n == "count_keys" || n == "column_sum" || n == "ordinal" ||
+                 n == "uniform") {
+        vecOwnerInner = false;
+        break;
+      }
+    }
+  }
+  bool scalarMembers = ownerAxis.has_value() && !vecOwnerInner;
 
   TaskTerm panelCount, tailStart;
   if (!whole) {
@@ -1433,6 +1565,199 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
       }
     }
   } else {
+    SmallVector<Operation *> allOps, writes, ownedWrites;
+    bool hasUniform = false, hasSpecialSweep = false;
+    for (Operation &op : bb.without_terminator()) {
+      allOps.push_back(&op);
+      StringRef n = op.getName().stripDialect();
+      if (n == "write")
+        writes.push_back(&op);
+      else if (n == "write_owner")
+        ownedWrites.push_back(&op);
+      else if (n == "uniform")
+        hasUniform = true;
+      else if (n == "ordered_sum" || n == "segment_length" ||
+               n == "scan_sum" || n == "count_keys" || n == "column_sum" ||
+               n == "gather_row")
+        hasSpecialSweep = true;
+    }
+
+    auto isReductionOp = [](Operation *op) {
+      StringRef n = op->getName().stripDialect();
+      return n == "sum" || n == "max_num" || n == "welford";
+    };
+
+    SmallVector<SmallVector<Operation *, 4>, 8> redStages;
+    llvm::DenseSet<Operation *> scheduledReds;
+    if (!isTransposeTile && !intentdsl::cpu::atomicMembers(bb) &&
+        !intentdsl::cpu::packed(bb)) {
+      for (Operation *op : allOps) {
+        if (!isReductionOp(op) || scheduledReds.contains(op))
+          continue;
+        StringRef kind = op->getName().stripDialect();
+        if (kind == "welford") {
+          scheduledReds.insert(op);
+          redStages.push_back({op});
+          continue;
+        }
+        auto dependsOnUnscheduledRed = [&](Operation *root) {
+          llvm::DenseSet<Operation *> seen;
+          SmallVector<Operation *, 16> work{root};
+          while (!work.empty()) {
+            Operation *cur = work.pop_back_val();
+            if (!seen.insert(cur).second)
+              continue;
+            if (cur != root && isReductionOp(cur) &&
+                !scheduledReds.contains(cur))
+              return true;
+            if (cur != root && isReductionOp(cur))
+              continue;
+            for (Value in : cur->getOperands())
+              if (auto *def = in.getDefiningOp(); def && def->getBlock() == &bb)
+                work.push_back(def);
+          }
+          return false;
+        };
+        SmallVector<Operation *, 4> stage{op};
+        constexpr size_t kMaxFusedReds = 4;
+        for (Operation *cand : allOps) {
+          if (stage.size() >= kMaxFusedReds)
+            break;
+          if (cand == op || cand->getName().stripDialect() != kind ||
+              scheduledReds.contains(cand))
+            continue;
+          if (!dependsOnUnscheduledRed(cand))
+            stage.push_back(cand);
+        }
+        for (Operation *sOp : stage)
+          scheduledReds.insert(sOp);
+        redStages.push_back(std::move(stage));
+      }
+    }
+
+    constexpr int64_t kMaxRowCacheCols = 8192;
+    SmallVector<Value, 4> cachedCut;
+    SmallVector<Value, 4> cachePtrs;
+    SmallVector<std::string, 4> cacheElemSps;
+    if (!isTransposeTile && !intentdsl::cpu::atomicMembers(bb) &&
+        !intentdsl::cpu::packed(bb) && !ownerAxis && !whole && fixed > 0 &&
+        hasUniform && !hasSpecialSweep && redStages.size() == 1 &&
+        redStages[0].front()->getName().stripDialect() != "welford" &&
+        !writes.empty() && ownedWrites.empty()) {
+      llvm::DenseSet<Operation *> s1Ops, s2Ops, storeDirect;
+      {
+        SmallVector<Operation *, 16> work;
+        for (Operation *ro : redStages[0])
+          if (auto *def = ro->getOperand(0).getDefiningOp();
+              def && def->getBlock() == &bb)
+            work.push_back(def);
+        while (!work.empty()) {
+          Operation *cur = work.pop_back_val();
+          if (!s1Ops.insert(cur).second)
+            continue;
+          if (cur->getName().stripDialect() == "read_owner")
+            continue;
+          for (Value in : cur->getOperands())
+            if (auto *def = in.getDefiningOp(); def && def->getBlock() == &bb)
+              work.push_back(def);
+        }
+      }
+      {
+        SmallVector<Operation *, 16> work;
+        for (Operation *wo : writes) {
+          if (auto *def = wo->getOperand(2).getDefiningOp();
+              def && def->getBlock() == &bb && !scheduledReds.contains(def)) {
+            storeDirect.insert(def);
+            work.push_back(def);
+          }
+        }
+        while (!work.empty()) {
+          Operation *cur = work.pop_back_val();
+          if (!s2Ops.insert(cur).second)
+            continue;
+          if (cur->getName().stripDialect() == "read_owner")
+            continue;
+          for (Value in : cur->getOperands())
+            if (auto *def = in.getDefiningOp();
+                def && def->getBlock() == &bb && !scheduledReds.contains(def))
+              work.push_back(def);
+        }
+      }
+      bool unwrapped = true;
+      llvm::DenseSet<Operation *> forcedRecompute;
+      while (unwrapped) {
+        unwrapped = false;
+        for (Operation *op : allOps) {
+          if (!s1Ops.contains(op) || forcedRecompute.contains(op) ||
+              op->getName().stripDialect() != "cast")
+            continue;
+          auto inTy = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
+          auto outTy = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+          auto *inDef = op->getOperand(0).getDefiningOp();
+          if (!inTy || !outTy || !inDef || !s1Ops.contains(inDef) ||
+              inTy.getElementTypeBitWidth() >= outTy.getElementTypeBitWidth() ||
+              !(inTy.getElementType().isBF16() ||
+                inTy.getElementType().isF16()))
+            continue;
+          bool usedInS2 =
+              storeDirect.contains(op) ||
+              llvm::any_of(op->getResult(0).getUsers(), [&](Operation *u) {
+                return (s2Ops.contains(u) && !s1Ops.contains(u)) ||
+                       forcedRecompute.contains(u);
+              });
+          if (usedInS2) {
+            forcedRecompute.insert(op);
+            unwrapped = true;
+          }
+        }
+      }
+      bool validCut = true;
+      for (Operation *op : allOps) {
+        if (!s1Ops.contains(op) || forcedRecompute.contains(op) ||
+            op->getNumResults() != 1 ||
+            !isa<ShapedType>(op->getResult(0).getType()))
+          continue;
+        Value v = op->getResult(0);
+        bool usedOutside =
+            storeDirect.contains(op) ||
+            llvm::any_of(v.getUsers(), [&](Operation *u) {
+              return (s2Ops.contains(u) && !s1Ops.contains(u)) ||
+                     forcedRecompute.contains(u);
+            });
+        if (!usedOutside)
+          continue;
+        auto rt = dyn_cast<RankedTensorType>(v.getType());
+        if (!rt || !(rt.getElementType().isBF16() ||
+                     rt.getElementType().isF16() ||
+                     rt.getElementType().isF32())) {
+          validCut = false;
+          break;
+        }
+        cachedCut.push_back(v);
+      }
+      if (!validCut || cachedCut.empty() || cachedCut.size() > 4) {
+        cachedCut.clear();
+      } else {
+        for (Value cv : cachedCut) {
+          std::string eSp = weftSpelling(
+              cast<RankedTensorType>(cv.getType()).getElementType());
+          std::string ptrTy = "!weft_kernel.pointer<" + eSp + ">";
+          Value ptrV = makeOp(b, loc, "task_local_alloc", {},
+                              {b.getIndexType()},
+                              {b.getNamedAttr("elements",
+                                              b.getI64IntegerAttr(
+                                                  kMaxRowCacheCols)),
+                               b.getNamedAttr("alignment",
+                                              b.getI64IntegerAttr(64)),
+                               b.getNamedAttr("ptr_type",
+                                              b.getStringAttr(ptrTy))})
+                           ->getResult(0);
+          cachePtrs.push_back(ptrV);
+          cacheElemSps.push_back(eSp);
+        }
+      }
+    }
+
     // Outer loop over rows %r = 0 to %T step 1
     Operation *rowFor = makeOp(
         b, loc, "task_for", {rb.zeroIdx.v, rb.extent.v, rb.oneIdx.v}, {},
@@ -1790,73 +2115,722 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
       }
       rb.commitOp(rb.castOp(count, "si32"),
                   rb.scalarSlice(pack.getOperand(2), {rowIv}, false));
-    } else if (whole && !scalarMembers) {
-      SmallVector<Operation *> ops, writes;
-      for (Operation &op : bb.without_terminator()) {
-        if (op.getName().stripDialect() == "write")
-          writes.push_back(&op);
-        else
-          ops.push_back(&op);
-      }
+    } else if (whole && !ownerAxis && redStages.empty() && !hasSpecialSweep) {
+      SmallVector<Operation *> ops;
+      for (Operation *op : allOps)
+        if (op->getName().stripDialect() != "write")
+          ops.push_back(op);
       llvm::DenseMap<Value, TaskTerm> localMap;
-      if (failed(rb.emitVectorPanelOps(ops, writes, rowIv, std::nullopt,
-                                       rb.panelWidth, -2, localMap)))
+      if (failed(rb.emitVectorPanelOps(ops, writes, rowIv, {rowIv},
+                                       std::nullopt, rb.panelWidth, -2, -2, 2,
+                                       false, localMap)))
         return failure();
     } else {
-      // Decompose logical row body into sweeps (owner captures, reductions,
-      // welford, private_bins/vertical_sum, segment/prefix sweeps, panel stores).
-      SmallVector<Operation *> allOps, writes, ownedWrites;
-      for (Operation &op : bb.without_terminator()) {
-        allOps.push_back(&op);
-        StringRef n = op.getName().stripDialect();
-        if (n == "write")
-          writes.push_back(&op);
-        else if (n == "write_owner")
-          ownedWrites.push_back(&op);
-      }
-
+      // Decompose logical row body into staged sweeps:
+      // 1) read_owner + hoisted row-invariant scalar math
+      // 2) fused reduction / SIMD Welford stages (+ scalar math between stages)
+      // 3) panel store / owner publish sweeps (with optional L1d row cache)
       llvm::DenseSet<Value> summaryValues;
       for (Operation *op : allOps) {
-        StringRef n = op->getName().stripDialect();
-        if (n == "read_owner") {
+        if (op->getName().stripDialect() == "read_owner") {
           rb.terms[op->getResult(0)] = rb.memberSlice(
               op->getOperand(0), rowIv, {}, true, true,
               weftSpelling(op->getResult(0).getType()));
           summaryValues.insert(op->getResult(0));
-          continue;
         }
-        bool publish = (n == "write_owner");
-        bool store = (n == "write" || publish);
-        if (!scalarMembers && store &&
-            op != (publish ? ownedWrites : writes).front())
-          continue;
-        if (!store && n != "sum" && n != "max_num" && n != "welford")
-          continue;
+      }
 
-        SweepDesc sw;
-        sw.combine =
-            publish ? "publish" : store ? "store" : std::string(n);
-        sw.anchor = op;
-        if (store) {
-          if (scalarMembers)
-            sw.writes.push_back(op);
-          else
-            sw.writes = publish ? ownedWrites : writes;
+      auto hasBoundScalar = [&](Value v) {
+        return !isa<MemRefType>(v.getType()) && !isa<ShapedType>(v.getType()) &&
+               rb.terms.count(v) > 0;
+      };
+
+      auto emitAvailableScalars = [&]() -> LogicalResult {
+        for (Operation *op : allOps) {
+          if (op->getNumResults() != 1)
+            continue;
+          Value res = op->getResult(0);
+          if (isa<ShapedType>(res.getType()) || rb.terms.count(res) ||
+              rb.records.count(res))
+            continue;
+          StringRef n = op->getName().stripDialect();
+          if (n == "read" || n == "read_owner" || isReductionOp(op) ||
+              n == "ordered_sum" || n == "segment_length" ||
+              n == "gather_row" || n == "count_keys" || n == "column_sum" ||
+              n == "scan_sum" || n == "ordinal" || n == "uniform" ||
+              n == "member_index")
+            continue;
+          if (n == "field") {
+            auto saved = rb.records.find(op->getOperand(0));
+            if (saved == rb.records.end())
+              continue;
+            rb.terms[res] = saved->second[op->getAttrOfType<IntegerAttr>(
+                                                "position")
+                                              .getInt()];
+            summaryValues.insert(res);
+            continue;
+          }
+          std::string ty = weftSpelling(res.getType());
+          if (n == "constant") {
+            if (auto integer = op->getAttrOfType<IntegerAttr>("value")) {
+              rb.terms[res] = rb.lit(
+                  ty == "i1" ? (integer.getInt() ? "true" : "false")
+                             : std::to_string(integer.getInt()),
+                  ty);
+            } else {
+              rb.terms[res] = rb.lit(stripTypeSuffix(op->getAttr("value")), ty);
+            }
+            summaryValues.insert(res);
+            continue;
+          }
+          if (!llvm::all_of(op->getOperands(), hasBoundScalar))
+            continue;
+          if (n == "cast") {
+            rb.terms[res] = rb.castOp(rb.terms.lookup(op->getOperand(0)), ty);
+          } else if (n == "sqrt" || n == "rsqrt" || n == "exp") {
+            rb.terms[res] = rb.unaryOp(n, rb.terms.lookup(op->getOperand(0)));
+          } else if (n == "select") {
+            rb.terms[res] =
+                rb.sel(rb.terms.lookup(op->getOperand(0)),
+                       rb.terms.lookup(op->getOperand(1)),
+                       rb.terms.lookup(op->getOperand(2)), ty);
+          } else if (n == "gt" || n == "ne") {
+            rb.terms[res] =
+                rb.cmp(n, rb.terms.lookup(op->getOperand(0)),
+                       rb.terms.lookup(op->getOperand(1)), ty);
+          } else if (n == "xor" || n == "and" || n == "shl" || n == "shr" ||
+                     n == "maximum" || n == "mul" || n == "add" || n == "div" ||
+                     n == "sub") {
+            StringRef bKind = n == "maximum" ? StringRef("max") : n;
+            rb.terms[res] =
+                rb.bin(bKind, rb.terms.lookup(op->getOperand(0)),
+                       rb.terms.lookup(op->getOperand(1)), ty);
+          } else {
+            continue;
+          }
+          summaryValues.insert(res);
         }
+        return success();
+      };
 
+      if (failed(emitAvailableScalars()))
+        return failure();
+
+      int d0SymIdx = 3 + (absolute ? 1 : 0) + (ownedKeys ? 2 : 0);
+      int ownerBaseColDim =
+          vecOwnerInner ? -(1 + d0SymIdx + int(rankDomain - 1)) : -2;
+      int ownerVecAxisId = vecOwnerInner ? int(rankDomain) : 2;
+      SmallVector<int64_t, 4> outerAxes;
+      TaskTerm outerTotal = rb.oneIdx;
+      TaskTerm innerCols, innerPanelCount, innerTailStart;
+      if (vecOwnerInner) {
+        for (int64_t j = 0; j < rankDomain - 1; ++j)
+          if (j != *ownerAxis)
+            outerAxes.push_back(j);
+        if (!outerAxes.empty()) {
+          outerTotal = rb.extents[outerAxes[0]];
+          for (size_t k = 1; k < outerAxes.size(); ++k)
+            outerTotal =
+                rb.bin("mul", outerTotal, rb.extents[outerAxes[k]], "index");
+        }
+        innerCols = rb.extents[rankDomain - 1];
+        innerPanelCount = rb.bin("div", innerCols, rb.panelWidth, "index");
+        innerTailStart = rb.bin("mul", innerPanelCount, rb.panelWidth, "index");
+      }
+
+      auto buildOwnerPrefix = [&](TaskTerm outerIv) {
+        SmallVector<TaskTerm, 4> prefix(rankDomain - 1);
+        prefix[*ownerAxis] = rowIv;
+        if (outerAxes.size() == 1) {
+          prefix[outerAxes[0]] = outerIv;
+        } else if (outerAxes.size() > 1) {
+          TaskTerm cur = outerIv;
+          for (int idx = int(outerAxes.size()) - 1; idx >= 0; --idx) {
+            int64_t ax = outerAxes[idx];
+            if (idx == 0) {
+              prefix[ax] = cur;
+            } else {
+              TaskTerm sz = rb.extents[ax];
+              prefix[ax] = rb.bin("mod", cur, sz, "index");
+              cur = rb.bin("div", cur, sz, "index");
+            }
+          }
+        }
+        return prefix;
+      };
+
+      int64_t tailVec =
+          fixed > 0 ? std::min<int64_t>(fixed, std::max<int64_t>(1, tailVecWidth))
+                    : std::max<int64_t>(1, tailVecWidth);
+
+      auto evalScalarAt = [&](ArrayRef<Operation *> ops,
+                              ArrayRef<TaskTerm> prefixCoords, TaskTerm colIv,
+                              Operation *stopOp,
+                              llvm::DenseMap<Value, TaskTerm> &localMap)
+          -> LogicalResult {
+        auto lookup = [&](Value v) -> TaskTerm {
+          auto it = localMap.find(v);
+          return it != localMap.end() ? it->second : rb.terms.lookup(v);
+        };
+        for (Operation *opPtr : ops) {
+          if (opPtr == stopOp)
+            continue;
+          Operation &op = *opPtr;
+          StringRef n = op.getName().stripDialect();
+          if (n == "write" || n == "write_owner")
+            continue;
+          Value resVal = op.getResult(0);
+          Type rawT = resVal.getType();
+          if (auto sh = dyn_cast<ShapedType>(rawT))
+            rawT = sh.getElementType();
+          std::string ty = weftSpelling(rawT);
+          if (n == "read") {
+            auto vt = cast<MemRefType>(op.getOperand(0).getType());
+            SmallVector<TaskTerm, 4> coords;
+            if (vt.getRank() >= 2)
+              coords.append(prefixCoords.begin(), prefixCoords.end());
+            coords.push_back(colIv);
+            localMap[resVal] = rb.scalarSlice(op.getOperand(0), coords, true, ty);
+          } else if (n == "read_owner") {
+            localMap[resVal] = rb.memberSlice(op.getOperand(0), rowIv, {}, true,
+                                              true, ty);
+          } else if (n == "field") {
+            auto saved = rb.records.find(op.getOperand(0));
+            if (saved == rb.records.end())
+              return op.emitError("unbound Weft tuple field");
+            localMap[resVal] =
+                saved->second[op.getAttrOfType<IntegerAttr>("position")
+                                  .getInt()];
+          } else if (n == "constant") {
+            if (auto integer = op.getAttrOfType<IntegerAttr>("value"))
+              localMap[resVal] = rb.lit(
+                  ty == "i1" ? (integer.getInt() ? "true" : "false")
+                             : std::to_string(integer.getInt()),
+                  ty);
+            else
+              localMap[resVal] =
+                  rb.lit(stripTypeSuffix(op.getAttr("value")), ty);
+          } else if (n == "cast") {
+            localMap[resVal] = rb.castOp(lookup(op.getOperand(0)), ty);
+          } else if (n == "rsqrt" || n == "exp" || n == "sqrt") {
+            localMap[resVal] = rb.unaryOp(n, lookup(op.getOperand(0)));
+          } else if (n == "select") {
+            localMap[resVal] =
+                rb.sel(lookup(op.getOperand(0)), lookup(op.getOperand(1)),
+                       lookup(op.getOperand(2)), ty);
+          } else if (n == "gt" || n == "ne") {
+            localMap[resVal] =
+                rb.cmp(n, lookup(op.getOperand(0)), lookup(op.getOperand(1)),
+                       ty);
+          } else if (n == "mul" || n == "add" || n == "div" || n == "sub" ||
+                     n == "maximum" || n == "xor" || n == "and" || n == "shl" ||
+                     n == "shr") {
+            StringRef bKind = n == "maximum" ? StringRef("max") : n;
+            localMap[resVal] = rb.bin(bKind, lookup(op.getOperand(0)),
+                                      lookup(op.getOperand(1)), ty);
+          } else {
+            return op.emitError("unsupported scalar tail op ") << n;
+          }
+        }
+        return success();
+      };
+
+      auto emitReductionStage =
+          [&](ArrayRef<Operation *> stage, ArrayRef<Value> cacheWriteVals,
+              bool onlyFullPanels) -> LogicalResult {
+        Operation *first = stage.front();
+        StringRef combine = first->getName().stripDialect();
         llvm::DenseSet<Operation *> visited;
         SmallVector<Operation *> subOps;
-        if (store) {
-          for (Operation *w : sw.writes)
+        if (combine == "welford") {
+          rb.collectSubgraph(first->getOperand(0).getDefiningOp(),
+                             summaryValues, visited, subOps);
+          subOps.push_back(first);
+        } else {
+          for (Operation *ro : stage)
+            rb.collectSubgraph(ro, summaryValues, visited, subOps);
+        }
+
+        SweepDesc sw;
+        sw.combine = combine.str();
+        sw.anchor = first;
+        sw.anchors.assign(stage.begin(), stage.end());
+        for (Operation *so : subOps) {
+          StringRef sn = so->getName().stripDialect();
+          if (sn == "ordered_sum")
+            sw.segmentLoop = true;
+          if (sn == "scan_sum")
+            sw.prefixCarry = true;
+        }
+
+        if (scalarMembers || sw.prefixCarry || sw.segmentLoop || whole ||
+            fixed <= 0) {
+          if (failed(rb.emitScalarSweep(sw, subOps, rowIv)))
+            return failure();
+          for (Operation *ro : stage)
+            summaryValues.insert(ro->getResult(0));
+          return success();
+        }
+
+        int axId = vecOwnerInner ? ownerVecAxisId : 2;
+        int baseDim = vecOwnerInner ? ownerBaseColDim : -2;
+        int w = int(fixed);
+        std::string vecF32Ty = regionType("value", "f32", 1, w, axId);
+
+        if (combine == "welford") {
+          std::string vecI1Ty = regionType("value", "i1", 1, w, axId);
+          TaskTerm initZeroVec = rb.splatOp(rb.zeroF32, vecF32Ty);
+          llvm::DenseSet<Operation *> skipW{first};
+
+          auto emitWelfordInner = [&](ArrayRef<TaskTerm> prefix,
+                                      TaskTerm colCnt, TaskTerm pCnt,
+                                      TaskTerm tStart, TaskTerm inNPanels,
+                                      TaskTerm inMeanVec, TaskTerm inM2Vec,
+                                      TaskTerm inTCnt, TaskTerm inTMean,
+                                      TaskTerm inTM2,
+                                      std::array<TaskTerm, 6> &outState)
+              -> LogicalResult {
+            Operation *pFor = makeOp(
+                b, loc, "task_for",
+                {rb.zeroIdx.v, pCnt.v, rb.oneIdx.v, inNPanels.v, inMeanVec.v,
+                 inM2Vec.v},
+                {b.getIndexType(), b.getIndexType(), b.getIndexType()},
+                {b.getNamedAttr("iter_types",
+                                b.getArrayAttr({b.getStringAttr("si32"),
+                                                b.getStringAttr(vecF32Ty),
+                                                b.getStringAttr(vecF32Ty)}))},
+                1);
+            Block &pBb = pFor->getRegion(0).emplaceBlock();
+            TaskTerm pIv{pBb.addArgument(b.getIndexType(), loc), "index"};
+            TaskTerm nCnt{pBb.addArgument(b.getIndexType(), loc), "si32"};
+            TaskTerm meanV{pBb.addArgument(b.getIndexType(), loc), vecF32Ty};
+            TaskTerm m2V{pBb.addArgument(b.getIndexType(), loc), vecF32Ty};
+            {
+              OpBuilder::InsertionGuard pg(b);
+              b.setInsertionPointToEnd(&pBb);
+              TaskTerm off = rb.bin("mul", pIv, rb.panelWidth, "index");
+              llvm::DenseMap<Value, TaskTerm> localMap;
+              if (failed(rb.emitVectorPanelOps(subOps, {}, rowIv, prefix, off,
+                                               rb.panelWidth, w, baseDim, axId,
+                                               true, localMap, &skipW)))
+                return failure();
+              TaskTerm vVec = localMap.at(first->getOperand(0));
+              TaskTerm count = rb.bin("add", nCnt, rb.oneCount, "si32");
+              TaskTerm delta = rb.bin("sub", vVec, meanV, vecF32Ty);
+              TaskTerm change =
+                  rb.bin("div", delta, rb.castOp(count, "f32"), vecF32Ty);
+              TaskTerm mNext = rb.bin("add", meanV, change, vecF32Ty);
+              TaskTerm m2Next = rb.bin(
+                  "add", m2V,
+                  rb.bin("mul",
+                         rb.bin("mul", delta, rb.castOp(nCnt, "f32"), vecF32Ty),
+                         change, vecF32Ty),
+                  vecF32Ty);
+              TaskTerm firstMask = rb.splatOp(
+                  rb.cmp("eq", nCnt, rb.zeroCount, "i1"), vecI1Ty);
+              mNext = rb.sel(firstMask, vVec, mNext, vecF32Ty);
+              m2Next = rb.sel(firstMask, initZeroVec, m2Next, vecF32Ty);
+              makeOp(b, loc, "task_yield", {count.v, mNext.v, m2Next.v}, {},
+                     {b.getNamedAttr(
+                         "val_types",
+                         b.getArrayAttr({b.getStringAttr("si32"),
+                                         b.getStringAttr(vecF32Ty),
+                                         b.getStringAttr(vecF32Ty)}))});
+            }
+
+            Operation *tFor = makeOp(
+                b, loc, "task_for",
+                {tStart.v, colCnt.v, rb.oneIdx.v, inTCnt.v, inTMean.v,
+                 inTM2.v},
+                {b.getIndexType(), b.getIndexType(), b.getIndexType()},
+                {b.getNamedAttr("iter_types",
+                                b.getArrayAttr({b.getStringAttr("si32"),
+                                                b.getStringAttr("f32"),
+                                                b.getStringAttr("f32")}))},
+                1);
+            Block &tBb = tFor->getRegion(0).emplaceBlock();
+            TaskTerm colIv{tBb.addArgument(b.getIndexType(), loc), "index"};
+            TaskTerm sCnt{tBb.addArgument(b.getIndexType(), loc), "si32"};
+            TaskTerm sMean{tBb.addArgument(b.getIndexType(), loc), "f32"};
+            TaskTerm sM2{tBb.addArgument(b.getIndexType(), loc), "f32"};
+            {
+              OpBuilder::InsertionGuard tg(b);
+              b.setInsertionPointToEnd(&tBb);
+              llvm::DenseMap<Value, TaskTerm> localMap;
+              if (failed(evalScalarAt(subOps, prefix, colIv, first, localMap)))
+                return failure();
+              TaskTerm v = localMap.at(first->getOperand(0));
+              TaskTerm count = rb.bin("add", sCnt, rb.oneCount, "si32");
+              TaskTerm delta = rb.bin("sub", v, sMean, "f32");
+              TaskTerm change =
+                  rb.bin("div", delta, rb.castOp(count, "f32"), "f32");
+              TaskTerm m = rb.bin("add", sMean, change, "f32");
+              TaskTerm variance = rb.bin(
+                  "add", sM2,
+                  rb.bin("mul", rb.bin("mul", delta, rb.castOp(sCnt, "f32"), "f32"),
+                         change, "f32"),
+                  "f32");
+              TaskTerm isFirst = rb.cmp("eq", sCnt, rb.zeroCount, "i1");
+              m = rb.sel(isFirst, v, m, "f32");
+              variance = rb.sel(isFirst, rb.zeroF32, variance, "f32");
+              makeOp(b, loc, "task_yield", {count.v, m.v, variance.v}, {},
+                     {b.getNamedAttr(
+                         "val_types",
+                         b.getArrayAttr({b.getStringAttr("si32"),
+                                         b.getStringAttr("f32"),
+                                         b.getStringAttr("f32")}))});
+            }
+
+            outState = {TaskTerm{pFor->getResult(0), "si32"},
+                        TaskTerm{pFor->getResult(1), vecF32Ty},
+                        TaskTerm{pFor->getResult(2), vecF32Ty},
+                        TaskTerm{tFor->getResult(0), "si32"},
+                        TaskTerm{tFor->getResult(1), "f32"},
+                        TaskTerm{tFor->getResult(2), "f32"}};
+            return success();
+          };
+
+          std::array<TaskTerm, 6> finState;
+          if (!vecOwnerInner) {
+            if (failed(emitWelfordInner({rowIv}, rb.columns, panelCount,
+                                        tailStart, rb.zeroCount, initZeroVec,
+                                        initZeroVec, rb.zeroCount, rb.zeroF32,
+                                        rb.zeroF32, finState)))
+              return failure();
+          } else {
+            SmallVector<Attribute, 6> oTys{
+                b.getStringAttr("si32"),     b.getStringAttr(vecF32Ty),
+                b.getStringAttr(vecF32Ty),   b.getStringAttr("si32"),
+                b.getStringAttr("f32"),      b.getStringAttr("f32")};
+            SmallVector<Type, 6> oResTys(6, b.getIndexType());
+            Operation *oFor = makeOp(
+                b, loc, "task_for",
+                {rb.zeroIdx.v, outerTotal.v, rb.oneIdx.v, rb.zeroCount.v,
+                 initZeroVec.v, initZeroVec.v, rb.zeroCount.v, rb.zeroF32.v,
+                 rb.zeroF32.v},
+                oResTys, {b.getNamedAttr("iter_types", b.getArrayAttr(oTys))},
+                1);
+            Block &oBb = oFor->getRegion(0).emplaceBlock();
+            TaskTerm outerIv{oBb.addArgument(b.getIndexType(), loc), "index"};
+            TaskTerm cNP{oBb.addArgument(b.getIndexType(), loc), "si32"};
+            TaskTerm cMV{oBb.addArgument(b.getIndexType(), loc), vecF32Ty};
+            TaskTerm cS2V{oBb.addArgument(b.getIndexType(), loc), vecF32Ty};
+            TaskTerm cTC{oBb.addArgument(b.getIndexType(), loc), "si32"};
+            TaskTerm cTM{oBb.addArgument(b.getIndexType(), loc), "f32"};
+            TaskTerm cTS2{oBb.addArgument(b.getIndexType(), loc), "f32"};
+            {
+              OpBuilder::InsertionGuard og(b);
+              b.setInsertionPointToEnd(&oBb);
+              auto prefix = buildOwnerPrefix(outerIv);
+              std::array<TaskTerm, 6> stepOut;
+              if (failed(emitWelfordInner(prefix, innerCols, innerPanelCount,
+                                          innerTailStart, cNP, cMV, cS2V, cTC,
+                                          cTM, cTS2, stepOut)))
+                return failure();
+              makeOp(b, loc, "task_yield",
+                     {stepOut[0].v, stepOut[1].v, stepOut[2].v, stepOut[3].v,
+                      stepOut[4].v, stepOut[5].v},
+                     {}, {b.getNamedAttr("val_types", b.getArrayAttr(oTys))});
+            }
+            finState = {TaskTerm{oFor->getResult(0), "si32"},
+                        TaskTerm{oFor->getResult(1), vecF32Ty},
+                        TaskTerm{oFor->getResult(2), vecF32Ty},
+                        TaskTerm{oFor->getResult(3), "si32"},
+                        TaskTerm{oFor->getResult(4), "f32"},
+                        TaskTerm{oFor->getResult(5), "f32"}};
+          }
+
+          // Reduce equal-count SIMD lanes via Chan's parallel axis formula.
+          TaskTerm nPanels = finState[0], meanVec = finState[1],
+                   m2Vec = finState[2];
+          TaskTerm vecCnt =
+              rb.bin("mul", nPanels, rb.lit(std::to_string(w), "si32"), "si32");
+          Value sumMeanV =
+              makeOp(b, loc, "task_reduce", {meanVec.v}, {b.getIndexType()},
+                     {b.getNamedAttr("kind", b.getStringAttr("add")),
+                      b.getNamedAttr("axis", b.getI64IntegerAttr(0)),
+                      b.getNamedAttr("in_type", b.getStringAttr(vecF32Ty)),
+                      b.getNamedAttr("val_type", b.getStringAttr("f32"))})
+                  ->getResult(0);
+          TaskTerm vecMeanCand =
+              rb.bin("div", {sumMeanV, "f32"},
+                     rb.lit(std::to_string(w) + ".0", "f32"), "f32");
+          TaskTerm dVec = rb.bin("sub", meanVec, vecMeanCand, vecF32Ty);
+          TaskTerm m2Terms = rb.bin(
+              "add", m2Vec,
+              rb.bin("mul", rb.castOp(nPanels, "f32"),
+                     rb.bin("mul", dVec, dVec, vecF32Ty), vecF32Ty),
+              vecF32Ty);
+          Value sumM2V =
+              makeOp(b, loc, "task_reduce", {m2Terms.v}, {b.getIndexType()},
+                     {b.getNamedAttr("kind", b.getStringAttr("add")),
+                      b.getNamedAttr("axis", b.getI64IntegerAttr(0)),
+                      b.getNamedAttr("in_type", b.getStringAttr(vecF32Ty)),
+                      b.getNamedAttr("val_type", b.getStringAttr("f32"))})
+                  ->getResult(0);
+          TaskTerm hasVec = rb.cmp("gt", vecCnt, rb.zeroCount, "i1");
+          TaskTerm vecMean = rb.sel(hasVec, vecMeanCand, rb.zeroF32, "f32");
+          TaskTerm vecM2 = rb.sel(hasVec, {sumM2V, "f32"}, rb.zeroF32, "f32");
+
+          // Combine vector summary with scalar tail summary.
+          TaskTerm tCnt = finState[3], tMean = finState[4], tM2 = finState[5];
+          TaskTerm totCnt = rb.bin("add", vecCnt, tCnt, "si32");
+          TaskTerm safeTotF = rb.castOp(
+              rb.sel(rb.cmp("gt", totCnt, rb.zeroCount, "i1"), totCnt,
+                     rb.oneCount, "si32"),
+              "f32");
+          TaskTerm delta = rb.bin("sub", tMean, vecMean, "f32");
+          TaskTerm combMean = rb.bin(
+              "add", vecMean,
+              rb.bin("mul", delta,
+                     rb.bin("div", rb.castOp(tCnt, "f32"), safeTotF, "f32"),
+                     "f32"),
+              "f32");
+          TaskTerm combM2 = rb.bin(
+              "add", rb.bin("add", vecM2, tM2, "f32"),
+              rb.bin("mul", rb.bin("mul", delta, delta, "f32"),
+                     rb.bin("div",
+                            rb.bin("mul", rb.castOp(vecCnt, "f32"),
+                                   rb.castOp(tCnt, "f32"), "f32"),
+                            safeTotF, "f32"),
+                     "f32"),
+              "f32");
+          TaskTerm tailEmpty = rb.cmp("eq", tCnt, rb.zeroCount, "i1");
+          TaskTerm vecEmpty = rb.cmp("eq", vecCnt, rb.zeroCount, "i1");
+          TaskTerm finMean = rb.sel(tailEmpty, vecMean,
+                                    rb.sel(vecEmpty, tMean, combMean, "f32"),
+                                    "f32");
+          TaskTerm finM2 =
+              rb.sel(tailEmpty, vecM2,
+                     rb.sel(vecEmpty, tM2, combM2, "f32"), "f32");
+          rb.records[first->getResult(0)] = {totCnt, finMean, finM2};
+          summaryValues.insert(first->getResult(0));
+          return success();
+        }
+
+        // Vector-accumulated fused sum / max_num stage.
+        size_t m = stage.size();
+        StringRef bKind = (combine == "sum") ? StringRef("add") : StringRef("max");
+        StringRef rKind = (combine == "sum") ? StringRef("add") : StringRef("max");
+        TaskTerm initSc = (combine == "sum") ? rb.zeroF32 : rb.minusInfF32;
+        TaskTerm initVec = rb.splatOp(initSc, vecF32Ty);
+        llvm::DenseSet<Operation *> skipReds(stage.begin(), stage.end());
+
+        auto emitRedInner = [&](ArrayRef<TaskTerm> prefix, TaskTerm colCnt,
+                                TaskTerm pCnt, TaskTerm tStart,
+                                ArrayRef<TaskTerm> inVecs,
+                                ArrayRef<TaskTerm> inTailScs,
+                                SmallVectorImpl<TaskTerm> &outVecs,
+                                SmallVectorImpl<TaskTerm> &outTailScs)
+            -> LogicalResult {
+          SmallVector<Value, 8> pOps{rb.zeroIdx.v, pCnt.v, rb.oneIdx.v};
+          SmallVector<Attribute, 4> pIterTys;
+          SmallVector<Type, 4> pResTys(m, b.getIndexType());
+          for (size_t k = 0; k < m; ++k) {
+            pOps.push_back(inVecs[k].v);
+            pIterTys.push_back(b.getStringAttr(vecF32Ty));
+          }
+          Operation *pFor = makeOp(
+              b, loc, "task_for", pOps, pResTys,
+              {b.getNamedAttr("iter_types", b.getArrayAttr(pIterTys))}, 1);
+          Block &pBb = pFor->getRegion(0).emplaceBlock();
+          TaskTerm pIv{pBb.addArgument(b.getIndexType(), loc), "index"};
+          SmallVector<TaskTerm, 4> accVecs;
+          for (size_t k = 0; k < m; ++k)
+            accVecs.push_back({pBb.addArgument(b.getIndexType(), loc), vecF32Ty});
+          {
+            OpBuilder::InsertionGuard pg(b);
+            b.setInsertionPointToEnd(&pBb);
+            TaskTerm off = rb.bin("mul", pIv, rb.panelWidth, "index");
+            llvm::DenseMap<Value, TaskTerm> localMap;
+            if (failed(rb.emitVectorPanelOps(subOps, {}, rowIv, prefix, off,
+                                             rb.panelWidth, w, baseDim, axId,
+                                             true, localMap, &skipReds)))
+              return failure();
+            if (!cacheWriteVals.empty()) {
+              std::string u64Ty = regionType("value", "ui64", 1, w, axId);
+              std::string ixTy = regionType("value", "si64", 1, w, axId);
+              std::string mskTy = regionType("value", "i1", 1, w, axId);
+              Value lanesV =
+                  makeOp(b, loc, "task_iota", {}, {b.getIndexType()},
+                         {b.getNamedAttr("start", b.getI64IntegerAttr(0)),
+                          b.getNamedAttr("end", b.getI64IntegerAttr(w)),
+                          b.getNamedAttr("val_type", b.getStringAttr(u64Ty))})
+                      ->getResult(0);
+              TaskTerm addr64 =
+                  rb.bin("add", rb.castOp({lanesV, u64Ty}, ixTy),
+                         rb.castOp(off, "si64"), ixTy);
+              TaskTerm trueVec = rb.splatOp(rb.lit("true", "i1"), mskTy);
+              for (auto [cIdx, cv] : llvm::enumerate(cacheWriteVals)) {
+                TaskTerm cVal = localMap.at(cv);
+                std::string pTy =
+                    "!weft_kernel.pointer<" + cacheElemSps[cIdx] + ">";
+                makeOp(b, loc, "task_ptr_store",
+                       {cachePtrs[cIdx], addr64.v, trueVec.v, cVal.v}, {},
+                       {b.getNamedAttr("ptr_type", b.getStringAttr(pTy)),
+                        b.getNamedAttr("val_type", b.getStringAttr(cVal.type))});
+              }
+            }
+            SmallVector<Value, 4> yVals;
+            for (size_t k = 0; k < m; ++k) {
+              TaskTerm inV = localMap.at(stage[k]->getOperand(0));
+              TaskTerm nextV = rb.bin(bKind, accVecs[k], inV, vecF32Ty);
+              yVals.push_back(nextV.v);
+            }
+            makeOp(b, loc, "task_yield", yVals, {},
+                   {b.getNamedAttr("val_types", b.getArrayAttr(pIterTys))});
+          }
+          outVecs.clear();
+          for (size_t k = 0; k < m; ++k)
+            outVecs.push_back({pFor->getResult(k), vecF32Ty});
+
+          outTailScs.clear();
+          if (onlyFullPanels) {
+            outTailScs.assign(inTailScs.begin(), inTailScs.end());
+            return success();
+          }
+
+          SmallVector<Value, 8> tOps{tStart.v, colCnt.v, rb.idx(tailVec).v};
+          SmallVector<Attribute, 4> tIterTys;
+          SmallVector<Type, 4> tResTys(m, b.getIndexType());
+          for (size_t k = 0; k < m; ++k) {
+            tOps.push_back(inTailScs[k].v);
+            tIterTys.push_back(b.getStringAttr("f32"));
+          }
+          Operation *tFor = makeOp(
+              b, loc, "task_for", tOps, tResTys,
+              {b.getNamedAttr("iter_types", b.getArrayAttr(tIterTys))}, 1);
+          Block &tBb = tFor->getRegion(0).emplaceBlock();
+          TaskTerm tIv{tBb.addArgument(b.getIndexType(), loc), "index"};
+          SmallVector<TaskTerm, 4> accScs;
+          for (size_t k = 0; k < m; ++k)
+            accScs.push_back({tBb.addArgument(b.getIndexType(), loc), "f32"});
+          {
+            OpBuilder::InsertionGuard tg(b);
+            b.setInsertionPointToEnd(&tBb);
+            llvm::DenseMap<Value, TaskTerm> localMap;
+            if (failed(rb.emitVectorPanelOps(subOps, {}, rowIv, prefix, tIv,
+                                             rb.panelWidth, int(tailVec),
+                                             baseDim, axId, false, localMap,
+                                             nullptr)))
+              return failure();
+            SmallVector<Value, 4> yVals;
+            for (size_t k = 0; k < m; ++k) {
+              TaskTerm part = localMap.at(stage[k]->getResult(0));
+              TaskTerm nextSc = rb.bin(bKind, accScs[k], part, "f32");
+              yVals.push_back(nextSc.v);
+            }
+            makeOp(b, loc, "task_yield", yVals, {},
+                   {b.getNamedAttr("val_types", b.getArrayAttr(tIterTys))});
+          }
+          for (size_t k = 0; k < m; ++k)
+            outTailScs.push_back({tFor->getResult(k), "f32"});
+          return success();
+        };
+
+        SmallVector<TaskTerm, 4> initVecs(m, initVec), initScs(m, initSc),
+            finVecs, finTailScs;
+        if (!vecOwnerInner) {
+          if (failed(emitRedInner({rowIv}, rb.columns, panelCount, tailStart,
+                                  initVecs, initScs, finVecs, finTailScs)))
+            return failure();
+        } else {
+          SmallVector<Value, 12> oOps{rb.zeroIdx.v, outerTotal.v, rb.oneIdx.v};
+          SmallVector<Attribute, 8> oTys;
+          SmallVector<Type, 8> oResTys(2 * m, b.getIndexType());
+          for (size_t k = 0; k < m; ++k) {
+            oOps.push_back(initVec.v);
+            oTys.push_back(b.getStringAttr(vecF32Ty));
+          }
+          for (size_t k = 0; k < m; ++k) {
+            oOps.push_back(initSc.v);
+            oTys.push_back(b.getStringAttr("f32"));
+          }
+          Operation *oFor = makeOp(
+              b, loc, "task_for", oOps, oResTys,
+              {b.getNamedAttr("iter_types", b.getArrayAttr(oTys))}, 1);
+          Block &oBb = oFor->getRegion(0).emplaceBlock();
+          TaskTerm outerIv{oBb.addArgument(b.getIndexType(), loc), "index"};
+          SmallVector<TaskTerm, 4> cVecs, cScs;
+          for (size_t k = 0; k < m; ++k)
+            cVecs.push_back({oBb.addArgument(b.getIndexType(), loc), vecF32Ty});
+          for (size_t k = 0; k < m; ++k)
+            cScs.push_back({oBb.addArgument(b.getIndexType(), loc), "f32"});
+          {
+            OpBuilder::InsertionGuard og(b);
+            b.setInsertionPointToEnd(&oBb);
+            auto prefix = buildOwnerPrefix(outerIv);
+            SmallVector<TaskTerm, 4> stepVecs, stepScs;
+            if (failed(emitRedInner(prefix, innerCols, innerPanelCount,
+                                    innerTailStart, cVecs, cScs, stepVecs,
+                                    stepScs)))
+              return failure();
+            SmallVector<Value, 8> yVals;
+            for (const TaskTerm &tv : stepVecs)
+              yVals.push_back(tv.v);
+            for (const TaskTerm &ts : stepScs)
+              yVals.push_back(ts.v);
+            makeOp(b, loc, "task_yield", yVals, {},
+                   {b.getNamedAttr("val_types", b.getArrayAttr(oTys))});
+          }
+          for (size_t k = 0; k < m; ++k) {
+            finVecs.push_back({oFor->getResult(k), vecF32Ty});
+            finTailScs.push_back({oFor->getResult(m + k), "f32"});
+          }
+        }
+
+        for (size_t k = 0; k < m; ++k) {
+          Value redV =
+              makeOp(b, loc, "task_reduce", {finVecs[k].v}, {b.getIndexType()},
+                     {b.getNamedAttr("kind", b.getStringAttr(rKind)),
+                      b.getNamedAttr("axis", b.getI64IntegerAttr(0)),
+                      b.getNamedAttr("in_type", b.getStringAttr(vecF32Ty)),
+                      b.getNamedAttr("val_type", b.getStringAttr("f32"))})
+                  ->getResult(0);
+          TaskTerm total = onlyFullPanels
+                               ? TaskTerm{redV, "f32"}
+                               : rb.bin(bKind, {redV, "f32"}, finTailScs[k],
+                                        "f32");
+          rb.terms[stage[k]->getResult(0)] = total;
+          summaryValues.insert(stage[k]->getResult(0));
+        }
+        return success();
+      };
+
+      auto emitStoreSubset =
+          [&](ArrayRef<Operation *> activeWrites, bool includeOwned,
+              ArrayRef<Value> cacheReadVals,
+              bool onlyFullPanels) -> LogicalResult {
+        if (includeOwned && !ownedWrites.empty()) {
+          SweepDesc pubSw;
+          pubSw.combine = "publish";
+          pubSw.anchor = ownedWrites.front();
+          pubSw.writes = ownedWrites;
+          llvm::DenseSet<Operation *> visited;
+          SmallVector<Operation *> subOps;
+          for (Operation *w : ownedWrites)
             rb.collectSubgraph(w->getOperand(2).getDefiningOp(), summaryValues,
                                visited, subOps);
-        } else if (n == "welford") {
-          rb.collectSubgraph(op->getOperand(0).getDefiningOp(), summaryValues,
-                             visited, subOps);
-          subOps.push_back(op);
-        } else {
-          rb.collectSubgraph(op, summaryValues, visited, subOps);
+          if (failed(rb.emitScalarSweep(pubSw, subOps, rowIv)))
+            return failure();
         }
+
+        if (activeWrites.empty())
+          return success();
+
+        llvm::DenseSet<Value> stopSet = summaryValues;
+        for (Value cv : cacheReadVals)
+          stopSet.insert(cv);
+
+        SweepDesc sw;
+        sw.combine = "store";
+        sw.anchor = activeWrites.front();
+        sw.writes.assign(activeWrites.begin(), activeWrites.end());
+        llvm::DenseSet<Operation *> visited;
+        SmallVector<Operation *> subOps;
+        for (Operation *w : activeWrites)
+          rb.collectSubgraph(w->getOperand(2).getDefiningOp(), stopSet, visited,
+                             subOps);
 
         for (Operation *so : subOps) {
           StringRef sn = so->getName().stripDialect();
@@ -1972,79 +2946,210 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
                      {b.getNamedAttr("val_types", b.getArrayAttr({}))});
             }
           }
-        } else if (scalarMembers || sw.prefixCarry ||
-                   (sw.segmentLoop &&
-                    (whole || sw.combine != "store" ||
-                     !canVectorizeSegmentSweep(task, subOps)))) {
-          if (!rb.zeroF32.v) {
-            rb.zeroCount = rb.lit("0", "si32");
-            rb.oneCount = rb.lit("1", "si32");
-            rb.zeroF32 = rb.lit("0.0", "f32");
-            rb.minusInfF32 = rb.lit("0xFF800000", "f32");
-          }
-          if (failed(rb.emitScalarSweep(sw, subOps, rowIv)))
-            return failure();
-        } else {
-          bool isStore = (sw.combine == "store");
-          TaskTerm prev;
-          if (!isStore)
-            prev = rb.lit(sw.combine == "sum" ? "0.0" : "0xFF800000", "f32");
-          int64_t tailVec =
-              fixed > 0
-                  ? std::min<int64_t>(fixed, std::max<int64_t>(1, tailVecWidth))
-                  : std::max<int64_t>(1, tailVecWidth);
-
-          for (bool tail : {false, true}) {
-            TaskTerm lb = tail ? tailStart : rb.zeroIdx;
-            TaskTerm ub = tail ? rb.columns : panelCount;
-            TaskTerm step = tail ? rb.idx(tailVec) : rb.oneIdx;
-            int dim = tail ? int(tailVec) : (fixed ? int(fixed) : -3);
-            SmallVector<Value, 4> fOps{lb.v, ub.v, step.v};
-            SmallVector<Attribute, 1> iterTys;
-            SmallVector<Type, 1> resTys;
-            if (!isStore) {
-              fOps.push_back(prev.v);
-              iterTys.push_back(b.getStringAttr("f32"));
-              resTys.push_back(b.getIndexType());
-            }
-            Operation *pFor = makeOp(
-                b, loc, "task_for", fOps, resTys,
-                {b.getNamedAttr("iter_types", b.getArrayAttr(iterTys))}, 1);
-            Block &pBb = pFor->getRegion(0).emplaceBlock();
-            TaskTerm pIv{pBb.addArgument(b.getIndexType(), loc), "index"};
-            TaskTerm accTerm;
-            if (!isStore)
-              accTerm = {pBb.addArgument(b.getIndexType(), loc), "f32"};
-            {
-              OpBuilder::InsertionGuard pg(b);
-              b.setInsertionPointToEnd(&pBb);
-              TaskTerm off =
-                  tail ? pIv : rb.bin("mul", pIv, rb.panelWidth, "index");
-              llvm::DenseMap<Value, TaskTerm> localMap;
-              if (failed(rb.emitVectorPanelOps(subOps, sw.writes, rowIv, off,
-                                               rb.panelWidth, dim, localMap)))
-                return failure();
-              if (!isStore) {
-                TaskTerm partial = localMap.at(sw.anchor->getResult(0));
-                TaskTerm next = rb.bin(sw.combine == "sum" ? "add" : "max",
-                                       accTerm, partial, "f32");
-                makeOp(
-                    b, loc, "task_yield", {next.v}, {},
-                    {b.getNamedAttr("val_types",
-                                    b.getArrayAttr({b.getStringAttr("f32")}))});
-                prev = {pFor->getResult(0), "f32"};
-              } else {
-                makeOp(b, loc, "task_yield", {}, {},
-                       {b.getNamedAttr("val_types", b.getArrayAttr({}))});
-              }
-            }
-          }
-          if (!isStore)
-            rb.terms[sw.anchor->getResult(0)] = prev;
+          return success();
         }
 
-        if (!store)
-          summaryValues.insert(op->getResult(0));
+        if (scalarMembers || sw.prefixCarry || whole ||
+            (sw.segmentLoop && !canVectorizeSegmentSweep(task, subOps)))
+          return rb.emitScalarSweep(sw, subOps, rowIv);
+
+        int axId = vecOwnerInner ? ownerVecAxisId : 2;
+        int baseDim = vecOwnerInner ? ownerBaseColDim : -2;
+        auto emitStorePanels = [&](ArrayRef<TaskTerm> prefix, TaskTerm colCnt,
+                                   TaskTerm pCnt, TaskTerm tStart)
+            -> LogicalResult {
+          for (bool tail : {false, true}) {
+            if (tail && onlyFullPanels)
+              continue;
+            TaskTerm lb = tail ? tStart : rb.zeroIdx;
+            TaskTerm ub = tail ? colCnt : pCnt;
+            TaskTerm step = tail ? rb.idx(tailVec) : rb.oneIdx;
+            int dim = tail ? int(tailVec) : (fixed ? int(fixed) : -3);
+            Operation *pFor = makeOp(
+                b, loc, "task_for", {lb.v, ub.v, step.v}, {},
+                {b.getNamedAttr("iter_types", b.getArrayAttr({}))}, 1);
+            Block &pBb = pFor->getRegion(0).emplaceBlock();
+            TaskTerm pIv{pBb.addArgument(b.getIndexType(), loc), "index"};
+            OpBuilder::InsertionGuard pg(b);
+            b.setInsertionPointToEnd(&pBb);
+            TaskTerm off =
+                tail ? pIv : rb.bin("mul", pIv, rb.panelWidth, "index");
+            llvm::DenseMap<Value, TaskTerm> localMap;
+            if (!tail && !cacheReadVals.empty()) {
+              std::string u64Ty = regionType("value", "ui64", 1, dim, axId);
+              std::string ixTy = regionType("value", "si64", 1, dim, axId);
+              std::string mskTy = regionType("value", "i1", 1, dim, axId);
+              Value lanesV =
+                  makeOp(b, loc, "task_iota", {}, {b.getIndexType()},
+                         {b.getNamedAttr("start", b.getI64IntegerAttr(0)),
+                          b.getNamedAttr("end", b.getI64IntegerAttr(dim)),
+                          b.getNamedAttr("val_type", b.getStringAttr(u64Ty))})
+                      ->getResult(0);
+              TaskTerm addr64 =
+                  rb.bin("add", rb.castOp({lanesV, u64Ty}, ixTy),
+                         rb.castOp(off, "si64"), ixTy);
+              TaskTerm trueVec = rb.splatOp(rb.lit("true", "i1"), mskTy);
+              for (auto [cIdx, cv] : llvm::enumerate(cacheReadVals)) {
+                std::string eSp = cacheElemSps[cIdx];
+                std::string pTy = "!weft_kernel.pointer<" + eSp + ">";
+                std::string cValTy = regionType("value", eSp, 1, dim, axId);
+                TaskTerm zVec = rb.splatOp(rb.lit("0.0", eSp), cValTy);
+                Value ldV =
+                    makeOp(b, loc, "task_ptr_load",
+                           {cachePtrs[cIdx], addr64.v, trueVec.v, zVec.v},
+                           {b.getIndexType()},
+                           {b.getNamedAttr("ptr_type", b.getStringAttr(pTy)),
+                            b.getNamedAttr("val_type",
+                                           b.getStringAttr(cValTy))})
+                        ->getResult(0);
+                localMap[cv] = {ldV, cValTy};
+              }
+            }
+            if (failed(rb.emitVectorPanelOps(subOps, sw.writes, rowIv, prefix,
+                                             off, rb.panelWidth, dim, baseDim,
+                                             axId, !tail && fixed > 0,
+                                             localMap)))
+              return failure();
+            makeOp(b, loc, "task_yield", {}, {},
+                   {b.getNamedAttr("val_types", b.getArrayAttr({}))});
+          }
+          return success();
+        };
+
+        if (!vecOwnerInner)
+          return emitStorePanels({rowIv}, rb.columns, panelCount, tailStart);
+
+        Operation *oFor = makeOp(
+            b, loc, "task_for", {rb.zeroIdx.v, outerTotal.v, rb.oneIdx.v}, {},
+            {b.getNamedAttr("iter_types", b.getArrayAttr({}))}, 1);
+        Block &oBb = oFor->getRegion(0).emplaceBlock();
+        TaskTerm outerIv{oBb.addArgument(b.getIndexType(), loc), "index"};
+        {
+          OpBuilder::InsertionGuard og(b);
+          b.setInsertionPointToEnd(&oBb);
+          auto prefix = buildOwnerPrefix(outerIv);
+          if (failed(emitStorePanels(prefix, innerCols, innerPanelCount,
+                                     innerTailStart)))
+            return failure();
+          makeOp(b, loc, "task_yield", {}, {},
+                 {b.getNamedAttr("val_types", b.getArrayAttr({}))});
+        }
+        return success();
+      };
+
+      if (!cachedCut.empty()) {
+        TaskTerm fitsLen =
+            rb.cmp("le", rb.columns, rb.idx(kMaxRowCacheCols), "i1");
+        TaskTerm exactPanels = rb.cmp("eq", tailStart, rb.columns, "i1");
+        TaskTerm canCache = rb.bin("and", fitsLen, exactPanels, "i1");
+        auto savedTerms = rb.terms;
+        auto savedRecords = rb.records;
+        auto savedSummaries = summaryValues;
+
+        Operation *ifCache =
+            makeOp(b, loc, "task_if", {canCache.v}, {},
+                   {b.getNamedAttr("res_types", b.getArrayAttr({}))}, 2);
+        Block &thenBb = ifCache->getRegion(0).emplaceBlock();
+        Block &elseBb = ifCache->getRegion(1).emplaceBlock();
+        {
+          OpBuilder::InsertionGuard tg(b);
+          b.setInsertionPointToEnd(&thenBb);
+          if (failed(emitReductionStage(redStages[0], cachedCut, true)) ||
+              failed(emitAvailableScalars()) ||
+              failed(emitStoreSubset(writes, true, cachedCut, true)))
+            return failure();
+          makeOp(b, loc, "task_yield", {}, {},
+                 {b.getNamedAttr("val_types", b.getArrayAttr({}))});
+        }
+        rb.terms = std::move(savedTerms);
+        rb.records = std::move(savedRecords);
+        summaryValues = std::move(savedSummaries);
+        {
+          OpBuilder::InsertionGuard eg(b);
+          b.setInsertionPointToEnd(&elseBb);
+          if (failed(emitReductionStage(redStages[0], {}, false)) ||
+              failed(emitAvailableScalars()) ||
+              failed(emitStoreSubset(writes, true, {}, false)))
+            return failure();
+          makeOp(b, loc, "task_yield", {}, {},
+                 {b.getNamedAttr("val_types", b.getArrayAttr({}))});
+        }
+      } else {
+        llvm::DenseSet<Operation *> doneReds, doneWrites;
+        auto writeReadyAndUsesRed = [&](Operation *w, bool &usesAnyRed) {
+          usesAnyRed = false;
+          llvm::DenseSet<Operation *> seen;
+          SmallVector<Operation *, 16> work;
+          if (auto *def = w->getOperand(2).getDefiningOp();
+              def && def->getBlock() == &bb)
+            work.push_back(def);
+          while (!work.empty()) {
+            Operation *cur = work.pop_back_val();
+            if (!seen.insert(cur).second)
+              continue;
+            if (isReductionOp(cur)) {
+              usesAnyRed = true;
+              if (!doneReds.contains(cur))
+                return false;
+              continue;
+            }
+            for (Value in : cur->getOperands())
+              if (auto *def = in.getDefiningOp(); def && def->getBlock() == &bb)
+                work.push_back(def);
+          }
+          return true;
+        };
+
+        constexpr size_t kMaxFusedStores = 4;
+        for (size_t sIdx = 0; sIdx < redStages.size(); ++sIdx) {
+          const auto &stage = redStages[sIdx];
+          if (failed(emitReductionStage(stage, {}, false)) ||
+              failed(emitAvailableScalars()))
+            return failure();
+          for (Operation *ro : stage)
+            doneReds.insert(ro);
+
+          if (redStages.size() > 1 && writes.size() > kMaxFusedStores &&
+              !hasSpecialSweep) {
+            SmallVector<Operation *, 4> ready;
+            for (Operation *w : writes) {
+              if (doneWrites.contains(w))
+                continue;
+              bool usesRed = false;
+              if (writeReadyAndUsesRed(w, usesRed) && usesRed)
+                ready.push_back(w);
+            }
+            for (size_t i = 0; i < ready.size(); i += kMaxFusedStores) {
+              auto chunk = ArrayRef<Operation *>(ready).slice(
+                  i, std::min(kMaxFusedStores, ready.size() - i));
+              if (failed(emitStoreSubset(chunk, false, {}, false)))
+                return failure();
+              for (Operation *cw : chunk)
+                doneWrites.insert(cw);
+            }
+          }
+        }
+
+        SmallVector<Operation *> remWrites;
+        for (Operation *w : writes)
+          if (!doneWrites.contains(w))
+            remWrites.push_back(w);
+        if (remWrites.empty()) {
+          if (failed(emitStoreSubset({}, true, {}, false)))
+            return failure();
+        } else if (remWrites.size() <= kMaxFusedStores || hasSpecialSweep) {
+          if (failed(emitStoreSubset(remWrites, true, {}, false)))
+            return failure();
+        } else {
+          if (failed(emitStoreSubset({}, true, {}, false)))
+            return failure();
+          for (size_t i = 0; i < remWrites.size(); i += kMaxFusedStores) {
+            auto chunk = ArrayRef<Operation *>(remWrites).slice(
+                i, std::min(kMaxFusedStores, remWrites.size() - i));
+            if (failed(emitStoreSubset(chunk, false, {}, false)))
+              return failure();
+          }
+        }
       }
     }
 
