@@ -268,7 +268,7 @@ mark 只写 expert_blocks 的前 total/128 项。调用方可以重用同一个�
 
 ### 独立成员内的有序程序
 
-`kir.owner_space` 的操作数与 `axes` 逐项确定成员域。区域的块参数是成员坐标。输出地址必须保留每个独立坐标，同一 InOut 的读写使用相同投影。前端将固定顺序的循环携带值写成 `scf.for` 的迭代参数和 yield。依赖谓词保护的读取放在 `scf.if` 的相应分支内。一次整轴读取产生 rank-one SSA 值，广播、求和和循环状态都保留成员轴的尺寸来源。
+`kir.owner_space` 的操作数与 `axes` 逐项确定成员域。区域的块参数是成员坐标。输出地址必须保留每个独立坐标，同一 InOut 的读写使用相同投影。前端将固定顺序的循环携带值写成 `scf.for` 的迭代参数和 yield。依赖谓词保护的读取放在 `scf.if` 的相应分支内。一次整轴读取产生 rank-one SSA 值，广播、求和和循环状态都保留成员轴的尺寸来源。标量比较（`index`/`i32`/`i64` 上的有符号比较 `arith.cmpi` 与 `f32` 上的有序浮点比较 `arith.cmpf`）和标量显式类型转换（`index` 与整数间的 `arith.index_cast`、整数与 `f32` 间的 `arith.sitofp`/`arith.fptosi`）直接捕获为标准 MLIR `arith` 标量操作，供位置相对距离计算和有序归约/选择网络使用。
 
 `I.window_contract` 在每个 batch、chunk 和 head 上计算独立的矩阵。输入布局为 `[B,L,H,P]` 与 `[B,L,G,N]`，系数视图为 `[B,H,C,S]`。调用时检查 `L=C*S` 和 `H=G*head_group`。右操作数的纯标量区域接收当前 basis、对应系数、当前 prefix 和 chunk 末项，区域必须返回 BF16。两个 BF16 面板在 S 轴做 FP32 累加，发布 `[B,C,H,P,N]`。没有跨 chunk 的状态依赖。
 | embedding、csr_spmv、jagged_mean、nonzero、moe_alignment、histogram | 间接地址、分段/空段、索引生成、计数/前缀/散射、确定冲突语义及 workspace |

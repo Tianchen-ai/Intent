@@ -183,10 +183,38 @@ class Ordered:
             return result
         if isinstance(node, ast.Compare) and len(node.ops) == 1:
             a, b = self.expr(node.left), self.expr(node.comparators[0])
-            pred = {ast.GtE: "sge", ast.Lt: "slt", ast.Eq: "eq"}[type(node.ops[0])]
-            if a.type != b.type or a.type != "index":
-                raise ValueError("expected an index predicate")
-            return self.emit(f"arith.cmpi {pred}, {a.name}, {b.name} : index", "i1")
+            if a.type != b.type:
+                raise ValueError("comparison requires matching scalar types")
+            op_ty = type(node.ops[0])
+            if a.type in ("index", "i32", "i64"):
+                preds = {
+                    ast.Gt: "sgt",
+                    ast.GtE: "sge",
+                    ast.Lt: "slt",
+                    ast.LtE: "sle",
+                    ast.Eq: "eq",
+                    ast.NotEq: "ne",
+                }
+                if op_ty not in preds:
+                    raise ValueError("unsupported integer comparison")
+                return self.emit(
+                    f"arith.cmpi {preds[op_ty]}, {a.name}, {b.name} : {a.type}", "i1"
+                )
+            if a.type == "f32":
+                preds = {
+                    ast.Gt: "ogt",
+                    ast.GtE: "oge",
+                    ast.Lt: "olt",
+                    ast.LtE: "ole",
+                    ast.Eq: "oeq",
+                    ast.NotEq: "une",
+                }
+                if op_ty not in preds:
+                    raise ValueError("unsupported floating comparison")
+                return self.emit(
+                    f"arith.cmpf {preds[op_ty]}, {a.name}, {b.name} : f32", "i1"
+                )
+            raise ValueError("unsupported comparison operand type: " + a.type)
         if isinstance(node, ast.IfExp):
             pred = self.expr(node.test)
             if pred.type != "i1":
@@ -255,8 +283,25 @@ class Ordered:
                 src = a.type.removeprefix("tensor<?x").removesuffix(">")
                 if ty == src:
                     return a
-                if src == "i32" and ty == "index" and a not in self.lanes:
-                    return self.emit(f"arith.index_cast {a.name} : i32 to index", "index")
+                if a not in self.lanes:
+                    if (src, ty) in {
+                        ("i32", "index"),
+                        ("i64", "index"),
+                        ("index", "i32"),
+                        ("index", "i64"),
+                    }:
+                        return self.emit(
+                            f"arith.index_cast {a.name} : {src} to {ty}", ty
+                        )
+                    if src in ("i32", "i64") and ty == "f32":
+                        return self.emit(f"arith.sitofp {a.name} : {src} to f32", "f32")
+                    if src == "index" and ty == "f32":
+                        wide = self.emit(
+                            f"arith.index_cast {a.name} : index to i64", "i64"
+                        )
+                        return self.emit(f"arith.sitofp {wide.name} : i64 to f32", "f32")
+                    if src == "f32" and ty == "i32":
+                        return self.emit(f"arith.fptosi {a.name} : f32 to i32", "i32")
                 if (src, ty) not in {
                     ("f16", "f32"),
                     ("bf16", "f32"),
