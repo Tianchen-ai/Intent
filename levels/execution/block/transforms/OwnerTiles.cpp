@@ -381,8 +381,12 @@ OwnerTiles::matchOnlinePanelPair(scf::ForOp maxLoop, scf::ForOp sumLoop) {
   };
   if (!sameVal(score1, score2) || (cond1 && !sameVal(cond1, cond2)))
     return std::nullopt;
-  return OnlinePanelFusion{maxLoop, score2,  cond2, subOp,
-                           expOp,   guardOp, wVal,  isa<math::Exp2Op>(expOp)};
+  bool causalInclusive = false;
+  Value causalUpper = causalMaskOwner(sumLoop, &causalInclusive);
+  return OnlinePanelFusion{maxLoop,         score2,      cond2,
+                           subOp,           expOp,       guardOp,
+                           wVal,            isa<math::Exp2Op>(expOp),
+                           causalUpper,     causalInclusive};
 }
 SmallVector<Value> OwnerTiles::lowerBody(Block &body, Values env, Value mask) {
   for (auto it = body.begin(); it != body.end(); ++it) {
@@ -539,11 +543,14 @@ LogicalResult OwnerTiles::build() {
   if (auto pair = space.getAttrOfType<IntegerAttr>("block.pair_axis")) {
     auto &bb = space.getRegion(0).front();
     auto pairArg = bb.getArgument(pair.getInt());
+    auto num = fn->getAttrOfType<StringAttr>("kir.numerics");
+    bool relaxed = num && num.getValue() == "relaxed_normalization";
     bool suffix = false, prefix = false;
     for (auto loop : bb.getOps<scf::ForOp>())
       if (loop->hasAttr("kir.reassociate")) {
         suffix |= loop.getLowerBound() == pairArg;
-        prefix |= causalPrefixOwner(loop) == pairArg;
+        prefix |= causalPrefixOwner(loop) == pairArg ||
+                  (relaxed && causalMaskOwner(loop) == pairArg);
         if (auto branch = loop.getUpperBound().getDefiningOp<scf::IfOp>();
             branch && branch.getNumResults() == 1 &&
             !branch.getElseRegion().empty())

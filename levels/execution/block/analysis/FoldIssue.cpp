@@ -151,6 +151,73 @@ Value causalPrefixOwner(scf::ForOp loop) {
     return {};
   return cmp.getLhs();
 }
+Value causalMaskOwner(scf::ForOp loop, bool *inclusive) {
+  if (!matchPattern(loop.getLowerBound(), m_Zero()) ||
+      !matchPattern(loop.getStep(), m_One()) || loop.getNumResults() == 0)
+    return {};
+  auto isConstF32 = [](Value v, llvm::function_ref<bool(const APFloat &)> p) {
+    auto c = v ? v.getDefiningOp<arith::ConstantOp>() : arith::ConstantOp();
+    auto f = c ? dyn_cast<FloatAttr>(c.getValue()) : FloatAttr();
+    return f && f.getType().isF32() && p(f.getValue());
+  };
+  auto isNegInf = [&](Value v) {
+    return isConstF32(
+        v, [](const APFloat &x) { return x.isInfinity() && x.isNegative(); });
+  };
+  auto isPosZero = [&](Value v) {
+    return isConstF32(
+        v, [](const APFloat &x) { return x.isZero() && !x.isNegative(); });
+  };
+  Value cond;
+  auto y0 = loop.getBody()->getTerminator()->getOperand(0);
+  if (auto mx = y0.getDefiningOp<arith::MaxNumFOp>()) {
+    if (loop.getNumResults() != 1 || mx.getLhs() != loop.getRegionIterArgs()[0])
+      return {};
+    Value cand = mx.getRhs();
+    if (auto br = cand.getDefiningOp<scf::IfOp>()) {
+      if (br.getNumResults() != 1 || br.getElseRegion().empty() ||
+          !isNegInf(br.elseYield().getOperand(0)))
+        return {};
+      cond = br.getCondition();
+    } else if (auto sel = cand.getDefiningOp<arith::SelectOp>()) {
+      if (!isNegInf(sel.getFalseValue()))
+        return {};
+      cond = sel.getCondition();
+    }
+  } else if (auto ad = y0.getDefiningOp<arith::AddFOp>()) {
+    if (ad.getLhs() != loop.getRegionIterArgs()[0])
+      return {};
+    Value rhs = ad.getRhs();
+    if (auto br = rhs.getDefiningOp<scf::IfOp>()) {
+      if (br.getNumResults() != 1 || br.getElseRegion().empty() ||
+          !isPosZero(br.elseYield().getOperand(0)))
+        return {};
+      cond = br.getCondition();
+    } else if (auto sel = rhs.getDefiningOp<arith::SelectOp>()) {
+      if (!isPosZero(sel.getFalseValue()))
+        return {};
+      cond = sel.getCondition();
+    }
+  }
+  auto cmp = cond ? cond.getDefiningOp<arith::CmpIOp>() : arith::CmpIOp();
+  if (!cmp)
+    return {};
+  Value iv = loop.getInductionVar(), lhs = cmp.getLhs(), rhs = cmp.getRhs();
+  auto pred = cmp.getPredicate();
+  if (rhs == iv && loop.isDefinedOutsideOfLoop(lhs) &&
+      (pred == arith::CmpIPredicate::sge || pred == arith::CmpIPredicate::sgt)) {
+    if (inclusive)
+      *inclusive = (pred == arith::CmpIPredicate::sge);
+    return lhs;
+  }
+  if (lhs == iv && loop.isDefinedOutsideOfLoop(rhs) &&
+      (pred == arith::CmpIPredicate::sle || pred == arith::CmpIPredicate::slt)) {
+    if (inclusive)
+      *inclusive = (pred == arith::CmpIPredicate::sle);
+    return rhs;
+  }
+  return {};
+}
 void partitionOwnerFolds(Operation *space,unsigned axis,int64_t rows,int64_t span){
   auto &body=space->getRegion(0).front();
   auto owner=body.getArgument(axis);

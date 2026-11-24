@@ -19,6 +19,7 @@ class Artifact:
         self.function = load(data["source"], data["entry"])._pyfunc
         self.lock = RLock()
         self.variants = {}
+        self.compiled = {}
         self.winners = {}
 
     def accepts(self, shape):
@@ -60,13 +61,64 @@ class Call(PreparedLaunch):
     def grid(self, row):
         return grid(self.artifact.data["grid"], self.shape, row)
 
+    def _compile_key(self):
+        base = self.args(self.artifact.data["rows"][0], self.values)[:-2]
+        sptrs = [
+            a.untyped_storage().data_ptr()
+            for a in base
+            if isinstance(a, torch.Tensor)
+        ]
+        shared = len(set(sptrs)) != len(sptrs)
+        seen = {}
+        items = []
+        for a in base:
+            if isinstance(a, torch.Tensor):
+                alias = None
+                if shared:
+                    sp = a.untyped_storage().data_ptr()
+                    alias = (seen.setdefault(sp, len(seen)), a.storage_offset())
+                items.append(
+                    (
+                        a.dtype,
+                        tuple(a.shape),
+                        tuple(a.stride()),
+                        a.data_ptr() % 16 == 0,
+                        alias,
+                    )
+                )
+            else:
+                items.append((type(a), a if isinstance(a, (int, bool)) else None))
+        return (self.device, self.shape, tuple(items))
+
     def compile(self):
         if self.candidates:
             return
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError("compile cuTile before graph capture")
         a = self.artifact
+        ckey = self._compile_key()
+        with a.lock:
+            cached = a.compiled.get(ckey)
+            if cached is not None:
+                self.candidates, comp, self.failures = cached
+                self.compilation = [
+                    dict(c, compiler_ms=0.0, dispatcher_hit=True) for c in comp
+                ]
+                self.compiles_before_launch = sum(
+                    d.compiles for _, d in self.candidates.values()
+                )
+                return
         with torch.cuda.device(self.device), a.lock:
-            if torch.cuda.is_current_stream_capturing():
-                raise RuntimeError("compile cuTile before graph capture")
+            cached = a.compiled.get(ckey)
+            if cached is not None:
+                self.candidates, comp, self.failures = cached
+                self.compilation = [
+                    dict(c, compiler_ms=0.0, dispatcher_hit=True) for c in comp
+                ]
+                self.compiles_before_launch = sum(
+                    d.compiles for _, d in self.candidates.values()
+                )
+                return
             arch = torch.cuda.get_device_capability(self.device)
             for r in a.data["rows"]:
                 id = r["id"]
@@ -87,6 +139,11 @@ class Call(PreparedLaunch):
             self.compiles_before_launch = sum(
                 d.compiles for _, d in self.candidates.values()
             )
+            a.compiled[ckey] = (
+                dict(self.candidates),
+                list(self.compilation),
+                dict(self.failures),
+            )
 
     def enqueue(self):
         a = self.artifact
@@ -97,7 +154,7 @@ class Call(PreparedLaunch):
             stream = torch.cuda.current_stream(self.device)
             if self.selected is None:
                 layout = tuple(
-                    (v.dtype, tuple(v.stride()), v.data_ptr() % 256)
+                    (v.dtype, tuple(v.shape), tuple(v.stride()), v.data_ptr() % 16 == 0)
                     for v in self.values
                     if isinstance(v, torch.Tensor)
                 )

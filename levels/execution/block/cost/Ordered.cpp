@@ -85,15 +85,24 @@ void orderedCost(Unit &u) {
             // For a causal one-to-one owner axis the mean prefix or suffix
             // length is (L+1)/2. Otherwise count the full sweep.
             double visits = extent;
+            auto fn = op->getParentOfType<mlir::func::FuncOp>();
+            auto num =
+                fn ? fn->getAttrOfType<mlir::StringAttr>("kir.numerics")
+                   : mlir::StringAttr();
+            bool relaxedNorm = num && num.getValue() == "relaxed_normalization";
             auto iv = mlir::dyn_cast<mlir::BlockArgument>(loop.getLowerBound());
             if (!iv)
               iv = mlir::dyn_cast_if_present<mlir::BlockArgument>(
                   intentdsl::block::causalPrefixOwner(loop));
+            if (!iv && relaxedNorm)
+              iv = mlir::dyn_cast_if_present<mlir::BlockArgument>(
+                  intentdsl::block::causalMaskOwner(loop));
             if (iv && iv.getOwner() == loop->getBlock()) {
               auto axes = op->getAttrOfType<mlir::DenseI64ArrayAttr>("axes");
               auto sh = f->shapeOf(op->getOperand(iv.getArgNumber()));
               if (axes && sh &&
-                  (*sh)[axes[iv.getArgNumber()]].getAsInteger() == extent)
+                  (*sh)[axes[iv.getArgNumber()]].getAsInteger() == extent &&
+                  (!span || span.getInt() < extent))
                 visits = (extent + 1.) / 2;
             }
             sweepBytesPerOwner += visits * tokenBytes;

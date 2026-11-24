@@ -240,7 +240,10 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
       if (tma && op->hasAttr("block.page_extent"))
         s.addAttribute("ct_src.page_tma", b.getUnitAttr());
       if (tma && op->hasAttr("block.rectangular_tokens") &&
-          op->getParentOp()->hasAttr("block.uniform_tokens"))
+          op->getParentOp()->hasAttr("block.uniform_tokens") &&
+          op->getParentOp()
+                  ->getAttrOfType<IntegerAttr>("block.contribution_width")
+                  .getInt() <= 64)
         s.addAttribute("ct_src.panel_tma", b.getUnitAttr());
       if (ownerRectangle(op, fn))
         s.addAttribute("ct_src.owner_rectangle", b.getUnitAttr());
@@ -556,7 +559,10 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
       auto cap = profile.services.get<intentdsl::cutile::ArrayIndices>();
       if (op->hasAttr("ct_src.panel_tma") !=
           (op->hasAttr("block.rectangular_tokens") && cap->permitTma &&
-           op->getParentOp()->hasAttr("block.uniform_tokens"))) {
+           op->getParentOp()->hasAttr("block.uniform_tokens") &&
+           op->getParentOp()
+                   ->getAttrOfType<IntegerAttr>("block.contribution_width")
+                   .getInt() <= 64)) {
         op->emitError(
             "rectangular transfer requires a compatible array layout");
         return WalkResult::interrupt();

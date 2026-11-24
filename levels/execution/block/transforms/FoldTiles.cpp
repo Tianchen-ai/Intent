@@ -33,6 +33,15 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
   auto uniform = [&](Value v) { return asScalar(v, "min"); };
   bool full = loop->hasAttr("block.full_panels");
   Value width = integer(span), lo = uniform(lower), hi = asScalar(upper, "max");
+  if (online && online->causalUpper) {
+    Value maxBnd = asScalar(at(online->causalUpper, parent), "max");
+    Value under = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt,
+                                          maxBnd, hi);
+    Value cap = online->causalInclusive
+                    ? Value(b.create<arith::AddIOp>(loc, maxBnd, integer(1)))
+                    : maxBnd;
+    hi = select(under, cap, hi);
+  }
   Value start =
       full ? lo
            : Value(b.create<arith::MulIOp>(
@@ -62,17 +71,24 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
           return ia.getInt();
       return std::nullopt;
     };
+    auto floorDiv = [](int64_t a, int64_t d) {
+      int64_t q = a / d, r = a % d;
+      return (r != 0 && ((r < 0) != (d < 0))) ? q - 1 : q;
+    };
     if (auto cs = constI64(start))
-      begin = b.create<arith::ConstantIntOp>(loc, *cs / span, 32);
+      begin = b.create<arith::ConstantIntOp>(loc, floorDiv(*cs, span), 32);
     else
       begin = b.create<arith::TruncIOp>(
-          loc, b.getI32Type(), b.create<arith::DivUIOp>(loc, start, width));
+          loc, b.getI32Type(),
+          b.create<arith::FloorDivSIOp>(loc, start, width));
     if (auto ch = constI64(hi))
-      end = b.create<arith::ConstantIntOp>(loc, (*ch + span - 1) / span, 32);
+      end = b.create<arith::ConstantIntOp>(loc, floorDiv(*ch + span - 1, span),
+                                           32);
     else {
       auto last = b.create<arith::AddIOp>(loc, hi, integer(span - 1));
       end = b.create<arith::TruncIOp>(
-          loc, b.getI32Type(), b.create<arith::DivUIOp>(loc, last, width));
+          loc, b.getI32Type(),
+          b.create<arith::FloorDivSIOp>(loc, last, width));
     }
     stride = b.create<arith::ConstantIntOp>(loc, 1, 32);
   }

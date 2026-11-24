@@ -34,6 +34,8 @@ struct OwnerTiles : Tiles {
     Operation *guardOp = nullptr;
     Value weightVal;
     bool isExp2 = false;
+    Value causalUpper;
+    bool causalInclusive = false;
   };
   std::optional<OnlinePanelFusion> matchOnlinePanelPair(scf::ForOp maxLoop,
                                                         scf::ForOp sumLoop);
