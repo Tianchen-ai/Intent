@@ -9,9 +9,9 @@ Release wheels statically link the required MLIR/LLVM libraries into `libintentd
 ```sh
 python -m venv .venv
 . .venv/bin/activate
-python -m pip install compilerinfra==0.4.2 intentdsl==2.0.0
+python -m pip install compilerinfra==0.5.0 intentdsl==2.0.0
 # Optional CLI / MCP compiler development host tools:
-python -m pip install compilerinfra-agent==0.4.2
+python -m pip install compilerinfra-agent==0.5.0
 ```
 
 Supported native wheel baselines:
@@ -43,7 +43,7 @@ Vendor compilers and device runtimes remain external user dependencies and are p
 ### Rebuilding a Wheel from `sdist` in a Clean Environment
 
 Build prerequisites:
-- `CompilerInfra == 0.4.2` native SDK and Python package
+- `CompilerInfra == 0.5.0` native SDK and Python package
 - `LLVM / MLIR == 20.1.8` (static archives built with `-fPIC`)
 - `CMake >= 3.22`, `Ninja`, C++17 compiler (`GCC >= 11` or `Clang >= 16`), `Python >= 3.10`
 
@@ -51,8 +51,8 @@ Build prerequisites:
 unset PYTHONPATH INTENTDSL_LIBRARY
 python -m venv /tmp/intentdsl-build-env
 /tmp/intentdsl-build-env/bin/pip install --upgrade pip build
-/tmp/intentdsl-build-env/bin/pip install compilerinfra-0.4.2-*.whl
-CMAKE_PREFIX_PATH="/path/to/compilerinfra-0.4.2:/path/to/llvm-20" \
+/tmp/intentdsl-build-env/bin/pip install compilerinfra-0.5.0-*.whl
+CMAKE_PREFIX_PATH="/path/to/compilerinfra-0.5.0:/path/to/llvm-20" \
   /tmp/intentdsl-build-env/bin/pip wheel --no-build-isolation --no-deps \
   intentdsl-2.0.0.tar.gz -w /tmp/dist
 ```
