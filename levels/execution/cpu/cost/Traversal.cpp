@@ -44,6 +44,9 @@ void registerCost(Unit &u) {
                  wr = intentdsl::quantity(ctx, "write_1", "B/ns");
             auto rs = intentdsl::quantity(ctx, "read_16", "B/ns"),
                  ws = intentdsl::quantity(ctx, "write_16", "B/ns");
+            auto rsPriv = intentdsl::quantity(ctx, "read_16_private_bw", "B/ns"),
+                 wsPriv = intentdsl::quantity(ctx, "write_16_private_bw", "B/ns"),
+                 wsShared = intentdsl::quantity(ctx, "write_16_shared_bw", "B/ns");
             auto launch = intentdsl::quantity(ctx, "launch", "ns"),
                  sync = intentdsl::quantity(ctx, "sync", "ns");
             double read = 0, write = 0, readNs = 0, writeNs = 0, lines = 0;
@@ -124,27 +127,55 @@ void registerCost(Unit &u) {
             e.terms["inner_write_stride"] = {writeStep, "element"};
             e.terms["line_touches"] = {lines, "line"};
             auto arithmetic = e.timeNs;
-            double sharedLines=0;
-            op->walk([&](Operation *update){
-              if(update->getName().stripDialect()!="atomic_add")return;
-              auto index=cast<BlockArgument>(update->getOperand(0)).getArgNumber();
-              auto *arg=facts->arguments[index].getAsObject();auto shape=arg->getArray("shape");
-              if(shape && shape->size()==1)sharedLines=std::max(1.,std::ceil(shape->front().getAsInteger().value_or(0)*4./64));
+            double sharedLines = 0, scatterBytes = 0, scatterSpanBytes = 0;
+            op->walk([&](Operation *update) {
+              auto uk = update->getName().stripDialect();
+              if (uk == "atomic_add") {
+                auto index =
+                    cast<BlockArgument>(update->getOperand(0)).getArgNumber();
+                auto *arg = facts->arguments[index].getAsObject();
+                auto shape = arg->getArray("shape");
+                if (shape && shape->size() == 1)
+                  sharedLines = std::max(
+                      1., std::ceil(shape->front().getAsInteger().value_or(0) *
+                                    4. / 64));
+              } else if (uk == "unique_put") {
+                auto dstArg = dyn_cast<BlockArgument>(update->getOperand(0));
+                if (!dstArg)
+                  return;
+                double elemBytes =
+                    cast<MemRefType>(dstArg.getType()).getElementTypeBitWidth() /
+                    8.;
+                scatterBytes += m * n * elemBytes;
+                auto *arg = facts->arguments[dstArg.getArgNumber()].getAsObject();
+                if (auto *shape = arg ? arg->getArray("shape") : nullptr) {
+                  double elems = 1.;
+                  for (auto &dVal : *shape)
+                    elems *= dVal.getAsInteger().value_or(1);
+                  scatterSpanBytes =
+                      std::max(scatterSpanBytes, elems * elemBytes);
+                }
+              }
             });
+            auto vecRate = intentdsl::quantity(ctx, "vector", "FLOP/ns");
             e.timeNs.reset();
             for (auto [i, row] : llvm::enumerate(rows)) {
               auto grain = cast<DictionaryAttr>(row)
                                .getAs<IntegerAttr>("grain")
                                .getInt();
+              bool singleDisp = d.contains("single_dispatcher");
               double groups =
-                  walk == "tile"
-                      ? std::ceil(n / 32.) * std::ceil(m / 32.)
-                      : std::ceil(((walk == "destination" ||
-                                    d.contains("member_tasks"))
-                                       ? n
-                                       : m) /
-                                  grain);
-              double active = std::min(groups, double(facts->participants));
+                  singleDisp
+                      ? 1.
+                      : walk == "tile"
+                            ? std::ceil(n / 32.) * std::ceil(m / 32.)
+                            : std::ceil(((walk == "destination" ||
+                                          d.contains("member_tasks"))
+                                             ? n
+                                             : m) /
+                                        grain);
+              double participants = std::max(1., double(facts->participants));
+              double active = singleDisp ? 1. : std::min(groups, participants);
               RowPrediction pred;
               pred.terms = e.terms;
               pred.terms["tasks"] = {groups, "count"};
@@ -152,25 +183,78 @@ void registerCost(Unit &u) {
               if (rd && wr && rs && ws && launch && sync && arithmetic) {
                 double work = std::max(readNs + writeNs, *arithmetic);
                 pred.timeNs =
-                    *launch + *sync +
-                    work * (groups ? std::ceil(groups / facts->participants) *
-                                         facts->participants / groups
-                                   : 0.);
-                if(sharedLines){
-                  bool sharded=d.contains("key_extent");
-                  double writers=d.contains("single_dispatcher")?1:sharded?std::min(sharedLines,double(facts->participants)):std::min(groups,double(facts->participants));
-                  double collisions=sharded?0:std::max(0.,writers-1)/sharedLines;
-                  pred.terms["shared_cacheline_writers"]={collisions,"ratio"};
-                  if(rs && rd){
-                    auto traffic=m*n*(64/std::max(1.,writers)/ *rs+64*collisions/ *rs);
-                    if(sharded)traffic+=read*(writers-1)/ *rd;
-                    if(auto bins=d.getAs<IntegerAttr>("batch_extent")){
-                      double reservations=std::min(m*n,writers*bins.getInt());
-                      pred.terms["maximum_reservations"]={reservations,"count"};
-                      traffic=reservations*(64/std::max(1.,writers)+64*collisions)/ *rs+read/ *rd;
+                    *launch + (singleDisp ? 0. : *sync) +
+                    (singleDisp
+                         ? work * participants
+                         : work * (groups ? std::ceil(groups / participants) *
+                                                participants / groups
+                                          : 0.));
+                if (sharedLines) {
+                  bool sharded = d.contains("key_extent");
+                  double writers =
+                      singleDisp ? 1.
+                      : sharded  ? std::min(sharedLines, participants)
+                                 : std::min(groups, participants);
+                  double collisions =
+                      sharded ? 0. : std::max(0., writers - 1.) / sharedLines;
+                  pred.terms["shared_cacheline_writers"] = {collisions, "ratio"};
+                  double rsP = rsPriv.value_or(*rs),
+                         wsP = wsPriv.value_or(*ws),
+                         wsSh = wsShared.value_or(*ws);
+                  double privRmwBw = (rsP * wsP) / std::max(1e-6, rsP + wsP);
+                  double traffic = 0.;
+                  if (auto bins = d.getAs<IntegerAttr>("batch_extent")) {
+                    double reservations =
+                        std::min(m * n, writers * bins.getInt());
+                    pred.terms["maximum_reservations"] = {reservations, "count"};
+                    traffic = (m * n * 4.) / privRmwBw +
+                              reservations *
+                                  (64. / std::max(1., writers) +
+                                   64. * collisions) /
+                                  *rs;
+                    if (scatterBytes > 0.) {
+                      double falseSharedLines =
+                          std::min(reservations, scatterSpanBytes / 64.) *
+                          std::max(0., writers - 1.) / std::max(1., writers);
+                      traffic += read / *rd + scatterBytes / wsSh +
+                                 (falseSharedLines * 64.) / *ws;
                     }
-                    *pred.timeNs+=traffic;
+                  } else if (singleDisp) {
+                    bool ticketsPrivate = sharedLines * 64. <= 131072.;
+                    traffic =
+                        (sharedLines * 64.) / *rd +
+                        (ticketsPrivate
+                             ? (m * n * 4.) / (privRmwBw / participants)
+                             : (m * n * 64.) / (*rs / participants));
+                    if (scatterBytes > 0.) {
+                      double scBw1 = (scatterSpanBytes <= 131072. ? wsP : *ws) /
+                                     participants;
+                      traffic +=
+                          scatterSpanBytes / *wr + scatterBytes / scBw1;
+                    }
+                  } else if (sharded) {
+                    double scale = writers / participants;
+                    double branchNs =
+                        vecRate ? (160. * participants / *vecRate) : 5.;
+                    double filterPenalty =
+                        writers > 1.
+                            ? m * n * 2. * (1. / writers) *
+                                  (1. - 1. / writers) * branchNs
+                            : 0.;
+                    traffic = read * std::max(0., writers - 1.) / *rd +
+                              (m * n * 4.) / std::max(1e-6, privRmwBw * scale) +
+                              filterPenalty;
+                    if (scatterBytes > 0.)
+                      traffic +=
+                          scatterBytes / std::max(1e-6, wsSh * scale);
+                  } else {
+                    traffic = m * n *
+                              (64. / std::max(1., writers) + 64. * collisions) /
+                              *rs;
+                    if (scatterBytes > 0.)
+                      traffic += scatterBytes / *ws;
                   }
+                  *pred.timeNs += traffic;
                 }
                 if (!e.timeNs || *pred.timeNs < *e.timeNs)
                   e.timeNs = pred.timeNs;

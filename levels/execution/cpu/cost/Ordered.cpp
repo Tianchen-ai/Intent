@@ -1,6 +1,9 @@
 #include "intentdsl/levels/execution/cpu/ir/Owners.h"
 #include "intentdsl/levels/execution/cpu/ir/ScoreCache.h"
 #include "intentdsl/levels/execution/cpu/ir/OwnerTraversal.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 namespace CI_UNIT_NAMESPACE {
 using namespace compilerinfra;
 void ownerCost(Unit &u) {
@@ -55,6 +58,34 @@ void ownerCost(Unit &u) {
                 together ? cache.getAs<mlir::IntegerAttr>("batch").getInt()
                          : int64_t(1);
             double trip = panel ? double(panel->keys) : 1.;
+            int64_t regCarryFloats = 0;
+            auto evalBound = [&](mlir::Value v) -> std::optional<int64_t> {
+              if (auto cOp = v.getDefiningOp<mlir::arith::ConstantIndexOp>())
+                return cOp.value();
+              if (auto dOp = v.getDefiningOp<mlir::memref::DimOp>()) {
+                if (auto ax = dOp.getConstantIndex()) {
+                  if (auto *sh = f->shapeOf(dOp.getSource());
+                      sh && *ax < sh->size())
+                    return (*sh)[*ax].getAsInteger();
+                }
+              }
+              return std::nullopt;
+            };
+            for (auto loop : o->getRegion(0).front().getOps<mlir::scf::ForOp>()) {
+              if (!panel) {
+                auto lb = evalBound(loop.getLowerBound());
+                auto ub = evalBound(loop.getUpperBound());
+                if (lb && ub && *ub > *lb)
+                  trip = std::max(trip, double(*ub - *lb));
+              }
+              for (mlir::Value init : loop.getInitArgs()) {
+                if (auto rt = mlir::dyn_cast<mlir::RankedTensorType>(init.getType())) {
+                  int64_t k = rt.getNumElements();
+                  if (k > 0 && k < 64)
+                    regCarryFloats += k;
+                }
+              }
+            }
             auto bytes = shared->readBytes * trip * n / ownersPerLoad;
             // One of the two projections is replaced by a private FP32
             // store/load pair for the score of each owner.
@@ -65,6 +96,12 @@ void ownerCost(Unit &u) {
               bytes = (shared->readBytes - savedPerStep) * trip * n /
                           ownersPerLoad +
                       8. * trip * n;
+            }
+            int64_t regCapFloats = (rm->vectorBits >= 512) ? 256 : 128;
+            if (together && regCarryFloats * ownersPerLoad > regCapFloats) {
+              double spillBytesPerStep =
+                  double(regCarryFloats * ownersPerLoad - regCapFloats) * 8.;
+              bytes += spillBytesPerStep * trip * (double(n) / ownersPerLoad);
             }
             e.terms["common_input_bytes_per_member"] = {bytes, "B"};
             *e.timeNs += bytes / bwVal;

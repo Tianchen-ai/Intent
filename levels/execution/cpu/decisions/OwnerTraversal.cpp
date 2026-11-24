@@ -25,7 +25,9 @@ static bool sameInterval(Value v, BlockArgument head, Value projected) {
            sameInterval(branch.elseYield().getOperand(0), head, projected);
   return (isa<memref::LoadOp, memref::DimOp>(p) ||
           p->getName().stripDialect() == "slice_read" ||
-          p->getName().getDialectNamespace() == "arith") &&
+          p->getName().stripDialect() == "lane_splat" ||
+          p->getName().getDialectNamespace() == "arith" ||
+          p->getName().getDialectNamespace() == "math") &&
          llvm::all_of(p->getOperands(), [&](Value x) {
            return sameInterval(x, head, projected);
          });
@@ -38,13 +40,45 @@ std::optional<OwnerReuse> sharedInterval(Operation *space,
                                          const CallFacts &facts) {
   auto &body = space->getRegion(0).front();
   auto axes = space->getAttrOfType<DenseI64ArrayAttr>("axes");
-  // Interleaving is legal only for read-only folds followed by publications.
-  // Any update of a captured view inside a fold keeps its original order.
+  // Interleaving is legal for read-only folds followed by publications, and
+  // for folds whose only in-loop write is a single disjoint per-(owner, step)
+  // scalar publication to a write-only output view.
+  llvm::SmallDenseSet<Value, 8> readViews;
+  llvm::DenseMap<Value, unsigned> writeSites;
+  body.walk([&](Operation *op) {
+    if (auto ld = dyn_cast<memref::LoadOp>(op))
+      readViews.insert(ld.getMemref());
+    else if (op->getName().stripDialect() == "slice_read")
+      readViews.insert(op->getOperand(0));
+    else if (auto st = dyn_cast<memref::StoreOp>(op))
+      ++writeSites[st.getMemref()];
+    else if (op->getName().stripDialect() == "slice_write")
+      ++writeSites[op->getOperand(1)];
+  });
+  auto isDisjointStepStore = [&](memref::StoreOp st) {
+    auto parentFor = dyn_cast<scf::ForOp>(st->getParentOp());
+    if (!parentFor || parentFor->getBlock() != &body ||
+        st->getBlock() != parentFor.getBody())
+      return false;
+    Value dst = st.getMemref();
+    if (!isa<BlockArgument>(dst) || readViews.contains(dst) ||
+        writeSites.lookup(dst) != 1)
+      return false;
+    auto idxs = st.getIndices();
+    if (!llvm::is_contained(idxs, parentFor.getInductionVar()))
+      return false;
+    return llvm::all_of(body.getArguments(), [&](BlockArgument ob) {
+      return llvm::is_contained(idxs, Value(ob));
+    });
+  };
   auto unsafe = body.walk([&](Operation *op) {
-    if (op->getName().stripDialect() == "slice_write" ||
-        isa<memref::StoreOp>(op))
+    if (op->getName().stripDialect() == "slice_write")
       return op->getBlock() == &body ? WalkResult::advance()
                                      : WalkResult::interrupt();
+    if (auto st = dyn_cast<memref::StoreOp>(op))
+      return (op->getBlock() == &body || isDisjointStepStore(st))
+                 ? WalkResult::advance()
+                 : WalkResult::interrupt();
     if (isa<scf::ForOp>(op) && op->getBlock() != &body)
       return WalkResult::interrupt();
     return WalkResult::advance();

@@ -367,6 +367,11 @@ struct RowLowerer {
           cBins = constIdx(b, loc, bins);
     Value i32Zero = constI32(b, loc, 0), i32One = constI32(b, loc, 1);
     Value privBuf;
+    int distOffSlot = -1;
+    for (Operation &step : body.without_terminator())
+      if (step.getName().stripDialect() == "distribute_tickets")
+        distOffSlot = int(slotIndex(step.getOperand(1)));
+
     for (Operation &step : body.without_terminator()) {
       auto n = step.getName().stripDialect();
       if (n == "tally_keys") {
@@ -387,7 +392,9 @@ struct RowLowerer {
           makeOp(b, loc, "store_scalar", {privBuf, zAddr, i32Zero});
           makeOp(b, loc, "end");
         }
-        {
+        auto emitTallyBody = [&](bool unitK) {
+          bool prevFast = forceUnitStride;
+          forceUnitStride = unitK;
           auto *rLoop =
               makeOp(b, loc, "for_range", {firstIdx, stopIdx, c1}, {}, {}, 1);
           Block &rBb = rLoop->getRegion(0).emplaceBlock();
@@ -414,14 +421,38 @@ struct RowLowerer {
           makeOp(b, loc, "end");
           b.setInsertionPointToEnd(&rBb);
           makeOp(b, loc, "end");
+          forceUnitStride = prevFast;
+        };
+        if (!slots[kSlot].boundStrides && slots[kSlot].rank >= 1) {
+          Value eq1 = b.create<arith::CmpIOp>(
+              loc, arith::CmpIPredicate::eq,
+              slots[kSlot].strideVals[slots[kSlot].rank - 1], c1);
+          auto ifUnit = b.create<scf::IfOp>(loc, TypeRange{}, eq1, true);
+          {
+            OpBuilder::InsertionGuard tg(b);
+            b.setInsertionPointToStart(&ifUnit.getThenRegion().front());
+            emitTallyBody(true);
+          }
+          {
+            OpBuilder::InsertionGuard eg(b);
+            b.setInsertionPointToStart(&ifUnit.getElseRegion().front());
+            emitTallyBody(false);
+          }
+        } else {
+          emitTallyBody(false);
         }
       } else if (n == "reserve_tickets") {
         unsigned cntSlot = slotIndex(step.getOperand(0));
+        Value threadShift = b.create<arith::MulIOp>(
+            loc, b.create<arith::ShRSIOp>(loc, firstIdx, constIdx(b, loc, 5)),
+            constIdx(b, loc, 16));
         auto *kLoop = makeOp(b, loc, "for_range", {c0, cBins, c1}, {}, {}, 1);
         Block &kBb = kLoop->getRegion(0).emplaceBlock();
-        Value k = kBb.addArgument(b.getIndexType(), loc);
+        Value kIter = kBb.addArgument(b.getIndexType(), loc);
         OpBuilder::InsertionGuard kg(b);
         b.setInsertionPointToEnd(&kBb);
+        Value k = b.create<arith::RemSIOp>(
+            loc, b.create<arith::AddIOp>(loc, kIter, threadShift), cBins);
         Value pAddr = makeStaticAddr(b, loc, privBuf, {k}, {1});
         Value count =
             makeOp(b, loc, "load_scalar", {privBuf, pAddr}, {b.getI32Type()})
@@ -435,53 +466,83 @@ struct RowLowerer {
             makeOp(b, loc, "atomic_fetch_add_i32",
                    {slots[cntSlot].ptrVal, gAddr, count}, {b.getI32Type()})
                 ->getResult(0);
+        if (distOffSlot >= 0) {
+          Value oAddr = emitViewAddr(unsigned(distOffSlot), {k});
+          Value oVal =
+              makeOp(b, loc, "load_scalar",
+                     {slots[distOffSlot].ptrVal, oAddr}, {b.getI32Type()})
+                  ->getResult(0);
+          base = b.create<arith::AddIOp>(loc, base, oVal);
+        }
         makeOp(b, loc, "store_scalar", {privBuf, pAddr, base});
         b.setInsertionPointToEnd(&kBb);
         makeOp(b, loc, "end");
       } else if (n == "distribute_tickets") {
         unsigned kSlot = slotIndex(step.getOperand(0));
-        unsigned offSlot = slotIndex(step.getOperand(1));
         unsigned outSlot = slotIndex(step.getOperand(3));
-        auto *rLoop =
-            makeOp(b, loc, "for_range", {firstIdx, stopIdx, c1}, {}, {}, 1);
-        Block &rBb = rLoop->getRegion(0).emplaceBlock();
-        Value r = rBb.addArgument(b.getIndexType(), loc);
-        OpBuilder::InsertionGuard rg(b);
-        b.setInsertionPointToEnd(&rBb);
-        auto *jLoop =
-            makeOp(b, loc, "for_range", {c0, colsIdx, c1}, {}, {}, 1);
-        Block &jBb = jLoop->getRegion(0).emplaceBlock();
-        Value j = jBb.addArgument(b.getIndexType(), loc);
-        b.setInsertionPointToEnd(&jBb);
-        Value kAddr = emitViewAddr(kSlot, {r, j});
-        Value kRaw = makeOp(b, loc, "load_scalar",
-                            {slots[kSlot].ptrVal, kAddr}, {slots[kSlot].elemTy})
-                         ->getResult(0);
-        Value kIdx = asInt(b, loc, kRaw);
-        Value pAddr = makeStaticAddr(b, loc, privBuf, {kIdx}, {1});
-        Value pVal =
-            makeOp(b, loc, "load_scalar", {privBuf, pAddr}, {b.getI32Type()})
-                ->getResult(0);
-        Value oAddr = emitViewAddr(offSlot, {kIdx});
-        Value oVal = makeOp(b, loc, "load_scalar",
-                            {slots[offSlot].ptrVal, oAddr}, {b.getI32Type()})
-                         ->getResult(0);
-        Value slotI32 = b.create<arith::AddIOp>(loc, pVal, oVal);
-        Value slotIdx = asInt(b, loc, slotI32);
-        Value dstAddr = emitViewAddr(outSlot, {slotIdx});
-        Value ordIdx = b.create<arith::AddIOp>(
-            loc, b.create<arith::MulIOp>(loc, r, colsIdx), j);
-        Value ordI32 =
-            makeOp(b, loc, "scalar_cast", {ordIdx}, {b.getI32Type()},
-                   {b.getNamedAttr("dtype", b.getStringAttr("int32"))})
-                ->getResult(0);
-        makeOp(b, loc, "store_scalar",
-               {slots[outSlot].ptrVal, dstAddr, ordI32});
-        makeOp(b, loc, "store_scalar",
-               {privBuf, pAddr, b.create<arith::AddIOp>(loc, pVal, i32One)});
-        makeOp(b, loc, "end");
-        b.setInsertionPointToEnd(&rBb);
-        makeOp(b, loc, "end");
+        auto emitDistBody = [&](bool unitFast) {
+          bool prevFast = forceUnitStride;
+          forceUnitStride = unitFast;
+          auto *rLoop =
+              makeOp(b, loc, "for_range", {firstIdx, stopIdx, c1}, {}, {}, 1);
+          Block &rBb = rLoop->getRegion(0).emplaceBlock();
+          Value r = rBb.addArgument(b.getIndexType(), loc);
+          OpBuilder::InsertionGuard rg(b);
+          b.setInsertionPointToEnd(&rBb);
+          auto *jLoop =
+              makeOp(b, loc, "for_range", {c0, colsIdx, c1}, {}, {}, 1);
+          Block &jBb = jLoop->getRegion(0).emplaceBlock();
+          Value j = jBb.addArgument(b.getIndexType(), loc);
+          b.setInsertionPointToEnd(&jBb);
+          Value kAddr = emitViewAddr(kSlot, {r, j});
+          Value kRaw = makeOp(b, loc, "load_scalar",
+                              {slots[kSlot].ptrVal, kAddr}, {slots[kSlot].elemTy})
+                           ->getResult(0);
+          Value kIdx = asInt(b, loc, kRaw);
+          Value pAddr = makeStaticAddr(b, loc, privBuf, {kIdx}, {1});
+          Value slotI32 =
+              makeOp(b, loc, "load_scalar", {privBuf, pAddr}, {b.getI32Type()})
+                  ->getResult(0);
+          Value slotIdx = asInt(b, loc, slotI32);
+          Value dstAddr = emitViewAddr(outSlot, {slotIdx});
+          Value ordIdx = b.create<arith::AddIOp>(
+              loc, b.create<arith::MulIOp>(loc, r, colsIdx), j);
+          Value ordI32 =
+              makeOp(b, loc, "scalar_cast", {ordIdx}, {b.getI32Type()},
+                     {b.getNamedAttr("dtype", b.getStringAttr("int32"))})
+                  ->getResult(0);
+          makeOp(b, loc, "store_scalar",
+                 {slots[outSlot].ptrVal, dstAddr, ordI32});
+          makeOp(b, loc, "store_scalar",
+                 {privBuf, pAddr, b.create<arith::AddIOp>(loc, slotI32, i32One)});
+          makeOp(b, loc, "end");
+          b.setInsertionPointToEnd(&rBb);
+          makeOp(b, loc, "end");
+          forceUnitStride = prevFast;
+        };
+        if (!slots[kSlot].boundStrides && !slots[outSlot].boundStrides &&
+            slots[kSlot].rank >= 1 && slots[outSlot].rank >= 1) {
+          Value eqK = b.create<arith::CmpIOp>(
+              loc, arith::CmpIPredicate::eq,
+              slots[kSlot].strideVals[slots[kSlot].rank - 1], c1);
+          Value eqO = b.create<arith::CmpIOp>(
+              loc, arith::CmpIPredicate::eq,
+              slots[outSlot].strideVals[slots[outSlot].rank - 1], c1);
+          auto ifUnit = b.create<scf::IfOp>(
+              loc, TypeRange{}, b.create<arith::AndIOp>(loc, eqK, eqO), true);
+          {
+            OpBuilder::InsertionGuard tg(b);
+            b.setInsertionPointToStart(&ifUnit.getThenRegion().front());
+            emitDistBody(true);
+          }
+          {
+            OpBuilder::InsertionGuard eg(b);
+            b.setInsertionPointToStart(&ifUnit.getElseRegion().front());
+            emitDistBody(false);
+          }
+        } else {
+          emitDistBody(false);
+        }
       } else {
         return step.emitError("unexpected reservation stage ") << n;
       }
@@ -581,8 +642,10 @@ struct RowLowerer {
       int32_t fill = 0;
     };
     SmallVector<PostAction, 2> postActions;
-
-    {
+    bool recordPost = true;
+    auto emitMemberLoop = [&](bool unitStride) -> LogicalResult {
+      bool savedForce = forceUnitStride;
+      forceUnitStride = unitStride;
       auto *jLoop = makeOp(b, loc, "for_range", {c0, colsIdx, c1}, {}, {}, 1);
       Block &jBb = jLoop->getRegion(0).emplaceBlock();
       Value j = jBb.addArgument(b.getIndexType(), loc);
@@ -723,10 +786,11 @@ struct RowLowerer {
             Value dAddr = emitViewAddr(dstIdx, {r, colPos});
             makeOp(b, loc, "store_scalar", {slots[dstIdx].ptrVal, dAddr, pay});
           }
-          postActions.push_back(
-              {PostAction::PrefixFill, dstIdx, cntIdx,
-               carries.lookup(v.getOperand(4)),
-               int32_t(v.getAttrOfType<IntegerAttr>("fill").getInt())});
+          if (recordPost)
+            postActions.push_back(
+                {PostAction::PrefixFill, dstIdx, cntIdx,
+                 carries.lookup(v.getOperand(4)),
+                 int32_t(v.getAttrOfType<IntegerAttr>("fill").getInt())});
         } else if (n == "write_offsets") {
           unsigned dstIdx = slotIndex(v.getOperand(0));
           unsigned totIdx = slotIndex(v.getOperand(1));
@@ -734,8 +798,9 @@ struct RowLowerer {
           Value dAddr =
               emitViewAddr(dstIdx, {b.create<arith::AddIOp>(loc, j, c1)});
           makeOp(b, loc, "store_scalar", {slots[dstIdx].ptrVal, dAddr, pref});
-          postActions.push_back({PostAction::WriteZeroOffsets, dstIdx, totIdx,
-                                 carries.lookup(v.getOperand(3)), 0});
+          if (recordPost)
+            postActions.push_back({PostAction::WriteZeroOffsets, dstIdx, totIdx,
+                                   carries.lookup(v.getOperand(3)), 0});
         } else if (n == "atomic_add") {
           unsigned dstIdx = slotIndex(v.getOperand(0));
           Value kIdx = asInt(b, loc, vals.lookup(v.getOperand(1)));
@@ -750,10 +815,19 @@ struct RowLowerer {
             b.setInsertionPointToStart(&ifRange.getThenRegion().front());
           }
           Value dAddr = emitViewAddr(dstIdx, {kIdx});
-          Value old =
-              makeOp(b, loc, "atomic_fetch_add_i32",
-                     {slots[dstIdx].ptrVal, dAddr, delta}, {b.getI32Type()})
-                  ->getResult(0);
+          Value old;
+          if (task.hasAttr("cpu.single_dispatcher") || keyLoIdx) {
+            old = makeOp(b, loc, "load_scalar", {slots[dstIdx].ptrVal, dAddr},
+                         {b.getI32Type()})
+                      ->getResult(0);
+            makeOp(b, loc, "store_scalar",
+                   {slots[dstIdx].ptrVal, dAddr,
+                    b.create<arith::AddIOp>(loc, old, delta)});
+          } else {
+            old = makeOp(b, loc, "atomic_fetch_add_i32",
+                         {slots[dstIdx].ptrVal, dAddr, delta}, {b.getI32Type()})
+                      ->getResult(0);
+          }
           vals.map(v.getResult(0), old);
         } else if (n == "index_read") {
           unsigned sIdx = slotIndex(v.getOperand(0));
@@ -770,11 +844,34 @@ struct RowLowerer {
           makeOp(b, loc, "store_scalar",
                  {slots[dstIdx].ptrVal, dAddr, vals.lookup(v.getOperand(2))});
         } else {
+          forceUnitStride = savedForce;
           return v.emitError("unsupported atomic member instruction ") << n;
         }
       }
       b.setInsertionPointToEnd(&jBb);
       makeOp(b, loc, "end");
+      forceUnitStride = savedForce;
+      recordPost = false;
+      return success();
+    };
+
+    Value allContig = b.create<arith::ConstantIntOp>(loc, 1, 1);
+    for (auto &sl : slots) {
+      if (!sl.strideVals.empty()) {
+        Value eq1 = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                            sl.strideVals.back(), c1);
+        allContig = b.create<arith::AndIOp>(loc, allContig, eq1);
+      }
+    }
+    auto ifContig = b.create<scf::IfOp>(loc, TypeRange{}, allContig, true);
+    {
+      OpBuilder::InsertionGuard ig(b);
+      b.setInsertionPointToStart(&ifContig.getThenRegion().front());
+      if (failed(emitMemberLoop(true)))
+        return failure();
+      b.setInsertionPointToStart(&ifContig.getElseRegion().front());
+      if (failed(emitMemberLoop(false)))
+        return failure();
     }
 
     for (auto &act : postActions) {
@@ -1260,74 +1357,93 @@ struct RowLowerer {
           Value end = loadOff(b.create<arith::AddIOp>(loc, r, c1));
           Value acc = w == 1 ? declScalarSlot(b.getF32Type(), constF32(b, loc, 0))
                              : declVecSlot(resTy, w);
-          auto *mLoop =
-              makeOp(b, loc, "for_range", {start, end, c1}, {}, {}, 1);
-          Block &mBb = mLoop->getRegion(0).emplaceBlock();
-          Value member = mBb.addArgument(b.getIndexType(), loc);
-          {
+          auto emitContigSegLoop = [&]() {
+            auto *mLoop =
+                makeOp(b, loc, "for_range", {start, end, c1}, {}, {}, 1);
+            Block &mBb = mLoop->getRegion(0).emplaceBlock();
+            Value member = mBb.addArgument(b.getIndexType(), loc);
             OpBuilder::InsertionGuard mg(b);
             b.setInsertionPointToEnd(&mBb);
-            if (w == 1) {
-              Value fAddr = emitViewAddr(fIdx, {member, j});
+            Value fAddr = emitViewAddr(fIdx, {member, j});
+            auto rawVecTy = VectorType::get({w}, fElem);
+            Value raw =
+                makeOp(b, loc, "load_slice", {slots[fIdx].ptrVal, fAddr},
+                       {rawVecTy},
+                       {b.getNamedAttr("width", b.getI64IntegerAttr(w))})
+                    ->getResult(0);
+            Value fVec = fElem.isF32()
+                             ? raw
+                             : b.create<arith::ExtFOp>(loc, resTy, raw)
+                                   .getResult();
+            writeVecSlot(acc, b.create<arith::AddFOp>(loc, readVecSlot(acc), fVec));
+            makeOp(b, loc, "end");
+          };
+          if (w == 1) {
+            auto *mLoop =
+                makeOp(b, loc, "for_range", {start, end, c1}, {}, {}, 1);
+            Block &mBb = mLoop->getRegion(0).emplaceBlock();
+            Value member = mBb.addArgument(b.getIndexType(), loc);
+            OpBuilder::InsertionGuard mg(b);
+            b.setInsertionPointToEnd(&mBb);
+            Value fAddr = emitViewAddr(fIdx, {member, j});
+            Value raw = makeOp(b, loc, "load_scalar",
+                               {slots[fIdx].ptrVal, fAddr}, {fElem})
+                            ->getResult(0);
+            Value fVal = fElem.isF32()
+                             ? raw
+                             : b.create<arith::ExtFOp>(loc, b.getF32Type(), raw)
+                                   .getResult();
+            writeScalarSlot(
+                acc, b.create<arith::AddFOp>(loc, readScalarSlot(acc), fVal));
+            makeOp(b, loc, "end");
+          } else if (forceUnitStride ||
+                     (slots[fIdx].boundStrides &&
+                      slots[fIdx].boundStrides[1] == 1)) {
+            emitContigSegLoop();
+          } else {
+            Value s1 = slots[fIdx].strideVals[1];
+            Value isContig = b.create<arith::CmpIOp>(
+                loc, arith::CmpIPredicate::eq, s1, c1);
+            auto ifContig =
+                b.create<scf::IfOp>(loc, TypeRange{}, isContig, true);
+            {
+              OpBuilder::InsertionGuard tg(b);
+              b.setInsertionPointToStart(&ifContig.getThenRegion().front());
+              emitContigSegLoop();
+            }
+            {
+              OpBuilder::InsertionGuard eg(b);
+              b.setInsertionPointToStart(&ifContig.getElseRegion().front());
+              Value cW = constIdx(b, loc, w);
+              auto *mLoop =
+                  makeOp(b, loc, "for_range", {start, end, c1}, {}, {}, 1);
+              Block &mBb = mLoop->getRegion(0).emplaceBlock();
+              Value member = mBb.addArgument(b.getIndexType(), loc);
+              b.setInsertionPointToEnd(&mBb);
+              auto *lLoop =
+                  makeOp(b, loc, "for_range", {c0, cW, c1}, {}, {}, 1);
+              Block &lBb = lLoop->getRegion(0).emplaceBlock();
+              Value lane = lBb.addArgument(b.getIndexType(), loc);
+              b.setInsertionPointToEnd(&lBb);
+              Value fAddr = emitViewAddr(
+                  fIdx, {member, b.create<arith::AddIOp>(loc, j, lane)});
               Value raw = makeOp(b, loc, "load_scalar",
                                  {slots[fIdx].ptrVal, fAddr}, {fElem})
                               ->getResult(0);
-              Value fVal = fElem.isF32()
-                               ? raw
-                               : b.create<arith::ExtFOp>(loc, b.getF32Type(), raw)
-                                     .getResult();
-              writeScalarSlot(
-                  acc, b.create<arith::AddFOp>(loc, readScalarSlot(acc), fVal));
-            } else {
-              Value s1 = slots[fIdx].strideVals[1];
-              Value isContig = b.create<arith::CmpIOp>(
-                  loc, arith::CmpIPredicate::eq, s1, c1);
-              auto ifContig =
-                  b.create<scf::IfOp>(loc, TypeRange{}, isContig, true);
-              {
-                OpBuilder::InsertionGuard tg(b);
-                b.setInsertionPointToStart(&ifContig.getThenRegion().front());
-                Value fAddr = emitViewAddr(fIdx, {member, j});
-                auto rawVecTy = VectorType::get({w}, fElem);
-                Value raw =
-                    makeOp(b, loc, "load_slice", {slots[fIdx].ptrVal, fAddr},
-                           {rawVecTy},
-                           {b.getNamedAttr("width", b.getI64IntegerAttr(w))})
-                        ->getResult(0);
-                Value fVec = fElem.isF32()
-                                 ? raw
-                                 : b.create<arith::ExtFOp>(loc, resTy, raw)
-                                       .getResult();
-                writeVecSlot(acc,
-                             b.create<arith::AddFOp>(loc, readVecSlot(acc), fVec));
-              }
-              {
-                OpBuilder::InsertionGuard eg(b);
-                b.setInsertionPointToStart(&ifContig.getElseRegion().front());
-                auto *lLoop =
-                    makeOp(b, loc, "for_range", {c0, cW, c1}, {}, {}, 1);
-                Block &lBb = lLoop->getRegion(0).emplaceBlock();
-                Value lane = lBb.addArgument(b.getIndexType(), loc);
-                b.setInsertionPointToEnd(&lBb);
-                Value fAddr = emitViewAddr(
-                    fIdx, {member, b.create<arith::AddIOp>(loc, j, lane)});
-                Value raw = makeOp(b, loc, "load_scalar",
-                                   {slots[fIdx].ptrVal, fAddr}, {fElem})
-                                ->getResult(0);
-                Value fVal =
-                    fElem.isF32()
-                        ? raw
-                        : b.create<arith::ExtFOp>(loc, b.getF32Type(), raw)
-                              .getResult();
-                Value prev = makeOp(b, loc, "extract_lane_dyn",
-                                    {readVecSlot(acc), lane}, {b.getF32Type()})
-                                 ->getResult(0);
-                makeOp(b, loc, "acc_insert_lane",
-                       {acc, lane, b.create<arith::AddFOp>(loc, prev, fVal)});
-                makeOp(b, loc, "end");
-              }
+              Value fVal =
+                  fElem.isF32()
+                      ? raw
+                      : b.create<arith::ExtFOp>(loc, b.getF32Type(), raw)
+                            .getResult();
+              Value prev = makeOp(b, loc, "extract_lane_dyn",
+                                  {readVecSlot(acc), lane}, {b.getF32Type()})
+                               ->getResult(0);
+              makeOp(b, loc, "acc_insert_lane",
+                     {acc, lane, b.create<arith::AddFOp>(loc, prev, fVal)});
+              makeOp(b, loc, "end");
+              b.setInsertionPointToEnd(&mBb);
+              makeOp(b, loc, "end");
             }
-            makeOp(b, loc, "end");
           }
           map.map(op.getResult(0),
                   w == 1 ? readScalarSlot(acc) : readVecSlot(acc));
@@ -2090,6 +2206,34 @@ struct RowLowerer {
                              {slots[sIdx].ptrVal, addr}, {slots[sIdx].elemTy})
                           ->getResult(0);
           hoistedRowMap.map(sop.getResult(0), val);
+        } else if (sc == "segment_size" && !ownerAxis &&
+                   slots[task.getAttrOfType<IntegerAttr>("domain_arg").getInt()]
+                           .rank > 1) {
+          unsigned offIdx = slotIndex(sop.getOperand(0));
+          if (writtenSlots.contains(offIdx))
+            continue;
+          auto loadOffH = [&](Value idxVal) {
+            Value a = emitViewAddr(offIdx, {idxVal});
+            Value raw = makeOp(b, loc, "load_scalar",
+                               {slots[offIdx].ptrVal, a}, {b.getI32Type()})
+                            ->getResult(0);
+            return asInt(b, loc, raw);
+          };
+          Value diff = b.create<arith::SubIOp>(
+              loc, loadOffH(b.create<arith::AddIOp>(loc, r, c1)), loadOffH(r));
+          Value scLen =
+              makeOp(b, loc, "scalar_cast", {diff}, {b.getF32Type()},
+                     {b.getNamedAttr("dtype", b.getStringAttr("float32"))})
+                  ->getResult(0);
+          Value val =
+              w == 1
+                  ? scLen
+                  : makeOp(b, loc, "splat_scalar", {scLen},
+                           {VectorType::get({w}, b.getF32Type())},
+                           {b.getNamedAttr("dtype", b.getStringAttr("float32")),
+                            b.getNamedAttr("width", b.getI64IntegerAttr(w))})
+                        ->getResult(0);
+          hoistedRowMap.map(sop.getResult(0), val);
         } else if (sc == "read" && !ownerAxis) {
           unsigned sIdx = slotIndex(sop.getOperand(0));
           if (writtenSlots.contains(sIdx) || !slots[sIdx].boundStrides ||
@@ -2344,6 +2488,19 @@ struct RowLowerer {
       if (!ownerAxis) {
         for (Operation &sop : loop.getRegion(0).front()) {
           auto scode = sop.getName().stripDialect();
+          if (scode == "segment_fold" && sop.hasAttr("feature_vector")) {
+            auto &terms = sop.getRegion(0).front();
+            Operation *ldOp = terms.back().getOperand(0).getDefiningOp();
+            if (ldOp->getName().stripDialect() == "cast")
+              ldOp = ldOp->getOperand(0).getDefiningOp();
+            unsigned fIdx = slotIndex(ldOp->getOperand(0));
+            if (!slots[fIdx].boundStrides && slots[fIdx].rank == 2) {
+              std::pair<unsigned, int64_t> key{fIdx, 1};
+              if (!llvm::is_contained(dynFastAxes, key))
+                dynFastAxes.push_back(key);
+            }
+            continue;
+          }
           if (scode != "read" && scode != "write")
             continue;
           unsigned idx = slotIndex(sop.getOperand(0));
@@ -2493,7 +2650,9 @@ LogicalResult lowerMojoRow(func::FuncOp fn, int64_t fullWidth) {
        usesMoments = false, usesScan = false;
   task.walk([&](Operation *op) {
     auto n = op->getName().stripDialect();
-    if (n == "atomic_members" || n == "reserve_tickets")
+    if (n == "reserve_tickets" ||
+        (n == "atomic_members" && !task.hasAttr("cpu.single_dispatcher") &&
+         !hasKeyBounds))
       usesAtomic = true;
     if (auto rng = op->getAttrOfType<StringAttr>("range");
         rng && rng.getValue() == "indexed_copy")
