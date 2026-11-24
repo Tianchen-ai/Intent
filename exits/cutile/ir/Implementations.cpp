@@ -52,17 +52,19 @@ void registerContracts(Unit &unit) {
         {"inclusive-scan", "scan_sum", "ct.cumsum"},
         {"moments-reduction", "summary_reduce", "merge_moments"},
         {"moments-merge", "summary_merge", "merge_moments"},
-        {"random", "uniform", "uniform_at"}}) {
+        {"random", "uniform", "uniform_at"},
+        {"random-quad", "uniform", "uniform_quad"}}) {
     ImplementationContract c;
     c.name = name;
     c.operation = "ct_src." + std::string(op);
     c.symbol = builtin;
     auto n = StringRef(name);
     bool dot = n == "scaled-mma" || n == "native-dot";
-    if (n == "moments-reduction" || n=="moments-merge" || n == "random") {
+    bool quad = n == "random-quad";
+    if (n == "moments-reduction" || n=="moments-merge" || n == "random" || quad) {
       c.source = ImplementationSource::Runtime;
-      c.resource = n == "random" ? "runtime/cutile/kernels/philox.py"
-                                 : "runtime/cutile/kernels/moments.py";
+      c.resource = (n == "random" || quad) ? "runtime/cutile/kernels/philox.py"
+                                           : "runtime/cutile/kernels/moments.py";
     }
     c.operands = dot ? "M x K, K x N after projected transpose"
                      : "typed fragment with the operation's declared inputs";
@@ -84,7 +86,7 @@ void registerContracts(Unit &unit) {
         return llvm::createStringError("missing cuTile target capability");
       return llvm::Error::success();
     };
-    c.verify = [dot](Operation *op) {
+    c.verify = [dot, quad](Operation *op) {
       if (dot)
         return matrix(op);
       auto n = op->getName().stripDialect();
@@ -95,7 +97,8 @@ void registerContracts(Unit &unit) {
       }
       if (n == "uniform")
         return success(getElementTypeOrSelf(op->getOperand(1).getType())
-                           .isUnsignedInteger(64));
+                           .isUnsignedInteger(64) &&
+                       op->hasAttr("quad_aligned") == quad);
       auto input = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
       if (!input)
         return failure();

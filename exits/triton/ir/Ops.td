@@ -59,6 +59,11 @@ def Itsrc_tiles : Inst<"tiles"> {
   let results = (outs Variadic<AnyType>:$results);
   let regions = (region AnyRegion:$body);
 }
+def Itsrc_output_partition : Inst<"output_partition"> {
+  let arguments = (ins I32Attr:$index);
+  let regions = (region AnyRegion:$body);
+}
+def Itsrc_partition_end : Inst<"partition_end", [Terminator]>;
 def Itsrc_stripe_loop : Inst<"stripe_loop"> {
   let arguments = (ins Variadic<AnyTensor>:$initial, I64Attr:$count, I64Attr:$stride);
   let results = (outs Variadic<AnyTensor>:$results);

@@ -1,5 +1,6 @@
 #include "Resident.h"
 #include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
+#include <map>
 
 namespace CI_UNIT_NAMESPACE {
 using namespace compilerinfra;
@@ -14,12 +15,15 @@ llvm::Expected<std::vector<StructuralCandidate>> residentCandidates(Operation *o
     if(!width)return llvm::createStringError("whole-row collective exceeds the available native tile widths");
     for(auto &r:caps->rows)if(r.width<width)last=std::max(last,r.width);
     Builder b(op->getContext());
+    std::map<unsigned, SmallVector<Attribute>> groups;
     for(auto &r:caps->rows)if(r.width==width && (!singleOwner || r.rows==1) && caps->acceptsGroup(op,r.rows)){
-      auto row=b.getDictionaryAttr({b.getNamedAttr("rows",b.getI32IntegerAttr(r.rows)),b.getNamedAttr("id",b.getI32IntegerAttr(r.id)),
-        b.getNamedAttr("width",b.getI32IntegerAttr(width)),b.getNamedAttr("payload",b.getStringAttr(r.payload))});
-      auto d=b.getDictionaryAttr({b.getNamedAttr("topology",b.getStringAttr("resident")),b.getNamedAttr("rows",b.getArrayAttr({row})),
+      groups[r.rows].push_back(b.getDictionaryAttr({b.getNamedAttr("rows",b.getI32IntegerAttr(r.rows)),b.getNamedAttr("id",b.getI32IntegerAttr(r.id)),
+        b.getNamedAttr("width",b.getI32IntegerAttr(width)),b.getNamedAttr("payload",b.getStringAttr(r.payload))}));
+    }
+    for (auto &[rowCount, rs] : groups) {
+      auto d=b.getDictionaryAttr({b.getNamedAttr("topology",b.getStringAttr("resident")),b.getNamedAttr("rows",b.getArrayAttr(rs)),
         b.getNamedAttr("guard",b.getDenseI64ArrayAttr({last?last+1:0,width}))});
-      choices.push_back({"resident-"+std::to_string(r.rows),"resident",d,{"legal-width-group"}});
+      choices.push_back({"resident-"+std::to_string(rowCount),"resident",d,{"legal-width-group"}});
     }
     return choices;
 }

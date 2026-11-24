@@ -120,7 +120,14 @@ llvm::Error describeArtifact(func::FuncOp fn, llvm::raw_pwrite_stream &out) {
       {"version", 2},
       {"grid",
        llvm::json::Array{
-           intentdsl::block::gridExpression(fn->getAttr("block.grid")), 1, 1}},
+           intentdsl::block::gridExpression(fn->getAttr("block.grid")),
+           std::max<int64_t>(
+               1, llvm::count_if(fn.front(),
+                                 [](Operation &op) {
+                                   return op.getName().getStringRef() ==
+                                          "triton_src.output_partition";
+                                 })),
+           1}},
       {"entry", "kernel"},
       {"source", ""},
       {"domain", intentdsl::publishDomain(fn)},

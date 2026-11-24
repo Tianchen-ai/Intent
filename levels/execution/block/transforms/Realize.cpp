@@ -44,6 +44,11 @@ public:
     auto pid = make("pid", {}, rw.getIndexType(), rw.getNamedAttr("axis",rw.getI32IntegerAttr(0)))->getResult(0);
     rows = make("rows", pid, vector(rw.getIndexType(), 1), rw.getNamedAttr("step",rw.getStringAttr("rows")))->getResult(0);
     auto &body = anchor->getRegion(0).front();
+    pureTileReads = !llvm::any_of(body.without_terminator(), [](Operation &op) {
+      auto c = op.getName().stripDialect();
+      return c == "prefix_scatter" || c == "unique_put" || c == "fill_ranges" ||
+             c == "write_offsets" || c == "atomic_add";
+    });
     if(gridTiles)
       tile(make("pid", {}, rw.getIndexType(),rw.getNamedAttr("axis",rw.getI32IntegerAttr(1)))->getResult(0));
     else if (resident)
@@ -94,6 +99,7 @@ public:
         sweep(writes.front());
     }
     local.clear();
+    localReads.clear();
     for(auto *w:ownerStores)
       make("owner_store",{w->getOperand(0),rows,expr(w->getOperand(2))},{});
     rw.eraseOp(anchor);
@@ -104,11 +110,12 @@ private:
   RewriterBase &rw;
   Location loc;
   Value domain, rows, cols, active;
-  bool resident, gridTiles;
+  bool resident, gridTiles, pureTileReads = false;
   IntegerAttr batch;
   StringAttr binMode;
   SmallVector<Operation *> writes;
   IRMapping fixed, local;
+  llvm::DenseMap<Value, Value> localReads;
   Type vector(Type element, unsigned rank) {
     return RankedTensorType::get(
         SmallVector<int64_t>(rank, ShapedType::kDynamic), element);
@@ -148,6 +155,7 @@ private:
     active = make("active", {domain, rows, cols}, vector(rw.getI1Type(), 2))
                  ->getResult(0);
     local.clear();
+    localReads.clear();
   }
   Value expr(Value v) {
     if (auto known = fixed.lookupOrNull(v))
@@ -201,6 +209,11 @@ private:
     }
     if (n == "read") {
       auto view = op->getOperand(0);
+      if (pureTileReads)
+        if (auto cached = localReads.lookup(view)) {
+          local.map(v, cached);
+          return cached;
+        }
       auto elem = cast<MemRefType>(view.getType()).getElementType();
       auto x = make("load", {view, rows, cols, active}, vector(elem, 2))
                    ->getResult(0);
@@ -211,6 +224,8 @@ private:
       } else if (cast<MemRefType>(domain.getType()).getRank() == 1)
         x.getDefiningOp()->setAttr("block.member_axes",
                                    rw.getDenseI64ArrayAttr({0}));
+      if (pureTileReads)
+        localReads[view] = x;
       local.map(v, x);
       return x;
     }
@@ -225,9 +240,26 @@ private:
     auto element = v.getType();
     if (auto shaped = dyn_cast<RankedTensorType>(element))
       element = shaped.getElementType();
-    auto x =
-        make(n, args, rank ? vector(element, rank) : element, op->getAttrs())
-            ->getResult(0);
+    Type resTy = rank ? vector(element, rank) : element;
+    if (pureTileReads && active &&
+        active.getParentBlock() == rw.getInsertionBlock() &&
+        llvm::StringSwitch<bool>(n)
+            .Cases("cast", "add", "sub", "mul", "div", "rsqrt", "exp", "sqrt",
+                   "maximum", "constant", true)
+            .Default(false)) {
+      std::string fullName = ("block." + n).str();
+      for (Operation *cur = active.getDefiningOp()->getNextNode();
+           cur && cur != &*rw.getInsertionPoint(); cur = cur->getNextNode()) {
+        if (cur->getName().getStringRef() == fullName &&
+            cur->getNumResults() == 1 && cur->getResult(0).getType() == resTy &&
+            cur->getOperands() == ValueRange(args) &&
+            cur->getAttrDictionary() == op->getAttrDictionary()) {
+          local.map(v, cur->getResult(0));
+          return cur->getResult(0);
+        }
+      }
+    }
+    auto x = make(n, args, resTy, op->getAttrs())->getResult(0);
     local.map(v, x);
     return x;
   }

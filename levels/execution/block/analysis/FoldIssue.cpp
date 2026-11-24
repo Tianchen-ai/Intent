@@ -210,7 +210,8 @@ std::optional<unsigned> issueAxis(Operation *op,
     if (!extent || *extent < rows || *extent % rows)
       continue;
     bool dot = false, good = true;
-    int64_t maxDepth = 0;
+    int64_t maxDepth = 0, operandBits = 32, shapedCarries = 0;
+    bool sawOperand = false;
     for (auto loop : bb.getOps<scf::ForOp>())
       if (loop->hasAttr("kir.reassociate")) {
         // Disjoint split intervals have no key panel to share. A lower bound
@@ -218,11 +219,22 @@ std::optional<unsigned> issueAxis(Operation *op,
         good &= loop.getLowerBound() == bb.getArgument(j) ||
                 sharedCoordinate(loop.getLowerBound(), bb.getArgument(j), loop,
                                  rows);
+        shapedCarries = std::max<int64_t>(
+            shapedCarries,
+            llvm::count_if(loop.getResultTypes(),
+                           [](Type t) { return isa<ShapedType>(t); }));
         for (auto &v : loop.getBody()->without_terminator()) {
           auto name = v.getName().stripDialect();
           if (name == "slice_read" || isa<memref::LoadOp>(v)) {
             for (auto coord : v.getOperands().drop_front())
               good &= sharedCoordinate(coord, bb.getArgument(j), loop, rows);
+            if (name == "slice_read") {
+              int64_t bits =
+                  cast<MemRefType>(v.getOperand(0).getType())
+                      .getElementTypeBitWidth();
+              operandBits = sawOperand ? std::min(operandBits, bits) : bits;
+              sawOperand = true;
+            }
           }
           if (name == "lane_sum") {
             auto d = tileDot(&v, loop);
@@ -269,8 +281,11 @@ std::optional<unsigned> issueAxis(Operation *op,
                          8 * physical * span + 2 * span * maxDepth;
     if (!caps->panelBytes || transferBytes > caps->panelBytes)
       good = false;
-    if (caps->contributionLimit &&
-        (physical + span) * maxDepth > caps->contributionLimit / 2)
+    int64_t liveWords =
+        ((physical + span) * maxDepth * operandBits + 31) / 32 +
+        std::max<int64_t>(2, shapedCarries) * physical * span +
+        shapedCarries * physical * maxDepth;
+    if (caps->contributionLimit && liveWords > caps->contributionLimit)
       good = false;
     // A masked edge replays at most one member vector per owner. The score
     // matrix and operand panels are live separately; no [row,token,depth]

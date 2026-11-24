@@ -20,7 +20,6 @@ mlir::Value scaledPanels(intentdsl::block::Tiles &,intentdsl::block::MatrixAcces
 using namespace mlir;
 using namespace compilerinfra;
 void registerIR(DialectRegistry &);
-void partitionOwners(func::FuncOp,const intentdsl::CallFacts &);
 llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &);
 llvm::Error describeArtifact(ModuleOp, llvm::raw_pwrite_stream &);
 TerminalPrinter cutilePrinter();
@@ -299,7 +298,6 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
       store->erase();
       value->erase();
     });
-    partitionOwners(fn,facts);
   }
 };
 struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
@@ -333,10 +331,20 @@ struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
     });
     fn->setAttr("ct_src.entry", b.getStringAttr("kernel"));
     fn->setAttr("ct_src.index_bits", b.getI32IntegerAttr(bits));
+    const auto *facts = profile.services.get<intentdsl::CallFacts>();
     fn.walk([&](Operation *op){
       if(op->getName().getDialectNamespace()!="ct_src")return;
       auto n=op->getName().stripDialect();
-      auto id=llvm::StringSwitch<StringRef>(n).Case("summary_reduce","moments-reduction").Case("summary_merge","moments-merge").Case("uniform","random")
+      if (n == "uniform") {
+        bool quad = intentdsl::cutile::quadAlignedUniform(op, fn, facts);
+        if (quad)
+          op->setAttr("quad_aligned", b.getUnitAttr());
+        op->setAttr("ci.implementation",
+                    b.getStringAttr(quad ? "exits/cutile::random-quad"
+                                         : "exits/cutile::random"));
+        return;
+      }
+      auto id=llvm::StringSwitch<StringRef>(n).Case("summary_reduce","moments-reduction").Case("summary_merge","moments-merge")
         .Case("scan_sum","inclusive-scan").Case("reduce","native-row-reduce").Default("");
       if(!id.empty())op->setAttr("ci.implementation",b.getStringAttr(("exits/cutile::"+id).str()));
     });
@@ -462,31 +470,6 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
   if (failed(intentdsl::verifyMapping(module, profile, "ct_src")))
     return failure();
   auto fn = *module.getOps<func::FuncOp>().begin();
-  unsigned branch=0;
-  llvm::SmallDenseSet<Value> published;
-  for(auto &op:fn.front())if(op.getName().getStringRef()=="ct_src.output_partition"){
-    if(op.getAttrOfType<IntegerAttr>("index").getInt()!=branch++ || !llvm::hasSingleElement(op.getRegion(0)))
-      return op.emitError("expected distinct contiguous output partitions");
-    auto &bb=op.getRegion(0).front();
-    if(bb.empty() || bb.back().getName().getStringRef()!="ct_src.partition_end")
-      return op.emitError("unterminated output partition");
-    unsigned writes=0;
-    auto checked=op.walk([&](Operation *inner){
-      auto n=inner->getName().stripDialect();
-      if(n=="tile_store" || n=="scatter_slab")return WalkResult::interrupt();
-      if(n=="owner_store"){
-        if(inner->getBlock()!=&bb || !published.insert(inner->getOperand(0)).second)return WalkResult::interrupt();
-        ++writes;
-      }
-      return WalkResult::advance();
-    });
-    if(checked.wasInterrupted() || writes!=1)
-      return op.emitError("expected one owner publication per partition");
-  }
-  if(branch)for(auto &op:fn.front())
-    if(op.getName().stripDialect()!="output_partition" && op.getName().stripDialect()!="identity" &&
-       op.getName().stripDialect()!="rows" && op.getName().stripDialect()!="pid" &&
-       op.getName().stripDialect()!="return")return op.emitError("unguarded work in partitioned grid");
   if(failed(intentdsl::specializeProjectedLayout(fn,*profile.services.get<intentdsl::CallFacts>(),"ct_src",false)))return failure();
   if (fn.empty() || !llvm::hasSingleElement(fn.getBody()) || fn.getNumResults())
     return fn.emitError("expected a defined output-buffer kernel");
@@ -541,10 +524,12 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
     auto *o = v->getAsObject();
     if (!o || o->size() != 3 || o->getInteger("num_ctas") != 1 ||
         o->getInteger("opt_level") != 3 ||
-        (o->getInteger("occupancy") != 1 && o->getInteger("occupancy") != 2))
+        (o->getInteger("occupancy") != 1 && o->getInteger("occupancy") != 2 &&
+         o->getInteger("occupancy") != 4))
       return fn.emitError("invalid native hints for row");
   }
   if(callable && failed(intentdsl::block::verifyRowProgram(fn,"ct_src")))return failure();
+  const auto *factsPtr = profile.services.get<intentdsl::CallFacts>();
   auto res = module.walk([&](Operation *op) {
     if(callable && isa<arith::ConstantOp,arith::IndexCastOp,scf::ForOp,scf::YieldOp>(op))return WalkResult::advance();
     if (op == module || op->getName().getDialectNamespace() == "func" ||
@@ -552,6 +537,19 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
       return WalkResult::advance();
     auto n = op->getName().stripDialect();
     bool ok = op->getName().getDialectNamespace() == "ct_src";
+    if (ok && n == "uniform") {
+      bool expectedQuad =
+          callable && intentdsl::cutile::quadAlignedUniform(op, fn, factsPtr);
+      if (op->hasAttr("quad_aligned") != expectedQuad)
+        return op->emitError("uniform quad alignment disagrees with row layout"),
+               WalkResult::interrupt();
+      if (callable &&
+          op->getAttrOfType<StringAttr>("ci.implementation") !=
+              (expectedQuad ? "exits/cutile::random-quad"
+                            : "exits/cutile::random"))
+        return op->emitError("uniform implementation contract mismatch"),
+               WalkResult::interrupt();
+    }
     if (ok && n == "array_dim") {
       auto arr = dyn_cast<BlockArgument>(op->getOperand(0));
       auto ax = op->getAttrOfType<IntegerAttr>("axis");

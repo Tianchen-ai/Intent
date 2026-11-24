@@ -40,20 +40,26 @@ llvm::Error rowRule(Operation &op, PrintPoint at, PrintContext &c) {
   bool sum = algebra && algebra == "sum";
   if (code == "tiles") {
     auto &bb = op.getRegion(0).front();
-    if (op.getNumResults())
-      line(result() + " = " + arg(1));
+    for (unsigned i = 0; i < op.getNumResults(); ++i)
+      line(c.name(op.getResult(i)) + " = " + arg(1 + i));
     line("for " + c.name(bb.getArgument(0)) + " in range(ct.cdiv(" +
          (owner ? memberCount(op.getOperand(0), arg(0))
                 : arg(0) + ".shape[-1]") +
          ",W)):");
     ++c.indent;
-    if (op.getNumResults())
-      line(c.name(bb.getArgument(1)) + " = " + result());
+    for (unsigned i = 0; i < op.getNumResults(); ++i)
+      line(c.name(bb.getArgument(1 + i)) + " = " + c.name(op.getResult(i)));
     return llvm::Error::success();
   }
   if (code == "yield") {
-    if (op.getNumOperands())
-      line(c.name(op.getParentOp()->getResult(0)) + " = " + arg(0));
+    if (op.getNumOperands()) {
+      SmallVector<std::string> lhs, rhs;
+      for (unsigned i = 0; i < op.getNumOperands(); ++i) {
+        lhs.push_back(c.name(op.getParentOp()->getResult(i)));
+        rhs.push_back(arg(i));
+      }
+      line(llvm::join(lhs, ", ") + " = " + llvm::join(rhs, ", "));
+    }
     return llvm::Error::success();
   }
   if (code == "output_partition") {
@@ -315,7 +321,9 @@ llvm::Error rowRule(Operation &op, PrintPoint at, PrintContext &c) {
   else if (code == "scan_sum")
     expr = "ct.cumsum(" + arg(0) + ",axis=1)";
   else if (code == "uniform")
-    expr = "uniform_at(" + arg(0) + "," + arg(1) + ")";
+    expr = op.hasAttr("quad_aligned")
+               ? "uniform_quad(" + arg(0) + "," + arg(1) + ",R,W)"
+               : "uniform_at(" + arg(0) + "," + arg(1) + ")";
   else if (code == "linear_index") {
     bool wide = cast<RankedTensorType>(op.getResult(0).getType())
                     .getElementType()

@@ -16,21 +16,39 @@ llvm::Error row(Operation &op, PrintPoint point, PrintContext &c) {
     if (point == PrintPoint::Enter) {
       auto &body = op.getRegion(0).front();
       std::string limit = "tl.cdiv(N, WIDTH)";
-      if (op.getNumResults())
-        c.line(name(op.getResult(0)) + " = " + arg(1));
+      for (unsigned i = 0; i < op.getNumResults(); ++i)
+        c.line(name(op.getResult(i)) + " = " + arg(1 + i));
       c.line("for " + name(body.getArgument(0)) + " in range(" + limit + "):");
       ++c.indent;
-      if (op.getNumResults())
-        c.line(name(body.getArgument(1)) + " = " + name(op.getResult(0)));
+      for (unsigned i = 0; i < op.getNumResults(); ++i)
+        c.line(name(body.getArgument(1 + i)) + " = " + name(op.getResult(i)));
+    } else if (point == PrintPoint::Leave)
+      --c.indent;
+    return llvm::Error::success();
+  }
+  if (n == "output_partition") {
+    if (point == PrintPoint::Enter) {
+      c.line("if tl.program_id(1) == " +
+             std::to_string(op.getAttrOfType<IntegerAttr>("index").getInt()) +
+             ":");
+      ++c.indent;
     } else if (point == PrintPoint::Leave)
       --c.indent;
     return llvm::Error::success();
   }
   if (point != PrintPoint::Enter)
     return llvm::Error::success();
+  if (n == "partition_end")
+    return llvm::Error::success();
   if (n == "yield") {
-    if (op.getNumOperands())
-      c.line(name(op.getParentOp()->getResult(0)) + " = " + arg(0));
+    if (op.getNumOperands()) {
+      SmallVector<std::string> lhs, rhs;
+      for (unsigned i = 0; i < op.getNumOperands(); ++i) {
+        lhs.push_back(name(op.getParentOp()->getResult(i)));
+        rhs.push_back(arg(i));
+      }
+      c.line(llvm::join(lhs, ", ") + " = " + llvm::join(rhs, ", "));
+    }
     return llvm::Error::success();
   }
   auto ownerAxis =
@@ -284,6 +302,8 @@ void addRowRules(TerminalPrinter &printer) {
                  "extract_lane", "axis_reduce", "map"})
     printer.operations["triton_src." + std::string(n)] = dynamicTile;
   for (auto n : {"tiles",
+                 "output_partition",
+                 "partition_end",
                  "cta_barrier",
                  "yield",
                  "ne",

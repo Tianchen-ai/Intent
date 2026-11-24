@@ -29,7 +29,7 @@ capabilities(const llvm::json::Object &options) {
               intentdsl::block::OwnerMachine{
                   32, 256,
                   options.getInteger("dynamic_shared_per_block").value_or(0),
-                  *architecture == 90 ? 32768 : 16384,
+                  *architecture == 90 ? 32768 : 24576,
                   *architecture == 90 ? 64 : 32,
                   *architecture == 90
                       ? options.getInteger("registers").value_or(0) / 2
@@ -66,12 +66,26 @@ capabilities(const llvm::json::Object &options) {
   for (unsigned width = 1; width <= maxWidth; width *= 2) {
     for (unsigned rows : {1u, 2u, 8u, 16u}) {
       if(rows>2 && width>128) continue;
-      unsigned occupancy = *architecture == 90 ? (rows == 1 ? 2 : 1) : std::min(rows, 2u);
-      std::string options;
-      llvm::raw_string_ostream(options) << llvm::json::Value(llvm::json::Object{
-          {"num_ctas", 1}, {"occupancy", occupancy}, {"opt_level", 3}});
-      auto id = rows <= 2 ? 2 * width + rows : 65536u + 32 * width + rows;
-      table->rows.push_back({id, rows, width, options});
+      llvm::SmallVector<unsigned, 2> occupancies;
+      if (*architecture == 90) {
+        occupancies.push_back(2u);
+        if (rows == 1 && width >= 1024)
+          occupancies.push_back(4u);
+      } else {
+        occupancies.push_back(std::min(rows, 2u));
+        if (rows == 1 && width >= 1024)
+          occupancies.push_back(2u);
+      }
+      for (auto [idx, occupancy] : llvm::enumerate(occupancies)) {
+        std::string rowOptions;
+        llvm::raw_string_ostream(rowOptions) << llvm::json::Value(
+            llvm::json::Object{{"num_ctas", 1},
+                               {"occupancy", occupancy},
+                               {"opt_level", 3}});
+        auto baseId = rows <= 2 ? 2 * width + rows : 65536u + 32 * width + rows;
+        auto id = idx == 0 ? baseId : 131072u + baseId;
+        table->rows.push_back({id, rows, width, rowOptions});
+      }
     }
   }
   if (auto e = profile.services.provide<intentdsl::RowCapacity>(table))

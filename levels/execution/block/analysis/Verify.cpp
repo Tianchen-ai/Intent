@@ -71,15 +71,15 @@ LogicalResult verifyMapping(ModuleOp m,const compilerinfra::TargetProfile &p,Str
       if(!llvm::hasSingleElement(op->getRegion(0)))return WalkResult::interrupt();
       auto &body=op->getRegion(0).front();
       auto count=op->getNumResults();
-      ok=count<=1 && op->getNumOperands()==count+1 && body.getNumArguments()==count+1 && !body.empty() &&
+      ok=op->getNumOperands()==count+1 && body.getNumArguments()==count+1 && !body.empty() &&
          body.getArgument(0).getType().isIndex() && body.back().getName().stripDialect()=="yield" && body.back().getNumOperands()==count;
-      if(ok && count){
-        auto init=op->getOperand(1),result=body.back().getOperand(0);
+      for(unsigned i=0;ok && i<count;++i){
+        auto init=op->getOperand(1+i),result=body.back().getOperand(i);
         bool tuple=isa<TupleType>(init.getType());
         ok=def(init,tuple?"summary_identity":"identity") && def(result,tuple?"summary_merge":"combine") &&
-           result.getDefiningOp()->getOperand(0)==body.getArgument(1) &&
+           result.getDefiningOp()->getOperand(0)==body.getArgument(1+i) &&
            init.getDefiningOp()->getAttr("algebra")==result.getDefiningOp()->getAttr("algebra") &&
-           init.getType()==result.getType() && init.getType()==op->getResult(0).getType();
+           init.getType()==result.getType() && init.getType()==op->getResult(i).getType();
       }
     }
     if(n=="stripe_loop"){
@@ -265,6 +265,79 @@ LogicalResult verifyMapping(ModuleOp m,const compilerinfra::TargetProfile &p,Str
   });
   if(result.wasInterrupted())return failure();
   if(instances.size()!=(tiles?2u:1u) || instances!=mapped || ((topology=="stream" && !tiles)!=(sweeps!=0)))return f.emitError("instance mapping does not match topology");
+  unsigned branch = 0;
+  llvm::SmallDenseSet<Value> published;
+  for (auto &op : f.front()) {
+    if (op.getName().getDialectNamespace() == dialect &&
+        op.getName().stripDialect() == "output_partition") {
+      if (op.getAttrOfType<IntegerAttr>("index").getInt() != branch++ ||
+          !llvm::hasSingleElement(op.getRegion(0)))
+        return op.emitError("expected distinct contiguous output partitions");
+      auto &bb = op.getRegion(0).front();
+      if (bb.empty() || bb.back().getName().getDialectNamespace() != dialect ||
+          bb.back().getName().stripDialect() != "partition_end")
+        return op.emitError("unterminated output partition");
+      unsigned writes = 0;
+      auto checked = op.walk([&](Operation *inner) {
+        if (inner->getName().getDialectNamespace() != dialect)
+          return WalkResult::advance();
+        auto n = inner->getName().stripDialect();
+        if (n == "store" || n == "tile_store" || n == "scatter_slab")
+          return WalkResult::interrupt();
+        if (n == "owner_store") {
+          if (inner->getBlock() != &bb ||
+              !published.insert(inner->getOperand(0)).second)
+            return WalkResult::interrupt();
+          ++writes;
+        }
+        if (n == "write_at") {
+          auto slot = dyn_cast<BlockArgument>(inner->getOperand(0));
+          auto *off = inner->getOperand(1).getDefiningOp();
+          auto *i64Map =
+              off && off->getNumOperands() == 2 ? off->getOperand(1).getDefiningOp() : nullptr;
+          auto *ltMap = inner->getOperand(3).getDefiningOp();
+          auto *dimM =
+              ltMap && ltMap->getNumOperands() == 2 ? ltMap->getOperand(1).getDefiningOp() : nullptr;
+          bool validExpandedOwnerStore =
+              dialect == "triton_src" && inner->getBlock() == &bb && slot &&
+              slot.getOwner() == &f.front() &&
+              cast<MemRefType>(slot.getType()).getRank() == 1 && off &&
+              off->getName().getStringRef() == "triton_src.view_offset" &&
+              off->getOperand(0) == slot && i64Map &&
+              i64Map->getName().getStringRef() == "triton_src.map" &&
+              i64Map->getAttrOfType<StringAttr>("kind") == "i64" &&
+              i64Map->getOperand(0).getDefiningOp() &&
+              i64Map->getOperand(0).getDefiningOp()->getName().getStringRef() ==
+                  "triton_src.rows" &&
+              ltMap &&
+              ltMap->getName().getStringRef() == "triton_src.map" &&
+              ltMap->getAttrOfType<StringAttr>("kind") == "lt" &&
+              ltMap->getOperand(0) == i64Map->getOperand(0) && dimM &&
+              dimM->getName().getStringRef() == "triton_src.dimension" &&
+              dimM->getAttrOfType<StringAttr>("name") == "M" &&
+              published.insert(slot).second;
+          if (!validExpandedOwnerStore)
+            return WalkResult::interrupt();
+          ++writes;
+        }
+        return WalkResult::advance();
+      });
+      if (checked.wasInterrupted() || writes == 0)
+        return op.emitError(
+            "expected distinct owner publications per partition");
+    }
+  }
+  if (branch) {
+    if (branch < 2 || topology != "stream")
+      return f.emitError(
+          "output partitioning requires multiple streaming partitions");
+    for (auto &op : f.front()) {
+      auto n = op.getName().stripDialect();
+      if (n != "output_partition" && n != "identity" &&
+          n != "summary_identity" && n != "rows" && n != "pid" && n != "return")
+        return op.emitError("unguarded work in partitioned grid");
+    }
+  }
   return success();
 }
 }
