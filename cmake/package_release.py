@@ -166,7 +166,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True, help="Output directory outside source tree")
     parser.add_argument("--compilerinfra-root", type=Path, default=None, help="Optional CompilerInfra repo root")
-    parser.add_argument("--sdk-prefix", type=Path, default=None, help="Installed static CompilerInfra 0.5.1 SDK prefix")
+    parser.add_argument("--sdk-prefix", type=Path, default=None, help="Installed static CompilerInfra 0.5.2 SDK prefix")
     parser.add_argument("--llvm-prefix", type=Path, default=None, help="LLVM/MLIR 20.1.8 prefix")
     parser.add_argument("--onednn-prefix", type=Path, default=None, help="Optional oneDNN >=3.13 prefix for header build")
     parser.add_argument("--platform-tag", default=f"linux_{platform.machine()}", help="Wheel platform tag")
