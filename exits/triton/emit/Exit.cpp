@@ -104,15 +104,25 @@ llvm::Error describeArtifact(func::FuncOp fn, llvm::raw_pwrite_stream &out) {
   if (entry.getName().getStringRef() == "triton_src.tile_program") {
     if (entry.getAttrOfType<StringAttr>("calling_convention") == "matrix")
       return intentdsl::block::emitMatrixPackage(fn, "", out, 2);
-    if (entry.hasAttr("block.pair_axis"))
+    if (entry.hasAttr("block.pair_axis")) {
+      auto ownerTile = entry.getAttrOfType<IntegerAttr>("block.owner_tile");
+      if (ownerTile && ownerTile.getInt() >= 128)
+        return intentdsl::block::emitOwnerArtifact(
+            fn, "",
+            ArrayRef<llvm::json::Object>{
+                llvm::json::Object{{"num_warps", 8}, {"num_stages", 2}},
+                llvm::json::Object{{"num_warps", 8}, {"num_stages", 3}}},
+            2, out);
       return intentdsl::block::emitOwnerArtifact(
           fn, "",
           ArrayRef<llvm::json::Object>{
               llvm::json::Object{{"num_warps", 4}, {"num_stages", 1}},
               llvm::json::Object{{"num_warps", 4}, {"num_stages", 2}},
               llvm::json::Object{{"num_warps", 4}, {"num_stages", 3}},
-              llvm::json::Object{{"num_warps", 8}, {"num_stages", 2}}},
+              llvm::json::Object{{"num_warps", 8}, {"num_stages", 2}},
+              llvm::json::Object{{"num_warps", 8}, {"num_stages", 3}}},
           2, out);
+    }
     int64_t warps = 4;
     if (auto ts = entry.getAttrOfType<IntegerAttr>("block.token_span");
         ts && ts.getInt() >= 1024)

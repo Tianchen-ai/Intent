@@ -48,14 +48,48 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
                  loc, b.create<arith::FloorDivSIOp>(loc, lo, width), width));
   SmallVector<Value> init;
   SmallVector<Type> types;
+  bool needLoopSeen =
+      online && online->condVal && !online->causalUpper;
+  bool onlineUseExp2 = false;
+  Value hoistedScaleRow, hoistedScaleTile;
   if (online) {
     auto mTy = shaped({rows}, b.getF32Type());
-    auto seenTy = shaped({rows}, b.getI32Type());
     init.push_back(broadcast(scalar(-INFINITY), mTy));
     types.push_back(mTy);
-    init.push_back(
-        broadcast(b.create<arith::ConstantIntOp>(loc, 0, 32), seenTy));
-    types.push_back(seenTy);
+    if (needLoopSeen) {
+      auto seenTy = shaped({rows}, b.getI32Type());
+      init.push_back(
+          broadcast(b.create<arith::ConstantIntOp>(loc, 0, 32), seenTy));
+      types.push_back(seenTy);
+    }
+    onlineUseExp2 =
+        online->isExp2 ||
+        bitEnumContainsAll(online->expFlags, arith::FastMathFlags::afn);
+    if (online->scaleVal && loop.isDefinedOutsideOfLoop(online->scaleVal)) {
+      Value rawS = at(online->scaleVal, parent);
+      if (!online->isExp2 && onlineUseExp2) {
+        Value log2e =
+            broadcast(scalar(1.4426950408889634f), rawS.getType());
+        rawS = b.create<arith::MulFOp>(loc, rawS, log2e, online->expFlags);
+      }
+      hoistedScaleRow = broadcast(rawS, mTy);
+      if (paired) {
+        Axis sAx = isa<RankedTensorType>(rawS.getType()) ? Axis::Owner
+                                                         : Axis::Scalar;
+        hoistedScaleTile = plane({rawS, sAx});
+      } else {
+        Value s1 = isa<RankedTensorType>(rawS.getType())
+                       ? (cast<RankedTensorType>(rawS.getType()).getRank() == 2
+                              ? op("drop_unit_owner", rawS,
+                                   shaped({cast<RankedTensorType>(rawS.getType())
+                                               .getDimSize(1)},
+                                          elem(rawS.getType())))
+                                    ->getResult(0)
+                              : asScalar(rawS, "min"))
+                       : rawS;
+        hoistedScaleTile = broadcast(s1, shaped({span}, b.getF32Type()));
+      }
+    }
   }
   for (auto v : loop.getInitArgs()) {
     auto t = lifted(v);
@@ -286,15 +320,17 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
         Value negInfTile = broadcast(scalar(-INFINITY), sTile.getType());
         Value sMasked = validMask ? select(validMask, sTile, negInfTile) : sTile;
         Value mPrev = l.getRegionIterArgs()[0];
-        Value seenPrev = l.getRegionIterArgs()[1];
-        Value rowValid =
-            validMask
-                ? broadcast(reduce(castElement(validMask, b.getI32Type()), "max",
-                                   paired ? 1 : 0),
-                            seenPrev.getType())
-                : broadcast(b.create<arith::ConstantIntOp>(loc, 1, 32),
-                            seenPrev.getType());
-        onlineSeenNew = b.create<arith::OrIOp>(loc, seenPrev, rowValid);
+        if (needLoopSeen) {
+          Value seenPrev = l.getRegionIterArgs()[1];
+          Value rowValid =
+              validMask
+                  ? broadcast(reduce(castElement(validMask, b.getI32Type()),
+                                     "max", paired ? 1 : 0),
+                              seenPrev.getType())
+                  : broadcast(b.create<arith::ConstantIntOp>(loc, 1, 32),
+                              seenPrev.getType());
+          onlineSeenNew = b.create<arith::OrIOp>(loc, seenPrev, rowValid);
+        }
         Value mPanel =
             broadcast(reduce(sMasked, "max", paired ? 1 : 0), mPrev.getType());
         onlineMNew =
@@ -308,12 +344,25 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
         Value mSafe = select(allMasked, zeroRow, onlineMNew);
         Value mDiff =
             b.create<arith::SubFOp>(loc, mPrev, mSafe, online->subFlags);
-        if (online->scaleVal) {
+        if (hoistedScaleRow) {
+          mDiff = b.create<arith::MulFOp>(loc, mDiff, hoistedScaleRow,
+                                          online->scaleFlags);
+        } else if (online->scaleVal) {
           Value sRow = broadcast(value(online->scaleVal).value, mDiff.getType());
           mDiff = b.create<arith::MulFOp>(loc, mDiff, sRow, online->scaleFlags);
+          if (!online->isExp2 && onlineUseExp2)
+            mDiff = b.create<arith::MulFOp>(
+                loc, mDiff,
+                broadcast(scalar(1.4426950408889634f), mDiff.getType()),
+                online->expFlags);
+        } else if (!online->isExp2 && onlineUseExp2) {
+          mDiff = b.create<arith::MulFOp>(
+              loc, mDiff,
+              broadcast(scalar(1.4426950408889634f), mDiff.getType()),
+              online->expFlags);
         }
         Value rawAlpha =
-            online->isExp2
+            onlineUseExp2
                 ? Value(b.create<math::Exp2Op>(loc, mDiff, online->expFlags))
                 : Value(b.create<math::ExpOp>(loc, mDiff, online->expFlags));
         onlineAlpha = select(prevNegInf, zeroRow, rawAlpha);
@@ -322,7 +371,10 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
                    : broadcast(singleMember({mSafe, Axis::Owner}), sTile.getType());
         Value sShift =
             b.create<arith::SubFOp>(loc, sTile, mSafeTile, online->subFlags);
-        if (online->scaleVal) {
+        if (hoistedScaleTile) {
+          sShift = b.create<arith::MulFOp>(loc, sShift, hoistedScaleTile,
+                                           online->scaleFlags);
+        } else if (online->scaleVal) {
           auto sFrag = value(online->scaleVal);
           Value sTileScale =
               paired ? plane(sFrag)
@@ -330,9 +382,19 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
           sShift = b.create<arith::MulFOp>(
               loc, sShift, broadcast(sTileScale, sShift.getType()),
               online->scaleFlags);
+          if (!online->isExp2 && onlineUseExp2)
+            sShift = b.create<arith::MulFOp>(
+                loc, sShift,
+                broadcast(scalar(1.4426950408889634f), sShift.getType()),
+                online->expFlags);
+        } else if (!online->isExp2 && onlineUseExp2) {
+          sShift = b.create<arith::MulFOp>(
+              loc, sShift,
+              broadcast(scalar(1.4426950408889634f), sShift.getType()),
+              online->expFlags);
         }
         Value wRaw =
-            online->isExp2
+            onlineUseExp2
                 ? Value(b.create<math::Exp2Op>(loc, sShift, online->expFlags))
                 : Value(b.create<math::ExpOp>(loc, sShift, online->expFlags));
         Value zeroTile = broadcast(scalar(0.f), sTile.getType());
@@ -462,12 +524,13 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
   };
   (void)lowerFoldBlock(*loop.getBody());
   SmallVector<Value> next;
+  unsigned onlineHead = online ? (needLoopSeen ? 2u : 1u) : 0u;
   if (online) {
     next.push_back(onlineMNew);
-    next.push_back(onlineSeenNew);
+    if (needLoopSeen)
+      next.push_back(onlineSeenNew);
   }
-  auto accIterArgs =
-      l.getRegionIterArgs().drop_front(online ? 2 : 0);
+  auto accIterArgs = l.getRegionIterArgs().drop_front(onlineHead);
   for (auto [ret, rawAcc] : llvm::zip(yielded, accIterArgs)) {
     auto *comb = ret.getDefiningOp();
     auto combFlags = intentdsl::kir::getFastMathFlags(comb);
@@ -674,17 +737,38 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
   if (!online)
     return SmallVector<Value>(l.getResults());
   Value finalM = l.getResult(0);
-  Value finalSeen = l.getResult(1);
-  Value zeroSeen =
-      broadcast(b.create<arith::ConstantIntOp>(loc, 0, 32), finalSeen.getType());
+  auto rowI64Ty = shaped({rows}, b.getI64Type());
+  auto rowI1Ty = shaped({rows}, b.getI1Type());
+  Value hasValid;
+  if (needLoopSeen) {
+    Value finalSeen = l.getResult(1);
+    Value zeroSeen = broadcast(b.create<arith::ConstantIntOp>(loc, 0, 32),
+                               finalSeen.getType());
+    hasValid = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, finalSeen,
+                                       zeroSeen);
+  } else {
+    Value loRow = broadcast(widen(lower), rowI64Ty);
+    Value hiRow = broadcast(widen(upper), rowI64Ty);
+    hasValid =
+        b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, loRow, hiRow);
+    if (online->causalUpper) {
+      Value cuRow = broadcast(widen(at(online->causalUpper, parent)), rowI64Ty);
+      Value zeroI64 = broadcast(integer(0), rowI64Ty);
+      Value cuOk = b.create<arith::CmpIOp>(
+          loc,
+          online->causalInclusive ? arith::CmpIPredicate::sge
+                                  : arith::CmpIPredicate::sgt,
+          cuRow, zeroI64);
+      hasValid = b.create<arith::AndIOp>(loc, hasValid, cuOk);
+    }
+    hasValid = broadcast(hasValid, rowI1Ty);
+  }
   Value negInfM = broadcast(scalar(-INFINITY), finalM.getType());
-  Value hasValid =
-      b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, finalSeen, zeroSeen);
   Value mIsNegInf =
       b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OEQ, finalM, negInfM);
   Value allValidNegInf = b.create<arith::AndIOp>(loc, hasValid, mIsNegInf);
   SmallVector<Value> outs{finalM};
-  for (Value res : l.getResults().drop_front(2)) {
+  for (Value res : l.getResults().drop_front(onlineHead)) {
     auto resTy = cast<RankedTensorType>(res.getType());
     Value nanMask = resTy.getRank() == 2
                         ? broadcast(allValidNegInf, resTy.clone(b.getI1Type()), 0)

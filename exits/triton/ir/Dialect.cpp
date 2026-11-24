@@ -286,6 +286,8 @@ struct TritonDescTiledAccessModel
         op->getNumOperands() != head + vShape.size())
       return failure();
     Value base = op->getOperand(0);
+    if (auto md = base.getDefiningOp<intentdsl::itsrc::MakeDesc>())
+      base = md.getBase();
     auto offsets = op->getOperands().drop_front(head);
     for (size_t d = 0; d < vShape.size(); ++d) {
       if (vShape[d] <= 0 || bShape[d] <= 0)

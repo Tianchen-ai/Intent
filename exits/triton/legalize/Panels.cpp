@@ -62,10 +62,37 @@ bool directViewLayout(Value view, func::FuncOp fn,
   return true;
 }
 
+Value getOrCreateDesc(Tiles &t, Value base, ArrayRef<int64_t> viewShape,
+                      ArrayRef<int64_t> viewStrides,
+                      ArrayRef<int64_t> blockShape) {
+  auto vShapeAttr = t.b.getDenseI64ArrayAttr(viewShape);
+  auto vStridesAttr = t.b.getDenseI64ArrayAttr(viewStrides);
+  auto bShapeAttr = t.b.getDenseI64ArrayAttr(blockShape);
+  Block &entry = t.program->getRegion(0).front();
+  for (Operation &inst : entry) {
+    if (inst.getName().getStringRef() == "triton_src.make_desc" &&
+        inst.getOperand(0) == base &&
+        inst.getAttrOfType<DenseI64ArrayAttr>("view_shape") == vShapeAttr &&
+        inst.getAttrOfType<DenseI64ArrayAttr>("view_strides") == vStridesAttr &&
+        inst.getAttrOfType<DenseI64ArrayAttr>("block_shape") == bShapeAttr)
+      return inst.getResult(0);
+  }
+  OpBuilder::InsertionGuard g(t.b);
+  t.b.setInsertionPointToStart(&entry);
+  OperationState st(t.loc, "triton_src.make_desc");
+  st.addOperands(base);
+  st.addTypes(base.getType());
+  st.addAttribute("view_shape", vShapeAttr);
+  st.addAttribute("view_strides", vStridesAttr);
+  st.addAttribute("block_shape", bShapeAttr);
+  return t.b.create(st)->getResult(0);
+}
+
 Value emitDescRead(Tiles &t, Value base, ValueRange offsets,
                    ArrayRef<int64_t> viewShape, ArrayRef<int64_t> viewStrides,
                    ArrayRef<int64_t> blockShape) {
-  SmallVector<Value> args{base};
+  Value desc = getOrCreateDesc(t, base, viewShape, viewStrides, blockShape);
+  SmallVector<Value> args{desc};
   llvm::append_range(args, offsets);
   return t
       .op("desc_read", args,
@@ -82,7 +109,8 @@ Value emitDescRead(Tiles &t, Value base, ValueRange offsets,
 void emitDescWrite(Tiles &t, Value base, Value val, ValueRange offsets,
                    ArrayRef<int64_t> viewShape, ArrayRef<int64_t> viewStrides,
                    ArrayRef<int64_t> blockShape) {
-  SmallVector<Value> args{base, val};
+  Value desc = getOrCreateDesc(t, base, viewShape, viewStrides, blockShape);
+  SmallVector<Value> args{desc, val};
   llvm::append_range(args, offsets);
   t.op("desc_write", args, {},
        {t.b.getNamedAttr("view_shape", t.b.getDenseI64ArrayAttr(viewShape)),
@@ -158,7 +186,10 @@ bool ownerRectangle(Tiles &t, Operation &op, ArrayRef<Value> coords,
     auto proof = compilerinfra::proveTailAccess(
         descOp, ranges.valid() ? &ranges : nullptr);
     if (!proof.proven || proof.kind != compilerinfra::TailKind::ExactInBounds) {
+      Operation *md = descOp->getOperand(0).getDefiningOp();
       descOp->erase();
+      if (md && md->use_empty())
+        md->erase();
       return false;
     }
   } else {
@@ -169,7 +200,10 @@ bool ownerRectangle(Tiles &t, Operation &op, ArrayRef<Value> coords,
     auto proof = compilerinfra::proveTailAccess(
         descOp, ranges.valid() ? &ranges : nullptr);
     if (!proof.proven || proof.kind != compilerinfra::TailKind::ExactInBounds) {
+      Operation *md = descOp->getOperand(0).getDefiningOp();
       descOp->erase();
+      if (md && md->use_empty())
+        md->erase();
       return false;
     }
     result = reshapeTile(t, readTile, {rows, width});
@@ -696,11 +730,34 @@ LogicalResult verifyTritonGeometry(func::FuncOp fn,
              op->emitError(msg);
              return WalkResult::interrupt();
            };
+           if (n == "triton_src.make_desc") {
+             if (!cap->permitTma)
+               return reject("descriptor creation without TMA capability");
+             auto arg = dyn_cast<BlockArgument>(op->getOperand(0));
+             if (!arg || arg.getOwner() != &fn.front() ||
+                 op->getResult(0).getType() != arg.getType())
+               return reject("descriptor must bind a function view");
+             auto mem = cast<MemRefType>(arg.getType());
+             auto vShape = op->getAttrOfType<DenseI64ArrayAttr>("view_shape");
+             auto vStrides =
+                 op->getAttrOfType<DenseI64ArrayAttr>("view_strides");
+             auto bShape = op->getAttrOfType<DenseI64ArrayAttr>("block_shape");
+             if (!vShape || !vStrides || !bShape ||
+                 !tmaViewCompatible(
+                     vShape.asArrayRef(), vStrides.asArrayRef(),
+                     bShape.asArrayRef(),
+                     llvm::divideCeil(mem.getElementTypeBitWidth(), 8)))
+               return reject("invalid Triton TMA descriptor geometry");
+           }
            if (n == "triton_src.desc_read" || n == "triton_src.desc_write") {
              if (!cap->permitTma)
                return reject("descriptor transfer without TMA capability");
              bool write = n == "triton_src.desc_write";
-             auto arg = dyn_cast<BlockArgument>(op->getOperand(0));
+             Value base = op->getOperand(0);
+             Operation *md = base.getDefiningOp();
+             if (!md || md->getName().getStringRef() != "triton_src.make_desc")
+               return reject("descriptor access requires hoisted make_desc");
+             auto arg = dyn_cast<BlockArgument>(md->getOperand(0));
              if (!arg || arg.getOwner() != &fn.front())
                return reject("descriptor access must bind a function view");
              auto mem = cast<MemRefType>(arg.getType());
@@ -712,6 +769,9 @@ LogicalResult verifyTritonGeometry(func::FuncOp fn,
                  op->getAttrOfType<DenseI64ArrayAttr>("view_strides");
              auto bShape = op->getAttrOfType<DenseI64ArrayAttr>("block_shape");
              if (!vShape || !vStrides || !bShape ||
+                 md->getAttr("view_shape") != vShape ||
+                 md->getAttr("view_strides") != vStrides ||
+                 md->getAttr("block_shape") != bShape ||
                  tile.getElementType() != mem.getElementType() ||
                  tile.getShape() != bShape.asArrayRef() ||
                  op->getNumOperands() !=

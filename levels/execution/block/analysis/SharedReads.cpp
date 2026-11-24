@@ -64,6 +64,40 @@ std::optional<SharedReads> sharedReads(Operation *op, const CallFacts &facts) {
     if (!reads.slices.empty())
       return reads;
   }
+  if (body.getNumArguments() >= 2) {
+    for (int axis = int(body.getNumArguments()) - 1; axis >= 0; --axis) {
+      auto owner = body.getArgument(axis);
+      auto *shape = facts.shapeOf(op->getOperand(axis));
+      auto extent = shape ? (*shape)[axes[axis]].getAsInteger() : std::nullopt;
+      if (!extent || *extent < 2)
+        continue;
+      SharedReads reads{unsigned(axis), *extent, {}};
+      op->walk([&](Operation *s) {
+        if (s->getName().stripDialect() != "slice_read" ||
+            !s->getParentOfType<scf::ForOp>())
+          return;
+        for (auto *p = s->getParentOp(); p != op; p = p->getParentOp()) {
+          if (auto loop = dyn_cast<scf::ForOp>(p)) {
+            if (!invariant(loop.getLowerBound(), owner, reads.group) ||
+                !invariant(loop.getUpperBound(), owner, reads.group))
+              return;
+          } else if (auto branch = dyn_cast<scf::IfOp>(p)) {
+            if (!invariant(branch.getCondition(), owner, reads.group))
+              return;
+          } else
+            return;
+        }
+        auto coords = s->getOperands().drop_front();
+        if (!coords.empty() &&
+            llvm::all_of(coords, [&](Value v) {
+              return invariant(v, owner, reads.group);
+            }))
+          reads.slices.push_back(s);
+      });
+      if (!reads.slices.empty())
+        return reads;
+    }
+  }
   return std::nullopt;
 }
 bool legalSharedReads(Operation *o, const compilerinfra::TargetProfile &p,

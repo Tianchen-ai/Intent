@@ -98,12 +98,22 @@ Value OwnerTiles::slice(Operation &old, ArrayRef<Value> outerCoords, Value mask,
     ix.insert(ix.begin() + axis, lanesK);
     SmallVector<int64_t> axes(ix.size(), -1);
     axes[axis] = 0;
-    auto active = reduce(mask, "max", 0);
-    auto inside =
-        b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, lanesK,
-                                like(integer(n), lanesK.getType()));
-    auto keep =
-        b.create<arith::AndIOp>(loc, like(active, inside.getType()), inside);
+    auto ownersAttr = program->getAttrOfType<IntegerAttr>("block.owners");
+    bool guaranteedActive =
+        mask == active && ownersAttr && ownersAttr.getInt() > 0;
+    Value keep;
+    if (!guaranteedActive || n != w) {
+      Value inside =
+          b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, lanesK,
+                                  like(integer(n), lanesK.getType()));
+      if (guaranteedActive) {
+        keep = inside;
+      } else {
+        auto anyActive = reduce(mask, "max", 0);
+        keep = b.create<arith::AndIOp>(loc, like(anyActive, inside.getType()),
+                                       inside);
+      }
+    }
     auto v = read(view, address(view, ix, axes), keep);
     return like(v, lifted(old.getResult(0)), 1);
   }

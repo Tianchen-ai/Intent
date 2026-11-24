@@ -98,13 +98,13 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
   caps->nativePrivateHistogram = true;
   caps->privateBinCapacity = options.getInteger("shared_per_block");
   caps->maxExpandedReductionLanes = 65536;
-  caps->independentWidths = {32};
+  caps->independentWidths = {32, 64, 128};
   if(auto error=caps->bind(options))return error;
   struct NativeRow {
     unsigned id, rows, warps, stages;
   };
-  static constexpr NativeRow hopper[] = {{0, 1, 4, 1}, {1, 2, 8, 1}};
-  static constexpr NativeRow blackwell[] = {{0, 1, 4, 1}, {1, 2, 4, 1}};
+  static constexpr NativeRow hopper[] = {{0, 1, 4, 1}, {1, 2, 8, 1}, {2, 1, 8, 1}};
+  static constexpr NativeRow blackwell[] = {{0, 1, 4, 1}, {1, 2, 4, 1}, {2, 1, 8, 1}};
   auto warp = options.getInteger("warp_size"),
        threads = options.getInteger("max_threads");
   if (!warp || !threads || *warp <= 0 || *threads <= 0)
@@ -118,7 +118,10 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
     os << llvm::json::Value(llvm::json::Object{
         {"num_warps", int64_t(r.warps)}, {"num_stages", int64_t(r.stages)}});
     for(unsigned width=1; width<=8192; width*=2) {
-      caps->rows.push_back({width*2+r.id, r.rows, width, payload});
+      if (r.id == 2 && width < 2048)
+        continue;
+      unsigned rowId = r.id < 2 ? (width * 2 + r.id) : (262144u + width);
+      caps->rows.push_back({rowId, r.rows, width, payload});
       if(r.id==0 && width<=128)
         for(unsigned group:{8u,16u})
           caps->rows.push_back({65536+32*width+group,group,width,payload});
@@ -135,7 +138,7 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
                   *arch == 90
                       ? options.getInteger("registers").value_or(0) * 7 / 16
                       : options.getInteger("registers").value_or(0) * 3 / 8,
-                  *arch == 90 ? 64 : 0})))
+                  *arch == 90 ? 64 : 0, *arch == 90 ? 2 : 1})))
     return err;
   std::string cal = options.getString("calibration")
                         .value_or(*arch == 90 ? "sm90" : "sm120")

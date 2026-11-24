@@ -1,5 +1,6 @@
 #include "intentdsl/levels/execution/block/ir/OwnerProgram.h"
 #include "intentdsl/levels/execution/block/ir/TileBuilder.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 namespace CI_UNIT_NAMESPACE {
 using namespace mlir;
 using intentdsl::block::Tiles;
@@ -50,11 +51,56 @@ Value load(Tiles &t, Value base, ValueRange at, ArrayRef<int64_t> shape,
           {t.b.getNamedAttr("allow_tma", t.b.getBoolAttr(tma))})
       ->getResult(0);
 }
+bool pureScalarCoord(Value v, unsigned depth = 0) {
+  if (!v || isa<ShapedType>(v.getType()) || depth > 12)
+    return false;
+  if (auto barg = dyn_cast<BlockArgument>(v))
+    return isa<scf::ForOp>(barg.getOwner()->getParentOp());
+  Operation *def = v.getDefiningOp();
+  if (!def)
+    return false;
+  if (def->getName().stripDialect() == "tile_pid" ||
+      isa<arith::ConstantOp>(def))
+    return true;
+  if (def->getName().getDialectNamespace() != "arith" ||
+      def->getNumRegions() != 0)
+    return false;
+  return llvm::all_of(def->getOperands(),
+                      [&](Value u) { return pureScalarCoord(u, depth + 1); });
+}
 bool rectangle(Tiles &t, Operation &op, ArrayRef<Value> coords, int64_t rows,
                Value stored, Value &result) {
   auto rectAxis = op.getAttrOfType<IntegerAttr>("ct_src.owner_rectangle");
-  if (!rectAxis)
+  if (!rectAxis) {
+    auto ownersAttr = t.program->getAttrOfType<IntegerAttr>("block.owners");
+    auto base = dyn_cast<BlockArgument>(op.getOperand(0));
+    int axis = op.getAttrOfType<IntegerAttr>("axis")
+                   ? int(op.getAttrOfType<IntegerAttr>("axis").getInt())
+                   : -1;
+    int sliceCount = 0;
+    if (Block *blk = op.getBlock())
+      for (Operation &inst : *blk)
+        if (inst.getName().stripDialect() == "slice_read")
+          ++sliceCount;
+    if (!stored && rows > 1 && sliceCount <= 8 && ownersAttr &&
+        ownersAttr.getInt() > 0 && base &&
+        base.getOwner() == &t.fn.front() &&
+        !t.fn.getArgAttr(base.getArgNumber(), "kir.indexing") && axis >= 0 &&
+        coords.size() + 1 == size_t(cast<MemRefType>(base.getType()).getRank()) &&
+        llvm::all_of(coords, [](Value c) { return pureScalarCoord(c); })) {
+      int64_t n = t.shape(base)[axis];
+      if (n > 0 && llvm::isPowerOf2_64(n)) {
+        SmallVector<Value> at(coords.begin(), coords.end());
+        at.insert(at.begin() + axis, t.integer(0));
+        SmallVector<int64_t> dims(at.size(), 1);
+        dims[axis] = n;
+        Value vec = reshape(t, load(t, base, at, dims, /*tma=*/false), {n});
+        result = t.like(vec, t.shaped({rows, n}, t.elem(vec.getType())), 1);
+        return true;
+      }
+    }
     return false;
+  }
   int64_t pos = rectAxis.getInt();
   auto base = op.getOperand(stored ? 1 : 0);
   int64_t width = t.shape(base).asArrayRef().back();

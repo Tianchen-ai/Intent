@@ -67,7 +67,9 @@ capabilities(const llvm::json::Object &options) {
                   *architecture == 90
                       ? options.getInteger("registers").value_or(0) / 2
                       : options.getInteger("registers").value_or(0) * 3 / 8,
-                  *architecture == 90 ? 64 : 0})))
+                  *architecture == 90 ? 64 : 0,
+                  /*maxWarpgroups=*/1,
+                  /*maxGroupReads=*/4})))
     return err;
   std::string cal = options.getString("calibration")
                         .value_or(*architecture == 90 ? "sm90" : "sm120")

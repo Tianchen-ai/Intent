@@ -9,7 +9,8 @@ namespace intentdsl::block {
 bool canGroupReads(Operation *o, const compilerinfra::TargetProfile &p,
                    unsigned width) {
   auto machine = p.services.get<OwnerMachine>();
-  if (!machine || machine->parallelMembers <= 1)
+  if (!machine || machine->parallelMembers <= 1 ||
+      int(width) > machine->maxGroupReads)
     return false;
   auto fn = o->getParentOfType<func::FuncOp>();
   auto abi = llvm::cantFail(

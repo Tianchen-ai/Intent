@@ -421,7 +421,10 @@ std::optional<unsigned> issueAxis(Operation *op,
         ((physical + span) * maxDepth * operandBits + 31) / 32 +
         std::max<int64_t>(2, shapedCarries) * physical * span +
         shapedCarries * physical * maxDepth;
-    if (caps->contributionLimit && liveWords > caps->contributionLimit)
+    int64_t contribLimit = caps->contributionLimit;
+    if (contribLimit && physical >= 128 && caps->maxWarpgroups >= 2)
+      contribLimit = contribLimit * 7 / 4;
+    if (contribLimit && liveWords > contribLimit)
       good = false;
     // A masked edge replays at most one member vector per owner. The score
     // matrix and operand panels are live separately; no [row,token,depth]

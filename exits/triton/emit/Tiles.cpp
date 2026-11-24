@@ -99,42 +99,32 @@ TerminalPrinter tilePrinter() {
             std::to_string(ax) + ")," + tuple(v.resultType(0)) + ")")
         .str();
   });
-  leaf("triton_src.desc_read", [](const LocalOpView &v) {
+  leaf("triton_src.make_desc", [](const LocalOpView &v) {
     auto joinI64 = [](DenseI64ArrayAttr a) {
       std::vector<std::string> parts;
       for (int64_t x : a.asArrayRef())
         parts.push_back(std::to_string(x));
       return "[" + llvm::join(parts, ",") + "]";
     };
+    return ("tl.make_tensor_descriptor(" + v.operand(0).str() + ",shape=" +
+            joinI64(v.attrOfType<DenseI64ArrayAttr>("view_shape")) +
+            ",strides=" +
+            joinI64(v.attrOfType<DenseI64ArrayAttr>("view_strides")) +
+            ",block_shape=" +
+            joinI64(v.attrOfType<DenseI64ArrayAttr>("block_shape")) + ")");
+  });
+  leaf("triton_src.desc_read", [](const LocalOpView &v) {
     std::vector<std::string> offs;
     for (unsigned i = 1; i < v.numOperands(); ++i)
       offs.push_back("tl.cast(" + v.operand(i).str() + ",tl.int32)");
-    return ("tl.make_tensor_descriptor(" + v.operand(0).str() + ",shape=" +
-            joinI64(v.attrOfType<DenseI64ArrayAttr>("view_shape")) +
-            ",strides=" +
-            joinI64(v.attrOfType<DenseI64ArrayAttr>("view_strides")) +
-            ",block_shape=" +
-            joinI64(v.attrOfType<DenseI64ArrayAttr>("block_shape")) +
-            ").load([" + llvm::join(offs, ",") + "])");
+    return (v.operand(0).str() + ".load([" + llvm::join(offs, ",") + "])");
   });
   leaf("triton_src.desc_write", [](const LocalOpView &v) {
-    auto joinI64 = [](DenseI64ArrayAttr a) {
-      std::vector<std::string> parts;
-      for (int64_t x : a.asArrayRef())
-        parts.push_back(std::to_string(x));
-      return "[" + llvm::join(parts, ",") + "]";
-    };
     std::vector<std::string> offs;
     for (unsigned i = 2; i < v.numOperands(); ++i)
       offs.push_back("tl.cast(" + v.operand(i).str() + ",tl.int32)");
-    return ("tl.make_tensor_descriptor(" + v.operand(0).str() + ",shape=" +
-            joinI64(v.attrOfType<DenseI64ArrayAttr>("view_shape")) +
-            ",strides=" +
-            joinI64(v.attrOfType<DenseI64ArrayAttr>("view_strides")) +
-            ",block_shape=" +
-            joinI64(v.attrOfType<DenseI64ArrayAttr>("block_shape")) +
-            ").store([" + llvm::join(offs, ",") + "]," + v.operand(1).str() +
-            ")");
+    return (v.operand(0).str() + ".store([" + llvm::join(offs, ",") + "]," +
+            v.operand(1).str() + ")");
   });
   leaf("math.exp", [](const LocalOpView &v) {
     if (viewHasFastMath(v, arith::FastMathFlags::afn))

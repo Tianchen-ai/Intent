@@ -210,6 +210,13 @@ defm Scale : ScaleDispatch<Itsrc_Dialect>;
 class TileInstruction<string mnemonic, list<Trait> traits = []> : Op<Itsrc_Dialect, mnemonic, traits>;
 include "intentdsl/levels/execution/block/ir/RowInstructions.td"
 include "intentdsl/levels/execution/block/ir/TileInstructions.td"
+def Itsrc_MakeDesc : Op<Itsrc_Dialect, "make_desc", [Pure]> {
+  let arguments = (ins AnyMemRef:$base,
+                       DenseI64ArrayAttr:$view_shape,
+                       DenseI64ArrayAttr:$view_strides,
+                       DenseI64ArrayAttr:$block_shape);
+  let results = (outs AnyMemRef:$desc);
+}
 def Itsrc_DescRead : Op<Itsrc_Dialect, "desc_read", [MemoryEffects<[MemRead]>]> {
   let arguments = (ins AnyMemRef:$base, Variadic<I64>:$offsets,
                        DenseI64ArrayAttr:$view_shape,

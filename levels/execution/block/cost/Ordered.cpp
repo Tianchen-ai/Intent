@@ -48,9 +48,24 @@ void orderedCost(Unit &u) {
           // visited token per tile of owners. Use its actual access dimension,
           // not the number of tokens in a single issue packet.
           double sweepBytesPerOwner = 0, maxTokenBytes = 0;
+          bool relaxedNormCost =
+              intentdsl::block::hasReassociativeNormalization(*op);
+          llvm::SmallVector<mlir::scf::ForOp, 4> reassociateLoops;
           for (auto loop :
-               op->getRegion(0).front().getOps<mlir::scf::ForOp>()) {
-            if (!loop->hasAttr("kir.reassociate"))
+               op->getRegion(0).front().getOps<mlir::scf::ForOp>())
+            if (loop->hasAttr("kir.reassociate"))
+              reassociateLoops.push_back(loop);
+          bool fuseTwoPassNorm =
+              relaxedNormCost && reassociateLoops.size() == 2 &&
+              reassociateLoops[0].getNumResults() == 1 &&
+              !mlir::isa<mlir::ShapedType>(
+                  reassociateLoops[0].getResultTypes()[0]) &&
+              llvm::any_of(reassociateLoops[1].getResultTypes(),
+                           [](mlir::Type t) {
+                             return mlir::isa<mlir::ShapedType>(t);
+                           });
+          for (auto [loopIdx, loop] : llvm::enumerate(reassociateLoops)) {
+            if (fuseTwoPassNorm && loopIdx == 0)
               continue;
             double tokenBytes = 0;
             int64_t extent = 0;
@@ -232,6 +247,9 @@ void orderedCost(Unit &u) {
                 double budget = caps->residentRegisters
                                     ? caps->residentRegisters
                                     : file.value_or(0) / 2;
+                if (budget && physicalRows >= 128 &&
+                    caps->maxWarpgroups >= 2)
+                  budget *= 1.75;
                 // Resident matrix A/B operands, two score intermediates,
                 // and each live FP32 accumulator occupy the CTA register file.
                 // Excess live words need a store and reload per issue.
@@ -277,9 +295,15 @@ void orderedCost(Unit &u) {
           if (intentdsl::block::canGroupReads(op, ctx.target, 4)) {
             auto fetch = choice.getAs<mlir::IntegerAttr>("prefetch");
             double span = fetch ? fetch.getInt() : 1;
-            double independentLoads = 0, wordsPerStep = 0;
+            double independentLoads = 0, wordsPerStep = 0, carryWords = 0;
             for (auto loop :
                  op->getRegion(0).front().getOps<mlir::scf::ForOp>()) {
+              for (auto t : loop.getResultTypes()) {
+                if (auto st = mlir::dyn_cast<mlir::ShapedType>(t))
+                  carryWords += lanes * (st.getElementTypeBitWidth() / 32.0);
+                else
+                  carryWords += t.getIntOrFloatBitWidth() / 32.0;
+              }
               loop.walk([&](mlir::Operation *v) {
                 if (v->getName().stripDialect() == "slice_read") {
                   ++independentLoads;
@@ -296,14 +320,19 @@ void orderedCost(Unit &u) {
                 }
               });
             }
-            double live = span * w * wordsPerStep;
+            double live = w * (carryWords + span * wordsPerStep);
             dependency = (1 + independentLoads / span) *
-                         (1 + std::max(0., live - 6144) / 6144);
+                         (1 + std::max(0., live - 6144) / 2048);
             e.terms["grouped_read_elements"] = {live, "count"};
           }
           double readCost = 0;
           if (auto r = intentdsl::block::sharedReads(op, *f)) {
-            auto shared = isSharedMode || isMatrixFold;
+            bool innerUniform =
+                w > 1 &&
+                r->axis + 1 ==
+                    op->getRegion(0).front().getNumArguments() &&
+                r->group % w == 0;
+            auto shared = isSharedMode || isMatrixFold || innerUniform;
             for (auto *load : r->slices) {
               auto loop = load->getParentOfType<mlir::scf::ForOp>();
               if (loop && loop->hasAttr("kir.reassociate") && sweepBytesPerOwner)
