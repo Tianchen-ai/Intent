@@ -82,6 +82,34 @@ LogicalResult verifyMapping(ModuleOp m,const compilerinfra::TargetProfile &p,Str
            init.getType()==result.getType() && init.getType()==op->getResult(0).getType();
       }
     }
+    if(n=="stripe_loop"){
+      auto cnt=op->getAttrOfType<IntegerAttr>("count"),st=op->getAttrOfType<IntegerAttr>("stride");
+      ok=topology=="resident" && cnt && cnt.getInt()>=2 && st && st.getInt()>=1 && llvm::hasSingleElement(op->getRegion(0));
+      if(ok){
+        auto &body=op->getRegion(0).front();
+        ok=!body.empty() && body.getNumArguments()==1+op->getNumOperands() &&
+           body.getArgument(0).getType().isIndex() && op->getResultTypes()==op->getOperandTypes() &&
+           body.back().getName().stripDialect()=="yield" && body.back().getOperandTypes()==op->getResultTypes();
+        for(unsigned i=0;ok && i<op->getNumOperands();++i)
+          ok &= body.getArgument(i+1).getType()==op->getOperand(i).getType();
+      }
+    }
+    if(n=="stripe_load" || n=="stripe_store"){
+      auto *parent=op->getParentOp();
+      auto slot=dyn_cast<BlockArgument>(op->getOperand(0));
+      auto viewTy=slot?dyn_cast<MemRefType>(slot.getType()):MemRefType();
+      bool store=n=="stripe_store";
+      auto valTy=dyn_cast<RankedTensorType>((store?op->getOperand(5):op->getResult(0)).getType());
+      ok=parent && parent->getName().getDialectNamespace()==dialect &&
+         parent->getName().stripDialect()=="stripe_loop" &&
+         op->getOperand(1)==parent->getRegion(0).front().getArgument(0) &&
+         op->getAttr("stride")==parent->getAttr("stride") &&
+         slot && slot.getOwner()==&f.front() && viewTy &&
+         (viewTy.getRank()==2 || (!store && viewTy.getRank()==1)) &&
+         valTy && valTy.getRank()==2 && valTy.getElementType()==viewTy.getElementType() &&
+         def(op->getOperand(2),"rows") && def(op->getOperand(3),"columns") &&
+         def(op->getOperand(4),"active") && op->getOperand(4).getParentBlock()==op->getBlock();
+    }
     if(n=="columns"){
       auto v=op->getOperand(0);
       if(tiles){mapped.insert(v);ok=def(v,"pid") && v.getDefiningOp()->getAttr("axis")==b.getI32IntegerAttr(1);}

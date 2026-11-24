@@ -217,7 +217,25 @@ llvm::Error rowRule(Operation &op, PrintPoint at, PrintContext &c) {
     }
   } else if (code == "owner_load")
     expr = "ct.gather(" + arg(0) + "," + arg(1) + ")";
-  else if (code == "owner_store") {
+  else if (code == "stripe_owner_load") {
+    auto s = std::to_string(op.getAttrOfType<IntegerAttr>("stride").getInt());
+    expr = "ct.broadcast_to(ct.expand_dims(ct.gather(" + arg(0) +
+           ",ct.astype(" + arg(1) + "," + indexType + ")*" + s + "+" + arg(2) +
+           "),1),(R,W))";
+  } else if (code == "stripe_tile_load" || code == "stripe_tile_store") {
+    auto s = std::to_string(op.getAttrOfType<IntegerAttr>("stride").getInt());
+    std::string hint = op.getAttrOfType<BoolAttr>("allow_tma").getValue()
+                           ? ""
+                           : ", allow_tma=False";
+    std::string index = "(ct.astype(" + arg(1) + ", " + indexType + ") * (" +
+                        s + " // R) + " + arg(2) + ", " + arg(3) + ")";
+    if (code == "stripe_tile_store") {
+      line("ct.store(" + arg(0) + ", " + index + ", " + arg(4) + hint + ")");
+      return llvm::Error::success();
+    }
+    expr = "ct.load(" + arg(0) + ", " + index +
+           ", shape=(R,W), padding_mode=ct.PaddingMode.ZERO" + hint + ")";
+  } else if (code == "owner_store") {
     line("ct.scatter(" + arg(0) + "," + arg(1) + "," + arg(2) + ")");
     return llvm::Error::success();
   } else if (code == "gather_slab" || code == "scatter_slab") {
@@ -477,6 +495,9 @@ void rowRules(TerminalPrinter &printer) {
                   "map",
                   "owner_load",
                   "owner_store",
+                  "stripe_owner_load",
+                  "stripe_tile_load",
+                  "stripe_tile_store",
                   "gather_slab",
                   "scatter_slab",
                   "active",

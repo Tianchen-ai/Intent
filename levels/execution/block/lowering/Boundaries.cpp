@@ -15,7 +15,7 @@ using namespace mlir;
 using namespace compilerinfra;
 namespace CI_UNIT_NAMESPACE {
 #include "Strategies.inc"
-void normalize(OpPassManager &);
+void normalize(OpPassManager &, const TargetProfile &);
 void registerRealizer(Unit &);
 namespace {
 struct Form : PassWrapper<Form, OperationPass<ModuleOp>> {
@@ -130,9 +130,9 @@ void bind(Unit &unit) {
   for (StringRef phase : {"formed", "decided", "realized", "normalized"}) {
     unit.boundaries.push_back(
         {{phase.str(),
-          [phase](OpPassManager &pm, const TargetProfile &) {
+          [phase](OpPassManager &pm, const TargetProfile &profile) {
             if (phase == "normalized")
-              normalize(pm);
+              normalize(pm, profile);
             if (phase == "formed")
               pm.addPass(std::make_unique<Form>());
             return llvm::Error::success();

@@ -31,6 +31,10 @@ def Uniform : Inst<"uniform",(ins UI64:$key,RankedTensorOf<[UI64]>:$position),(o
 def Identity : Inst<"identity",(ins StrAttr:$algebra),(outs AnyType:$result)>;
 def Combine : Inst<"combine",(ins AnyType:$lhs,AnyType:$rhs,StrAttr:$algebra),(outs AnyType:$result)>;
 def Sweep : Inst<"tiles",(ins MemRefRankOf<[AnyType],[1,2,3,4]>:$domain,Variadic<AnyType>:$initial),(outs Variadic<AnyType>:$summary)> {let regions=(region AnyRegion:$body);}
+def StripeLoop : Inst<"stripe_loop",(ins Variadic<AnyTensor>:$initial,I64Attr:$count,I64Attr:$stride),(outs Variadic<AnyTensor>:$summary)> {let regions=(region AnyRegion:$body);}
+def StripeTileLoad : Inst<"stripe_tile_load",(ins AnyMemRef:$array,Index:$round,Index:$rowBlock,Index:$columnBlock,I64Attr:$stride,BoolAttr:$allow_tma),(outs AnyTensor:$values)>;
+def StripeTileStore : Inst<"stripe_tile_store",(ins AnyMemRef:$array,Index:$round,Index:$rowBlock,Index:$columnBlock,AnyTensor:$values,I64Attr:$stride,BoolAttr:$allow_tma),(outs)>;
+def StripeOwnerLoad : Inst<"stripe_owner_load",(ins AnyMemRef:$array,Index:$round,AnyTensor:$rows,I64Attr:$stride),(outs AnyTensor:$values)>;
 def Yield : Inst<"yield",(ins Variadic<AnyType>:$carry),(outs),[Terminator]>;
 foreach i=["broadcast_rows","exp","rsqrt","sqrt","cast"] in {def Tile_#i : Inst<i,(ins AnyType:$x),(outs AnyType:$result)>;}
 foreach i=["add","sub","mul","div"] in {def Tile_#i : Inst<i,(ins AnyType:$x,AnyType:$y),(outs AnyType:$result)>;}

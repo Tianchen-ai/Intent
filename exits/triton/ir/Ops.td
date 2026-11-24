@@ -59,6 +59,19 @@ def Itsrc_tiles : Inst<"tiles"> {
   let results = (outs Variadic<AnyType>:$results);
   let regions = (region AnyRegion:$body);
 }
+def Itsrc_stripe_loop : Inst<"stripe_loop"> {
+  let arguments = (ins Variadic<AnyTensor>:$initial, I64Attr:$count, I64Attr:$stride);
+  let results = (outs Variadic<AnyTensor>:$results);
+  let regions = (region AnyRegion:$body);
+}
+def Itsrc_stripe_load : Inst<"stripe_load"> {
+  let arguments = (ins AnyMemRef:$view, Index:$round, AnyTensor:$rows, AnyTensor:$columns, I1Tensor:$active, I64Attr:$stride);
+  let results = (outs AnyTensor:$result);
+}
+def Itsrc_stripe_store : Inst<"stripe_store"> {
+  let arguments = (ins AnyMemRef:$view, Index:$round, AnyTensor:$rows, AnyTensor:$columns, I1Tensor:$active, AnyTensor:$value, I64Attr:$stride);
+  let results = (outs);
+}
 def Itsrc_yield : Inst<"yield", [Terminator]> {
   let arguments = (ins Variadic<AnyType>:$values);
   let results = (outs);

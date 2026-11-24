@@ -359,6 +359,55 @@ struct Row {
     store(arg(1), arg(2), total, binary("lt", arg(2), meta("M"), i1));
     old.erase();
   }
+  void stripeLoad() {
+    Value view = arg(0), round = arg(1), r = arg(2), c = arg(3), mask = arg(4);
+    int64_t s = attr("stride");
+    Value rCoord = binary(
+        "add", map("i64", r, i64),
+        binary("mul", map("i64", round, i64), constant(s)));
+    if (cast<MemRefType>(view.getType()).getRank() == 2) {
+      replace(read(view, {expand(rCoord, 1), expand(c, 0)}, mask));
+    } else {
+      Value rMask = binary("lt", map("i64", r, i64), meta("M"), i1);
+      replace(expand(read(view, {rCoord}, rMask), 1));
+    }
+  }
+  void stripeStore() {
+    Value view = arg(0), round = arg(1), r = arg(2), c = arg(3), mask = arg(4),
+          val = arg(5);
+    int64_t s = attr("stride");
+    Value rCoord = binary(
+        "add", map("i64", r, i64),
+        binary("mul", map("i64", round, i64), constant(s)));
+    store(view, {expand(rCoord, 1), expand(c, 0)}, val, mask);
+    old.erase();
+  }
+  void stripeLoop() {
+    int64_t cnt = attr("count");
+    auto lo = b.create<arith::ConstantIndexOp>(l, 0),
+         hi = b.create<arith::ConstantIndexOp>(l, cnt),
+         step = b.create<arith::ConstantIndexOp>(l, 1);
+    auto forOp = b.create<scf::ForOp>(l, lo, hi, step, old.getOperands());
+    forOp->setAttr(
+        (old.getName().getDialectNamespace() + ".runtime_range").str(),
+        b.getUnitAttr());
+    Block &srcBody = old.getRegion(0).front();
+    Block *dstBody = forOp.getBody();
+    if (!dstBody->empty() && isa<scf::YieldOp>(dstBody->back()))
+      dstBody->back().erase();
+    SmallVector<Value> replArgs{forOp.getInductionVar()};
+    llvm::append_range(replArgs, forOp.getRegionIterArgs());
+    for (auto [from, to] : llvm::zip(srcBody.getArguments(), replArgs))
+      from.replaceAllUsesWith(to);
+    Operation *oldYield = &srcBody.back();
+    SmallVector<Value> yieldOps(oldYield->getOperands());
+    oldYield->erase();
+    dstBody->getOperations().splice(dstBody->end(), srcBody.getOperations());
+    b.setInsertionPointToEnd(dstBody);
+    b.create<scf::YieldOp>(l, yieldOps);
+    old.replaceAllUsesWith(forOp.getResults());
+    old.erase();
+  }
 };
 } // namespace
 void expandRowOperation(Operation &op, StringRef unit, bool nativeHistogram) {
@@ -366,6 +415,12 @@ void expandRowOperation(Operation &op, StringRef unit, bool nativeHistogram) {
   Row row(op, unit);
   if (kind == "atomic_bins")
     row.atomicBins();
+  else if (kind == "stripe_load")
+    row.stripeLoad();
+  else if (kind == "stripe_store")
+    row.stripeStore();
+  else if (kind == "stripe_loop")
+    row.stripeLoop();
   else if ((kind == "indexed_tile_read" || kind == "owner_load" ||
             kind == "owner_store" || kind == "unique_put_at" ||
             kind == "index_read_at" || kind == "atomic_add_at"))

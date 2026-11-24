@@ -1,5 +1,6 @@
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
+#include "intentdsl/levels/execution/block/ir/FoldStripes.h"
 #include "mlir/IR/Builders.h"
 #include "llvm/ADT/DenseSet.h"
 
@@ -44,9 +45,23 @@ void registerRowStrategy(Unit &unit, StringRef mode, bool tuple) {
         inputBytesPerLane+=llvm::divideCeil(cast<MemRefType>(slot.getType()).getElementTypeBitWidth(),8u);
       mustStream=inputBytesPerLane>caps->stagedInputBudget/width;
     }
+    uint64_t stripeFactor = tuple ? 1 : intentdsl::block::foldableStripeCount(op);
+    uint64_t effectiveReductions = reductions / stripeFactor;
     bool resident = width && !mustStream && mode!="stream-row";
     if(!resident && mode=="resident-row") return Attribute{};
-    if(!resident) width=limit;
+    if(!resident) {
+      width = 0;
+      for (const auto &r : caps->rows) {
+        uint64_t streamCopies = 2 * uint64_t(r.rows) - 1;
+        if (caps->maxExpandedReductionLanes &&
+            streamCopies * r.width * effectiveReductions >
+                caps->maxExpandedReductionLanes)
+          continue;
+        width = std::max(width, r.width);
+      }
+      if (!width)
+        width = limit;
+    }
     for(auto &r:caps->rows) if(r.width<width)previous=std::max(previous,r.width);
     int64_t lo=resident?(previous?previous+1:0):(mode=="stream-row"?0:limit+1);
     auto guard=b.getDenseI64ArrayAttr({lo,resident?int64_t(width):-1});
@@ -57,9 +72,9 @@ void registerRowStrategy(Unit &unit, StringRef mode, bool tuple) {
       if (resident && caps->stagedInputBudget &&
           inputBytesPerLane > caps->stagedInputBudget/r.width/r.rows)
         continue;
-      uint64_t copies = r.rows - 1 + (resident ? 0 : r.rows);
+      uint64_t copies = resident ? uint64_t(r.rows) : 2 * uint64_t(r.rows) - 1;
       if (caps->maxExpandedReductionLanes &&
-          copies * r.width * reductions > caps->maxExpandedReductionLanes)
+          copies * r.width * effectiveReductions > caps->maxExpandedReductionLanes)
         continue;
       rows.push_back(b.getDictionaryAttr(
           {b.getNamedAttr("id", b.getI32IntegerAttr(r.id)),

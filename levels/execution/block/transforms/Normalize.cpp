@@ -1,4 +1,6 @@
 #include "compilerinfra/Assembly.h"
+#include "intentdsl/levels/execution/block/ir/Contraction.h"
+#include "intentdsl/levels/execution/block/ir/FoldStripes.h"
 #include "intentdsl/levels/execution/block/ir/Owners.h"
 #include "mlir/Pass/Pass.h"
 
@@ -6,13 +8,22 @@ namespace CI_UNIT_NAMESPACE {
 using namespace mlir;
 struct Normalize : PassWrapper<Normalize, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(Normalize)
+  compilerinfra::TargetProfile profile;
+  explicit Normalize(const compilerinfra::TargetProfile &p) : profile(p) {}
   void runOnOperation() final {
-    for (auto fn : getOperation().getOps<func::FuncOp>())
+    for (auto fn : getOperation().getOps<func::FuncOp>()) {
       if (intentdsl::kir::orderedOwners(fn) &&
           failed(intentdsl::block::forwardOwners(fn))) {
         signalPassFailure();
         return;
       }
+      if (!intentdsl::kir::orderedOwners(fn) &&
+          !intentdsl::kir::matrixDomain(fn) &&
+          failed(intentdsl::block::foldStripes(fn, profile))) {
+        signalPassFailure();
+        return;
+      }
+    }
     getOperation().walk([](Operation *op) {
       if (op->getName().getDialectNamespace() != "block" ||
           op->getNumResults() != 1)
@@ -37,5 +48,7 @@ struct Normalize : PassWrapper<Normalize, OperationPass<ModuleOp>> {
     });
   }
 };
-void normalize(OpPassManager &pm) { pm.addPass(std::make_unique<Normalize>()); }
+void normalize(OpPassManager &pm, const compilerinfra::TargetProfile &profile) {
+  pm.addPass(std::make_unique<Normalize>(profile));
+}
 } // namespace CI_UNIT_NAMESPACE

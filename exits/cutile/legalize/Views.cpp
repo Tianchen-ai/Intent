@@ -102,6 +102,33 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
         return;
       OpBuilder b(op);
       auto code = op->getName().stripDialect();
+      if (code == "stripe_load" || code == "stripe_store") {
+        auto view = op->getOperand(0);
+        int rank = cast<MemRefType>(view.getType()).getRank();
+        if (code == "stripe_load" && rank == 1) {
+          OperationState so(op->getLoc(), "ct_src.stripe_owner_load");
+          so.addOperands({view, op->getOperand(1), op->getOperand(2)});
+          so.addAttribute("stride", op->getAttr("stride"));
+          so.addTypes(op->getResultTypes());
+          op->replaceAllUsesWith(b.create(so));
+        } else {
+          auto *r = op->getOperand(2).getDefiningOp(),
+               *c = op->getOperand(3).getDefiningOp();
+          OperationState st(op->getLoc(), code == "stripe_load"
+                                              ? "ct_src.stripe_tile_load"
+                                              : "ct_src.stripe_tile_store");
+          st.addOperands(
+              {view, op->getOperand(1), r->getOperand(0), c->getOperand(0)});
+          if (code == "stripe_store")
+            st.addOperands(op->getOperand(5));
+          st.addAttribute("stride", op->getAttr("stride"));
+          st.addAttribute("allow_tma", b.getBoolAttr(tma));
+          st.addTypes(op->getResultTypes());
+          op->replaceAllUsesWith(b.create(st));
+        }
+        op->erase();
+        return;
+      }
       bool access = code == "load" || code == "store";
       bool slab = access && op->getParentOfType<func::FuncOp>()->hasAttr("kir.owner_axis");
       OperationState s(op->getLoc(),
@@ -301,7 +328,7 @@ struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
       auto n=op->getName().stripDialect();
       if(n=="key_counts")op->setAttr("native_panel",Builder(op->getContext()).getI64IntegerAttr(64));
       if(n=="indexed_tile_read" || n=="fill_ranges_at" || n=="segment_fold" || n=="segment_size" || n=="scatter_fragment" ||
-         n=="sum_columns" || n=="key_counts" || n=="publish_offsets")
+         n=="sum_columns" || n=="key_counts" || n=="publish_offsets" || n=="stripe_loop")
         intentdsl::block::expandRowOperation(*op,"exits/cutile",false);
     });
     fn->setAttr("ct_src.entry", b.getStringAttr("kernel"));
@@ -640,6 +667,54 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
     }
     if(ok && (n=="gather_slab" || n=="scatter_slab"))
       ok=op->hasAttr("ct_src.rectangular")==rectangularSlab(op,fn);
+    if (ok && n == "stripe_loop")
+      ok = !callable;
+    if (ok && (n == "stripe_tile_load" || n == "stripe_tile_store" ||
+               n == "stripe_owner_load")) {
+      bool store = n == "stripe_tile_store";
+      bool ownerLd = n == "stripe_owner_load";
+      auto arg = dyn_cast<BlockArgument>(op->getOperand(0));
+      auto round = dyn_cast<BlockArgument>(op->getOperand(1));
+      auto *parent = op->getParentOp();
+      auto st = op->getAttrOfType<IntegerAttr>("stride");
+      bool validRound =
+          round && parent && round.getOwner() == &parent->getRegion(0).front() &&
+          round.getArgNumber() == 0 &&
+          (callable ? isa<scf::ForOp>(parent)
+                    : parent->getName().getStringRef() == "ct_src.stripe_loop");
+      bool validDir =
+          arg && arg.getOwner() == &fn.front() &&
+          ((*slots)[arg.getArgNumber()].getAsObject()->getString("direction") ==
+               "InOut" ||
+           (*slots)[arg.getArgNumber()].getAsObject()->getString("direction") ==
+               (store ? "Out" : "In"));
+      if (!validRound || !validDir || !st || st.getInt() <= 0) {
+        op->emitError("invalid stripe access binding");
+        return WalkResult::interrupt();
+      }
+      int rank = cast<MemRefType>(arg.getType()).getRank();
+      if (ownerLd) {
+        auto *rowsOp = op->getOperand(2).getDefiningOp();
+        ok = rank == 1 && rowsOp &&
+             rowsOp->getName().getStringRef() == "ct_src.rows";
+      } else {
+        auto *pid = op->getOperand(2).getDefiningOp(),
+             *col = op->getOperand(3).getDefiningOp();
+        ok = rank == 2 &&
+             op->getAttrOfType<BoolAttr>("allow_tma").getValue() ==
+                 indices->permitTma &&
+             pid && pid->getName().getStringRef() == "ct_src.pid" && col &&
+             col->getName().getStringRef() == "ct_src.zero" &&
+             llvm::all_of(fn->getAttrOfType<ArrayAttr>("block.configs"),
+                          [&](Attribute row) {
+                            return st.getInt() %
+                                       cast<DictionaryAttr>(row)
+                                           .getAs<IntegerAttr>("rows")
+                                           .getInt() ==
+                                   0;
+                          });
+      }
+    }
     if (ok && (n == "tile_store" || n == "tile_load")) {
       auto arg = dyn_cast<BlockArgument>(op->getOperand(0));
       if (!arg || arg.getOwner() != &fn.front() ||
