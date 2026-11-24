@@ -12,6 +12,33 @@ using namespace mlir;
 namespace {
 std::string irId(PrintContext &c, Value v) { return "%" + c.name(v); }
 
+void emitTupleUnpack(PrintContext &c, Operation &op, StringRef tup,
+                     ArrayAttr tys) {
+  for (unsigned i = 0; i < op.getNumResults(); ++i) {
+    std::string t = cast<StringAttr>(tys[i]).str();
+    std::string zId = irId(c, op.getResult(i)) + "_z";
+    if (t == "index") {
+      c.line(zId + "=arith.constant 0:index");
+      c.line(irId(c, op.getResult(i)) + "=arith.addi " + tup.str() + "#" +
+             std::to_string(i) + "," + zId + ":index");
+      continue;
+    }
+    std::string scTy = t.find("f32") != std::string::npos    ? "f32"
+                       : t.find("f16") != std::string::npos  ? "f16"
+                       : t.find("bf16") != std::string::npos ? "bf16"
+                       : t.find("si64") != std::string::npos ? "si64"
+                       : t.find("ui64") != std::string::npos ? "ui64"
+                                                             : "si32";
+    std::string zLit =
+        (scTy == "f32" || scTy == "f16" || scTy == "bf16") ? "0.0" : "0";
+    c.line(zId + "=\"weft_kernel.constant\"() <{value=" + zLit + ":" + scTy +
+           "}>:()->" + scTy);
+    c.line(irId(c, op.getResult(i)) + "=\"weft_kernel.binary\"(" + tup.str() +
+           "#" + std::to_string(i) + "," + zId + ") <{kind=\"add\"}>:(" + t +
+           "," + scTy + ")->" + t);
+  }
+}
+
 std::string formatRecordDecl(bool weight) {
   struct Field {
     std::string name, type, layout;
@@ -59,7 +86,7 @@ std::string formatRecordDecl(bool weight) {
 }
 } // namespace
 
-TerminalPrinter weftMatrixPrinter() {
+TerminalPrinter weftTerminalPrinter() {
   TerminalPrinter p;
   auto noop = [](Operation &, PrintPoint, PrintContext &) {
     return llvm::Error::success();
@@ -69,8 +96,7 @@ TerminalPrinter weftMatrixPrinter() {
   p.operations["func.return"] = noop;
   p.operations["weft_host.end"] = noop;
 
-  p.operations["weft_host.matrix_program"] = [](Operation &, PrintPoint at,
-                                                PrintContext &c) {
+  auto programRule = [](Operation &, PrintPoint at, PrintContext &c) {
     if (at == PrintPoint::BeginRegion) {
       c.file = c.region == 0 ? "task.weftir" : "host.c";
       c.indent = 0;
@@ -82,6 +108,9 @@ TerminalPrinter weftMatrixPrinter() {
     }
     return llvm::Error::success();
   };
+  p.operations["weft_host.matrix_program"] = programRule;
+  p.operations["weft_host.row_program"] = programRule;
+  p.operations["weft_host.owner_program"] = programRule;
 
   // ---------------- Region 0 ("task.weftir") Ops ----------------
   p.operations["weft_host.encoding_decl"] = [](Operation &op, PrintPoint at,
@@ -97,14 +126,33 @@ TerminalPrinter weftMatrixPrinter() {
       auto &bb = op.getRegion(0).front();
       auto vTypes = op.getAttrOfType<ArrayAttr>("view_types");
       auto writes = op.getAttrOfType<ArrayAttr>("arg_writes");
+      auto accessModes = op.getAttrOfType<ArrayAttr>("arg_access");
+      auto aliasModes = op.getAttrOfType<DenseI64ArrayAttr>("arg_aliases");
+      auto shapeSymsAttr = op.getAttrOfType<ArrayAttr>("shape_symbols");
       auto strided = op.getAttrOfType<DenseI64ArrayAttr>("strided_slots");
-      SmallVector<std::string> names, effects, aliases, params, stridedNames;
+      SmallVector<std::string> names, effects, aliases, params, stridedNames,
+          symLiterals, symNames;
+      if (shapeSymsAttr) {
+        for (Attribute a : shapeSymsAttr) {
+          std::string s = cast<StringAttr>(a).str();
+          symNames.push_back(s);
+          symLiterals.push_back("\"" + s + "\"");
+        }
+      } else {
+        symNames = {"R", "C"};
+        symLiterals = {"\"R\"", "\"C\""};
+      }
       for (size_t i = 0; i < vTypes.size(); ++i) {
         std::string aName = "a" + std::to_string(i);
         names.push_back("\"" + aName + "\"");
-        effects.push_back(cast<BoolAttr>(writes[i]).getValue() ? "\"write\""
-                                                               : "\"read\"");
-        aliases.push_back("0");
+        if (accessModes) {
+          effects.push_back("\"" + cast<StringAttr>(accessModes[i]).str() +
+                            "\"");
+        } else {
+          effects.push_back(cast<BoolAttr>(writes[i]).getValue() ? "\"write\""
+                                                                 : "\"read\"");
+        }
+        aliases.push_back(aliasModes ? std::to_string(aliasModes[i]) : "0");
         params.push_back(irId(c, bb.getArgument(i)) + ":" +
                          cast<StringAttr>(vTypes[i]).str());
       }
@@ -116,18 +164,18 @@ TerminalPrinter weftMatrixPrinter() {
              op.getAttrOfType<StringAttr>("source").str() + "\",arg_names=[" +
              llvm::join(names, ",") + "],arg_access=[" +
              llvm::join(effects, ",") + "],arg_alias_sets=array<i64:" +
-             llvm::join(aliases, ",") +
-             ">,shape_symbols=[\"R\",\"C\"],strided_args=[" +
+             llvm::join(aliases, ",") + ">,shape_symbols=[" +
+             llvm::join(symLiterals, ",") + "],strided_args=[" +
              llvm::join(stridedNames, ",") + "]}> ({");
       c.line("^bb0(" + llvm::join(params, ",") + "):");
       size_t nViews = vTypes.size();
-      c.line(irId(c, bb.getArgument(nViews)) +
-             "=\"weft_kernel.symbol\"() "
-             "<{choices=array<i64>,kind=\"shape\",name=\"R\"}>:()->index");
-      c.line(irId(c, bb.getArgument(nViews + 1)) +
-             "=\"weft_kernel.symbol\"() "
-             "<{choices=array<i64>,kind=\"shape\",name=\"C\"}>:()->index");
-      c.line(irId(c, bb.getArgument(nViews + 2)) +
+      for (size_t k = 0; k < symNames.size(); ++k) {
+        c.line(irId(c, bb.getArgument(nViews + k)) +
+               "=\"weft_kernel.symbol\"() "
+               "<{choices=array<i64>,kind=\"shape\",name=\"" +
+               symNames[k] + "\"}>:()->index");
+      }
+      c.line(irId(c, bb.getArgument(nViews + symNames.size())) +
              "=\"weft_kernel.root_domain\"():()->!weft_kernel.domain<\"root\","
              "0,-1,0,\"root\",\"exact\">");
     } else if (at == PrintPoint::BeginBlock) {
@@ -192,6 +240,162 @@ TerminalPrinter weftMatrixPrinter() {
     return llvm::Error::success();
   };
 
+  p.operations["weft_host.task_subview"] = [](Operation &op, PrintPoint at,
+                                              PrintContext &c) {
+    if (at != PrintPoint::Enter)
+      return llvm::Error::success();
+    int64_t staticExt = op.getAttrOfType<IntegerAttr>("static_extent").getInt();
+    auto slTy = op.getAttrOfType<StringAttr>("slice_type").str();
+    auto vlTy = op.getAttrOfType<StringAttr>("val_type").str();
+    bool admit = op.getAttrOfType<BoolAttr>("admit").getValue();
+    std::string outSlTy = slTy;
+    auto bracket = outSlTy.rfind(">,[");
+    if (bracket != std::string::npos) {
+      auto close = outSlTy.find(']', bracket + 2);
+      outSlTy.replace(bracket + 2, close - (bracket + 2) + 1,
+                      "[" + std::to_string(staticExt) + "]");
+    }
+    std::string resId = irId(c, op.getResult(0));
+    std::string subId = admit ? (resId + "_s") : resId;
+    if (staticExt > 0) {
+      c.line(subId + "=\"weft_kernel.subview\"(" + irId(c, op.getOperand(0)) +
+             "," + irId(c, op.getOperand(1)) +
+             ") <{extents=array<i64:" + std::to_string(staticExt) +
+             ">,offsets=array<i64:-1>}>:(" + slTy + ",index)->" + outSlTy);
+    } else {
+      c.line(subId + "=\"weft_kernel.subview\"(" + irId(c, op.getOperand(0)) +
+             "," + irId(c, op.getOperand(1)) + "," + irId(c, op.getOperand(2)) +
+             ") <{extents=array<i64:-1>,offsets=array<i64:-1>}>:(" + slTy +
+             ",index,index)->" + outSlTy);
+    }
+    if (admit)
+      c.line(resId + "=\"weft_kernel.admit\"(" + subId + "):(" + outSlTy +
+             ")->" + vlTy);
+    return llvm::Error::success();
+  };
+
+  p.operations["weft_host.task_unary"] = [](Operation &op, PrintPoint at,
+                                            PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      auto vTy = op.getAttrOfType<StringAttr>("val_type").str();
+      c.line(irId(c, op.getResult(0)) + "=\"weft_kernel.unary\"(" +
+             irId(c, op.getOperand(0)) + ") <{kind=\"" +
+             op.getAttrOfType<StringAttr>("kind").str() + "\"}>:(" + vTy +
+             ")->" + vTy);
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["weft_host.task_reduce"] = [](Operation &op, PrintPoint at,
+                                             PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      c.line(irId(c, op.getResult(0)) + "=\"weft_kernel.reduce\"(" +
+             irId(c, op.getOperand(0)) + ") <{axis=" +
+             std::to_string(op.getAttrOfType<IntegerAttr>("axis").getInt()) +
+             ":i64,kind=\"" + op.getAttrOfType<StringAttr>("kind").str() +
+             "\"}>:(" + op.getAttrOfType<StringAttr>("in_type").str() + ")->" +
+             op.getAttrOfType<StringAttr>("val_type").str());
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["weft_host.task_scan"] = [](Operation &op, PrintPoint at,
+                                           PrintContext &c) {
+    auto &bb = op.getRegion(0).front();
+    auto eTy = op.getAttrOfType<StringAttr>("elem_type").str();
+    auto vTy = op.getAttrOfType<StringAttr>("val_type").str();
+    if (at == PrintPoint::Enter) {
+      int64_t axis = op.getAttrOfType<IntegerAttr>("axis").getInt();
+      bool rev = op.getAttrOfType<BoolAttr>("reverse").getValue();
+      c.line(irId(c, op.getResult(0)) + "=\"weft_kernel.scan\"(" +
+             irId(c, op.getOperand(0)) + ") <{axis=" + std::to_string(axis) +
+             ":i64,reverse=" + (rev ? "true" : "false") + "}> ({");
+      c.line("^bb0(" + irId(c, bb.getArgument(0)) + ":" + eTy + "," +
+             irId(c, bb.getArgument(1)) + ":" + eTy + "):");
+    } else if (at == PrintPoint::BeginBlock) {
+      c.indent++;
+    } else if (at == PrintPoint::EndBlock) {
+      c.indent--;
+      c.line("}):(" + vTy + ")->" + vTy);
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["weft_host.task_scan_yield"] = [](Operation &op, PrintPoint at,
+                                                 PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      c.line("\"weft_kernel.scan_yield\"(" + irId(c, op.getOperand(0)) + "):(" +
+             op.getAttrOfType<StringAttr>("val_type").str() + ")->()");
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["weft_host.task_iota"] = [](Operation &op, PrintPoint at,
+                                           PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      c.line(irId(c, op.getResult(0)) + "=\"weft_kernel.iota\"() <{end=" +
+             std::to_string(op.getAttrOfType<IntegerAttr>("end").getInt()) +
+             ":i64,start=" +
+             std::to_string(op.getAttrOfType<IntegerAttr>("start").getInt()) +
+             ":i64}>:()->" + op.getAttrOfType<StringAttr>("val_type").str());
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["weft_host.task_local_alloc"] = [](Operation &op, PrintPoint at,
+                                                  PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      c.line(irId(c, op.getResult(0)) +
+             "=\"weft_kernel.local_alloc\"() <{alignment=" +
+             std::to_string(op.getAttrOfType<IntegerAttr>("alignment").getInt()) +
+             ":i64,elements=" +
+             std::to_string(op.getAttrOfType<IntegerAttr>("elements").getInt()) +
+             ":i64}>:()->" + op.getAttrOfType<StringAttr>("ptr_type").str());
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["weft_host.task_ptr_load"] = [](Operation &op, PrintPoint at,
+                                               PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      auto pTy = op.getAttrOfType<StringAttr>("ptr_type").str();
+      auto vTy = op.getAttrOfType<StringAttr>("val_type").str();
+      c.line(irId(c, op.getResult(0)) + "=\"weft_kernel.pointer_load\"(" +
+             irId(c, op.getOperand(0)) + "," + irId(c, op.getOperand(1)) + "," +
+             irId(c, op.getOperand(2)) + "," + irId(c, op.getOperand(3)) +
+             "):(" + pTy + ",si64,i1," + vTy + ")->" + vTy);
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["weft_host.task_ptr_store"] = [](Operation &op, PrintPoint at,
+                                                PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      auto pTy = op.getAttrOfType<StringAttr>("ptr_type").str();
+      auto vTy = op.getAttrOfType<StringAttr>("val_type").str();
+      c.line("\"weft_kernel.pointer_store\"(" + irId(c, op.getOperand(0)) +
+             "," + irId(c, op.getOperand(1)) + "," + irId(c, op.getOperand(2)) +
+             "," + irId(c, op.getOperand(3)) + "):(" + pTy + ",si64,i1," + vTy +
+             ")->()");
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["weft_host.task_atomic_rmw"] = [](Operation &op, PrintPoint at,
+                                                 PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      auto vTy = op.getAttrOfType<StringAttr>("val_type").str();
+      auto sTy = op.getAttrOfType<StringAttr>("slice_type").str();
+      c.line(irId(c, op.getResult(0)) + "=\"weft_kernel.atomic_rmw\"(" +
+             irId(c, op.getOperand(0)) + "," + irId(c, op.getOperand(1)) +
+             ") <{kind=\"" + op.getAttrOfType<StringAttr>("kind").str() +
+             "\",ordering=\"" +
+             op.getAttrOfType<StringAttr>("ordering").str() + "\"}>:(" + vTy +
+             "," + sTy + ")->" + vTy);
+    }
+    return llvm::Error::success();
+  };
+
   p.operations["weft_host.task_binary"] = [](Operation &op, PrintPoint at,
                                              PrintContext &c) {
     if (at == PrintPoint::Enter) {
@@ -223,11 +427,15 @@ TerminalPrinter weftMatrixPrinter() {
                                              PrintContext &c) {
     if (at == PrintPoint::Enter) {
       auto vTy = op.getAttrOfType<StringAttr>("val_type").str();
+      auto tAttr = op.getAttrOfType<StringAttr>("true_type");
+      auto fAttr = op.getAttrOfType<StringAttr>("false_type");
+      std::string tTy = tAttr ? tAttr.str() : vTy;
+      std::string fTy = fAttr ? fAttr.str() : vTy;
       c.line(irId(c, op.getResult(0)) + "=\"weft_kernel.select\"(" +
              irId(c, op.getOperand(0)) + "," + irId(c, op.getOperand(1)) + "," +
              irId(c, op.getOperand(2)) + "):(" +
-             op.getAttrOfType<StringAttr>("cond_type").str() + "," + vTy + "," +
-             vTy + ")->" + vTy);
+             op.getAttrOfType<StringAttr>("cond_type").str() + "," + tTy + "," +
+             fTy + ")->" + vTy);
     }
     return llvm::Error::success();
   };
@@ -341,18 +549,7 @@ TerminalPrinter weftMatrixPrinter() {
       c.line("}");
       if (op.getNumResults() > 1) {
         std::string tup = irId(c, op.getResult(0)) + "_t";
-        for (unsigned i = 0; i < op.getNumResults(); ++i) {
-          std::string t = cast<StringAttr>(iterTys[i]).str();
-          std::string zId = irId(c, op.getResult(i)) + "_z";
-          std::string scTy =
-              t.find("f32") != std::string::npos ? "f32" : "si32";
-          std::string zLit = scTy == "f32" ? "0.0" : "0";
-          c.line(zId + "=\"weft_kernel.constant\"() <{value=" + zLit + ":" +
-                 scTy + "}>:()->" + scTy);
-          c.line(irId(c, op.getResult(i)) + "=\"weft_kernel.binary\"(" + tup +
-                 "#" + std::to_string(i) + "," + zId + ") <{kind=\"add\"}>:(" +
-                 t + "," + scTy + ")->" + t);
-        }
+        emitTupleUnpack(c, op, tup, iterTys);
       }
     }
     return llvm::Error::success();
@@ -364,17 +561,39 @@ TerminalPrinter weftMatrixPrinter() {
     SmallVector<std::string> tys;
     for (Attribute a : resTys)
       tys.push_back(cast<StringAttr>(a).str());
+    bool hasElse = !op.getRegion(1).empty();
     if (at == PrintPoint::Enter) {
-      c.line(irId(c, op.getResult(0)) + "=scf.if " + irId(c, op.getOperand(0)) +
-             " -> (" + llvm::join(tys, ",") + ") {");
+      if (op.getNumResults() == 0) {
+        c.line("scf.if " + irId(c, op.getOperand(0)) + " {");
+      } else if (op.getNumResults() == 1) {
+        c.line(irId(c, op.getResult(0)) + "=scf.if " + irId(c, op.getOperand(0)) +
+               " -> (" + llvm::join(tys, ",") + ") {");
+      } else {
+        std::string tup = irId(c, op.getResult(0)) + "_t";
+        c.line(tup + ":" + std::to_string(op.getNumResults()) + "=scf.if " +
+               irId(c, op.getOperand(0)) + " -> (" + llvm::join(tys, ",") +
+               ") {");
+      }
     } else if (at == PrintPoint::BeginRegion) {
-      if (c.region == 1)
+      if (c.region == 0) {
+        c.indent++;
+      } else if (hasElse) {
         c.line("} else {");
-      c.indent++;
+        c.indent++;
+      }
     } else if (at == PrintPoint::EndRegion) {
-      c.indent--;
-      if (c.region == 1)
+      if (c.region == 0) {
+        c.indent--;
+        if (!hasElse)
+          c.line("}");
+      } else if (hasElse) {
+        c.indent--;
         c.line("}");
+        if (op.getNumResults() > 1) {
+          std::string tup = irId(c, op.getResult(0)) + "_t";
+          emitTupleUnpack(c, op, tup, resTys);
+        }
+      }
     }
     return llvm::Error::success();
   };
@@ -1226,6 +1445,251 @@ TerminalPrinter weftMatrixPrinter() {
     return llvm::Error::success();
   };
 
+  p.operations["weft_host.host_row_fn"] = [](Operation &op, PrintPoint at,
+                                             PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      c.line("#include <stddef.h>");
+      c.line("#include <stdint.h>");
+      c.line("#include \"task_bridge.h\"");
+      c.line("int32_t intent_entry(" +
+             op.getAttrOfType<StringAttr>("params").str() + ") {");
+      c.indent++;
+      c.line("if (rows < 0 || cols < 0 || grain <= 0 || panel < 0 || workers "
+             "<= 0) return 1;");
+      c.line("if (!rows) return 0;");
+      auto walk = op.getAttrOfType<StringAttr>("walk").getValue();
+      if (walk == "destination") {
+        c.line("{ int64_t t = rows; rows = cols; cols = t; t = a0s0; a0s0 = "
+               "a0s1; a0s1 = t; t = a1s0; a1s0 = a1s1; a1s1 = t; }");
+      }
+      if (op.getAttrOfType<BoolAttr>("member_tasks").getValue())
+        c.line("rows = cols;");
+      if (op.getAttrOfType<BoolAttr>("single_dispatcher").getValue())
+        c.line("workers = 1;");
+      c.indent--;
+    } else if (at == PrintPoint::BeginBlock) {
+      c.indent++;
+    } else if (at == PrintPoint::EndBlock) {
+      c.line("return 0;");
+      c.indent--;
+      c.line("}");
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["weft_host.host_parallel_transpose_tiles"] =
+      [](Operation &op, PrintPoint at, PrintContext &c) {
+        if (at == PrintPoint::Enter) {
+          auto &bb = op.getRegion(0).front();
+          std::string st =
+              std::to_string(op.getAttrOfType<IntegerAttr>("tile").getInt());
+          std::string rN = c.name(bb.getArgument(0));
+          std::string cN = c.name(bb.getArgument(1));
+          std::string nrN = c.name(bb.getArgument(2));
+          std::string ncN = c.name(bb.getArgument(3));
+          c.line("const int64_t nt = (cols - 1) / " + st +
+                 " + 1, mt = (rows - 1) / " + st + " + 1;");
+          c.line("#pragma omp parallel for schedule(static) "
+                 "num_threads(workers) if(workers > 1)");
+          c.line("for (int64_t g = 0; g < mt * nt; ++g) {");
+          c.indent++;
+          c.line("const int64_t " + rN + " = (g / nt) * " + st + ", " + cN +
+                 " = (g % nt) * " + st + ";");
+          c.line("const int64_t " + nrN + " = rows - " + rN + " < " + st +
+                 " ? rows - " + rN + " : " + st + ", " + ncN + " = cols - " +
+                 cN + " < " + st + " ? cols - " + cN + " : " + st + ";");
+          c.indent--;
+        } else if (at == PrintPoint::BeginBlock) {
+          c.indent++;
+        } else if (at == PrintPoint::EndBlock) {
+          c.indent--;
+          c.line("}");
+        }
+        return llvm::Error::success();
+      };
+
+  p.operations["weft_host.host_parallel_key_ranges"] =
+      [](Operation &op, PrintPoint at, PrintContext &c) {
+        if (at == PrintPoint::Enter) {
+          auto &bb = op.getRegion(0).front();
+          int64_t keys = op.getAttrOfType<IntegerAttr>("key_extent").getInt();
+          c.line("const int64_t keys = " + std::to_string(keys) +
+                 ", lines = (keys + 15) / 16, n_thr = workers < lines ? "
+                 "workers : lines;");
+          c.line("#pragma omp parallel for num_threads(n_thr) schedule(static) "
+                 "if(n_thr > 1)");
+          c.line("for (int64_t b = 0; b < n_thr; ++b) {");
+          c.indent++;
+          c.line("const int64_t " + c.name(bb.getArgument(0)) + " = 0, " +
+                 c.name(bb.getArgument(1)) + " = rows;");
+          c.line("const int64_t " + c.name(bb.getArgument(2)) +
+                 " = 16 * (lines * b / n_thr), " + c.name(bb.getArgument(3)) +
+                 " = 16 * (lines * (b + 1) / n_thr);");
+          c.indent--;
+        } else if (at == PrintPoint::BeginBlock) {
+          c.indent++;
+        } else if (at == PrintPoint::EndBlock) {
+          c.indent--;
+          c.line("}");
+        }
+        return llvm::Error::success();
+      };
+
+  p.operations["weft_host.host_parallel_row_intervals"] =
+      [](Operation &op, PrintPoint at, PrintContext &c) {
+        if (at == PrintPoint::Enter) {
+          auto &bb = op.getRegion(0).front();
+          std::string chunk =
+              op.getAttrOfType<StringAttr>("chunk_expr").str();
+          std::string stN = c.name(bb.getArgument(0));
+          std::string ctN = c.name(bb.getArgument(1));
+          c.line("const int64_t groups = 1 + (rows - 1) / grain;");
+          c.line("const int64_t bins = groups < workers ? groups : workers;");
+          c.line("#pragma omp parallel for num_threads(bins) schedule(static) "
+                 "if(workers > 1)");
+          c.line("for (int64_t b = 0; b < bins; ++b) {");
+          c.indent++;
+          c.line("const int64_t group = (groups / bins * b + (groups % bins * "
+                 "b) / bins) * grain;");
+          c.line("const int64_t end = b + 1 == bins ? rows : (groups / bins * "
+                 "(b + 1) + (groups % bins * (b + 1)) / bins) * grain;");
+          c.line("for (int64_t cur = group; cur < end;) {");
+          c.indent++;
+          c.line("const int64_t rem = " + chunk + " - cur % " + chunk + ";");
+          c.line("const int64_t " + stN + " = cur, " + ctN +
+                 " = end - cur < rem ? end - cur : rem;");
+          c.line("cur += " + ctN + ";");
+          c.indent -= 2;
+        } else if (at == PrintPoint::BeginBlock) {
+          c.indent += 2;
+        } else if (at == PrintPoint::EndBlock) {
+          c.indent--;
+          c.line("}");
+          c.indent--;
+          c.line("}");
+        }
+        return llvm::Error::success();
+      };
+
+  p.operations["weft_host.host_row_offset"] = [](Operation &op, PrintPoint at,
+                                                 PrintContext &c) {
+    if (at != PrintPoint::Enter)
+      return llvm::Error::success();
+    auto mode = op.getAttrOfType<StringAttr>("mode").getValue();
+    auto dims = op.getAttrOfType<ArrayAttr>("dim_vars");
+    auto strides = op.getAttrOfType<ArrayAttr>("stride_vars");
+    std::string outN = c.name(op.getResult(0));
+    if (mode == "linear") {
+      c.line("const int64_t " + outN + " = (" + c.name(op.getOperand(0)) +
+             ") * " + cast<StringAttr>(strides[0]).str() + ";");
+    } else if (mode == "tile2d") {
+      c.line("const int64_t " + outN + " = (" + c.name(op.getOperand(0)) +
+             ") * " + cast<StringAttr>(strides[0]).str() + " + (" +
+             c.name(op.getOperand(1)) + ") * " +
+             cast<StringAttr>(strides[1]).str() + ";");
+    } else {
+      std::string row = c.name(op.getOperand(0));
+      SmallVector<std::string> terms{"0LL"};
+      for (int j = int(dims.size()) - 1; j >= 0; --j) {
+        std::string dm = cast<StringAttr>(dims[j]).str();
+        std::string st = cast<StringAttr>(strides[j]).str();
+        terms.push_back("((" + row + ") % " + dm + ") * " + st);
+        row = "(" + row + " / " + dm + ")";
+      }
+      c.line("const int64_t " + outN + " = " + llvm::join(terms, " + ") + ";");
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["weft_host.host_call_row_task"] =
+      [](Operation &op, PrintPoint at, PrintContext &c) {
+        if (at != PrintPoint::Enter)
+          return llvm::Error::success();
+        SmallVector<std::string> args;
+        for (Attribute a : op.getAttrOfType<ArrayAttr>("slot_args"))
+          args.push_back(cast<StringAttr>(a).str());
+        for (Attribute a : op.getAttrOfType<ArrayAttr>("shape_exprs")) {
+          std::string expr = cast<StringAttr>(a).str();
+          if (!expr.empty() && expr[0] == '$') {
+            unsigned idx = std::stoul(expr.substr(1));
+            args.push_back("(size_t)(" + c.name(op.getOperand(idx)) + ")");
+          } else {
+            args.push_back("(size_t)(" + expr + ")");
+          }
+        }
+        for (Attribute a : op.getAttrOfType<ArrayAttr>("stride_exprs"))
+          args.push_back("(size_t)(" + cast<StringAttr>(a).str() + ")");
+        c.line(op.getAttrOfType<StringAttr>("sym_name").str() + "_instance(" +
+               llvm::join(args, ", ") + ");");
+        return llvm::Error::success();
+      };
+
+  p.operations["weft_host.host_owner_fn"] = [](Operation &op, PrintPoint at,
+                                               PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      c.line("#include <stddef.h>");
+      c.line("#include <stdint.h>");
+      c.line("#include \"task_bridge.h\"");
+      c.line("int32_t intent_entry(" +
+             op.getAttrOfType<StringAttr>("params").str() + ") {");
+      c.indent++;
+      c.line("const int64_t count = " +
+             std::to_string(op.getAttrOfType<IntegerAttr>("owners").getInt()) +
+             "LL, tile = " +
+             std::to_string(op.getAttrOfType<IntegerAttr>("grain").getInt()) +
+             "LL;");
+      c.line("(void)rows; (void)columns; (void)grain; (void)panel;");
+      c.indent--;
+    } else if (at == PrintPoint::BeginBlock) {
+      c.indent++;
+    } else if (at == PrintPoint::EndBlock) {
+      c.line("return 0;");
+      c.indent--;
+      c.line("}");
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["weft_host.host_parallel_owners"] =
+      [](Operation &op, PrintPoint at, PrintContext &c) {
+        if (at == PrintPoint::Enter) {
+          auto &bb = op.getRegion(0).front();
+          std::string loN = c.name(bb.getArgument(0));
+          std::string hiN = c.name(bb.getArgument(1));
+          c.line("#pragma omp parallel for num_threads(workers) "
+                 "schedule(static) if(workers > 1 && count > tile)");
+          c.line("for (int64_t lo_i = 0; lo_i < count; lo_i += tile) {");
+          c.indent++;
+          c.line("const int64_t " + loN + " = lo_i, " + hiN +
+                 " = count - lo_i < tile ? count : lo_i + tile;");
+          c.indent--;
+        } else if (at == PrintPoint::BeginBlock) {
+          c.indent++;
+        } else if (at == PrintPoint::EndBlock) {
+          c.indent--;
+          c.line("}");
+        }
+        return llvm::Error::success();
+      };
+
+  p.operations["weft_host.host_call_owner_task"] =
+      [](Operation &op, PrintPoint at, PrintContext &c) {
+        if (at != PrintPoint::Enter)
+          return llvm::Error::success();
+        SmallVector<std::string> args;
+        for (Attribute a : op.getAttrOfType<ArrayAttr>("slot_args"))
+          args.push_back(cast<StringAttr>(a).str());
+        args.push_back("(size_t)(" + c.name(op.getOperand(0)) + ")");
+        args.push_back("(size_t)(" + c.name(op.getOperand(1)) + ")");
+        if (op.getAttrOfType<BoolAttr>("empty_extent").getValue())
+          args.push_back("(size_t)0ULL");
+        for (Attribute a : op.getAttrOfType<ArrayAttr>("stride_exprs"))
+          args.push_back("(size_t)(" + cast<StringAttr>(a).str() + ")");
+        c.line(op.getAttrOfType<StringAttr>("sym_name").str() + "_instance(" +
+               llvm::join(args, ", ") + ");");
+        return llvm::Error::success();
+      };
+
   p.package = [](DictionaryAttr attrs,
                  const std::map<std::string, std::string> &files,
                  llvm::raw_pwrite_stream &out) -> llvm::Error {
@@ -1244,4 +1708,6 @@ TerminalPrinter weftMatrixPrinter() {
 
   return p;
 }
+
+TerminalPrinter weftMatrixPrinter() { return weftTerminalPrinter(); }
 } // namespace CI_UNIT_NAMESPACE

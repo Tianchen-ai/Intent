@@ -24,5 +24,6 @@ mlir::LogicalResult verifyTask(mlir::ModuleOp,
                                bool logicalBody = true);
 llvm::Error realizeLocalValues(mlir::Operation *, mlir::Attribute,
                                const compilerinfra::TargetProfile &,
-                               mlir::RewriterBase &);
+                               mlir::RewriterBase &,
+                               llvm::StringRef realization = "private-values");
 } // namespace intentdsl::cpu

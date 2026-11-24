@@ -125,9 +125,10 @@ LogicalResult verifyOwnerGrain(func::FuncOp fn, Operation &space,
   return verifyOwnerLayouts(fn, space, p);
 }
 
-llvm::Error materializeOwnerBuffers(func::FuncOp fn, RewriterBase &rw) {
+llvm::Error materializeOwnerBuffers(func::FuncOp fn, RewriterBase &rw,
+                                    StringRef realization) {
   auto &task = fn.front().front();
-  task.setAttr("cpu.realization", rw.getStringAttr("private-values"));
+  task.setAttr("cpu.realization", rw.getStringAttr(realization));
   task.removeAttr("cpu.storage");
   auto &space = task.getRegion(0).front().front();
   auto &body = space.getRegion(0).front();
@@ -268,7 +269,8 @@ llvm::Error materializeOwnerBuffers(func::FuncOp fn, RewriterBase &rw) {
   return llvm::Error::success();
 }
 
-LogicalResult verifyOwnerBuffers(func::FuncOp fn, const TargetProfile &p) {
+LogicalResult verifyOwnerBuffers(func::FuncOp fn, const TargetProfile &p,
+                                 StringRef realization) {
   auto &task = fn.front().front();
   Builder b(fn.getContext());
   if (task.getOperands() != fn.getArguments() ||
@@ -280,7 +282,7 @@ LogicalResult verifyOwnerBuffers(func::FuncOp fn, const TargetProfile &p) {
       task.getRegion(0).front().back().getName().getStringRef() != "cpu.end")
     return task.emitError("invalid ordered task captures or completion");
   if (task.hasAttr("cpu.storage") ||
-      task.getAttr("cpu.realization") != b.getStringAttr("private-values"))
+      task.getAttr("cpu.realization") != b.getStringAttr(realization))
     return task.emitError("incorrect ordered task carry storage");
 
   auto &space = task.getRegion(0).front().front();
@@ -397,24 +399,6 @@ LogicalResult verifyOwnerTask(func::FuncOp fn, const TargetProfile &p,
                 task.getAttr("cpu.realization") != b.getStringAttr(storage))
     return task.emitError("incorrect ordered task carry storage");
   return verifyOwnerGrain(fn, task.getRegion(0).front().front(), p);
-}
-std::string ownerDispatcher(func::FuncOp fn, StringRef declare,
-                            StringRef call) {
-  auto &space = fn.front().front().getRegion(0).front().front();
-  auto count = space.getAttrOfType<IntegerAttr>("cpu.owners").getInt();
-  auto grain = space.getAttrOfType<IntegerAttr>("cpu.grain").getInt();
-  std::string src;
-  llvm::raw_string_ostream s(src);
-  s << "#include <stdint.h>\n#include <stddef.h>\n"
-    << declare << "\nint intent_entry(" << matrixHostParams(fn) << "){\n"
-    << "const int64_t count=" << count << ", tile=" << grain
-    << ";\n"
-       "#pragma omp parallel for num_threads(workers) schedule(static) "
-       "if(workers>1 && count>tile)\n"
-       "for(int64_t lo=0;lo<count;lo+=tile){int64_t "
-       "hi=count-lo<tile?count:lo+tile;"
-    << call << ";}return 0;}\n";
-  return src;
 }
 } // namespace intentdsl::cpu
 namespace CI_UNIT_NAMESPACE {

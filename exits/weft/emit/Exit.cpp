@@ -1,5 +1,4 @@
 #include "../legalize/Matrix.h"
-#include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/algorithm/kir/ir/Performance.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
@@ -8,16 +7,13 @@ using namespace compilerinfra;
 using namespace mlir;
 
 namespace CI_UNIT_NAMESPACE {
-llvm::Expected<std::string> taskSource(Operation *, const llvm::json::Array &);
-std::string hostSource(Operation *, const llvm::json::Array &);
 void dialect(DialectRegistry &);
-bool hasWeftMatrixProgram(ModuleOp);
-TerminalPrinter weftMatrixPrinter();
+TerminalPrinter weftTerminalPrinter();
 void registerWeftMatrixContracts(Unit &);
-void populateWeftMatrixContracts(intentdsl::cpu::MatrixMachine &, int64_t, bool);
+void populateWeftMatrixContracts(intentdsl::cpu::MatrixMachine &, int64_t,
+                                 bool);
 void registerWeftAddressOptimization(Unit &);
-void publishWeftMatrixABI(OpPassManager &);
-llvm::Error emitOrdered(func::FuncOp, llvm::raw_pwrite_stream &);
+void publishWeftABI(OpPassManager &);
 void lower(OpPassManager &, StringRef, const intentdsl::CallFacts &, bool);
 LogicalResult verifyHost(ModuleOp, const TargetProfile &, StringRef);
 
@@ -107,59 +103,6 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
     return e;
   return p;
 }
-
-llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
-  if (hasWeftMatrixProgram(m))
-    return weftMatrixPrinter().emit(m, out);
-  auto fn = *m.getOps<func::FuncOp>().begin();
-  if (fn.front().front().getName().getStringRef() == "cpu.owner_task")
-    return emitOrdered(fn, out);
-  auto abi = llvm::json::parse(fn->getAttrOfType<StringAttr>("kir.abi"));
-  if (!abi)
-    return abi.takeError();
-  auto &task = fn.front().front();
-  llvm::json::Array rows;
-  for (auto a : task.getAttrOfType<ArrayAttr>("rows")) {
-    auto row = cast<DictionaryAttr>(a);
-    rows.push_back(llvm::json::Object{
-        {"grain", row.getAs<IntegerAttr>("grain").getInt()},
-        {"columns", row.getAs<IntegerAttr>("columns").getInt()}});
-  }
-  auto program = taskSource(&task, *abi->getAsArray());
-  if (!program)
-    return program.takeError();
-  llvm::json::Object fields{{"task", *program},
-                            {"host", hostSource(&task, *abi->getAsArray())}};
-  fields["shape_parameters"] =
-      task.getAttrOfType<BoolAttr>("weft_host.absolute_origin").getValue()
-          ? llvm::json::Array{"T", "N", "C", "O"}
-          : llvm::json::Array{"T", "N", "C"};
-  if (task.hasAttr("cpu.key_extent")) {
-    auto *symbols = fields["shape_parameters"].getAsArray();
-    symbols->push_back("KL");
-    symbols->push_back("KH");
-  }
-  fields["version"] = 3;
-  llvm::json::Array compact;
-  for (unsigned i = 0; i < fn.getNumArguments(); ++i)
-    if (fn.getArgAttr(i, "weft_host.contiguous"))
-      compact.push_back(i);
-  if (!compact.empty())
-    fields["contiguous_slots"] = std::move(compact);
-  if (fn->hasAttr("kir.owner_axis")) {
-    auto ranks = task.getAttrOfType<DenseI64ArrayAttr>("weft_host.slot_ranks");
-    auto rank = ranks[intentdsl::domainSlot(fn)];
-    for (int i = 0; i < rank; ++i)
-      fields["shape_parameters"].getAsArray()->push_back(
-          "D" + std::to_string(i));
-    fields["task_ranks"] = llvm::json::Array(ranks.asArrayRef());
-  }
-  fields["domain"] = intentdsl::publishDomain(fn);
-  fields["abi"] = std::move(*abi);
-  fields["rows"] = std::move(rows);
-  out << llvm::json::Value(std::move(fields));
-  return llvm::Error::success();
-}
 } // namespace
 
 void nativePanelCost(Unit &);
@@ -170,17 +113,10 @@ void bind(Unit &u) {
   u.dialects = dialect;
   u.realizers.push_back(
       {{"task-values", "levels/execution/cpu::storage",
-        [](Operation *op, Attribute requirement, const TargetProfile &,
+        [](Operation *op, Attribute requirement, const TargetProfile &p,
            RewriterBase &rw) -> llvm::Error {
-          if (requirement != rw.getStringAttr("private-values"))
-            return llvm::createStringError(
-                "Weft task requires private SSA storage");
-          if (op->getName().getStringRef() == "cpu.matrix_task")
-            return intentdsl::cpu::materializeMatrixBuffers(
-                op->getParentOfType<func::FuncOp>(), rw, "weft-task-ssa");
-          op->setAttr("cpu.realization", rw.getStringAttr("weft-task-ssa"));
-          op->removeAttr("cpu.storage");
-          return llvm::Error::success();
+          return intentdsl::cpu::realizeLocalValues(op, requirement, p, rw,
+                                                    "weft-task-ssa");
         }},
        COMPILERINFRA_SOURCE});
   for (StringRef phase : {"legal", "realized", "callable"})
@@ -190,7 +126,7 @@ void bind(Unit &u) {
             lower(pm, phase, *p.services.get<intentdsl::CallFacts>(),
                   p.services.get<RecordFields>()->grouped);
             if (phase == "callable")
-              publishWeftMatrixABI(pm);
+              publishWeftABI(pm);
             return llvm::Error::success();
           },
           [phase](ModuleOp m, const TargetProfile &p) {
@@ -198,7 +134,7 @@ void bind(Unit &u) {
           }},
          COMPILERINFRA_SOURCE});
   ExitImplementation exit;
-  exit.emit = emit;
+  exit.terminal = weftTerminalPrinter();
   exit.capabilities = capabilities;
   u.exit = Located<ExitImplementation>{std::move(exit), COMPILERINFRA_SOURCE};
 }

@@ -21,7 +21,7 @@ LogicalResult verifyTask(ModuleOp m, const TargetProfile &profile,
   auto fn = *funcs.begin();
   if (ownerTask(fn))
     return storage == "pending" ? verifyOwnerTask(fn, profile, storage)
-                                : verifyOwnerBuffers(fn, profile);
+                                : verifyOwnerBuffers(fn, profile, storage);
   if (matrixTask(fn))
     return storage == "pending" ? verifyMatrixTask(fn, profile, storage)
                                 : verifyMatrixBuffers(fn, profile, storage);
@@ -126,14 +126,17 @@ LogicalResult verifyTask(ModuleOp m, const TargetProfile &profile,
   return success();
 }
 llvm::Error realizeLocalValues(Operation *op, Attribute value,
-                               const TargetProfile &, RewriterBase &rw) {
+                               const TargetProfile &, RewriterBase &rw,
+                               StringRef realization) {
   if (value != rw.getStringAttr("private-values"))
     return llvm::createStringError("unsupported storage contract");
   if (op->getName().getStringRef() == "cpu.matrix_task")
-    return materializeMatrixBuffers(op->getParentOfType<func::FuncOp>(), rw);
+    return materializeMatrixBuffers(op->getParentOfType<func::FuncOp>(), rw,
+                                    realization);
   if (op->getName().getStringRef() == "cpu.owner_task")
-    return materializeOwnerBuffers(op->getParentOfType<func::FuncOp>(), rw);
-  op->setAttr("cpu.realization", value);
+    return materializeOwnerBuffers(op->getParentOfType<func::FuncOp>(), rw,
+                                   realization);
+  op->setAttr("cpu.realization", rw.getStringAttr(realization));
   op->removeAttr("cpu.storage");
   auto &body = op->getRegion(0).front();
   if (op->getAttrOfType<StringAttr>("cpu.walk") == "tile") {
@@ -280,7 +283,11 @@ void bind(Unit &u) {
         }},
        COMPILERINFRA_SOURCE});
   u.realizers.push_back(
-      {{"allocate", u.qualify("storage"), intentdsl::cpu::realizeLocalValues},
+      {{"allocate", u.qualify("storage"),
+        [](Operation *op, Attribute v, const TargetProfile &p,
+           RewriterBase &rw) {
+          return intentdsl::cpu::realizeLocalValues(op, v, p, rw);
+        }},
        COMPILERINFRA_SOURCE});
   for (StringRef phase : {"formed", "tasked", "buffers"})
     u.boundaries.push_back(

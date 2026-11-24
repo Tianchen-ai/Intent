@@ -4,12 +4,11 @@ compilerinfra_unit(SOURCES
   cost/Matrix.cpp
   emit/Exit.cpp
   emit/MatrixPrinter.cpp
-  emit/Ordered.cpp
-  emit/Task.cpp
   ir/Host.cpp
   ir/MatrixContracts.cpp
   legalize/Matrix.cpp
-  legalize/Panels.cpp
+  legalize/Ordered.cpp
+  legalize/Rows.cpp
   transforms/NarrowAddress.cpp
   LINK_LIBRARIES ${cpu} ${algorithm}
   TABLEGEN "ir/Host.td Dialect.h.inc -gen-dialect-decls -dialect=weft_host"

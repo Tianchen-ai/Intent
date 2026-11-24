@@ -5,36 +5,7 @@ def WeftHost_Dialect : Dialect {
   let cppNamespace = "::intentdsl::wefthost";
 }
 
-// Dispatch disjoint intervals of the domain to one serial task instance per
-// interval. Matrix captures advance with the interval; vectors and scalars are shared.
-def DispatchRows : Op<WeftHost_Dialect, "dispatch_rows", [IsolatedFromAbove, SingleBlock]> {
-  let arguments = (ins Variadic<AnyType>:$captures, I64Attr:$domain_arg,
-                       ArrayAttr:$rows, StrAttr:$task_symbol);
-  let results = (outs Index:$completion);
-  let regions = (region AnyRegion:$task);
-}
-
-def PanelSweep : Op<WeftHost_Dialect, "sweep", [SingleBlock]> {
-  let arguments = (ins StrAttr:$combine, StrAttr:$tail);
-  let results = (outs Variadic<AnyType>:$summary);
-  let regions = (region AnyRegion:$panels);
-}
-def OwnerCapture : Op<WeftHost_Dialect, "capture_owner"> {
-  let arguments = (ins AnyMemRef:$view, Index:$owner);
-  let results = (outs AnyType:$snapshot);
-}
-def PanelRead : Op<WeftHost_Dialect, "read_panel"> {
-  let arguments = (ins AnyMemRef:$source, Index:$row, Index:$offset, Index:$extent);
-  let results = (outs AnyTensor:$value);
-}
-def PanelWrite : Op<WeftHost_Dialect, "write_panel"> {
-  let arguments = (ins AnyMemRef:$dest, Index:$row, Index:$offset, Index:$extent, AnyTensor:$value);
-}
-def PanelYield : Op<WeftHost_Dialect, "yield", [Terminator]> {
-  let arguments = (ins Variadic<AnyType>:$partial);
-}
-
-// ---------------- v0.4 Terminal Matrix Program Ops ----------------
+// ---------------- v0.4 Terminal Program Containers ----------------
 
 def MatrixProgramOp : Op<WeftHost_Dialect, "matrix_program"> {
   let arguments = (ins DenseI64ArrayAttr:$tile, DenseI64ArrayAttr:$extents,
@@ -42,16 +13,35 @@ def MatrixProgramOp : Op<WeftHost_Dialect, "matrix_program"> {
   let regions = (region AnyRegion:$task, AnyRegion:$host);
 }
 
+def RowProgramOp : Op<WeftHost_Dialect, "row_program"> {
+  let arguments = (ins ArrayAttr:$rows, ArrayAttr:$shape_parameters,
+                       DenseI64ArrayAttr:$contiguous_slots,
+                       DenseI64ArrayAttr:$task_ranks);
+  let regions = (region AnyRegion:$task, AnyRegion:$host);
+}
+
+def OwnerProgramOp : Op<WeftHost_Dialect, "owner_program"> {
+  let arguments = (ins I64Attr:$owners, I64Attr:$grain,
+                       ArrayAttr:$shape_parameters,
+                       DenseI64ArrayAttr:$contiguous_slots,
+                       DenseI64ArrayAttr:$task_ranks);
+  let regions = (region AnyRegion:$task, AnyRegion:$host);
+}
+
 def EndOp : Op<WeftHost_Dialect, "end", [Terminator]> {}
 
-// Region 0 ("task.weftir") terminal ops
+// ---------------- Region 0 ("task.weftir") Terminal Ops ----------------
+
 def EncodingDeclOp : Op<WeftHost_Dialect, "encoding_decl"> {
   let arguments = (ins StrAttr:$sym_name, BoolAttr:$is_weight);
 }
 
 def TaskKernelOp : Op<WeftHost_Dialect, "task_kernel"> {
   let arguments = (ins StrAttr:$sym_name, StrAttr:$source,
-                       ArrayAttr:$view_types, ArrayAttr:$arg_writes,
+                       ArrayAttr:$view_types, OptionalAttr<ArrayAttr>:$arg_writes,
+                       OptionalAttr<ArrayAttr>:$arg_access,
+                       OptionalAttr<DenseI64ArrayAttr>:$arg_aliases,
+                       OptionalAttr<ArrayAttr>:$shape_symbols,
                        DenseI64ArrayAttr:$strided_slots);
   let regions = (region AnyRegion:$body);
 }
@@ -73,6 +63,17 @@ def TaskSliceOp : Op<WeftHost_Dialect, "task_slice"> {
   let results = (outs Index:$res);
 }
 
+def TaskSubviewOp : Op<WeftHost_Dialect, "task_subview"> {
+  let arguments = (ins Variadic<Index>:$operands, I64Attr:$static_extent,
+                       StrAttr:$slice_type, StrAttr:$val_type, BoolAttr:$admit);
+  let results = (outs Index:$res);
+}
+
+def TaskUnaryOp : Op<WeftHost_Dialect, "task_unary"> {
+  let arguments = (ins Index:$input, StrAttr:$kind, StrAttr:$val_type);
+  let results = (outs Index:$res);
+}
+
 def TaskBinaryOp : Op<WeftHost_Dialect, "task_binary"> {
   let arguments = (ins Index:$lhs, Index:$rhs, StrAttr:$kind,
                        StrAttr:$lhs_type, StrAttr:$rhs_type, StrAttr:$val_type);
@@ -87,13 +88,60 @@ def TaskCompareOp : Op<WeftHost_Dialect, "task_compare"> {
 
 def TaskSelectOp : Op<WeftHost_Dialect, "task_select"> {
   let arguments = (ins Index:$cond, Index:$true_val, Index:$false_val,
-                       StrAttr:$cond_type, StrAttr:$val_type);
+                       StrAttr:$cond_type, OptionalAttr<StrAttr>:$true_type,
+                       OptionalAttr<StrAttr>:$false_type, StrAttr:$val_type);
   let results = (outs Index:$res);
 }
 
 def TaskCastOp : Op<WeftHost_Dialect, "task_cast"> {
   let arguments = (ins Index:$input, StrAttr:$op_kind,
                        StrAttr:$in_type, StrAttr:$val_type);
+  let results = (outs Index:$res);
+}
+
+def TaskReduceOp : Op<WeftHost_Dialect, "task_reduce"> {
+  let arguments = (ins Index:$input, StrAttr:$kind, I64Attr:$axis,
+                       StrAttr:$in_type, StrAttr:$val_type);
+  let results = (outs Index:$res);
+}
+
+def TaskScanOp : Op<WeftHost_Dialect, "task_scan"> {
+  let arguments = (ins Index:$input, I64Attr:$axis, BoolAttr:$reverse,
+                       StrAttr:$elem_type, StrAttr:$val_type);
+  let results = (outs Index:$res);
+  let regions = (region AnyRegion:$combine);
+}
+
+def TaskScanYieldOp : Op<WeftHost_Dialect, "task_scan_yield", [Terminator]> {
+  let arguments = (ins Index:$value, StrAttr:$val_type);
+}
+
+def TaskIotaOp : Op<WeftHost_Dialect, "task_iota"> {
+  let arguments = (ins I64Attr:$start, I64Attr:$end, StrAttr:$val_type);
+  let results = (outs Index:$res);
+}
+
+def TaskLocalAllocOp : Op<WeftHost_Dialect, "task_local_alloc"> {
+  let arguments = (ins I64Attr:$elements, I64Attr:$alignment,
+                       StrAttr:$ptr_type);
+  let results = (outs Index:$res);
+}
+
+def TaskPtrLoadOp : Op<WeftHost_Dialect, "task_ptr_load"> {
+  let arguments = (ins Index:$ptr, Index:$offset, Index:$mask, Index:$other,
+                       StrAttr:$ptr_type, StrAttr:$val_type);
+  let results = (outs Index:$res);
+}
+
+def TaskPtrStoreOp : Op<WeftHost_Dialect, "task_ptr_store"> {
+  let arguments = (ins Index:$ptr, Index:$offset, Index:$mask, Index:$value,
+                       StrAttr:$ptr_type, StrAttr:$val_type);
+}
+
+def TaskAtomicRmwOp : Op<WeftHost_Dialect, "task_atomic_rmw"> {
+  let arguments = (ins Index:$value, Index:$slice, StrAttr:$kind,
+                       StrAttr:$ordering, StrAttr:$val_type,
+                       StrAttr:$slice_type);
   let results = (outs Index:$res);
 }
 
@@ -154,7 +202,8 @@ def TaskCommitOp : Op<WeftHost_Dialect, "task_commit"> {
                        StrAttr:$val_type, StrAttr:$slice_type);
 }
 
-// Region 1 ("host.c") terminal ops
+// ---------------- Region 1 ("host.c") Terminal Ops ----------------
+
 def AddressOp : Op<WeftHost_Dialect, "address"> {
   let arguments = (ins Variadic<Index>:$indices, DenseI64ArrayAttr:$strides,
                        I32Attr:$index_bits);
@@ -167,6 +216,54 @@ def HostFnOp : Op<WeftHost_Dialect, "host_fn"> {
                        BoolAttr:$uses_bf16_math, BoolAttr:$uses_f16_math,
                        BoolAttr:$uses_mx8_math);
   let regions = (region AnyRegion:$body);
+}
+
+def HostRowFnOp : Op<WeftHost_Dialect, "host_row_fn"> {
+  let arguments = (ins StrAttr:$params, StrAttr:$walk,
+                       BoolAttr:$member_tasks, BoolAttr:$single_dispatcher);
+  let regions = (region AnyRegion:$body);
+}
+
+def HostParallelTransposeTilesOp : Op<WeftHost_Dialect, "host_parallel_transpose_tiles"> {
+  let arguments = (ins I64Attr:$tile);
+  let regions = (region AnyRegion:$body);
+}
+
+def HostParallelKeyRangesOp : Op<WeftHost_Dialect, "host_parallel_key_ranges"> {
+  let arguments = (ins I64Attr:$key_extent);
+  let regions = (region AnyRegion:$body);
+}
+
+def HostParallelRowIntervalsOp : Op<WeftHost_Dialect, "host_parallel_row_intervals"> {
+  let arguments = (ins StrAttr:$chunk_expr);
+  let regions = (region AnyRegion:$body);
+}
+
+def HostRowOffsetOp : Op<WeftHost_Dialect, "host_row_offset"> {
+  let arguments = (ins Variadic<Index>:$coords, StrAttr:$mode,
+                       ArrayAttr:$dim_vars, ArrayAttr:$stride_vars);
+  let results = (outs Index:$offset);
+}
+
+def HostCallRowTaskOp : Op<WeftHost_Dialect, "host_call_row_task"> {
+  let arguments = (ins Variadic<Index>:$shape_vals, StrAttr:$sym_name,
+                       ArrayAttr:$slot_args, ArrayAttr:$shape_exprs,
+                       ArrayAttr:$stride_exprs);
+}
+
+def HostOwnerFnOp : Op<WeftHost_Dialect, "host_owner_fn"> {
+  let arguments = (ins StrAttr:$params, I64Attr:$owners, I64Attr:$grain);
+  let regions = (region AnyRegion:$body);
+}
+
+def HostParallelOwnersOp : Op<WeftHost_Dialect, "host_parallel_owners"> {
+  let regions = (region AnyRegion:$body);
+}
+
+def HostCallOwnerTaskOp : Op<WeftHost_Dialect, "host_call_owner_task"> {
+  let arguments = (ins Index:$lo, Index:$hi, StrAttr:$sym_name,
+                       ArrayAttr:$slot_args, BoolAttr:$empty_extent,
+                       ArrayAttr:$stride_exprs);
 }
 
 def HostAllocOp : Op<WeftHost_Dialect, "host_alloc"> {
