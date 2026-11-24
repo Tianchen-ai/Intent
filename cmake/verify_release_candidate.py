@@ -174,6 +174,7 @@ TARGETS: dict[str, TargetSpec] = {
         device_kind="cuda",
         wheel_glob="intentdsl-2.0.0-*-linux_x86_64.whl",
         base_python="/srv/rc/site-1/.venvs/intentdsl-cutile/bin/python",
+        worker_env=(("TMPDIR", "/tmp"), ("INTENT_CACHE_DIR", "/srv/rc/site-1/phdworks/intentdsl_bench/output/cache/v26-rc-5090d")),
         captures_layout="local_flat",
     ),
     "h100": TargetSpec(
@@ -209,7 +210,6 @@ TARGETS: dict[str, TargetSpec] = {
         wheel_glob="intentdsl-2.0.0-*-linux_x86_64.whl",
         base_python="/srv/rc/site-1/phdworks/intentdsl_bench/output/work/v2-weft-env/bin/python",
         worker_launcher=("taskset", "-c", "0-7"),
-        extra_site_dirs=("/srv/rc/site-1/.local/lib/python3.10/site-packages",),
         captures_layout="local_flat",
     ),
     "sg2044": TargetSpec(
@@ -501,6 +501,9 @@ def _select_implementations(
             continue
         if device_kind == "mlu" and impl == "torch" and workload_name in ("program/jagged_mean", "program/cholesky", "program/int8_gemm"):
             skipped.append({"implementation": impl, "reason": "torch_mlu falls back to host CPU for this operator on MLU370; not an on-device MLU implementation"})
+            continue
+        if device_kind == "cuda" and impl == "torch" and workload_name.startswith("corpus/mojo/"):
+            skipped.append({"implementation": impl, "reason": "Mojo corpus source 'torch' executes on host CPU without CUDA or native timer"})
             continue
         if impl in mature_for_kind:
             selected.append(impl)
@@ -802,8 +805,11 @@ def run_worker_batch(batch_json: Path) -> int:
     for idx, work in enumerate(workloads_list, 1):
         out_res = exp_dir / work / "results.json"
         if spec.get("resume") and out_res.is_file():
-            print(f"[{spec['target_name']}] ({idx}/{len(workloads_list)}) RESUME {work}", flush=True)
-            continue
+            existing_rows = json.loads(out_res.read_text(encoding="utf-8")).get("results", [])
+            if not any(r.get("status") == "skipped_busy" for r in existing_rows):
+                print(f"[{spec['target_name']}] ({idx}/{len(workloads_list)}) RESUME {work}", flush=True)
+                continue
+            shutil.rmtree(exp_dir / work, ignore_errors=True)
         one_cfg = {**spec, "workload": work}
         cfg_file = exp_dir / f".cfg-{idx}.json"
         cfg_file.write_text(json.dumps(one_cfg), encoding="utf-8")
@@ -941,10 +947,11 @@ def execute_target(
     if not allow_busy:
         idle, msg = check_device_idle(spec)
         if not idle:
-            (local_exp_root / "target_skipped.json").write_text(
-                json.dumps({"target": spec.name, "status": "skipped_device_busy", "reason": msg}, indent=2) + "\n",
-                encoding="utf-8",
-            )
+            if not resume:
+                (local_exp_root / "target_skipped.json").write_text(
+                    json.dumps({"target": spec.name, "status": "skipped_device_busy", "reason": msg}, indent=2) + "\n",
+                    encoding="utf-8",
+                )
             print(f"[{spec.name}] SKIPPED ({msg})", flush=True)
             return local_exp_root
 
@@ -1008,8 +1015,8 @@ def execute_target(
             "device_kind": spec.device_kind,
             "backends": list(spec.backends),
             "profile_path": str(env_json_local),
-            "bench_output_root": str((bench_root / "output").resolve()),
-            "exp_dir": str(local_exp_root.resolve()),
+            "bench_output_root": os.path.abspath(bench_root / "output"),
+            "exp_dir": os.path.abspath(local_exp_root),
             "captures_layout": spec.captures_layout,
             "needs_controller_oracle": False,
             "workloads": workloads_to_run,
@@ -1088,11 +1095,44 @@ if [ "{recreate_flag}" = "1" ]; then
   mkdir -p "$REXP"
 fi
 if [ ! -x "$RWORK/venv/bin/python" ]; then
-  "$BASE_PY" -m venv "$RWORK/venv"
-  "$RWORK/venv/bin/pip" install --no-index --no-deps --force-reinstall \\
-    "$RWORK/bundle/{ci_whl.name}" \\
-    "$RWORK/bundle/{cia_whl.name}" \\
-    "$RWORK/bundle/{prod_whl.name}"
+  if "$BASE_PY" -m venv "$RWORK/venv" 2>/dev/null; then
+    "$RWORK/venv/bin/pip" install --no-index --no-deps --force-reinstall \\
+      "$RWORK/bundle/{ci_whl.name}" \\
+      "$RWORK/bundle/{cia_whl.name}" \\
+      "$RWORK/bundle/{prod_whl.name}"
+  else
+    rm -rf "$RWORK/venv"
+    "$BASE_PY" -m venv --without-pip "$RWORK/venv"
+    "$RWORK/venv/bin/python" - "$RWORK/venv" \\
+      "$RWORK/bundle/{ci_whl.name}" \\
+      "$RWORK/bundle/{cia_whl.name}" \\
+      "$RWORK/bundle/{prod_whl.name}" <<'PYWHL'
+import configparser, os, stat, sys, sysconfig, zipfile
+from pathlib import Path
+venv_root = Path(sys.argv[1]).resolve()
+purelib = Path(sysconfig.get_paths()["purelib"])
+purelib.mkdir(parents=True, exist_ok=True)
+bin_dir = venv_root / "bin"
+for whl in map(Path, sys.argv[2:]):
+    with zipfile.ZipFile(whl) as zf:
+        zf.extractall(purelib)
+        for name in zf.namelist():
+            if name.endswith(".dist-info/entry_points.txt"):
+                cp = configparser.ConfigParser()
+                cp.read_string(zf.read(name).decode("utf-8"))
+                if cp.has_section("console_scripts"):
+                    for cmd_name, spec_val in cp.items("console_scripts"):
+                        mod_name, _, fn_name = spec_val.partition(":")
+                        script = bin_dir / cmd_name
+                        script.write_text(
+                            f"#!{{venv_root / 'bin' / 'python'}}\\n"
+                            f"import sys\\nfrom {{mod_name}} import {{fn_name}}\\n"
+                            f"raise SystemExit({{fn_name}}())\\n",
+                            encoding="utf-8",
+                        )
+                        script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+PYWHL
+  fi
 fi
 SITE_DIR=$("$RWORK/venv/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
 rm -f "$SITE_DIR/zz_bench_external.pth"
@@ -1234,6 +1274,7 @@ def summarize_experiment(bench_root: Path, experiment_tag: str) -> tuple[dict[st
         "failures_and_skips": [],
     }
 
+    seen_ref_failures: set[tuple[str, str, str, str]] = set()
     md: list[str] = [
         f"# V2-6.R Release Candidate Full Verification & Scoreboard (`{experiment_tag}`)",
         "",
@@ -1320,23 +1361,26 @@ def summarize_experiment(bench_root: Path, experiment_tag: str) -> tuple[dict[st
                         }
                     )
 
-                # Record non-V2 failures/skips on this case too
+                # Record non-V2 failures/skips on this case too (deduplicated per target)
                 for other_impl, other_row in impl_map.items():
                     if other_impl.startswith("intent-v2:"):
                         continue
                     if other_row.get("status") != "passed":
-                        summary["failures_and_skips"].append(
-                            {
-                                "target": target_name,
-                                "backend": be,
-                                "workload": wname,
-                                "case": cname,
-                                "implementation": other_impl,
-                                "status": other_row.get("status"),
-                                "stage": other_row.get("stage"),
-                                "reason": other_row.get("error"),
-                            }
-                        )
+                        dedup_key = (target_name, wname, cname, other_impl)
+                        if dedup_key not in seen_ref_failures:
+                            seen_ref_failures.add(dedup_key)
+                            summary["failures_and_skips"].append(
+                                {
+                                    "target": target_name,
+                                    "backend": be,
+                                    "workload": wname,
+                                    "case": cname,
+                                    "implementation": other_impl,
+                                    "status": other_row.get("status"),
+                                    "stage": other_row.get("stage"),
+                                    "reason": other_row.get("error"),
+                                }
+                            )
 
                 if not st["performance"]:
                     continue
@@ -1523,8 +1567,8 @@ def main() -> int:
     if args.worker_batch:
         return run_worker_batch(args.worker_batch)
 
-    bench_root = args.bench_root.resolve()
-    wheel_dir = args.wheel_dir.resolve()
+    bench_root = Path(os.path.abspath(args.bench_root))
+    wheel_dir = Path(os.path.abspath(args.wheel_dir))
 
     if not args.summarize_only:
         raw_targets = args.targets or ["mlu370"]
