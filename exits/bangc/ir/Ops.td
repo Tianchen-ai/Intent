@@ -250,7 +250,7 @@ def NarrowQuotientOp : BangcOp<"narrow_quotient"> {
 }
 
 def Bf16TileOp : BangcOp<"bf16_tile"> {
-  let arguments = (ins AnyMemRef:$dst, AnyMemRef:$src, I64:$live, I64:$lanes,
+  let arguments = (ins Variadic<AnyMemRef>:$buffers, I64:$live, I64:$lanes,
                        StrAttr:$mode);
 }
 

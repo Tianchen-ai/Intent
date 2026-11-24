@@ -388,24 +388,34 @@ void rowContracts(Unit &unit) {
                        dTy.getElementType().isF32());
       });
 
-  add("bf16-tile-convert", "bf16_tile", "widen_bf16_tile/narrow_bf16_tile",
-      "bf16.mlu", "NRAM bf16 and f32 tile buffers",
+  add("bf16-tile-convert", "bf16_tile",
+      "widen_bf16_tile/narrow_bf16_tile/narrow_bf16_tile_fast", "bf16.mlu",
+      "NRAM bf16 and f32 tile buffers (with optional u16 scratch)",
       "64-lane aligned NRAM vector fragment", "f32",
       "writes destination NRAM tile",
       "NaN-preserving bf16<->f32 round-to-nearest-even",
       [](Operation *op) {
         auto mode = op->getAttrOfType<StringAttr>("mode");
+        if (!mode || (op->getNumOperands() != 4 && op->getNumOperands() != 5))
+          return failure();
         auto dst = dyn_cast<MemRefType>(op->getOperand(0).getType());
         auto src = dyn_cast<MemRefType>(op->getOperand(1).getType());
-        if (!mode || !isSpace(op->getOperand(0), 1) ||
-            !isSpace(op->getOperand(1), 1))
+        if (!isSpace(op->getOperand(0), 1) || !isSpace(op->getOperand(1), 1))
           return failure();
         if (mode == "widen")
-          return success(dst.getElementType().isF32() &&
+          return success(op->getNumOperands() == 4 &&
+                         dst.getElementType().isF32() &&
                          src.getElementType().isBF16());
-        if (mode == "narrow")
+        if (mode == "narrow") {
+          if (op->getNumOperands() == 5) {
+            auto sc = dyn_cast<MemRefType>(op->getOperand(2).getType());
+            if (!isSpace(op->getOperand(2), 1) ||
+                sc.getElementType().getIntOrFloatBitWidth() != 16)
+              return failure();
+          }
           return success(dst.getElementType().isBF16() &&
                          src.getElementType().isF32());
+        }
         return failure();
       });
 

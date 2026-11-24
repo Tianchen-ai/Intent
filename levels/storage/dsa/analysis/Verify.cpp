@@ -392,6 +392,12 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
         if(name=="dsa.owner_write")writes.push_back(item.getResult(0));
       }
       if (name == "dsa.write_back") {
+        auto asyncAttr = item.getAttrOfType<BoolAttr>("async");
+        if (!asyncAttr ||
+            asyncAttr.getValue() != (resident && d.contains("async_writeback"))) {
+          item.emitError("write_back async mode disagrees with supply layout");
+          return WalkResult::interrupt();
+        }
         if (!access(&item, 2, body.front(), fn, *abi) ||
             cast<RankedTensorType>(item.getOperand(1).getType()).getShape() != windowType.getShape()) {
           item.emitError("write must cover every active logical axis exactly once");

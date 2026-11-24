@@ -10,8 +10,10 @@ using namespace mlir;
 // A DMA slot holds a complete group. Vector temporaries and collective scratch
 // are reused after each member's compute and drain.
 struct Footprint {
-  int64_t inputBytes = 0, vectorBytes = 0, collectiveBytes = 0;
-  static Footprint of(Block &body, const LocalSupply &c, bool reuse=false) {
+  int64_t inputBytes = 0, sharedBytes = 0, outputBytes = 0, vectorBytes = 0,
+          collectiveBytes = 0;
+  static Footprint of(Block &body, const LocalSupply &c, bool reuse = false,
+                      bool persistent = false, bool asyncWrite = false) {
     auto reductionScratch=c.reductionScratchPerColumn;
     Footprint f;
     for (auto &op : body) {
@@ -19,6 +21,11 @@ struct Footprint {
       if (code == "await" || code == "active" || code == "window" ||
           code == "member_axis" || code == "slab_axis" || code == "rows" || code == "columns")
         continue;
+      if (asyncWrite && (code == "store" || code == "write_back")) {
+        f.outputBytes += llvm::divideCeil(
+            cast<MemRefType>(op.getOperand(0).getType()).getElementTypeBitWidth(),
+            8u);
+      }
       if (code == "reduce" || code == "exp") {
         f.collectiveBytes = std::max<int64_t>(f.collectiveBytes, reductionScratch);
       } else if (code == "summary_reduce") {
@@ -42,6 +49,9 @@ struct Footprint {
         if (t.getRank() == 2 && code == "mul" && t.getElementType().isBF16())
           f.collectiveBytes =
               std::max<int64_t>(f.collectiveBytes, 2 * int64_t(sizeof(float)));
+        if (t.getRank() == 2 && code == "cast" && t.getElementType().isBF16())
+          f.collectiveBytes =
+              std::max<int64_t>(f.collectiveBytes, int64_t(sizeof(uint16_t)));
         if (t.getRank() == 2 && code == "div" && t.getElementType().isF32()) {
           bool narrowed = false;
           if (op.hasOneUse()) {
@@ -68,9 +78,15 @@ struct Footprint {
         // fragments do.
         if (t.getRank() == 1 && code != "load" && code != "copy_in")
           continue;
-        if (code == "load" || code == "copy_in" || code=="indexed_tile_read")
-          f.inputBytes += llvm::divideCeil(t.getElementTypeBitWidth(), 8u);
-        else f.vectorBytes += llvm::divideCeil(t.getElementTypeBitWidth(), 8u);
+        if (code == "load" || code == "copy_in" || code=="indexed_tile_read") {
+          int64_t elemBytes = llvm::divideCeil(t.getElementTypeBitWidth(), 8u);
+          if (persistent && code != "indexed_tile_read" &&
+              cast<MemRefType>(op.getOperand(0).getType()).getRank() == 1)
+            f.sharedBytes += elemBytes;
+          else
+            f.inputBytes += elemBytes;
+        } else
+          f.vectorBytes += llvm::divideCeil(t.getElementTypeBitWidth(), 8u);
       }
     }
     if(reuse) f.vectorBytes=placeTemporaries(body).peak;
@@ -122,6 +138,41 @@ bool batchableInstances(func::FuncOp fn) {
   });
   return ok;
 }
+bool canAsyncWriteBack(func::FuncOp fn, int64_t depth) {
+  if (depth != 2 ||
+      fn->getAttrOfType<StringAttr>("block.topology") != "resident" ||
+      fn->hasAttr("kir.owner_axis"))
+    return false;
+  auto sig = fn->getAttrOfType<StringAttr>("kir.abi");
+  if (!sig)
+    return false;
+  auto abi = llvm::json::parse(sig.getValue());
+  if (!abi) {
+    llvm::consumeError(abi.takeError());
+    return false;
+  }
+  auto *arr = abi->getAsArray();
+  if (!arr)
+    return false;
+  for (auto &v : *arr) {
+    auto *obj = v.getAsObject();
+    if (!obj || obj->getString("direction") == "InOut")
+      return false;
+  }
+  unsigned stores = 0;
+  bool otherEffects = false;
+  fn.walk([&](Operation *op) {
+    auto code = op->getName().stripDialect();
+    if (code == "store" || code == "write_back")
+      ++stores;
+    else if (code == "scatter_fragment" || code == "publish_offsets" ||
+             code == "unique_put" || code == "unique_put_at" ||
+             code == "fill_ranges_at" || code == "owner_store" ||
+             code == "owner_write" || code == "atomic_add_at")
+      otherEffects = true;
+  });
+  return stores > 0 && !otherEffects;
+}
 static llvm::Expected<DictionaryAttr>
 planStorage(func::FuncOp fn, const LocalSupply &c, int64_t depth,
             int64_t participants, bool persistent, bool reuse, int64_t batch) {
@@ -134,6 +185,7 @@ planStorage(func::FuncOp fn, const LocalSupply &c, int64_t depth,
   if (participants <= 0 || participants > c.consumers)
     return llvm::createStringError("invalid supply work partition");
   Builder b(fn.getContext());
+  bool asyncWrite = c.asynchronous && canAsyncWriteBack(fn, depth);
   // A group of equally shaped lane-wise expressions can keep all member
   // results in private storage until the final rectangular transfer.
   bool wide = fn->hasAttr("kir.iteration") &&
@@ -156,31 +208,40 @@ planStorage(func::FuncOp fn, const LocalSupply &c, int64_t depth,
        code!="rows" && code!="columns" && code!="pid" && code!="active" &&
        code!="load" && code!="store" && code!="zero")) wide=false;
   });
+  auto configs = fn->getAttrOfType<ArrayAttr>("block.configs");
+  bool multiRow = false;
+  if (configs)
+    for (auto attr : configs)
+      if (auto r = dyn_cast<DictionaryAttr>(attr))
+        if (auto rows = r.getAs<IntegerAttr>("rows"))
+          multiRow |= (rows.getInt() * batch) > 1;
   wide = (wide && arithmetic != 0) || batch > 1 ||
+         (multiRow && batchableInstances(fn)) ||
          (permuted2D && !hasCollective);
   SmallVector<Footprint> phases;
   bool indexed=false;
   fn.walk([&](Operation *op) {
     indexed |= op->getName().getStringRef()=="block.indexed_tile_read" || op->getName().getStringRef()=="dsa.lookup_axis";
     if (op->getName().getStringRef() == "dsa.phase") {
-      auto f =
-          Footprint::of(op->getRegion(1).front(),c,reuse);
-      f.inputBytes =
-          Footprint::of(op->getRegion(0).front(),c)
-              .inputBytes;
+      auto f = Footprint::of(op->getRegion(1).front(), c, reuse, persistent,
+                             asyncWrite);
+      auto fetchF =
+          Footprint::of(op->getRegion(0).front(), c, false, persistent, false);
+      f.inputBytes = fetchF.inputBytes;
+      f.sharedBytes = fetchF.sharedBytes;
       phases.push_back(f);
     }
   });
   if (phases.empty() &&
       fn->getAttrOfType<StringAttr>("block.topology") == "resident")
-    phases.push_back(Footprint::of(fn.front(),c,reuse));
-  else
+    phases.push_back(
+        Footprint::of(fn.front(), c, reuse, persistent, asyncWrite));
+  else if (phases.empty())
     fn.walk([&](Operation *op) {
       if (op->getName().getStringRef() == "block.tiles")
-        phases.push_back(Footprint::of(op->getRegion(0).front(),
-                                       c,reuse));
+        phases.push_back(Footprint::of(op->getRegion(0).front(), c, reuse,
+                                       persistent, asyncWrite));
     });
-  auto configs = fn->getAttrOfType<ArrayAttr>("block.configs");
   if(indexed && fn->getAttrOfType<StringAttr>("block.topology")=="resident" &&
      phases.size()==1 && !phases.front().vectorBytes && !phases.front().collectiveBytes)
     wide=true;
@@ -204,8 +265,8 @@ planStorage(func::FuncOp fn, const LocalSupply &c, int64_t depth,
         scratchBytes =
             std::max<int64_t>(scratchBytes, 32 * effR * int64_t(sizeof(float)));
       bytes = std::max<int64_t>(
-          bytes, pitch * (depth * effR * p.inputBytes +
-                          (wide ? effR : 1) * p.vectorBytes) +
+          bytes, pitch * (depth * effR * (p.inputBytes + p.outputBytes) +
+                          (wide ? effR : 1) * (p.sharedBytes + p.vectorBytes)) +
                      scratchBytes);
     }
     if (indexed)
@@ -245,6 +306,8 @@ planStorage(func::FuncOp fn, const LocalSupply &c, int64_t depth,
                       : WalkResult::advance();
          }).wasInterrupted())
     out.set("independent_columns",b.getUnitAttr());
+  if (asyncWrite)
+    out.set("async_writeback", b.getUnitAttr());
   if(reuse)out.set("reuse_temporaries", b.getUnitAttr());
   out.set("group_temporaries",b.getBoolAttr(wide));
   out.set("persistent",b.getBoolAttr(persistent));
@@ -260,10 +323,13 @@ llvm::Expected<DictionaryAttr> plan(func::FuncOp fn, const LocalSupply &c,
                                     int64_t depth, int64_t participants,
                                     bool persistent, int64_t batch) {
   auto ordinary = planStorage(fn, c, depth, participants, persistent, false, batch);
-  if (!ordinary || !ordinary->getAs<ArrayAttr>("rows").empty())
+  if (!ordinary || ordinary->getAs<ArrayAttr>("rejected").empty())
     return ordinary;
   auto compact = planStorage(fn, c, depth, participants, persistent, true, batch);
-  if (!compact || !compact->getAs<ArrayAttr>("rows").empty())
+  if (!compact)
+    return compact;
+  if (compact->getAs<ArrayAttr>("rows").size() >
+      ordinary->getAs<ArrayAttr>("rows").size())
     return compact;
   return ordinary;
 }

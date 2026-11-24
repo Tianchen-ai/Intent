@@ -29,6 +29,7 @@ void supplyCost(Unit &u) {
           auto configs = op->getAttrOfType<ArrayAttr>("block.configs");
           unsigned ops = 0;
           unsigned summaries = 0, scans = 0, atomics=0;
+          bool hasIndexed = false;
           op->walk([&](Operation *i) {
             auto k = i->getName().stripDialect();
             ops += k == "mul" || k == "add" || k == "reduce" || k == "exp" ||
@@ -36,6 +37,7 @@ void supplyCost(Unit &u) {
             summaries += k == "summary_reduce";
             scans += k == "scan_sum";
             atomics += k == "atomic_add_at";
+            hasIndexed |= k == "indexed_tile_read";
           });
           e.timeNs.reset();
           for (auto a : d.getAs<ArrayAttr>("rows")) {
@@ -69,17 +71,26 @@ void supplyCost(Unit &u) {
               double fetch = effGroup * tileFraction * e.terms.at("fetch").value,
                      compute = tileFraction * ((effGroup * n * std::max(0.,ops-e.terms.at("native_operations").value) + 8 * merges + pred.terms["serial_prefix_adds"].value) / *vector + effGroup * e.terms.at("native_compute").value),
                      write = effGroup * tileFraction * e.terms.at("writeback").value;
-              double overlap = depth == 2 ? std::max(0., steps - 1) *
-                                                std::min(fetch, compute)
-                                          : 0.;
+              double overlapPool =
+                  d.contains("async_writeback") ? (fetch + write) : fetch;
+              double overlap =
+                  depth == 2
+                      ? std::max(0., steps - 1) *
+                            (hasIndexed && d.contains("async_writeback")
+                                 ? std::max(std::min(overlapPool, compute),
+                                            0.25 * std::min(fetch, write))
+                                 : std::min(overlapPool, compute))
+                      : 0.;
+              double waitNs =
+                  (depth == 2 || hasIndexed) ? steps * *sync : 0.;
               pred.terms["overlapped"] = {overlap, "ns"};
               pred.terms["fill"] = {fetch, "ns"};
               pred.terms["drain"] = {compute + write, "ns"};
               pred.terms["launch"] = {*launch, "ns"};
               pred.terms["first_io_excess"] = {*startup, "ns"};
-              pred.terms["wait"] = {depth == 2 ? steps * *sync : 0., "ns"};
+              pred.terms["wait"] = {waitNs, "ns"};
               pred.timeNs = *launch + (steps ? *startup : 0.) + steps * (fetch + compute + write) -
-                            overlap + (depth == 2 ? steps * *sync : 0.);
+                            overlap + waitNs;
               if(atomics)pred.timeNs=*pred.timeNs+steps*effGroup*n*atomics*(*sync);
               if(segmentWork || keys){
                 auto rate=intentdsl::quantity(ctx,"read_1","B/ns");

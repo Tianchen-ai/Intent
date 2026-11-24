@@ -74,6 +74,7 @@ LogicalResult phase(Operation *anchor, Block &source, bool stream,
   auto pending = fn->getAttrOfType<DictionaryAttr>("dsa.pending");
   bool persistent = pending.getAs<BoolAttr>("persistent").getValue();
   bool independent = pending.contains("independent_columns");
+  bool asyncWrite = !stream && pending.contains("async_writeback");
   int64_t batch =
       pending.getAs<IntegerAttr>("batch") ? pending.getAs<IntegerAttr>("batch").getInt() : 1;
   schedule(b.createBlock(&p->getRegion(2)), stream, depth, persistent,
@@ -208,7 +209,7 @@ LogicalResult phase(Operation *anchor, Block &source, bool stream,
       auto *store =
           inst(b, loc, "dsa.write_back",
                address,
-               b.getI1Type(), b.getNamedAttr("async", b.getBoolAttr(false)));
+               b.getI1Type(), b.getNamedAttr("async", b.getBoolAttr(asyncWrite)));
       completions.push_back(store->getResult(0));
     } else if (code == "yield") {
       for (auto v : op->getOperands())

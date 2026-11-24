@@ -18,8 +18,7 @@ TemporaryLayout placeTemporaries(mlir::Block &body) {
     if (!t || t.getRank()!=2 || !t.getElementType().isIntOrFloat()) continue;
     auto index=ordinal[&op],last=index;
     for(auto *use:value.getUsers()){
-      auto asynchronous=use->getAttrOfType<BoolAttr>("async");
-      last=std::max(last,use->getBlock()!=&body || (asynchronous && asynchronous.getValue())?end:ordinal[use]);
+      last=std::max(last,use->getBlock()!=&body?end:ordinal[use]);
     }
     llvm::erase_if(live,[index](const Live &slot){return slot.end<index;});
     auto size=(t.getElementTypeBitWidth()+7)/8;

@@ -642,10 +642,16 @@ TerminalPrinter rowPrinter() {
 
   enter("bangc_src.bf16_tile", [](Operation &op, PrintContext &c) {
     auto mode = op.getAttrOfType<StringAttr>("mode").getValue();
+    unsigned n = op.getNumOperands();
     if (mode == "widen")
       c.line("widen_bf16_tile(" + c.name(op.getOperand(0)) + ", " +
-             c.name(op.getOperand(1)) + ", (int)(" + c.name(op.getOperand(3)) +
-             "));");
+             c.name(op.getOperand(1)) + ", (int)(" +
+             c.name(op.getOperand(n - 1)) + "));");
+    else if (n == 5)
+      c.line("narrow_bf16_tile_fast(" + c.name(op.getOperand(0)) + ", " +
+             c.name(op.getOperand(1)) + ", (unsigned short *)" +
+             c.name(op.getOperand(2)) + ", (int)(" + c.name(op.getOperand(3)) +
+             "), (int)(" + c.name(op.getOperand(4)) + "));");
     else
       c.line("narrow_bf16_tile(" + c.name(op.getOperand(0)) + ", " +
              c.name(op.getOperand(1)) + ", (int)(" + c.name(op.getOperand(2)) +

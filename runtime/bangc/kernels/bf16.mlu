@@ -23,6 +23,20 @@ __mlu_func__ void widen_bf16_tile(float *dst, const unsigned short *src,
   __bang_int162int32((int *)dst, (const short *)src, lanes, 0, 16);
 }
 
+__mlu_func__ void narrow_bf16_tile_fast(unsigned short *dst, const float *src,
+                                        unsigned short *scratch, int live,
+                                        int lanes) {
+  __bang_float2bfloat16_rn((bfloat16_t *)dst, src, lanes);
+  __bang_band_scalar((short *)scratch, (const short *)dst, (short)0x7fff,
+                     lanes);
+  __bang_ge_scalar((short *)scratch, (const short *)scratch, (short)0x7f7f,
+                   lanes);
+  if (__bang_count(scratch, live)) {
+    for (int i = 0; i < live; ++i)
+      dst[i] = round_bf16(src[i]);
+  }
+}
+
 __mlu_func__ void narrow_bf16_tile(unsigned short *dst, const float *src,
                                    int live, int lanes) {
   __bang_float2bfloat16_rn((bfloat16_t *)dst, src, lanes);
@@ -45,5 +59,5 @@ __mlu_func__ void bf16_product_tile(unsigned short *dst,
   widen_bf16_tile(a, lhs, lanes);
   widen_bf16_tile(b, rhs, lanes);
   __bang_mul(a, a, b, lanes);
-  narrow_bf16_tile(dst, a, live, lanes);
+  narrow_bf16_tile_fast(dst, a, (unsigned short *)b, live, lanes);
 }

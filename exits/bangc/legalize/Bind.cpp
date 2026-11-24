@@ -89,7 +89,8 @@ StringRef primitive(Operation *op, int64_t depth) {
   if (n == "dsa.copy_in") {
     if(op->getNumOperands()==4 && op->getOperand(2).getDefiningOp()->getName().getStringRef()=="dsa.lookup_axis")
       return "indexed_dma";
-    if(op->getParentOfType<func::FuncOp>()->hasAttr("kir.owner_axis"))return "segmented_slab_read";
+    if(op->getParentOfType<func::FuncOp>()->hasAttr("kir.owner_axis"))
+      return depth == 2 ? "segmented_slab_read_async" : "segmented_slab_read";
     // The grouped transfer increments the view's penultimate stride. Prove
     // that it is precisely the fastest logical row axis; earlier coordinates
     // are invariant until that axis wraps. The emitted guard excludes wraps.
@@ -164,37 +165,59 @@ LogicalResult offsets(func::FuncOp f, bool install) {
     if (p->getName().getStringRef() != "dsa.phase")
       return WalkResult::advance();
     int64_t grouped = 0, local = 0;
-    auto attach = [&](Operation &o, int64_t g, int64_t l) {
+    auto attach = [&](Operation &o, StringRef attr, int64_t g, int64_t l) {
       auto address = b.getDenseI64ArrayAttr({g, l});
       if (install)
-        o.setAttr("bangc.offset", address);
-      return o.getAttr("bangc.offset") == address;
+        o.setAttr(attr, address);
+      return o.getAttr(attr) == address;
     };
+    auto &compute = p->getRegion(1).front();
     for (auto &o : p->getRegion(0).front().without_terminator()) {
-      if (o.getName().getStringRef() == "dsa.window" || o.getName().getStringRef()=="dsa.member_axis" || o.getName().getStringRef()=="dsa.slab_axis" || o.getName().getStringRef()=="dsa.lookup_axis")
+      if (o.getName().getStringRef() == "dsa.window" || o.getName().getStringRef()=="dsa.member_axis" || o.getName().getStringRef()=="dsa.slab_axis" || o.getName().getStringRef()=="dsa.lookup_axis" || o.hasAttr("dsa.shared"))
         continue;
-      if (o.getName().getStringRef() != "dsa.copy_in" || !attach(o, grouped, 0))
+      if (o.getName().getStringRef() != "dsa.copy_in" || !attach(o, "bangc.offset", grouped, 0))
         return WalkResult::interrupt();
       grouped +=
           cast<MemRefType>(o.getOperand(0).getType()).getElementTypeBitWidth() /
           8;
     }
-    auto &compute = p->getRegion(1).front();
+    for (auto &o : compute) {
+      if (o.getName().getStringRef() != "dsa.write_back")
+        continue;
+      auto asyncAttr = o.getAttrOfType<BoolAttr>("async");
+      if (!asyncAttr || !asyncAttr.getValue())
+        continue;
+      if (!attach(o, "bangc.write_offset", grouped, 0))
+        return WalkResult::interrupt();
+      grouped +=
+          cast<MemRefType>(o.getOperand(0).getType()).getElementTypeBitWidth() /
+          8;
+    }
+    for (auto &o : p->getRegion(0).front().without_terminator()) {
+      if (o.getName().getStringRef() != "dsa.copy_in" || !o.hasAttr("dsa.shared"))
+        continue;
+      if (!attach(o, "bangc.offset", grouped, local))
+        return WalkResult::interrupt();
+      local +=
+          cast<MemRefType>(o.getOperand(0).getType()).getElementTypeBitWidth() /
+          8;
+    }
     bool reuse=f->getAttrOfType<DictionaryAttr>("dsa.layout").contains("reuse_temporaries");
     auto temporaries=reuse?intentdsl::dsa::placeTemporaries(compute):intentdsl::dsa::TemporaryLayout{};
+    int64_t tempBase = local;
     for(auto &o:compute){
       if(o.getNumResults()!=1 || o.getName().getStringRef()=="dsa.await")continue;
       auto t=dyn_cast<RankedTensorType>(o.getResult(0).getType());
       if(!t || t.getRank()!=2)continue;
       if (reuse && !temporaries.offsets.count(&o))return WalkResult::interrupt();
-      if (!attach(o, grouped, reuse?temporaries.offsets.lookup(&o):local))
+      if (!attach(o, "bangc.offset", grouped, reuse ? tempBase + temporaries.offsets.lookup(&o) : local))
         return WalkResult::interrupt();
       local+=(t.getElementTypeBitWidth()+7)/8;
     }
-    if(reuse)local=temporaries.peak;
+    if(reuse)local = tempBase + temporaries.peak;
     for (auto &o : compute)
       if (o.getName().getStringRef() == "dsa.reduce" &&
-          !attach(o, grouped, local))
+          !attach(o, "bangc.offset", grouped, local))
         return WalkResult::interrupt();
     bool wideGroup =
         f->getAttrOfType<DictionaryAttr>("dsa.layout")
@@ -213,6 +236,8 @@ LogicalResult offsets(func::FuncOp f, bool install) {
           return WalkResult::interrupt();
       }
       if ((code == "block.mul" && resTy && resTy.getRank() == 2 &&
+           resTy.getElementType().isBF16()) ||
+          (code == "block.cast" && resTy && resTy.getRank() == 2 &&
            resTy.getElementType().isBF16()) ||
           (code == "block.div" && resTy && resTy.getRank() == 2 &&
            resTy.getElementType().isF32() && !narrowedQuotient(&o)) ||
@@ -322,7 +347,7 @@ struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
       if(p=="indexed_dma")o->setAttr("bangc.indexed_loop",indexedLoop(b,depth,supply.indexScratchPerMember,supply.alignment));
       if(auto slot=emptyCountSlot(o))o->setAttr("bangc.empty_count_slot",slot);
       if(p.starts_with("segmented_slab_"))
-        o->setAttr("bangc.slab_loop",slabLoop(o,p.ends_with("_read"),facts));
+        o->setAttr("bangc.slab_loop",slabLoop(o,!p.starts_with("segmented_slab_write"),facts));
       if (p == "certified_half_quotient")
         o->setAttr("bangc.scratch",
                    availableCollective(o->getOperand(0).getDefiningOp())
@@ -451,7 +476,7 @@ LogicalResult verify(ModuleOp m, const TargetProfile &p, unsigned stage) {
             return o->emitError("invalid index prefetch, member copies or completion"), WalkResult::interrupt();
           DictionaryAttr loop;
           if(k.starts_with("segmented_slab_"))
-            loop=slabLoop(o,k.ends_with("_read"),*p.services.get<intentdsl::CallFacts>());
+            loop=slabLoop(o,!k.starts_with("segmented_slab_write"),*p.services.get<intentdsl::CallFacts>());
           if(o->getAttr("bangc.slab_loop")!=loop){
             o->emitError("segmented transfer loop differs from the projected strides");
             return WalkResult::interrupt();

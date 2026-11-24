@@ -8,6 +8,7 @@ llvm::Expected<mlir::DictionaryAttr> plan(mlir::func::FuncOp,
                                           int64_t batch = 1);
 bool reusableInput(mlir::func::FuncOp);
 bool batchableInstances(mlir::func::FuncOp);
+bool canAsyncWriteBack(mlir::func::FuncOp, int64_t depth);
 llvm::Error stageTransfers(mlir::Operation *, mlir::Attribute,
                            const compilerinfra::TargetProfile &,
                            mlir::RewriterBase &);

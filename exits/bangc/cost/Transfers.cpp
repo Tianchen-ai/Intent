@@ -35,11 +35,14 @@ void dmaCost(Unit &u) {
           double in = 0, out = 0, r = 0, w = 0, scatter = 0;
           op->walk([&](Operation *i) {
             auto k = i->getName().stripDialect();
-            if (k != "load" && k != "store")
+            if (k != "load" && k != "store" && k != "indexed_tile_read")
               return;
             auto view = cast<MemRefType>(i->getOperand(0).getType());
             double bytes = n * view.getElementTypeBitWidth() / 8;
-            if (k == "load") {
+            if (k == "indexed_tile_read") {
+              in += bytes + 8.;
+              r += 1.;
+            } else if (k == "load") {
               double frequency = 1.;
               if (choice.getAs<BoolAttr>("persistent").getValue() &&
                   view.getRank() == 1) {

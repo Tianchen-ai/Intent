@@ -121,6 +121,8 @@ struct RowLowerer {
   llvm::DenseMap<int32_t, Value> constI32Map;
   llvm::DenseMap<std::pair<Value, int64_t>, Value> dimCache;
   llvm::DenseMap<std::pair<Value, int64_t>, Value> strideCache;
+  llvm::DenseMap<std::tuple<Block *, Value, Value, int64_t>, Value>
+      memberCoordCache;
   Value storage;
   Value symM, symN, symGrid, symTaskId, symTaskDim, symR, symB, symEB, symW,
       symP, symBytes;
@@ -536,11 +538,17 @@ struct RowLowerer {
       } else if (def->getName().getStringRef() == "dsa.member_axis") {
         Value dom = mapped.lookup(def->getOperand(1));
         int64_t k = def->getAttrOfType<IntegerAttr>("axis").getInt();
-        int64_t rank = cast<MemRefType>(dom.getType()).getRank();
-        Value q = rowIdx;
-        for (int64_t d = k + 1; d < rank - 1; ++d)
-          q = b.create<arith::DivSIOp>(loc, q, viewDim(dom, d));
-        q = b.create<arith::RemSIOp>(loc, q, viewDim(dom, k));
+        auto cacheKey = std::make_tuple(b.getInsertionBlock(), dom, rowIdx, k);
+        Value q = memberCoordCache.lookup(cacheKey);
+        if (!q) {
+          int64_t rank = cast<MemRefType>(dom.getType()).getRank();
+          q = rowIdx;
+          for (int64_t d = k + 1; d < rank - 1; ++d)
+            q = b.create<arith::DivSIOp>(loc, q, viewDim(dom, d));
+          if (k > 0)
+            q = b.create<arith::RemSIOp>(loc, q, viewDim(dom, k));
+          memberCoordCache[cacheKey] = q;
+        }
         coords.push_back(q);
         strides.push_back(st);
       } else if (res.getResultNumber() == 0) {
@@ -565,12 +573,23 @@ struct RowLowerer {
       if (coord->getName().getStringRef() == "dsa.slab_axis") {
         Value dom = mapped.lookup(coord->getOperand(1));
         int64_t axis = coord->getAttrOfType<IntegerAttr>("axis").getInt();
-        int64_t rank = cast<MemRefType>(dom.getType()).getRank();
-        idx = colPlusK;
-        for (int64_t dim = axis + 1; dim < rank; ++dim)
-          if (dim != owner)
-            idx = b.create<arith::DivSIOp>(loc, idx, viewDim(dom, dim));
-        idx = b.create<arith::RemSIOp>(loc, idx, viewDim(dom, axis));
+        auto cacheKey =
+            std::make_tuple(b.getInsertionBlock(), dom, colPlusK, axis);
+        idx = memberCoordCache.lookup(cacheKey);
+        if (!idx) {
+          int64_t rank = cast<MemRefType>(dom.getType()).getRank();
+          idx = colPlusK;
+          for (int64_t dim = axis + 1; dim < rank; ++dim)
+            if (dim != owner)
+              idx = b.create<arith::DivSIOp>(loc, idx, viewDim(dom, dim));
+          bool isOutermostNonOwner = true;
+          for (int64_t dim = 0; dim < axis; ++dim)
+            if (dim != owner)
+              isOutermostNonOwner = false;
+          if (!isOutermostNonOwner)
+            idx = b.create<arith::RemSIOp>(loc, idx, viewDim(dom, axis));
+          memberCoordCache[cacheKey] = idx;
+        }
       }
       coords.push_back(idx);
       strides.push_back(viewStride(view, pos));
@@ -579,7 +598,8 @@ struct RowLowerer {
   }
 
   void emitSlabTransfer(Operation &op, unsigned first, Value view, Value local,
-                        Value rowIdx, Value col, Value live, bool load) {
+                        Value rowIdx, Value col, Value live, bool load,
+                        bool async = false) {
     auto loop = op.getAttrOfType<DictionaryAttr>("bangc.slab_loop");
     auto getIdx = [&](StringRef key) {
       return loop.getAs<IntegerAttr>(key).getInt();
@@ -638,7 +658,7 @@ struct RowLowerer {
         auto emitOne = [&]() {
           if (opcode == "contiguous") {
             if (load)
-              memcpy1D(bufK, global, run, "GDRAM2NRAM", false);
+              memcpy1D(bufK, global, run, "GDRAM2NRAM", async);
             else
               memcpy1D(global, bufK, run, "NRAM2GDRAM", false);
           } else if (opcode == "broadcast") {
@@ -691,7 +711,7 @@ struct RowLowerer {
               Value seg = b.create<arith::SubIOp>(loc, cnt, cI64(1));
               if (load)
                 memcpy2D(bufK, global, run, run, outerStride, seg, "GDRAM2NRAM",
-                         false);
+                         async);
               else
                 memcpy2D(global, bufK, run, outerStride, run, seg, "NRAM2GDRAM",
                          false);
@@ -825,9 +845,15 @@ struct RowLowerer {
                 Value raw = b.create<arith::AddIOp>(
                     loc, b.create<arith::MulIOp>(loc, symEB, cI64(perMember)),
                     cI64(align - 1));
-                Value aligned = b.create<arith::MulIOp>(
-                    loc, b.create<arith::DivSIOp>(loc, raw, cI64(align)),
-                    cI64(align));
+                Value aligned =
+                    llvm::isPowerOf2_64(align)
+                        ? b.create<arith::AndIOp>(loc, raw, cI64(-align))
+                              .getResult()
+                        : b.create<arith::MulIOp>(
+                               loc,
+                               b.create<arith::DivSIOp>(loc, raw, cI64(align)),
+                               cI64(align))
+                              .getResult();
                 Value idsOff = b.create<arith::SubIOp>(loc, symBytes, aligned);
                 Value idsBuf = nramAt(keyElem, idsOff);
                 for (auto stepAttr : idxLoop.getAs<ArrayAttr>("batch")) {
@@ -854,13 +880,14 @@ struct RowLowerer {
           continue;
         }
 
-        if (prim == "segmented_slab_read") {
+        if (prim.starts_with("segmented_slab_read")) {
           forLoop(cI64(0), count, cI64(1), [&](Value j) {
             Value rIdx = b.create<arith::AddIOp>(loc, row0, j);
             Value slotRow = b.create<arith::AddIOp>(
                 loc, b.create<arith::MulIOp>(loc, slot, symEB), j);
             Value dPtr = makeAddr(dstBase, {slotRow}, {symP}, 1);
-            emitSlabTransfer(op, 2, src, dPtr, rIdx, col, live, true);
+            emitSlabTransfer(op, 2, src, dPtr, rIdx, col, live, true,
+                             async);
           });
           continue;
         }
@@ -881,8 +908,9 @@ struct RowLowerer {
           Value c4 = b.create<arith::CmpIOp>(
               loc, arith::CmpIPredicate::sle, outer,
               cI64(2147483647LL / std::max<int64_t>(1, elemBytes)));
-          Value wrap = b.create<arith::AddIOp>(
-              loc, b.create<arith::RemSIOp>(loc, row0, dim), count);
+          Value baseCoord =
+              axis == 0 ? row0 : b.create<arith::RemSIOp>(loc, row0, dim);
+          Value wrap = b.create<arith::AddIOp>(loc, baseCoord, count);
           Value c5 = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sle,
                                              wrap, dim);
           Value canGroup = b.create<arith::AndIOp>(
@@ -924,7 +952,8 @@ struct RowLowerer {
   LogicalResult emitCompute(Block &fetch, Block &body, Operation *phaseOp,
                             Value iterPos, Value slot, Value outerGroup,
                             Value carrySlot, bool carryIsMoment, bool packed,
-                            const llvm::DenseMap<Operation *, Value> &copyBuffers) {
+                            const llvm::DenseMap<Operation *, Value> &copyBuffers,
+                            const llvm::DenseMap<Operation *, Value> &writeBuffers) {
     auto [row0, col] = phaseCoords(iterPos, outerGroup);
     Value remN = b.create<arith::SubIOp>(loc, symN, col);
     Value live = b.create<arith::MinSIOp>(
@@ -934,11 +963,8 @@ struct RowLowerer {
         loc, b.create<arith::MaxSIOp>(loc, remM, cI64(0)), symEB);
 
     auto emitBodyMembers = [&]() -> LogicalResult {
-      Value rowLanes = b.create<arith::MulIOp>(
-          loc,
-          b.create<arith::DivSIOp>(
-              loc, b.create<arith::AddIOp>(loc, live, cI64(63)), cI64(64)),
-          cI64(64));
+      Value rowLanes = b.create<arith::AndIOp>(
+          loc, b.create<arith::AddIOp>(loc, live, cI64(63)), cI64(-64));
       bool hasTransposeStore = false, needsFullPitch = false;
       for (auto &inst : body) {
         auto pAttr = inst.getAttrOfType<StringAttr>("bangc.primitive");
@@ -1024,6 +1050,188 @@ struct RowLowerer {
                                : carrySlot;
           localMap[body.getArgument(argIdx)] = curCarry;
         }
+
+        llvm::DenseMap<Operation *, Value> directWriteDst;
+        llvm::DenseMap<Operation *, Value> writeStageSlots;
+        for (auto &inst : body) {
+          if (inst.getName().getStringRef() != "dsa.write_back")
+            continue;
+          auto asyncAttr = inst.getAttrOfType<BoolAttr>("async");
+          if (!asyncAttr || !asyncAttr.getValue())
+            continue;
+          Value wBase = writeBuffers.lookup(&inst);
+          Value slotRow = b.create<arith::AddIOp>(
+              loc, b.create<arith::MulIOp>(loc, slot, symEB), j);
+          Value stagePtr = makeAddr(wBase, {slotRow}, {symP}, 1);
+          writeStageSlots[&inst] = stagePtr;
+          StringRef wPrim =
+              inst.getAttrOfType<StringAttr>("bangc.primitive").getValue();
+          if (wPrim.starts_with("transpose_store"))
+            continue;
+          Operation *srcDef = inst.getOperand(1).getDefiningOp();
+          if (srcDef && srcDef->getBlock() == &body &&
+              srcDef->getName().stripDialect() != "await" &&
+              rankOf(srcDef->getResult(0).getType()) == 2 &&
+              !directWriteDst.count(srcDef)) {
+            directWriteDst[srcDef] = stagePtr;
+          }
+        }
+
+        struct DeferredWrite {
+          Operation *inst;
+          Value ptr;
+          Value src;
+        };
+        SmallVector<DeferredWrite> deferredAsyncWrites;
+        auto emitWriteBack = [&](Operation &inst, Value ptr, Value src,
+                                 bool async) {
+          StringRef prim =
+              inst.getAttrOfType<StringAttr>("bangc.primitive").getValue();
+          int64_t elemBytes = llvm::divideCeil(
+              cast<MemRefType>(ptr.getType()).getElementTypeBitWidth(), 8u);
+          if (prim == "segmented_slab_write") {
+            Value rIdx = b.create<arith::AddIOp>(loc, row0, j);
+            emitSlabTransfer(inst, 3, ptr, src, rIdx, col, live, false);
+            return;
+          }
+          auto emitMemberStores = [&]() {
+            forLoop(cI64(0), members, cI64(1), [&](Value h) {
+              Value rIdx = b.create<arith::AddIOp>(
+                  loc, row0, b.create<arith::AddIOp>(loc, j, h));
+              Value colStride;
+              Value outPtr = buildRowPtr(inst, 3, ptr, rIdx, col, colStride);
+              Value vPtr = makeAddr(src, {h}, {symP}, 1);
+              Value contig = b.create<arith::CmpIOp>(
+                  loc, arith::CmpIPredicate::eq, colStride, cI64(1));
+              ifThenElse(
+                  contig,
+                  [&]() { memcpy1D(outPtr, vPtr, live, "NRAM2GDRAM", async); },
+                  [&]() {
+                    forLoop(cI64(0), live, cI64(1), [&](Value k) {
+                      Value off = b.create<arith::MulIOp>(loc, k, colStride);
+                      storeAt(outPtr, off, loadAt(vPtr, k));
+                    });
+                  });
+            });
+          };
+          if (packed && multiMember &&
+              (prim == "transpose_store" || prim == "transpose_store_async")) {
+            Type elemTy = cast<MemRefType>(ptr.getType()).getElementType();
+            unsigned bits = elemTy.getIntOrFloatBitWidth();
+            if (bits == 16 || bits == 32) {
+              Value outS0 = viewStride(ptr, 0), outS1 = viewStride(ptr, 1);
+              Value rIdx0 = b.create<arith::AddIOp>(loc, row0, j);
+              Value outBase = makeAddr(ptr, {col, rIdx0}, {outS0, outS1}, 0);
+              Value ebAligned = b.create<arith::CmpIOp>(
+                  loc, arith::CmpIPredicate::eq,
+                  b.create<arith::AndIOp>(loc, symEB, cI64(31)), cI64(0));
+              Value hasRows = b.create<arith::CmpIOp>(
+                  loc, arith::CmpIPredicate::sgt, members, cI64(0));
+              Value hasCols = b.create<arith::CmpIOp>(
+                  loc, arith::CmpIPredicate::sgt, live, cI64(0));
+              Value unitInner = b.create<arith::CmpIOp>(
+                  loc, arith::CmpIPredicate::eq, outS1, cI64(1));
+              Value validPitch = b.create<arith::AndIOp>(
+                  loc,
+                  b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge, outS0,
+                                          members),
+                  b.create<arith::CmpIOp>(
+                      loc, arith::CmpIPredicate::sle, outS0,
+                      cI64(2147483647LL / std::max<int64_t>(1, elemBytes))));
+              Value canTrans = b.create<arith::AndIOp>(
+                  loc, ebAligned,
+                  b.create<arith::AndIOp>(
+                      loc, hasRows,
+                      b.create<arith::AndIOp>(
+                          loc, hasCols,
+                          b.create<arith::AndIOp>(loc, unitInner, validPitch))));
+              Value transScratch =
+                  async ? writeStageSlots.lookup(&inst)
+                        : nramAt(elemTy,
+                                 phaseByteOffset(
+                                     inst.getAttrOfType<DenseI64ArrayAttr>(
+                                         "bangc.scratch")));
+              ifThenElse(
+                  canTrans,
+                  [&]() {
+                    makeOp("tile_transpose", {transScratch, src, symEB, symP},
+                           {}, {}, "nram-transpose");
+                    if (async)
+                      sync("compute");
+                    Value oneCol = b.create<arith::CmpIOp>(
+                        loc, arith::CmpIPredicate::eq, live, cI64(1));
+                    ifThenElse(
+                        oneCol,
+                        [&]() {
+                          memcpy1D(outBase, transScratch, members, "NRAM2GDRAM",
+                                   async);
+                        },
+                        [&]() {
+                          Value seg =
+                              b.create<arith::SubIOp>(loc, live, cI64(1));
+                          memcpy2D(outBase, transScratch, members, outS0, symEB,
+                                   seg, "NRAM2GDRAM", async);
+                        });
+                  },
+                  emitMemberStores);
+              return;
+            }
+          }
+          if (packed && multiMember &&
+              (prim == "group_store" || prim == "group_store_async")) {
+            int64_t axis = cast<MemRefType>(ptr.getType()).getRank() - 2;
+            Value stride = viewStride(ptr, axis), dim = viewDim(ptr, axis);
+            Value rIdx0 = b.create<arith::AddIOp>(loc, row0, j);
+            Value colStride;
+            Value outBase = buildRowPtr(inst, 3, ptr, rIdx0, col, colStride);
+            Value c1 = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt,
+                                               members, cI64(1));
+            Value c2 = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                               colStride, cI64(1));
+            Value c3 = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge,
+                                               stride, live);
+            Value c4 = b.create<arith::CmpIOp>(
+                loc, arith::CmpIPredicate::sle, stride,
+                cI64(2147483647LL / std::max<int64_t>(1, elemBytes)));
+            Value baseCoord =
+                axis == 0 ? rIdx0 : b.create<arith::RemSIOp>(loc, rIdx0, dim);
+            Value wrap = b.create<arith::AddIOp>(loc, baseCoord, members);
+            Value c5 = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sle,
+                                               wrap, dim);
+            Value canGroup = b.create<arith::AndIOp>(
+                loc, c1,
+                b.create<arith::AndIOp>(
+                    loc, c2,
+                    b.create<arith::AndIOp>(
+                        loc, c3, b.create<arith::AndIOp>(loc, c4, c5))));
+            ifThenElse(
+                canGroup,
+                [&]() {
+                  Value flat = b.create<arith::AndIOp>(
+                      loc,
+                      b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                              stride, live),
+                      b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                              live, symP));
+                  ifThenElse(
+                      flat,
+                      [&]() {
+                        Value total =
+                            b.create<arith::MulIOp>(loc, members, live);
+                        memcpy1D(outBase, src, total, "NRAM2GDRAM", async);
+                      },
+                      [&]() {
+                        Value seg =
+                            b.create<arith::SubIOp>(loc, members, cI64(1));
+                        memcpy2D(outBase, src, live, stride, symP, seg,
+                                 "NRAM2GDRAM", async);
+                      });
+                },
+                emitMemberStores);
+            return;
+          }
+          emitMemberStores();
+        };
 
         for (auto &inst : body) {
           if (failed(bodyStatus))
@@ -1205,165 +1413,22 @@ struct RowLowerer {
             continue;
           }
           if (n == "drain") {
-            if (llvm::any_of(inst.getOperands(), [](Value v) {
-                  auto mode =
-                      v.getDefiningOp()->getAttrOfType<BoolAttr>("async");
-                  return mode && mode.getValue();
-                }))
-              sync("all");
+            if (!deferredAsyncWrites.empty()) {
+              sync("compute");
+              for (auto &dw : deferredAsyncWrites)
+                emitWriteBack(*dw.inst, dw.ptr, dw.src, true);
+              deferredAsyncWrites.clear();
+            }
             continue;
           }
           if (n == "write_back") {
             Value ptr = getVal(inst.getOperand(0));
             Value src = getVal(inst.getOperand(1));
             bool async = inst.getAttrOfType<BoolAttr>("async").getValue();
-            int64_t elemBytes = llvm::divideCeil(
-                cast<MemRefType>(ptr.getType()).getElementTypeBitWidth(), 8u);
-            if (prim == "segmented_slab_write") {
-              Value rIdx = b.create<arith::AddIOp>(loc, row0, j);
-              emitSlabTransfer(inst, 3, ptr, src, rIdx, col, live, false);
-              continue;
-            }
-            auto emitMemberStores = [&]() {
-              forLoop(cI64(0), members, cI64(1), [&](Value h) {
-                Value rIdx = b.create<arith::AddIOp>(
-                    loc, row0, b.create<arith::AddIOp>(loc, j, h));
-                Value colStride;
-                Value outPtr =
-                    buildRowPtr(inst, 3, ptr, rIdx, col, colStride);
-                Value vPtr = makeAddr(src, {h}, {symP}, 1);
-                Value contig = b.create<arith::CmpIOp>(
-                    loc, arith::CmpIPredicate::eq, colStride, cI64(1));
-                ifThenElse(
-                    contig,
-                    [&]() {
-                      memcpy1D(outPtr, vPtr, live, "NRAM2GDRAM", async);
-                    },
-                    [&]() {
-                      forLoop(cI64(0), live, cI64(1), [&](Value k) {
-                        Value off =
-                            b.create<arith::MulIOp>(loc, k, colStride);
-                        storeAt(outPtr, off, loadAt(vPtr, k));
-                      });
-                    });
-              });
-            };
-            if (packed && multiMember &&
-                (prim == "transpose_store" ||
-                 prim == "transpose_store_async")) {
-              Type elemTy = cast<MemRefType>(ptr.getType()).getElementType();
-              unsigned bits = elemTy.getIntOrFloatBitWidth();
-              if (bits == 16 || bits == 32) {
-                Value outS0 = viewStride(ptr, 0), outS1 = viewStride(ptr, 1);
-                Value rIdx0 = b.create<arith::AddIOp>(loc, row0, j);
-                Value outBase = makeAddr(ptr, {col, rIdx0}, {outS0, outS1}, 0);
-                Value ebAligned = b.create<arith::CmpIOp>(
-                    loc, arith::CmpIPredicate::eq,
-                    b.create<arith::RemSIOp>(loc, symEB, cI64(32)), cI64(0));
-                Value hasRows = b.create<arith::CmpIOp>(
-                    loc, arith::CmpIPredicate::sgt, members, cI64(0));
-                Value hasCols = b.create<arith::CmpIOp>(
-                    loc, arith::CmpIPredicate::sgt, live, cI64(0));
-                Value unitInner = b.create<arith::CmpIOp>(
-                    loc, arith::CmpIPredicate::eq, outS1, cI64(1));
-                Value validPitch = b.create<arith::AndIOp>(
-                    loc,
-                    b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge,
-                                            outS0, members),
-                    b.create<arith::CmpIOp>(
-                        loc, arith::CmpIPredicate::sle, outS0,
-                        cI64(2147483647LL / std::max<int64_t>(1, elemBytes))));
-                Value canTrans = b.create<arith::AndIOp>(
-                    loc, ebAligned,
-                    b.create<arith::AndIOp>(
-                        loc, hasRows,
-                        b.create<arith::AndIOp>(
-                            loc, hasCols,
-                            b.create<arith::AndIOp>(loc, unitInner,
-                                                    validPitch))));
-                Value transScratch = nramAt(
-                    elemTy,
-                    phaseByteOffset(inst.getAttrOfType<DenseI64ArrayAttr>(
-                        "bangc.scratch")));
-                ifThenElse(
-                    canTrans,
-                    [&]() {
-                      makeOp("tile_transpose",
-                             {transScratch, src, symEB, symP}, {}, {},
-                             "nram-transpose");
-                      Value oneCol = b.create<arith::CmpIOp>(
-                          loc, arith::CmpIPredicate::eq, live, cI64(1));
-                      ifThenElse(
-                          oneCol,
-                          [&]() {
-                            memcpy1D(outBase, transScratch, members,
-                                     "NRAM2GDRAM", async);
-                          },
-                          [&]() {
-                            Value seg =
-                                b.create<arith::SubIOp>(loc, live, cI64(1));
-                            memcpy2D(outBase, transScratch, members, outS0,
-                                     symEB, seg, "NRAM2GDRAM", async);
-                          });
-                    },
-                    emitMemberStores);
-                continue;
-              }
-            }
-            if (packed && multiMember &&
-                (prim == "group_store" || prim == "group_store_async")) {
-              int64_t axis = cast<MemRefType>(ptr.getType()).getRank() - 2;
-              Value stride = viewStride(ptr, axis), dim = viewDim(ptr, axis);
-              Value rIdx0 = b.create<arith::AddIOp>(loc, row0, j);
-              Value colStride;
-              Value outBase =
-                  buildRowPtr(inst, 3, ptr, rIdx0, col, colStride);
-              Value c1 = b.create<arith::CmpIOp>(
-                  loc, arith::CmpIPredicate::sgt, members, cI64(1));
-              Value c2 = b.create<arith::CmpIOp>(
-                  loc, arith::CmpIPredicate::eq, colStride, cI64(1));
-              Value c3 = b.create<arith::CmpIOp>(
-                  loc, arith::CmpIPredicate::sge, stride, live);
-              Value c4 = b.create<arith::CmpIOp>(
-                  loc, arith::CmpIPredicate::sle, stride,
-                  cI64(2147483647LL / std::max<int64_t>(1, elemBytes)));
-              Value wrap = b.create<arith::AddIOp>(
-                  loc, b.create<arith::RemSIOp>(loc, rIdx0, dim), members);
-              Value c5 = b.create<arith::CmpIOp>(
-                  loc, arith::CmpIPredicate::sle, wrap, dim);
-              Value canGroup = b.create<arith::AndIOp>(
-                  loc, c1,
-                  b.create<arith::AndIOp>(
-                      loc, c2,
-                      b.create<arith::AndIOp>(
-                          loc, c3, b.create<arith::AndIOp>(loc, c4, c5))));
-              ifThenElse(
-                  canGroup,
-                  [&]() {
-                    Value flat = b.create<arith::AndIOp>(
-                        loc,
-                        b.create<arith::CmpIOp>(
-                            loc, arith::CmpIPredicate::eq, stride, live),
-                        b.create<arith::CmpIOp>(
-                            loc, arith::CmpIPredicate::eq, live, symP));
-                    ifThenElse(
-                        flat,
-                        [&]() {
-                          Value total =
-                              b.create<arith::MulIOp>(loc, members, live);
-                          memcpy1D(outBase, src, total, "NRAM2GDRAM", async);
-                        },
-                        [&]() {
-                          Value seg =
-                              b.create<arith::SubIOp>(loc, members, cI64(1));
-                          memcpy2D(outBase, src, live, stride, symP, seg,
-                                   "NRAM2GDRAM", async);
-                        });
-                  },
-                  emitMemberStores);
-              continue;
-            }
-            emitMemberStores();
+            if (async)
+              deferredAsyncWrites.push_back({&inst, ptr, src});
+            else
+              emitWriteBack(inst, ptr, src, false);
             continue;
           }
 
@@ -1432,10 +1497,13 @@ struct RowLowerer {
           int resRank = rankOf(resVal.getType());
           Type dstElem = elemOf(resVal.getType());
           if (resRank == 2) {
-            Value dst = nramAt(
-                dstElem,
-                phaseByteOffset(
-                    inst.getAttrOfType<DenseI64ArrayAttr>("bangc.offset")));
+            Value dst =
+                directWriteDst.count(&inst)
+                    ? directWriteDst.lookup(&inst)
+                    : nramAt(dstElem,
+                             phaseByteOffset(
+                                 inst.getAttrOfType<DenseI64ArrayAttr>(
+                                     "bangc.offset")));
             localMap[resVal] = dst;
 
             if (prim == "quotient_for_narrow")
@@ -1776,11 +1844,27 @@ struct RowLowerer {
 
             if ((prim == "bf16_round" || prim == "bf16_widen") &&
                 rankOf(inst.getOperand(0).getType()) == 2) {
-              StringRef mode = prim == "bf16_round" ? "narrow" : "widen";
-              makeOp("bf16_tile",
-                     {dst, getVal(inst.getOperand(0)), live, lanes}, {},
-                     {b.getNamedAttr("mode", b.getStringAttr(mode))},
-                     "bf16-tile-convert");
+              if (prim == "bf16_round") {
+                Value scratch = nramAt(
+                    b.getBF16Type(),
+                    phaseByteOffset(
+                        inst.getAttrOfType<DenseI64ArrayAttr>("bangc.scratch")));
+                Value oneRow = b.create<arith::CmpIOp>(
+                    loc, arith::CmpIPredicate::eq, members, cI64(1));
+                Value activeElems = b.create<arith::SelectOp>(
+                    loc, oneRow, live,
+                    b.create<arith::MulIOp>(loc, members, symP));
+                makeOp("bf16_tile",
+                       {dst, getVal(inst.getOperand(0)), scratch, activeElems,
+                        lanes},
+                       {}, {b.getNamedAttr("mode", b.getStringAttr("narrow"))},
+                       "bf16-tile-convert");
+              } else {
+                makeOp("bf16_tile",
+                       {dst, getVal(inst.getOperand(0)), live, lanes}, {},
+                       {b.getNamedAttr("mode", b.getStringAttr("widen"))},
+                       "bf16-tile-convert");
+              }
               continue;
             }
 
@@ -2121,6 +2205,21 @@ struct RowLowerer {
       copyBuffers[&copy] = buf;
     }
 
+    bool phaseHasAsyncWrite = false;
+    llvm::DenseMap<Operation *, Value> writeBuffers;
+    for (auto &inst : body) {
+      if (inst.getName().getStringRef() != "dsa.write_back")
+        continue;
+      auto asyncAttr = inst.getAttrOfType<BoolAttr>("async");
+      if (!asyncAttr || !asyncAttr.getValue())
+        continue;
+      phaseHasAsyncWrite = true;
+      Type elem = cast<MemRefType>(inst.getOperand(0).getType()).getElementType();
+      writeBuffers[&inst] = nramAt(
+          elem, phaseByteOffset(
+                    inst.getAttrOfType<DenseI64ArrayAttr>("bangc.write_offset")));
+    }
+
     llvm::DenseMap<Value, Value> sMap;
     auto emitSteps = [&](auto &self, Block &steps) -> LogicalResult {
       for (auto &op : steps) {
@@ -2197,6 +2296,8 @@ struct RowLowerer {
             emitIssue(fetch, pos, sl, outerGroup, copyBuffers);
           });
         } else if (n == "iterate") {
+          if (phaseHasAsyncWrite && &steps == &sched)
+            sync("compute");
           Value lo = sMap.lookup(op.getOperand(0)),
                 hi = sMap.lookup(op.getOperand(1)),
                 st = sMap.lookup(op.getOperand(2)),
@@ -2212,7 +2313,7 @@ struct RowLowerer {
           if (failed(innerStatus))
             return failure();
         } else if (n == "wait_slot") {
-          sync("all");
+          sync(phaseHasAsyncWrite ? "io" : "all");
         } else if (n == "next") {
           sMap[op.getResult(0)] =
               b.create<arith::AddIOp>(loc, sMap.lookup(op.getOperand(0)),
@@ -2227,12 +2328,15 @@ struct RowLowerer {
                                  sMap.lookup(op.getOperand(0)),
                                  sMap.lookup(op.getOperand(1)), outerGroup,
                                  carrySlot, carryIsMoment, isPacked,
-                                 copyBuffers)))
+                                 copyBuffers, writeBuffers)))
             return failure();
         } else if (n == "advance") {
           b.create<scf::YieldOp>(loc,
                                  ValueRange{sMap.lookup(op.getOperand(0))});
-        } else if (n != "end") {
+        } else if (n == "end") {
+          if (phaseHasAsyncWrite && &steps == &sched)
+            sync("io");
+        } else {
           return failure();
         }
       }
