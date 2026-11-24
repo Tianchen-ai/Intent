@@ -41,7 +41,7 @@ void orderedCost(Unit &u) {
           // A slice indexed by the fold induction variable is loaded once per
           // visited token per tile of owners. Use its actual access dimension,
           // not the number of tokens in a single issue packet.
-          double sweepBytesPerOwner = 0;
+          double sweepBytesPerOwner = 0, maxTokenBytes = 0;
           for (auto loop :
                op->getRegion(0).front().getOps<mlir::scf::ForOp>()) {
             if (!loop->hasAttr("kir.reassociate"))
@@ -107,6 +107,7 @@ void orderedCost(Unit &u) {
             }
             if (!extent)
               continue;
+            maxTokenBytes = std::max(maxTokenBytes, tokenBytes);
             // For a causal one-to-one owner axis the mean prefix or suffix
             // length is (L+1)/2. Otherwise count the full sweep.
             double visits = extent;
@@ -156,6 +157,10 @@ void orderedCost(Unit &u) {
               double effectiveBlocks = std::max<double>(
                   blocks, std::max<int64_t>(1, f->participants));
               panelBytes = effectiveBlocks * sweepBytesPerOwner;
+              if (caps && caps->panelBytes > 0 &&
+                  blocks >= 2.0 * std::max<int64_t>(1, f->participants) &&
+                  2.0 * span.getInt() * maxTokenBytes > caps->panelBytes / 2.0)
+                panelBytes *= 1.25;
               dependency =
                   (1. + std::max(0., live / 32768. - 1.)) / span.getInt();
               // Independent matrix updates compete for resident accumulator

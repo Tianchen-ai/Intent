@@ -463,7 +463,7 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
       Location loc = store->getLoc();
       auto extent = value->getAttrOfType<IntegerAttr>("extent").getInt();
       auto span = value->getAttrOfType<IntegerAttr>("span").getInt();
-      int64_t step = std::min<int64_t>(2048, uint64_t(span) & -uint64_t(span));
+      int64_t step = std::min<int64_t>(512, uint64_t(span) & -uint64_t(span));
       int64_t panels = span / step;
       auto axes = store->getAttrOfType<DenseI64ArrayAttr>("block.member_axes");
       bool swap = axes && axes[0] == 1;
@@ -568,12 +568,14 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
       Value ltBins = rowMap("lt", {keys, binsKey}, i1VecTy);
       Value inBins = rowMap("and", {ge0, ltBins}, i1VecTy);
       Value valid = rowMap("and", {inExtent, inBins}, i1VecTy);
-      Value safeKey = rowMap("select", {valid, keys, cZeroKey}, keyVecTy);
+      Value cInvalidKey = cInt(-1, keyElemTy);
+      Value safeKey = rowMap("select", {valid, keys, cInvalidKey}, keyVecTy);
       Value inc = rowMap("i32", {valid}, i32VecTy);
 
       OperationState update(loc, "ct_src.atomic_bins");
       update.addOperands({dst, safeKey, inc});
       update.addAttribute("transposed", b.getBoolAttr(swap));
+      update.addAttribute("checked_bounds", b.getBoolAttr(true));
       update.addAttribute("scope", b.getStringAttr("workgroup"));
       b.create(update);
 
@@ -942,14 +944,24 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
         else if (inst.getName().getStringRef() == "ct_src.bin_index")
           convOp = &inst;
       }
-      if(loop.getNumArguments()!=1 || !loop.getArgument(0).getType().isInteger(32) ||
-         !readOp || !convOp || atomOp->getName().getStringRef()!="ct_src.atomic_bins" ||
-         readOp->getOperand(0)!=src || convOp->getOperand(0)!=readOp->getResult(0) ||
-         atomOp->getOperand(0)!=dst ||
-         atomOp->getAttrOfType<BoolAttr>("transposed").getValue()!=swapVal ||
-         atomOp->getAttrOfType<StringAttr>("scope")!="workgroup" || !src ||
-         convOp->getResult(0).getType()!=RankedTensorType::get({stepVal},cast<MemRefType>(src.getType()).getElementType().isInteger(64)?IntegerType::get(fn.getContext(),64):IntegerType::get(fn.getContext(),32)) ||
-         readOp->getResult(0).getType()!=RankedTensorType::get({stepVal},cast<MemRefType>(src.getType()).getElementType()))
+      if (loop.getNumArguments() != 1 ||
+          !loop.getArgument(0).getType().isInteger(32) || !readOp || !convOp ||
+          atomOp->getName().getStringRef() != "ct_src.atomic_bins" ||
+          readOp->getOperand(0) != src ||
+          convOp->getOperand(0) != readOp->getResult(0) ||
+          atomOp->getOperand(0) != dst ||
+          atomOp->getAttrOfType<BoolAttr>("transposed").getValue() != swapVal ||
+          !atomOp->getAttrOfType<BoolAttr>("checked_bounds") ||
+          atomOp->getAttrOfType<StringAttr>("scope") != "workgroup" || !src ||
+          convOp->getResult(0).getType() !=
+              RankedTensorType::get(
+                  {stepVal},
+                  cast<MemRefType>(src.getType()).getElementType().isInteger(64)
+                      ? IntegerType::get(fn.getContext(), 64)
+                      : IntegerType::get(fn.getContext(), 32)) ||
+          readOp->getResult(0).getType() !=
+              RankedTensorType::get(
+                  {stepVal}, cast<MemRefType>(src.getType()).getElementType()))
         return op->emitError("invalid count panel or atomic update"),WalkResult::interrupt();
       auto isPid0 = [](Value v) -> bool {
         auto *d = v.getDefiningOp();
@@ -1004,15 +1016,18 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
           binsBoundOk = isBinsDim(binsI32->getOperand(0));
         }
       }
-      bool inBinsOk = ge0Op && ltBinsOp &&
-                      ge0Op->getOperand(0) == convOp->getResult(0) &&
-                      isConst(ge0Op->getOperand(1), 0) &&
-                      ltBinsOp->getOperand(0) == convOp->getResult(0) &&
-                      binsBoundOk;
+      bool inBinsOk =
+          ge0Op && ltBinsOp && ge0Op->getOperand(0) == convOp->getResult(0) &&
+          isConst(ge0Op->getOperand(1), 0) &&
+          ltBinsOp->getOperand(0) == convOp->getResult(0) && binsBoundOk;
+      int64_t invalidKey =
+          atomOp->getAttrOfType<BoolAttr>("checked_bounds").getValue() ? -1 : 0;
       if (!panelIdxOk || !sel || sel->getOperand(1) != convOp->getResult(0) ||
-          !isConst(sel->getOperand(2), 0) || !inExtOp || !posOk ||
+          !isConst(sel->getOperand(2), invalidKey) || !inExtOp || !posOk ||
           !isConst(inExtOp->getOperand(1), extentVal) || !inBinsOk)
-        return atomOp->emitError("atomic_bins requires verified extent and bin range masks"), WalkResult::interrupt();
+        return atomOp->emitError(
+                   "atomic_bins requires verified extent and bin range masks"),
+               WalkResult::interrupt();
     }
     if (ok && op->hasAttr("ct_src.slab_tma") && n != "gather_slab" &&
         n != "scatter_slab")

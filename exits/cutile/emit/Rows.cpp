@@ -133,19 +133,18 @@ llvm::Error rowRule(Operation &op, PrintPoint at, PrintContext &c) {
   }
   if (code == "atomic_bins") {
     bool swap = op.getAttrOfType<BoolAttr>("transposed").getValue();
+    bool checked = op.getAttrOfType<BoolAttr>("checked_bounds").getValue();
     auto scope = op.getAttrOfType<StringAttr>("scope").getValue();
     if (scope != "workgroup" && scope != "device")
       return llvm::createStringError("invalid cuTile atomic scope " +
                                      scope.str());
-    std::string memScope = scope == "workgroup" ? "ct.MemoryScope.BLOCK"
-                                                : "ct.MemoryScope.DEVICE";
-    line("ct.atomic_add(" + arg(0) +
-         (swap ? ",(" + arg(1) + ",ct.bid(0))"
-               : ",(ct.bid(0)," + arg(1) + ")") +
-         "," + arg(2) +
-         ",check_bounds=False,memory_order=ct.MemoryOrder.RELAXED,"
-         "memory_scope=" +
-         memScope + ")");
+    std::string memScope =
+        scope == "workgroup" ? "ct.MemoryScope.BLOCK" : "ct.MemoryScope.DEVICE";
+    line(
+        "ct.atomic_add(" + arg(0) +
+        (swap ? ",(" + arg(1) + ",ct.bid(0))" : ",(ct.bid(0)," + arg(1) + ")") +
+        "," + arg(2) + ",check_bounds=" + (checked ? "True" : "False") +
+        ",memory_order=ct.MemoryOrder.RELAXED,memory_scope=" + memScope + ")");
     return llvm::Error::success();
   }
   if (code == "dimension") {

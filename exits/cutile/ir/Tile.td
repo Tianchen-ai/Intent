@@ -99,7 +99,7 @@ def ZeroBins : Op<TileSource,"zero_bins",[MemoryEffects<[MemWrite]>]> {let argum
 def BinPanels : Op<TileSource,"bin_panels",[SingleBlock,NoTerminator]> {let arguments=(ins I32:$limit);let regions=(region AnyRegion:$body);}
 def ReadBinKeys : Op<TileSource,"read_bin_keys",[MemoryEffects<[MemRead]>]> {let arguments=(ins AnyMemRef:$source,I64:$panel);let results=(outs AnyRankedTensor:$keys);}
 def BinIndex : Op<TileSource,"bin_index",[Pure]> {let arguments=(ins AnyRankedTensor:$raw);let results=(outs AnyRankedTensor:$key);}
-def AtomicBins : Op<TileSource,"atomic_bins",[MemoryEffects<[MemRead,MemWrite]>]> {let arguments=(ins AnyMemRef:$dest,AnyRankedTensor:$keys,I32Tensor:$increment,BoolAttr:$transposed,StrAttr:$scope);}
+def AtomicBins : Op<TileSource,"atomic_bins",[MemoryEffects<[MemRead,MemWrite]>]> {let arguments=(ins AnyMemRef:$dest,AnyRankedTensor:$keys,I32Tensor:$increment,BoolAttr:$transposed,BoolAttr:$checked_bounds,StrAttr:$scope);}
 def TileSource_Different : Op<TileSource,"ne"> {let arguments=(ins AnyType:$lhs,AnyType:$rhs);let results=(outs AnyTensor:$mask);}
 def TileSource_ColumnsTile : Op<TileSource,"member_tile"> {let arguments=(ins AnyTensor:$columns,I1Tensor:$active);let results=(outs I32Tensor:$members);}
 def TileSource_ScatterFragment : Op<TileSource,"scatter_fragment"> {let arguments=(ins AnyMemRef:$output,AnyMemRef:$counts,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active,I1Tensor:$predicate,I32Tensor:$prefix,I32Tensor:$values,I32Attr:$fill);}
