@@ -103,8 +103,12 @@ void ownerCost(Unit &u) {
                   double(regCarryFloats * ownersPerLoad - regCapFloats) * 8.;
               bytes += spillBytesPerStep * trip * (double(n) / ownersPerLoad);
             }
+            double activeWorkers =
+                std::max(1.0, std::min<double>(workers, tasks));
+            double effBw =
+                bwVal * (activeWorkers / std::max<double>(1, workers));
             e.terms["common_input_bytes_per_member"] = {bytes, "B"};
-            *e.timeNs += bytes / bwVal;
+            *e.timeNs += bytes / effBw;
           }
           return e;
         }},

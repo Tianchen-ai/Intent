@@ -111,6 +111,7 @@ struct OrderedLowerer {
   Location loc;
   int64_t batch = 1;
   Value localStackBuf;
+  BlockArgument innerOwnerArg;
   bool batchSimd = false;
   bool usesReduce16x16 = false;
   llvm::DenseMap<Value, Value> batchVecs;
@@ -399,6 +400,54 @@ struct OrderedLowerer {
           loadContiguousSlice(localStackBuf, addr, vecElemType(resTy), batch);
       return true;
     }
+    if (auto load = dyn_cast<memref::LoadOp>(op)) {
+      auto strides = argArray(load.getMemref(), "cpu.strides");
+      if (!innerOwnerArg || load.getIndices().empty() ||
+          load.getIndices().back() != innerOwnerArg || strides.empty() ||
+          strides[strides.size() - 1] != 1 ||
+          !canBatchVecType(load.getResult().getType()) ||
+          !lanes[0].contains(innerOwnerArg))
+        return false;
+      for (Value idx : load.getIndices().drop_back()) {
+        if (!lanes[0].contains(idx) ||
+            !llvm::all_of(lanes, [&](const IRMapping &m) {
+              return m.lookupOrNull(idx) == lanes[0].lookup(idx);
+            }))
+          return false;
+      }
+      Value ptr = lanes[0].lookup(load.getMemref());
+      SmallVector<Value> idxs;
+      for (Value idx : load.getIndices())
+        idxs.push_back(lanes[0].lookup(idx));
+      Value addr = makeAddr(b, loc, ptr, idxs, strides.asArrayRef());
+      batchVecs[load.getResult()] = loadContiguousSlice(
+          ptr, addr, vecElemType(load.getResult().getType()), batch);
+      return true;
+    }
+    if (auto store = dyn_cast<memref::StoreOp>(op)) {
+      auto strides = argArray(store.getMemref(), "cpu.strides");
+      if (!innerOwnerArg || store.getIndices().empty() ||
+          store.getIndices().back() != innerOwnerArg || strides.empty() ||
+          strides[strides.size() - 1] != 1 ||
+          !canBatchVecType(store.getValue().getType()) ||
+          !lanes[0].contains(innerOwnerArg))
+        return false;
+      for (Value idx : store.getIndices().drop_back()) {
+        if (!lanes[0].contains(idx) ||
+            !llvm::all_of(lanes, [&](const IRMapping &m) {
+              return m.lookupOrNull(idx) == lanes[0].lookup(idx);
+            }))
+          return false;
+      }
+      Value ptr = lanes[0].lookup(store.getMemref());
+      SmallVector<Value> idxs;
+      for (Value idx : store.getIndices())
+        idxs.push_back(lanes[0].lookup(idx));
+      Value addr = makeAddr(b, loc, ptr, idxs, strides.asArrayRef());
+      makeOp(b, loc, "store_slice",
+             {ptr, addr, getBatchVec(store.getValue(), lanes)});
+      return true;
+    }
     if (kind == "lane_splat" && isWideVal(op.getResult(0)) &&
         canBatchVecType(op.getOperand(0).getType())) {
       wideBatchSplats[op.getResult(0)] = getBatchVec(op.getOperand(0), lanes);
@@ -423,6 +472,22 @@ struct OrderedLowerer {
       batchVecs[op.getResult(0)] = b.create(st)->getResult(0);
       return true;
     }
+    if (auto e2 = dyn_cast<math::Exp2Op>(op);
+        e2 && bitEnumContainsAll(e2.getFastmath(), arith::FastMathFlags::afn) &&
+        resTy.isF32() && canBatchVecType(e2.getOperand().getType())) {
+      auto vTy = batchVecType(resTy);
+      Value ln2Scalar = constF32(b, loc, 0.6931471824645996f);
+      Value ln2Vec =
+          makeOp(b, loc, "splat_scalar", {ln2Scalar}, {vTy},
+                 {b.getNamedAttr("dtype", b.getStringAttr("float32")),
+                  b.getNamedAttr("width", b.getI64IntegerAttr(batch))})
+              ->getResult(0);
+      Value scaled = b.create<arith::MulFOp>(
+          loc, getBatchVec(e2.getOperand(), lanes), ln2Vec, e2.getFastmath());
+      batchVecs[e2.getResult()] =
+          b.create<math::ExpOp>(loc, scaled, e2.getFastmath())->getResult(0);
+      return true;
+    }
     if (isa<math::ExpOp, math::Exp2Op, math::LogOp, math::SqrtOp,
             math::RsqrtOp, arith::ExtFOp, arith::TruncFOp>(op)) {
       if (!canBatchVecType(op.getOperand(0).getType()))
@@ -433,7 +498,7 @@ struct OrderedLowerer {
       batchVecs[op.getResult(0)] = b.create(st)->getResult(0);
       return true;
     }
-    if (isa<arith::IndexCastOp>(op)) {
+    if (isa<arith::IndexCastOp, arith::SIToFPOp, arith::FPToSIOp>(op)) {
       if (!canBatchVecType(op.getOperand(0).getType()))
         return false;
       Value inVec = getBatchVec(op.getOperand(0), lanes);
@@ -844,6 +909,28 @@ struct OrderedLowerer {
         return success();
     }
 
+    if (auto e2 = dyn_cast<math::Exp2Op>(op);
+        e2 && bitEnumContainsAll(e2.getFastmath(), arith::FastMathFlags::afn) &&
+        e2.getType().isF32()) {
+      Value inVal = map.lookup(e2.getOperand());
+      Value ln2Scalar = constF32(b, loc, 0.6931471824645996f);
+      Value scaled =
+          b.create<arith::MulFOp>(loc, inVal, ln2Scalar, e2.getFastmath());
+      Value res =
+          b.create<math::ExpOp>(loc, scaled, e2.getFastmath())->getResult(0);
+      map.map(e2.getResult(), res);
+      return success();
+    }
+    if (isa<arith::SIToFPOp, arith::FPToSIOp>(op)) {
+      Value inVal = map.lookup(op.getOperand(0));
+      Type outTy = op.getResult(0).getType();
+      Value res = makeOp(b, loc, "scalar_cast", {inVal}, {outTy},
+                         {b.getNamedAttr("dtype",
+                                         b.getStringAttr(dtypeBare(outTy)))})
+                      ->getResult(0);
+      map.map(op.getResult(0), res);
+      return success();
+    }
     StringRef ns = op.getName().getDialectNamespace();
     if (ns == "arith" || ns == "math") {
       Operation *cloned = b.clone(op, map);
@@ -1813,6 +1900,7 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn) {
     }
     if (lowerer.batchSimd && pitch == 1 && innerAttr &&
         unsigned(innerAttr.getInt()) == ax) {
+      lowerer.innerOwnerArg = srcBody.getArgument(ax);
       Value baseI64 = b.create<arith::IndexCastOp>(loc, b.getI64Type(), coord);
       auto i64VecTy = RankedTensorType::get({batch}, b.getI64Type());
       lowerer.batchVecs[srcBody.getArgument(ax)] =

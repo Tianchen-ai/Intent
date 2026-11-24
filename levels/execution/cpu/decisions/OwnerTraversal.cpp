@@ -14,10 +14,18 @@ static bool sameInterval(Value v, BlockArgument head, Value projected) {
   if (auto a = dyn_cast<BlockArgument>(v)) {
     if (auto loop = dyn_cast<scf::ForOp>(a.getOwner()->getParentOp()))
       return v == loop.getInductionVar() &&
-             sameInterval(loop.getLowerBound(), head, projected);
+             sameInterval(loop.getLowerBound(), head, projected) &&
+             sameInterval(loop.getUpperBound(), head, projected) &&
+             sameInterval(loop.getStep(), head, projected);
     return true;
   }
   auto *p = v.getDefiningOp();
+  if (auto ld = dyn_cast<memref::LoadOp>(p))
+    if (llvm::any_of(ld.getMemref().getUsers(), [](Operation *u) {
+          return isa<memref::StoreOp>(u) ||
+                 u->getName().stripDialect() == "slice_write";
+        }))
+      return false;
   if (auto branch = dyn_cast<scf::IfOp>(p))
     return branch.getNumResults() == 1 &&
            sameInterval(branch.getCondition(), head, projected) &&
@@ -55,6 +63,14 @@ std::optional<OwnerReuse> sharedInterval(Operation *space,
     else if (op->getName().stripDialect() == "slice_write")
       ++writeSites[op->getOperand(1)];
   });
+  auto unitTrailingStride = [&](Value view) {
+    auto ba = dyn_cast<BlockArgument>(view);
+    if (!ba || ba.getArgNumber() >= facts.arguments.size())
+      return false;
+    auto *obj = facts.arguments[ba.getArgNumber()].getAsObject();
+    auto *st = obj ? obj->getArray("strides") : nullptr;
+    return st && !st->empty() && (*st)[st->size() - 1].getAsInteger() == 1;
+  };
   auto isDisjointStepStore = [&](memref::StoreOp st) {
     auto parentFor = dyn_cast<scf::ForOp>(st->getParentOp());
     if (!parentFor || parentFor->getBlock() != &body ||
@@ -71,20 +87,21 @@ std::optional<OwnerReuse> sharedInterval(Operation *space,
       return llvm::is_contained(idxs, Value(ob));
     });
   };
-  auto unsafe = body.walk([&](Operation *op) {
-    if (op->getName().stripDialect() == "slice_write")
-      return op->getBlock() == &body ? WalkResult::advance()
-                                     : WalkResult::interrupt();
-    if (auto st = dyn_cast<memref::StoreOp>(op))
-      return (op->getBlock() == &body || isDisjointStepStore(st))
-                 ? WalkResult::advance()
-                 : WalkResult::interrupt();
-    if (isa<scf::ForOp>(op) && op->getBlock() != &body)
-      return WalkResult::interrupt();
-    return WalkResult::advance();
-  });
-  if (unsafe.wasInterrupted())
-    return {};
+  bool simpleWrites = !body.walk([&](Operation *op) {
+                             if (op->getName().stripDialect() == "slice_write")
+                               return op->getBlock() == &body
+                                          ? WalkResult::advance()
+                                          : WalkResult::interrupt();
+                             if (auto st = dyn_cast<memref::StoreOp>(op))
+                               return (op->getBlock() == &body ||
+                                       isDisjointStepStore(st))
+                                          ? WalkResult::advance()
+                                          : WalkResult::interrupt();
+                             if (isa<scf::ForOp>(op) && op->getBlock() != &body)
+                               return WalkResult::interrupt();
+                             return WalkResult::advance();
+                           })
+                           .wasInterrupted();
 
   auto evaluateCandidate = [&](BlockArgument h, int64_t groupVal,
                                Value quotient) -> std::optional<OwnerReuse> {
@@ -97,6 +114,56 @@ std::optional<OwnerReuse> sharedInterval(Operation *space,
     auto extent = (*shape)[axes[axis]].getAsInteger();
     if (!extent || *extent < 2)
       return {};
+    if (!simpleWrites) {
+      if (quotient)
+        return {};
+      bool badBounds =
+          body.walk([&](scf::ForOp loop) {
+                return (sameInterval(loop.getLowerBound(), h, Value{}) &&
+                        sameInterval(loop.getUpperBound(), h, Value{}) &&
+                        sameInterval(loop.getStep(), h, Value{}))
+                           ? WalkResult::advance()
+                           : WalkResult::interrupt();
+              })
+              .wasInterrupted();
+      if (badBounds)
+        return {};
+      llvm::DenseMap<Value, unsigned> ownerAxisOf;
+      bool badAccess =
+          body.walk([&](Operation *op) {
+                Value view;
+                SmallVector<Value, 4> coords;
+                if (auto ld = dyn_cast<memref::LoadOp>(op)) {
+                  view = ld.getMemref();
+                  coords.assign(ld.getIndices().begin(), ld.getIndices().end());
+                } else if (auto st = dyn_cast<memref::StoreOp>(op)) {
+                  view = st.getMemref();
+                  coords.assign(st.getIndices().begin(), st.getIndices().end());
+                } else if (op->getName().stripDialect() == "slice_read" ||
+                           op->getName().stripDialect() == "slice_write") {
+                  bool wr = op->getName().stripDialect() == "slice_write";
+                  view = op->getOperand(wr ? 1 : 0);
+                  auto rest = op->getOperands().drop_front(wr ? 2 : 1);
+                  coords.assign(rest.begin(), rest.end());
+                  int64_t ax = op->getAttrOfType<IntegerAttr>("axis").getInt();
+                  coords.insert(coords.begin() + ax, Value{});
+                } else {
+                  return WalkResult::advance();
+                }
+                if (!writeSites.contains(view))
+                  return WalkResult::advance();
+                if (llvm::count(coords, Value(h)) != 1)
+                  return WalkResult::interrupt();
+                unsigned pos = llvm::find(coords, Value(h)) - coords.begin();
+                auto [it, inserted] = ownerAxisOf.try_emplace(view, pos);
+                return (inserted || it->second == pos)
+                           ? WalkResult::advance()
+                           : WalkResult::interrupt();
+              })
+              .wasInterrupted();
+      if (badAccess)
+        return {};
+    }
     double bytes = 0;
     for (auto loop : body.getOps<scf::ForOp>()) {
       if (!sameInterval(loop.getLowerBound(), h, quotient) ||
@@ -123,6 +190,48 @@ std::optional<OwnerReuse> sharedInterval(Operation *space,
                  cast<ShapedType>(read.getResult(0).getType())
                      .getElementTypeBitWidth() /
                  8.;
+      }
+    }
+    if (bytes <= 0 && !quotient) {
+      for (auto loop : body.getOps<scf::ForOp>()) {
+        if (!sameInterval(loop.getLowerBound(), h, Value{}) ||
+            !sameInterval(loop.getUpperBound(), h, Value{}) ||
+            !sameInterval(loop.getStep(), h, Value{})) {
+          bytes = 0;
+          break;
+        }
+        loop.walk([&](Operation *op) {
+          double weight = (isa<scf::ForOp>(op->getParentOp()) &&
+                           op->getParentOp() != loop.getOperation())
+                              ? 8.0
+                              : 1.0;
+          if (auto ld = dyn_cast<memref::LoadOp>(op)) {
+            double elemB = ld.getType().getIntOrFloatBitWidth() / 8.0;
+            if (!writeSites.contains(ld.getMemref()) &&
+                llvm::all_of(ld.getIndices(), [&](Value v) {
+                  return sameInterval(v, h, Value{});
+                })) {
+              bytes += elemB * weight;
+            } else if (!ld.getIndices().empty() &&
+                       ld.getIndices().back() == h &&
+                       unitTrailingStride(ld.getMemref()) &&
+                       llvm::all_of(ld.getIndices().drop_back(), [&](Value v) {
+                         return sameInterval(v, h, Value{});
+                       })) {
+              bytes += elemB * weight;
+            }
+          } else if (auto st = dyn_cast<memref::StoreOp>(op)) {
+            if (!st.getIndices().empty() && st.getIndices().back() == h &&
+                unitTrailingStride(st.getMemref()) &&
+                llvm::all_of(st.getIndices().drop_back(), [&](Value v) {
+                  return sameInterval(v, h, Value{});
+                })) {
+              bytes +=
+                  (st.getValue().getType().getIntOrFloatBitWidth() / 8.0) *
+                  weight;
+            }
+          }
+        });
       }
     }
     if (bytes <= 0)
