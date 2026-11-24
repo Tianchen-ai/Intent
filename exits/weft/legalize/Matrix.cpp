@@ -125,12 +125,116 @@ struct EpilogueItem {
   std::string targetCarrier;
 };
 
+struct RecordEncodingDesc {
+  std::string symName;
+  int64_t alignment = 0;
+  int64_t elements = 0;
+  int64_t storageBits = 0;
+  SmallVector<std::string, 6> fieldNames;
+  SmallVector<std::string, 6> fieldTypes;
+  SmallVector<int64_t, 6> fieldExtents;
+  SmallVector<std::string, 6> fieldLayouts;
+  SmallVector<int64_t, 6> fieldBitOffsets;
+  SmallVector<int64_t, 6> fieldStorageBits;
+};
+
+std::optional<RecordEncodingDesc> deriveWeftRecordEncoding(Type storageTy) {
+  const std::string natural = "[{kind=\"natural\"}]";
+  if (auto q4Ty = dyn_cast_or_null<intentdsl::kir::Q4KType>(storageTy)) {
+    auto q4 = q4Ty.getLayout();
+    RecordEncodingDesc d;
+    d.symName = "Q4_K";
+    d.alignment = q4.dmin - q4.d;
+    d.elements = q4.elements;
+    d.storageBits = int64_t(q4.bytes) * 8;
+    int64_t subgroups = q4.elements / q4.group;
+    int64_t dBits = int64_t(q4.dmin - q4.d) * 8;
+    int64_t dmBits = int64_t(q4.factors - q4.dmin) * 8;
+    int64_t facBits = int64_t(q4.packed - q4.factors) * 8;
+    int64_t qBits = int64_t(q4.bytes - q4.packed) * 8;
+    std::string scTy = "ui" + std::to_string(q4.scaleBits);
+    std::string qTy = "ui" + std::to_string(q4.nibbleBits);
+    std::string dTy = "f" + std::to_string(dBits);
+    std::string dmTy = "f" + std::to_string(dmBits);
+    auto joined = [&](int role) {
+      return "[{kind=\"joined\",fields=2:i64,low_bits=" +
+             std::to_string(q4.nibbleBits) + ":i64,order=\"lo_first\",size=" +
+             std::to_string(q4.halfGroups) + ":i64,role=" +
+             std::to_string(role) + ":i64}]";
+    };
+    std::string nibble =
+        "[{kind=\"grouped\",size=" + std::to_string(2 * q4.group) +
+        ":i64},{kind=\"layered\",size=" + std::to_string(q4.group) +
+        ":i64,order=\"lo_first\"}]";
+    d.fieldNames = {"d", "dmin", "sc", "m", "q"};
+    d.fieldTypes = {dTy, dmTy, scTy, scTy, qTy};
+    d.fieldExtents = {1, 1, subgroups, subgroups, q4.elements};
+    d.fieldLayouts = {natural, natural, joined(0), joined(1), nibble};
+    d.fieldBitOffsets = {int64_t(q4.d) * 8, int64_t(q4.dmin) * 8,
+                         int64_t(q4.factors) * 8, int64_t(q4.factors) * 8,
+                         int64_t(q4.packed) * 8};
+    d.fieldStorageBits = {dBits, dmBits, facBits, facBits, qBits};
+    return d;
+  }
+  if (auto q8Ty = dyn_cast_or_null<intentdsl::kir::Q8KType>(storageTy)) {
+    auto q8 = q8Ty.getLayout();
+    RecordEncodingDesc d;
+    d.symName = "Q8_K";
+    d.alignment = q8.scaleBits / 8;
+    d.elements = q8.elements;
+    d.storageBits = int64_t(q8.bytes) * 8;
+    int64_t sumCount = q8.elements / q8.sumGroup;
+    int64_t dsBits = int64_t(q8.values - q8.d) * 8;
+    int64_t qBits = int64_t(q8.sums - q8.values) * 8;
+    int64_t bsumBits = int64_t(q8.bytes - q8.sums) * 8;
+    int64_t bsumElemBits = bsumBits / sumCount;
+    d.fieldNames = {"ds", "q", "bsum"};
+    d.fieldTypes = {"f" + std::to_string(q8.scaleBits),
+                    "si" + std::to_string(q8.elementBits),
+                    "si" + std::to_string(bsumElemBits)};
+    d.fieldExtents = {1, q8.elements, sumCount};
+    d.fieldLayouts = {natural, natural, natural};
+    d.fieldBitOffsets = {int64_t(q8.d) * 8, int64_t(q8.values) * 8,
+                         int64_t(q8.sums) * 8};
+    d.fieldStorageBits = {dsBits, qBits, bsumBits};
+    return d;
+  }
+  return std::nullopt;
+}
+
+SmallVector<NamedAttribute, 12>
+makeRecordEncodingAttrs(OpBuilder &b, Type storageTy,
+                        const RecordEncodingDesc &d) {
+  auto toStrArray = [&](ArrayRef<std::string> vals) {
+    SmallVector<Attribute, 6> out;
+    for (const auto &s : vals)
+      out.push_back(b.getStringAttr(s));
+    return b.getArrayAttr(out);
+  };
+  return {
+      b.getNamedAttr("sym_name", b.getStringAttr(d.symName)),
+      b.getNamedAttr("alignment", b.getI64IntegerAttr(d.alignment)),
+      b.getNamedAttr("elements", b.getI64IntegerAttr(d.elements)),
+      b.getNamedAttr("storage_bits", b.getI64IntegerAttr(d.storageBits)),
+      b.getNamedAttr("field_names", toStrArray(d.fieldNames)),
+      b.getNamedAttr("field_types", toStrArray(d.fieldTypes)),
+      b.getNamedAttr("field_extents", b.getDenseI64ArrayAttr(d.fieldExtents)),
+      b.getNamedAttr("field_layouts", toStrArray(d.fieldLayouts)),
+      b.getNamedAttr("field_bit_offsets",
+                     b.getDenseI64ArrayAttr(d.fieldBitOffsets)),
+      b.getNamedAttr("field_storage_bits",
+                     b.getDenseI64ArrayAttr(d.fieldStorageBits)),
+      b.getNamedAttr("kir.storage", TypeAttr::get(storageTy)),
+  };
+}
+
 bool nativeQ4KStrides(func::FuncOp fn, Operation &dot) {
+  auto q4 = intentdsl::kir::Q4KType::get(fn.getContext()).getLayout();
   auto slot = cast<BlockArgument>(dot.getOperand(0)).getArgNumber();
   auto s = fn.getArgAttrOfType<DenseI64ArrayAttr>(slot, "cpu.strides");
   auto shape = fn.getArgAttrOfType<DenseI64ArrayAttr>(slot, "cpu.shape");
   return s && shape && s.size() == 3 && shape.size() == 3 && s[2] == 1 &&
-         s[1] == 144 && s[0] == 144 * shape[1];
+         s[1] == q4.bytes && s[0] == q4.bytes * shape[1];
 }
 
 Operation *makeOp(OpBuilder &b, Location loc, StringRef name,
@@ -402,36 +506,50 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
 
   if (!emptyRed) {
     if (isQ4k) {
-      int64_t ng = K / 256;
+      auto q4 = intentdsl::kir::Q4KType::get(fn.getContext()).getLayout();
+      auto q8 = intentdsl::kir::Q8KType::get(fn.getContext()).getLayout();
+      int64_t ng = K / q4.elements;
+      int64_t q4Subs = q4.elements / q4.group;
+      int64_t q8Sums = q8.elements / q8.sumGroup;
       unsigned wSlot = slotOf(dot.getOperand(0));
       auto wSt = argStrides(wSlot);
       if (useEncodedRecords) {
-        slots.push_back({{"Q4_K", {-1, ng, 256}, {1, 4, 3}},
+        slots.push_back({{"Q4_K", {-1, ng, q4.elements}, {1, 4, 3}},
                          "a" + std::to_string(wSlot),
                          0,
                          {{CoordTag::Src, wSt[0]}},
                          {},
                          false});
         slots.push_back(
-            {{"Q8_K", {ng, 256}, {4, 3}}, "packed", 0, {}, {}, false});
+            {{"Q8_K", {ng, q8.elements}, {4, 3}}, "packed", 0, {}, {}, false});
       } else {
-        slots.push_back({{"u8", {-1, ng, 16}, {1, 4, 5}},
+        slots.push_back({{"u8", {-1, ng, q4.packed}, {1, 4, 5}},
                          "a" + std::to_string(wSlot),
                          0,
                          {{CoordTag::Src, wSt[0]}},
                          {wSt[0], wSt[1], wSt[2]},
                          false});
-        slots.push_back({{"u8", {-1, ng, 4, 32}, {1, 4, 6, 3}},
+        slots.push_back({{"u8", {-1, ng, q4.halfGroups, q4.group}, {1, 4, 6, 3}},
                          "a" + std::to_string(wSlot),
-                         16 * wSt[2],
+                         q4.packed * wSt[2],
                          {{CoordTag::Src, wSt[0]}},
-                         {wSt[0], wSt[1], 32 * wSt[2], wSt[2]},
+                         {wSt[0], wSt[1], q4.group * wSt[2], wSt[2]},
                          false});
-        slots.push_back({{"f32", {ng}, {4}}, "packed", 0, {}, {73}, false});
         slots.push_back(
-            {{"i8", {ng, 8, 32}, {4, 7, 3}}, "packed", 4, {}, {292, 32, 1}, false});
-        slots.push_back(
-            {{"i16", {ng, 16}, {4, 8}}, "packed", 260, {}, {146, 1}, false});
+            {{"f32", {ng}, {4}}, "packed", q8.d, {},
+             {q8.bytes / int64_t(sizeof(float))}, false});
+        slots.push_back({{"i8", {ng, q4Subs, q4.group}, {4, 7, 3}},
+                         "packed",
+                         q8.values,
+                         {},
+                         {q8.bytes, q4.group, 1},
+                         false});
+        slots.push_back({{"i16", {ng, q8Sums}, {4, 8}},
+                         "packed",
+                         q8.sums,
+                         {},
+                         {q8.bytes / int64_t(sizeof(int16_t)), 1},
+                         false});
       }
     } else if (kind == "contract") {
       int ak = dot.getAttrOfType<IntegerAttr>("lhs_k").getInt();
@@ -625,16 +743,12 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
   Block &taskTop = prog->getRegion(0).emplaceBlock();
   b.setInsertionPointToEnd(&taskTop);
   if (useEncodedRecords) {
+    Type q4Ty = intentdsl::kir::Q4KType::get(fn.getContext());
+    Type q8Ty = intentdsl::kir::Q8KType::get(fn.getContext());
     makeOp(b, loc, "encoding_decl", {}, {},
-           {b.getNamedAttr("sym_name", b.getStringAttr("Q4_K")),
-            b.getNamedAttr("is_weight", b.getBoolAttr(true)),
-            b.getNamedAttr("kir.storage",
-                           TypeAttr::get(intentdsl::kir::Q4KType::get(fn.getContext())))});
+           makeRecordEncodingAttrs(b, q4Ty, *deriveWeftRecordEncoding(q4Ty)));
     makeOp(b, loc, "encoding_decl", {}, {},
-           {b.getNamedAttr("sym_name", b.getStringAttr("Q8_K")),
-            b.getNamedAttr("is_weight", b.getBoolAttr(false)),
-            b.getNamedAttr("kir.storage",
-                           TypeAttr::get(intentdsl::kir::Q8KType::get(fn.getContext())))});
+           makeRecordEncodingAttrs(b, q8Ty, *deriveWeftRecordEncoding(q8Ty)));
   }
 
   OperationState tkState(loc, "weft_host.task_kernel");
@@ -1533,75 +1647,625 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
       activeHeap.push_back(b.getStringAttr(name));
   }
 
-  for (Operation *pop : prepOps) {
-    StringRef pk = pop->getAttrOfType<StringAttr>("kind").getValue();
-    SmallVector<NamedAttribute> attrs{
-        b.getNamedAttr("kind", b.getStringAttr(pk)),
-        b.getNamedAttr("dst_buf",
-                       b.getStringAttr(bufNames[pop->getOperands().back()])),
-        b.getNamedAttr("cleanup", b.getArrayAttr(activeHeap))};
-    for (auto na : pop->getAttrs())
-      if (na.getName() != "kind")
-        attrs.push_back(na);
+  auto enterHostBlock = [&](Block *bb) {
+    if (bb->empty())
+      b.setInsertionPointToEnd(bb);
+    else
+      b.setInsertionPoint(&bb->back());
+  };
+  auto openHostRegionOp = [&](StringRef name,
+                              ArrayRef<NamedAttribute> attrs) -> Block * {
+    OperationState s(loc, ("weft_host." + name).str());
+    s.addAttributes(attrs);
+    Block &child = s.addRegion()->emplaceBlock();
+    b.create(s);
+    OpBuilder cb(fn.getContext());
+    cb.setInsertionPointToEnd(&child);
+    makeOp(cb, loc, "end");
+    return &child;
+  };
+  auto makeHostIf = [&](StringRef cond) -> Block * {
+    return openHostRegionOp("host_if",
+                            {b.getNamedAttr("cond", b.getStringAttr(cond))});
+  };
+  auto makeHostFor = [&](StringRef iv, StringRef lb, StringRef ub,
+                         StringRef step) -> Block * {
+    return openHostRegionOp(
+        "host_for",
+        {b.getNamedAttr("iv", b.getStringAttr(iv)),
+         b.getNamedAttr("lb", b.getStringAttr(lb)),
+         b.getNamedAttr("ub", b.getStringAttr(ub)),
+         b.getNamedAttr("step", b.getStringAttr(step))});
+  };
+  auto makeHostOmpFor = [&](StringRef iv, StringRef lb, StringRef ub,
+                            StringRef step, bool parallel, bool simd,
+                            bool x86Simd, StringRef ifCond) -> Block * {
+    return openHostRegionOp(
+        "host_omp_for",
+        {b.getNamedAttr("iv", b.getStringAttr(iv)),
+         b.getNamedAttr("lb", b.getStringAttr(lb)),
+         b.getNamedAttr("ub", b.getStringAttr(ub)),
+         b.getNamedAttr("step", b.getStringAttr(step)),
+         b.getNamedAttr("parallel", b.getBoolAttr(parallel)),
+         b.getNamedAttr("simd", b.getBoolAttr(simd)),
+         b.getNamedAttr("x86_simd", b.getBoolAttr(x86Simd)),
+         b.getNamedAttr("if_cond", b.getStringAttr(ifCond))});
+  };
+  auto emitLet = [&](StringRef name, StringRef expr) {
+    makeOp(b, loc, "host_let_i64", {}, {},
+           {b.getNamedAttr("name", b.getStringAttr(name)),
+            b.getNamedAttr("expr", b.getStringAttr(expr))});
+  };
+  auto emitPtr = [&](StringRef cTy, StringRef name, StringRef base,
+                     StringRef off) {
+    makeOp(b, loc, "host_ptr_offset", {}, {},
+           {b.getNamedAttr("c_type", b.getStringAttr(cTy)),
+            b.getNamedAttr("name", b.getStringAttr(name)),
+            b.getNamedAttr("base_expr", b.getStringAttr(base)),
+            b.getNamedAttr("offset_expr", b.getStringAttr(off))});
+  };
+  auto emitSpan = [&](StringRef op, StringRef dstE, StringRef srcE,
+                      StringRef cntE, int64_t eb) {
+    makeOp(b, loc, "host_span_op", {}, {},
+           {b.getNamedAttr("op", b.getStringAttr(op)),
+            b.getNamedAttr("dst_expr", b.getStringAttr(dstE)),
+            b.getNamedAttr("src_expr", b.getStringAttr(srcE)),
+            b.getNamedAttr("count_expr", b.getStringAttr(cntE)),
+            b.getNamedAttr("elem_bytes", b.getI64IntegerAttr(eb))});
+  };
+  auto emitElem = [&](StringRef op, StringRef dstE, StringRef srcE,
+                      StringRef auxE, int64_t eb) {
+    makeOp(b, loc, "host_elem_op", {}, {},
+           {b.getNamedAttr("op", b.getStringAttr(op)),
+            b.getNamedAttr("dst_expr", b.getStringAttr(dstE)),
+            b.getNamedAttr("src_expr", b.getStringAttr(srcE)),
+            b.getNamedAttr("aux_expr", b.getStringAttr(auxE)),
+            b.getNamedAttr("elem_bytes", b.getI64IntegerAttr(eb))});
+  };
 
+  for (Operation *pop : prepOps) {
+    OpBuilder::InsertionGuard prepGuard(b);
+    b.setInsertionPointToEnd(&hBb);
+    StringRef pk = pop->getAttrOfType<StringAttr>("kind").getValue();
+    std::string dst = bufNames[pop->getOperands().back()];
     SmallVector<int64_t> opSlots;
     for (Value v : pop->getOperands().drop_back())
       opSlots.push_back(slotOf(v));
-    attrs.push_back(
-        b.getNamedAttr("src_slots", b.getDenseI64ArrayAttr(opSlots)));
-    for (auto [idx, s] : llvm::enumerate(opSlots)) {
-      attrs.push_back(b.getNamedAttr("src_strides_" + std::to_string(idx),
-                                     argStrides(s)));
-      attrs.push_back(b.getNamedAttr(
-          "src_dtype_" + std::to_string(idx), b.getStringAttr(argDtype(s))));
-    }
-    if (kind == "window_contract") {
-      auto outSh = argShape(slotOf(dstArg));
-      attrs.push_back(b.getNamedAttr(
-          "head_extent", b.getI64IntegerAttr(std::max<int64_t>(1, outSh[2]))));
-      attrs.push_back(b.getNamedAttr(
-          "chunk_extent", b.getI64IntegerAttr(std::max<int64_t>(1, outSh[1]))));
-    }
 
-    OperationState ps(loc, "weft_host.host_prep");
-    ps.addAttributes(attrs);
-    if (!pop->getRegions().empty() && !pop->getRegion(0).empty()) {
-      Region *invReg = ps.addRegion();
-      Block &invBb = invReg->emplaceBlock();
+    if (pk == "map-window-rhs-f32" || pk == "map-window-rhs-bf16") {
+      auto outSh = argShape(slotOf(dstArg));
+      int64_t H = std::max<int64_t>(1, outSh[2]);
+      int64_t chunks = std::max<int64_t>(1, outSh[1]);
+      int64_t hg = pop->getAttrOfType<IntegerAttr>("head_group").getInt();
+      auto idxExpr = [&](unsigned idx, ArrayRef<std::string> coords) {
+        auto st = argStrides(opSlots[idx]);
+        std::string s = "0";
+        for (auto [ax, e] : llvm::enumerate(coords))
+          s += "+(" + e + ")*" + std::to_string(st[ax]) + "LL";
+        return s;
+      };
+      Block *gBb = makeHostOmpFor("g", "0", "G", "1", true, false, false,
+                                  "G > 1 && workers > 1");
+      enterHostBlock(gBb);
+      emitLet("head", "g%" + std::to_string(H));
+      emitLet("chunk", "g/" + std::to_string(H) + "%" + std::to_string(chunks));
+      emitLet("batch", "g/" + std::to_string(H) + "/" + std::to_string(chunks));
+      emitLet("group", "head/" + std::to_string(hg));
+
       auto &srcBb = pop->getRegion(0).front();
-      IRMapping mapping;
-      for (unsigned ai = 1; ai < srcBb.getNumArguments(); ++ai)
-        mapping.map(srcBb.getArgument(ai),
-                    invBb.addArgument(srcBb.getArgument(ai).getType(), loc));
+      Operation *term = srcBb.getTerminator();
       llvm::DenseSet<Value> dependsOnCol{srcBb.getArgument(0)};
-      OpBuilder ib(fn.getContext());
-      ib.setInsertionPointToEnd(&invBb);
+      bool hasStage1Transcendental = false;
       for (auto &mop : srcBb.without_terminator()) {
-        if (llvm::any_of(mop.getOperands(), [&](Value v) {
-              return dependsOnCol.contains(v);
-            })) {
+        if (llvm::any_of(mop.getOperands(),
+                         [&](Value v) { return dependsOnCol.contains(v); })) {
           dependsOnCol.insert(mop.getResult(0));
         } else {
-          ib.clone(mop, mapping);
+          auto mn = mop.getName().getStringRef();
+          if (mn == "math.exp" || mn == "math.exp2" || mn == "math.log")
+            hasStage1Transcendental = true;
         }
       }
-      OperationState colState(loc, "weft_host.host_col_loop");
-      Block &varBb = colState.addRegion()->emplaceBlock();
-      ib.create(colState);
-      makeOp(ib, loc, "end");
-
-      Value colArg = varBb.addArgument(srcBb.getArgument(0).getType(), loc);
-      mapping.map(srcBb.getArgument(0), colArg);
-      OpBuilder vb(fn.getContext());
-      vb.setInsertionPointToEnd(&varBb);
-      for (auto &mop : srcBb.without_terminator()) {
-        if (dependsOnCol.contains(mop.getResult(0)))
-          vb.clone(mop, mapping);
+      SmallVector<Value, 4> kCut;
+      bool canFissionK = hasStage1Transcendental && K > 0 && K <= 512;
+      if (canFissionK) {
+        auto maybeAddCut = [&](Value v) {
+          bool usedInStage2 =
+              (!dependsOnCol.contains(term->getOperand(0)) &&
+               term->getOperand(0) == v) ||
+              llvm::any_of(v.getUsers(), [&](Operation *u) {
+                return u == term ||
+                       (u->getNumResults() == 1 &&
+                        dependsOnCol.contains(u->getResult(0)));
+              });
+          if (!usedInStage2)
+            return;
+          if (!v.getType().isF32()) {
+            canFissionK = false;
+            return;
+          }
+          if (!llvm::is_contained(kCut, v))
+            kCut.push_back(v);
+        };
+        maybeAddCut(srcBb.getArgument(1));
+        maybeAddCut(srcBb.getArgument(2));
+        for (auto &mop : srcBb.without_terminator())
+          if (!dependsOnCol.contains(mop.getResult(0)))
+            maybeAddCut(mop.getResult(0));
+        if (kCut.empty() || kCut.size() > 4)
+          canFissionK = false;
       }
-      Operation *term = srcBb.getTerminator();
-      makeOp(vb, loc, "host_panel_yield", {mapping.lookup(term->getOperand(0))});
+
+      Value ld3 =
+          makeOp(b, loc, "host_load_scalar", {}, {srcBb.getArgument(3).getType()},
+                 {b.getNamedAttr("slot", b.getI64IntegerAttr(opSlots[2])),
+                  b.getNamedAttr("c_type", b.getStringAttr("float")),
+                  b.getNamedAttr("index_expr",
+                                 b.getStringAttr(idxExpr(
+                                     2, {"batch", "head", "chunk", "K-1"})))})
+              ->getResult(0);
+      if (canFissionK) {
+        for (size_t ci = 0; ci < kCut.size(); ++ci) {
+          makeOp(b, loc, "host_alloc", {}, {},
+                 {b.getNamedAttr("buf_name",
+                                 b.getStringAttr("wk_" + std::to_string(ci))),
+                  b.getNamedAttr("placement", b.getStringAttr("stack")),
+                  b.getNamedAttr("c_type", b.getStringAttr("float")),
+                  b.getNamedAttr("count_expr", b.getStringAttr("K")),
+                  b.getNamedAttr("elem_bytes", b.getI64IntegerAttr(4)),
+                  b.getNamedAttr("cleanup", b.getArrayAttr({}))});
+        }
+        {
+          Block *k1Bb = makeHostFor("k", "0", "K", "1");
+          enterHostBlock(k1Bb);
+          IRMapping map1;
+          Value ld1 =
+              makeOp(b, loc, "host_load_scalar", {},
+                     {srcBb.getArgument(1).getType()},
+                     {b.getNamedAttr("slot", b.getI64IntegerAttr(opSlots[1])),
+                      b.getNamedAttr("c_type", b.getStringAttr("float")),
+                      b.getNamedAttr("index_expr",
+                                     b.getStringAttr(idxExpr(
+                                         1, {"batch", "head", "chunk", "k"})))})
+                  ->getResult(0);
+          Value ld2 =
+              makeOp(b, loc, "host_load_scalar", {},
+                     {srcBb.getArgument(2).getType()},
+                     {b.getNamedAttr("slot", b.getI64IntegerAttr(opSlots[2])),
+                      b.getNamedAttr("c_type", b.getStringAttr("float")),
+                      b.getNamedAttr("index_expr",
+                                     b.getStringAttr(idxExpr(
+                                         2, {"batch", "head", "chunk", "k"})))})
+                  ->getResult(0);
+          map1.map(srcBb.getArgument(1), ld1);
+          map1.map(srcBb.getArgument(2), ld2);
+          map1.map(srcBb.getArgument(3), ld3);
+          for (auto &mop : srcBb.without_terminator())
+            if (!dependsOnCol.contains(mop.getResult(0)))
+              b.clone(mop, map1);
+          for (size_t ci = 0; ci < kCut.size(); ++ci) {
+            makeOp(b, loc, "host_panel_yield", {map1.lookup(kCut[ci])}, {},
+                   {b.getNamedAttr("widen_bf16", b.getBoolAttr(false)),
+                    b.getNamedAttr(
+                        "dst_expr",
+                        b.getStringAttr("wk_" + std::to_string(ci) + "[k]"))});
+          }
+        }
+        enterHostBlock(gBb);
+        Block *k2Bb = makeHostFor("k", "0", "K", "1");
+        enterHostBlock(k2Bb);
+        IRMapping map2;
+        map2.map(srcBb.getArgument(3), ld3);
+        for (size_t ci = 0; ci < kCut.size(); ++ci) {
+          Value wkVal =
+              makeOp(
+                  b, loc, "host_load_scalar", {}, {kCut[ci].getType()},
+                  {b.getNamedAttr("slot", b.getI64IntegerAttr(-1 - int64_t(ci))),
+                   b.getNamedAttr("c_type", b.getStringAttr("float")),
+                   b.getNamedAttr("index_expr", b.getStringAttr("k"))})
+                  ->getResult(0);
+          map2.map(kCut[ci], wkVal);
+        }
+        Block *nBb =
+            makeHostOmpFor("n", "0", "N", "1", false, true, false, "");
+        enterHostBlock(nBb);
+        Value ld0 =
+            makeOp(b, loc, "host_load_scalar", {},
+                   {srcBb.getArgument(0).getType()},
+                   {b.getNamedAttr("slot", b.getI64IntegerAttr(opSlots[0])),
+                    b.getNamedAttr("c_type", b.getStringAttr("uint16_t")),
+                    b.getNamedAttr("index_expr",
+                                   b.getStringAttr(idxExpr(
+                                       0, {"batch", "chunk*K+k", "group", "n"})))})
+                ->getResult(0);
+        map2.map(srcBb.getArgument(0), ld0);
+        for (auto &mop : srcBb.without_terminator())
+          if (dependsOnCol.contains(mop.getResult(0)))
+            b.clone(mop, map2);
+        makeOp(b, loc, "host_panel_yield", {map2.lookup(term->getOperand(0))},
+               {},
+               {b.getNamedAttr("widen_bf16",
+                               b.getBoolAttr(pk == "map-window-rhs-f32")),
+                b.getNamedAttr("dst_expr",
+                               b.getStringAttr(dst + "[(g*K+k)*N+n]"))});
+      } else {
+        Block *kBb = makeHostFor("k", "0", "K", "1");
+        enterHostBlock(kBb);
+        IRMapping mapping;
+        Value ld1 =
+            makeOp(b, loc, "host_load_scalar", {},
+                   {srcBb.getArgument(1).getType()},
+                   {b.getNamedAttr("slot", b.getI64IntegerAttr(opSlots[1])),
+                    b.getNamedAttr("c_type", b.getStringAttr("float")),
+                    b.getNamedAttr("index_expr",
+                                   b.getStringAttr(idxExpr(
+                                       1, {"batch", "head", "chunk", "k"})))})
+                ->getResult(0);
+        Value ld2 =
+            makeOp(b, loc, "host_load_scalar", {},
+                   {srcBb.getArgument(2).getType()},
+                   {b.getNamedAttr("slot", b.getI64IntegerAttr(opSlots[2])),
+                    b.getNamedAttr("c_type", b.getStringAttr("float")),
+                    b.getNamedAttr("index_expr",
+                                   b.getStringAttr(idxExpr(
+                                       2, {"batch", "head", "chunk", "k"})))})
+                ->getResult(0);
+        mapping.map(srcBb.getArgument(1), ld1);
+        mapping.map(srcBb.getArgument(2), ld2);
+        mapping.map(srcBb.getArgument(3), ld3);
+        for (auto &mop : srcBb.without_terminator())
+          if (!dependsOnCol.contains(mop.getResult(0)))
+            b.clone(mop, mapping);
+        Block *nBb =
+            makeHostOmpFor("n", "0", "N", "1", false, true, false, "");
+        enterHostBlock(nBb);
+        Value ld0 =
+            makeOp(b, loc, "host_load_scalar", {},
+                   {srcBb.getArgument(0).getType()},
+                   {b.getNamedAttr("slot", b.getI64IntegerAttr(opSlots[0])),
+                    b.getNamedAttr("c_type", b.getStringAttr("uint16_t")),
+                    b.getNamedAttr("index_expr",
+                                   b.getStringAttr(idxExpr(
+                                       0, {"batch", "chunk*K+k", "group", "n"})))})
+                ->getResult(0);
+        mapping.map(srcBb.getArgument(0), ld0);
+        for (auto &mop : srcBb.without_terminator())
+          if (dependsOnCol.contains(mop.getResult(0)))
+            b.clone(mop, mapping);
+        makeOp(b, loc, "host_panel_yield", {mapping.lookup(term->getOperand(0))},
+               {},
+               {b.getNamedAttr("widen_bf16",
+                               b.getBoolAttr(pk == "map-window-rhs-f32")),
+                b.getNamedAttr("dst_expr",
+                               b.getStringAttr(dst + "[(g*K+k)*N+n]"))});
+      }
+    } else if (pk == "widen-window-lhs") {
+      auto outSh = argShape(slotOf(dstArg));
+      int64_t H = std::max<int64_t>(1, outSh[2]);
+      int64_t chunks = std::max<int64_t>(1, outSh[1]);
+      auto st = argStrides(opSlots[0]);
+      Block *gBb = makeHostOmpFor("g", "0", "G", "1", true, false, false, "G>1");
+      enterHostBlock(gBb);
+      emitLet("batch", "g/" + std::to_string(H) + "/" + std::to_string(chunks));
+      emitLet("chunk", "g/" + std::to_string(H) + "%" + std::to_string(chunks));
+      emitLet("head", "g%" + std::to_string(H));
+      Block *mBb = makeHostFor("m", "0", "M", "1");
+      enterHostBlock(mBb);
+      Block *kBb = makeHostFor("k", "0", "K", "1");
+      enterHostBlock(kBb);
+      emitElem("expand_bf", dst + "[(g*M+m)*K+k]",
+               "((const uint16_t*)a" + std::to_string(opSlots[0]) + ")[batch*" +
+                   std::to_string(st[0]) + "LL+(chunk*K+k)*" +
+                   std::to_string(st[1]) + "LL+head*" + std::to_string(st[2]) +
+                   "LL+m*" + std::to_string(st[3]) + "LL]",
+               "", 4);
+    } else if (pk == "widen-lhs-f32") {
+      auto st = argStrides(opSlots[0]);
+      std::string dt = argDtype(opSlots[0]);
+      int64_t ak = pop->getAttrOfType<IntegerAttr>("lhs_k").getInt();
+      int64_t ab = pop->getAttrOfType<IntegerAttr>("lhs_batch").getInt();
+      int64_t am = 0;
+      while (am == ak || am == ab)
+        ++am;
+      std::string banks = ab < 0 ? "1LL" : "G";
+      Block *rBb = makeHostOmpFor("row", "0", "(" + banks + ")*M", "1", true,
+                                  false, false,
+                                  "(" + banks + ")*M*K > 131072");
+      enterHostBlock(rBb);
+      emitLet("g", "M ? row / M : 0");
+      emitLet("m", "M ? row % M : 0");
+      emitPtr("const uint16_t", "src", "a" + std::to_string(opSlots[0]),
+              "g*" + std::to_string(ab < 0 ? 0 : st[ab]) + "LL + m*" +
+                  std::to_string(st[am]) + "LL");
+      emitPtr("float", "out", dst, "row*K");
+      if (st[ak] == 1) {
+        emitSpan(dt == "bf16" ? "widen_bf16" : "widen_f16", "out", "src", "K",
+                 4);
+      } else {
+        Block *kBb = makeHostFor("k", "0", "K", "1");
+        enterHostBlock(kBb);
+        emitElem(dt == "bf16" ? "expand_bf" : "expand_f16", "out[k]",
+                 "src[k*" + std::to_string(st[ak]) + "LL]", "", 4);
+      }
+    } else if (pk == "widen-pack-rhs-f32") {
+      auto st = argStrides(opSlots[0]);
+      std::string dt = argDtype(opSlots[0]);
+      int64_t bk = pop->getAttrOfType<IntegerAttr>("rhs_k").getInt();
+      int64_t bb = pop->getAttrOfType<IntegerAttr>("rhs_batch").getInt();
+      int64_t bn = 0;
+      while (bn == bk || bn == bb)
+        ++bn;
+      std::string banks = bb < 0 ? "1LL" : "G";
+      Block *pBb = makeHostOmpFor(
+          "p", "0", "(" + banks + ")*nc", "1", true, false, false,
+          "(" + banks + ")*nc*K*nr > 131072 && (" + banks + ")*nc >= 4");
+      enterHostBlock(pBb);
+      emitLet("g", "nc ? p / nc : 0");
+      emitLet("c", "(nc ? p % nc : 0)*nr");
+      emitLet("valid", "N-c < nr ? N-c : nr");
+      Block *kBb = makeHostFor("k", "0", "K", "1");
+      enterHostBlock(kBb);
+      emitPtr("const uint16_t", "src", "a" + std::to_string(opSlots[0]),
+              "g*" + std::to_string(bb < 0 ? 0 : st[bb]) + "LL + k*" +
+                  std::to_string(st[bk]) + "LL + c*" + std::to_string(st[bn]) +
+                  "LL");
+      emitPtr("float", "out", dst, "(p*K + k)*nr");
+      if (st[bn] == 1) {
+        emitSpan(dt == "bf16" ? "widen_bf16" : "widen_f16", "out", "src",
+                 "valid", 4);
+      } else {
+        Block *jBb = makeHostFor("j", "0", "valid", "1");
+        enterHostBlock(jBb);
+        emitElem(dt == "bf16" ? "expand_bf" : "expand_f16", "out[j]",
+                 "src[j*" + std::to_string(st[bn]) + "LL]", "", 4);
+        enterHostBlock(kBb);
+      }
+      Block *zBb = makeHostFor("j", "valid", "nr", "1");
+      enterHostBlock(zBb);
+      emitElem("assign", "out[j]", "0.0f", "", 4);
+    } else if (pk == "pack-rhs-panels") {
+      auto st = argStrides(opSlots[0]);
+      std::string dt = argDtype(opSlots[0]);
+      int64_t bytes =
+          dt == "f32" || dt == "i32" ? 4 : dt == "i8" || dt == "u8" ? 1 : 2;
+      int64_t bk = pop->getAttrOfType<IntegerAttr>("rhs_k").getInt();
+      int64_t bb = pop->getAttrOfType<IntegerAttr>("rhs_batch").getInt();
+      int64_t bn = 0;
+      while (bn == bk || bn == bb)
+        ++bn;
+      std::string banks = bb < 0 ? "1LL" : "G";
+      Block *pBb = makeHostOmpFor(
+          "p", "0", "(" + banks + ")*nc", "1", true, false, false,
+          "(" + banks + ")*nc*K*nr > 131072 && (" + banks + ")*nc >= 4");
+      enterHostBlock(pBb);
+      emitLet("g", "nc ? p / nc : 0");
+      emitLet("c", "(nc ? p % nc : 0)*nr");
+      emitLet("valid", "N-c < nr ? N-c : nr");
+      Block *kBb = makeHostFor("k", "0", "K", "1");
+      enterHostBlock(kBb);
+      emitPtr("uint8_t", "out", dst,
+              "(p*K + k)*nr*" + std::to_string(bytes) + "LL");
+      emitPtr("const uint8_t", "src", "a" + std::to_string(opSlots[0]),
+              "(g*" + std::to_string(bb < 0 ? 0 : st[bb]) + "LL + k*" +
+                  std::to_string(st[bk]) + "LL + c*" + std::to_string(st[bn]) +
+                  "LL)*" + std::to_string(bytes) + "LL");
+      if (st[bn] == 1) {
+        emitSpan("memcpy", "out", "src", "valid", bytes);
+      } else {
+        Block *jBb = makeHostFor("j", "0", "valid", "1");
+        enterHostBlock(jBb);
+        emitElem("memcpy", "out+j*" + std::to_string(bytes) + "LL",
+                 "src+j*" + std::to_string(st[bn] * bytes) + "LL", "", bytes);
+        enterHostBlock(kBb);
+      }
+      Block *padIf = makeHostIf("valid < nr");
+      enterHostBlock(padIf);
+      emitSpan("zero", "out + valid*" + std::to_string(bytes) + "LL", "",
+               "nr - valid", bytes);
+    } else if (pk == "pack-vnni") {
+      auto st = argStrides(opSlots[0]);
+      int64_t kBlk = pop->getAttrOfType<IntegerAttr>("k_block").getInt();
+      int64_t bytes = kBlk == 4 ? 1 : 2;
+      std::string cTy = bytes == 1 ? "uint8_t" : "uint16_t";
+      int64_t bk = pop->getAttrOfType<IntegerAttr>("rhs_k").getInt();
+      int64_t bb = pop->getAttrOfType<IntegerAttr>("rhs_batch").getInt();
+      int64_t bn = 0;
+      while (bn == bk || bn == bb)
+        ++bn;
+      std::string banks = bb < 0 ? "1LL" : "G";
+      Block *pBb = makeHostOmpFor(
+          "p", "0", "(" + banks + ")*nc", "1", true, false, false,
+          "(" + banks + ")*nc*K*nr > 131072 && (" + banks + ")*nc >= 4");
+      enterHostBlock(pBb);
+      emitLet("g", "nc ? p / nc : 0");
+      emitLet("c", "(nc ? p % nc : 0)*nr");
+      emitLet("valid", "N-c < nr ? N-c : nr");
+      emitLet("kPad", "((K+" + std::to_string(kBlk - 1) + ")/" +
+                          std::to_string(kBlk) + ")*" + std::to_string(kBlk));
+      emitLet("kFull", "(K/" + std::to_string(kBlk) + ")*" +
+                           std::to_string(kBlk));
+      emitPtr(cTy, "out", dst, "p*kPad*nr");
+      {
+        Block *zIf = makeHostIf("valid < nr || kPad > K");
+        enterHostBlock(zIf);
+        emitSpan("zero", "out", "", "kPad*nr", bytes);
+      }
+      enterHostBlock(pBb);
+      {
+        Block *kbBb =
+            makeHostFor("kb", "0", "kFull", std::to_string(kBlk));
+        enterHostBlock(kbBb);
+        emitPtr("const " + cTy, "base", "a" + std::to_string(opSlots[0]),
+                "g*" + std::to_string(bb < 0 ? 0 : st[bb]) + "LL + c*" +
+                    std::to_string(st[bn]) + "LL + kb*" +
+                    std::to_string(st[bk]) + "LL");
+        emitPtr(cTy, "dst_k", "out",
+                "(kb/" + std::to_string(kBlk) + ")*nr*" +
+                    std::to_string(kBlk));
+        Block *jBb =
+            makeHostOmpFor("j", "0", "valid", "1", false, true, true, "");
+        enterHostBlock(jBb);
+        Block *lnBb =
+            makeHostFor("lane", "0", std::to_string(kBlk), "1");
+        enterHostBlock(lnBb);
+        emitElem("assign",
+                 "dst_k[j*" + std::to_string(kBlk) + " + lane]",
+                 "base[j*" + std::to_string(st[bn]) + "LL + lane*" +
+                     std::to_string(st[bk]) + "LL]",
+                 "", bytes);
+      }
+      enterHostBlock(pBb);
+      {
+        Block *kbTail =
+            makeHostFor("kb", "kFull", "K", std::to_string(kBlk));
+        enterHostBlock(kbTail);
+        emitPtr("const " + cTy, "base", "a" + std::to_string(opSlots[0]),
+                "g*" + std::to_string(bb < 0 ? 0 : st[bb]) + "LL + c*" +
+                    std::to_string(st[bn]) + "LL + kb*" +
+                    std::to_string(st[bk]) + "LL");
+        Block *jBb = makeHostFor("j", "0", "valid", "1");
+        enterHostBlock(jBb);
+        Block *lnBb =
+            makeHostFor("lane", "0", std::to_string(kBlk), "1");
+        enterHostBlock(lnBb);
+        Block *inK = makeHostIf("kb + lane < K");
+        enterHostBlock(inK);
+        emitElem("assign",
+                 "out[(kb/" + std::to_string(kBlk) + ")*nr*" +
+                     std::to_string(kBlk) + " + j*" + std::to_string(kBlk) +
+                     " + lane]",
+                 "base[j*" + std::to_string(st[bn]) + "LL + lane*" +
+                     std::to_string(st[bk]) + "LL]",
+                 "", bytes);
+      }
+    } else if (pk == "decode-mx8-lhs") {
+      auto mx = intentdsl::kir::MX8Type::get(fn.getContext()).getLayout();
+      auto stA = argStrides(opSlots[0]);
+      auto stS = argStrides(opSlots[1]);
+      std::string grpS = std::to_string(mx.group);
+      Block *rBb = makeHostOmpFor("r", "0", "M", "1", true, false, false,
+                                  "M*K>16384 && workers>1");
+      enterHostBlock(rBb);
+      emitPtr("const uint8_t", "src_r", "a" + std::to_string(opSlots[0]),
+              "r*" + std::to_string(stA[0]) + "LL");
+      emitPtr("const uint8_t", "sc_r", "a" + std::to_string(opSlots[1]),
+              "r*" + std::to_string(stS[0]) + "LL");
+      emitPtr("float", "dst_r", dst, "r*K");
+      Block *gBb = makeHostFor("g", "0", "K/" + grpS, "1");
+      enterHostBlock(gBb);
+      emitElem("let_mx8_scale", "factor",
+               "sc_r[g*" + std::to_string(stS[1]) + "LL]", "", 4);
+      emitPtr("const uint8_t", "src_g", "src_r",
+              "g*" + std::to_string(stA[1]) + "LL");
+      emitPtr("float", "dst_g", "dst_r", "g*" + grpS);
+      Block *tBb = makeHostOmpFor("t", "0", grpS, "1", false, true, true, "");
+      enterHostBlock(tBb);
+      emitElem("mx8_mul", "dst_g[t]",
+               "src_g[t*" + std::to_string(stA[2]) + "LL]", "factor", 4);
+    } else if (pk == "decode-mx8-rhs") {
+      auto mx = intentdsl::kir::MX8Type::get(fn.getContext()).getLayout();
+      auto stB = argStrides(opSlots[0]);
+      auto stS = argStrides(opSlots[1]);
+      std::string grpS = std::to_string(mx.group);
+      int64_t colAx =
+          pop->getAttrOfType<IntegerAttr>("scale_column_axis").getInt();
+      std::string scExpr =
+          colAx == 0 ? ("(c0+jc)*" + std::to_string(stS[0]) + "LL + g*" +
+                        std::to_string(stS[1]) + "LL")
+                     : ("g*" + std::to_string(stS[0]) + "LL + (c0+jc)*" +
+                        std::to_string(stS[1]) + "LL");
+      Block *gBb = makeHostOmpFor("g", "0", "K/" + grpS, "1", true, false,
+                                  false, "N*K>16384 && workers>1");
+      enterHostBlock(gBb);
+      Block *c0Bb = makeHostFor("c0", "0", "N", "64");
+      enterHostBlock(c0Bb);
+      emitLet("blk", "N - c0 < 64 ? N - c0 : 64");
+      makeOp(b, loc, "host_alloc", {}, {},
+             {b.getNamedAttr("buf_name", b.getStringAttr("sc_blk")),
+              b.getNamedAttr("placement", b.getStringAttr("stack")),
+              b.getNamedAttr("c_type", b.getStringAttr("float")),
+              b.getNamedAttr("count_expr", b.getStringAttr("64")),
+              b.getNamedAttr("elem_bytes", b.getI64IntegerAttr(4)),
+              b.getNamedAttr("cleanup", b.getArrayAttr({}))});
+      emitPtr("const uint8_t", "sc_base", "a" + std::to_string(opSlots[1]),
+              "0");
+      {
+        Block *jcBb = makeHostFor("jc", "0", "blk", "1");
+        enterHostBlock(jcBb);
+        emitElem("mx8_scale", "sc_blk[jc]", "sc_base[" + scExpr + "]", "", 4);
+      }
+      enterHostBlock(c0Bb);
+      Block *tBb = makeHostFor("t", "0", grpS, "1");
+      enterHostBlock(tBb);
+      emitPtr("const uint8_t", "src_gt", "a" + std::to_string(opSlots[0]),
+              "g*" + std::to_string(stB[0]) + "LL + t*" +
+                  std::to_string(stB[1]) + "LL + c0*" +
+                  std::to_string(stB[2]) + "LL");
+      emitPtr("float", "dst_gt", dst, "(g*" + grpS + " + t)*N + c0");
+      Block *jc2Bb =
+          makeHostOmpFor("jc", "0", "blk", "1", false, true, true, "");
+      enterHostBlock(jc2Bb);
+      emitElem("mx8_mul", "dst_gt[jc]",
+               "src_gt[jc*" + std::to_string(stB[2]) + "LL]", "sc_blk[jc]", 4);
+    } else if (pk == "encode-q8k") {
+      auto q8 = intentdsl::kir::Q8KType::get(fn.getContext()).getLayout();
+      auto st = argStrides(opSlots[0]);
+      Block *gBb =
+          makeHostFor("g", "0", "K/" + std::to_string(q8.elements), "1");
+      enterHostBlock(gBb);
+      emitElem("pack_q8k", "&" + dst + "[g]",
+               "(const float*)a" + std::to_string(opSlots[0]) + " + g*" +
+                   std::to_string(st[0]) + "LL",
+               std::to_string(st[1]) + "LL", q8.bytes);
+    } else if (pk == "gather-routed-lhs" ||
+               pk == "gather-widen-routed-lhs-f32") {
+      auto stA = argStrides(opSlots[0]);
+      auto stO = argStrides(opSlots[1]);
+      auto stR = argStrides(opSlots[2]);
+      std::string dt = argDtype(opSlots[0]);
+      int64_t ak = pop->getAttrOfType<IntegerAttr>("lhs_k").getInt();
+      int64_t mult = pop->getAttrOfType<IntegerAttr>("multiplicity").getInt();
+      bool wide = pk == "gather-widen-routed-lhs-f32";
+      emitLet("active_begin",
+              "((const int32_t*)a" + std::to_string(opSlots[1]) + ")[0]");
+      emitLet("active_end",
+              "((const int32_t*)a" + std::to_string(opSlots[1]) + ")[G*" +
+                  std::to_string(stO[0]) + "LL]");
+      Block *rBb = makeHostOmpFor("r", "active_begin", "active_end", "1", true,
+                                  false, false, "active_end > active_begin + 1");
+      enterHostBlock(rBb);
+      emitLet("src",
+              "((const int32_t*)a" + std::to_string(opSlots[2]) + ")[r*" +
+                  std::to_string(stR[0]) + "LL] / " + std::to_string(mult) +
+                  "LL");
+      if (wide) {
+        emitPtr("const uint16_t", "from", "a" + std::to_string(opSlots[0]),
+                "src*" + std::to_string(stA[1 - ak]) + "LL");
+        emitPtr("float", "to", dst, "r*K");
+        Block *kBb = makeHostFor("k", "0", "K", "1");
+        enterHostBlock(kBb);
+        emitElem(dt == "bf16" ? "expand_bf" : "expand_f16", "to[k]",
+                 "from[k*" + std::to_string(stA[ak]) + "LL]", "", 4);
+      } else {
+        int64_t bytes =
+            dt == "f32" || dt == "i32" ? 4 : dt == "i8" || dt == "u8" ? 1 : 2;
+        emitPtr("const uint8_t", "from", "a" + std::to_string(opSlots[0]),
+                "src*" + std::to_string(stA[1 - ak] * bytes) + "LL");
+        emitPtr("uint8_t", "to", dst,
+                "r*K*" + std::to_string(bytes) + "LL");
+        if (stA[ak] == 1) {
+          emitSpan("memcpy", "to", "from", "K", bytes);
+        } else {
+          Block *kBb = makeHostFor("k", "0", "K", "1");
+          enterHostBlock(kBb);
+          emitElem("memcpy", "to+k*" + std::to_string(bytes) + "LL",
+                   "from+k*" + std::to_string(stA[ak] * bytes) + "LL", "",
+                   bytes);
+        }
+      }
+    } else {
+      return pop->emitError("unsupported Weft host preparation kind ") << pk;
     }
-    b.create(ps);
   }
 
   bool windowed = (kind == "window_contract");
@@ -1832,6 +2496,36 @@ LogicalResult verifyWeftMatrix(ModuleOp m, const TargetProfile &p,
            if (!ciImpl || ciImpl != progImpl) {
              op->emitError(
                  "task_contract ci.implementation disagrees with matrix_program");
+             return WalkResult::interrupt();
+           }
+         } else if (name == "weft_host.encoding_decl") {
+           auto stAttr = op->getAttrOfType<TypeAttr>("kir.storage");
+           auto derived =
+               stAttr ? deriveWeftRecordEncoding(stAttr.getValue()) : std::nullopt;
+           if (!derived) {
+             op->emitError(
+                 "weft_host.encoding_decl requires a KIR record storage type");
+             return WalkResult::interrupt();
+           }
+           OpBuilder vb(op->getContext());
+           auto expectedAttrs =
+               makeRecordEncodingAttrs(vb, stAttr.getValue(), *derived);
+           for (const auto &na : expectedAttrs) {
+             if (op->getAttr(na.getName()) != na.getValue()) {
+               op->emitError(
+                   "weft_host.encoding_decl disagrees with KIR storage layout ")
+                   << na.getName();
+               return WalkResult::interrupt();
+             }
+           }
+         } else if (name == "weft_host.host_omp_for" ||
+                    name == "weft_host.host_for" ||
+                    name == "weft_host.host_if") {
+           if (op->getNumRegions() != 1 || op->getRegion(0).empty() ||
+               op->getRegion(0).front().empty() ||
+               op->getRegion(0).front().back().getName().getStringRef() !=
+                   "weft_host.end") {
+             op->emitError("incomplete Weft host control-flow region");
              return WalkResult::interrupt();
            }
          }

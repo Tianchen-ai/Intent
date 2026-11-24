@@ -33,7 +33,13 @@ def EndOp : Op<WeftHost_Dialect, "end", [Terminator]> {}
 // ---------------- Region 0 ("task.weftir") Terminal Ops ----------------
 
 def EncodingDeclOp : Op<WeftHost_Dialect, "encoding_decl"> {
-  let arguments = (ins StrAttr:$sym_name, BoolAttr:$is_weight);
+  let arguments = (ins StrAttr:$sym_name, I64Attr:$alignment,
+                       I64Attr:$elements, I64Attr:$storage_bits,
+                       ArrayAttr:$field_names, ArrayAttr:$field_types,
+                       DenseI64ArrayAttr:$field_extents,
+                       ArrayAttr:$field_layouts,
+                       DenseI64ArrayAttr:$field_bit_offsets,
+                       DenseI64ArrayAttr:$field_storage_bits);
 }
 
 def TaskKernelOp : Op<WeftHost_Dialect, "task_kernel"> {
@@ -274,17 +280,49 @@ def HostAllocOp : Op<WeftHost_Dialect, "host_alloc"> {
                        ArrayAttr:$cleanup);
 }
 
-def HostPrepOp : Op<WeftHost_Dialect, "host_prep"> {
-  let arguments = (ins StrAttr:$kind, StrAttr:$dst_buf, ArrayAttr:$cleanup);
-  let regions = (region VariadicRegion<AnyRegion>:$mapRegion);
-}
-
-def HostColLoopOp : Op<WeftHost_Dialect, "host_col_loop"> {
+def HostIfOp : Op<WeftHost_Dialect, "host_if"> {
+  let arguments = (ins StrAttr:$cond);
   let regions = (region AnyRegion:$body);
 }
 
-def HostPanelYieldOp : Op<WeftHost_Dialect, "host_panel_yield", [Terminator]> {
-  let arguments = (ins AnyType:$value);
+def HostOmpForOp : Op<WeftHost_Dialect, "host_omp_for"> {
+  let arguments = (ins StrAttr:$iv, StrAttr:$lb, StrAttr:$ub, StrAttr:$step,
+                       BoolAttr:$parallel, BoolAttr:$simd, BoolAttr:$x86_simd,
+                       StrAttr:$if_cond);
+  let regions = (region AnyRegion:$body);
+}
+
+def HostForOp : Op<WeftHost_Dialect, "host_for"> {
+  let arguments = (ins StrAttr:$iv, StrAttr:$lb, StrAttr:$ub, StrAttr:$step);
+  let regions = (region AnyRegion:$body);
+}
+
+def HostLetI64Op : Op<WeftHost_Dialect, "host_let_i64"> {
+  let arguments = (ins StrAttr:$name, StrAttr:$expr);
+}
+
+def HostLoadScalarOp : Op<WeftHost_Dialect, "host_load_scalar"> {
+  let arguments = (ins I64Attr:$slot, StrAttr:$c_type, StrAttr:$index_expr);
+  let results = (outs AnyType:$val);
+}
+
+def HostPtrOffsetOp : Op<WeftHost_Dialect, "host_ptr_offset"> {
+  let arguments = (ins StrAttr:$c_type, StrAttr:$name, StrAttr:$base_expr,
+                       StrAttr:$offset_expr);
+}
+
+def HostSpanOp : Op<WeftHost_Dialect, "host_span_op"> {
+  let arguments = (ins StrAttr:$op, StrAttr:$dst_expr, StrAttr:$src_expr,
+                       StrAttr:$count_expr, I64Attr:$elem_bytes);
+}
+
+def HostElemOp : Op<WeftHost_Dialect, "host_elem_op"> {
+  let arguments = (ins StrAttr:$op, StrAttr:$dst_expr, StrAttr:$src_expr,
+                       StrAttr:$aux_expr, I64Attr:$elem_bytes);
+}
+
+def HostPanelYieldOp : Op<WeftHost_Dialect, "host_panel_yield"> {
+  let arguments = (ins AnyType:$value, BoolAttr:$widen_bf16, StrAttr:$dst_expr);
 }
 
 def HostParallelTilesOp : Op<WeftHost_Dialect, "host_parallel_tiles"> {

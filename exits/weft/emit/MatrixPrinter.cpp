@@ -40,50 +40,40 @@ void emitTupleUnpack(PrintContext &c, Operation &op, StringRef tup,
   }
 }
 
-std::string formatRecordDecl(bool weight) {
-  struct Field {
-    std::string name, type, layout;
-    int extent, offset, bits;
-  };
-  const std::string natural = "[{kind=\"natural\"}]";
-  auto joined = [](int role) {
-    return "[{kind=\"joined\",fields=2:i64,low_bits=4:i64,order=\"lo_first\","
-           "size=4:i64,role=" +
-           std::to_string(role) + ":i64}]";
-  };
-  const std::string nibble = "[{kind=\"grouped\",size=64:i64},{kind="
-                             "\"layered\",size=32:i64,order=\"lo_first\"}]";
-  std::vector<Field> fields =
-      weight ? std::vector<Field>{{"d", "f16", natural, 1, 0, 16},
-                                  {"dmin", "f16", natural, 1, 16, 16},
-                                  {"sc", "ui6", joined(0), 8, 32, 96},
-                                  {"m", "ui6", joined(1), 8, 32, 96},
-                                  {"q", "ui4", nibble, 256, 128, 1024}}
-             : std::vector<Field>{{"ds", "f32", natural, 1, 0, 32},
-                                  {"q", "si8", natural, 256, 32, 2048},
-                                  {"bsum", "si16", natural, 16, 2080, 256}};
-  SmallVector<std::string> names, types, layouts, shapes, offsets, bits;
-  for (auto &f : fields) {
-    names.push_back("\"" + f.name + "\"");
-    types.push_back(f.type);
-    layouts.push_back(f.layout);
-    shapes.push_back(f.extent == 1
-                         ? "array<i64>"
-                         : "array<i64:" + std::to_string(f.extent) + ">");
-    offsets.push_back(std::to_string(f.offset));
-    bits.push_back(std::to_string(f.bits));
+std::string formatEncodingDecl(Operation &op) {
+  std::string name = op.getAttrOfType<StringAttr>("sym_name").str();
+  int64_t align = op.getAttrOfType<IntegerAttr>("alignment").getInt();
+  int64_t elems = op.getAttrOfType<IntegerAttr>("elements").getInt();
+  int64_t storageBits = op.getAttrOfType<IntegerAttr>("storage_bits").getInt();
+  auto fNames = op.getAttrOfType<ArrayAttr>("field_names");
+  auto fTypes = op.getAttrOfType<ArrayAttr>("field_types");
+  auto fExts = op.getAttrOfType<DenseI64ArrayAttr>("field_extents");
+  auto fLayouts = op.getAttrOfType<ArrayAttr>("field_layouts");
+  auto fOffsets = op.getAttrOfType<DenseI64ArrayAttr>("field_bit_offsets");
+  auto fBits = op.getAttrOfType<DenseI64ArrayAttr>("field_storage_bits");
+
+  SmallVector<std::string> names, types, shapes, layouts, offsets, bits;
+  for (size_t i = 0; i < fNames.size(); ++i) {
+    names.push_back("\"" + cast<StringAttr>(fNames[i]).str() + "\"");
+    types.push_back(cast<StringAttr>(fTypes[i]).str());
+    int64_t ext = fExts[i];
+    shapes.push_back(ext == 1 ? "array<i64>"
+                              : "array<i64:" + std::to_string(ext) + ">");
+    layouts.push_back(cast<StringAttr>(fLayouts[i]).str());
+    offsets.push_back(std::to_string(fOffsets[i]));
+    bits.push_back(std::to_string(fBits[i]));
   }
-  std::string name = weight ? "Q4_K" : "Q8_K";
   return "\"weft_kernel.encoding_decl\"() <{sym_name=\"" + name +
          "\",kind=\"base\",layout_identity=\"" + name +
          "\",bit_order=\"lsb_first\",byte_order=\"little\",alignment=" +
-         std::to_string(weight ? 2 : 4) + ":i64,elements=256:i64,storage_bits=" +
-         std::to_string((weight ? 144 : 292) * 8) + ":i64,field_names=[" +
-         llvm::join(names, ",") + "],field_types=[" + llvm::join(types, ",") +
-         "],field_shapes=[" + llvm::join(shapes, ",") + "],field_layouts=[" +
-         llvm::join(layouts, ",") + "],field_bit_offsets=array<i64:" +
-         llvm::join(offsets, ",") + ">,field_storage_bits=array<i64:" +
-         llvm::join(bits, ",") + ">,padding=array<i64>}>:()->()";
+         std::to_string(align) + ":i64,elements=" + std::to_string(elems) +
+         ":i64,storage_bits=" + std::to_string(storageBits) +
+         ":i64,field_names=[" + llvm::join(names, ",") + "],field_types=[" +
+         llvm::join(types, ",") + "],field_shapes=[" + llvm::join(shapes, ",") +
+         "],field_layouts=[" + llvm::join(layouts, ",") +
+         "],field_bit_offsets=array<i64:" + llvm::join(offsets, ",") +
+         ">,field_storage_bits=array<i64:" + llvm::join(bits, ",") +
+         ">,padding=array<i64>}>:()->()";
 }
 } // namespace
 
@@ -117,7 +107,7 @@ TerminalPrinter weftTerminalPrinter() {
   p.operations["weft_host.encoding_decl"] = [](Operation &op, PrintPoint at,
                                                PrintContext &c) {
     if (at == PrintPoint::Enter)
-      c.line(formatRecordDecl(op.getAttrOfType<BoolAttr>("is_weight").getValue()));
+      c.line(formatEncodingDecl(op));
     return llvm::Error::success();
   };
 
@@ -852,22 +842,26 @@ TerminalPrinter weftTerminalPrinter() {
 
       if (op.getAttrOfType<BoolAttr>("uses_q8k").getValue()) {
         using Q8 = intentdsl::kir::Q8KRecord;
-        c.line("struct Record { float d; int8_t q[" +
-               std::to_string(Q8::elements) + "]; int16_t sums[" +
-               std::to_string(Q8::elements / Q8::sumGroup) + "]; };");
+        const std::string q8Elems = std::to_string(Q8::elements);
+        const std::string q8Groups = std::to_string(Q8::elements / Q8::sumGroup);
+        const std::string q8GrpSz = std::to_string(Q8::sumGroup);
+        c.line("struct Record { float d; int8_t q[" + q8Elems +
+               "]; int16_t sums[" + q8Groups + "]; };");
         c.line("_Static_assert(sizeof(struct Record)==" +
                std::to_string(Q8::bytes) + ", \"Q8_K record ABI\");");
         c.line("static inline void pack_q8_record(struct Record *out, const float *x, int64_t stride) {");
         c.line("  float extreme=0.0f;");
-        c.line("  for (int64_t k=0; k<256; ++k) { float v=x[k*stride]; if (fabsf(v)>fabsf(extreme)) extreme=v; }");
+        c.line("  for (int64_t k=0; k<" + q8Elems +
+               "; ++k) { float v=x[k*stride]; if (fabsf(v)>fabsf(extreme)) extreme=v; }");
         c.line("  float inv=extreme==0.0f ? 0.0f : -127.0f/extreme;");
         c.line("  out->d=extreme==0.0f ? 0.0f : 1.0f/inv;");
-        c.line("  for (int group=0; group<16; ++group) {");
+        c.line("  for (int group=0; group<" + q8Groups + "; ++group) {");
         c.line("    int sum=0;");
         c.line("#if defined(__x86_64__)");
         c.line("    #pragma omp simd reduction(+:sum)");
         c.line("#endif");
-        c.line("    for (int64_t k=16*group; k<16*group+16; ++k) {");
+        c.line("    for (int64_t k=" + q8GrpSz + "*group; k<" + q8GrpSz +
+               "*group+" + q8GrpSz + "; ++k) {");
         c.line("      float v=x[k*stride]*inv; int q=(int)v; float fraction=fabsf(v-(float)q);");
         c.line("      if (fraction>0.5f || (fraction==0.5f && (q&1))) q+=v<0 ? -1 : 1;");
         c.line("      out->q[k]=(int8_t)(q>127 ? 127 : q); sum+=out->q[k];");
@@ -983,21 +977,48 @@ TerminalPrinter weftTerminalPrinter() {
     return llvm::Error::success();
   };
 
-  p.operations["weft_host.host_col_loop"] = [](Operation &op, PrintPoint at,
-                                               PrintContext &c) {
-    auto *prep = op.getParentOp();
-    auto slots = prep->getAttrOfType<DenseI64ArrayAttr>("src_slots");
-    auto st = prep->getAttrOfType<DenseI64ArrayAttr>("src_strides_0");
-    if (at == PrintPoint::Enter) {
-      auto &varBb = op.getRegion(0).front();
-      c.line("#pragma omp simd");
-      c.line("for (int64_t n=0; n<N; ++n) {");
+  p.operations["weft_host.host_if"] = [](Operation &op, PrintPoint at,
+                                         PrintContext &c) {
+    if (at == PrintPoint::Enter)
+      c.line("if (" + op.getAttrOfType<StringAttr>("cond").str() + ") {");
+    else if (at == PrintPoint::BeginBlock)
       c.indent++;
-      c.line("const uint16_t " + c.name(varBb.getArgument(0)) +
-             " = ((const uint16_t*)a" + std::to_string(slots[0]) + ")[batch*" +
-             std::to_string(st[0]) + "LL+(chunk*K+k)*" +
-             std::to_string(st[1]) + "LL+group*" + std::to_string(st[2]) +
-             "LL+n*" + std::to_string(st[3]) + "LL];");
+    else if (at == PrintPoint::EndBlock) {
+      c.indent--;
+      c.line("}");
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["weft_host.host_omp_for"] = [](Operation &op, PrintPoint at,
+                                              PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      bool par = op.getAttrOfType<BoolAttr>("parallel").getValue();
+      bool simd = op.getAttrOfType<BoolAttr>("simd").getValue();
+      bool x86Simd = op.getAttrOfType<BoolAttr>("x86_simd").getValue();
+      std::string ic = op.getAttrOfType<StringAttr>("if_cond").str();
+      std::string iv = op.getAttrOfType<StringAttr>("iv").str();
+      std::string lb = op.getAttrOfType<StringAttr>("lb").str();
+      std::string ub = op.getAttrOfType<StringAttr>("ub").str();
+      std::string st = op.getAttrOfType<StringAttr>("step").str();
+      if (simd) {
+        if (x86Simd) {
+          c.line("#if defined(__x86_64__)");
+          c.line("#pragma omp simd");
+          c.line("#endif");
+        } else {
+          c.line("#pragma omp simd");
+        }
+      } else if (par) {
+        c.line("#pragma omp parallel for num_threads(workers) schedule(static)" +
+               (ic.empty() ? "" : " if(" + ic + ")"));
+      } else {
+        c.line("#pragma omp for schedule(static)");
+      }
+      c.line("for (int64_t " + iv + "=" + lb + "; " + iv + "<" + ub + "; " +
+             iv + "+=" + st + ") {");
+    } else if (at == PrintPoint::BeginBlock) {
+      c.indent++;
     } else if (at == PrintPoint::EndBlock) {
       c.indent--;
       c.line("}");
@@ -1005,323 +1026,116 @@ TerminalPrinter weftTerminalPrinter() {
     return llvm::Error::success();
   };
 
+  p.operations["weft_host.host_for"] = [](Operation &op, PrintPoint at,
+                                          PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      std::string iv = op.getAttrOfType<StringAttr>("iv").str();
+      std::string lb = op.getAttrOfType<StringAttr>("lb").str();
+      std::string ub = op.getAttrOfType<StringAttr>("ub").str();
+      std::string st = op.getAttrOfType<StringAttr>("step").str();
+      c.line("for (int64_t " + iv + "=" + lb + "; " + iv + "<" + ub + "; " +
+             iv + "+=" + st + ") {");
+    } else if (at == PrintPoint::BeginBlock) {
+      c.indent++;
+    } else if (at == PrintPoint::EndBlock) {
+      c.indent--;
+      c.line("}");
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["weft_host.host_let_i64"] = [](Operation &op, PrintPoint at,
+                                              PrintContext &c) {
+    if (at == PrintPoint::Enter)
+      c.line("const int64_t " + op.getAttrOfType<StringAttr>("name").str() +
+             " = " + op.getAttrOfType<StringAttr>("expr").str() + ";");
+    return llvm::Error::success();
+  };
+
+  p.operations["weft_host.host_load_scalar"] = [](Operation &op, PrintPoint at,
+                                                  PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      int64_t s = op.getAttrOfType<IntegerAttr>("slot").getInt();
+      std::string cTy = op.getAttrOfType<StringAttr>("c_type").str();
+      std::string idx = op.getAttrOfType<StringAttr>("index_expr").str();
+      std::string base =
+          s >= 0 ? ("a" + std::to_string(s)) : ("wk_" + std::to_string(-1 - s));
+      c.line("const " + cTy + " " + c.name(op.getResult(0)) + " = ((const " +
+             cTy + "*)" + base + ")[" + idx + "];");
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["weft_host.host_ptr_offset"] = [](Operation &op, PrintPoint at,
+                                                 PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      std::string cTy = op.getAttrOfType<StringAttr>("c_type").str();
+      std::string nm = op.getAttrOfType<StringAttr>("name").str();
+      std::string bs = op.getAttrOfType<StringAttr>("base_expr").str();
+      std::string of = op.getAttrOfType<StringAttr>("offset_expr").str();
+      c.line(cTy + " *" + nm + " = (" + cTy + "*)(" + bs + ") + (" + of + ");");
+    }
+    return llvm::Error::success();
+  };
+
+  p.operations["weft_host.host_span_op"] = [](Operation &op, PrintPoint at,
+                                              PrintContext &c) {
+    if (at != PrintPoint::Enter)
+      return llvm::Error::success();
+    auto kind = op.getAttrOfType<StringAttr>("op").getValue();
+    std::string dst = op.getAttrOfType<StringAttr>("dst_expr").str();
+    std::string src = op.getAttrOfType<StringAttr>("src_expr").str();
+    std::string cnt = op.getAttrOfType<StringAttr>("count_expr").str();
+    int64_t eb = op.getAttrOfType<IntegerAttr>("elem_bytes").getInt();
+    if (kind == "widen_bf16")
+      c.line("widen_bf16_span(" + dst + ", " + src + ", " + cnt + ");");
+    else if (kind == "widen_f16")
+      c.line("widen_f16_span(" + dst + ", " + src + ", " + cnt + ");");
+    else if (kind == "memcpy")
+      c.line("memcpy(" + dst + ", " + src + ", (size_t)(" + cnt + ") * " +
+             std::to_string(eb) + "ULL);");
+    else if (kind == "zero")
+      c.line("memset(" + dst + ", 0, (size_t)(" + cnt + ") * " +
+             std::to_string(eb) + "ULL);");
+    return llvm::Error::success();
+  };
+
+  p.operations["weft_host.host_elem_op"] = [](Operation &op, PrintPoint at,
+                                              PrintContext &c) {
+    if (at != PrintPoint::Enter)
+      return llvm::Error::success();
+    auto kind = op.getAttrOfType<StringAttr>("op").getValue();
+    std::string dst = op.getAttrOfType<StringAttr>("dst_expr").str();
+    std::string src = op.getAttrOfType<StringAttr>("src_expr").str();
+    std::string aux = op.getAttrOfType<StringAttr>("aux_expr").str();
+    int64_t eb = op.getAttrOfType<IntegerAttr>("elem_bytes").getInt();
+    if (kind == "expand_bf")
+      c.line(dst + " = expand_bf(" + src + ");");
+    else if (kind == "expand_f16")
+      c.line(dst + " = expand_f16(" + src + ");");
+    else if (kind == "assign")
+      c.line(dst + " = " + src + ";");
+    else if (kind == "memcpy")
+      c.line("memcpy(" + dst + ", " + src + ", " + std::to_string(eb) + ");");
+    else if (kind == "pack_q8k")
+      c.line("pack_q8_record(" + dst + ", " + src + ", " + aux + ");");
+    else if (kind == "let_mx8_scale")
+      c.line("const float " + dst + " = g_mx8_scale[" + src + "];");
+    else if (kind == "mx8_scale")
+      c.line(dst + " = g_mx8_scale[" + src + "];");
+    else if (kind == "mx8_mul")
+      c.line(dst + " = g_mx8_val[" + src + "] * " + aux + ";");
+    return llvm::Error::success();
+  };
+
   p.operations["weft_host.host_panel_yield"] = [](Operation &op, PrintPoint at,
                                                   PrintContext &c) {
     if (at != PrintPoint::Enter)
       return llvm::Error::success();
-    auto *prep = op.getParentOp()->getParentOp();
-    bool wide = prep->getAttrOfType<StringAttr>("kind").getValue() ==
-                "map-window-rhs-f32";
-    std::string dst = prep->getAttrOfType<StringAttr>("dst_buf").str();
+    bool wide = op.getAttrOfType<BoolAttr>("widen_bf16").getValue();
+    std::string dst = op.getAttrOfType<StringAttr>("dst_expr").str();
     std::string v = c.name(op.getOperand(0));
-    c.line(dst + "[p*N+n] = " + (wide ? "expand_bf(" + v + ")" : v) + ";");
-    return llvm::Error::success();
-  };
-
-  p.operations["weft_host.host_prep"] = [](Operation &op, PrintPoint at,
-                                           PrintContext &c) -> llvm::Error {
-    auto pk = op.getAttrOfType<StringAttr>("kind").getValue();
-    bool isMap = pk == "map-window-rhs-f32" || pk == "map-window-rhs-bf16";
-    if (isMap) {
-      auto slots = op.getAttrOfType<DenseI64ArrayAttr>("src_slots");
-      auto access = [&](int idx, StringRef cTy, ArrayRef<std::string> coords) {
-        auto st = op.getAttrOfType<DenseI64ArrayAttr>("src_strides_" +
-                                                      std::to_string(idx));
-        std::string s =
-            "((" + cTy.str() + "*)a" + std::to_string(slots[idx]) + ")[0";
-        for (auto [ax, e] : llvm::enumerate(coords))
-          s += "+(" + e + ")*" + std::to_string(st[ax]) + "LL";
-        return s + "]";
-      };
-      if (at == PrintPoint::Enter) {
-        int64_t H = op.getAttrOfType<IntegerAttr>("head_extent").getInt();
-        int64_t chunks = op.getAttrOfType<IntegerAttr>("chunk_extent").getInt();
-        int64_t hg = op.getAttrOfType<IntegerAttr>("head_group").getInt();
-        c.line("#pragma omp parallel for num_threads(workers) schedule(static) if(G*K>1)");
-        c.line("for (int64_t p=0; p<G*K; ++p) {");
-        c.indent++;
-        c.line("const int64_t g=p/K, k=p%K, head=g%" + std::to_string(H) +
-               ", chunk=g/" + std::to_string(H) + "%" + std::to_string(chunks) +
-               ", batch=g/" + std::to_string(H) + "/" + std::to_string(chunks) +
-               ", group=head/" + std::to_string(hg) + ";");
-        auto &invBb = op.getRegion(0).front();
-        c.line("const float " + c.name(invBb.getArgument(0)) + " = " +
-               access(1, "const float", {"batch", "head", "chunk", "k"}) + ";");
-        c.line("const float " + c.name(invBb.getArgument(1)) + " = " +
-               access(2, "const float", {"batch", "head", "chunk", "k"}) + ";");
-        c.line("const float " + c.name(invBb.getArgument(2)) + " = " +
-               access(2, "const float", {"batch", "head", "chunk", "K-1"}) + ";");
-      } else if (at == PrintPoint::EndBlock) {
-        c.indent--;
-        c.line("}");
-      }
-      return llvm::Error::success();
-    }
-
-    if (at != PrintPoint::Enter)
-      return llvm::Error::success();
-    auto slots = op.getAttrOfType<DenseI64ArrayAttr>("src_slots");
-    auto dst = op.getAttrOfType<StringAttr>("dst_buf").str();
-
-    if (pk == "widen-window-lhs") {
-      int64_t H = op.getAttrOfType<IntegerAttr>("head_extent").getInt();
-      int64_t chunks = op.getAttrOfType<IntegerAttr>("chunk_extent").getInt();
-      auto st = op.getAttrOfType<DenseI64ArrayAttr>("src_strides_0");
-      c.line("#pragma omp parallel for num_threads(workers) schedule(static) if(G>1)");
-      c.line("for (int64_t g=0; g<G; ++g) {");
-      c.line("  const int64_t batch=g/" + std::to_string(H) + "/" +
-             std::to_string(chunks) + ", chunk=g/" + std::to_string(H) + "%" +
-             std::to_string(chunks) + ", head=g%" + std::to_string(H) + ";");
-      c.line("  for (int64_t m=0; m<M; ++m) for (int64_t k=0; k<K; ++k)");
-      c.line("    " + dst + "[(g*M+m)*K+k] = expand_bf(((const uint16_t*)a" +
-             std::to_string(slots[0]) + ")[batch*" + std::to_string(st[0]) +
-             "LL+(chunk*K+k)*" + std::to_string(st[1]) + "LL+head*" +
-             std::to_string(st[2]) + "LL+m*" + std::to_string(st[3]) + "LL]);");
-      c.line("}");
-    } else if (pk == "widen-lhs-f32") {
-      auto st = op.getAttrOfType<DenseI64ArrayAttr>("src_strides_0");
-      auto dt = op.getAttrOfType<StringAttr>("src_dtype_0").getValue();
-      int64_t ak = op.getAttrOfType<IntegerAttr>("lhs_k").getInt();
-      int64_t ab = op.getAttrOfType<IntegerAttr>("lhs_batch").getInt();
-      int64_t am = 0;
-      while (am == ak || am == ab)
-        ++am;
-      std::string banks = ab < 0 ? "1LL" : "G";
-      std::string fnWiden = dt == "bf16" ? "expand_bf" : "expand_f16";
-      std::string fnSpan = dt == "bf16" ? "widen_bf16_span" : "widen_f16_span";
-      c.line("#pragma omp parallel for num_threads(workers) schedule(static) if((" +
-             banks + ")*M*K > 131072)");
-      c.line("for (int64_t row=0; row<(" + banks + ")*M; ++row) {");
-      c.line("  const int64_t g = M ? row / M : 0, m = M ? row % M : 0;");
-      c.line("  const uint16_t *src = (const uint16_t*)a" +
-             std::to_string(slots[0]) + " + g*" +
-             std::to_string(ab < 0 ? 0 : st[ab]) + "LL + m*" +
-             std::to_string(st[am]) + "LL;");
-      c.line("  float *out = " + dst + " + row*K;");
-      if (st[ak] == 1)
-        c.line("  " + fnSpan + "(out, src, K);");
-      else
-        c.line("  for (int64_t k=0; k<K; ++k) out[k] = " + fnWiden + "(src[k*" +
-               std::to_string(st[ak]) + "LL]);");
-      c.line("}");
-    } else if (pk == "widen-pack-rhs-f32") {
-      auto st = op.getAttrOfType<DenseI64ArrayAttr>("src_strides_0");
-      auto dt = op.getAttrOfType<StringAttr>("src_dtype_0").getValue();
-      int64_t bk = op.getAttrOfType<IntegerAttr>("rhs_k").getInt();
-      int64_t bb = op.getAttrOfType<IntegerAttr>("rhs_batch").getInt();
-      int64_t bn = 0;
-      while (bn == bk || bn == bb)
-        ++bn;
-      std::string banks = bb < 0 ? "1LL" : "G";
-      std::string fnWiden = dt == "bf16" ? "expand_bf" : "expand_f16";
-      std::string fnSpan = dt == "bf16" ? "widen_bf16_span" : "widen_f16_span";
-      c.line("#pragma omp parallel for num_threads(workers) schedule(static) if((" +
-             banks + ")*nc*K*nr > 131072 && (" + banks + ")*nc >= 4)");
-      c.line("for (int64_t p=0; p<(" + banks + ")*nc; ++p) {");
-      c.line("  const int64_t g = nc ? p / nc : 0, c = (nc ? p % nc : 0)*nr, valid = N-c < nr ? N-c : nr;");
-      c.line("  for (int64_t k=0; k<K; ++k) {");
-      c.line("    const uint16_t *src = (const uint16_t*)a" +
-             std::to_string(slots[0]) + " + g*" +
-             std::to_string(bb < 0 ? 0 : st[bb]) + "LL + k*" +
-             std::to_string(st[bk]) + "LL + c*" + std::to_string(st[bn]) +
-             "LL;");
-      c.line("    float *out = " + dst + " + (p*K + k)*nr;");
-      if (st[bn] == 1)
-        c.line("    " + fnSpan + "(out, src, valid);");
-      else
-        c.line("    for (int64_t j=0; j<valid; ++j) out[j] = " + fnWiden +
-               "(src[j*" + std::to_string(st[bn]) + "LL]);");
-      c.line("    for (int64_t j=valid; j<nr; ++j) out[j] = 0.0f;");
-      c.line("  }");
-      c.line("}");
-    } else if (pk == "pack-rhs-panels") {
-      auto st = op.getAttrOfType<DenseI64ArrayAttr>("src_strides_0");
-      auto dt = op.getAttrOfType<StringAttr>("src_dtype_0").getValue();
-      int64_t bytes = dt == "f32" || dt == "i32" ? 4 : dt == "i8" || dt == "u8" ? 1 : 2;
-      int64_t bk = op.getAttrOfType<IntegerAttr>("rhs_k").getInt();
-      int64_t bb = op.getAttrOfType<IntegerAttr>("rhs_batch").getInt();
-      int64_t bn = 0;
-      while (bn == bk || bn == bb)
-        ++bn;
-      std::string banks = bb < 0 ? "1LL" : "G";
-      c.line("#pragma omp parallel for num_threads(workers) schedule(static) if((" +
-             banks + ")*nc*K*nr > 131072 && (" + banks + ")*nc >= 4)");
-      c.line("for (int64_t p=0; p<(" + banks + ")*nc; ++p) {");
-      c.line("  const int64_t g = nc ? p / nc : 0, c = (nc ? p % nc : 0)*nr, valid = N-c < nr ? N-c : nr;");
-      c.line("  for (int64_t k=0; k<K; ++k) {");
-      c.line("    uint8_t *out = (uint8_t*)" + dst + " + (p*K + k)*nr*" +
-             std::to_string(bytes) + "LL;");
-      c.line("    const uint8_t *src = (const uint8_t*)a" +
-             std::to_string(slots[0]) + " + (g*" +
-             std::to_string(bb < 0 ? 0 : st[bb]) + "LL + k*" +
-             std::to_string(st[bk]) + "LL + c*" + std::to_string(st[bn]) +
-             "LL)*" + std::to_string(bytes) + "LL;");
-      if (st[bn] == 1)
-        c.line("    memcpy(out, src, (size_t)(valid*" + std::to_string(bytes) +
-               "LL));");
-      else
-        c.line("    for (int64_t j=0; j<valid; ++j) memcpy(out+j*" +
-               std::to_string(bytes) + "LL, src+j*" +
-               std::to_string(st[bn] * bytes) + "LL, " + std::to_string(bytes) +
-               ");");
-      c.line("    if (valid < nr) memset(out + valid*" + std::to_string(bytes) +
-             "LL, 0, (size_t)((nr - valid)*" + std::to_string(bytes) + "LL));");
-      c.line("  }");
-      c.line("}");
-    } else if (pk == "pack-vnni") {
-      auto st = op.getAttrOfType<DenseI64ArrayAttr>("src_strides_0");
-      int64_t kBlk = op.getAttrOfType<IntegerAttr>("k_block").getInt();
-      int64_t bytes = kBlk == 4 ? 1 : 2;
-      std::string cTy = bytes == 1 ? "uint8_t" : "uint16_t";
-      int64_t bk = op.getAttrOfType<IntegerAttr>("rhs_k").getInt();
-      int64_t bb = op.getAttrOfType<IntegerAttr>("rhs_batch").getInt();
-      int64_t bn = 0;
-      while (bn == bk || bn == bb)
-        ++bn;
-      std::string banks = bb < 0 ? "1LL" : "G";
-      c.line("#pragma omp parallel for num_threads(workers) schedule(static) if((" +
-             banks + ")*nc*K*nr > 131072 && (" + banks + ")*nc >= 4)");
-      c.line("for (int64_t p=0; p<(" + banks + ")*nc; ++p) {");
-      c.line("  const int64_t g = nc ? p / nc : 0, c = (nc ? p % nc : 0)*nr, valid = N-c < nr ? N-c : nr;");
-      c.line("  const int64_t kPad = ((K+" + std::to_string(kBlk - 1) + ")/" +
-             std::to_string(kBlk) + ")*" + std::to_string(kBlk) + ";");
-      c.line("  " + cTy + " *out = (" + cTy + "*)" + dst + " + p*kPad*nr;");
-      c.line("  if (valid < nr || kPad > K) memset(out, 0, (size_t)(kPad*nr)*sizeof(" + cTy + "));");
-      c.line("  int64_t kb = 0;");
-      c.line("  for (; kb + " + std::to_string(kBlk) + " <= K; kb += " +
-             std::to_string(kBlk) + ") {");
-      c.line("    const " + cTy + " *base = (const " + cTy + "*)a" +
-             std::to_string(slots[0]) + " + g*" +
-             std::to_string(bb < 0 ? 0 : st[bb]) + "LL + c*" +
-             std::to_string(st[bn]) + "LL + kb*" + std::to_string(st[bk]) + "LL;");
-      c.line("    " + cTy + " *dst_k = out + (kb/" + std::to_string(kBlk) +
-             ")*nr*" + std::to_string(kBlk) + ";");
-      c.line("#if defined(__x86_64__)");
-      c.line("    #pragma omp simd");
-      c.line("#endif");
-      c.line("    for (int64_t j=0; j<valid; ++j)");
-      c.line("      for (int lane=0; lane<" + std::to_string(kBlk) + "; ++lane)");
-      c.line("        dst_k[j*" + std::to_string(kBlk) +
-             " + lane] = base[j*" + std::to_string(st[bn]) + "LL + lane*" +
-             std::to_string(st[bk]) + "LL];");
-      c.line("  }");
-      c.line("  for (; kb < K; kb += " + std::to_string(kBlk) + ") {");
-      c.line("    const " + cTy + " *base = (const " + cTy + "*)a" +
-             std::to_string(slots[0]) + " + g*" +
-             std::to_string(bb < 0 ? 0 : st[bb]) + "LL + c*" +
-             std::to_string(st[bn]) + "LL + kb*" + std::to_string(st[bk]) + "LL;");
-      c.line("    for (int64_t j=0; j<valid; ++j)");
-      c.line("      for (int lane=0; lane<" + std::to_string(kBlk) + "; ++lane)");
-      c.line("        if (kb+lane < K) out[(kb/" + std::to_string(kBlk) +
-             ")*nr*" + std::to_string(kBlk) + " + j*" + std::to_string(kBlk) +
-             " + lane] = base[j*" + std::to_string(st[bn]) + "LL + lane*" +
-             std::to_string(st[bk]) + "LL];");
-      c.line("  }");
-      c.line("}");
-    } else if (pk == "decode-mx8-lhs") {
-      auto stA = op.getAttrOfType<DenseI64ArrayAttr>("src_strides_0");
-      auto stS = op.getAttrOfType<DenseI64ArrayAttr>("src_strides_1");
-      c.line("#pragma omp parallel for num_threads(workers) schedule(static) if(M*K>16384 && workers>1)");
-      c.line("for (int64_t r=0; r<M; ++r) {");
-      c.line("  const uint8_t *src_r = (const uint8_t*)a" +
-             std::to_string(slots[0]) + " + r*" + std::to_string(stA[0]) + "LL;");
-      c.line("  const uint8_t *sc_r = (const uint8_t*)a" +
-             std::to_string(slots[1]) + " + r*" + std::to_string(stS[0]) + "LL;");
-      c.line("  float *dst_r = " + dst + " + r*K;");
-      c.line("  for (int64_t g=0; g<K/32; ++g) {");
-      c.line("    const float factor = g_mx8_scale[sc_r[g*" +
-             std::to_string(stS[1]) + "LL]];");
-      c.line("    const uint8_t *src_g = src_r + g*" + std::to_string(stA[1]) + "LL;");
-      c.line("    float *dst_g = dst_r + g*32;");
-      c.line("#if defined(__x86_64__)");
-      c.line("#if defined(__x86_64__)");
-      c.line("    #pragma omp simd");
-      c.line("#endif");
-      c.line("#endif");
-      c.line("    for (int t=0; t<32; ++t) dst_g[t] = g_mx8_val[src_g[t*" +
-             std::to_string(stA[2]) + "LL]] * factor;");
-      c.line("  }");
-      c.line("}");
-    } else if (pk == "decode-mx8-rhs") {
-      auto stB = op.getAttrOfType<DenseI64ArrayAttr>("src_strides_0");
-      auto stS = op.getAttrOfType<DenseI64ArrayAttr>("src_strides_1");
-      int64_t colAx =
-          op.getAttrOfType<IntegerAttr>("scale_column_axis").getInt();
-      std::string scExpr =
-          colAx == 0 ? ("(c0+jc)*" + std::to_string(stS[0]) + "LL + g*" +
-                        std::to_string(stS[1]) + "LL")
-                     : ("g*" + std::to_string(stS[0]) + "LL + (c0+jc)*" +
-                        std::to_string(stS[1]) + "LL");
-      c.line("#pragma omp parallel for num_threads(workers) schedule(static) if(N*K>16384 && workers>1)");
-      c.line("for (int64_t g=0; g<K/32; ++g) {");
-      c.line("  for (int64_t c0=0; c0<N; c0+=64) {");
-      c.line("    const int64_t blk = N - c0 < 64 ? N - c0 : 64;");
-      c.line("    float sc_blk[64];");
-      c.line("    const uint8_t *sc_base = (const uint8_t*)a" +
-             std::to_string(slots[1]) + ";");
-      c.line("    for (int64_t jc=0; jc<blk; ++jc) sc_blk[jc] = g_mx8_scale[sc_base[" +
-             scExpr + "]];");
-      c.line("    for (int t=0; t<32; ++t) {");
-      c.line("      const uint8_t *src_gt = (const uint8_t*)a" +
-             std::to_string(slots[0]) + " + g*" + std::to_string(stB[0]) +
-             "LL + t*" + std::to_string(stB[1]) + "LL + c0*" +
-             std::to_string(stB[2]) + "LL;");
-      c.line("      float *dst_gt = " + dst + " + (g*32 + t)*N + c0;");
-      c.line("#if defined(__x86_64__)");
-      c.line("      #pragma omp simd");
-      c.line("#endif");
-      c.line("      for (int64_t jc=0; jc<blk; ++jc) dst_gt[jc] = g_mx8_val[src_gt[jc*" +
-             std::to_string(stB[2]) + "LL]] * sc_blk[jc];");
-      c.line("    }");
-      c.line("  }");
-      c.line("}");
-    } else if (pk == "encode-q8k") {
-      auto st = op.getAttrOfType<DenseI64ArrayAttr>("src_strides_0");
-      c.line("for (int64_t g=0; g<K/256; ++g)");
-      c.line("  pack_q8_record(&" + dst + "[g], (const float*)a" +
-             std::to_string(slots[0]) + " + g*" + std::to_string(st[0]) +
-             "LL, " + std::to_string(st[1]) + "LL);");
-    } else if (pk == "gather-routed-lhs" || pk == "gather-widen-routed-lhs-f32") {
-      auto stA = op.getAttrOfType<DenseI64ArrayAttr>("src_strides_0");
-      auto stO = op.getAttrOfType<DenseI64ArrayAttr>("src_strides_1");
-      auto stR = op.getAttrOfType<DenseI64ArrayAttr>("src_strides_2");
-      auto dt = op.getAttrOfType<StringAttr>("src_dtype_0").getValue();
-      int64_t ak = op.getAttrOfType<IntegerAttr>("lhs_k").getInt();
-      int64_t mult = op.getAttrOfType<IntegerAttr>("multiplicity").getInt();
-      bool wide = pk == "gather-widen-routed-lhs-f32";
-      c.line("const int64_t active_begin = ((const int32_t*)a" +
-             std::to_string(slots[1]) + ")[0], active_end = ((const int32_t*)a" +
-             std::to_string(slots[1]) + ")[G*" + std::to_string(stO[0]) + "LL];");
-      c.line("#pragma omp parallel for num_threads(workers) schedule(static) if(active_end > active_begin + 1)");
-      c.line("for (int64_t r=active_begin; r<active_end; ++r) {");
-      c.line("  const int64_t src = ((const int32_t*)a" +
-             std::to_string(slots[2]) + ")[r*" + std::to_string(stR[0]) +
-             "LL] / " + std::to_string(mult) + "LL;");
-      if (wide) {
-        std::string fnWiden = dt == "bf16" ? "expand_bf" : "expand_f16";
-        c.line("  const uint16_t *from = (const uint16_t*)a" +
-               std::to_string(slots[0]) + " + src*" +
-               std::to_string(stA[1 - ak]) + "LL;");
-        c.line("  float *to = " + dst + " + r*K;");
-        c.line("  for (int64_t k=0; k<K; ++k) to[k] = " + fnWiden + "(from[k*" +
-               std::to_string(stA[ak]) + "LL]);");
-      } else {
-        int64_t bytes = dt == "f32" || dt == "i32" ? 4 : dt == "i8" || dt == "u8" ? 1 : 2;
-        c.line("  const uint8_t *from = (const uint8_t*)a" +
-               std::to_string(slots[0]) + " + src*" +
-               std::to_string(stA[1 - ak] * bytes) + "LL;");
-        c.line("  uint8_t *to = (uint8_t*)" + dst + " + r*K*" +
-               std::to_string(bytes) + "LL;");
-        if (stA[ak] == 1)
-          c.line("  memcpy(to, from, (size_t)(K*" + std::to_string(bytes) + "LL));");
-        else
-          c.line("  for (int64_t k=0; k<K; ++k) memcpy(to+k*" +
-                 std::to_string(bytes) + "LL, from+k*" +
-                 std::to_string(stA[ak] * bytes) + "LL, " +
-                 std::to_string(bytes) + ");");
-      }
-      c.line("}");
-    }
+    c.line(dst + " = " + (wide ? "expand_bf(" + v + ")" : v) + ";");
     return llvm::Error::success();
   };
 
