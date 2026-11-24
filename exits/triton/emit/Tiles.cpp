@@ -152,6 +152,8 @@ TerminalPrinter tilePrinter() {
       auto num = f.getValue();
       if (num.isInfinity())
         return std::string(num.isNegative() ? "-float('inf')" : "float('inf')");
+      if (num.isNaN())
+        return std::string("float('nan')");
       llvm::SmallString<32> txt;
       num.toString(txt);
       std::string number = txt.str().str();

@@ -186,14 +186,20 @@ LogicalResult verifyOwnerMap(func::FuncOp fn, const TargetProfile &p,
   return success();
 }
 llvm::Error emitOwnerArtifact(func::FuncOp fn, StringRef src,
-                              llvm::json::Object native, unsigned version,
-                              llvm::raw_pwrite_stream &out) {
+                              ArrayRef<llvm::json::Object> natives,
+                              unsigned version, llvm::raw_pwrite_stream &out) {
   auto &sp = fn.front().front();
   auto tile = sp.getAttrOfType<IntegerAttr>("block.owner_tile").getInt();
   auto count = sp.getAttrOfType<IntegerAttr>("block.owners").getInt();
   auto abi = llvm::json::parse(fn->getAttrOfType<StringAttr>("kir.abi"));
   if (!abi)
     return abi.takeError();
+  llvm::json::Array rows;
+  for (auto [idx, cfg] : llvm::enumerate(natives))
+    rows.push_back(llvm::json::Object{{"id", int64_t(idx)},
+                                      {"rows", tile},
+                                      {"width", 1},
+                                      {"native", llvm::json::Object(cfg)}});
   out << llvm::json::Value(llvm::json::Object{
       {"source", src.str()},
       {"entry", "kernel"},
@@ -203,12 +209,14 @@ llvm::Error emitOwnerArtifact(func::FuncOp fn, StringRef src,
       {"guard", llvm::json::Object{{"min_width", 0}, {"max_width", nullptr}}},
       {"grid", llvm::json::Array{int64_t(llvm::divideCeil(count, tile)), 1, 1}},
       {"direct_views", true},
-      {"rows",
-       llvm::json::Array{llvm::json::Object{{"id", 0},
-                                            {"rows", tile},
-                                            {"width", 1},
-                                            {"native", std::move(native)}}}}});
+      {"rows", std::move(rows)}});
   return llvm::Error::success();
+}
+llvm::Error emitOwnerArtifact(func::FuncOp fn, StringRef src,
+                              llvm::json::Object native, unsigned version,
+                              llvm::raw_pwrite_stream &out) {
+  return emitOwnerArtifact(fn, src, ArrayRef<llvm::json::Object>{native},
+                           version, out);
 }
 } // namespace intentdsl::block
 namespace CI_UNIT_NAMESPACE {

@@ -25,6 +25,9 @@ mlir::LogicalResult verifyOwnerMap(mlir::func::FuncOp,
                                    const compilerinfra::TargetProfile &,
                                    llvm::StringRef, llvm::StringRef);
 llvm::Error emitOwnerArtifact(mlir::func::FuncOp, llvm::StringRef,
+                              llvm::ArrayRef<llvm::json::Object>, unsigned,
+                              llvm::raw_pwrite_stream &);
+llvm::Error emitOwnerArtifact(mlir::func::FuncOp, llvm::StringRef,
                               llvm::json::Object, unsigned,
                               llvm::raw_pwrite_stream &);
 } // namespace intentdsl::block

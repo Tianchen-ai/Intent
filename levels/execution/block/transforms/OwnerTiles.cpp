@@ -182,6 +182,16 @@ SmallVector<Value> OwnerTiles::lowerBody(Block &body, Values env, Value mask) {
     }
     if (code == "end")
       break;
+    if (isa<arith::ExtFOp>(op) && !op.use_empty() &&
+        llvm::all_of(op.getUsers(), [](Operation *u) {
+          auto fl = dyn_cast_or_null<scf::ForOp>(u->getParentOp());
+          return fl && fl->hasAttr("block.contribution_width") &&
+                 !u->use_empty() &&
+                 llvm::all_of(u->getUsers(), [](Operation *s) {
+                   return s->hasAttr("block.pair_dot");
+                 });
+        }))
+      continue;
     if (auto c = dyn_cast<arith::ConstantOp>(op))
       v = constant(c);
     else if (auto d = dyn_cast<memref::DimOp>(op))
@@ -268,7 +278,44 @@ SmallVector<Value> OwnerTiles::lowerBody(Block &body, Values env, Value mask) {
 }
 
 LogicalResult OwnerTiles::build() {
-  Value start = b.create<arith::MulIOp>(loc, pid(0), integer(logical));
+  Value blockId = pid(0);
+  int64_t count = space.getAttrOfType<IntegerAttr>("block.owners").getInt();
+  auto axes = space.getAttrOfType<DenseI64ArrayAttr>("axes");
+  if (auto pair = space.getAttrOfType<IntegerAttr>("block.pair_axis")) {
+    auto &bb = space.getRegion(0).front();
+    auto pairArg = bb.getArgument(pair.getInt());
+    bool suffix = false, prefix = false;
+    for (auto loop : bb.getOps<scf::ForOp>())
+      if (loop->hasAttr("kir.reassociate")) {
+        suffix |= loop.getLowerBound() == pairArg;
+        prefix |= causalPrefixOwner(loop) == pairArg;
+        if (auto branch = loop.getUpperBound().getDefiningOp<scf::IfOp>();
+            branch && branch.getNumResults() == 1 &&
+            !branch.getElseRegion().empty())
+          if (auto cmp = branch.getCondition().getDefiningOp<arith::CmpIOp>();
+              cmp && cmp.getPredicate() == arith::CmpIPredicate::slt &&
+              cmp.getLhs() == pairArg)
+            prefix = true;
+      }
+    int64_t pairExtent =
+        std::max<int64_t>(1, shape(space.getOperand(pair.getInt()))[axes[pair.getInt()]]);
+    if ((suffix != prefix) && pairExtent >= logical &&
+        pairExtent % logical == 0 && count > pairExtent &&
+        count % pairExtent == 0) {
+      int64_t rowTiles = pairExtent / logical, outerGroups = count / pairExtent;
+      Value outerIdx =
+          b.create<arith::RemUIOp>(loc, blockId, integer(outerGroups));
+      Value tileRank =
+          b.create<arith::DivUIOp>(loc, blockId, integer(outerGroups));
+      Value rowTile = prefix ? Value(b.create<arith::SubIOp>(
+                                   loc, integer(rowTiles - 1), tileRank))
+                             : tileRank;
+      blockId = b.create<arith::AddIOp>(
+          loc, b.create<arith::MulIOp>(loc, outerIdx, integer(rowTiles)),
+          rowTile);
+    }
+  }
+  Value start = b.create<arith::MulIOp>(loc, blockId, integer(logical));
   auto r = lanes(rows);
   auto lane = rows == logical
                   ? r
@@ -276,7 +323,6 @@ LogicalResult OwnerTiles::build() {
                         loc, r, like(integer(logical), r.getType())));
   auto owner =
       b.create<arith::AddIOp>(loc, broadcast(start, r.getType()), lane);
-  int64_t count = space.getAttrOfType<IntegerAttr>("block.owners").getInt();
   active = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, owner,
                                    broadcast(integer(count), r.getType()));
   if (rows != logical)
@@ -287,7 +333,6 @@ LogicalResult OwnerTiles::build() {
   auto group = space.getAttrOfType<IntegerAttr>("block.pair_axis");
   if (!group)
     group = space.getAttrOfType<IntegerAttr>("block.group_axis");
-  auto axes = space.getAttrOfType<DenseI64ArrayAttr>("axes");
   SmallVector<int> order;
   if (group)
     order.push_back(group.getInt());

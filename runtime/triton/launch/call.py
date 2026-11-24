@@ -13,6 +13,7 @@ class Artifact:
             raise ValueError("unsupported Intent Triton ABI version")
         self.data = data
         self.kernel = load(data["source"], data["entry"])
+        self.compiled = {}
         self.winners = {}
         self.lock = RLock()
 
@@ -53,27 +54,72 @@ class Prepared(PreparedLaunch):
                 args.extend(value.stride())
         return (*args, self.m, self.n)
 
+    def _compile_key(self):
+        return (
+            self.device,
+            self.m,
+            self.n,
+            tuple(
+                (a.dtype, tuple(a.stride()), a.data_ptr() % 16 == 0)
+                if isinstance(a, torch.Tensor)
+                else (type(a), a if isinstance(a, int) else None)
+                for a in self.flat
+            ),
+        )
+
     def compile(self):
         if self.ready:
             return
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError("compile before graph capture")
-        with torch.cuda.device(self.device):
+        ckey = self._compile_key()
+        with self.artifact.lock:
+            cached = self.artifact.compiled.get(ckey)
+        if cached is not None:
+            self.rows, self.launchers, self.builds = cached
+            if len(self.rows) == 1:
+                self.row = self.rows[0]
+            self.ready = True
+            return
+        with torch.cuda.device(self.device), self.artifact.lock:
+            cached = self.artifact.compiled.get(ckey)
+            if cached is not None:
+                self.rows, self.launchers, self.builds = cached
+                if len(self.rows) == 1:
+                    self.row = self.rows[0]
+                self.ready = True
+                return
+            failures = {}
+            valid_rows = []
             for r in self.rows:
                 start = perf_counter()
-                native = self.artifact.kernel.warmup(
-                    *self.flat,
-                    ROWS=r["rows"],
-                    WIDTH=r["width"],
-                    grid=grid(self.artifact.data["grid"], (self.m, self.n), r),
-                    enable_fp_fusion=False,
-                    **r["native"],
-                )
-                self.launchers[r["id"]] = native[
-                    grid(self.artifact.data["grid"], (self.m, self.n), r)
-                ]
+                try:
+                    g = grid(self.artifact.data["grid"], (self.m, self.n), r)
+                    native = self.artifact.kernel.warmup(
+                        *self.flat,
+                        ROWS=r["rows"],
+                        WIDTH=r["width"],
+                        grid=g,
+                        enable_fp_fusion=False,
+                        **r["native"],
+                    )
+                    self.launchers[r["id"]] = native[g]
+                except triton.runtime.errors.OutOfResources as exc:
+                    failures[r["id"]] = str(exc)
+                    continue
                 self.builds.append({"id": r["id"], "milliseconds": (perf_counter() - start) * 1000,
                                     "native_hash": native.hash})
+                valid_rows.append(r)
+            if not valid_rows:
+                raise RuntimeError(f"Triton native compilation failed: {failures}")
+            self.rows = valid_rows
+            self.artifact.compiled[ckey] = (
+                list(self.rows),
+                dict(self.launchers),
+                list(self.builds),
+            )
+            if len(self.rows) == 1:
+                self.row = self.rows[0]
         self.ready = True
 
     def compilation_report(self):

@@ -84,6 +84,15 @@ llvm::Error describeArtifact(func::FuncOp fn, llvm::raw_pwrite_stream &out) {
   if (entry.getName().getStringRef() == "triton_src.tile_program") {
     if (entry.getAttrOfType<StringAttr>("calling_convention") == "matrix")
       return intentdsl::block::emitMatrixPackage(fn, "", out, 2);
+    if (entry.hasAttr("block.pair_axis"))
+      return intentdsl::block::emitOwnerArtifact(
+          fn, "",
+          ArrayRef<llvm::json::Object>{
+              llvm::json::Object{{"num_warps", 4}, {"num_stages", 1}},
+              llvm::json::Object{{"num_warps", 4}, {"num_stages", 2}},
+              llvm::json::Object{{"num_warps", 4}, {"num_stages", 3}},
+              llvm::json::Object{{"num_warps", 8}, {"num_stages", 2}}},
+          2, out);
     return intentdsl::block::emitOwnerArtifact(
         fn, "", llvm::json::Object{{"num_warps", 4}, {"num_stages", 1}}, 2,
         out);

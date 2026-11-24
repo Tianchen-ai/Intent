@@ -117,6 +117,14 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
   for (auto &o : *loop.getBody())
     if (o.hasAttr("block.pair_dot"))
       folded.insert(o.getOperand(0).getDefiningOp());
+  for (auto &o : loop.getBody()->without_terminator())
+    if (isa<arith::ExtFOp>(o) && o.getOperand(0).getDefiningOp() &&
+        o.getOperand(0).getDefiningOp()->getName().stripDialect() ==
+            "slice_read" &&
+        !o.use_empty() &&
+        llvm::all_of(o.getUsers(),
+                     [&](Operation *u) { return folded.contains(u); }))
+      folded.insert(&o);
   auto singleMember = [&](Fragment x) -> Value {
     if (x.axis != Axis::Owner)
       return x.value;
@@ -255,8 +263,153 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
       auto v = value(operands.values).value;
       auto zero = castElement(scalar(0), elem(w.getType()));
       auto guarded = full ? w : select(live, w, broadcast(zero, w.getType()));
-      next.push_back(
-          dot(castElement(guarded, elem(v.getType())), v, false, acc));
+      auto w16 = castElement(guarded, elem(v.getType()));
+      if (!loop->hasAttr("block.repair_masked_nan")) {
+        next.push_back(dot(w16, v, false, acc));
+      } else {
+        auto *vOp = operands.values.getDefiningOp();
+        Value vView = vOp->getOperand(0);
+        int64_t vAx = vOp->getAttrOfType<IntegerAttr>("axis").getInt();
+        int64_t vN = shape(vView)[vAx];
+        int64_t vPad = std::max<int64_t>(1, llvm::PowerOf2Ceil(vN));
+        SmallVector<Value> vOuter;
+        SmallVector<bool> vIsIv;
+        for (Value cv : vOp->getOperands().drop_front()) {
+          vIsIv.push_back(cv == loop.getInductionVar());
+          vOuter.push_back(cv == loop.getInductionVar() ? Value()
+                                                        : widen(coordinate(cv)));
+        }
+        auto eTy = elem(v.getType());
+        auto zElem = castElement(scalar(0), eTy);
+        auto zW = broadcast(zElem, w16.getType());
+        auto zV = broadcast(zElem, v.getType());
+        auto diffW = b.create<arith::SubFOp>(loc, w16, w16);
+        auto diffV = b.create<arith::SubFOp>(loc, v, v);
+        auto finW =
+            b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OEQ, diffW, zW);
+        auto finV =
+            b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OEQ, diffV, zV);
+        auto nfW =
+            b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::UNE, diffW, zW);
+        auto nfV =
+            b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::UNE, diffV, zV);
+        auto hasNf = b.create<arith::OrIOp>(
+            loc, reduce(reduce(nfW, "max", 1), "max", 0),
+            reduce(reduce(nfV, "max", 1), "max", 0));
+        Value fast =
+            dot(select(finW, w16, zW), select(finV, v, zV), false, acc);
+        auto fix = b.create<scf::IfOp>(loc, fast.getType(), hasNf, true);
+        b.setInsertionPointToStart(fix.thenBlock());
+        auto c0 = b.create<arith::ConstantIntOp>(loc, 0, 32),
+             cSpan = b.create<arith::ConstantIntOp>(loc, span, 32),
+             c1 = b.create<arith::ConstantIntOp>(loc, 1, 32);
+        auto fixLoop = b.create<scf::ForOp>(loc, c0, cSpan, c1, ValueRange{fast});
+        fixLoop->setAttr(symbol("runtime_range"), b.getUnitAttr());
+        b.setInsertionPointToStart(fixLoop.getBody());
+        Value cur = fixLoop.getRegionIterArgs()[0];
+        Value j64 = b.create<arith::ExtSIOp>(loc, b.getI64Type(),
+                                             fixLoop.getInductionVar());
+        Value tJ = b.create<arith::AddIOp>(loc, base, j64);
+        auto tokAxis = lanes(span);
+        auto isJ = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                           tokAxis, like(j64, tokAxis.getType()));
+        auto isJW = broadcast(isJ, live.getType(), 1);
+        auto liveJ = reduce(b.create<arith::AndIOp>(loc, live, isJW), "max", 1);
+        auto wJ = castElement(reduce(select(isJW, w16, zW), "sum", 1),
+                              b.getF32Type());
+        SmallVector<Value> vCoords;
+        SmallVector<int64_t> vAxes;
+        for (auto [idxC, oc] : llvm::enumerate(vOuter)) {
+          vCoords.push_back(vIsIv[idxC] ? tJ : oc);
+          vAxes.push_back(-1);
+        }
+        Value kAxis = lanes(vPad);
+        vCoords.insert(vCoords.begin() + vAx, kAxis);
+        vAxes.insert(vAxes.begin() + vAx, 0);
+        Value anyJ = reduce(b.create<arith::AndIOp>(loc, any, isJ), "max", 0);
+        Value vMask = broadcast(anyJ, shaped({vPad}, b.getI1Type()));
+        if (vPad != vN) {
+          auto within = b.create<arith::CmpIOp>(
+              loc, arith::CmpIPredicate::slt, kAxis,
+              like(integer(vN), kAxis.getType()));
+          vMask = b.create<arith::AndIOp>(loc, vMask, within);
+        }
+        auto vJ = castElement(read(vView, address(vView, vCoords, vAxes), vMask),
+                              b.getF32Type());
+        auto accMaskTy =
+            cast<RankedTensorType>(cur.getType()).clone(b.getI1Type());
+        auto classify = [&](Value vec, int axis) {
+          auto z1 = broadcast(scalar(0.f), vec.getType());
+          auto p1 = broadcast(scalar(INFINITY), vec.getType());
+          auto n1 = broadcast(scalar(-INFINITY), vec.getType());
+          auto lift = [&](Value p) { return broadcast(p, accMaskTy, axis); };
+          Value nan = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::UNE,
+                                              vec, vec);
+          Value notNan = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OEQ,
+                                                 vec, vec);
+          Value pinf = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OEQ,
+                                               vec, p1);
+          Value ninf = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OEQ,
+                                               vec, n1);
+          Value inf = b.create<arith::OrIOp>(loc, pinf, ninf);
+          Value zero = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OEQ,
+                                               vec, z1);
+          Value nz = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::UNE,
+                                             vec, z1);
+          Value mx = b.create<arith::MaxNumFOp>(loc, vec, z1);
+          Value pos = b.create<arith::AndIOp>(
+              loc, nz,
+              b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OEQ, mx, vec));
+          Value neg = b.create<arith::AndIOp>(
+              loc, b.create<arith::AndIOp>(loc, notNan, nz),
+              b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OEQ, mx, z1));
+          return std::tuple{lift(nan),  lift(pinf), lift(ninf), lift(inf),
+                            lift(zero), lift(pos),  lift(neg)};
+        };
+        auto [wNan, wPInf, wNInf, wInf, wZero, wPos, wNeg] = classify(wJ, 0);
+        auto [vNan, vPInf, vNInf, vInf, vZero, vPos, vNeg] = classify(vJ, 1);
+        auto and2 = [&](Value a, Value c) -> Value {
+          return b.create<arith::AndIOp>(loc, a, c);
+        };
+        auto or2 = [&](Value a, Value c) -> Value {
+          return b.create<arith::OrIOp>(loc, a, c);
+        };
+        auto live2D = broadcast(liveJ, accMaskTy, 0);
+        auto termPInf = and2(
+            live2D,
+            or2(or2(and2(wPInf, vPos), and2(wPos, vPInf)),
+                or2(and2(wNInf, vNeg), and2(wNeg, vNInf))));
+        auto termNInf = and2(
+            live2D,
+            or2(or2(and2(wPInf, vNeg), and2(wPos, vNInf)),
+                or2(and2(wNInf, vPos), and2(wNeg, vPInf))));
+        auto termNan = and2(
+            live2D,
+            or2(or2(wNan, vNan), or2(and2(wInf, vZero), and2(wZero, vInf))));
+        auto pInfAcc = broadcast(scalar(INFINITY), cur.getType());
+        auto nInfAcc = broadcast(scalar(-INFINITY), cur.getType());
+        auto nanAcc = broadcast(scalar(NAN), cur.getType());
+        auto badP = and2(
+            termPInf,
+            b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OEQ, cur,
+                                    nInfAcc));
+        auto badN = and2(
+            termNInf,
+            b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OEQ, cur,
+                                    pInfAcc));
+        auto stayNan =
+            b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::UNE, cur, cur);
+        cur = select(termPInf, pInfAcc, cur);
+        cur = select(termNInf, nInfAcc, cur);
+        cur = select(or2(or2(termNan, stayNan), or2(badP, badN)), nanAcc, cur);
+        b.create<scf::YieldOp>(loc, ValueRange{cur});
+        b.setInsertionPointAfter(fixLoop);
+        b.create<scf::YieldOp>(loc, fixLoop.getResults());
+        b.setInsertionPointToStart(fix.elseBlock());
+        b.create<scf::YieldOp>(loc, ValueRange{fast});
+        b.setInsertionPointAfter(fix);
+        next.push_back(fix.getResult(0));
+      }
     } else {
       bool max = isa<arith::MaxNumFOp>(comb);
       auto x = paired ? plane(value(rhs)) : singleMember(value(rhs));
@@ -276,21 +429,6 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
   }
   b.create<scf::YieldOp>(loc, next);
   b.setInsertionPointAfter(l);
-  if (!loop->hasAttr("block.repair_masked_nan"))
-    return SmallVector<Value>(l.getResults());
-  Value bad;
-  for (auto [i, v] : llvm::enumerate(l.getResults()))
-    if (cast<RankedTensorType>(v.getType()).getRank() == 2) {
-      auto nan = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::UNE, v, v);
-      auto anyNan = reduce(reduce(nan, "max", 1), "max", 0);
-      bad = bad ? Value(b.create<arith::OrIOp>(loc, bad, anyNan)) : anyNan;
-    }
-  auto branch = b.create<scf::IfOp>(loc, types, bad, true);
-  b.setInsertionPointToStart(branch.thenBlock());
-  b.create<scf::YieldOp>(loc, serialLoop(loop, parent, mask));
-  b.setInsertionPointToStart(branch.elseBlock());
-  b.create<scf::YieldOp>(loc, l.getResults());
-  b.setInsertionPointAfter(branch);
-  return SmallVector<Value>(branch.getResults());
+  return SmallVector<Value>(l.getResults());
 }
 } // namespace intentdsl::block

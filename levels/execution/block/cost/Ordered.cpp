@@ -121,10 +121,18 @@ void orderedCost(Unit &u) {
               // Independent matrix updates compete for resident accumulator
               // fragments and exchange score columns between issue groups.
               unsigned carries = 0, projections = 0;
+              double operandWords = 1.;
               for (auto loop :
                    op->getRegion(0).front().getOps<mlir::scf::ForOp>()) {
                 if (!loop->hasAttr("kir.reassociate"))
                   continue;
+                for (auto &inst : loop.getBody()->without_terminator())
+                  if (inst.getName().stripDialect() == "slice_read")
+                    operandWords = std::min(
+                        operandWords,
+                        mlir::cast<mlir::MemRefType>(inst.getOperand(0).getType())
+                                .getElementTypeBitWidth() /
+                            32.);
                 carries = std::max<unsigned>(
                     carries,
                     llvm::count_if(loop.getResultTypes(), [](mlir::Type t) {
@@ -154,7 +162,8 @@ void orderedCost(Unit &u) {
                 double operandStreams =
                     caps->operandGroupRows ? 1. : std::max(1u, carries);
                 double slots =
-                    operandStreams * (physicalRows + span.getInt()) * lanes +
+                    operandWords * operandStreams *
+                        (physicalRows + span.getInt()) * lanes +
                     std::max(2u, carries) * physicalRows * span.getInt() +
                     carries * physicalRows * lanes;
                 auto file =
@@ -180,8 +189,9 @@ void orderedCost(Unit &u) {
                 double packets =
                     std::ceil(double(span.getInt()) / caps->exchangeWidth);
                 double slots =
-                    streams * ((physicalRows + span.getInt()) * lanes +
-                               physicalRows * span.getInt()) +
+                    operandWords * streams * (physicalRows + span.getInt()) *
+                        lanes +
+                    streams * physicalRows * span.getInt() +
                     carries * physicalRows * lanes;
                 issueGroups = std::ceil(physicalRows / rowGroup) *
                               std::ceil(double(lanes) / 32.);
@@ -252,8 +262,14 @@ void orderedCost(Unit &u) {
             }
             e.terms["group_input_bytes"] = {readCost, "B"};
           }
+          double waveSetup = 0;
+          if (!span && choice.getAs<mlir::StringAttr>("memory") == "direct") {
+            dependency *= 1. + std::max(0., double(w) * lanes / 4096. - 1.);
+            waveSetup = waves;
+          }
           if (launch && sync)
             e.timeNs = *launch + *sync * (waves * issueGroups * dependency +
+                                          waveSetup +
                                           blocks / std::max<double>(1, n));
           if (e.timeNs && readCost)
             if (auto rate = intentdsl::quantity(ctx, "read_1", "B/ns"))

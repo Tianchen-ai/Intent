@@ -66,10 +66,11 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
           std::make_shared<intentdsl::block::OwnerMachine>(
               intentdsl::block::OwnerMachine{
                   32, 256,
-                  options.getInteger("dynamic_shared_per_block").value_or(0), 0,
-                  *arch == 90 ? 32 : 0,
-                  *arch == 90 ? options.getInteger("registers").value_or(0) / 2
-                              : 0,
+                  options.getInteger("dynamic_shared_per_block").value_or(0),
+                  32768, *arch == 90 ? 64 : 32,
+                  *arch == 90
+                      ? options.getInteger("registers").value_or(0) * 7 / 16
+                      : options.getInteger("registers").value_or(0) * 3 / 8,
                   *arch == 90 ? 64 : 0})))
     return err;
   if(auto err=intentdsl::bindPerformance(profile,options,"",options.getString("calibration").value_or("").str(),options.getInteger("sm_count").value_or(1)))return std::move(err);

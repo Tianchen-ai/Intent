@@ -28,7 +28,15 @@ llvm::Error describeArtifact(ModuleOp m, llvm::raw_pwrite_stream &out) {
       return intentdsl::block::emitMatrixPackage(fn, "", out, 3,
                                                  std::move(views));
     }
-    return intentdsl::block::emitOwnerArtifact(fn, "", {}, 3, out);
+    if (fn.front().front().hasAttr("block.pair_axis"))
+      return intentdsl::block::emitOwnerArtifact(
+          fn, "",
+          ArrayRef<llvm::json::Object>{
+              llvm::json::Object{{"num_ctas", 1}, {"occupancy", 1}, {"opt_level", 3}},
+              llvm::json::Object{{"num_ctas", 1}, {"occupancy", 2}, {"opt_level", 3}},
+              llvm::json::Object{{"num_ctas", 1}, {"occupancy", 4}, {"opt_level", 3}}},
+          3, out);
+    return intentdsl::block::emitOwnerArtifact(fn, "", llvm::json::Object{}, 3, out);
   }
 
   auto abi = llvm::json::parse(fn->getAttrOfType<StringAttr>("kir.abi"));
