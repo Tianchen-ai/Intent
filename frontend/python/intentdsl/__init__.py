@@ -7,6 +7,8 @@ from textwrap import dedent
 
 from .completion import Completion
 
+__version__ = "2.0.0"
+
 
 class _Direction:
     def __class_getitem__(cls, item):
@@ -52,24 +54,74 @@ def program(fn):
     return capture_program(fn)
 
 
-def jit(definition, *, backend, library=None, configuration=None):
+def library_path(library=None):
+    """Resolve the installed or bundled libintentdsl.so path."""
     import os
     import sys
     from pathlib import Path
+
+    if library:
+        return Path(library).resolve(strict=True)
+    env = os.environ.get("INTENTDSL_LIBRARY", "").strip()
+    if env:
+        return Path(env).resolve(strict=True)
+    pkg_dir = Path(__file__).resolve().parent
+    candidates = [
+        pkg_dir / "_bundled" / "lib" / "libintentdsl.so",
+        pkg_dir.parents[2] / "libintentdsl.so",
+        Path(sys.prefix) / "lib" / "libintentdsl.so",
+    ]
+    for cand in candidates:
+        if cand.is_file():
+            return cand.resolve(strict=True)
+    raise FileNotFoundError(
+        "libintentdsl.so not found in installed package or sys.prefix; "
+        "reinstall intentdsl wheel or set INTENTDSL_LIBRARY"
+    )
+
+
+def layout(*, library=None, configuration=None):
+    """Return the compiled product tree, units, exits, and active configuration."""
+    from compilerinfra import Compiler
+
+    with Compiler(library_path(library), configuration) as compiler:
+        return compiler.describe()
+
+
+def doctor(*, backend=None, library=None):
+    """Probe the installed compiler, external toolchains, optional libraries, and devices."""
+    from .diagnostics import run_doctor
+
+    return run_doctor(backend=backend, library=library)
+
+
+def setup(*, backend=None, library=None):
+    """Verify installation assets and return setup status and actionable environment hints."""
+    from .diagnostics import run_setup
+
+    return run_setup(backend=backend, library=library)
+
+
+def manual(topic=None, *, lang="zh"):
+    """Query the packaged offline manual ('zh' or 'en') without network access."""
+    from .diagnostics import read_manual
+
+    return read_manual(topic=topic, lang=lang)
+
+
+def skills(*, library=None):
+    """Discover and read manifest-verified product skills from the installed package."""
+    from .diagnostics import read_skills
+
+    return read_skills(library=library)
+
+
+def jit(definition, *, backend, library=None, configuration=None):
     from compilerinfra import Compiler
 
     from .compiler import Kernel
 
-    installed = Path(__file__).resolve().parents[3] / "libintentdsl.so"
-    path = (
-        library
-        or os.environ.get("INTENTDSL_LIBRARY")
-        or (
-            installed
-            if installed.is_file()
-            else Path(sys.prefix) / "lib/libintentdsl.so"
-        )
-    )
+    path = library_path(library)
     compiler = Compiler(path, configuration)
     if backend not in compiler.describe()["exits"]:
         raise ValueError(f"unknown exit: {backend}")

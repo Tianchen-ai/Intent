@@ -59,16 +59,30 @@ llvm::json::Object probeOneDNN() {
   return out;
 #else
   const char *overrideLib = std::getenv("INTENT_ONEDNN_LIB");
-  std::string candidate = (overrideLib && *overrideLib)
-                              ? std::string(overrideLib)
-                              : std::string(CI_ONEDNN_LIBRARY_PATH);
-  void *handle = dlopen(candidate.c_str(), RTLD_LAZY | RTLD_LOCAL);
-  if (!handle && !(overrideLib && *overrideLib))
-    handle = dlopen("libdnnl.so.3", RTLD_LAZY | RTLD_LOCAL);
+  std::vector<std::string> candidates;
+  if (overrideLib && *overrideLib) {
+    candidates.emplace_back(overrideLib);
+  } else {
+    for (const char *var : {"ONEDNN_ROOT", "DNNL_ROOT"}) {
+      if (const char *root = std::getenv(var); root && *root) {
+        candidates.push_back(std::string(root) + "/lib/libdnnl.so.3");
+        candidates.push_back(std::string(root) + "/lib64/libdnnl.so.3");
+        candidates.push_back(std::string(root) + "/lib/libdnnl.so");
+      }
+    }
+    candidates.emplace_back(CI_ONEDNN_LIBRARY_PATH);
+    candidates.emplace_back("libdnnl.so.3");
+  }
+  void *handle = nullptr;
+  for (const auto &cand : candidates) {
+    if (!cand.empty() && (handle = dlopen(cand.c_str(), RTLD_LAZY | RTLD_LOCAL)))
+      break;
+  }
   if (!handle) {
     out["available"] = false;
     const char *err = dlerror();
-    out["reason"] = std::string("dlopen failed: ") + (err ? err : candidate);
+    out["reason"] = std::string("dlopen failed: ") +
+                    (err ? err : candidates.front().c_str());
     return out;
   }
   struct Guard {

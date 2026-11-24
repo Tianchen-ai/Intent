@@ -1,6 +1,6 @@
 # 构建并运行第一条 GPU 路线
 
-构建机需要 CompilerInfra 0.3.1 SDK、与该 SDK 匹配的 MLIR 和 C++ 工具链。执行机使用同一 ABI 的产品编译库、CompilerInfra Python 绑定、PyTorch 和适合本机 GPU 的 Triton。以运行产品的虚拟环境作为安装前缀时，可以直接导入公开包。
+构建机需要 CompilerInfra 0.4.1 SDK、与该 SDK 匹配的 MLIR 和 C++ 工具链。执行机使用同一 ABI 的产品编译库、CompilerInfra Python 绑定、PyTorch 和适合本机 GPU 的 Triton。以运行产品的虚拟环境作为安装前缀时，可以直接导入公开包。
 
 ```sh
 cmake -S . -B build -G Ninja -DCMAKE_PREFIX_PATH="$COMPILERINFRA_PREFIX;$LLVM_PREFIX" \

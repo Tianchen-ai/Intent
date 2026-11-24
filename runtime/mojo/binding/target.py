@@ -10,10 +10,25 @@ from runtime.mojo.launch.native import Artifact
 
 def _discover_onednn():
     override = os.environ.get("INTENT_ONEDNN_LIB", "").strip()
-    candidates = [override] if override else [
-        "/opt/rc-dependencies/onednn-3.13.4/lib/libdnnl.so",
-        "/opt/rc-dependencies/onednn-3.13.4/lib/libdnnl.so.3",
-    ]
+    candidates = [override] if override else []
+    if not override:
+        roots = []
+        for var in ("ONEDNN_ROOT", "DNNL_ROOT", "CMAKE_PREFIX_PATH", "LD_LIBRARY_PATH"):
+            raw = os.environ.get(var, "")
+            for sep in (os.pathsep, ";"):
+                if sep in raw:
+                    roots.extend(p.strip() for p in raw.split(sep) if p.strip())
+                    break
+            else:
+                if raw.strip():
+                    roots.append(raw.strip())
+        for r in roots:
+            rp = Path(r)
+            dirs = [rp] if rp.name in ("lib", "lib64") else [rp / "lib", rp / "lib64"]
+            for d in dirs:
+                candidates.extend((str(d / "libdnnl.so"), str(d / "libdnnl.so.3")))
+        for sys_dir in ("/usr/local/lib", "/usr/local/lib64", "/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/usr/lib"):
+            candidates.extend((f"{sys_dir}/libdnnl.so", f"{sys_dir}/libdnnl.so.3"))
     for cand in candidates:
         if cand and os.path.isfile(cand):
             real = os.path.realpath(cand)

@@ -11,7 +11,10 @@ using namespace mlir;
 llvm::json::Object probeTritonWeftBrgemm() {
   llvm::json::Object out;
   out["source"] = "triton-weft-builtin";
-  out["onednn_root"] = "/opt/rc-dependencies/onednn-3.13.4";
+  if (const char *env = std::getenv("ONEDNN_ROOT"); env && *env)
+    out["onednn_root"] = env;
+  else if (const char *dnnl = std::getenv("DNNL_ROOT"); dnnl && *dnnl)
+    out["onednn_root"] = dnnl;
   out["note"] =
       "live capability and version discovery runs via triton.backends.weft.target.native_capabilities()";
   return out;

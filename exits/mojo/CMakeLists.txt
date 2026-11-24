@@ -22,7 +22,12 @@ if(CI_OPTIONAL_onednn)
   if(ci_onednn_inc)
     target_include_directories(${ci_target} PRIVATE ${ci_onednn_inc})
   endif()
+  if(INTENTDSL_PORTABLE_BINARY)
+    set(ci_onednn_lib_default "libdnnl.so.3")
+  else()
+    set(ci_onednn_lib_default "$<TARGET_FILE:${CI_OPTIONAL_onednn}>")
+  endif()
   target_compile_definitions(${ci_target} PRIVATE
     CI_ONEDNN_HEADER_AVAILABLE=1
-    CI_ONEDNN_LIBRARY_PATH="$<TARGET_FILE:${CI_OPTIONAL_onednn}>")
+    CI_ONEDNN_LIBRARY_PATH="${ci_onednn_lib_default}")
 endif()
