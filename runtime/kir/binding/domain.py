@@ -2,20 +2,47 @@
 
 from math import prod
 
-from .views import inspect
+from .views import inspect, touches
 
 
 def arguments(signature, values):
+    inspected = [
+        None if slot["direction"] == "Scalar" else inspect(value)
+        for slot, value in zip(signature, values, strict=True)
+    ]
+    n = len(signature)
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i in range(n):
+        if inspected[i] is None:
+            continue
+        for j in range(i + 1, n):
+            if inspected[j] is None:
+                continue
+            if touches(values[i], inspected[i], values[j], inspected[j]):
+                ri, rj = find(i), find(j)
+                if ri != rj:
+                    parent[rj] = ri
+
+    canon = {}
     result = []
-    for slot, value in zip(signature, values, strict=True):
-        if slot["direction"] == "Scalar":
+    for i, v in enumerate(inspected):
+        if v is None:
             result.append(None)
         else:
-            v = inspect(value)
+            root = find(i)
+            grp = canon.setdefault(root, len(canon))
             result.append(
                 {
                     "shape": list(v.shape),
                     "strides": list(v.strides),
+                    "alias_group": grp,
                 }
             )
     return result

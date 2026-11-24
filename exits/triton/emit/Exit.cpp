@@ -1,3 +1,4 @@
+#include "../capabilities/Target.h"
 #include "intentdsl/levels/execution/block/ir/MatrixProgram.h"
 #include "intentdsl/levels/execution/block/ir/OwnerProgram.h"
 #include "compilerinfra/Assembly.h"
@@ -18,12 +19,27 @@
 namespace CI_UNIT_NAMESPACE {
 using namespace mlir;
 using namespace compilerinfra;
-void legalize(OpPassManager &);
+void legalize(OpPassManager &, const TargetProfile &);
+Value tritonScaledPanels(intentdsl::block::Tiles &,
+                         intentdsl::block::MatrixAccess &);
+Value tritonMatrixRead(intentdsl::block::Tiles &,
+                       intentdsl::block::MatrixAccess &, bool, Value, Value);
+Value tritonWindowPanels(intentdsl::block::Tiles &,
+                         intentdsl::block::MatrixAccess &, Value &, Value &,
+                         Value &);
+bool tritonMatrixWrite(intentdsl::block::Tiles &,
+                       intentdsl::block::MatrixAccess &, Value, Value,
+                       ArrayRef<Value>);
+intentdsl::block::OwnerAccess tritonOwnerViews();
+std::optional<int64_t> tritonOwnerRectangleAxis(Operation *, func::FuncOp);
+bool tritonOwnerRectPermitsTma(Operation *, func::FuncOp, bool);
+bool tritonPanelPermitsTma(Operation *, func::FuncOp, bool);
+bool tritonPagePermitsTma(Operation *, func::FuncOp, bool);
 
 LogicalResult verifyTileProgram(func::FuncOp, const TargetProfile &);
 TerminalPrinter tritonPrinter();
-void lowerRows(func::FuncOp);
-LogicalResult verifyDynamicRows(func::FuncOp);
+void lowerRows(func::FuncOp, const TargetProfile &);
+LogicalResult verifyDynamicRows(func::FuncOp, const TargetProfile &);
 void tileContracts(Unit &);
 LogicalResult verifyColumnViews(func::FuncOp);
 LogicalResult verifyMatrixExit(func::FuncOp,const TargetProfile &);
@@ -37,9 +53,13 @@ struct BindCallable : PassWrapper<BindCallable, OperationPass<ModuleOp>> {
   void runOnOperation() final {
     auto module = getOperation();
     auto fn = *module.getOps<func::FuncOp>().begin();
-    if(intentdsl::kir::orderedOwners(fn))
-      intentdsl::block::expandOwnerProgram(fn,"exits/triton");
-    else intentdsl::block::expandMatrixProgram(fn,"exits/triton");
+    if (intentdsl::kir::orderedOwners(fn))
+      intentdsl::block::expandOwnerProgram(fn, "exits/triton",
+                                           tritonOwnerViews());
+    else
+      intentdsl::block::expandMatrixProgram(
+          fn, "exits/triton", tritonScaledPanels, tritonMatrixRead,
+          tritonWindowPanels, tritonMatrixWrite);
     Builder b(fn.getContext());
     if (fn.front().front().getName().getStringRef() !=
             "triton_src.tile_program" &&
@@ -47,7 +67,7 @@ struct BindCallable : PassWrapper<BindCallable, OperationPass<ModuleOp>> {
       auto guard = fn->getAttrOfType<DenseI64ArrayAttr>("block.guard");
       fn->setAttr("triton_src.min_width", b.getI64IntegerAttr(guard[0]));
       fn->setAttr("triton_src.max_width", b.getI64IntegerAttr(guard[1]));
-      lowerRows(fn);
+      lowerRows(fn, profile);
     }
     std::set<std::string> seenResources;
     SmallVector<std::string> runtimeImpls;
@@ -196,6 +216,9 @@ static LogicalResult verifyBoundary(ModuleOp m, const TargetProfile &profile,
                  "runtime_source declarations disagree with bound operations"),
              failure();
   }
+  auto tritonCap = profile.services.get<intentdsl::itsrc::TritonTarget>();
+  if (!tritonCap || fn->hasAttr("triton_src.tma") != tritonCap->permitTma)
+    return fn.emitError("invalid Triton TMA transfer capability"), failure();
   if (fn.front().front().getName().getStringRef() == "triton_src.tile_program")
     return phase == "callable" ? verifyTileProgram(fn, profile) : failure();
   if (failed(verifyColumnViews(fn)))
@@ -208,10 +231,33 @@ static LogicalResult verifyBoundary(ModuleOp m, const TargetProfile &profile,
       expected = Builder(fn.getContext()).getI64IntegerAttr(16);
     if (owner.getAttr("triton_src.matrix_rows") != expected)
       return fn.emitError("invalid native matrix fragment height"), failure();
+    if (failed(intentdsl::block::verifyOwnerMap(fn, profile, "triton_src",
+                                                "realized")))
+      return failure();
+    auto tmaWalk = fn.walk([&](Operation *op) {
+      if (op->hasAttr("triton_src.panel_tma") !=
+          tritonPanelPermitsTma(op, fn, tritonCap->permitTma)) {
+        op->emitError("Triton panel TMA disagrees with layout");
+        return WalkResult::interrupt();
+      }
+      if (op->hasAttr("triton_src.page_tma") !=
+          tritonPagePermitsTma(op, fn, tritonCap->permitTma)) {
+        op->emitError("Triton page TMA disagrees with layout");
+        return WalkResult::interrupt();
+      }
+      Attribute expectedRect;
+      if (auto rectAx = tritonOwnerRectangleAxis(op, fn))
+        expectedRect = Builder(fn.getContext()).getI64IntegerAttr(*rectAx);
+      if (op->getAttr("triton_src.owner_rectangle") != expectedRect ||
+          op->hasAttr("triton_src.owner_tma") !=
+              tritonOwnerRectPermitsTma(op, fn, tritonCap->permitTma)) {
+        op->emitError("Triton owner rectangle TMA disagrees with layout");
+        return WalkResult::interrupt();
+      }
+      return WalkResult::advance();
+    });
+    return success(!tmaWalk.wasInterrupted());
   }
-  if (intentdsl::kir::orderedOwners(fn))
-    return intentdsl::block::verifyOwnerMap(fn, profile, "triton_src",
-                                            "realized");
   if (intentdsl::kir::matrixDomain(fn))
     return verifyMatrixExit(fn, profile);
   if (!fn->getAttrOfType<StringAttr>("kir.abi") ||
@@ -342,7 +388,7 @@ static LogicalResult verifyBoundary(ModuleOp m, const TargetProfile &profile,
   });
   if (!valid)
     return failure();
-  return phase == "callable" ? verifyDynamicRows(fn) : success();
+  return phase == "callable" ? verifyDynamicRows(fn, profile) : success();
 }
 void matrixIssues(Unit &);
 void addressOptimization(Unit &);
@@ -360,9 +406,9 @@ void bind(Unit &unit) {
              "Tensor Core tl.dot contraction across SM90 and SM120"});
   addParity({"levels/execution/block::block-scaled-fp8-contraction",
              "*",
-             ParityStatus::Unsupported,
-             {},
-             "Triton exit lowers MX8/E8M0 block-scaled FP8 via explicit E8M0 ldexp decode into IEEE tl.dot rather than hardware tl.dot_scaled"});
+             ParityStatus::Implemented,
+             {"levels/execution/block::contraction", "exits/triton::scaled-mma"},
+             "Guarded MX8/E8M0 block-scaled FP8 Tensor Core contraction via tl.dot_scaled across SM90 and SM120"});
   addParity({"levels/execution/block::q4k-packed-contraction",
              "*",
              ParityStatus::Implemented,
@@ -393,9 +439,10 @@ void bind(Unit &unit) {
              "Builtin tl.randint4x counter-based Philox uniform generation"});
   addParity({"levels/execution/block::bulk-tma-transfer",
              "*",
-             ParityStatus::Unsupported,
-             {},
-             "Triton exit emits pointer-tile tl.load/tl.store rather than tl.make_tensor_descriptor TMA transfers"});
+             ParityStatus::Implemented,
+             {"levels/execution/block::contraction",
+              "levels/execution/block::ordered-owners"},
+             "Hardware TMA 2D/ND descriptor loads and stores via tl.make_tensor_descriptor"});
   addParity({"levels/execution/block::narrow-i32-addressing",
              "*",
              ParityStatus::Implemented,
@@ -410,7 +457,7 @@ void bind(Unit &unit) {
           [phase](OpPassManager &pm,
                   const TargetProfile &profile) -> llvm::Error {
             if (phase == "legal")
-              legalize(pm);
+              legalize(pm, profile);
             else {
               pm.addPass(std::make_unique<BindCallable>(profile));
             }

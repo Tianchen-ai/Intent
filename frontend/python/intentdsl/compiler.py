@@ -38,7 +38,7 @@ class Kernel:
             facts = self.domain.arguments(self.args, values)
             key = self.target.profile(device, values)
             # The cost model consumes exact iteration counts and per-view strides.
-            geometry_key=tuple(None if a is None else (tuple(a["shape"]),tuple(a["strides"])) for a in facts)
+            geometry_key=tuple(None if a is None else (tuple(a["shape"]),tuple(a["strides"]),a.get("alias_group")) for a in facts)
             # A measured package denotes one specific compilation. Loading it
             # checks its bytes even if the same path was used before.
             group = [] if artifact_file is not None else self.artifacts.setdefault((key,geometry_key), [])

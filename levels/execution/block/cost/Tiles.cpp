@@ -26,7 +26,8 @@ void registerCost(Unit &u) {
           if (swapped)
             std::swap(m, n);
           auto stridedRead = intentdsl::quantity(ctx, "read_16", "B/ns");
-          double r = 0, w = 0, ws = 0;
+          auto fn = op->getParentOfType<func::FuncOp>();
+          double rRegular = 0, rRowBroadcast = 0, w = 0, ws = 0;
           unsigned reductions = 0, summaryFields=0, scans=0, atomics=0;
           op->walk([&](Operation *i) {
             auto k = i->getName().stripDialect();
@@ -38,14 +39,35 @@ void registerCost(Unit &u) {
               return;
             auto ty = cast<MemRefType>(i->getOperand(0).getType());
             double bytes = m * n * ty.getElementTypeBitWidth() / 8.;
-            if (k == "read")
-              r += bytes;
-            else if (i->hasAttr("axes") != swapped)
+            if (k == "read") {
+              bool rowBcast = false;
+              if (!swapped && fn) {
+                if (auto slot = dyn_cast<BlockArgument>(i->getOperand(0));
+                    slot && slot.getOwner() == &fn.front()) {
+                  if (auto attr = fn.getArgAttrOfType<AffineMapAttr>(
+                          slot.getArgNumber(), "kir.indexing")) {
+                    auto map = attr.getValue();
+                    if (map.getNumDims() >= 2 &&
+                        llvm::none_of(map.getResults(), [&](AffineExpr ex) {
+                          return ex.isFunctionOfDim(map.getNumDims() - 2);
+                        }))
+                      rowBcast = true;
+                  }
+                }
+              }
+              if (rowBcast)
+                rRowBroadcast += bytes;
+              else
+                rRegular += bytes;
+            } else if (i->hasAttr("axes") != swapped)
               ws += bytes;
             else
               w += bytes;
           });
-          r *= stream ? 1 + reductions : 1;
+          double streamFactor = stream ? 1 + reductions : 1;
+          rRegular *= streamFactor;
+          rRowBroadcast *= streamFactor;
+          double r = rRegular + rRowBroadcast;
           auto [keys,segmentedRead]=intentdsl::kir::valueTraffic(op,*f);
           r+=segmentedRead;
           r+=4*m*n*atomics;ws+=4*m*n*atomics;
@@ -71,7 +93,6 @@ void registerCost(Unit &u) {
           std::optional<double> dmaSetup;
           unsigned rectangles = 0;
           if (!stream && ctx.target.services.facts.find("dma_in_latency")) {
-            auto fn = op->getParentOfType<func::FuncOp>();
             llvm::SmallDenseSet<Value> seen;
             op->walk([&](Operation *readOp) {
               if (readOp->getName().getStringRef() != "block.read") return;
@@ -143,16 +164,36 @@ void registerCost(Unit &u) {
                 scatterRate = std::min(*write, *strided * neighbors);
                 v.terms["contiguous_store_neighbors"] = {neighbors, "count"};
               }
+              double effReadBytes =
+                  (r - rRowBroadcast) + rRowBroadcast / std::max(1., rows);
+              double effCap =
+                  std::min(capacity, double(f->participants) * 2.);
+              double effActive =
+                  scheduled > 0 ? std::min(scheduled, std::max(1., effCap)) : 0.;
+              double effRounds =
+                  effActive > 0 ? std::ceil(scheduled / effActive) : 0.;
+              double waveQuant =
+                  scheduled > 0 ? (effRounds * effActive / scheduled) : 0.;
+              double usefulRows =
+                  m > 0 ? std::min(rows, double(m)) : rows;
+              double usefulCols =
+                  n > 0 ? std::min(width, double(n)) : width;
+              double ctaLanes = std::max(1., usefulRows * usefulCols);
+              double subCtaPenalty =
+                  (!stream && ctaLanes < 256.) ? std::sqrt(256. / ctaLanes) : 1.;
+              if (m > 0 && rows > m)
+                subCtaPenalty *= 1. + 0.05 * (rows - m) / double(m);
+              double ctaRegBudget = 16384.;
+              double spillBytes =
+                  (regFile && regs > ctaRegBudget)
+                      ? scheduled * serial * (regs - ctaRegBudget) * 8.
+                      : 0.;
               v.timeNs =
                   *launch +
-                  (r / (swapped ? *stridedRead : *read) + w / *write +
-                   ws / scatterRate) *
-                      (scheduled ? rounds *
-                                       std::min(capacity,
-                                                double(f->participants) * 2) /
-                                       scheduled
-                                 : 0.) *
-                      tailCost;
+                  ((effReadBytes + spillBytes) /
+                       (swapped ? *stridedRead : *read) +
+                   w / *write + ws / scatterRate) *
+                      waveQuant * tailCost * subCtaPenalty;
               if (dmaSetup) {
                 double submission = waves * rectangles * *dmaSetup;
                 v.terms["projected_dma_setup"] = {submission, "ns"};

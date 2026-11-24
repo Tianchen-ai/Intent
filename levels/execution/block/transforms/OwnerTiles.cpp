@@ -1,5 +1,7 @@
 #include "OwnerTiles.h"
+#include "compilerinfra/Proofs.h"
 #include "intentdsl/levels/execution/block/ir/FoldPanel.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 using namespace mlir;
 namespace intentdsl::block {
 namespace {
@@ -127,8 +129,239 @@ Value OwnerTiles::slice(Operation &old, ArrayRef<Value> outerCoords, Value mask,
   }
   return read(view, ptr, valid);
 }
+bool OwnerTiles::canVectorizeIndependentLoop(scf::ForOp loop) {
+  if (loop.getNumResults() != 0 ||
+      !matchPattern(loop.getLowerBound(), m_Zero()) ||
+      !matchPattern(loop.getStep(), m_One()))
+    return false;
+  if (!loop.isDefinedOutsideOfLoop(loop.getUpperBound()))
+    return false;
+  if (rows > 1) {
+    // Multi-owner tiles require the loop bound to be invariant across owners.
+    if (auto barg = dyn_cast<BlockArgument>(loop.getUpperBound());
+        barg && barg.getOwner() == &space.getRegion(0).front())
+      return false;
+    if (!isa<arith::ConstantOp, arith::ConstantIndexOp, memref::DimOp>(
+            loop.getUpperBound().getDefiningOp()))
+      return false;
+  }
+  Value iv = loop.getInductionVar();
+  SmallVector<memref::LoadOp, 4> loads;
+  SmallVector<memref::StoreOp, 4> stores;
+  std::function<bool(Block &, bool)> checkBlock = [&](Block &blk,
+                                                      bool top) -> bool {
+    for (Operation &inst : blk.without_terminator()) {
+      if (auto br = dyn_cast<scf::IfOp>(inst)) {
+        if (br.getNumResults() == 0 || br.getElseRegion().empty() ||
+            !checkBlock(*br.thenBlock(), false) ||
+            !checkBlock(*br.elseBlock(), false))
+          return false;
+        continue;
+      }
+      if (inst.getNumRegions() != 0)
+        return false;
+      if (auto ld = dyn_cast<memref::LoadOp>(inst)) {
+        if (!top)
+          return false;
+        auto arg = dyn_cast<BlockArgument>(ld.getMemRef());
+        if (!arg || arg.getOwner() != &fn.front())
+          return false;
+        int ivCount = 0;
+        for (Value idx : ld.getIndices()) {
+          if (idx == iv)
+            ++ivCount;
+          else if (!loop.isDefinedOutsideOfLoop(idx))
+            return false;
+        }
+        if (ivCount > 1)
+          return false;
+        loads.push_back(ld);
+        continue;
+      }
+      if (auto st = dyn_cast<memref::StoreOp>(inst)) {
+        if (!top)
+          return false;
+        auto arg = dyn_cast<BlockArgument>(st.getMemRef());
+        if (!arg || arg.getOwner() != &fn.front() || st.getIndices().empty() ||
+            st.getIndices().back() != iv)
+          return false;
+        for (Value idx : st.getIndices().drop_back())
+          if (!loop.isDefinedOutsideOfLoop(idx))
+            return false;
+        stores.push_back(st);
+        continue;
+      }
+      if (auto cmp = dyn_cast<arith::CmpIOp>(inst)) {
+        if (!supportedPanelCmpI(cmp))
+          return false;
+        continue;
+      }
+      if (!llvm::StringSwitch<bool>(inst.getName().getStringRef())
+               .Cases("arith.index_cast", "arith.constant", true)
+               .Cases("arith.sitofp", "arith.fptosi", "arith.cmpf", true)
+               .Cases("arith.extf", "arith.truncf", "arith.maxnumf", true)
+               .Cases("arith.minnumf", "arith.minimumf", "arith.minsi", true)
+               .Cases("arith.addf", "arith.mulf", "arith.subf", "arith.divf",
+                      true)
+               .Cases("arith.addi", "arith.subi", "arith.muli", true)
+               .Cases("arith.andi", "arith.ori", "arith.xori", true)
+               .Cases("arith.select", "math.exp", "math.exp2", "math.log",
+                      "math.absf", true)
+               .Default(false))
+        return false;
+    }
+    return true;
+  };
+  if (!checkBlock(*loop.getBody(), true) || stores.empty())
+    return false;
+  auto aliasGroup = [&](Value memrefVal) -> std::optional<int64_t> {
+    auto arg = dyn_cast<BlockArgument>(memrefVal);
+    if (!arg || arg.getOwner() != &fn.front())
+      return std::nullopt;
+    auto attr =
+        fn.getArgAttrOfType<IntegerAttr>(arg.getArgNumber(), "block.alias_group");
+    return attr ? std::optional<int64_t>(attr.getInt()) : std::nullopt;
+  };
+  for (size_t i = 0; i < stores.size(); ++i) {
+    auto sg = aliasGroup(stores[i].getMemRef());
+    if (!sg)
+      return false;
+    for (size_t j = i + 1; j < stores.size(); ++j) {
+      auto og = aliasGroup(stores[j].getMemRef());
+      if (!og || (*sg == *og &&
+                  (stores[i].getMemRef() != stores[j].getMemRef() ||
+                   stores[i].getIndices() != stores[j].getIndices())))
+        return false;
+    }
+    for (auto ld : loads) {
+      auto lg = aliasGroup(ld.getMemRef());
+      if (!lg)
+        return false;
+      if (*sg == *lg) {
+        if (stores[i].getMemRef() != ld.getMemRef() ||
+            stores[i].getIndices() != ld.getIndices() ||
+            !ld->isBeforeInBlock(stores[i]))
+          return false;
+      }
+    }
+  }
+  return true;
+}
+
+void OwnerTiles::vectorizedLoop(scf::ForOp loop, const Values &parent,
+                                Value mask) {
+  int64_t W = std::max<int64_t>(16, 512 / rows);
+  Value rawHi = widen(at(loop.getUpperBound(), parent));
+  Value hiScalar = isa<RankedTensorType>(rawHi.getType())
+                       ? reduce(rawHi, "max", 0)
+                       : rawHi;
+  auto l = b.create<scf::ForOp>(loc, integer(0), hiScalar, integer(W));
+  l->setAttr(symbol("runtime_range"), b.getUnitAttr());
+  b.setInsertionPointToStart(l.getBody());
+  Value base = l.getInductionVar();
+  Value colVec = stepped(base, W);
+  Type tileBool = shaped({rows, W}, b.getI1Type());
+  Value inBounds = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt,
+                                           colVec, like(hiScalar, colVec.getType()));
+  Value valid2D = b.create<arith::AndIOp>(loc, broadcast(mask, tileBool, 0),
+                                          broadcast(inBounds, tileBool, 1));
+  Value iv = loop.getInductionVar();
+  llvm::DenseMap<Value, Value> vecEnv;
+  auto lift2D = [&](Value orig) -> Value {
+    if (orig == iv)
+      return broadcast(colVec, shaped({rows, W}, b.getI64Type()), 1);
+    if (auto it = vecEnv.find(orig); it != vecEnv.end())
+      return it->second;
+    Value pv = at(orig, parent);
+    Type e = elem(pv.getType());
+    if (e.isIndex())
+      e = b.getI64Type();
+    if (elem(pv.getType()) != e)
+      pv = castElement(pv, e);
+    return broadcast(pv, shaped({rows, W}, e), 0);
+  };
+  std::function<SmallVector<Value>(Block &)> lowerVecBlock =
+      [&](Block &blk) -> SmallVector<Value> {
+    for (Operation &inst : blk.without_terminator()) {
+      if (auto c = dyn_cast<arith::ConstantOp>(inst)) {
+        Value cv = constant(c);
+        vecEnv[inst.getResult(0)] =
+            broadcast(cv, shaped({rows, W}, elem(cv.getType())), 0);
+        continue;
+      }
+      if (auto br = dyn_cast<scf::IfOp>(inst)) {
+        Value cond2D = lift2D(br.getCondition());
+        auto yes = lowerVecBlock(*br.thenBlock());
+        auto no = lowerVecBlock(*br.elseBlock());
+        for (auto [res, tv, fv] : llvm::zip(br.getResults(), yes, no))
+          vecEnv[res] = select(cond2D, tv, fv);
+        continue;
+      }
+      if (auto ld = dyn_cast<memref::LoadOp>(inst)) {
+        Value view = ld.getMemRef();
+        SmallVector<Value, 4> coords;
+        SmallVector<int64_t, 4> axes;
+        bool usesIv = false;
+        for (Value idx : ld.getIndices()) {
+          if (idx == iv) {
+            coords.push_back(colVec);
+            axes.push_back(1);
+            usesIv = true;
+          } else {
+            coords.push_back(
+                broadcast(widen(at(idx, parent)), shaped({rows}, b.getI64Type())));
+            axes.push_back(0);
+          }
+        }
+        if (usesIv) {
+          vecEnv[ld.getResult()] =
+              read(view, address(view, coords, axes), valid2D);
+        } else {
+          Value rv = read(view, address(view, coords, axes), mask);
+          vecEnv[ld.getResult()] =
+              broadcast(rv, shaped({rows, W}, elem(rv.getType())), 0);
+        }
+        continue;
+      }
+      if (auto st = dyn_cast<memref::StoreOp>(inst)) {
+        Value view = st.getMemRef();
+        SmallVector<Value, 4> coords;
+        SmallVector<int64_t, 4> axes;
+        for (Value idx : st.getIndices().drop_back()) {
+          coords.push_back(
+              broadcast(widen(at(idx, parent)), shaped({rows}, b.getI64Type())));
+          axes.push_back(0);
+        }
+        coords.push_back(colVec);
+        axes.push_back(1);
+        write(view, address(view, coords, axes), lift2D(st.getValueToStore()),
+              valid2D);
+        continue;
+      }
+      SmallVector<Value, 3> args;
+      for (Value opnd : inst.getOperands())
+        args.push_back(lift2D(opnd));
+      Type e = elem(inst.getResult(0).getType());
+      if (e.isIndex())
+        e = b.getI64Type();
+      vecEnv[inst.getResult(0)] = apply(inst, args, shaped({rows, W}, e));
+    }
+    SmallVector<Value> outs;
+    if (&blk != loop.getBody())
+      for (Value yv : blk.getTerminator()->getOperands())
+        outs.push_back(lift2D(yv));
+    return outs;
+  };
+  (void)lowerVecBlock(*loop.getBody());
+  b.setInsertionPointAfter(l);
+}
+
 SmallVector<Value> OwnerTiles::serialLoop(scf::ForOp loop, const Values &parent,
                                           Value mask) {
+  if (canVectorizeIndependentLoop(loop)) {
+    vectorizedLoop(loop, parent, mask);
+    return {};
+  }
   auto lo = at(loop.getLowerBound(), parent),
        hi = at(loop.getUpperBound(), parent), step = at(loop.getStep(), parent);
   bool ragged = isa<RankedTensorType>(lo.getType()) ||
@@ -181,9 +414,7 @@ OwnerTiles::matchOnlinePanelPair(scf::ForOp maxLoop, scf::ForOp sumLoop) {
       maxLoop->hasAttr("block.full_panels") !=
           sumLoop->hasAttr("block.full_panels") ||
       maxLoop->hasAttr("block.counted_panels") !=
-          sumLoop->hasAttr("block.counted_panels") ||
-      maxLoop->hasAttr("block.repair_masked_nan") ||
-      sumLoop->hasAttr("block.repair_masked_nan"))
+          sumLoop->hasAttr("block.counted_panels"))
     return std::nullopt;
   auto sameBound = [](Value a, Value b) {
     if (a == b)
@@ -320,11 +551,20 @@ OwnerTiles::matchOnlinePanelPair(scf::ForOp maxLoop, scf::ForOp sumLoop) {
     cond2 = br2.getCondition();
     expOut = br2.thenBlock()->getTerminator()->getOperand(0);
     guardOp = br2;
-    for (Operation &inner : br2.thenBlock()->without_terminator())
-      if (&inner != expOut.getDefiningOp() &&
-          (!expOut.getDefiningOp() ||
-           &inner != expOut.getDefiningOp()->getOperand(0).getDefiningOp()))
+    for (Operation &inner : br2.thenBlock()->without_terminator()) {
+      Operation *eDef = expOut.getDefiningOp();
+      Operation *argDef =
+          eDef && eDef->getNumOperands() > 0 ? eDef->getOperand(0).getDefiningOp()
+                                             : nullptr;
+      bool isAllowedSub = false;
+      if (argDef) {
+        for (Value v : argDef->getOperands())
+          if (v.getDefiningOp() == &inner)
+            isAllowedSub = true;
+      }
+      if (&inner != eDef && &inner != argDef && !isAllowedSub)
         return std::nullopt;
+    }
   } else if (auto sel2 = wVal.getDefiningOp<arith::SelectOp>()) {
     if (!cond1 || !isPosZero(sel2.getFalseValue()))
       return std::nullopt;
@@ -339,8 +579,29 @@ OwnerTiles::matchOnlinePanelPair(scf::ForOp maxLoop, scf::ForOp sumLoop) {
       (guardOp && !expOut.hasOneUse()) ||
       !intentdsl::kir::hasFastMath(expOp, arith::FastMathFlags::reassoc))
     return std::nullopt;
-  auto subOp = expOp->getOperand(0).getDefiningOp<arith::SubFOp>();
-  if (!subOp || !expOp->getOperand(0).hasOneUse() || subOp.getRhs() != peakRes ||
+  Value expArg = expOp->getOperand(0);
+  if (!expArg.hasOneUse())
+    return std::nullopt;
+  Operation *mulOp = nullptr;
+  Value scaleVal;
+  arith::FastMathFlags scaleFlags = arith::FastMathFlags::none;
+  if (auto m = expArg.getDefiningOp<arith::MulFOp>();
+      m && intentdsl::kir::hasFastMath(m, arith::FastMathFlags::reassoc)) {
+    for (int side : {0, 1}) {
+      Value candSub = m->getOperand(side);
+      Value other = m->getOperand(1 - side);
+      if (candSub.getDefiningOp<arith::SubFOp>() && candSub.hasOneUse() &&
+          sumLoop.isDefinedOutsideOfLoop(other) && other.getType().isF32()) {
+        mulOp = m;
+        expArg = candSub;
+        scaleVal = other;
+        scaleFlags = intentdsl::kir::getFastMathFlags(m);
+        break;
+      }
+    }
+  }
+  auto subOp = expArg.getDefiningOp<arith::SubFOp>();
+  if (!subOp || !expArg.hasOneUse() || subOp.getRhs() != peakRes ||
       !intentdsl::kir::hasFastMath(subOp, arith::FastMathFlags::reassoc))
     return std::nullopt;
   Value score2 = subOp.getLhs();
@@ -383,18 +644,62 @@ OwnerTiles::matchOnlinePanelPair(scf::ForOp maxLoop, scf::ForOp sumLoop) {
   };
   if (!sameVal(score1, score2) || (cond1 && !sameVal(cond1, cond2)))
     return std::nullopt;
+  // Prove via CompilerInfra's value-replay proof that no memory effect in
+  // maxLoop, between maxLoop and sumLoop, or in sumLoop can clobber or alias
+  // the memory locations read by maxLoop.
+  SmallVector<Value, 4> readViews;
+  llvm::SmallDenseSet<Value, 4> seenViews;
+  bool pureReads = true;
+  maxLoop.walk([&](Operation *inst) {
+    if (inst == maxLoop.getOperation())
+      return WalkResult::advance();
+    auto mem = dyn_cast<MemoryEffectOpInterface>(inst);
+    if (!mem) {
+      if (inst->getNumRegions() > 0 &&
+          inst->hasTrait<OpTrait::HasRecursiveMemoryEffects>())
+        return WalkResult::advance();
+      pureReads = false;
+      return WalkResult::interrupt();
+    }
+    SmallVector<MemoryEffects::EffectInstance, 4> effects;
+    mem.getEffects(effects);
+    for (const auto &eff : effects) {
+      if (isa<MemoryEffects::Write, MemoryEffects::Allocate,
+              MemoryEffects::Free>(eff.getEffect())) {
+        pureReads = false;
+        return WalkResult::interrupt();
+      }
+      if (isa<MemoryEffects::Read>(eff.getEffect())) {
+        Value v = eff.getValue();
+        if (!v) {
+          pureReads = false;
+          return WalkResult::interrupt();
+        }
+        if (seenViews.insert(v).second)
+          readViews.push_back(v);
+      }
+    }
+    return WalkResult::advance();
+  });
+  if (!pureReads ||
+      (!readViews.empty() &&
+       !compilerinfra::proveValueReplay(maxLoop, sumLoop, readViews).proven))
+    return std::nullopt;
   bool causalInclusive = false;
   Value causalUpper = causalMaskOwner(sumLoop, &causalInclusive);
   return OnlinePanelFusion{maxLoop,
                            score2,
                            cond2,
                            subOp,
+                           mulOp,
+                           scaleVal,
                            expOp,
                            guardOp,
                            wVal,
                            isa<math::Exp2Op>(expOp),
                            intentdsl::kir::getFastMathFlags(maxComb),
                            intentdsl::kir::getFastMathFlags(subOp),
+                           scaleFlags,
                            intentdsl::kir::getFastMathFlags(expOp),
                            causalUpper,
                            causalInclusive};

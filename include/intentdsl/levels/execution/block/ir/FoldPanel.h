@@ -57,12 +57,14 @@ inline bool panelFoldBlock(mlir::Block &block, bool topLevel) {
     if (kind != "lane_splat" &&
         !llvm::StringSwitch<bool>(v.getName().getStringRef())
              .Cases("arith.index_cast", "arith.constant", true)
+             .Cases("arith.sitofp", "arith.fptosi", "arith.cmpf", true)
              .Cases("arith.extf", "arith.truncf", "arith.maxnumf", true)
              .Cases("arith.minnumf", "arith.minimumf", "arith.minsi", true)
-             .Cases("arith.addf", "arith.mulf", "arith.subf", true)
+             .Cases("arith.addf", "arith.mulf", "arith.subf", "arith.divf", true)
              .Cases("arith.addi", "arith.subi", "arith.muli", true)
              .Cases("arith.andi", "arith.ori", "arith.xori", true)
-             .Cases("arith.select", "math.exp", "math.exp2", "math.absf", true)
+             .Cases("arith.select", "math.exp", "math.exp2", "math.log",
+                    "math.absf", true)
              .Default(false))
       return false;
   }
@@ -71,8 +73,8 @@ inline bool panelFoldBlock(mlir::Block &block, bool topLevel) {
 inline bool panelFolds(mlir::Operation *o,
                        const compilerinfra::TargetProfile &p, int64_t panel) {
   auto machine = p.services.get<OwnerMachine>();
-  if (!machine || machine->parallelMembers < 16 ||
-      (panel != 16 && panel != 32 && panel != 64 && panel != 128))
+  if (!machine || machine->parallelMembers < 16 || panel < 16 || panel > 512 ||
+      !llvm::isPowerOf2_64(panel))
     return false;
   bool matched = false;
   auto &body = o->getRegion(0).front();
@@ -115,7 +117,15 @@ inline bool hasReassociativeNormalization(mlir::Operation &space) {
       if (!mlir::isa<mlir::math::ExpOp, mlir::math::Exp2Op>(op) ||
           !intentdsl::kir::hasFastMath(op, FMF::reassoc))
         return;
-      if (auto sub = op->getOperand(0).getDefiningOp<mlir::arith::SubFOp>();
+      mlir::Value arg = op->getOperand(0);
+      if (auto mul = arg.getDefiningOp<mlir::arith::MulFOp>();
+          mul && intentdsl::kir::hasFastMath(mul, FMF::reassoc)) {
+        if (mul.getLhs().getDefiningOp<mlir::arith::SubFOp>())
+          arg = mul.getLhs();
+        else if (mul.getRhs().getDefiningOp<mlir::arith::SubFOp>())
+          arg = mul.getRhs();
+      }
+      if (auto sub = arg.getDefiningOp<mlir::arith::SubFOp>();
           sub && intentdsl::kir::hasFastMath(sub, FMF::reassoc))
         hasReassocExpShift = true;
     });

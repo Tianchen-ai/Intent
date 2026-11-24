@@ -1,3 +1,4 @@
+#include "../capabilities/Target.h"
 #include "intentdsl/levels/execution/block/ir/Access.h"
 #include "intentdsl/levels/execution/block/ir/MatrixAccess.h"
 #include "intentdsl/levels/execution/block/ir/ScaleDispatch.h"
@@ -9,19 +10,17 @@
 
 namespace CI_UNIT_NAMESPACE {
 using namespace mlir;
-bool neutralScaleDispatch(intentdsl::block::MatrixAccess &p) {
-  auto groups=p.shape[2]/32;
-  auto *publish=p.fold.getNextNode();
-  return groups>0 && groups<=64 && llvm::isPowerOf2_64(groups) && publish &&
-      publish->getName().stripDialect()=="publish_matrix" && publish->getOperand(1)==p.fold.getResult(0);
-}
+std::optional<int64_t> tritonOwnerRectangleAxis(Operation *, func::FuncOp);
+bool tritonOwnerRectPermitsTma(Operation *, func::FuncOp, bool);
+bool tritonPanelPermitsTma(Operation *, func::FuncOp, bool);
+bool tritonPagePermitsTma(Operation *, func::FuncOp, bool);
+
 LogicalResult verifyMatrixExit(func::FuncOp fn,const compilerinfra::TargetProfile &profile){
-  if(failed(intentdsl::block::verifyScaleDispatch(fn,profile,"triton_src","bf16")))return failure();
-  intentdsl::block::MatrixAccess p(fn);
-  if(p.dot.getName().stripDialect()=="scaled_contract" &&
-     p.dot.getAttr("triton_src.neutral_scale_dispatch")!=Builder(fn.getContext()).getBoolAttr(neutralScaleDispatch(p)))
-    return p.dot.emitError("unit-scale FP8 dispatch disagrees with reduction geometry or output use");
-  return success();
+  auto cap = profile.services.get<intentdsl::itsrc::TritonTarget>();
+  if (!cap || fn->hasAttr("triton_src.tma") != cap->permitTma)
+    return fn.emitError("invalid Triton transfer capability");
+  return intentdsl::block::verifyScaleDispatch(
+      fn, profile, "triton_src", cap->scaledMma ? "mx" : "bf16");
 }
 LogicalResult verifyColumnViews(func::FuncOp fn) {
   if (!fn.empty() && !fn.front().empty() &&
@@ -62,8 +61,14 @@ LogicalResult verifyColumnViews(func::FuncOp fn) {
 }
 struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(Legalize)
+  bool tma = false, scaledMma = false;
+  Legalize() = default;
+  Legalize(bool tma, bool scaledMma) : tma(tma), scaledMma(scaledMma) {}
   void runOnOperation() final {
     getContext().getOrLoadDialect<intentdsl::itsrc::ItsrcDialect>();
+    auto entryFn = *getOperation().getOps<func::FuncOp>().begin();
+    if (tma)
+      entryFn->setAttr("triton_src.tma", UnitAttr::get(&getContext()));
     getOperation().walk([&](Operation *op) {
       if (op->getName().getStringRef() == "block.owner_space" &&
           op->hasAttr("block.pair_axis") &&
@@ -78,7 +83,7 @@ struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
         });
       }
     });
-    getOperation().walk<WalkOrder::PostOrder>([](Operation *op) {
+    getOperation().walk<WalkOrder::PostOrder>([&](Operation *op) {
       if (op->getName().getDialectNamespace() != "block")
         return;
       OpBuilder b(op);
@@ -128,6 +133,17 @@ struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
         state.addOperands(args);
       state.addTypes(op->getResultTypes());
       state.addAttributes(op->getAttrs());
+      auto fn = op->getParentOfType<func::FuncOp>();
+      if (tritonPagePermitsTma(op, fn, tma))
+        state.addAttribute("triton_src.page_tma", b.getUnitAttr());
+      if (tritonPanelPermitsTma(op, fn, tma))
+        state.addAttribute("triton_src.panel_tma", b.getUnitAttr());
+      if (auto rectAx = tritonOwnerRectangleAxis(op, fn)) {
+        state.addAttribute("triton_src.owner_rectangle",
+                           b.getI64IntegerAttr(*rectAx));
+        if (tritonOwnerRectPermitsTma(op, fn, tma))
+          state.addAttribute("triton_src.owner_tma", b.getUnitAttr());
+      }
       for (auto &region : op->getRegions())
         state.addRegion()->takeBody(region);
       auto *newOp = b.create(state);
@@ -159,11 +175,14 @@ struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
     for(auto fn:getOperation().getOps<func::FuncOp>())if(intentdsl::kir::matrixDomain(fn)){
       intentdsl::block::MatrixAccess p(fn);
       if(p.dot.getName().stripDialect()=="scaled_contract"){
-        intentdsl::block::formScaleDispatch(p.dot,"bf16");
-        p.dot.setAttr("triton_src.neutral_scale_dispatch",Builder(fn.getContext()).getBoolAttr(neutralScaleDispatch(p)));
+        intentdsl::block::formScaleDispatch(p.dot, scaledMma ? "mx" : "bf16");
       }
     }
   }
 };
-void legalize(OpPassManager &pm) { pm.addPass(std::make_unique<Legalize>()); }
+void legalize(OpPassManager &pm, const compilerinfra::TargetProfile &profile) {
+  auto cap = profile.services.get<intentdsl::itsrc::TritonTarget>();
+  pm.addPass(std::make_unique<Legalize>(cap && cap->permitTma,
+                                        cap && cap->scaledMma));
+}
 } // namespace CI_UNIT_NAMESPACE

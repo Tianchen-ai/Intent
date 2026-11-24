@@ -69,10 +69,17 @@ LogicalResult verifyOwnerMap(func::FuncOp fn, const TargetProfile &p,
               if(v->hasAttr("block.full_panels")!=(v->hasAttr("block.uniform_tokens") && fullFoldPanels(loop,*facts,span.getInt())))
                 return WalkResult::interrupt();
               if(v->hasAttr("block.counted_panels")!=countedPanel(v,*facts))return WalkResult::interrupt();
-              bool replay = !v->hasAttr("block.uniform_tokens") &&
-                            llvm::any_of(loop.getResultTypes(), [](Type t) {
-                              return isa<ShapedType>(t);
-                            });
+              bool replay =
+                  !v->hasAttr("block.uniform_tokens") &&
+                  llvm::any_of(
+                      loop.getBody()->getTerminator()->getOperands(),
+                      [](Value y) {
+                        return isa<ShapedType>(y.getType()) &&
+                               (!y.getDefiningOp() ||
+                                !intentdsl::kir::hasFastMath(
+                                    y.getDefiningOp(),
+                                    arith::FastMathFlags::afn));
+                      });
               if (v->hasAttr("block.repair_masked_nan") != replay)
                 return WalkResult::interrupt();
             } else if (v->hasAttr("block.counted_panels") || v->hasAttr("block.full_panels") || v->hasAttr("block.uniform_tokens") ||
@@ -174,6 +181,13 @@ LogicalResult verifyOwnerMap(func::FuncOp fn, const TargetProfile &p,
           if (v.getAsInteger() != a)
             return fn.emitError("owner layout differs from the call");
       }
+      auto expectedAlias =
+          layout ? layout->getInteger("alias_group") : std::nullopt;
+      auto actualAlias =
+          fn.getArgAttrOfType<IntegerAttr>(arg.getArgNumber(), "block.alias_group");
+      if (expectedAlias.has_value() != bool(actualAlias) ||
+          (expectedAlias && actualAlias.getInt() != *expectedAlias))
+        return fn.emitError("owner alias group differs from the call");
     }
   return success();
 }
@@ -365,15 +379,19 @@ void registerOrdered(Unit &u) {
     auto f = p.services.get<CallFacts>();
     auto fn = o->getParentOfType<func::FuncOp>();
     for (auto arg : fn.getArguments())
-      if (isa<MemRefType>(arg.getType()))
+      if (isa<MemRefType>(arg.getType())) {
+        auto *obj = f->arguments[arg.getArgNumber()].getAsObject();
         for (auto key : {"shape", "strides"}) {
           SmallVector<int64_t> ds;
-          for (auto &v :
-               *f->arguments[arg.getArgNumber()].getAsObject()->getArray(key))
+          for (auto &v : *obj->getArray(key))
             ds.push_back(*v.getAsInteger());
           fn.setArgAttr(arg.getArgNumber(), std::string("block.") + key,
                         b.getDenseI64ArrayAttr(ds));
         }
+        if (auto ag = obj->getInteger("alias_group"))
+          fn.setArgAttr(arg.getArgNumber(), "block.alias_group",
+                        b.getI64IntegerAttr(*ag));
+      }
     auto d = cast<DictionaryAttr>(a);
     if (d.getAs<StringAttr>("memory") == "matrix-fold")
       o->setAttr("block.pair_axis", d.get("axis"));
@@ -393,15 +411,23 @@ void registerOrdered(Unit &u) {
               op.setAttr("block.page_extent", b.getI64IntegerAttr(page));
           }
           if (o->hasAttr("block.pair_axis")) {
+            if (block::countedPanel(loop, *f))
+              loop->setAttr("block.counted_panels", b.getUnitAttr());
             if (block::sharedBounds(loop, d.getAs<IntegerAttr>("axis").getInt(),
                                     d.getAs<IntegerAttr>("width").getInt())) {
               loop->setAttr("block.uniform_tokens", b.getUnitAttr());
-              if(block::countedPanel(loop,*f))loop->setAttr("block.counted_panels",b.getUnitAttr());
-              if(block::fullFoldPanels(loop,*f,d.getAs<IntegerAttr>("span").getInt()))
-                loop->setAttr("block.full_panels",b.getUnitAttr());
-            }
-            else if (llvm::any_of(loop.getResultTypes(),
-                                  [](Type t) { return isa<ShapedType>(t); }))
+              if (block::fullFoldPanels(
+                      loop, *f, d.getAs<IntegerAttr>("span").getInt()))
+                loop->setAttr("block.full_panels", b.getUnitAttr());
+            } else if (llvm::any_of(
+                         loop.getBody()->getTerminator()->getOperands(),
+                         [](Value y) {
+                           return isa<ShapedType>(y.getType()) &&
+                                  (!y.getDefiningOp() ||
+                                   !intentdsl::kir::hasFastMath(
+                                       y.getDefiningOp(),
+                                       arith::FastMathFlags::afn));
+                         }))
               loop->setAttr("block.repair_masked_nan", b.getUnitAttr());
             for (auto &op : loop.getBody()->without_terminator())
               if (block::tileDot(&op, loop))

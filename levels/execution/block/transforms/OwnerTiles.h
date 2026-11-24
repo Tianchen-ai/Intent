@@ -30,16 +30,21 @@ struct OwnerTiles : Tiles {
     Value scoreVal;
     Value condVal;
     Operation *subOp = nullptr;
+    Operation *mulOp = nullptr;
+    Value scaleVal;
     Operation *expOp = nullptr;
     Operation *guardOp = nullptr;
     Value weightVal;
     bool isExp2 = false;
     arith::FastMathFlags maxFlags = arith::FastMathFlags::none;
     arith::FastMathFlags subFlags = arith::FastMathFlags::none;
+    arith::FastMathFlags scaleFlags = arith::FastMathFlags::none;
     arith::FastMathFlags expFlags = arith::FastMathFlags::none;
     Value causalUpper;
     bool causalInclusive = false;
   };
+  bool canVectorizeIndependentLoop(scf::ForOp loop);
+  void vectorizedLoop(scf::ForOp loop, const Values &env, Value mask);
   std::optional<OnlinePanelFusion> matchOnlinePanelPair(scf::ForOp maxLoop,
                                                         scf::ForOp sumLoop);
   SmallVector<Value> lowerBody(Block &body, Values env, Value mask);

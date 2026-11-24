@@ -51,25 +51,34 @@ llvm::Error customRowOp(Operation &op, PrintPoint point, PrintContext &c) {
     auto ownerAxis = op.getParentOfType<func::FuncOp>()
                          ->getAttrOfType<IntegerAttr>("kir.owner_axis");
     int dims = cast<MemRefType>(op.getOperand(0).getType()).getRank();
+    bool narrow =
+        op.getAttrOfType<IntegerAttr>("index_bits").getInt() == 32;
     std::string e;
     if (ownerAxis) {
-      auto base = arg(0), col = arg(2) + "[None,:]";
+      auto base = arg(0);
+      std::string col =
+          narrow ? (arg(2) + ".to(tl.int32)[None,:]") : (arg(2) + "[None,:]");
       e = arg(1) + "[:,None]*" + base + "_s" +
           std::to_string(ownerAxis.getInt());
       for (int i = dims - 1; i >= 0; --i)
         if (i != ownerAxis.getInt()) {
           auto size = "tl.maximum(" + base + "_d" + std::to_string(i) + ",1)";
-          e += "+((" + col + ")%" + size + ")*" + base + "_s" +
-               std::to_string(i);
+          std::string rem = "((" + col + ")%" + size + ")";
+          if (narrow)
+            rem += ".to(tl.int64)";
+          e += "+" + rem + "*" + base + "_s" + std::to_string(i);
           col = "((" + col + ")//" + size + ")";
         }
     } else if (dims > 2) {
-      auto a = arg(0), row = arg(1);
+      auto a = arg(0);
+      std::string row = narrow ? (arg(1) + ".to(tl.int32)") : arg(1);
       e = arg(2) + "[None,:]*" + a + "_s" + std::to_string(dims - 1);
       for (int i = dims - 2; i >= 0; --i) {
         auto size = a + "_d" + std::to_string(i);
-        e += "+((" + row + ")%" + size + ")[:,None]*" + a + "_s" +
-             std::to_string(i);
+        std::string rem = "((" + row + ")%" + size + ")";
+        if (narrow)
+          rem += ".to(tl.int64)";
+        e += "+" + rem + "[:,None]*" + a + "_s" + std::to_string(i);
         row = "((" + row + ")//" + size + ")";
       }
     } else {

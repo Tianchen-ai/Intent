@@ -123,7 +123,16 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
                                 plane({lower, Axis::Owner})),
         b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, t,
                                 plane({upper, Axis::Owner})));
-    any = reduce(live, "max", 0);
+    live = b.create<arith::AndIOp>(loc, live, plane({mask, Axis::Owner}));
+    if (loop->hasAttr("block.repair_masked_nan"))
+      any = reduce(live, "max", 0);
+    else
+      any = b.create<arith::AndIOp>(
+          loc,
+          b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge, token,
+                                  like(lo, tokenType)),
+          b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, token,
+                                  like(hi, tokenType)));
   }
   llvm::DenseMap<Value, Fragment> local;
   local[loop.getInductionVar()] = tokens;
@@ -159,6 +168,8 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
   if (online) {
     onlineAnchor = online->guardOp ? online->guardOp : online->expOp;
     folded.insert(online->subOp);
+    if (online->mulOp)
+      folded.insert(online->mulOp);
     if (onlineAnchor != online->expOp)
       folded.insert(online->expOp);
   }
@@ -290,20 +301,36 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
             b.create<arith::MaxNumFOp>(loc, mPrev, mPanel, online->maxFlags);
         Value negInfRow = broadcast(scalar(-INFINITY), onlineMNew.getType());
         Value zeroRow = broadcast(scalar(0.f), onlineMNew.getType());
+        Value prevNegInf = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OEQ,
+                                                   mPrev, negInfRow);
         Value allMasked = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OEQ,
                                                   onlineMNew, negInfRow);
         Value mSafe = select(allMasked, zeroRow, onlineMNew);
         Value mDiff =
             b.create<arith::SubFOp>(loc, mPrev, mSafe, online->subFlags);
-        onlineAlpha =
+        if (online->scaleVal) {
+          Value sRow = broadcast(value(online->scaleVal).value, mDiff.getType());
+          mDiff = b.create<arith::MulFOp>(loc, mDiff, sRow, online->scaleFlags);
+        }
+        Value rawAlpha =
             online->isExp2
                 ? Value(b.create<math::Exp2Op>(loc, mDiff, online->expFlags))
                 : Value(b.create<math::ExpOp>(loc, mDiff, online->expFlags));
+        onlineAlpha = select(prevNegInf, zeroRow, rawAlpha);
         Value mSafeTile =
             paired ? plane({mSafe, Axis::Owner})
                    : broadcast(singleMember({mSafe, Axis::Owner}), sTile.getType());
         Value sShift =
             b.create<arith::SubFOp>(loc, sTile, mSafeTile, online->subFlags);
+        if (online->scaleVal) {
+          auto sFrag = value(online->scaleVal);
+          Value sTileScale =
+              paired ? plane(sFrag)
+                     : broadcast(singleMember(sFrag), sShift.getType());
+          sShift = b.create<arith::MulFOp>(
+              loc, sShift, broadcast(sTileScale, sShift.getType()),
+              online->scaleFlags);
+        }
         Value wRaw =
             online->isExp2
                 ? Value(b.create<math::Exp2Op>(loc, sShift, online->expFlags))
@@ -355,13 +382,18 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
             outer.push_back(widen(coordinate(v)));
           auto n = shape(view)[old.getAttrOfType<IntegerAttr>("axis").getInt()];
           if (Value tile = access.panel(*this, old, outer, base, span, n)) {
-            auto zero = castElement(scalar(0), elem(tile.getType()));
-            auto maskType =
-                cast<RankedTensorType>(tile.getType()).clone(b.getI1Type());
-            local[out] = {full ? tile
-                               : select(broadcast(any, maskType, 0), tile,
-                                        broadcast(zero, tile.getType())),
-                          Axis::Token};
+            bool keepDirect =
+                full || !loop->hasAttr("block.repair_masked_nan");
+            if (keepDirect) {
+              local[out] = {tile, Axis::Token};
+            } else {
+              auto zero = castElement(scalar(0), elem(tile.getType()));
+              auto maskType =
+                  cast<RankedTensorType>(tile.getType()).clone(b.getI1Type());
+              local[out] = {select(broadcast(any, maskType, 0), tile,
+                                   broadcast(zero, tile.getType())),
+                            Axis::Token};
+            }
             continue;
           }
         }
@@ -450,7 +482,13 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
       auto w = plane(value(operands.weights));
       auto v = value(operands.values).value;
       auto zero = castElement(scalar(0), elem(w.getType()));
-      auto guarded = full ? w : select(live, w, broadcast(zero, w.getType()));
+      bool alreadyMasked =
+          online && operands.weights.getDefiningOp<arith::TruncFOp>() &&
+          operands.weights.getDefiningOp<arith::TruncFOp>().getIn() ==
+              online->weightVal;
+      auto guarded = (full || alreadyMasked)
+                         ? w
+                         : select(live, w, broadcast(zero, w.getType()));
       auto w16 = castElement(guarded, elem(v.getType()));
       if (!loop->hasAttr("block.repair_masked_nan")) {
         next.push_back(dot(w16, v, false, acc));

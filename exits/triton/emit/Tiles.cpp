@@ -81,12 +81,66 @@ TerminalPrinter tilePrinter() {
   p.operations["arith.remsi"] = PrintRule::format("$r0 = $0%$1");
   p.operations["arith.ori"] = PrintRule::format("$r0 = $0|$1");
   p.operations["arith.xori"] = PrintRule::format("$r0 = $0^$1");
-  p.operations["math.exp"] = PrintRule::format("$r0 = tl.exp($0)");
   p.operations["math.log"] = PrintRule::format("$r0 = tl.log($0)");
   p.operations["math.exp2"] = PrintRule::format("$r0 = tl.exp2($0)");
   p.operations["arith.select"] = PrintRule::format("$r0 = tl.where($operands)");
+  p.operations["triton_src.transpose"] = PrintRule::format("$r0 = tl.trans($0)");
+  p.operations["triton_src.scaled_mma"] = PrintRule::format(
+      "$r0 = tl.dot_scaled($0,$1.to(tl.uint8),'e4m3',$2,$3.to(tl.uint8),'e4m3',$4)");
 
   // Local rules (LocalOpView only)
+  leaf("triton_src.reshape", [](const LocalOpView &v) {
+    return ("tl.reshape(" + v.operand(0) + "," + tuple(v.resultType(0)) + ")")
+        .str();
+  });
+  leaf("triton_src.expand_scale", [](const LocalOpView &v) {
+    auto ax = v.attrOfType<IntegerAttr>("axis").getInt();
+    return ("tl.broadcast_to(tl.expand_dims(" + v.operand(0) + "," +
+            std::to_string(ax) + ")," + tuple(v.resultType(0)) + ")")
+        .str();
+  });
+  leaf("triton_src.desc_read", [](const LocalOpView &v) {
+    auto joinI64 = [](DenseI64ArrayAttr a) {
+      std::vector<std::string> parts;
+      for (int64_t x : a.asArrayRef())
+        parts.push_back(std::to_string(x));
+      return "[" + llvm::join(parts, ",") + "]";
+    };
+    std::vector<std::string> offs;
+    for (unsigned i = 1; i < v.numOperands(); ++i)
+      offs.push_back("tl.cast(" + v.operand(i).str() + ",tl.int32)");
+    return ("tl.make_tensor_descriptor(" + v.operand(0).str() + ",shape=" +
+            joinI64(v.attrOfType<DenseI64ArrayAttr>("view_shape")) +
+            ",strides=" +
+            joinI64(v.attrOfType<DenseI64ArrayAttr>("view_strides")) +
+            ",block_shape=" +
+            joinI64(v.attrOfType<DenseI64ArrayAttr>("block_shape")) +
+            ").load([" + llvm::join(offs, ",") + "])");
+  });
+  leaf("triton_src.desc_write", [](const LocalOpView &v) {
+    auto joinI64 = [](DenseI64ArrayAttr a) {
+      std::vector<std::string> parts;
+      for (int64_t x : a.asArrayRef())
+        parts.push_back(std::to_string(x));
+      return "[" + llvm::join(parts, ",") + "]";
+    };
+    std::vector<std::string> offs;
+    for (unsigned i = 2; i < v.numOperands(); ++i)
+      offs.push_back("tl.cast(" + v.operand(i).str() + ",tl.int32)");
+    return ("tl.make_tensor_descriptor(" + v.operand(0).str() + ",shape=" +
+            joinI64(v.attrOfType<DenseI64ArrayAttr>("view_shape")) +
+            ",strides=" +
+            joinI64(v.attrOfType<DenseI64ArrayAttr>("view_strides")) +
+            ",block_shape=" +
+            joinI64(v.attrOfType<DenseI64ArrayAttr>("block_shape")) +
+            ").store([" + llvm::join(offs, ",") + "]," + v.operand(1).str() +
+            ")");
+  });
+  leaf("math.exp", [](const LocalOpView &v) {
+    if (viewHasFastMath(v, arith::FastMathFlags::afn))
+      return ("tl.exp2((" + v.operand(0) + ")*1.4426950408889634)").str();
+    return ("tl.exp(" + v.operand(0) + ")").str();
+  });
   leaf("triton_src.tile_axis", [](const LocalOpView &v) {
     return "tl.arange(0," + std::to_string(shape(v.resultType(0))[0]) +
            ").to(tl.int64)";
@@ -266,11 +320,20 @@ TerminalPrinter tilePrinter() {
       });
   for (auto name :
        {"arith.truncf", "arith.extf", "arith.extsi", "arith.sitofp",
-        "arith.fptosi", "arith.index_cast", "arith.trunci", "arith.extui"})
+        "arith.fptosi", "arith.index_cast", "arith.trunci"})
     leaf(name, [](const LocalOpView &v) {
       return ("tl.cast(" + v.operand(0) + "," + dtype(v.resultType(0)) + ")")
           .str();
     });
+  leaf("arith.extui", [](const LocalOpView &v) {
+    auto inElem = getElementTypeOrSelf(v.operandType(0));
+    std::string uTy = inElem.isInteger(8)    ? "tl.uint8"
+                      : inElem.isInteger(16) ? "tl.uint16"
+                      : inElem.isInteger(32) ? "tl.uint32"
+                                             : dtype(v.operandType(0));
+    return ("tl.cast(tl.cast(" + v.operand(0).str() + "," + uTy + ")," +
+            dtype(v.resultType(0)) + ")");
+  });
   p.package = [](DictionaryAttr, const auto &files,
                  llvm::raw_pwrite_stream &out) {
     out << files.at("kernel.py");

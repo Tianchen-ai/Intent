@@ -13,9 +13,23 @@ class Target:
     def profile(self, device, buffers):
         if getattr(device, "type", None) != "cuda":
             raise ValueError("Triton requires local CUDA buffers")
-        return device
+        tensor_map = True
+        seen_ptrs = set()
+        for view in buffers:
+            if not isinstance(view, torch.Tensor):
+                continue
+            ptr = view.data_ptr()
+            if ptr in seen_ptrs:
+                tensor_map = False
+            seen_ptrs.add(ptr)
+            tensor_map &= ptr % 16 == 0
+        return device, tensor_map
 
-    def options(self, device):
+    def options(self, key):
+        if isinstance(key, tuple):
+            device, tensor_map = key
+        else:
+            device, tensor_map = key, False
         if device not in self.devices:
             self.devices[device] = torch.cuda.get_device_properties(device)
         p = self.devices[device]
@@ -27,6 +41,7 @@ class Target:
             sm=p.major * 10 + p.minor,
             warp_size=p.warp_size,
             max_threads=p.max_threads_per_block,
+            allow_tma=tensor_map,
         )
 
     @staticmethod

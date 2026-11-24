@@ -1,4 +1,6 @@
 #include "TileShape.h"
+#include "../capabilities/Target.h"
+#include "intentdsl/levels/algorithm/kir/ir/StorageLayout.h"
 #include "intentdsl/levels/execution/block/ir/Contraction.h"
 #include "intentdsl/levels/execution/block/ir/Owners.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -285,6 +287,70 @@ void tileContracts(Unit &unit) {
     };
     c.verify = isDot ? dotSignature : collectiveSignature;
     unit.implementations.push_back({std::move(c), COMPILERINFRA_SOURCE});
+  }
+  {
+    ImplementationContract sc;
+    sc.name = "scaled-mma";
+    sc.operation = "triton_src.scaled_mma";
+    sc.symbol = "tl.dot_scaled";
+    sc.source = ImplementationSource::Builtin;
+    sc.minimum = Reuse::Native;
+    sc.operands = "[M,K] x [K,N] FP8 E4M3FN with [M,K/32] and [N,K/32] E8M0 scales";
+    sc.layout = "register or descriptor tiles; MX8 scales grouped by 32 along K";
+    sc.accumulator = "f32";
+    sc.effects = "pure register results";
+    sc.numerical = "MX8 E8M0 block-scaled FP8 Tensor Core accumulation into FP32";
+    sc.estimator = "exits/triton::matrix-issues";
+    sc.costParameters = {"M", "N", "K"};
+    TypedContract tc;
+    tc.effects = EffectMask::None;
+    tc.shape.minOperands = 5;
+    tc.shape.maxOperands = 5;
+    tc.shape.minResults = 1;
+    tc.shape.maxResults = 1;
+    tc.shape.operandRanks = {2, 2, 2, 2, 2};
+    tc.shape.resultRanks = {2};
+    tc.operandTypes = {ScalarTypeKind::F8E4M3FN, ScalarTypeKind::I8,
+                       ScalarTypeKind::F32};
+    tc.resultTypes = {ScalarTypeKind::F32};
+    tc.accumulatorTypes = {ScalarTypeKind::F32};
+    sc.typed = std::move(tc);
+    sc.available = [](const TargetProfile &p) -> llvm::Error {
+      auto t = p.services.get<intentdsl::itsrc::TritonTarget>();
+      if (!t || !t->scaledMma)
+        return llvm::createStringError("missing Triton scaled MMA capability");
+      return llvm::Error::success();
+    };
+    sc.verify = [](Operation *o) -> LogicalResult {
+      if (!isMemoryEffectFree(o) || o->getNumOperands() != 5 ||
+          o->getNumResults() != 1)
+        return failure();
+      auto aTy = dyn_cast<RankedTensorType>(o->getOperand(0).getType());
+      auto lsTy = dyn_cast<RankedTensorType>(o->getOperand(1).getType());
+      auto bTy = dyn_cast<RankedTensorType>(o->getOperand(2).getType());
+      auto rsTy = dyn_cast<RankedTensorType>(o->getOperand(3).getType());
+      auto resTy = dyn_cast<RankedTensorType>(o->getResult(0).getType());
+      if (!aTy || !lsTy || !bTy || !rsTy || !resTy)
+        return failure();
+      auto g = intentdsl::kir::MX8Block::group;
+      return success(
+          aTy.getRank() == 2 && bTy.getRank() == 2 && resTy.getRank() == 2 &&
+          isa<Float8E4M3FNType>(aTy.getElementType()) &&
+          isa<Float8E4M3FNType>(bTy.getElementType()) &&
+          resTy.getElementType().isF32() &&
+          o->getOperand(4).getType() == resTy &&
+          aTy.getDimSize(1) > 0 && aTy.getDimSize(1) % g == 0 &&
+          aTy.getDimSize(1) == bTy.getDimSize(0) &&
+          resTy.getDimSize(0) == aTy.getDimSize(0) &&
+          resTy.getDimSize(1) == bTy.getDimSize(1) &&
+          lsTy.getElementType().isInteger(8) &&
+          rsTy.getElementType().isInteger(8) &&
+          lsTy.getShape() ==
+              ArrayRef<int64_t>{aTy.getDimSize(0), aTy.getDimSize(1) / g} &&
+          rsTy.getShape() ==
+              ArrayRef<int64_t>{bTy.getDimSize(1), aTy.getDimSize(1) / g});
+    };
+    unit.implementations.push_back({std::move(sc), COMPILERINFRA_SOURCE});
   }
 }
 } // namespace CI_UNIT_NAMESPACE

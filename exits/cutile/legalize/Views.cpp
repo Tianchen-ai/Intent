@@ -67,11 +67,26 @@ std::optional<int64_t> ownerRectangleAxis(Operation *op, func::FuncOp fn) {
       cast<BlockArgument>(op->getOperand(kind == "slice_write" ? 1 : 0));
   auto shape = fn.getArgAttrOfType<DenseI64ArrayAttr>(view.getArgNumber(),
                                                       "block.shape");
-  if (!shape || shape.size() != coords.size() + 1 ||
-      shape[pairPos] %
-              space.getAttrOfType<IntegerAttr>("block.owner_tile").getInt() !=
-          0 ||
+  auto ownerTile =
+      space.getAttrOfType<IntegerAttr>("block.owner_tile").getInt();
+  if (!shape || shape.size() != coords.size() + 1 || shape[pairPos] < ownerTile ||
       !llvm::isPowerOf2_64(shape.asArrayRef().back()))
+    return std::nullopt;
+  compilerinfra::TailDimension ownerDim;
+  ownerDim.staticExtent = shape[pairPos];
+  ownerDim.staticOffset = shape[pairPos] - ownerTile;
+  ownerDim.tileSize = ownerTile;
+  ownerDim.step = 1;
+  ownerDim.tileAlignment = ownerTile;
+  compilerinfra::TailDimension laneDim;
+  laneDim.staticExtent = shape.asArrayRef().back();
+  laneDim.staticOffset = 0;
+  laneDim.tileSize = shape.asArrayRef().back();
+  laneDim.step = 1;
+  laneDim.tileAlignment = shape.asArrayRef().back();
+  auto tailProof = compilerinfra::proveTailAccess({ownerDim, laneDim});
+  if (!tailProof.proven ||
+      tailProof.kind != compilerinfra::TailKind::ExactInBounds)
     return std::nullopt;
   return pairPos;
 }
@@ -115,11 +130,6 @@ bool canNarrowCutileAddress(Operation &op) {
       if (proof.proven) {
         if (auto cr = intRanges.query(v))
           res = fit64(cr->smin().getSExtValue(), cr->smax().getSExtValue());
-      } else if (auto cr = intRanges.query(v);
-                 cr && cr->smin().getBitWidth() <= 64) {
-        // Intermediate scalar index before % or / may exceed i32 while final
-        // coordinate after modulo/div fits in i32; query IntegerRangeContext.
-        res = fit64(cr->smin().getSExtValue(), cr->smax().getSExtValue());
       }
       memo[v] = res;
       return res;
@@ -378,11 +388,21 @@ bool tileLoadStorePermitsTma(Value viewArg, func::FuncOp fn,
     auto configs = fn->getAttrOfType<ArrayAttr>("block.configs");
     if (!rowDim || *rowDim <= 0 || !configs)
       return false;
-    for (Attribute row : configs)
-      if (*rowDim %
-              cast<DictionaryAttr>(row).getAs<IntegerAttr>("rows").getInt() !=
-          0)
+    for (Attribute row : configs) {
+      int64_t r =
+          cast<DictionaryAttr>(row).getAs<IntegerAttr>("rows").getInt();
+      if (r <= 0 || *rowDim < r)
         return false;
+      compilerinfra::TailDimension td;
+      td.staticExtent = *rowDim;
+      td.staticOffset = *rowDim - r;
+      td.tileSize = r;
+      td.step = 1;
+      td.tileAlignment = r;
+      auto tp = compilerinfra::proveTailAccess({td});
+      if (!tp.proven || tp.kind != compilerinfra::TailKind::ExactInBounds)
+        return false;
+    }
   }
   return true;
 }

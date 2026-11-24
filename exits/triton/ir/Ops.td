@@ -210,6 +210,38 @@ defm Scale : ScaleDispatch<Itsrc_Dialect>;
 class TileInstruction<string mnemonic, list<Trait> traits = []> : Op<Itsrc_Dialect, mnemonic, traits>;
 include "intentdsl/levels/execution/block/ir/RowInstructions.td"
 include "intentdsl/levels/execution/block/ir/TileInstructions.td"
+def Itsrc_DescRead : Op<Itsrc_Dialect, "desc_read", [MemoryEffects<[MemRead]>]> {
+  let arguments = (ins AnyMemRef:$base, Variadic<I64>:$offsets,
+                       DenseI64ArrayAttr:$view_shape,
+                       DenseI64ArrayAttr:$view_strides,
+                       DenseI64ArrayAttr:$block_shape);
+  let results = (outs AnyRankedTensor:$tile);
+}
+def Itsrc_DescWrite : Op<Itsrc_Dialect, "desc_write", [MemoryEffects<[MemWrite]>]> {
+  let arguments = (ins AnyMemRef:$base, AnyRankedTensor:$value,
+                       Variadic<I64>:$offsets,
+                       DenseI64ArrayAttr:$view_shape,
+                       DenseI64ArrayAttr:$view_strides,
+                       DenseI64ArrayAttr:$block_shape);
+}
+def Itsrc_Reshape : Op<Itsrc_Dialect, "reshape", [Pure]> {
+  let arguments = (ins AnyRankedTensor:$value);
+  let results = (outs AnyRankedTensor:$result);
+}
+def Itsrc_Transpose : Op<Itsrc_Dialect, "transpose", [Pure]> {
+  let arguments = (ins AnyRankedTensor:$value);
+  let results = (outs AnyRankedTensor:$result);
+}
+def Itsrc_ExpandScale : Op<Itsrc_Dialect, "expand_scale", [Pure]> {
+  let arguments = (ins AnyRankedTensor:$value, I64Attr:$axis);
+  let results = (outs AnyRankedTensor:$result);
+}
+def Itsrc_ScaledMMA : Op<Itsrc_Dialect, "scaled_mma", [Pure]> {
+  let arguments = (ins AnyRankedTensor:$lhs, AnyRankedTensor:$ls,
+                       AnyRankedTensor:$rhs, AnyRankedTensor:$rs,
+                       AnyRankedTensor:$acc);
+  let results = (outs AnyRankedTensor:$value);
+}
 def Itsrc_RuntimeSource : Op<Itsrc_Dialect,"runtime_source"> {
   let arguments=(ins StrAttr:$implementation);
 }

@@ -1,3 +1,4 @@
+#include "Target.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/Performance.h"
 #include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
@@ -47,6 +48,12 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
   }
   if (*arch != 90 && *arch != 120)
     return llvm::createStringError("unsupported Triton GPU architecture");
+  auto target = std::make_shared<intentdsl::itsrc::TritonTarget>();
+  target->permitTma = options.getBoolean("allow_tma").value_or(false);
+  target->scaledMma = (*arch == 90 || *arch == 120);
+  if (auto err =
+          profile.services.provide<intentdsl::itsrc::TritonTarget>(target))
+    return std::move(err);
   auto caps = std::make_shared<intentdsl::RowCapacity>();
   caps->globalAtomicBins=true;
   auto matrix=std::make_shared<intentdsl::block::MatrixTarget>();
@@ -55,7 +62,8 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
       {"contract", {"exits/triton::native-dot"}},
       {"window_contract", {"exits/triton::native-dot"}},
       {"scaled_contract",
-       {"exits/triton::native-dot", "exits/triton::row-collective"}},
+       {"exits/triton::scaled-mma", "exits/triton::native-dot",
+        "exits/triton::row-collective"}},
       {"q4k_dot", {"exits/triton::row-collective"}}};
   if (*arch == 90)
     matrix->tiles = {
@@ -67,6 +75,8 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
         {32, 64, 64, R"({"num_warps":4,"num_stages":3})", "contract"},
         {64, 64, 32, R"({"num_warps":4,"num_stages":3})"},
         {64, 128, 64, R"({"num_warps":8,"num_stages":3})"},
+        {64, 64, 128, R"({"num_warps":4,"num_stages":3})", "scaled_contract"},
+        {64, 128, 128, R"({"num_warps":8,"num_stages":3})", "scaled_contract"},
         {128, 128, 64, R"({"num_warps":8,"num_stages":3})", "contract"},
         {128, 256, 64, R"({"num_warps":8,"num_stages":3})", "contract", 2}};
   else
@@ -78,7 +88,9 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
         {32, 64, 32, R"({"num_warps":4,"num_stages":2})"},
         {32, 64, 64, R"({"num_warps":4,"num_stages":3})", "contract"},
         {64, 64, 64, R"({"num_warps":4,"num_stages":3})"},
-        {64, 128, 64, R"({"num_warps":8,"num_stages":2})"}};
+        {64, 128, 64, R"({"num_warps":8,"num_stages":2})"},
+        {64, 64, 128, R"({"num_warps":4,"num_stages":3})", "scaled_contract"},
+        {64, 128, 128, R"({"num_warps":8,"num_stages":2})", "scaled_contract"}};
   if (auto err =
           profile.services.provide<intentdsl::block::MatrixTarget>(matrix))
     return std::move(err);

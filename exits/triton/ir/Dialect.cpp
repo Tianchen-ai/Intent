@@ -46,6 +46,37 @@ struct TritonDotContractModel
   }
 };
 
+struct TritonScaledMMAContractModel
+    : public compilerinfra::ContractOpInterface::ExternalModel<
+          TritonScaledMMAContractModel, intentdsl::itsrc::ScaledMMA> {
+  Type getAccumulatorType(Operation *op) const {
+    return getElementTypeOrSelf(op->getResult(0).getType());
+  }
+  LogicalResult verifyShapeAndTypes(Operation *op) const {
+    if (op->getNumResults() != 1 || op->getNumOperands() != 5)
+      return failure();
+    auto l = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
+    auto ls = dyn_cast<RankedTensorType>(op->getOperand(1).getType());
+    auto r = dyn_cast<RankedTensorType>(op->getOperand(2).getType());
+    auto rs = dyn_cast<RankedTensorType>(op->getOperand(3).getType());
+    auto m = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+    if (!l || !ls || !r || !rs || !m || l.getRank() != 2 || ls.getRank() != 2 ||
+        r.getRank() != 2 || rs.getRank() != 2 || m.getRank() != 2 ||
+        !l.hasStaticShape() || !ls.hasStaticShape() || !r.hasStaticShape() ||
+        !rs.hasStaticShape() || !m.hasStaticShape() ||
+        op->getOperand(4).getType() != m)
+      return failure();
+    return success(l.getDimSize(1) > 0 && l.getDimSize(1) % 32 == 0 &&
+                   l.getDimSize(1) == r.getDimSize(0) &&
+                   m.getDimSize(0) == l.getDimSize(0) &&
+                   m.getDimSize(1) == r.getDimSize(1) &&
+                   ls.getDimSize(0) == l.getDimSize(0) &&
+                   ls.getDimSize(1) == l.getDimSize(1) / 32 &&
+                   rs.getDimSize(0) == r.getDimSize(1) &&
+                   rs.getDimSize(1) == l.getDimSize(1) / 32);
+  }
+};
+
 template <typename ConcreteOp>
 struct TritonPureContractModel
     : public compilerinfra::ContractOpInterface::ExternalModel<
@@ -122,6 +153,7 @@ void intentdsl::itsrc::ItsrcDialect::initialize() {
       >();
   MLIRContext *ctx = getContext();
   TileDot::attachInterface<TritonDotContractModel>(*ctx);
+  ScaledMMA::attachInterface<TritonScaledMMAContractModel>(*ctx);
   TileReduce::attachInterface<TritonPureContractModel<TileReduce>>(*ctx);
   RowReduce::attachInterface<TritonPureContractModel<RowReduce>>(*ctx);
   BinCount::attachInterface<TritonPureContractModel<BinCount>>(*ctx);

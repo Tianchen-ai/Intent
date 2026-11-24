@@ -108,12 +108,21 @@ TerminalPrinter cutilePrinter() {
       PrintRule::format("$r0 = ct.minimum($operands)");
   p.operations["arith.maxnumf"] =
       PrintRule::format("$r0 = ct.maximum($operands)");
-  p.operations["math.exp"] = PrintRule::format("$r0 = ct.exp($operands)");
   p.operations["math.log"] = PrintRule::format("$r0 = ct.log($operands)");
   p.operations["math.sqrt"] = PrintRule::format("$r0 = ct.sqrt($operands)");
   p.operations["math.absf"] = PrintRule::format("$r0 = ct.abs($operands)");
 
   // Local rules (LocalOpView only)
+  localExpr("math.exp", [](const LocalOpView &v) {
+    if (viewHasFastMath(v, arith::FastMathFlags::afn)) {
+      std::string ftz =
+          viewHasFastMath(v, arith::FastMathFlags::nsz) ? ",flush_to_zero=True"
+                                                        : "";
+      return ("ct.exp2((" + v.operand(0) + ")*1.4426950408889634" + ftz + ")")
+          .str();
+    }
+    return ("ct.exp(" + v.operand(0) + ")").str();
+  });
   p.operations["builtin.module"] = PrintRule::local(
       [](const LocalOpView &, PrintPoint at, PrintContext &c) {
         if (at == PrintPoint::Enter) {
@@ -185,6 +194,8 @@ TerminalPrinter cutilePrinter() {
             ")")
         .str();
   });
+  // tileiras 1.6 deadlocks in mbarrier synchronization when a 4D TMA store
+  // follows a pipelined TMA load loop; keep rect_write on regular tile stores.
   localExpr("ct_src.rect_write", [](const LocalOpView &v) {
     return ("ct.store(" + v.operand(0) + ",(" +
             llvm::join(llvm::drop_begin(v.operands(), 2), ",") + ",)," +

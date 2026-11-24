@@ -83,6 +83,17 @@ capabilities(const llvm::json::Object &options) {
   table->globalAtomicBins=true;
   auto matrix=std::make_shared<intentdsl::block::MatrixTarget>();
   matrix->estimate="exits/cutile::matrix-issues";
+  matrix->implementations = {
+      {"contract", {"exits/cutile::native-dot"}},
+      {"window_contract", {"exits/cutile::native-dot"}},
+      {"scaled_contract",
+       indices->scaledMma
+           ? std::vector<std::string>{"exits/cutile::scaled-mma",
+                                      "exits/cutile::native-dot",
+                                      "exits/cutile::row-collective"}
+           : std::vector<std::string>{"exits/cutile::native-dot",
+                                      "exits/cutile::row-collective"}},
+      {"q4k_dot", {"exits/cutile::row-collective"}}};
   if (*architecture == 90)
     matrix->tiles = {
         {2, 32, 256, R"({"num_ctas":1,"occupancy":2,"opt_level":3})",

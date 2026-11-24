@@ -483,9 +483,11 @@ LogicalResult verifyRowProgram(func::FuncOp fn, StringRef dialect) {
       return WalkResult::interrupt();
     };
     if (code == "view_offset" || code == "offsets") {
-      if (op->getAttr("index_bits") !=
-          Builder(op->getContext()).getI32IntegerAttr(64))
-        return reject("row view requires wide indices");
+      auto bits = op->getAttrOfType<IntegerAttr>("index_bits");
+      if (!bits || !bits.getType().isInteger(32) ||
+          (bits.getInt() != 64 &&
+           !(code == "offsets" && bits.getInt() == 32)))
+        return reject("row view requires verified 32-bit or 64-bit indices");
       if (code == "view_offset") {
         if (op->getNumOperands() !=
             cast<MemRefType>(op->getOperand(0).getType()).getRank() + 1)

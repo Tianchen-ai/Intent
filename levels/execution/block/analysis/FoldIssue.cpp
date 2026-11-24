@@ -1,4 +1,5 @@
 #include "intentdsl/levels/execution/block/ir/FoldIssue.h"
+#include "compilerinfra/Proofs.h"
 #include "mlir/IR/IRMapping.h"
 using namespace mlir;
 namespace intentdsl::block {
@@ -102,26 +103,79 @@ std::optional<TileDot> tileDot(Operation *s, scf::ForOp loop) {
   }
   return {};
 }
-// Propagate divisibility through the actual bounds. The proof applies to
-// the entire interval, including the last panel, independently of input data.
-bool fullFoldPanels(scf::ForOp loop,const CallFacts &facts,int64_t span) {
-  if(span<=0 || !matchPattern(loop.getStep(),m_One()))return false;
-  std::function<bool(Value)> multiple=[&](Value v) {
-    if(auto c=v.getDefiningOp<arith::ConstantIndexOp>())return c.value()%span==0;
-    if(auto dim=v.getDefiningOp<memref::DimOp>()){
-      auto ax=dim.getConstantIndex();
-      auto shape=facts.shapeOf(dim.getSource());
-      if(!ax || !shape)return false;
-      auto n=(*shape)[*ax].getAsInteger();return n && *n%span==0;
-    }
-    if(auto m=v.getDefiningOp<arith::MulIOp>())return multiple(m.getLhs())||multiple(m.getRhs());
-    if(auto a=v.getDefiningOp<arith::AddIOp>())return multiple(a.getLhs())&&multiple(a.getRhs());
-    if(auto m=v.getDefiningOp<arith::MinSIOp>())return multiple(m.getLhs())&&multiple(m.getRhs());
-    if(auto br=v.getDefiningOp<scf::IfOp>(); br && br.getNumResults()==1 && !br.getElseRegion().empty())
-      return multiple(br.thenYield().getOperand(0))&&multiple(br.elseYield().getOperand(0));
+// Prove exact full-panel coverage via CompilerInfra's tail-access proof.
+bool fullFoldPanels(scf::ForOp loop, const CallFacts &facts, int64_t span) {
+  if (span <= 0 || !matchPattern(loop.getStep(), m_One()))
     return false;
+  auto staticVal = [&](Value v) -> std::optional<int64_t> {
+    if (auto c = v.getDefiningOp<arith::ConstantIndexOp>())
+      return c.value();
+    if (auto c = v.getDefiningOp<arith::ConstantOp>())
+      if (auto ia = dyn_cast<IntegerAttr>(c.getValue());
+          ia && ia.getValue().getSignificantBits() <= 64)
+        return ia.getValue().getSExtValue();
+    if (auto dim = v.getDefiningOp<memref::DimOp>()) {
+      auto ax = dim.getConstantIndex();
+      auto shape = facts.shapeOf(dim.getSource());
+      if (ax && shape)
+        return (*shape)[*ax].getAsInteger();
+    }
+    return std::nullopt;
   };
-  return multiple(loop.getLowerBound()) && multiple(loop.getUpperBound());
+  auto loCst = staticVal(loop.getLowerBound());
+  auto hiCst = staticVal(loop.getUpperBound());
+  if (loCst && hiCst && *loCst == *hiCst && *loCst >= 0 && *loCst % span == 0)
+    return true;
+  if (!hiCst || *hiCst < span || *hiCst % span != 0)
+    return false;
+  Operation *scope = loop->getParentOfType<func::FuncOp>();
+  if (!scope)
+    scope = loop->getParentOp();
+  compilerinfra::IntegerRangeContext ranges(scope);
+  compilerinfra::TailDimension dim;
+  dim.staticExtent = *hiCst;
+  dim.tileSize = span;
+  dim.step = 1;
+  dim.tileAlignment = span;
+  if (loCst) {
+    if (*loCst < 0 || *loCst > *hiCst - span || *loCst % span != 0)
+      return false;
+    dim.staticOffset = *hiCst - span;
+  } else {
+    dim.dynamicOffset = loop.getLowerBound();
+  }
+  auto proof =
+      compilerinfra::proveTailAccess({dim}, ranges.valid() ? &ranges : nullptr);
+  return proof.proven && proof.kind == compilerinfra::TailKind::ExactInBounds;
+}
+bool overlappingWindowBound(Value v, BlockArgument owner, scf::ForOp loop,
+                            int64_t width) {
+  if (v == owner || sharedCoordinate(v, owner, loop, width))
+    return true;
+  Operation *def = v.getDefiningOp();
+  if (!def)
+    return false;
+  if (auto add = dyn_cast<arith::AddIOp>(def))
+    return (overlappingWindowBound(add.getLhs(), owner, loop, width) &&
+            sharedCoordinate(add.getRhs(), owner, loop, width)) ||
+           (sharedCoordinate(add.getLhs(), owner, loop, width) &&
+            overlappingWindowBound(add.getRhs(), owner, loop, width));
+  if (auto sub = dyn_cast<arith::SubIOp>(def))
+    return overlappingWindowBound(sub.getLhs(), owner, loop, width) &&
+           sharedCoordinate(sub.getRhs(), owner, loop, width);
+  if (isa<arith::MinSIOp, arith::MaxSIOp>(def))
+    return overlappingWindowBound(def->getOperand(0), owner, loop, width) &&
+           overlappingWindowBound(def->getOperand(1), owner, loop, width);
+  if (auto sel = dyn_cast<arith::SelectOp>(def))
+    return overlappingWindowBound(sel.getTrueValue(), owner, loop, width) &&
+           overlappingWindowBound(sel.getFalseValue(), owner, loop, width);
+  if (auto br = dyn_cast<scf::IfOp>(def);
+      br && br.getNumResults() == 1 && !br.getElseRegion().empty())
+    return overlappingWindowBound(br.thenYield().getOperand(0), owner, loop,
+                                  width) &&
+           overlappingWindowBound(br.elseYield().getOperand(0), owner, loop,
+                                  width);
+  return false;
 }
 bool sharedBounds(scf::ForOp loop, unsigned axis, int64_t rows) {
   auto member = loop->getBlock()->getArgument(axis);
@@ -283,11 +337,11 @@ std::optional<unsigned> issueAxis(Operation *op,
     bool sawOperand = false;
     for (auto loop : bb.getOps<scf::ForOp>())
       if (loop->hasAttr("kir.reassociate")) {
-        // Disjoint split intervals have no key panel to share. A lower bound
-        // equal to the owner coordinate is the overlapping causal suffix.
-        good &= loop.getLowerBound() == bb.getArgument(j) ||
-                sharedCoordinate(loop.getLowerBound(), bb.getArgument(j), loop,
-                                 rows);
+        // Disjoint split intervals have no key panel to share, whereas a
+        // 1-Lipschitz owner-shifted lower bound (causal suffix or sliding
+        // window) shares overlapping token panels across adjacent owners.
+        good &= overlappingWindowBound(loop.getLowerBound(), bb.getArgument(j),
+                                       loop, rows);
         shapedCarries = std::max<int64_t>(
             shapedCarries,
             llvm::count_if(loop.getResultTypes(),

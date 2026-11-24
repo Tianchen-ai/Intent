@@ -6,6 +6,10 @@ import triton
 from runtime.block.binding.grid import accepts, grid
 from runtime.triton.cache.source import load
 
+triton.set_allocator(
+    lambda size, align, stream: torch.empty(size, dtype=torch.int8, device="cuda")
+)
+
 
 class Artifact:
     def __init__(self, data):

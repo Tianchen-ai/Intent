@@ -109,7 +109,7 @@ inline std::optional<PanelRange> panelRange(mlir::Value v,
 inline bool countedPanel(mlir::Operation *o,
                          const intentdsl::CallFacts &facts) {
   auto l = mlir::dyn_cast<mlir::scf::ForOp>(o);
-  if (!l || !o->hasAttr("block.uniform_tokens"))
+  if (!l || !mlir::matchPattern(l.getStep(), mlir::m_One()))
     return false;
   int64_t span = 1;
   if (auto cw = o->getAttrOfType<mlir::IntegerAttr>("block.contribution_width"))
