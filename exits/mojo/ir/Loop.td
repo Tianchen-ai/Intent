@@ -403,6 +403,10 @@ def MojoCTile2DOmp : RowInst<"c_tile_2d_omp",[SingleBlock]> {
 def MojoCRowOmpParallel : RowInst<"c_row_omp_parallel",[SingleBlock]> {
   let regions=(region AnyRegion:$body);
 }
+def MojoCFlatColOmp : RowInst<"c_flat_col_omp",[SingleBlock]> {
+  let arguments=(ins I64Attr:$col_grain);
+  let regions=(region AnyRegion:$body);
+}
 def MojoCProjectedWhile : RowInst<"c_projected_while",[SingleBlock]> {
   let arguments=(ins I64Attr:$proj_rank);
   let regions=(region AnyRegion:$body);

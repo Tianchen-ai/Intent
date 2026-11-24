@@ -108,7 +108,13 @@ void registerMatrixContracts(Unit &u) {
     c.estimator = u.qualify("brgemm-tile");
     c.costParameters = {"vector_bits", "workers"};
     c.dependencies = {"onednn"};
-    c.available = std::move(avail);
+    c.available =
+        [avail = std::move(avail)](const TargetProfile &p) -> llvm::Error {
+      if (!p.features.count("onednn_runtime"))
+        return llvm::createStringError(
+            "Mojo host runtime lacks oneDNN ukernel library and headers");
+      return avail(p);
+    };
     c.verify = [requiresFtz](Operation *op) -> LogicalResult {
       if (op->getNumOperands() != 5 || op->getNumResults() != 1 ||
           !op->getResult(0).getType().isInteger(32))
@@ -396,8 +402,8 @@ void populateMojoMatrixContracts(intentdsl::cpu::MatrixMachine &m, int64_t v) {
   };
 
   for (auto [r, c, d] : std::initializer_list<std::tuple<int64_t, int64_t, int64_t>>{
-           {2, v, 32}, {4, 2 * v, 64}, {8, 4 * v, 64}, {8, 3 * v, 128},
-           {12, 2 * v, 128}}) {
+           {2, v, 32}, {4, 2 * v, 64}, {8, 2 * v, 64}, {8, 4 * v, 64},
+           {8, 3 * v, 128}, {12, 2 * v, 128}}) {
     add(r, c, d, v, "simd-fma", "register-block", "any");
     if (!m.integerPacking.empty())
       add(r, c, d, v, "vnni-dot4", "register-block", "vnni-dot4", 4, true,
@@ -408,7 +414,7 @@ void populateMojoMatrixContracts(intentdsl::cpu::MatrixMachine &m, int64_t v) {
 
   // Vendor oneDNN BRGeMM candidates
   for (auto [r, c, d] : std::initializer_list<std::tuple<int64_t, int64_t, int64_t>>{
-           {4, 2 * v, 64}, {6, 4 * v, 64}, {8, 3 * v, 64}}) {
+           {4, 2 * v, 64}, {8, 2 * v, 64}, {6, 4 * v, 64}, {8, 3 * v, 64}}) {
     add(r, c, d, v, "onednn-brgemm-f32", "brgemm-tile", "f32", 1, true, false);
     add(r, c, d, v, "onednn-brgemm-f16", "brgemm-tile", "f16", 1, true, false);
   }

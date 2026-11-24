@@ -1,5 +1,6 @@
 from runtime.cpu.launch.completion import submit
 from runtime.cpu.binding.profile import calibration
+import ctypes as ct
 import os
 from functools import lru_cache
 from pathlib import Path
@@ -29,13 +30,28 @@ def _discover_onednn():
                 candidates.extend((str(d / "libdnnl.so"), str(d / "libdnnl.so.3")))
         for sys_dir in ("/usr/local/lib", "/usr/local/lib64", "/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/usr/lib"):
             candidates.extend((f"{sys_dir}/libdnnl.so", f"{sys_dir}/libdnnl.so.3"))
+    seen = set()
     for cand in candidates:
-        if cand and os.path.isfile(cand):
-            real = os.path.realpath(cand)
-            prefix = Path(real).parents[1]
-            inc = prefix / "include"
-            if (inc / "oneapi" / "dnnl" / "dnnl_ukernel.h").is_file():
-                return real, str(inc), os.stat(real).st_mtime_ns
+        if not cand or not os.path.isfile(cand):
+            continue
+        real = os.path.realpath(cand)
+        if real in seen:
+            continue
+        seen.add(real)
+        prefix = Path(real).parents[1]
+        inc = prefix / "include"
+        ukernel_hdr = inc / "oneapi" / "dnnl" / "dnnl_ukernel.h"
+        cfg_hdr = inc / "oneapi" / "dnnl" / "dnnl_config.h"
+        if not ukernel_hdr.is_file() or not cfg_hdr.is_file():
+            continue
+        if "#define DNNL_EXPERIMENTAL_UKERNEL" not in cfg_hdr.read_text(errors="ignore"):
+            continue
+        try:
+            if not hasattr(ct.CDLL(real), "dnnl_brgemm_create"):
+                continue
+        except OSError:
+            continue
+        return real, str(inc), os.stat(real).st_mtime_ns
     return "", "", 0
 
 
@@ -88,6 +104,7 @@ def discover(scope):
         amx_bf16=has_all("amx_tile", "amx_bf16"),
     )
     onednn_lib, onednn_inc, onednn_mtime = _discover_onednn()
+    feats["onednn_runtime"] = bool(onednn_lib and onednn_inc)
     return (
         binary,
         fields["--target-cpu"],

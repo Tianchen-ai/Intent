@@ -37,6 +37,8 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
     if (options.getBoolean(feat).value_or(false))
       p.features.insert(feat.str());
   }
+  if (options.getBoolean("onednn_runtime").value_or(true))
+    p.features.insert("onednn_runtime");
   auto caps = std::make_shared<intentdsl::cpu::RowMachine>();
   caps->vectorBits = *bits;
   caps->packedOwners = std::clamp<int64_t>(*bits / 32, 4, 16);
@@ -47,6 +49,7 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
     matrix->integerPacking = "signed-dot4-panels";
   matrix->choices = {{2, v, 32, v},
                      {4, 2 * v, 64, v},
+                     {8, 2 * v, 64, v},
                      {8, 4 * v, 64, v},
                      {8, 3 * v, 128, v},
                      {12, 2 * v, 128, v}};

@@ -990,11 +990,11 @@ TerminalPrinter mojoMatrixPrinter() {
         c.line("static inline uint16_t narrow_bf(float f){uint32_t b;memcpy(&b,&f,4);if((b&0x7fffffff)>0x7f800000)return (b>>16)|64;return (b+32767+((b>>16)&1))>>16;}");
         c.line("static inline float min_ieee(float a,float b){return isnan(a)?a:isnan(b)?b:fminf(a,b);}");
         c.line("static inline void widen_bf16_span(float *out, const uint16_t *src, int64_t n){");
-        c.line("  if (n <= 0) return; int64_t i=0;");
+        c.line("  if (n <= 0) return; size_t i=0, un=(size_t)n;");
         c.line("#if defined(__AVX512F__)");
-        c.line("  for (; i <= n - 16; i += 16) { __m256i h = _mm256_loadu_si256((const __m256i*)(src+i)); _mm512_storeu_ps(out+i, _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(h), 16))); }");
+        c.line("  for (; i + 16 <= un; i += 16) { __m256i h = _mm256_loadu_si256((const __m256i*)(src+i)); _mm512_storeu_ps(out+i, _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(h), 16))); }");
         c.line("#endif");
-        c.line("  for (; i<n; ++i) out[i] = expand_bf(src[i]);");
+        c.line("  for (; i<un; ++i) out[i] = expand_bf(src[i]);");
         c.line("}");
       }
       if (op.getAttrOfType<BoolAttr>("uses_f16_math").getValue()) {
@@ -1010,11 +1010,11 @@ TerminalPrinter mojoMatrixPrinter() {
         c.line("#endif");
         c.line("}");
         c.line("static inline void widen_f16_span(float *out, const uint16_t *src, int64_t n){");
-        c.line("  if (n <= 0) return; int64_t i=0;");
+        c.line("  if (n <= 0) return; size_t i=0, un=(size_t)n;");
         c.line("#if defined(__AVX512F__) && defined(__F16C__)");
-        c.line("  for (; i <= n - 16; i += 16) { __m256i h = _mm256_loadu_si256((const __m256i*)(src+i)); _mm512_storeu_ps(out+i, _mm512_cvtph_ps(h)); }");
+        c.line("  for (; i + 16 <= un; i += 16) { __m256i h = _mm256_loadu_si256((const __m256i*)(src+i)); _mm512_storeu_ps(out+i, _mm512_cvtph_ps(h)); }");
         c.line("#endif");
-        c.line("  for (; i<n; ++i) out[i] = expand_f16(src[i]);");
+        c.line("  for (; i<un; ++i) out[i] = expand_f16(src[i]);");
         c.line("}");
       }
       if (op.getAttrOfType<BoolAttr>("uses_mx8_math").getValue()) {
@@ -2076,6 +2076,29 @@ TerminalPrinter mojoMatrixPrinter() {
     return llvm::Error::success();
   };
 
+  p.operations["mojo_row.c_flat_col_omp"] = [](Operation &op, PrintPoint at,
+                                               PrintContext &c) {
+    int64_t cg = op.getAttrOfType<IntegerAttr>("col_grain").getInt();
+    std::string cgs = std::to_string(cg) + "LL";
+    if (at == PrintPoint::Enter) {
+      c.line("if (cols <= 0) return 0;");
+      c.line("const int64_t cgroups = (cols - 1) / " + cgs + " + 1;");
+      c.line("const int64_t threads = (rows == 1 && cgroups < workers) ? cgroups : (rows == 1 ? workers : 1);");
+      c.line("#pragma omp parallel num_threads(threads) if(threads>1)");
+      c.line("{");
+    } else if (at == PrintPoint::BeginBlock) {
+      c.indent++;
+      c.line("int64_t b = omp_get_thread_num(), nt = omp_get_num_threads();");
+      c.line("int64_t q = cgroups / nt, rem = cgroups % nt;");
+      c.line("int64_t cstart = (q * b + (b < rem ? b : rem)) * " + cgs + ";");
+      c.line("int64_t cstop = b + 1 == nt ? cols : cstart + (q + (b < rem)) * " + cgs + ";");
+    } else if (at == PrintPoint::EndBlock) {
+      c.indent--;
+      c.line("}");
+    }
+    return llvm::Error::success();
+  };
+
   p.operations["mojo_row.c_projected_while"] = [](Operation &op, PrintPoint at,
                                                   PrintContext &c) {
     int64_t pRank = op.getAttrOfType<IntegerAttr>("proj_rank").getInt();
@@ -2119,6 +2142,9 @@ TerminalPrinter mojoMatrixPrinter() {
     } else if (mode == "members") {
       c.line("intent_row_interval(" + pre +
              "start, start + 1, stop - start, columns);");
+    } else if (mode == "flat_cols") {
+      c.line("intent_row_interval(" + pre +
+             "0, rows, cstop - cstart, columns);");
     } else {
       c.line("intent_row_interval(" + pre + "start, stop, cols, columns);");
     }

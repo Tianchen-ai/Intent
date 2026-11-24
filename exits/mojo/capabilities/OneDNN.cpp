@@ -74,15 +74,30 @@ llvm::json::Object probeOneDNN() {
     candidates.emplace_back("libdnnl.so.3");
   }
   void *handle = nullptr;
+  std::string lastReason;
   for (const auto &cand : candidates) {
-    if (!cand.empty() && (handle = dlopen(cand.c_str(), RTLD_LAZY | RTLD_LOCAL)))
+    if (cand.empty())
+      continue;
+    void *h = dlopen(cand.c_str(), RTLD_LAZY | RTLD_LOCAL);
+    if (!h) {
+      if (lastReason.empty()) {
+        const char *err = dlerror();
+        lastReason =
+            std::string("dlopen failed: ") + (err ? err : cand.c_str());
+      }
+      continue;
+    }
+    if (dlsym(h, "dnnl_brgemm_create")) {
+      handle = h;
       break;
+    }
+    dlclose(h);
+    lastReason = "oneDNN runtime lacks experimental BRGeMM ukernel symbols";
   }
   if (!handle) {
     out["available"] = false;
-    const char *err = dlerror();
-    out["reason"] = std::string("dlopen failed: ") +
-                    (err ? err : candidates.front().c_str());
+    out["reason"] =
+        lastReason.empty() ? "no oneDNN library candidates" : lastReason;
     return out;
   }
   struct Guard {

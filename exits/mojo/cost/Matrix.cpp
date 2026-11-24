@@ -46,6 +46,15 @@ void registerBlockCost(compilerinfra::Unit &u) {
               tail ? (tail - 1) * columns * g->k /
                          std::max(1., std::ceil(double(g->m) / t[0]))
                    : 0.;
+          auto colTail = g->n % t[1];
+          if (colTail) {
+            double effMr = double(std::min<int64_t>(g->m, t[0]));
+            double colVecs = std::ceil(double(colTail) / t[3]);
+            double kSteps = t[4] == 2 ? double(g->k) / 4. : double(g->k);
+            fringe +=
+                ((effMr - 1.) * colVecs + effMr * std::max(0., colVecs - 1.)) *
+                kSteps / std::max(1., std::ceil(double(g->n) / t[1]));
+          }
           conversions += fringe;
           e.terms["l1_panel_loads"] = {l1Loads, "instruction"};
           e.terms["tail_rhs_reloads"] = {fringe, "instruction"};

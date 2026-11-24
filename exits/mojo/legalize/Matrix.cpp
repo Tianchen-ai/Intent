@@ -1095,9 +1095,82 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
       activeHeap.push_back(b.getStringAttr(name));
   }
 
+  enterBlock(&hBb);
+  if (usesBrgemm) {
+    bool isQ4k = implId == "exits/mojo::onednn-brgemm-u8s8";
+    int64_t aDt = implId == "exits/mojo::onednn-brgemm-f32"    ? 0
+                  : implId == "exits/mojo::onednn-brgemm-bf16" ? 1
+                  : implId == "exits/mojo::onednn-brgemm-f16"  ? 2
+                  : implId == "exits/mojo::onednn-brgemm-s8"   ? 3
+                                                               : 4;
+    int64_t bDt = isQ4k ? 3 : aDt;
+    int64_t cDt = (aDt == 3 || isQ4k) ? 5 : 0;
+    std::string ldaExpr =
+        isQ4k ? "32" : std::to_string(views[0].panelStrides[0]);
+    std::string ldbExpr =
+        isQ4k ? "1" : std::to_string(views[1].panelStrides[0]);
+    makeOp(b, loc, "host_brgemm_plan_decl");
+    Block *planIf = makeHostIf("jobs > 0 && K > 0");
+    enterBlock(planIf);
+    if (grouped) {
+      Block *gBb = makeHostFor("g", "0", "G", "1");
+      enterBlock(gBb);
+      std::string lenE =
+          "((const int32_t*)a" + std::to_string(offsetsSlot) + ")[(g+1)*" +
+          std::to_string(offsetsStride) + "LL] - ((const int32_t*)a" +
+          std::to_string(offsetsSlot) + ")[g*" + std::to_string(offsetsStride) +
+          "LL]";
+      makeOp(b, loc, "host_brgemm_mark_rows", {}, {},
+             {b.getNamedAttr("len_expr", b.getStringAttr(lenE))});
+      enterBlock(planIf);
+    } else {
+      makeOp(b, loc, "host_brgemm_mark_rows", {}, {},
+             {b.getNamedAttr("len_expr", b.getStringAttr("M"))});
+    }
+    Block *ciBb = makeHostFor("ci", "0", "2", "1");
+    enterBlock(ciBb);
+    emitLet("c_val", "ci == 0 ? (N >= nr ? nr : 0) : (N % nr)");
+    Block *cPosIf = makeHostIf("c_val > 0");
+    enterBlock(cPosIf);
+    Block *rtBb = makeHostFor("rt", "1", "mr + 1", "1");
+    enterBlock(rtBb);
+    Block *seenIf = makeHostIf("r_seen[rt]");
+    enterBlock(seenIf);
+    makeOp(b, loc, "host_brgemm_lookup", {}, {},
+           {b.getNamedAttr("a_dt", b.getI64IntegerAttr(aDt)),
+            b.getNamedAttr("b_dt", b.getI64IntegerAttr(bDt)),
+            b.getNamedAttr("c_dt", b.getI64IntegerAttr(cDt)),
+            b.getNamedAttr("lda_expr", b.getStringAttr(ldaExpr)),
+            b.getNamedAttr("ldb_expr", b.getStringAttr(ldbExpr)),
+            b.getNamedAttr("n_expr", b.getStringAttr(isQ4k ? "1" : "c_val")),
+            b.getNamedAttr("k_expr", b.getStringAttr(isQ4k ? "32" : "K")),
+            b.getNamedAttr("cleanup", b.getArrayAttr(activeHeap))});
+  }
+
+  enterBlock(&hBb);
+  bool windowed = kind == "window_contract";
+  int64_t headExt = 1, chunkExt = 1;
+  if (windowed) {
+    auto outSh = argShape(slotOf(dstArg));
+    headExt = std::max<int64_t>(1, outSh[2]);
+    chunkExt = std::max<int64_t>(1, outSh[1]);
+  }
+  Block *jobsIf = makeHostIf("jobs > 0");
+  enterBlock(jobsIf);
+  std::string ntExpr =
+      prepOps.empty()
+          ? "jobs < workers ? jobs : workers"
+          : "(G*(M*K + K*N) > 32768) ? workers : (jobs < workers ? jobs : workers)";
+  emitLet("nt", ntExpr);
+  Block *parBb = openHostBlock(
+      "host_omp_parallel",
+      {b.getNamedAttr("num_threads", b.getStringAttr("(int)nt")),
+       b.getNamedAttr("if_cond", b.getStringAttr("nt > 1")),
+       b.getNamedAttr("reduce_rc", b.getBoolAttr(true))});
+
   for (Operation *pop : prepOps) {
     OpBuilder::InsertionGuard prepGuard(b);
-    enterBlock(&hBb);
+    enterBlock(parBb);
     StringRef pk = pop->getAttrOfType<StringAttr>("kind").getValue();
     SmallVector<int64_t> opSlots;
     for (Value v : pop->getOperands().drop_back())
@@ -1116,8 +1189,7 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
           s += "+(" + e + ")*" + std::to_string(st[ax]) + "LL";
         return s;
       };
-      Block *pBb = makeHostOmpFor("p", "0", "G*K", "1", true, false, false,
-                                  "G*K>1");
+      Block *pBb = makeHostOmpFor("p", "0", "G*K", "1", false, false, false, "");
       enterBlock(pBb);
       emitLet("g", "p/K");
       emitLet("k", "p%K");
@@ -1196,24 +1268,32 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
       int64_t H = std::max<int64_t>(1, outSh[2]);
       int64_t chunks = std::max<int64_t>(1, outSh[1]);
       auto st = argStrides(opSlots[0]);
-      Block *gBb =
-          makeHostOmpFor("g", "0", "G", "1", true, false, false, "G>1");
-      enterBlock(gBb);
+      emitLet("k_tiles", "(K + 7) / 8");
+      Block *pBb =
+          makeHostOmpFor("p_wl", "0", "G*k_tiles", "1", false, false, false, "");
+      enterBlock(pBb);
+      emitLet("g", "k_tiles ? p_wl / k_tiles : 0");
+      emitLet("kb", "(k_tiles ? p_wl % k_tiles : 0) * 8");
+      emitLet("k_end", "kb + 8 < K ? kb + 8 : K");
       emitLet("batch",
               "g/" + std::to_string(H) + "/" + std::to_string(chunks));
       emitLet("chunk",
               "g/" + std::to_string(H) + "%" + std::to_string(chunks));
       emitLet("head", "g%" + std::to_string(H));
-      Block *mBb = makeHostFor("m", "0", "M", "1");
-      enterBlock(mBb);
-      Block *kBb = makeHostFor("k", "0", "K", "1");
+      Block *mbBb = makeHostFor("mb", "0", "M", "8");
+      enterBlock(mbBb);
+      emitLet("m_end", "mb + 8 < M ? mb + 8 : M");
+      Block *kBb = makeHostFor("k", "kb", "k_end", "1");
       enterBlock(kBb);
-      std::string srcE = "((const uint16_t*)a" + std::to_string(opSlots[0]) +
-                         ")[batch*" + std::to_string(st[0]) + "LL+(chunk*K+k)*" +
-                         std::to_string(st[1]) + "LL+head*" +
-                         std::to_string(st[2]) + "LL+m*" +
-                         std::to_string(st[3]) + "LL]";
-      emitElem("expand_bf", dst + "[(g*M+m)*K+k]", srcE, "", 4);
+      emitPtr("const uint16_t", "src_row", "a" + std::to_string(opSlots[0]),
+              "batch*" + std::to_string(st[0]) + "LL+(chunk*K+k)*" +
+                  std::to_string(st[1]) + "LL+head*" + std::to_string(st[2]) +
+                  "LL");
+      Block *mBb =
+          makeHostOmpFor("m", "mb", "m_end", "1", false, false, true, "");
+      enterBlock(mBb);
+      emitElem("expand_bf", dst + "[(g*M+m)*K+k]",
+               "src_row[m*" + std::to_string(st[3]) + "LL]", "", 4);
     } else if (pk == "widen-lhs-f32") {
       auto st = argStrides(opSlots[0]);
       std::string dt = argDtype(opSlots[0]);
@@ -1223,8 +1303,8 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
       while (am == ak || am == ab)
         ++am;
       std::string banks = ab < 0 ? "1LL" : "G";
-      Block *rBb = makeHostOmpFor("row", "0", "(" + banks + ")*M", "1", true,
-                                  false, false, "(" + banks + ")*M*K > 131072");
+      Block *rBb = makeHostOmpFor("row", "0", "(" + banks + ")*M", "1", false,
+                                  false, false, "");
       enterBlock(rBb);
       emitLet("g", "M ? row / M : 0");
       emitLet("m", "M ? row % M : 0");
@@ -1249,9 +1329,8 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
       while (bn == bk || bn == bb)
         ++bn;
       std::string banks = bb < 0 ? "1LL" : "G";
-      Block *pBb = makeHostOmpFor(
-          "p", "0", "(" + banks + ")*nc", "1", true, false, false,
-          "(" + banks + ")*nc*K*nr > 131072 && (" + banks + ")*nc >= 4");
+      Block *pBb = makeHostOmpFor("p", "0", "(" + banks + ")*nc", "1", false,
+                                  false, false, "");
       enterBlock(pBb);
       emitLet("g", "nc ? p / nc : 0");
       emitLet("c", "(nc ? p % nc : 0)*nr");
@@ -1287,9 +1366,8 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
       while (bn == bk || bn == bb)
         ++bn;
       std::string banks = bb < 0 ? "1LL" : "G";
-      Block *pBb = makeHostOmpFor(
-          "p", "0", "(" + banks + ")*nc", "1", true, false, false,
-          "(" + banks + ")*nc*K*nr > 131072 && (" + banks + ")*nc >= 4");
+      Block *pBb = makeHostOmpFor("p", "0", "(" + banks + ")*nc", "1", false,
+                                  false, false, "");
       enterBlock(pBb);
       emitLet("g", "nc ? p / nc : 0");
       emitLet("c", "(nc ? p % nc : 0)*nr");
@@ -1323,9 +1401,8 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
       while (bn == bk || bn == bb)
         ++bn;
       std::string banks = bb < 0 ? "1LL" : "G";
-      Block *pBb = makeHostOmpFor(
-          "p", "0", "(" + banks + ")*nc", "1", true, false, false,
-          "(" + banks + ")*nc*K*nr > 131072 && (" + banks + ")*nc >= 4");
+      Block *pBb = makeHostOmpFor("p", "0", "(" + banks + ")*nc", "1", false,
+                                  false, false, "");
       enterBlock(pBb);
       emitLet("g", "nc ? p / nc : 0");
       emitLet("c", "(nc ? p % nc : 0)*nr");
@@ -1356,9 +1433,8 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
       while (bn == bk || bn == bb)
         ++bn;
       std::string banks = bb < 0 ? "1LL" : "G";
-      Block *pBb = makeHostOmpFor(
-          "p", "0", "(" + banks + ")*nc", "1", true, false, false,
-          "(" + banks + ")*nc*K*nr > 131072 && (" + banks + ")*nc >= 4");
+      Block *pBb = makeHostOmpFor("p", "0", "(" + banks + ")*nc", "1", false,
+                                  false, false, "");
       enterBlock(pBb);
       emitLet("g", "nc ? p / nc : 0");
       emitLet("c", "(nc ? p % nc : 0)*nr");
@@ -1416,7 +1492,7 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
       auto stA = argStrides(opSlots[0]);
       auto stS = argStrides(opSlots[1]);
       Block *rBb =
-          makeHostOmpFor("r", "0", "M", "1", true, false, false, "M*K>4096");
+          makeHostOmpFor("r", "0", "M", "1", false, false, false, "");
       enterBlock(rBb);
       Block *gBb = makeHostFor("g", "0", "K/32", "1");
       enterBlock(gBb);
@@ -1441,7 +1517,7 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
                               : ("g*" + std::to_string(stS[0]) + "LL + c*" +
                                  std::to_string(stS[1]) + "LL");
       Block *gBb =
-          makeHostOmpFor("g", "0", "K/32", "1", true, false, false, "N*K>4096");
+          makeHostOmpFor("g", "0", "K/32", "1", false, false, false, "");
       enterBlock(gBb);
       Block *tBb = makeHostFor("t", "0", "32", "1");
       enterBlock(tBb);
@@ -1456,7 +1532,8 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
                4);
     } else if (pk == "encode-q8k") {
       auto st = argStrides(opSlots[0]);
-      Block *gBb = makeHostFor("g", "0", "K/256", "1");
+      Block *gBb =
+          makeHostOmpFor("g", "0", "K/256", "1", false, false, false, "");
       enterBlock(gBb);
       emitElem("pack_q8k", "&" + dst + "[g]",
                "(const float*)a" + std::to_string(opSlots[0]) + " + g*" +
@@ -1475,8 +1552,8 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
               "((const int32_t*)a" + std::to_string(opSlots[1]) + ")[0]");
       emitLet("active_end", "((const int32_t*)a" + std::to_string(opSlots[1]) +
                                 ")[G*" + std::to_string(stO[0]) + "LL]");
-      Block *rBb = makeHostOmpFor("r", "active_begin", "active_end", "1", true,
-                                  false, false, "active_end > active_begin + 1");
+      Block *rBb = makeHostOmpFor("r", "active_begin", "active_end", "1", false,
+                                  false, false, "");
       enterBlock(rBb);
       emitLet("src", "((const int32_t*)a" + std::to_string(opSlots[2]) +
                          ")[r*" + std::to_string(stR[0]) + "LL] / " +
@@ -1511,74 +1588,6 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
     }
   }
 
-  enterBlock(&hBb);
-  if (usesBrgemm) {
-    bool isQ4k = implId == "exits/mojo::onednn-brgemm-u8s8";
-    int64_t aDt = implId == "exits/mojo::onednn-brgemm-f32"    ? 0
-                  : implId == "exits/mojo::onednn-brgemm-bf16" ? 1
-                  : implId == "exits/mojo::onednn-brgemm-f16"  ? 2
-                  : implId == "exits/mojo::onednn-brgemm-s8"   ? 3
-                                                               : 4;
-    int64_t bDt = isQ4k ? 3 : aDt;
-    int64_t cDt = (aDt == 3 || isQ4k) ? 5 : 0;
-    std::string ldaExpr =
-        isQ4k ? "32" : std::to_string(views[0].panelStrides[0]);
-    std::string ldbExpr =
-        isQ4k ? "1" : std::to_string(views[1].panelStrides[0]);
-    makeOp(b, loc, "host_brgemm_plan_decl");
-    Block *planIf = makeHostIf("jobs > 0 && K > 0");
-    enterBlock(planIf);
-    if (grouped) {
-      Block *gBb = makeHostFor("g", "0", "G", "1");
-      enterBlock(gBb);
-      std::string lenE =
-          "((const int32_t*)a" + std::to_string(offsetsSlot) + ")[(g+1)*" +
-          std::to_string(offsetsStride) + "LL] - ((const int32_t*)a" +
-          std::to_string(offsetsSlot) + ")[g*" + std::to_string(offsetsStride) +
-          "LL]";
-      makeOp(b, loc, "host_brgemm_mark_rows", {}, {},
-             {b.getNamedAttr("len_expr", b.getStringAttr(lenE))});
-      enterBlock(planIf);
-    } else {
-      makeOp(b, loc, "host_brgemm_mark_rows", {}, {},
-             {b.getNamedAttr("len_expr", b.getStringAttr("M"))});
-    }
-    Block *ciBb = makeHostFor("ci", "0", "2", "1");
-    enterBlock(ciBb);
-    emitLet("c_val", "ci == 0 ? (N >= nr ? nr : 0) : (N % nr)");
-    Block *cPosIf = makeHostIf("c_val > 0");
-    enterBlock(cPosIf);
-    Block *rtBb = makeHostFor("rt", "1", "mr + 1", "1");
-    enterBlock(rtBb);
-    Block *seenIf = makeHostIf("r_seen[rt]");
-    enterBlock(seenIf);
-    makeOp(b, loc, "host_brgemm_lookup", {}, {},
-           {b.getNamedAttr("a_dt", b.getI64IntegerAttr(aDt)),
-            b.getNamedAttr("b_dt", b.getI64IntegerAttr(bDt)),
-            b.getNamedAttr("c_dt", b.getI64IntegerAttr(cDt)),
-            b.getNamedAttr("lda_expr", b.getStringAttr(ldaExpr)),
-            b.getNamedAttr("ldb_expr", b.getStringAttr(ldbExpr)),
-            b.getNamedAttr("n_expr", b.getStringAttr(isQ4k ? "1" : "c_val")),
-            b.getNamedAttr("k_expr", b.getStringAttr(isQ4k ? "32" : "K")),
-            b.getNamedAttr("cleanup", b.getArrayAttr(activeHeap))});
-  }
-
-  enterBlock(&hBb);
-  bool windowed = kind == "window_contract";
-  int64_t headExt = 1, chunkExt = 1;
-  if (windowed) {
-    auto outSh = argShape(slotOf(dstArg));
-    headExt = std::max<int64_t>(1, outSh[2]);
-    chunkExt = std::max<int64_t>(1, outSh[1]);
-  }
-  Block *jobsIf = makeHostIf("jobs > 0");
-  enterBlock(jobsIf);
-  emitLet("nt", "jobs < workers ? jobs : workers");
-  Block *parBb = openHostBlock(
-      "host_omp_parallel",
-      {b.getNamedAttr("num_threads", b.getStringAttr("(int)nt")),
-       b.getNamedAttr("if_cond", b.getStringAttr("nt > 1")),
-       b.getNamedAttr("reduce_rc", b.getBoolAttr(true))});
   enterBlock(parBb);
   if (usesBrgemm) {
     makeOp(b, loc, "host_thread_scratch_alloc", {}, {},
@@ -1588,7 +1597,7 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
     makeOp(b, loc, "host_brgemm_ctx_decl");
   }
   Block *ptBb = makeHostOmpFor("job", "0", "jobs", "1", /*parallel=*/false,
-                               /*nowait=*/usesBrgemm, /*simd=*/false, "");
+                               /*nowait=*/true, /*simd=*/false, "");
   enterBlock(ptBb);
   if (usesBrgemm)
     makeOp(b, loc, "host_guard_continue", {}, {},

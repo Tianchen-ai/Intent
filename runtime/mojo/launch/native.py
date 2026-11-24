@@ -60,6 +60,8 @@ class Artifact:
                         rows=self.data["rows"],
                     )
                 ]
+                if self.data.get("onednn") and self.info[8]:
+                    ct.CDLL(self.info[8], mode=ct.RTLD_GLOBAL)
                 library = ct.CDLL(str(path / "host.so"))
                 self.library = library
             return self.library.intent_entry
@@ -112,6 +114,8 @@ class Artifact:
                     str(bridge_obj),
                     "-Xlinker",
                     onednn_lib,
+                    "-Xlinker",
+                    "--disable-new-dtags",
                     "-Xlinker",
                     f"-rpath={onednn_dir}",
                     "-Xlinker",
