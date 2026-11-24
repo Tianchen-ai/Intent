@@ -24,19 +24,33 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
       {"scaled_contract",
        {"exits/triton::native-dot", "exits/triton::row-collective"}},
       {"q4k_dot", {"exits/triton::row-collective"}}};
-  if(*arch==90)matrix->tiles={{32,64,32,R"({"num_warps":4,"num_stages":3})"},
-                              {32,64,64,R"({"num_warps":4,"num_stages":3})","contract"},
-                              {64,64,32,R"({"num_warps":4,"num_stages":3})"},
-                              {64,128,64,R"({"num_warps":8,"num_stages":3})"}};
-  else matrix->tiles={{16,32,32,R"({"num_warps":4,"num_stages":2})"},
-                      {32,64,32,R"({"num_warps":4,"num_stages":2})"},
-                      {32,64,64,R"({"num_warps":4,"num_stages":3})","contract"},
-                      {64,64,64,R"({"num_warps":4,"num_stages":3})"},
-                      {64,128,64,R"({"num_warps":8,"num_stages":2})"}};
-  if(auto err=profile.services.provide<intentdsl::block::MatrixTarget>(matrix))return std::move(err);
+  if (*arch == 90)
+    matrix->tiles = {
+        {2, 32, 256, R"({"num_warps":2,"num_stages":2})", "q4k_dot"},
+        {4, 32, 256, R"({"num_warps":4,"num_stages":2})", "q4k_dot"},
+        {8, 32, 256, R"({"num_warps":4,"num_stages":2})", "q4k_dot"},
+        {16, 32, 32, R"({"num_warps":4,"num_stages":2})"},
+        {32, 64, 32, R"({"num_warps":4,"num_stages":3})"},
+        {32, 64, 64, R"({"num_warps":4,"num_stages":3})", "contract"},
+        {64, 64, 32, R"({"num_warps":4,"num_stages":3})"},
+        {64, 128, 64, R"({"num_warps":8,"num_stages":3})"}};
+  else
+    matrix->tiles = {
+        {2, 32, 256, R"({"num_warps":2,"num_stages":2})", "q4k_dot"},
+        {4, 32, 256, R"({"num_warps":4,"num_stages":2})", "q4k_dot"},
+        {8, 32, 256, R"({"num_warps":4,"num_stages":2})", "q4k_dot"},
+        {16, 32, 32, R"({"num_warps":4,"num_stages":2})"},
+        {32, 64, 32, R"({"num_warps":4,"num_stages":2})"},
+        {32, 64, 64, R"({"num_warps":4,"num_stages":3})", "contract"},
+        {64, 64, 64, R"({"num_warps":4,"num_stages":3})"},
+        {64, 128, 64, R"({"num_warps":8,"num_stages":2})"}};
+  if (auto err =
+          profile.services.provide<intentdsl::block::MatrixTarget>(matrix))
+    return std::move(err);
   caps->storeSectorBytes = 32;
-  caps->nativePrivateHistogram=true;
-  caps->privateBinCapacity=options.getInteger("shared_per_block");
+  caps->nativePrivateHistogram = true;
+  caps->privateBinCapacity = options.getInteger("shared_per_block");
+  caps->maxExpandedReductionLanes = 65536;
   caps->independentWidths = {32};
   if(auto error=caps->bind(options))return error;
   struct NativeRow {

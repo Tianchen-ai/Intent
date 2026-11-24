@@ -259,10 +259,14 @@ llvm::Error dynamicTile(Operation &op, PrintPoint point, PrintContext &c) {
         ",mask=" + arg(3) + ",sem='relaxed',scope='" + targetScope + "')";
   } else if (n == "bin_count")
     s = "tl.histogram(" + arg(0) + ",WIDTH)";
-  else if (n == "extract_lane")
-    s = "tl.reshape(tl.gather(" + arg(0) + ",tl.full((ROWS,WIDTH,1)," + arg(1) +
-        ",tl.int32),2),(ROWS,WIDTH))";
-  else if (n == "axis_reduce") {
+  else if (n == "extract_lane") {
+    auto ax = op.getAttrOfType<IntegerAttr>("axis").getInt();
+    s = ax == 1
+            ? "tl.reshape(tl.gather(" + arg(0) + ",tl.full((ROWS,1,WIDTH)," +
+                  arg(1) + ",tl.int32),1),(ROWS,WIDTH))"
+            : "tl.reshape(tl.gather(" + arg(0) + ",tl.full((ROWS,WIDTH,1)," +
+                  arg(1) + ",tl.int32),2),(ROWS,WIDTH))";
+  } else if (n == "axis_reduce") {
     auto axis = op.getAttrOfType<IntegerAttr>("axis").getInt();
     s = "tl." + op.getAttrOfType<StringAttr>("algebra").str() + "(" + arg(0) +
         "," + (axis == -1 ? "None" : std::to_string(axis)) + ")";

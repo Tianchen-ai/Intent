@@ -45,23 +45,54 @@ capabilities(const llvm::json::Object &options) {
   table->globalAtomicBins=true;
   auto matrix=std::make_shared<intentdsl::block::MatrixTarget>();
   matrix->estimate="exits/cutile::matrix-issues";
-  if(*architecture==90)matrix->tiles={{32,64,32,R"({"num_ctas":1,"occupancy":2,"opt_level":3})"},
-                                      {32,64,64,R"({"num_ctas":1,"occupancy":2,"opt_level":3})","contract"},
-                                      {64,32,64,R"({"num_ctas":1,"occupancy":2,"opt_level":3})","window_contract"},
-                                      {64,128,64,R"({"num_ctas":1,"occupancy":1,"opt_level":3})"},
-                                      {128,128,64,R"({"num_ctas":1,"occupancy":1,"opt_level":3})","contract"},
-                                      {64,64,256,R"({"num_ctas":1,"occupancy":1,"opt_level":3})","scaled_contract"},
-                                      {64,128,128,R"({"num_ctas":1,"occupancy":1,"opt_level":3})","scaled_contract"},
-                                      {32,64,128,R"({"num_ctas":1,"occupancy":2,"opt_level":3})","scaled_contract"}};
-  else matrix->tiles={{16,32,32,R"({"num_ctas":1,"occupancy":2,"opt_level":3})"},
-                      {32,64,64,R"({"num_ctas":1,"occupancy":2,"opt_level":3})"},
-                      {64,32,64,R"({"num_ctas":1,"occupancy":2,"opt_level":3})","window_contract"},
-                      {64,64,64,R"({"num_ctas":1,"occupancy":2,"opt_level":3})","contract"},
-                      {64,128,64,R"({"num_ctas":1,"occupancy":2,"opt_level":3})","contract"},
-                      {64,64,256,R"({"num_ctas":1,"occupancy":1,"opt_level":3})","scaled_contract"},
-                      {64,128,128,R"({"num_ctas":1,"occupancy":1,"opt_level":3})","scaled_contract"},
-                      {32,64,128,R"({"num_ctas":1,"occupancy":2,"opt_level":3})","scaled_contract"}};
-  if(auto err=profile.services.provide<intentdsl::block::MatrixTarget>(matrix))return std::move(err);
+  if (*architecture == 90)
+    matrix->tiles = {
+        {2, 32, 256, R"({"num_ctas":1,"occupancy":2,"opt_level":3})",
+         "q4k_dot"},
+        {4, 32, 256, R"({"num_ctas":1,"occupancy":2,"opt_level":3})",
+         "q4k_dot"},
+        {8, 32, 256, R"({"num_ctas":1,"occupancy":2,"opt_level":3})",
+         "q4k_dot"},
+        {16, 32, 32, R"({"num_ctas":1,"occupancy":2,"opt_level":3})"},
+        {32, 64, 32, R"({"num_ctas":1,"occupancy":2,"opt_level":3})"},
+        {32, 64, 64, R"({"num_ctas":1,"occupancy":2,"opt_level":3})",
+         "contract"},
+        {64, 32, 64, R"({"num_ctas":1,"occupancy":2,"opt_level":3})",
+         "window_contract"},
+        {64, 128, 64, R"({"num_ctas":1,"occupancy":1,"opt_level":3})"},
+        {128, 128, 64, R"({"num_ctas":1,"occupancy":1,"opt_level":3})",
+         "contract"},
+        {64, 64, 256, R"({"num_ctas":1,"occupancy":1,"opt_level":3})",
+         "scaled_contract"},
+        {64, 128, 128, R"({"num_ctas":1,"occupancy":1,"opt_level":3})",
+         "scaled_contract"},
+        {32, 64, 128, R"({"num_ctas":1,"occupancy":2,"opt_level":3})",
+         "scaled_contract"}};
+  else
+    matrix->tiles = {
+        {2, 32, 256, R"({"num_ctas":1,"occupancy":2,"opt_level":3})",
+         "q4k_dot"},
+        {4, 32, 256, R"({"num_ctas":1,"occupancy":2,"opt_level":3})",
+         "q4k_dot"},
+        {8, 32, 256, R"({"num_ctas":1,"occupancy":2,"opt_level":3})",
+         "q4k_dot"},
+        {16, 32, 32, R"({"num_ctas":1,"occupancy":2,"opt_level":3})"},
+        {32, 64, 64, R"({"num_ctas":1,"occupancy":2,"opt_level":3})"},
+        {64, 32, 64, R"({"num_ctas":1,"occupancy":2,"opt_level":3})",
+         "window_contract"},
+        {64, 64, 64, R"({"num_ctas":1,"occupancy":2,"opt_level":3})",
+         "contract"},
+        {64, 128, 64, R"({"num_ctas":1,"occupancy":2,"opt_level":3})",
+         "contract"},
+        {64, 64, 256, R"({"num_ctas":1,"occupancy":1,"opt_level":3})",
+         "scaled_contract"},
+        {64, 128, 128, R"({"num_ctas":1,"occupancy":1,"opt_level":3})",
+         "scaled_contract"},
+        {32, 64, 128, R"({"num_ctas":1,"occupancy":2,"opt_level":3})",
+         "scaled_contract"}};
+  if (auto err =
+          profile.services.provide<intentdsl::block::MatrixTarget>(matrix))
+    return std::move(err);
   table->privateBinCapacity=options.getInteger("shared_per_block");
   table->rectangularProjectedRows = true;
   // Bound tileiras expansion of repeated collectives. The limit admits a

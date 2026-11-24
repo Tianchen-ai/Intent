@@ -141,7 +141,34 @@ bool canNarrowCutileAddress(Operation &op) {
       if (sz > 0)
         res = SignedSpan{0, sz - 1};
     } else if (n == "ct_src.tile_pid") {
-      res = SignedSpan{0, INT32_MAX};
+      int64_t hi = INT32_MAX;
+      auto axisAttr = def->getAttrOfType<IntegerAttr>("axis");
+      if (auto *prog = def->getParentOp();
+          prog && axisAttr &&
+          prog->getName().getStringRef() == "ct_src.tile_program") {
+        int64_t ax = axisAttr.getInt();
+        auto mode = prog->getAttrOfType<StringAttr>("calling_convention");
+        if (mode == "matrix") {
+          auto dims = prog->getAttrOfType<DenseI64ArrayAttr>("block.extents");
+          auto tile =
+              prog->getAttrOfType<DenseI64ArrayAttr>("block.output_tile");
+          if (dims && dims.size() == 4 && tile && tile.size() == 3) {
+            if (ax == 0 && tile[0] > 0)
+              hi = std::max<int64_t>(0, llvm::divideCeil(dims[0], tile[0]) - 1);
+            else if (ax == 1 && tile[1] > 0)
+              hi = std::max<int64_t>(0, llvm::divideCeil(dims[1], tile[1]) - 1);
+            else if (ax == 2)
+              hi = std::max<int64_t>(0, dims[3] - 1);
+          }
+        } else if (mode == "owners" && ax == 0) {
+          auto owners = prog->getAttrOfType<IntegerAttr>("block.owners");
+          auto tile = prog->getAttrOfType<IntegerAttr>("block.owner_tile");
+          if (owners && tile && tile.getInt() > 0)
+            hi = std::max<int64_t>(
+                0, llvm::divideCeil(owners.getInt(), tile.getInt()) - 1);
+        }
+      }
+      res = SignedSpan{0, std::min<int64_t>(hi, INT32_MAX)};
     } else if (n == "ct_src.tile_broadcast" || n == "ct_src.tile_prefix" ||
                n == "ct_src.drop_unit_owner" || n == "ct_src.reshape" ||
                isa<arith::IndexCastOp, arith::ExtSIOp>(def)) {
@@ -174,8 +201,8 @@ bool canNarrowCutileAddress(Operation &op) {
       auto a = range(sel.getTrueValue()), b = range(sel.getFalseValue());
       if (a && b)
         res = SignedSpan{std::min(a->lo, b->lo), std::max(a->hi, b->hi)};
-    } else if (isa<arith::AddIOp, arith::SubIOp, arith::MulIOp,
-                   arith::MinSIOp>(def)) {
+    } else if (isa<arith::AddIOp, arith::SubIOp, arith::MulIOp, arith::MinSIOp>(
+                   def)) {
       auto a = range(def->getOperand(0)), b = range(def->getOperand(1));
       if (a && b) {
         __int128 al = a->lo, ah = a->hi, bl = b->lo, bh = b->hi;

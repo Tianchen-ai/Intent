@@ -188,10 +188,13 @@ llvm::Error rowRule(Operation &op, PrintPoint at, PrintContext &c) {
     line("ct.scatter(" + arg(0) + "," + arg(1) + "," + arg(2) +
          ",mask=" + arg(3) + ")");
     return llvm::Error::success();
-  } else if (code == "extract_lane")
-    expr = "ct.reshape(ct.extract(" + arg(0) + ",(0,0,ct.astype(" + arg(1) +
-           ",ct.int32)),shape=(R,W,1)),(R,W))";
-  else if (code == "axis_reduce") {
+  } else if (code == "extract_lane") {
+    auto ax = op.getAttrOfType<IntegerAttr>("axis").getInt();
+    expr = ax == 1 ? "ct.reshape(ct.extract(" + arg(0) + ",(0,ct.astype(" +
+                         arg(1) + ",ct.int32),0),shape=(R,1,W)),(R,W))"
+                   : "ct.reshape(ct.extract(" + arg(0) + ",(0,0,ct.astype(" +
+                         arg(1) + ",ct.int32)),shape=(R,W,1)),(R,W))";
+  } else if (code == "axis_reduce") {
     auto ax = op.getAttrOfType<IntegerAttr>("axis").getInt();
     expr = "ct." + op.getAttrOfType<StringAttr>("algebra").str() + "(" +
            arg(0) + (ax < 0 ? "" : ",axis=" + std::to_string(ax)) + ")";

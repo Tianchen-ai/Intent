@@ -18,4 +18,4 @@ def FetchAdd : TileInstruction<"fetch_add",[MemoryEffects<[MemRead,MemWrite]>]> 
   let results=(outs AnyRankedTensor:$old);
 }
 def RowReduce : TileInstruction<"axis_reduce",[Pure]> {let arguments=(ins AnyRankedTensor:$input,I64Attr:$axis,StrAttr:$algebra);let results=(outs AnyType:$reduced);}
-def ExtractLane : TileInstruction<"extract_lane",[Pure]> {let arguments=(ins AnyRankedTensor:$panel,Index:$lane);let results=(outs AnyRankedTensor:$value);}
+def ExtractLane : TileInstruction<"extract_lane",[Pure]> {let arguments=(ins AnyRankedTensor:$panel,Index:$lane,I64Attr:$axis);let results=(outs AnyRankedTensor:$value);}

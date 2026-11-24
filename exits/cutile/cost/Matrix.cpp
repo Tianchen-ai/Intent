@@ -11,8 +11,8 @@ void matrixIssues(compilerinfra::Unit &u) {
            compilerinfra::CostContext &ctx) {
           auto caps =
               ctx.target.services.get<intentdsl::cutile::ArrayIndices>();
-          return intentdsl::block::matrixIssues(o, c, caps->scaledMma ? 16 : 64,
-                                                8, 16);
+          return intentdsl::block::matrixIssues(
+              o, c, ctx, caps->scaledMma ? 16 : 64, 8, 16);
         }},
        COMPILERINFRA_SOURCE});
 }

@@ -220,57 +220,84 @@ struct Row {
     auto w = panel ? panel.getInt() : 1;
     auto limit = binary("ceildiv", reduce("max", length, -1, i64), constant(w));
     auto zero = b.create<arith::ConstantOp>(l, b.getF32FloatAttr(0));
-    auto result = loop(
-        limit, splat(zero, {"ROWS", "WIDTH"}), [&](Value piece, Value acc) {
-          auto start =
-              binary("add", cursor,
-                     binary("mul", map("i64", piece, i64), constant(w)));
-          auto live = binary("and", binary("lt", start, end, i1), arg(3));
-          auto pos = start, cols = expand(arg(2), 0);
-          if (panel) {
-            pos =
-                binary("add", expand(start, 2), expand(expand(lanes(w), 0), 0));
-            live = binary("and", binary("lt", pos, expand(end, 2), i1),
-                          expand(arg(3), 2));
-            cols = expand(cols, 2);
-          }
-          auto &body = old.getRegion(0).front();
-          IRMapping mapping;
-          mapping.map(body.getArgument(0), pos);
-          mapping.map(body.getArgument(1), cols);
-          for (auto &term : body.without_terminator()) {
-            SmallVector<Value> args;
-            for (auto v : term.getOperands())
-              args.push_back(mapping.lookupOrDefault(v));
-            auto code = term.getName().stripDialect();
-            Value val =
-                code == "member_load"
-                    ? read(args.front(), ArrayRef<Value>(args).drop_front(),
-                           live)
-                    : map(code == "mul" ? "mul_rn" : "add_rn", args, f32);
-            mapping.map(term.getResult(0), val);
-          }
-          auto value = mapping.lookup(body.back().getOperand(0));
-          auto add = [&](Value prev, Value delta, Value valid) {
-            return map("select", {valid, binary("add_rn", prev, delta), prev},
-                       f32);
-          };
-          if (!panel)
-            return add(acc, value, live);
-          return loop(
-              constant(w), acc,
-              [&](Value lane, Value prev) {
-                auto v = op("extract_lane", {value, lane}, tile(2, f32))
-                             ->getResult(0);
-                auto mask = binary(
-                    "and",
-                    binary("lt", binary("add", start, map("i64", lane, i64)),
-                           end, i1),
-                    arg(3));
-                return add(prev, v, mask);
-              },
-              true);
-        });
+    bool i32Loop =
+        cast<MemRefType>(arg(0).getType()).getElementType().isInteger(32) &&
+        w >= 4;
+    auto runSegmentLoop = [&](std::function<Value(Value, Value)> body) {
+      if (!i32Loop)
+        return loop(limit, splat(zero, {"ROWS", "WIDTH"}), body);
+      auto nonNeg =
+          map("select",
+              {binary("ge", limit, constant(0), i1), limit, constant(0)}, i64);
+      auto hi = map("i32", nonNeg, i32);
+      auto lo = b.create<arith::ConstantIntOp>(l, 0, 32),
+           step = b.create<arith::ConstantIntOp>(l, 1, 32);
+      auto init = splat(zero, {"ROWS", "WIDTH"});
+      auto forOp = b.create<scf::ForOp>(l, lo, hi, step, ValueRange{init});
+      forOp->setAttr(
+          (old.getName().getDialectNamespace() + ".runtime_range").str(),
+          b.getUnitAttr());
+      b.setInsertionPointToStart(forOp.getBody());
+      auto next = body(forOp.getInductionVar(), forOp.getRegionIterArgs()[0]);
+      b.create<scf::YieldOp>(l, next);
+      b.setInsertionPointAfter(forOp);
+      return forOp.getResult(0);
+    };
+    int64_t batchAxis = flat ? 2 : 1;
+    auto result = runSegmentLoop([&](Value piece, Value acc) {
+      auto start = binary("add", cursor,
+                          binary("mul", map("i64", piece, i64), constant(w)));
+      auto live = binary("and", binary("lt", start, end, i1), arg(3));
+      auto pos = start, cols = expand(arg(2), 0);
+      if (panel) {
+        if (flat) {
+          pos = binary("add", expand(start, 2), expand(expand(lanes(w), 0), 0));
+          live = binary("and", binary("lt", pos, expand(end, 2), i1),
+                        expand(arg(3), 2));
+          cols = expand(cols, 2);
+        } else {
+          pos = binary("add", expand(start, 2), expand(expand(lanes(w), 0), 2));
+          live = binary("and", binary("lt", pos, expand(end, 2), i1),
+                        expand(arg(3), 1));
+          cols = expand(cols, 0);
+        }
+      }
+      auto &body = old.getRegion(0).front();
+      IRMapping mapping;
+      mapping.map(body.getArgument(0), pos);
+      mapping.map(body.getArgument(1), cols);
+      for (auto &term : body.without_terminator()) {
+        SmallVector<Value> args;
+        for (auto v : term.getOperands())
+          args.push_back(mapping.lookupOrDefault(v));
+        auto code = term.getName().stripDialect();
+        Value val =
+            code == "member_load"
+                ? read(args.front(), ArrayRef<Value>(args).drop_front(), live)
+                : map(code == "mul" ? "mul_rn" : "add_rn", args, f32);
+        mapping.map(term.getResult(0), val);
+      }
+      auto value = mapping.lookup(body.back().getOperand(0));
+      auto add = [&](Value prev, Value delta, Value valid) {
+        return map("select", {valid, binary("add_rn", prev, delta), prev}, f32);
+      };
+      if (!panel)
+        return add(acc, value, live);
+      return loop(
+          constant(w), acc,
+          [&](Value lane, Value prev) {
+            auto v = op("extract_lane", {value, lane}, tile(2, f32),
+                        num("axis", batchAxis))
+                         ->getResult(0);
+            auto mask =
+                binary("and",
+                       binary("lt", binary("add", start, map("i64", lane, i64)),
+                              end, i1),
+                       arg(3));
+            return add(prev, v, mask);
+          },
+          true);
+    });
     replace(result);
   }
   void publishOffsets() {
@@ -484,6 +511,11 @@ LogicalResult verifyRowProgram(func::FuncOp fn, StringRef dialect) {
           !getElementTypeOrSelf(op->getOperand(read ? 2 : 3).getType())
                .isInteger(1))
         return reject("invalid row address or access mask");
+    }
+    if (code == "extract_lane") {
+      auto ax = op->getAttrOfType<IntegerAttr>("axis");
+      if (!ax || (ax.getInt() != 1 && ax.getInt() != 2))
+        return reject("invalid panel extraction axis");
     }
     if (code == "map") {
       auto k = op->getAttrOfType<StringAttr>("kind").getValue();

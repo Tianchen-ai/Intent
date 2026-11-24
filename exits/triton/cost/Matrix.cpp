@@ -7,8 +7,8 @@ void matrixIssues(compilerinfra::Unit &u) {
   u.costModels.push_back(
       {{"matrix-issues", "levels/execution/block::contraction", "1",
         [](mlir::Operation *o, const compilerinfra::StructuralCandidate &c,
-           compilerinfra::CostContext &) {
-          return intentdsl::block::matrixIssues(o, c, 16, 8, 16);
+           compilerinfra::CostContext &ctx) {
+          return intentdsl::block::matrixIssues(o, c, ctx, 16, 8, 16);
         }},
        COMPILERINFRA_SOURCE});
 }
