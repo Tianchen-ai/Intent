@@ -204,6 +204,10 @@ void populateWeftMatrixContracts(intentdsl::cpu::MatrixMachine &m, int64_t v,
     m.contracts.push_back(std::move(impl));
   };
 
+  // Native Q4_K/Q8_K fused record contraction precedes per-subgroup u8s8 fallback
+  for (int64_t r : {16, 8, 64})
+    add(r, 1, 256, v, "weft-q4k-dot", "q4k-panels", "q4k");
+
   if (!isRvv) {
     // Vendor triton-weft oneDNN BRGeMM builtin candidates on x86-64
     for (auto [r, c, d] :
@@ -240,7 +244,5 @@ void populateWeftMatrixContracts(intentdsl::cpu::MatrixMachine &m, int64_t v,
     add(r, c, d, v, "weft-simd-fma", "native-panels", "any");
     add(r, c, d, v, "weft-f32-panel-fma", "native-panels", "f32");
   }
-  for (int64_t r : {16, 8, 64})
-    add(r, 1, 256, v, "weft-q4k-dot", "q4k-panels", "q4k");
 }
 } // namespace CI_UNIT_NAMESPACE

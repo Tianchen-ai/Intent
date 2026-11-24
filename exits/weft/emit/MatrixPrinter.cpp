@@ -926,7 +926,9 @@ TerminalPrinter weftMatrixPrinter() {
              std::to_string(st[bn]) + "LL + kb*" + std::to_string(st[bk]) + "LL;");
       c.line("    " + cTy + " *dst_k = out + (kb/" + std::to_string(kBlk) +
              ")*nr*" + std::to_string(kBlk) + ";");
+      c.line("#if defined(__x86_64__)");
       c.line("    #pragma omp simd");
+      c.line("#endif");
       c.line("    for (int64_t j=0; j<valid; ++j)");
       c.line("      for (int lane=0; lane<" + std::to_string(kBlk) + "; ++lane)");
       c.line("        dst_k[j*" + std::to_string(kBlk) +
@@ -962,7 +964,9 @@ TerminalPrinter weftMatrixPrinter() {
       c.line("    const uint8_t *src_g = src_r + g*" + std::to_string(stA[1]) + "LL;");
       c.line("    float *dst_g = dst_r + g*32;");
       c.line("#if defined(__x86_64__)");
+      c.line("#if defined(__x86_64__)");
       c.line("    #pragma omp simd");
+      c.line("#endif");
       c.line("#endif");
       c.line("    for (int t=0; t<32; ++t) dst_g[t] = g_mx8_val[src_g[t*" +
              std::to_string(stA[2]) + "LL]] * factor;");

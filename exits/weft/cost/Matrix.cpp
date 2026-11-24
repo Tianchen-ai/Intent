@@ -24,8 +24,11 @@ void nativePanelCost(compilerinfra::Unit &u) {
           auto machine = ctx.target.services.get<intentdsl::cpu::RowMachine>();
           int64_t workers = machine->workers;
           double columns = std::ceil(double(t[1]) / t[3]);
-          int64_t vecRegs = machine->boundWidening ? 32 : (t[3] == 16 ? 32 : 16);
-          double live = t[0] * columns + columns + 2.0;
+          int64_t vecRegs =
+              machine->boundWidening ? 28 : (t[3] == 16 ? 32 : 16);
+          double live =
+              t[0] * columns +
+              (machine->boundWidening ? 3.0 * columns + 4.0 : columns + 2.0);
           double spill = std::max(0.0, live - vecRegs) * t[3] * 4.0 * 2.0 * g->k;
 
           int64_t packCode = t.size() > 4 ? t[4] : 0;
@@ -46,10 +49,13 @@ void nativePanelCost(compilerinfra::Unit &u) {
                              .getElementType()
                              .isInteger(32));
 
+          double maxLiveRows = std::max(1.0, std::floor(16.0 / std::max(1.0, columns)));
           double simultaneousRows =
-              inF32 ? std::min<double>(t[0], 4.0)
-                    : (machine->boundWidening ? 1.0
-                                              : std::min<double>(t[0], 4.0));
+              inF32 ? std::min<double>(t[0], maxLiveRows)
+                    : (machine->boundWidening
+                           ? (rawElemBytes == 1.0 ? std::min<double>(t[0], 2.0)
+                                                  : 1.0)
+                           : std::min<double>(t[0], maxLiveRows));
           double reloads =
               (std::ceil(double(t[0]) / simultaneousRows) - 1.0) * t[1] * g->k *
               inBytes;
