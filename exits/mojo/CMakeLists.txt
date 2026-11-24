@@ -6,13 +6,13 @@ compilerinfra_unit(SOURCES
   emit/Exit.cpp
   emit/Host.cpp
   emit/MatrixPrinter.cpp
-  emit/Ordered.cpp
   emit/Source.cpp
   ir/Dialect.cpp
   ir/MatrixContracts.cpp
   legalize/ABI.cpp
   legalize/Loops.cpp
   legalize/Matrix.cpp
+  legalize/Ordered.cpp
   transforms/NarrowAddress.cpp
   LINK_LIBRARIES ${cpu} ${algorithm}
   TABLEGEN "ir/Loop.td Dialect.h.inc -gen-dialect-decls -dialect=mojo_row"

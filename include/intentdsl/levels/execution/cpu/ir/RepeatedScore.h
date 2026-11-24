@@ -4,8 +4,9 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/Matchers.h"
 namespace intentdsl::cpu {
-// The 32 KiB per-task budget includes all owners of this candidate.
-inline constexpr int64_t batchScoreSlots = 32 * 1024 / sizeof(float);
+// The 64 KiB L2-resident per-task budget includes all owners of this candidate
+// (giving a 1024-token private score window at 16 packed owners).
+inline constexpr int64_t batchScoreSlots = 64 * 1024 / sizeof(float);
 struct RepeatedScore {
   mlir::Operation *record, *replay;
 };
@@ -44,6 +45,14 @@ inline std::optional<RepeatedScore> repeatedScore(mlir::Operation &space) {
   auto *producer = score.getDefiningOp();
   if (!producer || producer->getBlock() != a.getBody())
     return {};
+  auto nonMarkAttrs = [](Operation *op) {
+    SmallVector<NamedAttribute, 4> res;
+    for (auto attr : op->getAttrs())
+      if (attr.getName() != "cpu.record_score" &&
+          attr.getName() != "cpu.replay_score")
+        res.push_back(attr);
+    return res;
+  };
   auto same = [&](auto &self, Value x, Value y) -> bool {
     if (x == y || (x == a.getInductionVar() && y == b.getInductionVar()))
       return true;
@@ -52,7 +61,7 @@ inline std::optional<RepeatedScore> repeatedScore(mlir::Operation &space) {
         q->getBlock() != b.getBody() || p->getName() != q->getName() ||
         p->getNumRegions() || p->getNumResults() != 1 ||
         q->getNumResults() != 1 || x.getType() != y.getType() ||
-        p->getAttrs() != q->getAttrs() ||
+        nonMarkAttrs(p) != nonMarkAttrs(q) ||
         p->getPropertiesAsAttribute() != q->getPropertiesAsAttribute() ||
         p->getNumOperands() != q->getNumOperands())
       return false;

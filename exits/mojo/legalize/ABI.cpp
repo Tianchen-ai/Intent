@@ -13,9 +13,13 @@ using namespace mlir;
 #include "Lanes.h"
 namespace CI_UNIT_NAMESPACE {
 bool hasMojoMatrixProgram(ModuleOp);
+bool hasMojoOrderedProgram(ModuleOp);
 llvm::Error describeMojoMatrixPackage(func::FuncOp, Operation &,
                                       llvm::raw_pwrite_stream &);
+llvm::Error describeMojoOrderedPackage(func::FuncOp, Operation &,
+                                       llvm::raw_pwrite_stream &);
 LogicalResult verifyMojoMatrix(ModuleOp, const TargetProfile &, bool callable);
+LogicalResult verifyMojoOrdered(ModuleOp, const TargetProfile &, bool callable);
 namespace {
 struct Publish : PassWrapper<Publish, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(Publish)
@@ -24,10 +28,13 @@ struct Publish : PassWrapper<Publish, OperationPass<ModuleOp>> {
     auto fn = *module.getOps<func::FuncOp>().begin();
     fn->setAttr("mojo_row.entry",
                 StringAttr::get(&getContext(), "intent_entry"));
-    if (hasMojoMatrixProgram(module)) {
+    if (hasMojoMatrixProgram(module) || hasMojoOrderedProgram(module)) {
       llvm::SmallVector<char> metadata;
       llvm::raw_svector_ostream os(metadata);
-      if (auto err = describeMojoMatrixPackage(fn, fn.front().front(), os)) {
+      auto err = hasMojoMatrixProgram(module)
+                     ? describeMojoMatrixPackage(fn, fn.front().front(), os)
+                     : describeMojoOrderedPackage(fn, fn.front().front(), os);
+      if (err) {
         fn.emitError() << llvm::toString(std::move(err));
         signalPassFailure();
         return;
@@ -44,6 +51,8 @@ void publishABI(OpPassManager &pm) { pm.addPass(std::make_unique<Publish>()); }
 LogicalResult verifyLoops(ModuleOp m, const TargetProfile &p, bool callable) {
   if (hasMojoMatrixProgram(m))
     return verifyMojoMatrix(m, p, callable);
+  if (hasMojoOrderedProgram(m))
+    return verifyMojoOrdered(m, p, callable);
   if (failed(intentdsl::cpu::verifyTask(m, p, "private-values", "cpu.task",
                                         false)))
     return failure();

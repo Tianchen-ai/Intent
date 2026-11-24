@@ -18,7 +18,8 @@ LogicalResult verifyTask(ModuleOp m, const TargetProfile &profile,
     return m.emitError("expected one host");
   auto fn = *funcs.begin();
   if (ownerTask(fn))
-    return verifyOwnerTask(fn, profile, storage);
+    return storage == "pending" ? verifyOwnerTask(fn, profile, storage)
+                                : verifyOwnerBuffers(fn, profile);
   if (matrixTask(fn))
     return storage == "pending" ? verifyMatrixTask(fn, profile, storage)
                                 : verifyMatrixBuffers(fn, profile);
@@ -84,6 +85,8 @@ llvm::Error realizeLocalValues(Operation *op, Attribute value,
     return llvm::createStringError("unsupported storage contract");
   if (op->getName().getStringRef() == "cpu.matrix_task")
     return materializeMatrixBuffers(op->getParentOfType<func::FuncOp>(), rw);
+  if (op->getName().getStringRef() == "cpu.owner_task")
+    return materializeOwnerBuffers(op->getParentOfType<func::FuncOp>(), rw);
   op->setAttr("cpu.realization", value);
   op->removeAttr("cpu.storage");
   return llvm::Error::success();

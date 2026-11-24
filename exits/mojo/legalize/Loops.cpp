@@ -8,6 +8,7 @@
 #include "intentdsl/levels/execution/cpu/ir/Pack.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Math/IR/Math.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/Pass.h"
 #include <algorithm>
@@ -16,9 +17,10 @@ using namespace mlir;
 #include "Lanes.h"
 namespace CI_UNIT_NAMESPACE {
 LogicalResult lowerMojoMatrix(func::FuncOp);
+LogicalResult lowerMojoOrdered(func::FuncOp);
 void dialect(DialectRegistry &r) {
   r.insert<intentdsl::rowmojo::RowMojoDialect, mlir::arith::ArithDialect,
-           mlir::math::MathDialect>();
+           mlir::math::MathDialect, mlir::scf::SCFDialect>();
 }
 namespace {
 class Columns {
@@ -196,12 +198,13 @@ struct Realize : PassWrapper<Realize, OperationPass<ModuleOp>> {
   void runOnOperation() final {
     auto &first=(*getOperation().getOps<func::FuncOp>().begin()).front().front();
     if (first.getName().getStringRef() == "cpu.owner_task") {
-      if (failed(memberAccesses(first.getParentOfType<func::FuncOp>(), true))) {
+      auto fn = first.getParentOfType<func::FuncOp>();
+      getContext().getOrLoadDialect<intentdsl::rowmojo::RowMojoDialect>();
+      getContext().getOrLoadDialect<mlir::arith::ArithDialect>();
+      getContext().getOrLoadDialect<mlir::math::MathDialect>();
+      getContext().getOrLoadDialect<mlir::scf::SCFDialect>();
+      if (failed(memberAccesses(fn, true)) || failed(lowerMojoOrdered(fn)))
         signalPassFailure();
-        return;
-      }
-      first.setAttr("mojo_row.schedule",
-                    StringAttr::get(&getContext(), "ordered-owner-range"));
       return;
     }
     if (intentdsl::cpu::findMatrixTask(first.getParentOfType<func::FuncOp>())) {

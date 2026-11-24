@@ -154,3 +154,14 @@ def Cpu_PreparePanels : Inst<"prepare_panels"> {
 def Cpu_ReleaseBuffer : Inst<"release_buffer"> {
   let arguments=(ins AnyMemRef:$buffer, StrAttr:$placement);
 }
+def Cpu_LocalBuffer : Inst<"local_buffer"> {
+  let arguments=(ins I64Attr:$elements, TypeAttr:$element_type, StrAttr:$role);
+  let results=(outs AnyMemRef:$buffer);
+}
+def Cpu_BufferLoad : Inst<"buffer_load"> {
+  let arguments=(ins AnyMemRef:$buffer, Variadic<Index>:$indices);
+  let results=(outs AnyType:$value);
+}
+def Cpu_BufferStore : Inst<"buffer_store"> {
+  let arguments=(ins AnyType:$value, AnyMemRef:$buffer, Variadic<Index>:$indices);
+}

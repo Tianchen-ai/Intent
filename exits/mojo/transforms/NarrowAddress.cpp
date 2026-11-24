@@ -55,11 +55,31 @@ class Bounds {
     auto n = op->getName().getStringRef();
     if (n == "mojo_row.as_int")
       return get(op->getOperand(0));
+    if (n == "mojo_row.address")
+      return addressRange(*op);
+    if (n == "mojo_row.owner_coord") {
+      auto ext = op->getAttrOfType<IntegerAttr>("extent");
+      if (ext && ext.getInt() > 0)
+        return i32(0, ext.getInt() - 1);
+      return {};
+    }
     if (isa<arith::MinSIOp>(op)) {
       auto a = get(op->getOperand(0)), b = get(op->getOperand(1));
       if (!a || !b)
         return {};
       return i32(std::min(a->lo, b->lo), std::min(a->hi, b->hi));
+    }
+    if (isa<arith::FloorDivSIOp, arith::DivSIOp>(op)) {
+      auto a = get(op->getOperand(0)), b = get(op->getOperand(1));
+      if (!a || !b || b->lo <= 0 || b->lo != b->hi || a->lo < 0)
+        return {};
+      return i32(a->lo / b->lo, a->hi / b->lo);
+    }
+    if (isa<arith::RemSIOp>(op)) {
+      auto a = get(op->getOperand(0)), b = get(op->getOperand(1));
+      if (!a || !b || b->lo <= 0 || b->lo != b->hi || a->lo < 0)
+        return {};
+      return i32(0, std::min(a->hi, b->lo - 1));
     }
     if (!isa<arith::AddIOp, arith::SubIOp, arith::MulIOp>(op))
       return {};
@@ -76,6 +96,28 @@ class Bounds {
     return i32(extremes.first, extremes.second);
   }
 
+  Range addressRange(Operation &op) {
+    auto strides = op.getAttrOfType<DenseI64ArrayAttr>("strides");
+    auto indices = op.getOperands().drop_front();
+    if (!strides || strides.size() != indices.size())
+      return {};
+    Interval sum{0, 0};
+    for (auto [v, stride] : llvm::zip(indices, strides.asArrayRef())) {
+      auto r = get(v);
+      if (!r || stride < INT32_MIN || stride > INT32_MAX)
+        return {};
+      __int128 l = __int128(r->lo) * stride, h = __int128(r->hi) * stride;
+      if (l > h)
+        std::swap(l, h);
+      auto term = i32(l, h),
+           next = i32(__int128(sum.lo) + l, __int128(sum.hi) + h);
+      if (!term || !next)
+        return {};
+      sum = *next;
+    }
+    return sum;
+  }
+
 public:
   Range get(Value v) {
     auto it = known.find(v);
@@ -85,29 +127,12 @@ public:
     known[v] = r;
     return r;
   }
+  Range checkAddress(Operation &op) { return addressRange(op); }
 };
 } // namespace
 
 bool canNarrowMojoAddress(Operation &op) {
-  auto strides = op.getAttrOfType<DenseI64ArrayAttr>("strides");
-  auto indices = op.getOperands().drop_front();
-  if (!strides || strides.size() != indices.size())
-    return false;
-  Bounds bounds;
-  Interval sum{0, 0};
-  for (auto [v, stride] : llvm::zip(indices, strides.asArrayRef())) {
-    auto r = bounds.get(v);
-    if (!r || stride < INT32_MIN || stride > INT32_MAX)
-      return false;
-    __int128 l = __int128(r->lo) * stride, h = __int128(r->hi) * stride;
-    if (l > h)
-      std::swap(l, h);
-    auto term = i32(l, h), next = i32(__int128(sum.lo) + l, __int128(sum.hi) + h);
-    if (!term || !next)
-      return false;
-    sum = *next;
-  }
-  return true;
+  return Bounds{}.checkAddress(op).has_value();
 }
 
 namespace {

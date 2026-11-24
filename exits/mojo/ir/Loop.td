@@ -179,3 +179,76 @@ def MojoHostScatterRouted : RowInst<"host_scatter_routed"> {
 def MojoHostFree : RowInst<"host_free"> {
   let arguments=(ins StrAttr:$buf_name);
 }
+
+// Terminal ordered operations (v0.4)
+def MojoOrderedProgram : RowInst<"ordered_program",[SingleBlock]> {
+  let regions=(region AnyRegion:$kernel, AnyRegion:$host);
+}
+def MojoOwnerFn : RowInst<"owner_fn",[SingleBlock]> {
+  let arguments=(ins ArrayAttr:$param_types, BoolAttr:$uses_stack);
+  let regions=(region AnyRegion:$body);
+}
+def MojoOwnerCoord : RowInst<"owner_coord"> {
+  let arguments=(ins AnyType:$owner, I64Attr:$pitch, I64Attr:$extent);
+  let results=(outs Index:$coord);
+}
+def MojoScalarDecl : RowInst<"scalar_decl"> {
+  let arguments=(ins Variadic<AnyType>:$init, StrAttr:$scalar_type);
+  let results=(outs AnyType:$slot);
+}
+def MojoLoadScalar : RowInst<"load_scalar"> {
+  let arguments=(ins AnyType:$ptr, Index:$offset);
+  let results=(outs AnyType:$value);
+}
+def MojoStoreScalar : RowInst<"store_scalar"> {
+  let arguments=(ins AnyType:$ptr, Index:$offset, AnyType:$value);
+}
+def MojoLoadSlice : RowInst<"load_slice"> {
+  let arguments=(ins AnyType:$ptr, Index:$offset, I64Attr:$width);
+  let results=(outs AnyType:$value);
+}
+def MojoStoreSlice : RowInst<"store_slice"> {
+  let arguments=(ins AnyType:$ptr, Index:$offset, AnyType:$value);
+}
+def MojoAccInsertLane : RowInst<"acc_insert_lane"> {
+  let arguments=(ins AnyType:$slot, AnyType:$lane, AnyType:$scalar);
+}
+def MojoExtractLaneDyn : RowInst<"extract_lane_dyn"> {
+  let arguments=(ins AnyType:$vec, AnyType:$lane);
+  let results=(outs AnyType:$scalar);
+}
+def MojoSplatScalar : RowInst<"splat_scalar"> {
+  let arguments=(ins AnyType:$scalar, StrAttr:$dtype, I64Attr:$width);
+  let results=(outs AnyType:$value);
+}
+def MojoLaneSum : RowInst<"lane_sum"> {
+  let arguments=(ins AnyType:$input);
+  let results=(outs F32:$result);
+}
+def MojoLaneMax : RowInst<"lane_max"> {
+  let arguments=(ins AnyType:$input, I64Attr:$width);
+  let results=(outs F32:$result);
+}
+def MojoMaskPrefixZero : RowInst<"mask_prefix_zero"> {
+  let arguments=(ins AnyType:$input, Index:$t_base, Index:$active_limit);
+  let results=(outs AnyType:$masked);
+}
+def MojoPackApply : RowInst<"pack_apply"> {
+  let arguments=(ins Variadic<AnyType>:$scalars, StrAttr:$in_dtype, StrAttr:$out_dtype, StrAttr:$kind);
+  let results=(outs AnyType:$packed);
+}
+def MojoExtractLane : RowInst<"extract_lane"> {
+  let arguments=(ins AnyType:$packed, I64Attr:$lane);
+  let results=(outs AnyType:$scalar);
+}
+def MojoCHostFn : RowInst<"c_host_fn",[SingleBlock]> {
+  let arguments=(ins StrAttr:$params, StrAttr:$extern_decl);
+  let regions=(region AnyRegion:$body);
+}
+def MojoCOmpFor : RowInst<"c_omp_for",[SingleBlock]> {
+  let arguments=(ins I64Attr:$count, I64Attr:$grain, BoolAttr:$cyclic);
+  let regions=(region AnyRegion:$body);
+}
+def MojoCOwnerCall : RowInst<"c_owner_call"> {
+  let arguments=(ins StrAttr:$call_args, BoolAttr:$cyclic);
+}

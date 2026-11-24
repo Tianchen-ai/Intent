@@ -7,9 +7,9 @@ using namespace mlir;
 namespace CI_UNIT_NAMESPACE {
 void dialect(DialectRegistry &);
 bool hasMojoMatrixProgram(ModuleOp);
+bool hasMojoOrderedProgram(ModuleOp);
 TerminalPrinter mojoMatrixPrinter();
 void populateMojoMatrixContracts(intentdsl::cpu::MatrixMachine &, int64_t);
-llvm::Error emitOrdered(func::FuncOp, llvm::raw_pwrite_stream &);
 std::string hostSource(func::FuncOp);
 void publishABI(OpPassManager &);
 LogicalResult verifyLoops(ModuleOp, const TargetProfile &, bool callable);
@@ -43,7 +43,7 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
   }
   auto caps = std::make_shared<intentdsl::cpu::RowMachine>();
   caps->vectorBits = *bits;
-  caps->packedOwners = 8;
+  caps->packedOwners = std::clamp<int64_t>(*bits / 32, 4, 16);
   caps->workers = *workers;
   int64_t v = *bits / 32;
   auto matrix = std::make_shared<intentdsl::cpu::MatrixMachine>();
@@ -65,11 +65,9 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
   return p;
 }
 llvm::Error emit(ModuleOp m, llvm::raw_pwrite_stream &out) {
-  if (hasMojoMatrixProgram(m))
+  if (hasMojoMatrixProgram(m) || hasMojoOrderedProgram(m))
     return mojoMatrixPrinter().emit(m, out);
   auto fn = *m.getOps<func::FuncOp>().begin();
-  if (fn.front().front().getName().getStringRef() == "cpu.owner_task")
-    return emitOrdered(fn, out);
   auto abi = llvm::json::parse(fn->getAttrOfType<StringAttr>("kir.abi"));
   if (!abi)
     return abi.takeError();
