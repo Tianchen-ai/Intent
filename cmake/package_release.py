@@ -212,9 +212,10 @@ def main() -> int:
     print(f"Built wheel: {out_dir / whl_name}")
 
     if args.verify_clean_sdist:
-        ci_wheels = sorted(out_dir.glob("compilerinfra-0.4.1-*.whl"))
+        ci_ver = json.loads((product_root / "product.json").read_text(encoding="utf-8"))["compilerinfra"]
+        ci_wheels = sorted(out_dir.glob(f"compilerinfra-{ci_ver}-*.whl"))
         if not ci_wheels:
-            raise FileNotFoundError("Pass --compilerinfra-root so compilerinfra==0.4.1 wheel is available for clean venv test")
+            raise FileNotFoundError(f"Pass --compilerinfra-root so compilerinfra=={ci_ver} wheel is available for clean venv test")
         with tempfile.TemporaryDirectory(prefix="intentdsl-clean-sdist-") as tmp:
             tmp_path = Path(tmp)
             venv_dir = tmp_path / "venv"
