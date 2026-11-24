@@ -26,6 +26,8 @@ def Load : Inst<"tile_load",(ins AnyMemRef:$array,Index:$rowBlock,Index:$columnB
 def Store : Inst<"tile_store",(ins AnyMemRef:$array,Index:$rowBlock,Index:$columnBlock,AnyTensor:$values,BoolAttr:$matrix,BoolAttr:$allow_tma),(outs)>;
 def SlabRead : Inst<"gather_slab",(ins AnyMemRef:$array,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active),(outs AnyTensor:$values)>;
 def SlabWrite : Inst<"scatter_slab",(ins AnyMemRef:$array,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active,AnyTensor:$values),(outs)>;
+def RectSlabLoad : Inst<"rect_slab_load",(ins AnyMemRef:$array,Index:$rowBlock,Index:$columnBlock,I64Attr:$owner_axis,I64Attr:$inner_extent,BoolAttr:$broadcast_inner,BoolAttr:$allow_tma),(outs AnyTensor:$values)>;
+def RectSlabStore : Inst<"rect_slab_store",(ins AnyMemRef:$array,Index:$rowBlock,Index:$columnBlock,AnyTensor:$values,I64Attr:$owner_axis,I64Attr:$inner_extent,BoolAttr:$allow_tma),(outs)>;
 def Reduce : Inst<"reduce",(ins AnyTensor:$values,I1Tensor:$mask,StrAttr:$algebra),(outs AnyTensor:$summary),[Pure]>;
 def Uniform : Inst<"uniform",(ins UI64:$key,RankedTensorOf<[UI64]>:$position),(outs RankedTensorOf<[F32]>:$value),[Pure]>;
 def Identity : Inst<"identity",(ins StrAttr:$algebra),(outs AnyType:$result)>;

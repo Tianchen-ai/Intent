@@ -1070,6 +1070,19 @@ LogicalResult OwnerTiles::build() {
   int64_t pitch = 1;
   for (int i : order) {
     auto size = std::max<int64_t>(1, shape(space.getOperand(i))[axes[i]]);
+    if (pitch == 1 && rows == logical && count > 0 && size % logical == 0) {
+      int64_t rowTiles = size / logical;
+      Value tileIdx =
+          count == size
+              ? blockId
+              : Value(b.create<arith::RemUIOp>(loc, blockId, integer(rowTiles)));
+      Value tileStart =
+          b.create<arith::MulIOp>(loc, tileIdx, integer(logical));
+      outer[space.getRegion(0).front().getArgument(i)] =
+          b.create<arith::AddIOp>(loc, broadcast(tileStart, r.getType()), lane);
+      pitch *= size;
+      continue;
+    }
     // The first owner is aligned to logical. Dividing its consecutive
     // lanes by a multiple of logical gives one shared outer coordinate.
     Value base = pitch % logical == 0 ? start : Value(owner);

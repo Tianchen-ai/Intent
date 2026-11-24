@@ -106,6 +106,26 @@ Value scalarCoord(Tiles &t, Value v, StringRef alg = "min") {
   return isa<RankedTensorType>(v.getType()) ? t.reduce(v, alg, 0) : v;
 }
 
+Value scalarTileStart(Tiles &t, Value coord, int64_t rows) {
+  if (!isa<RankedTensorType>(coord.getType()))
+    return coord;
+  if (auto add = coord.getDefiningOp<arith::AddIOp>()) {
+    for (int side : {0, 1}) {
+      Operation *bcast = add->getOperand(side).getDefiningOp();
+      Operation *axis = add->getOperand(1 - side).getDefiningOp();
+      if (bcast && axis &&
+          bcast->getName().stripDialect() == "tile_broadcast" &&
+          bcast->getAttrOfType<IntegerAttr>("axis").getInt() == -1 &&
+          !isa<ShapedType>(bcast->getOperand(0).getType()) &&
+          axis->getName().stripDialect() == "tile_axis" &&
+          cast<RankedTensorType>(axis->getResult(0).getType()).getDimSize(0) ==
+              rows)
+        return bcast->getOperand(0);
+    }
+  }
+  return scalarCoord(t, coord);
+}
+
 bool ownerRectangle(Tiles &t, Operation &op, ArrayRef<Value> coords,
                     int64_t rows, Value stored, Value &result) {
   if (!op.hasAttr("triton_src.owner_tma"))
@@ -122,7 +142,8 @@ bool ownerRectangle(Tiles &t, Operation &op, ArrayRef<Value> coords,
   int64_t width = viewShape.back();
   SmallVector<Value> offsets;
   for (auto [idx, coord] : llvm::enumerate(coords))
-    offsets.push_back(scalarCoord(t, coord));
+    offsets.push_back(int64_t(idx) == pos ? scalarTileStart(t, coord, rows)
+                                          : scalarCoord(t, coord));
   offsets.push_back(t.integer(0));
   SmallVector<int64_t> blockShape(offsets.size(), 1);
   blockShape[pos] = rows;
@@ -132,11 +153,26 @@ bool ownerRectangle(Tiles &t, Operation &op, ArrayRef<Value> coords,
   if (stored) {
     emitDescWrite(t, base, reshapeTile(t, stored, blockShape), offsets,
                   viewShape, viewStrides, blockShape);
+    Operation *descOp = &t.b.getInsertionBlock()->back();
+    compilerinfra::IntegerRangeContext ranges(t.program);
+    auto proof = compilerinfra::proveTailAccess(
+        descOp, ranges.valid() ? &ranges : nullptr);
+    if (!proof.proven || proof.kind != compilerinfra::TailKind::ExactInBounds) {
+      descOp->erase();
+      return false;
+    }
   } else {
-    result = reshapeTile(
-        t,
-        emitDescRead(t, base, offsets, viewShape, viewStrides, blockShape),
-        {rows, width});
+    Value readTile =
+        emitDescRead(t, base, offsets, viewShape, viewStrides, blockShape);
+    Operation *descOp = readTile.getDefiningOp();
+    compilerinfra::IntegerRangeContext ranges(t.program);
+    auto proof = compilerinfra::proveTailAccess(
+        descOp, ranges.valid() ? &ranges : nullptr);
+    if (!proof.proven || proof.kind != compilerinfra::TailKind::ExactInBounds) {
+      descOp->erase();
+      return false;
+    }
+    result = reshapeTile(t, readTile, {rows, width});
   }
   return true;
 }
@@ -209,23 +245,11 @@ std::optional<int64_t> tritonOwnerRectangleAxis(Operation *op, func::FuncOp fn) 
       fn.getArgAttrOfType<DenseI64ArrayAttr>(view.getArgNumber(), "block.shape");
   auto ownerTile =
       space.getAttrOfType<IntegerAttr>("block.owner_tile").getInt();
-  if (!shape || shape.size() != coords.size() + 1 ||
-      shape[pairPos] < ownerTile ||
+  if (!shape || shape.size() != coords.size() + 1 || ownerTile <= 0 ||
+      shape[pairPos] < ownerTile || shape.asArrayRef().back() <= 0 ||
       !llvm::isPowerOf2_64(shape.asArrayRef().back()))
     return std::nullopt;
-  compilerinfra::TailDimension ownerDim;
-  ownerDim.staticExtent = shape[pairPos];
-  ownerDim.staticOffset = shape[pairPos] - ownerTile;
-  ownerDim.tileSize = ownerTile;
-  ownerDim.step = 1;
-  ownerDim.tileAlignment = ownerTile;
-  compilerinfra::TailDimension laneDim;
-  laneDim.staticExtent = shape.asArrayRef().back();
-  laneDim.staticOffset = 0;
-  laneDim.tileSize = shape.asArrayRef().back();
-  laneDim.step = 1;
-  laneDim.tileAlignment = shape.asArrayRef().back();
-  auto tailProof = compilerinfra::proveTailAccess({ownerDim, laneDim});
+  auto tailProof = compilerinfra::proveTailAccess(op);
   if (!tailProof.proven ||
       tailProof.kind != compilerinfra::TailKind::ExactInBounds)
     return std::nullopt;

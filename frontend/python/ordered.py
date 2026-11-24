@@ -266,7 +266,7 @@ class Ordered:
                     a = self.splat(a, *self.lanes[b])
                 if a.type != b.type or a.type in ("index", "i32", "i64"):
                     raise ValueError("fdiv requires matching floating operands")
-                extra = (*(("afn", "arcp") if approx else ()), *(("nsz",) if ftz else ()))
+                extra = ("afn", "arcp") if approx else ()
                 result = self.emit(
                     f"arith.divf {a.name}, {b.name}{self.fm_inline(extra)} : {a.type}",
                     a.type,
@@ -336,7 +336,7 @@ class Ordered:
                 a = self.expr(node.args[0])
                 if a.type != "f32":
                     raise ValueError("expected f32 operand")
-                extra = (*(("afn",) if approx else ()), *(("nsz",) if ftz else ()))
+                extra = ("afn",) if approx else ()
                 return self.emit(
                     f"math.{name} {a.name}{self.fm_inline(extra)} : f32", "f32"
                 )

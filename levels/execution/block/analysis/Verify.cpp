@@ -282,7 +282,8 @@ LogicalResult verifyMapping(ModuleOp m,const compilerinfra::TargetProfile &p,Str
         if (inner->getName().getDialectNamespace() != dialect)
           return WalkResult::advance();
         auto n = inner->getName().stripDialect();
-        if (n == "store" || n == "tile_store" || n == "scatter_slab")
+        if (n == "store" || n == "tile_store" || n == "scatter_slab" ||
+            n == "rect_slab_store")
           return WalkResult::interrupt();
         if (n == "owner_store") {
           if (inner->getBlock() != &bb ||

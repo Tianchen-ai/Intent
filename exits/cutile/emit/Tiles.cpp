@@ -115,9 +115,7 @@ TerminalPrinter cutilePrinter() {
   // Local rules (LocalOpView only)
   localExpr("math.exp", [](const LocalOpView &v) {
     if (viewHasFastMath(v, arith::FastMathFlags::afn)) {
-      std::string ftz =
-          viewHasFastMath(v, arith::FastMathFlags::nsz) ? ",flush_to_zero=True"
-                                                        : "";
+      std::string ftz = v.attr("ct_src.ftz") ? ",flush_to_zero=True" : "";
       return ("ct.exp2((" + v.operand(0) + ")*1.4426950408889634" + ftz + ")")
           .str();
     }
@@ -307,10 +305,15 @@ TerminalPrinter cutilePrinter() {
           .str();
     });
   localExpr("math.exp2", [](const LocalOpView &v) {
-    std::string ftz =
-        viewHasFastMath(v, arith::FastMathFlags::nsz) ? ",flush_to_zero=True"
-                                                      : "";
+    std::string ftz = v.attr("ct_src.ftz") ? ",flush_to_zero=True" : "";
     return "ct.exp2(" + llvm::join(v.operands(), ",") + ftz + ")";
+  });
+  localExpr("arith.divf", [](const LocalOpView &v) {
+    bool approx = viewHasAnyFastMath(
+        v, arith::FastMathFlags::arcp | arith::FastMathFlags::afn);
+    return "ct.truediv(" + llvm::join(v.operands(), ",") +
+           (v.attr("ct_src.ftz") ? ",flush_to_zero=True" : "") +
+           ",rounding_mode=ct.RoundingMode." + (approx ? "APPROX" : "RN") + ")";
   });
   localExpr("arith.cmpi", [](const LocalOpView &v) {
     auto raw = v.attrOfType<IntegerAttr>("predicate").getValue().getZExtValue();
@@ -411,44 +414,38 @@ TerminalPrinter cutilePrinter() {
       },
       "entry signature inspects inner program calling_convention and domain rank");
   p.operations["scf.for"] = PrintRule::custom(
-      [](Operation &op, PrintPoint at, PrintContext &c) {
+      [](Operation &op, PrintPoint at, PrintContext &c) -> llvm::Error {
         auto loop = cast<scf::ForOp>(op);
-        auto narrow = [](Value v) {
-          auto constant = v.getDefiningOp<arith::ConstantOp>();
-          if (!constant)
-            return false;
-          auto i = dyn_cast<IntegerAttr>(constant.getValue());
-          return i && i.getValue().isSignedIntN(32);
-        };
-        bool native = loop.getInductionVar().getType().isInteger(32);
-        bool counted = narrow(loop.getLowerBound()) &&
-                       narrow(loop.getUpperBound()) && narrow(loop.getStep());
+        auto kindAttr = loop->getAttrOfType<StringAttr>("ct_src.loop_kind");
+        if (!kindAttr)
+          return llvm::createStringError(
+              "missing ct_src.loop_kind on scf.for");
+        StringRef kind = kindAttr.getValue();
+        bool native = kind == "range_i32";
+        bool counted = kind == "range_const";
+        auto bounds = loop->getAttrOfType<ArrayAttr>("ct_src.range_bounds");
         auto index = c.name(loop.getInductionVar());
         if (at == PrintPoint::Enter) {
           for (auto [dst, src] :
                llvm::zip(loop.getResults(), loop.getInitArgs()))
             c.line(c.name(dst) + " = " + c.name(src));
           if (native) {
-            auto i32 = [&](Value v) -> std::string {
-              if (auto cst = v.getDefiningOp<arith::ConstantOp>())
-                if (auto ia = dyn_cast<IntegerAttr>(cst.getValue()))
+            auto i32Bound = [&](unsigned idx, Value v) -> std::string {
+              if (bounds && idx < bounds.size())
+                if (auto ia = dyn_cast<IntegerAttr>(bounds[idx]))
                   return std::to_string(ia.getInt());
               return "ct.astype(" + c.name(v) + ",ct.int32)";
             };
-            c.line("for " + index + " in range(" + i32(loop.getLowerBound()) +
-                   "," + i32(loop.getUpperBound()) + "," +
-                   i32(loop.getStep()) + "):");
+            c.line("for " + index + " in range(" +
+                   i32Bound(0, loop.getLowerBound()) + "," +
+                   i32Bound(1, loop.getUpperBound()) + "," +
+                   i32Bound(2, loop.getStep()) + "):");
           } else if (counted) {
-            auto bound = [&](Value v) {
-              return std::to_string(
-                  cast<IntegerAttr>(
-                      v.getDefiningOp<arith::ConstantOp>().getValue())
-                      .getInt());
+            auto cstBound = [&](unsigned idx) {
+              return std::to_string(cast<IntegerAttr>(bounds[idx]).getInt());
             };
-            c.line("for it_" + index + " in range(" +
-                   bound(loop.getLowerBound()) + "," +
-                   bound(loop.getUpperBound()) + "," + bound(loop.getStep()) +
-                   "):");
+            c.line("for it_" + index + " in range(" + cstBound(0) + "," +
+                   cstBound(1) + "," + cstBound(2) + "):");
           } else {
             c.line(index + " = ct.astype(" + c.name(loop.getLowerBound()) +
                    ",ct.int64)");
@@ -468,7 +465,7 @@ TerminalPrinter cutilePrinter() {
         }
         return llvm::Error::success();
       },
-      "binds scf.for carries and chooses counted range vs int64 while loop from constant bounds");
+      "binds scf.for loop-carried SSA results and region block arguments across Enter/Leave");
   p.operations["scf.yield"] = PrintRule::custom(
       [](Operation &op, PrintPoint at, PrintContext &c) {
         if (at == PrintPoint::Enter && op.getNumOperands()) {
@@ -483,25 +480,6 @@ TerminalPrinter cutilePrinter() {
         return llvm::Error::success();
       },
       "assigns yielded values to enclosing scf.for/scf.if SSA result names");
-  p.operations["arith.divf"] = PrintRule::custom(
-      [](Operation &o, PrintPoint at, PrintContext &c) {
-        if (at == PrintPoint::Enter) {
-          SmallVector<std::string> v;
-          for (auto operand : o.getOperands())
-            v.push_back(c.name(operand));
-          bool approx = intentdsl::kir::hasAnyFastMath(
-              &o, arith::FastMathFlags::arcp | arith::FastMathFlags::afn);
-          bool ftz =
-              intentdsl::kir::hasFastMath(&o, arith::FastMathFlags::nsz) ||
-              intentdsl::kir::allowsSubnormalFtz(&o);
-          c.line(c.name(o.getResult(0)) + " = ct.truediv(" +
-                 llvm::join(v, ",") + (ftz ? ",flush_to_zero=True" : "") +
-                 ",rounding_mode=ct.RoundingMode." +
-                 (approx ? "APPROX" : "RN") + ")");
-        }
-        return llvm::Error::success();
-      },
-      "reads function denormal-fp-math policy for flush_to_zero");
 
   rowRules(p);
   p.package = [](DictionaryAttr attrs, const auto &files,

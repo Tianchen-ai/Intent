@@ -126,7 +126,7 @@ bool fullFoldPanels(scf::ForOp loop, const CallFacts &facts, int64_t span) {
   auto hiCst = staticVal(loop.getUpperBound());
   if (loCst && hiCst && *loCst == *hiCst && *loCst >= 0 && *loCst % span == 0)
     return true;
-  if (!hiCst || *hiCst < span || *hiCst % span != 0)
+  if (!hiCst || *hiCst < span)
     return false;
   Operation *scope = loop->getParentOfType<func::FuncOp>();
   if (!scope)
@@ -140,7 +140,8 @@ bool fullFoldPanels(scf::ForOp loop, const CallFacts &facts, int64_t span) {
   if (loCst) {
     if (*loCst < 0 || *loCst > *hiCst - span || *loCst % span != 0)
       return false;
-    dim.staticOffset = *hiCst - span;
+    int64_t numPanels = llvm::divideCeil(*hiCst - *loCst, span);
+    dim.staticOffset = *loCst + (numPanels - 1) * span;
   } else {
     dim.dynamicOffset = loop.getLowerBound();
   }

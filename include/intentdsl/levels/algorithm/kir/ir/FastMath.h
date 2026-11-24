@@ -51,6 +51,7 @@ inline void setFastMathFlags(mlir::Operation *op,
     return;
   if (flags == mlir::arith::FastMathFlags::none && !op->getAttr("fastmath"))
     return;
+  op->getContext()->getOrLoadDialect<mlir::arith::ArithDialect>();
   op->setAttr("fastmath",
               mlir::arith::FastMathFlagsAttr::get(op->getContext(), flags));
 }

@@ -5,11 +5,14 @@
 #include "intentdsl/levels/execution/block/ir/ScaleDispatch.h"
 #include "compilerinfra/Assembly.h"
 #include "compilerinfra/Proofs.h"
+#include "intentdsl/levels/algorithm/kir/ir/Domain.h"
+#include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
 #include "intentdsl/levels/algorithm/kir/ir/KeyReduction.h"
 #include "intentdsl/levels/algorithm/kir/ir/ProjectedLayout.h"
 #include "intentdsl/levels/execution/block/decisions/Verify.h"
 #include "intentdsl/levels/execution/block/ir/Access.h"
 #include "intentdsl/levels/execution/block/ir/Contraction.h"
+#include "intentdsl/levels/execution/block/ir/Grid.h"
 #include "intentdsl/levels/execution/block/ir/Owners.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Pass/Pass.h"
@@ -69,22 +72,11 @@ std::optional<int64_t> ownerRectangleAxis(Operation *op, func::FuncOp fn) {
                                                       "block.shape");
   auto ownerTile =
       space.getAttrOfType<IntegerAttr>("block.owner_tile").getInt();
-  if (!shape || shape.size() != coords.size() + 1 || shape[pairPos] < ownerTile ||
+  if (!shape || shape.size() != coords.size() + 1 || ownerTile <= 0 ||
+      shape[pairPos] < ownerTile || shape.asArrayRef().back() <= 0 ||
       !llvm::isPowerOf2_64(shape.asArrayRef().back()))
     return std::nullopt;
-  compilerinfra::TailDimension ownerDim;
-  ownerDim.staticExtent = shape[pairPos];
-  ownerDim.staticOffset = shape[pairPos] - ownerTile;
-  ownerDim.tileSize = ownerTile;
-  ownerDim.step = 1;
-  ownerDim.tileAlignment = ownerTile;
-  compilerinfra::TailDimension laneDim;
-  laneDim.staticExtent = shape.asArrayRef().back();
-  laneDim.staticOffset = 0;
-  laneDim.tileSize = shape.asArrayRef().back();
-  laneDim.step = 1;
-  laneDim.tileAlignment = shape.asArrayRef().back();
-  auto tailProof = compilerinfra::proveTailAccess({ownerDim, laneDim});
+  auto tailProof = compilerinfra::proveTailAccess(op);
   if (!tailProof.proven ||
       tailProof.kind != compilerinfra::TailKind::ExactInBounds)
     return std::nullopt;
@@ -125,8 +117,7 @@ bool canNarrowCutileAddress(Operation &op) {
       compilerinfra::AddressProofOptions opts;
       opts.targetBitwidth = 32;
       opts.isSigned = true;
-      auto proof =
-          compilerinfra::proveNarrowAddress(scope, {v}, opts, &intRanges);
+      auto proof = compilerinfra::proveNarrowAddress(v, opts, &intRanges);
       if (proof.proven) {
         if (auto cr = intRanges.query(v))
           res = fit64(cr->smin().getSExtValue(), cr->smax().getSExtValue());
@@ -218,8 +209,7 @@ bool canNarrowCutileAddress(Operation &op) {
   narrowOpts.isSigned = true;
   for (Value coord : op.getOperands().drop_front()) {
     if (!isa<ShapedType>(coord.getType())) {
-      if (!compilerinfra::proveNarrowAddress(scope, {coord}, narrowOpts,
-                                             &intRanges)
+      if (!compilerinfra::proveNarrowAddress(coord, narrowOpts, &intRanges)
                .proven)
         return false;
       continue;
@@ -244,11 +234,65 @@ bool rectangularSlab(Operation *op,func::FuncOp fn){
   auto arg=dyn_cast<BlockArgument>(op->getOperand(0));
   auto owner=fn->getAttrOfType<IntegerAttr>("kir.owner_axis");
   if(!owner || owner.getInt()>1 || !arg || arg.getOwner()!=&fn.front())return false;
+  if(op->getNumOperands()<3)return false;
+  auto *r=op->getOperand(1).getDefiningOp(),*c=op->getOperand(2).getDefiningOp();
+  if(!r || r->getName().stripDialect()!="rows" || !c || c->getName().stripDialect()!="columns")return false;
   auto shape=fn.getArgAttrOfType<DenseI64ArrayAttr>(arg.getArgNumber(),"ct_src.shape");
   return shape && shape.size()==3 && llvm::isPowerOf2_64(shape[2]) &&
     llvm::all_of(fn->getAttrOfType<ArrayAttr>("block.configs"),[](Attribute row){
       return llvm::isPowerOf2_64(cast<DictionaryAttr>(row).getAs<IntegerAttr>("width").getInt());
     });
+}
+bool usesCutileFtzAttr(Operation *op) {
+  StringRef full = op->getName().getStringRef();
+  return full == "ct_src.div" || full == "arith.divf" || full == "math.exp2" ||
+         (full == "math.exp" &&
+          intentdsl::kir::hasFastMath(op, arith::FastMathFlags::afn));
+}
+void computeCutileLoopAttrs(scf::ForOp loop, StringAttr &kindOut,
+                            ArrayAttr &boundsOut) {
+  Builder b(loop.getContext());
+  auto constInt = [](Value v) -> std::optional<int64_t> {
+    auto cst = v.getDefiningOp<arith::ConstantOp>();
+    if (!cst)
+      return std::nullopt;
+    auto ia = dyn_cast<IntegerAttr>(cst.getValue());
+    if (!ia || ia.getValue().getSignificantBits() > 64)
+      return std::nullopt;
+    return ia.getInt();
+  };
+  auto constI32 = [](Value v) -> std::optional<int64_t> {
+    auto cst = v.getDefiningOp<arith::ConstantOp>();
+    if (!cst)
+      return std::nullopt;
+    auto ia = dyn_cast<IntegerAttr>(cst.getValue());
+    if (!ia || !ia.getValue().isSignedIntN(32))
+      return std::nullopt;
+    return ia.getInt();
+  };
+  Value ops[3] = {loop.getLowerBound(), loop.getUpperBound(), loop.getStep()};
+  if (loop.getInductionVar().getType().isInteger(32)) {
+    kindOut = b.getStringAttr("range_i32");
+    SmallVector<Attribute, 3> bounds;
+    for (Value v : ops) {
+      if (auto c = constInt(v))
+        bounds.push_back(b.getI64IntegerAttr(*c));
+      else
+        bounds.push_back(b.getUnitAttr());
+    }
+    boundsOut = b.getArrayAttr(bounds);
+    return;
+  }
+  auto lb = constI32(ops[0]), ub = constI32(ops[1]), st = constI32(ops[2]);
+  if (lb && ub && st) {
+    kindOut = b.getStringAttr("range_const");
+    boundsOut = b.getArrayAttr({b.getI64IntegerAttr(*lb),
+                                b.getI64IntegerAttr(*ub),
+                                b.getI64IntegerAttr(*st)});
+    return;
+  }
+  kindOut = b.getStringAttr("while");
+  boundsOut = {};
 }
 bool broadcastInner(Value viewArg, func::FuncOp fn) {
   auto arg = dyn_cast<BlockArgument>(viewArg);
@@ -395,7 +439,7 @@ bool tileLoadStorePermitsTma(Value viewArg, func::FuncOp fn,
         return false;
       compilerinfra::TailDimension td;
       td.staticExtent = *rowDim;
-      td.staticOffset = *rowDim - r;
+      td.staticOffset = (llvm::divideCeil(*rowDim, r) - 1) * r;
       td.tileSize = r;
       td.step = 1;
       td.tileAlignment = r;
@@ -645,6 +689,18 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
       store->erase();
       value->erase();
     });
+    bool fnFtz = intentdsl::kir::allowsSubnormalFtz(fn);
+    Builder fb(&getContext());
+    fn.walk([&](Operation *op) {
+      if (usesCutileFtzAttr(op)) {
+        if (fnFtz)
+          op->setAttr("ct_src.ftz", fb.getUnitAttr());
+        else
+          op->removeAttr("ct_src.ftz");
+      } else if (op->hasAttr("ct_src.ftz")) {
+        op->removeAttr("ct_src.ftz");
+      }
+    });
   }
 };
 struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
@@ -670,13 +726,130 @@ struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
                                             nativeWindowPanels,
                                             nativeMatrixWrite);
     }
-    else fn.walk<WalkOrder::PostOrder>([](Operation *op){
-      if(op->getName().getDialectNamespace()!="ct_src") return;
-      auto n=op->getName().stripDialect();
-      if(n=="key_counts")op->setAttr("native_panel",Builder(op->getContext()).getI64IntegerAttr(64));
-      if(n=="indexed_tile_read" || n=="fill_ranges_at" || n=="segment_fold" || n=="segment_size" || n=="scatter_fragment" ||
-         n=="sum_columns" || n=="key_counts" || n=="publish_offsets" || n=="stripe_loop")
-        intentdsl::block::expandRowOperation(*op,"exits/cutile",false);
+    else {
+      fn.walk<WalkOrder::PostOrder>([](Operation *op){
+        if(op->getName().getDialectNamespace()!="ct_src") return;
+        auto n=op->getName().stripDialect();
+        if(n=="key_counts")op->setAttr("native_panel",Builder(op->getContext()).getI64IntegerAttr(64));
+        if(n=="indexed_tile_read" || n=="fill_ranges_at" || n=="segment_fold" || n=="segment_size" || n=="scatter_fragment" ||
+           n=="sum_columns" || n=="key_counts" || n=="publish_offsets" || n=="stripe_loop")
+          intentdsl::block::expandRowOperation(*op,"exits/cutile",false);
+      });
+      auto ownerAttr = fn->getAttrOfType<IntegerAttr>("kir.owner_axis");
+      StringAttr idxTy = b.getStringAttr(bits == 64 ? "ct.int64" : "ct.int32");
+      BoolAttr colTiles =
+          b.getBoolAttr(fn->getAttr("block.grid") == intentdsl::block::grid(b, true));
+      fn.walk([&](Operation *op) {
+        if (op->getName().getDialectNamespace() != "ct_src")
+          return;
+        auto n = op->getName().stripDialect();
+        if (n == "dimension") {
+          OpBuilder db(op);
+          Location loc = op->getLoc();
+          Value base = fn.getArgument(intentdsl::domainSlot(fn));
+          int rank = cast<MemRefType>(base.getType()).getRank();
+          bool isM = op->getAttrOfType<StringAttr>("name") == "M";
+          auto dimAt = [&](int axis) -> Value {
+            OperationState ds(loc, "ct_src.array_dim");
+            ds.addOperands(base);
+            ds.addAttribute("axis", db.getI64IntegerAttr(axis));
+            ds.addTypes(db.getI64Type());
+            return db.create(ds)->getResult(0);
+          };
+          auto constOne = [&]() -> Value {
+            OperationState cs(loc, "ct_src.constant");
+            cs.addAttribute("value", db.getI64IntegerAttr(1));
+            cs.addTypes(db.getI64Type());
+            return db.create(cs)->getResult(0);
+          };
+          auto mulI64 = [&](Value lhs, Value rhs) -> Value {
+            OperationState ms(loc, "ct_src.map");
+            ms.addOperands({lhs, rhs});
+            ms.addAttribute("kind", db.getStringAttr("mul"));
+            ms.addTypes(db.getI64Type());
+            return db.create(ms)->getResult(0);
+          };
+          Value val;
+          if (ownerAttr && isM) {
+            val = dimAt(ownerAttr.getInt());
+          } else if (!ownerAttr && !isM) {
+            val = dimAt(rank - 1);
+          } else {
+            val = constOne();
+            for (int i = 0; i < (ownerAttr ? rank : rank - 1); ++i)
+              if (!ownerAttr || i != ownerAttr.getInt())
+                val = mulI64(val, dimAt(i));
+          }
+          op->getResult(0).replaceAllUsesWith(val);
+          op->erase();
+          return;
+        }
+        if (n == "gather_slab" || n == "scatter_slab") {
+          bool store = n == "scatter_slab";
+          if (op->hasAttr("ct_src.rectangular")) {
+            OpBuilder sb(op);
+            auto slot = cast<BlockArgument>(op->getOperand(0)).getArgNumber();
+            int64_t extent =
+                fn.getArgAttrOfType<DenseI64ArrayAttr>(slot, "ct_src.shape")[2];
+            Value rowBlk = op->getOperand(1).getDefiningOp()->getOperand(0);
+            Value colBlk = op->getOperand(2).getDefiningOp()->getOperand(0);
+            OperationState rs(op->getLoc(),
+                              store ? "ct_src.rect_slab_store"
+                                    : "ct_src.rect_slab_load");
+            rs.addOperands({op->getOperand(0), rowBlk, colBlk});
+            if (store)
+              rs.addOperands(op->getOperand(4));
+            rs.addAttribute("owner_axis",
+                            sb.getI64IntegerAttr(ownerAttr.getInt()));
+            rs.addAttribute("inner_extent", sb.getI64IntegerAttr(extent));
+            if (!store)
+              rs.addAttribute(
+                  "broadcast_inner",
+                  sb.getBoolAttr(op->hasAttr("ct_src.broadcast_inner")));
+            rs.addAttribute("allow_tma",
+                            sb.getBoolAttr(op->hasAttr("ct_src.slab_tma")));
+            rs.addTypes(op->getResultTypes());
+            auto *repl = sb.create(rs);
+            op->replaceAllUsesWith(repl);
+            op->erase();
+            return;
+          }
+          op->setAttr("owner_axis", b.getI64IntegerAttr(ownerAttr.getInt()));
+          return;
+        }
+        if (n == "rows" || n == "columns" || n == "stripe_owner_load" ||
+            n == "stripe_tile_load" || n == "stripe_tile_store") {
+          op->setAttr("index_type", idxTy);
+        } else if (n == "pid") {
+          op->setAttr("index_type", idxTy);
+          op->setAttr("column_tiles", colTiles);
+        } else if (n == "tiles" || n == "active" || n == "linear_index") {
+          if (ownerAttr)
+            op->setAttr("ct_src.owner_axis",
+                        b.getI64IntegerAttr(ownerAttr.getInt()));
+        }
+      });
+    }
+    bool fnFtz = intentdsl::kir::allowsSubnormalFtz(fn);
+    fn.walk([&](Operation *op) {
+      if (auto loop = dyn_cast<scf::ForOp>(op)) {
+        StringAttr kind;
+        ArrayAttr bounds;
+        computeCutileLoopAttrs(loop, kind, bounds);
+        loop->setAttr("ct_src.loop_kind", kind);
+        if (bounds)
+          loop->setAttr("ct_src.range_bounds", bounds);
+        else
+          loop->removeAttr("ct_src.range_bounds");
+      }
+      if (usesCutileFtzAttr(op)) {
+        if (fnFtz)
+          op->setAttr("ct_src.ftz", b.getUnitAttr());
+        else
+          op->removeAttr("ct_src.ftz");
+      } else if (op->hasAttr("ct_src.ftz")) {
+        op->removeAttr("ct_src.ftz");
+      }
     });
     fn->setAttr("ct_src.entry", b.getStringAttr("kernel"));
     fn->setAttr("ct_src.index_bits", b.getI32IntegerAttr(bits));
@@ -772,6 +945,29 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
   }
   auto arrayCap=profile.services.get<intentdsl::cutile::ArrayIndices>();
   if(!arrayCap || matrix->hasAttr("ct_src.tma")!=arrayCap->permitTma)return matrix.emitError("invalid array transfer capability");
+  bool expectedFtz = intentdsl::kir::allowsSubnormalFtz(matrix);
+  auto commonWalk = matrix.walk([&](Operation *op) {
+    if (op->hasAttr("ct_src.ftz") != (usesCutileFtzAttr(op) && expectedFtz)) {
+      op->emitError("ct_src.ftz disagrees with function denormal-fp-math mode");
+      return WalkResult::interrupt();
+    }
+    if (callable) {
+      if (auto loop = dyn_cast<scf::ForOp>(op)) {
+        StringAttr expectedKind;
+        ArrayAttr expectedBounds;
+        computeCutileLoopAttrs(loop, expectedKind, expectedBounds);
+        if (loop->getAttr("ct_src.loop_kind") != expectedKind ||
+            loop->getAttr("ct_src.range_bounds") != expectedBounds) {
+          loop.emitError(
+              "missing or mismatched cuTile scf.for lowering decision");
+          return WalkResult::interrupt();
+        }
+      }
+    }
+    return WalkResult::advance();
+  });
+  if (commonWalk.wasInterrupted())
+    return failure();
   if(matrix.front().front().getName().getStringRef()=="ct_src.tile_program"){
     if(!callable || failed(verifyArrayGeometry(matrix,profile)))return failure();
     return intentdsl::block::verifyTileProgram(
@@ -1107,16 +1303,96 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
     if (ok && op->hasAttr("ct_src.broadcast_inner") && n != "gather_slab" &&
         n != "tile_load")
       ok = false;
+    if (ok && n == "dimension")
+      ok = !callable;
+    if (ok && callable &&
+        (n == "rows" || n == "columns" || n == "stripe_owner_load" ||
+         n == "stripe_tile_load" || n == "stripe_tile_store" || n == "pid")) {
+      Builder ib(fn.getContext());
+      StringAttr expectedIdxTy =
+          ib.getStringAttr(indices->bits == 64 ? "ct.int64" : "ct.int32");
+      ok = op->getAttr("index_type") == expectedIdxTy;
+      if (ok && n == "pid") {
+        BoolAttr expectedCols = ib.getBoolAttr(
+            fn->getAttr("block.grid") == intentdsl::block::grid(ib, true));
+        ok = op->getAttr("column_tiles") == expectedCols;
+      }
+    }
+    if (ok && callable &&
+        (n == "tiles" || n == "active" || n == "linear_index")) {
+      auto ownerAttr = fn->getAttrOfType<IntegerAttr>("kir.owner_axis");
+      Attribute expectedOwner =
+          ownerAttr
+              ? Attribute(Builder(fn.getContext())
+                              .getI64IntegerAttr(ownerAttr.getInt()))
+              : Attribute();
+      ok = op->getAttr("ct_src.owner_axis") == expectedOwner;
+    }
     if (ok && (n == "gather_slab" || n == "scatter_slab")) {
       bool rect = rectangularSlab(op, fn);
-      bool bcast =
-          n == "gather_slab" && rect && broadcastInner(op->getOperand(0), fn);
-      bool slabTma = rect && !bcast && factsPtr &&
-                     alignedProjectedView(op->getOperand(0), fn, *factsPtr,
-                                          indices->permitTma);
-      ok = op->hasAttr("ct_src.rectangular") == rect &&
-           op->hasAttr("ct_src.broadcast_inner") == bcast &&
-           op->hasAttr("ct_src.slab_tma") == slabTma;
+      if (callable) {
+        auto ownerAttr = fn->getAttrOfType<IntegerAttr>("kir.owner_axis");
+        ok = !rect && !op->hasAttr("ct_src.rectangular") &&
+             !op->hasAttr("ct_src.broadcast_inner") &&
+             !op->hasAttr("ct_src.slab_tma") && ownerAttr &&
+             op->getAttr("owner_axis") ==
+                 Builder(fn.getContext()).getI64IntegerAttr(ownerAttr.getInt());
+      } else {
+        bool bcast =
+            n == "gather_slab" && rect && broadcastInner(op->getOperand(0), fn);
+        bool slabTma = rect && !bcast && factsPtr &&
+                       alignedProjectedView(op->getOperand(0), fn, *factsPtr,
+                                            indices->permitTma);
+        ok = op->hasAttr("ct_src.rectangular") == rect &&
+             op->hasAttr("ct_src.broadcast_inner") == bcast &&
+             op->hasAttr("ct_src.slab_tma") == slabTma;
+      }
+    }
+    if (ok && (n == "rect_slab_load" || n == "rect_slab_store")) {
+      bool store = n == "rect_slab_store";
+      auto arg = dyn_cast<BlockArgument>(op->getOperand(0));
+      auto ownerAttr = fn->getAttrOfType<IntegerAttr>("kir.owner_axis");
+      if (!callable || !arg || arg.getOwner() != &fn.front() || !ownerAttr ||
+          ownerAttr.getInt() > 1 ||
+          ((*slots)[arg.getArgNumber()].getAsObject()->getString("direction") !=
+               "InOut" &&
+           (*slots)[arg.getArgNumber()].getAsObject()->getString("direction") !=
+               (store ? "Out" : "In"))) {
+        op->emitError("invalid rectangular slab access");
+        return WalkResult::interrupt();
+      }
+      auto shape =
+          fn.getArgAttrOfType<DenseI64ArrayAttr>(arg.getArgNumber(), "ct_src.shape");
+      auto *pid = op->getOperand(1).getDefiningOp(),
+           *col = op->getOperand(2).getDefiningOp();
+      auto ind = dyn_cast<BlockArgument>(op->getOperand(2));
+      bool bcast = !store && broadcastInner(arg, fn);
+      bool allowTma = !bcast && factsPtr &&
+                      alignedProjectedView(arg, fn, *factsPtr,
+                                           indices->permitTma);
+      Builder sb(fn.getContext());
+      ok = shape && shape.size() == 3 && llvm::isPowerOf2_64(shape[2]) &&
+           llvm::all_of(fn->getAttrOfType<ArrayAttr>("block.configs"),
+                        [](Attribute row) {
+                          return llvm::isPowerOf2_64(
+                              cast<DictionaryAttr>(row)
+                                  .getAs<IntegerAttr>("width")
+                                  .getInt());
+                        }) &&
+           op->getAttr("owner_axis") ==
+               sb.getI64IntegerAttr(ownerAttr.getInt()) &&
+           op->getAttr("inner_extent") == sb.getI64IntegerAttr(shape[2]) &&
+           (store || op->getAttr("broadcast_inner") == sb.getBoolAttr(bcast)) &&
+           op->getAttr("allow_tma") == sb.getBoolAttr(allowTma) && pid &&
+           pid->getName().getStringRef() == "ct_src.pid" &&
+           ((col && col->getName().getStringRef() == "ct_src.zero") ||
+            (col && col->getName().getStringRef() == "ct_src.pid" &&
+             col->getAttrOfType<IntegerAttr>("axis").getInt() == 1 &&
+             pid->getAttrOfType<IntegerAttr>("axis").getInt() == 0 &&
+             isa<ArrayAttr>(fn->getAttrOfType<ArrayAttr>("block.grid")[1])) ||
+            (ind && ind.getArgNumber() == 0 &&
+             ind.getOwner()->getParentOp()->getName().getStringRef() ==
+                 "ct_src.tiles"));
     }
     if (ok && n == "sum_columns") {
       auto panel = op->getAttrOfType<IntegerAttr>("native_panel");

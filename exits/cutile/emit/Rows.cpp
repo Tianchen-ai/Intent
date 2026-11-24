@@ -1,229 +1,65 @@
 #include "compilerinfra/Assembly.h"
-#include "intentdsl/levels/algorithm/kir/ir/Domain.h"
-#include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
 #include "intentdsl/levels/algorithm/kir/ir/Literal.h"
-#include "intentdsl/levels/execution/block/ir/Grid.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/TypeUtilities.h"
 #include "llvm/ADT/StringExtras.h"
 
 namespace CI_UNIT_NAMESPACE {
 using namespace mlir;
 using namespace compilerinfra;
 namespace {
+bool rowHasAnyFastMath(const LocalOpView &v, arith::FastMathFlags mask) {
+  auto attr = v.attrOfType<arith::FastMathFlagsAttr>("fastmath");
+  return attr && bitEnumContainsAny(attr.getValue(), mask);
+}
+
+std::string memberCountExpr(Type viewTy, StringRef name, int64_t ownerAxis) {
+  std::string product = "1";
+  for (int i = 0; i < cast<MemRefType>(viewTy).getRank(); ++i)
+    if (i != ownerAxis)
+      product += "*" + name.str() + ".shape[" + std::to_string(i) + "]";
+  return product;
+}
+
 llvm::Error customRowRule(Operation &op, PrintPoint at, PrintContext &c) {
   auto code = op.getName().stripDialect();
-  if (at != PrintPoint::Enter) {
-    if (at == PrintPoint::Leave && code == "tiles")
-      --c.indent;
+  if (at != PrintPoint::Enter)
     return llvm::Error::success();
-  }
-  auto line = [&](const std::string &s) { c.line(s); };
-  auto arg = [&](unsigned n) { return c.name(op.getOperand(n)); };
-  auto result = [&]() { return c.name(op.getResult(0)); };
-  auto fn = op.getParentOfType<func::FuncOp>();
-  std::string indexType =
-      fn->getAttrOfType<IntegerAttr>("ct_src.index_bits").getInt() == 64
-          ? "ct.int64"
-          : "ct.int32";
-  auto owner = fn->getAttrOfType<IntegerAttr>("kir.owner_axis");
-  auto memberCount = [&](Value view, const std::string &name) {
-    std::string product = "1";
-    for (int i = 0; i < cast<MemRefType>(view.getType()).getRank(); ++i)
-      if (i != owner.getInt())
-        product += "*" + name + ".shape[" + std::to_string(i) + "]";
-    return product;
-  };
-  if (code == "tiles") {
-    auto &bb = op.getRegion(0).front();
-    for (unsigned i = 0; i < op.getNumResults(); ++i)
-      line(c.name(op.getResult(i)) + " = " + arg(1 + i));
-    line("for " + c.name(bb.getArgument(0)) + " in range(ct.cdiv(" +
-         (owner ? memberCount(op.getOperand(0), arg(0))
-                : arg(0) + ".shape[-1]") +
-         ",W)):");
-    ++c.indent;
-    for (unsigned i = 0; i < op.getNumResults(); ++i)
-      line(c.name(bb.getArgument(1 + i)) + " = " + c.name(op.getResult(i)));
-    return llvm::Error::success();
-  }
   if (code == "yield") {
     if (op.getNumOperands()) {
       SmallVector<std::string> lhs, rhs;
       for (unsigned i = 0; i < op.getNumOperands(); ++i) {
         lhs.push_back(c.name(op.getParentOp()->getResult(i)));
-        rhs.push_back(arg(i));
+        rhs.push_back(c.name(op.getOperand(i)));
       }
-      line(llvm::join(lhs, ", ") + " = " + llvm::join(rhs, ", "));
+      c.line(llvm::join(lhs, ", ") + " = " + llvm::join(rhs, ", "));
     }
     return llvm::Error::success();
   }
-  std::string expr;
-  if (code == "dimension") {
-    auto base = fn.getArgument(intentdsl::domainSlot(fn));
-    auto n = c.name(base);
-    int rank = cast<MemRefType>(base.getType()).getRank();
-    bool m = op.getAttrOfType<StringAttr>("name") == "M";
-    if (owner)
-      expr = m ? n + ".shape[" + std::to_string(owner.getInt()) + "]"
-               : memberCount(base, n);
-    else if (!m)
-      expr = n + ".shape[-1]";
-    else {
-      expr = "1";
-      for (int i = 0; i < rank - 1; ++i)
-        expr += "*" + n + ".shape[" + std::to_string(i) + "]";
-    }
-  } else if (code == "stripe_owner_load") {
-    auto s = std::to_string(op.getAttrOfType<IntegerAttr>("stride").getInt());
-    expr = "ct.broadcast_to(ct.expand_dims(ct.gather(" + arg(0) +
-           ",ct.astype(" + arg(1) + "," + indexType + ")*" + s + "+" + arg(2) +
-           "),1),(R,W))";
-  } else if (code == "stripe_tile_load" || code == "stripe_tile_store") {
-    auto s = std::to_string(op.getAttrOfType<IntegerAttr>("stride").getInt());
-    std::string hint = op.getAttrOfType<BoolAttr>("allow_tma").getValue()
-                           ? ""
-                           : ", allow_tma=False";
-    std::string index = "(ct.astype(" + arg(1) + ", " + indexType + ") * (" +
-                        s + " // R) + " + arg(2) + ", " + arg(3) + ")";
-    if (code == "stripe_tile_store") {
-      line("ct.store(" + arg(0) + ", " + index + ", " + arg(4) + hint + ")");
-      return llvm::Error::success();
-    }
-    expr = "ct.load(" + arg(0) + ", " + index +
-           ", shape=(R,W), padding_mode=ct.PaddingMode.ZERO" + hint + ")";
-  } else if (code == "gather_slab" || code == "scatter_slab") {
-    auto base = arg(0), col = "ct.expand_dims(" + arg(2) + ",0)";
-    if (op.hasAttr("ct_src.rectangular")) {
-      auto slot = cast<BlockArgument>(op.getOperand(0)).getArgNumber();
-      int64_t extent =
-          fn.getArgAttrOfType<DenseI64ArrayAttr>(slot, "ct_src.shape")[2];
-      auto row = c.name(op.getOperand(1).getDefiningOp()->getOperand(0));
-      auto tile = c.name(op.getOperand(2).getDefiningOp()->getOperand(0));
-      auto inner = "min(W," + std::to_string(extent) + ")";
-      auto segments = "(W//" + inner + ")";
-      auto major =
-          "(" + tile + "//(" + std::to_string(extent) + "//" + inner + "))";
-      auto minor =
-          "(" + tile + "%(" + std::to_string(extent) + "//" + inner + "))";
-      auto shape = owner.getInt() == 0 ? "(R," + segments + "," + inner + ")"
-                                       : "(" + segments + ",R," + inner + ")";
-      auto coord = owner.getInt() == 0
-                       ? "(" + row + "," + major + "," + minor + ")"
-                       : "(" + major + "," + row + "," + minor + ")";
-      bool bcast = op.hasAttr("ct_src.broadcast_inner");
-      std::string slabHint =
-          op.hasAttr("ct_src.slab_tma") ? "" : ",allow_tma=False";
-      if (code == "scatter_slab") {
-        auto v = arg(4);
-        auto shaped =
-            "ct.reshape(" + v + ",(R," + segments + "," + inner + "))";
-        if (owner.getInt() != 0)
-          shaped = "ct.permute(" + shaped + ",(1,0,2))";
-        line("ct.store(" + base + "," + coord + "," + shaped + slabHint + ")");
-      } else {
-        auto loadShape =
-            owner.getInt() == 0
-                ? "(R," + segments + "," + (bcast ? "1" : inner) + ")"
-                : "(" + segments + ",R," + (bcast ? "1" : inner) + ")";
-        auto loadCoord =
-            owner.getInt() == 0
-                ? "(" + row + "," + major + "," + (bcast ? "0" : minor) + ")"
-                : "(" + major + "," + row + "," + (bcast ? "0" : minor) + ")";
-        auto v = "ct.load(" + base + "," + loadCoord + ",shape=" + loadShape +
-                 ",padding_mode=ct.PaddingMode.ZERO" + slabHint + ")";
-        if (bcast)
-          v = "ct.broadcast_to(" + v + "," + shape + ")";
-        if (owner.getInt() != 0)
-          v = "ct.permute(" + v + ",(1,0,2))";
-        line(result() + " = ct.reshape(" + v + ",(R,W))");
-      }
-      return llvm::Error::success();
-    }
-    int rank = cast<MemRefType>(op.getOperand(0).getType()).getRank();
-    SmallVector<std::string> coords(rank);
-    for (int i = rank - 1; i >= 0; --i) {
-      auto size = "ct.maximum(" + base + ".shape[" + std::to_string(i) + "],1)";
-      if (i == owner.getInt())
-        coords[i] = "ct.expand_dims(" + arg(1) + ",1)";
-      else {
-        coords[i] = "(" + col + ")%" + size;
-        col = "((" + col + ")//" + size + ")";
-      }
-    }
-    auto address = base + ",(" + llvm::join(coords, ",") + ")";
-    if (code == "scatter_slab") {
-      line("ct.scatter(" + address + "," + arg(4) + ",mask=" + arg(3) + ")");
-      return llvm::Error::success();
-    }
-    expr = "ct.gather(" + address + ",mask=" + arg(3) + ")";
-  } else if (code == "active") {
-    if (owner) {
-      expr = "(ct.expand_dims(" + arg(1) + ",1)<" + arg(0) + ".shape[" +
-             std::to_string(owner.getInt()) + "]) & (ct.expand_dims(" + arg(2) +
-             ",0)<" + memberCount(op.getOperand(0), arg(0)) + ")";
-    } else if (cast<MemRefType>(op.getOperand(0).getType()).getRank() == 1) {
-      expr = "(ct.expand_dims(" + arg(1) + ",1)<1) & (ct.expand_dims(" +
-             arg(2) + ",0)<" + arg(0) + ".shape[0])";
-    } else if (cast<MemRefType>(op.getOperand(0).getType()).getRank() > 2) {
-      auto a = arg(0);
-      auto rank = cast<MemRefType>(op.getOperand(0).getType()).getRank();
-      std::string count = "1";
-      for (int i = 0; i < rank - 1; ++i)
-        count += "*" + a + ".shape[" + std::to_string(i) + "]";
-      expr = "(ct.expand_dims(" + arg(1) + ",1)<" + count +
-             ") & (ct.expand_dims(" + arg(2) + ",0)<" + a + ".shape[-1])";
-    } else {
-      expr = "(ct.expand_dims(" + arg(1) + ", 1) < " + arg(0) +
-             ".shape[0]) & (ct.expand_dims(" + arg(2) + ", 0) < " + arg(0) +
-             ".shape[1])";
-    }
-  } else if (code == "linear_index") {
-    bool wide = cast<RankedTensorType>(op.getResult(0).getType())
-                    .getElementType()
-                    .isUnsignedInteger(64);
-    std::string row = wide ? "ct.astype(" + arg(1) + ",ct.uint64)" : arg(1);
-    auto width = owner ? memberCount(op.getOperand(0), arg(0))
-                       : arg(0) + ".shape[-1]",
-         column = arg(2);
-    if (wide) {
-      width = "ct.astype(" + width + ",ct.uint64)";
-      column = "ct.astype(" + column + ",ct.uint64)";
-    }
-    expr = "ct.astype(ct.expand_dims(" + row + ",1)*" + width +
-           "+ct.expand_dims(" + column + ",0)," +
-           (wide ? "ct.uint64)" : "ct.int32)");
-  } else if (code == "pid") {
-    expr = "ct.astype(ct.bid(0), " + indexType + ")";
-    Builder b(fn.getContext());
-    if (fn->getAttr("block.grid") == intentdsl::block::grid(b, true)) {
-      expr += op.getAttrOfType<IntegerAttr>("axis").getInt() == 0
-                  ? " // COLUMN_TILES"
-                  : " % COLUMN_TILES";
-    }
-  } else if (code == "rows") {
-    expr = arg(0) + " * R + ct.arange(R, dtype=" + indexType + ")";
-  } else if (code == "columns") {
-    expr = "ct.astype(" + arg(0) + ", " + indexType +
-           ") * W + ct.arange(W, dtype=" + indexType + ")";
-  } else if (code == "div") {
-    bool approx = intentdsl::kir::hasAnyFastMath(
-        &op, arith::FastMathFlags::arcp | arith::FastMathFlags::afn);
-    bool ftz = intentdsl::kir::hasFastMath(&op, arith::FastMathFlags::nsz) ||
-               intentdsl::kir::allowsSubnormalFtz(&op);
-    expr = "ct.truediv(" + arg(0) + ", " + arg(1) +
-           (ftz ? ", flush_to_zero=True" : "") +
-           ", rounding_mode=ct.RoundingMode." + (approx ? "APPROX" : "RN") +
-           ")";
-  } else {
-    return llvm::createStringError("unexpected custom cuTile operation " + code);
-  }
-  c.line(result() + " = " + expr);
-  return llvm::Error::success();
+  return llvm::createStringError("unexpected custom cuTile operation " + code);
 }
 
 llvm::Error localRowRule(const LocalOpView &v, PrintPoint at, PrintContext &c) {
   auto code = v.operation().split('.').second;
+  if (code == "tiles") {
+    if (at == PrintPoint::Enter) {
+      for (unsigned i = 0; i < v.numResults(); ++i)
+        c.line((v.result(i) + " = " + v.operand(1 + i)).str());
+    } else if (at == PrintPoint::BeginBlock) {
+      auto owner = v.attrOfType<IntegerAttr>("ct_src.owner_axis");
+      c.line("for " + v.blockArguments()[0] + " in range(ct.cdiv(" +
+             (owner ? memberCountExpr(v.operandType(0), v.operand(0),
+                                      owner.getInt())
+                    : (v.operand(0) + ".shape[-1]").str()) +
+             ",W)):");
+      ++c.indent;
+      for (unsigned i = 0; i < v.numResults(); ++i)
+        c.line((v.blockArguments()[1 + i] + " = " + v.result(i)).str());
+    } else if (at == PrintPoint::Leave) {
+      --c.indent;
+    }
+    return llvm::Error::success();
+  }
   if (code == "bin_panels") {
     if (at == PrintPoint::BeginBlock) {
       c.line("for " + v.blockArguments()[0] + " in range(" +
@@ -280,7 +116,135 @@ llvm::Error localRowRule(const LocalOpView &v, PrintPoint at, PrintContext &c) {
          ",memory_order=ct.MemoryOrder.RELAXED,memory_scope=" + memScope + ")");
     return llvm::Error::success();
   }
-  if (code == "splat") {
+
+  if (code == "stripe_tile_load" || code == "stripe_tile_store") {
+    auto s = std::to_string(v.attrOfType<IntegerAttr>("stride").getInt());
+    auto idxTy = v.attrOfType<StringAttr>("index_type").str();
+    std::string hint = v.attrOfType<BoolAttr>("allow_tma").getValue()
+                           ? ""
+                           : ", allow_tma=False";
+    std::string index = "(ct.astype(" + arg(1) + ", " + idxTy + ") * (" + s +
+                        " // R) + " + arg(2) + ", " + arg(3) + ")";
+    if (code == "stripe_tile_store") {
+      line("ct.store(" + arg(0) + ", " + index + ", " + arg(4) + hint + ")");
+      return llvm::Error::success();
+    }
+    expr = "ct.load(" + arg(0) + ", " + index +
+           ", shape=(R,W), padding_mode=ct.PaddingMode.ZERO" + hint + ")";
+  } else if (code == "rect_slab_load" || code == "rect_slab_store") {
+    auto base = arg(0), row = arg(1), tile = arg(2);
+    int64_t owner = v.attrOfType<IntegerAttr>("owner_axis").getInt();
+    int64_t extent = v.attrOfType<IntegerAttr>("inner_extent").getInt();
+    auto inner = "min(W," + std::to_string(extent) + ")";
+    auto segments = "(W//" + inner + ")";
+    auto major =
+        "(" + tile + "//(" + std::to_string(extent) + "//" + inner + "))";
+    auto minor =
+        "(" + tile + "%(" + std::to_string(extent) + "//" + inner + "))";
+    auto shape = owner == 0 ? "(R," + segments + "," + inner + ")"
+                            : "(" + segments + ",R," + inner + ")";
+    auto coord = owner == 0 ? "(" + row + "," + major + "," + minor + ")"
+                            : "(" + major + "," + row + "," + minor + ")";
+    std::string slabHint =
+        v.attrOfType<BoolAttr>("allow_tma").getValue() ? "" : ",allow_tma=False";
+    if (code == "rect_slab_store") {
+      auto val = arg(3);
+      auto shaped =
+          "ct.reshape(" + val + ",(R," + segments + "," + inner + "))";
+      if (owner != 0)
+        shaped = "ct.permute(" + shaped + ",(1,0,2))";
+      line("ct.store(" + base + "," + coord + "," + shaped + slabHint + ")");
+      return llvm::Error::success();
+    }
+    bool bcast = v.attrOfType<BoolAttr>("broadcast_inner").getValue();
+    auto loadShape =
+        owner == 0 ? "(R," + segments + "," + (bcast ? "1" : inner) + ")"
+                   : "(" + segments + ",R," + (bcast ? "1" : inner) + ")";
+    auto loadCoord =
+        owner == 0 ? "(" + row + "," + major + "," + (bcast ? "0" : minor) + ")"
+                   : "(" + major + "," + row + "," + (bcast ? "0" : minor) + ")";
+    auto loaded = "ct.load(" + base + "," + loadCoord + ",shape=" + loadShape +
+                  ",padding_mode=ct.PaddingMode.ZERO" + slabHint + ")";
+    if (bcast)
+      loaded = "ct.broadcast_to(" + loaded + "," + shape + ")";
+    if (owner != 0)
+      loaded = "ct.permute(" + loaded + ",(1,0,2))";
+    expr = "ct.reshape(" + loaded + ",(R,W))";
+  } else if (code == "gather_slab" || code == "scatter_slab") {
+    auto base = arg(0), col = "ct.expand_dims(" + arg(2) + ",0)";
+    int64_t owner = v.attrOfType<IntegerAttr>("owner_axis").getInt();
+    int rank = cast<MemRefType>(v.operandType(0)).getRank();
+    SmallVector<std::string> coords(rank);
+    for (int i = rank - 1; i >= 0; --i) {
+      auto size = "ct.maximum(" + base + ".shape[" + std::to_string(i) + "],1)";
+      if (i == owner)
+        coords[i] = "ct.expand_dims(" + arg(1) + ",1)";
+      else {
+        coords[i] = "(" + col + ")%" + size;
+        col = "((" + col + ")//" + size + ")";
+      }
+    }
+    auto address = base + ",(" + llvm::join(coords, ",") + ")";
+    if (code == "scatter_slab") {
+      line("ct.scatter(" + address + "," + arg(4) + ",mask=" + arg(3) + ")");
+      return llvm::Error::success();
+    }
+    expr = "ct.gather(" + address + ",mask=" + arg(3) + ")";
+  } else if (code == "active") {
+    auto owner = v.attrOfType<IntegerAttr>("ct_src.owner_axis");
+    int rank = cast<MemRefType>(v.operandType(0)).getRank();
+    if (owner) {
+      expr = "(ct.expand_dims(" + arg(1) + ",1)<" + arg(0) + ".shape[" +
+             std::to_string(owner.getInt()) + "]) & (ct.expand_dims(" + arg(2) +
+             ",0)<" +
+             memberCountExpr(v.operandType(0), arg(0), owner.getInt()) + ")";
+    } else if (rank == 1) {
+      expr = "(ct.expand_dims(" + arg(1) + ",1)<1) & (ct.expand_dims(" +
+             arg(2) + ",0)<" + arg(0) + ".shape[0])";
+    } else if (rank > 2) {
+      auto a = arg(0);
+      std::string count = "1";
+      for (int i = 0; i < rank - 1; ++i)
+        count += "*" + a + ".shape[" + std::to_string(i) + "]";
+      expr = "(ct.expand_dims(" + arg(1) + ",1)<" + count +
+             ") & (ct.expand_dims(" + arg(2) + ",0)<" + a + ".shape[-1])";
+    } else {
+      expr = "(ct.expand_dims(" + arg(1) + ", 1) < " + arg(0) +
+             ".shape[0]) & (ct.expand_dims(" + arg(2) + ", 0) < " + arg(0) +
+             ".shape[1])";
+    }
+  } else if (code == "linear_index") {
+    auto owner = v.attrOfType<IntegerAttr>("ct_src.owner_axis");
+    bool wide = cast<RankedTensorType>(v.resultType(0))
+                    .getElementType()
+                    .isUnsignedInteger(64);
+    std::string row = wide ? "ct.astype(" + arg(1) + ",ct.uint64)" : arg(1);
+    std::string width =
+        owner ? memberCountExpr(v.operandType(0), arg(0), owner.getInt())
+              : arg(0) + ".shape[-1]";
+    std::string column = arg(2);
+    if (wide) {
+      width = "ct.astype(" + width + ",ct.uint64)";
+      column = "ct.astype(" + column + ",ct.uint64)";
+    }
+    expr = "ct.astype(ct.expand_dims(" + row + ",1)*" + width +
+           "+ct.expand_dims(" + column + ",0)," +
+           (wide ? "ct.uint64)" : "ct.int32)");
+  } else if (code == "pid") {
+    expr = "ct.astype(ct.bid(0), " +
+           v.attrOfType<StringAttr>("index_type").str() + ")";
+    if (v.attrOfType<BoolAttr>("column_tiles").getValue())
+      expr += v.attrOfType<IntegerAttr>("axis").getInt() == 0
+                  ? " // COLUMN_TILES"
+                  : " % COLUMN_TILES";
+  } else if (code == "div") {
+    bool approx = rowHasAnyFastMath(
+        v, arith::FastMathFlags::arcp | arith::FastMathFlags::afn);
+    expr = "ct.truediv(" + arg(0) + ", " + arg(1) +
+           (v.attr("ct_src.ftz") ? ", flush_to_zero=True" : "") +
+           ", rounding_mode=ct.RoundingMode." + (approx ? "APPROX" : "RN") +
+           ")";
+  } else if (code == "splat") {
     SmallVector<std::string> dims;
     for (auto a : v.attrOfType<ArrayAttr>("dimensions"))
       dims.push_back(cast<StringAttr>(a) == "ROWS" ? "R" : "W");
@@ -466,29 +430,25 @@ void rowRules(TerminalPrinter &printer) {
   ops["ct_src.sqrt"] = PrintRule::format("$r0 = ct.sqrt($0)");
   ops["ct_src.exp"] = PrintRule::format("$r0 = ct.exp($0)");
   ops["ct_src.rsqrt"] = PrintRule::format("$r0 = ct.rsqrt($0)");
+  ops["ct_src.rows"] =
+      PrintRule::format("$r0 = $0 * R + ct.arange(R, dtype={index_type})");
+  ops["ct_src.columns"] = PrintRule::format(
+      "$r0 = ct.astype($0, {index_type}) * W + ct.arange(W, dtype={index_type})");
+  ops["ct_src.stripe_owner_load"] = PrintRule::format(
+      "$r0 = ct.broadcast_to(ct.expand_dims(ct.gather($0,ct.astype($1,{index_type})*{stride}+$2),1),(R,W))");
 
   // Local rules (LocalOpView only)
-  for (auto op : {"bin_index", "zero_bins", "bin_panels", "read_bin_keys",
+  for (auto op : {"tiles", "stripe_tile_load", "stripe_tile_store",
+                  "rect_slab_load", "rect_slab_store", "gather_slab",
+                  "scatter_slab", "active", "linear_index", "pid", "div",
+                  "bin_index", "zero_bins", "bin_panels", "read_bin_keys",
                   "atomic_bins", "splat", "view_offset", "extract_lane",
                   "axis_reduce", "map", "uniform", "constant", "tile_load",
                   "tile_store", "reduce", "identity", "combine", "cast"})
     ops["ct_src." + std::string(op)] = PrintRule::local(localRowRule);
 
   // Audited custom rules with explicit structural reasons
-  ops["ct_src.tiles"] = PrintRule::custom(
-      customRowRule, "binds tile sweep carries and reads function kir.owner_axis");
   ops["ct_src.yield"] = PrintRule::custom(
       customRowRule, "assigns yielded values to enclosing ct_src.tiles results");
-  ops["ct_src.dimension"] = PrintRule::custom(
-      customRowRule, "computes logical M/N extent from verified domain slot argument");
-  for (auto op : {"stripe_owner_load", "stripe_tile_load", "stripe_tile_store",
-                  "pid", "rows", "columns"})
-    ops["ct_src." + std::string(op)] = PrintRule::custom(
-        customRowRule, "reads verified function ct_src.index_bits / block.grid ABI");
-  for (auto op : {"gather_slab", "scatter_slab", "active", "linear_index"})
-    ops["ct_src." + std::string(op)] = PrintRule::custom(
-        customRowRule, "reads verified function kir.owner_axis / ct_src.shape layout");
-  ops["ct_src.div"] = PrintRule::custom(
-      customRowRule, "reads function denormal-fp-math policy for flush_to_zero");
 }
 } // namespace CI_UNIT_NAMESPACE

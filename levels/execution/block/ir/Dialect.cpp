@@ -58,8 +58,13 @@ struct OwnerSpaceIndexedRegionModel
     if (auto pair = op->getAttrOfType<IntegerAttr>("block.pair_axis")) {
       if (auto tile = op->getAttrOfType<IntegerAttr>("block.owner_tile");
           tile && pair.getInt() == static_cast<int64_t>(idx) &&
-          tile.getInt() > 1)
+          tile.getInt() > 1) {
+        auto owners = op->getAttrOfType<IntegerAttr>("block.owners");
+        if (*ext < tile.getInt() || (*ext % tile.getInt()) != 0 || !owners ||
+            owners.getInt() <= 0 || (owners.getInt() % tile.getInt()) != 0)
+          return failure();
         step = tile.getInt();
+      }
     }
     out = compilerinfra::RegionIndexBounds{};
     out.staticLower = 0;

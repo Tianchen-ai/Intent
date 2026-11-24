@@ -222,7 +222,7 @@ class Capture:
                     raise ValueError("fdiv flags must be boolean literals")
                 args = [self.expr(v) for v in n.args]
                 ty = next((t for _, t in args if t.startswith("tensor")), args[0][1])
-                extra = (*(("afn", "arcp") if approx else ()), *(("nsz",) if ftz else ()))
+                extra = ("afn", "arcp") if approx else ()
                 return self.emit("div", args, ty, self.fm_attr(extra))
             count = 2 if fn == "cast" else 1
             if len(n.args) != count or (fn not in ("sum", "reduce", "exp") and n.keywords):
@@ -267,7 +267,7 @@ class Capture:
                 ftz = ast.literal_eval(kw["flush_to_zero"]) if "flush_to_zero" in kw else False
                 if type(approx) is not bool or type(ftz) is not bool:
                     raise ValueError("math flags must be boolean literals")
-                extra = (*(("afn",) if approx else ()), *(("nsz",) if ftz else ()))
+                extra = ("afn",) if approx else ()
                 return self.emit(fn, [v], v[1], self.fm_attr(extra))
         raise ValueError(
             f"unsupported author expression at line {n.lineno}: {ast.unparse(n)}"

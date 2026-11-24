@@ -12,7 +12,32 @@ Value scalarIndex(Tiles &t, Value value, StringRef op = "min") {
   return isa<RankedTensorType>(value.getType()) ? t.reduce(value, op, 0)
                                                 : value;
 }
+Value scalarTileStart(Tiles &t, Value coord, int64_t rows) {
+  if (!isa<RankedTensorType>(coord.getType()))
+    return coord;
+  if (auto add = coord.getDefiningOp<arith::AddIOp>()) {
+    for (int side : {0, 1}) {
+      Operation *bcast = add->getOperand(side).getDefiningOp();
+      Operation *axis = add->getOperand(1 - side).getDefiningOp();
+      if (bcast && axis &&
+          bcast->getName().stripDialect() == "tile_broadcast" &&
+          bcast->getAttrOfType<IntegerAttr>("axis").getInt() == -1 &&
+          !isa<ShapedType>(bcast->getOperand(0).getType()) &&
+          axis->getName().stripDialect() == "tile_axis" &&
+          cast<RankedTensorType>(axis->getResult(0).getType()).getDimSize(0) ==
+              rows)
+        return bcast->getOperand(0);
+    }
+  }
+  return scalarIndex(t, coord);
+}
 Value blockIndex(Tiles &t, Value index, int64_t width) {
+  if (auto mul = index.getDefiningOp<arith::MulIOp>())
+    if (auto c = mul.getRhs().getDefiningOp<arith::ConstantOp>())
+      if (auto ia = dyn_cast<IntegerAttr>(c.getValue());
+          ia && ia.getValue().getSignificantBits() <= 64 &&
+          ia.getInt() == width)
+        return mul.getLhs();
   return t.b.create<arith::DivUIOp>(t.loc, index, t.integer(width));
 }
 Value load(Tiles &t, Value base, ValueRange at, ArrayRef<int64_t> shape,
@@ -35,7 +60,8 @@ bool rectangle(Tiles &t, Operation &op, ArrayRef<Value> coords, int64_t rows,
   int64_t width = t.shape(base).asArrayRef().back();
   SmallVector<Value> at;
   for (auto [idx, coord] : llvm::enumerate(coords)) {
-    Value sc = scalarIndex(t, coord);
+    Value sc = int64_t(idx) == pos ? scalarTileStart(t, coord, rows)
+                                   : scalarIndex(t, coord);
     at.push_back(int64_t(idx) == pos ? blockIndex(t, sc, rows) : sc);
   }
   at.push_back(t.integer(0));

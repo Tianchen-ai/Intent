@@ -34,8 +34,7 @@ Range evaluateTileRange(Value v, Operation *scopeRoot,
     compilerinfra::AddressProofOptions opts;
     opts.targetBitwidth = 32;
     opts.isSigned = true;
-    auto proof =
-        compilerinfra::proveNarrowAddress(scopeRoot, {v}, opts, &ranges);
+    auto proof = compilerinfra::proveNarrowAddress(v, opts, &ranges);
     if (proof.proven) {
       if (auto cr = ranges.query(v)) {
         res = fitI32(cr->smin().getSExtValue(), cr->smax().getSExtValue());
