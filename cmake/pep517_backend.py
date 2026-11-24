@@ -244,7 +244,20 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
         for var in ("CMAKE_PREFIX_PATH", "CompilerInfra_DIR", "MLIR_DIR", "LLVM_DIR", "dnnl_DIR"):
             val = os.environ.get(var, "").strip()
             if val:
+                if var == "CMAKE_PREFIX_PATH":
+                    val = ";".join(p for p in re.split(r"[;:]", val) if p)
                 cfg_cmd.append(f"-D{var}={val}")
+        if not os.environ.get("CompilerInfra_DIR", "").strip():
+            raw_prefixes = os.environ.get("CMAKE_PREFIX_PATH", "")
+            for pref in (p.strip() for p in re.split(r"[;:]", raw_prefixes) if p.strip()):
+                for sub in ("lib/cmake/CompilerInfra", "lib64/cmake/CompilerInfra"):
+                    cand = Path(pref) / sub
+                    if (cand / "CompilerInfraConfig.cmake").is_file():
+                        cfg_cmd.append(f"-DCompilerInfra_DIR={cand}")
+                        break
+                else:
+                    continue
+                break
         extra = os.environ.get("INTENTDSL_CMAKE_ARGS", "").strip()
         if extra:
             cfg_cmd.extend(extra.split())
