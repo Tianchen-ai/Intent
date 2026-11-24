@@ -10,6 +10,7 @@
 #include "mlir/IR/IRMapping.h"
 #include "llvm/ADT/StringExtras.h"
 #include <cmath>
+#include <map>
 #include <set>
 
 namespace CI_UNIT_NAMESPACE {
@@ -133,6 +134,9 @@ struct RowLowerer {
   SmallVector<Value, 4> rowCacheBufs;
   SmallVector<Type, 4> rowCacheElemTypes;
   bool forceUnitStride = false;
+  Block *sweepHoistBlock = nullptr;
+  Operation *sweepHoistBefore = nullptr;
+  std::map<std::pair<void *, int64_t>, Value> sweepSplatCache;
 
   unsigned slotIndex(Value taskCapture) {
     return cast<BlockArgument>(taskCapture).getArgNumber() - 1;
@@ -808,6 +812,33 @@ struct RowLowerer {
   Value splatIfScalar(Value v, Type targetTy, int64_t w) {
     if (w == 1 || isa<ShapedType>(v.getType()) || !isa<ShapedType>(targetTy))
       return v;
+    auto key = std::make_pair(v.getAsOpaquePointer(), w);
+    if (sweepHoistBlock) {
+      Block *defBlk = v.getParentBlock();
+      bool dominates =
+          defBlk && (defBlk == sweepHoistBlock ||
+                     defBlk->getParentOp()->isProperAncestor(
+                         sweepHoistBlock->getParentOp()));
+      if (dominates) {
+        auto it = sweepSplatCache.find(key);
+        if (it != sweepSplatCache.end())
+          return it->second;
+        OpBuilder::InsertionGuard hg(b);
+        if (sweepHoistBefore)
+          b.setInsertionPoint(sweepHoistBefore);
+        else
+          b.setInsertionPointToEnd(sweepHoistBlock);
+        auto vecTy = VectorType::get({w}, v.getType());
+        Value res =
+            makeOp(b, loc, "splat_scalar", {v}, {vecTy},
+                   {b.getNamedAttr("dtype",
+                                   b.getStringAttr(dtypeBare(v.getType()))),
+                    b.getNamedAttr("width", b.getI64IntegerAttr(w))})
+                ->getResult(0);
+        sweepSplatCache[key] = res;
+        return res;
+      }
+    }
     auto vecTy = VectorType::get({w}, v.getType());
     return makeOp(b, loc, "splat_scalar", {v}, {vecTy},
                   {b.getNamedAttr("dtype", b.getStringAttr(dtypeBare(v.getType()))),
@@ -828,8 +859,6 @@ struct RowLowerer {
     }
 
     auto vecTy = VectorType::get({w}, elemTy);
-    Value c0 = constIdx(b, loc, 0), c1 = constIdx(b, loc, 1),
-          cW = constIdx(b, loc, w);
 
     if (ownerAxis) {
       int64_t R = slots[idx].rank;
@@ -856,6 +885,8 @@ struct RowLowerer {
               ->getResult(0);
         }
       }
+      Value c0 = constIdx(b, loc, 0), c1 = constIdx(b, loc, 1),
+            cW = constIdx(b, loc, w);
       Value resSlot = declVecSlot(vecTy, w);
       Value span = hoistedOwnerSizes[idx][fast];
       Value step = slots[idx].strideVals[fast];
@@ -948,6 +979,8 @@ struct RowLowerer {
             ->getResult(0);
       }
     }
+    Value c0 = constIdx(b, loc, 0), c1 = constIdx(b, loc, 1),
+          cW = constIdx(b, loc, w);
     Value resSlot = declVecSlot(vecTy, w);
     Value step = slots[idx].strideVals[fastAxis];
     Value baseAddr = emitViewAddr(idx, buildStandardCoords(idx, r, j, swap));
@@ -1013,8 +1046,6 @@ struct RowLowerer {
       return;
     }
 
-    Value c0 = constIdx(b, loc, 0), c1 = constIdx(b, loc, 1),
-          cW = constIdx(b, loc, w);
     if (ownerAxis) {
       int64_t R = slots[idx].rank;
       int64_t fast = R - 1 - (*ownerAxis == R - 1 ? 1 : 0);
@@ -1025,6 +1056,8 @@ struct RowLowerer {
         makeOp(b, loc, "store_slice", {slots[idx].ptrVal, baseAddr, val});
         return;
       }
+      Value c0 = constIdx(b, loc, 0), c1 = constIdx(b, loc, 1),
+            cW = constIdx(b, loc, w);
       Value span = hoistedOwnerSizes[idx][fast];
       Value step = slots[idx].strideVals[fast];
       Value baseAddr = emitViewAddr(idx, buildOwnerCoords(idx, r, j));
@@ -1067,6 +1100,8 @@ struct RowLowerer {
       makeOp(b, loc, "store_slice", {slots[idx].ptrVal, baseAddr, val});
       return;
     }
+    Value c0 = constIdx(b, loc, 0), c1 = constIdx(b, loc, 1),
+          cW = constIdx(b, loc, w);
     Value step = slots[idx].strideVals[fastAxis];
     Value baseAddr = emitViewAddr(idx, buildStandardCoords(idx, r, j, swap));
     Value isContig =
@@ -1111,6 +1146,8 @@ struct RowLowerer {
           yieldedVals.push_back(map.lookup(yv));
         return success();
       }
+      if (op.getNumResults() == 1 && map.contains(op.getResult(0)))
+        continue;
       if (code == "row_cache_load") {
         unsigned cSlot = op.getAttrOfType<IntegerAttr>("slot").getInt();
         Value buf = rowCacheBufs[cSlot];
@@ -1597,33 +1634,15 @@ struct RowLowerer {
       }
       if (code == "owner_read" || code == "owner_write") {
         unsigned sIdx = slotIndex(op.getOperand(0));
-        if (w == 1) {
-          Value addr = (forceUnitStride && slots[sIdx].rank == 1)
-                           ? makeStaticAddr(b, loc, slots[sIdx].ptrVal, {r}, {1})
-                           : emitViewAddr(sIdx, {r});
-          if (code == "owner_read") {
-            Value val = makeOp(b, loc, "load_scalar",
-                               {slots[sIdx].ptrVal, addr}, {slots[sIdx].elemTy})
-                            ->getResult(0);
-            map.map(op.getResult(0), val);
-          } else {
-            makeOp(b, loc, "store_scalar",
-                   {slots[sIdx].ptrVal, addr, map.lookup(op.getOperand(2))});
-          }
+        Value addr = emitViewAddr(sIdx, {r});
+        if (code == "owner_read") {
+          Value val = makeOp(b, loc, "load_scalar",
+                             {slots[sIdx].ptrVal, addr}, {slots[sIdx].elemTy})
+                          ->getResult(0);
+          map.map(op.getResult(0), val);
         } else {
-          Value addr = makeStaticAddr(b, loc, slots[sIdx].ptrVal, {r}, {1});
-          auto vecTy = VectorType::get({w}, slots[sIdx].elemTy);
-          if (code == "owner_read") {
-            Value val = makeOp(b, loc, "load_slice",
-                               {slots[sIdx].ptrVal, addr}, {vecTy},
-                               {b.getNamedAttr("width", b.getI64IntegerAttr(w))})
-                            ->getResult(0);
-            map.map(op.getResult(0), val);
-          } else {
-            Value vecVal =
-                splatIfScalar(map.lookup(op.getOperand(2)), vecTy, w);
-            makeOp(b, loc, "store_slice", {slots[sIdx].ptrVal, addr, vecVal});
-          }
+          makeOp(b, loc, "store_scalar",
+                 {slots[sIdx].ptrVal, addr, map.lookup(op.getOperand(2))});
         }
         continue;
       }
@@ -2041,9 +2060,137 @@ struct RowLowerer {
       }
     }
 
-    auto emitInnerColStep = [&](Value j) -> LogicalResult {
-      SmallVector<Value, 4> yielded;
-      IRMapping bodyMap = rowMap;
+    // Hoist row-invariant owner reads, static stride-0 broadcast reads, and
+    // pure invariant expressions out of the inner column loop.
+    IRMapping hoistedRowMap = rowMap;
+    sweepSplatCache.clear();
+    bool hasSweepUniform = false;
+    {
+      llvm::DenseSet<unsigned> writtenSlots;
+      for (Operation &sop : loop.getRegion(0).front()) {
+        auto sc = sop.getName().stripDialect();
+        if (sc == "write" || sc == "owner_write")
+          writtenSlots.insert(slotIndex(sop.getOperand(0)));
+        if (sc == "apply") {
+          auto k = sop.getAttrOfType<StringAttr>("kind");
+          if (k && k.getValue() == "uniform")
+            hasSweepUniform = true;
+        }
+      }
+      sweepHoistBlock = b.getInsertionBlock();
+      sweepHoistBefore = nullptr;
+      for (Operation &sop : loop.getRegion(0).front()) {
+        auto sc = sop.getName().stripDialect();
+        if (sc == "owner_read") {
+          unsigned sIdx = slotIndex(sop.getOperand(0));
+          if (writtenSlots.contains(sIdx))
+            continue;
+          Value addr = emitViewAddr(sIdx, {r});
+          Value val = makeOp(b, loc, "load_scalar",
+                             {slots[sIdx].ptrVal, addr}, {slots[sIdx].elemTy})
+                          ->getResult(0);
+          hoistedRowMap.map(sop.getResult(0), val);
+        } else if (sc == "read" && !ownerAxis) {
+          unsigned sIdx = slotIndex(sop.getOperand(0));
+          if (writtenSlots.contains(sIdx) || !slots[sIdx].boundStrides ||
+              slots[sIdx].rank < 1)
+            continue;
+          bool swap = sop.hasAttr("axes");
+          int64_t fAx =
+              slots[sIdx].rank == 2 && swap ? 0 : int64_t(slots[sIdx].rank) - 1;
+          if (slots[sIdx].boundStrides[fAx] != 0)
+            continue;
+          Value addr = emitViewAddr(sIdx, buildStandardCoords(sIdx, r, c0, swap));
+          Value scVal = makeOp(b, loc, "load_scalar",
+                               {slots[sIdx].ptrVal, addr}, {slots[sIdx].elemTy})
+                            ->getResult(0);
+          Value val =
+              w == 1
+                  ? scVal
+                  : makeOp(b, loc, "splat_scalar", {scVal},
+                           {VectorType::get({w}, slots[sIdx].elemTy)},
+                           {b.getNamedAttr("dtype",
+                                           b.getStringAttr(
+                                               dtypeBare(slots[sIdx].elemTy))),
+                            b.getNamedAttr("width", b.getI64IntegerAttr(w))})
+                        ->getResult(0);
+          hoistedRowMap.map(sop.getResult(0), val);
+        } else if (sc == "apply") {
+          auto opKind = sop.getAttrOfType<StringAttr>("kind").getValue();
+          if (opKind != "constant" && opKind != "field" && opKind != "cast" &&
+              opKind != "sqrt" && opKind != "exp" && opKind != "rsqrt" &&
+              opKind != "add" && opKind != "sub" && opKind != "mul" &&
+              opKind != "div")
+            continue;
+          Type origResTy = sop.getResult(0).getType();
+          Type elemResTy = isa<ShapedType>(origResTy)
+                               ? cast<ShapedType>(origResTy).getElementType()
+                               : origResTy;
+          if (opKind == "div" && !isa<FloatType>(elemResTy))
+            continue;
+          if (!llvm::all_of(sop.getOperands(),
+                            [&](Value in) { return hoistedRowMap.contains(in); }))
+            continue;
+          Type targetTy = w == 1 && isa<ShapedType>(origResTy) ? elemResTy
+                                                                : origResTy;
+          Value hRes;
+          if (opKind == "constant") {
+            hRes = makeOp(b, loc, "scalar_const", {}, {elemResTy},
+                          {b.getNamedAttr("dtype",
+                                          b.getStringAttr(dtypeBare(elemResTy))),
+                           b.getNamedAttr("literal",
+                                          b.getStringAttr(intentdsl::kir::literal(
+                                              sop.getAttrOfType<TypedAttr>(
+                                                  "value"))))})
+                       ->getResult(0);
+          } else if (opKind == "field") {
+            int64_t pos = sop.getAttrOfType<IntegerAttr>("position").getInt();
+            hRes = makeOp(b, loc, "tuple_field",
+                          {hoistedRowMap.lookup(sop.getOperand(0))},
+                          {elemResTy},
+                          {b.getNamedAttr("position", b.getI64IntegerAttr(pos))})
+                       ->getResult(0);
+          } else if (opKind == "cast") {
+            Value inVal = hoistedRowMap.lookup(sop.getOperand(0));
+            Type outTy = isa<ShapedType>(inVal.getType()) ? targetTy : elemResTy;
+            hRes = makeOp(b, loc, "scalar_cast", {inVal}, {outTy},
+                          {b.getNamedAttr("dtype",
+                                          b.getStringAttr(dtypeBare(elemResTy)))})
+                       ->getResult(0);
+          } else if (opKind == "sqrt" || opKind == "exp" || opKind == "rsqrt") {
+            Value inVal =
+                splatIfScalar(hoistedRowMap.lookup(sop.getOperand(0)), targetTy, w);
+            hRes = opKind == "sqrt"
+                       ? b.create<math::SqrtOp>(loc, inVal).getResult()
+                       : (opKind == "exp"
+                              ? b.create<math::ExpOp>(loc, inVal).getResult()
+                              : b.create<math::RsqrtOp>(loc, inVal).getResult());
+          } else {
+            Value lhs =
+                splatIfScalar(hoistedRowMap.lookup(sop.getOperand(0)), targetTy, w);
+            Value rhs =
+                splatIfScalar(hoistedRowMap.lookup(sop.getOperand(1)), targetTy, w);
+            bool isFl = isa<FloatType>(elemResTy);
+            if (opKind == "add")
+              hRes = isFl ? b.create<arith::AddFOp>(loc, lhs, rhs).getResult()
+                          : b.create<arith::AddIOp>(loc, lhs, rhs).getResult();
+            else if (opKind == "sub")
+              hRes = isFl ? b.create<arith::SubFOp>(loc, lhs, rhs).getResult()
+                          : b.create<arith::SubIOp>(loc, lhs, rhs).getResult();
+            else if (opKind == "mul")
+              hRes = isFl ? b.create<arith::MulFOp>(loc, lhs, rhs).getResult()
+                          : b.create<arith::MulIOp>(loc, lhs, rhs).getResult();
+            else
+              hRes = b.create<arith::DivFOp>(loc, lhs, rhs).getResult();
+          }
+          hoistedRowMap.map(sop.getResult(0), hRes);
+        }
+      }
+    }
+
+    auto emitInnerColStepTo = [&](Value j, ArrayRef<Value> dstAccs) -> LogicalResult {
+      SmallVector<Value, 16> yielded;
+      IRMapping bodyMap = hoistedRowMap;
       bodyMap.map(loop.getRegion(0).front().getArgument(0), j);
       if (failed(lowerSweepBody(loop.getRegion(0).front(), r, j, w, bodyMap,
                                 scanCarries, yielded)))
@@ -2081,57 +2228,114 @@ struct RowLowerer {
         }
       } else if (!isTail) {
         for (unsigned k = 0; k < numReds; ++k) {
-          Value cur = readVecSlot(accSlots[k]);
+          Value cur = readVecSlot(dstAccs[k]);
           Value next =
               isSum
                   ? b.create<arith::AddFOp>(loc, cur, yielded[k]).getResult()
                   : b.create<arith::MaxNumFOp>(loc, cur, yielded[k]).getResult();
-          writeVecSlot(accSlots[k], next);
+          writeVecSlot(dstAccs[k], next);
         }
       } else {
         for (unsigned k = 0; k < numReds; ++k) {
-          Value cur = readScalarSlot(accSlots[k]);
+          Value cur = readScalarSlot(dstAccs[k]);
           Value next =
               isSum
                   ? b.create<arith::AddFOp>(loc, cur, yielded[k]).getResult()
                   : b.create<arith::MaxNumFOp>(loc, cur, yielded[k]).getResult();
-          writeScalarSlot(accSlots[k], next);
+          writeVecSlot(dstAccs[k], next);
         }
       }
       return success();
     };
+    auto emitInnerColStep = [&](Value j) {
+      return emitInnerColStepTo(j, accSlots);
+    };
 
     if (!isTail) {
-      Value stepBlock = b.create<arith::MulIOp>(
-          loc,
-          b.create<arith::MaxSIOp>(
-              loc, c1,
-              b.create<arith::FloorDivSIOp>(loc, colBlockIdx,
-                                            constIdx(b, loc, w))),
-          constIdx(b, loc, w));
-      auto emitBlockedFullLoop = [&](bool unitFast) -> LogicalResult {
+      Value cW = constIdx(b, loc, w);
+      sweepHoistBefore = cW.getDefiningOp();
+      Value initVal;
+      if (!isStore && !isMoments && !isSum) {
+        Value neginf = constF32(b, loc, -INFINITY);
+        initVal =
+            makeOp(b, loc, "splat_scalar", {neginf}, {vecF32Ty},
+                   {b.getNamedAttr("dtype", b.getStringAttr("float32")),
+                    b.getNamedAttr("width", b.getI64IntegerAttr(w))})
+                ->getResult(0);
+      }
+      auto emitBlockedFullLoop = [&](bool unitFast,
+                                     bool allowUnroll4) -> LogicalResult {
         bool prevFast = forceUnitStride;
         forceUnitStride = unitFast;
-        auto *bLoop = makeOp(b, loc, "for_range", {c0, fullStop, stepBlock}, {},
-                             {}, 1);
-        Block &bBb = bLoop->getRegion(0).emplaceBlock();
-        Value base = bBb.addArgument(b.getIndexType(), loc);
-        OpBuilder::InsertionGuard bg(b);
-        b.setInsertionPointToEnd(&bBb);
-        Value jStop = b.create<arith::MinSIOp>(
-            loc, b.create<arith::AddIOp>(loc, base, stepBlock), fullStop);
-        auto *jLoop = makeOp(b, loc, "for_range",
-                             {base, jStop, constIdx(b, loc, w)}, {}, {}, 1);
+        if (allowUnroll4 && w > 1 && !isStore && !isMoments && numReds >= 1 &&
+            numReds <= 4 && !hasSweepUniform) {
+          SmallVector<SmallVector<Value, 4>, 3> extraAccs(3);
+          for (int u = 0; u < 3; ++u)
+            for (unsigned k = 0; k < numReds; ++k)
+              extraAccs[u].push_back(declVecSlot(vecF32Ty, w, initVal));
+          Value cW2 = constIdx(b, loc, 2 * w), cW3 = constIdx(b, loc, 3 * w),
+                cW4 = constIdx(b, loc, 4 * w);
+          Value unrollStop = b.create<arith::MulIOp>(
+              loc, b.create<arith::FloorDivSIOp>(loc, fullStop, cW4), cW4);
+          {
+            auto *uLoop =
+                makeOp(b, loc, "for_range", {c0, unrollStop, cW4}, {}, {}, 1);
+            Block &uBb = uLoop->getRegion(0).emplaceBlock();
+            Value j0 = uBb.addArgument(b.getIndexType(), loc);
+            OpBuilder::InsertionGuard ug(b);
+            b.setInsertionPointToEnd(&uBb);
+            if (failed(emitInnerColStepTo(j0, accSlots)) ||
+                failed(emitInnerColStepTo(
+                    b.create<arith::AddIOp>(loc, j0, cW), extraAccs[0])) ||
+                failed(emitInnerColStepTo(
+                    b.create<arith::AddIOp>(loc, j0, cW2), extraAccs[1])) ||
+                failed(emitInnerColStepTo(
+                    b.create<arith::AddIOp>(loc, j0, cW3), extraAccs[2]))) {
+              forceUnitStride = prevFast;
+              return failure();
+            }
+            makeOp(b, loc, "end");
+          }
+          {
+            auto *rLoop =
+                makeOp(b, loc, "for_range", {unrollStop, fullStop, cW}, {}, {}, 1);
+            Block &rBb = rLoop->getRegion(0).emplaceBlock();
+            Value j = rBb.addArgument(b.getIndexType(), loc);
+            OpBuilder::InsertionGuard rg(b);
+            b.setInsertionPointToEnd(&rBb);
+            if (failed(emitInnerColStepTo(j, accSlots))) {
+              forceUnitStride = prevFast;
+              return failure();
+            }
+            makeOp(b, loc, "end");
+          }
+          for (unsigned k = 0; k < numReds; ++k) {
+            auto comb = [&](Value a, Value d) {
+              return isSum ? b.create<arith::AddFOp>(loc, a, d).getResult()
+                           : b.create<arith::MaxNumFOp>(loc, a, d).getResult();
+            };
+            Value s01 =
+                comb(readVecSlot(accSlots[k]), readVecSlot(extraAccs[0][k]));
+            Value s23 =
+                comb(readVecSlot(extraAccs[1][k]), readVecSlot(extraAccs[2][k]));
+            writeVecSlot(accSlots[k], comb(s01, s23));
+          }
+          forceUnitStride = prevFast;
+          return success();
+        }
+        auto *jLoop =
+            makeOp(b, loc, "for_range", {c0, fullStop, cW}, {}, {}, 1);
         Block &jBb = jLoop->getRegion(0).emplaceBlock();
         Value j = jBb.addArgument(b.getIndexType(), loc);
-        b.setInsertionPointToEnd(&jBb);
-        if (failed(emitInnerColStep(j))) {
-          forceUnitStride = prevFast;
-          return failure();
+        {
+          OpBuilder::InsertionGuard jg(b);
+          b.setInsertionPointToEnd(&jBb);
+          if (failed(emitInnerColStep(j))) {
+            forceUnitStride = prevFast;
+            return failure();
+          }
+          makeOp(b, loc, "end");
         }
-        makeOp(b, loc, "end");
-        b.setInsertionPointToEnd(&bBb);
-        makeOp(b, loc, "end");
         forceUnitStride = prevFast;
         return success();
       };
@@ -2166,30 +2370,46 @@ struct RowLowerer {
         {
           OpBuilder::InsertionGuard tg(b);
           b.setInsertionPointToStart(&ifUnit.getThenRegion().front());
-          if (failed(emitBlockedFullLoop(true)))
+          if (failed(emitBlockedFullLoop(true, true))) {
+            sweepHoistBlock = nullptr;
+            sweepHoistBefore = nullptr;
             return failure();
+          }
         }
         {
           OpBuilder::InsertionGuard eg(b);
           b.setInsertionPointToStart(&ifUnit.getElseRegion().front());
-          if (failed(emitBlockedFullLoop(false)))
+          if (failed(emitBlockedFullLoop(false, false))) {
+            sweepHoistBlock = nullptr;
+            sweepHoistBefore = nullptr;
             return failure();
+          }
         }
       } else {
-        if (failed(emitBlockedFullLoop(false)))
+        if (failed(emitBlockedFullLoop(false, !ownerAxis))) {
+          sweepHoistBlock = nullptr;
+          sweepHoistBefore = nullptr;
           return failure();
+        }
       }
     } else {
+      sweepHoistBlock = nullptr;
+      sweepHoistBefore = nullptr;
       auto *jLoop =
           makeOp(b, loc, "for_range", {fullStop, colsIdx, c1}, {}, {}, 1);
       Block &jBb = jLoop->getRegion(0).emplaceBlock();
       Value j = jBb.addArgument(b.getIndexType(), loc);
-      OpBuilder::InsertionGuard jg(b);
-      b.setInsertionPointToEnd(&jBb);
-      if (failed(emitInnerColStep(j)))
-        return failure();
-      makeOp(b, loc, "end");
+      {
+        OpBuilder::InsertionGuard jg(b);
+        b.setInsertionPointToEnd(&jBb);
+        if (failed(emitInnerColStep(j))) {
+          return failure();
+        }
+        makeOp(b, loc, "end");
+      }
     }
+    sweepHoistBlock = nullptr;
+    sweepHoistBefore = nullptr;
 
     if (!isStore) {
       if (isMoments) {
@@ -2409,7 +2629,7 @@ LogicalResult lowerMojoRow(func::FuncOp fn, int64_t fullWidth) {
   lowerer.firstIdx = asInt(b, loc, fnBb.getArgument(argCursor++));
   lowerer.stopIdx = asInt(b, loc, fnBb.getArgument(argCursor++));
   lowerer.colsIdx = asInt(b, loc, fnBb.getArgument(argCursor++));
-  lowerer.colBlockIdx = asInt(b, loc, fnBb.getArgument(argCursor++));
+  ++argCursor; // unused column panel parameter
   if (hasKeyBounds) {
     lowerer.keyLoIdx = asInt(b, loc, fnBb.getArgument(argCursor++));
     lowerer.keyHiIdx = asInt(b, loc, fnBb.getArgument(argCursor++));

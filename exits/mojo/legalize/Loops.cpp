@@ -209,7 +209,7 @@ public:
     SmallVector<Operation *> original;
     for (auto &op : bb.without_terminator())
       original.push_back(&op);
-    bool hasUniform = false;
+    bool hasUniform = false, hasExp = false, hasIrregular = false;
     for (auto *op : original) {
       auto n = op->getName().stripDialect();
       if (n == "write")
@@ -218,6 +218,11 @@ public:
         ownerStores.push_back(op);
       else if (n == "uniform")
         hasUniform = true;
+      else if (n == "exp")
+        hasExp = true;
+      else if (n == "scan_sum" || n == "ordered_sum" || n == "segment_length" ||
+               n == "count_keys" || n == "column_sum" || n == "gather_row")
+        hasIrregular = true;
     }
     b.setInsertionPoint(&bb.back());
     auto ordered = original;
@@ -259,9 +264,10 @@ public:
         }
         return false;
       };
-      SmallVector<Operation *, 4> stage{op};
+      const size_t maxStageSums = lanes >= 16 ? 16 : 8;
+      SmallVector<Operation *, 16> stage{op};
       for (auto *cand : ordered) {
-        if (stage.size() >= 4)
+        if (stage.size() >= maxStageSums)
           break;
         if (cand == op || cand->getName().stripDialect() != "sum" ||
             scheduledReds.contains(cand))
@@ -274,103 +280,121 @@ public:
       redStages.push_back(std::move(stage));
     }
 
-    // Check if a 2-pass uniform+reduction+store row task can retain intermediate
-    // tensor values in per-thread L1d scratch across sweeps (cols <= 8192)
+    // Check if uniform or exp intermediate tensor values from the final
+    // reduction stage can be retained in per-thread L1d scratch (cols <= 8192)
+    // for the store stage instead of recomputing Philox or exp.
     SmallVector<Value, 4> cachedCut;
-    if (hasUniform && redStages.size() == 1 && !stores.empty() &&
-        ownerStores.empty()) {
+    size_t cacheStageIdx = 0;
+    if (!hasIrregular &&
+        ((hasUniform && redStages.size() == 1) ||
+         (!hasUniform && hasExp && !redStages.empty())) &&
+        !stores.empty() && ownerStores.empty()) {
+      cacheStageIdx = redStages.size() - 1;
+      llvm::DenseSet<Operation *> priorReds;
+      for (size_t si = 0; si < cacheStageIdx; ++si)
+        for (Operation *ro : redStages[si])
+          priorReds.insert(ro);
       llvm::DenseSet<Operation *> s1Ops, s2Ops;
       {
         SmallVector<Operation *, 16> work;
-        for (Operation *ro : redStages[0])
+        for (Operation *ro : redStages[cacheStageIdx])
           if (auto *def = ro->getOperand(0).getDefiningOp();
-              def && def->getBlock() == &bb)
+              def && def->getBlock() == &bb && !priorReds.contains(def))
             work.push_back(def);
         while (!work.empty()) {
           Operation *cur = work.pop_back_val();
           if (!s1Ops.insert(cur).second)
             continue;
           for (Value in : cur->getOperands())
-            if (auto *def = in.getDefiningOp(); def && def->getBlock() == &bb)
+            if (auto *def = in.getDefiningOp();
+                def && def->getBlock() == &bb && !priorReds.contains(def))
               work.push_back(def);
         }
       }
-      {
-        SmallVector<Operation *, 16> work;
-        for (Operation *wo : stores)
-          if (auto *def = wo->getOperand(2).getDefiningOp();
-              def && def->getBlock() == &bb && !scheduledReds.contains(def))
-            work.push_back(def);
-        while (!work.empty()) {
-          Operation *cur = work.pop_back_val();
-          if (!s2Ops.insert(cur).second)
-            continue;
-          for (Value in : cur->getOperands())
-            if (auto *def = in.getDefiningOp();
+      bool stageHasExpOrUniform =
+          hasUniform || llvm::any_of(s1Ops, [](Operation *o) {
+            return o->getName().stripDialect() == "exp";
+          });
+      if (stageHasExpOrUniform) {
+        {
+          SmallVector<Operation *, 16> work;
+          for (Operation *wo : stores)
+            if (auto *def = wo->getOperand(2).getDefiningOp();
                 def && def->getBlock() == &bb && !scheduledReds.contains(def))
               work.push_back(def);
-        }
-      }
-      llvm::DenseSet<Operation *> storeDirect;
-      for (Operation *wo : stores)
-        if (auto *def = wo->getOperand(2).getDefiningOp())
-          storeDirect.insert(def);
-
-      // Unwrap widening casts (bf16/f16 -> f32) from S1 boundary into S2 so the
-      // narrower bf16/f16 value is cached in L1d instead of f32
-      bool unwrapped = true;
-      llvm::DenseSet<Operation *> forcedRecompute;
-      while (unwrapped) {
-        unwrapped = false;
-        for (Operation *op : original) {
-          if (!s1Ops.contains(op) || forcedRecompute.contains(op) ||
-              op->getName().stripDialect() != "cast")
-            continue;
-          auto inTy = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
-          auto outTy = dyn_cast<RankedTensorType>(op->getResult(0).getType());
-          auto *inDef = op->getOperand(0).getDefiningOp();
-          if (!inTy || !outTy || !inDef || !s1Ops.contains(inDef) ||
-              inTy.getElementTypeBitWidth() >= outTy.getElementTypeBitWidth() ||
-              !(inTy.getElementType().isBF16() ||
-                inTy.getElementType().isF16()))
-            continue;
-          bool usedInS2 = storeDirect.contains(op) ||
-                          llvm::any_of(op->getResult(0).getUsers(), [&](Operation *u) {
-                            return (s2Ops.contains(u) && !s1Ops.contains(u)) ||
-                                   forcedRecompute.contains(u);
-                          });
-          if (usedInS2) {
-            forcedRecompute.insert(op);
-            unwrapped = true;
+          while (!work.empty()) {
+            Operation *cur = work.pop_back_val();
+            if (!s2Ops.insert(cur).second)
+              continue;
+            for (Value in : cur->getOperands())
+              if (auto *def = in.getDefiningOp();
+                  def && def->getBlock() == &bb && !scheduledReds.contains(def))
+                work.push_back(def);
           }
         }
-      }
+        llvm::DenseSet<Operation *> storeDirect;
+        for (Operation *wo : stores)
+          if (auto *def = wo->getOperand(2).getDefiningOp())
+            storeDirect.insert(def);
 
-      bool validCut = true;
-      for (Operation *op : original) {
-        if (!s1Ops.contains(op) || forcedRecompute.contains(op) ||
-            op->getNumResults() != 1)
-          continue;
-        Value v = op->getResult(0);
-        bool usedOutside =
-            storeDirect.contains(op) ||
-            llvm::any_of(v.getUsers(), [&](Operation *u) {
-              return (s2Ops.contains(u) && !s1Ops.contains(u)) ||
-                     forcedRecompute.contains(u);
-            });
-        if (!usedOutside)
-          continue;
-        auto rt = dyn_cast<RankedTensorType>(v.getType());
-        if (!rt || !(rt.getElementType().isBF16() ||
-                     rt.getElementType().isF16() ||
-                     rt.getElementType().isF32())) {
-          validCut = false;
-          break;
+        // Unwrap widening casts (bf16/f16 -> f32) from S1 boundary into S2 so
+        // the narrower bf16/f16 value is cached in L1d instead of f32
+        bool unwrapped = true;
+        llvm::DenseSet<Operation *> forcedRecompute;
+        while (unwrapped) {
+          unwrapped = false;
+          for (Operation *op : original) {
+            if (!s1Ops.contains(op) || forcedRecompute.contains(op) ||
+                op->getName().stripDialect() != "cast")
+              continue;
+            auto inTy = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
+            auto outTy = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+            auto *inDef = op->getOperand(0).getDefiningOp();
+            if (!inTy || !outTy || !inDef || !s1Ops.contains(inDef) ||
+                inTy.getElementTypeBitWidth() >=
+                    outTy.getElementTypeBitWidth() ||
+                !(inTy.getElementType().isBF16() ||
+                  inTy.getElementType().isF16()))
+              continue;
+            bool usedInS2 =
+                storeDirect.contains(op) ||
+                llvm::any_of(op->getResult(0).getUsers(), [&](Operation *u) {
+                  return (s2Ops.contains(u) && !s1Ops.contains(u)) ||
+                         forcedRecompute.contains(u);
+                });
+            if (usedInS2) {
+              forcedRecompute.insert(op);
+              unwrapped = true;
+            }
+          }
         }
-        cachedCut.push_back(v);
+
+        bool validCut = true;
+        for (Operation *op : original) {
+          if (!s1Ops.contains(op) || forcedRecompute.contains(op) ||
+              op->getNumResults() != 1)
+            continue;
+          Value v = op->getResult(0);
+          bool usedOutside =
+              storeDirect.contains(op) ||
+              llvm::any_of(v.getUsers(), [&](Operation *u) {
+                return (s2Ops.contains(u) && !s1Ops.contains(u)) ||
+                       forcedRecompute.contains(u);
+              });
+          if (!usedOutside)
+            continue;
+          auto rt = dyn_cast<RankedTensorType>(v.getType());
+          if (!rt || !(rt.getElementType().isBF16() ||
+                       rt.getElementType().isF16() ||
+                       rt.getElementType().isF32())) {
+            validCut = false;
+            break;
+          }
+          cachedCut.push_back(v);
+        }
+        if (!validCut || cachedCut.empty() || cachedCut.size() > 4)
+          cachedCut.clear();
       }
-      if (!validCut || cachedCut.empty() || cachedCut.size() > 4)
-        cachedCut.clear();
     }
 
     if (!cachedCut.empty()) {
@@ -383,13 +407,20 @@ public:
       for (StringRef mode : {StringRef("cached"), StringRef("uncached")}) {
         reduced.clear();
         bool useCache = mode == "cached";
+        for (size_t si = 0; si < cacheStageIdx; ++si) {
+          auto *pFull = sweepGroup(redStages[si], "full", {}, lanes, mode, {}, {});
+          auto *pTail = sweepGroup(redStages[si], "tail", pFull->getResults(), 1,
+                                   mode, {}, {});
+          for (auto [idx, ro] : llvm::enumerate(redStages[si]))
+            reduced.map(ro->getResult(0), pTail->getResult(idx));
+        }
         auto *rFull = sweepGroup(
-            redStages[0], "full", {}, lanes, mode,
+            redStages[cacheStageIdx], "full", {}, lanes, mode,
             useCache ? ArrayRef<Value>(cachedCut) : ArrayRef<Value>{}, {});
         auto *rTail = sweepGroup(
-            redStages[0], "tail", rFull->getResults(), 1, mode,
+            redStages[cacheStageIdx], "tail", rFull->getResults(), 1, mode,
             useCache ? ArrayRef<Value>(cachedCut) : ArrayRef<Value>{}, {});
-        for (auto [idx, ro] : llvm::enumerate(redStages[0]))
+        for (auto [idx, ro] : llvm::enumerate(redStages[cacheStageIdx]))
           reduced.map(ro->getResult(0), rTail->getResult(idx));
         sweepGroup({stores.front()}, "full", {}, lanes, mode, {},
                    useCache ? ArrayRef<Value>(cachedCut) : ArrayRef<Value>{});
