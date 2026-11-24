@@ -269,13 +269,17 @@ void orderedCost(Unit &u) {
           if (intentdsl::block::canGroupReads(op, ctx.target, 4)) {
             auto fetch = choice.getAs<mlir::IntegerAttr>("prefetch");
             double span = fetch ? fetch.getInt() : 1;
-            double independentLoads = 0;
+            double independentLoads = 0, elementsPerStep = 0;
             op->walk([&](mlir::Operation *v) {
-              if (v->getName().stripDialect() == "slice_read" ||
-                  v->getName().getStringRef() == "memref.load")
+              if (v->getName().stripDialect() == "slice_read") {
                 ++independentLoads;
+                elementsPerStep += lanes;
+              } else if (v->getName().getStringRef() == "memref.load") {
+                ++independentLoads;
+                elementsPerStep += 1;
+              }
             });
-            double live = span * w * lanes * independentLoads;
+            double live = span * w * elementsPerStep;
             dependency = (1 + independentLoads / span) *
                          (1 + std::max(0., live - 4096) / 4096);
             e.terms["grouped_read_elements"] = {live, "count"};

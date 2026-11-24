@@ -27,7 +27,7 @@ capabilities(const llvm::json::Object &options) {
   if (auto err = profile.services.provide<intentdsl::block::OwnerMachine>(
           std::make_shared<intentdsl::block::OwnerMachine>(
               intentdsl::block::OwnerMachine{
-                  32, 256,
+                  128, 256,
                   options.getInteger("dynamic_shared_per_block").value_or(0),
                   *architecture == 90 ? 32768 : 24576,
                   *architecture == 90 ? 64 : 32,
@@ -46,6 +46,7 @@ capabilities(const llvm::json::Object &options) {
   auto matrix=std::make_shared<intentdsl::block::MatrixTarget>();
   matrix->estimate="exits/cutile::matrix-issues";
   if(*architecture==90)matrix->tiles={{32,64,32,R"({"num_ctas":1,"occupancy":2,"opt_level":3})"},
+                                      {32,64,64,R"({"num_ctas":1,"occupancy":2,"opt_level":3})","contract"},
                                       {64,32,64,R"({"num_ctas":1,"occupancy":2,"opt_level":3})","window_contract"},
                                       {64,128,64,R"({"num_ctas":1,"occupancy":1,"opt_level":3})"},
                                       {128,128,64,R"({"num_ctas":1,"occupancy":1,"opt_level":3})","contract"},

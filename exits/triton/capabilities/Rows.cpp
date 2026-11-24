@@ -25,11 +25,13 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
        {"exits/triton::native-dot", "exits/triton::row-collective"}},
       {"q4k_dot", {"exits/triton::row-collective"}}};
   if(*arch==90)matrix->tiles={{32,64,32,R"({"num_warps":4,"num_stages":3})"},
+                              {32,64,64,R"({"num_warps":4,"num_stages":3})","contract"},
                               {64,64,32,R"({"num_warps":4,"num_stages":3})"},
                               {64,128,64,R"({"num_warps":8,"num_stages":3})"}};
   else matrix->tiles={{16,32,32,R"({"num_warps":4,"num_stages":2})"},
                       {32,64,32,R"({"num_warps":4,"num_stages":2})"},
-                      {64,64,64,R"({"num_warps":4,"num_stages":2})"},
+                      {32,64,64,R"({"num_warps":4,"num_stages":3})","contract"},
+                      {64,64,64,R"({"num_warps":4,"num_stages":3})"},
                       {64,128,64,R"({"num_warps":8,"num_stages":2})"}};
   if(auto err=profile.services.provide<intentdsl::block::MatrixTarget>(matrix))return std::move(err);
   caps->storeSectorBytes = 32;
@@ -66,7 +68,7 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
   if (auto err = profile.services.provide<intentdsl::block::OwnerMachine>(
           std::make_shared<intentdsl::block::OwnerMachine>(
               intentdsl::block::OwnerMachine{
-                  32, 256,
+                  128, 256,
                   options.getInteger("dynamic_shared_per_block").value_or(0),
                   32768, *arch == 90 ? 64 : 32,
                   *arch == 90

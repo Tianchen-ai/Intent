@@ -25,7 +25,9 @@ inline bool quadAlignedUniform(mlir::Operation *op, mlir::func::FuncOp fn,
     return false;
   bool validColOrigin = false;
   if (auto *z = cOp->getOperand(0).getDefiningOp())
-    validColOrigin = z->getName().getStringRef() == "ct_src.zero";
+    validColOrigin = z->getName().getStringRef() == "ct_src.zero" ||
+                     (z->getName().getStringRef() == "ct_src.pid" &&
+                      z->getAttrOfType<mlir::IntegerAttr>("axis").getInt() == 1);
   else if (auto tileIv = mlir::dyn_cast<mlir::BlockArgument>(cOp->getOperand(0)))
     validColOrigin = tileIv.getArgNumber() == 0 &&
                      tileIv.getOwner()->getParentOp() &&

@@ -99,9 +99,35 @@ void bind(Unit &unit) {
     }
     if(auto walk=d.getAs<StringAttr>("walk")){
       if(walk=="column-panels"){
-        if(c.topology!=walk.str() || c.preconditions!=std::vector<std::string>{"independent-bins"} || topology!="stream" ||
-           !op->walk([](Operation *v){return v->getName().stripDialect()=="column_sum"?WalkResult::interrupt():WalkResult::advance();}).wasInterrupted())
-          return llvm::createStringError("partition requires independent output bins");
+        bool hasColumnSum = op->walk([](Operation *v){return v->getName().stripDialect()=="column_sum"?WalkResult::interrupt():WalkResult::advance();}).wasInterrupted();
+        auto fn = op->getParentOfType<func::FuncOp>();
+        bool pureRank1Pointwise =
+            !hasColumnSum &&
+            cast<MemRefType>(op->getOperand(0).getType()).getRank() == 1 &&
+            !fn->hasAttr("kir.iteration") && !fn->hasAttr("kir.owner_axis") &&
+            !op->walk([](Operation *v) {
+                 auto n = v->getName().stripDialect();
+                 return n == "sum" || n == "max_num" || n == "welford" ||
+                                n == "scan_sum" || n == "ordered_sum" ||
+                                n == "count_keys" || n == "gather_row" ||
+                                n == "atomic_add" || n == "unique_put" ||
+                                n == "prefix_scatter" || n == "fill_ranges" ||
+                                n == "write_offsets"
+                            ? WalkResult::interrupt()
+                            : WalkResult::advance();
+               }).wasInterrupted();
+        auto width = cast<DictionaryAttr>(rows[0]).getAs<IntegerAttr>("width");
+        std::string expectedId =
+            "column-panels-" + std::to_string(width ? width.getInt() : 0);
+        std::vector<std::string> expectedPre{
+            hasColumnSum ? "independent-bins" : "independent-members"};
+        if (c.topology != walk.str() || c.id != expectedId ||
+            c.preconditions != expectedPre || topology != "stream" ||
+            (!hasColumnSum && !pureRank1Pointwise) ||
+            profile.services.get<intentdsl::RowCapacity>()
+                ->independentWidths.empty())
+          return llvm::createStringError(
+              "partition requires independent output columns");
         return llvm::Error::success();
       }
       if(walk=="segment-tile" || walk=="segment-row" || walk=="segment-stream"){
