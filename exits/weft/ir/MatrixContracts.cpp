@@ -77,7 +77,14 @@ void registerWeftMatrixContracts(Unit &u) {
         return failure();
       if (acc.getValue() != "f32" && acc.getValue() != "si32")
         return failure();
-      return success(checkMatrixProgram(op, "exits/weft::weft-simd-fma", false));
+      if (checkMatrixProgram(op, "exits/weft::weft-simd-fma", false))
+        return success();
+      for (Operation *p = op->getParentOp(); p; p = p->getParentOp())
+        if (p->getName().getStringRef() == "weft_host.owner_program")
+          return success(op->getNumOperands() == 2 &&
+                         kind.getValue() == "outer_contract" &&
+                         acc.getValue() == "f32");
+      return failure();
     };
     add(std::move(c));
   }

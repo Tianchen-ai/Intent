@@ -65,6 +65,7 @@ def TaskSliceOp : Op<WeftHost_Dialect, "task_slice"> {
 
 def TaskSubviewOp : Op<WeftHost_Dialect, "task_subview"> {
   let arguments = (ins Variadic<Index>:$operands, I64Attr:$static_extent,
+                       OptionalAttr<DenseI64ArrayAttr>:$static_extents,
                        StrAttr:$slice_type, StrAttr:$val_type, BoolAttr:$admit);
   let results = (outs Index:$res);
 }
@@ -257,6 +258,7 @@ def HostOwnerFnOp : Op<WeftHost_Dialect, "host_owner_fn"> {
 }
 
 def HostParallelOwnersOp : Op<WeftHost_Dialect, "host_parallel_owners"> {
+  let arguments = (ins OptionalAttr<BoolAttr>:$dynamic);
   let regions = (region AnyRegion:$body);
 }
 
