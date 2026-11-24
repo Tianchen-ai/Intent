@@ -7,6 +7,9 @@ from .matrix import (gemm, batched_gemm, batched_gemm_subnormal_ftz, ragged_gemm
                      q4_projection, mamba_chunk_state, fp8_gemm, qkv_projection, expert_projection)
 from .group7 import (sliding_window_attention, alibi_attention, cross_entropy,
                      topk_rows, qk_norm_rope, attention_unscaled_max)
+from .group7_cpu import (embedding_bag, index_add, triangular_solve,
+                         log_softmax_kl, retention_recurrence, radix_pass,
+                         layer_norm_welford)
 
 @I.kernel
 def count_routes(ids:I.In[I.i32,(4096,2)], counts:I.InOut[I.i32,(64,)]):
