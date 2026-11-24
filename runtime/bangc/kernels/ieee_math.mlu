@@ -26,7 +26,7 @@
 //      a' = fl(a * scale) = a * scale is exact (no FTZ, no overflow) and
 //      a / b = a' / b' exactly.
 //   2. Initial residual bound: q0 = a' * y * (1 + d0), |d0| <= u, so
-//      R = a' - q0 * b' satisfies |R| <= a'(|eta| + u + |eta|u) < 2^-20.7 |q0| b'.
+//      R = a' - q0 * b' satisfies |R| <= |a'|(|eta| + u + |eta|u) < 2^-20.6 |q0| b'.
 //   3. Exact Veltkamp-Dekker 12+12 split without subnormal FTZ:
 //      Masking with 0xfffff000U splits b' = b_hi + b_lo and q0 = q_hi + q_lo
 //      into <=12-bit halves. All four products P00 = b_hi*q_hi, P01 = b_hi*q_lo,
@@ -34,21 +34,22 @@
 //      multiples of U = 2^(exp(q0)-127-46) >= 2^(-78-46) = 2^-124 > 2^-126, as
 //      is a' (multiple of >= 2^-102). Thus every product and every Knuth TwoDiff
 //      intermediate is either 0.0f or normal >= 2^-124 (never flushed by FTZ).
-//      Since |a' - P00| <= |R| + |P01 + P10 + P11| < 2^-10 a', Sterbenz's Lemma
+//      Since |a' - P00| <= |R| + |P01 + P10 + P11| < 2^-10 |a'|, Sterbenz's Lemma
 //      makes r0 = fl(a' - P00) = a' - P00 exact. TwoDiff(r0, P01) gives exact
 //      sA + eA = r0 - P01 with |eA| <= u|sA| < 2^-35.8 |q0| b'; TwoDiff(sA, P10)
-//      gives exact sB + eB = sA - P10 with |eB| < 2^-44.6 |q0| b'. Combining
-//      r_hat = fl(sB + fl(fl(eA - P11) + eB)) yields |r_hat - R| < 2^-44.5 |q0| b'.
+//      gives exact sB + eB = sA - P10 with |eB| < 2^-44.5 |q0| b'. Combining
+//      r_hat = fl(sB + fl(fl(eA - P11) + eB)) yields |r_hat - R| < 2^-44.4 |q0| b'.
 //   4. Correction error bound: corr = fl(r_hat * y) approximates the exact
 //      quotient delta* = R / b' = (a / b) - q0 within:
 //        |corr - delta*| <= |r_hat - R|/b' * (1+|eta|)(1+u)
 //                         + |delta*| * (|eta| + u + |eta|u)
-//                        < 2^-44.4 |q0| + (2^-20.7 |q0|)(2^-20.8 + 2^-24)
-//                        < 2^-41.4 |q0|.
+//                        < 2^-44.3 |q0| + (2^-20.6 |q0|)(2^-20.8 + 2^-24 + 2^-44.8)
+//                        < 2^-41.0 |q0|.
 //   5. Endpoint certification: tol = fl(|q0| * 2^-38) = 2^-38 |q0| >= 2^-116
-//      (exact normal power-of-two scaling). Since |corr| < 2^-20.6 |q0|,
-//      rounding fl(corr +- tol) incurs <= u(|corr| + tol) < 2^-44.5 |q0|.
-//      Therefore c_lo = fl(corr - tol) < delta* < fl(corr + tol) = c_hi strictly!
+//      (exact normal power-of-two scaling). Since |corr| < 2^-20.5 |q0|,
+//      rounding fl(corr +- tol) incurs <= u(|corr| + tol) < 2^-44.4 |q0|.
+//      Therefore c_lo = fl(corr - tol) < delta* < fl(corr + tol) = c_hi strictly
+//      (margin tol - 2^-41.0 |q0| - 2^-44.4 |q0| > 2^-38.2 |q0| > 0).
 //      By monotonicity of RN, whenever RN(q0 + c_lo) == RN(q0 + c_hi),
 //      RN(q0 + corr) == RN(q0 + delta*) == RN(a / b) (0 ULP, including exact
 //      RN-even tie-breaking). Any lane with RN(q0 + c_lo) != RN(q0 + c_hi) or
@@ -61,16 +62,43 @@
 //          all negatives, -0.0f, +0.0f, subnormals, Inf, and NaN).
 //     (S2) 0x2c800000 <= y0_bits < 0x59800000 (y0 = __bang_sqrt(x) in [2^-38, 2^52)).
 //     (S3) Runtime-certified reciprocal inv2y: |fl((2*y0)*inv2y) - 1| <= 2^-21.
-//     (S4) Runtime-certified initial accuracy: |corr| <= 2^-21 * y0.
-//   Under (S1)-(S4): y0 = y_hi + y_lo (12+12 bits) has exact normal products
-//   P0 = y_hi^2, P1 = 2*y_hi*y_lo, P2 = y_lo^2 (all multiples of >= 2^-122 >
-//   2^-126, zero FTZ). (S4) implies |x - y0^2| < 2^-19.9 y0^2, so |x - P0| <
-//   2^-10 P0 and r0 = x - P0 is exact by Sterbenz. TwoDiff(r0, P1) + (-P2) gives
-//   |r_hat - (x - y0^2)| < 2^-43.9 y0^2. Moreover |sqrt(x) - y0| = |dy| <
-//   2^-20.98 y0, so the quadratic Taylor remainder |dy - (x - y0^2)/(2*y0)| =
-//   dy^2 / (2*y0) < 2^-42.9 y0, and |corr - dy| < 2^-41.1 y0 < 2^-38 y0 = tol.
-//   Thus c_lo = fl(corr - tol) < dy < fl(corr + tol) = c_hi strictly, certifying
-//   RN(y0 + corr) == RN(sqrt(x)) (0 ULP) whenever RN(y0 + c_lo) == RN(y0 + c_hi).
+//     (S4) Runtime-certified a priori residual: |fl(x - fl(y0*y0))| <= 2^-19 * x.
+//
+//   Under (S1)-(S4):
+//   1. A priori residual & root bound (independent of corr):
+//      By (S2), y0^2 in [2^-76, 2^104) is strictly normal, so q = fl(y0 * y0) =
+//      y0^2 * (1 + d1) with |d1| <= u (no FTZ, no overflow). By (S1) and (S4),
+//      d = fl(x - q) satisfies |d| <= fl(2^-19 * x) = 2^-19 * x (exact normal
+//      scaling >= 2^-95). Whether x - q is normal (|x - q| <= |d| / (1 - u)) or
+//      subnormal (|x - q| < 2^-126 <= 2^-50 * x), |x - q| <= 2^-19 * x / (1 - u),
+//      and q <= (1 + 2^-19 / (1 - u)) * x. Therefore the true residual R = x - y0^2
+//      satisfies a priori:
+//        |R| <= |x - q| + |q - y0^2| <= (2^-19 * x + u * q) / (1 - u)
+//             < 2^-18.95 * x < 2^-18.95 * y0^2,
+//      and dy = sqrt(x) - y0 = R / (sqrt(x) + y0) satisfies |dy| < 2^-19.95 * y0.
+//   2. Exact Veltkamp-Dekker residual without subnormal FTZ:
+//      Masking with 0xfffff000U splits y0 = y_hi + y_lo (|y_lo| < 2^-12 * y0)
+//      into <=12-bit halves with exact normal products P0 = y_hi^2, P1 = 2*y_hi*y_lo,
+//      P2 = y_lo^2 (all multiples of >= 2^-122 > 2^-126, zero FTZ). Using the a priori
+//      bound |R| < 2^-18.95 * y0^2 from Step 1:
+//        |x - P0| <= |R| + |P1 + P2| < (2^-18.95 + 2^-11 + 2^-24) * y0^2
+//                  < 2^-10.99 * P0 < 0.5 * P0,
+//      so r0 = fl(x - P0) = x - P0 is exact by Sterbenz's Lemma. TwoDiff(r0, P1)
+//      plus (-P2) yields |r_hat - R| < 2^-42.9 * y0^2.
+//   3. Correction & endpoint certification:
+//      By the exact identity R / (2 * y0) - dy = dy^2 / (2 * y0), the quadratic
+//      remainder satisfies dy^2 / (2 * y0) < 2^-40.9 * y0. Combined with (S3)
+//      (inv2y = (1 - eta) / (2 * y0), |eta| < 2^-20.8), corr = fl(r_hat * inv2y)
+//      approximates dy within:
+//        |corr - dy| <= dy^2 / (2 * y0) + |r_hat - R| / (2 * y0) * (1 + |eta|)(1 + u)
+//                       + |R| / (2 * y0) * (|eta| + u + |eta|u)
+//                     < 2^-40.9 * y0 + 2^-43.8 * y0 + 2^-40.6 * y0
+//                     < 2^-39.6 * y0.
+//      With tol = 2^-38 * y0 >= 2^-76 (exact normal power-of-two scaling) and
+//      rounding error <= u(|corr| + tol) < 2^-43.9 * y0, we have
+//      c_lo = fl(corr - tol) < dy < fl(corr + tol) = c_hi strictly (margin >
+//      2^-38.5 * y0 > 0), certifying RN(y0 + corr) == RN(sqrt(x)) (0 ULP)
+//      whenever RN(y0 + c_lo) == RN(y0 + c_hi).
 
 #define BANG_TWODIFF(u, v, t1, t2, n)                                          \
   do {                                                                         \
@@ -207,9 +235,12 @@ __mlu_func__ void vec_sqrt_rn(float *dst, const float *src, float *sc, int live,
   __bang_bor((char *)s5, (const char *)s5, (const char *)s3, lanes * 4);
   __bang_bor((char *)s5, (const char *)s5, (const char *)s4, lanes * 4);
 
-  // (S4) Certify |corr| <= 2^-21 * y0 (4.76837158203125e-7f).
-  __bang_abs(s4, s2, lanes);
-  __bang_mul_scalar(s3, dst, 4.76837158203125e-7f, lanes);
+  // (S4) Certify a priori residual |fl(x - fl(y0 * y0))| <= 2^-19 * x
+  // (1.9073486328125e-6f) BEFORE updating dst.
+  __bang_mul(s4, dst, dst, lanes);
+  __bang_sub(s4, (float *)src, s4, lanes);
+  __bang_abs(s4, s4, lanes);
+  __bang_mul_scalar(s3, (float *)src, 1.9073486328125e-6f, lanes);
   __bang_mul_scalar((int *)s4, (const int *)s4, -1, lanes);
   __bang_add((int *)s4, (const int *)s3, (const int *)s4, lanes);
   __bang_lt_scalar((int *)s4, (const int *)s4, 0, lanes);

@@ -30,6 +30,7 @@ struct PanelFoldSupply {
   int64_t wramBytes = 0;
   int64_t localBytes = 0;
   llvm::SmallVector<int64_t, 3> scratchOffsets;
+  llvm::DenseMap<mlir::Operation *, llvm::StringRef> roles;
 };
 
 OwnerStreams ownerStreams(mlir::func::FuncOp,

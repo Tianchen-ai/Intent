@@ -501,7 +501,7 @@ std::optional<PanelFoldSupply> panelFoldSupply(
     for (int side : {0, 1}) {
       Operation *ls = defWithName(mulScore.getOperand(side), "lane_sum");
       Value g = mulScore.getOperand(1 - side);
-      if (!ls || !rowInvariant(g, iv))
+      if (!ls || !ls->hasOneUse() || !rowInvariant(g, iv))
         continue;
       auto prod = ls->getOperand(0).getDefiningOp<arith::MulFOp>();
       if (!prod)
@@ -623,7 +623,7 @@ std::optional<PanelFoldSupply> panelFoldSupply(
                     : arith::TruncFOp{};
     Type vElem;
     int64_t vTokens = 0, vFeat = 0;
-    if (vs && trW && trW.getIn() == weightVal &&
+    if (vs && vs != kSlice2 && trW && trW.getIn() == weightVal &&
         trW.getType() == halfTy &&
         checkRowOrTokSlice(vs, sumLoop.getInductionVar(),
                            sumLoop.getInductionVar(), vElem, vTokens, vFeat) &&
@@ -685,7 +685,7 @@ std::optional<PanelFoldSupply> panelFoldSupply(
   if (wramBytes > ms->wramBytes)
     return {};
 
-  // Assign real NRAM fragment slots by interval liveness over actual operations.
+  // Assign real NRAM fragment slots by interval liveness over actual SSA uses.
   llvm::DenseMap<Operation *, unsigned> startOrd, endOrd;
   unsigned nextOrd = 0;
   std::function<void(Block &)> numberBlock = [&](Block &blk) {
@@ -699,59 +699,102 @@ std::optional<PanelFoldSupply> panelFoldSupply(
   };
   numberBlock(bb);
 
-  auto lastUseOrd = [&](Value v, Operation *defOp) {
+  Operation *weightDef = weightVal.getDefiningOp();
+  struct RoleSpec {
+    Operation *op;
+    StringRef role;
+    SmallVector<int64_t, 2> slotBytes;
+  };
+  SmallVector<RoleSpec, 13> roleSpecs = {
+      {qSlice, "query", {M * D * halfB}},
+      {maxLoop.getOperation(), "peak_loop", {M * 4}},
+      {kSlice1, "key_peak", {S * D * halfB}},
+      {dot1, "score_peak", {M * S * 4}},
+      {sumLoop.getOperation(), "sum_loop", {M * 4, M * DV * 4}},
+      {kSlice2, "key_sum", {S * D * halfB}},
+      {dot2, "score_sum", {M * S * 4}},
+      {weightDef, "weight", {M * S * 4}},
+      {wTrunc, "weight_narrow", {M * S * halfB}},
+      {vSlice, "value", {S * DV * halfB, DV * S * halfB}},
+      {normMul.getOperation(), "norm", {M * DV * 4}},
+      {outTrunc.getOperation(), "output_narrow", {M * DV * halfB}},
+      {outWrite, "output", {}},
+  };
+
+  llvm::DenseSet<Operation *> materialized;
+  llvm::DenseMap<Operation *, StringRef> roleMap;
+  for (const auto &rs : roleSpecs) {
+    materialized.insert(rs.op);
+    roleMap[rs.op] = rs.role;
+  }
+
+  // Compute the last program point where v's panel value (forwarded through
+  // unmaterialized elementwise/cast/if bridge ops) reaches a materialized
+  // consumer or enclosing loop latch.
+  auto liveEndOrd = [&](Value v, Operation *defOp) {
     unsigned hi = endOrd.lookup(defOp);
-    for (Operation *u : v.getUsers()) {
-      Operation *top = u;
-      while (top->getBlock() != defOp->getBlock() && top->getParentOp())
-        top = top->getParentOp();
-      hi = std::max(hi, endOrd.lookup(top));
+    SmallVector<Value, 8> worklist = {v};
+    llvm::DenseSet<Value> seen = {v};
+    while (!worklist.empty()) {
+      Value cur = worklist.pop_back_val();
+      for (Operation *u : cur.getUsers()) {
+        Operation *top = u;
+        while (top->getBlock() != defOp->getBlock() && top->getParentOp())
+          top = top->getParentOp();
+        if (top->getBlock() == defOp->getBlock())
+          hi = std::max(hi, endOrd.lookup(top));
+        if (materialized.contains(u))
+          continue;
+        for (Value res : u->getResults())
+          if (seen.insert(res).second)
+            worklist.push_back(res);
+        if (isa<scf::YieldOp>(u)) {
+          Operation *parent = u->getParentOp();
+          if (isa<scf::IfOp>(parent) && !materialized.contains(parent)) {
+            for (Value res : parent->getResults())
+              if (seen.insert(res).second)
+                worklist.push_back(res);
+          }
+        }
+      }
     }
     return hi;
   };
 
+  llvm::sort(roleSpecs, [&](const RoleSpec &a, const RoleSpec &b) {
+    return startOrd.lookup(a.op) < startOrd.lookup(b.op);
+  });
+
   IntervalAlloc alloc(caps->alignment);
   llvm::DenseMap<Operation *, SmallVector<int64_t>> map;
+  for (const auto &rs : roleSpecs) {
+    if (rs.slotBytes.empty())
+      continue;
+    SmallVector<int64_t> offs;
+    unsigned lo = startOrd.lookup(rs.op);
+    for (unsigned i = 0; i < rs.slotBytes.size(); ++i) {
+      Value tracked =
+          rs.op->getResult(std::min<unsigned>(i, rs.op->getNumResults() - 1));
+      unsigned hi = liveEndOrd(tracked, rs.op);
+      offs.push_back(alloc.alloc(lo, hi, rs.slotBytes[i]));
+    }
+    map[rs.op] = std::move(offs);
+  }
 
-  map[qSlice] = {
-      alloc.alloc(startOrd[qSlice], endOrd[sumLoop], M * D * halfB)};
-  map[maxLoop.getOperation()] = {alloc.alloc(
-      startOrd[maxLoop], lastUseOrd(maxLoop.getResult(0), maxLoop), M * 4)};
-  map[kSlice1] = {
-      alloc.alloc(startOrd[kSlice1], endOrd[dot1], S * D * halfB)};
-  map[dot1] = {
-      alloc.alloc(startOrd[dot1], endOrd[maxLoop], M * S * 4)};
-
-  int64_t massOff = alloc.alloc(
-      startOrd[sumLoop], lastUseOrd(sumLoop.getResult(0), sumLoop), M * 4);
-  int64_t weightedOff = alloc.alloc(
-      startOrd[sumLoop], lastUseOrd(sumLoop.getResult(1), sumLoop),
-      M * DV * 4);
-  map[sumLoop.getOperation()] = {massOff, weightedOff};
-
-  map[kSlice2] = {
-      alloc.alloc(startOrd[kSlice2], endOrd[dot2], S * D * halfB)};
-  Operation *weightDef = weightVal.getDefiningOp();
-  map[dot2] = {
-      alloc.alloc(startOrd[dot2], endOrd[weightDef], M * S * 4)};
-  map[weightDef] = {alloc.alloc(startOrd[weightDef],
-                                lastUseOrd(weightVal, weightDef), M * S * 4)};
-  map[wTrunc] = {alloc.alloc(startOrd[wTrunc], endOrd[vecUpdate], M * S * halfB)};
-  int64_t vOff =
-      alloc.alloc(startOrd[vSlice], endOrd[vecUpdate], S * DV * halfB);
-  int64_t vtOff =
-      alloc.alloc(startOrd[vSlice], endOrd[vecUpdate], DV * S * halfB);
-  map[vSlice] = {vOff, vtOff};
-
-  map[normMul.getOperation()] = {alloc.alloc(
-      startOrd[normMul], endOrd[outTrunc], M * DV * 4)};
-  map[outTrunc.getOperation()] = {alloc.alloc(
-      startOrd[outTrunc], endOrd[outWrite], M * DV * halfB)};
-
-  int64_t magOff = alloc.alloc(startOrd[maxLoop], endOrd[outWrite], 4096 * 2);
-  int64_t flagOff = alloc.alloc(startOrd[maxLoop], endOrd[outWrite], 4096 * 2);
+  // Derive panel-contraction / row-reduction scratch interval from the
+  // top-level operations enclosing the contraction and reduction roles.
+  unsigned scratchLo = ~0u, scratchHi = 0;
+  for (Operation *u : {dot1, dot2, weightDef, vSlice}) {
+    Operation *top = u;
+    while (top->getBlock() != &bb && top->getParentOp())
+      top = top->getParentOp();
+    scratchLo = std::min(scratchLo, startOrd.lookup(top));
+    scratchHi = std::max(scratchHi, endOrd.lookup(top));
+  }
+  int64_t magOff = alloc.alloc(scratchLo, scratchHi, 4096 * 2);
+  int64_t flagOff = alloc.alloc(scratchLo, scratchHi, 4096 * 2);
   int64_t auxBytes = 512 + M * 64 * 4;
-  int64_t auxOff = alloc.alloc(startOrd[maxLoop], endOrd[outWrite], auxBytes);
+  int64_t auxOff = alloc.alloc(scratchLo, scratchHi, auxBytes);
 
   if (alloc.peak > std::min(caps->budget, caps->capacity))
     return {};
@@ -767,6 +810,7 @@ std::optional<PanelFoldSupply> panelFoldSupply(
   res.wramBytes = wramBytes;
   res.localBytes = alloc.peak;
   res.scratchOffsets = {magOff, flagOff, auxOff};
+  res.roles = std::move(roleMap);
   return res;
 }
 } // namespace intentdsl::dsa

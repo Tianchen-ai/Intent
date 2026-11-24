@@ -330,87 +330,49 @@ struct OrderedLowerer {
     auto scratchOffs =
         space.getAttrOfType<DenseI64ArrayAttr>("dsa.panel_scratch");
 
-    Operation *qSlice = nullptr, *outWrite = nullptr;
-    SmallVector<scf::ForOp> loops;
-    for (auto &op : bb.without_terminator()) {
-      StringRef sn = op.getName().stripDialect();
-      if (auto l = dyn_cast<scf::ForOp>(op))
-        loops.push_back(l);
-      else if (sn == "slice_read")
-        qSlice = &op;
-      else if (sn == "slice_write")
-        outWrite = &op;
-    }
-    scf::ForOp maxLoop = loops[0], sumLoop = loops[1];
+    llvm::DenseMap<StringRef, Operation *> roleOp;
+    space.walk([&](Operation *op) {
+      if (auto r = op->getAttrOfType<StringAttr>("dsa.panel_role"))
+        roleOp[r.getValue()] = op;
+    });
+    Operation *qSlice = roleOp.lookup("query");
+    Operation *peakLoopOp = roleOp.lookup("peak_loop");
+    Operation *kSlice1 = roleOp.lookup("key_peak");
+    Operation *dot1 = roleOp.lookup("score_peak");
+    Operation *sumLoopOp = roleOp.lookup("sum_loop");
+    Operation *kSlice2 = roleOp.lookup("key_sum");
+    Operation *dot2 = roleOp.lookup("score_sum");
+    Operation *weightDef = roleOp.lookup("weight");
+    Operation *wTrunc = roleOp.lookup("weight_narrow");
+    Operation *vSlice = roleOp.lookup("value");
+    Operation *normMul = roleOp.lookup("norm");
+    Operation *outTrunc = roleOp.lookup("output_narrow");
+    Operation *outWrite = roleOp.lookup("output");
+    if (!qSlice || !peakLoopOp || !kSlice1 || !dot1 || !sumLoopOp ||
+        !kSlice2 || !dot2 || !weightDef || !wTrunc || !vSlice || !normMul ||
+        !outTrunc || !outWrite || !dot1->hasOneUse() || !dot2->hasOneUse())
+      return space.emitError("missing DSA panel-fold role bindings");
+
+    scf::ForOp maxLoop = cast<scf::ForOp>(peakLoopOp);
+    scf::ForOp sumLoop = cast<scf::ForOp>(sumLoopOp);
     Type halfTy =
         cast<MemRefType>(qSlice->getOperand(0).getType()).getElementType();
     int64_t halfB = halfTy.getIntOrFloatBitWidth() / 8;
     int64_t qRank = cast<MemRefType>(qSlice->getOperand(0).getType()).getRank();
     int64_t D = dimAttr(qSlice->getOperand(0), "block.shape", qRank - 1);
 
-    // Recover loop operations with DSA-assigned member_offsets.
-    Operation *kSlice1 = nullptr, *dot1 = nullptr;
-    Value gain1Src;
+    auto mulSc1 = cast<arith::MulFOp>(*dot1->getUsers().begin());
+    Value gain1Src = mulSc1.getLhs() == dot1->getResult(0) ? mulSc1.getRhs()
+                                                           : mulSc1.getLhs();
+    auto mulSc2 = cast<arith::MulFOp>(*dot2->getUsers().begin());
+    Value gain2Src = mulSc2.getLhs() == dot2->getResult(0) ? mulSc2.getRhs()
+                                                           : mulSc2.getLhs();
     bool causal = false;
-    {
-      auto maxUpd =
-          cast<arith::MaxNumFOp>(maxLoop.getBody()->getTerminator()->getOperand(0).getDefiningOp());
-      Value cand = maxUpd.getLhs() == maxLoop.getRegionIterArgs()[0]
-                       ? maxUpd.getRhs()
-                       : maxUpd.getLhs();
-      if (auto br = cand.getDefiningOp<scf::IfOp>()) {
-        causal = true;
-        cand = br.thenBlock()->getTerminator()->getOperand(0);
-      }
-      auto mulSc = cand.getDefiningOp<arith::MulFOp>();
-      for (int s : {0, 1}) {
-        Operation *ls = mulSc.getOperand(s).getDefiningOp();
-        if (ls && ls->getName().stripDialect() == "lane_sum") {
-          dot1 = ls;
-          gain1Src = mulSc.getOperand(1 - s);
-        }
-      }
-      for (auto &op : *maxLoop.getBody())
-        if (op.getName().stripDialect() == "slice_read")
-          kSlice1 = &op;
+    Operation *expOp = weightDef;
+    if (auto br = dyn_cast<scf::IfOp>(weightDef)) {
+      causal = true;
+      expOp = br.thenBlock()->getTerminator()->getOperand(0).getDefiningOp();
     }
-
-    Operation *kSlice2 = nullptr, *dot2 = nullptr, *weightDef = nullptr,
-              *wTrunc = nullptr, *vSlice = nullptr, *expOp = nullptr;
-    Value gain2Src;
-    {
-      auto sumY = sumLoop.getBody()->getTerminator()->getOperands();
-      auto mUpd = cast<arith::AddFOp>(sumY[0].getDefiningOp());
-      Value wVal = mUpd.getLhs() == sumLoop.getRegionIterArgs()[0]
-                       ? mUpd.getRhs()
-                       : mUpd.getLhs();
-      weightDef = wVal.getDefiningOp();
-      Value eVal = wVal;
-      if (auto br = wVal.getDefiningOp<scf::IfOp>())
-        eVal = br.thenBlock()->getTerminator()->getOperand(0);
-      expOp = eVal.getDefiningOp();
-      auto subP = expOp->getOperand(0).getDefiningOp<arith::SubFOp>();
-      auto mulSc = subP.getLhs().getDefiningOp<arith::MulFOp>();
-      for (int s : {0, 1}) {
-        Operation *ls = mulSc.getOperand(s).getDefiningOp();
-        if (ls && ls->getName().stripDialect() == "lane_sum") {
-          dot2 = ls;
-          gain2Src = mulSc.getOperand(1 - s);
-        }
-      }
-      for (auto &op : *sumLoop.getBody()) {
-        if (op.getName().stripDialect() == "slice_read") {
-          if (!kSlice2)
-            kSlice2 = &op;
-          else
-            vSlice = &op;
-        } else if (op.getName().getStringRef() == "arith.truncf") {
-          wTrunc = &op;
-        }
-      }
-    }
-    Operation *outTrunc = outWrite->getOperand(0).getDefiningOp();
-    Operation *normMul = outTrunc->getOperand(0).getDefiningOp();
 
     Value kView = kSlice1->getOperand(0), vView = vSlice->getOperand(0),
           qView = qSlice->getOperand(0), yView = outWrite->getOperand(1);

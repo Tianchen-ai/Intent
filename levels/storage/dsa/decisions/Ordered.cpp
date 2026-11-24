@@ -32,6 +32,16 @@ LogicalResult memberStorage(func::FuncOp fn, const TargetProfile &p,
     space.walk([&](Operation *op) {
       if (op == &space)
         return;
+      auto rIt = pf->roles.find(op);
+      if (rIt != pf->roles.end()) {
+        auto expectedRole = b.getStringAttr(rIt->second);
+        if (assign)
+          op->setAttr("dsa.panel_role", expectedRole);
+        else if (op->getAttr("dsa.panel_role") != expectedRole)
+          ok = false;
+      } else if (op->hasAttr("dsa.panel_role")) {
+        ok = false;
+      }
       auto it = offsets.find(op);
       if (it != offsets.end()) {
         auto expected = b.getDenseI64ArrayAttr(it->second);
