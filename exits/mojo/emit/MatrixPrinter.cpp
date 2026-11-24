@@ -2135,12 +2135,12 @@ TerminalPrinter mojoMatrixPrinter() {
 
   p.operations["mojo_row.c_row_omp_parallel"] = [](Operation &op, PrintPoint at,
                                                    PrintContext &c) {
-    bool dyn = false;
-    if (auto attr = op.getAttrOfType<BoolAttr>("dynamic_chunks"))
-      dyn = attr.getValue();
+    bool dyn = op.getAttrOfType<StringAttr>("schedule").getValue() == "dynamic";
+    int64_t chunk = op.getAttrOfType<IntegerAttr>("chunk_size").getInt();
     if (at == PrintPoint::Enter) {
       if (dyn) {
-        c.line("#pragma omp parallel for num_threads(threads) schedule(dynamic, groups > 256 ? 8 : 1)");
+        c.line("#pragma omp parallel for num_threads(threads) schedule(dynamic, " +
+               std::to_string(chunk) + ")");
         c.line("for (int64_t g = 0; g < groups; ++g) {");
       } else {
         c.line("#pragma omp parallel num_threads(threads)");

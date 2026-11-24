@@ -1,8 +1,11 @@
 #pragma once
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Matchers.h"
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/Support/JSON.h"
 #include <cmath>
 namespace intentdsl::cpu {
 // The 64 KiB L2-resident per-task budget includes all owners of this candidate
@@ -19,6 +22,74 @@ inline std::optional<RepeatedScore> repeatedScore(mlir::Operation &space) {
   if (loops.size() < 2)
     return {};
 
+  auto fn = space.getParentOfType<func::FuncOp>();
+  SmallVector<int64_t, 8> argPublicSlot;
+  SmallVector<std::string, 8> argDirection;
+  bool hasAbiFacts = false;
+  if (fn) {
+    bool projected = fn->hasAttr("kir.iteration");
+    auto abiAttr = fn->getAttrOfType<StringAttr>(
+        projected ? "kir.public_abi" : "kir.abi");
+    if (abiAttr) {
+      if (auto parsed = llvm::json::parse(abiAttr.getValue())) {
+        if (auto *slots = parsed->getAsArray()) {
+          bool ok = true;
+          argPublicSlot.resize(fn.getNumArguments(), -1);
+          argDirection.resize(fn.getNumArguments());
+          for (unsigned k = 0; k < fn.getNumArguments(); ++k) {
+            int64_t pubIdx = int64_t(k);
+            if (projected) {
+              auto src = fn.getArgAttrOfType<IntegerAttr>(k, "kir.source");
+              if (!src) {
+                ok = false;
+                break;
+              }
+              pubIdx = src.getInt();
+            }
+            if (pubIdx < 0 || size_t(pubIdx) >= slots->size()) {
+              ok = false;
+              break;
+            }
+            auto *obj = (*slots)[pubIdx].getAsObject();
+            auto dir = obj ? obj->getString("direction") : std::nullopt;
+            if (!dir) {
+              ok = false;
+              break;
+            }
+            argPublicSlot[k] = pubIdx;
+            argDirection[k] = dir->str();
+          }
+          hasAbiFacts = ok;
+        }
+      } else {
+        llvm::consumeError(parsed.takeError());
+      }
+    }
+  }
+
+  auto resolveFuncArg = [&](auto &self, Value v) -> std::optional<unsigned> {
+    if (!v || !fn)
+      return std::nullopt;
+    if (auto ba = dyn_cast<BlockArgument>(v)) {
+      if (ba.getOwner() == &fn.front())
+        return ba.getArgNumber();
+      if (Operation *parent = ba.getOwner()->getParentOp()) {
+        unsigned nArgs = ba.getOwner()->getNumArguments();
+        unsigned nOps = parent->getNumOperands();
+        if (nArgs == nOps && ba.getArgNumber() < nOps)
+          return self(self, parent->getOperand(ba.getArgNumber()));
+        if (nArgs == nOps + 1 && ba.getArgNumber() >= 1)
+          return self(self, parent->getOperand(ba.getArgNumber() - 1));
+      }
+      return std::nullopt;
+    }
+    auto *def = v.getDefiningOp();
+    if (isa_and_nonnull<memref::CastOp, memref::SubViewOp,
+                        memref::ReinterpretCastOp>(def))
+      return self(self, def->getOperand(0));
+    return std::nullopt;
+  };
+
   auto nonMarkAttrs = [](Operation *op) {
     SmallVector<NamedAttribute, 4> res;
     for (auto attr : op->getAttrs())
@@ -32,8 +103,60 @@ inline std::optional<RepeatedScore> repeatedScore(mlir::Operation &space) {
   };
 
   auto isPureOrRead = [](Operation *op) {
+    auto stripped = op->getName().stripDialect();
     return isMemoryEffectFree(op) || isa<memref::LoadOp, memref::DimOp>(op) ||
-           op->getName().stripDialect() == "slice_read";
+           stripped == "slice_read" || stripped == "lane_splat";
+  };
+
+  auto collectExprReadViews =
+      [&](ArrayRef<Value> roots,
+          llvm::SmallDenseSet<Value, 8> &rawReadViews,
+          llvm::SmallDenseSet<unsigned, 8> &resolvedReadArgs,
+          bool &allResolved) -> bool {
+    llvm::SmallDenseSet<Value, 16> visited;
+    SmallVector<Value, 16> work;
+    for (Value r : roots)
+      if (r)
+        work.push_back(r);
+    while (!work.empty()) {
+      Value cur = work.pop_back_val();
+      if (!visited.insert(cur).second)
+        continue;
+      if (isa<MemRefType>(cur.getType())) {
+        rawReadViews.insert(cur);
+        if (auto idx = resolveFuncArg(resolveFuncArg, cur))
+          resolvedReadArgs.insert(*idx);
+        else
+          allResolved = false;
+      }
+      if (auto ba = dyn_cast<BlockArgument>(cur)) {
+        if (auto ifParent = dyn_cast<scf::IfOp>(ba.getOwner()->getParentOp())) {
+          (void)ifParent;
+          return false;
+        }
+        continue;
+      }
+      Operation *def = cur.getDefiningOp();
+      if (!def)
+        continue;
+      if (auto ifOp = dyn_cast<scf::IfOp>(def)) {
+        if (ifOp.getElseRegion().empty())
+          return false;
+        work.push_back(ifOp.getCondition());
+        for (Operation &sub : ifOp.getThenRegion().front())
+          for (Value in : sub.getOperands())
+            work.push_back(in);
+        for (Operation &sub : ifOp.getElseRegion().front())
+          for (Value in : sub.getOperands())
+            work.push_back(in);
+        continue;
+      }
+      if (def->getNumRegions() != 0 || !isPureOrRead(def))
+        return false;
+      for (Value in : def->getOperands())
+        work.push_back(in);
+    }
+    return true;
   };
 
   auto isNegInf = [](Value v) {
@@ -141,22 +264,8 @@ inline std::optional<RepeatedScore> repeatedScore(mlir::Operation &space) {
                     nullptr, Value{}, Value{}))
         continue;
 
-      // Every load of the matched expression must see the same input in both folds.
-      bool interveningWrite = false;
-      for (Operation *op = a; op != b; op = op->getNextNode()) {
-        if (op->walk([&](Operation *v) {
-                if (v->getNumRegions() != 0 || isPureOrRead(v))
-                  return WalkResult::advance();
-                return WalkResult::interrupt();
-              }).wasInterrupted()) {
-          interveningWrite = true;
-          break;
-        }
-      }
-      if (interveningWrite)
-        break;
-
       Operation *matchedReplay = nullptr;
+      Value condB;
       bool ambiguous = false;
       b.getBody()->walk([&](arith::SubFOp sub) {
         if (sub.getRhs() != a.getResult(0))
@@ -172,6 +281,7 @@ inline std::optional<RepeatedScore> repeatedScore(mlir::Operation &space) {
             ambiguous = true;
             return;
           }
+          condB = ifB.getCondition();
           if (condA) {
             Region *expectedReg =
                 invertCond ? &ifB.getElseRegion() : &ifB.getThenRegion();
@@ -193,8 +303,77 @@ inline std::optional<RepeatedScore> repeatedScore(mlir::Operation &space) {
           ambiguous = true;
         matchedReplay = repOp;
       });
-      if (matchedReplay && !ambiguous)
-        return RepeatedScore{a, b, producer, matchedReplay};
+      if (!matchedReplay || ambiguous)
+        continue;
+
+      // Prove complete write-effect and alias safety across the entire [a, b]
+      // interval (including inside a, between a and b, and inside b itself):
+      // every memory read in the score expression, guard predicates, and loop
+      // bounds must observe identical memory contents in both folds.
+      llvm::SmallDenseSet<Value, 8> rawReadViews;
+      llvm::SmallDenseSet<unsigned, 8> scoreReadArgs;
+      bool allReadsResolved = true;
+      if (!collectExprReadViews(
+              {scoreA, condA, a.getLowerBound(), a.getUpperBound(),
+               matchedReplay->getResult(0), condB, b.getLowerBound(),
+               b.getUpperBound()},
+              rawReadViews, scoreReadArgs, allReadsResolved))
+        continue;
+      // Reject reads from buffers defined inside [a, b] (e.g. local allocas).
+      bool localReadBuf = llvm::any_of(rawReadViews, [&](Value v) {
+        auto *def = v.getDefiningOp();
+        return def && !def->isBeforeInBlock(a);
+      });
+      if (localReadBuf)
+        continue;
+
+      auto canAliasScoreRead = [&](Value writtenView) -> bool {
+        if (rawReadViews.contains(writtenView))
+          return true;
+        if (!hasAbiFacts || !allReadsResolved)
+          return true;
+        auto wIdx = resolveFuncArg(resolveFuncArg, writtenView);
+        if (!wIdx || *wIdx >= argDirection.size() ||
+            argDirection[*wIdx] != "Out")
+          return true;
+        for (unsigned rIdx : scoreReadArgs) {
+          if (rIdx == *wIdx || rIdx >= argDirection.size() ||
+              argDirection[rIdx] != "In" ||
+              argPublicSlot[rIdx] == argPublicSlot[*wIdx])
+            return true;
+        }
+        return false;
+      };
+
+      bool interveningOrAliasedWrite = false;
+      for (Operation *op = a; op != nullptr; op = op->getNextNode()) {
+        if (op->walk([&](Operation *v) {
+                if (v->getNumRegions() != 0)
+                  return isa<scf::ForOp, scf::IfOp>(v)
+                             ? WalkResult::advance()
+                             : WalkResult::interrupt();
+                if (isPureOrRead(v))
+                  return WalkResult::advance();
+                Value writtenView;
+                if (auto st = dyn_cast<memref::StoreOp>(v))
+                  writtenView = st.getMemref();
+                else if (v->getName().stripDialect() == "slice_write" &&
+                         v->getNumOperands() >= 2)
+                  writtenView = v->getOperand(1);
+                if (!writtenView || canAliasScoreRead(writtenView))
+                  return WalkResult::interrupt();
+                return WalkResult::advance();
+              }).wasInterrupted()) {
+          interveningOrAliasedWrite = true;
+          break;
+        }
+        if (op == b)
+          break;
+      }
+      if (interveningOrAliasedWrite)
+        continue;
+
+      return RepeatedScore{a, b, producer, matchedReplay};
     }
   }
   return {};

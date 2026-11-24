@@ -561,7 +561,7 @@ struct Realize : PassWrapper<Realize, OperationPass<ModuleOp>> {
           !intentdsl::cpu::formReservations(body) &&
           !intentdsl::cpu::atomicMembers(body) &&
           !intentdsl::cpu::formAtomicMembers(body)) {
-        int64_t knownCols = -1;
+        int64_t knownCols = -1, knownRows = -1;
         auto walkAttr = op->getAttrOfType<StringAttr>("cpu.walk");
         if ((!walkAttr || walkAttr.getValue() == "source") &&
             !op->hasAttr("cpu.member_tasks")) {
@@ -570,8 +570,25 @@ struct Realize : PassWrapper<Realize, OperationPass<ModuleOp>> {
             if (domIdx < fn.getNumArguments()) {
               if (auto *sh = facts.shapeOf(fn.getArgument(domIdx));
                   sh && !sh->empty()) {
-                if (auto c = (*sh)[sh->size() - 1].getAsInteger())
-                  knownCols = *c;
+                if (auto oa = fn->getAttrOfType<IntegerAttr>("kir.owner_axis")) {
+                  if (oa.getInt() >= 0 && size_t(oa.getInt()) < sh->size())
+                    if (auto rExt = (*sh)[oa.getInt()].getAsInteger())
+                      knownRows = *rExt;
+                } else {
+                  if (auto c = (*sh)[sh->size() - 1].getAsInteger())
+                    knownCols = *c;
+                  int64_t rProd = 1;
+                  for (size_t ax = 0; ax + 1 < sh->size(); ++ax) {
+                    auto dExt = (*sh)[ax].getAsInteger();
+                    if (!dExt || *dExt < 0) {
+                      rProd = -1;
+                      break;
+                    }
+                    rProd *= *dExt;
+                  }
+                  if (rProd >= 0)
+                    knownRows = rProd;
+                }
               }
             }
           }
@@ -580,6 +597,10 @@ struct Realize : PassWrapper<Realize, OperationPass<ModuleOp>> {
           op->setAttr("mojo_row.known_cols",
                       IntegerAttr::get(IntegerType::get(&getContext(), 64),
                                        knownCols));
+        if (knownRows > 0)
+          op->setAttr("mojo_row.known_rows",
+                      IntegerAttr::get(IntegerType::get(&getContext(), 64),
+                                       knownRows));
         Columns(op).run(effLanes, knownCols);
       }
     }

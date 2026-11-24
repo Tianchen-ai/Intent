@@ -2511,17 +2511,93 @@ struct RowLowerer {
                     b.getNamedAttr("width", b.getI64IntegerAttr(w))})
                 ->getResult(0);
       }
+      auto estimateUnroll4VecRegisters =
+          [&](bool deferCrossLaneStores) -> int64_t {
+        Block &sweepBb = loop.getRegion(0).front();
+        llvm::DenseSet<Value> invariantVecInputs;
+        llvm::DenseSet<Operation *> constApplyOps;
+        llvm::DenseMap<Value, int> remUses;
+        bool usesExpPoly = false;
+        for (Operation &sop : sweepBb) {
+          if (sop.getNumResults() == 1 &&
+              hoistedRowMap.contains(sop.getResult(0)))
+            continue;
+          auto sc = sop.getName().stripDialect();
+          if (sc == "apply") {
+            auto k = sop.getAttrOfType<StringAttr>("kind").getValue();
+            if (k == "constant") {
+              constApplyOps.insert(&sop);
+              continue;
+            }
+            if (k == "exp")
+              usesExpPoly = true;
+          }
+          if (sc != "yield" && sop.getNumResults() == 1) {
+            int uses = 0;
+            for (Operation *u : sop.getResult(0).getUsers())
+              if (u->getBlock() == &sweepBb)
+                ++uses;
+            remUses[sop.getResult(0)] = uses;
+          }
+          for (Value in : sop.getOperands()) {
+            if (in == sweepBb.getArgument(0))
+              continue;
+            if (hoistedRowMap.contains(in)) {
+              invariantVecInputs.insert(in);
+            } else if (Operation *inDef = in.getDefiningOp();
+                       inDef && constApplyOps.contains(inDef)) {
+              invariantVecInputs.insert(in);
+            }
+          }
+        }
+        int64_t hoistedVecs = invariantVecInputs.size();
+        int64_t sharedPolyRegs = usesExpPoly ? 6 : 0;
+        int64_t curLive = 0, lanePeak = 0, deferredPerLane = 0;
+        for (Operation &sop : sweepBb) {
+          if (sop.getNumResults() == 1 &&
+              (hoistedRowMap.contains(sop.getResult(0)) ||
+               constApplyOps.contains(&sop)))
+            continue;
+          auto sc = sop.getName().stripDialect();
+          int64_t opScratch = 0;
+          if (sc == "apply") {
+            auto k = sop.getAttrOfType<StringAttr>("kind").getValue();
+            if (k == "exp")
+              opScratch = 2;
+            else if (k == "sqrt" || k == "rsqrt" || k == "div")
+              opScratch = 1;
+          }
+          if (sc != "yield" && sop.getNumResults() == 1 &&
+              remUses.lookup(sop.getResult(0)) > 0)
+            ++curLive;
+          lanePeak = std::max(lanePeak, curLive + opScratch);
+          bool isDeferredSink =
+              deferCrossLaneStores &&
+              ((isStore && sc == "write") ||
+               (!isStore && sc == "row_cache_store"));
+          if (isDeferredSink)
+            ++deferredPerLane;
+          for (Value in : sop.getOperands()) {
+            auto it = remUses.find(in);
+            if (it != remUses.end() && --it->second == 0)
+              --curLive;
+          }
+        }
+        int64_t overlapLanes =
+            (isStore || deferCrossLaneStores) ? 4 : 2;
+        return hoistedVecs + sharedPolyRegs + 4 * int64_t(numReds) +
+               3 * deferredPerLane + overlapLanes * std::max<int64_t>(1, lanePeak);
+      };
+      const int64_t archVecRegs = fullWidth >= 16 ? 32 : 16;
       auto emitBlockedFullLoop = [&](bool unitFast,
                                      bool allowUnroll4) -> LogicalResult {
         bool prevFast = forceUnitStride;
         forceUnitStride = unitFast;
         if (allowUnroll4 && w > 1 && isStore && !hasSweepUniform && !ownerAxis) {
           Operation *singleFeatSeg = nullptr;
-          int segOps = 0, statefulOps = 0, bodyOps = 0, userReads = 0,
-              userWrites = 0;
+          int segOps = 0, statefulOps = 0, userReads = 0, userWrites = 0;
           bool hasCacheLoad = false;
           for (Operation &sop : loop.getRegion(0).front()) {
-            ++bodyOps;
             auto sc = sop.getName().stripDialect();
             if (sc == "segment_fold") {
               ++segOps;
@@ -2545,9 +2621,11 @@ struct RowLowerer {
               ++statefulOps;
             }
           }
-          if (segOps == 0 && statefulOps == 0 && bodyOps <= 24) {
+          if (segOps == 0 && statefulOps == 0 &&
+              estimateUnroll4VecRegisters(false) <= archVecRegs) {
             bool deferOut =
-                hasCacheLoad && userReads == 0 && userWrites == 1;
+                hasCacheLoad && userReads == 0 && userWrites == 1 &&
+                estimateUnroll4VecRegisters(true) <= archVecRegs;
             Value cW2 = constIdx(b, loc, 2 * w), cW3 = constIdx(b, loc, 3 * w),
                   cW4 = constIdx(b, loc, 4 * w);
             Value unrollStop = b.create<arith::MulIOp>(
@@ -2706,15 +2784,15 @@ struct RowLowerer {
           }
         }
         if (allowUnroll4 && w > 1 && !isStore && !isMoments && numReds >= 1 &&
-            numReds <= 4 && !hasSweepUniform) {
-          int redBodyOps = 0;
-          bool hasCacheStore = false;
-          for (Operation &sop : loop.getRegion(0).front()) {
-            ++redBodyOps;
-            if (sop.getName().stripDialect() == "row_cache_store")
-              hasCacheStore = true;
-          }
-          bool deferCache = hasCacheStore && numReds <= 2 && redBodyOps <= 16;
+            numReds <= 4 && !hasSweepUniform &&
+            estimateUnroll4VecRegisters(false) <= archVecRegs) {
+          bool hasCacheStore = llvm::any_of(
+              loop.getRegion(0).front(), [](Operation &sop) {
+                return sop.getName().stripDialect() == "row_cache_store";
+              });
+          bool deferCache =
+              hasCacheStore &&
+              estimateUnroll4VecRegisters(true) <= archVecRegs;
           SmallVector<SmallVector<Value, 4>, 3> extraAccs(3);
           for (int u = 0; u < 3; ++u)
             for (unsigned k = 0; k < numReds; ++k)
@@ -3417,9 +3495,26 @@ LogicalResult lowerMojoRow(func::FuncOp fn, int64_t fullWidth) {
     emitDispatchBody(sGuard->getRegion(0).emplaceBlock());
     bool dynChunks =
         hasSegmentFold && !singleDisp && !memberTasks && !lowerer.projectedRank;
+    int64_t chunkSize = 1;
+    if (dynChunks) {
+      int64_t knownRows = -1;
+      if (auto kr = task.getAttrOfType<IntegerAttr>("mojo_row.known_rows"))
+        knownRows = kr.getInt();
+      int64_t repGrain = 1;
+      if (rowsAttr && !rowsAttr.empty())
+        repGrain =
+            cast<DictionaryAttr>(rowsAttr[0]).getAs<IntegerAttr>("grain").getInt();
+      if (knownRows > 0 && repGrain > 0) {
+        int64_t groups = (knownRows - 1) / repGrain + 1;
+        chunkSize = groups > 256 ? 8 : 1;
+      }
+    }
     auto *rOmp = makeOp(
         b, loc, "c_row_omp_parallel", {}, {},
-        {b.getNamedAttr("dynamic_chunks", b.getBoolAttr(dynChunks))}, 1);
+        {b.getNamedAttr("schedule",
+                        b.getStringAttr(dynChunks ? "dynamic" : "static")),
+         b.getNamedAttr("chunk_size", b.getI64IntegerAttr(chunkSize))},
+        1);
     makeOp(b, loc, "end");
     emitDispatchBody(rOmp->getRegion(0).emplaceBlock());
   }
@@ -3482,6 +3577,16 @@ LogicalResult verifyMojoRow(ModuleOp m, const TargetProfile &p, bool callable) {
                int64_t(op->getNumOperands()) != 1 + 2 * terms.getInt()) {
              op->emitError(
                  "mojo_row.dyn_address requires 64-bit dynamic stride pairs");
+             return WalkResult::interrupt();
+           }
+         } else if (name == "mojo_row.c_row_omp_parallel") {
+           auto sched = op->getAttrOfType<StringAttr>("schedule");
+           auto chunk = op->getAttrOfType<IntegerAttr>("chunk_size");
+           if (!sched || !chunk || chunk.getInt() < 1 ||
+               (sched.getValue() != "static" && sched.getValue() != "dynamic") ||
+               (sched.getValue() == "static" && chunk.getInt() != 1)) {
+             op->emitError("mojo_row.c_row_omp_parallel requires verified "
+                           "schedule and chunk_size");
              return WalkResult::interrupt();
            }
          }
