@@ -4,14 +4,47 @@
 #include "intentdsl/levels/execution/block/ir/Contraction.h"
 #include "intentdsl/levels/execution/block/ir/Owners.h"
 #include "llvm/Support/MathExtras.h"
+#include <dlfcn.h>
 
 namespace CI_UNIT_NAMESPACE {
 using namespace compilerinfra;
+namespace {
+std::string probeCudaCalibration() {
+  static const std::string detected = []() -> std::string {
+    void *lib = dlopen("libcuda.so.1", RTLD_LAZY | RTLD_LOCAL);
+    if (!lib)
+      return "";
+    using InitFn = int (*)(unsigned);
+    using GetDevFn = int (*)(int *, int);
+    using GetAttrFn = int (*)(int *, int, int);
+    auto cuInit = reinterpret_cast<InitFn>(dlsym(lib, "cuInit"));
+    auto cuDeviceGet = reinterpret_cast<GetDevFn>(dlsym(lib, "cuDeviceGet"));
+    auto cuDeviceGetAttribute =
+        reinterpret_cast<GetAttrFn>(dlsym(lib, "cuDeviceGetAttribute"));
+    int dev = 0, major = 0, minor = 0;
+    if (cuInit && cuDeviceGet && cuDeviceGetAttribute && cuInit(0) == 0 &&
+        cuDeviceGet(&dev, 0) == 0 &&
+        cuDeviceGetAttribute(&major, 75, dev) == 0 &&
+        cuDeviceGetAttribute(&minor, 76, dev) == 0) {
+      int sm = major * 10 + minor;
+      if (sm == 90)
+        return "sm90";
+      if (sm == 120)
+        return "sm120";
+    }
+    return "";
+  }();
+  return detected;
+}
+} // namespace
 llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
   TargetProfile profile;
   auto arch = options.getInteger("sm");
-  if (!arch)
-    return profile; // Static layout has no device binding.
+  if (!arch) {
+    profile.services.calibrationProfile =
+        options.getString("calibration").value_or(probeCudaCalibration()).str();
+    return profile; // Static layout has no bound call arguments.
+  }
   if (*arch != 90 && *arch != 120)
     return llvm::createStringError("unsupported Triton GPU architecture");
   auto caps = std::make_shared<intentdsl::RowCapacity>();
@@ -92,7 +125,12 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
                       : options.getInteger("registers").value_or(0) * 3 / 8,
                   *arch == 90 ? 64 : 0})))
     return err;
-  if(auto err=intentdsl::bindPerformance(profile,options,"",options.getString("calibration").value_or("").str(),options.getInteger("sm_count").value_or(1)))return std::move(err);
+  std::string cal = options.getString("calibration")
+                        .value_or(*arch == 90 ? "sm90" : "sm120")
+                        .str();
+  if (auto err = intentdsl::bindPerformance(
+          profile, options, "", cal, options.getInteger("sm_count").value_or(1)))
+    return std::move(err);
   if (auto e = profile.services.provide<intentdsl::RowCapacity>(caps))
     return e;
   return profile;

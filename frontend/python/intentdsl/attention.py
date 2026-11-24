@@ -115,7 +115,11 @@ def paged_partials(
                     mass = mass + weight
                     value = I.cast(values[page, pos % page_size, kv, :], I.f32)
                     weighted = weighted + I.cast(I.cast(weight, I.f16), I.f32) * value
-                inv = I.f32(1) / mass if start < stop else I.f32(0)
+                inv = (
+                    I.fdiv(I.f32(1), mass, approximate=True, flush_to_zero=True)
+                    if start < stop
+                    else I.f32(0)
+                )
                 partial[batch, head, split, :] = weighted * inv
                 lse[batch, head, split] = peak + I.log(mass) * I.f32(1.4426950408889634) if start < stop else -I.inf
 

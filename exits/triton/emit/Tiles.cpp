@@ -1,11 +1,9 @@
 #include "../ir/TileShape.h"
 #include "compilerinfra/Assembly.h"
-#include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
 #include "intentdsl/levels/algorithm/kir/ir/Literal.h"
 #include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/TypeUtilities.h"
 #include "llvm/ADT/StringExtras.h"
 
 namespace CI_UNIT_NAMESPACE {
@@ -37,119 +35,149 @@ std::string dtype(Type t) {
     return "tl.int8";
   return "tl.int1";
 }
+bool viewHasAnyFastMath(const LocalOpView &v, arith::FastMathFlags mask) {
+  auto attr = v.attrOfType<arith::FastMathFlagsAttr>("fastmath");
+  return attr && bitEnumContainsAny(attr.getValue(), mask);
+}
+bool viewHasFastMath(const LocalOpView &v, arith::FastMathFlags req) {
+  auto attr = v.attrOfType<arith::FastMathFlagsAttr>("fastmath");
+  return attr && bitEnumContainsAll(attr.getValue(), req);
+}
+
 TerminalPrinter tilePrinter() {
   TerminalPrinter p;
   registerColumnRules(p);
   auto leaf = [&](StringRef name, auto rule) {
-    p.operations[name.str()] = PrintRule::custom([rule](Operation &op, PrintPoint at,
-                                      PrintContext &c) {
-      if (at != PrintPoint::Enter)
-        return llvm::Error::success();
-      std::vector<std::string> a;
-      for (Value v : op.getOperands())
-        a.push_back(c.name(v));
-      auto expr = rule(op, a);
-      if (!expr.empty())
-        c.line(op.getNumResults() ? c.name(op.getResult(0)) + " = " + expr
-                                  : expr);
-      return llvm::Error::success();
-    }, "legacy_operation_rule");
+    p.operations[name.str()] = PrintRule::local(
+        [rule](const LocalOpView &view, PrintPoint at, PrintContext &c) {
+          if (at != PrintPoint::Enter)
+            return llvm::Error::success();
+          auto expr = rule(view);
+          if (!expr.empty())
+            c.line(view.numResults() ? view.result(0).str() + " = " + expr
+                                     : expr);
+          return llvm::Error::success();
+        });
   };
-  leaf("triton_src.tile_program", [](auto &, auto &) { return std::string(); });
-  leaf("triton_src.tile_axis", [](Operation &op, auto &) {
-    return "tl.arange(0," +
-           std::to_string(shape(op.getResult(0).getType())[0]) +
+
+  // Declarative templates
+  p.operations["triton_src.tile_program"] = PrintRule::format("");
+  p.operations["triton_src.tile_pid"] =
+      PrintRule::format("$r0 = tl.program_id({axis}).to(tl.int64)");
+  p.operations["triton_src.from_le_half"] = PrintRule::format(
+      "$r0 = ($0|($1<<8)).to(tl.uint16).to(tl.float16,bitcast=True).to(tl.float32)");
+  p.operations["arith.minimumf"] = PrintRule::format(
+      "$r0 = tl.minimum($operands,propagate_nan=tl.PropagateNan.ALL)");
+  p.operations["math.absf"] = PrintRule::format("$r0 = tl.abs($0)");
+  p.operations["math.roundeven"] = PrintRule::format("$r0 = libdevice.rint($0)");
+  p.operations["arith.minnumf"] = PrintRule::format("$r0 = tl.minimum($operands)");
+  p.operations["arith.shli"] = PrintRule::format("$r0 = $0<<$1");
+  p.operations["arith.shrui"] =
+      PrintRule::format("$r0 = ($0.to(tl.uint32)>>$1).to(tl.int32)");
+  p.operations["arith.maxnumf"] = PrintRule::format("$r0 = tl.maximum($operands)");
+  p.operations["arith.minsi"] = PrintRule::format("$r0 = tl.minimum($operands)");
+  p.operations["arith.subi"] = PrintRule::format("$r0 = $0-$1");
+  p.operations["arith.floordivsi"] = PrintRule::format("$r0 = $0//$1");
+  p.operations["arith.remsi"] = PrintRule::format("$r0 = $0%$1");
+  p.operations["arith.ori"] = PrintRule::format("$r0 = $0|$1");
+  p.operations["arith.xori"] = PrintRule::format("$r0 = $0^$1");
+  p.operations["math.exp"] = PrintRule::format("$r0 = tl.exp($0)");
+  p.operations["math.log"] = PrintRule::format("$r0 = tl.log($0)");
+  p.operations["math.exp2"] = PrintRule::format("$r0 = tl.exp2($0)");
+  p.operations["arith.select"] = PrintRule::format("$r0 = tl.where($operands)");
+
+  // Local rules (LocalOpView only)
+  leaf("triton_src.tile_axis", [](const LocalOpView &v) {
+    return "tl.arange(0," + std::to_string(shape(v.resultType(0))[0]) +
            ").to(tl.int64)";
   });
-  leaf("triton_src.tile_pid", [](Operation &op, auto &) {
-    return "tl.program_id(" +
-           std::to_string(op.getAttrOfType<IntegerAttr>("axis").getInt()) +
-           ").to(tl.int64)";
+  leaf("triton_src.drop_unit_owner", [](const LocalOpView &v) {
+    return ("tl.reshape(" + v.operand(0) + "," + tuple(v.resultType(0)) + ")")
+        .str();
   });
-  leaf("triton_src.drop_unit_owner", [](Operation &op, auto &a) {
-    return "tl.reshape(" + a[0] + "," + tuple(op.getResult(0).getType()) + ")";
+  leaf("triton_src.tile_prefix", [](const LocalOpView &v) {
+    return ("tl.gather(" + v.operand(0) + ",tl.arange(0," +
+            std::to_string(shape(v.resultType(0))[0]) + "),0)")
+        .str();
   });
-  leaf("triton_src.tile_prefix", [](Operation &op, auto &a) {
-    return "tl.gather(" + a[0] + ",tl.arange(0," +
-           std::to_string(shape(op.getResult(0).getType())[0]) + "),0)";
-  });
-  leaf("triton_src.tile_address", [](Operation &op, auto &a) {
-    auto strides = op.getAttrOfType<DenseI64ArrayAttr>("strides");
-    auto axes = op.getAttrOfType<DenseI64ArrayAttr>("projection");
-    auto rank = shape(op.getResult(0).getType()).size();
+  leaf("triton_src.tile_address", [](const LocalOpView &v) {
+    auto strides = v.attrOfType<DenseI64ArrayAttr>("strides");
+    auto axes = v.attrOfType<DenseI64ArrayAttr>("projection");
+    auto rank = shape(v.resultType(0)).size();
+    auto width = v.attrOfType<IntegerAttr>("index_bits").getInt();
     std::vector<std::string> terms;
     for (size_t i = 0; i < axes.size(); ++i) {
-      std::string projection = rank == 2 && axes[i] >= 0
-                                   ? (axes[i] == 0 ? "[:,None]" : "[None,:]")
-                                   : "";
-      auto width = op.getAttrOfType<IntegerAttr>("index_bits").getInt();
-      terms.push_back("tl.cast(" + a[i + 1] + ",tl.int" +
+      std::string projection =
+          rank == 2 && axes[i] >= 0 ? (axes[i] == 0 ? "[:,None]" : "[None,:]")
+                                    : "";
+      terms.push_back("tl.cast(" + v.operand(i + 1).str() + ",tl.int" +
                       std::to_string(width) + ")" + projection + "*" +
                       std::to_string(strides[i]));
     }
     auto sum = llvm::join(terms, " + ");
-    return op.getAttrOfType<IntegerAttr>("index_bits").getInt() == 32
-               ? "tl.cast(" + sum + ",tl.int64)"
-               : sum;
+    return width == 32 ? "tl.cast(" + sum + ",tl.int64)" : sum;
   });
-  leaf("triton_src.tile_read", [](Operation &op, auto &a) {
-    auto e = getElementTypeOrSelf(op.getResult(0).getType());
+  leaf("triton_src.tile_read", [](const LocalOpView &v) {
+    auto e = getElementTypeOrSelf(v.resultType(0));
     bool fp8 = isa<Float8E4M3FNType>(e);
-    return "tl.load(" + a[0] + (fp8 ? ".to(tl.pointer_type(tl.uint8))" : "") +
-           "+" + a[1] + (a.size() == 3 ? ",mask=" + a[2] + ",other=0" : "") +
-           ")" + (fp8 ? ".to(tl.float8e4nv,bitcast=True)" : "");
+    return ("tl.load(" + v.operand(0) +
+            (fp8 ? ".to(tl.pointer_type(tl.uint8))" : "") + "+" + v.operand(1) +
+            (v.numOperands() == 3 ? ",mask=" + v.operand(2) + ",other=0" : "") +
+            ")" + (fp8 ? ".to(tl.float8e4nv,bitcast=True)" : ""))
+        .str();
   });
-  leaf("triton_src.from_le_half", [](auto &, auto &a) {
-    return "(" + a[0] + "|(" + a[1] +
-           "<<8)).to(tl.uint16).to(tl.float16,bitcast=True).to(tl.float32)";
-  });
-  leaf("triton_src.e8m0", [](Operation &op, auto &a) {
+  leaf("triton_src.e8m0", [](const LocalOpView &v) {
     using F = intentdsl::kir::MX8Block;
-    return "tl.where(" + a[0] + "==" + std::to_string(F::nan) +
-           ",float('nan'),libdevice.ldexp(tl.full(" +
-           tuple(op.getResult(0).getType()) + ",1.,tl.float32)," + a[0] + "-" +
-           std::to_string(F::bias) + "))";
+    return ("tl.where(" + v.operand(0) + "==" + std::to_string(F::nan) +
+            ",float('nan'),libdevice.ldexp(tl.full(" + tuple(v.resultType(0)) +
+            ",1.,tl.float32)," + v.operand(0) + "-" + std::to_string(F::bias) +
+            "))")
+        .str();
   });
-  leaf("triton_src.tile_write", [](auto &, auto &a) {
-    return "tl.store(" + a[0] + "+" + a[1] + "," + a[2] +
-           (a.size() == 4 ? ",mask=" + a[3] : "") + ")";
+  leaf("triton_src.tile_write", [](const LocalOpView &v) {
+    return ("tl.store(" + v.operand(0) + "+" + v.operand(1) + "," +
+            v.operand(2) +
+            (v.numOperands() == 4 ? ",mask=" + v.operand(3) : "") + ")")
+        .str();
   });
-  leaf("triton_src.tile_broadcast", [](Operation &op, auto &a) {
-    auto axis = op.getAttrOfType<IntegerAttr>("axis").getInt();
-    auto v = "tl.cast(" + a[0] + "," + dtype(op.getOperand(0).getType()) + ")" +
-             (axis < 0    ? ""
-              : axis == 0 ? "[:,None]"
-                          : "[None,:]");
-    return "tl.broadcast_to(" + v + "," + tuple(op.getResult(0).getType()) +
-           ")";
+  leaf("triton_src.tile_broadcast", [](const LocalOpView &v) {
+    auto axis = v.attrOfType<IntegerAttr>("axis").getInt();
+    auto castExpr = "tl.cast(" + v.operand(0).str() + "," +
+                    dtype(v.operandType(0)) + ")" +
+                    (axis < 0    ? ""
+                     : axis == 0 ? "[:,None]"
+                                 : "[None,:]");
+    return "tl.broadcast_to(" + castExpr + "," + tuple(v.resultType(0)) + ")";
   });
-  leaf("triton_src.tile_dot", [](Operation &op, auto &a) {
-    auto rhs = op.getAttrOfType<BoolAttr>("transpose_rhs").getValue()
-                   ? "tl.trans(" + a[1] + ")"
-                   : a[1];
-    return "tl.dot(" + a[0] + "," + rhs + (a.size() == 3 ? "," + a[2] : "") +
-           (op.hasAttr("triton_src.exact_acc") ? ",max_num_imprecise_acc=0"
-                                               : "") +
-           ",input_precision='ieee',out_dtype=" +
-           dtype(op.getResult(0).getType()) + ")";
+  leaf("triton_src.tile_dot", [](const LocalOpView &v) {
+    auto rhs = v.attrOfType<BoolAttr>("transpose_rhs").getValue()
+                   ? ("tl.trans(" + v.operand(1) + ")").str()
+                   : v.operand(1).str();
+    return ("tl.dot(" + v.operand(0) + "," + rhs +
+            (v.numOperands() == 3 ? "," + v.operand(2) : "") +
+            (v.attr("triton_src.exact_acc") ? ",max_num_imprecise_acc=0" : "") +
+            ",input_precision='ieee',out_dtype=" + dtype(v.resultType(0)) + ")")
+        .str();
   });
-  leaf("triton_src.tile_reduce", [](Operation &op, auto &a) {
-    auto expression =
-        "tl." + op.getAttrOfType<StringAttr>("algebra").str() + "(" + a[0] +
-        "," + std::to_string(op.getAttrOfType<IntegerAttr>("axis").getInt()) +
-        ")";
-    return getElementTypeOrSelf(op.getResult(0).getType()).isInteger(1)
+  leaf("triton_src.tile_reduce", [](const LocalOpView &v) {
+    auto expression = "tl." + v.attrOfType<StringAttr>("algebra").str() + "(" +
+                      v.operand(0).str() + "," +
+                      std::to_string(v.attrOfType<IntegerAttr>("axis").getInt()) +
+                      ")";
+    return getElementTypeOrSelf(v.resultType(0)).isInteger(1)
                ? expression + ".to(tl.int1)"
                : expression;
   });
-  leaf("arith.constant", [](Operation &op, auto &) {
-    auto v = op.getAttr("value");
-    if (auto i = dyn_cast<IntegerAttr>(v)) {
+  leaf("arith.constant", [](const LocalOpView &v) {
+    auto val = v.attr("value");
+    if (auto i = dyn_cast<IntegerAttr>(val)) {
       if (i.getType().isInteger(1))
         return std::string(i.getValue().isZero() ? "False" : "True");
+      if (!isa<ShapedType>(v.resultType(0)) && v.resultType(0).isIndex())
+        return std::to_string(i.getInt());
       return std::to_string(i.getInt());
     }
-    if (auto f = dyn_cast<FloatAttr>(v)) {
+    if (auto f = dyn_cast<FloatAttr>(val)) {
       auto num = f.getValue();
       if (num.isInfinity())
         return std::string(num.isNegative() ? "-float('inf')" : "float('inf')");
@@ -162,8 +190,8 @@ TerminalPrinter tilePrinter() {
         number += ".0";
       return number;
     }
-    auto type = op.getResult(0).getType();
-    auto dense = cast<DenseElementsAttr>(v);
+    auto type = v.resultType(0);
+    auto dense = cast<DenseElementsAttr>(val);
     auto attr = dense.getSplatValue<Attribute>();
     std::string literal = intentdsl::kir::literal(cast<TypedAttr>(attr));
     return "tl.full(" + tuple(type) + "," + literal + "," + dtype(type) + ")";
@@ -177,88 +205,72 @@ TerminalPrinter tilePrinter() {
                              {"arith.subf", "-"},
                              {"arith.addf", "+"},
                              {"arith.andi", "&"}})
-    leaf(name, [token](Operation &op, auto &v) {
-      if (op.hasAttr("triton_src.round_nearest"))
-        return "libdevice." + op.getName().stripDialect().drop_back().str() +
-               "_rn(" + llvm::join(v, ",") + ")";
-      if (op.getName().getStringRef() == "arith.divf" &&
-          !intentdsl::kir::hasAnyFastMath(
-              &op, arith::FastMathFlags::arcp | arith::FastMathFlags::afn))
-        return "tl.div_rn(" + llvm::join(v, ",") + ")";
-      return v[0] + token + v[1];
+    leaf(name, [token](const LocalOpView &v) {
+      if (v.attr("triton_src.round_nearest")) {
+        auto stem = v.operation().split('.').second.drop_back();
+        return ("libdevice." + stem + "_rn(" + llvm::join(v.operands(), ",") +
+                ")")
+            .str();
+      }
+      if (v.operation() == "arith.divf" &&
+          !viewHasAnyFastMath(v, arith::FastMathFlags::arcp |
+                                     arith::FastMathFlags::afn))
+        return "tl.div_rn(" + llvm::join(v.operands(), ",") + ")";
+      return (v.operand(0) + token + v.operand(1)).str();
     });
-  leaf("arith.cmpi", [](Operation &op, auto &a) {
-    auto pred = cast<arith::CmpIOp>(op).getPredicate();
-    auto token = pred == arith::CmpIPredicate::sge  ? ">="
+  leaf("arith.cmpi", [](const LocalOpView &v) {
+    auto raw = v.attrOfType<IntegerAttr>("predicate").getValue().getZExtValue();
+    auto pred = arith::symbolizeCmpIPredicate(raw).value_or(
+        arith::CmpIPredicate::slt);
+    auto token = pred == arith::CmpIPredicate::sge   ? ">="
                  : pred == arith::CmpIPredicate::sle ? "<="
                  : pred == arith::CmpIPredicate::sgt ? ">"
                  : pred == arith::CmpIPredicate::eq  ? "=="
                  : pred == arith::CmpIPredicate::ne  ? "!="
                                                      : "<";
-    return a[0] + token + a[1];
+    return (v.operand(0) + token + v.operand(1)).str();
   });
-  leaf("arith.cmpf", [](Operation &op, auto &a) {
-    return a[0] +
-           (cast<arith::CmpFOp>(op).getPredicate() == arith::CmpFPredicate::OEQ
-                ? "=="
-                : "!=") +
-           a[1];
+  leaf("arith.cmpf", [](const LocalOpView &v) {
+    auto raw = v.attrOfType<IntegerAttr>("predicate").getValue().getZExtValue();
+    auto pred = arith::symbolizeCmpFPredicate(raw).value_or(
+        arith::CmpFPredicate::UNE);
+    auto token = pred == arith::CmpFPredicate::OEQ   ? "=="
+                 : pred == arith::CmpFPredicate::OGT ? ">"
+                 : pred == arith::CmpFPredicate::OGE ? ">="
+                 : pred == arith::CmpFPredicate::OLT ? "<"
+                 : pred == arith::CmpFPredicate::OLE ? "<="
+                                                     : "!=";
+    return (v.operand(0) + token + v.operand(1)).str();
   });
-  leaf("arith.minimumf", [](auto &, auto &a) {
-    return "tl.minimum(" + llvm::join(a, ",") +
-           ",propagate_nan=tl.PropagateNan.ALL)";
+  leaf("math.sqrt", [](const LocalOpView &v) {
+    return (viewHasFastMath(v, arith::FastMathFlags::afn) &&
+                    !v.attr("triton_src.round_nearest")
+                ? "tl.sqrt(" + v.operand(0) + ")"
+                : "tl.sqrt_rn(" + v.operand(0) + ")")
+        .str();
   });
-  leaf("math.absf", [](auto &, auto &a) { return "tl.abs(" + a[0] + ")"; });
-  leaf("math.roundeven",
-       [](auto &, auto &a) { return "libdevice.rint(" + a[0] + ")"; });
-  leaf("arith.minnumf", [](auto &, auto &a) {
-    return "tl.minimum(" + llvm::join(a, ",") + ")";
-  });
-  leaf("arith.shli", [](auto &, auto &a) { return a[0] + "<<" + a[1]; });
-  leaf("arith.shrui", [](auto &, auto &a) {
-    return "(" + a[0] + ".to(tl.uint32)>>" + a[1] + ").to(tl.int32)";
-  });
-  for (auto [name, op] :
-       {std::pair{"arith.maxnumf", "maximum"}, {"arith.minsi", "minimum"}})
-    leaf(name, [op](auto &, auto &a) {
-      return "tl." + std::string(op) + "(" + llvm::join(a, ",") + ")";
-    });
-  for (auto [name, token] : {std::pair{"arith.subi", "-"},
-                             {"arith.floordivsi", "//"},
-                             {"arith.remsi", "%"},
-                             {"arith.ori", "|"},
-                             {"arith.xori", "^"}})
-    leaf(name, [token](auto &, auto &a) { return a[0] + token + a[1]; });
-  for (auto name : {"exp", "log"})
-    leaf("math." + std::string(name), [name](auto &, auto &a) {
-      return "tl." + std::string(name) + "(" + a[0] + ")";
-    });
-  leaf("math.sqrt", [](Operation &op, auto &a) {
-    return intentdsl::kir::hasFastMath(&op, arith::FastMathFlags::afn) &&
-                   !op.hasAttr("triton_src.round_nearest")
-               ? "tl.sqrt(" + a[0] + ")"
-               : "tl.sqrt_rn(" + a[0] + ")";
-  });
-  leaf("arith.select",
-       [](auto &, auto &a) { return "tl.where(" + llvm::join(a, ",") + ")"; });
-  p.operations["scf.if"] = PrintRule::custom([](Operation &op, PrintPoint at, PrintContext &c) {
-    if (at == PrintPoint::Enter)
-      c.line("if " + c.name(op.getOperand(0)) + ":");
-    if (at == PrintPoint::BeginRegion && !op.getRegion(c.region).empty()) {
-      if (c.region)
-        c.line("else:");
-      ++c.indent;
-    } else if (at == PrintPoint::EndRegion && !op.getRegion(c.region).empty())
-      --c.indent;
-    return llvm::Error::success();
-  }, "legacy_operation_rule");
+  p.operations["scf.if"] = PrintRule::local(
+      [](const LocalOpView &v, PrintPoint at, PrintContext &c) {
+        if (at == PrintPoint::Enter)
+          c.line("if " + v.operand(0) + ":");
+        if (at == PrintPoint::BeginRegion &&
+            c.region < v.numRegions() && v.numBlocks(c.region) > 0) {
+          if (c.region)
+            c.line("else:");
+          ++c.indent;
+        } else if (at == PrintPoint::EndRegion &&
+                   c.region < v.numRegions() && v.numBlocks(c.region) > 0) {
+          --c.indent;
+        }
+        return llvm::Error::success();
+      });
   for (auto name :
        {"arith.truncf", "arith.extf", "arith.extsi", "arith.sitofp",
         "arith.fptosi", "arith.index_cast", "arith.trunci", "arith.extui"})
-    leaf(name, [](Operation &op, auto &a) {
-      return "tl.cast(" + a[0] + "," + dtype(op.getResult(0).getType()) + ")";
+    leaf(name, [](const LocalOpView &v) {
+      return ("tl.cast(" + v.operand(0) + "," + dtype(v.resultType(0)) + ")")
+          .str();
     });
-  leaf("math.exp2", [](auto &, auto &a) { return "tl.exp2(" + a[0] + ")"; });
   p.package = [](DictionaryAttr, const auto &files,
                  llvm::raw_pwrite_stream &out) {
     out << files.at("kernel.py");
@@ -271,29 +283,30 @@ void addRowRules(TerminalPrinter &);
 TerminalPrinter tritonPrinter() {
   auto printer = tilePrinter();
   addRowRules(printer);
-  printer.operations["builtin.module"] = PrintRule::custom([](Operation &, PrintPoint at,
-                                            PrintContext &p) {
-    if (at == PrintPoint::Enter) {
-      p.file = "kernel.py";
-      p.line("import triton");
-      p.line("import triton.language as tl");
-      p.line("from triton.language.extra.cuda import libdevice");
-    }
-    return llvm::Error::success();
-  }, "legacy_operation_rule");
-  printer.operations["triton_src.runtime_source"] =
-      PrintRule::custom([](Operation &op, PrintPoint at, PrintContext &p) -> llvm::Error {
-    if (at == PrintPoint::Enter) {
-      auto impl = op.getAttrOfType<StringAttr>("implementation");
-      if (!impl)
-        return llvm::createStringError("missing runtime_source implementation");
-      auto helper = p.source(impl.getValue());
-      if (!helper)
-        return helper.takeError();
-      p.line(*helper);
-    }
-    return llvm::Error::success();
-  }, "legacy_operation_rule");
+  printer.operations["builtin.module"] = PrintRule::local(
+      [](const LocalOpView &, PrintPoint at, PrintContext &p) {
+        if (at == PrintPoint::Enter) {
+          p.file = "kernel.py";
+          p.line("import triton");
+          p.line("import triton.language as tl");
+          p.line("from triton.language.extra.cuda import libdevice");
+        }
+        return llvm::Error::success();
+      });
+  printer.operations["triton_src.runtime_source"] = PrintRule::local(
+      [](const LocalOpView &v, PrintPoint at, PrintContext &p) -> llvm::Error {
+        if (at == PrintPoint::Enter) {
+          auto impl = v.attrOfType<StringAttr>("implementation");
+          if (!impl)
+            return llvm::createStringError(
+                "missing runtime_source implementation");
+          auto helper = p.source(impl.getValue());
+          if (!helper)
+            return helper.takeError();
+          p.line(*helper);
+        }
+        return llvm::Error::success();
+      });
   printer.package = [](DictionaryAttr attrs, const auto &files,
                        llvm::raw_pwrite_stream &os) -> llvm::Error {
     auto package = attrs.getAs<StringAttr>("triton_src.package");

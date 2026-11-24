@@ -127,6 +127,69 @@ void registerContracts(Unit &unit) {
         dot ? "exits/cutile::matrix-issues" : "exits/cutile::collective-steps";
     c.costParameters = dot ? std::vector<std::string>{"M", "N", "K"}
                            : std::vector<std::string>{"rows", "width"};
+    TypedContract tc;
+    tc.effects = EffectMask::None;
+    tc.shape.minResults = 1;
+    tc.shape.maxResults = 1;
+    if (n == "native-dot") {
+      tc.shape.minOperands = 2;
+      tc.shape.maxOperands = 3;
+      tc.shape.operandRanks = {2, 2};
+      tc.shape.resultRanks = {2};
+      tc.operandTypes = {ScalarTypeKind::I8,  ScalarTypeKind::I32,
+                         ScalarTypeKind::F8E4M3FN, ScalarTypeKind::F16,
+                         ScalarTypeKind::BF16, ScalarTypeKind::F32};
+      tc.resultTypes = {ScalarTypeKind::I32, ScalarTypeKind::F32};
+      tc.accumulatorTypes = {ScalarTypeKind::I32, ScalarTypeKind::F32};
+    } else if (n == "scaled-mma") {
+      tc.shape.minOperands = 5;
+      tc.shape.maxOperands = 5;
+      tc.shape.operandRanks = {2, 2, 2, 2, 2};
+      tc.shape.resultRanks = {2};
+      tc.operandTypes = {ScalarTypeKind::F8E4M3FN, ScalarTypeKind::I8,
+                         ScalarTypeKind::F32};
+      tc.resultTypes = {ScalarTypeKind::F32};
+      tc.accumulatorTypes = {ScalarTypeKind::F32};
+    } else if (n == "moments-merge") {
+      tc.shape.minOperands = 2;
+      tc.shape.maxOperands = 2;
+      tc.operandTypes = {ScalarTypeKind::Any};
+      tc.resultTypes = {ScalarTypeKind::Any};
+    } else if (n == "moments-reduction") {
+      tc.shape.minOperands = 2;
+      tc.shape.maxOperands = 2;
+      tc.shape.operandRanks = {2, 2};
+      tc.operandTypes = {ScalarTypeKind::F32, ScalarTypeKind::I1};
+      tc.resultTypes = {ScalarTypeKind::Any};
+    } else if (n == "random" || quad) {
+      tc.shape.minOperands = 2;
+      tc.shape.maxOperands = 2;
+      tc.operandTypes = {ScalarTypeKind::I64};
+      tc.resultTypes = {ScalarTypeKind::F32};
+    } else if (n == "native-row-reduce") {
+      tc.shape.minOperands = 2;
+      tc.shape.maxOperands = 2;
+      tc.shape.operandRanks = {2, 2};
+      tc.shape.resultRanks = {1};
+      tc.operandTypes = {ScalarTypeKind::F32, ScalarTypeKind::I1};
+      tc.resultTypes = {ScalarTypeKind::F32};
+    } else if (n == "inclusive-scan") {
+      tc.shape.minOperands = 1;
+      tc.shape.maxOperands = 1;
+      tc.shape.operandRanks = {2};
+      tc.shape.resultRanks = {2};
+      tc.shape.sameFirstOperandAndResultShape = true;
+      tc.operandTypes = {ScalarTypeKind::I32, ScalarTypeKind::F32};
+      tc.resultTypes = {ScalarTypeKind::I32, ScalarTypeKind::F32};
+    } else {
+      tc.shape.minOperands = 1;
+      tc.shape.maxOperands = 1;
+      tc.operandTypes = {ScalarTypeKind::I1,  ScalarTypeKind::I32,
+                         ScalarTypeKind::I64, ScalarTypeKind::F16,
+                         ScalarTypeKind::BF16, ScalarTypeKind::F32};
+      tc.resultTypes = tc.operandTypes;
+    }
+    c.typed = std::move(tc);
     c.available = [scaled = n == "scaled-mma"](
                       const TargetProfile &profile) -> llvm::Error {
       auto cap = profile.services.get<intentdsl::cutile::ArrayIndices>();

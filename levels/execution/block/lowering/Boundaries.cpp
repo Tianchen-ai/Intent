@@ -47,6 +47,28 @@ void bind(Unit &unit) {
   registerCost(unit);
   matrixCost(unit);
   orderedCost(unit);
+  for (auto [name, cat, summary] :
+       {std::tuple{"matrix-contraction", "contraction",
+                   "Tiled dense, batched, ragged, and windowed matrix contraction"},
+        {"block-scaled-fp8-contraction", "contraction",
+         "Hardware MX8/E8M0 block-scaled FP8 matrix contraction"},
+        {"q4k-packed-contraction", "contraction",
+         "Sub-byte GGUF Q4_K x Q8_K super-block contraction"},
+        {"ordered-owner-pairing", "ordered",
+         "Independent owner tiling, QK/PV matrix pairing, and online rescaling"},
+        {"row-reduction-and-scan", "collective",
+         "Parallel row reductions, inclusive prefix scan, and Welford moments"},
+        {"shared-private-histogram", "collective",
+         "On-chip private bin histogram accumulation before global merge"},
+        {"counter-philox-rng", "random",
+         "Counter-based Philox 4x32 uniform random generation"},
+        {"bulk-tma-transfer", "memory",
+         "Hardware asynchronous 2D/ND bulk tensor descriptor transfer"},
+        {"narrow-i32-addressing", "addressing",
+         "Statically proven 32-bit signed coordinate and offset narrowing"}}) {
+    unit.capabilities.push_back(
+        {CapabilityDeclaration{name, cat, summary}, COMPILERINFRA_SOURCE});
+  }
   unit.dialects = [](DialectRegistry &r) {
     r.insert<intentdsl::iblock::IblockDialect>();
   };

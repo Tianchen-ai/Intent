@@ -350,6 +350,57 @@ void bind(Unit &unit) {
   matrixIssues(unit);
   addressOptimization(unit);
   tileContracts(unit);
+  auto addParity = [&](ParityDeclaration p) {
+    unit.parity.push_back({std::move(p), COMPILERINFRA_SOURCE});
+  };
+  addParity({"levels/execution/block::matrix-contraction",
+             "*",
+             ParityStatus::Implemented,
+             {"levels/execution/block::contraction", "exits/triton::native-dot"},
+             "Tensor Core tl.dot contraction across SM90 and SM120"});
+  addParity({"levels/execution/block::block-scaled-fp8-contraction",
+             "*",
+             ParityStatus::Unsupported,
+             {},
+             "Triton exit lowers MX8/E8M0 block-scaled FP8 via explicit E8M0 ldexp decode into IEEE tl.dot rather than hardware tl.dot_scaled"});
+  addParity({"levels/execution/block::q4k-packed-contraction",
+             "*",
+             ParityStatus::Implemented,
+             {"levels/execution/block::contraction", "exits/triton::row-collective"},
+             "Packed Q4_K x Q8_K super-block integer subgroup dot and FP32 scale accumulation"});
+  addParity({"levels/execution/block::ordered-owner-pairing",
+             "*",
+             ParityStatus::Implemented,
+             {"levels/execution/block::ordered-owners", "exits/triton::native-dot",
+              "exits/triton::row-collective"},
+             "Paired QK/PV Tensor Core owner tiles and single-pass online rescaling"});
+  addParity({"levels/execution/block::row-reduction-and-scan",
+             "*",
+             ParityStatus::Implemented,
+             {"levels/execution/block::structure",
+              "exits/triton::native-row-reduce", "exits/triton::inclusive-scan",
+              "exits/triton::moments-reduction", "exits/triton::moments-merge"},
+             "Native tl.sum/tl.max, tl.cumsum, and Welford moments reduction"});
+  addParity({"levels/execution/block::shared-private-histogram",
+             "*",
+             ParityStatus::Implemented,
+             {"levels/execution/block::structure", "exits/triton::histogram"},
+             "CTA-local tl.histogram private bin accumulation before global merge"});
+  addParity({"levels/execution/block::counter-philox-rng",
+             "*",
+             ParityStatus::Implemented,
+             {"levels/execution/block::structure"},
+             "Builtin tl.randint4x counter-based Philox uniform generation"});
+  addParity({"levels/execution/block::bulk-tma-transfer",
+             "*",
+             ParityStatus::Unsupported,
+             {},
+             "Triton exit emits pointer-tile tl.load/tl.store rather than tl.make_tensor_descriptor TMA transfers"});
+  addParity({"levels/execution/block::narrow-i32-addressing",
+             "*",
+             ParityStatus::Implemented,
+             {"exits/triton::narrow-proven-addresses"},
+             "proveNarrowAddress-verified 32-bit signed tile_address narrowing"});
   unit.dialects = [](DialectRegistry &r) {
     r.insert<intentdsl::itsrc::ItsrcDialect>();
   };

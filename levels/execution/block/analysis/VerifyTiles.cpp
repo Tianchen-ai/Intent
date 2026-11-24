@@ -95,7 +95,11 @@ verifyTileProgram(func::FuncOp fn, const TargetProfile &profile,
     }
     if (auto cmp = dyn_cast<arith::CmpFOp>(op);
         cmp && cmp.getPredicate() != arith::CmpFPredicate::OEQ &&
-        cmp.getPredicate() != arith::CmpFPredicate::UNE)
+        cmp.getPredicate() != arith::CmpFPredicate::UNE &&
+        cmp.getPredicate() != arith::CmpFPredicate::OGT &&
+        cmp.getPredicate() != arith::CmpFPredicate::OGE &&
+        cmp.getPredicate() != arith::CmpFPredicate::OLT &&
+        cmp.getPredicate() != arith::CmpFPredicate::OLE)
       return op->emitError("unsupported tile float comparison"),
              WalkResult::interrupt();
     if (name == "e8m0" || name == "from_le_half") {

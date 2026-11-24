@@ -4,6 +4,7 @@
 #include "../capabilities/Index.h"
 #include "intentdsl/levels/execution/block/ir/ScaleDispatch.h"
 #include "compilerinfra/Assembly.h"
+#include "compilerinfra/Proofs.h"
 #include "intentdsl/levels/algorithm/kir/ir/KeyReduction.h"
 #include "intentdsl/levels/algorithm/kir/ir/ProjectedLayout.h"
 #include "intentdsl/levels/execution/block/decisions/Verify.h"
@@ -83,6 +84,12 @@ bool canNarrowCutileAddress(Operation &op) {
         return s < 0 || s > INT32_MAX;
       }))
     return false;
+  Operation *scope = op.getParentOfType<func::FuncOp>();
+  if (!scope)
+    scope = op.getParentOp();
+  compilerinfra::IntegerRangeContext intRanges(scope);
+  if (!intRanges.valid())
+    return false;
   llvm::DenseMap<Value, std::optional<SignedSpan>> memo;
   auto fit64 = [](__int128 lo, __int128 hi) -> std::optional<SignedSpan> {
     if (lo > hi || lo < INT64_MIN || hi > INT64_MAX)
@@ -99,6 +106,24 @@ bool canNarrowCutileAddress(Operation &op) {
       return it->second;
     memo[v] = std::nullopt;
     std::optional<SignedSpan> res;
+    if (!isa<ShapedType>(v.getType())) {
+      compilerinfra::AddressProofOptions opts;
+      opts.targetBitwidth = 32;
+      opts.isSigned = true;
+      auto proof =
+          compilerinfra::proveNarrowAddress(scope, {v}, opts, &intRanges);
+      if (proof.proven) {
+        if (auto cr = intRanges.query(v))
+          res = fit64(cr->smin().getSExtValue(), cr->smax().getSExtValue());
+      } else if (auto cr = intRanges.query(v);
+                 cr && cr->smin().getBitWidth() <= 64) {
+        // Intermediate scalar index before % or / may exceed i32 while final
+        // coordinate after modulo/div fits in i32; query IntegerRangeContext.
+        res = fit64(cr->smin().getSExtValue(), cr->smax().getSExtValue());
+      }
+      memo[v] = res;
+      return res;
+    }
     Type elemTy = getElementTypeOrSelf(v.getType());
     if (auto it = dyn_cast<IntegerType>(elemTy);
         it && it.isSignless() && it.getWidth() > 0 && it.getWidth() <= 32) {
@@ -107,28 +132,13 @@ bool canNarrowCutileAddress(Operation &op) {
       memo[v] = res;
       return res;
     }
-    if (auto arg = dyn_cast<BlockArgument>(v)) {
-      if (auto loop = dyn_cast_or_null<scf::ForOp>(arg.getOwner()->getParentOp());
-          loop && loop.getInductionVar() == v) {
-        auto lb = range(loop.getLowerBound()), ub = range(loop.getUpperBound()),
-             st = range(loop.getStep());
-        if (lb && ub && st && st->lo > 0 && lb->lo < ub->hi)
-          res = fit64(lb->lo, static_cast<__int128>(ub->hi) - 1);
-      }
-      memo[v] = res;
-      return res;
-    }
     Operation *def = v.getDefiningOp();
     if (!def)
       return std::nullopt;
     if (auto c = dyn_cast<arith::ConstantOp>(def)) {
-      if (auto ia = dyn_cast<IntegerAttr>(c.getValue());
-          ia && ia.getValue().getBitWidth() <= 64) {
-        int64_t val = ia.getValue().getSExtValue();
-        res = SignedSpan{val, val};
-      } else if (auto da = dyn_cast<DenseIntElementsAttr>(c.getValue());
-                 da && da.isSplat() &&
-                 da.getElementType().getIntOrFloatBitWidth() <= 64) {
+      if (auto da = dyn_cast<DenseIntElementsAttr>(c.getValue());
+          da && da.isSplat() &&
+          da.getElementType().getIntOrFloatBitWidth() <= 64) {
         int64_t val = da.getSplatValue<APInt>().getSExtValue();
         res = SignedSpan{val, val};
       }
@@ -140,41 +150,13 @@ bool canNarrowCutileAddress(Operation &op) {
       int64_t sz = cast<RankedTensorType>(v.getType()).getDimSize(0);
       if (sz > 0)
         res = SignedSpan{0, sz - 1};
-    } else if (n == "ct_src.tile_pid") {
-      int64_t hi = INT32_MAX;
-      auto axisAttr = def->getAttrOfType<IntegerAttr>("axis");
-      if (auto *prog = def->getParentOp();
-          prog && axisAttr &&
-          prog->getName().getStringRef() == "ct_src.tile_program") {
-        int64_t ax = axisAttr.getInt();
-        auto mode = prog->getAttrOfType<StringAttr>("calling_convention");
-        if (mode == "matrix") {
-          auto dims = prog->getAttrOfType<DenseI64ArrayAttr>("block.extents");
-          auto tile =
-              prog->getAttrOfType<DenseI64ArrayAttr>("block.output_tile");
-          if (dims && dims.size() == 4 && tile && tile.size() == 3) {
-            if (ax == 0 && tile[0] > 0)
-              hi = std::max<int64_t>(0, llvm::divideCeil(dims[0], tile[0]) - 1);
-            else if (ax == 1 && tile[1] > 0)
-              hi = std::max<int64_t>(0, llvm::divideCeil(dims[1], tile[1]) - 1);
-            else if (ax == 2)
-              hi = std::max<int64_t>(0, dims[3] - 1);
-          }
-        } else if (mode == "owners" && ax == 0) {
-          auto owners = prog->getAttrOfType<IntegerAttr>("block.owners");
-          auto tile = prog->getAttrOfType<IntegerAttr>("block.owner_tile");
-          if (owners && tile && tile.getInt() > 0)
-            hi = std::max<int64_t>(
-                0, llvm::divideCeil(owners.getInt(), tile.getInt()) - 1);
-        }
-      }
-      res = SignedSpan{0, std::min<int64_t>(hi, INT32_MAX)};
     } else if (n == "ct_src.tile_broadcast" || n == "ct_src.tile_prefix" ||
                n == "ct_src.drop_unit_owner" || n == "ct_src.reshape" ||
                isa<arith::IndexCastOp, arith::ExtSIOp>(def)) {
       res = range(def->getOperand(0));
     } else if (auto eu = dyn_cast<arith::ExtUIOp>(def)) {
-      if (auto it = dyn_cast<IntegerType>(getElementTypeOrSelf(eu.getIn().getType()));
+      if (auto it =
+              dyn_cast<IntegerType>(getElementTypeOrSelf(eu.getIn().getType()));
           it && it.getWidth() > 0 && it.getWidth() < 32)
         res = SignedSpan{0, (int64_t(1) << it.getWidth()) - 1};
     } else if (n == "ct_src.tile_reduce") {
@@ -221,7 +203,17 @@ bool canNarrowCutileAddress(Operation &op) {
     memo[v] = res;
     return res;
   };
+  compilerinfra::AddressProofOptions narrowOpts;
+  narrowOpts.targetBitwidth = 32;
+  narrowOpts.isSigned = true;
   for (Value coord : op.getOperands().drop_front()) {
+    if (!isa<ShapedType>(coord.getType())) {
+      if (!compilerinfra::proveNarrowAddress(scope, {coord}, narrowOpts,
+                                             &intRanges)
+               .proven)
+        return false;
+      continue;
+    }
     auto r = range(coord);
     if (!r || r->lo < INT32_MIN || r->hi > INT32_MAX)
       return false;
@@ -1218,6 +1210,66 @@ void matrixIssues(Unit &);
 void bind(Unit &unit) {
   matrixIssues(unit);
   registerContracts(unit);
+  auto addParity = [&](ParityDeclaration p) {
+    unit.parity.push_back({std::move(p), COMPILERINFRA_SOURCE});
+  };
+  addParity({"levels/execution/block::matrix-contraction",
+             "*",
+             ParityStatus::Implemented,
+             {"levels/execution/block::contraction", "exits/cutile::native-dot"},
+             "Tensor Core ct.mma matrix contraction across SM90 and SM120"});
+  addParity({"levels/execution/block::block-scaled-fp8-contraction",
+             "sm120",
+             ParityStatus::Implemented,
+             {"levels/execution/block::contraction", "exits/cutile::scaled-mma"},
+             "Blackwell SM120 native ct.mma_scaled MX8/E8M0 block-scaled FP8 Tensor Core MMA"});
+  addParity({"levels/execution/block::block-scaled-fp8-contraction",
+             "sm90",
+             ParityStatus::Unsupported,
+             {},
+             "Hopper SM90 lacks Blackwell block-scaled MMA hardware; legalizes to E8M0 scale decode + ct.mma"});
+  addParity({"levels/execution/block::q4k-packed-contraction",
+             "*",
+             ParityStatus::Implemented,
+             {"levels/execution/block::contraction", "exits/cutile::row-collective"},
+             "Packed Q4_K x Q8_K super-block integer subgroup dot and FP32 scale accumulation"});
+  addParity({"levels/execution/block::ordered-owner-pairing",
+             "*",
+             ParityStatus::Implemented,
+             {"levels/execution/block::ordered-owners", "exits/cutile::native-dot",
+              "exits/cutile::row-collective"},
+             "Paired QK/PV Tensor Core owner tiles and single-pass online rescaling"});
+  addParity({"levels/execution/block::row-reduction-and-scan",
+             "*",
+             ParityStatus::Implemented,
+             {"levels/execution/block::structure",
+              "exits/cutile::native-row-reduce", "exits/cutile::inclusive-scan",
+              "exits/cutile::moments-reduction", "exits/cutile::moments-merge"},
+             "Native ct.sum/ct.max, ct.cumsum, and Welford moments reduction"});
+  addParity({"levels/execution/block::shared-private-histogram",
+             "*",
+             ParityStatus::Unsupported,
+             {},
+             "tileiras toolchain lacks on-chip shared-memory histogram/atomic intrinsics; lowers to global-atomic workspace bins"});
+  addParity({"levels/execution/block::counter-philox-rng",
+             "*",
+             ParityStatus::Implemented,
+             {"levels/execution/block::structure", "exits/cutile::random",
+              "exits/cutile::random-quad"},
+             "Runtime Philox 4x32 counter-based uniform_at / uniform_quad"});
+  addParity({"levels/execution/block::bulk-tma-transfer",
+             "*",
+             ParityStatus::Implemented,
+             {"levels/execution/block::contraction",
+              "levels/execution/block::ordered-owners",
+              "levels/execution/block::structure"},
+             "Hardware TMA 2D/ND rectangular tile loads via ct.load(..., allow_tma=True)"});
+  addParity({"levels/execution/block::narrow-i32-addressing",
+             "*",
+             ParityStatus::Implemented,
+             {"levels/execution/block::contraction",
+              "levels/execution/block::ordered-owners"},
+             "proveNarrowAddress-verified 32-bit array coordinate indexing"});
   unit.dialects = registerIR;
   for (bool callable : {false, true})
     unit.boundaries.push_back(

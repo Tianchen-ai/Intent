@@ -116,6 +116,53 @@ void tileContracts(Unit &unit) {
     c.numerical = "declared reduction algebra and author identity";
     c.estimator = "exits/triton::collective-steps";
     c.costParameters = {"participants", "width"};
+    TypedContract tc;
+    tc.effects = EffectMask::None;
+    tc.shape.minResults = 1;
+    tc.shape.maxResults = 1;
+    StringRef k(op);
+    if (k == "summary_merge") {
+      tc.shape.minOperands = 2;
+      tc.shape.maxOperands = 2;
+      tc.operandTypes = {ScalarTypeKind::Any};
+      tc.resultTypes = {ScalarTypeKind::Any};
+    } else if (k == "summary_reduce") {
+      tc.shape.minOperands = 2;
+      tc.shape.maxOperands = 2;
+      tc.shape.operandRanks = {2, 2};
+      tc.operandTypes = {ScalarTypeKind::F32, ScalarTypeKind::I1};
+      tc.resultTypes = {ScalarTypeKind::Any};
+    } else if (k == "bin_count") {
+      tc.shape.minOperands = 1;
+      tc.shape.maxOperands = 1;
+      tc.shape.operandRanks = {1};
+      tc.shape.resultRanks = {1};
+      tc.operandTypes = {ScalarTypeKind::I32, ScalarTypeKind::I64};
+      tc.resultTypes = {ScalarTypeKind::I32};
+    } else if (k == "scan_sum") {
+      tc.shape.minOperands = 1;
+      tc.shape.maxOperands = 1;
+      tc.shape.operandRanks = {2};
+      tc.shape.resultRanks = {2};
+      tc.shape.sameFirstOperandAndResultShape = true;
+      tc.operandTypes = {ScalarTypeKind::I32, ScalarTypeKind::F32};
+      tc.resultTypes = {ScalarTypeKind::I32, ScalarTypeKind::F32};
+    } else if (k == "reduce") {
+      tc.shape.minOperands = 1;
+      tc.shape.maxOperands = 1;
+      tc.shape.operandRanks = {2};
+      tc.shape.resultRanks = {1};
+      tc.operandTypes = {ScalarTypeKind::F32};
+      tc.resultTypes = {ScalarTypeKind::F32};
+    } else {
+      tc.shape.minOperands = 1;
+      tc.shape.maxOperands = 1;
+      tc.operandTypes = {ScalarTypeKind::I1,  ScalarTypeKind::I32,
+                         ScalarTypeKind::I64, ScalarTypeKind::F16,
+                         ScalarTypeKind::BF16, ScalarTypeKind::F32};
+      tc.resultTypes = tc.operandTypes;
+    }
+    c.typed = std::move(tc);
     c.available = [](const TargetProfile &p) -> llvm::Error {
       if (!p.services.get<intentdsl::block::OwnerMachine>())
         return llvm::createStringError("missing CUDA execution facts");
@@ -208,6 +255,29 @@ void tileContracts(Unit &unit) {
                         : "exits/triton::collective-steps";
     c.costParameters = isDot ? std::vector<std::string>{"M", "N", "K"}
                              : std::vector<std::string>{"M", "K"};
+    TypedContract tc;
+    tc.effects = EffectMask::None;
+    tc.shape.minResults = 1;
+    tc.shape.maxResults = 1;
+    if (isDot) {
+      tc.shape.minOperands = 2;
+      tc.shape.maxOperands = 3;
+      tc.shape.operandRanks = {2, 2};
+      tc.shape.resultRanks = {2};
+      tc.operandTypes = {ScalarTypeKind::I8,  ScalarTypeKind::I32,
+                         ScalarTypeKind::F8E4M3FN, ScalarTypeKind::F16,
+                         ScalarTypeKind::BF16, ScalarTypeKind::F32};
+      tc.resultTypes = {ScalarTypeKind::I32, ScalarTypeKind::F32};
+      tc.accumulatorTypes = {ScalarTypeKind::I32, ScalarTypeKind::F32};
+    } else {
+      tc.shape.minOperands = 1;
+      tc.shape.maxOperands = 1;
+      tc.operandTypes = {ScalarTypeKind::I1,  ScalarTypeKind::I32,
+                         ScalarTypeKind::I64, ScalarTypeKind::F16,
+                         ScalarTypeKind::BF16, ScalarTypeKind::F32};
+      tc.resultTypes = tc.operandTypes;
+    }
+    c.typed = std::move(tc);
     c.available = [](const TargetProfile &p) -> llvm::Error {
       if (!p.services.get<intentdsl::block::OwnerMachine>())
         return llvm::createStringError("missing CUDA execution capabilities");
