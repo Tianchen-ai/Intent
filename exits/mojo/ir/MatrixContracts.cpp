@@ -84,9 +84,42 @@ void registerMatrixContracts(Unit &u) {
       return llvm::Error::success();
     };
     c.verify = [](Operation *op) -> LogicalResult {
+      auto vnni = op->getAttrOfType<BoolAttr>("use_vnni");
       return success(
+          (!vnni || !vnni.getValue()) &&
           op->getAttr("kir.storage") ==
-          TypeAttr::get(intentdsl::kir::Q4KType::get(op->getContext())));
+              TypeAttr::get(intentdsl::kir::Q4KType::get(op->getContext())));
+    };
+    add(std::move(c));
+  }
+
+  {
+    ImplementationContract c;
+    c.name = "q4k-vnni";
+    c.operation = "mojo_row.q4k_superblock";
+    c.symbol = "llvm.x86.avx512.vpdpbusd.512";
+    c.source = ImplementationSource::Builtin;
+    c.minimum = Reuse::Native;
+    c.operands = "Q4_K[144B] x Q8_K[292B] -> f32";
+    c.layout = "Q4_K row records x shared Q8_K super-blocks";
+    c.accumulator = "s32x16 AVX-512 VNNI vpdpbusd subgroup dot products scaled into f32 per super-block";
+    c.effects = "reads Q4_K and Q8_K buffers";
+    c.numerical = "exact u8*s8->s32 8x32 subgroup sums with IEEE f16->f32 scales at super-block R32 boundary";
+    c.estimator = u.qualify("q4k-simd-row");
+    c.costParameters = {"vector_bits", "workers"};
+    c.available = [](const TargetProfile &p) -> llvm::Error {
+      auto *rm = p.services.get<intentdsl::cpu::RowMachine>();
+      if (!rm || rm->vectorBits < 512 || !p.features.count("avx512_vnni"))
+        return llvm::createStringError(
+            "Q4_K VNNI requires 512-bit AVX-512 VNNI on all active CPUs");
+      return llvm::Error::success();
+    };
+    c.verify = [](Operation *op) -> LogicalResult {
+      auto vnni = op->getAttrOfType<BoolAttr>("use_vnni");
+      return success(
+          vnni && vnni.getValue() &&
+          op->getAttr("kir.storage") ==
+              TypeAttr::get(intentdsl::kir::Q4KType::get(op->getContext())));
     };
     add(std::move(c));
   }
@@ -409,8 +442,11 @@ void populateMojoMatrixContracts(intentdsl::cpu::MatrixMachine &m, int64_t v) {
       add(r, c, d, v, "vnni-dot4", "register-block", "vnni-dot4", 4, true,
           false);
   }
-  for (int64_t r : {8, 16, 64})
+  for (int64_t r : {16, 8, 64}) {
+    if (!m.integerPacking.empty())
+      add(r, 1, 256, v, "q4k-vnni", "q4k-simd-row", "q4k");
     add(r, 1, 256, v, "q4k-simd", "q4k-simd-row", "q4k");
+  }
 
   // Vendor oneDNN BRGeMM candidates
   for (auto [r, c, d] : std::initializer_list<std::tuple<int64_t, int64_t, int64_t>>{

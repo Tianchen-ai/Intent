@@ -90,6 +90,10 @@ def MojoSplatCast : RowInst<"splat_cast"> {
   let arguments=(ins AnyType:$input, StrAttr:$dtype, I64Attr:$width, BoolAttr:$from_scalar);
   let results=(outs AnyType:$value);
 }
+def MojoSplatLane : RowInst<"splat_lane"> {
+  let arguments=(ins AnyType:$input, StrAttr:$dtype, I64Attr:$width, I64Attr:$lane);
+  let results=(outs AnyType:$value);
+}
 def MojoStoreVec : RowInst<"store_vec"> {
   let arguments=(ins AnyType:$ptr, Index:$offset, AnyType:$value, I64Attr:$width, I64Attr:$lane_stride);
 }
@@ -102,7 +106,7 @@ def MojoVnniDot4 : RowInst<"vnni_dot4"> {
   let results=(outs AnyType:$result);
 }
 def MojoQ4KSuperblock : RowInst<"q4k_superblock"> {
-  let arguments=(ins AnyType:$w_ptr, AnyType:$q_ptr, Index:$w_base, Index:$group, I64Attr:$byte_stride);
+  let arguments=(ins AnyType:$w_ptr, AnyType:$q_ptr, Index:$w_base, Index:$group, I64Attr:$byte_stride, BoolAttr:$use_vnni);
   let results=(outs AnyType:$result);
 }
 def MojoPtrOffset : RowInst<"ptr_offset"> {

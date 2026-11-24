@@ -105,6 +105,16 @@ def discover(scope):
     )
     onednn_lib, onednn_inc, onednn_mtime = _discover_onednn()
     feats["onednn_runtime"] = bool(onednn_lib and onednn_inc)
+    c_isa = []
+    if bits == 512:
+        for cpu_flag, cc_flag in (
+            ("avx512bw", "-mavx512bw"),
+            ("avx512vl", "-mavx512vl"),
+            ("avx512dq", "-mavx512dq"),
+            ("avx512_bf16", "-mavx512bf16"),
+        ):
+            if has_all(cpu_flag):
+                c_isa.append(cc_flag)
     return (
         binary,
         fields["--target-cpu"],
@@ -117,6 +127,7 @@ def discover(scope):
         onednn_lib,
         onednn_inc,
         onednn_mtime,
+        tuple(c_isa),
     ), bits, feats
 
 

@@ -360,7 +360,8 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
   SmallVector<Attribute> paramDtypes;
   for (auto &v : views)
     paramDtypes.push_back(b.getStringAttr(mojoDType(v.dtype)));
-  bool usesVnni = implId == "exits/mojo::vnni-dot4";
+  bool usesVnni = implId == "exits/mojo::vnni-dot4" ||
+                  implId == "exits/mojo::q4k-vnni";
   bool usesStack = usesBrgemm;
 
   OperationState pfnState(loc, "mojo_row.panel_fn");
@@ -390,7 +391,8 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
       "kir.storage", TypeAttr::get(intentdsl::kir::Q4KType::get(fn.getContext())));
   auto implNamedAttr = b.getNamedAttr("ci.implementation", implAttr);
 
-  if (implId == "exits/mojo::q4k-simd") {
+  if (implId == "exits/mojo::q4k-simd" || implId == "exits/mojo::q4k-vnni") {
+    bool q4kVnni = implId == "exits/mojo::q4k-vnni";
     Value c0 = constIdx(b, loc, 0);
     Value rBound = makeOp(b, loc, "as_int", {argR}, {b.getIndexType()})->getResult(0);
     Value c1 = constIdx(b, loc, 1);
@@ -421,6 +423,7 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
                {panelPtrs[0], panelPtrs[1], wBase, gIv}, {b.getIndexType()},
                {b.getNamedAttr("byte_stride",
                                b.getI64IntegerAttr(views[0].panelStrides[2])),
+                b.getNamedAttr("use_vnni", b.getBoolAttr(q4kVnni)),
                 q4kStorageAttr, implNamedAttr})
             ->getResult(0);
     Value prev =
@@ -861,24 +864,56 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
                     b.getNamedAttr("from_scalar", b.getBoolAttr(false))})
                 ->getResult(0);
       }
-      for (int64_t r = 0; r < rows; ++r) {
-        Value rCoord = addOffset(b, loc, rBase, r);
-        Value aAddr = makeAddr(b, loc, panelPtrs[0], {rCoord, kIv},
-                               views[0].panelStrides);
-        Value aSca =
-            makeOp(b, loc, "load_vec", {panelPtrs[0], aAddr},
+      bool contigLhsRows = w > 1 && rows >= 2 && (rows & (rows - 1)) == 0 &&
+                           views[0].panelStrides[0] == 1 &&
+                           (rows * vectors + vectors + 2 <= 32);
+      Value aColVec;
+      if (contigLhsRows) {
+        Value aColAddr =
+            makeAddr(b, loc, panelPtrs[0], {rBase, kIv}, views[0].panelStrides);
+        Value aRawCol =
+            makeOp(b, loc, "load_vec", {panelPtrs[0], aColAddr},
                    {b.getIndexType()},
                    {b.getNamedAttr("dtype",
                                    b.getStringAttr(mojoDType(views[0].dtype))),
-                    b.getNamedAttr("width", b.getI64IntegerAttr(1)),
+                    b.getNamedAttr("width", b.getI64IntegerAttr(rows)),
                     b.getNamedAttr("lane_stride", b.getI64IntegerAttr(1))})
                 ->getResult(0);
-        Value aVec =
-            makeOp(b, loc, "splat_cast", {aSca}, {b.getIndexType()},
+        aColVec =
+            makeOp(b, loc, "splat_cast", {aRawCol}, {b.getIndexType()},
                    {b.getNamedAttr("dtype", b.getStringAttr(accDtype)),
-                    b.getNamedAttr("width", b.getI64IntegerAttr(w)),
-                    b.getNamedAttr("from_scalar", b.getBoolAttr(true))})
+                    b.getNamedAttr("width", b.getI64IntegerAttr(rows)),
+                    b.getNamedAttr("from_scalar", b.getBoolAttr(false))})
                 ->getResult(0);
+      }
+      for (int64_t r = 0; r < rows; ++r) {
+        Value aVec;
+        if (contigLhsRows) {
+          aVec =
+              makeOp(b, loc, "splat_lane", {aColVec}, {b.getIndexType()},
+                     {b.getNamedAttr("dtype", b.getStringAttr(accDtype)),
+                      b.getNamedAttr("width", b.getI64IntegerAttr(w)),
+                      b.getNamedAttr("lane", b.getI64IntegerAttr(r))})
+                  ->getResult(0);
+        } else {
+          Value rCoord = addOffset(b, loc, rBase, r);
+          Value aAddr = makeAddr(b, loc, panelPtrs[0], {rCoord, kIv},
+                                 views[0].panelStrides);
+          Value aSca =
+              makeOp(b, loc, "load_vec", {panelPtrs[0], aAddr},
+                     {b.getIndexType()},
+                     {b.getNamedAttr("dtype",
+                                     b.getStringAttr(mojoDType(views[0].dtype))),
+                      b.getNamedAttr("width", b.getI64IntegerAttr(1)),
+                      b.getNamedAttr("lane_stride", b.getI64IntegerAttr(1))})
+                  ->getResult(0);
+          aVec =
+              makeOp(b, loc, "splat_cast", {aSca}, {b.getIndexType()},
+                     {b.getNamedAttr("dtype", b.getStringAttr(accDtype)),
+                      b.getNamedAttr("width", b.getI64IntegerAttr(w)),
+                      b.getNamedAttr("from_scalar", b.getBoolAttr(true))})
+                  ->getResult(0);
+        }
         for (int64_t v = 0; v < vectors; ++v) {
           Value slot = accs[r * vectors + v];
           Value cur = makeOp(b, loc, "acc_read", {slot}, {b.getIndexType()})
@@ -1198,10 +1233,8 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
           s += "+(" + e + ")*" + std::to_string(st[ax]) + "LL";
         return s;
       };
-      Block *pBb = makeHostOmpFor("p", "0", "G*K", "1", false, false, false, "");
-      enterBlock(pBb);
-      emitLet("g", "p/K");
-      emitLet("k", "p%K");
+      Block *gBb = makeHostOmpFor("g", "0", "G", "1", false, false, false, "");
+      enterBlock(gBb);
       emitLet("head", "g%" + std::to_string(H));
       emitLet("chunk",
               "g/" + std::to_string(H) + "%" + std::to_string(chunks));
@@ -1210,23 +1243,50 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
       emitLet("group", "head/" + std::to_string(hg));
 
       auto &srcBb = pop->getRegion(0).front();
-      IRMapping mapping;
-      Value ld1 =
-          makeOp(b, loc, "host_load_scalar", {}, {srcBb.getArgument(1).getType()},
-                 {b.getNamedAttr("slot", b.getI64IntegerAttr(opSlots[1])),
-                  b.getNamedAttr("c_type", b.getStringAttr("float")),
-                  b.getNamedAttr("index_expr",
-                                 b.getStringAttr(
-                                     idxExpr(1, {"batch", "head", "chunk", "k"})))})
-              ->getResult(0);
-      Value ld2 =
-          makeOp(b, loc, "host_load_scalar", {}, {srcBb.getArgument(2).getType()},
-                 {b.getNamedAttr("slot", b.getI64IntegerAttr(opSlots[2])),
-                  b.getNamedAttr("c_type", b.getStringAttr("float")),
-                  b.getNamedAttr("index_expr",
-                                 b.getStringAttr(
-                                     idxExpr(2, {"batch", "head", "chunk", "k"})))})
-              ->getResult(0);
+      Operation *term = srcBb.getTerminator();
+      llvm::DenseSet<Value> dependsOnCol{srcBb.getArgument(0)};
+      bool hasStage1Transcendental = false;
+      for (auto &mop : srcBb.without_terminator()) {
+        if (llvm::any_of(mop.getOperands(),
+                         [&](Value v) { return dependsOnCol.contains(v); })) {
+          dependsOnCol.insert(mop.getResult(0));
+        } else {
+          auto mn = mop.getName().getStringRef();
+          if (mn == "math.exp" || mn == "math.exp2" || mn == "math.log")
+            hasStage1Transcendental = true;
+        }
+      }
+      SmallVector<Value, 4> kCut;
+      bool canFissionK = hasStage1Transcendental && K > 0 && K <= 512;
+      if (canFissionK) {
+        auto maybeAddCut = [&](Value v) {
+          bool usedInStage2 =
+              (!dependsOnCol.contains(term->getOperand(0)) &&
+               term->getOperand(0) == v) ||
+              llvm::any_of(v.getUsers(), [&](Operation *u) {
+                return u == term ||
+                       (u->getNumResults() == 1 &&
+                        dependsOnCol.contains(u->getResult(0)));
+              });
+          if (!usedInStage2)
+            return;
+          if (!v.getType().isF32()) {
+            canFissionK = false;
+            return;
+          }
+          if (!llvm::is_contained(kCut, v))
+            kCut.push_back(v);
+        };
+        maybeAddCut(srcBb.getArgument(1));
+        maybeAddCut(srcBb.getArgument(2));
+        for (auto &mop : srcBb.without_terminator()) {
+          if (!dependsOnCol.contains(mop.getResult(0)))
+            maybeAddCut(mop.getResult(0));
+        }
+        if (kCut.empty() || kCut.size() > 4)
+          canFissionK = false;
+      }
+
       Value ld3 =
           makeOp(b, loc, "host_load_scalar", {}, {srcBb.getArgument(3).getType()},
                  {b.getNamedAttr("slot", b.getI64IntegerAttr(opSlots[2])),
@@ -1235,43 +1295,145 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
                                  b.getStringAttr(idxExpr(
                                      2, {"batch", "head", "chunk", "K-1"})))})
               ->getResult(0);
-      mapping.map(srcBb.getArgument(1), ld1);
-      mapping.map(srcBb.getArgument(2), ld2);
-      mapping.map(srcBb.getArgument(3), ld3);
-
-      llvm::DenseSet<Value> dependsOnCol{srcBb.getArgument(0)};
-      for (auto &mop : srcBb.without_terminator()) {
-        if (llvm::any_of(mop.getOperands(),
-                         [&](Value v) { return dependsOnCol.contains(v); }))
-          dependsOnCol.insert(mop.getResult(0));
-        else
-          b.clone(mop, mapping);
+      if (canFissionK) {
+        for (size_t ci = 0; ci < kCut.size(); ++ci) {
+          makeOp(b, loc, "host_alloc", {}, {},
+                 {b.getNamedAttr("buf_name",
+                                 b.getStringAttr("wk_" + std::to_string(ci))),
+                  b.getNamedAttr("placement", b.getStringAttr("stack")),
+                  b.getNamedAttr("c_type", b.getStringAttr("float")),
+                  b.getNamedAttr("count_expr", b.getStringAttr("K")),
+                  b.getNamedAttr("elem_bytes", b.getI64IntegerAttr(4)),
+                  b.getNamedAttr("cleanup", b.getArrayAttr({}))});
+        }
+        {
+          Block *k1Bb = makeHostFor("k", "0", "K", "1");
+          enterBlock(k1Bb);
+          IRMapping map1;
+          Value ld1 =
+              makeOp(b, loc, "host_load_scalar", {},
+                     {srcBb.getArgument(1).getType()},
+                     {b.getNamedAttr("slot", b.getI64IntegerAttr(opSlots[1])),
+                      b.getNamedAttr("c_type", b.getStringAttr("float")),
+                      b.getNamedAttr("index_expr",
+                                     b.getStringAttr(idxExpr(
+                                         1, {"batch", "head", "chunk", "k"})))})
+                  ->getResult(0);
+          Value ld2 =
+              makeOp(b, loc, "host_load_scalar", {},
+                     {srcBb.getArgument(2).getType()},
+                     {b.getNamedAttr("slot", b.getI64IntegerAttr(opSlots[2])),
+                      b.getNamedAttr("c_type", b.getStringAttr("float")),
+                      b.getNamedAttr("index_expr",
+                                     b.getStringAttr(idxExpr(
+                                         2, {"batch", "head", "chunk", "k"})))})
+                  ->getResult(0);
+          map1.map(srcBb.getArgument(1), ld1);
+          map1.map(srcBb.getArgument(2), ld2);
+          map1.map(srcBb.getArgument(3), ld3);
+          for (auto &mop : srcBb.without_terminator()) {
+            if (!dependsOnCol.contains(mop.getResult(0)))
+              b.clone(mop, map1);
+          }
+          for (size_t ci = 0; ci < kCut.size(); ++ci) {
+            makeOp(b, loc, "host_panel_yield", {map1.lookup(kCut[ci])}, {},
+                   {b.getNamedAttr("widen_bf16", b.getBoolAttr(false)),
+                    b.getNamedAttr(
+                        "dst_expr",
+                        b.getStringAttr("wk_" + std::to_string(ci) + "[k]"))});
+          }
+        }
+        enterBlock(gBb);
+        Block *k2Bb = makeHostFor("k", "0", "K", "1");
+        enterBlock(k2Bb);
+        IRMapping map2;
+        map2.map(srcBb.getArgument(3), ld3);
+        for (size_t ci = 0; ci < kCut.size(); ++ci) {
+          Value wkVal =
+              makeOp(
+                  b, loc, "host_load_scalar", {}, {kCut[ci].getType()},
+                  {b.getNamedAttr("slot", b.getI64IntegerAttr(-1 - int64_t(ci))),
+                   b.getNamedAttr("c_type", b.getStringAttr("float")),
+                   b.getNamedAttr("index_expr", b.getStringAttr("k"))})
+                  ->getResult(0);
+          map2.map(kCut[ci], wkVal);
+        }
+        Block *nBb =
+            makeHostOmpFor("n", "0", "N", "1", false, false, true, "");
+        enterBlock(nBb);
+        Value ld0 =
+            makeOp(b, loc, "host_load_scalar", {},
+                   {srcBb.getArgument(0).getType()},
+                   {b.getNamedAttr("slot", b.getI64IntegerAttr(opSlots[0])),
+                    b.getNamedAttr("c_type", b.getStringAttr("uint16_t")),
+                    b.getNamedAttr("index_expr",
+                                   b.getStringAttr(idxExpr(
+                                       0, {"batch", "chunk*K+k", "group", "n"})))})
+                ->getResult(0);
+        map2.map(srcBb.getArgument(0), ld0);
+        for (auto &mop : srcBb.without_terminator()) {
+          if (dependsOnCol.contains(mop.getResult(0)))
+            b.clone(mop, map2);
+        }
+        makeOp(b, loc, "host_panel_yield", {map2.lookup(term->getOperand(0))},
+               {},
+               {b.getNamedAttr("widen_bf16",
+                               b.getBoolAttr(pk == "map-window-rhs-f32")),
+                b.getNamedAttr("dst_expr",
+                               b.getStringAttr(dst + "[(g*K+k)*N+n]"))});
+      } else {
+        IRMapping mapping;
+        Block *kBb = makeHostFor("k", "0", "K", "1");
+        enterBlock(kBb);
+        Value ld1 =
+            makeOp(b, loc, "host_load_scalar", {},
+                   {srcBb.getArgument(1).getType()},
+                   {b.getNamedAttr("slot", b.getI64IntegerAttr(opSlots[1])),
+                    b.getNamedAttr("c_type", b.getStringAttr("float")),
+                    b.getNamedAttr("index_expr",
+                                   b.getStringAttr(idxExpr(
+                                       1, {"batch", "head", "chunk", "k"})))})
+                ->getResult(0);
+        Value ld2 =
+            makeOp(b, loc, "host_load_scalar", {},
+                   {srcBb.getArgument(2).getType()},
+                   {b.getNamedAttr("slot", b.getI64IntegerAttr(opSlots[2])),
+                    b.getNamedAttr("c_type", b.getStringAttr("float")),
+                    b.getNamedAttr("index_expr",
+                                   b.getStringAttr(idxExpr(
+                                       2, {"batch", "head", "chunk", "k"})))})
+                ->getResult(0);
+        mapping.map(srcBb.getArgument(1), ld1);
+        mapping.map(srcBb.getArgument(2), ld2);
+        mapping.map(srcBb.getArgument(3), ld3);
+        for (auto &mop : srcBb.without_terminator()) {
+          if (!dependsOnCol.contains(mop.getResult(0)))
+            b.clone(mop, mapping);
+        }
+        Block *nBb =
+            makeHostOmpFor("n", "0", "N", "1", false, false, true, "");
+        enterBlock(nBb);
+        Value ld0 =
+            makeOp(b, loc, "host_load_scalar", {},
+                   {srcBb.getArgument(0).getType()},
+                   {b.getNamedAttr("slot", b.getI64IntegerAttr(opSlots[0])),
+                    b.getNamedAttr("c_type", b.getStringAttr("uint16_t")),
+                    b.getNamedAttr("index_expr",
+                                   b.getStringAttr(idxExpr(
+                                       0, {"batch", "chunk*K+k", "group", "n"})))})
+                ->getResult(0);
+        mapping.map(srcBb.getArgument(0), ld0);
+        for (auto &mop : srcBb.without_terminator()) {
+          if (dependsOnCol.contains(mop.getResult(0)))
+            b.clone(mop, mapping);
+        }
+        makeOp(b, loc, "host_panel_yield", {mapping.lookup(term->getOperand(0))},
+               {},
+               {b.getNamedAttr("widen_bf16",
+                               b.getBoolAttr(pk == "map-window-rhs-f32")),
+                b.getNamedAttr("dst_expr",
+                               b.getStringAttr(dst + "[(g*K+k)*N+n]"))});
       }
-
-      Block *nBb =
-          makeHostOmpFor("n", "0", "N", "1", false, false, true, "");
-      enterBlock(nBb);
-      Value ld0 =
-          makeOp(b, loc, "host_load_scalar", {}, {srcBb.getArgument(0).getType()},
-                 {b.getNamedAttr("slot", b.getI64IntegerAttr(opSlots[0])),
-                  b.getNamedAttr("c_type", b.getStringAttr("uint16_t")),
-                  b.getNamedAttr(
-                      "index_expr",
-                      b.getStringAttr(
-                          idxExpr(0, {"batch", "chunk*K+k", "group", "n"})))})
-              ->getResult(0);
-      mapping.map(srcBb.getArgument(0), ld0);
-      for (auto &mop : srcBb.without_terminator()) {
-        if (dependsOnCol.contains(mop.getResult(0)))
-          b.clone(mop, mapping);
-      }
-      Operation *term = srcBb.getTerminator();
-      makeOp(b, loc, "host_panel_yield", {mapping.lookup(term->getOperand(0))},
-             {},
-             {b.getNamedAttr("widen_bf16",
-                             b.getBoolAttr(pk == "map-window-rhs-f32")),
-              b.getNamedAttr("dst_expr",
-                             b.getStringAttr(dst + "[p*N+n]"))});
     } else if (pk == "widen-window-lhs") {
       auto outSh = argShape(slotOf(dstArg));
       int64_t H = std::max<int64_t>(1, outSh[2]);

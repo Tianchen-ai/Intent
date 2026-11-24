@@ -84,11 +84,15 @@ void registerBlockCost(compilerinfra::Unit &u) {
               *ctx.target.services.get<intentdsl::CallFacts>());
           if (!g)
             return g.takeError();
+          auto *caps = ctx.target.services.get<intentdsl::cpu::MatrixMachine>();
+          bool isVnni =
+              caps && t.size() > 5 &&
+              caps->contracts[t[5]].id == "exits/mojo::q4k-vnni";
           compilerinfra::CostEstimate e;
           e.scope = "one output task";
           e.bottleneck = "SIMD nibble unpack and dot";
           double subgroups = double(g->k) / 32.;
-          double nibbleOps = t[0] * subgroups * 64.;
+          double nibbleOps = t[0] * subgroups * (isVnni ? 16. : 64.);
           e.terms["nibble_unpack_ops"] = {nibbleOps, "FLOP"};
           auto rate = intentdsl::quantity(ctx, "vector", "FLOP/ns");
           if (rate) {

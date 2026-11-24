@@ -73,7 +73,12 @@ class Artifact:
         host.write_text(self.data["host"])
         obj = path / "entry.o"
         bits = self.info[7]
-        isa_flags = ["-mavx512f", "-mf16c"] if bits == 512 else ["-mavx2", "-mf16c"]
+        extra_isa = self.info[11] if len(self.info) > 11 else ()
+        isa_flags = (
+            ["-mavx512f", "-mf16c", *extra_isa]
+            if bits == 512
+            else ["-mavx2", "-mf16c"]
+        )
         subprocess.run(
             [
                 self.info[3],

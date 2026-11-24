@@ -668,6 +668,19 @@ TerminalPrinter mojoMatrixPrinter() {
     return llvm::Error::success();
   };
 
+  p.operations["mojo_row.splat_lane"] = [](Operation &op, PrintPoint at,
+                                           PrintContext &c) {
+    if (at == PrintPoint::Enter) {
+      auto in = c.name(op.getOperand(0)), res = c.name(op.getResult(0));
+      auto dt = op.getAttrOfType<StringAttr>("dtype").getValue();
+      auto w = op.getAttrOfType<IntegerAttr>("width").getInt();
+      auto lane = op.getAttrOfType<IntegerAttr>("lane").getInt();
+      c.line("var " + res + " = SIMD[DType." + dt + "," + std::to_string(w) +
+             "](" + in + "[" + std::to_string(lane) + "])");
+    }
+    return llvm::Error::success();
+  };
+
   p.operations["mojo_row.store_vec"] = [](Operation &op, PrintPoint at,
                                           PrintContext &c) {
     if (at != PrintPoint::Enter)
@@ -724,6 +737,7 @@ TerminalPrinter mojoMatrixPrinter() {
          wb = c.name(op.getOperand(2)), g = c.name(op.getOperand(3)),
          res = c.name(op.getResult(0));
     int64_t bs = op.getAttrOfType<IntegerAttr>("byte_stride").getInt();
+    bool useVnni = op.getAttrOfType<BoolAttr>("use_vnni").getValue();
     auto wByte = [&](const std::string &off) {
       return "UInt16(" + wp + "[unsafe_offset=" + wb + "+(" + off + ")*" +
              std::to_string(bs) + "])";
@@ -736,43 +750,86 @@ TerminalPrinter mojoMatrixPrinter() {
     c.line("var " + res + "_dm = Float32(bitcast[DType.float16](" +
            wByte(std::to_string(Q4::dmin)) + " | (" +
            wByte(std::to_string(Q4::dmin + 1)) + " << 8)))");
-    c.line("var " + res + "_S = Int32(0)");
     c.line("var " + res + "_T = Int32(0)");
-    c.line("comptime for j in range(8):");
-    c.indent++;
-    c.line("var l = Int32(" + wByte(std::to_string(Q4::factors) + "+j%4") + ")");
-    c.line("var h = Int32(" + wByte(std::to_string(Q4::factors + 4) + "+j%4") +
-           ")");
-    c.line("var u = Int32(" + wByte(std::to_string(Q4::factors + 8) + "+j%4") +
-           ")");
-    c.line("var sc = (l&63) if j<4 else (u&15)|((l>>6)<<4)");
-    c.line("var mn = (h&63) if j<4 else (u>>4)|((h>>6)<<4)");
-    c.line("var q = " + qp + ".unsafe_offset(" + g + "*" +
-           std::to_string(Q8::bytes) + "+" + std::to_string(Q8::values) +
-           "+j*" + std::to_string(Q4::group) +
-           ").unsafe_load[width=32]().cast[DType.int32]()");
-    if (bs == 1) {
-      c.line("var raw = " + wp + ".unsafe_offset(" + wb + "+" +
-             std::to_string(Q4::packed) +
-             "+(j//2)*32).unsafe_load[width=32]()");
-    } else {
-      c.line("var raw = SIMD[DType.uint8,32](0)");
-      c.line("comptime for k in range(32):");
+    if (useVnni) {
+      c.line("var " + res + "_accS = SIMD[DType.int32,16](0)");
+      c.line("comptime for p in range(4):");
       c.indent++;
-      c.line("raw[k] = " + wp + "[unsafe_offset=" + wb + "+(" +
-             std::to_string(Q4::packed) + "+(j//2)*32+k)*" +
-             std::to_string(bs) + "]");
+      c.line("comptime j0 = 2 * p");
+      c.line("comptime j1 = 2 * p + 1");
+      c.line("var l0 = Int32(" + wByte(std::to_string(Q4::factors) + "+j0%4") + ")");
+      c.line("var h0 = Int32(" + wByte(std::to_string(Q4::factors + 4) + "+j0%4") + ")");
+      c.line("var u0 = Int32(" + wByte(std::to_string(Q4::factors + 8) + "+j0%4") + ")");
+      c.line("var sc0 = (l0&63) if j0<4 else (u0&15)|((l0>>6)<<4)");
+      c.line("var mn0 = (h0&63) if j0<4 else (u0>>4)|((h0>>6)<<4)");
+      c.line("var l1 = Int32(" + wByte(std::to_string(Q4::factors) + "+j1%4") + ")");
+      c.line("var h1 = Int32(" + wByte(std::to_string(Q4::factors + 4) + "+j1%4") + ")");
+      c.line("var u1 = Int32(" + wByte(std::to_string(Q4::factors + 8) + "+j1%4") + ")");
+      c.line("var sc1 = (l1&63) if j1<4 else (u1&15)|((l1>>6)<<4)");
+      c.line("var mn1 = (h1&63) if j1<4 else (u1>>4)|((h1>>6)<<4)");
+      if (bs == 1) {
+        c.line("var raw = " + wp + ".unsafe_offset(" + wb + "+" +
+               std::to_string(Q4::packed) + "+p*32).unsafe_load[width=32]()");
+      } else {
+        c.line("var raw = SIMD[DType.uint8,32](0)");
+        c.line("comptime for k in range(32):");
+        c.indent++;
+        c.line("raw[k] = " + wp + "[unsafe_offset=" + wb + "+(" +
+               std::to_string(Q4::packed) + "+p*32+k)*" +
+               std::to_string(bs) + "]");
+        c.indent--;
+      }
+      c.line("var nib64 = (raw & 15).join(raw >> 4)");
+      c.line("var q64 = " + qp + ".unsafe_offset(" + g + "*" +
+             std::to_string(Q8::bytes) + "+" + std::to_string(Q8::values) +
+             "+p*64).unsafe_load[width=64]()");
+      c.line("var dot16 = llvm_intrinsic[\"llvm.x86.avx512.vpdpbusd.512\",SIMD[DType.int32,16]](SIMD[DType.int32,16](0), nib64, q64)");
+      c.line(res + "_accS += dot16 * SIMD[DType.int32,8](sc0).join(SIMD[DType.int32,8](sc1))");
+      c.line("var sums = " + qp + ".bitcast[Int16]().unsafe_offset(" + g + "*" +
+             std::to_string(Q8::bytes / 2) + "+" + std::to_string(Q8::sums / 2) +
+             "+4*p)");
+      c.line(res + "_T += mn0*(Int32(sums[unsafe_offset=0])+Int32(sums[unsafe_offset=1])) + mn1*(Int32(sums[unsafe_offset=2])+Int32(sums[unsafe_offset=3]))");
       c.indent--;
+      c.line("var " + res + "_S = " + res + "_accS.reduce_add()");
+    } else {
+      c.line("var " + res + "_accS = SIMD[DType.int32,32](0)");
+      c.line("comptime for j in range(8):");
+      c.indent++;
+      c.line("var l = Int32(" + wByte(std::to_string(Q4::factors) + "+j%4") + ")");
+      c.line("var h = Int32(" + wByte(std::to_string(Q4::factors + 4) + "+j%4") +
+             ")");
+      c.line("var u = Int32(" + wByte(std::to_string(Q4::factors + 8) + "+j%4") +
+             ")");
+      c.line("var sc = (l&63) if j<4 else (u&15)|((l>>6)<<4)");
+      c.line("var mn = (h&63) if j<4 else (u>>4)|((h>>6)<<4)");
+      c.line("var q = " + qp + ".unsafe_offset(" + g + "*" +
+             std::to_string(Q8::bytes) + "+" + std::to_string(Q8::values) +
+             "+j*" + std::to_string(Q4::group) +
+             ").unsafe_load[width=32]().cast[DType.int32]()");
+      if (bs == 1) {
+        c.line("var raw = " + wp + ".unsafe_offset(" + wb + "+" +
+               std::to_string(Q4::packed) +
+               "+(j//2)*32).unsafe_load[width=32]()");
+      } else {
+        c.line("var raw = SIMD[DType.uint8,32](0)");
+        c.line("comptime for k in range(32):");
+        c.indent++;
+        c.line("raw[k] = " + wp + "[unsafe_offset=" + wb + "+(" +
+               std::to_string(Q4::packed) + "+(j//2)*32+k)*" +
+               std::to_string(bs) + "]");
+        c.indent--;
+      }
+      c.line("var nib = ((raw>>SIMD[DType.uint8,32](UInt8(4*(j%2))))&15).cast["
+             "DType.int32]()");
+      c.line("var sums = " + qp + ".bitcast[Int16]().unsafe_offset(" + g + "*" +
+             std::to_string(Q8::bytes / 2) + "+" + std::to_string(Q8::sums / 2) +
+             "+2*j)");
+      c.line(res + "_accS += SIMD[DType.int32,32](sc) * (q * nib)");
+      c.line(res + "_T += mn*(Int32(sums[unsafe_offset=0])+Int32(sums["
+                   "unsafe_offset=1]))");
+      c.indent--;
+      c.line("var " + res + "_S = " + res + "_accS.reduce_add()");
     }
-    c.line("var nib = ((raw>>SIMD[DType.uint8,32](UInt8(4*(j%2))))&15).cast["
-           "DType.int32]()");
-    c.line("var sums = " + qp + ".bitcast[Int16]().unsafe_offset(" + g + "*" +
-           std::to_string(Q8::bytes / 2) + "+" + std::to_string(Q8::sums / 2) +
-           "+2*j)");
-    c.line(res + "_S += sc*(q*nib).reduce_add()");
-    c.line(res + "_T += mn*(Int32(sums[unsafe_offset=0])+Int32(sums["
-                 "unsafe_offset=1]))");
-    c.indent--;
     c.line("var " + res + " = SIMD[DType.float32,1](" + res + "_ds*(" + res +
            "_d*Float32(" + res + "_S)-" + res + "_dm*Float32(" + res + "_T)))");
     return llvm::Error::success();
@@ -973,14 +1030,16 @@ TerminalPrinter mojoMatrixPrinter() {
         c.line("  for (int64_t k=0; k<256; ++k) { float v=x[k*stride]; if (fabsf(v)>fabsf(extreme)) extreme=v; }");
         c.line("  float inv=extreme==0.0f ? 0.0f : -127.0f/extreme;");
         c.line("  out->d=extreme==0.0f ? 0.0f : 1.0f/inv;");
+        c.line("  #pragma omp simd");
+        c.line("  for (int64_t k=0; k<256; ++k) {");
+        c.line("    float v=x[k*stride]*inv; int q=(int)v; float fraction=fabsf(v-(float)q);");
+        c.line("    if (fraction>0.5f || (fraction==0.5f && (q&1))) q+=v<0 ? -1 : 1;");
+        c.line("    out->q[k]=(int8_t)(q>127 ? 127 : q);");
+        c.line("  }");
         c.line("  for (int group=0; group<16; ++group) {");
         c.line("    int sum=0;");
         c.line("    #pragma omp simd reduction(+:sum)");
-        c.line("    for (int64_t k=16*group; k<16*group+16; ++k) {");
-        c.line("      float v=x[k*stride]*inv; int q=(int)v; float fraction=fabsf(v-(float)q);");
-        c.line("      if (fraction>0.5f || (fraction==0.5f && (q&1))) q+=v<0 ? -1 : 1;");
-        c.line("      out->q[k]=(int8_t)(q>127 ? 127 : q); sum+=out->q[k];");
-        c.line("    }");
+        c.line("    for (int64_t k=16*group; k<16*group+16; ++k) sum+=out->q[k];");
         c.line("    out->sums[group]=(int16_t)sum;");
         c.line("  }");
         c.line("}");
@@ -1184,9 +1243,10 @@ TerminalPrinter mojoMatrixPrinter() {
       int64_t s = op.getAttrOfType<IntegerAttr>("slot").getInt();
       std::string cTy = op.getAttrOfType<StringAttr>("c_type").str();
       std::string idx = op.getAttrOfType<StringAttr>("index_expr").str();
+      std::string base =
+          s >= 0 ? ("a" + std::to_string(s)) : ("wk_" + std::to_string(-1 - s));
       c.line("const " + cTy + " " + c.name(op.getResult(0)) +
-             " = ((const " + cTy + "*)a" + std::to_string(s) + ")[" + idx +
-             "];");
+             " = ((const " + cTy + "*)" + base + ")[" + idx + "];");
     }
     return llvm::Error::success();
   };

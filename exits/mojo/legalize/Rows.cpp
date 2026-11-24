@@ -10,6 +10,7 @@
 #include "mlir/IR/IRMapping.h"
 #include "llvm/ADT/StringExtras.h"
 #include <cmath>
+#include <functional>
 #include <map>
 #include <set>
 
@@ -1225,10 +1226,12 @@ struct RowLowerer {
     }
   }
 
-  LogicalResult lowerSweepBody(Block &bb, Value r, Value j, int64_t w,
-                               IRMapping &map,
-                               llvm::DenseMap<int64_t, Value> &scanCarries,
-                               SmallVectorImpl<Value> &yieldedVals) {
+  LogicalResult
+  lowerSweepBody(Block &bb, Value r, Value j, int64_t w, IRMapping &map,
+                 llvm::DenseMap<int64_t, Value> &scanCarries,
+                 SmallVectorImpl<Value> &yieldedVals,
+                 SmallVectorImpl<std::function<void()>> *deferredStores = nullptr,
+                 bool deferViewWrites = false) {
     Value c0 = constIdx(b, loc, 0), c1 = constIdx(b, loc, 1),
           cW = constIdx(b, loc, w);
     int64_t domArg = task.getAttrOfType<IntegerAttr>("domain_arg").getInt();
@@ -1265,11 +1268,21 @@ struct RowLowerer {
         unsigned cSlot = op.getAttrOfType<IntegerAttr>("slot").getInt();
         Value buf = rowCacheBufs[cSlot];
         Value val = map.lookup(op.getOperand(1));
-        Value addr = makeStaticAddr(b, loc, buf, {j}, {1});
-        if (w == 1)
-          makeOp(b, loc, "store_scalar", {buf, addr, val});
-        else
-          makeOp(b, loc, "store_slice", {buf, addr, val});
+        if (deferredStores) {
+          deferredStores->push_back([=, this]() {
+            Value addr = makeStaticAddr(b, loc, buf, {j}, {1});
+            if (w == 1)
+              makeOp(b, loc, "store_scalar", {buf, addr, val});
+            else
+              makeOp(b, loc, "store_slice", {buf, addr, val});
+          });
+        } else {
+          Value addr = makeStaticAddr(b, loc, buf, {j}, {1});
+          if (w == 1)
+            makeOp(b, loc, "store_scalar", {buf, addr, val});
+          else
+            makeOp(b, loc, "store_slice", {buf, addr, val});
+        }
         continue;
       }
       if (code == "sum_columns") {
@@ -1771,7 +1784,15 @@ struct RowLowerer {
         unsigned sIdx = slotIndex(op.getOperand(0));
         Type targetTy = w == 1 ? slots[sIdx].elemTy
                                : Type(VectorType::get({w}, slots[sIdx].elemTy));
-        emitSweepWrite(op, r, j, splatIfScalar(rawVal, targetTy, w), w);
+        Value splatted = splatIfScalar(rawVal, targetTy, w);
+        if (deferredStores && deferViewWrites) {
+          Operation *writeOpPtr = &op;
+          deferredStores->push_back([=, this]() {
+            emitSweepWrite(*writeOpPtr, r, j, splatted, w);
+          });
+        } else {
+          emitSweepWrite(op, r, j, splatted, w);
+        }
         continue;
       }
       if (code == "apply") {
@@ -2411,12 +2432,16 @@ struct RowLowerer {
       }
     }
 
-    auto emitInnerColStepTo = [&](Value j, ArrayRef<Value> dstAccs) -> LogicalResult {
+    auto emitInnerColStepTo =
+        [&](Value j, ArrayRef<Value> dstAccs,
+            SmallVectorImpl<std::function<void()>> *deferredStores = nullptr,
+            bool deferViewWrites = false) -> LogicalResult {
       SmallVector<Value, 16> yielded;
       IRMapping bodyMap = hoistedRowMap;
       bodyMap.map(loop.getRegion(0).front().getArgument(0), j);
       if (failed(lowerSweepBody(loop.getRegion(0).front(), r, j, w, bodyMap,
-                                scanCarries, yielded)))
+                                scanCarries, yielded, deferredStores,
+                                deferViewWrites)))
         return failure();
       if (isStore)
         return success();
@@ -2492,18 +2517,28 @@ struct RowLowerer {
         forceUnitStride = unitFast;
         if (allowUnroll4 && w > 1 && isStore && !hasSweepUniform && !ownerAxis) {
           Operation *singleFeatSeg = nullptr;
-          int segOps = 0, statefulOps = 0, bodyOps = 0;
+          int segOps = 0, statefulOps = 0, bodyOps = 0, userReads = 0,
+              userWrites = 0;
+          bool hasCacheLoad = false;
           for (Operation &sop : loop.getRegion(0).front()) {
             ++bodyOps;
             auto sc = sop.getName().stripDialect();
             if (sc == "segment_fold") {
               ++segOps;
+              ++userReads;
               if (sop.hasAttr("feature_vector"))
                 singleFeatSeg = &sop;
             } else if (sc == "segment_size" || sc == "indexed_read" ||
                        sc == "owner_write" || sc == "key_counts" ||
                        sc == "sum_columns" || sc == "row_cache_store") {
               ++statefulOps;
+              ++userReads;
+            } else if (sc == "read" || sc == "owner_read") {
+              ++userReads;
+            } else if (sc == "write") {
+              ++userWrites;
+            } else if (sc == "row_cache_load") {
+              hasCacheLoad = true;
             } else if (sc == "apply" &&
                        sop.getAttrOfType<StringAttr>("kind").getValue() ==
                            "scan_sum") {
@@ -2511,6 +2546,8 @@ struct RowLowerer {
             }
           }
           if (segOps == 0 && statefulOps == 0 && bodyOps <= 24) {
+            bool deferOut =
+                hasCacheLoad && userReads == 0 && userWrites == 1;
             Value cW2 = constIdx(b, loc, 2 * w), cW3 = constIdx(b, loc, 3 * w),
                   cW4 = constIdx(b, loc, 4 * w);
             Value unrollStop = b.create<arith::MulIOp>(
@@ -2522,16 +2559,23 @@ struct RowLowerer {
               Value j0 = uBb.addArgument(b.getIndexType(), loc);
               OpBuilder::InsertionGuard ug(b);
               b.setInsertionPointToEnd(&uBb);
-              if (failed(emitInnerColStep(j0)) ||
-                  failed(emitInnerColStep(
-                      b.create<arith::AddIOp>(loc, j0, cW))) ||
-                  failed(emitInnerColStep(
-                      b.create<arith::AddIOp>(loc, j0, cW2))) ||
-                  failed(emitInnerColStep(
-                      b.create<arith::AddIOp>(loc, j0, cW3)))) {
+              SmallVector<std::function<void()>, 4> deferred;
+              auto *defPtr = deferOut ? &deferred : nullptr;
+              if (failed(emitInnerColStepTo(j0, accSlots, defPtr, deferOut)) ||
+                  failed(emitInnerColStepTo(
+                      b.create<arith::AddIOp>(loc, j0, cW), accSlots, defPtr,
+                      deferOut)) ||
+                  failed(emitInnerColStepTo(
+                      b.create<arith::AddIOp>(loc, j0, cW2), accSlots, defPtr,
+                      deferOut)) ||
+                  failed(emitInnerColStepTo(
+                      b.create<arith::AddIOp>(loc, j0, cW3), accSlots, defPtr,
+                      deferOut))) {
                 forceUnitStride = prevFast;
                 return failure();
               }
+              for (auto &fn : deferred)
+                fn();
               makeOp(b, loc, "end");
             }
             {
@@ -2663,6 +2707,14 @@ struct RowLowerer {
         }
         if (allowUnroll4 && w > 1 && !isStore && !isMoments && numReds >= 1 &&
             numReds <= 4 && !hasSweepUniform) {
+          int redBodyOps = 0;
+          bool hasCacheStore = false;
+          for (Operation &sop : loop.getRegion(0).front()) {
+            ++redBodyOps;
+            if (sop.getName().stripDialect() == "row_cache_store")
+              hasCacheStore = true;
+          }
+          bool deferCache = hasCacheStore && numReds <= 2 && redBodyOps <= 16;
           SmallVector<SmallVector<Value, 4>, 3> extraAccs(3);
           for (int u = 0; u < 3; ++u)
             for (unsigned k = 0; k < numReds; ++k)
@@ -2678,16 +2730,23 @@ struct RowLowerer {
             Value j0 = uBb.addArgument(b.getIndexType(), loc);
             OpBuilder::InsertionGuard ug(b);
             b.setInsertionPointToEnd(&uBb);
-            if (failed(emitInnerColStepTo(j0, accSlots)) ||
+            SmallVector<std::function<void()>, 4> deferred;
+            auto *defPtr = deferCache ? &deferred : nullptr;
+            if (failed(emitInnerColStepTo(j0, accSlots, defPtr, false)) ||
                 failed(emitInnerColStepTo(
-                    b.create<arith::AddIOp>(loc, j0, cW), extraAccs[0])) ||
+                    b.create<arith::AddIOp>(loc, j0, cW), extraAccs[0], defPtr,
+                    false)) ||
                 failed(emitInnerColStepTo(
-                    b.create<arith::AddIOp>(loc, j0, cW2), extraAccs[1])) ||
+                    b.create<arith::AddIOp>(loc, j0, cW2), extraAccs[1], defPtr,
+                    false)) ||
                 failed(emitInnerColStepTo(
-                    b.create<arith::AddIOp>(loc, j0, cW3), extraAccs[2]))) {
+                    b.create<arith::AddIOp>(loc, j0, cW3), extraAccs[2], defPtr,
+                    false))) {
               forceUnitStride = prevFast;
               return failure();
             }
+            for (auto &fn : deferred)
+              fn();
             makeOp(b, loc, "end");
           }
           {
