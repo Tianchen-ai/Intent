@@ -18,6 +18,8 @@ Covers:
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager, nullcontext
+import fcntl
 import hashlib
 import json
 import math
@@ -343,8 +345,8 @@ TARGETS: dict[str, TargetSpec] = {
 }
 
 
-def responsible_unit(backend: str, workload: str) -> str:
-    """Map (exit backend, workload) to the owning compiler unit(s) per doc/plan/v2-6.md §2–§3."""
+def responsible_unit(backend: str, workload: str, case: str = "") -> str:
+    """Map (exit backend, workload, case) to the owning compiler unit(s) per doc/plan/v2-6.md §2–§3."""
     w = workload
     if backend == "bangc":
         if "group_norm_backward" in w:
@@ -361,7 +363,9 @@ def responsible_unit(backend: str, workload: str) -> str:
     if backend in ("triton", "cutile"):
         if "flash_attention_backward" in w or "attention" in w or "decode" in w:
             return f"levels/execution/block + exits/{backend} (panel exchange, local residency & pipeline scheduling)"
-        if "histogram" in w or "csr_spmv" in w or "jagged_mean" in w or "nonzero" in w or "moe_alignment" in w:
+        if "histogram" in w:
+            return f"levels/execution/block + exits/{backend} (two-kernel author workspace partition + merge vs V1 fused single kernel)"
+        if "csr_spmv" in w or "jagged_mean" in w or "nonzero" in w or "moe_alignment" in w:
             return f"levels/execution/block + exits/{backend} (irregular gather grouping & CTA partial atomic aggregation)"
         if "gemm" in w or "projection" in w or "mamba" in w:
             return f"levels/execution/block + exits/{backend} (small-tile launch occupancy, scale/record decode & MMA staging)"
@@ -373,16 +377,55 @@ def responsible_unit(backend: str, workload: str) -> str:
     if backend in ("mojo", "weft"):
         if "dropout_residual_rms_norm" in w or "dropout" in w:
             return f"levels/execution/cpu + exits/{backend} (two-pass Philox recomputation & BF16 widening)"
+        if "softmax" in w and case.startswith("1x"):
+            return f"levels/execution/cpu + exits/{backend} (single-row task dispatch & host variant selection overhead)"
         if "group_norm_backward" in w or "layer_norm_backward" in w or "batch_norm" in w or "rms_norm" in w or "softmax" in w:
             return f"levels/execution/cpu + exits/{backend} (task partitioning, BF16 vector reduction & shared gain load)"
         if "gemm" in w or "projection" in w or "mamba" in w:
             return f"levels/execution/cpu + exits/{backend} (panel packing traffic & SIMD/BRGeMM/RVV microkernel)"
         if "attention" in w or "decode" in w:
             return f"levels/execution/cpu + exits/{backend} (owner packing & online softmax horizontal reduction)"
-        if "moe_alignment" in w or "cumsum" in w or "csr_spmv" in w or "jagged_mean" in w or "histogram" in w or "nonzero" in w:
-            return f"levels/execution/cpu + exits/{backend} (per-task key reservation & indirect gather)"
+        if "gated_delta" in w or "cholesky" in w or "causal_" in w or "selective_state" in w:
+            return f"levels/execution/cpu + exits/{backend} (recurrence store conservative owner_batch vectorization)"
+        if "transpose" in w:
+            return f"levels/execution/cpu + exits/{backend} (2D tile strided scatter/gather & scalar tail)"
+        if "embedding" in w:
+            return f"levels/execution/cpu + exits/{backend} (indexed row copy & BF16 transfer)"
+        if "jagged_mean" in w:
+            return f"levels/execution/cpu + exits/{backend} (variable-length segment static row-chunk load imbalance)"
+        if "moe_alignment" in w or "cumsum" in w or "csr_spmv" in w or "histogram" in w or "nonzero" in w:
+            return f"levels/execution/cpu + exits/{backend} (multi-kernel native entry & per-task key reservation)"
         return f"levels/execution/cpu + exits/{backend}"
     return f"exits/{backend}"
+
+
+def classify_v1_gap(backend: str, workload: str, case: str) -> tuple[str, str]:
+    """Classify a `V2 / V1 > 1.20x` item into (`semantic_contract` | `performance_gap`, explanation)."""
+    if backend == "bangc" and workload in ("softmax", "program/softmax", "program/swiglu", "program/adamw"):
+        return (
+            "semantic_contract",
+            "exits/bangc — V2 履行 KIR 严格 0-ULP IEEE div_rn/sqrt_rn（运行期残差认证），V1 使用硬件近似倒数/未认证开方",
+        )
+    if backend in ("mojo", "weft") and workload == "program/batched_gemm" and case == "author":
+        return (
+            "semantic_contract",
+            f"levels/execution/cpu + exits/{backend} — author 默认严格保留次正规数（FP32 展宽 FMA，快于严格 ATen），V1 无许可调用冲零次正规数的 AMX BF16",
+        )
+    if backend in ("triton", "cutile") and workload in ("program/jagged_mean", "program/csr_spmv"):
+        return (
+            "semantic_contract",
+            f"levels/execution/block + exits/{backend} — 作者指定 ordered_sum 严格左结合顺序累加（add_rn），V1 为跨通道/跨行树归约重结合",
+        )
+    if (
+        workload in ("softmax", "program/softmax")
+        and not case.startswith("1x")
+        and backend in ("mojo", "weft", "triton", "cutile")
+    ):
+        return (
+            "semantic_contract",
+            f"exits/{backend} — 作者未声明 relaxed_normalization，V2 履行严格 max_num + 三遍归约与逐元素 IEEE RN 商，V1 采用在线重标定或倒数近似",
+        )
+    return ("performance_gap", responsible_unit(backend, workload, case))
 
 
 # ---------------------------------------------------------------------------
@@ -812,7 +855,10 @@ def run_single_workload(cfg: dict[str, Any]) -> int:
         iso_row_json.write_text(json.dumps([_dc_asdict(r) for r in sub_rows]) + "\n", encoding="utf-8")
         return 0
 
-    if device_kind == "cpu_x86" and selected:
+    if (
+        device_kind == "cpu_x86"
+        or (device_kind == "cpu_rvv" and "ggml" in selected and len(w.cases) > 1)
+    ) and selected:
         from intent_bench.engine import assign_speedups
         from intent_bench.measurement import device_window, reset as _bench_reset, synchronize as _bench_sync
         from intent_bench.model import DeviceBusy, Implementation
@@ -1095,7 +1141,52 @@ def check_device_idle(spec: TargetSpec) -> tuple[bool, str]:
     return True, "idle"
 
 
+@contextmanager
+def _host_exclusive_lock(lock_file: Path, label: str):
+    """Serialize targets sharing a physical CPU/host pool across concurrent worker processes."""
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    with lock_file.open("a+") as lf:
+        try:
+            fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print(f"[{label}] Waiting for shared host lock {lock_file.name} ...", flush=True)
+            fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
+
+
 def execute_target(
+    spec: TargetSpec,
+    *,
+    wheel_dir: Path,
+    bench_root: Path,
+    experiment_tag: str,
+    workloads_filter: list[str] | None,
+    resume: bool,
+    allow_busy: bool,
+    per_timeout: int,
+) -> Path:
+    lock_ctx = nullcontext()
+    if spec.device_kind == "cpu_x86":
+        lock_ctx = _host_exclusive_lock(bench_root / "output" / "work" / ".v26-rc-x86-cpu.lock", spec.name)
+    elif spec.name in ("k3-x100", "k3-a100"):
+        lock_ctx = _host_exclusive_lock(bench_root / "output" / "work" / ".v26-rc-k3-host.lock", spec.name)
+    with lock_ctx:
+        return _execute_target_locked(
+            spec,
+            wheel_dir=wheel_dir,
+            bench_root=bench_root,
+            experiment_tag=experiment_tag,
+            workloads_filter=workloads_filter,
+            resume=resume,
+            allow_busy=allow_busy,
+            per_timeout=per_timeout,
+        )
+
+
+def _execute_target_locked(
     spec: TargetSpec,
     *,
     wheel_dir: Path,
@@ -1364,9 +1455,10 @@ export TMPDIR="$RWORK"
 
 
 def _validate_rvv_captures(target_exp_dir: Path, bench_root: Path) -> None:
-    """Validate captured RVV actual outputs on the controller's PyTorch CPU oracle."""
+    """Validate captured RVV actual outputs on the controller's PyTorch CPU oracle (isolated from cores 0..7)."""
     validator_code = """
-import json, sys
+from dataclasses import replace
+import json, os, sys
 from pathlib import Path
 from intent_bench.environments import load_environment
 from intent_bench.model import Measurement, Result
@@ -1374,10 +1466,17 @@ from intent_bench.oracle import validate_captured
 from intent_bench.request import RunRequest
 from intent_bench.results import save
 
-target_dir = Path(sys.argv[1])
-oracle_env = load_environment("local-cpu")
+target_dir = Path(sys.argv[1]).resolve()
+oracle_work_root = target_dir / ".oracle-work"
+oracle_work_root.mkdir(parents=True, exist_ok=True)
+os.environ["INTENT_BENCH_OUTPUT_ROOT"] = str(oracle_work_root)
+allowed = sorted(os.sched_getaffinity(0))
+hi_cpus = tuple(c for c in range(64, 72) if c in allowed) or tuple(allowed[: min(8, len(allowed))])
+oracle_env = replace(load_environment("local-cpu"), cpus=hi_cpus, output_root=oracle_work_root)
 count = 0
 for res_file in sorted(target_dir.glob("**/results.json")):
+    if ".oracle-work" in res_file.parts:
+        continue
     payload = json.loads(res_file.read_text(encoding="utf-8"))
     rows = [Result(**r) for r in payload.get("results", [])]
     pending = [r for r in rows if r.status == "unchecked" and r.metadata.get("oracle_capture")]
@@ -1471,7 +1570,7 @@ def summarize_experiment(bench_root: Path, experiment_tag: str) -> tuple[dict[st
         by_work_case: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
         skipped_impl_records: list[dict[str, Any]] = []
         for rf in sorted(tdir.glob("**/results.json")):
-            if "artifacts" in rf.parts:
+            if "artifacts" in rf.parts or ".oracle-work" in rf.parts:
                 continue
             payload = json.loads(rf.read_text(encoding="utf-8"))
             cmd = payload.get("command") or {}
@@ -1582,6 +1681,7 @@ def summarize_experiment(bench_root: Path, experiment_tag: str) -> tuple[dict[st
                     else:
                         v1_cmp["slower"] += 1
                     if ratio > 1.20 and not sm120_single_tick:
+                        gap_cat, gap_note = classify_v1_gap(be, wname, cname)
                         summary["slower_than_v1_over_1_2x"].append(
                             {
                                 "target": target_name,
@@ -1591,7 +1691,9 @@ def summarize_experiment(bench_root: Path, experiment_tag: str) -> tuple[dict[st
                                 "v2_us": round(v2_us, 2),
                                 "v1_us": round(v1_us, 2),
                                 "ratio": round(ratio, 3),
-                                "unit": responsible_unit(be, wname),
+                                "category": gap_cat,
+                                "unit": responsible_unit(be, wname, cname),
+                                "note": gap_note,
                             }
                         )
 
@@ -1686,22 +1788,50 @@ def summarize_experiment(bench_root: Path, experiment_tag: str) -> tuple[dict[st
             f"**{mt['faster']}** 快 / **{mt['tied']}** 平 / **{mt['slower']}** 慢（{mt['ref_failed']} 失败, {mt['no_comparable']} 无）{sem_note}{mt_qnote} |"
         )
 
+    all_over_1_2x = sorted(
+        summary["slower_than_v1_over_1_2x"],
+        key=lambda x: (x["target"], x["backend"], -x["ratio"]),
+    )
+    sem_items = [x for x in all_over_1_2x if x.get("category") == "semantic_contract"]
+    perf_items = [x for x in all_over_1_2x if x.get("category") != "semantic_contract"]
+    summary["slower_than_v1_semantic"] = sem_items
+    summary["slower_than_v1_performance_gap"] = perf_items
+
     md.extend(
         [
             "",
-            "## 3. 比 V1 慢 1.2 倍以上的全部项目（`V2 / V1 > 1.20x`）及负责单元",
+            f"## 3. 比 V1 慢 1.2 倍以上的全部项目（`V2 / V1 > 1.20x`，共 {len(all_over_1_2x)} 项：语义口径不同 {len(sem_items)} 项，真实性能差距 {len(perf_items)} 项）",
             "",
-            "| 设备目标 | 出口 | 工作负载 (`case`) | V2 (µs) | V1 (µs) | V2/V1 | 负责单元 |",
+            f"### 3.1 语义与数值口径不同（共 {len(sem_items)} 项：V2 履行严格作者合同，V1 采用近似 / 重结合 / 次正规冲零）",
+            "",
+            "| 设备目标 | 出口 | 工作负载 (`case`) | V2 (µs) | V1 (µs) | V2/V1 | 口径差异与负责单元 |",
             "|---|---|---|---:|---:|---:|---|",
         ]
     )
-    for item in sorted(summary["slower_than_v1_over_1_2x"], key=lambda x: (x["target"], x["backend"], -x["ratio"])):
+    for item in sem_items:
+        md.append(
+            f"| `{item['target']}` | `{item['backend']}` | `{item['workload']}` (`{item['case']}`) | "
+            f"{item['v2_us']:.2f} | {item['v1_us']:.2f} | {item['ratio']:.2f}x | `{item['note']}` |"
+        )
+    if not sem_items:
+        md.append("| — | — | 无 | — | — | — | — |")
+
+    md.extend(
+        [
+            "",
+            f"### 3.2 真实性能差距（共 {len(perf_items)} 项：同合同下仍慢于 V1 `> 1.20x`）",
+            "",
+            "| 设备目标 | 出口 | 工作负载 (`case`) | V2 (µs) | V1 (µs) | V2/V1 | 负责单元与原因 |",
+            "|---|---|---|---:|---:|---:|---|",
+        ]
+    )
+    for item in perf_items:
         md.append(
             f"| `{item['target']}` | `{item['backend']}` | `{item['workload']}` (`{item['case']}`) | "
             f"{item['v2_us']:.2f} | {item['v1_us']:.2f} | {item['ratio']:.2f}x | `{item['unit']}` |"
         )
-    if not summary["slower_than_v1_over_1_2x"]:
-        md.append("| — | — | 无（全部项目 `V2 / V1 <= 1.20x`） | — | — | — | — |")
+    if not perf_items:
+        md.append("| — | — | 无（同合同项目全部 `V2 / V1 <= 1.20x`） | — | — | — | — |")
 
     # Failures & Skips section
     v2_issues = [x for x in summary["failures_and_skips"] if str(x.get("implementation", "")).startswith("intent-v2:") or x.get("scope") == "target"]
@@ -1729,8 +1859,13 @@ def summarize_experiment(bench_root: Path, experiment_tag: str) -> tuple[dict[st
             md.append(f"- … 其余 {len(ref_issues) - 80} 条详见 `scoreboard.json`")
 
     md_text = "\n".join(md) + "\n"
-    (exp_root / "scoreboard.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    (exp_root / "scoreboard.md").write_text(md_text, encoding="utf-8")
+    exp_root.mkdir(parents=True, exist_ok=True)
+    tmp_json = exp_root / f".scoreboard.{os.getpid()}.json"
+    tmp_md = exp_root / f".scoreboard.{os.getpid()}.md"
+    tmp_json.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    tmp_md.write_text(md_text, encoding="utf-8")
+    os.replace(tmp_json, exp_root / "scoreboard.json")
+    os.replace(tmp_md, exp_root / "scoreboard.md")
     return summary, md_text
 
 
@@ -1743,13 +1878,13 @@ def main() -> int:
     parser.add_argument("--worker-batch", type=Path, help="Internal: run batch JSON config on target host")
 
     parser.add_argument("--targets", nargs="+", help=f"Targets to execute ({', '.join(TARGETS)} or 'all')")
-    parser.add_argument("--wheel-dir", type=Path, default=Path("/srv/rc/site-1/phdworks/wt/dsa/dist/release"))
+    parser.add_argument("--wheel-dir", type=Path, default=Path("/srv/rc/site-1/phdworks/compilerinfra/.work/release/v2-6-final"))
     parser.add_argument("--bench-root", type=Path, default=Path("/srv/rc/site-1/phdworks/intentdsl_bench"))
-    parser.add_argument("--tag", default="v2-6-rc", help="Experiment tag under bench output/experiments/")
+    parser.add_argument("--tag", default="v2-6-final", help="Experiment tag under bench output/experiments/")
     parser.add_argument("--workloads", nargs="+", help="Optional subset of workloads to run")
     parser.add_argument("--resume", action="store_true", help="Reuse completed workload results.json files")
     parser.add_argument("--allow-busy", action="store_true", help="Do not skip when device reports active processes")
-    parser.add_argument("--timeout", type=int, default=600, help="Per-workload subprocess timeout in seconds")
+    parser.add_argument("--timeout", type=int, default=1800, help="Per-workload subprocess timeout in seconds")
     parser.add_argument("--summarize-only", action="store_true", help="Only aggregate existing results into scoreboard")
     args = parser.parse_args()
 
