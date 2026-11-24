@@ -34,7 +34,7 @@ struct OrderedLowerer {
   Value symGrid, symTaskId, symTaskDim;
   struct PendingOrderedTailGuard {
     Operation *guardIf;
-    compilerinfra::TailDimension dim;
+    Operation *accessOp;
   };
   SmallVector<PendingOrderedTailGuard, 8> orderedTailGuards;
 
@@ -1017,16 +1017,18 @@ struct OrderedLowerer {
                         for (Value c : bop.getOperands().drop_front().drop_back())
                           prefix.push_back(loopScalars.lookup(c));
                         Value kSlot = slotAt(&bop, 0, halfTy);
+                        Value kPtr = sliceBasePtr(kView, prefix, t0);
                         if (Operation *tailIf = stageRows(
-                                kSlot, kView, sliceBasePtr(kView, prefix, t0),
-                                nt, S, kFeat, true)) {
-                          compilerinfra::TailDimension stripDim;
-                          stripDim.staticExtent = K;
-                          stripDim.dynamicOffset = t0;
-                          stripDim.tileSize = S;
-                          stripDim.tileAlignment = S;
-                          orderedTailGuards.push_back(
-                              PendingOrderedTailGuard{tailIf, stripDim});
+                                kSlot, kView, kPtr, nt, S, kFeat, true)) {
+                          if (Operation *addrOp = kPtr.getDefiningOp()) {
+                            addrOp->setAttr(
+                                "bangc.tile_axes",
+                                b.getDenseI64ArrayAttr({kRank - 2}));
+                            addrOp->setAttr("bangc.tile_sizes",
+                                            b.getDenseI64ArrayAttr({S}));
+                            orderedTailGuards.push_back(
+                                PendingOrderedTailGuard{tailIf, addrOp});
+                          }
                         }
                         sync("io");
                         slotEnv[bop.getResult(0)] = kSlot;
@@ -2305,8 +2307,7 @@ struct OrderedLowerer {
     if (!orderedTailGuards.empty()) {
       compilerinfra::IntegerRangeContext tailRanges(fn.getOperation());
       for (auto &tg : orderedTailGuards) {
-        compilerinfra::TailDimension dims[1] = {tg.dim};
-        if (compilerinfra::proveTailAccess(dims, &tailRanges).kind ==
+        if (compilerinfra::proveTailAccess(tg.accessOp, &tailRanges).kind ==
             compilerinfra::TailKind::ExactInBounds) {
           Value cond = tg.guardIf->getOperand(0);
           tg.guardIf->erase();

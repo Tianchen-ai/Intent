@@ -590,7 +590,7 @@ void bind(Unit &u) {
              "*",
              ParityStatus::Unsupported,
              {},
-             "MLU370 (mtp_372) lacks 64-bit hardware vector gather DMA; indexed_dma stages i64 indices into NRAM and issues per-member async DMA"});
+             "Neuware BANG C / CNRT mtp_372 toolchain exposes no 64-bit indirect vector gather DMA intrinsic; indexed_dma stages i64 indices into NRAM and issues per-member async DMA"});
   u.dialects = [](DialectRegistry &r) {
     r.insert<intentdsl::bangc_src::BangcSrcDialect, scf::SCFDialect,
              arith::ArithDialect>();

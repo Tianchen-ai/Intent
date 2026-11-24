@@ -18,52 +18,52 @@ def Iblock_end : Inst<"end", [Terminator]> {
   let results = (outs);
 }
 def Iblock_read : Inst<"read"> {
-  let arguments = (ins AnyMemRef:$view, Variadic<Index>:$indices);
+  let arguments = (ins Arg<AnyMemRef, "", [MemRead]>:$view, Variadic<Index>:$indices);
   let results = (outs AnyType:$result);
 }
 def Iblock_OwnerReadOp : Inst<"read_owner"> {
-  let arguments = (ins AnyMemRef:$source,Index:$owner); let results = (outs AnyType:$scalar);
+  let arguments = (ins Arg<AnyMemRef, "", [MemRead]>:$source,Index:$owner); let results = (outs AnyType:$scalar);
 }
 def Iblock_OwnerWriteOp : Inst<"write_owner"> {
-  let arguments = (ins AnyMemRef:$destination,Index:$owner,AnyType:$scalar);
+  let arguments = (ins Arg<AnyMemRef, "", [MemWrite]>:$destination,Index:$owner,AnyType:$scalar);
 }
 def Iblock_write : Inst<"write"> {
-  let arguments = (ins AnyMemRef:$view, Index:$row, AnyTensor:$value);
+  let arguments = (ins Arg<AnyMemRef, "", [MemWrite]>:$view, Index:$row, AnyTensor:$value);
   let results = (outs);
 }
-def Iblock_pid : Inst<"pid"> {
+def Iblock_pid : Inst<"pid", [Pure]> {
   let arguments = (ins);
   let results = (outs Index:$result);
 }
-def Iblock_rows : Inst<"rows"> {
+def Iblock_rows : Inst<"rows", [Pure]> {
   let arguments = (ins Index:$instance);
   let results = (outs AnyType:$result);
 }
-def Iblock_columns : Inst<"columns"> {
+def Iblock_columns : Inst<"columns", [Pure]> {
   let arguments = (ins Index:$tile);
   let results = (outs AnyType:$result);
 }
-def Iblock_active : Inst<"active"> {
+def Iblock_active : Inst<"active", [Pure]> {
   let arguments = (ins AnyMemRef:$domain, AnyTensor:$rows, AnyTensor:$columns);
   let results = (outs AnyType:$result);
 }
 def Iblock_load : Inst<"load"> {
-  let arguments = (ins AnyMemRef:$view, AnyTensor:$rows, AnyTensor:$columns,
+  let arguments = (ins Arg<AnyMemRef, "", [MemRead]>:$view, AnyTensor:$rows, AnyTensor:$columns,
       AnyTensor:$mask);
   let results = (outs AnyType:$result);
 }
 def Iblock_store : Inst<"store"> {
-  let arguments = (ins AnyMemRef:$view, AnyTensor:$rows, AnyTensor:$columns,
+  let arguments = (ins Arg<AnyMemRef, "", [MemWrite]>:$view, AnyTensor:$rows, AnyTensor:$columns,
       AnyTensor:$mask, AnyTensor:$value);
   let results = (outs);
 }
 def Iblock_Dialect_OwnerLoadOp : Op<Iblock_Dialect,"owner_load"> {
-  let arguments = (ins AnyMemRef:$view,AnyTensor:$rows); let results = (outs AnyTensor:$values);
+  let arguments = (ins Arg<AnyMemRef, "", [MemRead]>:$view,AnyTensor:$rows); let results = (outs AnyTensor:$values);
 }
 def Iblock_Dialect_OwnerStoreOp : Op<Iblock_Dialect,"owner_store"> {
-  let arguments = (ins AnyMemRef:$view,AnyTensor:$rows,AnyTensor:$values);
+  let arguments = (ins Arg<AnyMemRef, "", [MemWrite]>:$view,AnyTensor:$rows,AnyTensor:$values);
 }
-def Iblock_reduce : Inst<"reduce"> {
+def Iblock_reduce : Inst<"reduce", [Pure]> {
   let arguments = (ins AnyTensor:$value, AnyTensor:$mask, StrAttr:$algebra);
   let results = (outs AnyType:$result);
 }
@@ -83,130 +83,130 @@ def Iblock_stripe_loop : Inst<"stripe_loop"> {
   let regions = (region AnyRegion:$body);
 }
 def Iblock_stripe_load : Inst<"stripe_load"> {
-  let arguments = (ins AnyMemRef:$view, Index:$round, AnyTensor:$rows, AnyTensor:$columns, I1Tensor:$active, I64Attr:$stride);
+  let arguments = (ins Arg<AnyMemRef, "", [MemRead]>:$view, Index:$round, AnyTensor:$rows, AnyTensor:$columns, I1Tensor:$active, I64Attr:$stride);
   let results = (outs AnyTensor:$result);
 }
 def Iblock_stripe_store : Inst<"stripe_store"> {
-  let arguments = (ins AnyMemRef:$view, Index:$round, AnyTensor:$rows, AnyTensor:$columns, I1Tensor:$active, AnyTensor:$value, I64Attr:$stride);
+  let arguments = (ins Arg<AnyMemRef, "", [MemWrite]>:$view, Index:$round, AnyTensor:$rows, AnyTensor:$columns, I1Tensor:$active, AnyTensor:$value, I64Attr:$stride);
   let results = (outs);
 }
 def Iblock_yield : Inst<"yield", [Terminator]> {
   let arguments = (ins Variadic<AnyType>:$values);
   let results = (outs);
 }
-def Iblock_zero : Inst<"zero"> {
+def Iblock_zero : Inst<"zero", [Pure]> {
   let arguments = (ins);
   let results = (outs Index:$result);
 }
-def Iblock_combine : Inst<"combine"> {
+def Iblock_combine : Inst<"combine", [Pure]> {
   let arguments = (ins AnyTensor:$acc, AnyTensor:$partial, StrAttr:$algebra);
   let results = (outs AnyType:$result);
 }
-def Iblock_identity : Inst<"identity"> {
+def Iblock_identity : Inst<"identity", [Pure]> {
   let arguments = (ins StrAttr:$algebra);
   let results = (outs AnyType:$result);
 }
-def Iblock_broadcast_rows : Inst<"broadcast_rows"> {
+def Iblock_broadcast_rows : Inst<"broadcast_rows", [Pure]> {
   let arguments = (ins AnyTensor:$input);
   let results = (outs AnyTensor:$result);
 }
-def Iblock_cast : Inst<"cast"> {
+def Iblock_cast : Inst<"cast", [Pure]> {
   let arguments = (ins AnyType:$input);
   let results = (outs AnyType:$result);
 }
-def Iblock_add : Inst<"add"> {
+def Iblock_add : Inst<"add", [Pure]> {
   let arguments = (ins AnyType:$lhs, AnyType:$rhs);
   let results = (outs AnyType:$result);
 }
-def Iblock_sub : Inst<"sub"> {
+def Iblock_sub : Inst<"sub", [Pure]> {
   let arguments = (ins AnyType:$lhs, AnyType:$rhs);
   let results = (outs AnyType:$result);
 }
-def Iblock_mul : Inst<"mul"> {
+def Iblock_mul : Inst<"mul", [Pure]> {
   let arguments = (ins AnyType:$lhs, AnyType:$rhs);
   let results = (outs AnyType:$result);
 }
-def Iblock_div : Inst<"div"> {
+def Iblock_div : Inst<"div", [Pure]> {
   let arguments = (ins AnyType:$lhs, AnyType:$rhs);
   let results = (outs AnyType:$result);
 }
-def Iblock_exp : Inst<"exp"> {
+def Iblock_exp : Inst<"exp", [Pure]> {
   let arguments = (ins AnyType:$input);
   let results = (outs AnyType:$result);
 }
-def Iblock_rsqrt : Inst<"rsqrt"> {
+def Iblock_rsqrt : Inst<"rsqrt", [Pure]> {
   let arguments = (ins AnyType:$input);
   let results = (outs AnyType:$result);
 }
-def Iblock_sum : Inst<"sum"> {
+def Iblock_sum : Inst<"sum", [Pure]> {
   let arguments = (ins AnyTensor:$input);
   let results = (outs AnyType:$result);
 }
-def Iblock_max_num : Inst<"max_num"> {
+def Iblock_max_num : Inst<"max_num", [Pure]> {
   let arguments = (ins AnyTensor:$input);
   let results = (outs AnyType:$result);
 }
 
-def Iblock_constant : Inst<"constant"> {let arguments=(ins AnyAttr:$value);let results=(outs AnyType:$result);}
-def Iblock_maximum : Inst<"maximum"> {let arguments=(ins AnyType:$lhs,AnyType:$rhs);let results=(outs AnyType:$result);}
+def Iblock_constant : Inst<"constant", [Pure]> {let arguments=(ins AnyAttr:$value);let results=(outs AnyType:$result);}
+def Iblock_maximum : Inst<"maximum", [Pure]> {let arguments=(ins AnyType:$lhs,AnyType:$rhs);let results=(outs AnyType:$result);}
 
 foreach mnemonic=["xor","and","shl","shr","gt"] in {
-  def Iblock_#mnemonic#Op : Op<Iblock_Dialect,mnemonic> {
+  def Iblock_#mnemonic#Op : Op<Iblock_Dialect,mnemonic,[Pure]> {
     let arguments=(ins AnyType:$lhs,AnyType:$rhs); let results=(outs AnyType:$result);
   }
 }
-def Iblock_select : Op<Iblock_Dialect,"select"> {
+def Iblock_select : Op<Iblock_Dialect,"select",[Pure]> {
   let arguments=(ins AnyType:$predicate,AnyType:$onTrue,AnyType:$onFalse); let results=(outs AnyType:$result);
 }
-def Iblock_ordinal : Op<Iblock_Dialect,"ordinal"> {
+def Iblock_ordinal : Op<Iblock_Dialect,"ordinal",[Pure]> {
   let arguments=(ins AnyMemRef:$domain,Index:$row); let results=(outs AnyType:$result);
 }
-def Iblock_linear_index : Op<Iblock_Dialect,"linear_index"> {
+def Iblock_linear_index : Op<Iblock_Dialect,"linear_index",[Pure]> {
   let arguments=(ins AnyMemRef:$domain,AnyTensor:$rows,AnyTensor:$columns); let results=(outs AnyType:$result);
 }
 
-def Iblock_sqrt : Inst<"sqrt"> { let arguments=(ins AnyType:$input); let results=(outs AnyType:$result); }
+def Iblock_sqrt : Inst<"sqrt", [Pure]> { let arguments=(ins AnyType:$input); let results=(outs AnyType:$result); }
 
-def Iblock_uniform : Inst<"uniform"> {
+def Iblock_uniform : Inst<"uniform", [Pure]> {
   let arguments=(ins UI64:$seed,AnyTensor:$counter);let results=(outs AnyTensor:$result);
 }
-def Iblock_Dialect_welfordOp : Op<Iblock_Dialect,"welford"> {
+def Iblock_Dialect_welfordOp : Op<Iblock_Dialect,"welford",[Pure]> {
   let arguments = (ins AnyRankedTensor:$samples); let results = (outs AnyTuple:$summary);
 }
-def Iblock_Dialect_fieldOp : Op<Iblock_Dialect,"field"> {
+def Iblock_Dialect_fieldOp : Op<Iblock_Dialect,"field",[Pure]> {
   let arguments = (ins AnyTuple:$state, I64Attr:$position); let results = (outs AnyType:$element);
 }
-def Iblock_Dialect_summary_fieldOp : Op<Iblock_Dialect,"summary_field"> {
+def Iblock_Dialect_summary_fieldOp : Op<Iblock_Dialect,"summary_field",[Pure]> {
   let arguments = (ins AnyTuple:$state, I64Attr:$position); let results = (outs AnyRankedTensor:$element);
 }
-def Iblock_Dialect_summary_reduceOp : Op<Iblock_Dialect,"summary_reduce"> {
+def Iblock_Dialect_summary_reduceOp : Op<Iblock_Dialect,"summary_reduce",[Pure]> {
   let arguments = (ins AnyRankedTensor:$samples, I1Tensor:$mask); let results = (outs AnyTuple:$summary);
 }
-def Iblock_Dialect_summary_identityOp : Op<Iblock_Dialect,"summary_identity"> {
+def Iblock_Dialect_summary_identityOp : Op<Iblock_Dialect,"summary_identity",[Pure]> {
   let arguments = (ins StrAttr:$algebra); let results = (outs AnyTuple:$summary);
 }
-def Iblock_Dialect_summary_mergeOp : Op<Iblock_Dialect,"summary_merge"> {
+def Iblock_Dialect_summary_mergeOp : Op<Iblock_Dialect,"summary_merge",[Pure]> {
   let arguments = (ins AnyTuple:$left, AnyTuple:$right, StrAttr:$algebra); let results = (outs AnyTuple:$summary);
 }
-def Iblock_Dialect_ScanSum : Op<Iblock_Dialect, "scan_sum", [SameOperandsAndResultType]> {
+def Iblock_Dialect_ScanSum : Op<Iblock_Dialect, "scan_sum", [Pure, SameOperandsAndResultType]> {
   let arguments=(ins AnyRankedTensor:$input); let results=(outs AnyRankedTensor:$prefix);
 }
 def Iblock_Dialect_GatherRow : Op<Iblock_Dialect,"gather_row"> {
-  let arguments=(ins AnyMemRef:$table,AnyMemRef:$indices,Index:$owner,UnitAttr:$in_bounds);
+  let arguments=(ins Arg<AnyMemRef, "", [MemRead]>:$table,Arg<AnyMemRef, "", [MemRead]>:$indices,Index:$owner,UnitAttr:$in_bounds);
   let results=(outs AnyRankedTensor:$fragment);
 }
 def Iblock_Dialect_IndexedTileRead : Op<Iblock_Dialect,"indexed_tile_read"> {
-  let arguments=(ins AnyMemRef:$table,AnyMemRef:$indices,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active);
+  let arguments=(ins Arg<AnyMemRef, "", [MemRead]>:$table,Arg<AnyMemRef, "", [MemRead]>:$indices,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active);
   let results=(outs AnyRankedTensor:$fragment);
 }
 def Iblock_Dialect_Ordered : Op<Iblock_Dialect,"ordered_sum",[SingleBlock]> {
   let arguments=(ins AnyMemRef:$offsets,Index:$owner); let results=(outs F32Tensor:$value); let regions=(region AnyRegion:$terms);
 }
 def Iblock_Dialect_Length : Op<Iblock_Dialect,"segment_length"> {
-  let arguments=(ins AnyMemRef:$offsets,Index:$owner);let results=(outs F32Tensor:$value);
+  let arguments=(ins Arg<AnyMemRef, "", [MemRead]>:$offsets,Index:$owner);let results=(outs F32Tensor:$value);
 }
 def Iblock_Dialect_MemberLoad : Op<Iblock_Dialect,"member_load"> {
-  let arguments=(ins AnyMemRef:$source,Variadic<AnyType>:$coordinates);let results=(outs AnyType:$value);
+  let arguments=(ins Arg<AnyMemRef, "", [MemRead]>:$source,Variadic<AnyType>:$coordinates);let results=(outs AnyType:$value);
 }
 def Iblock_Dialect_Term : Op<Iblock_Dialect,"term",[Terminator]> {let arguments=(ins F32:$value);}
 def Iblock_Dialect_SegmentFold : Op<Iblock_Dialect,"segment_fold",[SingleBlock]> {
@@ -214,35 +214,35 @@ def Iblock_Dialect_SegmentFold : Op<Iblock_Dialect,"segment_fold",[SingleBlock]>
   let results=(outs F32Tensor:$value);let regions=(region AnyRegion:$terms);
 }
 def Iblock_Dialect_SegmentSize : Op<Iblock_Dialect,"segment_size"> {
-  let arguments=(ins AnyMemRef:$offsets,AnyTensor:$rows,AnyTensor:$cols,I1Tensor:$active);let results=(outs F32Tensor:$value);
+  let arguments=(ins Arg<AnyMemRef, "", [MemRead]>:$offsets,AnyTensor:$rows,AnyTensor:$cols,I1Tensor:$active);let results=(outs F32Tensor:$value);
 }
 def Iblock_Dialect_CountKeys : Op<Iblock_Dialect,"count_keys"> {
-  let arguments=(ins AnyMemRef:$source,Index:$owner,I64Attr:$span);let results=(outs I32Tensor:$counts);
+  let arguments=(ins Arg<AnyMemRef, "", [MemRead]>:$source,Index:$owner,I64Attr:$span);let results=(outs I32Tensor:$counts);
 }
 def Iblock_Dialect_ColumnSum : Op<Iblock_Dialect,"column_sum"> {
-  let arguments=(ins AnyMemRef:$source,Index:$owner);let results=(outs I32Tensor:$counts);
+  let arguments=(ins Arg<AnyMemRef, "", [MemRead]>:$source,Index:$owner);let results=(outs I32Tensor:$counts);
 }
 def Iblock_Dialect_KeyCounts : Op<Iblock_Dialect,"key_counts"> {
-  let arguments=(ins AnyMemRef:$source,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active,I64Attr:$extent,I64Attr:$span);let results=(outs I32Tensor:$counts);
+  let arguments=(ins Arg<AnyMemRef, "", [MemRead]>:$source,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active,I64Attr:$extent,I64Attr:$span);let results=(outs I32Tensor:$counts);
 }
 def Iblock_Dialect_SumColumns : Op<Iblock_Dialect,"sum_columns"> {
-  let arguments=(ins AnyMemRef:$source,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active,I64Attr:$extent);let results=(outs I32Tensor:$counts);
+  let arguments=(ins Arg<AnyMemRef, "", [MemRead]>:$source,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active,I64Attr:$extent);let results=(outs I32Tensor:$counts);
 }
-def Iblock_Dialect_Different : Op<Iblock_Dialect,"ne"> {let arguments=(ins AnyType:$lhs,AnyType:$rhs);let results=(outs AnyTensor:$mask);}
-def Iblock_Dialect_ColumnsI32 : Op<Iblock_Dialect,"member_index"> {let arguments=(ins AnyMemRef:$domain,Index:$row);let results=(outs I32Tensor:$members);}
-def Iblock_Dialect_PrefixScatter : Op<Iblock_Dialect,"prefix_scatter"> {let arguments=(ins AnyMemRef:$output,AnyMemRef:$counts,Index:$owner,I1Tensor:$predicate,I32Tensor:$prefix,I32Tensor:$values,I32Attr:$fill);}
-def Iblock_Dialect_ColumnsTile : Op<Iblock_Dialect,"member_tile"> {let arguments=(ins AnyTensor:$columns,I1Tensor:$active);let results=(outs I32Tensor:$members);}
-def Iblock_Dialect_ScatterFragment : Op<Iblock_Dialect,"scatter_fragment"> {let arguments=(ins AnyMemRef:$output,AnyMemRef:$counts,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active,I1Tensor:$predicate,I32Tensor:$prefix,I32Tensor:$values,I32Attr:$fill);}
-def Iblock_Dialect_Input : Op<Iblock_Dialect,"index_read"> {let arguments=(ins AnyMemRef:$base,I32Tensor:$key,UnitAttr:$in_bounds);let results=(outs I32Tensor:$values);}
-def Iblock_Dialect_InputTile : Op<Iblock_Dialect,"index_read_at"> {let arguments=(ins AnyMemRef:$base,I32Tensor:$key,I1Tensor:$valid,UnitAttr:$in_bounds);let results=(outs I32Tensor:$values);}
-def Iblock_Dialect_Ticket : Op<Iblock_Dialect,"atomic_add"> {let arguments=(ins AnyMemRef:$base,I32Tensor:$key,I32:$delta,StrAttr:$ordering,UnitAttr:$in_bounds);let results=(outs I32Tensor:$values);}
-def Iblock_Dialect_TicketTile : Op<Iblock_Dialect,"atomic_add_at"> {let arguments=(ins AnyMemRef:$base,I32Tensor:$key,I32:$delta,I1Tensor:$valid,StrAttr:$ordering,UnitAttr:$in_bounds);let results=(outs I32Tensor:$values);}
-def Iblock_Dialect_Put : Op<Iblock_Dialect,"unique_put"> {let arguments=(ins AnyMemRef:$base,I32Tensor:$key,I32Tensor:$value,UnitAttr:$in_bounds);}
-def Iblock_Dialect_PutTile : Op<Iblock_Dialect,"unique_put_at"> {let arguments=(ins AnyMemRef:$base,I32Tensor:$key,I32Tensor:$value,I1Tensor:$valid,UnitAttr:$in_bounds);}
-def Iblock_Dialect_WriteOffsets : Op<Iblock_Dialect,"write_offsets"> {let arguments=(ins AnyMemRef:$offsets,AnyMemRef:$total,Index:$owner,I32Tensor:$prefix);}
-def Iblock_Dialect_PublishOffsets : Op<Iblock_Dialect,"publish_offsets"> {let arguments=(ins AnyMemRef:$offsets,AnyMemRef:$total,AnyTensor:$columns,I1Tensor:$active,I32Tensor:$prefix);}
-def Iblock_Dialect_Ranges : Op<Iblock_Dialect,"fill_ranges"> {let arguments=(ins AnyMemRef:$out,AnyMemRef:$offsets,Index:$owner,I64Attr:$unit,UnitAttr:$disjoint_in_bounds);}
-def Iblock_Dialect_RangesAt : Op<Iblock_Dialect,"fill_ranges_at"> {let arguments=(ins AnyMemRef:$out,AnyMemRef:$offsets,AnyTensor:$columns,I1Tensor:$active,I64Attr:$unit,UnitAttr:$disjoint_in_bounds);}
+def Iblock_Dialect_Different : Op<Iblock_Dialect,"ne",[Pure]> {let arguments=(ins AnyType:$lhs,AnyType:$rhs);let results=(outs AnyTensor:$mask);}
+def Iblock_Dialect_ColumnsI32 : Op<Iblock_Dialect,"member_index",[Pure]> {let arguments=(ins AnyMemRef:$domain,Index:$row);let results=(outs I32Tensor:$members);}
+def Iblock_Dialect_PrefixScatter : Op<Iblock_Dialect,"prefix_scatter"> {let arguments=(ins Arg<AnyMemRef, "", [MemWrite]>:$output,Arg<AnyMemRef, "", [MemRead, MemWrite]>:$counts,Index:$owner,I1Tensor:$predicate,I32Tensor:$prefix,I32Tensor:$values,I32Attr:$fill);}
+def Iblock_Dialect_ColumnsTile : Op<Iblock_Dialect,"member_tile",[Pure]> {let arguments=(ins AnyTensor:$columns,I1Tensor:$active);let results=(outs I32Tensor:$members);}
+def Iblock_Dialect_ScatterFragment : Op<Iblock_Dialect,"scatter_fragment"> {let arguments=(ins Arg<AnyMemRef, "", [MemWrite]>:$output,Arg<AnyMemRef, "", [MemRead, MemWrite]>:$counts,AnyTensor:$rows,AnyTensor:$columns,I1Tensor:$active,I1Tensor:$predicate,I32Tensor:$prefix,I32Tensor:$values,I32Attr:$fill);}
+def Iblock_Dialect_Input : Op<Iblock_Dialect,"index_read"> {let arguments=(ins Arg<AnyMemRef, "", [MemRead]>:$base,I32Tensor:$key,UnitAttr:$in_bounds);let results=(outs I32Tensor:$values);}
+def Iblock_Dialect_InputTile : Op<Iblock_Dialect,"index_read_at"> {let arguments=(ins Arg<AnyMemRef, "", [MemRead]>:$base,I32Tensor:$key,I1Tensor:$valid,UnitAttr:$in_bounds);let results=(outs I32Tensor:$values);}
+def Iblock_Dialect_Ticket : Op<Iblock_Dialect,"atomic_add"> {let arguments=(ins Arg<AnyMemRef, "", [MemRead, MemWrite]>:$base,I32Tensor:$key,I32:$delta,StrAttr:$ordering,UnitAttr:$in_bounds);let results=(outs I32Tensor:$values);}
+def Iblock_Dialect_TicketTile : Op<Iblock_Dialect,"atomic_add_at"> {let arguments=(ins Arg<AnyMemRef, "", [MemRead, MemWrite]>:$base,I32Tensor:$key,I32:$delta,I1Tensor:$valid,StrAttr:$ordering,UnitAttr:$in_bounds);let results=(outs I32Tensor:$values);}
+def Iblock_Dialect_Put : Op<Iblock_Dialect,"unique_put"> {let arguments=(ins Arg<AnyMemRef, "", [MemWrite]>:$base,I32Tensor:$key,I32Tensor:$value,UnitAttr:$in_bounds);}
+def Iblock_Dialect_PutTile : Op<Iblock_Dialect,"unique_put_at"> {let arguments=(ins Arg<AnyMemRef, "", [MemWrite]>:$base,I32Tensor:$key,I32Tensor:$value,I1Tensor:$valid,UnitAttr:$in_bounds);}
+def Iblock_Dialect_WriteOffsets : Op<Iblock_Dialect,"write_offsets"> {let arguments=(ins Arg<AnyMemRef, "", [MemWrite]>:$offsets,Arg<AnyMemRef, "", [MemWrite]>:$total,Index:$owner,I32Tensor:$prefix);}
+def Iblock_Dialect_PublishOffsets : Op<Iblock_Dialect,"publish_offsets"> {let arguments=(ins Arg<AnyMemRef, "", [MemWrite]>:$offsets,Arg<AnyMemRef, "", [MemWrite]>:$total,AnyTensor:$columns,I1Tensor:$active,I32Tensor:$prefix);}
+def Iblock_Dialect_Ranges : Op<Iblock_Dialect,"fill_ranges"> {let arguments=(ins Arg<AnyMemRef, "", [MemWrite]>:$out,Arg<AnyMemRef, "", [MemRead]>:$offsets,Index:$owner,I64Attr:$unit,UnitAttr:$disjoint_in_bounds);}
+def Iblock_Dialect_RangesAt : Op<Iblock_Dialect,"fill_ranges_at"> {let arguments=(ins Arg<AnyMemRef, "", [MemWrite]>:$out,Arg<AnyMemRef, "", [MemRead]>:$offsets,AnyTensor:$columns,I1Tensor:$active,I64Attr:$unit,UnitAttr:$disjoint_in_bounds);}
 include "intentdsl/levels/algorithm/kir/ir/Matrix.td"
 defm Matrix : MatrixExpressions<Iblock_Dialect>;
 include "intentdsl/levels/algorithm/kir/ir/Ordered.td"

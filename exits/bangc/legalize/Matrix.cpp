@@ -35,7 +35,7 @@ struct MatrixLowerer {
   SmallVector<std::string> argDtypes;
   struct PendingTailGuard {
     Operation *guardIf;
-    SmallVector<compilerinfra::TailDimension, 2> dims;
+    Operation *accessOp;
   };
   SmallVector<PendingTailGuard, 8> tailGuards;
 
@@ -951,18 +951,13 @@ struct MatrixLowerer {
           b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, nk, cI64(bk)));
       auto guardIf =
           ifThen(partial, [&]() { fillVec(trans, cI64(bk * bn), zeroElem); });
-      compilerinfra::TailDimension dimC, dimK;
-      dimC.staticExtent = p.shape[1];
-      dimC.dynamicOffset = c;
-      dimC.tileSize = bn;
-      dimC.tileAlignment = bn;
-      dimK.staticExtent = p.shape[2];
-      dimK.dynamicOffset = kk;
-      dimK.tileSize = bk;
-      dimK.tileAlignment = bk;
-      tailGuards.push_back(
-          PendingTailGuard{guardIf.getOperation(), {dimC, dimK}});
       Value base = termPtr(v, kAx, bAx, c, kk, gVal);
+      if (Operation *addrOp = base.getDefiningOp()) {
+        addrOp->setAttr("bangc.tile_axes",
+                        b.getDenseI64ArrayAttr({memberAx, kAx}));
+        addrOp->setAttr("bangc.tile_sizes", b.getDenseI64ArrayAttr({bn, bk}));
+        tailGuards.push_back(PendingTailGuard{guardIf.getOperation(), addrOp});
+      }
       ifThenElse(
           b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, nc, cI64(1)),
           {}, [&]() { memcpy1D(trans, base, nk, "GDRAM2NRAM"); },
@@ -986,19 +981,6 @@ struct MatrixLowerer {
                                 cI64(pitch)));
     auto guardIf = ifThen(
         partial, [&]() { fillVec(buf, cI64(outerCap * pitch), zeroElem); });
-    if (!lhs || (!p.routed() && p.dot.getNumOperands() <= 2)) {
-      compilerinfra::TailDimension dimOut, dimIn;
-      dimOut.staticExtent = lhs ? p.shape[0] : p.shape[2];
-      dimOut.dynamicOffset = lhs ? r : kk;
-      dimOut.tileSize = outerCap;
-      dimOut.tileAlignment = outerCap;
-      dimIn.staticExtent = lhs ? p.shape[2] : p.shape[1];
-      dimIn.dynamicOffset = lhs ? kk : c;
-      dimIn.tileSize = pitch;
-      dimIn.tileAlignment = pitch;
-      tailGuards.push_back(
-          PendingTailGuard{guardIf.getOperation(), {dimOut, dimIn}});
-    }
 
     if (mode == "routed-row-dma") {
       forLoop(cI64(0), nr, cI64(1), [&](Value i) {
@@ -1009,6 +991,18 @@ struct MatrixLowerer {
     } else if (mode == "pitched-dma") {
       Value base =
           termPtr(v, kAx, bAx, lhs ? inputRow(r, cI64(0)) : c, kk, gVal);
+      if (!lhs || (!p.routed() && p.dot.getNumOperands() <= 2)) {
+        if (Operation *addrOp = base.getDefiningOp()) {
+          int64_t outAx = lhs ? memberAx : kAx;
+          int64_t inAx = lhs ? kAx : memberAx;
+          addrOp->setAttr("bangc.tile_axes",
+                          b.getDenseI64ArrayAttr({outAx, inAx}));
+          addrOp->setAttr("bangc.tile_sizes",
+                          b.getDenseI64ArrayAttr({outerCap, pitch}));
+          tailGuards.push_back(
+              PendingTailGuard{guardIf.getOperation(), addrOp});
+        }
+      }
       int64_t outerStride = p.stride(v, lhs ? memberAx : kAx);
       ifThenElse(
           b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, outer,
@@ -1511,7 +1505,7 @@ struct MatrixLowerer {
     if (!tailGuards.empty()) {
       compilerinfra::IntegerRangeContext tailRanges(fn.getOperation());
       for (auto &tg : tailGuards) {
-        if (compilerinfra::proveTailAccess(tg.dims, &tailRanges).kind ==
+        if (compilerinfra::proveTailAccess(tg.accessOp, &tailRanges).kind ==
             compilerinfra::TailKind::ExactInBounds) {
           Value cond = tg.guardIf->getOperand(0);
           tg.guardIf->erase();

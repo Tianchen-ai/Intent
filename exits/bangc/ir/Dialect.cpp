@@ -1,5 +1,6 @@
 #include "intentdsl/exits/bangc/ir/Dialect.h"
 #include "Dialect.cpp.inc"
+#include "compilerinfra/Proofs.h"
 #include "mlir/Bytecode/BytecodeOpInterface.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Builders.h"
@@ -220,6 +221,68 @@ struct SummaryMergeContract
     return success(isMomentTupleType(op->getOperand(0).getType()) &&
                    isMomentTupleType(op->getOperand(1).getType()) &&
                    isMomentTupleType(op->getResult(0).getType()));
+  }
+};
+
+struct AddressLinearModel
+    : public compilerinfra::AddressOpInterface::ExternalModel<
+          AddressLinearModel, AddressOp> {
+  LogicalResult
+  getLinearAddress(Operation *op,
+                   compilerinfra::LinearAddressDescriptor &out) const {
+    auto addr = cast<AddressOp>(op);
+    auto coords = addr.getCoords();
+    auto strides = addr.getStrides();
+    if (coords.size() != strides.size())
+      return failure();
+    out = compilerinfra::LinearAddressDescriptor{};
+    out.baseContainer = addr.getBase();
+    out.coordinates.assign(coords.begin(), coords.end());
+    out.dynamicStrides.assign(strides.begin(), strides.end());
+    out.constantOffset = 0;
+    return success();
+  }
+};
+
+struct AddressTiledAccessModel
+    : public compilerinfra::TiledAccessOpInterface::ExternalModel<
+          AddressTiledAccessModel, AddressOp> {
+  LogicalResult
+  getAccessedAxes(Operation *op,
+                  SmallVectorImpl<compilerinfra::AccessAxis> &axes) const {
+    auto addr = cast<AddressOp>(op);
+    auto tileAxes = op->getAttrOfType<DenseI64ArrayAttr>("bangc.tile_axes");
+    auto tileSizes = op->getAttrOfType<DenseI64ArrayAttr>("bangc.tile_sizes");
+    if (!tileAxes || !tileSizes || tileAxes.empty() ||
+        tileAxes.size() != tileSizes.size())
+      return failure();
+    Value base = addr.getBase();
+    auto coords = addr.getCoords();
+    DenseI64ArrayAttr viewShape;
+    if (auto barg = dyn_cast<BlockArgument>(base)) {
+      if (auto fn = op->getParentOfType<func::FuncOp>();
+          fn && barg.getOwner() == &fn.front())
+        viewShape =
+            fn.getArgAttrOfType<DenseI64ArrayAttr>(barg.getArgNumber(),
+                                                   "block.shape");
+    }
+    for (auto [axIdx, tileSz] :
+         llvm::zip(tileAxes.asArrayRef(), tileSizes.asArrayRef())) {
+      if (axIdx < 0 || static_cast<size_t>(axIdx) >= coords.size() ||
+          tileSz <= 0)
+        return failure();
+      compilerinfra::AccessAxis ax;
+      ax.container = base;
+      ax.containerDim = static_cast<unsigned>(axIdx);
+      if (viewShape && static_cast<size_t>(axIdx) < viewShape.size() &&
+          viewShape[axIdx] >= 0)
+        ax.staticExtent = viewShape[axIdx];
+      ax.coord = coords[axIdx];
+      ax.tileSize = tileSz;
+      ax.step = 1;
+      axes.push_back(ax);
+    }
+    return success();
   }
 };
 } // namespace
@@ -631,4 +694,6 @@ void BangcSrcDialect::initialize() {
   SummaryMergeOp::attachInterface<SummaryMergeContract>(*ctx);
   PhiloxUniformOp::attachInterface<I32AccContract<PhiloxUniformOp>>(*ctx);
   PhiloxAtOp::attachInterface<I32AccContract<PhiloxAtOp>>(*ctx);
+  AddressOp::attachInterface<AddressLinearModel>(*ctx);
+  AddressOp::attachInterface<AddressTiledAccessModel>(*ctx);
 }
