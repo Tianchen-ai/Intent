@@ -445,8 +445,10 @@ void rowContracts(Unit &unit) {
       "64-lane aligned NRAM vector fragment with 6x lanes f32 scratch", "f32",
       "writes NRAM f32 scratch and correctly rounded NRAM f32 square root",
       "correctly rounded IEEE-754 binary32 round-to-nearest-even (0 ULP): "
-      "48-bit Veltkamp-Dekker/TwoDiff square residual + runtime-certified "
-      "reciprocal + endpoint certification + exact integer RN-even fallback",
+      "correctness guaranteed solely by unconditional symmetric exact runtime "
+      "endpoint certification on exact Veltkamp-Dekker/TwoDiff residual "
+      "x - r^2 with bit-exact integer RN-even fallback (a priori candidate "
+      "accuracy only bounds fallback frequency)",
       [](Operation *op) {
         if (op->getNumOperands() != 5)
           return failure();
@@ -468,8 +470,10 @@ void rowContracts(Unit &unit) {
       "64-lane aligned NRAM vector fragment with 6x lanes f32 scratch", "f32",
       "writes NRAM f32 scratch and correctly rounded NRAM f32 quotient",
       "correctly rounded IEEE-754 binary32 round-to-nearest-even (0 ULP): "
-      "exponent scaling + reciprocal Newton-Raphson + 48-bit "
-      "Veltkamp-Dekker/TwoDiff residual + endpoint certification",
+      "correctness guaranteed solely by unconditional symmetric exact runtime "
+      "endpoint certification on exact Veltkamp-Dekker/TwoDiff residual "
+      "a' - r * b' with exact __cn_scalar_div_f32_rn fallback (a priori "
+      "candidate accuracy only bounds fallback frequency)",
       [](Operation *op) {
         auto mode = op->getAttrOfType<StringAttr>("mode");
         auto dst = dyn_cast<MemRefType>(op->getOperand(0).getType());

@@ -195,11 +195,15 @@ TARGETS: dict[str, TargetSpec] = {
         device_kind="cpu_x86",
         wheel_glob="intentdsl-2.0.0-*-linux_x86_64.whl",
         base_python="/srv/rc/site-1/.venvs/intentdsl-cutile/bin/python",
-        standalone_env=(("PATH", "/srv/rc/site-1/.venvs/intentdsl-mojo/bin:/usr/local/bin:/usr/bin:/bin"),),
+        standalone_env=(
+            ("PATH", "/srv/rc/site-1/.venvs/intentdsl-mojo/bin:/usr/local/bin:/usr/bin:/bin"),
+            ("LD_LIBRARY_PATH", "/opt/rc-dependencies/onednn-3.13.4/lib:/srv/rc/site-1/phdworks/intentdsl_bench/output/build/onednn-install/lib"),
+        ),
         worker_env=(
             ("PATH", "/srv/rc/site-1/.venvs/intentdsl-mojo/bin:/usr/local/bin:/usr/bin:/bin"),
-            ("LD_LIBRARY_PATH", "/srv/rc/site-1/phdworks/intentdsl_bench/output/build/onednn-install/lib"),
+            ("LD_LIBRARY_PATH", "/opt/rc-dependencies/onednn-3.13.4/lib:/srv/rc/site-1/phdworks/intentdsl_bench/output/build/onednn-install/lib"),
         ),
+        worker_launcher=("taskset", "-c", "0-7"),
         captures_layout="local_flat",
     ),
     "x86-weft": TargetSpec(

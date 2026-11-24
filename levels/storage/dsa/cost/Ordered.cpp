@@ -39,13 +39,13 @@ void ownerSupplyCost(compilerinfra::Unit &u) {
                lat = intentdsl::quantity(ctx, "dma_in_latency", "ns");
           if (c.id == "panel-fold") {
             auto pf = intentdsl::dsa::panelFoldSupply(fn, ctx.target);
-            double m = pf ? pf->rows : 64.0;
+            double m = pf ? double(std::max<int64_t>(1, pf->rows)) : 64.0;
             double panels = std::max(1.0, std::ceil(foldSteps / 64.0));
-            double transfers = (2.0 + 3.0 * panels) / m;
+            double transfers =
+                pf ? double(pf->ownerTransferSites + pf->stripTransferSites) / m
+                   : (2.0 + 3.0 * panels) / m;
             double bytesPerOwner =
-                pf ? double(pf->depth + pf->features +
-                            3.0 * foldSteps * (pf->depth + pf->features) / m) *
-                         2.0
+                pf ? double(pf->ownerTransferBytes + pf->stripTransferBytes) / m
                    : double(b);
             e.terms["memory_access_sites"] = {double(reads + writes + slices),
                                               "count"};

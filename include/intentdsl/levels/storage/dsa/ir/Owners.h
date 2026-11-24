@@ -25,10 +25,12 @@ struct OwnerStreams {
 struct PanelFoldSupply {
   int64_t rows = 0;
   int64_t span = 0;
-  int64_t depth = 0;
-  int64_t features = 0;
   int64_t wramBytes = 0;
   int64_t localBytes = 0;
+  int64_t ownerTransferSites = 0;
+  int64_t ownerTransferBytes = 0;
+  int64_t stripTransferSites = 0;
+  int64_t stripTransferBytes = 0;
   llvm::SmallVector<int64_t, 3> scratchOffsets;
   llvm::DenseMap<mlir::Operation *, llvm::StringRef> roles;
 };

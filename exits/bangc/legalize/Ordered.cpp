@@ -316,7 +316,8 @@ struct OrderedLowerer {
     return Value{};
   }
 
-  // Lower cooperative panel fold ("panel-fold") from DSA-assigned fragment slots.
+  // Lower cooperative panel fold ("panel-fold") op-by-op from DSA-assigned
+  // per-value roles and live-interval NRAM offsets (no whole-algorithm matching).
   LogicalResult lowerPanelFold() {
     auto &bb = space.getRegion(0).front();
     int64_t tile = space.getAttrOfType<IntegerAttr>("block.owner_tile").getInt();
@@ -330,79 +331,32 @@ struct OrderedLowerer {
     auto scratchOffs =
         space.getAttrOfType<DenseI64ArrayAttr>("dsa.panel_scratch");
 
-    llvm::DenseMap<StringRef, Operation *> roleOp;
+    Type halfTy;
     space.walk([&](Operation *op) {
-      if (auto r = op->getAttrOfType<StringAttr>("dsa.panel_role"))
-        roleOp[r.getValue()] = op;
+      if (halfTy)
+        return;
+      StringRef sn = op->getName().stripDialect();
+      if (sn == "slice_read" || sn == "slice_write") {
+        Value view = op->getOperand(sn == "slice_write" ? 1 : 0);
+        if (auto mt = dyn_cast<MemRefType>(view.getType())) {
+          Type et = mt.getElementType();
+          if (et.isBF16() || et.isF16())
+            halfTy = et;
+        }
+      }
     });
-    Operation *qSlice = roleOp.lookup("query");
-    Operation *peakLoopOp = roleOp.lookup("peak_loop");
-    Operation *kSlice1 = roleOp.lookup("key_peak");
-    Operation *dot1 = roleOp.lookup("score_peak");
-    Operation *sumLoopOp = roleOp.lookup("sum_loop");
-    Operation *kSlice2 = roleOp.lookup("key_sum");
-    Operation *dot2 = roleOp.lookup("score_sum");
-    Operation *weightDef = roleOp.lookup("weight");
-    Operation *wTrunc = roleOp.lookup("weight_narrow");
-    Operation *vSlice = roleOp.lookup("value");
-    Operation *normMul = roleOp.lookup("norm");
-    Operation *outTrunc = roleOp.lookup("output_narrow");
-    Operation *outWrite = roleOp.lookup("output");
-    if (!qSlice || !peakLoopOp || !kSlice1 || !dot1 || !sumLoopOp ||
-        !kSlice2 || !dot2 || !weightDef || !wTrunc || !vSlice || !normMul ||
-        !outTrunc || !outWrite || !dot1->hasOneUse() || !dot2->hasOneUse())
-      return space.emitError("missing DSA panel-fold role bindings");
-
-    scf::ForOp maxLoop = cast<scf::ForOp>(peakLoopOp);
-    scf::ForOp sumLoop = cast<scf::ForOp>(sumLoopOp);
-    Type halfTy =
-        cast<MemRefType>(qSlice->getOperand(0).getType()).getElementType();
+    if (!halfTy || !scratchOffs || scratchOffs.size() < 3)
+      return space.emitError("missing DSA panel-fold element type or scratch");
     int64_t halfB = halfTy.getIntOrFloatBitWidth() / 8;
-    int64_t qRank = cast<MemRefType>(qSlice->getOperand(0).getType()).getRank();
-    int64_t D = dimAttr(qSlice->getOperand(0), "block.shape", qRank - 1);
-
-    auto mulSc1 = cast<arith::MulFOp>(*dot1->getUsers().begin());
-    Value gain1Src = mulSc1.getLhs() == dot1->getResult(0) ? mulSc1.getRhs()
-                                                           : mulSc1.getLhs();
-    auto mulSc2 = cast<arith::MulFOp>(*dot2->getUsers().begin());
-    Value gain2Src = mulSc2.getLhs() == dot2->getResult(0) ? mulSc2.getRhs()
-                                                           : mulSc2.getLhs();
-    bool causal = false;
-    Operation *expOp = weightDef;
-    if (auto br = dyn_cast<scf::IfOp>(weightDef)) {
-      causal = true;
-      expOp = br.thenBlock()->getTerminator()->getOperand(0).getDefiningOp();
-    }
-
-    Value kView = kSlice1->getOperand(0), vView = vSlice->getOperand(0),
-          qView = qSlice->getOperand(0), yView = outWrite->getOperand(1);
-    int64_t kRank = cast<MemRefType>(kView.getType()).getRank();
-    int64_t K = dimAttr(kView, "block.shape", kRank - 2);
-    int64_t DV = dimAttr(vView, "block.shape", kRank - 1);
-    bool useExp2 = expOp->getName().getStringRef() == "math.exp2";
 
     Value storage = nramBuf(b.getI8Type(), memberBytes);
     Value filter = wramBuf(halfTy, wramBytes / halfB);
 
     auto slotAt = [&](Operation *op, unsigned idx, Type elemTy) {
-      int64_t off = op->getAttrOfType<DenseI64ArrayAttr>("dsa.member_offsets")[idx];
+      int64_t off =
+          op->getAttrOfType<DenseI64ArrayAttr>("dsa.member_offsets")[idx];
       return nramPtr(storage, cI64(off), elemTy);
     };
-
-    Value qBuf = slotAt(qSlice, 0, halfTy);
-    Value peakBuf = slotAt(maxLoop, 0, b.getF32Type());
-    Value kBuf1 = slotAt(kSlice1, 0, halfTy);
-    Value scores1Buf = slotAt(dot1, 0, b.getF32Type());
-    Value massBuf = slotAt(sumLoop, 0, b.getF32Type());
-    Value weightedBuf = slotAt(sumLoop, 1, b.getF32Type());
-    Value kBuf2 = slotAt(kSlice2, 0, halfTy);
-    Value scores2Buf = slotAt(dot2, 0, b.getF32Type());
-    Value probBuf = slotAt(weightDef, 0, b.getF32Type());
-    Value pHalfBuf = slotAt(wTrunc, 0, halfTy);
-    Value vBuf = slotAt(vSlice, 0, halfTy);
-    Value vtBuf = slotAt(vSlice, 1, halfTy);
-    Value normBuf = slotAt(normMul, 0, b.getF32Type());
-    Value outBuf = slotAt(outTrunc, 0, halfTy);
 
     Value magScratch = nramPtr(storage, cI64(scratchOffs[0]), b.getBF16Type());
     Value flagScratch = nramPtr(storage, cI64(scratchOffs[1]), b.getBF16Type());
@@ -555,250 +509,716 @@ struct OrderedLowerer {
                {b.getNamedAttr("kind", b.getStringAttr("f32_to_f16"))});
     };
 
+    auto widenPanel = [&](Value dstF32, Value srcHalf, int64_t count) {
+      if (halfTy.isBF16())
+        makeOp("bf16_tile", {dstF32, srcHalf, cI64(count), cI64(count)}, {},
+               {b.getNamedAttr("mode", b.getStringAttr("widen"))},
+               "bf16-tile-convert");
+      else
+        makeOp("vec_cast", {dstF32, srcHalf, cI64(count)}, {},
+               {b.getNamedAttr("kind", b.getStringAttr("f16_to_f32"))});
+    };
+
+    auto isFloatConstPred = [](Value v,
+                               llvm::function_ref<bool(const APFloat &)> pred) {
+      auto c = v ? v.getDefiningOp<arith::ConstantOp>() : arith::ConstantOp{};
+      auto fa = c ? dyn_cast<FloatAttr>(c.getValue()) : FloatAttr{};
+      return fa && fa.getType().isF32() && pred(fa.getValue());
+    };
+    auto isNegInfVal = [&](Value v) {
+      return isFloatConstPred(
+          v, [](const APFloat &x) { return x.isInfinity() && x.isNegative(); });
+    };
+    auto isZeroVal = [&](Value v) {
+      return isFloatConstPred(v, [](const APFloat &x) { return x.isZero(); });
+    };
+
+    Value rowArg = bb.getArguments().back();
     int64_t stepTile = std::max<int64_t>(tile, M);
     auto axes = space.getAttrOfType<DenseI64ArrayAttr>("axes");
+
     forLoop(symTaskId, symGrid, symTaskDim, [&](Value job) {
       forLoop(cI64(0), cI64(stepTile), cI64(M), [&](Value sub) {
         Value ownerBase = b.create<arith::AddIOp>(
             loc, b.create<arith::MulIOp>(loc, job, cI64(stepTile)), sub);
-        ifThen(b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt,
-                                       ownerBase, cI64(owners)),
-               [&]() {
-                 llvm::DenseMap<Value, Value> env;
-                 for (Value arg : fn.getArguments())
-                   env[arg] = arg;
-                 int64_t pitch = 1;
-                 for (int i = axes.size() - 1; i >= 0; --i) {
-                   int64_t ext = std::max<int64_t>(
-                       1, dimAttr(space.getOperand(i), "block.shape", axes[i]));
-                   Value coord = b.create<arith::RemSIOp>(
-                       loc, b.create<arith::DivSIOp>(loc, ownerBase, cI64(pitch)),
-                       cI64(ext));
-                   env[bb.getArgument(i)] = coord;
-                   pitch *= ext;
-                 }
-                 Value rowBase = env.lookup(bb.getArguments().back());
+        ifThen(
+            b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, ownerBase,
+                                    cI64(owners)),
+            [&]() {
+              llvm::DenseMap<Value, Value> scalarEnv;
+              llvm::DenseMap<Value, Value> slotEnv;
+              llvm::DenseMap<Value, int64_t> panelFeat;
+              llvm::DenseSet<Value> ownerScalars;
+              llvm::DenseSet<Value> causalMaskedStrips;
 
-                 // Evaluate outer scalar setup ops (head group division, scale, etc.).
-                 for (auto &op : bb.without_terminator()) {
-                   if (isa<scf::ForOp, scf::IfOp>(op) ||
-                       op.getName().stripDialect() == "slice_read" ||
-                       op.getName().stripDialect() == "slice_write")
-                     continue;
-                   if (op.getNumResults() == 1 &&
-                       !isa<RankedTensorType>(op.getResult(0).getType())) {
-                     if (Value sv = lowerScalarExpr(op, env))
-                       env[op.getResult(0)] = sv;
-                   }
-                 }
-                 auto evalInLoop = [&](Block &lBody) {
-                   for (auto &op : lBody.without_terminator()) {
-                     if (isa<scf::ForOp, scf::IfOp>(op))
-                       continue;
-                     if (op.getNumResults() == 1 &&
-                         !isa<RankedTensorType>(op.getResult(0).getType()) &&
-                         llvm::all_of(op.getOperands(),
-                                      [&](Value u) { return env.count(u); })) {
-                       if (Value sv = lowerScalarExpr(op, env))
-                         env[op.getResult(0)] = sv;
-                     }
-                   }
-                 };
-                 evalInLoop(*maxLoop.getBody());
-                 evalInLoop(*sumLoop.getBody());
+              for (Value arg : fn.getArguments())
+                scalarEnv[arg] = arg;
+              int64_t pitch = 1;
+              for (int i = axes.size() - 1; i >= 0; --i) {
+                int64_t ext = std::max<int64_t>(
+                    1, dimAttr(space.getOperand(i), "block.shape", axes[i]));
+                Value coord = b.create<arith::RemSIOp>(
+                    loc, b.create<arith::DivSIOp>(loc, ownerBase, cI64(pitch)),
+                    cI64(ext));
+                if (size_t(i) + 1 < bb.getNumArguments())
+                  scalarEnv[bb.getArgument(i)] = coord;
+                else
+                  scalarEnv[rowArg] = coord;
+                pitch *= ext;
+              }
+              Value rowBase = scalarEnv.lookup(rowArg);
+              scalarEnv.erase(rowArg);
 
-                 Value gain1Val = env.lookup(gain1Src);
-                 Value gain2Val = env.lookup(gain2Src);
+              auto unwrapBridge = [](Value v) -> Value {
+                while (Operation *d = v.getDefiningOp()) {
+                  if (d->hasAttr("dsa.panel_role"))
+                    break;
+                  StringRef sn = d->getName().stripDialect();
+                  if (d->getName().getStringRef() == "arith.extf" ||
+                      sn == "lane_splat") {
+                    v = d->getOperand(0);
+                    continue;
+                  }
+                  break;
+                }
+                return v;
+              };
 
-                 SmallVector<Value> qPrefix, kPrefix, vPrefix, yPrefix;
-                 for (Value c : qSlice->getOperands().drop_front().drop_back())
-                   qPrefix.push_back(env.lookup(c));
-                 for (Value c : kSlice1->getOperands().drop_front().drop_back())
-                   kPrefix.push_back(env.lookup(c));
-                 for (Value c : vSlice->getOperands().drop_front().drop_back())
-                   vPrefix.push_back(env.lookup(c));
-                 for (Value c : outWrite->getOperands().drop_front(2).drop_back())
-                   yPrefix.push_back(env.lookup(c));
+              auto evalScalarBlockForRow =
+                  [&](Block &subBlk, Value r,
+                      const llvm::DenseMap<Value, Value> &baseScalars) -> Value {
+                llvm::DenseMap<Value, Value> rowEnv = baseScalars;
+                rowEnv[rowArg] = b.create<arith::AddIOp>(loc, rowBase, r);
+                for (Value os : ownerScalars)
+                  rowEnv[os] = loadAt(slotEnv.lookup(os), r);
+                for (Operation &inOp : subBlk.without_terminator())
+                  if (Value sv = lowerScalarExpr(inOp, rowEnv))
+                    rowEnv[inOp.getResult(0)] = sv;
+                return rowEnv.lookup(subBlk.getTerminator()->getOperand(0));
+              };
 
-                 // Stage Q [M, D].
-                 stageRows(qBuf, qView, sliceBasePtr(qView, qPrefix, rowBase),
-                           cI64(M), M, D, false);
-                 sync("io");
+              auto emitStripElem = [&](Operation &eop, Value dstSlot,
+                                       const llvm::DenseMap<Value, Value> &lEnv,
+                                       Value singleRow, Value activeCount) {
+                StringRef en = eop.getName().getStringRef();
+                auto rowSlice = [&](Value panel, Value r) {
+                  return makeAddr(panel, {r}, {cI64(S)}, 1);
+                };
+                if (en == "math.exp" || en == "math.exp2") {
+                  bool isExp2 = en == "math.exp2";
+                  Value srcSlot = slotEnv.lookup(eop.getOperand(0));
+                  auto emitOne = [&](Value r, Value cnt) {
+                    ifThen(b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt,
+                                                   cnt, cI64(0)),
+                           [&]() {
+                             Value dR = rowSlice(dstSlot, r);
+                             Value sR = rowSlice(srcSlot, r);
+                             makeOp(isExp2 ? "row_exp2" : "row_exp",
+                                    {dR, reduceScratch, sR, cnt, cI64(S)}, {},
+                                    {},
+                                    isExp2 ? "validated-exp2" : "validated-exp");
+                           });
+                  };
+                  if (singleRow)
+                    emitOne(singleRow, activeCount);
+                  else
+                    forLoop(cI64(0), cI64(M), cI64(1),
+                            [&](Value r) { emitOne(r, activeCount); });
+                  return;
+                }
 
-                 Value tokLimit =
-                     causal ? b.create<arith::MinSIOp>(
-                                  loc, b.create<arith::AddIOp>(loc, rowBase, cI64(M)),
-                                  cI64(K))
-                                  .getResult()
-                            : cI64(K);
+                StringRef opKind = en == "arith.addf"   ? "add"
+                                   : en == "arith.subf" ? "sub"
+                                                        : "mul";
+                Value lhs = eop.getOperand(0), rhs = eop.getOperand(1);
+                bool lhsStrip = slotEnv.contains(lhs) && !ownerScalars.contains(lhs);
+                bool rhsStrip = slotEnv.contains(rhs) && !ownerScalars.contains(rhs);
 
-                 // Pass 1: peak[0..M-1]
-                 fillVec(peakBuf, cI64(M),
-                         cF32(-std::numeric_limits<float>::infinity()));
-                 forLoop(cI64(0), tokLimit, cI64(S), [&](Value t0) {
-                   Value nt = b.create<arith::MinSIOp>(
-                       loc, b.create<arith::SubIOp>(loc, cI64(K), t0), cI64(S));
-                   stageRows(kBuf1, kView, sliceBasePtr(kView, kPrefix, t0), nt,
-                             S, D, true);
-                   sync("io");
-                   emitPanelProduct(scores1Buf, qBuf, kBuf1, D, S, false);
-                   makeOp("vec_scalar",
-                          {scores1Buf, scores1Buf, gain1Val, cI64(M * S)}, {},
-                          {b.getNamedAttr("op", b.getStringAttr("mul"))});
-                   sync("compute");
-                   forLoop(cI64(0), cI64(M), cI64(1), [&](Value r) {
-                     Value live =
-                         causal
-                             ? b.create<arith::MinSIOp>(
-                                   loc,
-                                   b.create<arith::MaxSIOp>(
-                                       loc,
-                                       b.create<arith::SubIOp>(
-                                           loc,
-                                           b.create<arith::AddIOp>(
-                                               loc,
-                                               b.create<arith::AddIOp>(
-                                                   loc, rowBase, r),
-                                               cI64(1)),
-                                           t0),
-                                       cI64(0)),
-                                   nt)
-                                   .getResult()
-                             : nt;
-                     ifThen(b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt,
-                                                    live, cI64(0)),
-                            [&]() {
-                              Value sRow =
-                                  makeAddr(scores1Buf, {r}, {cI64(S)}, 1);
-                              makeOp("row_reduce",
-                                     {scalarOutBuf, reduceScratch, sRow,
-                                      cI64(1), cI64(S), live},
-                                     {},
-                                     {b.getNamedAttr("algebra",
-                                                     b.getStringAttr("max_num"))},
-                                     "row-reduce");
-                              Value curP = loadAt(peakBuf, r);
-                              Value blkP = loadAt(scalarOutBuf, cI64(0));
-                              Value nxtP =
-                                  makeOp("scalar_math", {curP, blkP},
-                                         {b.getF32Type()},
-                                         {b.getNamedAttr(
-                                             "op", b.getStringAttr("max_num"))})
-                                      ->getResult(0);
-                              storeAt(peakBuf, r, nxtP);
-                            });
-                   });
-                 });
+                if (lhsStrip && rhsStrip) {
+                  if (singleRow) {
+                    makeOp("vec_binary",
+                           {rowSlice(dstSlot, singleRow),
+                            rowSlice(slotEnv.lookup(lhs), singleRow),
+                            rowSlice(slotEnv.lookup(rhs), singleRow), cI64(S)},
+                           {}, {b.getNamedAttr("op", b.getStringAttr(opKind))});
+                  } else {
+                    makeOp("vec_binary",
+                           {dstSlot, slotEnv.lookup(lhs), slotEnv.lookup(rhs),
+                            cI64(M * S)},
+                           {}, {b.getNamedAttr("op", b.getStringAttr(opKind))});
+                  }
+                  return;
+                }
 
-                 // Pass 2: mass[0..M-1] and weighted[0..M*DV-1]
-                 fillVec(massBuf, cI64(M), cF32(0.0f));
-                 fillVec(weightedBuf, cI64(M * DV), cF32(0.0f));
-                 forLoop(cI64(0), tokLimit, cI64(S), [&](Value t0) {
-                   Value nt = b.create<arith::MinSIOp>(
-                       loc, b.create<arith::SubIOp>(loc, cI64(K), t0), cI64(S));
-                   stageRows(kBuf2, kView, sliceBasePtr(kView, kPrefix, t0), nt,
-                             S, D, true);
-                   sync("io");
-                   emitPanelProduct(scores2Buf, qBuf, kBuf2, D, S, false);
-                   makeOp("vec_scalar",
-                          {scores2Buf, scores2Buf, gain2Val, cI64(M * S)}, {},
-                          {b.getNamedAttr("op", b.getStringAttr("mul"))});
-                   sync("compute");
-                   forLoop(cI64(0), cI64(M), cI64(1), [&](Value r) {
-                     Value sRow = makeAddr(scores2Buf, {r}, {cI64(S)}, 1);
-                     Value pRow = makeAddr(probBuf, {r}, {cI64(S)}, 1);
-                     Value live =
-                         causal
-                             ? b.create<arith::MinSIOp>(
-                                   loc,
-                                   b.create<arith::MaxSIOp>(
-                                       loc,
-                                       b.create<arith::SubIOp>(
-                                           loc,
-                                           b.create<arith::AddIOp>(
-                                               loc,
-                                               b.create<arith::AddIOp>(
-                                                   loc, rowBase, r),
-                                               cI64(1)),
-                                           t0),
-                                       cI64(0)),
-                                   nt)
-                                   .getResult()
-                             : nt;
-                     ifThenElse(
-                         b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt,
-                                                 live, cI64(0)),
-                         {},
-                         [&]() {
-                           Value pk = loadAt(peakBuf, r);
-                           makeOp("vec_scalar", {pRow, sRow, pk, cI64(S)}, {},
-                                  {b.getNamedAttr("op", b.getStringAttr("sub"))});
-                           makeOp(useExp2 ? "row_exp2" : "row_exp",
-                                  {pRow, reduceScratch, pRow, live, cI64(S)}, {},
-                                  {},
-                                  useExp2 ? "validated-exp2" : "validated-exp");
-                           ifThen(b.create<arith::CmpIOp>(
-                                      loc, arith::CmpIPredicate::slt, live,
-                                      cI64(S)),
-                                  [&]() {
+                Value stripV = lhsStrip ? lhs : rhs;
+                Value scV = lhsStrip ? rhs : lhs;
+                Value srcSlot = slotEnv.lookup(stripV);
+                bool reverseSub = (opKind == "sub" && !lhsStrip);
+
+                auto emitRowScalar = [&](Value dPtr, Value sPtr, Value scVal,
+                                         int64_t len) {
+                  if (reverseSub) {
+                    makeOp("vec_scalar", {dPtr, sPtr, cF32(-1.0f), cI64(len)},
+                           {}, {b.getNamedAttr("op", b.getStringAttr("mul"))});
+                    makeOp("vec_scalar", {dPtr, dPtr, scVal, cI64(len)}, {},
+                           {b.getNamedAttr("op", b.getStringAttr("add"))});
+                  } else {
+                    makeOp("vec_scalar", {dPtr, sPtr, scVal, cI64(len)}, {},
+                           {b.getNamedAttr("op", b.getStringAttr(opKind))});
+                  }
+                };
+
+                if (ownerScalars.contains(scV)) {
+                  Value osBuf = slotEnv.lookup(scV);
+                  if (singleRow) {
+                    emitRowScalar(rowSlice(dstSlot, singleRow),
+                                  rowSlice(srcSlot, singleRow),
+                                  loadAt(osBuf, singleRow), S);
+                  } else {
+                    forLoop(cI64(0), cI64(M), cI64(1), [&](Value r) {
+                      emitRowScalar(rowSlice(dstSlot, r), rowSlice(srcSlot, r),
+                                    loadAt(osBuf, r), S);
+                    });
+                  }
+                } else {
+                  Value invSc = lEnv.lookup(scV);
+                  if (singleRow)
+                    emitRowScalar(rowSlice(dstSlot, singleRow),
+                                  rowSlice(srcSlot, singleRow), invSc, S);
+                  else
+                    emitRowScalar(dstSlot, srcSlot, invSc, M * S);
+                }
+              };
+
+              // Walk bb in program order, emitting each op from its DSA role.
+              for (Operation &op : bb.without_terminator()) {
+                auto roleAttr = op.getAttrOfType<StringAttr>("dsa.panel_role");
+                if (!roleAttr) {
+                  if (!isa<scf::ForOp, scf::IfOp>(op) &&
+                      op.getNumResults() == 1 &&
+                      !isa<RankedTensorType>(op.getResult(0).getType()) &&
+                      llvm::all_of(op.getOperands(),
+                                   [&](Value u) { return scalarEnv.count(u); })) {
+                    if (Value sv = lowerScalarExpr(op, scalarEnv))
+                      scalarEnv[op.getResult(0)] = sv;
+                  }
+                  continue;
+                }
+                StringRef role = roleAttr.getValue();
+
+                if (role == "owner_slice") {
+                  Value qView = op.getOperand(0);
+                  int64_t rank = cast<MemRefType>(qView.getType()).getRank();
+                  int64_t D = dimAttr(qView, "block.shape", rank - 1);
+                  SmallVector<Value> prefix;
+                  for (Value c : op.getOperands().drop_front().drop_back())
+                    prefix.push_back(scalarEnv.lookup(c));
+                  Value dst = slotAt(&op, 0, halfTy);
+                  stageRows(dst, qView, sliceBasePtr(qView, prefix, rowBase),
+                            cI64(M), M, D, false);
+                  sync("io");
+                  slotEnv[op.getResult(0)] = dst;
+                  panelFeat[op.getResult(0)] = D;
+                  continue;
+                }
+
+                if (role == "owner_widen") {
+                  Value src = slotEnv.lookup(op.getOperand(0));
+                  int64_t F = panelFeat.lookup(op.getOperand(0));
+                  Value dst = slotAt(&op, 0, b.getF32Type());
+                  widenPanel(dst, src, M * F);
+                  sync("compute");
+                  slotEnv[op.getResult(0)] = dst;
+                  panelFeat[op.getResult(0)] = F;
+                  continue;
+                }
+
+                if (role == "owner_scalar") {
+                  Value dst = slotAt(&op, 0, b.getF32Type());
+                  forLoop(cI64(0), cI64(M), cI64(1), [&](Value r) {
+                    if (auto sif = dyn_cast<scf::IfOp>(op)) {
+                      Value cond = scalarEnv.lookup(sif.getCondition());
+                      ifThenElse(
+                          cond, {},
+                          [&]() {
+                            storeAt(dst, r,
+                                    evalScalarBlockForRow(*sif.thenBlock(), r,
+                                                          scalarEnv));
+                          },
+                          [&]() {
+                            storeAt(dst, r,
+                                    evalScalarBlockForRow(*sif.elseBlock(), r,
+                                                          scalarEnv));
+                          });
+                    } else {
+                      llvm::DenseMap<Value, Value> rowEnv = scalarEnv;
+                      rowEnv[rowArg] = b.create<arith::AddIOp>(loc, rowBase, r);
+                      for (Value os : ownerScalars)
+                        rowEnv[os] = loadAt(slotEnv.lookup(os), r);
+                      storeAt(dst, r, lowerScalarExpr(op, rowEnv));
+                    }
+                  });
+                  sync("compute");
+                  slotEnv[op.getResult(0)] = dst;
+                  ownerScalars.insert(op.getResult(0));
+                  continue;
+                }
+
+                if (role == "owner_vec") {
+                  Value dst = slotAt(&op, 0, b.getF32Type());
+                  StringRef en = op.getName().getStringRef();
+                  StringRef opKind = en == "arith.addf"   ? "add"
+                                     : en == "arith.subf" ? "sub"
+                                                          : "mul";
+                  Value lhs = op.getOperand(0), rhs = op.getOperand(1);
+                  bool lhsPanel = slotEnv.contains(lhs);
+                  bool rhsPanel = slotEnv.contains(rhs);
+                  int64_t F =
+                      panelFeat.lookup(lhsPanel ? lhs : rhs);
+                  if (lhsPanel && rhsPanel) {
+                    makeOp("vec_binary",
+                           {dst, slotEnv.lookup(lhs), slotEnv.lookup(rhs),
+                            cI64(M * F)},
+                           {}, {b.getNamedAttr("op", b.getStringAttr(opKind))});
+                  } else {
+                    Value pVal = lhsPanel ? lhs : rhs;
+                    Value spVal = unwrapBridge(lhsPanel ? rhs : lhs);
+                    Value pSlot = slotEnv.lookup(pVal);
+                    bool revSub = (opKind == "sub" && !lhsPanel);
+                    auto emitOne = [&](Value dP, Value sP, Value sc, int64_t n) {
+                      if (revSub) {
+                        makeOp("vec_scalar", {dP, sP, cF32(-1.0f), cI64(n)}, {},
+                               {b.getNamedAttr("op", b.getStringAttr("mul"))});
+                        makeOp("vec_scalar", {dP, dP, sc, cI64(n)}, {},
+                               {b.getNamedAttr("op", b.getStringAttr("add"))});
+                      } else {
+                        makeOp("vec_scalar", {dP, sP, sc, cI64(n)}, {},
+                               {b.getNamedAttr("op", b.getStringAttr(opKind))});
+                      }
+                    };
+                    if (ownerScalars.contains(spVal)) {
+                      Value osBuf = slotEnv.lookup(spVal);
+                      forLoop(cI64(0), cI64(M), cI64(1), [&](Value r) {
+                        emitOne(makeAddr(dst, {r}, {cI64(F)}, 1),
+                                makeAddr(pSlot, {r}, {cI64(F)}, 1),
+                                loadAt(osBuf, r), F);
+                      });
+                    } else {
+                      emitOne(dst, pSlot, scalarEnv.lookup(spVal), M * F);
+                    }
+                  }
+                  sync("compute");
+                  slotEnv[op.getResult(0)] = dst;
+                  panelFeat[op.getResult(0)] = F;
+                  continue;
+                }
+
+                if (role == "owner_narrow") {
+                  Value src = slotEnv.lookup(op.getOperand(0));
+                  int64_t F = panelFeat.lookup(op.getOperand(0));
+                  Value dst = slotAt(&op, 0, halfTy);
+                  narrowPanel(dst, src, M * F);
+                  sync("compute");
+                  slotEnv[op.getResult(0)] = dst;
+                  panelFeat[op.getResult(0)] = F;
+                  continue;
+                }
+
+                if (role == "owner_write") {
+                  Value src = slotEnv.lookup(op.getOperand(0));
+                  int64_t F = panelFeat.lookup(op.getOperand(0));
+                  Value yView = op.getOperand(1);
+                  int64_t yRank = cast<MemRefType>(yView.getType()).getRank();
+                  int64_t yStride = dimAttr(yView, "block.strides", yRank - 2);
+                  SmallVector<Value> prefix;
+                  for (Value c : op.getOperands().drop_front(2).drop_back())
+                    prefix.push_back(scalarEnv.lookup(c));
+                  Value yPtr = sliceBasePtr(yView, prefix, rowBase);
+                  if (yStride == F)
+                    memcpy1D(yPtr, src, cI64(M * F), "NRAM2GDRAM");
+                  else
+                    memcpy2D(yPtr, src, cI64(F), cI64(yStride), cI64(F),
+                             cI64(M - 1), "NRAM2GDRAM");
+                  continue;
+                }
+
+                if (role == "strip_loop") {
+                  auto loop = cast<scf::ForOp>(op);
+                  auto dimOp = loop.getUpperBound().getDefiningOp<memref::DimOp>();
+                  int64_t K = dimAttr(dimOp.getSource(), "block.shape",
+                                      *dimOp.getConstantIndex());
+
+                  // Initialize all loop-carried slots from initArgs.
+                  llvm::DenseMap<Operation *, unsigned> outerAccCarryIdx;
+                  auto *yieldOp = loop.getBody()->getTerminator();
+                  for (unsigned k = 0; k < loop.getNumResults(); ++k) {
+                    Value initV = loop.getInitArgs()[k];
+                    Value iterV = loop.getRegionIterArgs()[k];
+                    Value resV = loop.getResult(k);
+                    Value cSlot = slotAt(&op, k, b.getF32Type());
+                    if (resV.getType().isF32()) {
+                      if (ownerScalars.contains(initV))
+                        memcpy1D(cSlot, slotEnv.lookup(initV), cI64(M),
+                                 "NRAM2NRAM");
+                      else
+                        fillVec(cSlot, cI64(M), scalarEnv.lookup(initV));
+                      ownerScalars.insert(resV);
+                    } else {
+                      int64_t F =
+                          intentdsl::kir::memberExtent(fn, resV, "block.shape");
+                      if (slotEnv.contains(initV)) {
+                        memcpy1D(cSlot, slotEnv.lookup(initV), cI64(M * F),
+                                 "NRAM2NRAM");
+                      } else {
+                        Value sp = unwrapBridge(initV);
+                        if (ownerScalars.contains(sp)) {
+                          forLoop(cI64(0), cI64(M), cI64(1), [&](Value r) {
+                            fillVec(makeAddr(cSlot, {r}, {cI64(F)}, 1), cI64(F),
+                                    loadAt(slotEnv.lookup(sp), r));
+                          });
+                        } else {
+                          fillVec(cSlot, cI64(M * F), scalarEnv.lookup(sp));
+                        }
+                      }
+                      panelFeat[iterV] = F;
+                      panelFeat[resV] = F;
+                      Operation *comb = yieldOp->getOperand(k).getDefiningOp();
+                      Value term = comb->getOperand(0) == iterV
+                                       ? comb->getOperand(1)
+                                       : comb->getOperand(0);
+                      outerAccCarryIdx[term.getDefiningOp()] = k;
+                    }
+                    slotEnv[iterV] = cSlot;
+                    slotEnv[resV] = cSlot;
+                  }
+                  sync("compute");
+
+                  // Pre-evaluate owner/strip-invariant scalar ops in loop body.
+                  llvm::DenseMap<Value, Value> loopScalars = scalarEnv;
+                  for (Operation &bop : loop.getBody()->without_terminator()) {
+                    if (bop.hasAttr("dsa.panel_role") ||
+                        isa<scf::ForOp, scf::IfOp>(bop))
+                      continue;
+                    if (bop.getNumResults() == 1 &&
+                        !isa<RankedTensorType>(bop.getResult(0).getType()) &&
+                        llvm::all_of(bop.getOperands(), [&](Value u) {
+                          return loopScalars.count(u);
+                        })) {
+                      if (Value sv = lowerScalarExpr(bop, loopScalars))
+                        loopScalars[bop.getResult(0)] = sv;
+                    }
+                  }
+
+                  // Check whether every carry update in this loop is identity-padded
+                  // past the causal diagonal so strips t0 >= rowBase + M are no-ops.
+                  auto causalPadOf = [&](Value v) -> Value {
+                    Operation *d = v.getDefiningOp();
+                    if (!d || d->getAttrOfType<StringAttr>("dsa.panel_role") !=
+                                  StringAttr::get(b.getContext(),
+                                                  "strip_causal_mask"))
+                      return Value{};
+                    if (auto br = dyn_cast<scf::IfOp>(d))
+                      return br.elseBlock()->getTerminator()->getOperand(0);
+                    if (auto sel = dyn_cast<arith::SelectOp>(d))
+                      return sel.getFalseValue();
+                    return Value{};
+                  };
+                  bool canTrimCausal = true;
+                  for (unsigned k = 0; k < loop.getNumResults(); ++k) {
+                    Value iterV = loop.getRegionIterArgs()[k];
+                    Operation *comb = yieldOp->getOperand(k).getDefiningOp();
+                    Value rhs = comb->getOperand(0) == iterV
+                                    ? comb->getOperand(1)
+                                    : comb->getOperand(0);
+                    if (loop.getResult(k).getType().isF32()) {
+                      Value pad = causalPadOf(rhs);
+                      if (!pad || (isa<arith::MaxNumFOp>(comb) && !isNegInfVal(pad)) ||
+                          (isa<arith::AddFOp>(comb) && !isZeroVal(pad)))
+                        canTrimCausal = false;
+                    } else {
+                      Operation *omul = rhs.getDefiningOp();
+                      bool okW = false;
+                      for (Value u : omul->getOperands()) {
+                        Value base = unwrapBridge(u);
+                        if (auto tr = base.getDefiningOp<arith::TruncFOp>()) {
+                          Value pad = causalPadOf(tr.getIn());
+                          if (pad && isZeroVal(pad))
+                            okW = true;
+                        }
+                      }
+                      if (!okW)
+                        canTrimCausal = false;
+                    }
+                  }
+
+                  Value tokLimit =
+                      canTrimCausal
+                          ? b.create<arith::MinSIOp>(
+                                 loc,
+                                 b.create<arith::AddIOp>(loc, rowBase, cI64(M)),
+                                 cI64(K))
+                                .getResult()
+                          : cI64(K);
+
+                  auto causalLive = [&](Value r, Value t0, Value nt) {
+                    return b.create<arith::MinSIOp>(
+                        loc,
+                        b.create<arith::MaxSIOp>(
+                            loc,
+                            b.create<arith::SubIOp>(
+                                loc,
+                                b.create<arith::AddIOp>(
+                                    loc,
+                                    b.create<arith::AddIOp>(loc, rowBase, r),
+                                    cI64(1)),
+                                t0),
+                            cI64(0)),
+                        nt);
+                  };
+
+                  forLoop(cI64(0), tokLimit, cI64(S), [&](Value t0) {
+                    Value nt = b.create<arith::MinSIOp>(
+                        loc, b.create<arith::SubIOp>(loc, cI64(K), t0),
+                        cI64(S));
+
+                    for (Operation &bop : loop.getBody()->without_terminator()) {
+                      auto bRoleAttr =
+                          bop.getAttrOfType<StringAttr>("dsa.panel_role");
+                      if (!bRoleAttr)
+                        continue;
+                      StringRef bRole = bRoleAttr.getValue();
+
+                      if (bRole == "strip_slice") {
+                        Value kView = bop.getOperand(0);
+                        int64_t kRank =
+                            cast<MemRefType>(kView.getType()).getRank();
+                        int64_t kFeat =
+                            dimAttr(kView, "block.shape", kRank - 1);
+                        SmallVector<Value> prefix;
+                        for (Value c : bop.getOperands().drop_front().drop_back())
+                          prefix.push_back(loopScalars.lookup(c));
+                        Value kSlot = slotAt(&bop, 0, halfTy);
+                        stageRows(kSlot, kView,
+                                  sliceBasePtr(kView, prefix, t0), nt, S,
+                                  kFeat, true);
+                        sync("io");
+                        slotEnv[bop.getResult(0)] = kSlot;
+                        panelFeat[bop.getResult(0)] = kFeat;
+                        continue;
+                      }
+
+                      if (bRole == "strip_transpose_slice") {
+                        Value vView = bop.getOperand(0);
+                        int64_t vRank =
+                            cast<MemRefType>(vView.getType()).getRank();
+                        int64_t vFeat =
+                            dimAttr(vView, "block.shape", vRank - 1);
+                        SmallVector<Value> prefix;
+                        for (Value c : bop.getOperands().drop_front().drop_back())
+                          prefix.push_back(loopScalars.lookup(c));
+                        Value vSlot = slotAt(&bop, 0, halfTy);
+                        Value vtSlot = slotAt(&bop, 1, halfTy);
+                        stageRows(vSlot, vView,
+                                  sliceBasePtr(vView, prefix, t0), nt, S,
+                                  vFeat, true);
+                        sync("io");
+                        makeOp("tile_transpose",
+                               {vtSlot, vSlot, cI64(S), cI64(vFeat)}, {}, {},
+                               "nram-transpose");
+                        sync("compute");
+                        slotEnv[bop.getResult(0)] = vtSlot;
+                        panelFeat[bop.getResult(0)] = vFeat;
+                        continue;
+                      }
+
+                      if (bRole == "strip_dot") {
+                        auto mul =
+                            bop.getOperand(0).getDefiningOp<arith::MulFOp>();
+                        Value u0 = unwrapBridge(mul.getLhs());
+                        Value u1 = unwrapBridge(mul.getRhs());
+                        bool u0IsOwner =
+                            u0.getDefiningOp() &&
+                            u0.getDefiningOp()->getBlock() == &bb;
+                        Value qVal = u0IsOwner ? u0 : u1;
+                        Value kVal = u0IsOwner ? u1 : u0;
+                        int64_t D = panelFeat.lookup(qVal);
+                        Value dst = slotAt(&bop, 0, b.getF32Type());
+                        emitPanelProduct(dst, slotEnv.lookup(qVal),
+                                         slotEnv.lookup(kVal), D, S, false);
+                        slotEnv[bop.getResult(0)] = dst;
+                        continue;
+                      }
+
+                      if (bRole == "strip_elem") {
+                        Value dst = slotAt(&bop, 0, b.getF32Type());
+                        emitStripElem(bop, dst, loopScalars, Value{}, nt);
+                        sync("compute");
+                        slotEnv[bop.getResult(0)] = dst;
+                        continue;
+                      }
+
+                      if (bRole == "strip_causal_mask") {
+                        Value dst = slotAt(&bop, 0, b.getF32Type());
+                        Value padSrc;
+                        if (auto br = dyn_cast<scf::IfOp>(bop))
+                          padSrc =
+                              br.elseBlock()->getTerminator()->getOperand(0);
+                        else
+                          padSrc = cast<arith::SelectOp>(bop).getFalseValue();
+                        Value padVal = loopScalars.lookup(padSrc);
+                        if (!padVal && padSrc.getDefiningOp())
+                          padVal = lowerScalarExpr(*padSrc.getDefiningOp(),
+                                                   loopScalars);
+
+                        forLoop(cI64(0), cI64(M), cI64(1), [&](Value r) {
+                          Value dRow = makeAddr(dst, {r}, {cI64(S)}, 1);
+                          Value live = causalLive(r, t0, nt);
+                          ifThenElse(
+                              b.create<arith::CmpIOp>(
+                                  loc, arith::CmpIPredicate::sgt, live, cI64(0)),
+                              {},
+                              [&]() {
+                                Value thenVal;
+                                if (auto br = dyn_cast<scf::IfOp>(bop)) {
+                                  for (Operation &inOp :
+                                       br.thenBlock()->without_terminator()) {
+                                    Value inSlot =
+                                        slotAt(&inOp, 0, b.getF32Type());
+                                    emitStripElem(inOp, inSlot, loopScalars, r,
+                                                  live);
                                     sync("compute");
-                                    forLoop(live, cI64(S), cI64(1),
-                                            [&](Value j) {
-                                              storeAt(pRow, j, cF32(0.0f));
-                                            });
-                                  });
-                           makeOp("row_reduce",
-                                  {scalarOutBuf, reduceScratch, pRow, cI64(1),
-                                   cI64(S), live},
-                                  {},
-                                  {b.getNamedAttr("algebra",
-                                                  b.getStringAttr("sum"))},
-                                  "row-reduce");
-                           storeAt(massBuf, r,
-                                   b.create<arith::AddFOp>(
-                                       loc, loadAt(massBuf, r),
-                                       loadAt(scalarOutBuf, cI64(0))));
-                         },
-                         [&]() { fillVec(pRow, cI64(S), cF32(0.0f)); });
-                   });
-                   narrowPanel(pHalfBuf, probBuf, M * S);
-                   sync("compute");
+                                    slotEnv[inOp.getResult(0)] = inSlot;
+                                  }
+                                  thenVal = br.thenBlock()
+                                                ->getTerminator()
+                                                ->getOperand(0);
+                                } else {
+                                  thenVal =
+                                      cast<arith::SelectOp>(bop).getTrueValue();
+                                }
+                                Value sRow = makeAddr(slotEnv.lookup(thenVal),
+                                                      {r}, {cI64(S)}, 1);
+                                memcpy1D(dRow, sRow, cI64(S), "NRAM2NRAM");
+                                sync("io");
+                                ifThen(b.create<arith::CmpIOp>(
+                                           loc, arith::CmpIPredicate::slt, live,
+                                           cI64(S)),
+                                       [&]() {
+                                         forLoop(live, cI64(S), cI64(1),
+                                                 [&](Value j) {
+                                                   storeAt(dRow, j, padVal);
+                                                 });
+                                         sync("compute");
+                                       });
+                              },
+                              [&]() {
+                                fillVec(dRow, cI64(S), padVal);
+                                sync("compute");
+                              });
+                        });
+                        slotEnv[bop.getResult(0)] = dst;
+                        causalMaskedStrips.insert(bop.getResult(0));
+                        continue;
+                      }
 
-                   stageRows(vBuf, vView, sliceBasePtr(vView, vPrefix, t0), nt,
-                             S, DV, true);
-                   sync("io");
-                   makeOp("tile_transpose", {vtBuf, vBuf, cI64(S), cI64(DV)},
-                          {}, {}, "nram-transpose");
-                   sync("compute");
-                   emitPanelProduct(weightedBuf, pHalfBuf, vtBuf, S, DV, true);
-                 });
+                      if (bRole == "strip_narrow") {
+                        Value srcVal = bop.getOperand(0);
+                        Value srcSlot = slotEnv.lookup(srcVal);
+                        if (!causalMaskedStrips.contains(srcVal)) {
+                          ifThen(b.create<arith::CmpIOp>(
+                                     loc, arith::CmpIPredicate::slt, nt,
+                                     cI64(S)),
+                                 [&]() {
+                                   sync("compute");
+                                   forLoop(cI64(0), cI64(M), cI64(1),
+                                           [&](Value r) {
+                                             Value sRow = makeAddr(
+                                                 srcSlot, {r}, {cI64(S)}, 1);
+                                             forLoop(nt, cI64(S), cI64(1),
+                                                     [&](Value j) {
+                                                       storeAt(sRow, j,
+                                                               cF32(0.0f));
+                                                     });
+                                           });
+                                   sync("compute");
+                                 });
+                        }
+                        Value dst = slotAt(&bop, 0, halfTy);
+                        narrowPanel(dst, srcSlot, M * S);
+                        sync("compute");
+                        slotEnv[bop.getResult(0)] = dst;
+                        continue;
+                      }
 
-                 // Normalize and publish Y [M, DV].
-                 forLoop(cI64(0), cI64(M), cI64(1), [&](Value r) {
-                   Value mVal = loadAt(massBuf, r);
-                   Value inv =
-                       K == 0 ? cF32(0.0f)
-                              : b.create<arith::DivFOp>(loc, cF32(1.0f), mVal)
-                                    .getResult();
-                   Value wRow = makeAddr(weightedBuf, {r}, {cI64(DV)}, 1);
-                   Value nRow = makeAddr(normBuf, {r}, {cI64(DV)}, 1);
-                   makeOp("vec_scalar", {nRow, wRow, inv, cI64(DV)}, {},
-                          {b.getNamedAttr("op", b.getStringAttr("mul"))});
-                 });
-                 narrowPanel(outBuf, normBuf, M * DV);
-                 sync("compute");
+                      if (bRole == "strip_outer_acc") {
+                        unsigned k = outerAccCarryIdx.lookup(&bop);
+                        Value carrySlot = slotAt(&op, k, b.getF32Type());
+                        Value u0 = unwrapBridge(bop.getOperand(0));
+                        Value u1 = unwrapBridge(bop.getOperand(1));
+                        bool u0IsW =
+                            u0.getDefiningOp() &&
+                            u0.getDefiningOp()->getAttrOfType<StringAttr>(
+                                "dsa.panel_role") ==
+                                StringAttr::get(b.getContext(), "strip_narrow");
+                        Value wVal = u0IsW ? u0 : u1;
+                        Value vVal = u0IsW ? u1 : u0;
+                        int64_t DV = panelFeat.lookup(vVal);
+                        emitPanelProduct(carrySlot, slotEnv.lookup(wVal),
+                                         slotEnv.lookup(vVal), S, DV, true);
+                        continue;
+                      }
+                    }
 
-                 Value yPtr = sliceBasePtr(yView, yPrefix, rowBase);
-                 int64_t yRank = cast<MemRefType>(yView.getType()).getRank();
-                 int64_t yRowStride =
-                     dimAttr(yView, "block.strides", yRank - 2);
-                 if (yRowStride == DV) {
-                   memcpy1D(yPtr, outBuf, cI64(M * DV), "NRAM2GDRAM");
-                 } else {
-                   memcpy2D(yPtr, outBuf, cI64(DV), cI64(yRowStride), cI64(DV),
-                            cI64(M - 1), "NRAM2GDRAM");
-                 }
-               });
+                    // Update scalar reduction carries at scf.yield.
+                    for (unsigned k = 0; k < loop.getNumResults(); ++k) {
+                      if (!loop.getResult(k).getType().isF32())
+                        continue;
+                      Value iterV = loop.getRegionIterArgs()[k];
+                      Value carrySlot = slotAt(&op, k, b.getF32Type());
+                      Operation *comb = yieldOp->getOperand(k).getDefiningOp();
+                      Value stripV = comb->getOperand(0) == iterV
+                                         ? comb->getOperand(1)
+                                         : comb->getOperand(0);
+                      Value stripSlot = slotEnv.lookup(stripV);
+                      bool isMax = isa<arith::MaxNumFOp>(comb);
+                      bool masked = causalMaskedStrips.contains(stripV);
+                      forLoop(cI64(0), cI64(M), cI64(1), [&](Value r) {
+                        Value cnt = masked ? causalLive(r, t0, nt) : nt;
+                        ifThen(b.create<arith::CmpIOp>(
+                                   loc, arith::CmpIPredicate::sgt, cnt, cI64(0)),
+                               [&]() {
+                                 Value sRow =
+                                     makeAddr(stripSlot, {r}, {cI64(S)}, 1);
+                                 makeOp("row_reduce",
+                                        {scalarOutBuf, reduceScratch, sRow,
+                                         cI64(1), cI64(S), cnt},
+                                        {},
+                                        {b.getNamedAttr(
+                                            "algebra",
+                                            b.getStringAttr(isMax ? "max_num"
+                                                                  : "sum"))},
+                                        "row-reduce");
+                                 Value cur = loadAt(carrySlot, r);
+                                 Value blk = loadAt(scalarOutBuf, cI64(0));
+                                 Value nxt =
+                                     isMax
+                                         ? makeOp("scalar_math", {cur, blk},
+                                                  {b.getF32Type()},
+                                                  {b.getNamedAttr(
+                                                      "op", b.getStringAttr(
+                                                                "max_num"))})
+                                               ->getResult(0)
+                                         : b.create<arith::AddFOp>(loc, cur, blk)
+                                               .getResult();
+                                 storeAt(carrySlot, r, nxt);
+                               });
+                      });
+                    }
+                  });
+                  continue;
+                }
+              }
+            });
       });
     });
     return success();
