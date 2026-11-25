@@ -6,7 +6,7 @@
 
 MLU370 没有硬件统一缓存替内核自动重排数据，执行性能完全由以下三项显式决定支配：
 
-1. **片上存储归属与预算**：每个 IPU 核具备独立的私有 NRAM（768 KiB，预算上限 `min(2/3 * NRAM, 512 KiB)`）与矩阵滤波空间 WRAM（512 KiB）；每个 4 核 Cluster 具备共享 SRAM（MLU370 为 4 MiB，`cnrtFuncTypeUnion4` 含 1 个专职搬运 MPU 与 4 个计算 IPU）。NRAM 承载流式输入槽、归约暂存与写回缓冲；WRAM 承载 64 通道卷积滤波块（`__bang_conv` / `__bang_conv_partial`）；Cluster SRAM 承载跨核复用的大矩阵块与协作解码面板（`512×512` 稠密/缩放收缩与 `256×64` 分组权重量化收缩），由 MPU 异步执行 `GDRAM→SRAM` 双缓冲预取并与 4 个 IPU 的 Split-M `4×64` WRAM 发射重叠。
+1. **片上存储归属与预算。** 每个 IPU 核使用私有 NRAM（768 KiB，预算上限 `min(2/3 * NRAM, 512 KiB)`）和 WRAM（512 KiB）。同簇的 4 个 IPU 共用 4 MiB SRAM。稠密收缩的完整块在 SRAM 为 A、B 各分配两个槽。MPU 同步拷入下一对面板时，IPU 从当前槽取数并发射 64 通道 WRAM 卷积，簇屏障完成后才交换槽位。分组量化收缩可以只双缓冲左面板，右面板由各核独立解码。块缩放收缩则由 IPU 协作解码，写入单份 A、B 共享面板，经过簇屏障再消费。`bangc@callable` 中的循环、地址选择、搬运和同步给出各自的执行顺序。`quant.mlu` 实现 NRAM 面板内的查表、缩放和排列。
 2. **DMA 供数与计算重叠**：1D/2D `__memcpy_async` 可将 GDRAM↔NRAM 或 GDRAM↔SRAM 传输与向量/矩阵计算重叠；但双缓冲会使输入与写回槽占用翻倍，缩小单步宽度或批大小，因此深度 1 与深度 2 必须根据实际搬运体积与计算强度比较。
 3. **严格 IEEE-754 合同与快速路径边界**：
    - `div` / `sqrt` / `f16` 商由无条件对称精确残差端点认证保证 0 ULP（含跨多行批处理的 `group_div_scalar_rn` 与无拷贝双精度残差 `BANG_TWODIFF_SE`），快路走向量指令，未过认证的极少数通道走标量精确修复；
@@ -19,7 +19,7 @@ MLU370 没有硬件统一缓存替内核自动重排数据，执行性能完全�
 |---|---|---|---|
 | `levels/execution/block::structure` | `block@decided` | `resident` / `stream`、行宽 `W ∈ [1..4096]`、行组 `R ∈ {1,2,16,32,64}`、`private-merge` 直方图 | 任务切分与片上驻留拓扑 |
 | `levels/storage/dsa::supply` | `dsa@formed` → `dsa@supplied` | 深度 `depth ∈ {1, 2}`、共享只读 1D 向量驻留 `persistent`、异步写回 `async_writeback`、临时片段区间复用 `reuse_temporaries`、批大小 `batch ∈ {1,2,4}`（含 `indexed_tile_read` 索引行收集批处理），以及 `library` 档位下的外部库供数 `library-cnnl` | 行与归约程序的 NRAM 槽位、DMA 流水与整算子库调用 |
-| `levels/storage/dsa::panel-supply` | `dsa@formed` → `dsa@supplied` | 单核私有块 `(BM, BN=64, BK)`（`8×64×64` 至 `128×64×256`）、`Union4` 簇级 SRAM 协作块（稠密 `512×512×256`、块缩放 `512×512×128`、分组权重量化 `256×64×128`）及参与者核数，以及 `library` 档位下的 `library-cnnl` | 稠密、批处理、路由、窗口、融合尾声与量化收缩 |
+| `levels/storage/dsa::panel-supply` | `dsa@formed` → `dsa@supplied` | 对 block 已选的块形比较供数方式与参与核数。`private` 为各核独立取数，`shared-tile` 为多核共同计算一个块，`shared-lhs` 为相邻列块复用左面板。后两者由 BANG C 根据矩阵访问、类型、簇宽与 SRAM 容量提供。`library` 档还可选 `library-cnnl`。 | 稠密、批处理、路由、窗口、融合尾声与量化收缩 |
 | `levels/storage/dsa::ordered-supply` | `dsa@formed` → `dsa@supplied` | `panel-fold`（片上双遍 QK/PV WRAM 面板折叠）、`packed`（多 owner 打包流 `pack ∈ {2,4,8}`）、`general`（通用标量/向量流） | 注意力、线性注意力、Mamba/Gated Delta 等有序程序 |
 | `exits/bangc::narrow-proven-addresses` | `bangc@callable` | 经 `proveNarrowAddress` 白名单证明不溢出的 32 位有符号坐标乘步长 vs 64 位回退 | GDRAM/NRAM 地址计算吞吐 |
 

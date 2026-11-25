@@ -14,6 +14,18 @@ struct MatrixStorage {
   std::string libraryF16Impl;
   std::string libraryFtzImpl;
   std::string libraryEstimator;
+  // Native placement supported for this tile and worker count. Shared-LHS
+  // tiles also have an independent private implementation.
+  llvm::StringRef (*panelPlacement)(block::MatrixAccess &, int64_t,
+                                    const MatrixStorage &);
+};
+struct PanelPlan {
+  int64_t participants;
+  llvm::StringRef placement;
+  std::string id() const;
+  mlir::DictionaryAttr attribute(mlir::Builder &) const;
+  static std::optional<PanelPlan> read(mlir::Attribute, block::MatrixAccess &,
+                                       const MatrixStorage &);
 };
 struct LibraryMatrixPlan {
   std::string impl;

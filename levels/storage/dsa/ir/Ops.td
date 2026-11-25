@@ -7,7 +7,8 @@ def SupplyDialect : Dialect {
 }
 
 def MatrixSetup : Op<SupplyDialect,"panel_supply",[SingleBlock]> {
- let arguments=(ins I64Attr:$participants,I64Attr:$scratch_bytes,OptionalAttr<StrAttr>:$library_impl);
+ let arguments=(ins I64Attr:$participants,I64Attr:$scratch_bytes,
+                    OptionalAttr<StrAttr>:$library_impl,OptionalAttr<StrAttr>:$placement);
  let regions=(region AnyRegion:$transfers);
 }
 def MatrixStage : Op<SupplyDialect,"stage_operand"> {

@@ -4,6 +4,37 @@
 using namespace mlir;
 using namespace compilerinfra;
 namespace intentdsl::dsa {
+std::string PanelPlan::id() const {
+  return (placement + "-" + std::to_string(participants)).str();
+}
+
+DictionaryAttr PanelPlan::attribute(Builder &b) const {
+  return b.getDictionaryAttr({
+      b.getNamedAttr("participants", b.getI64IntegerAttr(participants)),
+      b.getNamedAttr("placement", b.getStringAttr(placement))});
+}
+
+std::optional<PanelPlan> PanelPlan::read(Attribute value, block::MatrixAccess &a,
+                                         const MatrixStorage &ms) {
+  auto dict = dyn_cast_or_null<DictionaryAttr>(value);
+  auto participants = dict ? dict.getAs<IntegerAttr>("participants")
+                           : dyn_cast_or_null<IntegerAttr>(value);
+  if (!participants || !participants.getType().isInteger(64))
+    return std::nullopt;
+  int64_t n = participants.getInt();
+  auto supported = ms.panelPlacement(a, n, ms);
+  if (supported.empty())
+    return std::nullopt;
+  // Older native checkpoints carried only the participant count.
+  if (!dict)
+    return PanelPlan{n, supported};
+  auto placement = dict.getAs<StringAttr>("placement");
+  if (!placement || (placement != supported &&
+                     !(placement == "private" && supported == "shared-lhs")))
+    return std::nullopt;
+  return PanelPlan{n, placement.getValue()};
+}
+
 std::optional<LibraryMatrixPlan> matchLibraryMatrix(block::MatrixAccess &a,
                                                     const TargetProfile &p) {
   auto ms = p.services.get<MatrixStorage>();
@@ -218,15 +249,10 @@ bool supportsSupply(block::MatrixAccess &a, Attribute v,
     return plan && plan->impl == lib.getValue() &&
            !p.checkImplementationForOp(lib.getValue(), a.fn.getOperation());
   }
-  auto count = dyn_cast_or_null<IntegerAttr>(v);
   auto cap = p.services.get<LocalSupply>();
   auto ms = p.services.get<MatrixStorage>();
-  if (!count || !cap || !ms || count.getInt() <= 0 ||
-      count.getInt() > cap->consumers)
-    return false;
-  if (a.tile[0] == 512 && a.tile[1] == 512 &&
-      (ms->sramBytes <= 0 ||
-       count.getInt() != ms->clusters * ms->coresPerCluster))
+  auto plan = ms ? PanelPlan::read(v, a, *ms) : std::nullopt;
+  if (!cap || !plan || plan->participants < 1 || plan->participants > cap->consumers)
     return false;
   return bytes(a, p) <= std::min(cap->capacity, cap->budget);
 }
@@ -258,11 +284,16 @@ LogicalResult verifyMatrix(func::FuncOp fn, const TargetProfile &p,
       if (auto err =
               p.checkImplementationForOp(lib.getValue(), fn.getOperation()))
         return setup.emitError() << llvm::toString(std::move(err));
-    } else if (!cap || !p.services.get<MatrixStorage>() || tasks < 1 ||
-               tasks > cap->consumers || scratch != bytes(a, p) ||
-               scratch > std::min(cap->budget, cap->capacity))
-      return setup.emitError(
-          "matrix inputs or accumulator exceed the physical supply");
+      if (setup.hasAttr("placement"))
+        return setup.emitError("external library cannot use native panel storage");
+    } else {
+      Builder b(fn.getContext());
+      Attribute plan = setup.getAttr("participants");
+      if (auto placement = setup.getAttrOfType<StringAttr>("placement"))
+        plan = PanelPlan{tasks, placement.getValue()}.attribute(b);
+      if (!supportsSupply(a, plan, p) || scratch != bytes(a, p))
+        return setup.emitError("invalid native matrix placement or footprint");
+    }
     auto sources = feeds(a);
     auto &body = setup.getRegion(0).front();
     if (body.getOperations().size() != sources.size() + 1 ||
@@ -312,8 +343,8 @@ void matrixSupply(Unit &u) {
           "illegal participant or private panel footprint");
     return llvm::Error::success();
   };
-  f.verifyCandidate = [](Operation *, const StructuralCandidate &c,
-                         const TargetProfile &) -> llvm::Error {
+  f.verifyCandidate = [](Operation *op, const StructuralCandidate &c,
+                         const TargetProfile &p) -> llvm::Error {
     if (auto lib = dyn_cast<StringAttr>(c.value)) {
       if (c.id != "library-cnnl" || c.topology != "external-library" ||
           c.preconditions != std::vector<std::string>{"exact-library-abi"} ||
@@ -321,11 +352,12 @@ void matrixSupply(Unit &u) {
         return llvm::createStringError("invalid library matrix candidate");
       return llvm::Error::success();
     }
-    auto count = dyn_cast<IntegerAttr>(c.value);
-    if (!count ||
-        c.id != "private-" + std::to_string(count.getInt()) ||
-        c.topology != "private-panels" ||
-        c.preconditions != std::vector<std::string>{"complete-private-tiles"})
+    block::MatrixAccess a(cast<func::FuncOp>(op));
+    auto ms = p.services.get<dsa::MatrixStorage>();
+    auto plan = ms ? dsa::PanelPlan::read(c.value, a, *ms) : std::nullopt;
+    if (!plan || c.id != plan->id() ||
+        c.topology != (plan->placement + "-panels").str() ||
+        c.preconditions != std::vector<std::string>{"legal-panel-placement"})
       return llvm::createStringError("invalid matrix supply candidate");
     return llvm::Error::success();
   };
@@ -339,14 +371,22 @@ void matrixSupply(Unit &u) {
     auto cap = p.services.get<dsa::LocalSupply>();
     block::MatrixAccess a(cast<func::FuncOp>(op));
     std::vector<StructuralCandidate> cs;
+    Builder b(op->getContext());
+    auto ms = p.services.get<dsa::MatrixStorage>();
     for (auto n = cap->consumers; n > 0; n /= 2) {
-      auto attr = Builder(op->getContext()).getI64IntegerAttr(n);
-      if (!dsa::supportsSupply(a, attr, p))
+      auto placement = ms->panelPlacement(a, n, *ms);
+      if (placement.empty())
         continue;
-      cs.push_back({"private-" + std::to_string(n),
-                    "private-panels",
-                    attr,
-                    {"complete-private-tiles"}});
+      auto propose = [&](StringRef kind) {
+        dsa::PanelPlan plan{n, kind};
+        auto attr = plan.attribute(b);
+        if (dsa::supportsSupply(a, attr, p))
+          cs.push_back({plan.id(), (kind + "-panels").str(), attr,
+                        {"legal-panel-placement"}});
+      };
+      propose(placement);
+      if (placement == "shared-lhs")
+        propose("private");
     }
     return cs;
   };
@@ -383,7 +423,11 @@ void matrixSupply(Unit &u) {
       setup.addAttribute("scratch_bytes", b.getI64IntegerAttr(0));
       setup.addAttribute("library_impl", lib);
     } else {
-      setup.addAttribute("participants", choice);
+      auto plan = dsa::PanelPlan::read(choice, a, *p.services.get<dsa::MatrixStorage>());
+      if (!plan)
+        return llvm::createStringError("cannot realize native panel placement");
+      setup.addAttribute("participants", b.getI64IntegerAttr(plan->participants));
+      setup.addAttribute("placement", b.getStringAttr(plan->placement));
       setup.addAttribute("scratch_bytes", b.getI64IntegerAttr(dsa::bytes(a,p)));
     }
     setup.addRegion();

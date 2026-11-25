@@ -17,9 +17,14 @@ void matrixSupplyCost(Unit &u) {
           auto t = a.tile, d = a.shape;
           double jobs = std::ceil(double(d[0]) / t[0]) *
                         std::ceil(double(d[1]) / t[1]) * d[3];
-          bool isCluster = (t[0] == 512 && t[1] == 512);
-          double rawWorkers = mlir::cast<mlir::IntegerAttr>(c.value).getInt(),
-                 workers = isCluster ? std::max(1.0, rawWorkers / 4.0)
+          auto ms = ctx.target.services.get<intentdsl::dsa::MatrixStorage>();
+          auto plan = ms ? intentdsl::dsa::PanelPlan::read(c.value, a, *ms)
+                         : std::nullopt;
+          if (!plan)
+            return llvm::createStringError("invalid matrix placement for estimation");
+          bool isCluster = plan->placement == "shared-tile";
+          double rawWorkers = plan->participants,
+                 workers = isCluster ? std::max(1.0, rawWorkers / ms->coresPerCluster)
                                      : rawWorkers,
                  waves = std::ceil(jobs / workers),
                  active = std::min(workers, std::max(1.0, jobs));
@@ -32,6 +37,14 @@ void matrixSupplyCost(Unit &u) {
                  bytes = inElemBytes * t[2] * (t[0] + t[1]),
                  transactions = 2 * panels;
           CostEstimate e;
+          if (plan->placement == "shared-lhs") {
+            // Only complete M tiles stage one LHS for the cluster. Tail rows
+            // use the independent GDRAM path on each consuming core.
+            double fullFraction = (d[0] / t[0]) / std::ceil(double(d[0]) / t[0]);
+            double shared = inElemBytes * t[2] * t[0] * fullFraction;
+            bytes -= shared * (1.0 - 1.0 / ms->coresPerCluster);
+            e.terms["shared_lhs_bytes_per_panel"] = {shared, "B"};
+          }
           e.scope = "full_call";
           e.bottleneck = "panel supply";
           e.terms["waves"] = {waves, "count"};

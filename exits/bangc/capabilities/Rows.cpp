@@ -1,4 +1,5 @@
 #include "intentdsl/levels/algorithm/kir/ir/Performance.h"
+#include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 #include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
 #include "intentdsl/levels/execution/block/ir/Contraction.h"
 #include "intentdsl/levels/execution/block/ir/Owners.h"
@@ -6,6 +7,27 @@
 #include "intentdsl/levels/storage/dsa/ir/Supply.h"
 
 namespace CI_UNIT_NAMESPACE {
+static llvm::StringRef panelPlacement(intentdsl::block::MatrixAccess &a,
+                                      int64_t participants,
+                                      const intentdsl::dsa::MatrixStorage &ms) {
+  bool union4 = ms.clusters == 4 && ms.coresPerCluster == 4 &&
+                participants == ms.clusters * ms.coresPerCluster;
+  if (a.tile[0] == 512 && a.tile[1] == 512)
+    return union4 && ms.sramBytes >= 2097152 ? "shared-tile" : "";
+  const auto *spec = intentdsl::kir::quantFormatSpec(a.dot);
+  if (union4 && spec &&
+      spec->roleLayout == intentdsl::kir::QuantRoleLayout::GroupedWeightRhs &&
+      spec->packBits == 4 && spec->packFactor == 8 && a.tile[1] == 64 &&
+      mlir::getElementTypeOrSelf(a.dot.getOperand(0)).isF16() &&
+      mlir::getElementTypeOrSelf(a.dot.getOperand(2)).isF16() &&
+      a.shape[0] >= a.tile[0] && a.shape[2] > 0 &&
+      a.shape[2] % a.tile[2] == 0 && a.stride(a.dot.getOperand(0), 1) == 1 &&
+      llvm::divideCeil(uint64_t(a.shape[1]), uint64_t(a.tile[1])) %
+              ms.coresPerCluster == 0 &&
+      ms.sramBytes >= 2 * a.tile[0] * a.tile[2] * int64_t(sizeof(uint16_t)))
+    return "shared-lhs";
+  return "private";
+}
 static int64_t matrixPrivateBytes(int64_t rows, int64_t columns, int64_t depth,
                                   llvm::StringRef computation) {
   if (rows == 512 && columns == 512) {
@@ -86,7 +108,7 @@ capabilities(const llvm::json::Object &opts) {
       std::make_shared<intentdsl::dsa::MatrixStorage>(intentdsl::dsa::MatrixStorage{
           matrixPrivateBytes, wram.value_or(0), sram.value_or(0), *clusters,
           *cores, "exits/bangc::cnnl-matmul-f16", "exits/bangc::cnnl-matmul-ftz",
-          "exits/bangc::cnnl-matmul-cost"})))return e;
+          "exits/bangc::cnnl-matmul-cost", panelPlacement})))return e;
   if(auto e=profile.services.provide<intentdsl::block::MatrixTarget>(matrices))return e;
   if(auto error=caps->bind(opts))return error;
   caps->storeSectorBytes = 128;

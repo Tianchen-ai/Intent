@@ -28,31 +28,14 @@ inline mlir::LogicalResult bindMatrix(mlir::func::FuncOp fn, unsigned phase,
       return setup.emitError("missing matrix queue entry");
     return success();
   }
-  bool isClusterTile = (p.tile[0] == 512 && p.tile[1] == 512);
   auto ms = profile.services.get<intentdsl::dsa::MatrixStorage>();
-  bool isClusterRowShare = false;
-  if (!isClusterTile && ms && ms->sramBytes >= 262144 && ms->clusters == 4 &&
-      ms->coresPerCluster == 4 &&
-      setup.getAttrOfType<IntegerAttr>("participants").getInt() == 16 &&
-      p.dot.getName().stripDialect() == "quant_contract" && !p.routed()) {
-    if (const auto *qSpec = intentdsl::kir::quantFormatSpec(p.dot);
-        qSpec &&
-        qSpec->roleLayout ==
-            intentdsl::kir::QuantRoleLayout::GroupedWeightRhs &&
-        p.tile[1] == 64 &&
-        llvm::divideCeil(uint64_t(p.shape[1]), uint64_t(p.tile[1])) % 4 == 0 &&
-        p.stride(p.dot.getOperand(0), 1) == 1)
-      isClusterRowShare = true;
-  }
-  if (isClusterTile &&
-      (!ms || ms->sramBytes < 2097152 || ms->clusters != 4 ||
-       ms->coresPerCluster != 4 ||
-       setup.getAttrOfType<IntegerAttr>("participants").getInt() != 16))
-    return setup.emitError("cluster-SRAM matrix tile requires 4x4 Union4 MLU");
-  StringRef spaceName =
-      (isClusterTile || isClusterRowShare) ? "cluster.sram" : "private.nram";
-  StringRef workerName =
-      (isClusterTile || isClusterRowShare) ? "cluster-union4" : "task-stride";
+  auto attr = setup.getAttrOfType<StringAttr>("placement");
+  StringRef placement = attr ? attr.getValue() : ms->panelPlacement(
+      p, setup.getAttrOfType<IntegerAttr>("participants").getInt(), *ms);
+  bool isClusterTile = placement == "shared-tile";
+  bool shared = isClusterTile || placement == "shared-lhs";
+  StringRef spaceName = shared ? "cluster.sram" : "private.nram";
+  StringRef workerName = shared ? "cluster-union4" : "task-stride";
   if (!field(setup, "bangc.space", b.getStringAttr(spaceName)) ||
       !field(setup, "bangc.worker", b.getStringAttr(workerName)))
     return setup.emitError("matrix task or local storage mismatch");
