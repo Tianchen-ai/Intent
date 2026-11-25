@@ -1,4 +1,5 @@
 #include "Rows.h"
+#include "Broadcast.h"
 #include "Slab.h"
 #include "intentdsl/exits/bangc/ir/Dialect.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
@@ -9,6 +10,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
+#include <numeric>
 #include <set>
 
 namespace CI_UNIT_NAMESPACE {
@@ -128,7 +130,9 @@ struct RowLowerer {
   llvm::DenseMap<std::tuple<Block *, Value, Value, int64_t>, Value>
       memberCoordCache;
   Value storage;
+  llvm::DenseMap<Value, Value> localBroadcasts;
   int64_t boundRows = 0, boundColumns = 0;
+  int64_t widthMultiple = 0;
   bool fullMembers = false, fullColumns = false;
   Value symM, symN, symGrid, symTaskId, symTaskDim, symR, symB, symEB, symW,
       symP, symBytes;
@@ -179,6 +183,8 @@ struct RowLowerer {
           if (row.get("id") == id) {
             maxRows = std::max(maxRows, row.getAs<IntegerAttr>("rows").getInt());
             int64_t members = row.getAs<IntegerAttr>("rows").getInt() * batch;
+            widthMultiple = std::gcd(
+                widthMultiple, row.getAs<IntegerAttr>("width").getInt());
             fullMembers &= m % members == 0;
             fullColumns &= n % row.getAs<IntegerAttr>("width").getInt() == 0;
           }
@@ -399,6 +405,15 @@ struct RowLowerer {
         ->getResult(0);
   }
   Value loadAt(Value ptr, Value idx, Type resTy = {}) {
+    if (auto *address = ptr.getDefiningOp();
+        address && address->getName().getStringRef() == "bangc_src.address") {
+      if (Value local = localBroadcasts.lookup(address->getOperand(0))) {
+        SmallVector<Value> operands(address->getOperands());
+        operands.front() = local;
+        ptr = makeOp("address", operands, {local.getType()}, address->getAttrs())
+                  ->getResult(0);
+      }
+    }
     if (!resTy)
       resTy = cast<MemRefType>(ptr.getType()).getElementType();
     return makeOp("load_scalar", {ptr, idx}, {resTy})->getResult(0);
@@ -676,6 +691,42 @@ struct RowLowerer {
                             : viewStride(view, getIdx("outer_pitch"));
     int64_t elemBytes = llvm::divideCeil(
         cast<MemRefType>(view.getType()).getElementTypeBitWidth(), 8u);
+
+    // For complete tiles starting on a member boundary, all source runs
+    // have the same length. Lower the entire rectangle to one strided DMA.
+    const auto &facts = *profile.services.get<intentdsl::CallFacts>();
+    auto inner = getIdx("inner_stride"), outer = getIdx("outer_pitch");
+    if (fullColumns && widthMultiple > 0 && slot >= 0 && outer >= 0) {
+      auto length = boundViewField(fn.getArgument(slot), getIdx("extent_axis"),
+                                   facts, false);
+      auto stride = inner < 0 ? std::optional<int64_t>(0)
+                              : boundViewField(view, inner, facts, true);
+      auto pitch = boundViewField(view, outer, facts, true);
+      if (length && *length > 0 && widthMultiple % *length == 0 && stride &&
+          pitch && *pitch >= 0 && *pitch <= INT32_MAX / elemBytes &&
+          *length <= INT32_MAX / elemBytes) {
+        Value base = buildSlabPtr(op, first, view, rowIdx, col);
+        Value runs = b.create<arith::DivSIOp>(loc, live, extent);
+        if (*stride == 1 && *pitch >= *length) {
+          Value repeats = b.create<arith::SubIOp>(loc, runs, cI64(1));
+          if (load)
+            memcpy2D(local, base, extent, extent, outerStride, repeats,
+                     "GDRAM2NRAM", async);
+          else
+            memcpy2D(base, local, extent, outerStride, extent, repeats,
+                     "NRAM2GDRAM", false);
+          return;
+        }
+        if (*stride == 0 && load) {
+          forLoop(cI64(0), runs, cI64(1), [&](Value i) {
+            auto dst = makeAddr(local, {i}, {extent}, 1);
+            Value index = b.create<arith::MulIOp>(loc, i, outerStride);
+            fillVec(dst, extent, loadAt(base, index));
+          });
+          return;
+        }
+      }
+    }
 
     auto w = b.create<scf::WhileOp>(loc, TypeRange{b.getI64Type()},
                                     ValueRange{cI64(0)});
@@ -3032,6 +3083,19 @@ struct RowLowerer {
     symP = makeSym("P");
     symBytes = makeSym("BYTES");
     constAnchor = symBytes.getDefiningOp();
+
+    for (auto [arg, elements] : broadcastSpans(
+             fn, *profile.services.get<intentdsl::CallFacts>(),
+             *profile.services.get<intentdsl::dsa::LocalSupply>())) {
+      Type elem = cast<MemRefType>(arg.getType()).getElementType();
+      Value local = makeOp("nram_buffer", {}, {ptrType(b.getContext(), elem, 1)},
+                           {b.getNamedAttr("elements", b.getI64IntegerAttr(elements))})
+                        ->getResult(0);
+      memcpy1D(local, arg, cI64(elements), "GDRAM2NRAM", true);
+      localBroadcasts[arg] = local;
+    }
+    if (!localBroadcasts.empty())
+      sync("io");
 
     if (failed(emitOuterOps(oldOps, cI64(0))))
       return fn.emitError("failed to lower row program to bangc_src");

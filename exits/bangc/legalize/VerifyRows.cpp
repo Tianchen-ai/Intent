@@ -180,6 +180,18 @@ LogicalResult verifyCallableRows(ModuleOp m, const TargetProfile &profile) {
     return fn.emitError(
         "BANG C package disagrees with verified ABI or specialization rows");
 
+  int64_t reserved = 0;
+  for (auto attr : layout.getAs<ArrayAttr>("rows")) {
+    auto row = dyn_cast<DictionaryAttr>(attr);
+    auto bytes = row ? row.getAs<IntegerAttr>("bytes") : IntegerAttr{};
+    if (!bytes || bytes.getInt() < 0)
+      return fn.emitError("invalid row allocation");
+    reserved = std::max(reserved, bytes.getInt());
+  }
+  int64_t available = std::min(capacity->budget, capacity->capacity) - reserved;
+  if (available < 0)
+    return fn.emitError("row allocation exceeds private NRAM budget");
+
   compilerinfra::IntegerRangeContext rangeCtx(fn.getOperation());
   std::set<std::string> declaredResources, requiredResources;
   bool walkFailed = m.walk([&](Operation *op) {
@@ -191,6 +203,22 @@ LogicalResult verifyCallableRows(ModuleOp m, const TargetProfile &profile) {
                          return WalkResult::interrupt();
                        }
                        auto fullName = op->getName().getStringRef();
+                       if (fullName == "bangc_src.nram_buffer") {
+                         auto elements =
+                             op->getAttrOfType<IntegerAttr>("elements").getInt();
+                         auto type = cast<MemRefType>(op->getResult(0).getType());
+                         auto bytes =
+                             llvm::divideCeil(type.getElementTypeBitWidth(), 8u);
+                         if (elements <= 0 || elements > available / bytes) {
+                           op->emitError("row buffer exceeds private NRAM budget");
+                           return WalkResult::interrupt();
+                         }
+                         available -= llvm::alignTo(elements * bytes, capacity->alignment);
+                         if (available < 0) {
+                           op->emitError("aligned row buffers exceed private NRAM budget");
+                           return WalkResult::interrupt();
+                         }
+                       }
                        if (fullName == "bangc_src.address") {
                          auto bits = op->getAttrOfType<IntegerAttr>("index_bits");
                          if (!bits ||
