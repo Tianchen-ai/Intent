@@ -3,6 +3,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/IR/TypeUtilities.h"
+#include "llvm/ADT/FloatingPointMode.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/JSON.h"
 
@@ -16,6 +17,18 @@ struct FastMathPolicy {
 inline bool validDenormalMode(llvm::StringRef mode) {
   return mode == "ieee" || mode == "preserve-sign" ||
          mode == "positive-zero" || mode == "dynamic";
+}
+
+inline std::string canonicalDenormalName(llvm::DenormalMode mode) {
+  if (mode == llvm::DenormalMode::getIEEE())
+    return "ieee";
+  if (mode == llvm::DenormalMode::getPreserveSign())
+    return "preserve-sign";
+  if (mode == llvm::DenormalMode::getPositiveZero())
+    return "positive-zero";
+  if (mode == llvm::DenormalMode::getDynamic())
+    return "dynamic";
+  return mode.str();
 }
 
 inline llvm::StringRef getDenormalFpMath(mlir::Operation *op) {

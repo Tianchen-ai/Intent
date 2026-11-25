@@ -1350,10 +1350,18 @@ def _classify_row_stages(row: dict[str, Any]) -> dict[str, bool]:
     }
 
 
-def summarize_experiment(bench_root: Path, experiment_tag: str, targets: dict[str, TargetSpec]) -> tuple[dict[str, Any], str]:
+def summarize_experiment(
+    bench_root: Path,
+    experiment_tag: str,
+    targets: dict[str, TargetSpec],
+    *,
+    fast_tag: str | None = None,
+) -> tuple[dict[str, Any], str]:
     exp_root = bench_root / "output" / "experiments" / experiment_tag
+    fast_root = (bench_root / "output" / "experiments" / fast_tag) if fast_tag else None
     summary: dict[str, Any] = {
         "experiment_tag": experiment_tag,
+        **({"fast_tag": fast_tag} if fast_tag else {}),
         "targets": {},
         "backend_scoreboards": [],
         "slower_than_v1_over_1_2x": [],
@@ -1402,6 +1410,17 @@ def summarize_experiment(bench_root: Path, experiment_tag: str, targets: dict[st
                 key = (r["workload"], r["case"])
                 by_work_case.setdefault(key, {})[r["implementation"]] = r
 
+        # Load optional same-semantics (fpmath_mode="fast") overlay results under fast_root
+        fast_by_work_case: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
+        if fast_root is not None and (fast_root / target_name).exists():
+            for rf in sorted((fast_root / target_name).glob("**/results.json")):
+                if "artifacts" in rf.parts or ".oracle-work" in rf.parts:
+                    continue
+                payload = json.loads(rf.read_text(encoding="utf-8"))
+                for r in payload.get("results", []):
+                    key = (r["workload"], r["case"])
+                    fast_by_work_case.setdefault(key, {})[r["implementation"]] = r
+
         summary["targets"][target_name] = {
             "install": install_info,
             "skipped_implementations_count": len(skipped_impl_records),
@@ -1417,6 +1436,7 @@ def summarize_experiment(bench_root: Path, experiment_tag: str, targets: dict[st
 
             v1_cmp = {"faster": 0, "tied": 0, "slower": 0, "no_comparable": 0, "ref_failed": 0, "quantized_short_ties": 0}
             mat_cmp = {"faster": 0, "tied": 0, "slower": 0, "no_comparable": 0, "ref_failed": 0, "semantic_diff": 0, "quantized_short_ties": 0}
+            mat_fast_cmp = {"faster": 0, "tied": 0, "slower": 0, "no_comparable": 0, "ref_failed": 0, "quantized_short_ties": 0} if fast_root is not None else None
 
             for (wname, cname), impl_map in sorted(by_work_case.items()):
                 if v2_key not in impl_map:
@@ -1567,6 +1587,43 @@ def summarize_experiment(bench_root: Path, experiment_tag: str, targets: dict[st
                         else:
                             mat_cmp["slower"] += 1
 
+                # 3. Optional same-semantics (fpmath_mode="fast") V2 vs Mature tally
+                if mat_fast_cmp is not None:
+                    if not mature_candidates:
+                        mat_fast_cmp["no_comparable"] += 1
+                    else:
+                        passing_mat_f = [
+                            (ik, float(ir["median_ms"]))
+                            for ik, ir in mature_candidates
+                            if ir.get("status") == "passed" and ir.get("median_ms")
+                        ]
+                        if not passing_mat_f:
+                            mat_fast_cmp["ref_failed"] += 1
+                        else:
+                            fast_row = fast_by_work_case.get((wname, cname), {}).get(v2_key)
+                            v2_fast_ms = (
+                                float(fast_row["median_ms"])
+                                if fast_row and fast_row.get("status") == "passed" and fast_row.get("median_ms")
+                                else v2_ms
+                            )
+                            _, best_ms_f = min(passing_mat_f, key=lambda x: x[1])
+                            ratio_f = v2_fast_ms / best_ms_f
+                            sm120_fast_tick = (
+                                target_name == "5090d"
+                                and min(v2_fast_ms * 1000.0, best_ms_f * 1000.0) < 8.0
+                                and abs(v2_fast_ms - best_ms_f) * 1000.0 <= 2.10
+                            )
+                            if sm120_fast_tick:
+                                mat_fast_cmp["tied"] += 1
+                                if ratio_f < 0.95 or ratio_f > 1.05:
+                                    mat_fast_cmp["quantized_short_ties"] += 1
+                            elif ratio_f < 0.95:
+                                mat_fast_cmp["faster"] += 1
+                            elif ratio_f <= 1.05:
+                                mat_fast_cmp["tied"] += 1
+                            else:
+                                mat_fast_cmp["slower"] += 1
+
             md.append(
                 f"| `{target_name}` | `{be}` | {'PASS' if install_ok else 'FAIL'} | "
                 f"{prog_pass}/{prog_total} | {total_cases} | {counts['generate']}/{total_cases} | "
@@ -1583,6 +1640,7 @@ def summarize_experiment(bench_root: Path, experiment_tag: str, targets: dict[st
                 "stages": counts,
                 "vs_v1": v1_cmp,
                 "vs_mature": mat_cmp,
+                **({"vs_mature_same_semantics": mat_fast_cmp} if mat_fast_cmp is not None else {}),
             }
             summary["backend_scoreboards"].append(board_entry)
 
@@ -1593,8 +1651,12 @@ def summarize_experiment(bench_root: Path, experiment_tag: str, targets: dict[st
             "",
             "> 注：`5090d`（SM120）上 `CUDAGraph` 内 CUDA Event 硬件计时步长为 `2.048 µs`；对 `< 8 µs` 的短 kernel，前后差 `≤ 1` 个硬件刻度（`≤ 2.048 µs`）属于量化步长内正常波动，按持平计入且不列入 `> 1.20x` 表。",
             "",
-            "| 设备目标 | 出口 | V2 对 V1（更快 / 持平 / 更慢 / V1失败或无对照） | V2 对成熟实现（更快 / 持平 / 更慢 / 无同合同或失败） |",
-            "|---|---|---|---|",
+            (
+                "| 设备目标 | 出口 | V2 对 V1（更快 / 持平 / 更慢 / V1失败或无对照） | V2 对成熟实现（默认语义） | V2 对成熟实现（同语义） |"
+                if fast_root is not None
+                else "| 设备目标 | 出口 | V2 对 V1（更快 / 持平 / 更慢 / V1失败或无对照） | V2 对成熟实现（更快 / 持平 / 更慢 / 无同合同或失败） |"
+            ),
+            ("|---|---|---|---|---|" if fast_root is not None else "|---|---|---|---|"),
         ]
     )
     for b in summary["backend_scoreboards"]:
@@ -1603,10 +1665,15 @@ def summarize_experiment(bench_root: Path, experiment_tag: str, targets: dict[st
         v1_qnote = f"（含 {v1['quantized_short_ties']} 项 `<8µs` 单刻度量化持平）" if v1.get("quantized_short_ties") else ""
         sem_note = f"（含 {mt['semantic_diff']} 项 f16 softmax 精确商语义差）" if mt["semantic_diff"] else ""
         mt_qnote = f"（含 {mt['quantized_short_ties']} 项 `<8µs` 单刻度量化持平）" if mt.get("quantized_short_ties") else ""
+        fast_col = ""
+        if fast_root is not None and "vs_mature_same_semantics" in b:
+            mf = b["vs_mature_same_semantics"]
+            mf_qnote = f"（含 {mf['quantized_short_ties']} 项 `<8µs` 单刻度量化持平）" if mf.get("quantized_short_ties") else ""
+            fast_col = f" **{mf['faster']}** 快 / **{mf['tied']}** 平 / **{mf['slower']}** 慢（{mf['ref_failed']} 失败, {mf['no_comparable']} 无）{mf_qnote} |"
         md.append(
             f"| `{b['target']}` | `{b['backend']}` | "
             f"**{v1['faster']}** 快 / **{v1['tied']}** 平 / **{v1['slower']}** 慢（{v1['ref_failed']} 失败, {v1['no_comparable']} 无）{v1_qnote} | "
-            f"**{mt['faster']}** 快 / **{mt['tied']}** 平 / **{mt['slower']}** 慢（{mt['ref_failed']} 失败, {mt['no_comparable']} 无）{sem_note}{mt_qnote} |"
+            f"**{mt['faster']}** 快 / **{mt['tied']}** 平 / **{mt['slower']}** 慢（{mt['ref_failed']} 失败, {mt['no_comparable']} 无）{sem_note}{mt_qnote} |{fast_col}"
         )
 
     all_over_1_2x = sorted(
@@ -1704,6 +1771,7 @@ def main() -> int:
     parser.add_argument("--wheel-dir", type=Path, help="Override the configured wheel directory")
     parser.add_argument("--bench-root", type=Path, help="Override the configured Bench checkout")
     parser.add_argument("--tag", default="v2-6-final", help="Experiment tag under bench output/experiments/")
+    parser.add_argument("--fast-tag", default=None, help="Optional same-semantics (fpmath_mode=fast) experiment tag for dual-column scoreboard")
     parser.add_argument("--workloads", nargs="+", help="Optional subset of workloads to run")
     parser.add_argument("--resume", action="store_true", help="Reuse completed workload results.json files")
     parser.add_argument("--allow-busy", action="store_true", help="Do not skip when device reports active processes")
@@ -1769,7 +1837,7 @@ def main() -> int:
         if serial_local_cpu:
             _run_group(serial_local_cpu)
 
-    _, md_text = summarize_experiment(bench_root, args.tag, targets)
+    _, md_text = summarize_experiment(bench_root, args.tag, targets, fast_tag=args.fast_tag)
     print("\n" + md_text, flush=True)
     return 0
 

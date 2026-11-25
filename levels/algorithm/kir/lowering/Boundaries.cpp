@@ -465,6 +465,15 @@ void bind(Unit &unit) {
               if (auto *svc =
                       profile.services.get<intentdsl::kir::FastMathPolicy>())
                 p = *svc;
+              if (profile.numerical.defaultFastMath !=
+                  arith::FastMathFlags::none)
+                p.defaultFlags =
+                    p.defaultFlags | profile.numerical.defaultFastMath;
+              if (p.denormalFpMath == "ieee" &&
+                  profile.numerical.defaultDenormal !=
+                      llvm::DenormalMode::getIEEE())
+                p.denormalFpMath = intentdsl::kir::canonicalDenormalName(
+                    profile.numerical.defaultDenormal);
               pm.addPass(std::make_unique<Canonicalize>(std::move(p)));
             }
             return llvm::Error::success();
