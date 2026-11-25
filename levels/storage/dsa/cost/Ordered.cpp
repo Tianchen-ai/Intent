@@ -21,9 +21,9 @@ void ownerSupplyCost(compilerinfra::Unit &u) {
             auto sn = v->getName().stripDialect();
             if (sn == "slice_read" || sn == "slice_write")
               ++slices;
-            if (auto loop = mlir::dyn_cast<mlir::scf::ForOp>(v))
+            if (auto loop = mlir::dyn_cast<mlir::scf::ForOp>(v)) {
               if (auto dim = loop.getUpperBound()
-                                 .getDefiningOp<mlir::memref::DimOp>())
+                                 .getDefiningOp<mlir::memref::DimOp>()) {
                 if (dim.getConstantIndex())
                   foldSteps = std::max<int64_t>(
                       foldSteps,
@@ -31,6 +31,27 @@ void ownerSupplyCost(compilerinfra::Unit &u) {
                           mlir::cast<mlir::BlockArgument>(dim.getSource())
                               .getArgNumber(),
                           "block.shape")[*dim.getConstantIndex()]);
+              } else {
+                mlir::Value iv = loop.getInductionVar();
+                loop.walk([&](mlir::Operation *sub) {
+                  if (sub->getName().stripDialect() == "slice_read" &&
+                      mlir::isa<mlir::BlockArgument>(sub->getOperand(0))) {
+                    auto coords = sub->getOperands().drop_front();
+                    if (!coords.empty() && coords.back() == iv) {
+                      auto sh = fn.getArgAttrOfType<mlir::DenseI64ArrayAttr>(
+                          mlir::cast<mlir::BlockArgument>(sub->getOperand(0))
+                              .getArgNumber(),
+                          "block.shape");
+                      int64_t rk =
+                          mlir::cast<mlir::MemRefType>(sub->getOperand(0).getType())
+                              .getRank();
+                      if (sh && rk >= 2)
+                        foldSteps = std::max<int64_t>(foldSteps, sh[rk - 2]);
+                    }
+                  }
+                });
+              }
+            }
           });
           CostEstimate e;
           e.scope = "one owner";

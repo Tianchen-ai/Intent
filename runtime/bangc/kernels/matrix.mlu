@@ -129,9 +129,31 @@ __mlu_func__ void bf16_ieee_dot_panel(float *acc, const unsigned short *lhs,
   for (int i = 0; i < nr; ++i) {
     for (int j = 0; j < nc; ++j) {
       unsigned z = acc_bits[i * bn + j];
-      for (int k = 0; k < nk; ++k)
-        z = add_binary32_ieee(
-            z, multiply_bf16_ieee(lhs[i * bk + k], rhs_t[j * bk + k]));
+      for (int k = 0; k < nk; ++k) {
+        unsigned l = lhs[i * bk + k], r = rhs_t[j * bk + k];
+        unsigned lm = l & 0x7fffu, rm = r & 0x7fffu;
+        if ((!lm || !rm) && lm < 0x7f80u && rm < 0x7f80u && z != 0x80000000u)
+          continue;
+        unsigned ae = lm >> 7, be = rm >> 7;
+        unsigned zm = z & 0x7fffffffu;
+        if (ae >= 1u && be >= 1u && ae + be >= 130u && ae + be <= 380u &&
+            (z == 0u || (zm >= 0x00800000u && zm < 0x7f000000u))) {
+          union {
+            unsigned u;
+            float f;
+          } lu, ru, zu, su;
+          lu.u = l << 16;
+          ru.u = r << 16;
+          zu.u = z;
+          su.f = zu.f + lu.f * ru.f;
+          unsigned sm = su.u & 0x7fffffffu;
+          if (sm >= 0x00800000u && sm < 0x7f800000u) {
+            z = su.u;
+            continue;
+          }
+        }
+        z = add_binary32_ieee(z, multiply_bf16_ieee(l, r));
+      }
       acc_bits[i * bn + j] = z;
     }
   }

@@ -29,6 +29,11 @@ multiclass MatrixExpressions<Dialect d> {
     let arguments=(ins AnyMemRef:$weights,AnyRankedTensor:$activation);
     let results=(outs AnyRankedTensor:$sum);
   }
+  def QuantContract : Op<d,"quant_contract"> {
+    let arguments=(ins Variadic<AnyTypeOf<[AnyMemRef,AnyRankedTensor]>>:$inputs,
+                       StrAttr:$format);
+    let results=(outs AnyRankedTensor:$sums);
+  }
   def AddColumns : Op<d,"add_columns"> {
     let arguments=(ins AnyRankedTensor:$input,AnyMemRef:$bias);let results=(outs AnyRankedTensor:$result);
   }

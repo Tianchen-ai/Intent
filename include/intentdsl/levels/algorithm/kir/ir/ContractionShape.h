@@ -60,6 +60,56 @@ contractionShape(mlir::Operation &op, mlir::Value out, const CallFacts &f) {
         return llvm::createStringError("Q8_K contraction extent exceeds i64");
       return ContractionShape{axis(a, 0), 1, k, 1, slot(a), slot(x), slot(out)};
     }
+    if (name == "quant_contract") {
+      auto fmtAttr = op.getAttrOfType<StringAttr>("format");
+      const auto *spec =
+          fmtAttr ? lookupQuantFormat(fmtAttr.getValue()) : nullptr;
+      if (!spec)
+        return llvm::createStringError("unknown quantized contraction format");
+      if (spec->roleLayout == QuantRoleLayout::RecordGemv) {
+        auto x = spec->q8kActivation
+                     ? op.getOperand(1).getDefiningOp()->getOperand(0)
+                     : op.getOperand(1);
+        int64_t m = axis(a, 0), g = axis(a, 1), k = 0;
+        if (m < 0 || g < 0 || axis(a, 2) != spec->recordBytes ||
+            axis(x, 0) != g || axis(x, 1) != spec->blockElements ||
+            __builtin_mul_overflow(g, int64_t(spec->blockElements), &k))
+          return llvm::createStringError(
+              "record contraction extents disagree with format descriptor");
+        return ContractionShape{m, 1, k, 1, slot(a), slot(x), slot(out)};
+      }
+      if (spec->roleLayout == QuantRoleLayout::BlockScaledPair) {
+        auto sa = op.getOperand(1), b = op.getOperand(2);
+        RightScale rs(op);
+        int64_t m = axis(a, 0), g = axis(a, 1), n = axis(b, 2), k = 0;
+        if (m < 0 || g < 0 || n < 0 || axis(a, 2) != spec->recordBytes ||
+            axis(b, 0) != g || axis(b, 1) != spec->recordBytes ||
+            axis(sa, 0) != m || axis(sa, 1) != g ||
+            axis(rs.view, rs.column) != n || axis(rs.view, rs.group) != g ||
+            __builtin_mul_overflow(g, int64_t(spec->blockElements), &k))
+          return llvm::createStringError(
+              "block-scaled contraction extents disagree with format descriptor");
+        return ContractionShape{m, n, k, 1, slot(a), slot(b), slot(out)};
+      }
+      auto qw = op.getOperand(1), sc = op.getOperand(2);
+      int64_t m = axis(a, 0), k = axis(a, 1), g = axis(sc, 0), n = axis(sc, 1),
+              np = axis(qw, 1);
+      int64_t expectedK = 0, expectedN = 0;
+      if (m < 0 || k < 0 || g < 0 || n < 0 || np < 0 || axis(qw, 0) != k ||
+          __builtin_mul_overflow(g, int64_t(spec->blockElements), &expectedK) ||
+          expectedK != k ||
+          __builtin_mul_overflow(np, int64_t(spec->packFactor), &expectedN) ||
+          expectedN != n)
+        return llvm::createStringError(
+            "grouped quantized weight extents disagree with format descriptor");
+      if (spec->hasZeroView) {
+        auto qz = op.getOperand(3);
+        if (axis(qz, 0) != g || axis(qz, 1) != np)
+          return llvm::createStringError(
+              "quantized zero-point view extents disagree with scales/weights");
+      }
+      return ContractionShape{m, n, k, 1, slot(a), slot(qw), slot(out)};
+    }
     bool scaled = name == "scaled_contract";
     auto b = op.getOperand(scaled ? 2 : 1);
     auto ak = scaled ? 1 : op.getAttrOfType<IntegerAttr>("lhs_k").getInt();

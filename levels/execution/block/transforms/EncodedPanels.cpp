@@ -383,14 +383,372 @@ struct Panel {
                        false, carry);
         });
   }
+  Value laneShift(Value subLane, const intentdsl::kir::QuantFormatSpec &spec) {
+    auto shTy = cast<RankedTensorType>(subLane.getType()).clone(b.getI32Type());
+    Value sh = lit(spec.laneBitShifts[0], shTy);
+    for (int idx = 1; idx < spec.packFactor; ++idx)
+      sh = b.create<arith::SelectOp>(
+          loc,
+          cmp(arith::CmpIPredicate::eq, subLane,
+              lit(idx, subLane.getType())),
+          lit(spec.laneBitShifts[idx], shTy), sh);
+    return sh;
+  }
+  Value decodeQuantCode(Value codeI32,
+                        const intentdsl::kir::QuantFormatSpec &spec) {
+    Type ty = codeI32.getType();
+    Type fTy = cast<RankedTensorType>(ty).clone(b.getF32Type());
+    if (spec.valueCode == intentdsl::kir::QuantValueCode::Fp4E2M1) {
+      Value s = b.create<arith::AndIOp>(
+          loc, b.create<arith::ShRUIOp>(loc, codeI32, lit(3, ty)), lit(1, ty));
+      Value e = b.create<arith::AndIOp>(
+          loc, b.create<arith::ShRUIOp>(loc, codeI32, lit(1, ty)), lit(3, ty));
+      Value m = b.create<arith::AndIOp>(loc, codeI32, lit(1, ty));
+      Value isSub = cmp(arith::CmpIPredicate::eq, e, lit(0, ty));
+      Value safeShift = b.create<arith::SelectOp>(
+          loc, isSub, lit(0, ty),
+          b.create<arith::SubIOp>(loc, e, lit(1, ty)));
+      Value normDouble = b.create<arith::ShLIOp>(
+          loc, b.create<arith::AddIOp>(loc, m, lit(2, ty)), safeShift);
+      Value magDouble =
+          b.create<arith::SelectOp>(loc, isSub, m, normDouble);
+      Value magF = castTo("arith.sitofp", magDouble, b.getF32Type());
+      Value neg = cmp(arith::CmpIPredicate::ne, s, lit(0, ty));
+      Value halfScale = b.create<arith::SelectOp>(
+          loc, neg, t.like(t.scalar(-0.5f), fTy), t.like(t.scalar(0.5f), fTy));
+      return b.create<arith::MulFOp>(loc, halfScale, magF);
+    }
+    return castTo("arith.sitofp", codeI32, b.getF32Type());
+  }
+  Value quantized() {
+    const auto *spec = intentdsl::kir::quantFormatSpec(p.dot);
+    assert(spec && "verified quantized contraction must carry format spec");
+    if (spec->roleLayout == intentdsl::kir::QuantRoleLayout::RecordGemv) {
+      Value w = p.dot.getOperand(0);
+      Value x = spec->q8kActivation
+                    ? p.dot.getOperand(1).getDefiningOp()->getOperand(0)
+                    : p.dot.getOperand(1);
+      return fold(
+          p.shape[2] / spec->blockElements, zero({p.tile[0]}),
+          [&](Value g, Value acc) {
+            auto ix = t.lanes(spec->blockElements);
+            Value ds, qAct, vAct;
+            if (spec->q8kActivation) {
+              intentdsl::kir::Q8KRecord q8;
+              auto v = t.read(x, t.address(x, {g, ix}, {-1, 0}));
+              auto abs = b.create<math::AbsFOp>(loc, v);
+              auto peak = t.reduce(abs, "max", 0);
+              auto eq = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OEQ,
+                                                abs, t.like(peak, v.getType()));
+              auto first = t.reduce(
+                  b.create<arith::SelectOp>(
+                      loc, eq, ix, lit(spec->blockElements, ix.getType())),
+                  "min", 0);
+              auto extreme = t.reduce(
+                  b.create<arith::SelectOp>(
+                      loc, cmp(arith::CmpIPredicate::eq, ix, first), v,
+                      t.like(t.scalar(0), v.getType())),
+                  "sum", 0);
+              auto empty = b.create<arith::CmpFOp>(
+                  loc, arith::CmpFPredicate::OEQ, peak, t.scalar(0));
+              float maxQ = -float((1 << (q8.elementBits - 1)) - 1);
+              auto inv = strict(
+                  "arith.divf", t.scalar(maxQ),
+                  b.create<arith::SelectOp>(loc, empty, t.scalar(1), extreme));
+              ds = b.create<arith::SelectOp>(
+                  loc, empty, t.scalar(0),
+                  strict("arith.divf", t.scalar(1), inv));
+              auto rounded = b.create<math::RoundEvenOp>(
+                  loc, strict("arith.mulf", t.like(inv, v.getType()), v));
+              float loQ = -float(1 << (q8.elementBits - 1));
+              float hiQ = float((1 << (q8.elementBits - 1)) - 1);
+              auto clamp = b.create<arith::MinNumFOp>(
+                  loc,
+                  b.create<arith::MaxNumFOp>(
+                      loc, rounded, t.like(t.scalar(loQ), v.getType())),
+                  t.like(t.scalar(hiQ), v.getType()));
+              qAct = castTo("arith.fptosi", clamp, b.getI32Type());
+            } else {
+              vAct = t.read(x, t.address(x, {g, ix}, {-1, 0}));
+            }
+            auto byte = [&](Value index, int dim) {
+              auto ptr = t.address(w, {row, g, index}, {0, -1, dim});
+              auto mask = t.like(
+                  validRow,
+                  cast<RankedTensorType>(ptr.getType()).clone(b.getI1Type()), 0);
+              auto u = castTo("arith.extui", t.read(w, ptr, mask),
+                              b.getI32Type());
+              return b.create<arith::AndIOp>(loc, u, lit(255, u.getType()))
+                  .getResult();
+            };
+            auto halfAt = [&](int offset) {
+              return t
+                  .op("from_le_half",
+                      {byte(t.integer(offset), -1),
+                       byte(t.integer(offset + 1), -1)},
+                      acc.getType())
+                  ->getResult(0);
+            };
+            Value half =
+                b.create<arith::DivUIOp>(loc, ix, lit(128, ix.getType()));
+            Value inHalf =
+                b.create<arith::RemUIOp>(loc, ix, lit(128, ix.getType()));
+            Value quad =
+                b.create<arith::DivUIOp>(loc, inHalf, lit(32, ix.getType()));
+            Value lane =
+                b.create<arith::RemUIOp>(loc, inHalf, lit(32, ix.getType()));
+            Value quadOdd =
+                b.create<arith::RemUIOp>(loc, quad, lit(2, ix.getType()));
+            Value quadHalf =
+                b.create<arith::DivUIOp>(loc, quad, lit(2, ix.getType()));
+            Value code;
+            for (int pi = 0; pi < spec->numBitPlanes; ++pi) {
+              const auto &pl = spec->planes[pi];
+              Value byteIdx = b.create<arith::AddIOp>(
+                  loc,
+                  b.create<arith::AddIOp>(
+                      loc, lit(pl.baseByte, ix.getType()),
+                      b.create<arith::MulIOp>(
+                          loc, half, lit(pl.halfStride, ix.getType()))),
+                  b.create<arith::AddIOp>(
+                      loc,
+                      b.create<arith::MulIOp>(
+                          loc, quadOdd, lit(pl.quadByteStep, ix.getType())),
+                      lane));
+              Value raw = byte(byteIdx, 1);
+              Type ty = raw.getType();
+              Value shFactor =
+                  pl.quadShiftMode == 0 ? quadHalf : quad;
+              Value sh64 = b.create<arith::MulIOp>(
+                  loc, shFactor, lit(pl.shiftUnit, ix.getType()));
+              Value sh32 =
+                  t.like(castTo("arith.trunci", sh64, b.getI32Type()), ty, 1);
+              Value part = b.create<arith::AndIOp>(
+                  loc, b.create<arith::ShRUIOp>(loc, raw, sh32),
+                  lit((1 << pl.bitWidth) - 1, ty));
+              if (pl.destBitOffset > 0)
+                part = b.create<arith::ShLIOp>(
+                    loc, part, lit(pl.destBitOffset, ty));
+              code = pi == 0 ? part
+                             : b.create<arith::OrIOp>(loc, code, part)
+                                   .getResult();
+            }
+            Type ty = code.getType();
+            if (spec->zeroBias != 0)
+              code = b.create<arith::SubIOp>(loc, code, lit(spec->zeroBias, ty));
+            if (spec->subScaleOffset >= 0 && spec->subBlockElements > 0) {
+              Value subIdx = b.create<arith::AddIOp>(
+                  loc, lit(spec->subScaleOffset, ix.getType()),
+                  b.create<arith::DivUIOp>(
+                      loc, ix, lit(spec->subBlockElements, ix.getType())));
+              Value scU8 = byte(subIdx, 1);
+              Value scS8 = b.create<arith::SubIOp>(
+                  loc, b.create<arith::XOrIOp>(loc, scU8, lit(128, ty)),
+                  lit(128, ty));
+              code = b.create<arith::MulIOp>(loc, code, scS8);
+            }
+            Value d = spec->scaleCode ==
+                              intentdsl::kir::QuantScaleCode::LeHalfAtOffset
+                          ? halfAt(spec->superScaleOffset)
+                          : t.like(t.scalar(1.0f), acc.getType());
+            if (spec->q8kActivation) {
+              Value prod = b.create<arith::MulIOp>(
+                  loc, code, t.like(qAct, ty, 1));
+              Value sumI = t.reduce(prod, "sum", 1);
+              Value scaledSum = strict(
+                  "arith.mulf", d,
+                  castTo("arith.sitofp", sumI, b.getF32Type()));
+              return b
+                  .create<arith::AddFOp>(
+                      loc, acc,
+                      strict("arith.mulf", t.like(ds, acc.getType()), scaledSum))
+                  .getResult();
+            }
+            Value fWeight = castTo("arith.sitofp", code, b.getF32Type());
+            Value fProd = b.create<arith::MulFOp>(
+                loc, fWeight, t.like(vAct, fWeight.getType(), 1));
+            Value sumF = t.reduce(fProd, "sum", 1);
+            return b
+                .create<arith::AddFOp>(loc, acc,
+                                       strict("arith.mulf", d, sumF))
+                .getResult();
+          });
+    }
+    if (spec->roleLayout == intentdsl::kir::QuantRoleLayout::BlockScaledPair) {
+      Value a = p.dot.getOperand(0), sa = p.dot.getOperand(1),
+            rhs = p.dot.getOperand(2);
+      intentdsl::kir::RightScale right(p.dot);
+      Value init = zero({p.tile[0], p.tile[1]});
+      int64_t groups = p.shape[2] / spec->blockElements;
+      auto readScale = [&](Value base, Value ptr, Value valid, int axis) {
+        auto ix = cast<RankedTensorType>(ptr.getType());
+        auto mask = t.like(valid, ix.clone(b.getI1Type()), axis);
+        auto u = castTo("arith.extui", t.read(base, ptr, mask), b.getI32Type());
+        auto v = b.create<arith::AndIOp>(loc, u, lit(255, u.getType()));
+        return b
+            .create<arith::SelectOp>(loc, mask, v,
+                                     lit(spec->scaleBias, v.getType()))
+            .getResult();
+      };
+      auto inRange = [&](Value x, int lo, int hi) {
+        auto min = t.reduce(x, "min", 0), max = t.reduce(x, "max", 0);
+        return b.create<arith::AndIOp>(
+            loc, cmp(arith::CmpIPredicate::sge, min, lit(lo, min.getType())),
+            cmp(arith::CmpIPredicate::slt, max, lit(hi + 1, max.getType())));
+      };
+      auto k = t.lanes(spec->blockElements);
+      Value bytePos =
+          b.create<arith::DivUIOp>(loc, k, lit(spec->packFactor, k.getType()));
+      Value subLane =
+          b.create<arith::RemUIOp>(loc, k, lit(spec->packFactor, k.getType()));
+      Value sh1D = laneShift(subLane, *spec);
+      int codeMaskVal = (1 << spec->packBits) - 1;
+      return fold(groups, init, [&](Value g, Value acc) {
+        SmallVector<Value> rCoords(2);
+        SmallVector<int64_t> rDims(2);
+        rCoords[right.column] = col;
+        rDims[right.column] = 0;
+        rCoords[right.group] = g;
+        rDims[right.group] = -1;
+        Value ax =
+            readScale(sa, t.address(sa, {row, g}, {0, -1}), validRow, 0);
+        Value bx = readScale(right.view, t.address(right.view, rCoords, rDims),
+                             validCol, 0);
+        Value aMask = t.like(
+            validRow,
+            t.shaped({p.tile[0], spec->blockElements}, b.getI1Type()), 0);
+        Value bMask = t.like(
+            validCol,
+            t.shaped({spec->blockElements, p.tile[1]}, b.getI1Type()), 1);
+        Value aRaw = castTo(
+            "arith.extui",
+            t.read(a, t.address(a, {row, g, bytePos}, {0, -1, 1}), aMask),
+            b.getI32Type());
+        aRaw = b.create<arith::AndIOp>(loc, aRaw, lit(255, aRaw.getType()));
+        Value bRaw = castTo(
+            "arith.extui",
+            t.read(rhs, t.address(rhs, {g, bytePos, col}, {-1, 0, 1}), bMask),
+            b.getI32Type());
+        bRaw = b.create<arith::AndIOp>(loc, bRaw, lit(255, bRaw.getType()));
+        Value aCode = b.create<arith::AndIOp>(
+            loc,
+            b.create<arith::ShRUIOp>(loc, aRaw,
+                                     t.like(sh1D, aRaw.getType(), 1)),
+            lit(codeMaskVal, aRaw.getType()));
+        Value bCode = b.create<arith::AndIOp>(
+            loc,
+            b.create<arith::ShRUIOp>(loc, bRaw,
+                                     t.like(sh1D, bRaw.getType(), 0)),
+            lit(codeMaskVal, bRaw.getType()));
+        if (spec->zeroBias != 0) {
+          aCode = b.create<arith::SubIOp>(loc, aCode,
+                                          lit(spec->zeroBias, aCode.getType()));
+          bCode = b.create<arith::SubIOp>(loc, bCode,
+                                          lit(spec->zeroBias, bCode.getType()));
+        }
+        Value aVal = decodeQuantCode(aCode, *spec);
+        Value bVal = decodeQuantCode(bCode, *spec);
+        auto rescale = [&](Value val, Value scale, int axis) -> Value {
+          auto factor = t.op("e8m0", scale,
+                             cast<RankedTensorType>(scale.getType())
+                                 .clone(b.getF32Type()))
+                            ->getResult(0);
+          return b.create<arith::MulFOp>(loc, val,
+                                         t.like(factor, val.getType(), axis));
+        };
+        Value x = rescale(aVal, ax, 0), y = rescale(bVal, bx, 1);
+        Value fast =
+            b.create<arith::AndIOp>(loc, inRange(ax, 2, 252),
+                                    inRange(bx, 2, 252));
+        return choice(
+            fast, acc,
+            [&]() {
+              return t.dot(castTo("arith.truncf", x, b.getBF16Type()),
+                           castTo("arith.truncf", y, b.getBF16Type()), false,
+                           acc);
+            },
+            [&]() { return t.dot(x, y, false, acc); });
+      });
+    }
+    // GroupedWeightRhs: lhs [M, K], qweight [K, N / packFactor],
+    // scales [K / blockElements, N], optional qzeros [G, N / packFactor].
+    Value a = p.dot.getOperand(0), qw = p.dot.getOperand(1),
+          sc = p.dot.getOperand(2);
+    Type lhsElem = cast<MemRefType>(a.getType()).getElementType();
+    Value init = zero({p.tile[0], p.tile[1]});
+    Value packCol = b.create<arith::DivUIOp>(
+        loc, col, lit(spec->packFactor, col.getType()));
+    Value subCol = b.create<arith::RemUIOp>(
+        loc, col, lit(spec->packFactor, col.getType()));
+    Value colShift1D = laneShift(subCol, *spec);
+    Type rhsI32Ty = t.shaped({p.tile[2], p.tile[1]}, b.getI32Type());
+    Value colShift2D = t.like(colShift1D, rhsI32Ty, 1);
+    int codeMaskVal = (1 << spec->packBits) - 1;
+    auto readPackedI32 = [&](Value view, Value ptr, Value mask) -> Value {
+      Value raw = t.read(view, ptr, mask);
+      if (t.elem(raw.getType()).isInteger(32))
+        return raw;
+      Value u = castTo("arith.extui", raw, b.getI32Type());
+      return b.create<arith::AndIOp>(loc, u, lit(255, u.getType()));
+    };
+    return fold(
+        llvm::divideCeil(p.shape[2], p.tile[2]), init,
+        [&](Value it, Value acc) {
+          Value member = t.stepped(
+              b.create<arith::MulIOp>(loc, it, t.integer(p.tile[2])),
+              p.tile[2]);
+          Value validK =
+              cmp(arith::CmpIPredicate::slt, member, t.integer(p.shape[2]));
+          Value grp = b.create<arith::DivUIOp>(
+              loc, member, lit(spec->blockElements, member.getType()));
+          Value lhs = t.read(a, t.address(a, {row, member}, {0, 1}),
+                             pairMask(validRow, validK));
+          Value rhsMask = pairMask(validK, validCol);
+          Value qwRaw = readPackedI32(
+              qw, t.address(qw, {member, packCol}, {0, 1}), rhsMask);
+          Value wCode = b.create<arith::AndIOp>(
+              loc, b.create<arith::ShRUIOp>(loc, qwRaw, colShift2D),
+              lit(codeMaskVal, rhsI32Ty));
+          if (spec->hasZeroView) {
+            Value qz = p.dot.getOperand(3);
+            Value qzRaw = readPackedI32(
+                qz, t.address(qz, {grp, packCol}, {0, 1}), rhsMask);
+            Value zCode = b.create<arith::AndIOp>(
+                loc, b.create<arith::ShRUIOp>(loc, qzRaw, colShift2D),
+                lit(codeMaskVal, rhsI32Ty));
+            wCode = b.create<arith::SubIOp>(loc, wCode, zCode);
+          }
+          if (spec->zeroBias != 0)
+            wCode =
+                b.create<arith::SubIOp>(loc, wCode, lit(spec->zeroBias, rhsI32Ty));
+          Value wF32 = decodeQuantCode(wCode, *spec);
+          Value scVal = t.read(sc, t.address(sc, {grp, col}, {0, 1}), rhsMask);
+          if (!t.elem(scVal.getType()).isF32())
+            scVal = castTo("arith.extf", scVal, b.getF32Type());
+          Value rhsF32 = b.create<arith::MulFOp>(loc, wF32, scVal);
+          auto rhsTy = RankedTensorType::get({p.tile[2], p.tile[1]}, lhsElem);
+          Value rhsCast = lhsElem.isF32()
+                              ? rhsF32
+                              : castTo("arith.truncf", rhsF32, lhsElem);
+          auto zeroRhs = b.create<arith::ConstantOp>(
+              loc, rhsTy, DenseElementsAttr::get(rhsTy, b.getZeroAttr(lhsElem)));
+          Value rhsMasked =
+              b.create<arith::SelectOp>(loc, rhsMask, rhsCast, zeroRhs);
+          return t.dot(lhs, rhsMasked, false, acc);
+        });
+  }
   void run(ScaledPanelLowering native, WindowPanelLowering windowNative,
            MatrixPanelWrite writeNative) {
     bool records = p.dot.getName().stripDialect() == "q4k_dot";
+    bool isQuant = p.dot.getName().stripDialect() == "quant_contract";
     bool hasWindow = p.dot.getName().stripDialect() == "window_contract";
+    bool is1D = records || (isQuant && p.rank(p.domain.getOperand(0)) == 1);
     Value batch, chunk, head;
     Value acc;
     if (records)
       acc = record();
+    else if (isQuant)
+      acc = quantized();
     else if (hasWindow) {
       if (windowNative)
         acc = windowNative(t, p, batch, chunk, head);
@@ -404,8 +762,8 @@ struct Panel {
       auto code = op.getName().stripDialect();
       if (code == "add_columns") {
         auto view = op.getOperand(1), old = map.lookup(op.getOperand(0));
-        auto bias = t.read(view, t.address(view, records ? row : col, {0}),
-                           records ? validRow : validCol);
+        auto bias = t.read(view, t.address(view, is1D ? row : col, {0}),
+                           is1D ? validRow : validCol);
         map.map(op.getResult(0), b.create<arith::AddFOp>(
                                      loc, old, t.like(bias, old.getType(), 1)));
       } else if (code == "convert_matrix") {
@@ -421,14 +779,14 @@ struct Panel {
         SmallVector<Value, 3> batches;
         if (hasWindow)
           batches.assign({batch, chunk, head});
-        if (!records && writeNative && writeNative(t, p, y, value, batches))
+        if (!is1D && writeNative && writeNative(t, p, y, value, batches))
           continue;
-        auto ptr = records     ? t.address(y, row, {0})
+        auto ptr = is1D      ? t.address(y, row, {0})
                    : hasWindow ? t.address(y, {batch, chunk, head, row, col},
                                            {-1, -1, -1, 0, 1})
                                : t.address(y, {row, col}, {0, 1});
         t.write(y, ptr, value,
-                records ? validRow : pairMask(validRow, validCol));
+                is1D ? validRow : pairMask(validRow, validCol));
       }
     }
   }

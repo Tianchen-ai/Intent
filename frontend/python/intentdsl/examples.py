@@ -10,6 +10,8 @@ from .group7 import (sliding_window_attention, alibi_attention, cross_entropy,
 from .group7_cpu import (embedding_bag, index_add, triangular_solve,
                          log_softmax_kl, retention_recurrence, radix_pass,
                          layer_norm_welford)
+from .group7_dsa import (q6k_gemv, mxfp4_gemm, awq_int4_gemm,
+                         depthwise_conv2d, gemm_nt)
 
 @I.kernel
 def count_routes(ids:I.In[I.i32,(4096,2)], counts:I.InOut[I.i32,(64,)]):

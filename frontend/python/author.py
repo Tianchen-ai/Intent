@@ -19,7 +19,7 @@ def root_ir(source: bytes) -> bytes:
         from .ordered import Ordered
         return Ordered(definition).capture()
     if any(isinstance(n,ast.Call) and isinstance(n.func,ast.Attribute) and
-           n.func.attr in {"contract","window_contract","scaled_contract","q4k_dot"} for n in ast.walk(definition)):
+           n.func.attr in {"contract","window_contract","scaled_contract","q4k_dot","quant_contract"} for n in ast.walk(definition)):
         from .contractions import capture
         return capture(definition)
     return Capture(definition).capture()

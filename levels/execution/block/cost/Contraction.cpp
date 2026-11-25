@@ -1,4 +1,5 @@
 #include "intentdsl/levels/execution/block/ir/Contraction.h"
+#include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 namespace CI_UNIT_NAMESPACE {
 using namespace compilerinfra;
 void matrixCost(Unit &u) {
@@ -12,18 +13,42 @@ void matrixCost(Unit &u) {
             return shape.takeError();
           auto tile = mlir::cast<mlir::DenseI64ArrayAttr>(c.value);
           double tm = tile[0], tn = tile[1], tk = tile[2];
-          bool records =
-              llvm::any_of(op->getRegion(0).front(), [](mlir::Operation &o) {
-                return o.getName().stripDialect() == "q4k_dot";
-              });
+          bool records = false;
+          double recordBytes = 144.0, recordElems = 256.0;
+          const intentdsl::kir::QuantFormatSpec *qSpec = nullptr;
+          for (mlir::Operation &o : op->getRegion(0).front()) {
+            auto k = o.getName().stripDialect();
+            if (k == "q4k_dot") {
+              records = true;
+            } else if (k == "quant_contract") {
+              qSpec = intentdsl::kir::quantFormatSpec(o);
+              if (qSpec &&
+                  qSpec->roleLayout == intentdsl::kir::QuantRoleLayout::RecordGemv) {
+                records = true;
+                recordBytes = qSpec->recordBytes;
+                recordElems = qSpec->blockElements;
+              }
+            }
+          }
           double jobs = shape->batches * std::ceil(shape->m / tm) *
                         std::ceil(shape->n / tn);
-          double panels =
-              records ? std::ceil(shape->k / 256.0) : std::ceil(shape->k / tk);
+          double panels = records ? std::ceil(shape->k / recordElems)
+                                  : std::ceil(shape->k / tk);
           double panelBytes =
-              records ? (tm * 144.0 + 256.0 * 4.0) : ((tm + tn) * tk * 2.0);
+              records ? (tm * recordBytes + recordElems * 4.0)
+              : (qSpec && qSpec->roleLayout ==
+                              intentdsl::kir::QuantRoleLayout::BlockScaledPair)
+                  ? ((tm + tn) * tk * (qSpec->packBits / 8.0 +
+                                       1.0 / std::max(1, qSpec->blockElements)))
+              : (qSpec && qSpec->roleLayout ==
+                              intentdsl::kir::QuantRoleLayout::GroupedWeightRhs)
+                  ? (tm * tk * 2.0 +
+                     tn * tk * (qSpec->packBits / 8.0 +
+                                2.5 / std::max(1, qSpec->blockElements)))
+                  : ((tm + tn) * tk * 2.0);
           double read =
-              records ? (shape->batches * panels * (shape->m * 144.0 + 1024.0))
+              records ? (shape->batches * panels *
+                         (shape->m * recordBytes + recordElems * 4.0))
                       : (jobs * panels * panelBytes);
           double waves =
               std::ceil(jobs / std::max<int64_t>(1, f->participants));
@@ -42,8 +67,9 @@ void matrixCost(Unit &u) {
           e.terms["panel_load_issues"] = {issues, "count"};
           auto sync = intentdsl::quantity(ctx, "sync", "ns");
           double waveBytes =
-              records ? (tm * 144.0 * std::max<int64_t>(1, f->participants) +
-                         1024.0)
+              records ? (tm * recordBytes *
+                             std::max<int64_t>(1, f->participants) +
+                         recordElems * 4.0)
                       : (panelBytes * std::max<int64_t>(1, f->participants));
           if (bw && startup)
             e.timeNs = *startup + read / *bw +

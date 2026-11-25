@@ -1,4 +1,5 @@
 #include "intentdsl/levels/execution/block/ir/Contraction.h"
+#include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 #include "mlir/IR/PatternMatch.h"
 namespace CI_UNIT_NAMESPACE {
 using namespace mlir;
@@ -47,10 +48,29 @@ void registerContraction(Unit &u) {
     std::vector<StructuralCandidate> rows;
     std::vector<std::string> implementations;
     for (auto &operation : op->getRegion(0).front()) {
-      auto found =
-          caps->implementations.find(operation.getName().stripDialect().str());
-      if (found != caps->implementations.end())
+      auto opName = operation.getName().stripDialect();
+      auto found = caps->implementations.find(opName.str());
+      if (found != caps->implementations.end()) {
         llvm::append_range(implementations, found->second);
+      } else if (opName == "quant_contract") {
+        if (const auto *spec = kir::quantFormatSpec(operation)) {
+          auto addFallback = [&](llvm::StringRef key) {
+            auto it = caps->implementations.find(key.str());
+            if (it != caps->implementations.end())
+              for (const auto &impl : it->second)
+                if (!llvm::is_contained(implementations, impl))
+                  implementations.push_back(impl);
+          };
+          if (spec->roleLayout == kir::QuantRoleLayout::RecordGemv) {
+            addFallback("q4k_dot");
+          } else if (spec->roleLayout == kir::QuantRoleLayout::BlockScaledPair) {
+            addFallback("contract");
+            addFallback("q4k_dot");
+          } else {
+            addFallback("contract");
+          }
+        }
+      }
     }
     for (auto &t : caps->tiles) {
       auto choice = b.getDenseI64ArrayAttr({t.m, t.n, t.k});

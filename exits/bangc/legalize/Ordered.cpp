@@ -7,11 +7,13 @@
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/Matchers.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/Support/JSON.h"
 #include <cmath>
 #include <limits>
 #include <set>
+#include <tuple>
 
 namespace CI_UNIT_NAMESPACE {
 using namespace mlir;
@@ -93,16 +95,19 @@ struct OrderedLowerer {
     return b.create<arith::ExtSIOp>(loc, b.getI64Type(), v).getResult();
   }
 
-  Value floorDivI64(Value lhs, Value rhs) {
+  Value floorDivSI(Value lhs, Value rhs) {
+    Type ty = lhs.getType();
+    Value zero = ty.isInteger(32) ? cI32(0) : cI64(0);
+    Value one = ty.isInteger(32) ? cI32(1) : cI64(1);
     Value q = b.create<arith::DivSIOp>(loc, lhs, rhs);
     Value r = b.create<arith::RemSIOp>(loc, lhs, rhs);
-    Value nz = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, r, cI64(0));
+    Value nz = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, r, zero);
     Value diffSign = b.create<arith::CmpIOp>(
         loc, arith::CmpIPredicate::slt, b.create<arith::XOrIOp>(loc, r, rhs),
-        cI64(0));
+        zero);
     Value adjust = b.create<arith::AndIOp>(loc, nz, diffSign);
     return b.create<arith::SelectOp>(
-        loc, adjust, b.create<arith::SubIOp>(loc, q, cI64(1)), q);
+        loc, adjust, b.create<arith::SubIOp>(loc, q, one), q);
   }
 
   Operation *makeOp(StringRef name, ValueRange operands, TypeRange results = {},
@@ -272,7 +277,56 @@ struct OrderedLowerer {
     if (n == "arith.index_cast") {
       if (op.getResult(0).getType().isIndex())
         return toI64(a(0));
-      return b.create<arith::TruncIOp>(loc, op.getResult(0).getType(), toI64(a(0)));
+      Value v64 = toI64(a(0));
+      if (op.getResult(0).getType().isSignlessInteger(64))
+        return v64;
+      return b.create<arith::TruncIOp>(loc, op.getResult(0).getType(), v64);
+    }
+    if (n == "arith.index_castui") {
+      Value u64 = a(0).getType().isSignlessInteger(64)
+                      ? a(0)
+                      : a(0).getType().isIndex()
+                            ? b.create<arith::IndexCastUIOp>(loc, b.getI64Type(),
+                                                             a(0))
+                                  .getResult()
+                            : b.create<arith::ExtUIOp>(loc, b.getI64Type(), a(0))
+                                  .getResult();
+      if (op.getResult(0).getType().isIndex() ||
+          op.getResult(0).getType().isSignlessInteger(64))
+        return u64;
+      return b.create<arith::TruncIOp>(loc, op.getResult(0).getType(), u64);
+    }
+    if (n == "arith.extsi")
+      return b.create<arith::ExtSIOp>(loc, op.getResult(0).getType(), a(0));
+    if (n == "arith.extui")
+      return b.create<arith::ExtUIOp>(loc, op.getResult(0).getType(), a(0));
+    if (n == "arith.trunci")
+      return b.create<arith::TruncIOp>(loc, op.getResult(0).getType(), a(0));
+    if (n == "arith.sitofp" || n == "arith.uitofp") {
+      Type to = op.getResult(0).getType();
+      Type mid = to.isBF16() ? Type(b.getF32Type()) : to;
+      Value fp = n == "arith.sitofp"
+                     ? b.create<arith::SIToFPOp>(loc, mid, a(0)).getResult()
+                     : b.create<arith::UIToFPOp>(loc, mid, a(0)).getResult();
+      if (to.isBF16())
+        return makeOp("bf16_scalar", {fp}, {b.getBF16Type()},
+                      {b.getNamedAttr("mode", b.getStringAttr("narrow"))},
+                      "bf16-scalar-convert")
+            ->getResult(0);
+      return fp;
+    }
+    if (n == "arith.fptosi" || n == "arith.fptoui") {
+      Value src = a(0);
+      if (src.getType().isBF16())
+        src = makeOp("bf16_scalar", {src}, {b.getF32Type()},
+                     {b.getNamedAttr("mode", b.getStringAttr("widen"))},
+                     "bf16-scalar-convert")
+                  ->getResult(0);
+      Type to = op.getResult(0).getType().isIndex() ? Type(b.getI64Type())
+                                                    : op.getResult(0).getType();
+      return n == "arith.fptosi"
+                 ? b.create<arith::FPToSIOp>(loc, to, src).getResult()
+                 : b.create<arith::FPToUIOp>(loc, to, src).getResult();
     }
     if (n == "arith.extf") {
       Type from = op.getOperand(0).getType();
@@ -296,23 +350,51 @@ struct OrderedLowerer {
       return makeOp("scalar_math", {a(0), a(1)}, {b.getF32Type()},
                     {b.getNamedAttr("op", b.getStringAttr("max_num"))})
           ->getResult(0);
+    if (n == "arith.minnumf")
+      return b.create<arith::MinNumFOp>(loc, a(0), a(1));
     if (n == "math.sqrt" || n == "math.exp" || n == "math.exp2" ||
-        n == "math.log")
+        n == "math.log" || n == "math.absf" || n == "math.floor") {
+      StringRef mOp = kind == "absf" ? "fabs" : kind;
       return makeOp("scalar_math", {a(0)}, {b.getF32Type()},
-                    {b.getNamedAttr("op", b.getStringAttr(kind))})
+                    {b.getNamedAttr("op", b.getStringAttr(mOp))})
           ->getResult(0);
+    }
     if (n == "arith.addi")
       return b.create<arith::AddIOp>(loc, a(0), a(1));
     if (n == "arith.subi")
       return b.create<arith::SubIOp>(loc, a(0), a(1));
     if (n == "arith.muli")
       return b.create<arith::MulIOp>(loc, a(0), a(1));
+    if (n == "arith.divsi")
+      return b.create<arith::DivSIOp>(loc, a(0), a(1));
+    if (n == "arith.divui")
+      return b.create<arith::DivUIOp>(loc, a(0), a(1));
     if (n == "arith.floordivsi")
-      return floorDivI64(a(0), a(1));
+      return floorDivSI(a(0), a(1));
     if (n == "arith.remsi")
       return b.create<arith::RemSIOp>(loc, a(0), a(1));
+    if (n == "arith.remui")
+      return b.create<arith::RemUIOp>(loc, a(0), a(1));
     if (n == "arith.minsi")
       return b.create<arith::MinSIOp>(loc, a(0), a(1));
+    if (n == "arith.maxsi")
+      return b.create<arith::MaxSIOp>(loc, a(0), a(1));
+    if (n == "arith.minui")
+      return b.create<arith::MinUIOp>(loc, a(0), a(1));
+    if (n == "arith.maxui")
+      return b.create<arith::MaxUIOp>(loc, a(0), a(1));
+    if (n == "arith.andi")
+      return b.create<arith::AndIOp>(loc, a(0), a(1));
+    if (n == "arith.ori")
+      return b.create<arith::OrIOp>(loc, a(0), a(1));
+    if (n == "arith.xori")
+      return b.create<arith::XOrIOp>(loc, a(0), a(1));
+    if (n == "arith.shli")
+      return b.create<arith::ShLIOp>(loc, a(0), a(1));
+    if (n == "arith.shrsi")
+      return b.create<arith::ShRSIOp>(loc, a(0), a(1));
+    if (n == "arith.shrui")
+      return b.create<arith::ShRUIOp>(loc, a(0), a(1));
     if (n == "arith.addf")
       return b.create<arith::AddFOp>(loc, a(0), a(1));
     if (n == "arith.subf")
@@ -321,8 +403,27 @@ struct OrderedLowerer {
       return b.create<arith::MulFOp>(loc, a(0), a(1));
     if (n == "arith.divf")
       return b.create<arith::DivFOp>(loc, a(0), a(1));
+    if (n == "arith.negf") {
+      Value z = b.create<arith::ConstantOp>(
+          loc, b.getZeroAttr(op.getResult(0).getType()));
+      return b.create<arith::SubFOp>(loc, z, a(0));
+    }
     if (auto cmp = dyn_cast<arith::CmpIOp>(op))
       return b.create<arith::CmpIOp>(loc, cmp.getPredicate(), a(0), a(1));
+    if (auto cmpf = dyn_cast<arith::CmpFOp>(op)) {
+      Value lhs = a(0), rhs = a(1);
+      if (lhs.getType().isBF16()) {
+        lhs = makeOp("bf16_scalar", {lhs}, {b.getF32Type()},
+                     {b.getNamedAttr("mode", b.getStringAttr("widen"))},
+                     "bf16-scalar-convert")
+                  ->getResult(0);
+        rhs = makeOp("bf16_scalar", {rhs}, {b.getF32Type()},
+                     {b.getNamedAttr("mode", b.getStringAttr("widen"))},
+                     "bf16-scalar-convert")
+                  ->getResult(0);
+      }
+      return b.create<arith::CmpFOp>(loc, cmpf.getPredicate(), lhs, rhs);
+    }
     if (auto sel = dyn_cast<arith::SelectOp>(op))
       return b.create<arith::SelectOp>(loc, a(0), a(1), a(2));
     return Value{};
@@ -375,8 +476,12 @@ struct OrderedLowerer {
     Value scalarOutBuf = nramPtr(storage, cI64(scratchOffs[2]), b.getF32Type());
     Value reduceScratch =
         nramPtr(storage, cI64(scratchOffs[2] + 128), b.getF32Type());
+    Value loBuf =
+        nramPtr(storage, cI64(scratchOffs[2] + 512), b.getI64Type());
+    Value hiBuf =
+        nramPtr(storage, cI64(scratchOffs[2] + 1024), b.getI64Type());
     Value convTmp =
-        nramPtr(storage, cI64(scratchOffs[2] + 512), b.getF32Type());
+        nramPtr(storage, cI64(scratchOffs[2] + 1536), b.getF32Type());
 
     auto sliceBasePtr = [&](Value view, ValueRange prefixCoords, Value rowOrTok) {
       int64_t rank = cast<MemRefType>(view.getType()).getRank();
@@ -448,7 +553,8 @@ struct OrderedLowerer {
                  makeConvAttrs(M, 64, Kdim), cKey);
           sync("compute");
         } else if (Cdim == 32) {
-          Value padNram = nramPtr(storage, cI64(scratchOffs[2] + 512), halfTy);
+          Value padNram =
+              nramPtr(storage, cI64(scratchOffs[2] + 1536), halfTy);
           fillVec(padNram, cI64(64 * Kdim),
                   b.create<arith::ConstantOp>(loc, b.getZeroAttr(halfTy)));
           memcpy1D(padNram, rhsFilterMajor, cI64(32 * Kdim), "NRAM2NRAM");
@@ -569,6 +675,9 @@ struct OrderedLowerer {
               llvm::DenseMap<Value, int64_t> panelFeat;
               llvm::DenseSet<Value> ownerScalars;
               llvm::DenseSet<Value> causalMaskedStrips;
+              llvm::DenseSet<Value> windowZeroedStrips;
+              bool curLoopHasWindow = false;
+              Value curStripT0;
 
               for (Value arg : fn.getArguments())
                 scalarEnv[arg] = arg;
@@ -638,11 +747,57 @@ struct OrderedLowerer {
                                     isExp2 ? "validated-exp2" : "validated-exp");
                            });
                   };
-                  if (singleRow)
+                  if (singleRow) {
                     emitOne(singleRow, activeCount);
-                  else
+                  } else if (curLoopHasWindow) {
+                    forLoop(cI64(0), cI64(M), cI64(1), [&](Value r) {
+                      Value rLo = b.create<arith::MinSIOp>(
+                          loc, activeCount,
+                          b.create<arith::MaxSIOp>(
+                              loc, cI64(0),
+                              b.create<arith::SubIOp>(
+                                  loc, loadAt(loBuf, r), curStripT0)));
+                      Value rHi = b.create<arith::MinSIOp>(
+                          loc, activeCount,
+                          b.create<arith::MaxSIOp>(
+                              loc, rLo,
+                              b.create<arith::SubIOp>(
+                                  loc, loadAt(hiBuf, r), curStripT0)));
+                      Value cnt = b.create<arith::SubIOp>(loc, rHi, rLo);
+                      Value dR = rowSlice(dstSlot, r);
+                      Value sR = rowSlice(srcSlot, r);
+                      ifThenElse(
+                          b.create<arith::CmpIOp>(
+                              loc, arith::CmpIPredicate::sgt, cnt, cI64(0)),
+                          {},
+                          [&]() {
+                            memcpy1D(convTmp, sR, cI64(S), "NRAM2NRAM");
+                            sync("io");
+                            forLoop(cI64(0), rLo, cI64(1), [&](Value j) {
+                              storeAt(convTmp, j, cF32(0.0f));
+                            });
+                            forLoop(rHi, cI64(S), cI64(1), [&](Value j) {
+                              storeAt(convTmp, j, cF32(0.0f));
+                            });
+                            sync("compute");
+                            makeOp(isExp2 ? "row_exp2" : "row_exp",
+                                   {dR, reduceScratch, convTmp, cI64(S),
+                                    cI64(S)},
+                                   {}, {},
+                                   isExp2 ? "validated-exp2" : "validated-exp");
+                            sync("compute");
+                            forLoop(cI64(0), rLo, cI64(1),
+                                    [&](Value j) { storeAt(dR, j, cF32(0.0f)); });
+                            forLoop(rHi, cI64(S), cI64(1),
+                                    [&](Value j) { storeAt(dR, j, cF32(0.0f)); });
+                          },
+                          [&]() { fillVec(dR, cI64(S), cF32(0.0f)); });
+                    });
+                    windowZeroedStrips.insert(eop.getResult(0));
+                  } else {
                     forLoop(cI64(0), cI64(M), cI64(1),
                             [&](Value r) { emitOne(r, activeCount); });
+                  }
                   return;
                 }
 
@@ -713,6 +868,22 @@ struct OrderedLowerer {
               for (Operation &op : bb.without_terminator()) {
                 auto roleAttr = op.getAttrOfType<StringAttr>("dsa.panel_role");
                 if (!roleAttr) {
+                  if (auto ld = dyn_cast<memref::LoadOp>(op)) {
+                    if (llvm::all_of(ld.getOperands(),
+                                     [&](Value u) { return scalarEnv.count(u); })) {
+                      SmallVector<Value> coords, strides;
+                      for (auto [ax, cv] : llvm::enumerate(ld.getIndices())) {
+                        coords.push_back(scalarEnv.lookup(cv));
+                        strides.push_back(
+                            cI64(dimAttr(ld.getMemref(), "block.strides", ax)));
+                      }
+                      scalarEnv[ld.getResult()] = loadAt(
+                          makeAddr(scalarEnv.lookup(ld.getMemref()), coords,
+                                   strides, 0),
+                          cI64(0), ld.getType());
+                    }
+                    continue;
+                  }
                   if (!isa<scf::ForOp, scf::IfOp>(op) &&
                       op.getNumResults() == 1 &&
                       !isa<RankedTensorType>(op.getResult(0).getType()) &&
@@ -753,10 +924,15 @@ struct OrderedLowerer {
                 }
 
                 if (role == "owner_scalar") {
-                  Value dst = slotAt(&op, 0, b.getF32Type());
+                  Type resTy = op.getResult(0).getType();
+                  Type slotTy = resTy.isIndex() ? Type(b.getI64Type()) : resTy;
+                  Value dst = slotAt(&op, 0, slotTy);
                   forLoop(cI64(0), cI64(M), cI64(1), [&](Value r) {
                     if (auto sif = dyn_cast<scf::IfOp>(op)) {
-                      Value cond = scalarEnv.lookup(sif.getCondition());
+                      Value condV = sif.getCondition();
+                      Value cond = ownerScalars.contains(condV)
+                                       ? loadAt(slotEnv.lookup(condV), r)
+                                       : scalarEnv.lookup(condV);
                       ifThenElse(
                           cond, {},
                           [&]() {
@@ -863,9 +1039,36 @@ struct OrderedLowerer {
 
                 if (role == "strip_loop") {
                   auto loop = cast<scf::ForOp>(op);
-                  auto dimOp = loop.getUpperBound().getDefiningOp<memref::DimOp>();
-                  int64_t K = dimAttr(dimOp.getSource(), "block.shape",
-                                      *dimOp.getConstantIndex());
+                  int64_t K = -1;
+                  bool ubIsFullDimK = false;
+                  if (auto dimOp =
+                          loop.getUpperBound().getDefiningOp<memref::DimOp>()) {
+                    int64_t dRank =
+                        cast<MemRefType>(dimOp.getSource().getType()).getRank();
+                    if (isa<BlockArgument>(dimOp.getSource()) &&
+                        dimOp.getConstantIndex() &&
+                        *dimOp.getConstantIndex() == size_t(dRank - 2)) {
+                      K = dimAttr(dimOp.getSource(), "block.shape",
+                                  *dimOp.getConstantIndex());
+                      ubIsFullDimK = true;
+                    }
+                  }
+                  if (K < 0) {
+                    for (Operation &bop : loop.getBody()->without_terminator()) {
+                      if (bop.getAttrOfType<StringAttr>("dsa.panel_role") ==
+                          StringAttr::get(b.getContext(), "strip_slice")) {
+                        Value kv = bop.getOperand(0);
+                        int64_t rk = cast<MemRefType>(kv.getType()).getRank();
+                        K = dimAttr(kv, "block.shape", rk - 2);
+                        break;
+                      }
+                    }
+                  }
+                  bool hasWindow =
+                      !matchPattern(loop.getLowerBound(), m_Zero()) ||
+                      !ubIsFullDimK;
+                  curLoopHasWindow = hasWindow;
+                  windowZeroedStrips.clear();
 
                   // Initialize all loop-carried slots from initArgs.
                   llvm::DenseMap<Operation *, unsigned> outerAccCarryIdx;
@@ -970,6 +1173,7 @@ struct OrderedLowerer {
                     }
                   }
 
+                  Value tStart = cI64(0);
                   Value tokLimit =
                       canTrimCausal
                           ? b.create<arith::MinSIOp>(
@@ -978,6 +1182,50 @@ struct OrderedLowerer {
                                  cI64(K))
                                 .getResult()
                           : cI64(K);
+
+                  if (hasWindow) {
+                    auto evalBoundAtRow = [&](Value bnd, Value r) -> Value {
+                      if (bnd == rowArg)
+                        return b.create<arith::AddIOp>(loc, rowBase, r);
+                      if (ownerScalars.contains(bnd))
+                        return toI64(loadAt(slotEnv.lookup(bnd), r));
+                      return toI64(scalarEnv.lookup(bnd));
+                    };
+                    auto winScan = forLoopCarry(
+                        cI64(0), cI64(M), cI64(1),
+                        ValueRange{cI64(K), cI64(0)},
+                        [&](Value r, ValueRange wSt) {
+                          Value rawLo = evalBoundAtRow(loop.getLowerBound(), r);
+                          Value rawHi = evalBoundAtRow(loop.getUpperBound(), r);
+                          Value cLo = b.create<arith::MinSIOp>(
+                              loc, cI64(K),
+                              b.create<arith::MaxSIOp>(loc, cI64(0), rawLo));
+                          Value cHi = b.create<arith::MinSIOp>(
+                              loc, cI64(K),
+                              b.create<arith::MaxSIOp>(loc, cLo, rawHi));
+                          storeAt(loBuf, r, cLo);
+                          storeAt(hiBuf, r, cHi);
+                          Value hasActive = b.create<arith::CmpIOp>(
+                              loc, arith::CmpIPredicate::slt, cLo, cHi);
+                          Value nMin = b.create<arith::SelectOp>(
+                              loc, hasActive,
+                              b.create<arith::MinSIOp>(loc, wSt[0], cLo),
+                              wSt[0]);
+                          Value nMax = b.create<arith::SelectOp>(
+                              loc, hasActive,
+                              b.create<arith::MaxSIOp>(loc, wSt[1], cHi),
+                              wSt[1]);
+                          b.create<scf::YieldOp>(loc, ValueRange{nMin, nMax});
+                        });
+                    sync("compute");
+                    tStart = b.create<arith::MulIOp>(
+                        loc,
+                        b.create<arith::DivSIOp>(loc, winScan.getResult(0),
+                                                 cI64(S)),
+                        cI64(S));
+                    tokLimit = b.create<arith::MinSIOp>(
+                        loc, tokLimit, winScan.getResult(1));
+                  }
 
                   auto causalLive = [&](Value r, Value t0, Value nt) {
                     return b.create<arith::MinSIOp>(
@@ -995,7 +1243,8 @@ struct OrderedLowerer {
                         nt);
                   };
 
-                  forLoop(cI64(0), tokLimit, cI64(S), [&](Value t0) {
+                  forLoop(tStart, tokLimit, cI64(S), [&](Value t0) {
+                    curStripT0 = t0;
                     Value nt = b.create<arith::MinSIOp>(
                         loc, b.create<arith::SubIOp>(loc, cI64(K), t0),
                         cI64(S));
@@ -1006,6 +1255,29 @@ struct OrderedLowerer {
                       if (!bRoleAttr)
                         continue;
                       StringRef bRole = bRoleAttr.getValue();
+
+                      if (bRole == "strip_index_f32") {
+                        Value dst = slotAt(&bop, 0, b.getF32Type());
+                        forLoop(cI64(0), cI64(S), cI64(1), [&](Value j) {
+                          Value tj = b.create<arith::TruncIOp>(
+                              loc, b.getI32Type(),
+                              b.create<arith::AddIOp>(loc, t0, j));
+                          storeAt(dst, j,
+                                  b.create<arith::SIToFPOp>(loc, b.getF32Type(),
+                                                            tj));
+                        });
+                        sync("compute");
+                        for (int64_t d = 1; d < M; d *= 2) {
+                          int64_t copyRows = std::min<int64_t>(d, M - d);
+                          if (copyRows > 0) {
+                            memcpy1D(makeAddr(dst, {cI64(d)}, {cI64(S)}, 1), dst,
+                                     cI64(copyRows * S), "NRAM2NRAM");
+                            sync("io");
+                          }
+                        }
+                        slotEnv[bop.getResult(0)] = dst;
+                        continue;
+                      }
 
                       if (bRole == "strip_slice") {
                         Value kView = bop.getOperand(0);
@@ -1153,7 +1425,33 @@ struct OrderedLowerer {
                       if (bRole == "strip_narrow") {
                         Value srcVal = bop.getOperand(0);
                         Value srcSlot = slotEnv.lookup(srcVal);
-                        if (!causalMaskedStrips.contains(srcVal)) {
+                        if (hasWindow && !windowZeroedStrips.contains(srcVal) &&
+                            !causalMaskedStrips.contains(srcVal)) {
+                          sync("compute");
+                          forLoop(cI64(0), cI64(M), cI64(1), [&](Value r) {
+                            Value sRow = makeAddr(srcSlot, {r}, {cI64(S)}, 1);
+                            Value rLo = b.create<arith::MinSIOp>(
+                                loc, nt,
+                                b.create<arith::MaxSIOp>(
+                                    loc, cI64(0),
+                                    b.create<arith::SubIOp>(
+                                        loc, loadAt(loBuf, r), t0)));
+                            Value rHi = b.create<arith::MinSIOp>(
+                                loc, nt,
+                                b.create<arith::MaxSIOp>(
+                                    loc, rLo,
+                                    b.create<arith::SubIOp>(
+                                        loc, loadAt(hiBuf, r), t0)));
+                            forLoop(cI64(0), rLo, cI64(1), [&](Value j) {
+                              storeAt(sRow, j, cF32(0.0f));
+                            });
+                            forLoop(rHi, cI64(S), cI64(1), [&](Value j) {
+                              storeAt(sRow, j, cF32(0.0f));
+                            });
+                          });
+                          sync("compute");
+                        } else if (!windowZeroedStrips.contains(srcVal) &&
+                                   !causalMaskedStrips.contains(srcVal)) {
                           ifThen(b.create<arith::CmpIOp>(
                                      loc, arith::CmpIPredicate::slt, nt,
                                      cI64(S)),
@@ -1211,39 +1509,106 @@ struct OrderedLowerer {
                       Value stripSlot = slotEnv.lookup(stripV);
                       bool isMax = isa<arith::MaxNumFOp>(comb);
                       bool masked = causalMaskedStrips.contains(stripV);
-                      forLoop(cI64(0), cI64(M), cI64(1), [&](Value r) {
-                        Value cnt = masked ? causalLive(r, t0, nt) : nt;
-                        ifThen(b.create<arith::CmpIOp>(
-                                   loc, arith::CmpIPredicate::sgt, cnt, cI64(0)),
-                               [&]() {
-                                 Value sRow =
-                                     makeAddr(stripSlot, {r}, {cI64(S)}, 1);
-                                 makeOp("row_reduce",
-                                        {scalarOutBuf, reduceScratch, sRow,
-                                         cI64(1), cI64(S), cnt},
-                                        {},
-                                        {b.getNamedAttr(
-                                            "algebra",
-                                            b.getStringAttr(isMax ? "max_num"
-                                                                  : "sum"))},
-                                        "row-reduce");
-                                 Value cur = loadAt(carrySlot, r);
-                                 Value blk = loadAt(scalarOutBuf, cI64(0));
-                                 Value nxt =
-                                     isMax
-                                         ? makeOp("scalar_math", {cur, blk},
-                                                  {b.getF32Type()},
-                                                  {b.getNamedAttr(
-                                                      "op", b.getStringAttr(
-                                                                "max_num"))})
-                                               ->getResult(0)
-                                         : b.create<arith::AddFOp>(loc, cur, blk)
-                                               .getResult();
-                                 storeAt(carrySlot, r, nxt);
-                               });
-                      });
+                      bool zeroed = windowZeroedStrips.contains(stripV);
+                      if (hasWindow) {
+                        Value padId = isMax
+                                          ? cF32(-std::numeric_limits<float>::infinity())
+                                          : cF32(0.0f);
+                        forLoop(cI64(0), cI64(M), cI64(1), [&](Value r) {
+                          Value rLo = b.create<arith::MinSIOp>(
+                              loc, nt,
+                              b.create<arith::MaxSIOp>(
+                                  loc, cI64(0),
+                                  b.create<arith::SubIOp>(
+                                      loc, loadAt(loBuf, r), t0)));
+                          Value hiLim = masked ? causalLive(r, t0, nt) : nt;
+                          Value rHi = b.create<arith::MinSIOp>(
+                              loc, hiLim,
+                              b.create<arith::MaxSIOp>(
+                                  loc, rLo,
+                                  b.create<arith::SubIOp>(
+                                      loc, loadAt(hiBuf, r), t0)));
+                          Value cnt = b.create<arith::SubIOp>(loc, rHi, rLo);
+                          ifThen(
+                              b.create<arith::CmpIOp>(
+                                  loc, arith::CmpIPredicate::sgt, cnt, cI64(0)),
+                              [&]() {
+                                Value sRow =
+                                    makeAddr(stripSlot, {r}, {cI64(S)}, 1);
+                                Value redIn = sRow;
+                                if (isMax || !zeroed || masked) {
+                                  memcpy1D(convTmp, sRow, cI64(S), "NRAM2NRAM");
+                                  sync("io");
+                                  forLoop(cI64(0), rLo, cI64(1), [&](Value j) {
+                                    storeAt(convTmp, j, padId);
+                                  });
+                                  forLoop(rHi, cI64(S), cI64(1), [&](Value j) {
+                                    storeAt(convTmp, j, padId);
+                                  });
+                                  sync("compute");
+                                  redIn = convTmp;
+                                }
+                                makeOp("row_reduce",
+                                       {scalarOutBuf, reduceScratch, redIn,
+                                        cI64(1), cI64(S), cI64(S)},
+                                       {},
+                                       {b.getNamedAttr(
+                                           "algebra",
+                                           b.getStringAttr(isMax ? "max_num"
+                                                                 : "sum"))},
+                                       "row-reduce");
+                                Value cur = loadAt(carrySlot, r);
+                                Value blk = loadAt(scalarOutBuf, cI64(0));
+                                Value nxt =
+                                    isMax
+                                        ? makeOp("scalar_math", {cur, blk},
+                                                 {b.getF32Type()},
+                                                 {b.getNamedAttr(
+                                                     "op", b.getStringAttr(
+                                                               "max_num"))})
+                                              ->getResult(0)
+                                        : b.create<arith::AddFOp>(loc, cur, blk)
+                                              .getResult();
+                                storeAt(carrySlot, r, nxt);
+                              });
+                        });
+                      } else {
+                        forLoop(cI64(0), cI64(M), cI64(1), [&](Value r) {
+                          Value cnt = masked ? causalLive(r, t0, nt) : nt;
+                          ifThen(
+                              b.create<arith::CmpIOp>(
+                                  loc, arith::CmpIPredicate::sgt, cnt, cI64(0)),
+                              [&]() {
+                                Value sRow =
+                                    makeAddr(stripSlot, {r}, {cI64(S)}, 1);
+                                makeOp("row_reduce",
+                                       {scalarOutBuf, reduceScratch, sRow,
+                                        cI64(1), cI64(S), cnt},
+                                       {},
+                                       {b.getNamedAttr(
+                                           "algebra",
+                                           b.getStringAttr(isMax ? "max_num"
+                                                                 : "sum"))},
+                                       "row-reduce");
+                                Value cur = loadAt(carrySlot, r);
+                                Value blk = loadAt(scalarOutBuf, cI64(0));
+                                Value nxt =
+                                    isMax
+                                        ? makeOp("scalar_math", {cur, blk},
+                                                 {b.getF32Type()},
+                                                 {b.getNamedAttr(
+                                                     "op", b.getStringAttr(
+                                                               "max_num"))})
+                                              ->getResult(0)
+                                        : b.create<arith::AddFOp>(loc, cur, blk)
+                                              .getResult();
+                                storeAt(carrySlot, r, nxt);
+                              });
+                        });
+                      }
                     }
                   });
+                  curLoopHasWindow = false;
                   continue;
                 }
               }
@@ -1715,11 +2080,427 @@ struct OrderedLowerer {
 
   // General single-owner lowering (direct, stage-slab, or 1-owner streams).
   struct GeneralState {
-    Value storage, streambuf, deferred, slabLocal, poolScratch, scalarOut;
+    Value storage, streambuf, deferred, slabLocal, poolScratch, scalarOut,
+        vecPool;
     int64_t slabBytes = 0;
     llvm::DenseMap<Value, Value> env;
     llvm::DenseMap<Operation *, Value> streams;
   };
+
+  static constexpr int64_t kVecStreamChunk = 1024;
+  static constexpr int64_t kVecStreamPoolBytes = 8 * kVecStreamChunk * 4 + 256;
+
+  bool canVectorizeStreamLoop(scf::ForOp loop) {
+    if (loop->getParentOp() != &space ||
+        !matchPattern(loop.getLowerBound(), m_Zero()) ||
+        !matchPattern(loop.getStep(), m_One()))
+      return false;
+    auto dimOp = loop.getUpperBound().getDefiningOp<memref::DimOp>();
+    if (!dimOp || !isa<BlockArgument>(dimOp.getSource()) ||
+        !dimOp.getConstantIndex())
+      return false;
+    int64_t N =
+        dimAttr(dimOp.getSource(), "block.shape", *dimOp.getConstantIndex());
+    if (N < 64 || N > 0x3fffffffLL || N % 32 != 0)
+      return false;
+
+    bool isRed = loop.getNumResults() == 1 && loop->hasAttr("kir.reassociate") &&
+                 loop.getResult(0).getType().isF32();
+    bool isMap = loop.getNumResults() == 0;
+    if (!isRed && !isMap)
+      return false;
+
+    Value iv = loop.getInductionVar();
+    Block &body = *loop.getBody();
+    auto *yieldOp = body.getTerminator();
+    Operation *redComb = nullptr;
+    if (isRed) {
+      redComb = yieldOp->getOperand(0).getDefiningOp();
+      Value iterV = loop.getRegionIterArgs()[0];
+      if (!redComb || redComb->getBlock() != &body || !redComb->hasOneUse() ||
+          !isa<arith::MaxNumFOp, arith::AddFOp>(redComb) ||
+          (redComb->getOperand(0) != iterV && redComb->getOperand(1) != iterV))
+        return false;
+    }
+
+    auto checkContig1DAccess = [&](Value view, ValueRange indices) -> bool {
+      if (!isa<BlockArgument>(view))
+        return false;
+      Type et = cast<MemRefType>(view.getType()).getElementType();
+      if (!et.isF32() && !et.isF16() && !et.isBF16())
+        return false;
+      int64_t rank = cast<MemRefType>(view.getType()).getRank();
+      if (rank < 1 || int64_t(indices.size()) != rank ||
+          indices.back() != iv ||
+          dimAttr(view, "block.strides", rank - 1) != 1 ||
+          dimAttr(view, "block.shape", rank - 1) < N)
+        return false;
+      return llvm::all_of(indices.drop_back(), [&](Value c) {
+        return loop.isDefinedOutsideOfLoop(c);
+      });
+    };
+
+    llvm::DenseSet<Value> vecF32, vecHalf, invSc;
+    int numStores = 0;
+    for (Operation &bop : body.without_terminator()) {
+      if (&bop == redComb)
+        continue;
+      if (auto ld = dyn_cast<memref::LoadOp>(bop)) {
+        if (!checkContig1DAccess(ld.getMemref(), ld.getIndices()))
+          return false;
+        if (ld.getType().isF32())
+          vecF32.insert(ld.getResult());
+        else
+          vecHalf.insert(ld.getResult());
+        continue;
+      }
+      if (auto stOp = dyn_cast<memref::StoreOp>(bop)) {
+        if (!isMap || !checkContig1DAccess(stOp.getMemref(), stOp.getIndices()))
+          return false;
+        Value val = stOp.getValue();
+        if (!vecF32.contains(val) && !vecHalf.contains(val))
+          return false;
+        ++numStores;
+        continue;
+      }
+      if (auto cmp = dyn_cast<arith::CmpIOp>(bop)) {
+        if (cmp.getPredicate() == arith::CmpIPredicate::eq &&
+            ((cmp.getLhs() == iv &&
+              loop.isDefinedOutsideOfLoop(cmp.getRhs())) ||
+             (cmp.getRhs() == iv &&
+              loop.isDefinedOutsideOfLoop(cmp.getLhs()))))
+          continue;
+        return false;
+      }
+      if (auto iff = dyn_cast<scf::IfOp>(bop)) {
+        if (!isMap || iff.getNumResults() != 1 ||
+            !iff.getResult(0).getType().isF32() || iff.getElseRegion().empty())
+          return false;
+        auto cmp = iff.getCondition().getDefiningOp<arith::CmpIOp>();
+        if (!cmp || cmp.getPredicate() != arith::CmpIPredicate::eq ||
+            !((cmp.getLhs() == iv &&
+               loop.isDefinedOutsideOfLoop(cmp.getRhs())) ||
+              (cmp.getRhs() == iv &&
+               loop.isDefinedOutsideOfLoop(cmp.getLhs()))))
+          return false;
+        if (!iff.elseBlock()->without_terminator().empty())
+          return false;
+        Value baseV = iff.elseBlock()->getTerminator()->getOperand(0);
+        if (!vecF32.contains(baseV))
+          return false;
+        Operation *adjOp = nullptr;
+        for (Operation &tOp : iff.thenBlock()->without_terminator()) {
+          if (isa<arith::ConstantOp>(tOp) && tOp.getResult(0).getType().isF32()) {
+            invSc.insert(tOp.getResult(0));
+            continue;
+          }
+          if (!adjOp && isa<arith::AddFOp, arith::SubFOp>(tOp) &&
+              tOp.getResult(0).getType().isF32()) {
+            adjOp = &tOp;
+            continue;
+          }
+          return false;
+        }
+        if (!adjOp ||
+            iff.thenBlock()->getTerminator()->getOperand(0) !=
+                adjOp->getResult(0))
+          return false;
+        Value o0 = adjOp->getOperand(0), o1 = adjOp->getOperand(1);
+        auto isInv = [&](Value v) {
+          return loop.isDefinedOutsideOfLoop(v) || invSc.contains(v);
+        };
+        if (!(o0 == baseV && isInv(o1)) &&
+            !(isa<arith::AddFOp>(adjOp) && o1 == baseV && isInv(o0)))
+          return false;
+        vecF32.insert(iff.getResult(0));
+        continue;
+      }
+      StringRef fnName = bop.getName().getStringRef();
+      if (isa<arith::ConstantOp>(bop) && bop.getResult(0).getType().isF32()) {
+        invSc.insert(bop.getResult(0));
+        continue;
+      }
+      if (fnName == "arith.extf" && bop.getResult(0).getType().isF32() &&
+          vecHalf.contains(bop.getOperand(0))) {
+        vecF32.insert(bop.getResult(0));
+        continue;
+      }
+      if (fnName == "arith.truncf" &&
+          (bop.getResult(0).getType().isBF16() ||
+           bop.getResult(0).getType().isF16()) &&
+          vecF32.contains(bop.getOperand(0))) {
+        vecHalf.insert(bop.getResult(0));
+        continue;
+      }
+      if ((fnName == "math.exp" || fnName == "math.exp2") &&
+          vecF32.contains(bop.getOperand(0))) {
+        vecF32.insert(bop.getResult(0));
+        continue;
+      }
+      if ((fnName == "arith.addf" || fnName == "arith.subf" ||
+           fnName == "arith.mulf") &&
+          bop.getResult(0).getType().isF32()) {
+        Value u0 = bop.getOperand(0), u1 = bop.getOperand(1);
+        auto okS = [&](Value v) {
+          return v.getType().isF32() &&
+                 (loop.isDefinedOutsideOfLoop(v) || invSc.contains(v));
+        };
+        if ((vecF32.contains(u0) && vecF32.contains(u1)) ||
+            (vecF32.contains(u0) && okS(u1)) ||
+            (okS(u0) && vecF32.contains(u1))) {
+          vecF32.insert(bop.getResult(0));
+          continue;
+        }
+      }
+      return false;
+    }
+
+    if (isRed) {
+      Value iterV = loop.getRegionIterArgs()[0];
+      Value rhs = redComb->getOperand(0) == iterV ? redComb->getOperand(1)
+                                                  : redComb->getOperand(0);
+      return vecF32.contains(rhs);
+    }
+    return numStores > 0;
+  }
+
+  bool tryEmitVectorStreamLoop(scf::ForOp loop, GeneralState &st) {
+    if (!st.vecPool || !canVectorizeStreamLoop(loop))
+      return false;
+
+    auto dimOp = loop.getUpperBound().getDefiningOp<memref::DimOp>();
+    int64_t N =
+        dimAttr(dimOp.getSource(), "block.shape", *dimOp.getConstantIndex());
+    bool isRed = loop.getNumResults() == 1;
+    Block &body = *loop.getBody();
+    auto *yieldOp = body.getTerminator();
+    Operation *redComb =
+        isRed ? yieldOp->getOperand(0).getDefiningOp() : nullptr;
+
+    // Partition vecPool: slots 0..5 = work vectors (1024 f32 = 4096B each),
+    // slot 6 = exp/reduce scratch (4096B), slot 7 = scalarOut (128B) + narrowScratch (2048B).
+    auto workSlot = [&](int idx, Type elemTy) {
+      return nramPtr(st.vecPool, cI64((idx % 6) * kVecStreamChunk * 4), elemTy);
+    };
+    Value expRedScratch =
+        nramPtr(st.vecPool, cI64(6 * kVecStreamChunk * 4), b.getF32Type());
+    Value redScalarOut =
+        nramPtr(st.vecPool, cI64(7 * kVecStreamChunk * 4), b.getF32Type());
+    Value narrowScratch = nramPtr(
+        st.vecPool, cI64(7 * kVecStreamChunk * 4 + 128), b.getBF16Type());
+
+    auto streamChunkGlobalPtr = [&](Value view, ValueRange indices, Value c0) {
+      SmallVector<Value> addrC, addrS;
+      for (auto [ax, cv] : llvm::enumerate(indices.drop_back())) {
+        addrC.push_back(st.env.lookup(cv));
+        addrS.push_back(cI64(dimAttr(view, "block.strides", ax)));
+      }
+      addrC.push_back(c0);
+      addrS.push_back(cI64(1));
+      return makeAddr(st.env.lookup(view), addrC, addrS, 0);
+    };
+
+    auto emitChunkBody = [&](Value c0, Value curLanes,
+                             llvm::DenseMap<Value, Value> &vecEnv) {
+      llvm::DenseMap<Value, Value> scEnv = st.env;
+      int nextSlot = 0;
+      for (Operation &bop : body.without_terminator()) {
+        if (&bop == redComb || isa<arith::CmpIOp>(bop))
+          continue;
+        if (auto cst = dyn_cast<arith::ConstantOp>(bop)) {
+          scEnv[cst.getResult()] = lowerScalarExpr(bop, scEnv);
+          continue;
+        }
+        if (auto ld = dyn_cast<memref::LoadOp>(bop)) {
+          Value dst = workSlot(nextSlot++, ld.getType());
+          memcpy1D(dst,
+                   streamChunkGlobalPtr(ld.getMemref(), ld.getIndices(), c0),
+                   curLanes, "GDRAM2NRAM");
+          sync("io");
+          vecEnv[ld.getResult()] = dst;
+          continue;
+        }
+        if (auto stOp = dyn_cast<memref::StoreOp>(bop)) {
+          Value src = vecEnv.lookup(stOp.getValue());
+          sync("compute");
+          memcpy1D(
+              streamChunkGlobalPtr(stOp.getMemref(), stOp.getIndices(), c0),
+              src, curLanes, "NRAM2GDRAM");
+          sync("io");
+          continue;
+        }
+        if (auto iff = dyn_cast<scf::IfOp>(bop)) {
+          auto cmp = iff.getCondition().getDefiningOp<arith::CmpIOp>();
+          Value targetIdx = cmp.getLhs() == loop.getInductionVar()
+                                ? scEnv.lookup(cmp.getRhs())
+                                : scEnv.lookup(cmp.getLhs());
+          Value baseV = iff.elseBlock()->getTerminator()->getOperand(0);
+          Value dst = workSlot(nextSlot++, b.getF32Type());
+          memcpy1D(dst, vecEnv.lookup(baseV), curLanes, "NRAM2NRAM");
+          sync("io");
+          Operation *adjOp = nullptr;
+          for (Operation &tOp : iff.thenBlock()->without_terminator()) {
+            if (isa<arith::ConstantOp>(tOp))
+              scEnv[tOp.getResult(0)] = lowerScalarExpr(tOp, scEnv);
+            else
+              adjOp = &tOp;
+          }
+          Value deltaV = adjOp->getOperand(0) == baseV
+                             ? scEnv.lookup(adjOp->getOperand(1))
+                             : scEnv.lookup(adjOp->getOperand(0));
+          Value t64 = toI64(targetIdx);
+          Value hi32 = b.create<arith::TruncIOp>(
+              loc, b.getI32Type(),
+              b.create<arith::ShRUIOp>(loc, t64, cI64(32)));
+          Value t32 = b.create<arith::TruncIOp>(loc, b.getI32Type(), t64);
+          Value c0_32 = b.create<arith::TruncIOp>(loc, b.getI32Type(), c0);
+          Value lanes32 =
+              b.create<arith::TruncIOp>(loc, b.getI32Type(), curLanes);
+          Value cEnd32 = b.create<arith::AddIOp>(loc, c0_32, lanes32);
+          Value inChunk = b.create<arith::AndIOp>(
+              loc,
+              b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, hi32,
+                                      cI32(0)),
+              b.create<arith::AndIOp>(
+                  loc,
+                  b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge, t32,
+                                          c0_32),
+                  b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, t32,
+                                          cEnd32)));
+          Value rel32 = b.create<arith::SubIOp>(loc, t32, c0_32);
+          Value safeRel32 =
+              b.create<arith::SelectOp>(loc, inChunk, rel32, cI32(0));
+          Value safeRel =
+              b.create<arith::ExtUIOp>(loc, b.getI64Type(), safeRel32);
+          sync("all");
+          Value cur = loadAt(dst, safeRel, b.getF32Type());
+          Value adjDelta =
+              b.create<arith::SelectOp>(loc, inChunk, deltaV, cF32(0.0f));
+          Value upd = isa<arith::SubFOp>(adjOp)
+                          ? b.create<arith::SubFOp>(loc, cur, adjDelta)
+                                .getResult()
+                          : b.create<arith::AddFOp>(loc, cur, adjDelta)
+                                .getResult();
+          storeAt(dst, safeRel, upd);
+          sync("all");
+          vecEnv[iff.getResult(0)] = dst;
+          continue;
+        }
+        StringRef fnName = bop.getName().getStringRef();
+        if (fnName == "arith.extf") {
+          Type fromTy = bop.getOperand(0).getType();
+          Value dst = workSlot(nextSlot++, b.getF32Type());
+          Value src = vecEnv.lookup(bop.getOperand(0));
+          if (fromTy.isBF16())
+            makeOp("bf16_tile", {dst, src, curLanes, curLanes}, {},
+                   {b.getNamedAttr("mode", b.getStringAttr("widen"))},
+                   "bf16-tile-convert");
+          else
+            makeOp("vec_cast", {dst, src, curLanes}, {},
+                   {b.getNamedAttr("kind", b.getStringAttr("f16_to_f32"))});
+          sync("compute");
+          vecEnv[bop.getResult(0)] = dst;
+          continue;
+        }
+        if (fnName == "arith.truncf") {
+          Type toTy = bop.getResult(0).getType();
+          Value dst = workSlot(nextSlot++, toTy);
+          Value src = vecEnv.lookup(bop.getOperand(0));
+          if (toTy.isBF16())
+            makeOp("bf16_tile",
+                   {dst, src, narrowScratch, curLanes, curLanes}, {},
+                   {b.getNamedAttr("mode", b.getStringAttr("narrow"))},
+                   "bf16-tile-convert");
+          else
+            makeOp("vec_cast", {dst, src, curLanes}, {},
+                   {b.getNamedAttr("kind", b.getStringAttr("f32_to_f16"))});
+          sync("compute");
+          vecEnv[bop.getResult(0)] = dst;
+          continue;
+        }
+        if (fnName == "math.exp" || fnName == "math.exp2") {
+          bool isExp2 = fnName == "math.exp2";
+          Value dst = workSlot(nextSlot++, b.getF32Type());
+          Value src = vecEnv.lookup(bop.getOperand(0));
+          makeOp(isExp2 ? "row_exp2" : "row_exp",
+                 {dst, expRedScratch, src, curLanes, curLanes}, {}, {},
+                 isExp2 ? "validated-exp2" : "validated-exp");
+          sync("compute");
+          vecEnv[bop.getResult(0)] = dst;
+          continue;
+        }
+        StringRef opKind = fnName == "arith.addf"   ? "add"
+                           : fnName == "arith.subf" ? "sub"
+                                                    : "mul";
+        Value u0 = bop.getOperand(0), u1 = bop.getOperand(1);
+        bool v0 = vecEnv.contains(u0), v1 = vecEnv.contains(u1);
+        Value dst = workSlot(nextSlot++, b.getF32Type());
+        if (v0 && v1) {
+          makeOp("vec_binary",
+                 {dst, vecEnv.lookup(u0), vecEnv.lookup(u1), curLanes}, {},
+                 {b.getNamedAttr("op", b.getStringAttr(opKind))});
+        } else if (v0) {
+          makeOp("vec_scalar",
+                 {dst, vecEnv.lookup(u0), scEnv.lookup(u1), curLanes}, {},
+                 {b.getNamedAttr("op", b.getStringAttr(opKind))});
+        } else if (opKind == "sub") {
+          makeOp("vec_scalar",
+                 {dst, vecEnv.lookup(u1), cF32(-1.0f), curLanes}, {},
+                 {b.getNamedAttr("op", b.getStringAttr("mul"))});
+          makeOp("vec_scalar", {dst, dst, scEnv.lookup(u0), curLanes}, {},
+                 {b.getNamedAttr("op", b.getStringAttr("add"))});
+        } else {
+          makeOp("vec_scalar",
+                 {dst, vecEnv.lookup(u1), scEnv.lookup(u0), curLanes}, {},
+                 {b.getNamedAttr("op", b.getStringAttr(opKind))});
+        }
+        sync("compute");
+        vecEnv[bop.getResult(0)] = dst;
+      }
+    };
+
+    if (isRed) {
+      Value initVal = st.env.lookup(loop.getInitArgs()[0]);
+      bool isMax = isa<arith::MaxNumFOp>(redComb);
+      Value iterV = loop.getRegionIterArgs()[0];
+      Value rhs = redComb->getOperand(0) == iterV ? redComb->getOperand(1)
+                                                  : redComb->getOperand(0);
+      auto cLoop = forLoopCarry(
+          cI64(0), cI64(N), cI64(kVecStreamChunk), ValueRange{initVal},
+          [&](Value c0, ValueRange cIter) {
+            Value curLanes = b.create<arith::MinSIOp>(
+                loc, b.create<arith::SubIOp>(loc, cI64(N), c0),
+                cI64(kVecStreamChunk));
+            llvm::DenseMap<Value, Value> vecEnv;
+            emitChunkBody(c0, curLanes, vecEnv);
+            makeOp("row_reduce",
+                   {redScalarOut, expRedScratch, vecEnv.lookup(rhs), cI64(1),
+                    curLanes, curLanes},
+                   {},
+                   {b.getNamedAttr("algebra",
+                                   b.getStringAttr(isMax ? "max_num" : "sum"))},
+                   "row-reduce");
+            Value blk = loadAt(redScalarOut, cI64(0));
+            Value nxt =
+                isMax
+                    ? makeOp("scalar_math", {cIter[0], blk}, {b.getF32Type()},
+                             {b.getNamedAttr("op", b.getStringAttr("max_num"))})
+                          ->getResult(0)
+                    : b.create<arith::AddFOp>(loc, cIter[0], blk).getResult();
+            b.create<scf::YieldOp>(loc, ValueRange{nxt});
+          });
+      st.env[loop.getResult(0)] = cLoop.getResult(0);
+    } else {
+      forLoop(cI64(0), cI64(N), cI64(kVecStreamChunk), [&](Value c0) {
+        Value curLanes = b.create<arith::MinSIOp>(
+            loc, b.create<arith::SubIOp>(loc, cI64(N), c0),
+            cI64(kVecStreamChunk));
+        llvm::DenseMap<Value, Value> vecEnv;
+        emitChunkBody(c0, curLanes, vecEnv);
+      });
+    }
+    return true;
+  }
 
   void emitGeneralStreamTransfers(scf::ForOp loop, bool publish,
                                   GeneralState &st) {
@@ -1811,6 +2592,8 @@ struct OrderedLowerer {
       StringRef impl = implAttr ? implAttr.getValue() : StringRef();
 
       if (auto loop = dyn_cast<scf::ForOp>(op)) {
+        if (tryEmitVectorStreamLoop(loop, st))
+          continue;
         emitGeneralStreamTransfers(loop, false, st);
         unsigned pos = 0;
         auto offsets = op.getAttrOfType<DenseI64ArrayAttr>("dsa.member_offsets");
@@ -2146,6 +2929,608 @@ struct OrderedLowerer {
     return success();
   }
 
+  // Abstract 2D spatial plane stencil matcher & NRAM DMA+vector lowerer.
+  struct StencilTapSpec {
+    int64_t k = 0;
+    int64_t dh = 0, dw = 0;
+    int64_t ohLo = 0, ohHi = 0, owLo = 0, owHi = 0;
+  };
+  struct PlaneStencilPlan {
+    int64_t H = 0, W = 0, WP = 0, padH = 1;
+    Value xView, outView, biasVal, weightVal;
+    SmallVector<Value, 4> xOuterCoords, outOuterCoords;
+    scf::ForOp loop;
+    SmallVector<StencilTapSpec, 16> taps;
+  };
+
+  std::optional<PlaneStencilPlan> matchPlaneStencil() {
+    auto axes = space.getAttrOfType<DenseI64ArrayAttr>("axes");
+    auto &bb = space.getRegion(0).front();
+    int64_t tile = space.getAttrOfType<IntegerAttr>("block.owner_tile").getInt();
+    int64_t owners = space.getAttrOfType<IntegerAttr>("block.owners").getInt();
+    int64_t slabBytes =
+        space.getAttrOfType<IntegerAttr>("dsa.owner_bytes").getInt();
+    if (!axes || axes.size() < 2 || bb.getNumArguments() != axes.size() ||
+        slabBytes != 0)
+      return std::nullopt;
+
+    unsigned na = axes.size();
+    Value hArg = bb.getArgument(na - 2);
+    Value wArg = bb.getArgument(na - 1);
+    int64_t H = dimAttr(space.getOperand(na - 2), "block.shape", axes[na - 2]);
+    int64_t W = dimAttr(space.getOperand(na - 1), "block.shape", axes[na - 1]);
+    int64_t WP = llvm::alignTo(W, 32);
+    int64_t planeOwners = H * W;
+    if (H < 1 || W < 8 || planeOwners <= 0 || H * WP * 4 > 65536 ||
+        owners % planeOwners != 0)
+      return std::nullopt;
+
+    auto planeInvariant = [&](Value v, Value loopIv = {}) {
+      return !intentdsl::dsa::ownerValueDependsOn(v, hArg) &&
+             !intentdsl::dsa::ownerValueDependsOn(v, wArg) &&
+             (!loopIv || !intentdsl::dsa::ownerValueDependsOn(v, loopIv));
+    };
+
+    memref::StoreOp outStore;
+    scf::ForOp stencilLoop;
+    for (Operation &op : bb.without_terminator()) {
+      if (auto stOp = dyn_cast<memref::StoreOp>(op)) {
+        if (outStore)
+          return std::nullopt;
+        outStore = stOp;
+      } else if (auto lOp = dyn_cast<scf::ForOp>(op)) {
+        if (stencilLoop)
+          return std::nullopt;
+        stencilLoop = lOp;
+      } else if (!isMemoryEffectFree(&op) && !isa<memref::LoadOp>(op)) {
+        return std::nullopt;
+      } else if (auto ldOp = dyn_cast<memref::LoadOp>(op)) {
+        if (!isa<BlockArgument>(ldOp.getMemref()) ||
+            llvm::any_of(ldOp.getIndices(),
+                         [&](Value c) { return !planeInvariant(c); }))
+          return std::nullopt;
+      }
+    }
+    if (!outStore || !stencilLoop || !isa<BlockArgument>(outStore.getMemref()))
+      return std::nullopt;
+
+    Value outView = outStore.getMemref();
+    if (!cast<MemRefType>(outView.getType()).getElementType().isF32() ||
+        outStore.getIndices().size() != na ||
+        outStore.getIndices()[na - 2] != hArg ||
+        outStore.getIndices()[na - 1] != wArg ||
+        dimAttr(outView, "block.strides", na - 1) != 1 ||
+        dimAttr(outView, "block.strides", na - 2) != W ||
+        llvm::any_of(outStore.getIndices().drop_back(2),
+                     [&](Value c) { return !planeInvariant(c); }))
+      return std::nullopt;
+
+    Value biasVal;
+    Value storedV = outStore.getValue();
+    if (storedV != stencilLoop.getResult(0)) {
+      auto addOp = storedV.getDefiningOp<arith::AddFOp>();
+      if (!addOp)
+        return std::nullopt;
+      if (addOp.getLhs() == stencilLoop.getResult(0) &&
+          planeInvariant(addOp.getRhs()))
+        biasVal = addOp.getRhs();
+      else if (addOp.getRhs() == stencilLoop.getResult(0) &&
+               planeInvariant(addOp.getLhs()))
+        biasVal = addOp.getLhs();
+      else
+        return std::nullopt;
+    }
+
+    llvm::APInt kAp;
+    if (!stencilLoop->hasAttr("kir.reassociate") ||
+        stencilLoop.getNumResults() != 1 ||
+        !stencilLoop.getResult(0).getType().isF32() ||
+        !matchPattern(stencilLoop.getLowerBound(), m_Zero()) ||
+        !matchPattern(stencilLoop.getStep(), m_One()) ||
+        !matchPattern(stencilLoop.getUpperBound(), m_ConstantInt(&kAp)))
+      return std::nullopt;
+    int64_t kTaps = kAp.getSExtValue();
+    auto initCst =
+        stencilLoop.getInitArgs()[0].getDefiningOp<arith::ConstantOp>();
+    auto initFa = initCst ? dyn_cast<FloatAttr>(initCst.getValue()) : FloatAttr{};
+    if (kTaps < 1 || kTaps > 64 || !initFa || !initFa.getValue().isZero())
+      return std::nullopt;
+
+    Block &lBody = *stencilLoop.getBody();
+    Value iv = stencilLoop.getInductionVar();
+    Value iterArg = stencilLoop.getRegionIterArgs()[0];
+    auto yieldAdd =
+        lBody.getTerminator()->getOperand(0).getDefiningOp<arith::AddFOp>();
+    if (!yieldAdd ||
+        (yieldAdd.getLhs() != iterArg && yieldAdd.getRhs() != iterArg))
+      return std::nullopt;
+    Value termV =
+        yieldAdd.getLhs() == iterArg ? yieldAdd.getRhs() : yieldAdd.getLhs();
+    auto termMul = termV.getDefiningOp<arith::MulFOp>();
+    if (!termMul)
+      return std::nullopt;
+
+    Value sampleVal, weightVal;
+    if (!intentdsl::dsa::ownerValueDependsOn(termMul.getRhs(), hArg) &&
+        !intentdsl::dsa::ownerValueDependsOn(termMul.getRhs(), wArg)) {
+      sampleVal = termMul.getLhs();
+      weightVal = termMul.getRhs();
+    } else if (!intentdsl::dsa::ownerValueDependsOn(termMul.getLhs(), hArg) &&
+               !intentdsl::dsa::ownerValueDependsOn(termMul.getLhs(), wArg)) {
+      sampleVal = termMul.getRhs();
+      weightVal = termMul.getLhs();
+    } else {
+      return std::nullopt;
+    }
+
+    auto sampleIf = sampleVal.getDefiningOp<scf::IfOp>();
+    if (!sampleIf || sampleIf.getNumResults() != 1 ||
+        sampleIf.getElseRegion().empty())
+      return std::nullopt;
+    Value elseY = sampleIf.elseBlock()->getTerminator()->getOperand(0);
+    auto elseCst = elseY.getDefiningOp<arith::ConstantOp>();
+    auto elseFa = elseCst ? dyn_cast<FloatAttr>(elseCst.getValue()) : FloatAttr{};
+    if (!elseFa || !elseFa.getValue().isZero())
+      return std::nullopt;
+
+    memref::LoadOp xLoad;
+    for (Operation &tOp : sampleIf.thenBlock()->without_terminator()) {
+      if (auto ld = dyn_cast<memref::LoadOp>(tOp)) {
+        if (xLoad)
+          return std::nullopt;
+        xLoad = ld;
+      } else if (!isMemoryEffectFree(&tOp)) {
+        return std::nullopt;
+      }
+    }
+    if (!xLoad ||
+        sampleIf.thenBlock()->getTerminator()->getOperand(0) !=
+            xLoad.getResult() ||
+        !isa<BlockArgument>(xLoad.getMemref()))
+      return std::nullopt;
+
+    Value xView = xLoad.getMemref();
+    unsigned xRank = cast<MemRefType>(xView.getType()).getRank();
+    if (!cast<MemRefType>(xView.getType()).getElementType().isF32() ||
+        xRank < 2 || xLoad.getIndices().size() != xRank ||
+        dimAttr(xView, "block.shape", xRank - 2) != H ||
+        dimAttr(xView, "block.shape", xRank - 1) != W ||
+        dimAttr(xView, "block.strides", xRank - 1) != 1 ||
+        dimAttr(xView, "block.strides", xRank - 2) != W ||
+        llvm::any_of(xLoad.getIndices().drop_back(2),
+                     [&](Value c) { return !planeInvariant(c, iv); }))
+      return std::nullopt;
+
+    // Verify public ABI disjointness (xView and weight reads must be In, outView Out).
+    auto abiParsed =
+        llvm::json::parse(fn->getAttrOfType<StringAttr>("kir.abi").getValue());
+    if (!abiParsed || !abiParsed->getAsArray()) {
+      if (!abiParsed)
+        llvm::consumeError(abiParsed.takeError());
+      return std::nullopt;
+    }
+    const auto &abiArr = *abiParsed->getAsArray();
+    auto argDir = [&](Value v) -> StringRef {
+      auto ba = dyn_cast<BlockArgument>(v);
+      if (!ba || ba.getOwner() != &fn.front())
+        return "";
+      auto *obj = abiArr[ba.getArgNumber()].getAsObject();
+      return obj ? obj->getString("direction").value_or("") : "";
+    };
+    if (argDir(xView) != "In" || argDir(outView) != "Out")
+      return std::nullopt;
+
+    // Verify weightVal has no side effects other than reading In views.
+    bool weightOk = true;
+    lBody.walk([&](Operation *sub) {
+      if (sub == xLoad.getOperation())
+        return;
+      if (auto ld = dyn_cast<memref::LoadOp>(sub)) {
+        if (argDir(ld.getMemref()) != "In" ||
+            llvm::any_of(ld.getIndices(), [&](Value c) {
+              return intentdsl::dsa::ownerValueDependsOn(c, hArg) ||
+                     intentdsl::dsa::ownerValueDependsOn(c, wArg);
+            }))
+          weightOk = false;
+      } else if (isa<memref::StoreOp>(sub)) {
+        weightOk = false;
+      }
+    });
+    if (!weightOk)
+      return std::nullopt;
+
+    // Abstract interpretation of affine spatial expressions & 2D indicator rectangles.
+    struct AffVal {
+      int kind = -1; // 0 = const, 1 = hArg + c, 2 = wArg + c
+      int64_t c = 0;
+    };
+    struct Rect2D {
+      int64_t hLo = 0, hHi = 0, wLo = 0, wHi = 0;
+      bool empty() const { return hLo >= hHi || wLo >= wHi; }
+    };
+    auto intersectRect = [](Rect2D a, Rect2D b) -> Rect2D {
+      Rect2D r{std::max(a.hLo, b.hLo), std::min(a.hHi, b.hHi),
+               std::max(a.wLo, b.wLo), std::min(a.wHi, b.wHi)};
+      if (r.empty())
+        return {0, 0, 0, 0};
+      return r;
+    };
+
+    llvm::DenseMap<Value, AffVal> outerAff;
+    outerAff[hArg] = {1, 0};
+    outerAff[wArg] = {2, 0};
+    for (Operation &topOp : bb.without_terminator()) {
+      if (&topOp == stencilLoop.getOperation())
+        break;
+      if (auto cst = dyn_cast<arith::ConstantOp>(topOp)) {
+        if (auto ia = dyn_cast<IntegerAttr>(cst.getValue()))
+          outerAff[cst.getResult()] = {0, ia.getInt()};
+      } else if (auto dOp = dyn_cast<memref::DimOp>(topOp)) {
+        if (isa<BlockArgument>(dOp.getSource()) && dOp.getConstantIndex())
+          outerAff[dOp.getResult()] = {
+              0, dimAttr(dOp.getSource(), "block.shape",
+                         *dOp.getConstantIndex())};
+      }
+    }
+
+    PlaneStencilPlan plan;
+    plan.H = H;
+    plan.W = W;
+    plan.WP = WP;
+    plan.xView = xView;
+    plan.outView = outView;
+    plan.biasVal = biasVal;
+    plan.weightVal = weightVal;
+    plan.loop = stencilLoop;
+    llvm::append_range(plan.xOuterCoords, xLoad.getIndices().drop_back(2));
+    llvm::append_range(plan.outOuterCoords, outStore.getIndices().drop_back(2));
+
+    int64_t maxAbsDh = 1;
+    for (int64_t k = 0; k < kTaps; ++k) {
+      llvm::DenseMap<Value, AffVal> aff = outerAff;
+      llvm::DenseMap<Value, Rect2D> rects;
+      aff[iv] = {0, k};
+
+      std::function<bool(Operation &)> evalAffOp =
+          [&](Operation &op) -> bool {
+        if (auto cst = dyn_cast<arith::ConstantOp>(op)) {
+          if (auto ia = dyn_cast<IntegerAttr>(cst.getValue())) {
+            int64_t v = ia.getInt();
+            aff[cst.getResult()] = {0, v};
+            if (v == 1)
+              rects[cst.getResult()] = {0, H, 0, W};
+            else if (v == 0)
+              rects[cst.getResult()] = {0, 0, 0, 0};
+            return true;
+          }
+          return true;
+        }
+        if (auto dOp = dyn_cast<memref::DimOp>(op)) {
+          if (isa<BlockArgument>(dOp.getSource()) && dOp.getConstantIndex()) {
+            aff[dOp.getResult()] = {
+                0, dimAttr(dOp.getSource(), "block.shape",
+                           *dOp.getConstantIndex())};
+            return true;
+          }
+          return false;
+        }
+        StringRef n = op.getName().getStringRef();
+        if (n == "arith.addi" || n == "arith.subi" || n == "arith.floordivsi" ||
+            n == "arith.divsi" || n == "arith.remsi" || n == "arith.muli") {
+          auto it0 = aff.find(op.getOperand(0)),
+               it1 = aff.find(op.getOperand(1));
+          if (it0 == aff.end() || it1 == aff.end())
+            return true;
+          AffVal a0 = it0->second, a1 = it1->second;
+          if (n == "arith.addi" && (a0.kind == 0 || a1.kind == 0)) {
+            aff[op.getResult(0)] = {a0.kind ? a0.kind : a1.kind, a0.c + a1.c};
+          } else if (n == "arith.subi" && a1.kind == 0) {
+            aff[op.getResult(0)] = {a0.kind, a0.c - a1.c};
+          } else if (a0.kind == 0 && a1.kind == 0 && a1.c != 0) {
+            if (n == "arith.muli")
+              aff[op.getResult(0)] = {0, a0.c * a1.c};
+            else if (n == "arith.divsi")
+              aff[op.getResult(0)] = {0, a0.c / a1.c};
+            else if (n == "arith.floordivsi") {
+              int64_t q = a0.c / a1.c, r = a0.c % a1.c;
+              if (r != 0 && ((r ^ a1.c) < 0))
+                --q;
+              aff[op.getResult(0)] = {0, q};
+            } else if (n == "arith.remsi")
+              aff[op.getResult(0)] = {0, a0.c % a1.c};
+          }
+          return true;
+        }
+        if (auto cmp = dyn_cast<arith::CmpIOp>(op)) {
+          Value lhs = cmp.getLhs(), rhs = cmp.getRhs();
+          auto pred = cmp.getPredicate();
+          if (pred == arith::CmpIPredicate::eq) {
+            if (rects.contains(lhs) && aff.contains(rhs) &&
+                aff[rhs].kind == 0 && aff[rhs].c == 1) {
+              rects[cmp.getResult()] = rects[lhs];
+              return true;
+            }
+            if (rects.contains(rhs) && aff.contains(lhs) &&
+                aff[lhs].kind == 0 && aff[lhs].c == 1) {
+              rects[cmp.getResult()] = rects[rhs];
+              return true;
+            }
+          }
+          if (!aff.contains(lhs) || !aff.contains(rhs))
+            return true;
+          AffVal a0 = aff[lhs], a1 = aff[rhs];
+          if (a0.kind == 0 && a1.kind != 0) {
+            std::swap(a0, a1);
+            pred = arith::invertPredicate(pred); // wait: swap flips direction!
+            return false;
+          }
+          if ((a0.kind == 1 || a0.kind == 2) && a1.kind == 0) {
+            int64_t lim = a0.kind == 1 ? H : W;
+            int64_t rhsBound = a1.c - a0.c;
+            int64_t lo = 0, hi = lim;
+            if (pred == arith::CmpIPredicate::sge)
+              lo = std::max<int64_t>(0, rhsBound);
+            else if (pred == arith::CmpIPredicate::sgt)
+              lo = std::max<int64_t>(0, rhsBound + 1);
+            else if (pred == arith::CmpIPredicate::sle)
+              hi = std::min<int64_t>(lim, rhsBound + 1);
+            else if (pred == arith::CmpIPredicate::slt)
+              hi = std::min<int64_t>(lim, rhsBound);
+            else
+              return false;
+            if (lo >= hi)
+              rects[cmp.getResult()] = {0, 0, 0, 0};
+            else if (a0.kind == 1)
+              rects[cmp.getResult()] = {lo, hi, 0, W};
+            else
+              rects[cmp.getResult()] = {0, H, lo, hi};
+            return true;
+          }
+          return true;
+        }
+        if (n == "arith.andi") {
+          if (rects.contains(op.getOperand(0)) &&
+              rects.contains(op.getOperand(1)))
+            rects[op.getResult(0)] =
+                intersectRect(rects[op.getOperand(0)], rects[op.getOperand(1)]);
+          return true;
+        }
+        if (auto iff = dyn_cast<scf::IfOp>(op)) {
+          if (&op == sampleIf.getOperation())
+            return true;
+          if (iff.getNumResults() != 1 || iff.getElseRegion().empty() ||
+              !rects.contains(iff.getCondition()))
+            return false;
+          for (Operation &sub : iff.thenBlock()->without_terminator())
+            if (!evalAffOp(sub))
+              return false;
+          for (Operation &sub : iff.elseBlock()->without_terminator())
+            if (!evalAffOp(sub))
+              return false;
+          Value tY = iff.thenBlock()->getTerminator()->getOperand(0);
+          Value eY = iff.elseBlock()->getTerminator()->getOperand(0);
+          if (!rects.contains(tY) || !rects.contains(eY) || !rects[eY].empty())
+            return false;
+          rects[iff.getResult(0)] =
+              intersectRect(rects[iff.getCondition()], rects[tY]);
+          return true;
+        }
+        return true;
+      };
+
+      for (Operation &bop : lBody.without_terminator())
+        if (!evalAffOp(bop))
+          return std::nullopt;
+      if (!rects.contains(sampleIf.getCondition()))
+        return std::nullopt;
+      for (Operation &tOp : sampleIf.thenBlock()->without_terminator())
+        if (!isa<memref::LoadOp>(tOp) && !evalAffOp(tOp))
+          return std::nullopt;
+
+      Value ihV = xLoad.getIndices()[xRank - 2];
+      Value iwV = xLoad.getIndices()[xRank - 1];
+      if (!aff.contains(ihV) || !aff.contains(iwV) || aff[ihV].kind != 1 ||
+          aff[iwV].kind != 2)
+        return std::nullopt;
+      Rect2D validR = rects[sampleIf.getCondition()];
+      int64_t dh = aff[ihV].c, dw = aff[iwV].c;
+      if (!validR.empty()) {
+        if (validR.hLo + dh < 0 || validR.hHi - 1 + dh >= H ||
+            validR.wLo + dw < 0 || validR.wHi - 1 + dw >= W)
+          return std::nullopt;
+        maxAbsDh = std::max<int64_t>(maxAbsDh, std::abs(dh));
+      }
+      plan.taps.push_back(
+          {k, dh, dw, validR.hLo, validR.hHi, validR.wLo, validR.wHi});
+    }
+
+    plan.padH = maxAbsDh;
+    // Count distinct horizontal windows (dw, owLo, owHi).
+    SmallVector<std::tuple<int64_t, int64_t, int64_t>, 8> horizKeys;
+    for (const auto &tp : plan.taps) {
+      if (tp.ohLo >= tp.ohHi || tp.owLo >= tp.owHi)
+        continue;
+      if (tp.dw == 0 && tp.owLo == 0 && tp.owHi == W)
+        continue;
+      std::tuple<int64_t, int64_t, int64_t> key{tp.dw, tp.owLo, tp.owHi};
+      if (!llvm::is_contained(horizKeys, key))
+        horizKeys.push_back(key);
+    }
+    int64_t paddedPlaneBytes = (H + 2 * plan.padH) * WP * 4;
+    int64_t totalStencilNram =
+        (1 + int64_t(horizKeys.size())) * llvm::alignTo(paddedPlaneBytes, 128) +
+        2 * llvm::alignTo(H * WP * 4, 128);
+    auto supply = profile.services.get<intentdsl::dsa::LocalSupply>();
+    if (!supply ||
+        totalStencilNram > std::min(supply->budget, supply->capacity))
+      return std::nullopt;
+
+    return plan;
+  }
+
+  LogicalResult lowerPlaneStencil(PlaneStencilPlan plan) {
+    auto axes = space.getAttrOfType<DenseI64ArrayAttr>("axes");
+    auto &bb = space.getRegion(0).front();
+    unsigned na = axes.size();
+    int64_t H = plan.H, W = plan.W, WP = plan.WP, padH = plan.padH;
+    int64_t owners = space.getAttrOfType<IntegerAttr>("block.owners").getInt();
+    int64_t numPlanes = owners / (H * W);
+    int64_t paddedRows = H + 2 * padH;
+
+    Value xZero = nramBuf(b.getF32Type(), paddedRows * WP);
+    Value outBuf = nramBuf(b.getF32Type(), H * WP);
+    Value tmpBuf = nramBuf(b.getF32Type(), H * WP);
+
+    SmallVector<std::tuple<int64_t, int64_t, int64_t>, 8> horizKeys;
+    SmallVector<Value, 8> horizBufs;
+    for (const auto &tp : plan.taps) {
+      if (tp.ohLo >= tp.ohHi || tp.owLo >= tp.owHi)
+        continue;
+      if (tp.dw == 0 && tp.owLo == 0 && tp.owHi == W)
+        continue;
+      std::tuple<int64_t, int64_t, int64_t> key{tp.dw, tp.owLo, tp.owHi};
+      if (!llvm::is_contained(horizKeys, key)) {
+        horizKeys.push_back(key);
+        horizBufs.push_back(nramBuf(b.getF32Type(), paddedRows * WP));
+      }
+    }
+
+    // Zero-fill padded borders once per core before iterating over planes.
+    fillVec(xZero, cI64(paddedRows * WP), cF32(0.0f));
+    for (Value hb : horizBufs)
+      fillVec(hb, cI64(paddedRows * WP), cF32(0.0f));
+    sync("compute");
+
+    // Collect loop-body ops needed to evaluate weightVal for a given iv = k.
+    SmallVector<Operation *, 16> weightSlice;
+    {
+      llvm::DenseSet<Operation *> inSlice;
+      std::function<void(Value)> collect = [&](Value v) {
+        Operation *def = v.getDefiningOp();
+        if (!def || def->getBlock() != plan.loop.getBody() ||
+            !inSlice.insert(def).second)
+          return;
+        for (Value u : def->getOperands())
+          collect(u);
+        weightSlice.push_back(def);
+      };
+      collect(plan.weightVal);
+    }
+
+    forLoop(symTaskId, cI64(numPlanes), symTaskDim, [&](Value planeIdx) {
+      GeneralState st;
+      for (Value arg : fn.getArguments())
+        st.env[arg] = arg;
+      int64_t pitch = 1;
+      for (int i = int(na) - 3; i >= 0; --i) {
+        int64_t ext = std::max<int64_t>(
+            1, dimAttr(space.getOperand(i), "block.shape", axes[i]));
+        Value coord = b.create<arith::RemSIOp>(
+            loc, b.create<arith::DivSIOp>(loc, planeIdx, cI64(pitch)),
+            cI64(ext));
+        st.env[bb.getArgument(i)] = coord;
+        pitch *= ext;
+      }
+
+      // Evaluate outer plane-invariant ops in bb (e.g. bias[c]).
+      for (Operation &op : bb.without_terminator()) {
+        if (&op == plan.loop.getOperation() || isa<memref::StoreOp>(op))
+          continue;
+        if (llvm::any_of(op.getOperands(),
+                         [&](Value u) { return !st.env.count(u); }))
+          continue;
+        if (auto ld = dyn_cast<memref::LoadOp>(op)) {
+          auto [ptr, idx] =
+              generalScalarPtr(op, ld.getMemref(), ld.getIndices(), st);
+          st.env[ld.getResult()] = loadAt(ptr, idx, ld.getType());
+        } else if (Value sv = lowerScalarExpr(op, st.env)) {
+          st.env[op.getResult(0)] = sv;
+        }
+      }
+
+      // Stage x[outer..., :, :] into xZero[padH : padH + H, 0 : W].
+      SmallVector<Value, 4> xCoords, xStrides;
+      for (auto [ax, cv] : llvm::enumerate(plan.xOuterCoords)) {
+        xCoords.push_back(st.env.lookup(cv));
+        xStrides.push_back(cI64(dimAttr(plan.xView, "block.strides", ax)));
+      }
+      Value xGlobal = makeAddr(plan.xView, xCoords, xStrides, 0);
+      Value xCenterDst = makeAddr(xZero, {cI64(padH)}, {cI64(WP)}, 1);
+      if (H == 1)
+        memcpy1D(xCenterDst, xGlobal, cI64(W), "GDRAM2NRAM");
+      else
+        memcpy2D(xCenterDst, xGlobal, cI64(W), cI64(WP), cI64(W),
+                 cI64(H - 1), "GDRAM2NRAM");
+      sync("io");
+
+      // Populate horizontally shifted NRAM planes via 2D NRAM2NRAM DMA.
+      for (auto [hk, hBuf] : llvm::zip(horizKeys, horizBufs)) {
+        auto [dw, owLo, owHi] = hk;
+        int64_t width = owHi - owLo;
+        Value dstSh = makeAddr(hBuf, {cI64(padH), cI64(owLo)},
+                               {cI64(WP), cI64(1)}, 1);
+        Value srcSh = makeAddr(xZero, {cI64(padH), cI64(owLo + dw)},
+                               {cI64(WP), cI64(1)}, 1);
+        if (H == 1)
+          memcpy1D(dstSh, srcSh, cI64(width), "NRAM2NRAM");
+        else
+          memcpy2D(dstSh, srcSh, cI64(width), cI64(WP), cI64(WP),
+                   cI64(H - 1), "NRAM2NRAM");
+      }
+      if (!horizKeys.empty())
+        sync("io");
+
+      Value initVal = plan.biasVal ? st.env.lookup(plan.biasVal) : cF32(0.0f);
+      fillVec(outBuf, cI64(H * WP), initVal);
+      sync("compute");
+
+      for (const auto &tp : plan.taps) {
+        if (tp.ohLo >= tp.ohHi || tp.owLo >= tp.owHi)
+          continue;
+        st.env[plan.loop.getInductionVar()] = cI64(tp.k);
+        for (Operation *wOp : weightSlice) {
+          if (auto ld = dyn_cast<memref::LoadOp>(*wOp)) {
+            auto [ptr, idx] =
+                generalScalarPtr(*wOp, ld.getMemref(), ld.getIndices(), st);
+            st.env[ld.getResult()] = loadAt(ptr, idx, ld.getType());
+          } else if (Value sv = lowerScalarExpr(*wOp, st.env)) {
+            st.env[wOp->getResult(0)] = sv;
+          }
+        }
+        Value wScalar = st.env.lookup(plan.weightVal);
+        Value srcBase = xZero;
+        if (!(tp.dw == 0 && tp.owLo == 0 && tp.owHi == W)) {
+          std::tuple<int64_t, int64_t, int64_t> key{tp.dw, tp.owLo, tp.owHi};
+          auto it = llvm::find(horizKeys, key);
+          srcBase = horizBufs[it - horizKeys.begin()];
+        }
+        int64_t rowCount = tp.ohHi - tp.ohLo;
+        int64_t lanes = rowCount * WP;
+        Value srcPtr =
+            makeAddr(srcBase, {cI64(tp.ohLo + padH + tp.dh)}, {cI64(WP)}, 1);
+        Value dstPtr = makeAddr(outBuf, {cI64(tp.ohLo)}, {cI64(WP)}, 1);
+        makeOp("vec_scalar", {tmpBuf, srcPtr, wScalar, cI64(lanes)}, {},
+               {b.getNamedAttr("op", b.getStringAttr("mul"))});
+        makeOp("vec_binary", {dstPtr, dstPtr, tmpBuf, cI64(lanes)}, {},
+               {b.getNamedAttr("op", b.getStringAttr("add"))});
+      }
+      sync("compute");
+
+      SmallVector<Value, 4> oCoords, oStrides;
+      for (auto [ax, cv] : llvm::enumerate(plan.outOuterCoords)) {
+        oCoords.push_back(st.env.lookup(cv));
+        oStrides.push_back(cI64(dimAttr(plan.outView, "block.strides", ax)));
+      }
+      Value oGlobal = makeAddr(plan.outView, oCoords, oStrides, 0);
+      if (H == 1)
+        memcpy1D(oGlobal, outBuf, cI64(W), "NRAM2GDRAM");
+      else
+        memcpy2D(oGlobal, outBuf, cI64(W), cI64(W), cI64(WP), cI64(H - 1),
+                 "NRAM2GDRAM");
+    });
+    return success();
+  }
+
   LogicalResult lowerGeneral() {
     auto &bb = space.getRegion(0).front();
     int64_t tile = space.getAttrOfType<IntegerAttr>("block.owner_tile").getInt();
@@ -2160,6 +3545,7 @@ struct OrderedLowerer {
     GeneralState st;
     st.slabBytes = slabBytes;
     bool needsReduce = false;
+    bool wantsVecPool = false;
     space.walk([&](Operation *op) {
       if (op->getName().stripDialect() == "lane_sum") {
         auto im = op->getAttrOfType<StringAttr>("bangc.vector_impl");
@@ -2168,21 +3554,41 @@ struct OrderedLowerer {
           needsReduce = true;
       }
     });
+    for (Operation &topOp : bb.without_terminator()) {
+      if (auto lOp = dyn_cast<scf::ForOp>(topOp))
+        if (canVectorizeStreamLoop(lOp))
+          wantsVecPool = true;
+    }
+    int64_t usedNram = 0;
     if (needsReduce) {
       st.poolScratch = nramBuf(b.getF32Type(), 32);
       st.scalarOut = nramBuf(b.getF32Type(), 32);
+      usedNram += 256;
     }
-    if (memberBytes)
+    if (memberBytes) {
       st.storage = nramBuf(b.getI8Type(), memberBytes);
-    if (streamAttr && streamAttr.getInt())
+      usedNram += llvm::alignTo(memberBytes, 128);
+    }
+    if (streamAttr && streamAttr.getInt()) {
       st.streambuf = nramBuf(b.getI8Type(), streamAttr.getInt());
-    if (defAttr && defAttr.getInt())
+      usedNram += llvm::alignTo(streamAttr.getInt(), 128);
+    }
+    if (defAttr && defAttr.getInt()) {
       st.deferred = nramBuf(b.getF32Type(), defAttr.getInt() / 4);
+      usedNram += llvm::alignTo(defAttr.getInt(), 128);
+    }
     if (slabBytes) {
       Type slabElem =
           cast<MemRefType>(fn.getArgument(0).getType()).getElementType();
       int64_t elemB = slabElem.getIntOrFloatBitWidth() / 8;
       st.slabLocal = nramBuf(slabElem, slabBytes / elemB);
+      usedNram += llvm::alignTo(slabBytes, 128);
+    }
+    if (wantsVecPool) {
+      auto supply = profile.services.get<intentdsl::dsa::LocalSupply>();
+      int64_t limit = supply ? std::min(supply->budget, supply->capacity) : 0;
+      if (usedNram + llvm::alignTo(kVecStreamPoolBytes, 128) <= limit)
+        st.vecPool = nramBuf(b.getI8Type(), kVecStreamPoolBytes);
     }
 
     auto axes = space.getAttrOfType<DenseI64ArrayAttr>("axes");
@@ -2242,7 +3648,11 @@ struct OrderedLowerer {
         transfers == "panel-fold"
             ? space.getAttrOfType<IntegerAttr>("dsa.panel_rows").getInt()
             : 1;
-    int64_t launchTile = std::max<int64_t>({tile, pack, panelM});
+    std::optional<PlaneStencilPlan> stencilPlan;
+    if (transfers != "panel-fold" && pack <= 1)
+      stencilPlan = matchPlaneStencil();
+    int64_t stencilTile = stencilPlan ? stencilPlan->H * stencilPlan->W : 1;
+    int64_t launchTile = std::max<int64_t>({tile, pack, panelM, stencilTile});
 
     b.setInsertionPointToStart(&fn.front());
     OperationState progState(loc, "bangc_src.ordered_program");
@@ -2273,6 +3683,7 @@ struct OrderedLowerer {
 
     LogicalResult st = transfers == "panel-fold" ? lowerPanelFold()
                        : pack > 1                ? lowerPackedStreams(pack)
+                       : stencilPlan             ? lowerPlaneStencil(*stencilPlan)
                                                  : lowerGeneral();
     if (failed(st))
       return failure();

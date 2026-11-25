@@ -79,6 +79,23 @@ def capture(fn):
         if name == "q4k_dot" and len(node.args) == 2 and not kw:
             qfm = format_fastmath_attr((*default_flags, "reassoc", "contract"))
             return emit("q4k_dot", [view(node.args[0]), expr(node.args[1])], tensor(rank, "f32"), f"{{fastmath={qfm}}}")
+        if name == "quant_contract" and len(node.args) in (2, 3, 4) and set(kw) == {"format", "acc"}:
+            fmt = ast.literal_eval(kw["format"])
+            if type(fmt) is not str or not fmt:
+                raise ValueError("quant_contract requires a string format name")
+            acc_ty = spelling(kw["acc"], api)
+            qfm = format_fastmath_attr((*default_flags, "reassoc", "contract"))
+            inputs = []
+            for idx, arg_node in enumerate(node.args):
+                if isinstance(arg_node, ast.Subscript):
+                    inputs.append(view(arg_node))
+                elif idx == 3 and isinstance(arg_node, ast.Call) and spelling(arg_node.func, api) == "transpose":
+                    if len(arg_node.args) != 2 or arg_node.keywords or ast.literal_eval(arg_node.args[1]) != (1, 0):
+                        raise ValueError("right scale transpose must swap (1, 0)")
+                    inputs.append(emit("transpose_scale", [view(arg_node.args[0])], tensor(2, "u8")))
+                else:
+                    inputs.append(expr(arg_node))
+            return emit("quant_contract", inputs, tensor(rank, acc_ty), f'{{fastmath={qfm}, format={json.dumps(fmt)}}}')
         if name == "scaled_contract" and len(node.args) == 4 and set(kw) == {"acc"}:
             sfm = format_fastmath_attr((*default_flags, "reassoc", "contract"))
             transpose = node.args[3]

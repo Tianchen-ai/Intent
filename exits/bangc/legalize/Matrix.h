@@ -23,6 +23,7 @@ inline mlir::LogicalResult bindMatrix(mlir::func::FuncOp fn, unsigned phase,
     auto name = p.dot.getName().stripDialect();
     StringRef primitive = name == "q4k_dot"               ? "q4k-q8k"
                           : name == "scaled_contract"     ? "scaled-f32"
+                          : name == "quant_contract"      ? "quant-format"
                           : type.isF16() || type.isBF16() ? "wram-conv"
                           : type.isInteger(8)             ? "exact-i8-conv"
                                                           : "f32-outer";
@@ -71,7 +72,9 @@ inline mlir::LogicalResult bindMatrix(mlir::func::FuncOp fn, unsigned phase,
           mode = "filter-major-dma";
         else
           mode = p.stride(v, inner) == 1 ? "pitched-dma" : "indexed-pack";
-      } else if (role.starts_with("left-") || role.starts_with("right-"))
+      } else if (role == "quant-left")
+        mode = p.stride(v, 1) == 1 ? "pitched-dma" : "indexed-pack";
+      else if (role.starts_with("left-") || role.starts_with("right-"))
         mode = "group-scale";
       if (!field(op, "bangc.transfer", b.getStringAttr(mode)))
         return op.emitError("illegal panel transfer projection");

@@ -5,7 +5,7 @@
 namespace intentdsl::kir {
 inline bool isContraction(llvm::StringRef kind) {
   return kind == "contract" || kind == "window_contract" || kind == "q4k_dot" ||
-         kind == "scaled_contract";
+         kind == "scaled_contract" || kind == "quant_contract";
 }
 // The caller spells its native min, exp and the two explicit conversions.
 // Operands can denote either a scalar element or a whole native panel.

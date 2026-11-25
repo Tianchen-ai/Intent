@@ -95,7 +95,7 @@ inline bool isFloatingMathOp(mlir::Operation *op) {
         llvm::ArrayRef<llvm::StringRef>{
             "add", "sub", "mul", "div", "exp", "exp2", "rsqrt", "sqrt",
             "maximum", "sum", "max_num", "lane_sum", "ordered_sum", "contract",
-            "scaled_contract", "window_contract", "q4k_dot"},
+            "scaled_contract", "window_contract", "q4k_dot", "quant_contract"},
         code);
   return false;
 }

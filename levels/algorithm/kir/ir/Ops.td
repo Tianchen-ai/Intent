@@ -20,6 +20,16 @@ def Q8K : StorageFormat<"Q8K", "q8_k"> {
 def MX8 : StorageFormat<"MX8", "mx_e4m3_e8m0"> {
   let extraClassDeclaration = [{ ::intentdsl::kir::MX8Block getLayout() const { return {}; } }];
 }
+def QuantFormat : TypeDef<Kir_Dialect, "QuantFormat"> {
+  let mnemonic = "quant";
+  let parameters = (ins "::mlir::StringAttr":$format);
+  let assemblyFormat = "`<` $format `>`";
+  let extraClassDeclaration = [{
+    const ::intentdsl::kir::QuantFormatSpec *getSpec() const {
+      return ::intentdsl::kir::lookupQuantFormat(getFormat().getValue());
+    }
+  }];
+}
 class Inst<string mnemonic, list<Trait> traits = []>
     : Op<Kir_Dialect, mnemonic, traits>;
 def Kir_parallel : Inst<"parallel"> {

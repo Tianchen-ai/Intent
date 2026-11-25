@@ -236,6 +236,82 @@ LogicalResult verifyMatrixBody(func::FuncOp fn, Operation &domain,
       shape = {A[0]};
       type = Float32Type::get(fn.getContext());
       ++dots;
+    } else if (name == "quant_contract") {
+      auto fmtAttr = op.getAttrOfType<StringAttr>("format");
+      const auto *spec =
+          fmtAttr ? lookupQuantFormat(fmtAttr.getValue()) : nullptr;
+      if (!spec)
+        return op.emitError("unknown quantized format descriptor");
+      if (spec->roleLayout == QuantRoleLayout::RecordGemv) {
+        if (op.getNumOperands() != 2 || A.size() != 3 ||
+            A[2].getAsInteger() != spec->recordBytes || dtype(a) != "u8")
+          return op.emitError(
+              "record contraction operand disagrees with format descriptor");
+        if (spec->q8kActivation) {
+          auto *encoder = op.getOperand(1).getDefiningOp();
+          if (!encoder ||
+              encoder->getName().stripDialect() != "quantize_q8k" ||
+              shapes.lookup(op.getOperand(1)) != Shape{A[1], Q8KRecord::bytes})
+            return op.emitError(
+                "record contraction expects Q8_K encoded activation");
+        } else {
+          auto x = op.getOperand(1);
+          auto X = shapes.lookup(x);
+          if (!isa<BlockArgument>(x) || X.size() != 2 || X[0] != A[1] ||
+              X[1].getAsInteger() != spec->blockElements || dtype(x) != "f32")
+            return op.emitError(
+                "record contraction expects f32[G,blockElements] activation");
+        }
+        shape = {A[0]};
+      } else if (spec->roleLayout == QuantRoleLayout::BlockScaledPair) {
+        if (op.getNumOperands() != 4)
+          return op.emitError("block-scaled contraction requires 4 operands");
+        auto sa = op.getOperand(1), b = op.getOperand(2), sb = op.getOperand(3);
+        auto B = shapes.lookup(b);
+        if (!isa<BlockArgument>(sa) || !isa<BlockArgument>(b) ||
+            A.size() != 3 || B.size() != 3 ||
+            A[2].getAsInteger() != spec->recordBytes ||
+            B[1].getAsInteger() != spec->recordBytes || A[1] != B[0] ||
+            dtype(a) != "u8" || dtype(b) != "u8" || dtype(sa) != "u8" ||
+            shapes.lookup(sa) != Shape{A[0], A[1]} ||
+            shapes.lookup(sb) != Shape{B[2], A[1]} ||
+            !elem(sb).isInteger(8) ||
+            (sb.getDefiningOp()
+                 ? sb.getDefiningOp()->getName().stripDialect() !=
+                       "transpose_scale"
+                 : dtype(sb) != "u8"))
+          return op.emitError(
+              "block-scaled contraction operands disagree with format descriptor");
+        shape = {A[0], B[2]};
+      } else {
+        unsigned expectedOps = 3 + (spec->hasZeroView ? 1 : 0);
+        if (op.getNumOperands() != expectedOps)
+          return op.emitError(
+              "grouped quantized contraction operand count mismatch");
+        auto qw = op.getOperand(1), sc = op.getOperand(2);
+        auto QW = shapes.lookup(qw), SC = shapes.lookup(sc);
+        std::string packCarrier =
+            (spec->packBits * spec->packFactor == 32) ? "i32" : "u8";
+        if (!isa<BlockArgument>(qw) || !isa<BlockArgument>(sc) ||
+            A.size() != 2 || QW.size() != 2 || SC.size() != 2 ||
+            A[1] != QW[0] ||
+            (dtype(a) != "f16" && dtype(a) != "bf16" && dtype(a) != "f32") ||
+            dtype(qw) != packCarrier ||
+            (dtype(sc) != dtype(a) && dtype(sc) != "f32"))
+          return op.emitError(
+              "grouped quantized contraction operands disagree with format descriptor");
+        if (spec->hasZeroView) {
+          auto qz = op.getOperand(3);
+          if (!isa<BlockArgument>(qz) ||
+              shapes.lookup(qz) != Shape{SC[0], QW[1]} ||
+              dtype(qz) != packCarrier)
+            return op.emitError(
+                "quantized zero-point view disagrees with format descriptor");
+        }
+        shape = {A[0], SC[1]};
+      }
+      type = Float32Type::get(fn.getContext());
+      ++dots;
     } else if (name == "add_columns") {
       if (A.empty() || shapes.lookup(op.getOperand(1)) != Shape{A.back()} ||
           elem(a) != elem(op.getOperand(1)))

@@ -28,6 +28,29 @@ SmallVector<std::pair<Value, std::string>> feeds(block::MatrixAccess &a) {
             {dot.getOperand(1), "left-scales"},
             {dot.getOperand(2), "right-groups"},
             {kir::RightScale(dot).view, "right-scales"}};
+  if (n == "quant_contract") {
+    auto fmtAttr = dot.getAttrOfType<StringAttr>("format");
+    const auto *spec =
+        fmtAttr ? kir::lookupQuantFormat(fmtAttr.getValue()) : nullptr;
+    if (spec && spec->roleLayout == kir::QuantRoleLayout::RecordGemv) {
+      Value act = spec->q8kActivation
+                      ? dot.getOperand(1).getDefiningOp()->getOperand(0)
+                      : dot.getOperand(1);
+      return {{dot.getOperand(0), "packed-weight"}, {act, "encode-activation"}};
+    }
+    if (spec && spec->roleLayout == kir::QuantRoleLayout::BlockScaledPair)
+      return {{dot.getOperand(0), "left-groups"},
+              {dot.getOperand(1), "left-scales"},
+              {dot.getOperand(2), "right-groups"},
+              {kir::RightScale(dot).view, "right-scales"}};
+    SmallVector<std::pair<Value, std::string>> res{
+        {dot.getOperand(0), "quant-left"},
+        {dot.getOperand(1), "packed-weight"},
+        {dot.getOperand(2), "right-scales"}};
+    if (spec && spec->hasZeroView)
+      res.push_back({dot.getOperand(3), "right-zeros"});
+    return res;
+  }
   return {{dot.getOperand(0), "left-panel"},
           {dot.getOperand(1), "right-panel"}};
 }

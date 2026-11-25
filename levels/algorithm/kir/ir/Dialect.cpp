@@ -16,7 +16,7 @@
 #define GET_OP_CLASSES
 #include "Ops.cpp.inc"
 void intentdsl::kir::KirDialect::initialize() {
-  addTypes<Q4KType,Q8KType,MX8Type>();
+  addTypes<Q4KType,Q8KType,MX8Type,QuantFormatType>();
   addOperations<
 #define GET_OP_LIST
 #include "Ops.cpp.inc"

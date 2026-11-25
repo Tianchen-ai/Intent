@@ -459,14 +459,21 @@ std::optional<PanelFoldSupply> panelFoldSupply(
     StringRef n = op.getName().getStringRef();
     return n == "arith.constant" || n == "memref.dim" ||
            n == "arith.index_cast" || n == "arith.index_castui" ||
-           n == "arith.addi" || n == "arith.subi" || n == "arith.muli" ||
-           n == "arith.divsi" || n == "arith.floordivsi" ||
-           n == "arith.remsi" || n == "arith.minsi" || n == "arith.maxsi" ||
-           n == "arith.addf" || n == "arith.subf" || n == "arith.mulf" ||
-           n == "arith.divf" || n == "arith.maxnumf" || n == "arith.extf" ||
-           n == "arith.truncf" || n == "arith.cmpi" || n == "arith.select" ||
-           n == "math.sqrt" || n == "math.exp" || n == "math.exp2" ||
-           n == "math.log";
+           n == "arith.extsi" || n == "arith.extui" || n == "arith.trunci" ||
+           n == "arith.sitofp" || n == "arith.uitofp" || n == "arith.fptosi" ||
+           n == "arith.fptoui" || n == "arith.addi" || n == "arith.subi" ||
+           n == "arith.muli" || n == "arith.divsi" || n == "arith.divui" ||
+           n == "arith.floordivsi" || n == "arith.remsi" ||
+           n == "arith.remui" || n == "arith.minsi" || n == "arith.maxsi" ||
+           n == "arith.minui" || n == "arith.maxui" || n == "arith.andi" ||
+           n == "arith.ori" || n == "arith.xori" || n == "arith.shli" ||
+           n == "arith.shrsi" || n == "arith.shrui" || n == "arith.addf" ||
+           n == "arith.subf" || n == "arith.mulf" || n == "arith.divf" ||
+           n == "arith.negf" || n == "arith.maxnumf" || n == "arith.minnumf" ||
+           n == "arith.extf" || n == "arith.truncf" || n == "arith.cmpi" ||
+           n == "arith.cmpf" || n == "arith.select" || n == "math.sqrt" ||
+           n == "math.exp" || n == "math.exp2" || n == "math.log" ||
+           n == "math.absf" || n == "math.floor";
   };
 
   auto isCausalCond = [&](Value cond, Value iv) {
@@ -492,6 +499,7 @@ std::optional<PanelFoldSupply> panelFoldSupply(
     LoopPanelCarry,
     StripSliceHalf,
     StripSliceWidenRef,
+    StripIndexInt,
     StripPanelF32,
     StripPanelHalf,
     StripWeightSplatRef,
@@ -514,6 +522,7 @@ std::optional<PanelFoldSupply> panelFoldSupply(
   };
   SmallVector<RoleSpec, 16> roleSpecs;
   SmallVector<Operation *, 8> scratchAnchors;
+  SmallVector<Operation *, 4> invLoads;
   int64_t wramBytes = 0;
   int64_t ownerTransferSites = 0, ownerTransferBytes = 0;
   int64_t stripTransferSites = 0, stripTransferBytes = 0;
@@ -523,13 +532,23 @@ std::optional<PanelFoldSupply> panelFoldSupply(
     return halfTy ? halfTy.getIntOrFloatBitWidth() / 8 : 2;
   };
 
+  auto scalarSlotBytes = [&](Type t) -> int64_t {
+    if (t.isIndex() || t.getIntOrFloatBitWidth() == 64)
+      return M * 8;
+    if (t.getIntOrFloatBitWidth() == 32)
+      return M * 4;
+    if (t.getIntOrFloatBitWidth() == 16)
+      return M * 2;
+    return M;
+  };
+
   auto checkScalarSubregion = [&](Block &subBlk) -> bool {
     llvm::DenseSet<Value> localOk;
     for (Operation &inOp : subBlk.without_terminator()) {
       if (!isPureScalarArith(inOp))
         return false;
       for (Value u : inOp.getOperands()) {
-        if (localOk.contains(u))
+        if (u == rowArg || localOk.contains(u))
           continue;
         auto it = vals.find(u);
         if (it == vals.end() || (it->second.kind != VKind::InvScalar &&
@@ -542,7 +561,7 @@ std::optional<PanelFoldSupply> panelFoldSupply(
     if (term->getNumOperands() != 1)
       return false;
     Value y = term->getOperand(0);
-    if (localOk.contains(y))
+    if (y == rowArg || localOk.contains(y))
       return true;
     auto it = vals.find(y);
     return it != vals.end() && (it->second.kind == VKind::InvScalar ||
@@ -551,35 +570,52 @@ std::optional<PanelFoldSupply> panelFoldSupply(
 
   auto analyzeStripLoop = [&](scf::ForOp loop) -> bool {
     if (!loop->hasAttr("kir.reassociate") || loop.getNumResults() == 0 ||
-        !matchPattern(loop.getLowerBound(), m_Zero()) ||
         !matchPattern(loop.getStep(), m_One()))
       return false;
-    auto dimOp = loop.getUpperBound().getDefiningOp<memref::DimOp>();
-    if (!dimOp || !isa<BlockArgument>(dimOp.getSource()) ||
-        !dimOp.getConstantIndex())
-      return false;
-    auto boundType = cast<MemRefType>(dimOp.getSource().getType());
-    if (*dimOp.getConstantIndex() != size_t(boundType.getRank() - 2))
-      return false;
-    int64_t K =
-        layout(dimOp.getSource(), "block.shape")[*dimOp.getConstantIndex()];
-    if (K < 0)
+    auto okBound = [&](Value bnd) {
+      if (bnd == rowArg)
+        return true;
+      auto it = vals.find(bnd);
+      return it != vals.end() && (it->second.kind == VKind::InvScalar ||
+                                  it->second.kind == VKind::OwnerScalar);
+    };
+    if (!okBound(loop.getLowerBound()) || !okBound(loop.getUpperBound()))
       return false;
 
-    // Pre-scan strip_read element type if halfTy has not been latched yet.
-    if (!halfTy) {
-      loop.walk([&](Operation *sub) {
-        if (sub->getName().stripDialect() == "slice_read" &&
-            isa<BlockArgument>(sub->getOperand(0))) {
-          Type et =
-              cast<MemRefType>(sub->getOperand(0).getType()).getElementType();
-          if (et.isBF16() || et.isF16())
-            halfTy = et;
+    int64_t K = -1;
+    Value iv = loop.getInductionVar();
+    loop.walk([&](Operation *sub) {
+      if (sub->getName().stripDialect() == "slice_read" &&
+          isa<BlockArgument>(sub->getOperand(0))) {
+        Type et =
+            cast<MemRefType>(sub->getOperand(0).getType()).getElementType();
+        if (!halfTy && (et.isBF16() || et.isF16()))
+          halfTy = et;
+        auto coords = sub->getOperands().drop_front();
+        if (!coords.empty() && coords.back() == iv) {
+          auto sh = layout(sub->getOperand(0), "block.shape");
+          int64_t rank =
+              cast<MemRefType>(sub->getOperand(0).getType()).getRank();
+          if (sh && rank >= 2 && K < 0)
+            K = sh[rank - 2];
         }
-      });
-      if (!halfTy)
+      }
+    });
+    if (auto dimOp = loop.getUpperBound().getDefiningOp<memref::DimOp>()) {
+      if (!isa<BlockArgument>(dimOp.getSource()) || !dimOp.getConstantIndex())
+        return false;
+      auto boundType = cast<MemRefType>(dimOp.getSource().getType());
+      if (*dimOp.getConstantIndex() != size_t(boundType.getRank() - 2))
+        return false;
+      int64_t dimK =
+          layout(dimOp.getSource(), "block.shape")[*dimOp.getConstantIndex()];
+      if (K < 0)
+        K = dimK;
+      else if (dimK != K)
         return false;
     }
+    if (K < 0 || !halfTy)
+      return false;
 
     SmallVector<int64_t, 2> carryBytes;
     for (unsigned k = 0; k < loop.getNumResults(); ++k) {
@@ -613,7 +649,6 @@ std::optional<PanelFoldSupply> panelFoldSupply(
     }
 
     Block &body = *loop.getBody();
-    Value iv = loop.getInductionVar();
     auto *yieldOp = body.getTerminator();
 
     llvm::DenseSet<Operation *> yieldCombOps;
@@ -804,6 +839,23 @@ std::optional<PanelFoldSupply> panelFoldSupply(
 
       if (isa<arith::CmpIOp>(bop) && isCausalCond(bop.getResult(0), iv))
         continue;
+
+      if ((fnName == "arith.index_cast" || fnName == "arith.index_castui") &&
+          bop.getOperand(0) == iv) {
+        vals[bop.getResult(0)] = {VKind::StripIndexInt, S};
+        continue;
+      }
+
+      if (fnName == "arith.sitofp" && bop.getResult(0).getType().isF32()) {
+        Value src = bop.getOperand(0);
+        auto itS = vals.find(src);
+        if (src == iv ||
+            (itS != vals.end() && itS->second.kind == VKind::StripIndexInt)) {
+          roleSpecs.push_back({&bop, "strip_index_f32", {M * S * 4}});
+          vals[bop.getResult(0)] = {VKind::StripPanelF32, S};
+          continue;
+        }
+      }
 
       if (auto br = dyn_cast<scf::IfOp>(bop)) {
         if (br.getNumResults() != 1 || !br.getResult(0).getType().isF32() ||
@@ -996,16 +1048,31 @@ std::optional<PanelFoldSupply> panelFoldSupply(
       continue;
     }
 
+    if (auto ld = dyn_cast<memref::LoadOp>(op)) {
+      if (!isa<BlockArgument>(ld.getMemref()) ||
+          isa<RankedTensorType>(ld.getType()) ||
+          llvm::any_of(ld.getIndices(),
+                       [&](Value c) { return !rowInvariant(c); }))
+        return {};
+      vals[ld.getResult()] = {VKind::InvScalar, 0};
+      invLoads.push_back(&op);
+      continue;
+    }
+
     if (auto sif = dyn_cast<scf::IfOp>(op)) {
-      if (sif.getNumResults() != 1 || !sif.getResult(0).getType().isF32() ||
+      if (sif.getNumResults() != 1 ||
+          isa<RankedTensorType>(sif.getResult(0).getType()) ||
           sif.getElseRegion().empty())
         return {};
       auto itC = vals.find(sif.getCondition());
-      if (itC == vals.end() || itC->second.kind != VKind::InvScalar ||
+      if (itC == vals.end() ||
+          (itC->second.kind != VKind::InvScalar &&
+           itC->second.kind != VKind::OwnerScalar) ||
           !checkScalarSubregion(*sif.thenBlock()) ||
           !checkScalarSubregion(*sif.elseBlock()))
         return {};
-      roleSpecs.push_back({&op, "owner_scalar", {M * 4}});
+      roleSpecs.push_back(
+          {&op, "owner_scalar", {scalarSlotBytes(sif.getResult(0).getType())}});
       vals[sif.getResult(0)] = {VKind::OwnerScalar, 0};
       continue;
     }
@@ -1032,8 +1099,9 @@ std::optional<PanelFoldSupply> panelFoldSupply(
         vals[op.getResult(0)] = {VKind::InvScalar, 0};
         continue;
       }
-      if (anyOwner && op.getResult(0).getType().isF32()) {
-        roleSpecs.push_back({&op, "owner_scalar", {M * 4}});
+      if (anyOwner && !isa<RankedTensorType>(op.getResult(0).getType())) {
+        roleSpecs.push_back(
+            {&op, "owner_scalar", {scalarSlotBytes(op.getResult(0).getType())}});
         vals[op.getResult(0)] = {VKind::OwnerScalar, 0};
         continue;
       }
@@ -1140,6 +1208,12 @@ std::optional<PanelFoldSupply> panelFoldSupply(
                .proven)
         return {};
     }
+    for (Operation *ldOp : invLoads) {
+      auto ba = cast<BlockArgument>(ldOp->getOperand(0));
+      auto *desc = abiArr[ba.getArgNumber()].getAsObject();
+      if (!desc || desc->getString("direction").value_or("") != "In")
+        return {};
+    }
   }
 
   // Assign real NRAM fragment slots by interval liveness over actual SSA uses.
@@ -1220,7 +1294,7 @@ std::optional<PanelFoldSupply> panelFoldSupply(
   }
   int64_t magOff = alloc.alloc(scratchLo, scratchHi, 4096 * 2);
   int64_t flagOff = alloc.alloc(scratchLo, scratchHi, 4096 * 2);
-  int64_t auxBytes = 512 + M * 64 * 4;
+  int64_t auxBytes = 1536 + M * 64 * 4;
   int64_t auxOff = alloc.alloc(scratchLo, scratchHi, auxBytes);
 
   if (alloc.peak > std::min(caps->budget, caps->capacity))

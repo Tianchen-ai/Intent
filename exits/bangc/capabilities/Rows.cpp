@@ -12,7 +12,8 @@ static int64_t matrixPrivateBytes(int64_t rows, int64_t columns, int64_t depth,
   // microkernels, including conversion and record scratch.
   return 256 + 4 * (rows * depth + 2 * depth * columns + 2 * rows * columns) +
          2 * 292 +
-         (computation == "window_contract" ? 4 * depth * (columns + 3) : 0);
+         (computation == "window_contract" ? 4 * depth * (columns + 3) : 0) +
+         (computation == "quant_contract" ? 32768 : 0);
 }
 llvm::Expected<compilerinfra::TargetProfile>
 capabilities(const llvm::json::Object &opts) {
@@ -33,6 +34,7 @@ capabilities(const llvm::json::Object &opts) {
   matrices->tiles = {{8, 64, 64, "{}"},
                      {16, 64, 128, "{}"},
                      {32, 64, 128, "{}"},
+                     {64, 64, 128, "{}"},
                      {16, 64, 256, "{}", "contract"},
                      {32, 64, 256, "{}", "contract"},
                      {64, 64, 256, "{}", "contract"},

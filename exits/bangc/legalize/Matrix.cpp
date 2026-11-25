@@ -10,6 +10,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/Support/JSON.h"
 #include <limits>
+#include <numeric>
 #include <set>
 
 namespace CI_UNIT_NAMESPACE {
@@ -557,6 +558,1228 @@ struct MatrixLowerer {
     Value factorF =
         b.create<arith::BitcastOp>(loc, b.getF32Type(), factorBits);
     return b.create<arith::MulFOp>(loc, valF, factorF);
+  }
+
+  Value emitLaneShiftScalar(Value subLane64,
+                            const intentdsl::kir::QuantFormatSpec &spec) {
+    Value sh = cI32(spec.laneBitShifts[0]);
+    for (int idx = 1; idx < spec.packFactor; ++idx) {
+      Value eq = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                         subLane64, cI64(idx));
+      sh = b.create<arith::SelectOp>(loc, eq, cI32(spec.laneBitShifts[idx]), sh);
+    }
+    return sh;
+  }
+
+  Value decodeScalarQuantCode(Value codeI32,
+                              const intentdsl::kir::QuantFormatSpec &spec) {
+    if (spec.valueCode == intentdsl::kir::QuantValueCode::Fp4E2M1) {
+      Value s = b.create<arith::AndIOp>(
+          loc, b.create<arith::ShRUIOp>(loc, codeI32, cI32(3)), cI32(1));
+      Value e = b.create<arith::AndIOp>(
+          loc, b.create<arith::ShRUIOp>(loc, codeI32, cI32(1)), cI32(3));
+      Value m = b.create<arith::AndIOp>(loc, codeI32, cI32(1));
+      Value isSub =
+          b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, e, cI32(0));
+      Value safeShift = b.create<arith::SelectOp>(
+          loc, isSub, cI32(0), b.create<arith::SubIOp>(loc, e, cI32(1)));
+      Value normDouble = b.create<arith::ShLIOp>(
+          loc, b.create<arith::AddIOp>(loc, m, cI32(2)), safeShift);
+      Value magDouble =
+          b.create<arith::SelectOp>(loc, isSub, m, normDouble);
+      Value magF = b.create<arith::SIToFPOp>(loc, b.getF32Type(), magDouble);
+      Value neg =
+          b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, s, cI32(0));
+      Value halfScale =
+          b.create<arith::SelectOp>(loc, neg, cF32(-0.5f), cF32(0.5f));
+      return b.create<arith::MulFOp>(loc, halfScale, magF);
+    }
+    return b.create<arith::SIToFPOp>(loc, b.getF32Type(), codeI32);
+  }
+
+  Value decodeScalarE8M0(Value scaleByte,
+                         const intentdsl::kir::QuantFormatSpec &spec) {
+    Value scNan = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                          scaleByte, cI32(spec.scaleNan));
+    Value scZero =
+        b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, scaleByte, cI32(0));
+    int32_t zeroExpBits = 1 << (149 - spec.scaleBias);
+    Value shiftedSc = b.create<arith::ShLIOp>(
+        loc,
+        b.create<arith::AddIOp>(loc, scaleByte, cI32(127 - spec.scaleBias)),
+        cI32(23));
+    Value factorBits = b.create<arith::SelectOp>(
+        loc, scNan, cI32(0x7fc00000),
+        b.create<arith::SelectOp>(loc, scZero, cI32(zeroExpBits), shiftedSc));
+    return b.create<arith::BitcastOp>(loc, b.getF32Type(), factorBits);
+  }
+
+  // Descriptor-driven quantized contraction lowering ("format as data"):
+  // Handles RecordGemv, BlockScaledPair, and GroupedWeightRhs from QuantFormatSpec
+  // with zero per-format branches.
+  LogicalResult emitQuantizedFromDescriptor(Value acc, Value r, Value c,
+                                            Value nr, Value nc) {
+    const auto *spec = intentdsl::kir::quantFormatSpec(p.dot);
+    if (!spec)
+      return p.dot.emitError("missing quantized format descriptor");
+    int64_t bm = p.tile[0], bn = p.tile[1], bk = p.tile[2];
+    int64_t shapeK = p.shape[2];
+
+    if (spec->roleLayout == intentdsl::kir::QuantRoleLayout::RecordGemv) {
+      Value w = p.dot.getOperand(0);
+      Value x = spec->q8kActivation
+                    ? p.dot.getOperand(1).getDefiningOp()->getOperand(0)
+                    : p.dot.getOperand(1);
+      Value rec = nramBuf(b.getI8Type(), llvm::alignTo(spec->recordBytes, 64));
+      Value actBuf =
+          nramBuf(b.getF32Type(), llvm::alignTo(spec->blockElements, 64));
+      Value qArr =
+          spec->q8kActivation
+              ? nramBuf(b.getI32Type(), llvm::alignTo(spec->blockElements, 64))
+              : Value{};
+      forLoop(cI64(0), nr, cI64(1),
+              [&](Value i) { storeAt(acc, i, cF32(0.0f)); });
+
+      int64_t recordGroups = shapeK / spec->blockElements;
+      int64_t xSt1 = p.stride(x, 1), wSt2 = p.stride(w, 2);
+      forLoop(cI64(0), cI64(recordGroups), cI64(1), [&](Value gq) {
+        if (xSt1 == 1) {
+          memcpy1D(actBuf, globalPtr(x, {gq, cI64(0)}),
+                   cI64(spec->blockElements), "GDRAM2NRAM");
+          sync("io");
+        } else {
+          forLoop(cI64(0), cI64(spec->blockElements), cI64(1), [&](Value k) {
+            storeAt(actBuf, k,
+                    loadAt(globalPtr(x, {gq, k}), cI64(0), b.getF32Type()));
+          });
+        }
+        auto emitRecordRows = [&](Value ds) {
+          forLoop(cI64(0), nr, cI64(1), [&](Value i) {
+            Value ri = b.create<arith::AddIOp>(loc, r, i);
+            Value base = globalPtr(w, {ri, gq, cI64(0)});
+            if (wSt2 == 1) {
+              memcpy1D(rec, base, cI64(spec->recordBytes), "GDRAM2NRAM");
+              sync("io");
+            } else {
+              forLoop(cI64(0), cI64(spec->recordBytes), cI64(1), [&](Value z) {
+                Value elemPtr = makeAddr(base, {z}, {cI64(wSt2)}, 0);
+                storeAt(rec, z, loadAt(elemPtr, cI64(0), b.getI8Type()));
+              });
+            }
+            auto recU32 = [&](Value idx) {
+              return b
+                  .create<arith::ExtUIOp>(loc, b.getI32Type(),
+                                          loadAt(rec, idx, b.getI8Type()))
+                  .getResult();
+            };
+            Value dVal =
+                spec->scaleCode ==
+                        intentdsl::kir::QuantScaleCode::LeHalfAtOffset
+                    ? makeOp("from_le_half",
+                             {recU32(cI64(spec->superScaleOffset)),
+                              recU32(cI64(spec->superScaleOffset + 1))},
+                             {b.getF32Type()})
+                          ->getResult(0)
+                    : cF32(1.0f);
+
+            bool hierarchicalPlanes =
+                spec->numBitPlanes > 0 && spec->blockElements % 128 == 0 &&
+                (spec->subBlockElements <= 0 || 32 % spec->subBlockElements == 0);
+            if (hierarchicalPlanes) {
+              int64_t halves = spec->blockElements / 128;
+              int64_t stepLen = spec->subBlockElements > 0
+                                    ? spec->subBlockElements
+                                    : 32;
+              int64_t subSteps = 32 / stepLen;
+              auto extractCodeAt = [&](ArrayRef<Value> planeBases, Value lane,
+                                       int64_t q) -> Value {
+                Value code;
+                for (int pi = 0; pi < spec->numBitPlanes; ++pi) {
+                  const auto &pl = spec->planes[pi];
+                  Value byteIdx =
+                      b.create<arith::AddIOp>(loc, planeBases[pi], lane);
+                  Value raw = recU32(byteIdx);
+                  int32_t shConst = static_cast<int32_t>(
+                      (pl.quadShiftMode == 0 ? (q / 2) : q) * pl.shiftUnit);
+                  Value shifted =
+                      shConst > 0
+                          ? b.create<arith::ShRUIOp>(loc, raw, cI32(shConst))
+                                .getResult()
+                          : raw;
+                  Value part = b.create<arith::AndIOp>(
+                      loc, shifted, cI32((1 << pl.bitWidth) - 1));
+                  if (pl.destBitOffset > 0)
+                    part = b.create<arith::ShLIOp>(loc, part,
+                                                   cI32(pl.destBitOffset));
+                  code = pi == 0 ? part
+                                 : b.create<arith::OrIOp>(loc, code, part)
+                                       .getResult();
+                }
+                if (spec->zeroBias != 0)
+                  code =
+                      b.create<arith::SubIOp>(loc, code, cI32(spec->zeroBias));
+                return code;
+              };
+
+              if (spec->q8kActivation) {
+                auto halfLoop = forLoopCarry(
+                    cI64(0), cI64(halves), cI64(1), ValueRange{cI32(0)},
+                    [&](Value half, ValueRange hIter) {
+                      Value accI32 = hIter[0];
+                      for (int64_t q = 0; q < 4; ++q) {
+                        for (int64_t sb = 0; sb < subSteps; ++sb) {
+                          int64_t inHalfOff = q * 32 + sb * stepLen;
+                          SmallVector<Value, 4> planeBases;
+                          for (int pi = 0; pi < spec->numBitPlanes; ++pi) {
+                            const auto &pl = spec->planes[pi];
+                            int64_t cOff = pl.baseByte +
+                                           (q % 2) * pl.quadByteStep +
+                                           sb * stepLen;
+                            planeBases.push_back(b.create<arith::AddIOp>(
+                                loc, cI64(cOff),
+                                b.create<arith::MulIOp>(
+                                    loc, half, cI64(pl.halfStride))));
+                          }
+                          Value qBase = b.create<arith::AddIOp>(
+                              loc, cI64(inHalfOff),
+                              b.create<arith::MulIOp>(loc, half, cI64(128)));
+                          auto laneLoop = forLoopCarry(
+                              cI64(0), cI64(stepLen), cI64(1),
+                              ValueRange{cI32(0)},
+                              [&](Value lane, ValueRange lIter) {
+                                Value wCode =
+                                    extractCodeAt(planeBases, lane, q);
+                                Value qv = loadAt(
+                                    qArr,
+                                    b.create<arith::AddIOp>(loc, qBase, lane));
+                                Value prod =
+                                    b.create<arith::MulIOp>(loc, wCode, qv);
+                                b.create<scf::YieldOp>(
+                                    loc, ValueRange{b.create<arith::AddIOp>(
+                                             loc, lIter[0], prod)});
+                              });
+                          Value subSum = laneLoop.getResult(0);
+                          if (spec->subScaleOffset >= 0 &&
+                              spec->subBlockElements > 0) {
+                            int64_t cSub = spec->subScaleOffset +
+                                           inHalfOff / spec->subBlockElements;
+                            int64_t hStep = 128 / spec->subBlockElements;
+                            Value subIdx = b.create<arith::AddIOp>(
+                                loc, cI64(cSub),
+                                b.create<arith::MulIOp>(loc, half,
+                                                        cI64(hStep)));
+                            Value scU8 = recU32(subIdx);
+                            Value scS8 = b.create<arith::SubIOp>(
+                                loc,
+                                b.create<arith::XOrIOp>(loc, scU8, cI32(128)),
+                                cI32(128));
+                            subSum =
+                                b.create<arith::MulIOp>(loc, subSum, scS8);
+                          }
+                          accI32 =
+                              b.create<arith::AddIOp>(loc, accI32, subSum);
+                        }
+                      }
+                      b.create<scf::YieldOp>(loc, ValueRange{accI32});
+                    });
+                Value sumF = b.create<arith::SIToFPOp>(
+                    loc, b.getF32Type(), halfLoop.getResult(0));
+                Value contrib = b.create<arith::MulFOp>(
+                    loc, ds, b.create<arith::MulFOp>(loc, dVal, sumF));
+                storeAt(acc, i,
+                        b.create<arith::AddFOp>(loc, loadAt(acc, i), contrib));
+              } else {
+                auto halfLoop = forLoopCarry(
+                    cI64(0), cI64(halves), cI64(1), ValueRange{cF32(0.0f)},
+                    [&](Value half, ValueRange hIter) {
+                      Value accF = hIter[0];
+                      for (int64_t q = 0; q < 4; ++q) {
+                        for (int64_t sb = 0; sb < subSteps; ++sb) {
+                          int64_t inHalfOff = q * 32 + sb * stepLen;
+                          SmallVector<Value, 4> planeBases;
+                          for (int pi = 0; pi < spec->numBitPlanes; ++pi) {
+                            const auto &pl = spec->planes[pi];
+                            int64_t cOff = pl.baseByte +
+                                           (q % 2) * pl.quadByteStep +
+                                           sb * stepLen;
+                            planeBases.push_back(b.create<arith::AddIOp>(
+                                loc, cI64(cOff),
+                                b.create<arith::MulIOp>(
+                                    loc, half, cI64(pl.halfStride))));
+                          }
+                          Value qBase = b.create<arith::AddIOp>(
+                              loc, cI64(inHalfOff),
+                              b.create<arith::MulIOp>(loc, half, cI64(128)));
+                          auto laneLoop = forLoopCarry(
+                              cI64(0), cI64(stepLen), cI64(1),
+                              ValueRange{cF32(0.0f)},
+                              [&](Value lane, ValueRange lIter) {
+                                Value wF = b.create<arith::SIToFPOp>(
+                                    loc, b.getF32Type(),
+                                    extractCodeAt(planeBases, lane, q));
+                                Value xv = loadAt(
+                                    actBuf,
+                                    b.create<arith::AddIOp>(loc, qBase, lane),
+                                    b.getF32Type());
+                                Value prod =
+                                    b.create<arith::MulFOp>(loc, wF, xv);
+                                b.create<scf::YieldOp>(
+                                    loc, ValueRange{b.create<arith::AddFOp>(
+                                             loc, lIter[0], prod)});
+                              });
+                          Value subSum = laneLoop.getResult(0);
+                          if (spec->subScaleOffset >= 0 &&
+                              spec->subBlockElements > 0) {
+                            int64_t cSub = spec->subScaleOffset +
+                                           inHalfOff / spec->subBlockElements;
+                            int64_t hStep = 128 / spec->subBlockElements;
+                            Value subIdx = b.create<arith::AddIOp>(
+                                loc, cI64(cSub),
+                                b.create<arith::MulIOp>(loc, half,
+                                                        cI64(hStep)));
+                            Value scU8 = recU32(subIdx);
+                            Value scS8 = b.create<arith::SubIOp>(
+                                loc,
+                                b.create<arith::XOrIOp>(loc, scU8, cI32(128)),
+                                cI32(128));
+                            subSum = b.create<arith::MulFOp>(
+                                loc, subSum,
+                                b.create<arith::SIToFPOp>(loc, b.getF32Type(),
+                                                          scS8));
+                          }
+                          accF = b.create<arith::AddFOp>(loc, accF, subSum);
+                        }
+                      }
+                      b.create<scf::YieldOp>(loc, ValueRange{accF});
+                    });
+                Value contrib =
+                    b.create<arith::MulFOp>(loc, dVal, halfLoop.getResult(0));
+                storeAt(acc, i,
+                        b.create<arith::AddFOp>(loc, loadAt(acc, i), contrib));
+              }
+              return;
+            }
+
+            auto reconstructWeight = [&](Value idx) -> Value {
+              Value half = b.create<arith::DivSIOp>(loc, idx, cI64(128));
+              Value inHalf = b.create<arith::RemSIOp>(loc, idx, cI64(128));
+              Value quad = b.create<arith::DivSIOp>(loc, inHalf, cI64(32));
+              Value lane = b.create<arith::RemSIOp>(loc, inHalf, cI64(32));
+              Value quadOdd = b.create<arith::RemSIOp>(loc, quad, cI64(2));
+              Value quadHalf = b.create<arith::DivSIOp>(loc, quad, cI64(2));
+              Value code;
+              for (int pi = 0; pi < spec->numBitPlanes; ++pi) {
+                const auto &pl = spec->planes[pi];
+                Value byteIdx = b.create<arith::AddIOp>(
+                    loc,
+                    b.create<arith::AddIOp>(
+                        loc, cI64(pl.baseByte),
+                        b.create<arith::MulIOp>(loc, half,
+                                                cI64(pl.halfStride))),
+                    b.create<arith::AddIOp>(
+                        loc,
+                        b.create<arith::MulIOp>(loc, quadOdd,
+                                                cI64(pl.quadByteStep)),
+                        lane));
+                Value raw = recU32(byteIdx);
+                Value shFactor = pl.quadShiftMode == 0 ? quadHalf : quad;
+                Value sh32 = b.create<arith::TruncIOp>(
+                    loc, b.getI32Type(),
+                    b.create<arith::MulIOp>(loc, shFactor,
+                                            cI64(pl.shiftUnit)));
+                Value part = b.create<arith::AndIOp>(
+                    loc, b.create<arith::ShRUIOp>(loc, raw, sh32),
+                    cI32((1 << pl.bitWidth) - 1));
+                if (pl.destBitOffset > 0)
+                  part = b.create<arith::ShLIOp>(loc, part,
+                                                 cI32(pl.destBitOffset));
+                code = pi == 0
+                           ? part
+                           : b.create<arith::OrIOp>(loc, code, part).getResult();
+              }
+              if (spec->zeroBias != 0)
+                code =
+                    b.create<arith::SubIOp>(loc, code, cI32(spec->zeroBias));
+              if (spec->subScaleOffset >= 0 && spec->subBlockElements > 0) {
+                Value subIdx = b.create<arith::AddIOp>(
+                    loc, cI64(spec->subScaleOffset),
+                    b.create<arith::DivSIOp>(loc, idx,
+                                             cI64(spec->subBlockElements)));
+                Value scU8 = recU32(subIdx);
+                Value scS8 = b.create<arith::SubIOp>(
+                    loc, b.create<arith::XOrIOp>(loc, scU8, cI32(128)),
+                    cI32(128));
+                code = b.create<arith::MulIOp>(loc, code, scS8);
+              }
+              return code;
+            };
+            if (spec->q8kActivation) {
+              auto dotLoop = forLoopCarry(
+                  cI64(0), cI64(spec->blockElements), cI64(1),
+                  ValueRange{cI32(0)}, [&](Value idx, ValueRange st) {
+                    Value wCode = reconstructWeight(idx);
+                    Value qv = loadAt(qArr, idx);
+                    Value prod = b.create<arith::MulIOp>(loc, wCode, qv);
+                    b.create<scf::YieldOp>(
+                        loc,
+                        ValueRange{b.create<arith::AddIOp>(loc, st[0], prod)});
+                  });
+              Value sumF = b.create<arith::SIToFPOp>(
+                  loc, b.getF32Type(), dotLoop.getResult(0));
+              Value contrib = b.create<arith::MulFOp>(
+                  loc, ds, b.create<arith::MulFOp>(loc, dVal, sumF));
+              storeAt(acc, i,
+                      b.create<arith::AddFOp>(loc, loadAt(acc, i), contrib));
+            } else {
+              auto dotLoop = forLoopCarry(
+                  cI64(0), cI64(spec->blockElements), cI64(1),
+                  ValueRange{cF32(0.0f)}, [&](Value idx, ValueRange st) {
+                    Value wF = b.create<arith::SIToFPOp>(
+                        loc, b.getF32Type(), reconstructWeight(idx));
+                    Value xv = loadAt(actBuf, idx, b.getF32Type());
+                    Value prod = b.create<arith::MulFOp>(loc, wF, xv);
+                    b.create<scf::YieldOp>(
+                        loc,
+                        ValueRange{b.create<arith::AddFOp>(loc, st[0], prod)});
+                  });
+              Value contrib =
+                  b.create<arith::MulFOp>(loc, dVal, dotLoop.getResult(0));
+              storeAt(acc, i,
+                      b.create<arith::AddFOp>(loc, loadAt(acc, i), contrib));
+            }
+          });
+        };
+
+        if (!spec->q8kActivation) {
+          emitRecordRows(cF32(1.0f));
+          return;
+        }
+        intentdsl::kir::Q8KRecord q8;
+        auto maxLoop = forLoopCarry(
+            cI64(0), cI64(spec->blockElements), cI64(1),
+            ValueRange{cF32(0.0f)}, [&](Value k, ValueRange iter) {
+              Value xk = loadAt(actBuf, k, b.getF32Type());
+              Value ax = makeOp("scalar_math", {xk}, {b.getF32Type()},
+                                {b.getNamedAttr("op", b.getStringAttr("fabs"))})
+                             ->getResult(0);
+              Value ae =
+                  makeOp("scalar_math", {iter[0]}, {b.getF32Type()},
+                         {b.getNamedAttr("op", b.getStringAttr("fabs"))})
+                      ->getResult(0);
+              Value gt = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OGT,
+                                                 ax, ae);
+              Value next = b.create<arith::SelectOp>(loc, gt, xk, iter[0]);
+              b.create<scf::YieldOp>(loc, ValueRange{next});
+            });
+        Value e = maxLoop.getResult(0);
+        Value isZero = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OEQ,
+                                               e, cF32(0.0f));
+        ifThenElse(
+            isZero, {},
+            [&]() {
+              if (spec->scaleCode ==
+                  intentdsl::kir::QuantScaleCode::LeHalfAtOffset) {
+                forLoop(cI64(0), nr, cI64(1), [&](Value i) {
+                  Value ri = b.create<arith::AddIOp>(loc, r, i);
+                  Value dHiPtr =
+                      globalPtr(w, {ri, gq, cI64(spec->superScaleOffset + 1)});
+                  Value dHi = b.create<arith::ExtUIOp>(
+                      loc, b.getI32Type(),
+                      loadAt(dHiPtr, cI64(0), b.getI8Type()));
+                  Value c7c = cI32(0x7c);
+                  Value nf = b.create<arith::CmpIOp>(
+                      loc, arith::CmpIPredicate::eq,
+                      b.create<arith::AndIOp>(loc, dHi, c7c), c7c);
+                  Value nanF = cF32(std::numeric_limits<float>::quiet_NaN());
+                  Value delta =
+                      b.create<arith::SelectOp>(loc, nf, nanF, cF32(0.0f));
+                  storeAt(acc, i,
+                          b.create<arith::AddFOp>(loc, loadAt(acc, i), delta));
+                });
+              }
+            },
+            [&]() {
+              Value maxQuant = cF32(-float((1 << (q8.elementBits - 1)) - 1));
+              Value inv = b.create<arith::DivFOp>(loc, maxQuant, e);
+              Value ds = b.create<arith::DivFOp>(loc, cF32(1.0f), inv);
+              int32_t qMin = -(1 << (q8.elementBits - 1));
+              int32_t qMax = (1 << (q8.elementBits - 1)) - 1;
+              forLoop(cI64(0), cI64(spec->blockElements), cI64(1),
+                      [&](Value k) {
+                        Value xk = loadAt(actBuf, k, b.getF32Type());
+                        Value f = b.create<arith::MulFOp>(loc, xk, inv);
+                        Value fl = makeOp("scalar_math", {f}, {b.getF32Type()},
+                                          {b.getNamedAttr(
+                                              "op", b.getStringAttr("floor"))})
+                                       ->getResult(0);
+                        Value lo =
+                            b.create<arith::FPToSIOp>(loc, b.getI32Type(), fl);
+                        Value frac = b.create<arith::SubFOp>(loc, f, fl);
+                        Value gtHalf = b.create<arith::CmpFOp>(
+                            loc, arith::CmpFPredicate::OGT, frac, cF32(0.5f));
+                        Value eqHalf = b.create<arith::CmpFOp>(
+                            loc, arith::CmpFPredicate::OEQ, frac, cF32(0.5f));
+                        Value odd = b.create<arith::CmpIOp>(
+                            loc, arith::CmpIPredicate::ne,
+                            b.create<arith::AndIOp>(loc, lo, cI32(1)), cI32(0));
+                        Value bump = b.create<arith::OrIOp>(
+                            loc, gtHalf,
+                            b.create<arith::AndIOp>(loc, eqHalf, odd));
+                        Value inc = b.create<arith::SelectOp>(loc, bump,
+                                                              cI32(1), cI32(0));
+                        Value rnd = b.create<arith::AddIOp>(loc, lo, inc);
+                        Value cl = b.create<arith::MinSIOp>(
+                            loc, b.create<arith::MaxSIOp>(loc, rnd, cI32(qMin)),
+                            cI32(qMax));
+                        storeAt(qArr, k, cl);
+                      });
+              emitRecordRows(ds);
+            });
+      });
+      return success();
+    }
+
+    if (spec->roleLayout ==
+        intentdsl::kir::QuantRoleLayout::BlockScaledPair) {
+      Value a = p.dot.getOperand(0), sa = p.dot.getOperand(1),
+            rhs = p.dot.getOperand(2);
+      intentdsl::kir::RightScale rightScale(p.dot);
+      int64_t recBytes = spec->recordBytes;
+      int64_t groups = shapeK / spec->blockElements;
+      int64_t groupsPerPanel = std::gcd(
+          groups, std::max<int64_t>(1, bk / spec->blockElements));
+      int64_t panelRecBytes = groupsPerPanel * recBytes;
+      int64_t panelElems = groupsPerPanel * spec->blockElements;
+      int64_t convK = std::max<int64_t>(panelElems, 64);
+
+      Value aRawBuf =
+          nramBuf(b.getI8Type(), llvm::alignTo(bm * panelRecBytes, 64));
+      Value bRawBuf =
+          nramBuf(b.getI8Type(), llvm::alignTo(panelRecBytes * bn, 64));
+      Value saBuf =
+          nramBuf(b.getI8Type(), llvm::alignTo(bm * groupsPerPanel, 64));
+      Value sbBuf =
+          nramBuf(b.getI8Type(), llvm::alignTo(bn * groupsPerPanel, 64));
+      Value leftF16 = nramBuf(b.getF16Type(), bm * convK);
+      Value transF16 = nramBuf(b.getF16Type(), bn * convK);
+      Value wFilter = wramBuf(b.getF16Type(), bn * convK);
+      Value rightBuf = nramBuf(b.getF32Type(), spec->blockElements * bn);
+      Value tmpBuf = nramBuf(b.getF32Type(), bn);
+      fillVec(acc, cI64(bm * bn), cF32(0.0f));
+
+      int32_t codeMask = (1 << spec->packBits) - 1;
+      int32_t f16MinExp = spec->scaleBias - 13;
+      int32_t f16MaxExp = spec->scaleBias + 13;
+      forLoop(cI64(0), cI64(groups), cI64(groupsPerPanel), [&](Value u0) {
+        if (p.stride(a, 2) == 1 && p.stride(a, 1) == recBytes) {
+          Value aBase = globalPtr(a, {r, u0, cI64(0)}, b.getI8Type());
+          ifThenElse(
+              b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, nr,
+                                      cI64(1)),
+              {},
+              [&]() {
+                memcpy1D(aRawBuf, aBase, cI64(panelRecBytes), "GDRAM2NRAM");
+              },
+              [&]() {
+                memcpy2D(aRawBuf, aBase, cI64(panelRecBytes),
+                         cI64(panelRecBytes), cI64(p.stride(a, 0)),
+                         b.create<arith::SubIOp>(loc, nr, cI64(1)),
+                         "GDRAM2NRAM");
+              });
+        } else {
+          forLoop(cI64(0), nr, cI64(1), [&](Value i) {
+            Value ri = b.create<arith::AddIOp>(loc, r, i);
+            forLoop(cI64(0), cI64(groupsPerPanel), cI64(1), [&](Value g) {
+              Value ug = b.create<arith::AddIOp>(loc, u0, g);
+              forLoop(cI64(0), cI64(recBytes), cI64(1), [&](Value z) {
+                Value idx = b.create<arith::AddIOp>(
+                    loc,
+                    b.create<arith::MulIOp>(loc, i, cI64(panelRecBytes)),
+                    b.create<arith::AddIOp>(
+                        loc, b.create<arith::MulIOp>(loc, g, cI64(recBytes)),
+                        z));
+                storeAt(aRawBuf, idx,
+                        loadAt(globalPtr(a, {ri, ug, z}, b.getI8Type()),
+                               cI64(0), b.getI8Type()));
+              });
+            });
+          });
+        }
+
+        if (p.stride(rhs, 2) == 1 &&
+            p.stride(rhs, 0) == recBytes * p.stride(rhs, 1)) {
+          Value bBase = globalPtr(rhs, {u0, cI64(0), c}, b.getI8Type());
+          if (panelRecBytes == 1)
+            memcpy1D(bRawBuf, bBase, nc, "GDRAM2NRAM");
+          else
+            memcpy2D(bRawBuf, bBase, nc, cI64(bn), cI64(p.stride(rhs, 1)),
+                     cI64(panelRecBytes - 1), "GDRAM2NRAM");
+        } else {
+          forLoop(cI64(0), cI64(groupsPerPanel), cI64(1), [&](Value g) {
+            Value ug = b.create<arith::AddIOp>(loc, u0, g);
+            forLoop(cI64(0), cI64(recBytes), cI64(1), [&](Value z) {
+              Value gz = b.create<arith::AddIOp>(
+                  loc, b.create<arith::MulIOp>(loc, g, cI64(recBytes)), z);
+              forLoop(cI64(0), nc, cI64(1), [&](Value j) {
+                Value cj = b.create<arith::AddIOp>(loc, c, j);
+                Value idx = b.create<arith::AddIOp>(
+                    loc, b.create<arith::MulIOp>(loc, gz, cI64(bn)), j);
+                storeAt(bRawBuf, idx,
+                        loadAt(globalPtr(rhs, {ug, z, cj}, b.getI8Type()),
+                               cI64(0), b.getI8Type()));
+              });
+            });
+          });
+        }
+
+        if (p.stride(sa, 1) == 1) {
+          Value saBase = globalPtr(sa, {r, u0}, b.getI8Type());
+          ifThenElse(
+              b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, nr,
+                                      cI64(1)),
+              {},
+              [&]() {
+                memcpy1D(saBuf, saBase, cI64(groupsPerPanel), "GDRAM2NRAM");
+              },
+              [&]() {
+                memcpy2D(saBuf, saBase, cI64(groupsPerPanel),
+                         cI64(groupsPerPanel), cI64(p.stride(sa, 0)),
+                         b.create<arith::SubIOp>(loc, nr, cI64(1)),
+                         "GDRAM2NRAM");
+              });
+        } else {
+          forLoop(cI64(0), nr, cI64(1), [&](Value i) {
+            Value ri = b.create<arith::AddIOp>(loc, r, i);
+            forLoop(cI64(0), cI64(groupsPerPanel), cI64(1), [&](Value g) {
+              Value ug = b.create<arith::AddIOp>(loc, u0, g);
+              Value idx = b.create<arith::AddIOp>(
+                  loc, b.create<arith::MulIOp>(loc, i, cI64(groupsPerPanel)),
+                  g);
+              storeAt(saBuf, idx,
+                      loadAt(globalPtr(sa, {ri, ug}, b.getI8Type()), cI64(0),
+                             b.getI8Type()));
+            });
+          });
+        }
+
+        // Stage rightScale into sbBuf laid out as [nc, groupsPerPanel].
+        if (rightScale.column == 0 && p.stride(rightScale.view, 1) == 1) {
+          Value sbBase =
+              globalPtr(rightScale.view, {c, u0}, b.getI8Type());
+          ifThenElse(
+              b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, nc,
+                                      cI64(1)),
+              {},
+              [&]() {
+                memcpy1D(sbBuf, sbBase, cI64(groupsPerPanel), "GDRAM2NRAM");
+              },
+              [&]() {
+                memcpy2D(sbBuf, sbBase, cI64(groupsPerPanel),
+                         cI64(groupsPerPanel),
+                         cI64(p.stride(rightScale.view, 0)),
+                         b.create<arith::SubIOp>(loc, nc, cI64(1)),
+                         "GDRAM2NRAM");
+              });
+        } else {
+          forLoop(cI64(0), nc, cI64(1), [&](Value j) {
+            Value cj = b.create<arith::AddIOp>(loc, c, j);
+            forLoop(cI64(0), cI64(groupsPerPanel), cI64(1), [&](Value g) {
+              Value ug = b.create<arith::AddIOp>(loc, u0, g);
+              SmallVector<Value> sbCoords(2);
+              sbCoords[rightScale.column] = cj;
+              sbCoords[rightScale.group] = ug;
+              Value idx = b.create<arith::AddIOp>(
+                  loc, b.create<arith::MulIOp>(loc, j, cI64(groupsPerPanel)),
+                  g);
+              storeAt(sbBuf, idx,
+                      loadAt(globalPtr(rightScale.view, sbCoords, b.getI8Type()),
+                             cI64(0), b.getI8Type()));
+            });
+          });
+        }
+        sync("io");
+
+        auto okA = forLoopCarry(
+            cI64(0), b.create<arith::MulIOp>(loc, nr, cI64(groupsPerPanel)),
+            cI64(1), ValueRange{cI1(bn == 64)}, [&](Value idx, ValueRange st) {
+              Value sb = b.create<arith::ExtUIOp>(
+                  loc, b.getI32Type(), loadAt(saBuf, idx, b.getI8Type()));
+              Value inWin = b.create<arith::AndIOp>(
+                  loc,
+                  b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge, sb,
+                                          cI32(f16MinExp)),
+                  b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sle, sb,
+                                          cI32(f16MaxExp)));
+              b.create<scf::YieldOp>(
+                  loc, ValueRange{b.create<arith::AndIOp>(loc, st[0], inWin)});
+            });
+        auto okAB = forLoopCarry(
+            cI64(0), b.create<arith::MulIOp>(loc, nc, cI64(groupsPerPanel)),
+            cI64(1), ValueRange{okA.getResult(0)},
+            [&](Value idx, ValueRange st) {
+              Value sb = b.create<arith::ExtUIOp>(
+                  loc, b.getI32Type(), loadAt(sbBuf, idx, b.getI8Type()));
+              Value inWin = b.create<arith::AndIOp>(
+                  loc,
+                  b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge, sb,
+                                          cI32(f16MinExp)),
+                  b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sle, sb,
+                                          cI32(f16MaxExp)));
+              b.create<scf::YieldOp>(
+                  loc, ValueRange{b.create<arith::AndIOp>(loc, st[0], inWin)});
+            });
+
+        ifThenElse(
+            okAB.getResult(0), {},
+            [&]() {
+              Value zeroHalf = b.create<arith::ConstantOp>(
+                  loc, b.getZeroAttr(b.getF16Type()));
+              if (panelElems < convK) {
+                fillVec(leftF16, cI64(bm * convK), zeroHalf);
+                fillVec(transF16, cI64(bn * convK), zeroHalf);
+              } else {
+                ifThen(b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne,
+                                               nr, cI64(bm)),
+                       [&]() { fillVec(leftF16, cI64(bm * convK), zeroHalf); });
+                ifThen(b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne,
+                                               nc, cI64(bn)),
+                       [&]() {
+                         fillVec(transF16, cI64(bn * convK), zeroHalf);
+                       });
+              }
+              sync("compute");
+              forLoop(cI64(0), nc, cI64(1), [&](Value j) {
+                Value fltRowBase =
+                    b.create<arith::MulIOp>(loc, j, cI64(convK));
+                Value sbRowBase =
+                    b.create<arith::MulIOp>(loc, j, cI64(groupsPerPanel));
+                forLoop(cI64(0), cI64(groupsPerPanel), cI64(1), [&](Value g) {
+                  Value sbByte = b.create<arith::ExtUIOp>(
+                      loc, b.getI32Type(),
+                      loadAt(sbBuf,
+                             b.create<arith::AddIOp>(loc, sbRowBase, g),
+                             b.getI8Type()));
+                  Value sbF = decodeScalarE8M0(sbByte, *spec);
+                  Value gRecBase =
+                      b.create<arith::MulIOp>(loc, g, cI64(recBytes));
+                  Value gElemBase = b.create<arith::AddIOp>(
+                      loc, fltRowBase,
+                      b.create<arith::MulIOp>(loc, g,
+                                              cI64(spec->blockElements)));
+                  forLoop(cI64(0), cI64(recBytes), cI64(1), [&](Value z) {
+                    Value gz = b.create<arith::AddIOp>(loc, gRecBase, z);
+                    Value rawIdx = b.create<arith::AddIOp>(
+                        loc, b.create<arith::MulIOp>(loc, gz, cI64(bn)), j);
+                    Value raw = b.create<arith::ExtUIOp>(
+                        loc, b.getI32Type(),
+                        loadAt(bRawBuf, rawIdx, b.getI8Type()));
+                    Value zElemOff = b.create<arith::AddIOp>(
+                        loc, gElemBase,
+                        b.create<arith::MulIOp>(loc, z,
+                                                cI64(spec->packFactor)));
+                    for (int sub = 0; sub < spec->packFactor; ++sub) {
+                      Value shifted =
+                          spec->laneBitShifts[sub] > 0
+                              ? b.create<arith::ShRUIOp>(
+                                     loc, raw, cI32(spec->laneBitShifts[sub]))
+                                    .getResult()
+                              : raw;
+                      Value code =
+                          b.create<arith::AndIOp>(loc, shifted, cI32(codeMask));
+                      if (spec->zeroBias != 0)
+                        code = b.create<arith::SubIOp>(loc, code,
+                                                       cI32(spec->zeroBias));
+                      Value decF = b.create<arith::MulFOp>(
+                          loc, decodeScalarQuantCode(code, *spec), sbF);
+                      Value decH =
+                          b.create<arith::TruncFOp>(loc, b.getF16Type(), decF);
+                      storeAt(transF16,
+                              b.create<arith::AddIOp>(loc, zElemOff, cI64(sub)),
+                              decH);
+                    }
+                  });
+                });
+              });
+              forLoop(cI64(0), nr, cI64(1), [&](Value i) {
+                Value lhsRowBase =
+                    b.create<arith::MulIOp>(loc, i, cI64(convK));
+                Value saRowBase =
+                    b.create<arith::MulIOp>(loc, i, cI64(groupsPerPanel));
+                Value aRowBase =
+                    b.create<arith::MulIOp>(loc, i, cI64(panelRecBytes));
+                forLoop(cI64(0), cI64(groupsPerPanel), cI64(1), [&](Value g) {
+                  Value saByte = b.create<arith::ExtUIOp>(
+                      loc, b.getI32Type(),
+                      loadAt(saBuf,
+                             b.create<arith::AddIOp>(loc, saRowBase, g),
+                             b.getI8Type()));
+                  Value saF = decodeScalarE8M0(saByte, *spec);
+                  Value gRecBase = b.create<arith::AddIOp>(
+                      loc, aRowBase,
+                      b.create<arith::MulIOp>(loc, g, cI64(recBytes)));
+                  Value gElemBase = b.create<arith::AddIOp>(
+                      loc, lhsRowBase,
+                      b.create<arith::MulIOp>(loc, g,
+                                              cI64(spec->blockElements)));
+                  forLoop(cI64(0), cI64(recBytes), cI64(1), [&](Value z) {
+                    Value raw = b.create<arith::ExtUIOp>(
+                        loc, b.getI32Type(),
+                        loadAt(aRawBuf,
+                               b.create<arith::AddIOp>(loc, gRecBase, z),
+                               b.getI8Type()));
+                    Value zElemOff = b.create<arith::AddIOp>(
+                        loc, gElemBase,
+                        b.create<arith::MulIOp>(loc, z,
+                                                cI64(spec->packFactor)));
+                    for (int sub = 0; sub < spec->packFactor; ++sub) {
+                      Value shifted =
+                          spec->laneBitShifts[sub] > 0
+                              ? b.create<arith::ShRUIOp>(
+                                     loc, raw, cI32(spec->laneBitShifts[sub]))
+                                    .getResult()
+                              : raw;
+                      Value code =
+                          b.create<arith::AndIOp>(loc, shifted, cI32(codeMask));
+                      if (spec->zeroBias != 0)
+                        code = b.create<arith::SubIOp>(loc, code,
+                                                       cI32(spec->zeroBias));
+                      Value decF = b.create<arith::MulFOp>(
+                          loc, decodeScalarQuantCode(code, *spec), saF);
+                      Value decH =
+                          b.create<arith::TruncFOp>(loc, b.getF16Type(), decF);
+                      storeAt(leftF16,
+                              b.create<arith::AddIOp>(loc, zElemOff, cI64(sub)),
+                              decH);
+                    }
+                  });
+                });
+              });
+              sync("compute");
+              memcpy1D(wFilter, transF16, cI64(bn * convK), "NRAM2WRAM");
+              makeOp("wram_conv", {acc, leftF16, wFilter, cI1(true)}, {},
+                     {b.getNamedAttr("bm", b.getI64IntegerAttr(bm)),
+                      b.getNamedAttr("bn", b.getI64IntegerAttr(bn)),
+                      b.getNamedAttr("bk", b.getI64IntegerAttr(convK)),
+                      b.getNamedAttr("mode", b.getStringAttr("f16"))},
+                     "wram-conv-f16");
+              sync("compute");
+            },
+            [&]() {
+              forLoop(cI64(0), cI64(groupsPerPanel), cI64(1), [&](Value g) {
+                Value gRecBase =
+                    b.create<arith::MulIOp>(loc, g, cI64(recBytes));
+                forLoop(cI64(0), nc, cI64(1), [&](Value j) {
+                  Value sbByte = b.create<arith::ExtUIOp>(
+                      loc, b.getI32Type(),
+                      loadAt(sbBuf,
+                             b.create<arith::AddIOp>(
+                                 loc,
+                                 b.create<arith::MulIOp>(loc, j,
+                                                         cI64(groupsPerPanel)),
+                                 g),
+                             b.getI8Type()));
+                  Value sbF = decodeScalarE8M0(sbByte, *spec);
+                  forLoop(cI64(0), cI64(recBytes), cI64(1), [&](Value z) {
+                    Value gz = b.create<arith::AddIOp>(loc, gRecBase, z);
+                    Value raw = b.create<arith::ExtUIOp>(
+                        loc, b.getI32Type(),
+                        loadAt(
+                            bRawBuf,
+                            b.create<arith::AddIOp>(
+                                loc, b.create<arith::MulIOp>(loc, gz, cI64(bn)),
+                                j),
+                            b.getI8Type()));
+                    Value tBase =
+                        b.create<arith::MulIOp>(loc, z, cI64(spec->packFactor));
+                    for (int sub = 0; sub < spec->packFactor; ++sub) {
+                      Value shifted =
+                          spec->laneBitShifts[sub] > 0
+                              ? b.create<arith::ShRUIOp>(
+                                     loc, raw, cI32(spec->laneBitShifts[sub]))
+                                    .getResult()
+                              : raw;
+                      Value code =
+                          b.create<arith::AndIOp>(loc, shifted, cI32(codeMask));
+                      if (spec->zeroBias != 0)
+                        code = b.create<arith::SubIOp>(loc, code,
+                                                       cI32(spec->zeroBias));
+                      Value decF = b.create<arith::MulFOp>(
+                          loc, decodeScalarQuantCode(code, *spec), sbF);
+                      Value t = b.create<arith::AddIOp>(loc, tBase, cI64(sub));
+                      Value idx = b.create<arith::AddIOp>(
+                          loc, b.create<arith::MulIOp>(loc, t, cI64(bn)), j);
+                      storeAt(rightBuf, idx, decF);
+                    }
+                  });
+                });
+                forLoop(cI64(0), nr, cI64(1), [&](Value i) {
+                  Value saByte = b.create<arith::ExtUIOp>(
+                      loc, b.getI32Type(),
+                      loadAt(saBuf,
+                             b.create<arith::AddIOp>(
+                                 loc,
+                                 b.create<arith::MulIOp>(loc, i,
+                                                         cI64(groupsPerPanel)),
+                                 g),
+                             b.getI8Type()));
+                  Value saF = decodeScalarE8M0(saByte, *spec);
+                  Value accRow = makeAddr(acc, {i}, {cI64(bn)}, 1);
+                  Value aBaseOff = b.create<arith::AddIOp>(
+                      loc,
+                      b.create<arith::MulIOp>(loc, i, cI64(panelRecBytes)),
+                      gRecBase);
+                  forLoop(cI64(0), cI64(recBytes), cI64(1), [&](Value z) {
+                    Value raw = b.create<arith::ExtUIOp>(
+                        loc, b.getI32Type(),
+                        loadAt(aRawBuf,
+                               b.create<arith::AddIOp>(loc, aBaseOff, z),
+                               b.getI8Type()));
+                    Value tBase =
+                        b.create<arith::MulIOp>(loc, z, cI64(spec->packFactor));
+                    for (int sub = 0; sub < spec->packFactor; ++sub) {
+                      Value shifted =
+                          spec->laneBitShifts[sub] > 0
+                              ? b.create<arith::ShRUIOp>(
+                                     loc, raw, cI32(spec->laneBitShifts[sub]))
+                                    .getResult()
+                              : raw;
+                      Value code =
+                          b.create<arith::AndIOp>(loc, shifted, cI32(codeMask));
+                      if (spec->zeroBias != 0)
+                        code = b.create<arith::SubIOp>(loc, code,
+                                                       cI32(spec->zeroBias));
+                      Value av = b.create<arith::MulFOp>(
+                          loc, decodeScalarQuantCode(code, *spec), saF);
+                      Value t = b.create<arith::AddIOp>(loc, tBase, cI64(sub));
+                      Value rRow = makeAddr(rightBuf, {t}, {cI64(bn)}, 1);
+                      makeOp("vec_scalar", {tmpBuf, rRow, av, cI64(bn)}, {},
+                             {b.getNamedAttr("op", b.getStringAttr("mul"))});
+                      makeOp("vec_binary", {accRow, accRow, tmpBuf, cI64(bn)},
+                             {},
+                             {b.getNamedAttr("op", b.getStringAttr("add"))});
+                    }
+                  });
+                });
+              });
+            });
+      });
+      return success();
+    }
+
+    // GroupedWeightRhs: lhs [M, K], qw [K, N / packFactor],
+    // sc [K / blockElements, N], optional qz [K / blockElements, N / packFactor].
+    Value lhsView = p.dot.getOperand(0), qwView = p.dot.getOperand(1),
+          scView = p.dot.getOperand(2);
+    Type lhsElem = carrierElemType(lhsView);
+    Type packElem = carrierElemType(qwView);
+    Type scElem = carrierElemType(scView);
+    int64_t packCols = std::max<int64_t>(1, bn / spec->packFactor);
+    int64_t maxGroupsInPanel = bk / spec->blockElements + 2;
+    Value leftBuf = nramBuf(lhsElem, bm * bk);
+    Value transBuf = nramBuf(lhsElem, bn * bk);
+    Value wFilter = lhsElem.isF16() ? wramBuf(lhsElem, bn * bk) : Value{};
+    Value qwBuf =
+        nramBuf(packElem, llvm::alignTo(bk * packCols, 16));
+    Value scBuf =
+        nramBuf(scElem, llvm::alignTo(maxGroupsInPanel * bn, 64));
+    Value qzBuf = spec->hasZeroView
+                      ? nramBuf(packElem,
+                                llvm::alignTo(maxGroupsInPanel * packCols, 32))
+                      : Value{};
+    Value tmpF32 = !lhsElem.isF16() ? nramBuf(b.getF32Type(), bn) : Value{};
+    Value rightF32 =
+        !lhsElem.isF16() ? nramBuf(b.getF32Type(), bk * bn) : Value{};
+    fillVec(acc, cI64(bm * bn), cF32(0.0f));
+
+    int32_t codeMask = (1 << spec->packBits) - 1;
+    forLoop(cI64(0), cI64(shapeK), cI64(bk), [&](Value kk) {
+      Value nk = b.create<arith::MinSIOp>(
+          loc, b.create<arith::SubIOp>(loc, cI64(shapeK), kk), cI64(bk));
+      Value zeroLhs =
+          b.create<arith::ConstantOp>(loc, b.getZeroAttr(lhsElem));
+      Value partialLhs = b.create<arith::OrIOp>(
+          loc,
+          b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, nr, cI64(bm)),
+          b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, nk, cI64(bk)));
+      ifThen(partialLhs, [&]() { fillVec(leftBuf, cI64(bm * bk), zeroLhs); });
+      if (p.stride(lhsView, 1) == 1) {
+        Value lBase = globalPtr(lhsView, {r, kk}, lhsElem);
+        ifThenElse(
+            b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, nr, cI64(1)),
+            {}, [&]() { memcpy1D(leftBuf, lBase, nk, "GDRAM2NRAM"); },
+            [&]() {
+              memcpy2D(leftBuf, lBase, nk, cI64(bk),
+                       cI64(p.stride(lhsView, 0)),
+                       b.create<arith::SubIOp>(loc, nr, cI64(1)),
+                       "GDRAM2NRAM");
+            });
+      } else {
+        forLoop(cI64(0), nr, cI64(1), [&](Value i) {
+          Value ri = b.create<arith::AddIOp>(loc, r, i);
+          forLoop(cI64(0), nk, cI64(1), [&](Value t) {
+            Value kt = b.create<arith::AddIOp>(loc, kk, t);
+            Value idx = b.create<arith::AddIOp>(
+                loc, b.create<arith::MulIOp>(loc, i, cI64(bk)), t);
+            storeAt(leftBuf, idx,
+                    loadAt(globalPtr(lhsView, {ri, kt}, lhsElem), cI64(0),
+                           lhsElem));
+          });
+        });
+      }
+
+      Value nPack = b.create<arith::DivSIOp>(
+          loc,
+          b.create<arith::AddIOp>(loc, nc, cI64(spec->packFactor - 1)),
+          cI64(spec->packFactor));
+      Value cPackBase =
+          b.create<arith::DivSIOp>(loc, c, cI64(spec->packFactor));
+      if (p.stride(qwView, 1) == 1 && bn % spec->packFactor == 0) {
+        Value qBase = globalPtr(qwView, {kk, cPackBase}, packElem);
+        ifThenElse(
+            b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, nk, cI64(1)),
+            {}, [&]() { memcpy1D(qwBuf, qBase, nPack, "GDRAM2NRAM"); },
+            [&]() {
+              memcpy2D(qwBuf, qBase, nPack, cI64(packCols),
+                       cI64(p.stride(qwView, 0)),
+                       b.create<arith::SubIOp>(loc, nk, cI64(1)),
+                       "GDRAM2NRAM");
+            });
+      } else {
+        forLoop(cI64(0), nk, cI64(1), [&](Value t) {
+          Value kt = b.create<arith::AddIOp>(loc, kk, t);
+          forLoop(cI64(0), nPack, cI64(1), [&](Value pIdx) {
+            Value cp = b.create<arith::AddIOp>(loc, cPackBase, pIdx);
+            Value dstIdx = b.create<arith::AddIOp>(
+                loc, b.create<arith::MulIOp>(loc, t, cI64(packCols)), pIdx);
+            storeAt(qwBuf, dstIdx,
+                    loadAt(globalPtr(qwView, {kt, cp}, packElem), cI64(0),
+                           packElem));
+          });
+        });
+      }
+
+      Value grpBase =
+          b.create<arith::DivSIOp>(loc, kk, cI64(spec->blockElements));
+      Value grpLast = b.create<arith::DivSIOp>(
+          loc,
+          b.create<arith::SubIOp>(
+              loc, b.create<arith::AddIOp>(loc, kk, nk), cI64(1)),
+          cI64(spec->blockElements));
+      Value numGrp = b.create<arith::AddIOp>(
+          loc, b.create<arith::SubIOp>(loc, grpLast, grpBase), cI64(1));
+
+      if (p.stride(scView, 1) == 1) {
+        Value scBase = globalPtr(scView, {grpBase, c}, scElem);
+        ifThenElse(
+            b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, numGrp,
+                                    cI64(1)),
+            {}, [&]() { memcpy1D(scBuf, scBase, nc, "GDRAM2NRAM"); },
+            [&]() {
+              memcpy2D(scBuf, scBase, nc, cI64(bn), cI64(p.stride(scView, 0)),
+                       b.create<arith::SubIOp>(loc, numGrp, cI64(1)),
+                       "GDRAM2NRAM");
+            });
+      } else {
+        forLoop(cI64(0), numGrp, cI64(1), [&](Value gLocal) {
+          Value grp = b.create<arith::AddIOp>(loc, grpBase, gLocal);
+          forLoop(cI64(0), nc, cI64(1), [&](Value j) {
+            Value cj = b.create<arith::AddIOp>(loc, c, j);
+            Value dstIdx = b.create<arith::AddIOp>(
+                loc, b.create<arith::MulIOp>(loc, gLocal, cI64(bn)), j);
+            storeAt(scBuf, dstIdx,
+                    loadAt(globalPtr(scView, {grp, cj}, scElem), cI64(0),
+                           scElem));
+          });
+        });
+      }
+
+      if (spec->hasZeroView) {
+        Value qzView = p.dot.getOperand(3);
+        if (p.stride(qzView, 1) == 1 && bn % spec->packFactor == 0) {
+          Value qzBase = globalPtr(qzView, {grpBase, cPackBase}, packElem);
+          ifThenElse(
+              b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, numGrp,
+                                      cI64(1)),
+              {}, [&]() { memcpy1D(qzBuf, qzBase, nPack, "GDRAM2NRAM"); },
+              [&]() {
+                memcpy2D(qzBuf, qzBase, nPack, cI64(packCols),
+                         cI64(p.stride(qzView, 0)),
+                         b.create<arith::SubIOp>(loc, numGrp, cI64(1)),
+                         "GDRAM2NRAM");
+              });
+        } else {
+          forLoop(cI64(0), numGrp, cI64(1), [&](Value gLocal) {
+            Value grp = b.create<arith::AddIOp>(loc, grpBase, gLocal);
+            forLoop(cI64(0), nPack, cI64(1), [&](Value pIdx) {
+              Value cp = b.create<arith::AddIOp>(loc, cPackBase, pIdx);
+              Value dstIdx = b.create<arith::AddIOp>(
+                  loc, b.create<arith::MulIOp>(loc, gLocal, cI64(packCols)),
+                  pIdx);
+              storeAt(qzBuf, dstIdx,
+                      loadAt(globalPtr(qzView, {grp, cp}, packElem), cI64(0),
+                             packElem));
+            });
+          });
+        }
+      }
+      sync("io");
+
+      if (lhsElem.isF16() && bn == 64) {
+        ifThen(
+            b.create<arith::OrIOp>(
+                loc,
+                b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, nc,
+                                        cI64(bn)),
+                b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, nk,
+                                        cI64(bk))),
+            [&]() { fillVec(transBuf, cI64(bn * bk), zeroLhs); });
+      } else if (!lhsElem.isF16()) {
+        fillVec(rightF32, cI64(bk * bn), cF32(0.0f));
+      }
+
+      forLoop(cI64(0), numGrp, cI64(1), [&](Value gLocal) {
+        Value grp = b.create<arith::AddIOp>(loc, grpBase, gLocal);
+        Value tStart = b.create<arith::MaxSIOp>(
+            loc, cI64(0),
+            b.create<arith::SubIOp>(
+                loc,
+                b.create<arith::MulIOp>(loc, grp, cI64(spec->blockElements)),
+                kk));
+        Value tStop = b.create<arith::MinSIOp>(
+            loc, nk,
+            b.create<arith::SubIOp>(
+                loc,
+                b.create<arith::MulIOp>(
+                    loc, b.create<arith::AddIOp>(loc, grp, cI64(1)),
+                    cI64(spec->blockElements)),
+                kk));
+        Value scGrpBase = b.create<arith::MulIOp>(loc, gLocal, cI64(bn));
+        Value qzGrpBase = b.create<arith::MulIOp>(loc, gLocal, cI64(packCols));
+
+        forLoop(cI64(0), nPack, cI64(1), [&](Value pLocal) {
+          Value qzWord;
+          if (spec->hasZeroView) {
+            qzWord = loadAt(
+                qzBuf, b.create<arith::AddIOp>(loc, qzGrpBase, pLocal),
+                packElem);
+            if (!qzWord.getType().isInteger(32))
+              qzWord = b.create<arith::ExtUIOp>(loc, b.getI32Type(), qzWord);
+          }
+          Value jBase =
+              b.create<arith::MulIOp>(loc, pLocal, cI64(spec->packFactor));
+          for (int sub = 0; sub < spec->packFactor; ++sub) {
+            Value j = b.create<arith::AddIOp>(loc, jBase, cI64(sub));
+            auto emitColBody = [&]() {
+              Value zCode;
+              if (spec->hasZeroView) {
+                Value zSh =
+                    spec->laneBitShifts[sub] > 0
+                        ? b.create<arith::ShRUIOp>(
+                               loc, qzWord, cI32(spec->laneBitShifts[sub]))
+                              .getResult()
+                        : qzWord;
+                zCode = b.create<arith::AndIOp>(loc, zSh, cI32(codeMask));
+              }
+              Value scRaw = loadAt(
+                  scBuf, b.create<arith::AddIOp>(loc, scGrpBase, j), scElem);
+              Value scF =
+                  scElem.isF32()
+                      ? scRaw
+                      : scElem.isF16()
+                            ? b.create<arith::ExtFOp>(loc, b.getF32Type(),
+                                                      scRaw)
+                                  .getResult()
+                            : makeOp("bf16_scalar", {scRaw}, {b.getF32Type()},
+                                     {b.getNamedAttr("mode",
+                                                     b.getStringAttr("widen"))},
+                                     "bf16-scalar-convert")
+                                  ->getResult(0);
+              Value fltRowBase = b.create<arith::MulIOp>(loc, j, cI64(bk));
+              forLoop(tStart, tStop, cI64(1), [&](Value t) {
+                Value qIdx = b.create<arith::AddIOp>(
+                    loc, b.create<arith::MulIOp>(loc, t, cI64(packCols)),
+                    pLocal);
+                Value qwRaw = loadAt(qwBuf, qIdx, packElem);
+                if (!qwRaw.getType().isInteger(32))
+                  qwRaw = b.create<arith::ExtUIOp>(loc, b.getI32Type(), qwRaw);
+                Value qwSh =
+                    spec->laneBitShifts[sub] > 0
+                        ? b.create<arith::ShRUIOp>(
+                               loc, qwRaw, cI32(spec->laneBitShifts[sub]))
+                              .getResult()
+                        : qwRaw;
+                Value wCode =
+                    b.create<arith::AndIOp>(loc, qwSh, cI32(codeMask));
+                if (spec->hasZeroView)
+                  wCode = b.create<arith::SubIOp>(loc, wCode, zCode);
+                if (spec->zeroBias != 0)
+                  wCode = b.create<arith::SubIOp>(loc, wCode,
+                                                  cI32(spec->zeroBias));
+                Value decF = b.create<arith::MulFOp>(
+                    loc, decodeScalarQuantCode(wCode, *spec), scF);
+                if (lhsElem.isF16() && bn == 64) {
+                  Value decH =
+                      b.create<arith::TruncFOp>(loc, b.getF16Type(), decF);
+                  storeAt(transBuf,
+                          b.create<arith::AddIOp>(loc, fltRowBase, t), decH);
+                } else {
+                  Value rIdx = b.create<arith::AddIOp>(
+                      loc, b.create<arith::MulIOp>(loc, t, cI64(bn)), j);
+                  storeAt(rightF32, rIdx, decF);
+                }
+              });
+            };
+            if (bn % spec->packFactor == 0 && p.shape[1] % bn == 0)
+              emitColBody();
+            else
+              ifThen(b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, j,
+                                             nc),
+                     emitColBody);
+          }
+        });
+      });
+
+      if (lhsElem.isF16() && bn == 64) {
+        Value accum =
+            b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, kk, cI64(0));
+        sync("compute");
+        memcpy1D(wFilter, transBuf, cI64(bk * bn), "NRAM2WRAM");
+        makeOp("wram_conv", {acc, leftBuf, wFilter, accum}, {},
+               {b.getNamedAttr("bm", b.getI64IntegerAttr(bm)),
+                b.getNamedAttr("bn", b.getI64IntegerAttr(bn)),
+                b.getNamedAttr("bk", b.getI64IntegerAttr(bk)),
+                b.getNamedAttr("mode", b.getStringAttr("f16"))},
+               "wram-conv-f16");
+        sync("compute");
+      } else {
+        forLoop(cI64(0), nr, cI64(1), [&](Value i) {
+          Value accRow = makeAddr(acc, {i}, {cI64(bn)}, 1);
+          forLoop(cI64(0), nk, cI64(1), [&](Value t) {
+            Value lIdx = b.create<arith::AddIOp>(
+                loc, b.create<arith::MulIOp>(loc, i, cI64(bk)), t);
+            Value lvRaw = loadAt(leftBuf, lIdx, lhsElem);
+            Value lv = lhsElem.isF32()
+                           ? lvRaw
+                           : lhsElem.isF16()
+                                 ? b.create<arith::ExtFOp>(loc, b.getF32Type(),
+                                                           lvRaw)
+                                       .getResult()
+                                 : makeOp("bf16_scalar", {lvRaw},
+                                          {b.getF32Type()},
+                                          {b.getNamedAttr(
+                                              "mode", b.getStringAttr("widen"))},
+                                          "bf16-scalar-convert")
+                                       ->getResult(0);
+            Value rRow = makeAddr(rightF32, {t}, {cI64(bn)}, 1);
+            makeOp("vec_scalar", {tmpF32, rRow, lv, cI64(bn)}, {},
+                   {b.getNamedAttr("op", b.getStringAttr("mul"))});
+            makeOp("vec_binary", {accRow, accRow, tmpF32, cI64(bn)}, {},
+                   {b.getNamedAttr("op", b.getStringAttr("add"))});
+          });
+        });
+      }
+    });
+    return success();
   }
 
   LogicalResult emitScaledMX8(Value acc, Value r, Value c, Value nr, Value nc) {
@@ -1186,6 +2409,9 @@ struct MatrixLowerer {
             status = failure();
         } else if (mode == "scaled-f32") {
           if (failed(emitScaledMX8(acc, r, c, nr, nc)))
+            status = failure();
+        } else if (mode == "quant-format") {
+          if (failed(emitQuantizedFromDescriptor(acc, r, c, nr, nc)))
             status = failure();
         } else {
           fillVec(acc, cI64(bm * bn),
