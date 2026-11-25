@@ -33,7 +33,7 @@ Value tritonWindowPanels(intentdsl::block::Tiles &,
 bool tritonMatrixWrite(intentdsl::block::Tiles &,
                        intentdsl::block::MatrixAccess &, Value, Value,
                        ArrayRef<Value>);
-intentdsl::block::OwnerAccess tritonOwnerViews();
+intentdsl::block::OwnerAccess tritonOwnerViews(int64_t scatterPanelWidth);
 std::optional<int64_t> tritonOwnerRectangleAxis(Operation *, func::FuncOp);
 bool tritonOwnerRectPermitsTma(Operation *, func::FuncOp, bool);
 bool tritonPanelPermitsTma(Operation *, func::FuncOp, bool);
@@ -126,6 +126,134 @@ LogicalResult verifyTritonCarryAndLoops(func::FuncOp fn) {
   return success(!res.wasInterrupted());
 }
 
+void promoteSteppedTmaLoops(func::FuncOp fn) {
+  auto constInt = [](Value v) -> std::optional<int64_t> {
+    if (auto ci = v.getDefiningOp<arith::ConstantIndexOp>())
+      return ci.value();
+    if (auto c = v.getDefiningOp<arith::ConstantIntOp>())
+      return c.value();
+    return std::nullopt;
+  };
+  SmallVector<scf::ForOp> candidates;
+  fn.walk([&](scf::ForOp loop) { candidates.push_back(loop); });
+  for (scf::ForOp loop : candidates) {
+    auto lo = constInt(loop.getLowerBound());
+    auto hi = constInt(loop.getUpperBound());
+    auto st = constInt(loop.getStep());
+    if (!lo || !hi || !st || *lo != 0 || *st != 1 || *hi <= 1)
+      continue;
+    Value iv = loop.getInductionVar();
+    Value ivI64 = iv;
+    arith::IndexCastOp ivCast;
+    if (iv.getType().isIndex()) {
+      for (Operation *u : iv.getUsers()) {
+        if (auto ic = dyn_cast<arith::IndexCastOp>(u);
+            ic && ic.getType().isInteger(64) && !ivCast)
+          ivCast = ic;
+        else {
+          ivCast = nullptr;
+          break;
+        }
+      }
+      if (!ivCast)
+        continue;
+      ivI64 = ivCast.getResult();
+    } else if (!iv.getType().isInteger(64)) {
+      continue;
+    }
+
+    int64_t stride = 0;
+    bool ok = true;
+    unsigned descReadCount = 0;
+    SmallVector<arith::MulIOp, 4> strideMuls;
+    for (Operation &inst : loop.getBody()->without_terminator()) {
+      if (inst.getName().getStringRef() != "triton_src.desc_read")
+        continue;
+      ++descReadCount;
+      for (Value off : inst.getOperands().drop_front()) {
+        auto mul = off.getDefiningOp<arith::MulIOp>();
+        if (!mul) {
+          if (off == ivI64)
+            ok = false;
+          continue;
+        }
+        std::optional<int64_t> factor;
+        if (mul.getLhs() == ivI64)
+          factor = constInt(mul.getRhs());
+        else if (mul.getRhs() == ivI64)
+          factor = constInt(mul.getLhs());
+        if (!factor)
+          continue;
+        if (*factor < 16 || !llvm::isPowerOf2_64(*factor) ||
+            (stride != 0 && stride != *factor)) {
+          ok = false;
+          break;
+        }
+        stride = *factor;
+      }
+      if (!ok)
+        break;
+    }
+    if (!ok || descReadCount == 0 || stride == 0 ||
+        *hi > INT32_MAX / stride)
+      continue;
+
+    for (Operation *u : ivI64.getUsers()) {
+      if (auto mul = dyn_cast<arith::MulIOp>(u)) {
+        std::optional<int64_t> f;
+        if (mul.getLhs() == ivI64)
+          f = constInt(mul.getRhs());
+        else if (mul.getRhs() == ivI64)
+          f = constInt(mul.getLhs());
+        if (f && *f == stride)
+          strideMuls.push_back(mul);
+      }
+    }
+
+    OpBuilder b(loop);
+    Location loc = loop.getLoc();
+    auto makeBound = [&](int64_t val) -> Value {
+      if (iv.getType().isIndex())
+        return b.create<arith::ConstantIndexOp>(loc, val);
+      return b.create<arith::ConstantIntOp>(loc, val, 64);
+    };
+    auto newLoop = b.create<scf::ForOp>(loc, makeBound(0),
+                                        makeBound(*hi * stride),
+                                        makeBound(stride), loop.getInitArgs());
+    if (loop->hasAttr("triton_src.runtime_range"))
+      newLoop->setAttr("triton_src.runtime_range", b.getUnitAttr());
+    Block &oldBody = *loop.getBody();
+    Block &newBody = *newLoop.getBody();
+    b.setInsertionPointToStart(&newBody);
+    Value newIv = newLoop.getInductionVar();
+    Value newIvI64 =
+        newIv.getType().isIndex()
+            ? Value(b.create<arith::IndexCastOp>(loc, b.getI64Type(), newIv))
+            : newIv;
+
+    for (auto mul : strideMuls) {
+      mul.replaceAllUsesWith(newIvI64);
+      mul.erase();
+    }
+    if (ivCast && ivCast->use_empty())
+      ivCast.erase();
+    else if (!ivI64.use_empty()) {
+      Value panelIdx = b.create<arith::DivUIOp>(
+          loc, newIvI64, b.create<arith::ConstantIntOp>(loc, stride, 64));
+      ivI64.replaceAllUsesWith(panelIdx);
+      if (ivCast)
+        ivCast.erase();
+    }
+    for (auto [oldArg, newArg] :
+         llvm::zip(oldBody.getArguments().drop_front(),
+                   newBody.getArguments().drop_front()))
+      oldArg.replaceAllUsesWith(newArg);
+    newBody.getOperations().splice(newBody.end(), oldBody.getOperations());
+    loop.replaceAllUsesWith(newLoop.getResults());
+    loop.erase();
+  }
+}
+
 llvm::Error describeArtifact(func::FuncOp, llvm::raw_pwrite_stream &);
 struct BindCallable : PassWrapper<BindCallable, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(BindCallable)
@@ -134,10 +262,12 @@ struct BindCallable : PassWrapper<BindCallable, OperationPass<ModuleOp>> {
   void runOnOperation() final {
     auto module = getOperation();
     auto fn = *module.getOps<func::FuncOp>().begin();
-    if (intentdsl::kir::orderedOwners(fn))
+    if (intentdsl::kir::orderedOwners(fn)) {
+      auto *om = profile.services.get<intentdsl::block::OwnerMachine>();
+      int64_t scatterPanel = (om && om->maxWarpgroups <= 1) ? 64 : 32;
       intentdsl::block::expandOwnerProgram(fn, "exits/triton",
-                                           tritonOwnerViews());
-    else {
+                                           tritonOwnerViews(scatterPanel));
+    } else {
       auto mt = profile.services.get<intentdsl::block::MatrixTarget>();
       intentdsl::block::expandMatrixProgram(
           fn, "exits/triton", tritonScaledPanels, tritonMatrixRead,
@@ -153,6 +283,7 @@ struct BindCallable : PassWrapper<BindCallable, OperationPass<ModuleOp>> {
       fn->setAttr("triton_src.max_width", b.getI64IntegerAttr(guard[1]));
       lowerRows(fn, profile);
     }
+    promoteSteppedTmaLoops(fn);
     stampTritonCarryAndLoops(fn);
     std::set<std::string> seenResources;
     SmallVector<std::string> runtimeImpls;
@@ -230,6 +361,15 @@ llvm::Error describeArtifact(func::FuncOp fn, llvm::raw_pwrite_stream &out) {
       if ((maxAxis >= 256 || ownerRows * maxAxis >= 2048) &&
           !(hasHistogram && maxAxis <= 512))
         warps = 8;
+      if (ownerRows == 1 && hasHistogram &&
+          !entry.hasAttr("block.token_span"))
+        return intentdsl::block::emitOwnerArtifact(
+            fn, "",
+            ArrayRef<llvm::json::Object>{
+                llvm::json::Object{{"num_warps", 2}, {"num_stages", 1}},
+                llvm::json::Object{{"num_warps", 4}, {"num_stages", 1}},
+                llvm::json::Object{{"num_warps", 8}, {"num_stages", 1}}},
+            2, out);
       if (ownerRows == 1 && maxAxis <= 64 && !hasHistogram &&
           !entry.hasAttr("block.token_span"))
         return intentdsl::block::emitOwnerArtifact(
@@ -267,6 +407,15 @@ llvm::Error describeArtifact(func::FuncOp fn, llvm::raw_pwrite_stream &out) {
       if ((maxAxis >= 256 || ownerRows * maxAxis >= 2048) &&
           !(hasHistogram && maxAxis <= 512))
         warps = 8;
+      if (ownerRows == 1 && hasHistogram &&
+          !entry.hasAttr("block.token_span"))
+        return intentdsl::block::emitOwnerArtifact(
+            fn, "",
+            ArrayRef<llvm::json::Object>{
+                llvm::json::Object{{"num_warps", 2}, {"num_stages", 1}},
+                llvm::json::Object{{"num_warps", 4}, {"num_stages", 1}},
+                llvm::json::Object{{"num_warps", 8}, {"num_stages", 1}}},
+            2, out);
       if (ownerRows == 1 && maxAxis <= 64 && !hasHistogram &&
           !entry.hasAttr("block.token_span"))
         return intentdsl::block::emitOwnerArtifact(

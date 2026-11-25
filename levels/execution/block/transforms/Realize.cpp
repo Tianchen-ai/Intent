@@ -93,13 +93,22 @@ public:
     }
     if (!writes.empty()) {
       if (resident || gridTiles) {
-        // When a resident multi-reduction body accumulates many distinct input
-        // views, caching every pre-reduction read across the reduction barrier
-        // overflows the CTA register file. Rematerialize reads from L1 in the
-        // write pass and emit each non-aliasing store immediately to keep peak
-        // live tile count bounded.
+        // When a wide resident multi-reduction body accumulates many distinct
+        // input views, caching every pre-reduction read across the reduction
+        // barrier overflows the CTA register file. Rematerialize reads from L1
+        // in the write pass and emit each non-aliasing store immediately to
+        // keep peak live tile count bounded; skip narrow tiles that fit cleanly
+        // in registers.
+        int64_t maxConfigWidth = 0;
+        if (auto cfgs = anchor->getParentOfType<func::FuncOp>()
+                            ->getAttrOfType<ArrayAttr>("block.configs")) {
+          for (Attribute entry : cfgs)
+            if (auto d = dyn_cast<DictionaryAttr>(entry))
+              if (auto w = d.getAs<IntegerAttr>("width"))
+                maxConfigWidth = std::max(maxConfigWidth, w.getInt());
+        }
         bool rematWrites = resident && reductionCount >= 4 &&
-                           localReads.size() >= 8;
+                           localReads.size() >= 8 && maxConfigWidth >= 512;
         bool disjointWrites = false;
         if (rematWrites) {
           llvm::DenseMap<Value, unsigned> readCounts;

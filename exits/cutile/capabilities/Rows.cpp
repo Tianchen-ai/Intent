@@ -194,18 +194,23 @@ capabilities(const llvm::json::Object &options) {
       if (rows > 2 && width > 128)
         continue;
       llvm::SmallVector<unsigned, 2> occupancies;
+      bool narrowMultiRow = rows == 8 && width >= 32 && width <= 128;
       if (*architecture == 90) {
         occupancies.push_back(2u);
-        if (rows == 1 && ((width >= 32 && width <= 256) || width >= 1024))
+        if ((rows == 1 && ((width >= 32 && width <= 256) || width >= 1024)) ||
+            narrowMultiRow)
           occupancies.push_back(4u);
       } else {
         occupancies.push_back(
             rows == 1 && ((width >= 32 && width <= 256) || width >= 1024)
                 ? 2u
                 : std::min(rows, 2u));
-        if (rows == 1 && ((width >= 32 && width <= 256) || width >= 512))
+        if ((rows == 1 && ((width >= 32 && width <= 256) || width >= 512)) ||
+            narrowMultiRow)
           occupancies.push_back(
-              rows == 1 && ((width >= 32 && width <= 256) || width >= 1024)
+              (rows == 1 &&
+               ((width >= 32 && width <= 256) || width >= 1024)) ||
+                      narrowMultiRow
                   ? 4u
                   : 2u);
       }

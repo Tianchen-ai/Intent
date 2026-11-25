@@ -27,6 +27,7 @@ struct OwnerAccess {
                        mlir::Value panelBase, int64_t panelSpan,
                        int64_t sliceAxis, int64_t sliceWidth, int64_t rows,
                        llvm::SmallVectorImpl<mlir::Value> &slices) = nullptr;
+  int64_t scatterPanelWidth = 0;
 };
 void expandOwnerProgram(mlir::func::FuncOp fn, llvm::StringRef unit,
                         OwnerAccess access = {});

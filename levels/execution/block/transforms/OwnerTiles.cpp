@@ -729,7 +729,12 @@ void OwnerTiles::boundedHistogramLoop(scf::ForOp loop,
   bool useNativeHist = access.nativeTileHistogram && unitI32;
   bool useAtomicBins = !useNativeHist && access.blockAtomicMemoryBins &&
                        (elemT.isInteger(32) || elemT.isF32());
-  int64_t P = useAtomicBins ? 512 : (useNativeHist ? 256 : 64);
+  auto staticHi = orderedStaticLoopExtent(loop, fn, nullptr);
+  int64_t nativeP = (staticHi && *staticHi > 0 && *staticHi < 512)
+                        ? std::clamp<int64_t>(llvm::PowerOf2Ceil(*staticHi), 64,
+                                              512)
+                        : 512;
+  int64_t P = useAtomicBins ? 512 : (useNativeHist ? nativeP : 64);
   Type histVecTy = shaped({B_pad}, elemT);
   Type pIdxTy = shaped({P}, b.getI64Type());
   Type pI32Ty = shaped({P}, b.getI32Type());
@@ -755,6 +760,51 @@ void OwnerTiles::boundedHistogramLoop(scf::ForOp loop,
       pv = castElement(pv, b.getI64Type());
     scalarCache[orig] = pv;
     return pv;
+  };
+  struct Pow2DivInfo {
+    Value isPow2;
+    Value shiftVec;
+    Value divVec;
+  };
+  llvm::DenseMap<Value, Pow2DivInfo> pow2DivCache;
+  auto getPow2DivInfo = [&](Value origDiv) -> Pow2DivInfo {
+    if (auto it = pow2DivCache.find(origDiv); it != pow2DivCache.end())
+      return it->second;
+    OpBuilder::InsertionGuard g(b);
+    b.setInsertionPoint(pLoop);
+    Value d = castElement(toScalar(origDiv), b.getI32Type());
+    Value c0 = b.create<arith::ConstantIntOp>(loc, 0, 32);
+    Value c1 = b.create<arith::ConstantIntOp>(loc, 1, 32);
+    Value gt0 = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, d, c0);
+    Value dm1 = b.create<arith::SubIOp>(loc, d, c1);
+    Value eq0 = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                        b.create<arith::AndIOp>(loc, d, dm1),
+                                        c0);
+    Value isPow2 = b.create<arith::AndIOp>(loc, gt0, eq0);
+    Value t = d;
+    Value sh = c0;
+    for (auto [maskVal, logBit] : {std::pair{65535, 4},
+                                   {255, 3},
+                                   {15, 2},
+                                   {3, 1},
+                                   {1, 0}}) {
+      Value m = b.create<arith::ConstantIntOp>(loc, maskVal, 32);
+      Value isZero = b.create<arith::CmpIOp>(
+          loc, arith::CmpIPredicate::eq, b.create<arith::AndIOp>(loc, t, m),
+          c0);
+      Value bit = b.create<arith::ExtUIOp>(loc, b.getI32Type(), isZero);
+      Value delta =
+          logBit > 0
+              ? Value(b.create<arith::ShLIOp>(
+                    loc, bit, b.create<arith::ConstantIntOp>(loc, logBit, 32)))
+              : bit;
+      sh = b.create<arith::OrIOp>(loc, sh, delta);
+      if (logBit > 0)
+        t = b.create<arith::ShRUIOp>(loc, t, delta);
+    }
+    Pow2DivInfo info{isPow2, like(sh, pI32Ty), like(d, pI32Ty)};
+    pow2DivCache[origDiv] = info;
+    return info;
   };
 
   bool exactMask = exactOwners && mask == active;
@@ -786,7 +836,6 @@ void OwnerTiles::boundedHistogramLoop(scf::ForOp loop,
     atomicXchg(histSt.getMemRef(), hAddr, histInit, validB, "acq_rel", "block");
 
   Value hiScalar = toScalar(loop.getUpperBound());
-  auto staticHi = orderedStaticLoopExtent(loop, fn, nullptr);
   bool exactP = exactMask && staticHi && *staticHi > 0 && (*staticHi % P == 0);
   pLoop = useAtomicBins
               ? b.create<scf::ForOp>(loc, integer(0), hiScalar, integer(P))
@@ -857,6 +906,28 @@ void OwnerTiles::boundedHistogramLoop(scf::ForOp loop,
         vecEnv[ld.getResult()] =
             like(rScalar, shaped({P}, elem(rScalar.getType())));
       }
+      continue;
+    }
+    if (auto fdiv = dyn_cast<arith::FloorDivSIOp>(inst);
+        fdiv && fdiv.getType().isInteger(32) &&
+        loop.isDefinedOutsideOfLoop(fdiv.getRhs()) &&
+        !fdiv.getRhs().getDefiningOp<arith::ConstantOp>()) {
+      // For any two's-complement signed integer x and positive power-of-2
+      // d = 2^s, floor(x / 2^s) == x >>_arith s identically. Guarding on the
+      // loop-invariant uniform scalar predicate avoids software integer
+      // division without changing semantics for non-power-of-2 divisors.
+      Value lhsVec = lift1D(fdiv.getLhs());
+      auto info = getPow2DivInfo(fdiv.getRhs());
+      auto br = b.create<scf::IfOp>(loc, TypeRange{pI32Ty}, info.isPow2,
+                                    /*withElseRegion=*/true);
+      b.setInsertionPointToStart(br.thenBlock());
+      b.create<scf::YieldOp>(
+          loc, Value(b.create<arith::ShRSIOp>(loc, lhsVec, info.shiftVec)));
+      b.setInsertionPointToStart(br.elseBlock());
+      b.create<scf::YieldOp>(
+          loc, Value(b.create<arith::FloorDivSIOp>(loc, lhsVec, info.divVec)));
+      b.setInsertionPointAfter(br);
+      vecEnv[inst.getResult(0)] = br.getResult(0);
       continue;
     }
     SmallVector<Value, 3> args;
@@ -943,8 +1014,9 @@ void OwnerTiles::boundedScatterLoop(scf::ForOp loop,
   int64_t B_pad = std::max<int64_t>(2, llvm::PowerOf2Ceil(B));
   bool useNativeGatherHist =
       access.nativeTileGather && access.nativeTileHistogram;
-  bool useAtomicCursors = !useNativeGatherHist && access.blockAtomicMemoryBins;
-  int64_t P = useAtomicCursors ? 64 : 32;
+  bool useMemoryCursors = !useNativeGatherHist && access.blockAtomicMemoryBins;
+  int64_t P = access.scatterPanelWidth > 0 ? access.scatterPanelWidth
+                                           : (useMemoryCursors ? 64 : 32);
   Type pIdxTy = shaped({P}, b.getI64Type());
   Type pI32Ty = shaped({P}, b.getI32Type());
   Type bIdxTy = shaped({B_pad}, b.getI64Type());
@@ -972,6 +1044,51 @@ void OwnerTiles::boundedScatterLoop(scf::ForOp loop,
     scalarCache[orig] = pv;
     return pv;
   };
+  struct Pow2DivInfo {
+    Value isPow2;
+    Value shiftVec;
+    Value divVec;
+  };
+  llvm::DenseMap<Value, Pow2DivInfo> pow2DivCache;
+  auto getPow2DivInfo = [&](Value origDiv) -> Pow2DivInfo {
+    if (auto it = pow2DivCache.find(origDiv); it != pow2DivCache.end())
+      return it->second;
+    OpBuilder::InsertionGuard g(b);
+    b.setInsertionPoint(pLoop);
+    Value d = castElement(toScalar(origDiv), b.getI32Type());
+    Value c0 = b.create<arith::ConstantIntOp>(loc, 0, 32);
+    Value c1 = b.create<arith::ConstantIntOp>(loc, 1, 32);
+    Value gt0 = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, d, c0);
+    Value dm1 = b.create<arith::SubIOp>(loc, d, c1);
+    Value eq0 = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                        b.create<arith::AndIOp>(loc, d, dm1),
+                                        c0);
+    Value isPow2 = b.create<arith::AndIOp>(loc, gt0, eq0);
+    Value t = d;
+    Value sh = c0;
+    for (auto [maskVal, logBit] : {std::pair{65535, 4},
+                                   {255, 3},
+                                   {15, 2},
+                                   {3, 1},
+                                   {1, 0}}) {
+      Value m = b.create<arith::ConstantIntOp>(loc, maskVal, 32);
+      Value isZero = b.create<arith::CmpIOp>(
+          loc, arith::CmpIPredicate::eq, b.create<arith::AndIOp>(loc, t, m),
+          c0);
+      Value bit = b.create<arith::ExtUIOp>(loc, b.getI32Type(), isZero);
+      Value delta =
+          logBit > 0
+              ? Value(b.create<arith::ShLIOp>(
+                    loc, bit, b.create<arith::ConstantIntOp>(loc, logBit, 32)))
+              : bit;
+      sh = b.create<arith::OrIOp>(loc, sh, delta);
+      if (logBit > 0)
+        t = b.create<arith::ShRUIOp>(loc, t, delta);
+    }
+    Pow2DivInfo info{isPow2, like(sh, pI32Ty), like(d, pI32Ty)};
+    pow2DivCache[origDiv] = info;
+    return info;
+  };
 
   bool exactMask = exactOwners && mask == active;
   Value activeScalar = exactMask ? Value() : reduce(mask, "max", 0);
@@ -987,23 +1104,30 @@ void OwnerTiles::boundedScatterLoop(scf::ForOp loop,
 
   memref::LoadOp curLd = scat.cursorLoad;
   memref::StoreOp curSt = scat.cursorStore;
-  SmallVector<Value, 4> cCoords;
-  SmallVector<int64_t, 4> cAxes;
-  for (Value idx : curSt.getIndices().drop_back()) {
-    cCoords.push_back(like(toScalar(idx), bIdxTy));
+  Value cAddr, curInit;
+  if (!useMemoryCursors) {
+    SmallVector<Value, 4> cCoords;
+    SmallVector<int64_t, 4> cAxes;
+    for (Value idx : curSt.getIndices().drop_back()) {
+      cCoords.push_back(like(toScalar(idx), bIdxTy));
+      cAxes.push_back(0);
+    }
+    cCoords.push_back(lanesB);
     cAxes.push_back(0);
+    cAddr = address(curSt.getMemRef(), cCoords, cAxes);
+    curInit = read(curSt.getMemRef(), cAddr, validB);
   }
-  cCoords.push_back(lanesB);
-  cAxes.push_back(0);
-  Value cAddr = address(curSt.getMemRef(), cCoords, cAxes);
-  Value curInit = read(curSt.getMemRef(), cAddr, validB);
-  if (useAtomicCursors)
-    atomicXchg(curSt.getMemRef(), cAddr, curInit, validB, "acq_rel", "block");
+
+  Value lanesPI32 = b.create<arith::TruncIOp>(loc, pI32Ty, lanes(P));
+  Value afterPP = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt,
+                                          broadcast(lanesPI32, ppI32Ty, 0),
+                                          broadcast(lanesPI32, ppI32Ty, 1));
+  Value zeroP32 = like(b.create<arith::ConstantIntOp>(loc, 0, 32), pI32Ty);
 
   Value hiScalar = toScalar(loop.getUpperBound());
   auto staticHi = orderedStaticLoopExtent(loop, fn, nullptr);
   bool exactP = exactMask && staticHi && *staticHi > 0 && (*staticHi % P == 0);
-  pLoop = useAtomicCursors
+  pLoop = useMemoryCursors
               ? b.create<scf::ForOp>(loc, integer(0), hiScalar, integer(P))
               : b.create<scf::ForOp>(loc, integer(0), hiScalar, integer(P),
                                      ValueRange{curInit});
@@ -1011,7 +1135,7 @@ void OwnerTiles::boundedScatterLoop(scf::ForOp loop,
   b.setInsertionPointToStart(pLoop.getBody());
 
   Value base = pLoop.getInductionVar();
-  Value curVec = useAtomicCursors ? Value() : pLoop.getRegionIterArgs()[0];
+  Value curVec = useMemoryCursors ? Value() : pLoop.getRegionIterArgs()[0];
   Value colVec = stepped(base, P);
   Value validP;
   if (!exactP) {
@@ -1075,6 +1199,24 @@ void OwnerTiles::boundedScatterLoop(scf::ForOp loop,
       }
       continue;
     }
+    if (auto fdiv = dyn_cast<arith::FloorDivSIOp>(inst);
+        fdiv && fdiv.getType().isInteger(32) &&
+        loop.isDefinedOutsideOfLoop(fdiv.getRhs()) &&
+        !fdiv.getRhs().getDefiningOp<arith::ConstantOp>()) {
+      Value lhsVec = lift1D(fdiv.getLhs());
+      auto info = getPow2DivInfo(fdiv.getRhs());
+      auto br = b.create<scf::IfOp>(loc, TypeRange{pI32Ty}, info.isPow2,
+                                    /*withElseRegion=*/true);
+      b.setInsertionPointToStart(br.thenBlock());
+      b.create<scf::YieldOp>(
+          loc, Value(b.create<arith::ShRSIOp>(loc, lhsVec, info.shiftVec)));
+      b.setInsertionPointToStart(br.elseBlock());
+      b.create<scf::YieldOp>(
+          loc, Value(b.create<arith::FloorDivSIOp>(loc, lhsVec, info.divVec)));
+      b.setInsertionPointAfter(br);
+      vecEnv[inst.getResult(0)] = br.getResult(0);
+      continue;
+    }
     SmallVector<Value, 3> args;
     for (Value opnd : inst.getOperands())
       args.push_back(lift1D(opnd));
@@ -1096,10 +1238,13 @@ void OwnerTiles::boundedScatterLoop(scf::ForOp loop,
   Value binI32 = b.create<arith::TruncIOp>(loc, pI32Ty, bin1D);
   Value baseCursor1D, matchBP, safeBin, stepCurAddr;
   if (useNativeGatherHist) {
-    Value zeroP32 = like(b.create<arith::ConstantIntOp>(loc, 0, 32), pI32Ty);
     safeBin = select(validBinP, binI32, zeroP32);
     baseCursor1D = tileGather(curVec, safeBin, 0);
-  } else if (useAtomicCursors) {
+  } else if (useMemoryCursors) {
+    // Keep the owner-private cursor table in L1 cache and update each distinct
+    // active bin exactly once per chunk via the unique rank-0 representative
+    // lane, avoiding global/L2 atomic read-modify-write latency while staying
+    // race-free.
     SmallVector<Value, 4> stepCoords;
     SmallVector<int64_t, 4> stepAxes;
     for (Value idx : curSt.getIndices().drop_back()) {
@@ -1109,9 +1254,7 @@ void OwnerTiles::boundedScatterLoop(scf::ForOp loop,
     stepCoords.push_back(bin1D);
     stepAxes.push_back(0);
     stepCurAddr = address(curSt.getMemRef(), stepCoords, stepAxes);
-    Value zeroP32 = like(b.create<arith::ConstantIntOp>(loc, 0, 32), pI32Ty);
-    baseCursor1D = atomicFetchAdd(curSt.getMemRef(), stepCurAddr, zeroP32,
-                                  validBinP, "relaxed", "block");
+    baseCursor1D = read(curSt.getMemRef(), stepCurAddr, validBinP);
   } else {
     Value lanesBI32 = b.create<arith::TruncIOp>(loc, bI32Ty, lanes(B_pad));
     matchBP = b.create<arith::AndIOp>(
@@ -1127,18 +1270,13 @@ void OwnerTiles::boundedScatterLoop(scf::ForOp loop,
         "sum", 0);
   }
 
-  Value lanesPI32 = b.create<arith::TruncIOp>(loc, pI32Ty, lanes(P));
   Value sameBinPP =
       b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
                               broadcast(binI32, ppI32Ty, 0),
                               broadcast(binI32, ppI32Ty, 1));
-  Value afterPP =
-      b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt,
-                              broadcast(lanesPI32, ppI32Ty, 0),
-                              broadcast(lanesPI32, ppI32Ty, 1));
-  Value priorValidPP = b.create<arith::AndIOp>(
-      loc, b.create<arith::AndIOp>(loc, sameBinPP, afterPP),
-      broadcast(validBinP, ppBoolTy, 1));
+  Value sameValidPP = b.create<arith::AndIOp>(
+      loc, sameBinPP, broadcast(validBinP, ppBoolTy, 1));
+  Value priorValidPP = b.create<arith::AndIOp>(loc, sameValidPP, afterPP);
   Value rank1D = reduce(
       b.create<arith::ExtUIOp>(loc, ppI32Ty, priorValidPP), "sum", 1);
 
@@ -1158,15 +1296,15 @@ void OwnerTiles::boundedScatterLoop(scf::ForOp loop,
           lift1D(st.getValue()), validBinP);
   }
 
-  if (useAtomicCursors) {
-    Value oneP32 = like(b.create<arith::ConstantIntOp>(loc, 1, 32), pI32Ty);
-    (void)atomicFetchAdd(curSt.getMemRef(), stepCurAddr, oneP32, validBinP,
-                         "relaxed", "block");
+  if (useMemoryCursors) {
+    Value tot1D = reduce(
+        b.create<arith::ExtUIOp>(loc, ppI32Ty, sameValidPP), "sum", 1);
+    Value isFirst1D = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                              rank1D, zeroP32);
+    Value updMask1D = b.create<arith::AndIOp>(loc, validBinP, isFirst1D);
+    Value nextCursor1D = b.create<arith::AddIOp>(loc, baseCursor1D, tot1D);
+    write(curSt.getMemRef(), stepCurAddr, nextCursor1D, updMask1D);
     b.setInsertionPointAfter(pLoop);
-    Value zeroB32 = like(b.create<arith::ConstantIntOp>(loc, 0, 32), bI32Ty);
-    Value curFinal = atomicFetchAdd(curSt.getMemRef(), cAddr, zeroB32, validB,
-                                    "acq_rel", "block");
-    write(curSt.getMemRef(), cAddr, curFinal, validB);
     return;
   }
 

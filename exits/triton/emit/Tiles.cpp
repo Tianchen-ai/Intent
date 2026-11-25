@@ -74,6 +74,7 @@ TerminalPrinter tilePrinter() {
   p.operations["math.roundeven"] = PrintRule::format("$r0 = libdevice.rint($0)");
   p.operations["arith.minnumf"] = PrintRule::format("$r0 = tl.minimum($operands)");
   p.operations["arith.shli"] = PrintRule::format("$r0 = $0<<$1");
+  p.operations["arith.shrsi"] = PrintRule::format("$r0 = $0>>$1");
   p.operations["arith.maxnumf"] = PrintRule::format("$r0 = tl.maximum($operands)");
   p.operations["arith.minsi"] = PrintRule::format("$r0 = tl.minimum($operands)");
   p.operations["arith.maxsi"] = PrintRule::format("$r0 = tl.maximum($operands)");

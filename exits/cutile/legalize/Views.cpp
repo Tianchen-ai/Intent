@@ -912,6 +912,92 @@ struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
                                             nativeMatrixRead,
                                             nativeWindowPanels,
                                             nativeMatrixWrite);
+      int matSm = 0;
+      if (auto *cap = profile.services.get<intentdsl::cutile::ArrayIndices>())
+        matSm = cap->sm;
+      if (matSm == 90) {
+        // On SM90, aligned 1-row contiguous loads inside a TMA contraction
+        // K-loop stall warpgroup scheduling when lowered as per-lane gathers.
+        // Rewrite unmasked aligned 2D 1-row tile_reads to non-TMA rect_reads.
+        auto extractAlignedBlock = [](Value coord, int64_t width) -> Value {
+          auto add = coord.getDefiningOp<arith::AddIOp>();
+          if (!add)
+            return {};
+          Value baseScalar;
+          for (int side : {0, 1}) {
+            Operation *bc = add->getOperand(side).getDefiningOp();
+            Operation *ax = add->getOperand(1 - side).getDefiningOp();
+            if (bc && ax &&
+                bc->getName().getStringRef() == "ct_src.tile_broadcast" &&
+                bc->getAttrOfType<IntegerAttr>("axis").getInt() == -1 &&
+                !isa<ShapedType>(bc->getOperand(0).getType()) &&
+                ax->getName().getStringRef() == "ct_src.tile_axis" &&
+                cast<RankedTensorType>(ax->getResult(0).getType())
+                        .getDimSize(0) == width) {
+              baseScalar = bc->getOperand(0);
+              break;
+            }
+          }
+          if (!baseScalar)
+            return {};
+          if (auto mul = baseScalar.getDefiningOp<arith::MulIOp>()) {
+            for (int side : {0, 1}) {
+              if (auto c = mul->getOperand(side).getDefiningOp<arith::ConstantOp>())
+                if (auto ia = dyn_cast<IntegerAttr>(c.getValue());
+                    ia && ia.getValue().getSignificantBits() <= 64 &&
+                    ia.getInt() == width)
+                  return mul->getOperand(1 - side);
+            }
+          }
+          return {};
+        };
+        SmallVector<Operation *> rowReads;
+        fn.walk([&](Operation *op) {
+          if (op->getName().getStringRef() == "ct_src.tile_read" &&
+              op->getNumOperands() == 2 &&
+              op->getParentOfType<scf::ForOp>())
+            rowReads.push_back(op);
+        });
+        for (Operation *rd : rowReads) {
+          auto resTy = dyn_cast<RankedTensorType>(rd->getResult(0).getType());
+          auto view = dyn_cast<BlockArgument>(rd->getOperand(0));
+          Operation *addr = rd->getOperand(1).getDefiningOp();
+          if (!resTy || resTy.getRank() != 1 || !view ||
+              view.getOwner() != &fn.front() || !addr ||
+              addr->getName().getStringRef() != "ct_src.tile_address" ||
+              addr->getNumOperands() != 3)
+            continue;
+          auto mem = dyn_cast<MemRefType>(view.getType());
+          auto proj = addr->getAttrOfType<DenseI64ArrayAttr>("projection");
+          auto strides = addr->getAttrOfType<DenseI64ArrayAttr>("strides");
+          int64_t width = resTy.getDimSize(0);
+          if (!mem || mem.getRank() != 2 || !proj || proj.size() != 2 ||
+              proj[0] != -1 || proj[1] != 0 || !strides ||
+              strides.size() != 2 || strides[0] <= 0 || strides[1] != 1 ||
+              width <= 0 || !llvm::isPowerOf2_64(width))
+            continue;
+          Value rowScalar = addr->getOperand(1);
+          Value colBlock = extractAlignedBlock(addr->getOperand(2), width);
+          if (isa<ShapedType>(rowScalar.getType()) || !colBlock)
+            continue;
+          OpBuilder rb(rd);
+          Location rloc = rd->getLoc();
+          auto rectTy = RankedTensorType::get({1, width}, resTy.getElementType());
+          OperationState rSt(rloc, "ct_src.rect_read");
+          rSt.addOperands({view, rowScalar, colBlock});
+          rSt.addTypes(rectTy);
+          rSt.addAttribute("allow_tma", rb.getBoolAttr(false));
+          Value rect = rb.create(rSt)->getResult(0);
+          OperationState shSt(rloc, "ct_src.reshape");
+          shSt.addOperands(rect);
+          shSt.addTypes(resTy);
+          Value reshaped = rb.create(shSt)->getResult(0);
+          rd->getResult(0).replaceAllUsesWith(reshaped);
+          rd->erase();
+          if (addr->use_empty())
+            addr->erase();
+        }
+      }
     }
     else {
       fn.walk<WalkOrder::PostOrder>([](Operation *op){

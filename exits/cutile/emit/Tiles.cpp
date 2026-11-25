@@ -98,6 +98,7 @@ TerminalPrinter cutilePrinter() {
                           {"ori", "|"},
                           {"xori", "^"},
                           {"shli", "<<"},
+                          {"shrsi", ">>"},
                           {"shrui", ">>"}})
     p.operations["arith." + std::string(n)] =
         PrintRule::format(std::string("$r0 = $0") + token + "$1");

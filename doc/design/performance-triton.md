@@ -7,13 +7,13 @@
 Triton 出口的执行吞吐由四项显式 IR 决定支配：
 
 1. **CTA 数据归属、异步张量描述符（TMA）与双 Warpgroup 流水**：
-   - 稠密、批处理、路由与窗口矩阵收缩按 `(BM, BN, BK)` 切分输出驻留块，绑定 `{num_warps, num_stages}` 参数行；对满足 16B 起始与步长对齐且在足够 `K` 面板上可摊薄描述符构造与共享内存暂存开销的视图（`kPanels ≥ 8` 或 `BM·BN ≥ 4096 ∧ kPanels ≥ 4`，跳过单次外层读与窄面板），在 `triton_src.tile_program` 入口块外提并去重 `triton_src.make_desc`（`tl.make_tensor_descriptor`），由 `desc_read` / `desc_write` 直接驱动 TMA 异步搬运与 WGMMA / MMA 指令流水。
+   - 稠密、批处理、路由与窗口矩阵收缩按 `(BM, BN, BK)` 切分输出驻留块，绑定 `{num_warps, num_stages}` 参数行；对满足 16B 起始与步长对齐且在足够 `K` 面板上可摊薄描述符构造与共享内存暂存开销的视图（`kPanels ≥ 8` 或 `BM·BN ≥ 4096 ∧ kPanels ≥ 4`，跳过单次外层读与窄面板），在 `triton_src.tile_program` 入口块外提并去重 `triton_src.make_desc`（`tl.make_tensor_descriptor`），并由 `promoteSteppedTmaLoops` 将常量单位步长 TMA K-loop 提升为步长 `BK` 的仿射循环以契合 Hopper TMA 软件流水线。
    - Hopper `sm90` 在 `OwnerMachine` 中对单 carry 单投影融合循环开放双 warpgroup（`maxWarpgroups = 2`，`num_warps = 8`）协同矩阵面板（如 `pair-128x64`），多 carry / 多投影循环保持单 warpgroup 预算以防 256 寄存器溢出；`FoldIssue::fullFoldPanels` 经 `proveTailAccess` 支持纯索引表达式等价与 `min` 截断上界证明，恢复分段因果与分组解码内层完整面板。
-   - 窄单 owner 递推（`ownerRows == 1 ∧ maxAxis <= 64`）开放 `{num_warps = 1, 2, 4}` 候选，配合 `Ordered` 并发窄 CTA 驻留波次与 SM 欠饱和建模，使小状态线性注意力与门控递推在满 SM 并行下显著提速；驻留多归约内核（`reductionCount ≥ 4 ∧ localReads ≥ 8`）自动按 L1 重物化写回并保留高频共享广播视图、立即发无别名存储，同时对 `width ≥ 1024` 开放 `num_warps = 8`。
+   - 窄单 owner 递推（`ownerRows == 1 ∧ maxAxis <= 64`）开放 `{num_warps = 1, 2, 4}` 候选，单 owner 直方图核开放 `{num_warps = 2, 4, 8}` 候选并按 `OwnerMachine::maxWarpgroups` 选定散射面板宽（`sm120`: `P=64`，`sm90`: `P=32`）；宽驻留多归约内核（`reductionCount ≥ 4 ∧ localReads ≥ 8 ∧ maxConfigWidth ≥ 512`）自动按 L1 重物化写回并保留高频共享广播视图、立即发无别名存储，窄行（`width < 512`）保持寄存器缓存不重复加载，同时对 `width ≥ 1024` 开放 `num_warps = 8`。
    - 超块记录量化（`RecordGemv`）按 `MatrixTarget::flatRecordBitPlanes = true` 生成四象限展平 `[tm, 64]` 单 warp（`num_warps = 1`）解码与单次位精确 `i64` 打包键 `Q8_K` argmax，消除 `reshape` 与跨 warp 共享内存栅栏。
-   - 终端打印器全部由声明式规则（`61` 条）与 `LocalOpView` 局部规则（`74` 条）构成，**`PrintRule::custom` 为 `0`**。
+   - 终端打印器全部由声明式规则（`62` 条）与 `LocalOpView` 局部规则（`74` 条）构成，**`PrintRule::custom` 为 `0`**。
 2. **有序区域向量化与单趟融合**：
-   - `block.owner_space` 统一比较单 owner 宽贡献面板（`tokens-S`，标量折叠扩展至 `4096`）、多 owner 协同矩阵面板（`pair-WxS`）、`K` 槽有序选择链并行选优归约、下三角前缀内积的寄存器驻留列消元代换（结合类型化合同 `tile-gather` 直接抽取对角列并消去死 `select`）、以及有界桶计数直方图 / 前缀扫描 / 稳定秩散射面板化（接入 `tile-histogram` 与 `tile-gather`、静态整除 `exactOwners` 掩码消去及零填充 load-select 折叠）。
+   - `block.owner_space` 统一比较单 owner 宽贡献面板（`tokens-S`，标量折叠扩展至 `4096`）、多 owner 协同矩阵面板（`pair-WxS`）、`K` 槽有序选择链并行选优归约、下三角前缀内积的寄存器驻留列消元代换（结合类型化合同 `tile-gather` 直接抽取对角列并消去死 `select`）、以及有界桶计数直方图 / 前缀扫描 / 稳定秩散射面板化（接入 `tile-histogram` `P=512` 与 `tile-gather`、循环不变运行时 2 的幂 `arith.floordivsi` 纯算术移位快路径、循环外提秩掩码矩阵、静态整除 `exactOwners` 掩码消去及零填充 load-select 折叠）。
    - 当作者授予 `reassoc` 且 `proveValueReplay` 证明两次遍历间无别名写冲突时，在线 `(max, sum)` 重缩放融合为单趟扫描；在 `afn` 许可下将循环不变量 `scale * log2e` 外提至循环外直接发射硬件 SFU `exp2`。
 3. **行程序驻留、条带折叠与片上原子**：
    - 行与集体归约在满足寄存器文件预算时选 `resident-R` 整行驻留（跨 `R` 行复用广播权重与位置表），超预算时切为 `stream-R` 分片归约；等距同构投影折叠为 `triton_src.stripe_loop`；256-bin 直方图支持 `private-merge`（片上 `tl.histogram` + 纵向归并）与 `global-atomic` 双候选择优。

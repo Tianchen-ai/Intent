@@ -1002,10 +1002,11 @@ Value tritonScaledPanels(Tiles &t, MatrixAccess &p) {
   return loop.getResult(0);
 }
 
-intentdsl::block::OwnerAccess tritonOwnerViews() {
+intentdsl::block::OwnerAccess tritonOwnerViews(int64_t scatterPanelWidth) {
   return {ownerRectangle, ownerPanel, /*scalarBroadcastRead=*/true,
           /*nativeTileGather=*/true, /*nativeTileHistogram=*/true,
-          /*blockAtomicMemoryBins=*/false};
+          /*blockAtomicMemoryBins=*/false, /*minMmaRows=*/0,
+          /*groupedPanel=*/nullptr, scatterPanelWidth};
 }
 
 LogicalResult verifyTritonGeometry(func::FuncOp fn,
