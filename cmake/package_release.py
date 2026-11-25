@@ -54,6 +54,8 @@ def _parse_simple_pyproject(toml_path: Path) -> dict:
             "version": _str_field("project", "version"),
             "description": _str_field("project", "description"),
             "requires-python": _str_field("project", "requires-python") or ">=3.10",
+            "license": _str_field("project", "license"),
+            "license-files": _list_field("project", "license-files"),
             "dependencies": _list_field("project", "dependencies"),
             "scripts": scripts,
         },
@@ -80,13 +82,17 @@ def _build_pure_python_pkg(src_dir: Path, out_dir: Path) -> tuple[Path, Path]:
     scripts: dict[str, str] = proj.get("scripts", {})
     packages: list[str] = st.get("packages", [])
     py_modules: list[str] = st.get("py-modules", [])
+    license_files = sorted({p.relative_to(src_dir) for pattern in proj.get("license-files", [])
+                            for p in src_dir.glob(pattern) if p.is_file()})
 
     meta_lines = [
-        "Metadata-Version: 2.1",
+        "Metadata-Version: 2.4",
         f"Name: {name}",
         f"Version: {version}",
         f"Summary: {desc}",
         f"Requires-Python: {req_py}",
+        *([f"License-Expression: {proj['license']}"] if proj.get("license") else []),
+        *[f"License-File: {p.as_posix()}" for p in license_files],
         *[f"Requires-Dist: {d}" for d in deps],
         "",
     ]
@@ -102,6 +108,8 @@ def _build_pure_python_pkg(src_dir: Path, out_dir: Path) -> tuple[Path, Path]:
         ti.mode = 0o644
         tf.addfile(ti, io.BytesIO(b_info))
         tf.add(src_dir / "pyproject.toml", arcname=f"{base}/pyproject.toml", recursive=False)
+        for path in license_files:
+            tf.add((src_dir / path).resolve(), arcname=f"{base}/{path.as_posix()}", recursive=False)
         for mod in py_modules:
             tf.add(src_dir / f"{mod}.py", arcname=f"{base}/{mod}.py", recursive=False)
         for pkg in packages:
@@ -125,6 +133,10 @@ def _build_pure_python_pkg(src_dir: Path, out_dir: Path) -> tuple[Path, Path]:
 
         dist_info = wroot / f"{dist_norm}-{version}.dist-info"
         dist_info.mkdir(parents=True)
+        for path in license_files:
+            dest = dist_info / "licenses" / path
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src_dir / path, dest)
         (dist_info / "METADATA").write_text(pkg_info, encoding="utf-8")
         (dist_info / "WHEEL").write_text(
             "Wheel-Version: 1.0\nGenerator: compilerinfra-release\nRoot-Is-Purelib: true\nTag: py3-none-any\n",

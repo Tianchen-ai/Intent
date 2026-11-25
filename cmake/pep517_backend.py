@@ -45,12 +45,14 @@ def _product_meta(root: Path) -> tuple[str, str, str]:
 
 def _pkg_info(name: str, version: str, ci_ver: str, readme: str) -> str:
     lines = [
-        "Metadata-Version: 2.1",
+        "Metadata-Version: 2.4",
         f"Name: {name}",
         f"Version: {version}",
         "Summary: Multi-target native JIT compiler for typed Python tensor kernels and programs",
         "Requires-Python: >=3.10",
         f"Requires-Dist: compilerinfra=={ci_ver}",
+        "License-Expression: Apache-2.0",
+        "License-File: LICENSE",
         "Description-Content-Type: text/markdown",
         "",
         readme,
@@ -68,6 +70,8 @@ def get_requires_for_build_sdist(config_settings=None):
 
 def _write_dist_info(dist_info: Path, name: str, version: str, ci_ver: str, readme: str, tag: str) -> None:
     dist_info.mkdir(parents=True, exist_ok=True)
+    (dist_info / "licenses").mkdir(exist_ok=True)
+    shutil.copyfile(Path.cwd() / "LICENSE", dist_info / "licenses" / "LICENSE")
     (dist_info / "METADATA").write_text(_pkg_info(name, version, ci_ver, readme), encoding="utf-8")
     (dist_info / "WHEEL").write_text(
         "\n".join(
@@ -120,6 +124,7 @@ def build_sdist(sdist_directory, config_settings=None):
         ti.size = len(pkg_bytes)
         ti.mode = 0o644
         tf.addfile(ti, io.BytesIO(pkg_bytes))
+        tf.add(root / "LICENSE", arcname=f"{archive_base}/LICENSE", recursive=False)
 
         for fname in ROOT_FILES:
             fpath = root / fname
