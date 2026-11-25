@@ -10,7 +10,8 @@
 namespace CI_UNIT_NAMESPACE {
 using namespace mlir;
 llvm::Error describeArtifact(ModuleOp m, llvm::raw_pwrite_stream &out) {
-  auto fn = *m.getOps<func::FuncOp>().begin();
+  SmallVector<func::FuncOp, 2> fns(m.getOps<func::FuncOp>());
+  auto fn = fns.back();
   if (fn.front().front().getName().getStringRef() == "ct_src.tile_program" ||
       intentdsl::kir::orderedOwners(fn)) {
     if (auto conv =

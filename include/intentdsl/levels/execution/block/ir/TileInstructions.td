@@ -43,3 +43,8 @@ def TileProgram : TileInstruction<"tile_program", [SingleBlock]> {
   let arguments=(ins Variadic<AnyMemRef>:$domain, StrAttr:$calling_convention);
   let regions=(region AnyRegion:$program);
 }
+def LibraryGemm : TileInstruction<"library_gemm"> {
+  let arguments=(ins Arg<AnyMemRef, "", [MemRead]>:$lhs,
+                     Arg<AnyMemRef, "", [MemRead]>:$rhs,
+                     Arg<AnyMemRef, "", [MemWrite]>:$out);
+}

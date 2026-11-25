@@ -55,22 +55,29 @@ capabilities(const llvm::json::Object &options) {
   indices->bits = *bits;
   indices->scaledMma=*architecture>=100;
   indices->permitTma = options.getBoolean("allow_tma").value_or(false);
-  indices->sm = int(*architecture);
+  indices->preferRectRowReads = (*architecture == 90);
+  int64_t warpSize = options.getInteger("warp_size").value_or(32);
+  int64_t exchangeW = *architecture == 90 ? 64 : 32;
+  int64_t residentEl = 256;
   if(auto registers=options.getInteger("registers"))
     if(auto err=profile.services.facts.query("register_file",{*registers,"reg32","CUDA",llvm::json::Object{{"source","device properties"}}}))return err;
   if (auto err = profile.services.provide<intentdsl::block::OwnerMachine>(
           std::make_shared<intentdsl::block::OwnerMachine>(
               intentdsl::block::OwnerMachine{
-                  128, 256,
+                  128, int(residentEl),
                   options.getInteger("dynamic_shared_per_block").value_or(0),
-                  *architecture == 90 ? 32768 : 24576,
-                  *architecture == 90 ? 64 : 32,
+                  *architecture == 90 ? 32768 : 24576, exchangeW,
                   *architecture == 90
                       ? options.getInteger("registers").value_or(0) / 2
                       : options.getInteger("registers").value_or(0) * 3 / 8,
                   *architecture == 90 ? 64 : 0,
                   /*maxWarpgroups=*/1,
-                  /*maxGroupReads=*/16})))
+                  /*maxGroupReads=*/16,
+                  /*nativeTileGather=*/false,
+                  warpSize,
+                  /*scatterPanelWidth=*/64,
+                  /*histogramPanelWidth=*/residentEl * 2,
+                  /*minHistogramPanelWidth=*/64})))
     return err;
   std::string cal = options.getString("calibration")
                         .value_or(*architecture == 90 ? "sm90" : "sm120")
@@ -86,6 +93,13 @@ capabilities(const llvm::json::Object &options) {
   table->globalAtomicBins=true;
   auto matrix=std::make_shared<intentdsl::block::MatrixTarget>();
   matrix->estimate="exits/cutile::matrix-issues";
+  matrix->supportsSplitGroupedRhs = true;
+  matrix->flatSplitDequant = false;
+  matrix->splitDequantWriteScale = (*architecture == 90 ? 1.5 : 3.5);
+  matrix->l2CacheBytes = options.getInteger("l2_cache_bytes").value_or(0);
+  matrix->smMmaOpsPerNs = (*architecture == 90 ? 5200.0 : 1800.0);
+  matrix->libraryGemmImpl = "exits/cutile::cublas-gemm";
+  matrix->librarySmMmaOpsPerNs = (*architecture == 90 ? 5500.0 : 1700.0);
   matrix->implementations = {
       {"contract", {"exits/cutile::native-dot"}},
       {"window_contract", {"exits/cutile::native-dot"}},
@@ -189,12 +203,15 @@ capabilities(const llvm::json::Object &options) {
   // Wide rectangular transfers amortize a large resident tile. For generic
   // strided loads a smaller table also bounds native compile-time expansion.
   const unsigned maxWidth = indices->permitTma ? 4096 : 256;
+  const unsigned warpU = unsigned(std::max<int64_t>(1, warpSize));
+  const unsigned maxMultiRowElems = warpU * 32u;
   for (unsigned width = 1; width <= maxWidth; width *= 2) {
     for (unsigned rows : {1u, 2u, 8u, 16u}) {
       if (rows > 2 && width > 128)
         continue;
       llvm::SmallVector<unsigned, 2> occupancies;
-      bool narrowMultiRow = rows == 8 && width >= 32 && width <= 128;
+      bool narrowMultiRow =
+          rows == 8 && width >= warpU && rows * width <= maxMultiRowElems;
       if (*architecture == 90) {
         occupancies.push_back(2u);
         if ((rows == 1 && ((width >= 32 && width <= 256) || width >= 1024)) ||

@@ -16,5 +16,8 @@ void expandMatrixProgram(mlir::func::FuncOp, llvm::StringRef unit,
                          MatrixPanelRead read = nullptr,
                          WindowPanelLowering window = nullptr,
                          MatrixPanelWrite write = nullptr,
-                         bool flatRecordBitPlanes = false);
+                         bool flatRecordBitPlanes = false,
+                         bool flatSplitDequant = false,
+                         bool permitTma = false,
+                         llvm::StringRef libraryGemmImpl = "");
 } // namespace intentdsl::block

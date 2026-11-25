@@ -53,6 +53,27 @@ struct CutileAtomicContractModel
   }
 };
 
+struct CutileLibraryGemmContractModel
+    : public compilerinfra::ContractOpInterface::ExternalModel<
+          CutileLibraryGemmContractModel, intentdsl::cutile::LibraryGemm> {
+  Type getAccumulatorType(Operation *op) const {
+    return Float32Type::get(op->getContext());
+  }
+  LogicalResult verifyShapeAndTypes(Operation *op) const {
+    if (op->getNumResults() != 0 || op->getNumOperands() != 3)
+      return failure();
+    auto a = dyn_cast<MemRefType>(op->getOperand(0).getType());
+    auto b = dyn_cast<MemRefType>(op->getOperand(1).getType());
+    auto c = dyn_cast<MemRefType>(op->getOperand(2).getType());
+    if (!a || !b || !c || a.getRank() != 2 || b.getRank() != 2 ||
+        c.getRank() != 2)
+      return failure();
+    Type el = a.getElementType();
+    return success((el.isF16() || el.isBF16() || el.isF32()) &&
+                   b.getElementType() == el && c.getElementType() == el);
+  }
+};
+
 struct CutileTilePidRangeModel
     : public InferIntRangeInterface::ExternalModel<CutileTilePidRangeModel,
                                                    intentdsl::cutile::TilePid> {
@@ -81,6 +102,18 @@ struct CutileTilePidRangeModel
             hi = std::max<int64_t>(0, llvm::divideCeil(dims[1], tile[1]) - 1);
           else if (ax == 2)
             hi = std::max<int64_t>(0, dims[3] - 1);
+        }
+      } else if (mode && mode.getValue() == "split_dequant") {
+        auto ext = prog->getAttrOfType<DenseI64ArrayAttr>("block.dequant_extents");
+        auto dqTile = prog->getAttrOfType<DenseI64ArrayAttr>("block.dequant_tile");
+        if (ext && ext.size() == 2 && dqTile && dqTile.size() == 2) {
+          if (dqTile[1] == 1 && ax == 0 && dqTile[0] > 0)
+            hi = std::max<int64_t>(
+                0, llvm::divideCeil(ext[0] * ext[1], dqTile[0]) - 1);
+          else if (ax == 0 && dqTile[0] > 0)
+            hi = std::max<int64_t>(0, llvm::divideCeil(ext[0], dqTile[0]) - 1);
+          else if (ax == 1 && dqTile[1] > 0)
+            hi = std::max<int64_t>(0, llvm::divideCeil(ext[1], dqTile[1]) - 1);
         }
       } else if (mode && mode.getValue() == "owners" && ax == 0) {
         auto owners = prog->getAttrOfType<IntegerAttr>("block.owners");
@@ -388,6 +421,7 @@ void intentdsl::cutile::TileSource::initialize() {
   TileDot::attachInterface<CutileMatrixContractModel<TileDot>>(*ctx);
   NativeScaleMMA::attachInterface<CutileMatrixContractModel<NativeScaleMMA>>(
       *ctx);
+  LibraryGemm::attachInterface<CutileLibraryGemmContractModel>(*ctx);
   TileAtomicAdd::attachInterface<
       CutileAtomicContractModel<TileAtomicAdd, true>>(*ctx);
   TileAtomicFetchAdd::attachInterface<

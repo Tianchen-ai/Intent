@@ -27,9 +27,27 @@ void registerContraction(Unit &u) {
   family.verifyCandidate = [](Operation *, const StructuralCandidate &c,
                               const TargetProfile &) -> llvm::Error {
     auto tile = cast<DenseI64ArrayAttr>(c.value);
+    if (tile.size() == 4 && tile[3] == 2) {
+      if (c.id != "split-library" || c.topology != "split-dequant-library" ||
+          c.preconditions !=
+              std::vector<std::string>{"independent-output-tiles",
+                                       "split-grouped-rhs-workspace"})
+        return llvm::createStringError("invalid split library candidate");
+      return llvm::Error::success();
+    }
+    if (tile.size() == 4 && tile[3] == 1) {
+      std::string id = "split-" + std::to_string(tile[0]) + "x" +
+                       std::to_string(tile[1]) + "x" + std::to_string(tile[2]);
+      if (c.id != id || c.topology != "split-dequant-contraction" ||
+          c.preconditions !=
+              std::vector<std::string>{"independent-output-tiles",
+                                       "split-grouped-rhs-workspace"})
+        return llvm::createStringError("invalid split contraction candidate");
+      return llvm::Error::success();
+    }
     std::string id = std::to_string(tile[0]) + "x" + std::to_string(tile[1]) +
                      "x" + std::to_string(tile[2]);
-    if (c.id != id || c.topology != "output-stationary" ||
+    if (tile.size() != 3 || c.id != id || c.topology != "output-stationary" ||
         c.preconditions != std::vector<std::string>{"independent-output-tiles"})
       return llvm::createStringError("candidate and matrix tile disagree");
     return llvm::Error::success();
@@ -89,6 +107,39 @@ void registerContraction(Unit &u) {
                       {"independent-output-tiles"},
                       implementations});
     }
+    if (block::canSplitGroupedRhs(op, p)) {
+      std::vector<std::string> contractImpls;
+      if (auto it = caps->implementations.find("contract");
+          it != caps->implementations.end())
+        contractImpls = it->second;
+      llvm::StringSet<> seenSplit;
+      for (auto &t : caps->tiles) {
+        auto choice = b.getDenseI64ArrayAttr({t.m, t.n, t.k, 1});
+        if (!block::supportsMatrixTile(op, choice, p))
+          continue;
+        std::string id = "split-" + std::to_string(t.m) + "x" +
+                         std::to_string(t.n) + "x" + std::to_string(t.k);
+        if (!seenSplit.insert(id).second)
+          continue;
+        rows.push_back({std::move(id),
+                        "split-dequant-contraction",
+                        choice,
+                        {"independent-output-tiles",
+                         "split-grouped-rhs-workspace"},
+                        contractImpls});
+      }
+      if (!caps->libraryGemmImpl.empty()) {
+        auto choice = b.getDenseI64ArrayAttr({1, 1, 1, 2});
+        if (block::supportsMatrixTile(op, choice, p)) {
+          rows.push_back({"split-library",
+                          "split-dequant-library",
+                          choice,
+                          {"independent-output-tiles",
+                           "split-grouped-rhs-workspace"},
+                          {caps->libraryGemmImpl}});
+        }
+      }
+    }
     return rows;
   };
   u.strategies.push_back({std::move(strategy), COMPILERINFRA_SOURCE});
@@ -103,6 +154,9 @@ void registerContraction(Unit &u) {
       return shape.takeError();
     auto fn = op->getParentOfType<func::FuncOp>();
     auto tile = cast<DenseI64ArrayAttr>(a);
+    bool isSplit = tile.size() == 4 && (tile[3] == 1 || tile[3] == 2);
+    bool isSplitLib = tile.size() == 4 && tile[3] == 2;
+    auto outTile = b.getDenseI64ArrayAttr({tile[0], tile[1], tile[2]});
     for (auto [i, value] : llvm::enumerate(fn.getArguments())) {
       SmallVector<int64_t> strides;
       for (auto &v : *facts->arguments[i].getAsObject()->getArray("strides"))
@@ -113,7 +167,11 @@ void registerContraction(Unit &u) {
         extents.push_back(*v.getAsInteger());
       fn.setArgAttr(i, "block.shape", b.getDenseI64ArrayAttr(extents));
     }
-    op->setAttr("block.output_tile", tile);
+    op->setAttr("block.output_tile", outTile);
+    if (isSplit)
+      op->setAttr("block.split_dequant", b.getUnitAttr());
+    if (isSplitLib)
+      op->setAttr("block.split_library", b.getUnitAttr());
     op->setAttr(
         "block.extents",
         b.getDenseI64ArrayAttr({shape->m, shape->n, shape->k, shape->batches}));

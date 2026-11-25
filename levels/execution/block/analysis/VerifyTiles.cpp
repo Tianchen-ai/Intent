@@ -40,33 +40,51 @@ verifyTileProgram(func::FuncOp fn, const TargetProfile &profile,
         owners.getInt() != intentdsl::kir::ownerCount(&sp, *facts) ||
         (fs && (fs.getInt() < 2 || !llvm::isPowerOf2_64(fs.getInt()))))
       return sp.emitError("invalid owner grid");
+  } else if (mode == "split_dequant") {
+    auto caps = profile.services.get<intentdsl::block::MatrixTarget>();
+    auto ext = sp.getAttrOfType<DenseI64ArrayAttr>("block.dequant_extents");
+    auto dqTile = sp.getAttrOfType<DenseI64ArrayAttr>("block.dequant_tile");
+    if (!caps || !caps->supportsSplitGroupedRhs || !ext || ext.size() != 2 ||
+        ext[0] <= 0 || ext[1] <= 0 || !dqTile || dqTile.size() != 2 ||
+        dqTile[0] <= 0 || dqTile[1] <= 0)
+      return sp.emitError("invalid split dequantization grid");
   } else if (mode == "matrix") {
     auto dims = sp.getAttrOfType<DenseI64ArrayAttr>("block.extents");
     auto tile = sp.getAttrOfType<DenseI64ArrayAttr>("block.output_tile");
     auto native = sp.getAttrOfType<StringAttr>("block.native_row");
     auto caps = profile.services.get<intentdsl::block::MatrixTarget>();
-    int64_t dotElemBytes = 0;
-    sp.walk([&](Operation *inst) {
-      auto k = inst->getName().stripDialect();
-      if (k != "tile_dot" && k != "mma")
-        return;
-      for (unsigned i = 0; i < std::min(2u, inst->getNumOperands()); ++i) {
-        Type elem = getElementTypeOrSelf(inst->getOperand(i).getType());
-        if (elem.isIntOrFloat())
-          dotElemBytes = std::max<int64_t>(
-              dotElemBytes, llvm::divideCeil(elem.getIntOrFloatBitWidth(), 8));
-      }
-    });
-    if (!dims || dims.size() != 4 ||
-        llvm::any_of(dims.asArrayRef(), [](auto i) { return i < 0; }) ||
-        !tile || tile.size() != 3 || !native || !caps ||
-        !llvm::any_of(caps->tiles, [&](auto &t) {
-          return tile.asArrayRef() == ArrayRef<int64_t>{t.m, t.n, t.k} &&
-                 native == t.native &&
-                 (!t.maxOperandBytes || dotElemBytes <= t.maxOperandBytes);
-        }))
-      return sp.emitError(
-          "invalid installed contraction grid or native parameter row");
+    if (sp.hasAttr("block.split_library")) {
+      if (!dims || dims.size() != 4 ||
+          llvm::any_of(dims.asArrayRef(), [](auto i) { return i < 0; }) ||
+          !tile || tile.size() != 3 ||
+          tile.asArrayRef() != ArrayRef<int64_t>{1, 1, 1} || !caps ||
+          !caps->supportsSplitGroupedRhs || caps->libraryGemmImpl.empty())
+        return sp.emitError("invalid split library contraction grid");
+    } else {
+      int64_t dotElemBytes = 0;
+      sp.walk([&](Operation *inst) {
+        auto k = inst->getName().stripDialect();
+        if (k != "tile_dot" && k != "mma")
+          return;
+        for (unsigned i = 0; i < std::min(2u, inst->getNumOperands()); ++i) {
+          Type elem = getElementTypeOrSelf(inst->getOperand(i).getType());
+          if (elem.isIntOrFloat())
+            dotElemBytes = std::max<int64_t>(
+                dotElemBytes,
+                llvm::divideCeil(elem.getIntOrFloatBitWidth(), 8));
+        }
+      });
+      if (!dims || dims.size() != 4 ||
+          llvm::any_of(dims.asArrayRef(), [](auto i) { return i < 0; }) ||
+          !tile || tile.size() != 3 || !native || !caps ||
+          !llvm::any_of(caps->tiles, [&](auto &t) {
+            return tile.asArrayRef() == ArrayRef<int64_t>{t.m, t.n, t.k} &&
+                   native == t.native &&
+                   (!t.maxOperandBytes || dotElemBytes <= t.maxOperandBytes);
+          }))
+        return sp.emitError(
+            "invalid installed contraction grid or native parameter row");
+    }
   } else
     return sp.emitError("unknown tile calling convention");
   auto check = fn.walk([&](Operation *op) {
@@ -131,25 +149,51 @@ verifyTileProgram(func::FuncOp fn, const TargetProfile &profile,
           !getElementTypeOrSelf(op->getResult(0).getType()).isInteger(64))
         return op->emitError("invalid address rank or index width"),
                WalkResult::interrupt();
-      auto native =
-          facts->arguments[view.getArgNumber()].getAsObject()->getArray(
-              "strides");
       auto output = shape(op->getResult(0).getType());
-      if (!native || native->size() != rank || output.size() > 2)
-        return WalkResult::interrupt();
-      for (int i = 0; i < rank; i++) {
-        auto type = op->getOperand(i + 1).getType();
-        auto coord = shape(type);
-        auto axis = axes[i];
-        if ((*native)[i].getAsInteger() != strides[i] ||
-            (!getElementTypeOrSelf(type).isInteger(64) &&
-             !(bits == 32 && getElementTypeOrSelf(type).isInteger(32))) ||
-            (coord.empty()
-                 ? axis != -1
-                 : (coord.size() != 1 || axis < 0 ||
-                    size_t(axis) >= output.size() || coord[0] != output[axis])))
-          return op->emitError("coordinate projection or ABI stride mismatch"),
-                 WalkResult::interrupt();
+      bool useArgStrides =
+          mode == "split_dequant" ||
+          view.getArgNumber() >= facts->arguments.size();
+      if (useArgStrides) {
+        auto expected = fn.getArgAttrOfType<DenseI64ArrayAttr>(
+            view.getArgNumber(), "block.strides");
+        if (!expected || expected.size() != rank || output.size() > 2)
+          return WalkResult::interrupt();
+        for (int i = 0; i < rank; i++) {
+          auto type = op->getOperand(i + 1).getType();
+          auto coord = shape(type);
+          auto axis = axes[i];
+          if (expected[i] != strides[i] ||
+              (!getElementTypeOrSelf(type).isInteger(64) &&
+               !(bits == 32 && getElementTypeOrSelf(type).isInteger(32))) ||
+              (coord.empty()
+                   ? axis != -1
+                   : (coord.size() != 1 || axis < 0 ||
+                      size_t(axis) >= output.size() ||
+                      coord[0] != output[axis])))
+            return op->emitError("coordinate projection or view stride mismatch"),
+                   WalkResult::interrupt();
+        }
+      } else {
+        auto native =
+            facts->arguments[view.getArgNumber()].getAsObject()->getArray(
+                "strides");
+        if (!native || native->size() != rank || output.size() > 2)
+          return WalkResult::interrupt();
+        for (int i = 0; i < rank; i++) {
+          auto type = op->getOperand(i + 1).getType();
+          auto coord = shape(type);
+          auto axis = axes[i];
+          if ((*native)[i].getAsInteger() != strides[i] ||
+              (!getElementTypeOrSelf(type).isInteger(64) &&
+               !(bits == 32 && getElementTypeOrSelf(type).isInteger(32))) ||
+              (coord.empty()
+                   ? axis != -1
+                   : (coord.size() != 1 || axis < 0 ||
+                      size_t(axis) >= output.size() ||
+                      coord[0] != output[axis])))
+            return op->emitError("coordinate projection or ABI stride mismatch"),
+                   WalkResult::interrupt();
+        }
       }
     }
     if (name == "tile_pid") {
@@ -213,6 +257,25 @@ verifyTileProgram(func::FuncOp fn, const TargetProfile &profile,
         if (failed(compilerinfra::verifyContractOp(op, profile)))
           return WalkResult::interrupt();
       }
+    }
+    if (name == "tile_read") {
+      if (auto ev = op->getAttr("eviction_policy")) {
+        auto s = dyn_cast<StringAttr>(ev);
+        if (!s || (s.getValue() != "evict_last" && s.getValue() != "evict_first"))
+          return op->emitError("invalid cache eviction policy"),
+                 WalkResult::interrupt();
+      }
+    }
+    if (name == "library_gemm") {
+      auto impl = op->getAttrOfType<StringAttr>("ci.implementation");
+      if (!impl)
+        return op->emitError("library_gemm requires bound implementation contract"),
+               WalkResult::interrupt();
+      if (auto err = profile.checkImplementation(impl.getValue()))
+        return op->emitError() << llvm::toString(std::move(err)),
+               WalkResult::interrupt();
+      if (failed(compilerinfra::verifyContractOp(op, profile)))
+        return WalkResult::interrupt();
     }
     if (name == "tile_gather" || name == "tile_histogram") {
       auto impl = op->getAttrOfType<StringAttr>("ci.implementation");

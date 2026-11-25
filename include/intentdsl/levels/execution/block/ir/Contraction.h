@@ -18,10 +18,21 @@ struct MatrixTarget {
   std::string estimate;
   std::map<std::string, std::vector<std::string>> implementations;
   bool flatRecordBitPlanes = false;
+  bool supportsSplitGroupedRhs = false;
+  bool flatSplitDequant = false;
+  double splitDequantWriteScale = 1.0;
+  int64_t l2CacheBytes = 0;
+  double smMmaOpsPerNs = 0.0;
+  std::string libraryGemmImpl;
+  double librarySmMmaOpsPerNs = 0.0;
 };
-const MatrixTile *findMatrixTile(mlir::Operation *, llvm::ArrayRef<int64_t>,
-                                 const compilerinfra::TargetProfile &,
-                                 std::optional<llvm::StringRef> native = std::nullopt);
+bool canSplitGroupedRhs(mlir::Operation *,
+                        const compilerinfra::TargetProfile &);
+const MatrixTile *findMatrixTile(
+    mlir::Operation *, llvm::ArrayRef<int64_t>,
+    const compilerinfra::TargetProfile &,
+    std::optional<llvm::StringRef> native = std::nullopt,
+    bool split = false);
 bool supportsMatrixTile(mlir::Operation *, mlir::Attribute,
                         const compilerinfra::TargetProfile &);
 

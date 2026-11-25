@@ -1,5 +1,6 @@
 #include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 #include "intentdsl/levels/execution/block/ir/OwnerProgram.h"
+#include "intentdsl/levels/execution/block/ir/Owners.h"
 #include "intentdsl/levels/execution/block/ir/TileBuilder.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 namespace CI_UNIT_NAMESPACE {
@@ -263,17 +264,19 @@ bool groupedPanel(Tiles &t, Value view, ArrayRef<Value> coords,
 } // namespace
 mlir::Value nativeMatrixRead(Tiles &t, intentdsl::block::MatrixAccess &p,
                              bool left, Value group, Value panel) {
-  bool isQuant = p.dot.getName().stripDialect() == "quant_contract";
+  bool isSplit = p.domain.hasAttr("block.split_dequant");
+  bool isQuant = !isSplit && p.dot.getName().stripDialect() == "quant_contract";
   const auto *qSpec = isQuant ? intentdsl::kir::quantFormatSpec(p.dot) : nullptr;
-  if ((!isQuant && left && p.dot.getNumOperands() > 2) ||
+  if ((!isSplit && !isQuant && left && p.dot.getNumOperands() > 2) ||
       (isQuant && (!qSpec ||
                    qSpec->roleLayout !=
                        intentdsl::kir::QuantRoleLayout::GroupedWeightRhs)))
     return {};
-  auto view = p.dot.getOperand(left ? 0 : 1);
+  auto view = isSplit ? (left ? p.dot.getOperand(0) : t.fn.getArguments().back())
+                      : p.dot.getOperand(left ? 0 : 1);
   int rank = p.rank(view);
-  int batch = isQuant ? -1 : p.axis(left ? "lhs_batch" : "rhs_batch");
-  int inner = isQuant ? (left ? 1 : 0) : p.axis(left ? "lhs_k" : "rhs_k");
+  int batch = (isSplit || isQuant) ? -1 : p.axis(left ? "lhs_batch" : "rhs_batch");
+  int inner = (isSplit || isQuant) ? (left ? 1 : 0) : p.axis(left ? "lhs_k" : "rhs_k");
   if ((rank != 2 && rank != 3) || (batch != -1 && batch != 0))
     return {};
   SmallVector<Value> at(rank);
@@ -282,7 +285,7 @@ mlir::Value nativeMatrixRead(Tiles &t, intentdsl::block::MatrixAccess &p,
     at[0] = group;
     dims[0] = 1;
   }
-  auto free = isQuant ? (left ? 0 : 1) : p.freeAxis(view, inner, batch);
+  auto free = (isSplit || isQuant) ? (left ? 0 : 1) : p.freeAxis(view, inner, batch);
   int64_t freeDim = p.tile[left ? 0 : 1];
   if (isQuant && !left) {
     if (qSpec->packFactor <= 0 || freeDim % qSpec->packFactor != 0)
@@ -425,14 +428,18 @@ bool nativeMatrixWrite(Tiles &t, intentdsl::block::MatrixAccess &p, Value y,
   t.op("rect_write", args);
   return true;
 }
-intentdsl::block::OwnerAccess nativeOwnerViews(int sm) {
+intentdsl::block::OwnerAccess
+nativeOwnerViews(const intentdsl::block::OwnerMachine *om) {
   return {rectangle,
           panel,
           /*scalarBroadcastRead=*/false,
           /*nativeTileGather=*/false,
           /*nativeTileHistogram=*/false,
           /*blockAtomicMemoryBins=*/true,
-          /*minMmaRows=*/sm == 90 ? 64 : 0,
-          groupedPanel};
+          /*minMmaRows=*/om ? om->operandGroupRows : 0,
+          groupedPanel,
+          /*scatterPanelWidth=*/om ? om->scatterPanelWidth : 0,
+          /*histogramPanelWidth=*/om ? om->histogramPanelWidth : 0,
+          /*minHistogramPanelWidth=*/om ? om->minHistogramPanelWidth : 0};
 }
 } // namespace CI_UNIT_NAMESPACE

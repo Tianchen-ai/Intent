@@ -17,8 +17,13 @@ class Artifact:
             raise ValueError("unsupported cuTile ABI")
         self.data = data
         self.function = load(data["source"], data["entry"])._pyfunc
+        pre = data.get("pre_stage")
+        self.pre_function = (
+            load(data["source"], pre["entry"])._pyfunc if pre else None
+        )
         self.lock = RLock()
         self.variants = {}
+        self.pre_variant = None
         self.compiled = {}
         self.winners = {}
 
@@ -30,10 +35,22 @@ class Artifact:
         return Call(self, values, outputs, device, (m, n))
 
 
+_WS_DTYPES = {"f16": torch.float16, "bf16": torch.bfloat16, "f32": torch.float32}
+
+
 class Call(PreparedLaunch):
     def __init__(self, artifact, values, outputs, device, shape):
         self.artifact, self.values, self.outputs = artifact, tuple(values), outputs
         self.device, self.shape = device, shape
+        self.pre_stage = artifact.data.get("pre_stage")
+        self.library_gemm = bool(artifact.data.get("library_gemm"))
+        self.workspace = None
+        self.pre_dispatcher = None
+        if self.pre_stage:
+            ws = self.pre_stage["workspace"]
+            self.workspace = torch.empty(
+                tuple(ws["shape"]), dtype=_WS_DTYPES[ws["dtype"]], device=device
+            )
         self.candidates = {}
         self.compilation = []
         self.selected = None
@@ -49,9 +66,19 @@ class Call(PreparedLaunch):
             result[int(slot)] = result[int(slot)].view(tuple(shape))
         return tuple(result)
 
+    def pre_args(self, values):
+        return (
+            *(values[i] for i in self.pre_stage["arg_slots"]),
+            self.workspace,
+            self.pre_stage["rows"],
+            self.pre_stage["width"],
+        )
+
     def args(self, row, values):
         if self.artifact.data.get("matrix_views") or self.artifact.data.get("direct_views"):
             values = self.native_values if values is self.values else self._views(values)
+            if self.workspace is not None:
+                return (*values, self.workspace, row["rows"], row["width"])
             return (*values,row["rows"],row["width"])
         slot=self.artifact.data.get("outer_shape_slot", -1)
         outer=values[slot].shape[:-1] if slot>=0 else ()
@@ -100,26 +127,49 @@ class Call(PreparedLaunch):
         with a.lock:
             cached = a.compiled.get(ckey)
             if cached is not None:
-                self.candidates, comp, self.failures = cached
+                self.candidates, comp, self.failures, self.pre_dispatcher = cached
                 self.compilation = [
                     dict(c, compiler_ms=0.0, dispatcher_hit=True) for c in comp
                 ]
                 self.compiles_before_launch = sum(
-                    d.compiles for _, d in self.candidates.values()
-                )
+                    d.compiles for _, d in self.candidates.values() if d is not None
+                ) + (self.pre_dispatcher.compiles if self.pre_dispatcher is not None else 0)
                 return
         with torch.cuda.device(self.device), a.lock:
             cached = a.compiled.get(ckey)
             if cached is not None:
-                self.candidates, comp, self.failures = cached
+                self.candidates, comp, self.failures, self.pre_dispatcher = cached
                 self.compilation = [
                     dict(c, compiler_ms=0.0, dispatcher_hit=True) for c in comp
                 ]
                 self.compiles_before_launch = sum(
-                    d.compiles for _, d in self.candidates.values()
-                )
+                    d.compiles for _, d in self.candidates.values() if d is not None
+                ) + (self.pre_dispatcher.compiles if self.pre_dispatcher is not None else 0)
                 return
             arch = torch.cuda.get_device_capability(self.device)
+            if self.pre_stage is not None:
+                if a.pre_variant is None:
+                    a.pre_variant = BoundKernel(
+                        a.pre_function, hints=self.pre_stage["native"], arch=arch
+                    )
+                self.pre_dispatcher = a.pre_variant
+                pre_record = self.pre_dispatcher.prepare_native(
+                    self.pre_args(self.values)
+                )
+                self.compilation.append(dict(row="pre_stage", **pre_record))
+            if self.library_gemm:
+                for r in a.data["rows"]:
+                    self.candidates[r["id"]] = (r, None)
+                self.compiles_before_launch = (
+                    self.pre_dispatcher.compiles if self.pre_dispatcher is not None else 0
+                )
+                a.compiled[ckey] = (
+                    dict(self.candidates),
+                    list(self.compilation),
+                    dict(self.failures),
+                    self.pre_dispatcher,
+                )
+                return
             for r in a.data["rows"]:
                 id = r["id"]
                 if id not in a.variants:
@@ -137,13 +187,31 @@ class Call(PreparedLaunch):
             if not self.candidates:
                 raise RuntimeError(f"cuTile native compilation failed: {self.failures}")
             self.compiles_before_launch = sum(
-                d.compiles for _, d in self.candidates.values()
-            )
+                d.compiles for _, d in self.candidates.values() if d is not None
+            ) + (self.pre_dispatcher.compiles if self.pre_dispatcher is not None else 0)
             a.compiled[ckey] = (
                 dict(self.candidates),
                 list(self.compilation),
                 dict(self.failures),
+                self.pre_dispatcher,
             )
+
+    def _launch_once(self, stream, row, kernel, values):
+        if self.pre_stage is not None:
+            ct.launch(
+                stream,
+                tuple(self.pre_stage["grid"]),
+                self.pre_dispatcher,
+                self.pre_args(values),
+            )
+        if self.library_gemm:
+            torch.matmul(
+                values[self.pre_stage["lhs_slot"]],
+                self.workspace,
+                out=values[self.pre_stage["out_slot"]],
+            )
+            return
+        ct.launch(stream, self.grid(row), kernel, self.args(row, values))
 
     def enqueue(self):
         a = self.artifact
@@ -174,16 +242,13 @@ class Call(PreparedLaunch):
                             from statistics import median
 
                             trials = TrialBindings(self.values, a.data["abi"])
-                            if trials.restores:
+                            if trials.restores or self.pre_stage is not None:
                                 for i, (row, kernel) in self.candidates.items():
                                     self.timings[i] = cuda_trials(
                                         trials,
                                         stream,
-                                        lambda: ct.launch(
-                                            stream,
-                                            self.grid(row),
-                                            kernel,
-                                            self.args(row, trials.values),
+                                        lambda: self._launch_once(
+                                            stream, row, kernel, trials.values
                                         ),
                                     )
                                 winner = min(
@@ -212,10 +277,12 @@ class Call(PreparedLaunch):
                     winner, self.timings = a.winners[key]
                     self.selected = self.candidates[winner]
             r, k = self.selected
-            ct.launch(stream, self.grid(r), k, self.args(r, self.values))
+            self._launch_once(stream, r, k, self.values)
             for v in self.values:
                 if isinstance(v, torch.Tensor):
                     v.record_stream(stream)
+            if self.workspace is not None:
+                self.workspace.record_stream(stream)
 
     def bind_row(self, row_id):
         from copy import copy
@@ -244,6 +311,14 @@ class Call(PreparedLaunch):
             rows=self.compilation,
             failures=dict(self.failures),
             compiles_before_launch=self.compiles_before_launch,
-            native_compiles=sum(d.compiles for _, d in self.candidates.values()),
-            dispatch_reuses=sum(k.reuses for k in self.artifact.variants.values()),
+            native_compiles=sum(
+                d.compiles for _, d in self.candidates.values() if d is not None
+            )
+            + (self.pre_dispatcher.compiles if self.pre_dispatcher is not None else 0),
+            dispatch_reuses=sum(k.reuses for k in self.artifact.variants.values())
+            + (
+                self.artifact.pre_variant.reuses
+                if self.artifact.pre_variant is not None
+                else 0
+            ),
         )

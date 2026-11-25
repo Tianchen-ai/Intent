@@ -42,7 +42,10 @@ void registerColumnRules(TerminalPrinter &printer) {
           if (row)
             args.insert(args.end(), {"M", "N"});
           args.insert(args.end(), {"ROWS:tl.constexpr", "WIDTH:tl.constexpr"});
-          p.line("def kernel(" + llvm::join(args, ",") + "):");
+          auto entryAttr = view.attrOfType<StringAttr>("block.entry");
+          std::string entryName =
+              entryAttr ? entryAttr.getValue().str() : "kernel";
+          p.line("def " + entryName + "(" + llvm::join(args, ",") + "):");
           ++p.indent;
         } else if (at == PrintPoint::Leave) {
           --p.indent;

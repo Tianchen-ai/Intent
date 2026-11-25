@@ -1,6 +1,7 @@
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/KeyReduction.h"
 #include "intentdsl/levels/execution/block/ir/Grid.h"
+#include "intentdsl/levels/execution/block/ir/Owners.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
@@ -11,8 +12,9 @@ using namespace compilerinfra;
 namespace {
 class RowTile {
 public:
-  RowTile(Operation *anchor, DictionaryAttr choice, RewriterBase &rw)
-      : anchor(anchor), rw(rw), loc(anchor->getLoc()),
+  RowTile(Operation *anchor, DictionaryAttr choice, const TargetProfile &profile,
+          RewriterBase &rw)
+      : anchor(anchor), profile(profile), rw(rw), loc(anchor->getLoc()),
         domain(anchor->getOperand(0)),
         resident(choice.getAs<StringAttr>("topology") == "resident") {
     auto fn = anchor->getParentOfType<func::FuncOp>();
@@ -93,22 +95,39 @@ public:
     }
     if (!writes.empty()) {
       if (resident || gridTiles) {
-        // When a wide resident multi-reduction body accumulates many distinct
-        // input views, caching every pre-reduction read across the reduction
-        // barrier overflows the CTA register file. Rematerialize reads from L1
-        // in the write pass and emit each non-aliasing store immediately to
-        // keep peak live tile count bounded; skip narrow tiles that fit cleanly
-        // in registers.
-        int64_t maxConfigWidth = 0;
+        // When a resident multi-reduction body accumulates many distinct input
+        // views, caching every pre-reduction read across the reduction barrier
+        // overflows the CTA register file. Compare estimated live 32-bit tile
+        // words (cached reads plus live intermediates/gradients across the
+        // barrier) against OwnerMachine::residentRegisters.
+        int64_t maxTileElems = 0;
         if (auto cfgs = anchor->getParentOfType<func::FuncOp>()
                             ->getAttrOfType<ArrayAttr>("block.configs")) {
           for (Attribute entry : cfgs)
-            if (auto d = dyn_cast<DictionaryAttr>(entry))
-              if (auto w = d.getAs<IntegerAttr>("width"))
-                maxConfigWidth = std::max(maxConfigWidth, w.getInt());
+            if (auto d = dyn_cast<DictionaryAttr>(entry)) {
+              auto r = d.getAs<IntegerAttr>("rows");
+              auto w = d.getAs<IntegerAttr>("width");
+              if (r && w)
+                maxTileElems = std::max(maxTileElems, r.getInt() * w.getInt());
+            }
         }
+        int64_t cachedViewWords = 0;
+        for (const auto &[view, tileVal] : localReads) {
+          Type el = cast<MemRefType>(view.getType()).getElementType();
+          int64_t words = el.isIntOrFloat()
+                              ? std::max<int64_t>(
+                                    1, llvm::divideCeil(
+                                           el.getIntOrFloatBitWidth(), 32))
+                              : 1;
+          cachedViewWords += words;
+        }
+        const auto *om = profile.services.get<intentdsl::block::OwnerMachine>();
+        int64_t regBudget =
+            (om && om->residentRegisters > 0) ? om->residentRegisters : 0;
+        bool exceedsRegFile =
+            regBudget > 0 && (maxTileElems * cachedViewWords * 4 >= regBudget);
         bool rematWrites = resident && reductionCount >= 4 &&
-                           localReads.size() >= 8 && maxConfigWidth >= 512;
+                           localReads.size() >= 8 && exceedsRegFile;
         bool disjointWrites = false;
         if (rematWrites) {
           llvm::DenseMap<Value, unsigned> readCounts;
@@ -171,6 +190,7 @@ public:
 
 private:
   Operation *anchor;
+  const TargetProfile &profile;
   RewriterBase &rw;
   Location loc;
   Value domain, rows, cols, active;
@@ -403,7 +423,7 @@ void registerRealizer(Unit &unit) {
       if(!e)problem=e.takeError();else v->setAttr("extent",rw.getI64IntegerAttr(*e));
     });
     if(problem)return problem;
-    RowTile(op, cast<DictionaryAttr>(a), rw).build();
+    RowTile(op, cast<DictionaryAttr>(a), p, rw).build();
     return llvm::Error(llvm::Error::success());
   };
   unit.realizers.push_back({std::move(r), COMPILERINFRA_SOURCE});

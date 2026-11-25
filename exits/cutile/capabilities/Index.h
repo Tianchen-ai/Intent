@@ -6,7 +6,7 @@ struct ArrayIndices {
   unsigned bits;
   bool permitTma;
   bool scaledMma;
-  int sm = 0;
+  bool preferRectRowReads = false;
 };
 inline bool quadAlignedUniform(mlir::Operation *op, mlir::func::FuncOp fn,
                                const intentdsl::CallFacts *facts) {

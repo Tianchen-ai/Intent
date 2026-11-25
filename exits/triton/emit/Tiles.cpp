@@ -64,6 +64,7 @@ TerminalPrinter tilePrinter() {
 
   // Declarative templates
   p.operations["triton_src.tile_program"] = PrintRule::format("");
+  p.operations["triton_src.library_gemm"] = PrintRule::format("pass");
   p.operations["triton_src.tile_pid"] =
       PrintRule::format("$r0 = tl.program_id({axis}).to(tl.int64)");
   p.operations["triton_src.from_le_half"] = PrintRule::format(
@@ -182,10 +183,13 @@ TerminalPrinter tilePrinter() {
   leaf("triton_src.tile_read", [](const LocalOpView &v) {
     auto e = getElementTypeOrSelf(v.resultType(0));
     bool fp8 = isa<Float8E4M3FNType>(e);
+    auto evict = v.attrOfType<StringAttr>("eviction_policy");
+    std::string evictArg =
+        evict ? (",eviction_policy='" + evict.getValue().str() + "'") : "";
     return ("tl.load(" + v.operand(0) +
             (fp8 ? ".to(tl.pointer_type(tl.uint8))" : "") + "+" + v.operand(1) +
             (v.numOperands() == 3 ? ",mask=" + v.operand(2) + ",other=0" : "") +
-            ")" + (fp8 ? ".to(tl.float8e4nv,bitcast=True)" : ""))
+            evictArg + ")" + (fp8 ? ".to(tl.float8e4nv,bitcast=True)" : ""))
         .str();
   });
   leaf("triton_src.e8m0", [](const LocalOpView &v) {

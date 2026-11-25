@@ -39,7 +39,8 @@ bool nativeMatrixWrite(intentdsl::block::Tiles &,
                        intentdsl::block::MatrixAccess &, Value, Value,
                        ArrayRef<Value>);
 LogicalResult verifyArrayGeometry(func::FuncOp,const TargetProfile &);
-intentdsl::block::OwnerAccess nativeOwnerViews(int sm);
+intentdsl::block::OwnerAccess
+nativeOwnerViews(const intentdsl::block::OwnerMachine *);
 namespace {
 std::optional<int64_t> ownerRectangleAxis(Operation *op, func::FuncOp fn) {
   auto kind = op->getName().stripDialect();
@@ -876,12 +877,11 @@ struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
     auto fn = *getOperation().getOps<func::FuncOp>().begin();
     Builder b(&getContext());
     getContext().loadDialect<arith::ArithDialect,scf::SCFDialect>();
+    auto *cap = profile.services.get<intentdsl::cutile::ArrayIndices>();
     if (intentdsl::kir::orderedOwners(fn)) {
-      int sm = 0;
-      if (auto *cap = profile.services.get<intentdsl::cutile::ArrayIndices>())
-        sm = cap->sm;
+      auto *om = profile.services.get<intentdsl::block::OwnerMachine>();
       intentdsl::block::expandOwnerProgram(fn, "exits/cutile",
-                                           nativeOwnerViews(sm));
+                                           nativeOwnerViews(om));
     }
     else if(intentdsl::kir::matrixDomain(fn)){
       intentdsl::block::MatrixAccess p(fn);
@@ -908,14 +908,14 @@ struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
           fn->setAttr("ct_src.native_views",b.getStringAttr(llvm::formatv("{0}",llvm::json::Value(std::move(views))).str()));
         }
       }
-      intentdsl::block::expandMatrixProgram(fn, "exits/cutile", scaledPanels,
-                                            nativeMatrixRead,
-                                            nativeWindowPanels,
-                                            nativeMatrixWrite);
-      int matSm = 0;
-      if (auto *cap = profile.services.get<intentdsl::cutile::ArrayIndices>())
-        matSm = cap->sm;
-      if (matSm == 90) {
+      auto mt = profile.services.get<intentdsl::block::MatrixTarget>();
+      intentdsl::block::expandMatrixProgram(
+          fn, "exits/cutile", scaledPanels, nativeMatrixRead,
+          nativeWindowPanels, nativeMatrixWrite,
+          mt && mt->flatRecordBitPlanes, mt && mt->flatSplitDequant,
+          cap && cap->permitTma,
+          mt ? StringRef(mt->libraryGemmImpl) : StringRef(""));
+      if (cap && cap->preferRectRowReads) {
         // On SM90, aligned 1-row contiguous loads inside a TMA contraction
         // K-loop stall warpgroup scheduling when lowered as per-lane gathers.
         // Rewrite unmasked aligned 2D 1-row tile_reads to non-TMA rect_reads.
@@ -1218,37 +1218,71 @@ struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
           i2f.erase();
       }
     }
-    bool fnFtz = intentdsl::kir::allowsSubnormalFtz(fn);
-    fn.walk([&](Operation *op) {
-      if (auto loop = dyn_cast<scf::ForOp>(op)) {
-        StringAttr kind;
-        ArrayAttr bounds;
-        computeCutileLoopAttrs(loop, kind, bounds);
-        loop->setAttr("ct_src.loop_kind", kind);
-        if (bounds)
-          loop->setAttr("ct_src.range_bounds", bounds);
-        else
-          loop->removeAttr("ct_src.range_bounds");
-      }
-      if (usesCutileFtzAttr(op)) {
-        if (fnFtz)
-          op->setAttr("ct_src.ftz", b.getUnitAttr());
-        else
+    const auto *facts = profile.services.get<intentdsl::CallFacts>();
+    auto finalizeFunc = [&](func::FuncOp f) {
+      if (cap && cap->permitTma)
+        f->setAttr("ct_src.tma", b.getUnitAttr());
+      bool fFtz = intentdsl::kir::allowsSubnormalFtz(f);
+      f.walk([&](Operation *op) {
+        if (auto loop = dyn_cast<scf::ForOp>(op)) {
+          StringAttr kind;
+          ArrayAttr bounds;
+          computeCutileLoopAttrs(loop, kind, bounds);
+          loop->setAttr("ct_src.loop_kind", kind);
+          if (bounds)
+            loop->setAttr("ct_src.range_bounds", bounds);
+          else
+            loop->removeAttr("ct_src.range_bounds");
+        }
+        if (usesCutileFtzAttr(op)) {
+          if (fFtz)
+            op->setAttr("ct_src.ftz", b.getUnitAttr());
+          else
+            op->removeAttr("ct_src.ftz");
+        } else if (op->hasAttr("ct_src.ftz")) {
           op->removeAttr("ct_src.ftz");
-      } else if (op->hasAttr("ct_src.ftz")) {
-        op->removeAttr("ct_src.ftz");
-      }
-    });
-    fn->setAttr("ct_src.entry", b.getStringAttr("kernel"));
-    fn->setAttr("ct_src.index_bits", b.getI32IntegerAttr(bits));
-    fn->setAttr("ct_src.extra_params", computeCutileExtraParams(fn));
-    stampCutileCarryIds(fn);
-    if (bits == 32) {
-      fn.walk([&](Operation *op) {
-        if (op->getName().getStringRef() == "ct_src.tile_address" &&
-            canNarrowCutileAddress(*op))
-          op->setAttr("index_bits", b.getI32IntegerAttr(32));
+        }
       });
+      auto entryAttr = f->getAttrOfType<StringAttr>("block.entry");
+      f->setAttr("ct_src.entry",
+                 entryAttr ? entryAttr : b.getStringAttr("kernel"));
+      f->setAttr("ct_src.index_bits", b.getI32IntegerAttr(bits));
+      f->setAttr("ct_src.extra_params", computeCutileExtraParams(f));
+      stampCutileCarryIds(f);
+      if (bits == 32) {
+        f.walk([&](Operation *op) {
+          if (op->getName().getStringRef() == "ct_src.tile_address" &&
+              canNarrowCutileAddress(*op))
+            op->setAttr("index_bits", b.getI32IntegerAttr(32));
+        });
+      }
+      f.walk([&](Operation *op) {
+        if (op->getName().getDialectNamespace() != "ct_src")
+          return;
+        auto n = op->getName().stripDialect();
+        if (n == "uniform") {
+          bool quad = intentdsl::cutile::quadAlignedUniform(op, f, facts);
+          if (quad)
+            op->setAttr("quad_aligned", b.getUnitAttr());
+          op->setAttr("ci.implementation",
+                      b.getStringAttr(quad ? "exits/cutile::random-quad"
+                                           : "exits/cutile::random"));
+          return;
+        }
+        auto id = llvm::StringSwitch<StringRef>(n)
+                      .Case("summary_reduce", "moments-reduction")
+                      .Case("summary_merge", "moments-merge")
+                      .Case("scan_sum", "inclusive-scan")
+                      .Case("reduce", "native-row-reduce")
+                      .Default("");
+        if (!id.empty())
+          op->setAttr("ci.implementation",
+                      b.getStringAttr(("exits/cutile::" + id).str()));
+      });
+    };
+    for (auto f : getOperation().getOps<func::FuncOp>())
+      finalizeFunc(f);
+    if (bits == 32) {
       // Narrow proven-bounded i64 coordinate chains (rooted at i32 extui/extsi)
       // feeding narrowed tile_address/cmpi/trunci directly to i32 to cut 64-bit
       // register pressure in unrolled multi-axis indexing loops.
@@ -1516,26 +1550,9 @@ struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
         }
       }
     }
-    const auto *facts = profile.services.get<intentdsl::CallFacts>();
-    fn.walk([&](Operation *op){
-      if(op->getName().getDialectNamespace()!="ct_src")return;
-      auto n=op->getName().stripDialect();
-      if (n == "uniform") {
-        bool quad = intentdsl::cutile::quadAlignedUniform(op, fn, facts);
-        if (quad)
-          op->setAttr("quad_aligned", b.getUnitAttr());
-        op->setAttr("ci.implementation",
-                    b.getStringAttr(quad ? "exits/cutile::random-quad"
-                                         : "exits/cutile::random"));
-        return;
-      }
-      auto id=llvm::StringSwitch<StringRef>(n).Case("summary_reduce","moments-reduction").Case("summary_merge","moments-merge")
-        .Case("scan_sum","inclusive-scan").Case("reduce","native-row-reduce").Default("");
-      if(!id.empty())op->setAttr("ci.implementation",b.getStringAttr(("exits/cutile::"+id).str()));
-    });
     std::set<std::string> seenResources;
     SmallVector<std::string> runtimeImpls;
-    fn.walk([&](Operation *op) {
+    getOperation().walk([&](Operation *op) {
       if (auto attr = op->getAttrOfType<StringAttr>("ci.implementation")) {
         auto key = attr.getValue().str();
         auto it = profile.implementations.find(key);
@@ -1545,9 +1562,10 @@ struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
           runtimeImpls.push_back(key);
       }
     });
-    OpBuilder mb(fn);
+    auto firstFn = *getOperation().getOps<func::FuncOp>().begin();
+    OpBuilder mb(firstFn);
     for (auto &impl : runtimeImpls) {
-      OperationState st(fn.getLoc(), "ct_src.runtime_source");
+      OperationState st(firstFn.getLoc(), "ct_src.runtime_source");
       st.addAttribute("implementation", mb.getStringAttr(impl));
       mb.create(st);
     }
@@ -1558,12 +1576,24 @@ struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
 };
 LogicalResult verify(ModuleOp module, const TargetProfile &profile,
                      bool callable) {
-  auto funcs = module.getOps<func::FuncOp>();
-  if (!llvm::hasSingleElement(funcs))
+  SmallVector<func::FuncOp, 2> fns(module.getOps<func::FuncOp>());
+  if (fns.empty() || fns.size() > (callable ? 2u : 1u))
     return failure();
-  auto matrix=*funcs.begin();
-  if (matrix.empty() || matrix.front().empty())
-    return failure();
+  for (auto f : fns)
+    if (f.empty() || f.front().empty())
+      return failure();
+  bool isSplitModule = fns.size() == 2;
+  auto matrix = fns.back();
+  if (isSplitModule) {
+    auto dqFn = fns.front();
+    if (dqFn->getAttrOfType<StringAttr>("ct_src.entry") != "dequant_rhs" ||
+        dqFn.front().front().getName().getStringRef() !=
+            "ct_src.tile_program" ||
+        dqFn.front().front().getAttrOfType<StringAttr>("calling_convention") !=
+            "split_dequant" ||
+        !matrix->hasAttr("block.split_dequant"))
+      return dqFn.emitError("invalid cuTile split dequantization module");
+  }
   if (!callable) {
     if (!llvm::hasSingleElement(module.getBody()->getOperations()))
       return failure();
@@ -1573,10 +1603,13 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
     if (&module.getBody()->back() != matrix.getOperation())
       return matrix.emitError("expected function after runtime_source declarations");
     std::set<std::string> declaredResources;
+    bool seenFunc = false;
     for (auto &top : module.getBody()->without_terminator()) {
-      if (&top == matrix.getOperation())
-        break;
-      if (top.getName().getStringRef() != "ct_src.runtime_source")
+      if (isa<func::FuncOp>(top)) {
+        seenFunc = true;
+        continue;
+      }
+      if (seenFunc || top.getName().getStringRef() != "ct_src.runtime_source")
         return top.emitError("unexpected module-level operation");
       auto impl = top.getAttrOfType<StringAttr>("implementation");
       if (!impl)
@@ -1589,7 +1622,7 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
         return top.emitError("invalid or duplicate runtime_source");
     }
     std::set<std::string> usedResources;
-    matrix.walk([&](Operation *op) {
+    module.walk([&](Operation *op) {
       if (auto attr = op->getAttrOfType<StringAttr>("ci.implementation")) {
         auto it = profile.implementations.find(attr.getValue().str());
         if (it != profile.implementations.end() &&
@@ -1601,36 +1634,48 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
       return matrix.emitError("runtime_source declarations disagree with bound operations");
   }
   auto arrayCap=profile.services.get<intentdsl::cutile::ArrayIndices>();
-  if(!arrayCap || matrix->hasAttr("ct_src.tma")!=arrayCap->permitTma)return matrix.emitError("invalid array transfer capability");
-  bool expectedFtz = intentdsl::kir::allowsSubnormalFtz(matrix);
-  auto commonWalk = matrix.walk([&](Operation *op) {
-    if (op->hasAttr("ct_src.ftz") != (usesCutileFtzAttr(op) && expectedFtz)) {
-      op->emitError("ct_src.ftz disagrees with function denormal-fp-math mode");
-      return WalkResult::interrupt();
-    }
-    if (callable) {
-      if (auto loop = dyn_cast<scf::ForOp>(op)) {
-        StringAttr expectedKind;
-        ArrayAttr expectedBounds;
-        computeCutileLoopAttrs(loop, expectedKind, expectedBounds);
-        if (loop->getAttr("ct_src.loop_kind") != expectedKind ||
-            loop->getAttr("ct_src.range_bounds") != expectedBounds) {
-          loop.emitError(
-              "missing or mismatched cuTile scf.for lowering decision");
-          return WalkResult::interrupt();
+  for (auto f : fns) {
+    if(!arrayCap || f->hasAttr("ct_src.tma")!=arrayCap->permitTma)return f.emitError("invalid array transfer capability");
+    bool expectedFtz = intentdsl::kir::allowsSubnormalFtz(f);
+    auto commonWalk = f.walk([&](Operation *op) {
+      if (op->hasAttr("ct_src.ftz") != (usesCutileFtzAttr(op) && expectedFtz)) {
+        op->emitError("ct_src.ftz disagrees with function denormal-fp-math mode");
+        return WalkResult::interrupt();
+      }
+      if (callable) {
+        if (auto loop = dyn_cast<scf::ForOp>(op)) {
+          StringAttr expectedKind;
+          ArrayAttr expectedBounds;
+          computeCutileLoopAttrs(loop, expectedKind, expectedBounds);
+          if (loop->getAttr("ct_src.loop_kind") != expectedKind ||
+              loop->getAttr("ct_src.range_bounds") != expectedBounds) {
+            loop.emitError(
+                "missing or mismatched cuTile scf.for lowering decision");
+            return WalkResult::interrupt();
+          }
         }
       }
-    }
-    return WalkResult::advance();
-  });
-  if (commonWalk.wasInterrupted())
-    return failure();
-  if (callable) {
-    if (matrix->getAttr("ct_src.extra_params") !=
-        computeCutileExtraParams(matrix))
-      return matrix.emitError("missing or mismatched ct_src.extra_params");
-    if (failed(verifyCutileCarryIds(matrix)))
+      return WalkResult::advance();
+    });
+    if (commonWalk.wasInterrupted())
       return failure();
+    if (callable) {
+      if (f->getAttr("ct_src.extra_params") != computeCutileExtraParams(f))
+        return f.emitError("missing or mismatched ct_src.extra_params");
+      if (failed(verifyCutileCarryIds(f)))
+        return failure();
+    }
+  }
+  if (isSplitModule) {
+    for (auto f : fns) {
+      if (failed(verifyArrayGeometry(f, profile)) ||
+          failed(intentdsl::block::verifyTileProgram(
+              f, profile, [&](Operation &op) {
+                return arrayCap->bits == 32 && canNarrowCutileAddress(op);
+              })))
+        return failure();
+    }
+    return success();
   }
   if(matrix.front().front().getName().getStringRef()=="ct_src.tile_program"){
     if(!callable || failed(verifyArrayGeometry(matrix,profile)))return failure();

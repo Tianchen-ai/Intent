@@ -1,6 +1,7 @@
 #include "../capabilities/Index.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/StorageLayout.h"
+#include "intentdsl/levels/execution/block/ir/Contraction.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
@@ -418,6 +419,51 @@ void registerContracts(Unit &unit) {
       return success();
     };
     unit.implementations.push_back({std::move(ac), COMPILERINFRA_SOURCE});
+  }
+  {
+    ImplementationContract lc;
+    lc.name = "cublas-gemm";
+    lc.operation = "ct_src.library_gemm";
+    lc.symbol = "torch.matmul";
+    lc.source = ImplementationSource::Builtin;
+    lc.minimum = Reuse::Library;
+    lc.operands = "2D contiguous lhs [M,K], materialized rhs workspace [K,N], output [M,N]";
+    lc.layout = "row-major contiguous 2D device arrays";
+    lc.accumulator = "FP32";
+    lc.effects = "reads lhs and workspace, writes output on active CUDA stream";
+    lc.numerical = "cuBLAS GEMM with FP32 accumulation";
+    lc.estimator = "exits/cutile::matrix-issues";
+    lc.costParameters = {"M", "N", "K"};
+    TypedContract tc;
+    tc.effects = EffectMask::ReadWrite;
+    tc.shape.minOperands = 3;
+    tc.shape.maxOperands = 3;
+    tc.shape.minResults = 0;
+    tc.shape.maxResults = 0;
+    tc.shape.operandRanks = {2, 2, 2};
+    tc.operandTypes = {ScalarTypeKind::F16, ScalarTypeKind::BF16,
+                       ScalarTypeKind::F32};
+    tc.accumulatorTypes = {ScalarTypeKind::F32};
+    lc.typed = std::move(tc);
+    lc.available = [](const TargetProfile &profile) -> llvm::Error {
+      if (!profile.services.get<intentdsl::block::MatrixTarget>())
+        return llvm::createStringError("missing cuTile matrix capability");
+      return llvm::Error::success();
+    };
+    lc.verify = [](Operation *op) -> LogicalResult {
+      if (op->getNumOperands() != 3 || op->getNumResults() != 0)
+        return failure();
+      auto a = dyn_cast<MemRefType>(op->getOperand(0).getType());
+      auto b = dyn_cast<MemRefType>(op->getOperand(1).getType());
+      auto c = dyn_cast<MemRefType>(op->getOperand(2).getType());
+      if (!a || !b || !c || a.getRank() != 2 || b.getRank() != 2 ||
+          c.getRank() != 2)
+        return failure();
+      Type el = a.getElementType();
+      return success((el.isF16() || el.isBF16() || el.isF32()) &&
+                     b.getElementType() == el && c.getElementType() == el);
+    };
+    unit.implementations.push_back({std::move(lc), COMPILERINFRA_SOURCE});
   }
 }
 } // namespace CI_UNIT_NAMESPACE

@@ -730,11 +730,15 @@ void OwnerTiles::boundedHistogramLoop(scf::ForOp loop,
   bool useAtomicBins = !useNativeHist && access.blockAtomicMemoryBins &&
                        (elemT.isInteger(32) || elemT.isF32());
   auto staticHi = orderedStaticLoopExtent(loop, fn, nullptr);
-  int64_t nativeP = (staticHi && *staticHi > 0 && *staticHi < 512)
-                        ? std::clamp<int64_t>(llvm::PowerOf2Ceil(*staticHi), 64,
-                                              512)
-                        : 512;
-  int64_t P = useAtomicBins ? 512 : (useNativeHist ? nativeP : 64);
+  int64_t maxHistP =
+      access.histogramPanelWidth > 0 ? access.histogramPanelWidth : 512;
+  int64_t minHistP =
+      access.minHistogramPanelWidth > 0 ? access.minHistogramPanelWidth : 64;
+  int64_t nativeP = (staticHi && *staticHi > 0 && *staticHi < maxHistP)
+                        ? std::clamp<int64_t>(llvm::PowerOf2Ceil(*staticHi),
+                                              minHistP, maxHistP)
+                        : maxHistP;
+  int64_t P = useAtomicBins ? maxHistP : (useNativeHist ? nativeP : minHistP);
   Type histVecTy = shaped({B_pad}, elemT);
   Type pIdxTy = shaped({P}, b.getI64Type());
   Type pI32Ty = shaped({P}, b.getI32Type());

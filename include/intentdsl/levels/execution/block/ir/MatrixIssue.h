@@ -10,6 +10,7 @@ matrixIssues(mlir::Operation *domain,
              compilerinfra::CostContext &ctx, int m, int n, int k,
              int warpRowCap = 4) {
   auto t = mlir::cast<mlir::DenseI64ArrayAttr>(candidate.value);
+  bool isSplit = t.size() == 4 && (t[3] == 1 || t[3] == 2);
   compilerinfra::CostEstimate estimate;
   estimate.scope = "one panel";
   estimate.bottleneck = "matrix instructions";
@@ -36,7 +37,8 @@ matrixIssues(mlir::Operation *domain,
                        spec->planes[1].quadByteStep == 0 &&
                        spec->planes[1].quadShiftMode == 1;
         } else if (spec->roleLayout ==
-                   intentdsl::kir::QuantRoleLayout::GroupedWeightRhs) {
+                       intentdsl::kir::QuantRoleLayout::GroupedWeightRhs &&
+                   !isSplit) {
           groupedRhs = true;
           blockElems = spec->blockElements;
         }
@@ -83,11 +85,11 @@ matrixIssues(mlir::Operation *domain,
         auto f = ctx.target.services.get<intentdsl::CallFacts>();
         double smBw = *sbw / std::max<int64_t>(1, f ? f->participants : 1);
         estimate.timeNs =
-            rhsElems * 4.0 * pressure * pressure * groupAlign / smBw;
+            rhsElems * 2.0 * pressure * pressure * groupAlign / smBw;
       } else if (auto rate = intentdsl::quantity(ctx, "compute", "lane/ns")) {
         auto f = ctx.target.services.get<intentdsl::CallFacts>();
         double sms = std::max<double>(1.0, f ? f->participants : 1);
-        estimate.timeNs = rhsElems * 12.0 * pressure * pressure * groupAlign *
+        estimate.timeNs = rhsElems * 6.0 * pressure * pressure * groupAlign *
                           sms / *rate;
       }
     }

@@ -17,6 +17,8 @@ class Artifact:
             raise ValueError("unsupported Intent Triton ABI version")
         self.data = data
         self.kernel = load(data["source"], data["entry"])
+        pre = data.get("pre_stage")
+        self.pre_kernel = load(data["source"], pre["entry"]) if pre else None
         self.compiled = {}
         self.winners = {}
         self.lock = RLock()
@@ -29,10 +31,26 @@ class Artifact:
         return Prepared(self, values, outputs, device, m, n)
 
 
+_WS_DTYPES = {"f16": torch.float16, "bf16": torch.bfloat16, "f32": torch.float32}
+
+
 class Prepared(PreparedLaunch):
     def __init__(self, artifact, values, outputs, device, m, n):
         self.artifact, self.values, self.outputs = artifact, values, outputs
         self.device, self.m, self.n = device, m, n
+        self.pre_stage = artifact.data.get("pre_stage")
+        self.library_gemm = bool(artifact.data.get("library_gemm"))
+        self.workspace = None
+        self.pre_flat = None
+        if self.pre_stage:
+            ws = self.pre_stage["workspace"]
+            self.workspace = torch.empty(
+                tuple(ws["shape"]), dtype=_WS_DTYPES[ws["dtype"]], device=device
+            )
+            self.pre_flat = (
+                *(values[i] for i in self.pre_stage["arg_slots"]),
+                self.workspace,
+            )
         self.flat = self.flatten(values)
         if not artifact.accepts((m, n)):
             raise ValueError("width lies outside the compiled shape class")
@@ -40,6 +58,7 @@ class Prepared(PreparedLaunch):
         if not self.rows:
             raise ValueError("no row satisfies the bound width")
         self.launchers = {}
+        self.pre_launcher = None
         self.builds = []
         self.timings = {r["id"]: [] for r in self.rows}
         self.ready = False
@@ -47,6 +66,8 @@ class Prepared(PreparedLaunch):
 
     def flatten(self, values):
         if self.artifact.data.get("matrix_views") or self.artifact.data.get("direct_views"):
+            if self.workspace is not None:
+                return (*values, self.workspace)
             return tuple(values)
         args = []
         for value in values:
@@ -80,7 +101,7 @@ class Prepared(PreparedLaunch):
         with self.artifact.lock:
             cached = self.artifact.compiled.get(ckey)
         if cached is not None:
-            self.rows, self.launchers, self.builds = cached
+            self.rows, self.launchers, self.builds, self.pre_launcher = cached
             if len(self.rows) == 1:
                 self.row = self.rows[0]
             self.ready = True
@@ -88,7 +109,37 @@ class Prepared(PreparedLaunch):
         with torch.cuda.device(self.device), self.artifact.lock:
             cached = self.artifact.compiled.get(ckey)
             if cached is not None:
-                self.rows, self.launchers, self.builds = cached
+                self.rows, self.launchers, self.builds, self.pre_launcher = cached
+                if len(self.rows) == 1:
+                    self.row = self.rows[0]
+                self.ready = True
+                return
+            if self.pre_stage is not None:
+                pg = tuple(self.pre_stage["grid"])
+                pre_start = perf_counter()
+                pre_native = self.artifact.pre_kernel.warmup(
+                    *self.pre_flat,
+                    ROWS=self.pre_stage["rows"],
+                    WIDTH=self.pre_stage["width"],
+                    grid=pg,
+                    enable_fp_fusion=False,
+                    **self.pre_stage["native"],
+                )
+                self.pre_launcher = pre_native[pg]
+                self.builds.append(
+                    {
+                        "id": "pre_stage",
+                        "milliseconds": (perf_counter() - pre_start) * 1000,
+                        "native_hash": pre_native.hash,
+                    }
+                )
+            if self.library_gemm:
+                self.artifact.compiled[ckey] = (
+                    list(self.rows),
+                    dict(self.launchers),
+                    list(self.builds),
+                    self.pre_launcher,
+                )
                 if len(self.rows) == 1:
                     self.row = self.rows[0]
                 self.ready = True
@@ -121,6 +172,7 @@ class Prepared(PreparedLaunch):
                 list(self.rows),
                 dict(self.launchers),
                 list(self.builds),
+                self.pre_launcher,
             )
             if len(self.rows) == 1:
                 self.row = self.rows[0]
@@ -131,6 +183,21 @@ class Prepared(PreparedLaunch):
         return {"candidate_count": len(self.rows), "rows": list(self.builds)}
 
     def _invoke(self, row, args):
+        if self.pre_stage is not None:
+            pre_args = (
+                *(args[i] for i in self.pre_stage["arg_slots"]),
+                self.workspace,
+            )
+            self.pre_launcher(
+                *pre_args, self.pre_stage["rows"], self.pre_stage["width"]
+            )
+        if self.library_gemm:
+            torch.matmul(
+                args[self.pre_stage["lhs_slot"]],
+                self.workspace,
+                out=args[self.pre_stage["out_slot"]],
+            )
+            return
         self.launchers[row["id"]](*args, row["rows"], row["width"])
 
     def enqueue(self):
@@ -155,12 +222,14 @@ class Prepared(PreparedLaunch):
                             raise RuntimeError("select a row before graph capture")
                         from runtime.kir.binding.trials import (
                             TrialBindings,
+                            cuda_event_trials,
                             cuda_trials,
                         )
                         from statistics import median
 
                         shadow = TrialBindings(self.values, self.artifact.data["abi"])
                         trial = self.flatten(shadow.values)
+                        stream = torch.cuda.current_stream(self.device)
                         times = {}
                         for r in self.rows:
 
@@ -170,14 +239,14 @@ class Prepared(PreparedLaunch):
                             if shadow.restores:
                                 times[r["id"]] = cuda_trials(
                                     shadow,
-                                    torch.cuda.current_stream(self.device),
+                                    stream,
                                     invoke,
                                 )
                             else:
-                                times[r["id"]] = [
-                                    1000
-                                    * triton.testing.do_bench(invoke, warmup=3, rep=10)
-                                ]
+                                times[r["id"]] = cuda_event_trials(
+                                    stream,
+                                    invoke,
+                                )
                         best = min(self.rows, key=lambda r: median(times[r["id"]]))
                         self.artifact.winners[key] = best, times
                     self.row, self.timings = self.artifact.winners[key]
@@ -186,6 +255,8 @@ class Prepared(PreparedLaunch):
             for value in self.values:
                 if isinstance(value, torch.Tensor):
                     value.record_stream(stream)
+            if self.workspace is not None:
+                self.workspace.record_stream(stream)
 
     def bind_row(self, row_id):
         from copy import copy

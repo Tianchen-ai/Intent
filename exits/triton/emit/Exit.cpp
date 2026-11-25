@@ -33,7 +33,8 @@ Value tritonWindowPanels(intentdsl::block::Tiles &,
 bool tritonMatrixWrite(intentdsl::block::Tiles &,
                        intentdsl::block::MatrixAccess &, Value, Value,
                        ArrayRef<Value>);
-intentdsl::block::OwnerAccess tritonOwnerViews(int64_t scatterPanelWidth);
+intentdsl::block::OwnerAccess
+tritonOwnerViews(const intentdsl::block::OwnerMachine *);
 std::optional<int64_t> tritonOwnerRectangleAxis(Operation *, func::FuncOp);
 bool tritonOwnerRectPermitsTma(Operation *, func::FuncOp, bool);
 bool tritonPanelPermitsTma(Operation *, func::FuncOp, bool);
@@ -254,7 +255,8 @@ void promoteSteppedTmaLoops(func::FuncOp fn) {
   }
 }
 
-llvm::Error describeArtifact(func::FuncOp, llvm::raw_pwrite_stream &);
+llvm::Error describeArtifact(func::FuncOp, const TargetProfile &,
+                             llvm::raw_pwrite_stream &);
 struct BindCallable : PassWrapper<BindCallable, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(BindCallable)
   TargetProfile profile;
@@ -262,17 +264,19 @@ struct BindCallable : PassWrapper<BindCallable, OperationPass<ModuleOp>> {
   void runOnOperation() final {
     auto module = getOperation();
     auto fn = *module.getOps<func::FuncOp>().begin();
+    auto tritonCap = profile.services.get<intentdsl::itsrc::TritonTarget>();
     if (intentdsl::kir::orderedOwners(fn)) {
       auto *om = profile.services.get<intentdsl::block::OwnerMachine>();
-      int64_t scatterPanel = (om && om->maxWarpgroups <= 1) ? 64 : 32;
       intentdsl::block::expandOwnerProgram(fn, "exits/triton",
-                                           tritonOwnerViews(scatterPanel));
+                                           tritonOwnerViews(om));
     } else {
       auto mt = profile.services.get<intentdsl::block::MatrixTarget>();
       intentdsl::block::expandMatrixProgram(
           fn, "exits/triton", tritonScaledPanels, tritonMatrixRead,
           tritonWindowPanels, tritonMatrixWrite,
-          mt && mt->flatRecordBitPlanes);
+          mt && mt->flatRecordBitPlanes, mt && mt->flatSplitDequant,
+          tritonCap && tritonCap->permitTma,
+          mt ? StringRef(mt->libraryGemmImpl) : StringRef(""));
     }
     Builder b(fn.getContext());
     if (fn.front().front().getName().getStringRef() !=
@@ -283,11 +287,15 @@ struct BindCallable : PassWrapper<BindCallable, OperationPass<ModuleOp>> {
       fn->setAttr("triton_src.max_width", b.getI64IntegerAttr(guard[1]));
       lowerRows(fn, profile);
     }
-    promoteSteppedTmaLoops(fn);
-    stampTritonCarryAndLoops(fn);
+    for (auto f : module.getOps<func::FuncOp>()) {
+      if (tritonCap && tritonCap->permitTma)
+        f->setAttr("triton_src.tma", b.getUnitAttr());
+      promoteSteppedTmaLoops(f);
+      stampTritonCarryAndLoops(f);
+    }
     std::set<std::string> seenResources;
     SmallVector<std::string> runtimeImpls;
-    fn.walk([&](Operation *op) {
+    module.walk([&](Operation *op) {
       if (auto attr = op->getAttrOfType<StringAttr>("ci.implementation")) {
         auto key = attr.getValue().str();
         auto it = profile.implementations.find(key);
@@ -297,15 +305,16 @@ struct BindCallable : PassWrapper<BindCallable, OperationPass<ModuleOp>> {
           runtimeImpls.push_back(key);
       }
     });
-    OpBuilder mb(fn);
+    auto firstFn = *module.getOps<func::FuncOp>().begin();
+    OpBuilder mb(firstFn);
     for (auto &impl : runtimeImpls) {
-      OperationState st(fn.getLoc(), "triton_src.runtime_source");
+      OperationState st(firstFn.getLoc(), "triton_src.runtime_source");
       st.addAttribute("implementation", mb.getStringAttr(impl));
       mb.create(st);
     }
     llvm::SmallVector<char> metadata;
     llvm::raw_svector_ostream os(metadata);
-    if (auto error = describeArtifact(fn, os)) {
+    if (auto error = describeArtifact(fn, profile, os)) {
       fn.emitError() << llvm::toString(std::move(error));
       signalPassFailure();
       return;
@@ -315,14 +324,73 @@ struct BindCallable : PassWrapper<BindCallable, OperationPass<ModuleOp>> {
         b.getStringAttr(StringRef(metadata.data(), metadata.size())));
   }
 };
-llvm::Error describeArtifact(func::FuncOp fn, llvm::raw_pwrite_stream &out) {
+llvm::Error emitTritonOwnerDefaults(func::FuncOp fn, Operation &entry,
+                                    const TargetProfile &profile,
+                                    llvm::raw_pwrite_stream &out) {
+  const auto *om = profile.services.get<intentdsl::block::OwnerMachine>();
+  int64_t warpWidth = (om && om->warpSize > 0) ? om->warpSize : 32;
+  int64_t residentEl =
+      (om && om->residentElements > 0) ? om->residentElements : 256;
+  int64_t histMax =
+      (om && om->histogramPanelWidth > 0) ? om->histogramPanelWidth : 512;
+  int64_t histMin =
+      (om && om->minHistogramPanelWidth > 0) ? om->minHistogramPanelWidth : 64;
+  int64_t warps = 4;
+  int64_t ownerRows = 1;
+  if (auto ot = entry.getAttrOfType<IntegerAttr>("block.owner_tile"))
+    ownerRows = std::max<int64_t>(1, ot.getInt());
+  if (auto ts = entry.getAttrOfType<IntegerAttr>("block.token_span");
+      ts && ts.getInt() >= 8 * warpWidth * 4)
+    warps = 8;
+  else {
+    bool hasHistogram = false;
+    int64_t maxAxis = 0;
+    entry.walk([&](Operation *op) {
+      auto k = op->getName().stripDialect();
+      if (k == "tile_histogram")
+        hasHistogram = true;
+      if (k == "tile_axis")
+        if (auto rt = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+            rt && rt.getRank() == 1)
+          maxAxis = std::max(maxAxis, rt.getDimSize(0));
+    });
+    if ((maxAxis >= residentEl || ownerRows * maxAxis >= residentEl * 8) &&
+        !(hasHistogram && maxAxis <= histMax))
+      warps = 8;
+    if (ownerRows == 1 && hasHistogram && !entry.hasAttr("block.token_span"))
+      return intentdsl::block::emitOwnerArtifact(
+          fn, "",
+          ArrayRef<llvm::json::Object>{
+              llvm::json::Object{{"num_warps", 2}, {"num_stages", 1}},
+              llvm::json::Object{{"num_warps", 4}, {"num_stages", 1}},
+              llvm::json::Object{{"num_warps", 8}, {"num_stages", 1}}},
+          2, out);
+    if (ownerRows == 1 && maxAxis <= histMin && !hasHistogram &&
+        !entry.hasAttr("block.token_span"))
+      return intentdsl::block::emitOwnerArtifact(
+          fn, "",
+          ArrayRef<llvm::json::Object>{
+              llvm::json::Object{{"num_warps", 1}, {"num_stages", 1}},
+              llvm::json::Object{{"num_warps", 2}, {"num_stages", 1}},
+              llvm::json::Object{{"num_warps", 4}, {"num_stages", 1}}},
+          2, out);
+  }
+  return intentdsl::block::emitOwnerArtifact(
+      fn, "", llvm::json::Object{{"num_warps", warps}, {"num_stages", 1}}, 2,
+      out);
+}
+llvm::Error describeArtifact(func::FuncOp fn, const TargetProfile &profile,
+                             llvm::raw_pwrite_stream &out) {
   auto &entry = fn.front().front();
   if (entry.getName().getStringRef() == "triton_src.tile_program") {
     if (entry.getAttrOfType<StringAttr>("calling_convention") == "matrix")
       return intentdsl::block::emitMatrixPackage(fn, "", out, 2);
     if (entry.hasAttr("block.pair_axis")) {
+      const auto *om = profile.services.get<intentdsl::block::OwnerMachine>();
+      int64_t wideOwnerRows =
+          (om && om->parallelMembers > 0) ? om->parallelMembers : 128;
       auto ownerTile = entry.getAttrOfType<IntegerAttr>("block.owner_tile");
-      if (ownerTile && ownerTile.getInt() >= 128)
+      if (ownerTile && ownerTile.getInt() >= wideOwnerRows)
         return intentdsl::block::emitOwnerArtifact(
             fn, "",
             ArrayRef<llvm::json::Object>{
@@ -339,97 +407,10 @@ llvm::Error describeArtifact(func::FuncOp fn, llvm::raw_pwrite_stream &out) {
               llvm::json::Object{{"num_warps", 8}, {"num_stages", 3}}},
           2, out);
     }
-    int64_t warps = 4;
-    int64_t ownerRows = 1;
-    if (auto ot = entry.getAttrOfType<IntegerAttr>("block.owner_tile"))
-      ownerRows = std::max<int64_t>(1, ot.getInt());
-    if (auto ts = entry.getAttrOfType<IntegerAttr>("block.token_span");
-        ts && ts.getInt() >= 1024)
-      warps = 8;
-    else {
-      bool hasHistogram = false;
-      int64_t maxAxis = 0;
-      entry.walk([&](Operation *op) {
-        auto k = op->getName().stripDialect();
-        if (k == "tile_histogram")
-          hasHistogram = true;
-        if (k == "tile_axis")
-          if (auto rt = dyn_cast<RankedTensorType>(op->getResult(0).getType());
-              rt && rt.getRank() == 1)
-            maxAxis = std::max(maxAxis, rt.getDimSize(0));
-      });
-      if ((maxAxis >= 256 || ownerRows * maxAxis >= 2048) &&
-          !(hasHistogram && maxAxis <= 512))
-        warps = 8;
-      if (ownerRows == 1 && hasHistogram &&
-          !entry.hasAttr("block.token_span"))
-        return intentdsl::block::emitOwnerArtifact(
-            fn, "",
-            ArrayRef<llvm::json::Object>{
-                llvm::json::Object{{"num_warps", 2}, {"num_stages", 1}},
-                llvm::json::Object{{"num_warps", 4}, {"num_stages", 1}},
-                llvm::json::Object{{"num_warps", 8}, {"num_stages", 1}}},
-            2, out);
-      if (ownerRows == 1 && maxAxis <= 64 && !hasHistogram &&
-          !entry.hasAttr("block.token_span"))
-        return intentdsl::block::emitOwnerArtifact(
-            fn, "",
-            ArrayRef<llvm::json::Object>{
-                llvm::json::Object{{"num_warps", 1}, {"num_stages", 1}},
-                llvm::json::Object{{"num_warps", 2}, {"num_stages", 1}},
-                llvm::json::Object{{"num_warps", 4}, {"num_stages", 1}}},
-            2, out);
-    }
-    return intentdsl::block::emitOwnerArtifact(
-        fn, "", llvm::json::Object{{"num_warps", warps}, {"num_stages", 1}}, 2,
-        out);
+    return emitTritonOwnerDefaults(fn, entry, profile, out);
   }
-  if (intentdsl::kir::orderedOwners(fn)) {
-    int64_t warps = 4;
-    int64_t ownerRows = 1;
-    if (auto ot = entry.getAttrOfType<IntegerAttr>("block.owner_tile"))
-      ownerRows = std::max<int64_t>(1, ot.getInt());
-    if (auto ts = entry.getAttrOfType<IntegerAttr>("block.token_span");
-        ts && ts.getInt() >= 1024)
-      warps = 8;
-    else {
-      bool hasHistogram = false;
-      int64_t maxAxis = 0;
-      entry.walk([&](Operation *op) {
-        auto k = op->getName().stripDialect();
-        if (k == "tile_histogram")
-          hasHistogram = true;
-        if (k == "tile_axis")
-          if (auto rt = dyn_cast<RankedTensorType>(op->getResult(0).getType());
-              rt && rt.getRank() == 1)
-            maxAxis = std::max(maxAxis, rt.getDimSize(0));
-      });
-      if ((maxAxis >= 256 || ownerRows * maxAxis >= 2048) &&
-          !(hasHistogram && maxAxis <= 512))
-        warps = 8;
-      if (ownerRows == 1 && hasHistogram &&
-          !entry.hasAttr("block.token_span"))
-        return intentdsl::block::emitOwnerArtifact(
-            fn, "",
-            ArrayRef<llvm::json::Object>{
-                llvm::json::Object{{"num_warps", 2}, {"num_stages", 1}},
-                llvm::json::Object{{"num_warps", 4}, {"num_stages", 1}},
-                llvm::json::Object{{"num_warps", 8}, {"num_stages", 1}}},
-            2, out);
-      if (ownerRows == 1 && maxAxis <= 64 && !hasHistogram &&
-          !entry.hasAttr("block.token_span"))
-        return intentdsl::block::emitOwnerArtifact(
-            fn, "",
-            ArrayRef<llvm::json::Object>{
-                llvm::json::Object{{"num_warps", 1}, {"num_stages", 1}},
-                llvm::json::Object{{"num_warps", 2}, {"num_stages", 1}},
-                llvm::json::Object{{"num_warps", 4}, {"num_stages", 1}}},
-            2, out);
-    }
-    return intentdsl::block::emitOwnerArtifact(
-        fn, "", llvm::json::Object{{"num_warps", warps}, {"num_stages", 1}}, 2,
-        out);
-  }
+  if (intentdsl::kir::orderedOwners(fn))
+    return emitTritonOwnerDefaults(fn, entry, profile, out);
   auto args = llvm::json::parse(fn->getAttrOfType<StringAttr>("kir.abi"));
   if (!args)
     return args.takeError();
@@ -479,12 +460,25 @@ llvm::Error describeArtifact(func::FuncOp fn, llvm::raw_pwrite_stream &out) {
 static LogicalResult verifyBoundary(ModuleOp m, const TargetProfile &profile,
                                     StringRef phase) {
 
-  auto funcs = m.getOps<func::FuncOp>();
-  if (!llvm::hasSingleElement(funcs))
+  SmallVector<func::FuncOp, 2> fns(m.getOps<func::FuncOp>());
+  if (fns.empty() || fns.size() > (phase == "callable" ? 2u : 1u))
     return failure();
-  auto fn = *funcs.begin();
-  if (fn.empty() || fn.front().empty())
-    return failure();
+  for (auto f : fns)
+    if (f.empty() || f.front().empty())
+      return failure();
+  bool isSplitModule = fns.size() == 2;
+  auto fn = fns.back();
+  if (isSplitModule) {
+    auto dqFn = fns.front();
+    if (dqFn->getAttrOfType<StringAttr>("block.entry") != "dequant_rhs" ||
+        dqFn.front().front().getName().getStringRef() !=
+            "triton_src.tile_program" ||
+        dqFn.front().front().getAttrOfType<StringAttr>("calling_convention") !=
+            "split_dequant" ||
+        !fn->hasAttr("block.split_dequant"))
+      return dqFn.emitError("invalid split dequantization module structure"),
+             failure();
+  }
   if (phase != "callable") {
     if (!llvm::hasSingleElement(m.getBody()->getOperations()))
       return failure();
@@ -495,10 +489,13 @@ static LogicalResult verifyBoundary(ModuleOp m, const TargetProfile &profile,
       return fn.emitError("expected function after runtime_source declarations"),
              failure();
     std::set<std::string> declaredResources;
+    bool seenFunc = false;
     for (auto &top : m.getBody()->without_terminator()) {
-      if (&top == fn.getOperation())
-        break;
-      if (top.getName().getStringRef() != "triton_src.runtime_source")
+      if (isa<func::FuncOp>(top)) {
+        seenFunc = true;
+        continue;
+      }
+      if (seenFunc || top.getName().getStringRef() != "triton_src.runtime_source")
         return top.emitError("unexpected module-level operation"), failure();
       auto impl = top.getAttrOfType<StringAttr>("implementation");
       if (!impl)
@@ -512,7 +509,7 @@ static LogicalResult verifyBoundary(ModuleOp m, const TargetProfile &profile,
         return top.emitError("invalid or duplicate runtime_source"), failure();
     }
     std::set<std::string> usedResources;
-    fn.walk([&](Operation *op) {
+    m.walk([&](Operation *op) {
       if (auto attr = op->getAttrOfType<StringAttr>("ci.implementation")) {
         auto it = profile.implementations.find(attr.getValue().str());
         if (it != profile.implementations.end() &&
@@ -526,10 +523,18 @@ static LogicalResult verifyBoundary(ModuleOp m, const TargetProfile &profile,
              failure();
   }
   auto tritonCap = profile.services.get<intentdsl::itsrc::TritonTarget>();
-  if (!tritonCap || fn->hasAttr("triton_src.tma") != tritonCap->permitTma)
-    return fn.emitError("invalid Triton TMA transfer capability"), failure();
-  if (phase == "callable" && failed(verifyTritonCarryAndLoops(fn)))
-    return failure();
+  for (auto f : fns) {
+    if (!tritonCap || f->hasAttr("triton_src.tma") != tritonCap->permitTma)
+      return f.emitError("invalid Triton TMA transfer capability"), failure();
+    if (phase == "callable" && failed(verifyTritonCarryAndLoops(f)))
+      return failure();
+  }
+  if (isSplitModule) {
+    for (auto f : fns)
+      if (failed(verifyTileProgram(f, profile)))
+        return failure();
+    return success();
+  }
   if (fn.front().front().getName().getStringRef() == "triton_src.tile_program")
     return phase == "callable" ? verifyTileProgram(fn, profile) : failure();
   if (failed(verifyColumnViews(fn)))
@@ -779,10 +784,11 @@ void bind(Unit &unit) {
               return failure();
             if (phase == "legal")
               return success();
-            auto fn = *m.getOps<func::FuncOp>().begin();
+            SmallVector<func::FuncOp, 2> fns(m.getOps<func::FuncOp>());
+            auto fn = fns.back();
             llvm::SmallVector<char> expected;
             llvm::raw_svector_ostream os(expected);
-            if (auto err = describeArtifact(fn, os))
+            if (auto err = describeArtifact(fn, profile, os))
               return fn.emitError() << llvm::toString(std::move(err)),
                      failure();
             auto package = m->getAttrOfType<StringAttr>("triton_src.package");

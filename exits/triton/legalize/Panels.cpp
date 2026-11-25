@@ -5,6 +5,7 @@
 #include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 #include "intentdsl/levels/execution/block/ir/MatrixProgram.h"
 #include "intentdsl/levels/execution/block/ir/OwnerProgram.h"
+#include "intentdsl/levels/execution/block/ir/Owners.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -357,18 +358,20 @@ static bool matrixTmaAmortized(const MatrixAccess &p) {
 
 Value tritonMatrixRead(Tiles &t, MatrixAccess &p, bool left, Value group,
                        Value panel) {
-  bool isQuant = p.dot.getName().stripDialect() == "quant_contract";
+  bool isSplit = p.domain.hasAttr("block.split_dequant");
+  bool isQuant = !isSplit && p.dot.getName().stripDialect() == "quant_contract";
   const auto *qSpec = isQuant ? intentdsl::kir::quantFormatSpec(p.dot) : nullptr;
   if (!t.fn->hasAttr("triton_src.tma") || !matrixTmaAmortized(p) ||
-      (!isQuant && left && p.dot.getNumOperands() > 2) ||
+      (!isSplit && !isQuant && left && p.dot.getNumOperands() > 2) ||
       (isQuant && (!qSpec ||
                    qSpec->roleLayout !=
                        intentdsl::kir::QuantRoleLayout::GroupedWeightRhs)))
     return {};
-  Value view = p.dot.getOperand(left ? 0 : 1);
+  Value view = isSplit ? (left ? p.dot.getOperand(0) : t.fn.getArguments().back())
+                       : p.dot.getOperand(left ? 0 : 1);
   int rank = p.rank(view);
-  int batch = isQuant ? -1 : p.axis(left ? "lhs_batch" : "rhs_batch");
-  int inner = isQuant ? (left ? 1 : 0) : p.axis(left ? "lhs_k" : "rhs_k");
+  int batch = (isSplit || isQuant) ? -1 : p.axis(left ? "lhs_batch" : "rhs_batch");
+  int inner = (isSplit || isQuant) ? (left ? 1 : 0) : p.axis(left ? "lhs_k" : "rhs_k");
   if ((rank != 2 && rank != 3) || (batch != -1 && batch != 0))
     return {};
   SmallVector<int64_t> viewShape, viewStrides;
@@ -377,7 +380,7 @@ Value tritonMatrixRead(Tiles &t, MatrixAccess &p, bool left, Value group,
     return {};
   auto &b = t.b;
   auto loc = t.loc;
-  int freeAx = isQuant ? (left ? 0 : 1) : p.freeAxis(view, inner, batch);
+  int freeAx = (isSplit || isQuant) ? (left ? 0 : 1) : p.freeAxis(view, inner, batch);
   int64_t freeTile = p.tile[left ? 0 : 1], kTile = p.tile[2];
   if (isQuant && !left) {
     if (qSpec->packFactor <= 0 || freeTile % qSpec->packFactor != 0)
@@ -1002,11 +1005,19 @@ Value tritonScaledPanels(Tiles &t, MatrixAccess &p) {
   return loop.getResult(0);
 }
 
-intentdsl::block::OwnerAccess tritonOwnerViews(int64_t scatterPanelWidth) {
-  return {ownerRectangle, ownerPanel, /*scalarBroadcastRead=*/true,
-          /*nativeTileGather=*/true, /*nativeTileHistogram=*/true,
-          /*blockAtomicMemoryBins=*/false, /*minMmaRows=*/0,
-          /*groupedPanel=*/nullptr, scatterPanelWidth};
+intentdsl::block::OwnerAccess
+tritonOwnerViews(const intentdsl::block::OwnerMachine *om) {
+  return {ownerRectangle,
+          ownerPanel,
+          /*scalarBroadcastRead=*/true,
+          /*nativeTileGather=*/true,
+          /*nativeTileHistogram=*/true,
+          /*blockAtomicMemoryBins=*/false,
+          /*minMmaRows=*/0,
+          /*groupedPanel=*/nullptr,
+          /*scatterPanelWidth=*/om ? om->scatterPanelWidth : 0,
+          /*histogramPanelWidth=*/om ? om->histogramPanelWidth : 0,
+          /*minHistogramPanelWidth=*/om ? om->minHistogramPanelWidth : 0};
 }
 
 LogicalResult verifyTritonGeometry(func::FuncOp fn,

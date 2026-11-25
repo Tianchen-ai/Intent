@@ -72,6 +72,7 @@ TerminalPrinter cutilePrinter() {
   // Declarative templates
   for (auto n : {"func.return", "ct_src.tile_program", "ct_src.end"})
     p.operations[n] = PrintRule::format("");
+  p.operations["ct_src.library_gemm"] = PrintRule::format("pass");
   p.operations["ct_src.from_le_half"] = PrintRule::format(
       "$r0 = ct.astype(ct.bitcast(ct.astype($0|($1<<8),ct.uint16),ct.float16),ct.float32)");
   p.operations["ct_src.transpose"] =
@@ -509,7 +510,10 @@ TerminalPrinter cutilePrinter() {
             return llvm::createStringError("missing ct_src.extra_params");
           for (Attribute a : extra)
             args.push_back(cast<StringAttr>(a).str());
-          c.line("def kernel(" + llvm::join(args, ",") + "):");
+          auto entryAttr = v.attrOfType<StringAttr>("ct_src.entry");
+          std::string entryName =
+              entryAttr ? entryAttr.getValue().str() : "kernel";
+          c.line("def " + entryName + "(" + llvm::join(args, ",") + "):");
           ++c.indent;
         } else if (at == PrintPoint::Leave) {
           --c.indent;

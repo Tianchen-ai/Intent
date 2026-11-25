@@ -59,6 +59,13 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
   auto matrix=std::make_shared<intentdsl::block::MatrixTarget>();
   matrix->estimate="exits/triton::matrix-issues";
   matrix->flatRecordBitPlanes = true;
+  matrix->supportsSplitGroupedRhs = true;
+  matrix->flatSplitDequant = (*arch != 90);
+  matrix->splitDequantWriteScale = 1.0;
+  matrix->l2CacheBytes = options.getInteger("l2_cache_bytes").value_or(0);
+  matrix->smMmaOpsPerNs = (*arch == 90 ? 4500.0 : 1800.0);
+  matrix->libraryGemmImpl = "exits/triton::cublas-gemm";
+  matrix->librarySmMmaOpsPerNs = (*arch == 90 ? 5500.0 : 2100.0);
   matrix->implementations = {
       {"contract", {"exits/triton::native-dot"}},
       {"window_contract", {"exits/triton::native-dot"}},
@@ -75,6 +82,8 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
         {32, 64, 32, R"({"num_warps":4,"num_stages":3})"},
         {32, 64, 64, R"({"num_warps":4,"num_stages":3})", "contract"},
         {64, 64, 32, R"({"num_warps":4,"num_stages":3})"},
+        {64, 64, 64, R"({"num_warps":4,"num_stages":5})", "contract", 2},
+        {64, 128, 64, R"({"num_warps":4,"num_stages":5})", "contract", 2},
         {64, 128, 64, R"({"num_warps":8,"num_stages":3})"},
         {32, 128, 128, R"({"num_warps":4,"num_stages":3})", "quant_contract", 2},
         {64, 64, 64, R"({"num_warps":4,"num_stages":3})", "quant_contract", 2},
@@ -95,7 +104,9 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
         {16, 32, 32, R"({"num_warps":4,"num_stages":2})"},
         {32, 64, 32, R"({"num_warps":4,"num_stages":2})"},
         {32, 64, 64, R"({"num_warps":4,"num_stages":3})", "contract"},
+        {64, 64, 64, R"({"num_warps":4,"num_stages":4})", "contract", 2},
         {64, 64, 64, R"({"num_warps":4,"num_stages":3})"},
+        {64, 128, 64, R"({"num_warps":8,"num_stages":4})", "contract", 2},
         {64, 128, 64, R"({"num_warps":8,"num_stages":2})"},
         {32, 128, 128, R"({"num_warps":4,"num_stages":3})", "quant_contract", 2},
         {64, 64, 64, R"({"num_warps":4,"num_stages":3})", "quant_contract", 2},
@@ -133,8 +144,9 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
     llvm::raw_string_ostream os(payload);
     os << llvm::json::Value(llvm::json::Object{
         {"num_warps", int64_t(r.warps)}, {"num_stages", int64_t(r.stages)}});
+    const unsigned minWideRow = unsigned(r.warps) * unsigned(*warp) * 4u;
     for(unsigned width=1; width<=8192; width*=2) {
-      if (r.id == 2 && width < 1024)
+      if (r.id == 2 && width < minWideRow)
         continue;
       unsigned rowId = r.id < 2 ? (width * 2 + r.id) : (262144u + width);
       caps->rows.push_back({rowId, r.rows, width, payload});
@@ -145,16 +157,22 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
   }
   if(auto registers=options.getInteger("registers"))
     if(auto err=profile.services.facts.query("register_file",{*registers,"reg32","CUDA",llvm::json::Object{{"source","device properties"}}}))return err;
+  int64_t exchangeW = *arch == 90 ? 64 : 32;
+  int64_t residentEl = 256;
   if (auto err = profile.services.provide<intentdsl::block::OwnerMachine>(
           std::make_shared<intentdsl::block::OwnerMachine>(
               intentdsl::block::OwnerMachine{
-                  128, 256,
+                  128, int(residentEl),
                   options.getInteger("dynamic_shared_per_block").value_or(0),
-                  32768, *arch == 90 ? 64 : 32,
+                  32768, exchangeW,
                   *arch == 90
                       ? options.getInteger("registers").value_or(0) * 7 / 16
                       : options.getInteger("registers").value_or(0) * 3 / 8,
-                  *arch == 90 ? 64 : 0, *arch == 90 ? 2 : 1, 16, true})))
+                  *arch == 90 ? 64 : 0, *arch == 90 ? 2 : 1, 16, true,
+                  *warp,
+                  /*scatterPanelWidth=*/*arch == 90 ? 32 : 64,
+                  /*histogramPanelWidth=*/residentEl * 2,
+                  /*minHistogramPanelWidth=*/64})))
     return err;
   std::string cal = options.getString("calibration")
                         .value_or(*arch == 90 ? "sm90" : "sm120")

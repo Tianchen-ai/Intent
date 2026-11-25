@@ -29,6 +29,18 @@ struct Tiles {
     auto *body = b.createBlock(&program->getRegion(0));
     b.setInsertionPointToStart(body);
   }
+  Tiles(func::FuncOp f, StringRef convention, StringRef unit,
+        StringRef dialectName, ValueRange domainOperands)
+      : b(&f.front().front()), loc(f.getLoc()), fn(f), dialect(dialectName),
+        unit(unit) {
+    OperationState s(loc, symbol("tile_program"));
+    s.addOperands(domainOperands);
+    s.addAttribute("calling_convention", b.getStringAttr(convention));
+    s.addRegion();
+    program = b.create(s);
+    auto *body = b.createBlock(&program->getRegion(0));
+    b.setInsertionPointToStart(body);
+  }
   Operation *op(StringRef name, ValueRange args = {}, TypeRange results = {},
                 ArrayRef<NamedAttribute> attrs = {}) {
     OperationState s(loc, symbol(name));

@@ -71,7 +71,7 @@ def cuda_trials(trials, stream, submit):
     import torch
 
     times = []
-    for _ in range(4):
+    for _ in range(7):
         trials.reset()
         before = torch.cuda.Event(enable_timing=True)
         after = torch.cuda.Event(enable_timing=True)
@@ -80,4 +80,21 @@ def cuda_trials(trials, stream, submit):
         after.record(stream)
         after.synchronize()
         times.append(1000.0 * before.elapsed_time(after))
-    return times[1:]
+    return times[2:]
+
+
+def cuda_event_trials(stream, submit, warmup=3, samples=9):
+    """Time stateless GPU invocations with batched CUDA events after warmup."""
+    import torch
+
+    for _ in range(warmup):
+        submit()
+    stream.synchronize()
+    starts = [torch.cuda.Event(enable_timing=True) for _ in range(samples)]
+    ends = [torch.cuda.Event(enable_timing=True) for _ in range(samples)]
+    for start, end in zip(starts, ends):
+        start.record(stream)
+        submit()
+        end.record(stream)
+    stream.synchronize()
+    return [1000.0 * start.elapsed_time(end) for start, end in zip(starts, ends)]
