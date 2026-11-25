@@ -156,10 +156,11 @@ class GeneratedProgram:
                 detail += "\nRegenerate an incompatible artifact from its original Intent definition or KIR; generated source is not the original algorithm."
             raise CompilationStageError("generated_program_loading", detail, cache_directory=path) from error
 
-    def materialize(self, *, target: Target | None = None) -> CompiledArtifact:
+    def materialize(self, *, target: Target | ResolvedTarget | None = None) -> CompiledArtifact:
         """Bind this program to a matching runtime target, without recompiling KIR.
 
-        An explicit target chooses the local device or SDK. Programs generated
+        An explicit target chooses the local device or SDK: a runtime Target, or the
+        local binding that resolve_local returns. Programs generated
         with a local target may reuse that process-local binding; programs loaded
         from disk or generated from explicit compiler facts require a target.
         Providers may defer native compilation and loading until invocation.
@@ -170,7 +171,8 @@ class GeneratedProgram:
         from .toolchain import CompilationStageError
 
         try:
-            binding = target.resolve() if target is not None else self._binding
+            binding = self._binding if target is None else (
+                target if isinstance(target, ResolvedTarget) else target.resolve())
             if binding is None:
                 raise ValueError("materialize requires an explicit runtime target for this generated program")
             if not isinstance(binding, ResolvedTarget):
