@@ -128,6 +128,8 @@ struct RowLowerer {
   llvm::DenseMap<std::tuple<Block *, Value, Value, int64_t>, Value>
       memberCoordCache;
   Value storage;
+  int64_t boundRows = 0, boundColumns = 0;
+  bool fullMembers = false, fullColumns = false;
   Value symM, symN, symGrid, symTaskId, symTaskDim, symR, symB, symEB, symW,
       symP, symBytes;
   llvm::DenseMap<Value, Value> mapped;
@@ -143,6 +145,30 @@ struct RowLowerer {
                 ? layout.getAs<IntegerAttr>("batch").getInt()
                 : 1;
     int64_t maxRows = 1;
+    auto slot = intentdsl::domainSlot(fn);
+    int64_t m = 1, n = 1;
+    if (slot >= 0 && slot < fn.getNumArguments()) {
+      auto domain = fn.getArgument(slot);
+      auto shape = dyn_cast<MemRefType>(domain.getType());
+      auto owner = fn->getAttrOfType<IntegerAttr>("kir.owner_axis");
+      for (int64_t i = 0; shape && i < shape.getRank(); ++i) {
+        auto extent = boundViewField(
+            domain, i, *p.services.get<intentdsl::CallFacts>(), false);
+        bool outer = owner ? i == owner.getInt() : i + 1 < shape.getRank();
+        auto &size = outer ? m : n;
+        if (!extent || *extent <= 0 ||
+            __builtin_mul_overflow(size, *extent, &size)) {
+          m = n = 0;
+          break;
+        }
+      }
+      fullMembers = shape && m > 0 && (resident || batch == 1);
+      fullColumns = shape && n > 0;
+      if (shape) {
+        boundRows = m;
+        boundColumns = n;
+      }
+    }
     if (auto rowsAttr = layout.getAs<ArrayAttr>("rows")) {
       for (auto a : rowsAttr) {
         auto alloc = cast<DictionaryAttr>(a);
@@ -150,8 +176,12 @@ struct RowLowerer {
         minPitch = std::min(minPitch, alloc.getAs<IntegerAttr>("pitch").getInt());
         for (auto cfg : fn->getAttrOfType<ArrayAttr>("block.configs")) {
           auto row = cast<DictionaryAttr>(cfg);
-          if (row.get("id") == id)
+          if (row.get("id") == id) {
             maxRows = std::max(maxRows, row.getAs<IntegerAttr>("rows").getInt());
+            int64_t members = row.getAs<IntegerAttr>("rows").getInt() * batch;
+            fullMembers &= m % members == 0;
+            fullColumns &= n % row.getAs<IntegerAttr>("width").getInt() == 0;
+          }
         }
       }
     }
@@ -285,6 +315,9 @@ struct RowLowerer {
         ->getResult(0);
   }
   Value viewDim(Value view, int64_t axis) {
+    if (auto extent = boundViewField(
+            view, axis, *profile.services.get<intentdsl::CallFacts>(), false))
+      return cI64(*extent);
     if (constAnchor && isa<BlockArgument>(view)) {
       auto key = std::make_pair(view, axis);
       if (auto it = dimCache.find(key); it != dimCache.end())
@@ -303,6 +336,9 @@ struct RowLowerer {
         ->getResult(0);
   }
   Value viewStride(Value view, int64_t axis) {
+    if (auto stride = boundViewField(
+            view, axis, *profile.services.get<intentdsl::CallFacts>(), true))
+      return cI64(*stride);
     if (constAnchor && isa<BlockArgument>(view)) {
       auto key = std::make_pair(view, axis);
       if (auto it = strideCache.find(key); it != strideCache.end())
@@ -775,12 +811,16 @@ struct RowLowerer {
     auto [row0, col] = phaseCoords(iterPos, outerGroup);
     Value remN = b.create<arith::SubIOp>(loc, symN, col);
     Value live = b.create<arith::MinSIOp>(loc, remN, symW);
+    if (fullColumns)
+      live = symW;
     Value hasLive =
         b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, live, cI64(0));
     ifThen(hasLive, [&]() {
       Value remM = b.create<arith::SubIOp>(loc, symM, row0);
       Value count = b.create<arith::MinSIOp>(
           loc, b.create<arith::MaxSIOp>(loc, remM, cI64(0)), symEB);
+      if (fullMembers)
+        count = symEB;
       for (auto &op : fetch.without_terminator()) {
         auto code = op.getName().getStringRef();
         if (code == "dsa.window" || code == "dsa.member_axis" ||
@@ -986,6 +1026,10 @@ struct RowLowerer {
     Value remM = b.create<arith::SubIOp>(loc, symM, row0);
     Value count = b.create<arith::MinSIOp>(
         loc, b.create<arith::MaxSIOp>(loc, remM, cI64(0)), symEB);
+    if (fullColumns)
+      live = symW;
+    if (fullMembers)
+      count = symEB;
     bool bodyHasCompute = blockHasCompute(body);
     int64_t numRowSums = 0;
     for (auto &inst : body) {
@@ -2947,8 +2991,8 @@ struct RowLowerer {
     storage =
         makeOp("nram_alloc", {}, {ptrType(b.getContext(), b.getI8Type(), 1)})
             ->getResult(0);
-    symM = makeSym("M");
-    symN = makeSym("N");
+    symM = boundRows ? cI64(boundRows) : makeSym("M");
+    symN = boundColumns ? cI64(boundColumns) : makeSym("N");
     symGrid = makeSym("grid");
     symTaskId = makeSym("taskId");
     symTaskDim = makeSym("taskDim");

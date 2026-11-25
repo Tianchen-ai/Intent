@@ -1,9 +1,34 @@
 #pragma once
 
-#include "intentdsl/levels/algorithm/kir/ir/Performance.h"
+#include "intentdsl/levels/algorithm/kir/ir/ProjectedLayout.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 
 namespace CI_UNIT_NAMESPACE {
+// Resolve the same logical view that bind_views passes to the device.
+inline std::optional<int64_t> boundViewField(mlir::Value view, int64_t axis,
+                                             const intentdsl::CallFacts &facts,
+                                             bool stride) {
+  using namespace mlir;
+  auto arg = dyn_cast<BlockArgument>(view);
+  if (!arg || axis < 0)
+    return {};
+  auto fn = dyn_cast<func::FuncOp>(arg.getOwner()->getParentOp());
+  if (!fn || arg.getOwner() != &fn.front())
+    return {};
+  unsigned slot = arg.getArgNumber();
+  if (fn.getArgAttr(slot, "kir.indexing")) {
+    auto layout = intentdsl::projectedLayout(fn, slot, facts, !stride, true);
+    if (!layout || axis >= layout.size())
+      return {};
+    return layout[axis];
+  }
+  if (slot >= facts.arguments.size())
+    return {};
+  auto *obj = facts.arguments[slot].getAsObject();
+  auto *values = obj ? obj->getArray(stride ? "strides" : "shape") : nullptr;
+  return values && size_t(axis) < values->size() ? (*values)[axis].getAsInteger()
+                                                : std::nullopt;
+}
 inline mlir::DictionaryAttr indexedLoop(mlir::Builder b,int64_t depth,int64_t slot,int64_t alignment){
   llvm::SmallVector<mlir::Attribute> batch{b.getStringAttr("stage_contiguous_indices"),
                                          b.getStringAttr("async_dma_per_member")};

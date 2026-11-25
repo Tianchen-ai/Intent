@@ -1,4 +1,5 @@
 #include "compilerinfra/Proofs.h"
+#include "intentdsl/levels/algorithm/kir/ir/Performance.h"
 #include "mlir/Analysis/AliasAnalysis.h"
 #include "mlir/Analysis/AliasAnalysis/LocalAliasAnalysis.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -11,6 +12,34 @@
 namespace intentdsl::dsa {
 using namespace mlir;
 namespace {
+// Each projected view names its public storage slot. Only the bound call's
+// disjoint groups prove separation; distinct arguments alone do not.
+struct BoundAliases {
+  DenseMap<Value, int64_t> groups;
+  AliasResult alias(Value a, Value b) {
+    auto x = groups.find(a), y = groups.find(b);
+    return x != groups.end() && y != groups.end() && x->second != y->second
+               ? AliasResult::NoAlias : AliasResult::MayAlias;
+  }
+
+  ModRefResult getModRef(Operation *op, Value loc) {
+    auto mem = dyn_cast<MemoryEffectOpInterface>(op);
+    if (!mem)
+      return ModRefResult::getModAndRef();
+    SmallVector<MemoryEffects::EffectInstance> effects;
+    mem.getEffects(effects);
+    auto result = ModRefResult::getNoModRef();
+    for (const auto &effect : effects) {
+      if (effect.getValue() && alias(effect.getValue(), loc).isNo())
+        continue;
+      if (isa<MemoryEffects::Read>(effect.getEffect()))
+        result = result.merge(ModRefResult::getRef());
+      else
+        result = result.merge(ModRefResult::getMod());
+    }
+    return result;
+  }
+};
 // Reuse a fetched fragment and its pure consumers within a single block using
 // CompilerInfra's conservative MemoryEffectOpInterface + proveValueReplay model:
 // - Any operation without MemoryEffectOpInterface is treated as unknown,
@@ -20,10 +49,29 @@ namespace {
 // - Read-bearing operations require proveValueReplay(other, &op, {}, &aa).proven.
 struct ReuseFragments : PassWrapper<ReuseFragments, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ReuseFragments)
+  compilerinfra::TargetProfile profile;
+  explicit ReuseFragments(const compilerinfra::TargetProfile &p) : profile(p) {}
   void runOnOperation() final {
     ModuleOp mod = getOperation();
     AliasAnalysis aa(mod);
     aa.addAnalysisImplementation(LocalAliasAnalysis());
+    if (auto *facts = profile.services.get<CallFacts>()) {
+      BoundAliases aliases;
+      for (auto fn : mod.getOps<func::FuncOp>()) {
+        for (auto arg : fn.getArguments()) {
+          if (!isa<MemRefType>(arg.getType()))
+            continue;
+          auto source = fn.getArgAttrOfType<IntegerAttr>(arg.getArgNumber(), "kir.source");
+          int64_t slot = source ? source.getInt() : arg.getArgNumber();
+          if (slot < 0 || size_t(slot) >= facts->arguments.size())
+            continue;
+          if (auto *record = facts->arguments[slot].getAsObject())
+            if (auto group = record->getInteger("alias_group"); group && *group >= 0)
+              aliases.groups.try_emplace(arg, *group);
+        }
+      }
+      aa.addAnalysisImplementation(std::move(aliases));
+    }
 
     mod.walk([&](Block *block) {
       DenseMap<llvm::hash_code, SmallVector<Operation *>> available;
@@ -99,7 +147,7 @@ struct ReuseFragments : PassWrapper<ReuseFragments, OperationPass<ModuleOp>> {
 };
 } // namespace
 
-void reuseFragments(OpPassManager &pm) {
-  pm.addPass(std::make_unique<ReuseFragments>());
+void reuseFragments(OpPassManager &pm, const compilerinfra::TargetProfile &p) {
+  pm.addPass(std::make_unique<ReuseFragments>(p));
 }
 } // namespace intentdsl::dsa

@@ -6,12 +6,13 @@ namespace intentdsl {
 // Project exactly the binding used by this specialization. A missing fact
 // leaves the ordinary strided ABI in effect.
 inline mlir::DenseI64ArrayAttr projectedLayout(mlir::func::FuncOp fn,
-    unsigned slot,const CallFacts &facts,bool shape) {
+    unsigned slot,const CallFacts &facts,bool shape,bool includeOwner=false) {
   using namespace mlir;
   auto map=fn.getArgAttrOfType<AffineMapAttr>(slot,"kir.indexing");
   auto bounds=fn->getAttrOfType<DenseI64ArrayAttr>("kir.iteration");
   auto src=fn.getArgAttrOfType<IntegerAttr>(slot,"kir.source");
-  if(!map || !bounds || !src || fn.getArgAttr(slot,"kir.owner_projection"))return {};
+  bool owned=bool(fn.getArgAttr(slot,"kir.owner_projection"));
+  if(!map || !bounds || !src || (owned && !includeOwner))return {};
   SmallVector<int64_t> values(map.getValue().getNumDims(),0);
   auto get=[&](int64_t s,StringRef field,int64_t axis)->std::optional<int64_t>{
     if(s<0 || size_t(s)>=facts.arguments.size())return {};
@@ -24,7 +25,7 @@ inline mlir::DenseI64ArrayAttr projectedLayout(mlir::func::FuncOp fn,
     for(unsigned j=0;j<values.size();++j){
       auto b=bounds.asArrayRef().slice(4*j,4);
       auto n=b[0]<0?std::optional<int64_t>(b[3]):get(b[0],"shape",b[1]);
-      if(!n || *n<0 || b[2]<=0)return {};
+      if(!n || *n<0 || b[2]<=0 || *n%b[2])return {};
       values[j]=b[0]<0?*n:*n/b[2];
     }
   }else for(auto [i,expr]:llvm::enumerate(map.getValue().getResults())){
@@ -36,6 +37,11 @@ inline mlir::DenseI64ArrayAttr projectedLayout(mlir::func::FuncOp fn,
       if(__builtin_mul_overflow(factors[j],*stride,&term) ||
          __builtin_add_overflow(values[j],term,&values[j]))return {};
     }
+  }
+  if(owned){
+    auto owner=fn->getAttrOfType<IntegerAttr>("kir.owner_axis");
+    if(!owner || owner.getInt()<0 || size_t(owner.getInt())>=values.size())return {};
+    return Builder(fn.getContext()).getDenseI64ArrayAttr({values[owner.getInt()]});
   }
   return Builder(fn.getContext()).getDenseI64ArrayAttr(values);
 }
