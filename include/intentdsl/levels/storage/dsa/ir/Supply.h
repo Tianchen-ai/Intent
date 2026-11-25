@@ -13,6 +13,8 @@ struct LocalSupply {
   std::string libraryLayerNormImpl;
   std::string libraryEstimator;
   std::string libraryGatherImpl;
+  // Scratch bytes per lane for an authorized alternative to certified math.
+  std::optional<int64_t> (*approxScratch)(mlir::Operation *) = nullptr;
 };
 bool projectsConsecutiveRows(mlir::Operation *access, unsigned maskIndex);
 bool projectsTransposed2D(mlir::Operation *op);

@@ -1,5 +1,6 @@
 #include "intentdsl/levels/algorithm/kir/ir/Performance.h"
 #include "ScaledPanels.h"
+#include "VectorMath.h"
 #include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
 #include "intentdsl/levels/execution/block/ir/Contraction.h"
 #include "intentdsl/levels/execution/block/ir/Owners.h"
@@ -140,7 +141,7 @@ capabilities(const llvm::json::Object &opts) {
           (*clusters) * (*cores), sizeof(float), true, 16, 12, 8192,
           "exits/bangc::cnnl-transpose", "exits/bangc::cnnl-softmax",
           "exits/bangc::cnnl-layer-norm", "exits/bangc::cnnl-row-cost",
-          "exits/bangc::cnnl-gather-rows"});
+          "exits/bangc::cnnl-gather-rows", approximateScratch});
   caps->stagedInputBudget=std::min(resource->capacity,resource->budget);
   if (auto err = profile.services.provide<intentdsl::block::OwnerMachine>(
           std::make_shared<intentdsl::block::OwnerMachine>(

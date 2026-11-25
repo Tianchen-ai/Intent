@@ -212,7 +212,7 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
             : 0,
         d.getAs<BoolAttr>("persistent") &&
             d.getAs<BoolAttr>("persistent").getValue(),
-        d.getAs<IntegerAttr>("batch").getInt());
+        d.getAs<IntegerAttr>("batch").getInt(), d.contains("approximate_math"));
     if (!expected) {
       return fn.emitError() << llvm::toString(expected.takeError());
     }

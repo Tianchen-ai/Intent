@@ -1,4 +1,5 @@
 #include "intentdsl/levels/algorithm/kir/ir/Performance.h"
+#include "../capabilities/VectorMath.h"
 namespace CI_UNIT_NAMESPACE {
 using namespace mlir;
 using namespace compilerinfra;
@@ -79,9 +80,24 @@ void dmaCost(Unit &u) {
                      {"outgoing", {out, "B"}},
                      {"requests", {r + w, "count"}}};
           double specialized = 0, count = 0;
+          double mathPasses = 0;
           double lanes = n * batch;
           op->walk([&](Operation *i) {
             auto code=i->getName().stripDialect();
+            if (approximateScratch(i)) {
+              // A certified vector runs candidate generation, both endpoint
+              // checks and a mask reduction before any exceptional-lane repair.
+              // Charge the minimum vector traversals, even if no lane repairs.
+              bool fast = choice.contains("approximate_math");
+              bool scalarDivisor = code == "div" && i->getOperand(1).getType().isF32();
+              double passes = fast ? (code == "sqrt" || scalarDivisor ? 1 : 2) : 6;
+              mathPasses += passes;
+              if (auto rate = intentdsl::quantity(ctx, "compute", "lane/ns")) {
+                specialized += passes * n / *rate;
+                if (code == "div") ++count;
+              }
+              return;
+            }
             std::string primitive;
             if(code=="reduce"){
               auto algebra=i->getAttrOfType<StringAttr>("algebra");
@@ -108,6 +124,7 @@ void dmaCost(Unit &u) {
             }
           });
           e.terms["native_compute"]={specialized,"ns"};
+          if (mathPasses) e.terms["vector_math_passes"] = {mathPasses, "count"};
           e.terms["native_operations"]={count,"count"};
           if (bi && bo && li && lo && bw) {
             double fetch = in / *bi + r * *li,

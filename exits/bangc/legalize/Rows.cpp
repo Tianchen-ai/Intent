@@ -2213,6 +2213,12 @@ struct RowLowerer {
             }
             if (n == "sqrt" && dstElem.isF32() &&
                 rankOf(inst.getOperand(0).getType()) == 2) {
+              if (prim == "approximate_sqrt") {
+                makeOp("vec_sqrt", {dst, getVal(inst.getOperand(0)), lanes}, {},
+                       {b.getNamedAttr("fastmath", inst.getAttr("fastmath"))},
+                       "approximate-sqrt");
+                continue;
+              }
               Value scratch = nramAt(
                   b.getF32Type(),
                   phaseByteOffset(
@@ -2252,6 +2258,18 @@ struct RowLowerer {
                 dstElem.isF32()) {
               int r0 = rankOf(inst.getOperand(0).getType());
               int r1 = rankOf(inst.getOperand(1).getType());
+              if (prim == "approximate_div") {
+                Value reciprocal = dst;
+                if (r0 == 2 && r1 == 2)
+                  reciprocal = nramAt(
+                      b.getF32Type(), phaseByteOffset(
+                          inst.getAttrOfType<DenseI64ArrayAttr>("bangc.scratch"), groupedShift));
+                makeOp("vec_div_approx",
+                       {dst, getVal(inst.getOperand(0)), getVal(inst.getOperand(1)), reciprocal, lanes},
+                       {}, {b.getNamedAttr("fastmath", inst.getAttr("fastmath"))},
+                       "reciprocal-product");
+                continue;
+              }
               Value scratch = nramAt(
                   b.getF32Type(),
                   phaseByteOffset(

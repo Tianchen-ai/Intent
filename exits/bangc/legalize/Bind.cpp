@@ -2,6 +2,7 @@
 #include "OwnerVectors.h"
 #include "Rows.h"
 #include "Slab.h"
+#include "../capabilities/VectorMath.h"
 #include "intentdsl/exits/bangc/ir/Dialect.h"
 #include "intentdsl/levels/algorithm/kir/ir/Segment.h"
 #include "intentdsl/levels/storage/dsa/ir/Owners.h"
@@ -22,9 +23,15 @@ Operation *availableCollective(Operation *op) {
       return prev;
   return nullptr;
 }
+bool usesApproximateMath(Operation *op) {
+  if (!op || !approximateScratch(op))
+    return false;
+  auto layout = op->getParentOfType<func::FuncOp>()->getAttrOfType<DictionaryAttr>("dsa.layout");
+  return layout && layout.contains("approximate_math");
+}
 bool narrowedQuotient(Operation *div) {
   if (!div || div->getName().getStringRef() != "block.div" ||
-      !div->hasOneUse() || !availableCollective(div))
+      !div->hasOneUse() || !availableCollective(div) || usesApproximateMath(div))
     return false;
   auto *castOp = *div->getUsers().begin();
   if (castOp->getName().getStringRef() != "block.cast" ||
@@ -41,6 +48,8 @@ bool narrowedQuotient(Operation *div) {
 }
 StringRef primitive(Operation *op, int64_t depth) {
   auto n = op->getName().getStringRef();
+  if (usesApproximateMath(op))
+    return n == "block.div" ? "approximate_div" : "approximate_sqrt";
   if(n=="block.segment_size") return "segment_size";
   if(n=="block.segment_fold"){
     if(intentdsl::kir::contiguousFeatureRead(op))return "feature_panel_sum";
@@ -228,6 +237,8 @@ LogicalResult offsets(func::FuncOp f, bool install) {
       auto resTy = o.getNumResults() == 1
                        ? dyn_cast<RankedTensorType>(o.getResult(0).getType())
                        : RankedTensorType{};
+      if (usesApproximateMath(&o) && *approximateScratch(&o) == 0)
+        continue;
       if (code == "block.scan_sum") {
         auto addr = b.getDenseI64ArrayAttr({grouped, local});
         if (install)

@@ -15,7 +15,8 @@ struct Footprint {
   int64_t inputBytes = 0, sharedBytes = 0, outputBytes = 0, vectorBytes = 0,
           collectiveBytes = 0;
   static Footprint of(Block &body, const LocalSupply &c, bool reuse = false,
-                      bool persistent = false, bool asyncWrite = false) {
+                      bool persistent = false, bool asyncWrite = false,
+                      bool approximate = false) {
     auto reductionScratch=c.reductionScratchPerColumn;
     Footprint f;
     for (auto &op : body) {
@@ -54,7 +55,10 @@ struct Footprint {
         if (t.getRank() == 2 && code == "cast" && t.getElementType().isBF16())
           f.collectiveBytes =
               std::max<int64_t>(f.collectiveBytes, int64_t(sizeof(uint16_t)));
-        if (t.getRank() == 2 && code == "div" && t.getElementType().isF32()) {
+        auto fastScratch = approximate && c.approxScratch ? c.approxScratch(&op) : std::nullopt;
+        if (fastScratch) {
+          f.collectiveBytes = std::max(f.collectiveBytes, *fastScratch);
+        } else if (t.getRank() == 2 && code == "div" && t.getElementType().isF32()) {
           bool narrowed = false;
           if (op.hasOneUse()) {
             Operation *u = *op.getUsers().begin();
@@ -72,7 +76,7 @@ struct Footprint {
             f.collectiveBytes = std::max<int64_t>(f.collectiveBytes,
                                                   6 * int64_t(sizeof(float)));
         }
-        if (t.getRank() == 2 && code == "sqrt" && t.getElementType().isF32())
+        else if (t.getRank() == 2 && code == "sqrt" && t.getElementType().isF32())
           f.collectiveBytes = std::max<int64_t>(f.collectiveBytes,
                                                 6 * int64_t(sizeof(float)));
         // Rank-one calculation results in the block contract are per-row
@@ -178,7 +182,8 @@ bool canAsyncWriteBack(func::FuncOp fn, int64_t depth) {
 }
 static llvm::Expected<DictionaryAttr>
 planStorage(func::FuncOp fn, const LocalSupply &c, int64_t depth,
-            int64_t participants, bool persistent, bool reuse, int64_t batch) {
+            int64_t participants, bool persistent, bool reuse, int64_t batch,
+            bool approximate) {
   if (persistent && !reusableInput(fn))
     return llvm::createStringError(
         "persistent panel requires an immutable row-invariant input");
@@ -227,7 +232,7 @@ planStorage(func::FuncOp fn, const LocalSupply &c, int64_t depth,
     indexed |= op->getName().getStringRef()=="block.indexed_tile_read" || op->getName().getStringRef()=="dsa.lookup_axis";
     if (op->getName().getStringRef() == "dsa.phase") {
       auto f = Footprint::of(op->getRegion(1).front(), c, reuse, persistent,
-                             asyncWrite);
+                             asyncWrite, approximate);
       auto fetchF =
           Footprint::of(op->getRegion(0).front(), c, false, persistent, false);
       f.inputBytes = fetchF.inputBytes;
@@ -238,12 +243,12 @@ planStorage(func::FuncOp fn, const LocalSupply &c, int64_t depth,
   if (phases.empty() &&
       fn->getAttrOfType<StringAttr>("block.topology") == "resident")
     phases.push_back(
-        Footprint::of(fn.front(), c, reuse, persistent, asyncWrite));
+        Footprint::of(fn.front(), c, reuse, persistent, asyncWrite, approximate));
   else if (phases.empty())
     fn.walk([&](Operation *op) {
       if (op->getName().getStringRef() == "block.tiles")
         phases.push_back(Footprint::of(op->getRegion(0).front(), c, reuse,
-                                       persistent, asyncWrite));
+                                       persistent, asyncWrite, approximate));
     });
   if(indexed && fn->getAttrOfType<StringAttr>("block.topology")=="resident" &&
      phases.size()==1 && !phases.front().vectorBytes && !phases.front().collectiveBytes)
@@ -312,6 +317,7 @@ planStorage(func::FuncOp fn, const LocalSupply &c, int64_t depth,
   if (asyncWrite)
     out.set("async_writeback", b.getUnitAttr());
   if(reuse)out.set("reuse_temporaries", b.getUnitAttr());
+  if (approximate) out.set("approximate_math", b.getUnitAttr());
   out.set("group_temporaries",b.getBoolAttr(wide));
   out.set("persistent",b.getBoolAttr(persistent));
   out.set("participants",b.getI64IntegerAttr(participants));
@@ -324,11 +330,15 @@ planStorage(func::FuncOp fn, const LocalSupply &c, int64_t depth,
 }
 llvm::Expected<DictionaryAttr> plan(func::FuncOp fn, const LocalSupply &c,
                                     int64_t depth, int64_t participants,
-                                    bool persistent, int64_t batch) {
-  auto ordinary = planStorage(fn, c, depth, participants, persistent, false, batch);
+                                    bool persistent, int64_t batch, bool approximate) {
+  if (approximate && (!c.approxScratch || !fn.walk([&](Operation *op) {
+        return c.approxScratch(op) ? WalkResult::interrupt() : WalkResult::advance();
+      }).wasInterrupted()))
+    return llvm::createStringError("approximate math requires an authorized vector operation");
+  auto ordinary = planStorage(fn, c, depth, participants, persistent, false, batch, approximate);
   if (!ordinary || ordinary->getAs<ArrayAttr>("rejected").empty())
     return ordinary;
-  auto compact = planStorage(fn, c, depth, participants, persistent, true, batch);
+  auto compact = planStorage(fn, c, depth, participants, persistent, true, batch, approximate);
   if (!compact)
     return compact;
   if (compact->getAs<ArrayAttr>("rows").size() >
@@ -894,7 +904,7 @@ void supply(Unit &u) {
         cast<func::FuncOp>(op), *facts, d.getAs<IntegerAttr>("depth").getInt(),
         d.getAs<IntegerAttr>("participants").getInt(),
         d.getAs<BoolAttr>("persistent").getValue(),
-        d.getAs<IntegerAttr>("batch").getInt());
+        d.getAs<IntegerAttr>("batch").getInt(), d.contains("approximate_math"));
     if (!check)
       return check.takeError();
     if(!d.getAs<ArrayAttr>("rows") || d.getAs<ArrayAttr>("rows").empty())return llvm::createStringError("no legal private storage row or DMA completion");
@@ -921,6 +931,7 @@ void supply(Unit &u) {
     if(d.getAs<BoolAttr>("persistent").getValue())topology+="-shared";
     std::string expectedId = topology + "-" + std::to_string(count) +
                              (batch > 1 ? "-b" + std::to_string(batch) : "");
+    if (d.contains("approximate_math")) expectedId += "-approx";
     if(c.topology!=topology || c.id!=expectedId || c.preconditions!=std::vector<std::string>{"legal-private-supply"})return llvm::createStringError("supply topology or participants mismatch");
     return llvm::Error::success();};
   u.families.push_back({{std::move(family), "dsa@formed", "dsa@supplied"},
@@ -937,6 +948,9 @@ void supply(Unit &u) {
             "target has no private transfer resources");
       auto fn = cast<func::FuncOp>(op);
       bool canBatch = intentdsl::dsa::batchableInstances(fn);
+      bool canApproximate = facts->approxScratch && fn.walk([&](Operation *i) {
+        return facts->approxScratch(i) ? WalkResult::interrupt() : WalkResult::advance();
+      }).wasInterrupted();
       std::vector<StructuralCandidate> cs;
       for(bool persistent:{false,true})for(int64_t n=facts->consumers;n>=1;n/=2){
         if(persistent && !intentdsl::dsa::reusableInput(fn))continue;
@@ -950,6 +964,11 @@ void supply(Unit &u) {
           std::string id = topology + "-" + std::to_string(n) +
                            (batch > 1 ? "-b" + std::to_string(batch) : "");
           cs.push_back({id,topology,*d,{"legal-private-supply"}});
+          if (canApproximate) {
+            auto fast = intentdsl::dsa::plan(fn, *facts, depth, n, persistent, batch, true);
+            if (!fast) return fast.takeError();
+            cs.push_back({id+"-approx",topology,*fast,{"legal-private-supply"}});
+          }
         }
       }return cs;
     };

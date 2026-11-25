@@ -707,6 +707,20 @@ void VecSqrtRnOp::getEffects(EffectList &effects) {
   addReadWrite(effects, op, 2);
 }
 
+void VecSqrtOp::getEffects(EffectList &effects) {
+  addWrite(effects, getOperation(), 0);
+  addRead(effects, getOperation(), 1);
+}
+
+void VecDivApproxOp::getEffects(EffectList &effects) {
+  addWrite(effects, getOperation(), 0);
+  for (unsigned i : {1u, 2u})
+    if (isa<MemRefType>(getOperation()->getOperand(i).getType()))
+      addRead(effects, getOperation(), i);
+  if (isa<MemRefType>(getLhs().getType()) && isa<MemRefType>(getRhs().getType()))
+    addReadWrite(effects, getOperation(), 3);
+}
+
 void VecDivRnOp::getEffects(EffectList &effects) {
   Operation *op = getOperation();
   addWrite(effects, op, 0);
@@ -938,6 +952,8 @@ void BangcSrcDialect::initialize() {
   Bf16TileOp::attachInterface<F32AccContract<Bf16TileOp>>(*ctx);
   Bf16ProductOp::attachInterface<F32AccContract<Bf16ProductOp>>(*ctx);
   VecSqrtRnOp::attachInterface<F32AccContract<VecSqrtRnOp>>(*ctx);
+  VecSqrtOp::attachInterface<F32AccContract<VecSqrtOp>>(*ctx);
+  VecDivApproxOp::attachInterface<F32AccContract<VecDivApproxOp>>(*ctx);
   VecDivRnOp::attachInterface<F32AccContract<VecDivRnOp>>(*ctx);
   Bf16ScalarOp::attachInterface<F32AccContract<Bf16ScalarOp>>(*ctx);
   ScanSumOp::attachInterface<ScanSumContract>(*ctx);

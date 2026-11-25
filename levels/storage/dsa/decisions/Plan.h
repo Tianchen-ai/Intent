@@ -6,7 +6,7 @@ llvm::Expected<mlir::DictionaryAttr> plan(mlir::func::FuncOp,
                                           const LocalSupply &, int64_t depth,
                                           int64_t participants,
                                           bool persistent = false,
-                                          int64_t batch = 1);
+                                          int64_t batch = 1, bool approximate = false);
 std::optional<mlir::DictionaryAttr>
 planLibrary(mlir::func::FuncOp, const compilerinfra::TargetProfile &);
 bool reusableInput(mlir::func::FuncOp);

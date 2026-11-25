@@ -378,6 +378,14 @@ def Bf16ProductOp : BangcOp<"bf16_product",
                        AnyMemRef:$scratch, I64:$live, I64:$lanes);
 }
 
+def VecSqrtOp : BangcOp<"vec_sqrt", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments = (ins AnyMemRef:$dst, AnyMemRef:$src, I64:$lanes);
+}
+
+def VecDivApproxOp : BangcOp<"vec_div_approx", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments = (ins AnyMemRef:$dst, AnyType:$lhs, AnyType:$rhs, AnyMemRef:$scratch, I64:$lanes);
+}
+
 def VecSqrtRnOp : BangcOp<"vec_sqrt_rn",
                           [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let arguments = (ins AnyMemRef:$dst, AnyMemRef:$src, AnyMemRef:$scratch,

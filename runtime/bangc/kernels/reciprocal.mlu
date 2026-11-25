@@ -1,0 +1,16 @@
+__mlu_func__ void reciprocal_product(float *dst, const float *a, const float *b,
+                                     float *scratch, int lanes) {
+  __bang_recip(scratch, b, lanes);
+  __bang_mul(dst, a, scratch, lanes);
+}
+
+__mlu_func__ void reciprocal_product(float *dst, float a, const float *b,
+                                     float *, int lanes) {
+  __bang_recip(dst, b, lanes);
+  __bang_mul_scalar(dst, dst, a, lanes);
+}
+
+__mlu_func__ void reciprocal_product(float *dst, const float *a, float b,
+                                     float *, int lanes) {
+  __bang_mul_scalar(dst, a, 1.0f / b, lanes);
+}

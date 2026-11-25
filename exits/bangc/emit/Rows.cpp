@@ -225,6 +225,9 @@ TerminalPrinter rowPrinter() {
       "bf16_product_tile($0, $1, $2, $3, (int)($4), (int)($5));");
   rules["bangc_src.vec_sqrt_rn"] =
       PrintRule::format("vec_sqrt_rn($0, $1, $2, (int)($3), (int)($4));");
+  rules["bangc_src.vec_sqrt"] = PrintRule::format("__bang_sqrt($0, $1, (int)($2));");
+  rules["bangc_src.vec_div_approx"] =
+      PrintRule::format("reciprocal_product($0, $1, $2, $3, (int)($4));");
   rules["bangc_src.scan_sum"] =
       PrintRule::format("tile_prefix($0, $1, $2, (int)($3), (int)($4));");
   rules["bangc_src.philox_uniform"] = PrintRule::format(
