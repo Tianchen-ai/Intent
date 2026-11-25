@@ -16,6 +16,7 @@ class Capture:
         self.fn = fn
         self.namespace = namespace(fn)
         self.default_flags, self.denormal_mode = kernel_math_policy(fn)
+        self.kernel_denormal_mode = self.denormal_mode
         self.args = signature(fn)
         self.values = {
             a["name"]: ("%" + a["name"], argument_type(a)) for a in self.args
@@ -25,9 +26,13 @@ class Capture:
         self.serial = 0
         self.line = fn.lineno
 
-    def fm_attr(self, extra=()):
+    def fm_attr(self, extra=(), *, flush=None):
         fm = format_fastmath_attr((*self.default_flags, *extra))
-        return f"{{fastmath = {fm}}}" if fm else ""
+        attrs = [f"fastmath = {fm}"] if fm else []
+        if flush is not None:
+            mode = "preserve-sign" if flush and self.kernel_denormal_mode == "ieee" else self.kernel_denormal_mode
+            attrs.append(f'"denormal-fp-math" = "{mode}"')
+        return "{" + ", ".join(attrs) + "}" if attrs else ""
 
     def emit(self, op, args, ty=None, attrs=""):
         self.serial += 1
@@ -125,7 +130,7 @@ class Capture:
             ty = next((t for _, t in args if t.startswith("tensor")), args[0][1])
             elem = ty.removeprefix("tensor<?x").removesuffix(">")
             is_fp = elem in ("f16", "bf16", "f32")
-            return self.emit(op, args, ty, self.fm_attr() if is_fp else "")
+            return self.emit(op, args, ty, self.fm_attr(flush=False if op == "div" else None) if is_fp else "")
         if isinstance(n, ast.Call):
             fn = spelling(n.func, self.namespace)
             if fn in ("atomic_add", "gather"):
@@ -225,7 +230,7 @@ class Capture:
                 args = [self.expr(v) for v in n.args]
                 ty = next((t for _, t in args if t.startswith("tensor")), args[0][1])
                 extra = ("afn", "arcp") if approx else ()
-                return self.emit("div", args, ty, self.fm_attr(extra))
+                return self.emit("div", args, ty, self.fm_attr(extra, flush=ftz))
             count = 2 if fn == "cast" else 1
             if len(n.args) != count or (fn not in ("sum", "reduce", "exp") and n.keywords):
                 raise ValueError(f"unsupported arguments for {fn}")
@@ -272,7 +277,7 @@ class Capture:
                 if ftz and self.denormal_mode == "ieee":
                     self.denormal_mode = "preserve-sign"
                 extra = ("afn",) if approx else ()
-                return self.emit(fn, [v], v[1], self.fm_attr(extra))
+                return self.emit(fn, [v], v[1], self.fm_attr(extra, flush=ftz if fn == "sqrt" else None))
         raise ValueError(
             f"unsupported author expression at line {n.lineno}: {ast.unparse(n)}"
         )
