@@ -64,10 +64,8 @@ void dmaCost(Unit &u) {
               if (auto axes =
                       i->getAttrOfType<DenseI64ArrayAttr>("block.member_axes");
                   axes && axes.size() == 2 && axes[0] == 1) {
-                if (!canTileTranspose) {
-                  scatter += bytes;
-                  permuted = true;
-                }
+                scatter += canTileTranspose ? 0.85 * bytes : bytes;
+                permuted = !canTileTranspose;
               }
               w += (!permuted && view.getRank() >= 2) ? 1. / batch : 1.;
             }
@@ -117,6 +115,47 @@ void dmaCost(Unit &u) {
             e.terms["fetch"] = {fetch, "ns"};
             e.terms["writeback"] = {drain, "ns"};
             e.timeNs = fetch + drain;
+          }
+          return e;
+        }},
+       COMPILERINFRA_SOURCE});
+  u.costModels.push_back(
+      {{"cnnl-row-cost", "levels/storage/dsa::supply", "1",
+        [](Operation *op, const StructuralCandidate &c,
+           CostContext &ctx) -> llvm::Expected<CostEstimate> {
+          auto *facts = ctx.target.services.get<intentdsl::CallFacts>();
+          auto [m, n] = facts->geometry(op);
+          auto fn = cast<func::FuncOp>(op);
+          auto d = cast<DictionaryAttr>(c.value);
+          auto kind = d.getAs<StringAttr>("library_kind").getValue();
+          double bytes = 0;
+          for (Value arg : fn.getArguments())
+            if (isa<MemRefType>(arg.getType()))
+              bytes += facts->viewBytes(arg);
+          CostEstimate e;
+          e.scope = "full_call";
+          e.bottleneck = "external library";
+          e.terms["bytes"] = {bytes, "B"};
+          auto bw = intentdsl::quantity(ctx, "read_1", "B/ns"),
+               launch = intentdsl::quantity(ctx, "launch", "ns"),
+               startup = intentdsl::quantity(ctx, "first_io", "ns"),
+               vec = intentdsl::quantity(ctx, "compute", "lane/ns");
+          if (bw && launch && startup && vec) {
+            double computeNs =
+                kind == "transpose"
+                    ? 0.0
+                    : (3.0 * m * n) /
+                          (std::max(1.0, double(facts->participants)) * (*vec));
+            double timeNs =
+                1.35 * (*launch) + bytes / (*bw) + computeNs;
+            e.timeNs = timeNs;
+            if (auto rows = d.getAs<ArrayAttr>("rows"); rows && !rows.empty()) {
+              auto id = cast<DictionaryAttr>(rows[0]).getAs<IntegerAttr>("id");
+              RowPrediction pred;
+              pred.terms = e.terms;
+              pred.timeNs = timeNs;
+              e.rows[std::to_string(id.getInt())] = std::move(pred);
+            }
           }
           return e;
         }},

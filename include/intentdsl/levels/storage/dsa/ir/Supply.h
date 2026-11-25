@@ -8,6 +8,10 @@ struct LocalSupply {
   int64_t featurePanelMembers;
   int64_t indexScratchPerMember;
   int64_t randomScratchBytes = 0;
+  std::string libraryTransposeImpl;
+  std::string librarySoftmaxImpl;
+  std::string libraryLayerNormImpl;
+  std::string libraryEstimator;
 };
 bool projectsConsecutiveRows(mlir::Operation *access, unsigned maskIndex);
 bool projectsTransposed2D(mlir::Operation *op);

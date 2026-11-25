@@ -74,13 +74,17 @@
           "realizer":"levels/storage/dsa::bind-owner-supply"
         },
         "levels/storage/dsa::panel-supply": {
-          "strategies": ["levels/storage/dsa::task-panels"],
+          "strategies": [
+            "levels/storage/dsa::task-panels",
+            "levels/storage/dsa::library-panels"
+          ],
           "realizer": "levels/storage/dsa::place-panels"
         },
         "levels/storage/dsa::supply": {
           "strategies": [
             "levels/storage/dsa::double-buffer",
-            "levels/storage/dsa::direct"
+            "levels/storage/dsa::direct",
+            "levels/storage/dsa::library"
           ],
           "realizer": "levels/storage/dsa::stage-transfers"
         }

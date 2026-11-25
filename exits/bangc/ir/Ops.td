@@ -400,3 +400,20 @@ def PhiloxAtOp : BangcOp<"philox_at", [Pure]> {
   let arguments = (ins AnyInteger:$seed, AnyInteger:$index);
   let results = (outs F32:$value);
 }
+
+def CnnlMatmulOp : BangcOp<"cnnl_matmul",
+                           [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments = (ins Variadic<AnyType>:$args,
+                       I64Attr:$lhs_slot, I64Attr:$rhs_slot, I64Attr:$dst_slot,
+                       I64Attr:$batch, I64Attr:$m, I64Attr:$n, I64Attr:$k,
+                       I32Attr:$trans_a, I32Attr:$trans_b,
+                       I64Attr:$lhs_batch_stride, I64Attr:$rhs_batch_stride,
+                       I64Attr:$dst_batch_stride,
+                       I32Attr:$in_dtype, I32Attr:$out_dtype);
+}
+
+def CnnlRowOp : BangcOp<"cnnl_row_op",
+                        [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments = (ins Variadic<AnyType>:$args, StrAttr:$kind,
+                       I32Attr:$dtype_code, I32Attr:$elem_bytes);
+}

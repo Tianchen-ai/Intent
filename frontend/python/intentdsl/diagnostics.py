@@ -206,6 +206,7 @@ def _probe_backend(name: str, compiler, native_doctor: dict, tri_info: dict) -> 
         return {
             "ready": cncc_ok and cnrt_ok and torch_mlu_ok and mlu_count > 0,
             "mlu_device_count": mlu_count,
+            "optional_dependencies": native_doctor.get("bangc", {}),
             "external_dependencies": ext,
             "missing": missing,
         }

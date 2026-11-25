@@ -14,6 +14,19 @@ inline mlir::LogicalResult bindMatrix(mlir::func::FuncOp fn, unsigned phase,
       op.setAttr(key, a);
     return op.getAttr(key) == a;
   };
+  if (setup.hasAttr("library_impl")) {
+    if (!field(setup, "bangc.space", b.getStringAttr("external.cnnl")) ||
+        !field(setup, "bangc.worker", b.getStringAttr("host-queue")))
+      return setup.emitError("external matrix library binding mismatch");
+    if (phase >= 1 &&
+        (!field(p.dot, "bangc.matrix", b.getStringAttr("cnnl-matmul")) ||
+         !field(setup, "bangc.writeback", b.getStringAttr("cnnl-direct"))))
+      return setup.emitError("external matrix primitive binding mismatch");
+    if (phase >= 2 &&
+        !field(setup, "bangc.entry", b.getStringAttr("intent_enqueue")))
+      return setup.emitError("missing matrix queue entry");
+    return success();
+  }
   if (!field(setup, "bangc.space", b.getStringAttr("private.nram")) ||
       !field(setup, "bangc.worker", b.getStringAttr("task-stride")))
     return setup.emitError("matrix task or local storage mismatch");

@@ -317,6 +317,29 @@ struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
       return;
     }
     Builder b(&getContext());
+    auto layout = f->getAttrOfType<DictionaryAttr>("dsa.layout");
+    if (layout && layout.contains("library_impl")) {
+      if (phase == 0) {
+        f->setAttr("bangc.space", b.getStringAttr("external.cnnl"));
+        f->setAttr("bangc.participant", b.getStringAttr("host-queue"));
+        return;
+      }
+      if (phase == 1) {
+        auto kind = layout.getAs<StringAttr>("library_kind");
+        auto &call = f.front().front();
+        if (!kind || call.getName().getStringRef() != "dsa.library_call") {
+          f.emitError("missing dsa.library_call for external library supply");
+          signalPassFailure();
+          return;
+        }
+        call.setAttr("bangc.primitive",
+                     b.getStringAttr(("cnnl_" + kind.getValue()).str()));
+        return;
+      }
+      if (failed(lowerRowsToCallable(getOperation(), target)))
+        signalPassFailure();
+      return;
+    }
     if (phase == 0) {
       if (failed(offsets(f, true))) {
         signalPassFailure();
@@ -331,7 +354,6 @@ struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
         signalPassFailure();
       return;
     }
-    auto layout = f->getAttrOfType<DictionaryAttr>("dsa.layout");
     auto depth = layout.getAs<IntegerAttr>("depth").getInt();
     f.walk([&](Operation *o) {
       if (o->getName().getDialectNamespace() == "func")
@@ -445,6 +467,20 @@ LogicalResult verify(ModuleOp m, const TargetProfile &p, unsigned stage) {
                                 Builder(fn.getContext()).getI64IntegerAttr(n));
   }
   auto layout = fn->getAttrOfType<DictionaryAttr>("dsa.layout");
+  if (layout && layout.contains("library_impl")) {
+    if (fn->getAttrOfType<StringAttr>("bangc.space") != "external.cnnl" ||
+        fn->getAttrOfType<StringAttr>("bangc.participant") != "host-queue")
+      return fn.emitError("missing external CNNL participant mapping");
+    if (stage > 0) {
+      auto kind = layout.getAs<StringAttr>("library_kind");
+      auto &call = fn.front().front();
+      if (!kind || call.getName().getStringRef() != "dsa.library_call" ||
+          call.getAttrOfType<StringAttr>("bangc.primitive") !=
+              ("cnnl_" + kind.getValue()).str())
+        return fn.emitError("external library call primitive mismatch");
+    }
+    return success();
+  }
   auto depth = layout.getAs<IntegerAttr>("depth").getInt();
   if (fn->getAttrOfType<StringAttr>("bangc.space") != "private.nram" ||
       fn->getAttrOfType<StringAttr>("bangc.participant") != "block")
@@ -500,7 +536,9 @@ LogicalResult verify(ModuleOp m, const TargetProfile &p, unsigned stage) {
 } // namespace
 void dmaCost(Unit &);
 void panelCost(Unit &);
+void registerCNNL(Unit &);
 void bind(Unit &u) {
+  registerCNNL(u);
   dmaCost(u);
   panelCost(u);
   rowContracts(u);

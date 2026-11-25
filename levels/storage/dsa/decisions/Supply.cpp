@@ -1,8 +1,10 @@
 #include "Plan.h"
 #include "intentdsl/levels/algorithm/kir/ir/Matrix.h"
+#include "intentdsl/levels/algorithm/kir/ir/Performance.h"
 #include "intentdsl/levels/algorithm/kir/ir/Segment.h"
 #include "intentdsl/levels/storage/dsa/ir/Owners.h"
 #include "llvm/Support/MathExtras.h"
+#include <climits>
 
 namespace intentdsl::dsa {
 using namespace mlir;
@@ -333,6 +335,469 @@ llvm::Expected<DictionaryAttr> plan(func::FuncOp fn, const LocalSupply &c,
     return compact;
   return ordinary;
 }
+
+namespace {
+bool isUnprojectedArg(func::FuncOp fn, unsigned slot) {
+  return !fn.getArgAttr(slot, "kir.indexing") &&
+         !fn.getArgAttr(slot, "kir.source");
+}
+
+std::optional<int64_t> aliasGroupOf(const CallFacts &facts, unsigned slot) {
+  if (slot >= facts.arguments.size())
+    return std::nullopt;
+  auto *obj = facts.arguments[slot].getAsObject();
+  return obj ? obj->getInteger("alias_group") : std::nullopt;
+}
+
+bool isContiguous2D(func::FuncOp fn, const CallFacts &facts, unsigned slot,
+                    int64_t d0, int64_t d1) {
+  if (slot >= fn.getNumArguments() || slot >= facts.arguments.size() ||
+      !isUnprojectedArg(fn, slot))
+    return false;
+  auto mr = dyn_cast<MemRefType>(fn.getArgument(slot).getType());
+  auto *obj = facts.arguments[slot].getAsObject();
+  auto *shape = obj ? obj->getArray("shape") : nullptr;
+  auto *strides = obj ? obj->getArray("strides") : nullptr;
+  if (!mr || mr.getRank() != 2 || !shape || !strides || shape->size() != 2 ||
+      strides->size() != 2)
+    return false;
+  auto s0 = (*shape)[0].getAsInteger(), s1 = (*shape)[1].getAsInteger();
+  auto st0 = (*strides)[0].getAsInteger(), st1 = (*strides)[1].getAsInteger();
+  if (!s0 || !s1 || !st0 || !st1 || *s0 != d0 || *s1 != d1)
+    return false;
+  return (d1 <= 1 || *st1 == 1) && (d0 <= 1 || *st0 == d1);
+}
+
+bool isContiguous1D(func::FuncOp fn, const CallFacts &facts, unsigned slot,
+                    int64_t d0) {
+  if (slot >= fn.getNumArguments() || slot >= facts.arguments.size() ||
+      !isUnprojectedArg(fn, slot))
+    return false;
+  auto mr = dyn_cast<MemRefType>(fn.getArgument(slot).getType());
+  auto *obj = facts.arguments[slot].getAsObject();
+  auto *shape = obj ? obj->getArray("shape") : nullptr;
+  auto *strides = obj ? obj->getArray("strides") : nullptr;
+  if (!mr || mr.getRank() != 1 || !shape || !strides || shape->size() != 1 ||
+      strides->size() != 1)
+    return false;
+  auto s0 = (*shape)[0].getAsInteger(), st0 = (*strides)[0].getAsInteger();
+  if (!s0 || !st0 || *s0 != d0)
+    return false;
+  return d0 <= 1 || *st0 == 1;
+}
+
+Value stripCastTo(Value v, Type targetElem) {
+  if (auto *op = v.getDefiningOp();
+      op && op->getName().stripDialect() == "cast" && op->getNumOperands() == 1) {
+    auto rTy = dyn_cast<RankedTensorType>(v.getType());
+    if (rTy && rTy.getElementType() == targetElem)
+      return op->getOperand(0);
+  }
+  return v;
+}
+
+bool isLoadOf2D(Value v, Value expectedArg, Type workElem) {
+  Value raw = stripCastTo(v, workElem);
+  auto *op = raw.getDefiningOp();
+  if (!op || op->getName().getStringRef() != "block.load" ||
+      op->getOperand(0) != expectedArg)
+    return false;
+  if (auto axes = op->getAttrOfType<DenseI64ArrayAttr>("block.member_axes"))
+    return axes.asArrayRef() == ArrayRef<int64_t>({0, 1});
+  return true;
+}
+
+bool isLoadOf1D(Value v, Value expectedArg, Type workElem) {
+  Value raw = stripCastTo(v, workElem);
+  auto *op = raw.getDefiningOp();
+  return op && op->getName().getStringRef() == "block.load" &&
+         op->getOperand(0) == expectedArg;
+}
+
+bool matchTransposePattern(func::FuncOp fn, const CallFacts &facts, int64_t m,
+                           int64_t n) {
+  if (fn.getNumArguments() != 2)
+    return false;
+  auto inTy = dyn_cast<MemRefType>(fn.getArgument(0).getType());
+  auto outTy = dyn_cast<MemRefType>(fn.getArgument(1).getType());
+  if (!inTy || !outTy || inTy.getElementType() != outTy.getElementType())
+    return false;
+  unsigned bits = inTy.getElementTypeBitWidth();
+  if (bits != 8 && bits != 16 && bits != 32)
+    return false;
+  auto g0 = aliasGroupOf(facts, 0), g1 = aliasGroupOf(facts, 1);
+  if (!g0 || !g1 || *g0 == *g1 || !isContiguous2D(fn, facts, 0, m, n) ||
+      !isContiguous2D(fn, facts, 1, n, m))
+    return false;
+  unsigned loads = 0, stores = 0;
+  Operation *loadOp = nullptr, *storeOp = nullptr;
+  bool badOp = false;
+  fn.walk([&](Operation *op) {
+    auto ns = op->getName().getDialectNamespace();
+    if (ns == "builtin" || ns == "func")
+      return;
+    auto code = op->getName().stripDialect();
+    if (code == "load") {
+      ++loads;
+      loadOp = op;
+    } else if (code == "store") {
+      ++stores;
+      storeOp = op;
+    } else if (!llvm::is_contained(
+                   ArrayRef<StringRef>{"rows", "columns", "zero", "pid",
+                                       "active", "tiles", "yield"},
+                   code)) {
+      badOp = true;
+    }
+  });
+  if (badOp || loads != 1 || stores != 1 || !loadOp || !storeOp ||
+      loadOp->getBlock() != storeOp->getBlock() ||
+      loadOp->getOperand(0) != fn.getArgument(0) ||
+      storeOp->getOperand(0) != fn.getArgument(1) ||
+      storeOp->getOperand(4) != loadOp->getResult(0) ||
+      !projectsTransposed2D(storeOp))
+    return false;
+  if (auto axes = loadOp->getAttrOfType<DenseI64ArrayAttr>("block.member_axes"))
+    if (axes.asArrayRef() != ArrayRef<int64_t>({0, 1}))
+      return false;
+  return true;
+}
+
+bool matchSoftmaxPattern(func::FuncOp fn, const CallFacts &facts, int64_t m,
+                         int64_t n) {
+  if (fn.getNumArguments() != 2)
+    return false;
+  auto inTy = dyn_cast<MemRefType>(fn.getArgument(0).getType());
+  auto outTy = dyn_cast<MemRefType>(fn.getArgument(1).getType());
+  if (!inTy || !outTy || inTy.getElementType() != outTy.getElementType())
+    return false;
+  Type elem = inTy.getElementType();
+  if (!elem.isF16() && !elem.isBF16() && !elem.isF32())
+    return false;
+  auto g0 = aliasGroupOf(facts, 0), g1 = aliasGroupOf(facts, 1);
+  if (!g0 || !g1 || *g0 == *g1 || !isContiguous2D(fn, facts, 0, m, n) ||
+      !isContiguous2D(fn, facts, 1, m, n))
+    return false;
+
+  Type f32 = Float32Type::get(fn.getContext());
+  Value inArg = fn.getArgument(0), outArg = fn.getArgument(1);
+  unsigned stores = 0;
+  Operation *storeOp = nullptr;
+  bool badOp = false;
+  fn.walk([&](Operation *op) {
+    auto ns = op->getName().getDialectNamespace();
+    if (ns == "builtin" || ns == "func")
+      return;
+    auto code = op->getName().stripDialect();
+    if (code == "store") {
+      ++stores;
+      storeOp = op;
+    } else if (!llvm::is_contained(
+                   ArrayRef<StringRef>{"rows", "columns", "zero", "pid",
+                                       "active", "load", "cast", "reduce",
+                                       "sub", "exp", "div", "tiles", "identity",
+                                       "combine", "yield"},
+                   code)) {
+      badOp = true;
+    }
+  });
+  if (badOp || stores != 1 || !storeOp || storeOp->getOperand(0) != outArg ||
+      projectsTransposed2D(storeOp))
+    return false;
+  if (auto axes = storeOp->getAttrOfType<DenseI64ArrayAttr>("block.member_axes"))
+    if (axes.asArrayRef() != ArrayRef<int64_t>({0, 1}))
+      return false;
+
+  Value storedVal = storeOp->getOperand(4);
+  if (!elem.isF32()) {
+    auto *cOp = storedVal.getDefiningOp();
+    if (!cOp || cOp->getName().stripDialect() != "cast")
+      return false;
+    storedVal = cOp->getOperand(0);
+  }
+  auto *divOp = storedVal.getDefiningOp();
+  if (!divOp || divOp->getName().stripDialect() != "div")
+    return false;
+  auto matchShiftedExp = [&](Value v, Value &outMax) -> bool {
+    auto *expOp = v.getDefiningOp();
+    if (!expOp || expOp->getName().stripDialect() != "exp")
+      return false;
+    auto *subOp = expOp->getOperand(0).getDefiningOp();
+    if (!subOp || subOp->getName().stripDialect() != "sub" ||
+        !isLoadOf2D(subOp->getOperand(0), inArg, f32))
+      return false;
+    outMax = subOp->getOperand(1);
+    return true;
+  };
+  Value maxVal;
+  if (!matchShiftedExp(divOp->getOperand(0), maxVal))
+    return false;
+  Value sumVal = divOp->getOperand(1);
+
+  if (fn->getAttrOfType<StringAttr>("block.topology") == "resident") {
+    auto *maxRed = maxVal.getDefiningOp();
+    auto *sumRed = sumVal.getDefiningOp();
+    if (!maxRed || !sumRed || maxRed->getName().stripDialect() != "reduce" ||
+        sumRed->getName().stripDialect() != "reduce" ||
+        maxRed->getAttrOfType<StringAttr>("algebra") != "max_num" ||
+        sumRed->getAttrOfType<StringAttr>("algebra") != "sum" ||
+        !isLoadOf2D(maxRed->getOperand(0), inArg, f32) ||
+        sumRed->getOperand(0) != divOp->getOperand(0))
+      return false;
+    return true;
+  }
+
+  auto *maxLoop = maxVal.getDefiningOp();
+  auto *sumLoop = sumVal.getDefiningOp();
+  if (!maxLoop || !sumLoop || maxLoop->getName().stripDialect() != "tiles" ||
+      sumLoop->getName().stripDialect() != "tiles" ||
+      maxLoop->getNumResults() != 1 || sumLoop->getNumResults() != 1)
+    return false;
+  auto *maxComb =
+      maxLoop->getRegion(0).front().getTerminator()->getOperand(0).getDefiningOp();
+  auto *sumComb =
+      sumLoop->getRegion(0).front().getTerminator()->getOperand(0).getDefiningOp();
+  if (!maxComb || !sumComb || maxComb->getName().stripDialect() != "combine" ||
+      sumComb->getName().stripDialect() != "combine" ||
+      maxComb->getAttrOfType<StringAttr>("algebra") != "max_num" ||
+      sumComb->getAttrOfType<StringAttr>("algebra") != "sum")
+    return false;
+  auto *maxRed = maxComb->getOperand(1).getDefiningOp();
+  auto *sumRed = sumComb->getOperand(1).getDefiningOp();
+  Value sumMax;
+  return maxRed && sumRed && maxRed->getName().stripDialect() == "reduce" &&
+         sumRed->getName().stripDialect() == "reduce" &&
+         isLoadOf2D(maxRed->getOperand(0), inArg, f32) &&
+         matchShiftedExp(sumRed->getOperand(0), sumMax) && sumMax == maxVal;
+}
+
+bool matchLayerNormPattern(func::FuncOp fn, const CallFacts &facts, int64_t m,
+                           int64_t n) {
+  if (fn.getNumArguments() != 5 || !fn.getArgument(4).getType().isF32())
+    return false;
+  auto xTy = dyn_cast<MemRefType>(fn.getArgument(0).getType());
+  auto gTy = dyn_cast<MemRefType>(fn.getArgument(1).getType());
+  auto bTy = dyn_cast<MemRefType>(fn.getArgument(2).getType());
+  auto yTy = dyn_cast<MemRefType>(fn.getArgument(3).getType());
+  if (!xTy || !gTy || !bTy || !yTy)
+    return false;
+  Type elem = xTy.getElementType();
+  if (elem != gTy.getElementType() || elem != bTy.getElementType() ||
+      elem != yTy.getElementType() ||
+      (!elem.isF16() && !elem.isBF16() && !elem.isF32()))
+    return false;
+  auto ax = aliasGroupOf(facts, 0), ag = aliasGroupOf(facts, 1),
+       ab = aliasGroupOf(facts, 2), ay = aliasGroupOf(facts, 3);
+  if (!ax || !ag || !ab || !ay || *ay == *ax || *ay == *ag || *ay == *ab ||
+      !isContiguous2D(fn, facts, 0, m, n) ||
+      !isContiguous1D(fn, facts, 1, n) || !isContiguous1D(fn, facts, 2, n) ||
+      !isContiguous2D(fn, facts, 3, m, n))
+    return false;
+
+  Type f32 = Float32Type::get(fn.getContext());
+  Value xArg = fn.getArgument(0), gArg = fn.getArgument(1),
+        bArg = fn.getArgument(2), yArg = fn.getArgument(3),
+        epsArg = fn.getArgument(4);
+  unsigned stores = 0, summaryReds = 0;
+  Operation *storeOp = nullptr, *sumRedOp = nullptr;
+  bool badOp = false;
+  fn.walk([&](Operation *op) {
+    auto ns = op->getName().getDialectNamespace();
+    if (ns == "builtin" || ns == "func")
+      return;
+    auto code = op->getName().stripDialect();
+    if (code == "store") {
+      ++stores;
+      storeOp = op;
+    } else if (code == "summary_reduce") {
+      ++summaryReds;
+      sumRedOp = op;
+    } else if (!llvm::is_contained(
+                   ArrayRef<StringRef>{"rows", "columns", "zero", "pid",
+                                       "active", "load", "cast", "sub", "mul",
+                                       "add", "div", "rsqrt", "tiles",
+                                       "summary_identity", "summary_merge",
+                                       "summary_field", "yield"},
+                   code)) {
+      badOp = true;
+    }
+  });
+  if (badOp || stores != 1 || summaryReds != 1 || !storeOp || !sumRedOp ||
+      storeOp->getOperand(0) != yArg || projectsTransposed2D(storeOp) ||
+      !isLoadOf2D(sumRedOp->getOperand(0), xArg, f32))
+    return false;
+
+  Value momVal = sumRedOp->getResult(0);
+  if (fn->getAttrOfType<StringAttr>("block.topology") != "resident") {
+    auto *loopOp = sumRedOp->getParentOp();
+    while (loopOp && loopOp->getName().stripDialect() != "tiles")
+      loopOp = loopOp->getParentOp();
+    if (!loopOp || loopOp->getNumResults() != 1)
+      return false;
+    momVal = loopOp->getResult(0);
+  }
+
+  auto isSummaryField = [&](Value v, int64_t pos) {
+    auto *op = v.getDefiningOp();
+    auto pAttr = op ? op->getAttrOfType<IntegerAttr>("position") : IntegerAttr{};
+    return op && op->getName().stripDialect() == "summary_field" &&
+           op->getOperand(0) == momVal && pAttr && pAttr.getInt() == pos;
+  };
+  auto isInvStd = [&](Value v) {
+    auto *rsq = v.getDefiningOp();
+    if (!rsq || rsq->getName().stripDialect() != "rsqrt")
+      return false;
+    auto *add = rsq->getOperand(0).getDefiningOp();
+    if (!add || add->getName().stripDialect() != "add")
+      return false;
+    Value varVal = add->getOperand(0) == epsArg   ? add->getOperand(1)
+                   : add->getOperand(1) == epsArg ? add->getOperand(0)
+                                                  : Value{};
+    auto *div = varVal ? varVal.getDefiningOp() : nullptr;
+    if (!div || div->getName().stripDialect() != "div" ||
+        !isSummaryField(div->getOperand(0), 2))
+      return false;
+    auto *cntCast = div->getOperand(1).getDefiningOp();
+    return cntCast && cntCast->getName().stripDialect() == "cast" &&
+           isSummaryField(cntCast->getOperand(0), 0);
+  };
+  auto isCentered = [&](Value v) {
+    auto *sub = v.getDefiningOp();
+    return sub && sub->getName().stripDialect() == "sub" &&
+           isLoadOf2D(sub->getOperand(0), xArg, f32) &&
+           isSummaryField(sub->getOperand(1), 1);
+  };
+
+  Value yVal = storeOp->getOperand(4);
+  if (!elem.isF32()) {
+    auto *cOp = yVal.getDefiningOp();
+    if (!cOp || cOp->getName().stripDialect() != "cast")
+      return false;
+    yVal = cOp->getOperand(0);
+  }
+  auto *biasAdd = yVal.getDefiningOp();
+  if (!biasAdd || biasAdd->getName().stripDialect() != "add")
+    return false;
+  Value scaledVal = isLoadOf1D(biasAdd->getOperand(1), bArg, f32)
+                        ? biasAdd->getOperand(0)
+                    : isLoadOf1D(biasAdd->getOperand(0), bArg, f32)
+                        ? biasAdd->getOperand(1)
+                        : Value{};
+  if (!scaledVal)
+    return false;
+
+  SmallVector<Value, 3> factors;
+  std::function<void(Value)> collectMul = [&](Value v) {
+    if (auto *mOp = v.getDefiningOp();
+        mOp && mOp->getName().stripDialect() == "mul" && factors.size() < 4) {
+      collectMul(mOp->getOperand(0));
+      collectMul(mOp->getOperand(1));
+      return;
+    }
+    factors.push_back(v);
+  };
+  collectMul(scaledVal);
+  if (factors.size() != 3)
+    return false;
+  bool gotCentered = false, gotInv = false, gotGain = false;
+  for (Value f : factors) {
+    if (!gotCentered && isCentered(f))
+      gotCentered = true;
+    else if (!gotInv && isInvStd(f))
+      gotInv = true;
+    else if (!gotGain && isLoadOf1D(f, gArg, f32))
+      gotGain = true;
+    else
+      return false;
+  }
+  return gotCentered && gotInv && gotGain;
+}
+} // namespace
+
+std::optional<DictionaryAttr> planLibrary(func::FuncOp fn,
+                                          const compilerinfra::TargetProfile &p) {
+  auto *caps = p.services.get<LocalSupply>();
+  auto *facts = p.services.get<CallFacts>();
+  if (!caps || !facts || caps->libraryEstimator.empty() ||
+      fn->hasAttr("kir.owner_axis"))
+    return std::nullopt;
+  auto configs = fn->getAttrOfType<ArrayAttr>("block.configs");
+  if (!configs || configs.empty())
+    return std::nullopt;
+  auto firstRow = dyn_cast<DictionaryAttr>(configs[0]);
+  if (!firstRow || !firstRow.getAs<IntegerAttr>("id"))
+    return std::nullopt;
+
+  auto [mD, nD] = facts->geometry(fn);
+  int64_t m = int64_t(mD), n = int64_t(nD);
+  if (m <= 0 || n <= 0 || m > INT32_MAX || n > INT32_MAX)
+    return std::nullopt;
+
+  std::string kind, impl;
+  if (!fn.empty() && !fn.front().empty() &&
+      fn.front().front().getName().getStringRef() == "dsa.library_call") {
+    auto &call = fn.front().front();
+    auto kAttr = call.getAttrOfType<StringAttr>("kind");
+    auto iAttr = call.getAttrOfType<StringAttr>("implementation");
+    if (!kAttr || !iAttr || call.getOperands() != ValueRange(fn.getArguments()))
+      return std::nullopt;
+    kind = kAttr.getValue().str();
+    impl = iAttr.getValue().str();
+    if (kind == "transpose") {
+      if (impl != caps->libraryTransposeImpl || fn.getNumArguments() != 2 ||
+          !isContiguous2D(fn, *facts, 0, m, n) ||
+          !isContiguous2D(fn, *facts, 1, n, m))
+        return std::nullopt;
+    } else if (kind == "softmax") {
+      if (impl != caps->librarySoftmaxImpl || fn.getNumArguments() != 2 ||
+          !isContiguous2D(fn, *facts, 0, m, n) ||
+          !isContiguous2D(fn, *facts, 1, m, n))
+        return std::nullopt;
+    } else if (kind == "layer_norm") {
+      if (impl != caps->libraryLayerNormImpl || fn.getNumArguments() != 5 ||
+          !isContiguous2D(fn, *facts, 0, m, n) ||
+          !isContiguous1D(fn, *facts, 1, n) ||
+          !isContiguous1D(fn, *facts, 2, n) ||
+          !isContiguous2D(fn, *facts, 3, m, n))
+        return std::nullopt;
+    } else {
+      return std::nullopt;
+    }
+  } else if (!caps->libraryTransposeImpl.empty() &&
+             matchTransposePattern(fn, *facts, m, n)) {
+    kind = "transpose";
+    impl = caps->libraryTransposeImpl;
+  } else if (!caps->librarySoftmaxImpl.empty() &&
+             matchSoftmaxPattern(fn, *facts, m, n)) {
+    kind = "softmax";
+    impl = caps->librarySoftmaxImpl;
+  } else if (!caps->libraryLayerNormImpl.empty() &&
+             matchLayerNormPattern(fn, *facts, m, n)) {
+    kind = "layer_norm";
+    impl = caps->libraryLayerNormImpl;
+  } else {
+    return std::nullopt;
+  }
+
+  Builder b(fn.getContext());
+  NamedAttrList rowAttrs;
+  rowAttrs.set("id", firstRow.get("id"));
+  rowAttrs.set("bytes", b.getI64IntegerAttr(0));
+  rowAttrs.set("pitch", b.getI64IntegerAttr(64));
+
+  NamedAttrList out;
+  out.set("library_impl", b.getStringAttr(impl));
+  out.set("library_kind", b.getStringAttr(kind));
+  out.set("group_temporaries", b.getBoolAttr(false));
+  out.set("persistent", b.getBoolAttr(false));
+  out.set("participants", b.getI64IntegerAttr(1));
+  out.set("batch", b.getI64IntegerAttr(1));
+  out.set("budget", b.getI64IntegerAttr(std::min(caps->budget, caps->capacity)));
+  out.set("depth", b.getI32IntegerAttr(1));
+  out.set("rows", b.getArrayAttr({rowAttrs.getDictionary(fn.getContext())}));
+  out.set("rejected", b.getArrayAttr({}));
+  return out.getDictionary(fn.getContext());
+}
 } // namespace intentdsl::dsa
 namespace CI_UNIT_NAMESPACE {
 using namespace mlir;
@@ -358,6 +823,12 @@ void supply(Unit &u) {
         !d.getAs<IntegerAttr>("participants") ||
         !d.getAs<BoolAttr>("persistent") || !d.getAs<IntegerAttr>("batch"))
       return llvm::createStringError("missing private supply facts");
+    if (auto lib = d.getAs<StringAttr>("library_impl")) {
+      auto expected = intentdsl::dsa::planLibrary(cast<func::FuncOp>(op), p);
+      if (!expected || *expected != d)
+        return llvm::createStringError("library supply layout mismatch");
+      return p.checkImplementationForOp(lib.getValue(), op);
+    }
     auto check = intentdsl::dsa::plan(
         cast<func::FuncOp>(op), *facts, d.getAs<IntegerAttr>("depth").getInt(),
         d.getAs<IntegerAttr>("participants").getInt(),
@@ -373,6 +844,13 @@ void supply(Unit &u) {
   };
   family.verifyCandidate=[](Operation*,const StructuralCandidate &c,const TargetProfile &)->llvm::Error{
     auto d=cast<DictionaryAttr>(c.value);
+    if (auto lib = d.getAs<StringAttr>("library_impl")) {
+      if (c.id != "library-cnnl" || c.topology != "external-library" ||
+          c.preconditions != std::vector<std::string>{"exact-library-abi"} ||
+          c.implementations != std::vector<std::string>{lib.getValue().str()})
+        return llvm::createStringError("library supply candidate mismatch");
+      return llvm::Error::success();
+    }
     if (!d.getAs<IntegerAttr>("batch"))
       return llvm::createStringError("missing supply batch factor");
     auto depth=d.getAs<IntegerAttr>("depth").getInt(),
@@ -416,6 +894,23 @@ void supply(Unit &u) {
     };
     u.strategies.push_back({std::move(s), COMPILERINFRA_SOURCE});
   }
+  Strategy libS;
+  libS.name = "library";
+  libS.family = u.qualify("supply");
+  libS.enumerate = [](Operation *op, const TargetProfile &p, AnalysisManager &)
+      -> llvm::Expected<std::vector<StructuralCandidate>> {
+    std::vector<StructuralCandidate> cs;
+    if (auto d = intentdsl::dsa::planLibrary(cast<func::FuncOp>(op), p)) {
+      auto impl = d->getAs<StringAttr>("library_impl").getValue().str();
+      cs.push_back({"library-cnnl",
+                    "external-library",
+                    *d,
+                    {"exact-library-abi"},
+                    {impl}});
+    }
+    return cs;
+  };
+  u.strategies.push_back({std::move(libS), COMPILERINFRA_SOURCE});
   Realizer r;
   r.name = "stage-transfers";
   r.family = u.qualify("supply");

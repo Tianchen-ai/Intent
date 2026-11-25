@@ -190,6 +190,20 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
       d.getAs<ArrayAttr>("rows").empty() || !d.getAs<IntegerAttr>("depth") ||
       !d.getAs<IntegerAttr>("batch"))
     return fn.emitError("missing supply rows, depth or batch");
+  if (auto lib = d.getAs<StringAttr>("library_impl")) {
+    auto expected = planLibrary(fn, p);
+    if (!expected || *expected != d)
+      return fn.emitError("library supply layout disagrees with function ABI");
+    if (auto err = p.checkImplementationForOp(lib.getValue(), fn.getOperation()))
+      return fn.emitError() << llvm::toString(std::move(err));
+    if (!supplied)
+      return success();
+    if (fn.front().getOperations().size() != 2 ||
+        fn.front().front().getName().getStringRef() != "dsa.library_call" ||
+        fn.front().back().getName().getStringRef() != "func.return")
+      return fn.emitError("expected terminal dsa.library_call and return");
+    return success();
+  }
   auto verifyLayout = [&]() -> LogicalResult {
     auto expected = plan(
         fn, *caps, d.getAs<IntegerAttr>("depth").getInt(),

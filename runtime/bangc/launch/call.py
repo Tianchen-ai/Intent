@@ -48,7 +48,12 @@ class Call(PreparedLaunch):
                 i = row["id"]
                 hit = i in a.variants
                 if not hit:
-                    a.variants[i] = Native(a.data["source"], row, a.data["abi"])
+                    a.variants[i] = Native(
+                        a.data["source"],
+                        row,
+                        a.data["abi"],
+                        cnnl=bool(a.data.get("cnnl")),
+                    )
                 report.append(
                     dict(
                         row=i,

@@ -1,8 +1,165 @@
 #include "intentdsl/levels/storage/dsa/ir/Matrix.h"
 #include "mlir/IR/PatternMatch.h"
+#include <climits>
 using namespace mlir;
 using namespace compilerinfra;
 namespace intentdsl::dsa {
+std::optional<LibraryMatrixPlan> matchLibraryMatrix(block::MatrixAccess &a,
+                                                    const TargetProfile &p) {
+  auto ms = p.services.get<MatrixStorage>();
+  if (!ms || ms->libraryEstimator.empty())
+    return std::nullopt;
+  if (a.dot.getName().stripDialect() != "contract" ||
+      a.dot.getNumOperands() != 2 || a.routed() ||
+      a.domain.getNumOperands() != 1)
+    return std::nullopt;
+  auto lhsArg = dyn_cast<BlockArgument>(a.dot.getOperand(0));
+  auto rhsArg = dyn_cast<BlockArgument>(a.dot.getOperand(1));
+  auto dstArg = dyn_cast<BlockArgument>(a.domain.getOperand(0));
+  if (!lhsArg || !rhsArg || !dstArg || lhsArg.getOwner() != &a.fn.front() ||
+      rhsArg.getOwner() != &a.fn.front() ||
+      dstArg.getOwner() != &a.fn.front() || dstArg == lhsArg ||
+      dstArg == rhsArg)
+    return std::nullopt;
+
+  auto lhsTy = dyn_cast<MemRefType>(lhsArg.getType());
+  auto rhsTy = dyn_cast<MemRefType>(rhsArg.getType());
+  auto dstTy = dyn_cast<MemRefType>(dstArg.getType());
+  if (!lhsTy || !rhsTy || !dstTy)
+    return std::nullopt;
+  Type elem = lhsTy.getElementType();
+  if (elem != rhsTy.getElementType() || elem != dstTy.getElementType())
+    return std::nullopt;
+
+  int32_t dtypeCode = elem.isF16()    ? 1
+                      : elem.isF32()  ? 2
+                      : elem.isBF16() ? 17
+                                      : 0;
+  if (!dtypeCode)
+    return std::nullopt;
+  std::string impl = elem.isF16() ? ms->libraryF16Impl : ms->libraryFtzImpl;
+  if (impl.empty())
+    return std::nullopt;
+
+  if (&a.domain.getRegion(0).front().front() != &a.fold)
+    return std::nullopt;
+  Operation *afterFold = a.fold.getNextNode();
+  if (!afterFold)
+    return std::nullopt;
+  auto isEndOrNull = [](Operation *op) {
+    return !op || op->hasTrait<OpTrait::IsTerminator>();
+  };
+  if (elem.isF32()) {
+    if (afterFold->getName().stripDialect() != "publish_matrix" ||
+        afterFold->getNumOperands() != 2 ||
+        afterFold->getOperand(0) != dstArg ||
+        afterFold->getOperand(1) != a.fold.getResult(0) ||
+        !isEndOrNull(afterFold->getNextNode()))
+      return std::nullopt;
+  } else {
+    Operation *pub = afterFold->getNextNode();
+    if (afterFold->getName().stripDialect() != "convert_matrix" ||
+        afterFold->getOperand(0) != a.fold.getResult(0) || !pub ||
+        pub->getName().stripDialect() != "publish_matrix" ||
+        pub->getNumOperands() != 2 || pub->getOperand(0) != dstArg ||
+        pub->getOperand(1) != afterFold->getResult(0) ||
+        !isEndOrNull(pub->getNextNode()))
+      return std::nullopt;
+  }
+
+  int64_t M = a.shape[0], N = a.shape[1], K = a.shape[2], B = a.shape[3];
+  if (M <= 0 || N <= 0 || K <= 0 || B <= 0 || M > INT32_MAX || N > INT32_MAX ||
+      K > INT32_MAX)
+    return std::nullopt;
+
+  auto checkOperand = [&](BlockArgument v, bool isLhs, int32_t &trans,
+                          int64_t &batchStride) -> bool {
+    int kAx = a.axis(isLhs ? "lhs_k" : "rhs_k");
+    int bAx = a.axis(isLhs ? "lhs_batch" : "rhs_batch");
+    int expectedRank = bAx < 0 ? 2 : 3;
+    if (a.rank(v) != expectedRank)
+      return false;
+    int fAx = a.freeAxis(v, kAx, bAx);
+    auto vShape =
+        a.fn.getArgAttrOfType<DenseI64ArrayAttr>(a.slot(v), "block.shape");
+    if (!vShape || static_cast<int>(vShape.size()) != expectedRank)
+      return false;
+    int64_t freeDim = isLhs ? M : N;
+    if (vShape[fAx] != freeDim || vShape[kAx] != K)
+      return false;
+    if (bAx < 0) {
+      batchStride = 0;
+    } else if (vShape[bAx] == 1) {
+      batchStride = 0;
+    } else if (vShape[bAx] == B) {
+      batchStride = a.stride(v, bAx);
+      if (batchStride < 0)
+        return false;
+    } else {
+      return false;
+    }
+    int64_t stF = a.stride(v, fAx), stK = a.stride(v, kAx);
+    if (isLhs) {
+      if (stK == 1 && (M == 1 || stF == K)) {
+        trans = 0;
+        return true;
+      }
+      if (stF == 1 && (K == 1 || stK == M)) {
+        trans = 1;
+        return true;
+      }
+      return false;
+    }
+    if (stF == 1 && (K == 1 || stK == N)) {
+      trans = 0;
+      return true;
+    }
+    if (stK == 1 && (N == 1 || stF == K)) {
+      trans = 1;
+      return true;
+    }
+    return false;
+  };
+
+  LibraryMatrixPlan plan;
+  plan.impl = std::move(impl);
+  plan.lhsSlot = lhsArg.getArgNumber();
+  plan.rhsSlot = rhsArg.getArgNumber();
+  plan.dstSlot = dstArg.getArgNumber();
+  plan.batch = B;
+  plan.m = M;
+  plan.n = N;
+  plan.k = K;
+  plan.inDtype = dtypeCode;
+  plan.outDtype = dtypeCode;
+  if (!checkOperand(lhsArg, true, plan.transA, plan.lhsBatchStride) ||
+      !checkOperand(rhsArg, false, plan.transB, plan.rhsBatchStride))
+    return std::nullopt;
+
+  auto dstShape =
+      a.fn.getArgAttrOfType<DenseI64ArrayAttr>(a.slot(dstArg), "block.shape");
+  int dstRank = a.rank(dstArg);
+  if (!dstShape || static_cast<int>(dstShape.size()) != dstRank)
+    return std::nullopt;
+  if (dstRank == 2) {
+    if (B != 1 || dstShape[0] != M || dstShape[1] != N ||
+        (N > 1 && a.stride(dstArg, 1) != 1) ||
+        (M > 1 && a.stride(dstArg, 0) != N))
+      return std::nullopt;
+    plan.dstBatchStride = 0;
+  } else if (dstRank == 3) {
+    if (dstShape[0] != B || dstShape[1] != M || dstShape[2] != N ||
+        (N > 1 && a.stride(dstArg, 2) != 1) ||
+        (M > 1 && a.stride(dstArg, 1) != N) ||
+        (B > 1 && a.stride(dstArg, 0) < M * N))
+      return std::nullopt;
+    plan.dstBatchStride = B > 1 ? a.stride(dstArg, 0) : 0;
+  } else {
+    return std::nullopt;
+  }
+  return plan;
+}
+
 namespace {
 // The exit supplies one physical implementation of the two input panels and
 // its accumulator. All sizes include the consumer's padded native footprint.
@@ -56,6 +213,11 @@ SmallVector<std::pair<Value, std::string>> feeds(block::MatrixAccess &a) {
 }
 bool supportsSupply(block::MatrixAccess &a, Attribute v,
                     const TargetProfile &p) {
+  if (auto lib = dyn_cast_or_null<StringAttr>(v)) {
+    auto plan = matchLibraryMatrix(a, p);
+    return plan && plan->impl == lib.getValue() &&
+           !p.checkImplementationForOp(lib.getValue(), a.fn.getOperation());
+  }
   auto count = dyn_cast_or_null<IntegerAttr>(v);
   auto cap = p.services.get<LocalSupply>();
   return count && cap && p.services.get<MatrixStorage>() && count.getInt() > 0 &&
@@ -82,8 +244,17 @@ LogicalResult verifyMatrix(func::FuncOp fn, const TargetProfile &p,
     auto cap = p.services.get<LocalSupply>();
     auto tasks = setup.getAttrOfType<IntegerAttr>("participants").getInt();
     auto scratch = setup.getAttrOfType<IntegerAttr>("scratch_bytes").getInt();
-    if (!cap || !p.services.get<MatrixStorage>() || tasks < 1 || tasks > cap->consumers || scratch != bytes(a,p) ||
-        scratch > std::min(cap->budget, cap->capacity))
+    if (auto lib = setup.getAttrOfType<StringAttr>("library_impl")) {
+      auto plan = matchLibraryMatrix(a, p);
+      if (!cap || !plan || plan->impl != lib.getValue() || tasks != 1 ||
+          scratch != 0)
+        return setup.emitError("invalid external library matrix supply");
+      if (auto err =
+              p.checkImplementationForOp(lib.getValue(), fn.getOperation()))
+        return setup.emitError() << llvm::toString(std::move(err));
+    } else if (!cap || !p.services.get<MatrixStorage>() || tasks < 1 ||
+               tasks > cap->consumers || scratch != bytes(a, p) ||
+               scratch > std::min(cap->budget, cap->capacity))
       return setup.emitError(
           "matrix inputs or accumulator exceed the physical supply");
     auto sources = feeds(a);
@@ -122,6 +293,14 @@ void matrixSupply(Unit &u) {
   f.verify = [](Operation *op, Attribute v,
                 const TargetProfile &p) -> llvm::Error {
     block::MatrixAccess a(cast<func::FuncOp>(op));
+    if (auto lib = dyn_cast_or_null<StringAttr>(v)) {
+      auto plan = dsa::matchLibraryMatrix(a, p);
+      if (!plan || plan->impl != lib.getValue())
+        return llvm::createStringError("unsupported library matrix ABI");
+      if (auto err = p.checkImplementationForOp(lib.getValue(), op))
+        return err;
+      return llvm::Error::success();
+    }
     if (!dsa::supportsSupply(a, v, p))
       return llvm::createStringError(
           "illegal participant or private panel footprint");
@@ -129,8 +308,16 @@ void matrixSupply(Unit &u) {
   };
   f.verifyCandidate = [](Operation *, const StructuralCandidate &c,
                          const TargetProfile &) -> llvm::Error {
-    if (c.id !=
-            "private-" + std::to_string(cast<IntegerAttr>(c.value).getInt()) ||
+    if (auto lib = dyn_cast<StringAttr>(c.value)) {
+      if (c.id != "library-cnnl" || c.topology != "external-library" ||
+          c.preconditions != std::vector<std::string>{"exact-library-abi"} ||
+          c.implementations != std::vector<std::string>{lib.getValue().str()})
+        return llvm::createStringError("invalid library matrix candidate");
+      return llvm::Error::success();
+    }
+    auto count = dyn_cast<IntegerAttr>(c.value);
+    if (!count ||
+        c.id != "private-" + std::to_string(count.getInt()) ||
         c.topology != "private-panels" ||
         c.preconditions != std::vector<std::string>{"complete-private-tiles"})
       return llvm::createStringError("invalid matrix supply candidate");
@@ -153,6 +340,24 @@ void matrixSupply(Unit &u) {
     return cs;
   };
   u.strategies.push_back({std::move(s), COMPILERINFRA_SOURCE});
+  Strategy libStrat;
+  libStrat.name = "library-panels";
+  libStrat.family = u.qualify("panel-supply");
+  libStrat.enumerate = [](Operation *op, const TargetProfile &p,
+                          AnalysisManager &)
+      -> llvm::Expected<std::vector<StructuralCandidate>> {
+    std::vector<StructuralCandidate> cs;
+    block::MatrixAccess a(cast<func::FuncOp>(op));
+    if (auto plan = dsa::matchLibraryMatrix(a, p)) {
+      cs.push_back({"library-cnnl",
+                    "external-library",
+                    Builder(op->getContext()).getStringAttr(plan->impl),
+                    {"exact-library-abi"},
+                    {plan->impl}});
+    }
+    return cs;
+  };
+  u.strategies.push_back({std::move(libStrat), COMPILERINFRA_SOURCE});
   Realizer r;
   r.name = "place-panels";
   r.family = u.qualify("panel-supply");
@@ -162,8 +367,14 @@ void matrixSupply(Unit &u) {
     block::MatrixAccess a(cast<func::FuncOp>(op));
     b.setInsertionPoint(&a.dot);
     OperationState setup(op->getLoc(), "dsa.panel_supply");
-    setup.addAttribute("participants", choice);
-    setup.addAttribute("scratch_bytes", b.getI64IntegerAttr(dsa::bytes(a,p)));
+    if (auto lib = dyn_cast<StringAttr>(choice)) {
+      setup.addAttribute("participants", b.getI64IntegerAttr(1));
+      setup.addAttribute("scratch_bytes", b.getI64IntegerAttr(0));
+      setup.addAttribute("library_impl", lib);
+    } else {
+      setup.addAttribute("participants", choice);
+      setup.addAttribute("scratch_bytes", b.getI64IntegerAttr(dsa::bytes(a,p)));
+    }
     setup.addRegion();
     auto *panel = b.create(setup);
     b.createBlock(&panel->getRegion(0));

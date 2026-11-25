@@ -1,6 +1,8 @@
 #include "compilerinfra/Assembly.h"
+#include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
 #include "intentdsl/levels/storage/dsa/ir/Matrix.h"
 #include "intentdsl/levels/storage/dsa/ir/Supply.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinTypes.h"
 
@@ -864,5 +866,197 @@ void rowContracts(Unit &unit) {
             op->getOperand(1).getType().getIntOrFloatBitWidth() == 64 &&
             op->getResult(0).getType().isF32());
       });
+
+  auto hasCnnl = [hasNram](const TargetProfile &p) -> llvm::Error {
+    if (auto err = hasNram(p))
+      return err;
+    if (!p.features.count("cnnl_runtime"))
+      return llvm::createStringError(
+          "BANG C host runtime disables external CNNL library dispatch");
+    return llvm::Error::success();
+  };
+  auto checkRowFastMath = [](Operation *op, const TargetProfile &target,
+                             arith::FastMathFlags req,
+                             llvm::StringRef label) -> llvm::Error {
+    auto effDefault = target.numerical.defaultFastMath;
+    if (auto *fmp = target.services.get<intentdsl::kir::FastMathPolicy>())
+      effDefault = effDefault | fmp->defaultFlags;
+    if (auto fn = dyn_cast<func::FuncOp>(op)) {
+      SmallVector<Operation *> mathOps;
+      fn.walk([&](Operation *inner) {
+        auto code = inner->getName().stripDialect();
+        if (llvm::is_contained(
+                ArrayRef<StringRef>{"add", "sub", "mul", "div", "exp", "rsqrt",
+                                    "sqrt", "reduce", "combine",
+                                    "summary_reduce", "summary_merge"},
+                code))
+          mathOps.push_back(inner);
+      });
+      auto actual = intersectFastMath(mathOps, effDefault);
+      if (!arith::bitEnumContainsAll(actual, req)) {
+        auto missing = req & ~actual;
+        return llvm::createStringError(
+            label.str() + ": missing required fastmath flags (" +
+            arith::stringifyFastMathFlags(missing) + ")");
+      }
+      if (fn.getNumArguments() > 0) {
+        if (auto mr = dyn_cast<MemRefType>(fn.getArgument(0).getType());
+            mr && mr.getElementType().isBF16() &&
+            !allowsSubnormalFlush(op, target.numerical))
+          return llvm::createStringError(
+              label.str() +
+              ": BF16 CNNL operator requires denormal-fp-math FTZ permission");
+      }
+      return llvm::Error::success();
+    }
+    NumericalOptions opts = target.numerical;
+    opts.defaultFastMath = effDefault;
+    if (!hasFastMath(op, req, opts)) {
+      auto actual = effectiveFastMath(op, effDefault);
+      auto missing = req & ~actual;
+      return llvm::createStringError(
+          label.str() + ": missing required fastmath flags (" +
+          arith::stringifyFastMathFlags(missing) + ")");
+    }
+    if (op->getNumOperands() > 0) {
+      if (auto mr = dyn_cast<MemRefType>(op->getOperand(0).getType());
+          mr && mr.getElementType().isBF16() &&
+          !allowsSubnormalFlush(op, target.numerical))
+        return llvm::createStringError(
+            label.str() +
+            ": BF16 CNNL operator requires denormal-fp-math FTZ permission");
+    }
+    return llvm::Error::success();
+  };
+  auto addCnnl = [&](StringRef name, StringRef op, StringRef symbol,
+                     StringRef estimator, std::vector<std::string> costParams,
+                     StringRef operands, StringRef layout, StringRef acc,
+                     StringRef effects, StringRef numerical,
+                     TypedContract typed,
+                     std::function<LogicalResult(Operation *)> verify) {
+    ImplementationContract c;
+    c.name = name.str();
+    c.operation = ("bangc_src." + op).str();
+    c.symbol = symbol.str();
+    c.source = ImplementationSource::External;
+    c.minimum = Reuse::Library;
+    c.dependencies = {"cnnl"};
+    c.operands = operands.str();
+    c.layout = layout.str();
+    c.accumulator = acc.str();
+    c.effects = effects.str();
+    c.numerical = numerical.str();
+    c.estimator = estimator.str();
+    c.costParameters = std::move(costParams);
+    c.available = hasCnnl;
+    c.verify = std::move(verify);
+    c.typed = std::move(typed);
+    unit.implementations.push_back({std::move(c), COMPILERINFRA_SOURCE});
+  };
+
+  addCnnl(
+      "cnnl-matmul-f16", "cnnl_matmul", "intent_cnnl_matmul",
+      "exits/bangc::cnnl-matmul-cost", {"m", "n", "k", "batch"},
+      "GDRAM f16[M,K]/[K,M] lhs, f16[K,N]/[N,K] rhs -> f16[M,N] output",
+      "contiguous or transposed 2D/3D GDRAM tensors", "f32",
+      "reads GDRAM lhs/rhs and writes GDRAM f16 output on CNRT queue",
+      "Cambricon CNNL cnnlMatMul_v2 with CNNL_DTYPE_FLOAT compute/onchip "
+      "(ALLOW_TF32=0), preserving IEEE FP16 subnormals",
+      makeTyped(3, std::nullopt, 0,
+                {STK::F16, STK::F32, STK::I32, STK::I64}, {}, {STK::F32},
+                EffectMask::ReadWrite, 0, std::nullopt),
+      [](Operation *op) {
+        auto dt = op->getAttrOfType<IntegerAttr>("in_dtype");
+        return success(dt && dt.getInt() == 1);
+      });
+
+  {
+    TypedContract ftzMm = makeTyped(
+        3, std::nullopt, 0, {STK::BF16, STK::F32, STK::I32, STK::I64}, {},
+        {STK::F32}, EffectMask::ReadWrite, 0, std::nullopt);
+    ftzMm.numerical.requireInputSubnormalFlush = true;
+    ftzMm.numerical.requireOutputSubnormalFlush = true;
+    addCnnl(
+        "cnnl-matmul-ftz", "cnnl_matmul", "intent_cnnl_matmul",
+        "exits/bangc::cnnl-matmul-cost", {"m", "n", "k", "batch"},
+        "GDRAM bf16/f32[M,K]/[K,M] lhs, bf16/f32[K,N]/[N,K] rhs -> bf16/f32[M,N]",
+        "contiguous or transposed 2D/3D GDRAM tensors", "f32",
+        "reads GDRAM lhs/rhs and writes GDRAM bf16/f32 output on CNRT queue",
+        "Cambricon CNNL cnnlMatMul_v2 with CNNL_DTYPE_FLOAT compute/onchip "
+        "(ALLOW_TF32=0); flushes binary32 subnormals (requires denormal-fp-math FTZ)",
+        std::move(ftzMm), [](Operation *op) {
+          auto dt = op->getAttrOfType<IntegerAttr>("in_dtype");
+          return success(dt && (dt.getInt() == 2 || dt.getInt() == 17));
+        });
+  }
+
+  addCnnl(
+      "cnnl-transpose", "cnnl_row_op", "intent_cnnl_transpose",
+      "exits/bangc::cnnl-row-cost", {"m", "n"},
+      "GDRAM [M, N] source and GDRAM [N, M] destination (8/16/32-bit elements)",
+      "contiguous 2D GDRAM tensors", "none",
+      "reads GDRAM [M, N] source and writes transposed GDRAM [N, M] output",
+      "bitwise exact 2D transpose via Cambricon CNNL cnnlTranspose_v2",
+      makeTyped(2, 2, 0,
+                {STK::I8, STK::UI8, STK::I16, STK::F16, STK::BF16, STK::I32,
+                 STK::F32},
+                {}, {}, EffectMask::ReadWrite, 0, std::nullopt),
+      [](Operation *op) {
+        auto k = op->getAttrOfType<StringAttr>("kind");
+        return success(k && k.getValue() == "transpose");
+      });
+
+  {
+    TypedContract smTyped =
+        makeTyped(2, 2, 0, {STK::F16, STK::BF16, STK::F32}, {}, {STK::F32},
+                  EffectMask::ReadWrite, 0, std::nullopt);
+    smTyped.precondition =
+        [checkRowFastMath](Operation *op,
+                           const TargetProfile &target) -> llvm::Error {
+      return checkRowFastMath(
+          op, target,
+          arith::FastMathFlags::afn | arith::FastMathFlags::arcp |
+              arith::FastMathFlags::reassoc,
+          "exits/bangc::cnnl-softmax");
+    };
+    addCnnl(
+        "cnnl-softmax", "cnnl_row_op", "intent_cnnl_softmax",
+        "exits/bangc::cnnl-row-cost", {"m", "n"},
+        "GDRAM [M, N] input and GDRAM [M, N] output (f16/bf16/f32)",
+        "contiguous 2D GDRAM tensors reduced along minor axis", "f32",
+        "reads GDRAM [M, N] input and writes normalized GDRAM [M, N] output",
+        "Cambricon CNNL cnnlSoftmaxForward_v2 (ACCURATE, HIGH_PRECISION); "
+        "requires fastmath afn,arcp,reassoc",
+        std::move(smTyped), [](Operation *op) {
+          auto k = op->getAttrOfType<StringAttr>("kind");
+          return success(k && k.getValue() == "softmax");
+        });
+  }
+
+  {
+    TypedContract lnTyped =
+        makeTyped(5, 5, 0, {STK::F16, STK::BF16, STK::F32}, {}, {STK::F32},
+                  EffectMask::ReadWrite, 0, std::nullopt);
+    lnTyped.precondition =
+        [checkRowFastMath](Operation *op,
+                           const TargetProfile &target) -> llvm::Error {
+      return checkRowFastMath(
+          op, target,
+          arith::FastMathFlags::afn | arith::FastMathFlags::reassoc,
+          "exits/bangc::cnnl-layer-norm");
+    };
+    addCnnl(
+        "cnnl-layer-norm", "cnnl_row_op", "intent_cnnl_layer_norm",
+        "exits/bangc::cnnl-row-cost", {"m", "n"},
+        "GDRAM [M, N] input, [N] gain, [N] bias, [M, N] output and scalar f32 eps",
+        "contiguous 2D/1D GDRAM tensors normalized along minor axis", "f32",
+        "reads GDRAM input/gain/bias and writes normalized GDRAM [M, N] output",
+        "Cambricon CNNL cnnlLayerNormForward with FP32 mean/rstd; "
+        "requires fastmath afn,reassoc",
+        std::move(lnTyped), [](Operation *op) {
+          auto k = op->getAttrOfType<StringAttr>("kind");
+          return success(k && k.getValue() == "layer_norm");
+        });
+  }
 }
 } // namespace CI_UNIT_NAMESPACE

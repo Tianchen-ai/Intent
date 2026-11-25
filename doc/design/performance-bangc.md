@@ -18,10 +18,19 @@ MLU370 没有硬件统一缓存替内核自动重排数据，执行性能完全�
 | 决策族 | 位置 | 枚举候选 | 影响范围 |
 |---|---|---|---|
 | `levels/execution/block::structure` | `block@decided` | `resident` / `stream`、行宽 `W ∈ [1..4096]`、行组 `R ∈ {1,2,16,32,64}`、`private-merge` 直方图 | 任务切分与片上驻留拓扑 |
-| `levels/storage/dsa::supply` | `dsa@formed` → `dsa@supplied` | 深度 `depth ∈ {1, 2}`、共享只读 1D 向量驻留 `persistent`、异步写回 `async_writeback`、临时片段区间复用 `reuse_temporaries`、批大小 `batch` | 行与归约程序的 NRAM 槽位和 DMA 流水 |
-| `levels/storage/dsa::panel-supply` | `dsa@formed` → `dsa@supplied` | 符合 NRAM/WRAM 容量的矩阵块 `(BM, BN=64, BK)`（`8×64×64` 至 `128×64×256`）及参与者核数 | 稠密、批处理、路由、窗口与量化收缩 |
+| `levels/storage/dsa::supply` | `dsa@formed` → `dsa@supplied` | 深度 `depth ∈ {1, 2}`、共享只读 1D 向量驻留 `persistent`、异步写回 `async_writeback`、临时片段区间复用 `reuse_temporaries`、批大小 `batch`，以及 `library` 档位下的外部库供数 `library-cnnl` | 行与归约程序的 NRAM 槽位、DMA 流水与整算子库调用 |
+| `levels/storage/dsa::panel-supply` | `dsa@formed` → `dsa@supplied` | 符合 NRAM/WRAM 容量的矩阵块 `(BM, BN=64, BK)`（`8×64×64` 至 `128×64×256`）及参与者核数，以及 `library` 档位下的 `library-cnnl` | 稠密、批处理、路由、窗口与量化收缩 |
 | `levels/storage/dsa::ordered-supply` | `dsa@formed` → `dsa@supplied` | `panel-fold`（片上双遍 QK/PV WRAM 面板折叠）、`packed`（多 owner 打包流 `pack ∈ {2,4,8}`）、`general`（通用标量/向量流） | 注意力、线性注意力、Mamba/Gated Delta 等有序程序 |
 | `exits/bangc::narrow-proven-addresses` | `bangc@callable` | 经 `proveNarrowAddress` 白名单证明不溢出的 32 位有符号坐标乘步长 vs 64 位回退 | GDRAM/NRAM 地址计算吞吐 |
+
+### 外部库档位（CNNL `reuse="library"`）
+
+`product.json` 将寒武纪 CNNL（`libcnnl.so` `>=1.15,<3`）登记为 `exits/bangc` 拥有的可选依赖 `cnnl`（探测钩子 `exits/bangc::cnnl-library` 校验动态库版本与全部 26 个 C API 符号，集成至 `doctor`）。`exits/bangc` 注册 5 项 `Reuse::Library` / `ImplementationSource::External` 类型化合同，默认 `reuse="vendor"` 自动以 `exceeds reuse=vendor` 排除；显式开启 `reuse="library"` 时，仅在作者数值许可与布局前提满足时与 `vendor` 候选同场按代价竞选（高档位允许低档位在小形状上胜出）：
+- `exits/bangc::cnnl-matmul-f16`（`cnnlMatMul_v2`，FP32 累加，`ALLOW_TF32=0`，严格保留 FP16 次正规数）；
+- `exits/bangc::cnnl-matmul-ftz`（BF16/FP32，要求函数级 `denormal-fp-math` 冲零许可）；
+- `exits/bangc::cnnl-transpose`（`cnnlTranspose_v2`，8/16/32 位逐位精确二维转置）；
+- `exits/bangc::cnnl-softmax`（`cnnlSoftmaxForward_v2`，要求 `fastmath` `afn,arcp,reassoc`）；
+- `exits/bangc::cnnl-layer-norm`（`cnnlLayerNormForward`，要求 `fastmath` `afn,reassoc`）。
 
 ## 3. 代价项与局部估算器
 

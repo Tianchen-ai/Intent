@@ -1,4 +1,5 @@
 #include "intentdsl/levels/storage/dsa/ir/Supply.h"
+#include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
 #include "intentdsl/levels/execution/block/ir/Access.h"
 #include "../decisions/Plan.h"
 #include "mlir/IR/IRMapping.h"
@@ -231,12 +232,48 @@ LogicalResult phase(Operation *anchor, Block &source, bool stream,
 }
 } // namespace
 llvm::Error stageTransfers(Operation *op, Attribute a,
-                           const compilerinfra::TargetProfile &,
+                           const compilerinfra::TargetProfile &profile,
                            RewriterBase &b) {
   auto fn = cast<func::FuncOp>(op);
   auto decision = cast<DictionaryAttr>(a);
   // Load the registered dialect also when resuming from a Block checkpoint.
   fn.getContext()->getOrLoadDialect("dsa");
+  if (auto lib = decision.getAs<StringAttr>("library_impl")) {
+    auto kind = decision.getAs<StringAttr>("library_kind");
+    if (!kind)
+      return llvm::createStringError("missing library_kind in supply decision");
+    SmallVector<Operation *> mathOps;
+    fn.walk([&](Operation *inner) {
+      auto code = inner->getName().stripDialect();
+      if (llvm::is_contained(
+              ArrayRef<StringRef>{"add", "sub", "mul", "div", "exp", "rsqrt",
+                                  "sqrt", "reduce", "combine", "summary_reduce",
+                                  "summary_merge"},
+              code))
+        mathOps.push_back(inner);
+    });
+    SmallVector<Operation *> oldOps;
+    for (auto &item : fn.front())
+      if (item.getName().getStringRef() != "func.return")
+        oldOps.push_back(&item);
+    b.setInsertionPointToStart(&fn.front());
+    auto *call = inst(b, fn.getLoc(), "dsa.library_call", fn.getArguments(), {},
+                      {b.getNamedAttr("kind", kind),
+                       b.getNamedAttr("implementation", lib)});
+    auto effDefault = profile.numerical.defaultFastMath;
+    if (auto *fmp = profile.services.get<intentdsl::kir::FastMathPolicy>())
+      effDefault = effDefault | fmp->defaultFlags;
+    fn.getContext()->getOrLoadDialect<mlir::arith::ArithDialect>();
+    if (!mathOps.empty())
+      compilerinfra::propagateNumericalFlags(mathOps, call, effDefault);
+    else if (effDefault != mlir::arith::FastMathFlags::none)
+      compilerinfra::setFastMath(call, effDefault);
+    for (auto *oldOp : llvm::reverse(oldOps))
+      b.eraseOp(oldOp);
+    fn->setAttr("dsa.layout", decision);
+    fn->removeAttr("dsa.pending");
+    return llvm::Error::success();
+  }
   if (fn->getAttrOfType<StringAttr>("block.topology") == "resident") {
     if (failed(phase(&fn.front().front(), fn.front(), false,
                      decision.getAs<IntegerAttr>("depth").getInt(), b)))

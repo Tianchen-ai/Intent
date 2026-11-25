@@ -7,7 +7,7 @@ def SupplyDialect : Dialect {
 }
 
 def MatrixSetup : Op<SupplyDialect,"panel_supply",[SingleBlock]> {
- let arguments=(ins I64Attr:$participants,I64Attr:$scratch_bytes);
+ let arguments=(ins I64Attr:$participants,I64Attr:$scratch_bytes,OptionalAttr<StrAttr>:$library_impl);
  let regions=(region AnyRegion:$transfers);
 }
 def MatrixStage : Op<SupplyDialect,"stage_operand"> {
@@ -68,3 +68,4 @@ def SupplyDialect_ScatterDrain : Op<SupplyDialect,"scatter_fragment"> {let argum
 def SupplyIndexedPut : Op<SupplyDialect,"unique_put"> {let arguments=(ins AnyMemRef:$base,I32Tensor:$indices,I32Tensor:$values,I1Tensor:$valid,UnitAttr:$in_bounds);let results=(outs I1:$done);}
 def SupplyDialect_PublishOffsets : Op<SupplyDialect,"publish_offsets"> {let arguments=(ins AnyMemRef:$offsets,AnyMemRef:$total,AnyTensor:$columns,I1Tensor:$active,I32Tensor:$prefix);let results=(outs I1:$done);}
 def SupplyDialect_RangesAt : Op<SupplyDialect,"fill_ranges_at"> {let arguments=(ins AnyMemRef:$out,AnyMemRef:$offsets,AnyTensor:$columns,I1Tensor:$active,I64Attr:$unit,UnitAttr:$disjoint_in_bounds);let results=(outs I1:$done);}
+def LibraryCall : Inst<"library_call", (ins Variadic<AnyType>:$args, StrAttr:$kind, StrAttr:$implementation), (outs)>;

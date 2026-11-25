@@ -282,6 +282,101 @@ TerminalPrinter rowPrinter() {
                return llvm::Error::success();
              });
 
+  enterLocal("bangc_src.cnnl_matmul",
+             [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
+               auto ls = view.attrOfType<IntegerAttr>("lhs_slot").getInt();
+               auto rs = view.attrOfType<IntegerAttr>("rhs_slot").getInt();
+               auto ds = view.attrOfType<IntegerAttr>("dst_slot").getInt();
+               auto B = view.attrOfType<IntegerAttr>("batch").getInt();
+               auto M = view.attrOfType<IntegerAttr>("m").getInt();
+               auto N = view.attrOfType<IntegerAttr>("n").getInt();
+               auto K = view.attrOfType<IntegerAttr>("k").getInt();
+               auto ta = view.attrOfType<IntegerAttr>("trans_a").getInt();
+               auto tb = view.attrOfType<IntegerAttr>("trans_b").getInt();
+               auto lbs =
+                   view.attrOfType<IntegerAttr>("lhs_batch_stride").getInt();
+               auto rbs =
+                   view.attrOfType<IntegerAttr>("rhs_batch_stride").getInt();
+               auto dbs =
+                   view.attrOfType<IntegerAttr>("dst_batch_stride").getInt();
+               auto inDt = view.attrOfType<IntegerAttr>("in_dtype").getInt();
+               auto outDt = view.attrOfType<IntegerAttr>("out_dtype").getInt();
+               c.line("extern \"C\" int intent_cnnl_matmul(const void *, const "
+                      "void *, void *, long long, long long, long long, long "
+                      "long, int, int, long long, long long, long long, int, "
+                      "int, void *);");
+               c.line("extern \"C\" int intent_enqueue(" +
+                      formatArgs(view, true) + ", int cores, void *queue) {");
+               ++c.indent;
+               c.line("(void)M; (void)N; (void)grid; (void)cores;");
+               c.line("return intent_cnnl_matmul(" +
+                      view.operand(ls).str() + ", " + view.operand(rs).str() +
+                      ", " + view.operand(ds).str() + ", " + std::to_string(B) +
+                      "LL, " + std::to_string(M) + "LL, " + std::to_string(N) +
+                      "LL, " + std::to_string(K) + "LL, " + std::to_string(ta) +
+                      ", " + std::to_string(tb) + ", " + std::to_string(lbs) +
+                      "LL, " + std::to_string(rbs) + "LL, " +
+                      std::to_string(dbs) + "LL, " + std::to_string(inDt) +
+                      ", " + std::to_string(outDt) + ", queue);");
+               --c.indent;
+               c.line("}");
+               return llvm::Error::success();
+             });
+
+  enterLocal("bangc_src.cnnl_row_op",
+             [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
+               auto kind = view.attrOfType<StringAttr>("kind").getValue();
+               auto dt = view.attrOfType<IntegerAttr>("dtype_code").getInt();
+               auto eb = view.attrOfType<IntegerAttr>("elem_bytes").getInt();
+               if (kind == "transpose") {
+                 c.line("extern \"C\" int intent_cnnl_transpose(const void *, "
+                        "void *, long long, long long, int, void *);");
+                 c.line("extern \"C\" int intent_enqueue(" +
+                        formatArgs(view, true) + ", int cores, void *queue) {");
+                 ++c.indent;
+                 c.line("(void)grid; (void)cores;");
+                 c.line("return intent_cnnl_transpose(" +
+                        view.operand(0).str() + ", " + view.operand(1).str() +
+                        ", M, N, " + std::to_string(eb) + ", queue);");
+                 --c.indent;
+                 c.line("}");
+                 return llvm::Error::success();
+               }
+               if (kind == "softmax") {
+                 c.line("extern \"C\" int intent_cnnl_softmax(const void *, "
+                        "void *, long long, long long, int, void *);");
+                 c.line("extern \"C\" int intent_enqueue(" +
+                        formatArgs(view, true) + ", int cores, void *queue) {");
+                 ++c.indent;
+                 c.line("(void)grid; (void)cores;");
+                 c.line("return intent_cnnl_softmax(" + view.operand(0).str() +
+                        ", " + view.operand(1).str() + ", M, N, " +
+                        std::to_string(dt) + ", queue);");
+                 --c.indent;
+                 c.line("}");
+                 return llvm::Error::success();
+               }
+               if (kind == "layer_norm") {
+                 c.line("extern \"C\" int intent_cnnl_layer_norm(const void *, "
+                        "const void *, const void *, void *, long long, long "
+                        "long, float, int, void *);");
+                 c.line("extern \"C\" int intent_enqueue(" +
+                        formatArgs(view, true) + ", int cores, void *queue) {");
+                 ++c.indent;
+                 c.line("(void)grid; (void)cores;");
+                 c.line("return intent_cnnl_layer_norm(" +
+                        view.operand(0).str() + ", " + view.operand(1).str() +
+                        ", " + view.operand(2).str() + ", " +
+                        view.operand(3).str() + ", M, N, (float)(" +
+                        view.operand(4).str() + "), " + std::to_string(dt) +
+                        ", queue);");
+                 --c.indent;
+                 c.line("}");
+                 return llvm::Error::success();
+               }
+               return llvm::createStringError("unknown cnnl_row_op kind");
+             });
+
   enterLocal("bangc_src.nram_buffer",
              [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
                auto t = ctype(view.resultType(0));

@@ -52,7 +52,7 @@ llvm::Error describeRowArtifact(func::FuncOp fn, llvm::raw_pwrite_stream &out) {
                      : fn->getAttrOfType<ArrayAttr>("block.grid");
   for (auto expr : mapping)
     axes.push_back(intentdsl::block::gridExpression(expr));
-  out << llvm::json::Value(llvm::json::Object{
+  llvm::json::Object pkgObj{
       {"version", 2},
       {"source", ""},
       {"domain", intentdsl::publishDomain(fn)},
@@ -64,7 +64,10 @@ llvm::Error describeRowArtifact(func::FuncOp fn, llvm::raw_pwrite_stream &out) {
        llvm::json::Object{{"min_width", guard[0]},
                           {"max_width", guard[1] < 0
                                             ? llvm::json::Value(nullptr)
-                                            : llvm::json::Value(guard[1])}}}});
+                                            : llvm::json::Value(guard[1])}}}};
+  if (layout.contains("library_impl"))
+    pkgObj["cnnl"] = true;
+  out << llvm::json::Value(std::move(pkgObj));
   return llvm::Error::success();
 }
 
@@ -1470,9 +1473,37 @@ struct RowLowerer {
               break;
             }
             Type fieldTy = elemOf(resVal.getType());
+            Value srcMom = getVal(inst.getOperand(0));
+            if (srcMom.getType() == momentArrayTuple(b.getContext())) {
+              if (rankOf(resVal.getType()) == 1) {
+                Value arr = localVar(fieldTy, "EB");
+                forLoop(cI64(0), members, cI64(1), [&](Value h) {
+                  Value jh = b.create<arith::AddIOp>(loc, j, h);
+                  Value m = makeOp("moment_get", {srcMom, jh},
+                                   {momentTuple(b.getContext())})
+                                ->getResult(0);
+                  Value fv =
+                      makeOp("summary_field", {m}, {fieldTy},
+                             {b.getNamedAttr("position",
+                                             b.getI64IntegerAttr(pos))})
+                          ->getResult(0);
+                  storeAt(arr, jh, fv);
+                });
+                localMap[resVal] = arr;
+              } else {
+                Value m = makeOp("moment_get", {srcMom, j},
+                                 {momentTuple(b.getContext())})
+                              ->getResult(0);
+                localMap[resVal] =
+                    makeOp("summary_field", {m}, {fieldTy},
+                           {b.getNamedAttr("position",
+                                           b.getI64IntegerAttr(pos))})
+                        ->getResult(0);
+              }
+              continue;
+            }
             Value fVal =
-                makeOp("summary_field", {getVal(inst.getOperand(0))},
-                       {fieldTy},
+                makeOp("summary_field", {srcMom}, {fieldTy},
                        {b.getNamedAttr("position", b.getI64IntegerAttr(pos))})
                     ->getResult(0);
             if (rankOf(resVal.getType()) == 1) {
@@ -2511,6 +2542,33 @@ struct RowLowerer {
     Block *sourcesBlk = b.createBlock(&prog->getRegion(0));
     Block *deviceBlk = b.createBlock(&prog->getRegion(1));
     Block *hostBlk = b.createBlock(&prog->getRegion(2));
+
+    if (auto lib = layout.getAs<StringAttr>("library_impl")) {
+      auto kind = layout.getAs<StringAttr>("library_kind");
+      if (!kind || oldOps.size() != 1 ||
+          oldOps[0]->getName().getStringRef() != "dsa.library_call")
+        return fn.emitError("expected single dsa.library_call op");
+      auto inMr = cast<MemRefType>(fn.getArgument(0).getType());
+      Type elem = inMr.getElementType();
+      int32_t elemBytes =
+          static_cast<int32_t>(llvm::divideCeil(inMr.getElementTypeBitWidth(), 8u));
+      int32_t dtypeCode = elem.isF16()    ? 1
+                          : elem.isF32()  ? 2
+                          : elem.isBF16() ? 17
+                                          : 0;
+      b.setInsertionPointToStart(hostBlk);
+      OperationState cs(loc, "bangc_src.cnnl_row_op");
+      cs.addOperands(fn.getArguments());
+      cs.addAttribute("kind", kind);
+      cs.addAttribute("dtype_code", b.getI32IntegerAttr(dtypeCode));
+      cs.addAttribute("elem_bytes", b.getI32IntegerAttr(elemBytes));
+      cs.addAttribute("ci.implementation", lib);
+      if (auto fm = oldOps[0]->getAttr("fastmath"))
+        cs.addAttribute("fastmath", fm);
+      b.create(cs);
+      oldOps[0]->erase();
+      return success();
+    }
 
     b.setInsertionPointToStart(deviceBlk);
     OperationState dkState(loc, "bangc_src.device_kernel");

@@ -1,4 +1,5 @@
 #include "intentdsl/levels/execution/block/ir/Traffic.h"
+#include "intentdsl/levels/storage/dsa/ir/Supply.h"
 namespace CI_UNIT_NAMESPACE {
 using namespace compilerinfra;
 using namespace mlir;
@@ -7,6 +8,15 @@ void supplyCost(Unit &u) {
       {{"pipeline-time", u.qualify("supply"), "1",
         [](Operation *op, const StructuralCandidate &c,
            CostContext &ctx) -> llvm::Expected<CostEstimate> {
+          auto d = cast<DictionaryAttr>(c.value);
+          if (d.contains("library_impl")) {
+            auto *caps =
+                ctx.target.services.get<intentdsl::dsa::LocalSupply>();
+            if (!caps || caps->libraryEstimator.empty())
+              return llvm::createStringError(
+                  "missing target library supply estimator");
+            return ctx.local(caps->libraryEstimator);
+          }
           auto *facts = ctx.target.services.get<intentdsl::CallFacts>();
           auto [m, n] = facts->geometry(op);
           auto dma = ctx.local(facts->localEstimator);
@@ -19,7 +29,6 @@ void supplyCost(Unit &u) {
                launch = intentdsl::quantity(ctx, "launch", "ns"),
                vector = intentdsl::quantity(ctx, "compute", "lane/ns");
           auto startup = intentdsl::quantity(ctx, "first_io", "ns");
-          auto d = cast<DictionaryAttr>(c.value);
           auto [keys,segmentWork]=intentdsl::block::realizedTraffic(op,*facts);
           auto depth = d.getAs<IntegerAttr>("depth").getInt();
           double participants = d.getAs<IntegerAttr>("participants").getInt();

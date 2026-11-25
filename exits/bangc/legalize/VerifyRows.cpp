@@ -145,10 +145,13 @@ LogicalResult verifyCallableRows(ModuleOp m, const TargetProfile &profile) {
     return fn.emitError() << llvm::toString(std::move(err));
   auto capacity = profile.services.get<intentdsl::dsa::LocalSupply>();
   auto layout = fn->getAttrOfType<DictionaryAttr>("dsa.layout");
+  bool isLibRow = layout && layout.contains("library_impl");
   if (!capacity || !layout || !layout.getAs<ArrayAttr>("rows") ||
       layout.getAs<ArrayAttr>("rows").empty() ||
-      fn->getAttrOfType<StringAttr>("bangc.space") != "private.nram" ||
-      fn->getAttrOfType<StringAttr>("bangc.participant") != "block")
+      fn->getAttrOfType<StringAttr>("bangc.space") !=
+          (isLibRow ? "external.cnnl" : "private.nram") ||
+      fn->getAttrOfType<StringAttr>("bangc.participant") !=
+          (isLibRow ? "host-queue" : "block"))
     return fn.emitError("missing private NRAM layout or participant mapping");
   for (auto a : fn->getAttrOfType<ArrayAttr>("block.configs")) {
     unsigned tasks = 0;
@@ -368,7 +371,7 @@ LogicalResult verifyCallableMatrix(ModuleOp m, const TargetProfile &profile) {
       uint64_t(extents[3]);
   llvm::SmallVector<char> expected;
   llvm::raw_svector_ostream os(expected);
-  os << llvm::json::Value(llvm::json::Object{
+  llvm::json::Object matPkg{
       {"version", 2},
       {"source", ""},
       {"abi", std::move(*abiJson)},
@@ -381,7 +384,10 @@ LogicalResult verifyCallableMatrix(ModuleOp m, const TargetProfile &profile) {
                                             {"width", bn.getInt()},
                                             {"pitch", bk.getInt()},
                                             {"bytes", scratch.getInt()},
-                                            {"tasks", tasks.getInt()}}}}});
+                                            {"tasks", tasks.getInt()}}}}};
+  if (prog.hasAttr("cnnl"))
+    matPkg["cnnl"] = true;
+  os << llvm::json::Value(std::move(matPkg));
   auto package = m->getAttrOfType<StringAttr>("bangc_src.package");
   if (!package ||
       package.getValue() != StringRef(expected.data(), expected.size()))

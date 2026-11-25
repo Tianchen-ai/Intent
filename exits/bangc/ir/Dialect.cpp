@@ -224,6 +224,116 @@ struct SummaryMergeContract
   }
 };
 
+struct CnnlMatmulContract
+    : public compilerinfra::ContractOpInterface::ExternalModel<
+          CnnlMatmulContract, CnnlMatmulOp> {
+  Type getAccumulatorType(Operation *op) const {
+    return Float32Type::get(op->getContext());
+  }
+  LogicalResult verifyShapeAndTypes(Operation *op) const {
+    auto mm = cast<CnnlMatmulOp>(op);
+    unsigned nOps = op->getNumOperands();
+    int64_t ls = mm.getLhsSlot(), rs = mm.getRhsSlot(), ds = mm.getDstSlot();
+    if (ls < 0 || rs < 0 || ds < 0 || ls >= nOps || rs >= nOps || ds >= nOps ||
+        ds == ls || ds == rs)
+      return failure();
+    auto lTy = dyn_cast<MemRefType>(op->getOperand(ls).getType());
+    auto rTy = dyn_cast<MemRefType>(op->getOperand(rs).getType());
+    auto dTy = dyn_cast<MemRefType>(op->getOperand(ds).getType());
+    if (!lTy || !rTy || !dTy || lTy.getRank() < 2 || lTy.getRank() > 3 ||
+        rTy.getRank() < 2 || rTy.getRank() > 3 || dTy.getRank() < 2 ||
+        dTy.getRank() > 3)
+      return failure();
+    Type elem = lTy.getElementType();
+    if (elem != rTy.getElementType() || elem != dTy.getElementType() ||
+        mm.getInDtype() != mm.getOutDtype())
+      return failure();
+    int32_t dt = mm.getInDtype();
+    bool dtOk = (dt == 1 && elem.isF16()) || (dt == 2 && elem.isF32()) ||
+                (dt == 17 && elem.isBF16());
+    return success(dtOk && mm.getBatch() > 0 && mm.getM() > 0 &&
+                   mm.getN() > 0 && mm.getK() > 0 && mm.getM() <= INT_MAX &&
+                   mm.getN() <= INT_MAX && mm.getK() <= INT_MAX);
+  }
+  LogicalResult verifyLayoutAndAddressSpace(Operation *op) const {
+    auto mm = cast<CnnlMatmulOp>(op);
+    return success(hasMemSpace(op->getOperand(mm.getLhsSlot()), 0) &&
+                   hasMemSpace(op->getOperand(mm.getRhsSlot()), 0) &&
+                   hasMemSpace(op->getOperand(mm.getDstSlot()), 0));
+  }
+};
+
+struct CnnlRowContract
+    : public compilerinfra::ContractOpInterface::ExternalModel<
+          CnnlRowContract, CnnlRowOp> {
+  Type getAccumulatorType(Operation *op) const {
+    if (cast<CnnlRowOp>(op).getKind() == "transpose")
+      return {};
+    return Float32Type::get(op->getContext());
+  }
+  arith::FastMathFlags getRequiredFastMath(Operation *op) const {
+    StringRef k = cast<CnnlRowOp>(op).getKind();
+    if (k == "softmax")
+      return arith::FastMathFlags::afn | arith::FastMathFlags::arcp |
+             arith::FastMathFlags::reassoc;
+    if (k == "layer_norm")
+      return arith::FastMathFlags::afn | arith::FastMathFlags::reassoc;
+    return arith::FastMathFlags::none;
+  }
+  LogicalResult verifyShapeAndTypes(Operation *op) const {
+    auto rop = cast<CnnlRowOp>(op);
+    StringRef k = rop.getKind();
+    if (k == "transpose") {
+      if (op->getNumOperands() != 2)
+        return failure();
+      auto x = dyn_cast<MemRefType>(op->getOperand(0).getType());
+      auto y = dyn_cast<MemRefType>(op->getOperand(1).getType());
+      if (!x || !y || x.getRank() != 2 || y.getRank() != 2 ||
+          x.getElementType() != y.getElementType())
+        return failure();
+      int32_t eb = rop.getElemBytes();
+      return success((eb == 1 || eb == 2 || eb == 4) &&
+                     static_cast<int32_t>(x.getElementTypeBitWidth()) ==
+                         eb * 8);
+    }
+    int32_t dt = rop.getDtypeCode();
+    auto matchesDt = [&](Type t) {
+      return (dt == 1 && t.isF16()) || (dt == 2 && t.isF32()) ||
+             (dt == 17 && t.isBF16());
+    };
+    if (k == "softmax") {
+      if (op->getNumOperands() != 2)
+        return failure();
+      auto x = dyn_cast<MemRefType>(op->getOperand(0).getType());
+      auto y = dyn_cast<MemRefType>(op->getOperand(1).getType());
+      return success(x && y && x.getRank() == 2 && y.getRank() == 2 &&
+                     x.getElementType() == y.getElementType() &&
+                     matchesDt(x.getElementType()));
+    }
+    if (k == "layer_norm") {
+      if (op->getNumOperands() != 5 || !op->getOperand(4).getType().isF32())
+        return failure();
+      auto x = dyn_cast<MemRefType>(op->getOperand(0).getType());
+      auto g = dyn_cast<MemRefType>(op->getOperand(1).getType());
+      auto b = dyn_cast<MemRefType>(op->getOperand(2).getType());
+      auto y = dyn_cast<MemRefType>(op->getOperand(3).getType());
+      return success(x && g && b && y && x.getRank() == 2 && g.getRank() == 1 &&
+                     b.getRank() == 1 && y.getRank() == 2 &&
+                     x.getElementType() == g.getElementType() &&
+                     x.getElementType() == b.getElementType() &&
+                     x.getElementType() == y.getElementType() &&
+                     matchesDt(x.getElementType()));
+    }
+    return failure();
+  }
+  LogicalResult verifyLayoutAndAddressSpace(Operation *op) const {
+    for (Value v : op->getOperands())
+      if (isa<MemRefType>(v.getType()) && !hasMemSpace(v, 0))
+        return failure();
+    return success();
+  }
+};
+
 struct AddressLinearModel
     : public compilerinfra::AddressOpInterface::ExternalModel<
           AddressLinearModel, AddressOp> {
@@ -598,6 +708,26 @@ void PhiloxUniformOp::getEffects(EffectList &effects) {
   addReadWrite(effects, op, 1);
 }
 
+void CnnlMatmulOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  addRead(effects, op, static_cast<unsigned>(getLhsSlot()));
+  addRead(effects, op, static_cast<unsigned>(getRhsSlot()));
+  addWrite(effects, op, static_cast<unsigned>(getDstSlot()));
+}
+
+void CnnlRowOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  if (getKind() == "layer_norm") {
+    addRead(effects, op, 0);
+    addRead(effects, op, 1);
+    addRead(effects, op, 2);
+    addWrite(effects, op, 3);
+  } else {
+    addRead(effects, op, 0);
+    addWrite(effects, op, 1);
+  }
+}
+
 void SymbolOp::inferResultRanges(ArrayRef<ConstantIntRanges>,
                                  SetIntRangeFn setResultRange) {
   StringRef sym = getName();
@@ -781,6 +911,8 @@ void BangcSrcDialect::initialize() {
   SummaryMergeOp::attachInterface<SummaryMergeContract>(*ctx);
   PhiloxUniformOp::attachInterface<I32AccContract<PhiloxUniformOp>>(*ctx);
   PhiloxAtOp::attachInterface<I32AccContract<PhiloxAtOp>>(*ctx);
+  CnnlMatmulOp::attachInterface<CnnlMatmulContract>(*ctx);
+  CnnlRowOp::attachInterface<CnnlRowContract>(*ctx);
   AddressOp::attachInterface<AddressLinearModel>(*ctx);
   AddressOp::attachInterface<AddressTiledAccessModel>(*ctx);
 }

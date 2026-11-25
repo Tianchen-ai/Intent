@@ -2,7 +2,7 @@ compilerinfra_target(kir levels/algorithm/kir)
 compilerinfra_target(dsa levels/storage/dsa)
 compilerinfra_unit(SOURCES
     ir/Dialect.cpp ir/Implementations.cpp transforms/NarrowAddress.cpp
-    cost/Transfers.cpp cost/Matrix.cpp capabilities/Rows.cpp
+    cost/Transfers.cpp cost/Matrix.cpp capabilities/Rows.cpp capabilities/CNNL.cpp
     legalize/Bind.cpp legalize/Rows.cpp legalize/Matrix.cpp legalize/Ordered.cpp legalize/VerifyRows.cpp
     emit/Rows.cpp
   LINK_LIBRARIES ${dsa} ${kir}

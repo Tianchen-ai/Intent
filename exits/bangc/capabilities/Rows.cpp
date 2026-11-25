@@ -50,9 +50,14 @@ capabilities(const llvm::json::Object &opts) {
            matrixPrivateBytes(t.m, t.n, t.k, t.operation) >
                std::min<int64_t>(*nram / 3 * 2, 512 * 1024);
   });
+  if (opts.getBoolean("cnnl_runtime").value_or(true))
+    profile.features.insert("cnnl_runtime");
   matrices->estimate="exits/bangc::matrix-transfer";
   if(auto e=profile.services.provide<intentdsl::dsa::MatrixStorage>(
-      std::make_shared<intentdsl::dsa::MatrixStorage>(intentdsl::dsa::MatrixStorage{matrixPrivateBytes, wram.value_or(0)})))return e;
+      std::make_shared<intentdsl::dsa::MatrixStorage>(intentdsl::dsa::MatrixStorage{
+          matrixPrivateBytes, wram.value_or(0),
+          "exits/bangc::cnnl-matmul-f16", "exits/bangc::cnnl-matmul-ftz",
+          "exits/bangc::cnnl-matmul-cost"})))return e;
   if(auto e=profile.services.provide<intentdsl::block::MatrixTarget>(matrices))return e;
   if(auto error=caps->bind(opts))return error;
   caps->storeSectorBytes = 128;
@@ -67,7 +72,9 @@ capabilities(const llvm::json::Object &opts) {
   auto resource =
       std::make_shared<intentdsl::dsa::LocalSupply>(intentdsl::dsa::LocalSupply{
           *nram, std::min<int64_t>(*nram / 3 * 2, 512 * 1024), 128,
-          (*clusters) * (*cores), sizeof(float), true, 16, 12, 8192});
+          (*clusters) * (*cores), sizeof(float), true, 16, 12, 8192,
+          "exits/bangc::cnnl-transpose", "exits/bangc::cnnl-softmax",
+          "exits/bangc::cnnl-layer-norm", "exits/bangc::cnnl-row-cost"});
   caps->stagedInputBudget=std::min(resource->capacity,resource->budget);
   if (auto err = profile.services.provide<intentdsl::block::OwnerMachine>(
           std::make_shared<intentdsl::block::OwnerMachine>(

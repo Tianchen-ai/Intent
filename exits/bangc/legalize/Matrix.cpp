@@ -2624,6 +2624,64 @@ struct MatrixLowerer {
     Block *deviceBlk = b.createBlock(&prog->getRegion(1));
     Block *hostBlk = b.createBlock(&prog->getRegion(2));
 
+    if (auto lib = setup.getAttrOfType<StringAttr>("library_impl")) {
+      auto plan = intentdsl::dsa::matchLibraryMatrix(p, profile);
+      if (!plan || plan->impl != lib.getValue())
+        return p.dot.emitError("external CNNL matrix plan mismatch");
+      prog->setAttr("cnnl", b.getUnitAttr());
+      b.setInsertionPointToStart(hostBlk);
+      OperationState cs(loc, "bangc_src.cnnl_matmul");
+      cs.addOperands(fn.getArguments());
+      cs.addAttribute("lhs_slot", b.getI64IntegerAttr(plan->lhsSlot));
+      cs.addAttribute("rhs_slot", b.getI64IntegerAttr(plan->rhsSlot));
+      cs.addAttribute("dst_slot", b.getI64IntegerAttr(plan->dstSlot));
+      cs.addAttribute("batch", b.getI64IntegerAttr(plan->batch));
+      cs.addAttribute("m", b.getI64IntegerAttr(plan->m));
+      cs.addAttribute("n", b.getI64IntegerAttr(plan->n));
+      cs.addAttribute("k", b.getI64IntegerAttr(plan->k));
+      cs.addAttribute("trans_a", b.getI32IntegerAttr(plan->transA));
+      cs.addAttribute("trans_b", b.getI32IntegerAttr(plan->transB));
+      cs.addAttribute("lhs_batch_stride",
+                      b.getI64IntegerAttr(plan->lhsBatchStride));
+      cs.addAttribute("rhs_batch_stride",
+                      b.getI64IntegerAttr(plan->rhsBatchStride));
+      cs.addAttribute("dst_batch_stride",
+                      b.getI64IntegerAttr(plan->dstBatchStride));
+      cs.addAttribute("in_dtype", b.getI32IntegerAttr(plan->inDtype));
+      cs.addAttribute("out_dtype", b.getI32IntegerAttr(plan->outDtype));
+      cs.addAttribute("ci.implementation", lib);
+      b.create(cs);
+
+      uint64_t grid = llvm::divideCeil(uint64_t(shapeM), uint64_t(bm)) *
+                      llvm::divideCeil(uint64_t(shapeN), uint64_t(bn)) *
+                      uint64_t(shapeB);
+      auto abiJson = llvm::json::parse(
+          fn->getAttrOfType<StringAttr>("kir.abi").getValue());
+      if (!abiJson)
+        return llvm::consumeError(abiJson.takeError()), failure();
+      p.domain.erase();
+      llvm::SmallVector<char> metadata;
+      llvm::raw_svector_ostream os(metadata);
+      os << llvm::json::Value(llvm::json::Object{
+          {"version", 2},
+          {"source", ""},
+          {"cnnl", true},
+          {"abi", std::move(*abiJson)},
+          {"domain", intentdsl::publishDomain(fn)},
+          {"grid", llvm::json::Array{int64_t(grid), 1, 1}},
+          {"guard", llvm::json::Object{{"min_width", 0}, {"max_width", nullptr}}},
+          {"rows",
+           llvm::json::Array{llvm::json::Object{{"id", 0},
+                                                {"rows", bm},
+                                                {"width", bn},
+                                                {"pitch", bk},
+                                                {"bytes", scratchBytes},
+                                                {"tasks", tasks}}}}});
+      m->setAttr("bangc_src.package",
+                 b.getStringAttr(StringRef(metadata.data(), metadata.size())));
+      return success();
+    }
+
     b.setInsertionPointToStart(deviceBlk);
     OperationState dkState(loc, "bangc_src.device_kernel");
     dkState.addOperands(fn.getArguments());
