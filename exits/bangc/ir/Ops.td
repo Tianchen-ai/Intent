@@ -38,6 +38,16 @@ def WramBufferOp : BangcOp<"wram_buffer",
   let results = (outs AnyMemRef:$buffer);
 }
 
+def SramBufferOp : BangcOp<"sram_buffer",
+                           [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments = (ins I64Attr:$elements);
+  let results = (outs AnyMemRef:$buffer);
+}
+
+def IsMpuOp : BangcOp<"is_mpu", [Pure]> {
+  let results = (outs I1:$flag);
+}
+
 def WramConvOp : BangcOp<"wram_conv",
                          [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let arguments = (ins Variadic<AnyType>:$inputs, I64Attr:$bm, I64Attr:$bn,
@@ -95,7 +105,8 @@ def DeviceKernelOp : BangcOp<"device_kernel", [SingleBlock, NoTerminator]> {
 }
 
 def HostEnqueueOp : BangcOp<"host_enqueue"> {
-  let arguments = (ins Variadic<AnyType>:$args);
+  let arguments = (ins Variadic<AnyType>:$args,
+                       OptionalAttr<StrAttr>:$func_type);
 }
 
 def NramAllocOp : BangcOp<"nram_alloc",
@@ -245,7 +256,8 @@ def ScalarMathOp : BangcOp<"scalar_math", [Pure]> {
 def RowReduceOp : BangcOp<"row_reduce",
                           [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let arguments = (ins AnyMemRef:$out, AnyMemRef:$scratch, AnyMemRef:$input,
-                       I64:$members, I64:$pitch, I64:$live, StrAttr:$algebra);
+                       I64:$members, I64:$pitch, I64:$live, StrAttr:$algebra,
+                       DefaultValuedStrAttr<StrAttr, "full">:$mode);
 }
 
 def RowExpOp : BangcOp<"row_exp",
@@ -374,9 +386,7 @@ def VecSqrtRnOp : BangcOp<"vec_sqrt_rn",
 
 def VecDivRnOp : BangcOp<"vec_div_rn",
                          [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
-  let arguments = (ins AnyMemRef:$dst, AnyType:$lhs, AnyType:$rhs,
-                       AnyMemRef:$scratch, I64:$live, I64:$lanes,
-                       StrAttr:$mode);
+  let arguments = (ins Variadic<AnyType>:$inputs, StrAttr:$mode);
 }
 
 def Bf16ScalarOp : BangcOp<"bf16_scalar", [Pure]> {

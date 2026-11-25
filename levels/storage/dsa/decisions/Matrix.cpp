@@ -220,9 +220,15 @@ bool supportsSupply(block::MatrixAccess &a, Attribute v,
   }
   auto count = dyn_cast_or_null<IntegerAttr>(v);
   auto cap = p.services.get<LocalSupply>();
-  return count && cap && p.services.get<MatrixStorage>() && count.getInt() > 0 &&
-         count.getInt() <= cap->consumers &&
-         bytes(a,p) <= std::min(cap->capacity, cap->budget);
+  auto ms = p.services.get<MatrixStorage>();
+  if (!count || !cap || !ms || count.getInt() <= 0 ||
+      count.getInt() > cap->consumers)
+    return false;
+  if (a.tile[0] == 512 && a.tile[1] == 512 &&
+      (ms->sramBytes <= 0 ||
+       count.getInt() != ms->clusters * ms->coresPerCluster))
+    return false;
+  return bytes(a, p) <= std::min(cap->capacity, cap->budget);
 }
 } // namespace
 LogicalResult verifyMatrix(func::FuncOp fn, const TargetProfile &p,
@@ -331,12 +337,17 @@ void matrixSupply(Unit &u) {
   s.enumerate = [](Operation *op, const TargetProfile &p, AnalysisManager &)
       -> llvm::Expected<std::vector<StructuralCandidate>> {
     auto cap = p.services.get<dsa::LocalSupply>();
+    block::MatrixAccess a(cast<func::FuncOp>(op));
     std::vector<StructuralCandidate> cs;
-    for (auto n = cap->consumers; n > 0; n /= 2)
+    for (auto n = cap->consumers; n > 0; n /= 2) {
+      auto attr = Builder(op->getContext()).getI64IntegerAttr(n);
+      if (!dsa::supportsSupply(a, attr, p))
+        continue;
       cs.push_back({"private-" + std::to_string(n),
                     "private-panels",
-                    Builder(op->getContext()).getI64IntegerAttr(n),
+                    attr,
                     {"complete-private-tiles"}});
+    }
     return cs;
   };
   u.strategies.push_back({std::move(s), COMPILERINFRA_SOURCE});

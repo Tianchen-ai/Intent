@@ -93,6 +93,9 @@ struct PlanRegistry {
 };
 
 static PlanRegistry g_registry;
+static __thread CachedPlan *tls_last_plan = nullptr;
+static uint64_t g_epoch = 1;
+static __thread uint64_t tls_epoch = 0;
 
 static size_t dtypeBytes(int code) {
   if (code == CNNL_DTYPE_HALF || code == CNNL_DTYPE_BFLOAT16 ||
@@ -105,15 +108,23 @@ static size_t dtypeBytes(int code) {
 }
 
 static CachedPlan *findLocked(const PlanKey &k) {
-  for (CachedPlan *p = g_registry.head; p; p = p->next)
-    if (p->key == k)
+  if (tls_epoch == g_epoch && tls_last_plan && tls_last_plan->key == k)
+    return tls_last_plan;
+  for (CachedPlan *p = g_registry.head; p; p = p->next) {
+    if (p->key == k) {
+      tls_last_plan = p;
+      tls_epoch = g_epoch;
       return p;
+    }
+  }
   return nullptr;
 }
 } // namespace
 
 extern "C" void intent_cnnl_cleanup() {
   pthread_mutex_lock(&g_registry.mu);
+  ++g_epoch;
+  tls_last_plan = nullptr;
   g_registry.clearLocked();
   pthread_mutex_unlock(&g_registry.mu);
 }

@@ -6,31 +6,33 @@
 
 MLU370 没有硬件统一缓存替内核自动重排数据，执行性能完全由以下三项显式决定支配：
 
-1. **片上存储归属与预算**：每个 IPU 核具备独立的私有 NRAM（768 KiB，预算上限 `min(2/3 * NRAM, 512 KiB)`）与矩阵滤波空间 WRAM（512 KiB）。NRAM 承载流式输入槽、归约暂存与写回缓冲；WRAM 承载 64 通道卷积滤波块（`__bang_conv` / `__bang_conv_partial`）。
-2. **DMA 供数与计算重叠**：1D/2D `__memcpy_async` 可将 GDRAM↔NRAM 传输与向量/矩阵计算重叠；但双缓冲会使输入与写回槽占用翻倍，缩小单步宽度或批大小，因此深度 1 与深度 2 必须根据实际搬运体积与计算强度比较。
+1. **片上存储归属与预算**：每个 IPU 核具备独立的私有 NRAM（768 KiB，预算上限 `min(2/3 * NRAM, 512 KiB)`）与矩阵滤波空间 WRAM（512 KiB）；每个 4 核 Cluster 具备共享 SRAM（MLU370 为 4 MiB，`cnrtFuncTypeUnion4` 含 1 个专职搬运 MPU 与 4 个计算 IPU）。NRAM 承载流式输入槽、归约暂存与写回缓冲；WRAM 承载 64 通道卷积滤波块（`__bang_conv` / `__bang_conv_partial`）；Cluster SRAM 承载跨核复用的大矩阵块与协作解码面板（`512×512` 稠密/缩放收缩与 `256×64` 分组权重量化收缩），由 MPU 异步执行 `GDRAM→SRAM` 双缓冲预取并与 4 个 IPU 的 Split-M `4×64` WRAM 发射重叠。
+2. **DMA 供数与计算重叠**：1D/2D `__memcpy_async` 可将 GDRAM↔NRAM 或 GDRAM↔SRAM 传输与向量/矩阵计算重叠；但双缓冲会使输入与写回槽占用翻倍，缩小单步宽度或批大小，因此深度 1 与深度 2 必须根据实际搬运体积与计算强度比较。
 3. **严格 IEEE-754 合同与快速路径边界**：
-   - `div` / `sqrt` / `f16` 商由无条件对称精确残差端点认证保证 0 ULP，快路走向量指令，未过认证的极少数通道走标量精确修复；
+   - `div` / `sqrt` / `f16` 商由无条件对称精确残差端点认证保证 0 ULP（含跨多行批处理的 `group_div_scalar_rn` 与无拷贝双精度残差 `BANG_TWODIFF_SE`），快路走向量指令，未过认证的极少数通道走标量精确修复；
    - `exp` / `exp2` 在安全指数窗内走 `__bang_active_exphp`，窗外走标量 `expf` / `exp2f` 修复；
-   - BF16 矩阵收缩在默认 `denormal-fp-math=ieee,ieee` 下先由 `bf16_panel_ok` 检查正规指数窗 `[127-48, 127+46]`，通过则走 WRAM 矩阵引擎，否则回退至 NRAM IEEE 点积；当函数显式授予次正规冲零许可时直接走 WRAM 矩阵引擎。
+   - BF16 矩阵收缩在默认 `denormal-fp-math=ieee,ieee` 下先由 `bf16_panel_ok`（单次分块按位或归并 `__bang_count`）检查正规指数窗 `[127-48, 127+46]`，通过则走 WRAM 矩阵引擎，否则回退至 NRAM/WRAM 精确 IEEE 点积；当函数显式授予次正规冲零许可时直接走 WRAM 矩阵引擎。
 
 ## 2. 候选空间（Decision Families）
 
 | 决策族 | 位置 | 枚举候选 | 影响范围 |
 |---|---|---|---|
 | `levels/execution/block::structure` | `block@decided` | `resident` / `stream`、行宽 `W ∈ [1..4096]`、行组 `R ∈ {1,2,16,32,64}`、`private-merge` 直方图 | 任务切分与片上驻留拓扑 |
-| `levels/storage/dsa::supply` | `dsa@formed` → `dsa@supplied` | 深度 `depth ∈ {1, 2}`、共享只读 1D 向量驻留 `persistent`、异步写回 `async_writeback`、临时片段区间复用 `reuse_temporaries`、批大小 `batch`，以及 `library` 档位下的外部库供数 `library-cnnl` | 行与归约程序的 NRAM 槽位、DMA 流水与整算子库调用 |
-| `levels/storage/dsa::panel-supply` | `dsa@formed` → `dsa@supplied` | 符合 NRAM/WRAM 容量的矩阵块 `(BM, BN=64, BK)`（`8×64×64` 至 `128×64×256`）及参与者核数，以及 `library` 档位下的 `library-cnnl` | 稠密、批处理、路由、窗口与量化收缩 |
+| `levels/storage/dsa::supply` | `dsa@formed` → `dsa@supplied` | 深度 `depth ∈ {1, 2}`、共享只读 1D 向量驻留 `persistent`、异步写回 `async_writeback`、临时片段区间复用 `reuse_temporaries`、批大小 `batch ∈ {1,2,4}`（含 `indexed_tile_read` 索引行收集批处理），以及 `library` 档位下的外部库供数 `library-cnnl` | 行与归约程序的 NRAM 槽位、DMA 流水与整算子库调用 |
+| `levels/storage/dsa::panel-supply` | `dsa@formed` → `dsa@supplied` | 单核私有块 `(BM, BN=64, BK)`（`8×64×64` 至 `128×64×256`）、`Union4` 簇级 SRAM 协作块（稠密 `512×512×256`、块缩放 `512×512×128`、分组权重量化 `256×64×128`）及参与者核数，以及 `library` 档位下的 `library-cnnl` | 稠密、批处理、路由、窗口、融合尾声与量化收缩 |
 | `levels/storage/dsa::ordered-supply` | `dsa@formed` → `dsa@supplied` | `panel-fold`（片上双遍 QK/PV WRAM 面板折叠）、`packed`（多 owner 打包流 `pack ∈ {2,4,8}`）、`general`（通用标量/向量流） | 注意力、线性注意力、Mamba/Gated Delta 等有序程序 |
 | `exits/bangc::narrow-proven-addresses` | `bangc@callable` | 经 `proveNarrowAddress` 白名单证明不溢出的 32 位有符号坐标乘步长 vs 64 位回退 | GDRAM/NRAM 地址计算吞吐 |
 
-### 外部库档位（CNNL `reuse="library"`）
+### 外部库档位（`exits.bangc.reuse = "library"` 默认）
 
-`product.json` 将寒武纪 CNNL（`libcnnl.so` `>=1.15,<3`）登记为 `exits/bangc` 拥有的可选依赖 `cnnl`（探测钩子 `exits/bangc::cnnl-library` 校验动态库版本与全部 26 个 C API 符号，集成至 `doctor`）。`exits/bangc` 注册 5 项 `Reuse::Library` / `ImplementationSource::External` 类型化合同，默认 `reuse="vendor"` 自动以 `exceeds reuse=vendor` 排除；显式开启 `reuse="library"` 时，仅在作者数值许可与布局前提满足时与 `vendor` 候选同场按代价竞选（高档位允许低档位在小形状上胜出）：
-- `exits/bangc::cnnl-matmul-f16`（`cnnlMatMul_v2`，FP32 累加，`ALLOW_TF32=0`，严格保留 FP16 次正规数）；
-- `exits/bangc::cnnl-matmul-ftz`（BF16/FP32，要求函数级 `denormal-fp-math` 冲零许可）；
+MLU370 没有类似 oneDNN BRGeMM 微核的厂商微核接口，CNNL 是唯一可复用的厂商整算子库实现。因此产品配置（`cmake/default.json`）与 `exits/bangc` 目标能力仅对 `bangc` 出口将默认复用档位设为 `library`（其余出口 `triton`、`cutile`、`mojo`、`weft` 保持 `vendor`；顶层显式传入 `derive({"reuse": "vendor"})` 或 `"native"` 时仍按框架规则统一覆盖所有出口）。
+
+`product.json` 将寒武纪 CNNL（`libcnnl.so` `>=1.15,<3`）登记为 `exits/bangc` 拥有的可选依赖 `cnnl`（探测钩子 `exits/bangc::cnnl-library` 校验动态库版本与全部 26 个 C API 符号，集成至 `doctor`）。`exits/bangc` 注册 5 项 `Reuse::Library` / `ImplementationSource::External` 类型化合同，默认严格 `source` 数值语义保持不变，仅在作者数值许可与布局前提满足时与原生候选同场按代价竞选（`explain` 显式展示选中 `library-cnnl` 或被数值前提拒绝的原因）：
+- `exits/bangc::cnnl-matmul-f16`（`cnnlMatMul_v2`，FP32 累加，`ALLOW_TF32=0`，严格保留 FP16 次正规数；默认选中大形状稠密 GEMM/QKV，带融合尾声或量化解码的算子自动走 `Union4` 原生路径）；
+- `exits/bangc::cnnl-matmul-ftz`（BF16/FP32，要求函数级 `denormal-fp-math` 冲零许可；未授许可时自动走带 `bf16_panel_ok` 守卫的原生路径）；
 - `exits/bangc::cnnl-transpose`（`cnnlTranspose_v2`，8/16/32 位逐位精确二维转置）；
-- `exits/bangc::cnnl-softmax`（`cnnlSoftmaxForward_v2`，要求 `fastmath` `afn,arcp,reassoc`）；
-- `exits/bangc::cnnl-layer-norm`（`cnnlLayerNormForward`，要求 `fastmath` `afn,reassoc`）。
+- `exits/bangc::cnnl-softmax`（`cnnlSoftmaxForward_v2`，要求 `fastmath` `afn,arcp,reassoc`；默认无 `fastmath` 时仍走 0-ULP 原生路径）；
+- `exits/bangc::cnnl-layer-norm`（`cnnlLayerNormForward`，要求 `fastmath` `afn,reassoc`；默认无 `fastmath` 时仍走 0-ULP 原生路径）。
 
 ## 3. 代价项与局部估算器
 

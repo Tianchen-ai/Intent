@@ -1,5 +1,6 @@
 #pragma once
 #include "compilerinfra/Assembly.h"
+#include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 #include "intentdsl/levels/storage/dsa/ir/Matrix.h"
 namespace CI_UNIT_NAMESPACE {
 inline mlir::LogicalResult bindMatrix(mlir::func::FuncOp fn, unsigned phase,
@@ -27,8 +28,33 @@ inline mlir::LogicalResult bindMatrix(mlir::func::FuncOp fn, unsigned phase,
       return setup.emitError("missing matrix queue entry");
     return success();
   }
-  if (!field(setup, "bangc.space", b.getStringAttr("private.nram")) ||
-      !field(setup, "bangc.worker", b.getStringAttr("task-stride")))
+  bool isClusterTile = (p.tile[0] == 512 && p.tile[1] == 512);
+  auto ms = profile.services.get<intentdsl::dsa::MatrixStorage>();
+  bool isClusterRowShare = false;
+  if (!isClusterTile && ms && ms->sramBytes >= 262144 && ms->clusters == 4 &&
+      ms->coresPerCluster == 4 &&
+      setup.getAttrOfType<IntegerAttr>("participants").getInt() == 16 &&
+      p.dot.getName().stripDialect() == "quant_contract" && !p.routed()) {
+    if (const auto *qSpec = intentdsl::kir::quantFormatSpec(p.dot);
+        qSpec &&
+        qSpec->roleLayout ==
+            intentdsl::kir::QuantRoleLayout::GroupedWeightRhs &&
+        p.tile[1] == 64 &&
+        llvm::divideCeil(uint64_t(p.shape[1]), uint64_t(p.tile[1])) % 4 == 0 &&
+        p.stride(p.dot.getOperand(0), 1) == 1)
+      isClusterRowShare = true;
+  }
+  if (isClusterTile &&
+      (!ms || ms->sramBytes < 2097152 || ms->clusters != 4 ||
+       ms->coresPerCluster != 4 ||
+       setup.getAttrOfType<IntegerAttr>("participants").getInt() != 16))
+    return setup.emitError("cluster-SRAM matrix tile requires 4x4 Union4 MLU");
+  StringRef spaceName =
+      (isClusterTile || isClusterRowShare) ? "cluster.sram" : "private.nram";
+  StringRef workerName =
+      (isClusterTile || isClusterRowShare) ? "cluster-union4" : "task-stride";
+  if (!field(setup, "bangc.space", b.getStringAttr(spaceName)) ||
+      !field(setup, "bangc.worker", b.getStringAttr(workerName)))
     return setup.emitError("matrix task or local storage mismatch");
   if (phase >= 1) {
     auto a = p.dot.getOperand(0);
@@ -43,7 +69,7 @@ inline mlir::LogicalResult bindMatrix(mlir::func::FuncOp fn, unsigned phase,
     if (!field(p.dot, "bangc.matrix", b.getStringAttr(primitive)))
       return p.dot.emitError("incorrect matrix microkernel");
     if ((primitive == "wram-conv" || primitive == "exact-i8-conv") &&
-        p.tile[1] != 64)
+        p.tile[1] != 64 && !isClusterTile)
       return p.dot.emitError(
           "native filter copy implements one 64-channel weight bank");
     bool allowFtz =

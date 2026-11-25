@@ -125,7 +125,8 @@ bool batchableInstances(func::FuncOp fn) {
         ArrayRef<StringRef>{
             "rows",     "columns",          "pid",          "active",
             "zero",     "load",             "store",        "window",
-            "member_axis", "copy_in",       "await",        "write_back",
+            "member_axis", "lookup_axis",   "indexed_tile_read",
+            "copy_in",  "await",            "write_back",
             "issued",   "drain",            "complete",     "yield",
             "phase",    "range",            "slot_zero",    "iterate",
             "issue_if_in_bounds",           "wait_slot",    "next",

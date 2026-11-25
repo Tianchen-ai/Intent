@@ -146,6 +146,12 @@ struct MatrixLowerer {
         ->getResult(0);
   }
 
+  Value sramBuf(Type elemTy, int64_t elements) {
+    return makeOp("sram_buffer", {}, {memSpacePtr(b.getContext(), elemTy, 4)},
+                  {b.getNamedAttr("elements", b.getI64IntegerAttr(elements))})
+        ->getResult(0);
+  }
+
   Value localVar(Type elemTy, int64_t extent) {
     return makeOp("local_var", {}, {memSpacePtr(b.getContext(), elemTy, 2)},
                   {b.getNamedAttr("extent",
@@ -194,17 +200,19 @@ struct MatrixLowerer {
     makeOp("store_scalar", {ptr, idx, val});
   }
 
-  void memcpy1D(Value dst, Value src, Value elems, StringRef dir) {
+  void memcpy1D(Value dst, Value src, Value elems, StringRef dir,
+                bool async = false) {
     makeOp("memcpy_1d", {dst, src, elems}, {},
            {b.getNamedAttr("direction", b.getStringAttr(dir)),
-            b.getNamedAttr("async", b.getBoolAttr(false))});
+            b.getNamedAttr("async", b.getBoolAttr(async))});
   }
 
   void memcpy2D(Value dst, Value src, Value width, Value dstStride,
-                Value srcStride, Value segNum, StringRef dir) {
+                Value srcStride, Value segNum, StringRef dir,
+                bool async = false) {
     makeOp("memcpy_2d", {dst, src, width, dstStride, srcStride, segNum}, {},
            {b.getNamedAttr("direction", b.getStringAttr(dir)),
-            b.getNamedAttr("async", b.getBoolAttr(false))});
+            b.getNamedAttr("async", b.getBoolAttr(async))});
   }
 
   void sync(StringRef dom) {
@@ -621,7 +629,10 @@ struct MatrixLowerer {
                                             Value nr, Value nc, Value quantLut,
                                             Value quantRecLut,
                                             Value qActAllF32, Value dsAll,
-                                            Value zeroAll) {
+                                            Value zeroAll,
+                                            Value sharedLhsSram0 = {},
+                                            Value sharedLhsSram1 = {},
+                                            Value useSramLhs = {}) {
     const auto *spec = intentdsl::kir::quantFormatSpec(p.dot);
     if (!spec)
       return p.dot.emitError("missing quantized format descriptor");
@@ -1779,34 +1790,62 @@ struct MatrixLowerer {
           loc, b.create<arith::SubIOp>(loc, cI64(shapeK), kk), cI64(bk));
       Value zeroLhs =
           b.create<arith::ConstantOp>(loc, b.getZeroAttr(lhsElem));
-      Value partialLhs = b.create<arith::OrIOp>(
-          loc,
-          b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, nr, cI64(bm)),
-          b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, nk, cI64(bk)));
-      ifThen(partialLhs, [&]() { fillVec(leftBuf, cI64(bm * bk), zeroLhs); });
-      if (p.stride(lhsView, 1) == 1) {
-        Value lBase = globalPtr(lhsView, {r, kk}, lhsElem);
-        ifThenElse(
-            b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, nr, cI64(1)),
-            {}, [&]() { memcpy1D(leftBuf, lBase, nk, "GDRAM2NRAM"); },
-            [&]() {
-              memcpy2D(leftBuf, lBase, nk, cI64(bk),
-                       cI64(p.stride(lhsView, 0)),
-                       b.create<arith::SubIOp>(loc, nr, cI64(1)),
-                       "GDRAM2NRAM");
+      auto stageLhsFromGdram = [&](bool isAsync) {
+        Value partialLhs = b.create<arith::OrIOp>(
+            loc,
+            b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, nr,
+                                    cI64(bm)),
+            b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, nk,
+                                    cI64(bk)));
+        ifThen(partialLhs, [&]() { fillVec(leftBuf, cI64(bm * bk), zeroLhs); });
+        if (p.stride(lhsView, 1) == 1) {
+          Value lBase = globalPtr(lhsView, {r, kk}, lhsElem);
+          ifThenElse(
+              b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, nr,
+                                      cI64(1)),
+              {},
+              [&]() { memcpy1D(leftBuf, lBase, nk, "GDRAM2NRAM", isAsync); },
+              [&]() {
+                memcpy2D(leftBuf, lBase, nk, cI64(bk),
+                         cI64(p.stride(lhsView, 0)),
+                         b.create<arith::SubIOp>(loc, nr, cI64(1)),
+                         "GDRAM2NRAM", isAsync);
+              });
+        } else {
+          forLoop(cI64(0), nr, cI64(1), [&](Value i) {
+            Value ri = b.create<arith::AddIOp>(loc, r, i);
+            forLoop(cI64(0), nk, cI64(1), [&](Value t) {
+              Value kt = b.create<arith::AddIOp>(loc, kk, t);
+              Value idx = b.create<arith::AddIOp>(
+                  loc, b.create<arith::MulIOp>(loc, i, cI64(bk)), t);
+              storeAt(leftBuf, idx,
+                      loadAt(globalPtr(lhsView, {ri, kt}, lhsElem), cI64(0),
+                             lhsElem));
             });
-      } else {
-        forLoop(cI64(0), nr, cI64(1), [&](Value i) {
-          Value ri = b.create<arith::AddIOp>(loc, r, i);
-          forLoop(cI64(0), nk, cI64(1), [&](Value t) {
-            Value kt = b.create<arith::AddIOp>(loc, kk, t);
-            Value idx = b.create<arith::AddIOp>(
-                loc, b.create<arith::MulIOp>(loc, i, cI64(bk)), t);
-            storeAt(leftBuf, idx,
-                    loadAt(globalPtr(lhsView, {ri, kt}, lhsElem), cI64(0),
-                           lhsElem));
           });
-        });
+        }
+      };
+
+      bool asyncRhs = useGrpSimd && p.stride(qwView, 1) == 1 &&
+                      bn % spec->packFactor == 0 && p.stride(scView, 1) == 1 &&
+                      (!spec->hasZeroView ||
+                       p.stride(p.dot.getOperand(3), 1) == 1);
+      if (sharedLhsSram0 && useSramLhs) {
+        ifThenElse(
+            useSramLhs, {},
+            [&]() {
+              Value sIdx = b.create<arith::DivSIOp>(loc, kk, cI64(bk));
+              Value isOdd = b.create<arith::CmpIOp>(
+                  loc, arith::CmpIPredicate::ne,
+                  b.create<arith::AndIOp>(loc, sIdx, cI64(1)), cI64(0));
+              Value curSram = b.create<arith::SelectOp>(loc, isOdd,
+                                                        sharedLhsSram1,
+                                                        sharedLhsSram0);
+              memcpy1D(leftBuf, curSram, cI64(bm * bk), "SRAM2NRAM", asyncRhs);
+            },
+            [&]() { stageLhsFromGdram(asyncRhs); });
+      } else {
+        stageLhsFromGdram(asyncRhs);
       }
 
       Value nPack = b.create<arith::DivSIOp>(
@@ -1819,12 +1858,12 @@ struct MatrixLowerer {
         Value qBase = globalPtr(qwView, {kk, cPackBase}, packElem);
         ifThenElse(
             b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, nk, cI64(1)),
-            {}, [&]() { memcpy1D(qwBuf, qBase, nPack, "GDRAM2NRAM"); },
+            {}, [&]() { memcpy1D(qwBuf, qBase, nPack, "GDRAM2NRAM", asyncRhs); },
             [&]() {
               memcpy2D(qwBuf, qBase, nPack, cI64(packCols),
                        cI64(p.stride(qwView, 0)),
                        b.create<arith::SubIOp>(loc, nk, cI64(1)),
-                       "GDRAM2NRAM");
+                       "GDRAM2NRAM", asyncRhs);
             });
       } else {
         forLoop(cI64(0), nk, cI64(1), [&](Value t) {
@@ -1855,11 +1894,11 @@ struct MatrixLowerer {
         ifThenElse(
             b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, numGrp,
                                     cI64(1)),
-            {}, [&]() { memcpy1D(scBuf, scBase, nc, "GDRAM2NRAM"); },
+            {}, [&]() { memcpy1D(scBuf, scBase, nc, "GDRAM2NRAM", asyncRhs); },
             [&]() {
               memcpy2D(scBuf, scBase, nc, cI64(bn), cI64(p.stride(scView, 0)),
                        b.create<arith::SubIOp>(loc, numGrp, cI64(1)),
-                       "GDRAM2NRAM");
+                       "GDRAM2NRAM", asyncRhs);
             });
       } else {
         forLoop(cI64(0), numGrp, cI64(1), [&](Value gLocal) {
@@ -1882,12 +1921,13 @@ struct MatrixLowerer {
           ifThenElse(
               b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, numGrp,
                                       cI64(1)),
-              {}, [&]() { memcpy1D(qzBuf, qzBase, nPack, "GDRAM2NRAM"); },
+              {},
+              [&]() { memcpy1D(qzBuf, qzBase, nPack, "GDRAM2NRAM", asyncRhs); },
               [&]() {
                 memcpy2D(qzBuf, qzBase, nPack, cI64(packCols),
                          cI64(p.stride(qzView, 0)),
                          b.create<arith::SubIOp>(loc, numGrp, cI64(1)),
-                         "GDRAM2NRAM");
+                         "GDRAM2NRAM", asyncRhs);
               });
         } else {
           forLoop(cI64(0), numGrp, cI64(1), [&](Value gLocal) {
@@ -1904,33 +1944,72 @@ struct MatrixLowerer {
           });
         }
       }
-      sync("io");
+      if (asyncRhs) {
+        sync("dram_to_nram");
+        if (sharedLhsSram0 && useSramLhs)
+          sync("sram_to_nram");
+      } else {
+        sync("io");
+      }
+
+      if (sharedLhsSram0 && useSramLhs) {
+        sync("cluster");
+        Value sIdx = b.create<arith::DivSIOp>(loc, kk, cI64(bk));
+        Value nxtKk = b.create<arith::AddIOp>(loc, kk, cI64(bk));
+        Value hasNext = b.create<arith::AndIOp>(
+            loc, useSramLhs,
+            b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, nxtKk,
+                                    cI64(shapeK)));
+        Value isMpu = makeOp("is_mpu", {}, {b.getI1Type()})->getResult(0);
+        ifThen(b.create<arith::AndIOp>(loc, isMpu, hasNext), [&]() {
+          Value isOdd = b.create<arith::CmpIOp>(
+              loc, arith::CmpIPredicate::ne,
+              b.create<arith::AndIOp>(loc, sIdx, cI64(1)), cI64(0));
+          Value nxtSram = b.create<arith::SelectOp>(loc, isOdd, sharedLhsSram0,
+                                                    sharedLhsSram1);
+          Value lNext = globalPtr(lhsView, {r, nxtKk}, lhsElem);
+          if (p.stride(lhsView, 0) == bk)
+            memcpy1D(nxtSram, lNext, cI64(bm * bk), "GDRAM2SRAM");
+          else
+            memcpy2D(nxtSram, lNext, cI64(bk), cI64(bk),
+                     cI64(p.stride(lhsView, 0)), cI64(bm - 1), "GDRAM2SRAM");
+        });
+      }
 
       if (useGrpSimd) {
-        Value kkMod =
-            b.create<arith::RemSIOp>(loc, kk, cI64(spec->blockElements));
-        SmallVector<int32_t, 8> lShifts(spec->laneBitShifts,
-                                        spec->laneBitShifts + 8);
-        makeOp("quant_decode_grouped_rhs",
-               {transBuf, qwBuf, scBuf, spec->hasZeroView ? qzBuf : qzDummy,
-                quantLut, idxScratch, workA, workB, nk, nc, cI64(bk), cI64(bn),
-                cI64(spec->blockElements), kkMod,
-                cI32(spec->hasZeroView ? 1 : 0)},
-               {},
-               {b.getNamedAttr("lane_shifts",
-                               b.getDenseI32ArrayAttr(lShifts))},
-               "quant-grouped-rhs");
-        Value accum =
-            b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, kk, cI64(0));
-        sync("compute");
-        memcpy1D(wFilter, transBuf, cI64(bk * bn), "NRAM2WRAM");
-        makeOp("wram_conv", {acc, leftBuf, wFilter, accum}, {},
-               {b.getNamedAttr("bm", b.getI64IntegerAttr(bm)),
-                b.getNamedAttr("bn", b.getI64IntegerAttr(bn)),
-                b.getNamedAttr("bk", b.getI64IntegerAttr(bk)),
-                b.getNamedAttr("mode", b.getStringAttr("f16"))},
-               "wram-conv-f16");
-        sync("compute");
+        auto runSimdDecode = [&]() {
+          Value kkMod =
+              b.create<arith::RemSIOp>(loc, kk, cI64(spec->blockElements));
+          SmallVector<int32_t, 8> lShifts(spec->laneBitShifts,
+                                          spec->laneBitShifts + 8);
+          makeOp("quant_decode_grouped_rhs",
+                 {transBuf, qwBuf, scBuf, spec->hasZeroView ? qzBuf : qzDummy,
+                  quantLut, idxScratch, workA, workB, nk, nc, cI64(bk),
+                  cI64(bn), cI64(spec->blockElements), kkMod,
+                  cI32(spec->hasZeroView ? 1 : 0)},
+                 {},
+                 {b.getNamedAttr("lane_shifts",
+                                 b.getDenseI32ArrayAttr(lShifts))},
+                 "quant-grouped-rhs");
+          Value accum = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne,
+                                                kk, cI64(0));
+          sync("compute");
+          memcpy1D(wFilter, transBuf, cI64(bk * bn), "NRAM2WRAM");
+          makeOp("wram_conv", {acc, leftBuf, wFilter, accum}, {},
+                 {b.getNamedAttr("bm", b.getI64IntegerAttr(bm)),
+                  b.getNamedAttr("bn", b.getI64IntegerAttr(bn)),
+                  b.getNamedAttr("bk", b.getI64IntegerAttr(bk)),
+                  b.getNamedAttr("mode", b.getStringAttr("f16"))},
+                 "wram-conv-f16");
+          sync("compute");
+        };
+        if (sharedLhsSram0 && useSramLhs) {
+          Value isMpu = makeOp("is_mpu", {}, {b.getI1Type()})->getResult(0);
+          ifThen(b.create<arith::XOrIOp>(loc, isMpu, cI1(true)), runSimdDecode);
+          sync("cluster");
+        } else {
+          runSimdDecode();
+        }
         return;
       }
 
@@ -2326,7 +2405,7 @@ struct MatrixLowerer {
                                  Value c, Value gVal, Value kk, Value nr,
                                  Value nc, Value nk, Value batchVal,
                                  Value chunkVal, Value headVal, Value groupVal,
-                                 Value lastVal) {
+                                 Value lastVal, bool async = false) {
     int64_t bm = p.tile[0], bn = p.tile[1], bk = p.tile[2];
     Value v = p.dot.getOperand(lhs ? 0 : 1);
     auto &feeds = p.fold.getRegion(0).front().front().getRegion(0).front();
@@ -2491,13 +2570,38 @@ struct MatrixLowerer {
         addrOp->setAttr("bangc.tile_sizes", b.getDenseI64ArrayAttr({bn, bk}));
         tailGuards.push_back(PendingTailGuard{guardIf.getOperation(), addrOp});
       }
-      ifThenElse(
-          b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, nc, cI64(1)),
-          {}, [&]() { memcpy1D(trans, base, nk, "GDRAM2NRAM"); },
-          [&]() {
-            memcpy2D(trans, base, nk, cI64(bk), cI64(p.stride(v, memberAx)),
-                     b.create<arith::SubIOp>(loc, nc, cI64(1)), "GDRAM2NRAM");
-          });
+      int64_t mStride = p.stride(v, memberAx);
+      if (mStride == bk) {
+        Value fullK =
+            b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, nk, cI64(bk));
+        ifThenElse(
+            fullK, {},
+            [&]() {
+              memcpy1D(trans, base,
+                       b.create<arith::MulIOp>(loc, nc, cI64(bk)), "GDRAM2NRAM",
+                       async);
+            },
+            [&]() {
+              ifThenElse(
+                  b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, nc,
+                                          cI64(1)),
+                  {}, [&]() { memcpy1D(trans, base, nk, "GDRAM2NRAM", async); },
+                  [&]() {
+                    memcpy2D(trans, base, nk, cI64(bk), cI64(mStride),
+                             b.create<arith::SubIOp>(loc, nc, cI64(1)),
+                             "GDRAM2NRAM", async);
+                  });
+            });
+      } else {
+        ifThenElse(
+            b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, nc, cI64(1)),
+            {}, [&]() { memcpy1D(trans, base, nk, "GDRAM2NRAM", async); },
+            [&]() {
+              memcpy2D(trans, base, nk, cI64(bk), cI64(mStride),
+                       b.create<arith::SubIOp>(loc, nc, cI64(1)), "GDRAM2NRAM",
+                       async);
+            });
+      }
       return success();
     }
 
@@ -2519,7 +2623,7 @@ struct MatrixLowerer {
       forLoop(cI64(0), nr, cI64(1), [&](Value i) {
         Value dstRow = makeAddr(left, {i}, {cI64(bk)}, 1);
         Value srcRow = termPtr(v, kAx, bAx, inputRow(r, i), kk, gVal);
-        memcpy1D(dstRow, srcRow, nk, "GDRAM2NRAM");
+        memcpy1D(dstRow, srcRow, nk, "GDRAM2NRAM", async);
       });
     } else if (mode == "pitched-dma") {
       Value base =
@@ -2537,15 +2641,38 @@ struct MatrixLowerer {
         }
       }
       int64_t outerStride = p.stride(v, lhs ? memberAx : kAx);
-      ifThenElse(
-          b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, outer,
-                                  cI64(1)),
-          {}, [&]() { memcpy1D(buf, base, inner, "GDRAM2NRAM"); },
-          [&]() {
-            memcpy2D(buf, base, inner, cI64(pitch), cI64(outerStride),
-                     b.create<arith::SubIOp>(loc, outer, cI64(1)),
-                     "GDRAM2NRAM");
-          });
+      if (outerStride == pitch) {
+        Value fullIn = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                               inner, cI64(pitch));
+        ifThenElse(
+            fullIn, {},
+            [&]() {
+              memcpy1D(buf, base,
+                       b.create<arith::MulIOp>(loc, outer, cI64(pitch)),
+                       "GDRAM2NRAM", async);
+            },
+            [&]() {
+              ifThenElse(
+                  b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, outer,
+                                          cI64(1)),
+                  {}, [&]() { memcpy1D(buf, base, inner, "GDRAM2NRAM", async); },
+                  [&]() {
+                    memcpy2D(buf, base, inner, cI64(pitch), cI64(outerStride),
+                             b.create<arith::SubIOp>(loc, outer, cI64(1)),
+                             "GDRAM2NRAM", async);
+                  });
+            });
+      } else {
+        ifThenElse(
+            b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, outer,
+                                    cI64(1)),
+            {}, [&]() { memcpy1D(buf, base, inner, "GDRAM2NRAM", async); },
+            [&]() {
+              memcpy2D(buf, base, inner, cI64(pitch), cI64(outerStride),
+                       b.create<arith::SubIOp>(loc, outer, cI64(1)),
+                       "GDRAM2NRAM", async);
+            });
+      }
     } else {
       forLoop(cI64(0), outer, cI64(1), [&](Value i) {
         forLoop(cI64(0), inner, cI64(1), [&](Value j) {
@@ -2558,6 +2685,8 @@ struct MatrixLowerer {
           storeAt(buf, dstIdx, loadAt(addr, cI64(0), loadTy));
         });
       });
+      if (async)
+        sync("all");
     }
     return success();
   }
@@ -2690,6 +2819,10 @@ struct MatrixLowerer {
     Block *kBody = b.createBlock(&dk->getRegion(0));
     b.setInsertionPointToStart(kBody);
 
+    bool isUnion4 =
+        setup.getAttrOfType<StringAttr>("bangc.worker") == "cluster-union4";
+    bool isCluster512 = isUnion4 && bm == 512 && bn == 512;
+
     symGrid = makeSym("grid");
     symTaskId = makeSym("taskId");
     symTaskDim = makeSym("taskDim");
@@ -2697,6 +2830,1816 @@ struct MatrixLowerer {
     symBN = makeSym("BN");
     symBK = makeSym("BK");
     constAnchor = symBK.getDefiningOp();
+
+    auto finalizeModule = [&](bool union4Launch) -> LogicalResult {
+      b.setInsertionPointToStart(hostBlk);
+      if (union4Launch)
+        makeOp("host_enqueue", fn.getArguments(), {},
+               {b.getNamedAttr("func_type", b.getStringAttr("union4"))});
+      else
+        makeOp("host_enqueue", fn.getArguments());
+
+      std::set<std::string> seenResources;
+      SmallVector<std::string> neededImpls;
+      prog->walk([&](Operation *op) {
+        if (auto attr = op->getAttrOfType<StringAttr>("ci.implementation")) {
+          auto key = attr.getValue().str();
+          auto it = profile.implementations.find(key);
+          if (it != profile.implementations.end() &&
+              it->second.source == ImplementationSource::Runtime &&
+              seenResources.insert(it->second.resource).second)
+            neededImpls.push_back(key);
+        }
+      });
+      b.setInsertionPointToStart(sourcesBlk);
+      for (auto &impl : neededImpls)
+        makeOp("runtime_source", {}, {},
+               {b.getNamedAttr("implementation", b.getStringAttr(impl))});
+
+      uint64_t grid = llvm::divideCeil(uint64_t(shapeM), uint64_t(bm)) *
+                      llvm::divideCeil(uint64_t(shapeN), uint64_t(bn)) *
+                      uint64_t(shapeB);
+      auto abiJson =
+          llvm::json::parse(fn->getAttrOfType<StringAttr>("kir.abi").getValue());
+      if (!abiJson)
+        return llvm::consumeError(abiJson.takeError()), failure();
+
+      p.domain.erase();
+
+      if (!tailGuards.empty()) {
+        compilerinfra::IntegerRangeContext tailRanges(fn.getOperation());
+        for (auto &tg : tailGuards) {
+          if (compilerinfra::proveTailAccess(tg.accessOp, &tailRanges).kind ==
+              compilerinfra::TailKind::ExactInBounds) {
+            Value cond = tg.guardIf->getOperand(0);
+            tg.guardIf->erase();
+            if (cond.use_empty())
+              if (Operation *def = cond.getDefiningOp())
+                def->erase();
+          }
+        }
+      }
+
+      llvm::SmallVector<char> metadata;
+      llvm::raw_svector_ostream os(metadata);
+      os << llvm::json::Value(llvm::json::Object{
+          {"version", 2},
+          {"source", ""},
+          {"abi", std::move(*abiJson)},
+          {"domain", intentdsl::publishDomain(fn)},
+          {"grid", llvm::json::Array{int64_t(grid), 1, 1}},
+          {"guard", llvm::json::Object{{"min_width", 0}, {"max_width", nullptr}}},
+          {"rows",
+           llvm::json::Array{llvm::json::Object{{"id", 0},
+                                                {"rows", bm},
+                                                {"width", bn},
+                                                {"pitch", bk},
+                                                {"bytes", scratchBytes},
+                                                {"tasks", tasks}}}}});
+      m->setAttr("bangc_src.package",
+                 b.getStringAttr(StringRef(metadata.data(), metadata.size())));
+      return success();
+    };
+
+    auto emitSubtileWriteback = [&](Value accSub, Value bias64, Value coreR,
+                                    Value colU, Value coreNr, Value ncU,
+                                    Value gVal, Value strictFlag) {
+      constexpr int64_t subM = 256, subN = 64;
+      Value accOut = accSub;
+      auto narrowSubAcc = [&]() {
+        if (outElem.isBF16()) {
+          Value bfAcc = makeOp("nram_ptr", {accSub, cI64(0)},
+                               {memSpacePtr(b.getContext(), b.getBF16Type(), 1)})
+                            ->getResult(0);
+          makeOp("bf16_acc_narrow",
+                 {bfAcc, accSub, cI64(subM * subN),
+                  hasBf16Guard ? strictFlag : cI1(false)},
+                 {}, {}, "bf16-acc-narrow");
+          accOut = bfAcc;
+        } else if (outElem.isF16()) {
+          Value f16Acc = makeOp("nram_ptr", {accSub, cI64(0)},
+                                {memSpacePtr(b.getContext(), b.getF16Type(), 1)})
+                             ->getResult(0);
+          makeOp("vec_cast", {f16Acc, accSub, cI64(subM * subN)}, {},
+                 {b.getNamedAttr("kind", b.getStringAttr("f32_to_f16"))});
+          accOut = f16Acc;
+        }
+      };
+
+      if (writeback == "routed-row-dma") {
+        int64_t q = dstShape[1];
+        narrowSubAcc();
+        sync("compute");
+        forLoop(cI64(0), coreNr, cI64(1), [&](Value i) {
+          Value ri = b.create<arith::AddIOp>(loc, coreR, i);
+          Value dest = toI64(
+              loadAt(globalPtr(routedIds, {ri}), cI64(0), b.getI32Type()));
+          Value d0 = b.create<arith::DivSIOp>(loc, dest, cI64(q));
+          Value d1 = b.create<arith::RemSIOp>(loc, dest, cI64(q));
+          Value outPtr = globalPtr(dst, {d0, d1, colU});
+          Value srcRow = makeAddr(accOut, {i}, {cI64(subN)}, 1);
+          memcpy1D(outPtr, srcRow, ncU, "NRAM2GDRAM");
+        });
+      } else if (writeback == "pitched-dma") {
+        for (auto &ep : epilogue) {
+          if (ep.kind == "add_columns") {
+            if (p.stride(ep.bias, 0) == 1) {
+              memcpy1D(bias64, globalPtr(ep.bias, {colU}), ncU, "GDRAM2NRAM");
+              sync("io");
+            } else {
+              forLoop(cI64(0), ncU, cI64(1), [&](Value j) {
+                Value cj = b.create<arith::AddIOp>(loc, colU, j);
+                storeAt(bias64, j, loadAt(globalPtr(ep.bias, {cj}), cI64(0)));
+              });
+              sync("all");
+            }
+            forLoop(cI64(0), coreNr, cI64(1), [&](Value i) {
+              Value aRow = makeAddr(accSub, {i}, {cI64(subN)}, 1);
+              makeOp("vec_binary", {aRow, aRow, bias64, cI64(subN)}, {},
+                     {b.getNamedAttr("op", b.getStringAttr("add"))});
+            });
+          }
+        }
+        narrowSubAcc();
+        sync("compute");
+        if (p.rank(dst) == 1) {
+          memcpy1D(globalPtr(dst, {coreR}), accOut, coreNr, "NRAM2GDRAM");
+        } else {
+          Value outPtr = p.rank(dst) == 2 ? globalPtr(dst, {coreR, colU})
+                                          : globalPtr(dst, {gVal, coreR, colU});
+          ifThenElse(
+              b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, coreNr,
+                                      cI64(1)),
+              {}, [&]() { memcpy1D(outPtr, accOut, ncU, "NRAM2GDRAM"); },
+              [&]() {
+                memcpy2D(outPtr, accOut, ncU,
+                         cI64(p.stride(dst, p.rank(dst) - 2)), cI64(subN),
+                         b.create<arith::SubIOp>(loc, coreNr, cI64(1)),
+                         "NRAM2GDRAM");
+              });
+        }
+      } else {
+        sync("compute");
+        forLoop(cI64(0), coreNr, cI64(1), [&](Value i) {
+          Value ri = b.create<arith::AddIOp>(loc, coreR, i);
+          Value dest =
+              isRouted ? toI64(loadAt(globalPtr(routedIds, {ri}), cI64(0),
+                                      b.getI32Type()))
+                       : ri;
+          forLoop(cI64(0), ncU, cI64(1), [&](Value j) {
+            Value cj = b.create<arith::AddIOp>(loc, colU, j);
+            Value aIdx = p.rank(dst) == 1
+                             ? i
+                             : b.create<arith::AddIOp>(
+                                   loc,
+                                   b.create<arith::MulIOp>(loc, i, cI64(subN)),
+                                   j);
+            Value val = loadAt(accSub, aIdx);
+            for (auto &ep : epilogue) {
+              if (ep.kind == "add_columns") {
+                Value bCoord = p.rank(dst) == 1 ? dest : cj;
+                Value bv = loadAt(globalPtr(ep.bias, {bCoord}), cI64(0),
+                                  ep.toTy);
+                val = ep.toTy.isInteger(32)
+                          ? b.create<arith::AddIOp>(loc, val, bv).getResult()
+                          : b.create<arith::AddFOp>(loc, val, bv).getResult();
+              } else if (ep.kind == "convert_matrix") {
+                if (ep.toTy.isBF16() && ep.fromTy.isInteger(32)) {
+                  val = makeOp("i32_to_bf16", {val}, {b.getBF16Type()}, {},
+                               "i32-to-bf16")
+                            ->getResult(0);
+                } else if (ep.toTy.isBF16() && ep.fromTy.isF32()) {
+                  val = makeOp("bf16_scalar", {val}, {b.getBF16Type()},
+                               {b.getNamedAttr("mode",
+                                               b.getStringAttr("narrow"))},
+                               "bf16-scalar-convert")
+                            ->getResult(0);
+                } else if (ep.toTy.isF16() && ep.fromTy.isF32()) {
+                  val = b.create<arith::TruncFOp>(loc, b.getF16Type(), val);
+                } else if (ep.toTy.isF32() && ep.fromTy.isF16()) {
+                  val = b.create<arith::ExtFOp>(loc, b.getF32Type(), val);
+                } else if (ep.toTy.isF32() && ep.fromTy.isInteger(32)) {
+                  val = b.create<arith::SIToFPOp>(loc, b.getF32Type(), val);
+                }
+              }
+            }
+            Value outPtr;
+            if (p.rank(dst) == 1)
+              outPtr = globalPtr(dst, {dest});
+            else if (p.rank(dst) == 2)
+              outPtr = globalPtr(dst, {dest, cj});
+            else if (isRouted) {
+              int64_t q = dstShape[1];
+              outPtr = globalPtr(
+                  dst, {b.create<arith::DivSIOp>(loc, dest, cI64(q)),
+                        b.create<arith::RemSIOp>(loc, dest, cI64(q)), cj});
+            } else {
+              outPtr = globalPtr(dst, {gVal, dest, cj});
+            }
+            storeAt(outPtr, cI64(0), val);
+          });
+        });
+      }
+    };
+
+    if (isCluster512 && (mode == "wram-conv" || mode == "exact-i8-conv") &&
+        !isWindow) {
+      constexpr int64_t CM = 512, CN = 512, coreBM = 256, coreBN = 256,
+                        HM = 128;
+      Value symClusterId = makeSym("clusterId");
+      Value symClusterDim = makeSym("clusterDim");
+      constAnchor = symClusterDim.getDefiningOp();
+
+      Type inElem = carrierElemType(p.dot.getOperand(0));
+      Type accElem = (mode == "exact-i8-conv") ? Type(b.getI32Type())
+                                               : Type(b.getF32Type());
+      auto &feeds = p.fold.getRegion(0).front().front().getRegion(0).front();
+      StringRef lhsMode = feeds.front()
+                              .getAttrOfType<StringAttr>("bangc.transfer")
+                              .getValue();
+      StringRef rhsMode = feeds.front()
+                              .getNextNode()
+                              ->getAttrOfType<StringAttr>("bangc.transfer")
+                              .getValue();
+
+      Value sA0 = sramBuf(inElem, CM * bk);
+      Value sA1 = sramBuf(inElem, CM * bk);
+      Value sB0 = sramBuf(inElem, CN * bk);
+      Value sB1 = sramBuf(inElem, CN * bk);
+      Value sBt = (rhsMode != "filter-major-dma") ? sramBuf(inElem, CN * bk)
+                                                  : Value{};
+      Value flt[4] = {wramBuf(inElem, 64 * bk), wramBuf(inElem, 64 * bk),
+                      wramBuf(inElem, 64 * bk), wramBuf(inElem, 64 * bk)};
+      Value acc[4] = {nramBuf(accElem, coreBM * 64),
+                      nramBuf(accElem, coreBM * 64),
+                      nramBuf(accElem, coreBM * 64),
+                      nramBuf(accElem, coreBM * 64)};
+      Value left0 = nramBuf(inElem, HM * bk);
+      Value left1 = nramBuf(inElem, HM * bk);
+      Value partial = (mode == "exact-i8-conv")
+                          ? nramBuf(b.getF32Type(), HM * 64)
+                          : Value{};
+      Value magSc = hasBf16Guard ? nramBuf(b.getBF16Type(), 4096) : Value{};
+      Value flgSc = hasBf16Guard ? nramBuf(b.getBF16Type(), 4096) : Value{};
+      Value transSub =
+          hasBf16Guard ? nramBuf(b.getBF16Type(), 64 * bk) : Value{};
+      Value bias64;
+      if (writeback == "pitched-dma") {
+        for (auto &ep : epilogue)
+          if (ep.kind == "add_columns")
+            bias64 = nramBuf(carrierElemType(ep.bias), 64);
+      }
+
+      Value lhsV = p.dot.getOperand(0), rhsV = p.dot.getOperand(1);
+      int lkAx = p.axis("lhs_k"), lbAx = p.axis("lhs_batch"),
+          lfAx = p.freeAxis(lhsV, lkAx, lbAx);
+      int rkAx = p.axis("rhs_k"), rbAx = p.axis("rhs_batch"),
+          rfAx = p.freeAxis(rhsV, rkAx, rbAx);
+      Type lhsLoadTy =
+          inElem.isSignedInteger(8) ? Type(b.getI32Type()) : inElem;
+      Value zeroElem =
+          inElem.isSignedInteger(8)
+              ? cI32(0)
+              : b.create<arith::ConstantOp>(loc, b.getZeroAttr(inElem))
+                    .getResult();
+
+      int64_t cmb = std::max<int64_t>(
+          1, llvm::divideCeil(uint64_t(shapeM), uint64_t(CM)));
+      int64_t cnb = std::max<int64_t>(
+          1, llvm::divideCeil(uint64_t(shapeN), uint64_t(CN)));
+      int64_t tilesPerBatch = cmb * cnb;
+
+      auto emitSplitMCompute = [&](Value sramA, Value sramBFlt, Value coreId,
+                                   Value subM, Value subN, Value nrCore,
+                                   Value curCN, Value nk, Value kk,
+                                   Value strictIn) -> Value {
+        Value aBase =
+            makeAddr(sramA, {b.create<arith::MulIOp>(loc, subM, cI64(bk))},
+                     {cI64(1)}, 4);
+        Value bBase =
+            makeAddr(sramBFlt, {b.create<arith::MulIOp>(loc, subN, cI64(bk))},
+                     {cI64(1)}, 4);
+        StringRef mKind = inElem.isBF16() ? "bf16" : "f16";
+        StringRef cKey = inElem.isBF16() ? "wram-conv-bf16" : "wram-conv-f16";
+
+        if (hasBf16Guard) {
+          memcpy1D(left0, aBase, cI64(HM * bk), "SRAM2NRAM", true);
+          memcpy1D(left1, makeAddr(aBase, {cI64(HM * bk)}, {cI64(1)}, 4),
+                   cI64(HM * bk), "SRAM2NRAM", true);
+          sync("sram_to_nram");
+          Value okL0 = makeOp("bf16_panel_ok",
+                              {left0, magSc, flgSc, cI64(HM * bk)},
+                              {b.getI1Type()}, {}, "bf16-panel-guard")
+                           ->getResult(0);
+          Value okL1 = makeOp("bf16_panel_ok",
+                              {left1, magSc, flgSc, cI64(HM * bk)},
+                              {b.getI1Type()}, {}, "bf16-panel-guard")
+                           ->getResult(0);
+          Value allOk = b.create<arith::AndIOp>(loc, okL0, okL1);
+          for (int u = 0; u < 4; ++u) {
+            Value bSub = makeAddr(bBase, {cI64(u * 64 * bk)}, {cI64(1)}, 4);
+            memcpy1D(transSub, bSub, cI64(64 * bk), "SRAM2NRAM");
+            sync("sram_to_nram");
+            Value okR = makeOp("bf16_panel_ok",
+                               {transSub, magSc, flgSc, cI64(64 * bk)},
+                               {b.getI1Type()}, {}, "bf16-panel-guard")
+                            ->getResult(0);
+            allOk = b.create<arith::AndIOp>(loc, allOk, okR);
+            sync("compute");
+            memcpy1D(flt[u], transSub, cI64(64 * bk), "NRAM2WRAM");
+          }
+          Value nextStrict = b.create<arith::OrIOp>(
+              loc, strictIn, b.create<arith::XOrIOp>(loc, allOk, cI1(true)));
+          ifThenElse(
+              nextStrict, {},
+              [&]() {
+                Value nr0 = b.create<arith::MinSIOp>(
+                    loc, b.create<arith::MaxSIOp>(loc, nrCore, cI64(0)),
+                    cI64(HM));
+                Value nr1 = b.create<arith::MinSIOp>(
+                    loc,
+                    b.create<arith::MaxSIOp>(
+                        loc, b.create<arith::SubIOp>(loc, nrCore, cI64(HM)),
+                        cI64(0)),
+                    cI64(HM));
+                for (int u = 0; u < 4; ++u) {
+                  Value colOff =
+                      b.create<arith::AddIOp>(loc, subN, cI64(u * 64));
+                  Value ncU = b.create<arith::MinSIOp>(
+                      loc,
+                      b.create<arith::MaxSIOp>(
+                          loc, b.create<arith::SubIOp>(loc, curCN, colOff),
+                          cI64(0)),
+                      cI64(64));
+                  ifThen(
+                      b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt,
+                                              ncU, cI64(0)),
+                      [&]() {
+                        Value bSub =
+                            makeAddr(bBase, {cI64(u * 64 * bk)}, {cI64(1)}, 4);
+                        memcpy1D(transSub, bSub, cI64(64 * bk), "SRAM2NRAM");
+                        sync("sram_to_nram");
+                        ifThen(
+                            b.create<arith::CmpIOp>(
+                                loc, arith::CmpIPredicate::sgt, nr0, cI64(0)),
+                            [&]() {
+                              makeOp("bf16_ieee_dot",
+                                     {acc[u], left0, transSub, nr0, ncU, nk,
+                                      cI64(bk), cI64(64)},
+                                     {}, {}, "bf16-ieee-dot");
+                            });
+                        ifThen(
+                            b.create<arith::CmpIOp>(
+                                loc, arith::CmpIPredicate::sgt, nr1, cI64(0)),
+                            [&]() {
+                              Value accBot = makeAddr(acc[u], {cI64(HM * 64)},
+                                                      {cI64(1)}, 1);
+                              makeOp("bf16_ieee_dot",
+                                     {accBot, left1, transSub, nr1, ncU, nk,
+                                      cI64(bk), cI64(64)},
+                                     {}, {}, "bf16-ieee-dot");
+                            });
+                      });
+                }
+              },
+              [&]() {
+                Value accum = b.create<arith::CmpIOp>(
+                    loc, arith::CmpIPredicate::ne, kk, cI64(0));
+                for (int u = 0; u < 4; ++u) {
+                  makeOp("wram_conv", {acc[u], left0, flt[u], accum}, {},
+                         {b.getNamedAttr("bm", b.getI64IntegerAttr(HM)),
+                          b.getNamedAttr("bn", b.getI64IntegerAttr(64)),
+                          b.getNamedAttr("bk", b.getI64IntegerAttr(bk)),
+                          b.getNamedAttr("mode", b.getStringAttr("bf16")),
+                          b.getNamedAttr("bangc.guarded_bf16_window",
+                                         b.getBoolAttr(true))},
+                         "wram-conv-bf16");
+                }
+                for (int u = 0; u < 4; ++u) {
+                  Value accBot =
+                      makeAddr(acc[u], {cI64(HM * 64)}, {cI64(1)}, 1);
+                  makeOp("wram_conv", {accBot, left1, flt[u], accum}, {},
+                         {b.getNamedAttr("bm", b.getI64IntegerAttr(HM)),
+                          b.getNamedAttr("bn", b.getI64IntegerAttr(64)),
+                          b.getNamedAttr("bk", b.getI64IntegerAttr(bk)),
+                          b.getNamedAttr("mode", b.getStringAttr("bf16")),
+                          b.getNamedAttr("bangc.guarded_bf16_window",
+                                         b.getBoolAttr(true))},
+                         "wram-conv-bf16");
+                }
+                sync("compute");
+              });
+          return nextStrict;
+        }
+
+        memcpy1D(left0, aBase, cI64(HM * bk), "SRAM2NRAM", true);
+        memcpy1D(flt[0], bBase, cI64(64 * bk), "SRAM2WRAM", true);
+        sync("sram_to_nram");
+        sync("sram_to_wram");
+        memcpy1D(left1, makeAddr(aBase, {cI64(HM * bk)}, {cI64(1)}, 4),
+                 cI64(HM * bk), "SRAM2NRAM", true);
+        Value accum = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, kk,
+                                              cI64(0));
+        auto emitConvHalf = [&](Value aHalf, Value lhsHalf, Value wFlt) {
+          if (mode == "exact-i8-conv") {
+            makeOp("wram_conv", {aHalf, partial, lhsHalf, wFlt}, {},
+                   {b.getNamedAttr("bm", b.getI64IntegerAttr(HM)),
+                    b.getNamedAttr("bn", b.getI64IntegerAttr(64)),
+                    b.getNamedAttr("bk", b.getI64IntegerAttr(bk)),
+                    b.getNamedAttr("mode", b.getStringAttr("i8"))},
+                   "wram-conv-i8");
+          } else {
+            makeOp("wram_conv", {aHalf, lhsHalf, wFlt, accum}, {},
+                   {b.getNamedAttr("bm", b.getI64IntegerAttr(HM)),
+                    b.getNamedAttr("bn", b.getI64IntegerAttr(64)),
+                    b.getNamedAttr("bk", b.getI64IntegerAttr(bk)),
+                    b.getNamedAttr("mode", b.getStringAttr(mKind))},
+                   cKey);
+          }
+        };
+        for (int u = 0; u < 4; ++u) {
+          if (u + 1 < 4)
+            memcpy1D(flt[u + 1],
+                     makeAddr(bBase, {cI64((u + 1) * 64 * bk)}, {cI64(1)}, 4),
+                     cI64(64 * bk), "SRAM2WRAM", true);
+          emitConvHalf(acc[u], left0, flt[u]);
+          if (u + 1 < 4)
+            sync("sram_to_wram");
+        }
+        sync("sram_to_nram");
+        for (int u = 0; u < 4; ++u) {
+          Value accBot = makeAddr(acc[u], {cI64(HM * 64)}, {cI64(1)}, 1);
+          emitConvHalf(accBot, left1, flt[u]);
+        }
+        sync("compute");
+        return strictIn;
+      };
+
+      bool canFastPipe =
+          (shapeK > 0) && (shapeK % bk == 0) && (lhsMode == "pitched-dma") &&
+          (rhsMode == "filter-major-dma" || rhsMode == "pitched-dma");
+      int64_t lhsSt = (lhsMode == "pitched-dma") ? p.stride(lhsV, lfAx) : 0;
+      int64_t rhsSt =
+          (rhsMode == "filter-major-dma")
+              ? p.stride(rhsV, rfAx)
+              : ((rhsMode == "pitched-dma") ? p.stride(rhsV, rkAx) : 0);
+
+      forLoop(symClusterId, symGrid, symClusterDim, [&](Value cjob) {
+        Value gVal = b.create<arith::DivSIOp>(loc, cjob, cI64(tilesPerBatch));
+        Value rem = b.create<arith::RemSIOp>(loc, cjob, cI64(tilesPerBatch));
+        Value crIdx = b.create<arith::DivSIOp>(loc, rem, cI64(cnb));
+        Value ccIdx =
+            (!isRagged && cnb > 1)
+                ? b.create<arith::RemSIOp>(
+                      loc,
+                      b.create<arith::AddIOp>(
+                          loc, b.create<arith::RemSIOp>(loc, rem, cI64(cnb)),
+                          crIdx),
+                      cI64(cnb))
+                      .getResult()
+                : b.create<arith::RemSIOp>(loc, rem, cI64(cnb)).getResult();
+        Value crInit = b.create<arith::MulIOp>(loc, crIdx, cI64(CM));
+        Value cc = b.create<arith::MulIOp>(loc, ccIdx, cI64(CN));
+
+        auto emitClusterWork = [&](Value cr, Value endM) {
+          Value curCM = b.create<arith::MinSIOp>(
+              loc, b.create<arith::SubIOp>(loc, endM, cr), cI64(CM));
+          Value curCN = b.create<arith::MinSIOp>(
+              loc, b.create<arith::SubIOp>(loc, cI64(shapeN), cc), cI64(CN));
+          Value isMpu = makeOp("is_mpu", {}, {b.getI1Type()})->getResult(0);
+          Value coreId =
+              b.create<arith::AndIOp>(loc, makeSym("coreId"), cI64(3));
+          Value subM = b.create<arith::MulIOp>(
+              loc, b.create<arith::ShRUIOp>(loc, coreId, cI64(1)),
+              cI64(coreBM));
+          Value subN = b.create<arith::MulIOp>(
+              loc, b.create<arith::AndIOp>(loc, coreId, cI64(1)), cI64(coreBN));
+          Value coreR = b.create<arith::AddIOp>(loc, cr, subM);
+          Value coreNr = b.create<arith::MinSIOp>(
+              loc,
+              b.create<arith::MaxSIOp>(
+                  loc, b.create<arith::SubIOp>(loc, endM, coreR), cI64(0)),
+              cI64(coreBM));
+
+          if (mode == "exact-i8-conv" || hasBf16Guard || shapeK == 0) {
+            ifThen(b.create<arith::XOrIOp>(loc, isMpu, cI1(true)), [&]() {
+              Value zAcc = mode == "exact-i8-conv" ? cI32(0) : cF32(0.0f);
+              for (int u = 0; u < 4; ++u)
+                fillVec(acc[u], cI64(coreBM * 64), zAcc);
+              sync("compute");
+            });
+          }
+
+          Value fullTile =
+              canFastPipe
+                  ? b.create<arith::AndIOp>(
+                        loc,
+                        b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                                curCM, cI64(CM)),
+                        b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                                curCN, cI64(CN)))
+                        .getResult()
+                  : cI1(false);
+
+          auto stageMpuFull = [&](Value dstA, Value dstB, Value kOff) {
+            Value aPtr = termPtr(lhsV, lkAx, lbAx, cr, kOff, gVal);
+            if (lhsSt == bk)
+              memcpy1D(dstA, aPtr, cI64(CM * bk), "GDRAM2SRAM");
+            else
+              memcpy2D(dstA, aPtr, cI64(bk), cI64(bk), cI64(lhsSt),
+                       cI64(CM - 1), "GDRAM2SRAM");
+            Value bPtr = termPtr(rhsV, rkAx, rbAx, cc, kOff, gVal);
+            if (rhsMode == "filter-major-dma") {
+              if (rhsSt == bk)
+                memcpy1D(dstB, bPtr, cI64(CN * bk), "GDRAM2SRAM");
+              else
+                memcpy2D(dstB, bPtr, cI64(bk), cI64(bk), cI64(rhsSt),
+                         cI64(CN - 1), "GDRAM2SRAM");
+            } else {
+              if (rhsSt == CN)
+                memcpy1D(dstB, bPtr, cI64(bk * CN), "GDRAM2SRAM");
+              else
+                memcpy2D(dstB, bPtr, cI64(CN), cI64(CN), cI64(rhsSt),
+                         cI64(bk - 1), "GDRAM2SRAM");
+            }
+          };
+
+          auto topIf = ifThenElse(
+              fullTile, {b.getI1Type()},
+              [&]() {
+                ifThen(isMpu, [&]() { stageMpuFull(sA0, sB0, cI64(0)); });
+                sync("cluster");
+                int64_t steps = shapeK / bk;
+                auto sLoop = forLoopCarry(
+                    cI64(0), cI64(steps), cI64(1), ValueRange{cI1(false)},
+                    [&](Value s, ValueRange sIter) {
+                      Value kk = b.create<arith::MulIOp>(loc, s, cI64(bk));
+                      Value isOdd = b.create<arith::CmpIOp>(
+                          loc, arith::CmpIPredicate::ne,
+                          b.create<arith::AndIOp>(loc, s, cI64(1)), cI64(0));
+                      Value curSA =
+                          b.create<arith::SelectOp>(loc, isOdd, sA1, sA0);
+                      Value curSB =
+                          b.create<arith::SelectOp>(loc, isOdd, sB1, sB0);
+                      Value nxtSA =
+                          b.create<arith::SelectOp>(loc, isOdd, sA0, sA1);
+                      Value nxtSB =
+                          b.create<arith::SelectOp>(loc, isOdd, sB0, sB1);
+
+                      if (rhsMode != "filter-major-dma") {
+                        ifThen(
+                            b.create<arith::XOrIOp>(loc, isMpu, cI1(true)),
+                            [&]() {
+                              Value cOff = b.create<arith::MulIOp>(loc, coreId,
+                                                                   cI64(128));
+                              Value sbSlice =
+                                  makeAddr(curSB, {cOff}, {cI64(1)}, 4);
+                              memcpy2D(left0, sbSlice, cI64(128), cI64(128),
+                                       cI64(CN), cI64(bk - 1), "SRAM2NRAM");
+                              sync("sram_to_nram");
+                              makeOp("tile_transpose",
+                                     {left1, left0, cI64(bk), cI64(128)}, {},
+                                     {}, "nram-transpose");
+                              sync("compute");
+                              Value sbtSlice = makeAddr(
+                                  sBt,
+                                  {b.create<arith::MulIOp>(loc, coreId,
+                                                           cI64(128 * bk))},
+                                  {cI64(1)}, 4);
+                              memcpy1D(sbtSlice, left1, cI64(128 * bk),
+                                       "NRAM2SRAM");
+                              sync("all");
+                            });
+                        sync("cluster");
+                      }
+
+                      Value bFltSram =
+                          (rhsMode == "filter-major-dma") ? curSB : sBt;
+                      auto roleIf = ifThenElse(
+                          isMpu, {b.getI1Type()},
+                          [&]() {
+                            Value sp1 =
+                                b.create<arith::AddIOp>(loc, s, cI64(1));
+                            ifThen(
+                                b.create<arith::CmpIOp>(
+                                    loc, arith::CmpIPredicate::slt, sp1,
+                                    cI64(steps)),
+                                [&]() {
+                                  stageMpuFull(
+                                      nxtSA, nxtSB,
+                                      b.create<arith::MulIOp>(loc, sp1,
+                                                              cI64(bk)));
+                                });
+                            b.create<scf::YieldOp>(loc, ValueRange{sIter[0]});
+                          },
+                          [&]() {
+                            Value ns = emitSplitMCompute(
+                                curSA, bFltSram, coreId, subM, subN,
+                                cI64(coreBM), cI64(CN), cI64(bk), kk, sIter[0]);
+                            b.create<scf::YieldOp>(loc, ValueRange{ns});
+                          },
+                          false);
+                      sync("cluster");
+                      b.create<scf::YieldOp>(loc,
+                                             ValueRange{roleIf.getResult(0)});
+                    });
+                b.create<scf::YieldOp>(loc, ValueRange{sLoop.getResult(0)});
+              },
+              [&]() {
+                auto kLoop = forLoopCarry(
+                    cI64(0), cI64(shapeK), cI64(bk), ValueRange{cI1(false)},
+                    [&](Value kk, ValueRange kIter) {
+                      Value nk = b.create<arith::MinSIOp>(
+                          loc, b.create<arith::SubIOp>(loc, cI64(shapeK), kk),
+                          cI64(bk));
+                      ifThen(
+                          b.create<arith::XOrIOp>(loc, isMpu, cI1(true)), [&]() {
+                            fillVec(left0, cI64(HM * bk), zeroElem);
+                            sync("compute");
+                            Value zOff = b.create<arith::MulIOp>(
+                                loc, coreId, cI64(HM * bk));
+                            memcpy1D(makeAddr(sA0, {zOff}, {cI64(1)}, 4), left0,
+                                     cI64(HM * bk), "NRAM2SRAM");
+                            memcpy1D(makeAddr(rhsMode == "filter-major-dma"
+                                                  ? sB0
+                                                  : sBt,
+                                              {zOff}, {cI64(1)}, 4),
+                                     left0, cI64(HM * bk), "NRAM2SRAM");
+                            if (rhsMode != "filter-major-dma")
+                              memcpy1D(makeAddr(sB0, {zOff}, {cI64(1)}, 4),
+                                       left0, cI64(HM * bk), "NRAM2SRAM");
+                            sync("all");
+                          });
+                      sync("cluster");
+
+                      if (lhsMode == "pitched-dma") {
+                        ifThen(isMpu, [&]() {
+                          Value aPtr = termPtr(lhsV, lkAx, lbAx, cr, kk, gVal);
+                          ifThenElse(
+                              b.create<arith::CmpIOp>(
+                                  loc, arith::CmpIPredicate::eq, curCM,
+                                  cI64(1)),
+                              {}, [&]() { memcpy1D(sA0, aPtr, nk, "GDRAM2SRAM"); },
+                              [&]() {
+                                memcpy2D(
+                                    sA0, aPtr, nk, cI64(bk),
+                                    cI64(p.stride(lhsV, lfAx)),
+                                    b.create<arith::SubIOp>(loc, curCM, cI64(1)),
+                                    "GDRAM2SRAM");
+                              });
+                        });
+                      } else {
+                        ifThen(
+                            b.create<arith::XOrIOp>(loc, isMpu, cI1(true)),
+                            [&]() {
+                              forLoop(coreId, curCM, cI64(4), [&](Value i) {
+                                Value dstRow =
+                                    makeAddr(sA0, {i}, {cI64(bk)}, 4);
+                                if (lhsMode == "routed-row-dma") {
+                                  Value sRow = termPtr(lhsV, lkAx, lbAx,
+                                                       inputRow(cr, i), kk,
+                                                       gVal);
+                                  memcpy1D(left0, sRow, nk, "GDRAM2NRAM");
+                                  sync("io");
+                                } else {
+                                  forLoop(cI64(0), nk, cI64(1), [&](Value t) {
+                                    Value kt =
+                                        b.create<arith::AddIOp>(loc, kk, t);
+                                    Value addr = termPtr(lhsV, lkAx, lbAx,
+                                                         inputRow(cr, i), kt,
+                                                         gVal);
+                                    storeAt(left0, t,
+                                            loadAt(addr, cI64(0), lhsLoadTy));
+                                  });
+                                  sync("all");
+                                }
+                                memcpy1D(dstRow, left0, nk, "NRAM2SRAM");
+                                sync("all");
+                              });
+                            });
+                      }
+
+                      if (rhsMode == "filter-major-dma") {
+                        ifThen(isMpu, [&]() {
+                          Value bPtr = termPtr(rhsV, rkAx, rbAx, cc, kk, gVal);
+                          ifThenElse(
+                              b.create<arith::CmpIOp>(
+                                  loc, arith::CmpIPredicate::eq, curCN,
+                                  cI64(1)),
+                              {}, [&]() { memcpy1D(sB0, bPtr, nk, "GDRAM2SRAM"); },
+                              [&]() {
+                                memcpy2D(
+                                    sB0, bPtr, nk, cI64(bk),
+                                    cI64(p.stride(rhsV, rfAx)),
+                                    b.create<arith::SubIOp>(loc, curCN, cI64(1)),
+                                    "GDRAM2SRAM");
+                              });
+                        });
+                      } else if (rhsMode == "pitched-dma") {
+                        ifThen(isMpu, [&]() {
+                          Value bPtr = termPtr(rhsV, rkAx, rbAx, cc, kk, gVal);
+                          ifThenElse(
+                              b.create<arith::CmpIOp>(
+                                  loc, arith::CmpIPredicate::eq, nk, cI64(1)),
+                              {},
+                              [&]() { memcpy1D(sB0, bPtr, curCN, "GDRAM2SRAM"); },
+                              [&]() {
+                                memcpy2D(
+                                    sB0, bPtr, curCN, cI64(CN),
+                                    cI64(p.stride(rhsV, rkAx)),
+                                    b.create<arith::SubIOp>(loc, nk, cI64(1)),
+                                    "GDRAM2SRAM");
+                              });
+                        });
+                      } else {
+                        ifThen(
+                            b.create<arith::XOrIOp>(loc, isMpu, cI1(true)),
+                            [&]() {
+                              forLoop(coreId, curCN, cI64(4), [&](Value j) {
+                                Value cj = b.create<arith::AddIOp>(loc, cc, j);
+                                forLoop(cI64(0), nk, cI64(1), [&](Value t) {
+                                  Value kt =
+                                      b.create<arith::AddIOp>(loc, kk, t);
+                                  Value addr =
+                                      termPtr(rhsV, rkAx, rbAx, cj, kt, gVal);
+                                  storeAt(left0, t,
+                                          loadAt(addr, cI64(0), lhsLoadTy));
+                                });
+                                sync("all");
+                                Value dstRow =
+                                    makeAddr(sBt, {j}, {cI64(bk)}, 4);
+                                memcpy1D(dstRow, left0, nk, "NRAM2SRAM");
+                                sync("all");
+                              });
+                            });
+                      }
+                      sync("cluster");
+
+                      if (rhsMode == "pitched-dma") {
+                        ifThen(
+                            b.create<arith::XOrIOp>(loc, isMpu, cI1(true)),
+                            [&]() {
+                              Value cOff = b.create<arith::MulIOp>(loc, coreId,
+                                                                   cI64(128));
+                              Value sbSlice =
+                                  makeAddr(sB0, {cOff}, {cI64(1)}, 4);
+                              memcpy2D(left0, sbSlice, cI64(128), cI64(128),
+                                       cI64(CN), cI64(bk - 1), "SRAM2NRAM");
+                              sync("sram_to_nram");
+                              makeOp("tile_transpose",
+                                     {left1, left0, cI64(bk), cI64(128)}, {},
+                                     {}, "nram-transpose");
+                              sync("compute");
+                              Value sbtSlice = makeAddr(
+                                  sBt,
+                                  {b.create<arith::MulIOp>(loc, coreId,
+                                                           cI64(128 * bk))},
+                                  {cI64(1)}, 4);
+                              memcpy1D(sbtSlice, left1, cI64(128 * bk),
+                                       "NRAM2SRAM");
+                              sync("all");
+                            });
+                        sync("cluster");
+                      }
+
+                      Value bFltSram =
+                          (rhsMode == "filter-major-dma") ? sB0 : sBt;
+                      auto ipuIf = ifThenElse(
+                          isMpu, {b.getI1Type()},
+                          [&]() {
+                            b.create<scf::YieldOp>(loc, ValueRange{kIter[0]});
+                          },
+                          [&]() {
+                            Value ns = emitSplitMCompute(
+                                sA0, bFltSram, coreId, subM, subN, coreNr,
+                                curCN, nk, kk, kIter[0]);
+                            b.create<scf::YieldOp>(loc, ValueRange{ns});
+                          },
+                          false);
+                      sync("cluster");
+                      b.create<scf::YieldOp>(loc,
+                                             ValueRange{ipuIf.getResult(0)});
+                    });
+                b.create<scf::YieldOp>(loc, ValueRange{kLoop.getResult(0)});
+              },
+              false);
+
+          Value strictOut = topIf.getResult(0);
+          ifThen(
+              b.create<arith::AndIOp>(
+                  loc, b.create<arith::XOrIOp>(loc, isMpu, cI1(true)),
+                  b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt,
+                                          coreNr, cI64(0))),
+              [&]() {
+                for (int u = 0; u < 4; ++u) {
+                  Value colOff =
+                      b.create<arith::AddIOp>(loc, subN, cI64(u * 64));
+                  Value ncU = b.create<arith::MinSIOp>(
+                      loc,
+                      b.create<arith::MaxSIOp>(
+                          loc, b.create<arith::SubIOp>(loc, curCN, colOff),
+                          cI64(0)),
+                      cI64(64));
+                  ifThen(
+                      b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt,
+                                              ncU, cI64(0)),
+                      [&]() {
+                        Value colU = b.create<arith::AddIOp>(loc, cc, colOff);
+                        emitSubtileWriteback(acc[u], bias64, coreR, colU,
+                                             coreNr, ncU, gVal, strictOut);
+                      });
+                }
+              });
+          sync("cluster");
+        };
+
+        if (isRagged) {
+          Value gStart = toI64(loadAt(globalPtr(raggedOffsets, {gVal}), cI64(0),
+                                      b.getI32Type()));
+          Value gEnd = toI64(loadAt(
+              globalPtr(raggedOffsets,
+                        {b.create<arith::AddIOp>(loc, gVal, cI64(1))}),
+              cI64(0), b.getI32Type()));
+          Value cr = b.create<arith::AddIOp>(loc, crInit, gStart);
+          ifThen(b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, cr,
+                                         gEnd),
+                 [&]() { emitClusterWork(cr, gEnd); });
+        } else {
+          emitClusterWork(crInit, cI64(shapeM));
+        }
+      });
+
+      return finalizeModule(/*union4Launch=*/true);
+    }
+
+    if (isCluster512 && mode == "quant-format") {
+      const auto *spec = intentdsl::kir::quantFormatSpec(p.dot);
+      if (spec &&
+          spec->roleLayout == intentdsl::kir::QuantRoleLayout::BlockScaledPair &&
+          spec->packBits == 4 && spec->packFactor == 2 && !isRagged &&
+          !isRouted) {
+        int64_t groups = shapeK / spec->blockElements;
+        int64_t groupsPerPanel = std::gcd(
+            groups, std::max<int64_t>(1, bk / spec->blockElements));
+        int64_t panelElems = groupsPerPanel * spec->blockElements;
+        int64_t convK = std::max<int64_t>(panelElems, 64);
+        if (panelElems == convK) {
+          constexpr int64_t CM = 512, CN = 512, coreBM = 256, coreBN = 256,
+                            HM = 128;
+          int64_t recBytes = spec->recordBytes;
+          int64_t panelRecBytes = groupsPerPanel * recBytes;
+          Value symClusterId = makeSym("clusterId");
+          Value symClusterDim = makeSym("clusterDim");
+          constAnchor = symClusterDim.getDefiningOp();
+
+          Value sA = sramBuf(b.getF16Type(), CM * convK);
+          Value sB = sramBuf(b.getF16Type(), CN * convK);
+          Value sOk = sramBuf(b.getI32Type(), 32);
+          Value flt[4] = {wramBuf(b.getF16Type(), 64 * convK),
+                          wramBuf(b.getF16Type(), 64 * convK),
+                          wramBuf(b.getF16Type(), 64 * convK),
+                          wramBuf(b.getF16Type(), 64 * convK)};
+          Value acc[4] = {nramBuf(b.getF32Type(), coreBM * 64),
+                          nramBuf(b.getF32Type(), coreBM * 64),
+                          nramBuf(b.getF32Type(), coreBM * 64),
+                          nramBuf(b.getF32Type(), coreBM * 64)};
+          Value left0 = nramBuf(b.getF16Type(), HM * convK);
+          Value left1 = nramBuf(b.getF16Type(), HM * convK);
+          Value aRawBuf =
+              nramBuf(b.getI8Type(), llvm::alignTo(HM * panelRecBytes, 64));
+          Value bRawBuf =
+              nramBuf(b.getI8Type(), llvm::alignTo(panelRecBytes * 64, 64));
+          Value saBuf =
+              nramBuf(b.getI8Type(), llvm::alignTo(HM * groupsPerPanel, 64));
+          Value sbBuf =
+              nramBuf(b.getI8Type(), llvm::alignTo(64 * groupsPerPanel, 64));
+          Value quantLut = nramBuf(b.getI32Type(), 256);
+          Value idxScratch =
+              nramBuf(b.getI32Type(), llvm::alignTo(HM * panelRecBytes, 64));
+          Value scScratch = nramBuf(
+              b.getF16Type(),
+              std::max<int64_t>(8192,
+                                llvm::alignTo(HM * groupsPerPanel * 2, 64)));
+          Value trScratch = nramBuf(b.getF16Type(), HM * convK);
+          Value rightF32 = nramBuf(b.getF32Type(), spec->blockElements * 64);
+          Value tmpF32 = nramBuf(b.getF32Type(), 64);
+          Value bias64;
+          if (writeback == "pitched-dma") {
+            for (auto &ep : epilogue)
+              if (ep.kind == "add_columns")
+                bias64 = nramBuf(carrierElemType(ep.bias), 64);
+          }
+
+          Value isMpuInit = makeOp("is_mpu", {}, {b.getI1Type()})->getResult(0);
+          ifThen(b.create<arith::XOrIOp>(loc, isMpuInit, cI1(true)), [&]() {
+            int32_t vc =
+                spec->valueCode == intentdsl::kir::QuantValueCode::Fp4E2M1 ? 1
+                                                                           : 0;
+            makeOp("quant_init_lut",
+                   {quantLut, cI32(vc), cI32(spec->packBits),
+                    cI32(spec->zeroBias), cI32(spec->laneBitShifts[0]),
+                    cI32(spec->laneBitShifts[1])},
+                   {}, {}, "quant-lut-init");
+          });
+
+          Value a = p.dot.getOperand(0), sa = p.dot.getOperand(1),
+                rhs = p.dot.getOperand(2);
+          intentdsl::kir::RightScale rightScale(p.dot);
+          int32_t codeMask = (1 << spec->packBits) - 1;
+          int32_t f16MinExp = spec->scaleBias - 13;
+          int32_t f16MaxExp = spec->scaleBias + 13;
+
+          int64_t cmb = std::max<int64_t>(
+              1, llvm::divideCeil(uint64_t(shapeM), uint64_t(CM)));
+          int64_t cnb = std::max<int64_t>(
+              1, llvm::divideCeil(uint64_t(shapeN), uint64_t(CN)));
+          int64_t tilesPerBatch = cmb * cnb;
+
+          auto stageASlice = [&](Value rS, Value nrS, Value u0) {
+            if (p.stride(a, 2) == 1 && p.stride(a, 1) == recBytes) {
+              Value aBase = globalPtr(a, {rS, u0, cI64(0)}, b.getI8Type());
+              ifThenElse(
+                  b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, nrS,
+                                          cI64(1)),
+                  {},
+                  [&]() {
+                    memcpy1D(aRawBuf, aBase, cI64(panelRecBytes), "GDRAM2NRAM");
+                  },
+                  [&]() {
+                    memcpy2D(aRawBuf, aBase, cI64(panelRecBytes),
+                             cI64(panelRecBytes), cI64(p.stride(a, 0)),
+                             b.create<arith::SubIOp>(loc, nrS, cI64(1)),
+                             "GDRAM2NRAM");
+                  });
+            } else {
+              forLoop(cI64(0), nrS, cI64(1), [&](Value i) {
+                Value ri = b.create<arith::AddIOp>(loc, rS, i);
+                forLoop(cI64(0), cI64(groupsPerPanel), cI64(1), [&](Value g) {
+                  Value ug = b.create<arith::AddIOp>(loc, u0, g);
+                  forLoop(cI64(0), cI64(recBytes), cI64(1), [&](Value z) {
+                    Value idx = b.create<arith::AddIOp>(
+                        loc,
+                        b.create<arith::MulIOp>(loc, i, cI64(panelRecBytes)),
+                        b.create<arith::AddIOp>(
+                            loc, b.create<arith::MulIOp>(loc, g, cI64(recBytes)),
+                            z));
+                    storeAt(aRawBuf, idx,
+                            loadAt(globalPtr(a, {ri, ug, z}, b.getI8Type()),
+                                   cI64(0), b.getI8Type()));
+                  });
+                });
+              });
+            }
+            if (p.stride(sa, 1) == 1) {
+              Value saBase = globalPtr(sa, {rS, u0}, b.getI8Type());
+              ifThenElse(
+                  b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, nrS,
+                                          cI64(1)),
+                  {},
+                  [&]() {
+                    memcpy1D(saBuf, saBase, cI64(groupsPerPanel), "GDRAM2NRAM");
+                  },
+                  [&]() {
+                    memcpy2D(saBuf, saBase, cI64(groupsPerPanel),
+                             cI64(groupsPerPanel), cI64(p.stride(sa, 0)),
+                             b.create<arith::SubIOp>(loc, nrS, cI64(1)),
+                             "GDRAM2NRAM");
+                  });
+            } else {
+              forLoop(cI64(0), nrS, cI64(1), [&](Value i) {
+                Value ri = b.create<arith::AddIOp>(loc, rS, i);
+                forLoop(cI64(0), cI64(groupsPerPanel), cI64(1), [&](Value g) {
+                  Value ug = b.create<arith::AddIOp>(loc, u0, g);
+                  Value idx = b.create<arith::AddIOp>(
+                      loc,
+                      b.create<arith::MulIOp>(loc, i, cI64(groupsPerPanel)), g);
+                  storeAt(saBuf, idx,
+                          loadAt(globalPtr(sa, {ri, ug}, b.getI8Type()),
+                                 cI64(0), b.getI8Type()));
+                });
+              });
+            }
+          };
+
+          auto stageB64Slice = [&](Value cS, Value ncS, Value u0) -> Value {
+            if (p.stride(rhs, 2) == 1 &&
+                p.stride(rhs, 0) == recBytes * p.stride(rhs, 1)) {
+              Value bBase = globalPtr(rhs, {u0, cI64(0), cS}, b.getI8Type());
+              if (panelRecBytes == 1)
+                memcpy1D(bRawBuf, bBase, ncS, "GDRAM2NRAM");
+              else
+                memcpy2D(bRawBuf, bBase, ncS, cI64(64), cI64(p.stride(rhs, 1)),
+                         cI64(panelRecBytes - 1), "GDRAM2NRAM");
+            } else {
+              forLoop(cI64(0), cI64(groupsPerPanel), cI64(1), [&](Value g) {
+                Value ug = b.create<arith::AddIOp>(loc, u0, g);
+                forLoop(cI64(0), cI64(recBytes), cI64(1), [&](Value z) {
+                  Value gz = b.create<arith::AddIOp>(
+                      loc, b.create<arith::MulIOp>(loc, g, cI64(recBytes)), z);
+                  forLoop(cI64(0), ncS, cI64(1), [&](Value j) {
+                    Value cj = b.create<arith::AddIOp>(loc, cS, j);
+                    Value idx = b.create<arith::AddIOp>(
+                        loc, b.create<arith::MulIOp>(loc, gz, cI64(64)), j);
+                    storeAt(bRawBuf, idx,
+                            loadAt(globalPtr(rhs, {ug, z, cj}, b.getI8Type()),
+                                   cI64(0), b.getI8Type()));
+                  });
+                });
+              });
+            }
+            Value rhsColMode = cI32(1);
+            if (rightScale.column == 0 && p.stride(rightScale.view, 1) == 1) {
+              Value sbBase = globalPtr(rightScale.view, {cS, u0}, b.getI8Type());
+              ifThenElse(
+                  b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, ncS,
+                                          cI64(1)),
+                  {},
+                  [&]() {
+                    memcpy1D(sbBuf, sbBase, cI64(groupsPerPanel), "GDRAM2NRAM");
+                  },
+                  [&]() {
+                    memcpy2D(sbBuf, sbBase, cI64(groupsPerPanel),
+                             cI64(groupsPerPanel),
+                             cI64(p.stride(rightScale.view, 0)),
+                             b.create<arith::SubIOp>(loc, ncS, cI64(1)),
+                             "GDRAM2NRAM");
+                  });
+            } else if (rightScale.column == 1 &&
+                       p.stride(rightScale.view, 1) == 1) {
+              Value fullCols = b.create<arith::CmpIOp>(
+                  loc, arith::CmpIPredicate::eq, ncS, cI64(64));
+              rhsColMode =
+                  b.create<arith::SelectOp>(loc, fullCols, cI32(2), cI32(1));
+              ifThenElse(
+                  fullCols, {},
+                  [&]() {
+                    Value sbBase =
+                        globalPtr(rightScale.view, {u0, cS}, b.getI8Type());
+                    if (groupsPerPanel == 1)
+                      memcpy1D(sbBuf, sbBase, cI64(64), "GDRAM2NRAM");
+                    else
+                      memcpy2D(sbBuf, sbBase, cI64(64), cI64(64),
+                               cI64(p.stride(rightScale.view, 0)),
+                               cI64(groupsPerPanel - 1), "GDRAM2NRAM");
+                  },
+                  [&]() {
+                    forLoop(cI64(0), ncS, cI64(1), [&](Value j) {
+                      Value cj = b.create<arith::AddIOp>(loc, cS, j);
+                      forLoop(cI64(0), cI64(groupsPerPanel), cI64(1),
+                              [&](Value g) {
+                                Value ug =
+                                    b.create<arith::AddIOp>(loc, u0, g);
+                                Value idx = b.create<arith::AddIOp>(
+                                    loc,
+                                    b.create<arith::MulIOp>(
+                                        loc, j, cI64(groupsPerPanel)),
+                                    g);
+                                storeAt(sbBuf, idx,
+                                        loadAt(globalPtr(rightScale.view,
+                                                         {ug, cj},
+                                                         b.getI8Type()),
+                                               cI64(0), b.getI8Type()));
+                              });
+                    });
+                  });
+            } else {
+              forLoop(cI64(0), ncS, cI64(1), [&](Value j) {
+                Value cj = b.create<arith::AddIOp>(loc, cS, j);
+                forLoop(cI64(0), cI64(groupsPerPanel), cI64(1), [&](Value g) {
+                  Value ug = b.create<arith::AddIOp>(loc, u0, g);
+                  SmallVector<Value> sbCoords(2);
+                  sbCoords[rightScale.column] = cj;
+                  sbCoords[rightScale.group] = ug;
+                  Value idx = b.create<arith::AddIOp>(
+                      loc, b.create<arith::MulIOp>(loc, j, cI64(groupsPerPanel)),
+                      g);
+                  storeAt(sbBuf, idx,
+                          loadAt(globalPtr(rightScale.view, sbCoords,
+                                           b.getI8Type()),
+                                 cI64(0), b.getI8Type()));
+                });
+              });
+            }
+            return rhsColMode;
+          };
+
+          forLoop(symClusterId, symGrid, symClusterDim, [&](Value cjob) {
+            Value gVal =
+                b.create<arith::DivSIOp>(loc, cjob, cI64(tilesPerBatch));
+            Value rem =
+                b.create<arith::RemSIOp>(loc, cjob, cI64(tilesPerBatch));
+            Value crIdx = b.create<arith::DivSIOp>(loc, rem, cI64(cnb));
+            Value ccIdx =
+                (cnb > 1)
+                    ? b.create<arith::RemSIOp>(
+                          loc,
+                          b.create<arith::AddIOp>(
+                              loc, b.create<arith::RemSIOp>(loc, rem, cI64(cnb)),
+                              crIdx),
+                          cI64(cnb))
+                          .getResult()
+                    : b.create<arith::RemSIOp>(loc, rem, cI64(cnb)).getResult();
+            Value cr = b.create<arith::MulIOp>(loc, crIdx, cI64(CM));
+            Value cc = b.create<arith::MulIOp>(loc, ccIdx, cI64(CN));
+            Value curCN = b.create<arith::MinSIOp>(
+                loc, b.create<arith::SubIOp>(loc, cI64(shapeN), cc), cI64(CN));
+
+            Value isMpu = makeOp("is_mpu", {}, {b.getI1Type()})->getResult(0);
+            Value coreId =
+                b.create<arith::AndIOp>(loc, makeSym("coreId"), cI64(3));
+            Value subM = b.create<arith::MulIOp>(
+                loc, b.create<arith::ShRUIOp>(loc, coreId, cI64(1)),
+                cI64(coreBM));
+            Value subN = b.create<arith::MulIOp>(
+                loc, b.create<arith::AndIOp>(loc, coreId, cI64(1)),
+                cI64(coreBN));
+            Value coreR = b.create<arith::AddIOp>(loc, cr, subM);
+            Value coreNr = b.create<arith::MinSIOp>(
+                loc,
+                b.create<arith::MaxSIOp>(
+                    loc, b.create<arith::SubIOp>(loc, cI64(shapeM), coreR),
+                    cI64(0)),
+                cI64(coreBM));
+            Value zeroHalf = b.create<arith::ConstantOp>(
+                loc, b.getZeroAttr(b.getF16Type()));
+
+            ifThen(b.create<arith::XOrIOp>(loc, isMpu, cI1(true)), [&]() {
+              for (int u = 0; u < 4; ++u)
+                fillVec(acc[u], cI64(coreBM * 64), cF32(0.0f));
+              sync("compute");
+            });
+
+            forLoopCarry(
+                cI64(0), cI64(groups), cI64(groupsPerPanel),
+                ValueRange{cI1(false)}, [&](Value u0, ValueRange uIter) {
+                  ifThen(
+                      b.create<arith::XOrIOp>(loc, isMpu, cI1(true)), [&]() {
+                        Value rDec = b.create<arith::AddIOp>(
+                            loc, cr,
+                            b.create<arith::MulIOp>(loc, coreId, cI64(HM)));
+                        Value nrDec = b.create<arith::MinSIOp>(
+                            loc,
+                            b.create<arith::MaxSIOp>(
+                                loc,
+                                b.create<arith::SubIOp>(loc, cI64(shapeM), rDec),
+                                cI64(0)),
+                            cI64(HM));
+                        auto okAIf = ifThenElse(
+                            b.create<arith::CmpIOp>(
+                                loc, arith::CmpIPredicate::sgt, nrDec, cI64(0)),
+                            {b.getI1Type()},
+                            [&]() {
+                              stageASlice(rDec, nrDec, u0);
+                              sync("io");
+                              Value na = b.create<arith::MulIOp>(
+                                  loc, nrDec, cI64(groupsPerPanel));
+                              Value okA = makeOp("quant_e8m0_ok",
+                                                 {saBuf, na, saBuf, na,
+                                                  scScratch, cI32(f16MinExp),
+                                                  cI32(f16MaxExp)},
+                                                 {b.getI1Type()}, {},
+                                                 "quant-e8m0-guard")
+                                              ->getResult(0);
+                              ifThen(okA, [&]() {
+                                makeOp("quant_decode_block_scaled",
+                                       {left0, aRawBuf, saBuf, quantLut,
+                                        idxScratch, scScratch, trScratch, nrDec,
+                                        cI64(HM), cI64(groupsPerPanel),
+                                        cI64(spec->blockElements),
+                                        cI32(spec->scaleBias), cI32(0)},
+                                       {}, {}, "quant-block-scaled");
+                              });
+                              b.create<scf::YieldOp>(loc, ValueRange{okA});
+                            },
+                            [&]() {
+                              fillVec(left0, cI64(HM * convK), zeroHalf);
+                              b.create<scf::YieldOp>(loc, ValueRange{cI1(true)});
+                            },
+                            false);
+                        Value okCore = okAIf.getResult(0);
+
+                        for (int h = 0; h < 2; ++h) {
+                          Value cDec = b.create<arith::AddIOp>(
+                              loc, cc,
+                              b.create<arith::AddIOp>(
+                                  loc,
+                                  b.create<arith::MulIOp>(loc, coreId, cI64(HM)),
+                                  cI64(h * 64)));
+                          Value ncDec = b.create<arith::MinSIOp>(
+                              loc,
+                              b.create<arith::MaxSIOp>(
+                                  loc,
+                                  b.create<arith::SubIOp>(loc, cI64(shapeN),
+                                                          cDec),
+                                  cI64(0)),
+                              cI64(64));
+                          Value dstH = makeAddr(
+                              left1, {cI64(h * 64 * convK)}, {cI64(1)}, 1);
+                          auto okBIf = ifThenElse(
+                              b.create<arith::CmpIOp>(
+                                  loc, arith::CmpIPredicate::sgt, ncDec,
+                                  cI64(0)),
+                              {b.getI1Type()},
+                              [&]() {
+                                Value colMode = stageB64Slice(cDec, ncDec, u0);
+                                sync("io");
+                                Value nb = b.create<arith::MulIOp>(
+                                    loc, ncDec, cI64(groupsPerPanel));
+                                Value okB = makeOp("quant_e8m0_ok",
+                                                   {sbBuf, nb, sbBuf, nb,
+                                                    scScratch, cI32(f16MinExp),
+                                                    cI32(f16MaxExp)},
+                                                   {b.getI1Type()}, {},
+                                                   "quant-e8m0-guard")
+                                                ->getResult(0);
+                                ifThen(okB, [&]() {
+                                  makeOp("quant_decode_block_scaled",
+                                         {dstH, bRawBuf, sbBuf, quantLut,
+                                          idxScratch, scScratch, trScratch,
+                                          ncDec, cI64(64), cI64(groupsPerPanel),
+                                          cI64(spec->blockElements),
+                                          cI32(spec->scaleBias), colMode},
+                                         {}, {}, "quant-block-scaled");
+                                });
+                                b.create<scf::YieldOp>(loc, ValueRange{okB});
+                              },
+                              [&]() {
+                                fillVec(dstH, cI64(64 * convK), zeroHalf);
+                                b.create<scf::YieldOp>(loc,
+                                                       ValueRange{cI1(true)});
+                              },
+                              false);
+                          okCore = b.create<arith::AndIOp>(
+                              loc, okCore, okBIf.getResult(0));
+                        }
+                        sync("compute");
+                        storeAt(sOk, coreId,
+                                b.create<arith::SelectOp>(loc, okCore, cI32(1),
+                                                          cI32(0)));
+                        ifThen(okCore, [&]() {
+                          Value sOff = b.create<arith::MulIOp>(
+                              loc, coreId, cI64(HM * convK));
+                          memcpy1D(makeAddr(sA, {sOff}, {cI64(1)}, 4), left0,
+                                   cI64(HM * convK), "NRAM2SRAM");
+                          memcpy1D(makeAddr(sB, {sOff}, {cI64(1)}, 4), left1,
+                                   cI64(HM * convK), "NRAM2SRAM");
+                          sync("all");
+                        });
+                      });
+                  sync("cluster");
+
+                  auto stepIf = ifThenElse(
+                      isMpu, {b.getI1Type()},
+                      [&]() {
+                        b.create<scf::YieldOp>(loc, ValueRange{uIter[0]});
+                      },
+                      [&]() {
+                        Value o0 = loadAt(sOk, cI64(0), b.getI32Type());
+                        Value o1 = loadAt(sOk, cI64(1), b.getI32Type());
+                        Value o2 = loadAt(sOk, cI64(2), b.getI32Type());
+                        Value o3 = loadAt(sOk, cI64(3), b.getI32Type());
+                        Value allOkBits = b.create<arith::AndIOp>(
+                            loc, b.create<arith::AndIOp>(loc, o0, o1),
+                            b.create<arith::AndIOp>(loc, o2, o3));
+                        Value allOk = b.create<arith::CmpIOp>(
+                            loc, arith::CmpIPredicate::ne, allOkBits, cI32(0));
+                        Value accum = b.create<arith::OrIOp>(
+                            loc, uIter[0],
+                            b.create<arith::CmpIOp>(loc,
+                                                    arith::CmpIPredicate::ne,
+                                                    u0, cI64(0)));
+                        auto okIf = ifThenElse(
+                            allOk, {b.getI1Type()},
+                            [&]() {
+                              Value aBase = makeAddr(
+                                  sA,
+                                  {b.create<arith::MulIOp>(loc, subM,
+                                                           cI64(convK))},
+                                  {cI64(1)}, 4);
+                              Value bBase = makeAddr(
+                                  sB,
+                                  {b.create<arith::MulIOp>(loc, subN,
+                                                           cI64(convK))},
+                                  {cI64(1)}, 4);
+                              memcpy1D(left0, aBase, cI64(HM * convK),
+                                       "SRAM2NRAM", true);
+                              memcpy1D(flt[0], bBase, cI64(64 * convK),
+                                       "SRAM2WRAM", true);
+                              sync("sram_to_nram");
+                              sync("sram_to_wram");
+                              memcpy1D(
+                                  left1,
+                                  makeAddr(aBase, {cI64(HM * convK)}, {cI64(1)},
+                                           4),
+                                  cI64(HM * convK), "SRAM2NRAM", true);
+                              for (int u = 0; u < 4; ++u) {
+                                if (u + 1 < 4)
+                                  memcpy1D(flt[u + 1],
+                                           makeAddr(bBase,
+                                                    {cI64((u + 1) * 64 * convK)},
+                                                    {cI64(1)}, 4),
+                                           cI64(64 * convK), "SRAM2WRAM", true);
+                                makeOp("wram_conv",
+                                       {acc[u], left0, flt[u], accum}, {},
+                                       {b.getNamedAttr("bm",
+                                                       b.getI64IntegerAttr(HM)),
+                                        b.getNamedAttr("bn",
+                                                       b.getI64IntegerAttr(64)),
+                                        b.getNamedAttr(
+                                            "bk", b.getI64IntegerAttr(convK)),
+                                        b.getNamedAttr("mode",
+                                                       b.getStringAttr("f16"))},
+                                       "wram-conv-f16");
+                                if (u + 1 < 4)
+                                  sync("sram_to_wram");
+                              }
+                              sync("sram_to_nram");
+                              for (int u = 0; u < 4; ++u) {
+                                Value accBot = makeAddr(acc[u], {cI64(HM * 64)},
+                                                        {cI64(1)}, 1);
+                                makeOp("wram_conv",
+                                       {accBot, left1, flt[u], accum}, {},
+                                       {b.getNamedAttr("bm",
+                                                       b.getI64IntegerAttr(HM)),
+                                        b.getNamedAttr("bn",
+                                                       b.getI64IntegerAttr(64)),
+                                        b.getNamedAttr(
+                                            "bk", b.getI64IntegerAttr(convK)),
+                                        b.getNamedAttr("mode",
+                                                       b.getStringAttr("f16"))},
+                                       "wram-conv-f16");
+                              }
+                              sync("compute");
+                              b.create<scf::YieldOp>(loc, ValueRange{uIter[0]});
+                            },
+                            [&]() {
+                              for (int halfIdx = 0; halfIdx < 2; ++halfIdx) {
+                                Value rH = b.create<arith::AddIOp>(
+                                    loc, coreR, cI64(halfIdx * HM));
+                                Value nrH = b.create<arith::MinSIOp>(
+                                    loc,
+                                    b.create<arith::MaxSIOp>(
+                                        loc,
+                                        b.create<arith::SubIOp>(
+                                            loc, cI64(shapeM), rH),
+                                        cI64(0)),
+                                    cI64(HM));
+                                ifThen(
+                                    b.create<arith::CmpIOp>(
+                                        loc, arith::CmpIPredicate::sgt, nrH,
+                                        cI64(0)),
+                                    [&]() {
+                                      stageASlice(rH, nrH, u0);
+                                      sync("io");
+                                      for (int u = 0; u < 4; ++u) {
+                                        Value colOff = b.create<arith::AddIOp>(
+                                            loc, subN, cI64(u * 64));
+                                        Value ncU = b.create<arith::MinSIOp>(
+                                            loc,
+                                            b.create<arith::MaxSIOp>(
+                                                loc,
+                                                b.create<arith::SubIOp>(
+                                                    loc, curCN, colOff),
+                                                cI64(0)),
+                                            cI64(64));
+                                        ifThen(
+                                            b.create<arith::CmpIOp>(
+                                                loc, arith::CmpIPredicate::sgt,
+                                                ncU, cI64(0)),
+                                            [&]() {
+                                              Value cU =
+                                                  b.create<arith::AddIOp>(
+                                                      loc, cc, colOff);
+                                              forLoop(
+                                                  cI64(0), ncU, cI64(1),
+                                                  [&](Value j) {
+                                                    Value cj =
+                                                        b.create<arith::AddIOp>(
+                                                            loc, cU, j);
+                                                    forLoop(
+                                                        cI64(0),
+                                                        cI64(groupsPerPanel),
+                                                        cI64(1), [&](Value g) {
+                                                          Value ug = b.create<
+                                                              arith::AddIOp>(
+                                                              loc, u0, g);
+                                                          SmallVector<Value>
+                                                              sbCoords(2);
+                                                          sbCoords[rightScale
+                                                                       .column] =
+                                                              cj;
+                                                          sbCoords[rightScale
+                                                                       .group] =
+                                                              ug;
+                                                          Value idx = b.create<
+                                                              arith::AddIOp>(
+                                                              loc,
+                                                              b.create<
+                                                                  arith::MulIOp>(
+                                                                  loc, j,
+                                                                  cI64(
+                                                                      groupsPerPanel)),
+                                                              g);
+                                                          storeAt(
+                                                              sbBuf, idx,
+                                                              loadAt(
+                                                                  globalPtr(
+                                                                      rightScale
+                                                                          .view,
+                                                                      sbCoords,
+                                                                      b.getI8Type()),
+                                                                  cI64(0),
+                                                                  b.getI8Type()));
+                                                          forLoop(
+                                                              cI64(0),
+                                                              cI64(recBytes),
+                                                              cI64(1),
+                                                              [&](Value z) {
+                                                                Value gz = b.create<
+                                                                    arith::AddIOp>(
+                                                                    loc,
+                                                                    b.create<
+                                                                        arith::
+                                                                            MulIOp>(
+                                                                        loc, g,
+                                                                        cI64(
+                                                                            recBytes)),
+                                                                    z);
+                                                                Value rIdx = b.create<
+                                                                    arith::AddIOp>(
+                                                                    loc,
+                                                                    b.create<
+                                                                        arith::
+                                                                            MulIOp>(
+                                                                        loc, gz,
+                                                                        cI64(
+                                                                            64)),
+                                                                    j);
+                                                                storeAt(
+                                                                    bRawBuf,
+                                                                    rIdx,
+                                                                    loadAt(
+                                                                        globalPtr(
+                                                                            rhs,
+                                                                            {ug,
+                                                                             z,
+                                                                             cj},
+                                                                            b.getI8Type()),
+                                                                        cI64(0),
+                                                                        b.getI8Type()));
+                                                              });
+                                                        });
+                                                  });
+                                              sync("all");
+                                              Value accHalf =
+                                                  halfIdx == 0
+                                                      ? acc[u]
+                                                      : makeAddr(
+                                                            acc[u],
+                                                            {cI64(HM * 64)},
+                                                            {cI64(1)}, 1);
+                                              forLoop(
+                                                  cI64(0), cI64(groupsPerPanel),
+                                                  cI64(1), [&](Value g) {
+                                                    Value gRecBase =
+                                                        b.create<arith::MulIOp>(
+                                                            loc, g,
+                                                            cI64(recBytes));
+                                                    forLoop(
+                                                        cI64(0), ncU, cI64(1),
+                                                        [&](Value j) {
+                                                          Value sbByte = b.create<
+                                                              arith::ExtUIOp>(
+                                                              loc,
+                                                              b.getI32Type(),
+                                                              loadAt(
+                                                                  sbBuf,
+                                                                  b.create<
+                                                                      arith::
+                                                                          AddIOp>(
+                                                                      loc,
+                                                                      b.create<
+                                                                          arith::
+                                                                              MulIOp>(
+                                                                          loc,
+                                                                          j,
+                                                                          cI64(
+                                                                              groupsPerPanel)),
+                                                                      g),
+                                                                  b.getI8Type()));
+                                                          Value sbF =
+                                                              decodeScalarE8M0(
+                                                                  sbByte,
+                                                                  *spec);
+                                                          forLoop(
+                                                              cI64(0),
+                                                              cI64(recBytes),
+                                                              cI64(1),
+                                                              [&](Value z) {
+                                                                Value gz = b.create<
+                                                                    arith::AddIOp>(
+                                                                    loc,
+                                                                    gRecBase,
+                                                                    z);
+                                                                Value raw = b.create<
+                                                                    arith::
+                                                                        ExtUIOp>(
+                                                                    loc,
+                                                                    b.getI32Type(),
+                                                                    loadAt(
+                                                                        bRawBuf,
+                                                                        b.create<
+                                                                            arith::
+                                                                                AddIOp>(
+                                                                            loc,
+                                                                            b.create<
+                                                                                arith::
+                                                                                    MulIOp>(
+                                                                                loc,
+                                                                                gz,
+                                                                                cI64(
+                                                                                    64)),
+                                                                            j),
+                                                                        b.getI8Type()));
+                                                                Value tBase = b.create<
+                                                                    arith::
+                                                                        MulIOp>(
+                                                                    loc, z,
+                                                                    cI64(spec
+                                                                             ->packFactor));
+                                                                for (
+                                                                    int sub = 0;
+                                                                    sub <
+                                                                    spec->packFactor;
+                                                                    ++sub) {
+                                                                  Value
+                                                                      shifted =
+                                                                          spec->laneBitShifts
+                                                                                      [sub] >
+                                                                                  0
+                                                                              ? b.create<
+                                                                                     arith::
+                                                                                         ShRUIOp>(
+                                                                                     loc,
+                                                                                     raw,
+                                                                                     cI32(
+                                                                                         spec->laneBitShifts
+                                                                                             [sub]))
+                                                                                    .getResult()
+                                                                              : raw;
+                                                                  Value code = b.create<
+                                                                      arith::
+                                                                          AndIOp>(
+                                                                      loc,
+                                                                      shifted,
+                                                                      cI32(
+                                                                          codeMask));
+                                                                  if (spec->zeroBias !=
+                                                                      0)
+                                                                    code = b.create<
+                                                                        arith::
+                                                                            SubIOp>(
+                                                                        loc,
+                                                                        code,
+                                                                        cI32(
+                                                                            spec->zeroBias));
+                                                                  Value decF = b.create<
+                                                                      arith::
+                                                                          MulFOp>(
+                                                                      loc,
+                                                                      decodeScalarQuantCode(
+                                                                          code,
+                                                                          *spec),
+                                                                      sbF);
+                                                                  Value t = b.create<
+                                                                      arith::
+                                                                          AddIOp>(
+                                                                      loc,
+                                                                      tBase,
+                                                                      cI64(
+                                                                          sub));
+                                                                  Value idx = b.create<
+                                                                      arith::
+                                                                          AddIOp>(
+                                                                      loc,
+                                                                      b.create<
+                                                                          arith::
+                                                                              MulIOp>(
+                                                                          loc,
+                                                                          t,
+                                                                          cI64(
+                                                                              64)),
+                                                                      j);
+                                                                  storeAt(
+                                                                      rightF32,
+                                                                      idx,
+                                                                      decF);
+                                                                }
+                                                              });
+                                                        });
+                                                    sync("all");
+                                                    forLoop(
+                                                        cI64(0), nrH, cI64(1),
+                                                        [&](Value i) {
+                                                          Value saByte = b.create<
+                                                              arith::ExtUIOp>(
+                                                              loc,
+                                                              b.getI32Type(),
+                                                              loadAt(
+                                                                  saBuf,
+                                                                  b.create<
+                                                                      arith::
+                                                                          AddIOp>(
+                                                                      loc,
+                                                                      b.create<
+                                                                          arith::
+                                                                              MulIOp>(
+                                                                          loc,
+                                                                          i,
+                                                                          cI64(
+                                                                              groupsPerPanel)),
+                                                                      g),
+                                                                  b.getI8Type()));
+                                                          Value saF =
+                                                              decodeScalarE8M0(
+                                                                  saByte,
+                                                                  *spec);
+                                                          Value accRow =
+                                                              makeAddr(
+                                                                  accHalf, {i},
+                                                                  {cI64(64)},
+                                                                  1);
+                                                          Value aBaseOff = b.create<
+                                                              arith::AddIOp>(
+                                                              loc,
+                                                              b.create<
+                                                                  arith::MulIOp>(
+                                                                  loc, i,
+                                                                  cI64(
+                                                                      panelRecBytes)),
+                                                              gRecBase);
+                                                          forLoop(
+                                                              cI64(0),
+                                                              cI64(recBytes),
+                                                              cI64(1),
+                                                              [&](Value z) {
+                                                                Value raw = b.create<
+                                                                    arith::
+                                                                        ExtUIOp>(
+                                                                    loc,
+                                                                    b.getI32Type(),
+                                                                    loadAt(
+                                                                        aRawBuf,
+                                                                        b.create<
+                                                                            arith::
+                                                                                AddIOp>(
+                                                                            loc,
+                                                                            aBaseOff,
+                                                                            z),
+                                                                        b.getI8Type()));
+                                                                Value tBase = b.create<
+                                                                    arith::
+                                                                        MulIOp>(
+                                                                    loc, z,
+                                                                    cI64(spec
+                                                                             ->packFactor));
+                                                                for (
+                                                                    int sub = 0;
+                                                                    sub <
+                                                                    spec->packFactor;
+                                                                    ++sub) {
+                                                                  Value
+                                                                      shifted =
+                                                                          spec->laneBitShifts
+                                                                                      [sub] >
+                                                                                  0
+                                                                              ? b.create<
+                                                                                     arith::
+                                                                                         ShRUIOp>(
+                                                                                     loc,
+                                                                                     raw,
+                                                                                     cI32(
+                                                                                         spec->laneBitShifts
+                                                                                             [sub]))
+                                                                                    .getResult()
+                                                                              : raw;
+                                                                  Value code = b.create<
+                                                                      arith::
+                                                                          AndIOp>(
+                                                                      loc,
+                                                                      shifted,
+                                                                      cI32(
+                                                                          codeMask));
+                                                                  if (spec->zeroBias !=
+                                                                      0)
+                                                                    code = b.create<
+                                                                        arith::
+                                                                            SubIOp>(
+                                                                        loc,
+                                                                        code,
+                                                                        cI32(
+                                                                            spec->zeroBias));
+                                                                  Value av = b.create<
+                                                                      arith::
+                                                                          MulFOp>(
+                                                                      loc,
+                                                                      decodeScalarQuantCode(
+                                                                          code,
+                                                                          *spec),
+                                                                      saF);
+                                                                  Value t = b.create<
+                                                                      arith::
+                                                                          AddIOp>(
+                                                                      loc,
+                                                                      tBase,
+                                                                      cI64(
+                                                                          sub));
+                                                                  Value rRow =
+                                                                      makeAddr(
+                                                                          rightF32,
+                                                                          {t},
+                                                                          {cI64(
+                                                                              64)},
+                                                                          1);
+                                                                  makeOp(
+                                                                      "vec_"
+                                                                      "scalar",
+                                                                      {tmpF32,
+                                                                       rRow, av,
+                                                                       cI64(
+                                                                           64)},
+                                                                      {},
+                                                                      {b.getNamedAttr(
+                                                                          "op",
+                                                                          b.getStringAttr(
+                                                                              "mul"))});
+                                                                  makeOp(
+                                                                      "vec_"
+                                                                      "binary",
+                                                                      {accRow,
+                                                                       accRow,
+                                                                       tmpF32,
+                                                                       cI64(
+                                                                           64)},
+                                                                      {},
+                                                                      {b.getNamedAttr(
+                                                                          "op",
+                                                                          b.getStringAttr(
+                                                                              "add"))});
+                                                                }
+                                                              });
+                                                        });
+                                                    sync("compute");
+                                                  });
+                                            });
+                                      }
+                                    });
+                              }
+                              b.create<scf::YieldOp>(loc,
+                                                     ValueRange{cI1(true)});
+                            },
+                            false);
+                        b.create<scf::YieldOp>(loc,
+                                               ValueRange{okIf.getResult(0)});
+                      },
+                      false);
+                  sync("cluster");
+                  b.create<scf::YieldOp>(loc, ValueRange{stepIf.getResult(0)});
+                });
+
+            ifThen(
+                b.create<arith::AndIOp>(
+                    loc, b.create<arith::XOrIOp>(loc, isMpu, cI1(true)),
+                    b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt,
+                                            coreNr, cI64(0))),
+                [&]() {
+                  for (int u = 0; u < 4; ++u) {
+                    Value colOff =
+                        b.create<arith::AddIOp>(loc, subN, cI64(u * 64));
+                    Value ncU = b.create<arith::MinSIOp>(
+                        loc,
+                        b.create<arith::MaxSIOp>(
+                            loc, b.create<arith::SubIOp>(loc, curCN, colOff),
+                            cI64(0)),
+                        cI64(64));
+                    ifThen(
+                        b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt,
+                                                ncU, cI64(0)),
+                        [&]() {
+                          Value colU =
+                              b.create<arith::AddIOp>(loc, cc, colOff);
+                          emitSubtileWriteback(acc[u], bias64, coreR, colU,
+                                               coreNr, ncU, gVal, cI1(false));
+                        });
+                  }
+                });
+            sync("cluster");
+          });
+
+          return finalizeModule(/*union4Launch=*/true);
+        }
+      }
+    }
 
     Type accElem = (mode == "exact-i8-conv") ? Type(b.getI32Type())
                                              : Type(b.getF32Type());
@@ -2729,6 +4672,13 @@ struct MatrixLowerer {
           biasBuf = nramBuf(carrierElemType(ep.bias), bn);
     }
 
+    Value rowShareSram0, rowShareSram1;
+    if (isUnion4 && !isCluster512 && mode == "quant-format") {
+      Type lhsElem = carrierElemType(p.dot.getOperand(0));
+      rowShareSram0 = sramBuf(lhsElem, bm * bk);
+      rowShareSram1 = sramBuf(lhsElem, bm * bk);
+    }
+
     Value quantLut, quantRecLut, qActAllF32, dsAll, zeroAll;
     if (mode == "quant-format") {
       if (const auto *qSpec = intentdsl::kir::quantFormatSpec(p.dot)) {
@@ -2745,10 +4695,21 @@ struct MatrixLowerer {
               qSpec->packFactor == 2 ? qSpec->laneBitShifts[0] : 0;
           int32_t s1 =
               qSpec->packFactor == 2 ? qSpec->laneBitShifts[1] : 4;
-          makeOp("quant_init_lut",
-                 {quantLut, cI32(vc), cI32(qSpec->packBits),
-                  cI32(qSpec->zeroBias), cI32(s0), cI32(s1)},
-                 {}, {}, "quant-lut-init");
+          if (rowShareSram0) {
+            Value isMpuInit =
+                makeOp("is_mpu", {}, {b.getI1Type()})->getResult(0);
+            ifThen(b.create<arith::XOrIOp>(loc, isMpuInit, cI1(true)), [&]() {
+              makeOp("quant_init_lut",
+                     {quantLut, cI32(vc), cI32(qSpec->packBits),
+                      cI32(qSpec->zeroBias), cI32(s0), cI32(s1)},
+                     {}, {}, "quant-lut-init");
+            });
+          } else {
+            makeOp("quant_init_lut",
+                   {quantLut, cI32(vc), cI32(qSpec->packBits),
+                    cI32(qSpec->zeroBias), cI32(s0), cI32(s1)},
+                   {}, {}, "quant-lut-init");
+          }
         } else if (qSpec->roleLayout ==
                        intentdsl::kir::QuantRoleLayout::RecordGemv &&
                    qSpec->q8kActivation && qSpec->numBitPlanes == 2 &&
@@ -2863,7 +4824,20 @@ struct MatrixLowerer {
         std::max<int64_t>(1, llvm::divideCeil(uint64_t(shapeN), uint64_t(bn)));
 
     LogicalResult status = success();
-    forLoop(symTaskId, symGrid, symTaskDim, [&](Value job) {
+    Value iterStart = rowShareSram0 ? makeSym("clusterId") : symTaskId;
+    Value iterBound =
+        rowShareSram0 ? b.create<arith::DivSIOp>(loc, symGrid, cI64(4)).getResult()
+                      : symGrid;
+    Value iterStep = rowShareSram0 ? makeSym("clusterDim") : symTaskDim;
+
+    forLoop(iterStart, iterBound, iterStep, [&](Value jobIter) {
+      Value job = jobIter;
+      if (rowShareSram0) {
+        Value coreId =
+            b.create<arith::AndIOp>(loc, makeSym("coreId"), cI64(3));
+        job = b.create<arith::AddIOp>(
+            loc, b.create<arith::MulIOp>(loc, jobIter, cI64(4)), coreId);
+      }
       Value c = b.create<arith::MulIOp>(
           loc, b.create<arith::RemSIOp>(loc, job, cI64(nb)), cI64(bn));
       Value rInit = b.create<arith::MulIOp>(
@@ -2907,18 +4881,46 @@ struct MatrixLowerer {
           if (failed(emitScaledMX8(acc, r, c, nr, nc)))
             status = failure();
         } else if (mode == "quant-format") {
-          if (failed(emitQuantizedFromDescriptor(
-                  acc, r, c, nr, nc, quantLut, quantRecLut, qActAllF32, dsAll,
-                  zeroAll)))
-            status = failure();
+          if (rowShareSram0) {
+            Value lhsView = p.dot.getOperand(0);
+            Type lhsElem = carrierElemType(lhsView);
+            Value canShare =
+                (shapeK > 0 && shapeK % bk == 0)
+                    ? b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, nr,
+                                              cI64(bm))
+                          .getResult()
+                    : cI1(false);
+            Value isMpu = makeOp("is_mpu", {}, {b.getI1Type()})->getResult(0);
+            ifThen(b.create<arith::AndIOp>(loc, isMpu, canShare), [&]() {
+              Value lBase = globalPtr(lhsView, {r, cI64(0)}, lhsElem);
+              if (p.stride(lhsView, 0) == bk)
+                memcpy1D(rowShareSram0, lBase, cI64(bm * bk), "GDRAM2SRAM");
+              else
+                memcpy2D(rowShareSram0, lBase, cI64(bk), cI64(bk),
+                         cI64(p.stride(lhsView, 0)), cI64(bm - 1),
+                         "GDRAM2SRAM");
+            });
+            sync("cluster");
+            if (failed(emitQuantizedFromDescriptor(
+                    acc, r, c, nr, nc, quantLut, quantRecLut, qActAllF32,
+                    dsAll, zeroAll, rowShareSram0, rowShareSram1, canShare)))
+              status = failure();
+          } else {
+            if (failed(emitQuantizedFromDescriptor(
+                    acc, r, c, nr, nc, quantLut, quantRecLut, qActAllF32,
+                    dsAll, zeroAll)))
+              status = failure();
+          }
         } else {
-          fillVec(acc, cI64(bm * bn),
-                  mode == "exact-i8-conv" ? cI32(0) : cF32(0.0f));
+          if (!(mode == "wram-conv" && !hasBf16Guard && shapeK > 0))
+            fillVec(acc, cI64(bm * bn),
+                    mode == "exact-i8-conv" ? cI32(0) : cF32(0.0f));
           auto &feeds = p.fold.getRegion(0).front().front().getRegion(0).front();
           StringRef rhsTransfer = feeds.front()
                                       .getNextNode()
                                       ->getAttrOfType<StringAttr>("bangc.transfer")
                                       .getValue();
+          bool asyncStages = !isWindow;
           auto kLoop = forLoopCarry(
               cI64(0), cI64(shapeK), cI64(bk), ValueRange{cI1(false)},
               [&](Value kk, ValueRange iter) {
@@ -2928,15 +4930,19 @@ struct MatrixLowerer {
                 if (failed(emitOperandStage(
                         true, left, right, trans, mapped, stepbuf, prefixbuf,
                         scales, expScratch, r, c, gVal, kk, nr, nc, nk,
-                        batchVal, chunkVal, headVal, groupVal, lastVal)) ||
+                        batchVal, chunkVal, headVal, groupVal, lastVal,
+                        asyncStages)) ||
                     failed(emitOperandStage(
                         false, left, right, trans, mapped, stepbuf, prefixbuf,
                         scales, expScratch, r, c, gVal, kk, nr, nc, nk,
-                        batchVal, chunkVal, headVal, groupVal, lastVal))) {
+                        batchVal, chunkVal, headVal, groupVal, lastVal,
+                        asyncStages))) {
                   status = failure();
                   b.create<scf::YieldOp>(loc, ValueRange{iter[0]});
                   return;
                 }
+                if (asyncStages)
+                  sync("dram_to_nram");
                 if (mode == "wram-conv" || mode == "exact-i8-conv") {
                   if (rhsTransfer != "filter-major-dma" &&
                       rhsTransfer != "mapped-filter-major-dma") {
@@ -3035,145 +5041,157 @@ struct MatrixLowerer {
         }
 
         // Epilogue and writeback.
-        Value accOut = acc;
-        auto narrowAcc = [&]() {
-          if (outElem.isBF16()) {
-            Value bfAcc = makeOp("nram_ptr", {acc, cI64(0)},
-                                 {memSpacePtr(b.getContext(), b.getBF16Type(), 1)})
-                              ->getResult(0);
-            makeOp("bf16_acc_narrow",
-                   {bfAcc, acc, cI64(bm * bn),
-                    hasBf16Guard ? strictFlag : cI1(false)},
-                   {}, {}, "bf16-acc-narrow");
-            accOut = bfAcc;
-          } else if (outElem.isF16()) {
-            Value f16Acc =
-                makeOp("nram_ptr", {acc, cI64(0)},
-                       {memSpacePtr(b.getContext(), b.getF16Type(), 1)})
-                    ->getResult(0);
-            makeOp("vec_cast", {f16Acc, acc, cI64(bm * bn)}, {},
-                   {b.getNamedAttr("kind", b.getStringAttr("f32_to_f16"))});
-            accOut = f16Acc;
-          }
-        };
+        auto emitWritebackAll = [&]() {
+          Value accOut = acc;
+          auto narrowAcc = [&]() {
+            if (outElem.isBF16()) {
+              Value bfAcc =
+                  makeOp("nram_ptr", {acc, cI64(0)},
+                         {memSpacePtr(b.getContext(), b.getBF16Type(), 1)})
+                      ->getResult(0);
+              makeOp("bf16_acc_narrow",
+                     {bfAcc, acc, cI64(bm * bn),
+                      hasBf16Guard ? strictFlag : cI1(false)},
+                     {}, {}, "bf16-acc-narrow");
+              accOut = bfAcc;
+            } else if (outElem.isF16()) {
+              Value f16Acc =
+                  makeOp("nram_ptr", {acc, cI64(0)},
+                         {memSpacePtr(b.getContext(), b.getF16Type(), 1)})
+                      ->getResult(0);
+              makeOp("vec_cast", {f16Acc, acc, cI64(bm * bn)}, {},
+                     {b.getNamedAttr("kind", b.getStringAttr("f32_to_f16"))});
+              accOut = f16Acc;
+            }
+          };
 
-        if (writeback == "routed-row-dma") {
-          int64_t q = dstShape[1];
-          narrowAcc();
-          sync("compute");
-          forLoop(cI64(0), nr, cI64(1), [&](Value i) {
-            Value ri = b.create<arith::AddIOp>(loc, r, i);
-            Value dest = toI64(
-                loadAt(globalPtr(routedIds, {ri}), cI64(0), b.getI32Type()));
-            Value d0 = b.create<arith::DivSIOp>(loc, dest, cI64(q));
-            Value d1 = b.create<arith::RemSIOp>(loc, dest, cI64(q));
-            Value outPtr = globalPtr(dst, {d0, d1, c});
-            Value srcRow = makeAddr(accOut, {i}, {cI64(bn)}, 1);
-            memcpy1D(outPtr, srcRow, nc, "NRAM2GDRAM");
-          });
-        } else if (writeback == "pitched-dma") {
-          for (auto &ep : epilogue) {
-            if (ep.kind == "add_columns") {
-              if (p.stride(ep.bias, 0) == 1) {
-                memcpy1D(biasBuf, globalPtr(ep.bias, {c}), nc, "GDRAM2NRAM");
-                sync("io");
-              } else {
-                forLoop(cI64(0), nc, cI64(1), [&](Value j) {
-                  Value cj = b.create<arith::AddIOp>(loc, c, j);
-                  storeAt(biasBuf, j,
-                          loadAt(globalPtr(ep.bias, {cj}), cI64(0)));
+          if (writeback == "routed-row-dma") {
+            int64_t q = dstShape[1];
+            narrowAcc();
+            sync("compute");
+            forLoop(cI64(0), nr, cI64(1), [&](Value i) {
+              Value ri = b.create<arith::AddIOp>(loc, r, i);
+              Value dest = toI64(
+                  loadAt(globalPtr(routedIds, {ri}), cI64(0), b.getI32Type()));
+              Value d0 = b.create<arith::DivSIOp>(loc, dest, cI64(q));
+              Value d1 = b.create<arith::RemSIOp>(loc, dest, cI64(q));
+              Value outPtr = globalPtr(dst, {d0, d1, c});
+              Value srcRow = makeAddr(accOut, {i}, {cI64(bn)}, 1);
+              memcpy1D(outPtr, srcRow, nc, "NRAM2GDRAM");
+            });
+          } else if (writeback == "pitched-dma") {
+            for (auto &ep : epilogue) {
+              if (ep.kind == "add_columns") {
+                if (p.stride(ep.bias, 0) == 1) {
+                  memcpy1D(biasBuf, globalPtr(ep.bias, {c}), nc, "GDRAM2NRAM");
+                  sync("io");
+                } else {
+                  forLoop(cI64(0), nc, cI64(1), [&](Value j) {
+                    Value cj = b.create<arith::AddIOp>(loc, c, j);
+                    storeAt(biasBuf, j,
+                            loadAt(globalPtr(ep.bias, {cj}), cI64(0)));
+                  });
+                }
+                forLoop(cI64(0), nr, cI64(1), [&](Value i) {
+                  Value aRow = makeAddr(acc, {i}, {cI64(bn)}, 1);
+                  makeOp("vec_binary", {aRow, aRow, biasBuf, cI64(bn)}, {},
+                         {b.getNamedAttr("op", b.getStringAttr("add"))});
                 });
               }
-              forLoop(cI64(0), nr, cI64(1), [&](Value i) {
-                Value aRow = makeAddr(acc, {i}, {cI64(bn)}, 1);
-                makeOp("vec_binary", {aRow, aRow, biasBuf, cI64(bn)}, {},
-                       {b.getNamedAttr("op", b.getStringAttr("add"))});
-              });
             }
-          }
-          narrowAcc();
-          sync("compute");
-          if (p.rank(dst) == 1) {
-            memcpy1D(globalPtr(dst, {r}), accOut, nr, "NRAM2GDRAM");
+            narrowAcc();
+            sync("compute");
+            if (p.rank(dst) == 1) {
+              memcpy1D(globalPtr(dst, {r}), accOut, nr, "NRAM2GDRAM");
+            } else {
+              Value outPtr =
+                  p.rank(dst) == 5
+                      ? globalPtr(dst, {batchVal, chunkVal, headVal, r, c})
+                  : p.rank(dst) == 2 ? globalPtr(dst, {r, c})
+                                     : globalPtr(dst, {gVal, r, c});
+              ifThenElse(
+                  b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, nr,
+                                          cI64(1)),
+                  {}, [&]() { memcpy1D(outPtr, accOut, nc, "NRAM2GDRAM"); },
+                  [&]() {
+                    memcpy2D(outPtr, accOut, nc,
+                             cI64(p.stride(dst, p.rank(dst) - 2)), cI64(bn),
+                             b.create<arith::SubIOp>(loc, nr, cI64(1)),
+                             "NRAM2GDRAM");
+                  });
+            }
           } else {
-            Value outPtr =
-                p.rank(dst) == 5
-                    ? globalPtr(dst, {batchVal, chunkVal, headVal, r, c})
-                : p.rank(dst) == 2 ? globalPtr(dst, {r, c})
-                                   : globalPtr(dst, {gVal, r, c});
-            ifThenElse(
-                b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, nr,
-                                        cI64(1)),
-                {}, [&]() { memcpy1D(outPtr, accOut, nc, "NRAM2GDRAM"); },
-                [&]() {
-                  memcpy2D(outPtr, accOut, nc,
-                           cI64(p.stride(dst, p.rank(dst) - 2)), cI64(bn),
-                           b.create<arith::SubIOp>(loc, nr, cI64(1)),
-                           "NRAM2GDRAM");
-                });
-          }
-        } else {
-          sync("compute");
-          forLoop(cI64(0), nr, cI64(1), [&](Value i) {
-            Value ri = b.create<arith::AddIOp>(loc, r, i);
-            Value dest =
-                isRouted ? toI64(loadAt(globalPtr(routedIds, {ri}), cI64(0),
-                                        b.getI32Type()))
-                         : ri;
-            forLoop(cI64(0), nc, cI64(1), [&](Value j) {
-              Value cj = b.create<arith::AddIOp>(loc, c, j);
-              Value aIdx = p.rank(dst) == 1
-                               ? i
-                               : b.create<arith::AddIOp>(
-                                     loc, b.create<arith::MulIOp>(loc, i, cI64(bn)),
-                                     j);
-              Value val = loadAt(acc, aIdx);
-              for (auto &ep : epilogue) {
-                if (ep.kind == "add_columns") {
-                  Value bCoord = p.rank(dst) == 1 ? dest : cj;
-                  Value bv = loadAt(globalPtr(ep.bias, {bCoord}), cI64(0),
-                                    ep.toTy);
-                  val = ep.toTy.isInteger(32)
-                            ? b.create<arith::AddIOp>(loc, val, bv).getResult()
-                            : b.create<arith::AddFOp>(loc, val, bv).getResult();
-                } else if (ep.kind == "convert_matrix") {
-                  if (ep.toTy.isBF16() && ep.fromTy.isInteger(32)) {
-                    val = makeOp("i32_to_bf16", {val}, {b.getBF16Type()}, {},
-                                 "i32-to-bf16")
-                              ->getResult(0);
-                  } else if (ep.toTy.isBF16() && ep.fromTy.isF32()) {
-                    val = makeOp("bf16_scalar", {val}, {b.getBF16Type()},
-                                 {b.getNamedAttr("mode",
-                                                 b.getStringAttr("narrow"))},
-                                 "bf16-scalar-convert")
-                              ->getResult(0);
-                  } else if (ep.toTy.isF16() && ep.fromTy.isF32()) {
-                    val = b.create<arith::TruncFOp>(loc, b.getF16Type(), val);
-                  } else if (ep.toTy.isF32() && ep.fromTy.isF16()) {
-                    val = b.create<arith::ExtFOp>(loc, b.getF32Type(), val);
-                  } else if (ep.toTy.isF32() && ep.fromTy.isInteger(32)) {
-                    val = b.create<arith::SIToFPOp>(loc, b.getF32Type(), val);
+            sync("compute");
+            forLoop(cI64(0), nr, cI64(1), [&](Value i) {
+              Value ri = b.create<arith::AddIOp>(loc, r, i);
+              Value dest =
+                  isRouted ? toI64(loadAt(globalPtr(routedIds, {ri}), cI64(0),
+                                          b.getI32Type()))
+                           : ri;
+              forLoop(cI64(0), nc, cI64(1), [&](Value j) {
+                Value cj = b.create<arith::AddIOp>(loc, c, j);
+                Value aIdx =
+                    p.rank(dst) == 1
+                        ? i
+                        : b.create<arith::AddIOp>(
+                              loc, b.create<arith::MulIOp>(loc, i, cI64(bn)), j);
+                Value val = loadAt(acc, aIdx);
+                for (auto &ep : epilogue) {
+                  if (ep.kind == "add_columns") {
+                    Value bCoord = p.rank(dst) == 1 ? dest : cj;
+                    Value bv = loadAt(globalPtr(ep.bias, {bCoord}), cI64(0),
+                                      ep.toTy);
+                    val = ep.toTy.isInteger(32)
+                              ? b.create<arith::AddIOp>(loc, val, bv).getResult()
+                              : b.create<arith::AddFOp>(loc, val, bv)
+                                    .getResult();
+                  } else if (ep.kind == "convert_matrix") {
+                    if (ep.toTy.isBF16() && ep.fromTy.isInteger(32)) {
+                      val = makeOp("i32_to_bf16", {val}, {b.getBF16Type()}, {},
+                                   "i32-to-bf16")
+                                ->getResult(0);
+                    } else if (ep.toTy.isBF16() && ep.fromTy.isF32()) {
+                      val = makeOp("bf16_scalar", {val}, {b.getBF16Type()},
+                                   {b.getNamedAttr("mode",
+                                                   b.getStringAttr("narrow"))},
+                                   "bf16-scalar-convert")
+                                ->getResult(0);
+                    } else if (ep.toTy.isF16() && ep.fromTy.isF32()) {
+                      val = b.create<arith::TruncFOp>(loc, b.getF16Type(), val);
+                    } else if (ep.toTy.isF32() && ep.fromTy.isF16()) {
+                      val = b.create<arith::ExtFOp>(loc, b.getF32Type(), val);
+                    } else if (ep.toTy.isF32() && ep.fromTy.isInteger(32)) {
+                      val = b.create<arith::SIToFPOp>(loc, b.getF32Type(), val);
+                    }
                   }
                 }
-              }
-              Value outPtr;
-              if (p.rank(dst) == 1)
-                outPtr = globalPtr(dst, {dest});
-              else if (p.rank(dst) == 2)
-                outPtr = globalPtr(dst, {dest, cj});
-              else if (isRouted) {
-                int64_t q = dstShape[1];
-                outPtr = globalPtr(
-                    dst, {b.create<arith::DivSIOp>(loc, dest, cI64(q)),
-                          b.create<arith::RemSIOp>(loc, dest, cI64(q)), cj});
-              } else if (p.rank(dst) == 5)
-                outPtr =
-                    globalPtr(dst, {batchVal, chunkVal, headVal, dest, cj});
-              else
-                outPtr = globalPtr(dst, {gVal, dest, cj});
-              storeAt(outPtr, cI64(0), val);
+                Value outPtr;
+                if (p.rank(dst) == 1)
+                  outPtr = globalPtr(dst, {dest});
+                else if (p.rank(dst) == 2)
+                  outPtr = globalPtr(dst, {dest, cj});
+                else if (isRouted) {
+                  int64_t q = dstShape[1];
+                  outPtr = globalPtr(
+                      dst, {b.create<arith::DivSIOp>(loc, dest, cI64(q)),
+                            b.create<arith::RemSIOp>(loc, dest, cI64(q)), cj});
+                } else if (p.rank(dst) == 5)
+                  outPtr =
+                      globalPtr(dst, {batchVal, chunkVal, headVal, dest, cj});
+                else
+                  outPtr = globalPtr(dst, {gVal, dest, cj});
+                storeAt(outPtr, cI64(0), val);
+              });
             });
-          });
+          }
+        };
+        if (rowShareSram0) {
+          Value isMpu = makeOp("is_mpu", {}, {b.getI1Type()})->getResult(0);
+          ifThen(b.create<arith::XOrIOp>(loc, isMpu, cI1(true)),
+                 emitWritebackAll);
+          sync("cluster");
+        } else {
+          emitWritebackAll();
         }
       };
 
@@ -3196,69 +5214,7 @@ struct MatrixLowerer {
     if (failed(status))
       return failure();
 
-    b.setInsertionPointToStart(hostBlk);
-    makeOp("host_enqueue", fn.getArguments());
-
-    std::set<std::string> seenResources;
-    SmallVector<std::string> neededImpls;
-    prog->walk([&](Operation *op) {
-      if (auto attr = op->getAttrOfType<StringAttr>("ci.implementation")) {
-        auto key = attr.getValue().str();
-        auto it = profile.implementations.find(key);
-        if (it != profile.implementations.end() &&
-            it->second.source == ImplementationSource::Runtime &&
-            seenResources.insert(it->second.resource).second)
-          neededImpls.push_back(key);
-      }
-    });
-    b.setInsertionPointToStart(sourcesBlk);
-    for (auto &impl : neededImpls)
-      makeOp("runtime_source", {}, {},
-             {b.getNamedAttr("implementation", b.getStringAttr(impl))});
-
-    uint64_t grid = llvm::divideCeil(uint64_t(shapeM), uint64_t(bm)) *
-                    llvm::divideCeil(uint64_t(shapeN), uint64_t(bn)) *
-                    uint64_t(shapeB);
-    auto abiJson =
-        llvm::json::parse(fn->getAttrOfType<StringAttr>("kir.abi").getValue());
-    if (!abiJson)
-      return llvm::consumeError(abiJson.takeError()), failure();
-
-    p.domain.erase();
-
-    if (!tailGuards.empty()) {
-      compilerinfra::IntegerRangeContext tailRanges(fn.getOperation());
-      for (auto &tg : tailGuards) {
-        if (compilerinfra::proveTailAccess(tg.accessOp, &tailRanges).kind ==
-            compilerinfra::TailKind::ExactInBounds) {
-          Value cond = tg.guardIf->getOperand(0);
-          tg.guardIf->erase();
-          if (cond.use_empty())
-            if (Operation *def = cond.getDefiningOp())
-              def->erase();
-        }
-      }
-    }
-
-    llvm::SmallVector<char> metadata;
-    llvm::raw_svector_ostream os(metadata);
-    os << llvm::json::Value(llvm::json::Object{
-        {"version", 2},
-        {"source", ""},
-        {"abi", std::move(*abiJson)},
-        {"domain", intentdsl::publishDomain(fn)},
-        {"grid", llvm::json::Array{int64_t(grid), 1, 1}},
-        {"guard", llvm::json::Object{{"min_width", 0}, {"max_width", nullptr}}},
-        {"rows",
-         llvm::json::Array{llvm::json::Object{{"id", 0},
-                                              {"rows", bm},
-                                              {"width", bn},
-                                              {"pitch", bk},
-                                              {"bytes", scratchBytes},
-                                              {"tasks", tasks}}}}});
-    m->setAttr("bangc_src.package",
-               b.getStringAttr(StringRef(metadata.data(), metadata.size())));
-    return success();
+    return finalizeModule(/*union4Launch=*/bool(rowShareSram0));
   }
 };
 } // namespace

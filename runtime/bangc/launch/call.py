@@ -34,17 +34,31 @@ class Call(PreparedLaunch):
         )
         self.arguments = self._args(self.values)
         self.grid_sizes = {r["id"]:grid(artifact.data["grid"],shape,r)[0] for r in artifact.data["rows"]}
+        self._has_work = any(self.grid_sizes.values())
+        self._tensors = tuple(v for v in self.values if isinstance(v, torch.Tensor))
+        self._dev_idx = torch.device(self.device).index if isinstance(self.device, (str, torch.device)) else None
+        self._fast_fn = None
+        self._fast_prefix = None
         self.records = []
         self.timings = {}
         self.selected = None
 
+    def _bind_fast(self, row):
+        self.selected = row
+        rid = row["id"]
+        self._fast_fn = self.artifact.variants[rid].launch
+        self._fast_prefix = (*self.arguments, *self.shape, self.grid_sizes[rid], row["tasks"])
+
     def compile(self):
+        if self.records:
+            return
         a = self.artifact
         with a.lock:
             if self.records:
                 return
+            rows = a.data["rows"]
             report = []
-            for row in a.data["rows"]:
+            for row in rows:
                 i = row["id"]
                 hit = i in a.variants
                 if not hit:
@@ -62,6 +76,9 @@ class Call(PreparedLaunch):
                     )
                 )
             self.records = report
+            if len(rows) == 1 and self.selected is None:
+                self.timings = {rows[0]["id"]: []}
+                self._bind_fast(rows[0])
 
     def compilation_report(self):
         return dict(candidate_count=len(self.artifact.data["rows"]), rows=self.records)
@@ -87,8 +104,34 @@ class Call(PreparedLaunch):
             )
 
     def enqueue(self):
+        if self._fast_fn is not None:
+            if not self._has_work:
+                return
+            if self._dev_idx is not None and torch.mlu.current_device() != self._dev_idx:
+                torch.mlu.set_device(self._dev_idx)
+            stream = torch.mlu.current_stream(self.device)
+            status = self._fast_fn(*self._fast_prefix, stream.mlu_stream)
+            if status:
+                raise RuntimeError(
+                    f"MLU row {self.selected['id']} enqueue on {self.device} failed with CNRT status {status}"
+                )
+            for v in self._tensors:
+                v.record_stream(stream)
+            return
         self.compile()
-        if not any(self.grid_sizes.values()):
+        if not self._has_work:
+            return
+        if self._fast_fn is not None:
+            if self._dev_idx is not None and torch.mlu.current_device() != self._dev_idx:
+                torch.mlu.set_device(self._dev_idx)
+            stream = torch.mlu.current_stream(self.device)
+            status = self._fast_fn(*self._fast_prefix, stream.mlu_stream)
+            if status:
+                raise RuntimeError(
+                    f"MLU row {self.selected['id']} enqueue on {self.device} failed with CNRT status {status}"
+                )
+            for v in self._tensors:
+                v.record_stream(stream)
             return
         a = self.artifact
         with torch.mlu.device(self.device):
@@ -96,11 +139,7 @@ class Call(PreparedLaunch):
             if self.selected is None:
                 key = (
                     self.shape,
-                    tuple(
-                        (v.dtype, tuple(v.stride()))
-                        for v in self.values
-                        if isinstance(v, torch.Tensor)
-                    ),
+                    tuple((v.dtype, tuple(v.stride())) for v in self._tensors),
                 )
                 with a.lock:
                     if key not in a.winners:
@@ -131,19 +170,20 @@ class Call(PreparedLaunch):
                         else:
                             winner = rows[0]
                         a.winners[key] = winner, durations
-                    self.selected, self.timings = a.winners[key]
+                    winner, self.timings = a.winners[key]
+                    self._bind_fast(winner)
             self._enqueue(self.selected, self.arguments, stream)
-            for v in self.values:
-                if isinstance(v, torch.Tensor):
-                    v.record_stream(stream)
+            for v in self._tensors:
+                v.record_stream(stream)
 
     def bind_row(self, row_id):
         from copy import copy
         self.compile()
         row=copy(self)
         row._forced = True
-        row.selected=next((r for r in row.artifact.data["rows"] if r["id"]==row_id),None)
-        if row.selected is None:raise ValueError("unknown BANG C row")
+        sel=next((r for r in row.artifact.data["rows"] if r["id"]==row_id),None)
+        if sel is None:raise ValueError("unknown BANG C row")
+        row._bind_fast(sel)
         return row
 
     def tuning_report(self):

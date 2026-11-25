@@ -721,7 +721,8 @@ void rowContracts(Unit &unit) {
       });
 
   add("ieee-div-rn", "vec_div_rn",
-      "vec_div_rn/vec_div_scalar_rn/scalar_div_vec_rn", "ieee_math.mlu",
+      "vec_div_rn/vec_div_scalar_rn/scalar_div_vec_rn/group_div_scalar_rn",
+      "ieee_math.mlu",
       "NRAM f32 destination, NRAM or scalar f32 dividend and divisor, and NRAM "
       "f32 scratch",
       "64-lane aligned NRAM vector fragment with 6x lanes f32 scratch", "f32",
@@ -731,8 +732,8 @@ void rowContracts(Unit &unit) {
       "endpoint certification on exact Veltkamp-Dekker/TwoDiff residual "
       "a' - r * b' with exact __cn_scalar_div_f32_rn fallback (a priori "
       "candidate accuracy only bounds fallback frequency)",
-      makeTyped(6, 6, 0, {STK::F32, STK::I64}, {}, {STK::F32},
-                EffectMask::ReadWrite, 64, 1),
+      makeTyped(6, 8, 0, {STK::F32, STK::I64}, {}, {STK::F32},
+                EffectMask::ReadWrite, 64, std::nullopt),
       [](Operation *op) {
         auto mode = op->getAttrOfType<StringAttr>("mode");
         auto dst = dyn_cast<MemRefType>(op->getOperand(0).getType());
@@ -759,6 +760,16 @@ void rowContracts(Unit &unit) {
           auto r = dyn_cast<MemRefType>(op->getOperand(2).getType());
           return success(op->getOperand(1).getType().isF32() &&
                          isSpace(op->getOperand(2), 1) &&
+                         r.getElementType().isF32());
+        }
+        if (mode == "vg") {
+          auto l = dyn_cast<MemRefType>(op->getOperand(1).getType());
+          auto r = dyn_cast<MemRefType>(op->getOperand(2).getType());
+          return success(op->getNumOperands() == 8 &&
+                         isSpace(op->getOperand(1), 1) &&
+                         (isSpace(op->getOperand(2), 1) ||
+                          isSpace(op->getOperand(2), 2)) &&
+                         l && r && l.getElementType().isF32() &&
                          r.getElementType().isF32());
         }
         return failure();

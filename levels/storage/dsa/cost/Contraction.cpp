@@ -17,7 +17,10 @@ void matrixSupplyCost(Unit &u) {
           auto t = a.tile, d = a.shape;
           double jobs = std::ceil(double(d[0]) / t[0]) *
                         std::ceil(double(d[1]) / t[1]) * d[3];
-          double workers = mlir::cast<mlir::IntegerAttr>(c.value).getInt(),
+          bool isCluster = (t[0] == 512 && t[1] == 512);
+          double rawWorkers = mlir::cast<mlir::IntegerAttr>(c.value).getInt(),
+                 workers = isCluster ? std::max(1.0, rawWorkers / 4.0)
+                                     : rawWorkers,
                  waves = std::ceil(jobs / workers),
                  active = std::min(workers, std::max(1.0, jobs));
           double inElemBytes =
@@ -39,12 +42,25 @@ void matrixSupplyCost(Unit &u) {
                sync = intentdsl::quantity(ctx, "sync", "ns"),
                launch = intentdsl::quantity(ctx, "launch", "ns");
           if (bw) {
-            double perWorkerBw = std::min(dmaIn.value_or(*bw), *bw / active);
-            double computeNs = (2.0 * t[0] * t[1] * t[2] * panels) / 512.0;
-            e.timeNs =
-                launch.value_or(0.0) +
-                waves * (bytes * panels / perWorkerBw + computeNs +
-                         (sync ? transactions * *sync : 0));
+            if (isCluster) {
+              double perClusterBw = *bw / active;
+              double dmaNs = bytes * panels / perClusterBw;
+              double coreComputeNs =
+                  (2.0 * (t[0] / 2.0) * (t[1] / 2.0) * t[2] * panels) / 2048.0;
+              double waveNs = std::max(dmaNs, coreComputeNs) +
+                              0.2 * std::min(dmaNs, coreComputeNs) +
+                              (sync ? transactions * *sync : 0);
+              e.timeNs = launch.value_or(0.0) + waves * waveNs;
+            } else {
+              double perWorkerBw = std::min(dmaIn.value_or(*bw), *bw / active);
+              double computeNs = (2.0 * t[0] * t[1] * t[2] * panels) / 512.0;
+              e.timeNs =
+                  launch.value_or(0.0) +
+                  waves * (bytes * panels / perWorkerBw + computeNs +
+                           (sync ? transactions * *sync : 0));
+            }
+            if (e.timeNs)
+              e.rows["0"] = {e.terms, e.timeNs};
           }
           return e;
         }},

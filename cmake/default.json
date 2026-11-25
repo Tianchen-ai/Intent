@@ -91,5 +91,9 @@
       }
     }
   },
-  "exits": {}
+  "exits": {
+    "bangc": {
+      "reuse": "library"
+    }
+  }
 }

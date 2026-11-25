@@ -155,6 +155,8 @@ TerminalPrinter rowPrinter() {
       "#include <bang.h>\n#include <cnrt.h>\n#include <math.h>");
   rules["bangc_src.nram_alloc"] = PrintRule::format(
       "__nram__ unsigned char $r0[BYTES] __attribute__((aligned(128)));");
+  rules["bangc_src.is_mpu"] =
+      PrintRule::format("unsigned char $r0 = __is_mpu();");
   rules["bangc_src.dim"] = PrintRule::format("long long $r0 = $0_d{axis};");
   rules["bangc_src.stride"] = PrintRule::format("long long $r0 = $0_s{axis};");
   rules["bangc_src.symbol"] = PrintRule::format("long long $r0 = {name};");
@@ -272,10 +274,18 @@ TerminalPrinter rowPrinter() {
                       formatArgs(view, true) + ", int cores, void *queue) {");
                ++c.indent;
                c.line("if (grid == 0) return 0;");
-               c.line("cnrtDim3_t dim = {(unsigned)(grid < cores ? grid : "
-                      "cores), 1, 1};");
-               c.line("tile<<<dim, cnrtFuncTypeBlock, (cnrtQueue_t)queue>>>(" +
-                      formatArgs(view, false) + ");");
+               auto ft = view.attrOfType<StringAttr>("func_type");
+               if (ft && ft.getValue() == "union4") {
+                 c.line("cnrtDim3_t dim = {(unsigned)cores, 1, 1};");
+                 c.line(
+                     "tile<<<dim, cnrtFuncTypeUnion4, (cnrtQueue_t)queue>>>(" +
+                     formatArgs(view, false) + ");");
+               } else {
+                 c.line("cnrtDim3_t dim = {(unsigned)(grid < cores ? grid : "
+                        "cores), 1, 1};");
+                 c.line("tile<<<dim, cnrtFuncTypeBlock, (cnrtQueue_t)queue>>>(" +
+                        formatArgs(view, false) + ");");
+               }
                c.line("return (int)cnrtGetLastError();");
                --c.indent;
                c.line("}");
@@ -395,6 +405,15 @@ TerminalPrinter rowPrinter() {
                return llvm::Error::success();
              });
 
+  enterLocal("bangc_src.sram_buffer",
+             [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
+               auto t = ctype(view.resultType(0));
+               auto elems = view.attrOfType<IntegerAttr>("elements").getInt();
+               c.line("__mlu_shared__ " + t + " " + view.result(0).str() + "[" +
+                      std::to_string(elems) + "] __attribute__((aligned(128)));");
+               return llvm::Error::success();
+             });
+
   enterLocal("bangc_src.nram_ptr",
              [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
                auto t = ctype(view.resultType(0));
@@ -499,9 +518,14 @@ TerminalPrinter rowPrinter() {
   enterLocal("bangc_src.sync",
              [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
                auto dom = view.attrOfType<StringAttr>("domain").getValue();
-               c.line(dom == "io"        ? "__sync_io();"
-                      : dom == "compute" ? "__sync_compute();"
-                                         : "__sync();");
+               c.line(dom == "io"             ? "__sync_io();"
+                      : dom == "compute"      ? "__sync_compute();"
+                      : dom == "cluster"      ? "__sync_cluster();"
+                      : dom == "sram_to_nram" ? "__sync_copy_sram_to_nram();"
+                      : dom == "sram_to_wram" ? "__sync_copy_sram_to_wram();"
+                      : dom == "dram_to_nram" ? "__sync_copy_dram_to_nram();"
+                      : dom == "move"         ? "__sync_move();"
+                                              : "__sync();");
                return llvm::Error::success();
              });
 
@@ -584,6 +608,24 @@ TerminalPrinter rowPrinter() {
   enterLocal("bangc_src.row_reduce",
              [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
                auto alg = view.attrOfType<StringAttr>("algebra").getValue();
+               auto modeAttr = view.attrOfType<StringAttr>("mode");
+               StringRef mode = modeAttr ? modeAttr.getValue() : "full";
+               if (alg == "sum" && mode == "stage") {
+                 c.line("group_sum_stage(" + view.operand(1).str() + ", " +
+                        view.operand(2).str() + ", (int)(" +
+                        view.operand(3).str() + "), (int)(" +
+                        view.operand(4).str() + "), (int)(" +
+                        view.operand(5).str() + "));");
+                 return llvm::Error::success();
+               }
+               if (alg == "sum" && mode == "finish") {
+                 c.line("group_sum_finish(" + view.operand(0).str() + ", " +
+                        view.operand(1).str() + ", " + view.operand(2).str() +
+                        ", (int)(" + view.operand(3).str() + "), (int)(" +
+                        view.operand(4).str() + "), (int)(" +
+                        view.operand(5).str() + "));");
+                 return llvm::Error::success();
+               }
                std::string fnName =
                    alg == "sum" ? "group_sum" : "group_max_num";
                c.line(fnName + "(" + view.operand(0).str() + ", " +
@@ -669,6 +711,16 @@ TerminalPrinter rowPrinter() {
   enterLocal("bangc_src.vec_div_rn",
              [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
                auto mode = view.attrOfType<StringAttr>("mode").getValue();
+               if (mode == "vg") {
+                 c.line("group_div_scalar_rn(" + view.operand(0).str() + ", " +
+                        view.operand(1).str() + ", " + view.operand(2).str() +
+                        ", " + view.operand(3).str() + ", (int)(" +
+                        view.operand(4).str() + "), (int)(" +
+                        view.operand(5).str() + "), (int)(" +
+                        view.operand(6).str() + "), (int)(" +
+                        view.operand(7).str() + "));");
+                 return llvm::Error::success();
+               }
                std::string fnName = mode == "vv"   ? "vec_div_rn"
                                     : mode == "vs" ? "vec_div_scalar_rn"
                                                    : "scalar_div_vec_rn";
@@ -1215,7 +1267,15 @@ TerminalPrinter rowPrinter() {
 
   enterLocal("arith.select",
              [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
-               auto t = ctype(view.resultType(0));
+               auto resTy = view.resultType(0);
+               auto t = ctype(resTy);
+               if (isa<MemRefType>(resTy)) {
+                 c.line(t + " *" + view.result(0).str() + " = (" +
+                        view.operand(0).str() + " ? (" + t + " *)" +
+                        view.operand(1).str() + " : (" + t + " *)" +
+                        view.operand(2).str() + ");");
+                 return llvm::Error::success();
+               }
                c.line(t + " " + view.result(0).str() + " = (" +
                       view.operand(0).str() + " ? " + view.operand(1).str() +
                       " : " + view.operand(2).str() + ");");

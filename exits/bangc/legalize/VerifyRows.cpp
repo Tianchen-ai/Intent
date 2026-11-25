@@ -274,9 +274,10 @@ LogicalResult verifyCallableMatrix(ModuleOp m, const TargetProfile &profile) {
 
   auto ms = profile.services.get<intentdsl::dsa::MatrixStorage>();
   int64_t wramLimit = ms ? ms->wramBytes : 0;
+  int64_t sramLimit = ms ? ms->sramBytes : 0;
 
   compilerinfra::IntegerRangeContext rangeCtx(fn.getOperation());
-  int64_t totalNram = 0, totalWram = 0;
+  int64_t totalNram = 0, totalWram = 0, totalSram = 0;
   std::set<std::string> declaredResources, requiredResources;
   bool walkFailed = m.walk([&](Operation *op) {
                        auto ns = op->getName().getDialectNamespace();
@@ -309,6 +310,18 @@ LogicalResult verifyCallableMatrix(ModuleOp m, const TargetProfile &profile) {
                          int64_t elemB =
                              llvm::divideCeil(ty.getElementTypeBitWidth(), 8u);
                          totalWram += elems.getInt() * elemB;
+                       }
+                       if (fullName == "bangc_src.sram_buffer") {
+                         auto elems =
+                             op->getAttrOfType<IntegerAttr>("elements");
+                         auto ty =
+                             dyn_cast<MemRefType>(op->getResult(0).getType());
+                         if (!elems || !ty)
+                           return WalkResult::interrupt();
+                         int64_t elemB =
+                             llvm::divideCeil(ty.getElementTypeBitWidth(), 8u);
+                         totalSram +=
+                             llvm::alignTo(elems.getInt() * elemB, 128);
                        }
                        if (fullName == "bangc_src.address") {
                          auto bits =
@@ -356,6 +369,8 @@ LogicalResult verifyCallableMatrix(ModuleOp m, const TargetProfile &profile) {
     return prog.emitError("matrix NRAM buffers exceed private capacity");
   if (totalWram > 0 && wramLimit > 0 && totalWram > wramLimit)
     return prog.emitError("matrix WRAM buffers exceed filter capacity");
+  if (totalSram > 0 && (sramLimit <= 0 || totalSram > sramLimit))
+    return prog.emitError("matrix SRAM buffers exceed cluster capacity");
   if (declaredResources != requiredResources)
     return prog.emitError(
         "runtime_source declarations disagree with bound implementations");
@@ -431,9 +446,10 @@ LogicalResult verifyCallableOrdered(ModuleOp m, const TargetProfile &profile) {
 
   auto ms = profile.services.get<intentdsl::dsa::MatrixStorage>();
   int64_t wramLimit = ms ? ms->wramBytes : 0;
+  int64_t sramLimit = ms ? ms->sramBytes : 0;
 
   compilerinfra::IntegerRangeContext rangeCtx(fn.getOperation());
-  int64_t totalNram = 0, totalWram = 0;
+  int64_t totalNram = 0, totalWram = 0, totalSram = 0;
   std::set<std::string> declaredResources, requiredResources;
   bool walkFailed = m.walk([&](Operation *op) {
                        auto ns = op->getName().getDialectNamespace();
@@ -466,6 +482,18 @@ LogicalResult verifyCallableOrdered(ModuleOp m, const TargetProfile &profile) {
                          int64_t elemB =
                              llvm::divideCeil(ty.getElementTypeBitWidth(), 8u);
                          totalWram += elems.getInt() * elemB;
+                       }
+                       if (fullName == "bangc_src.sram_buffer") {
+                         auto elems =
+                             op->getAttrOfType<IntegerAttr>("elements");
+                         auto ty =
+                             dyn_cast<MemRefType>(op->getResult(0).getType());
+                         if (!elems || !ty)
+                           return WalkResult::interrupt();
+                         int64_t elemB =
+                             llvm::divideCeil(ty.getElementTypeBitWidth(), 8u);
+                         totalSram +=
+                             llvm::alignTo(elems.getInt() * elemB, 128);
                        }
                        if (fullName == "bangc_src.address") {
                          auto bits =
@@ -513,6 +541,8 @@ LogicalResult verifyCallableOrdered(ModuleOp m, const TargetProfile &profile) {
     return prog.emitError("ordered NRAM buffers exceed private capacity");
   if (totalWram > 0 && wramLimit > 0 && totalWram > wramLimit)
     return prog.emitError("ordered WRAM buffers exceed filter capacity");
+  if (totalSram > 0 && (sramLimit <= 0 || totalSram > sramLimit))
+    return prog.emitError("ordered SRAM buffers exceed cluster capacity");
   if (declaredResources != requiredResources)
     return prog.emitError(
         "runtime_source declarations disagree with bound implementations");

@@ -214,9 +214,84 @@ __mlu_func__ void quant_decode_grouped_rhs_f16(
   int n_words = bk * pack_cols;
   int total_bytes = n_words << 2;
   int shifts[8] = {s0, s1, s2, s3, s4, s5, s6, s7};
+  int num_grp = (kk_mod_block + nk - 1) / block_elems + 1;
+  bool nibble_aligned =
+      ((s0 | s1 | s2 | s3 | s4 | s5 | s6 | s7) & 3) == 0;
+  bool identity_perm = (s0 == 0 && s1 == 4 && s2 == 8 && s3 == 12 &&
+                        s4 == 16 && s5 == 20 && s6 == 24 && s7 == 28);
+
+  if (bn == 64 && (bk & 31) == 0 && num_grp <= 4 && nibble_aligned) {
+    __nram__ int _zp_idx[128] __attribute__((aligned(128)));
+    __nram__ half _zp_nat[256] __attribute__((aligned(128)));
+    __nram__ half _sc_nat[256] __attribute__((aligned(128)));
+
+    __bang_int82int32((int *)idx_scratch, (const signed char *)qw_bytes,
+                      total_bytes, 0, 0);
+    __bang_band_scalar((int *)idx_scratch, (const int *)idx_scratch, 0xff,
+                       total_bytes);
+    __bang_lut((int *)work_a, idx_scratch, lut256, total_bytes, 256);
+
+    if (has_zero) {
+      __bang_int82int32(_zp_idx, (const signed char *)qz_words, 128, 0, 0);
+      __bang_band_scalar(_zp_idx, _zp_idx, 0xff, 128);
+      __bang_lut((int *)_zp_nat, (unsigned int *)_zp_idx, lut256, 128, 256);
+      __bang_mul_scalar(_zp_nat, _zp_nat, (half)(-1.0f), 256);
+    }
+
+    const half *sc_use = sc_f16;
+    if (!identity_perm) {
+      for (int sub = 0; sub < 8; ++sub) {
+        int slot = shifts[sub] >> 2;
+        __memcpy_async(_sc_nat + slot, sc_f16 + sub, (int)sizeof(half),
+                       NRAM2NRAM, 8 * (int)sizeof(half), 8 * (int)sizeof(half),
+                       num_grp * 8 - 1);
+      }
+      __sync_move();
+      sc_use = _sc_nat;
+    }
+
+    for (int g = 0; g < num_grp; ++g) {
+      int t0 = g * block_elems - kk_mod_block;
+      if (t0 < 0)
+        t0 = 0;
+      int t1 = (g + 1) * block_elems - kk_mod_block;
+      if (t1 > nk)
+        t1 = nk;
+      if (t0 >= t1)
+        continue;
+      int count = (t1 - t0) * 64;
+      if (has_zero)
+        __bang_cycle_add(work_a + t0 * 64, work_a + t0 * 64, _zp_nat + g * 64,
+                         count, 64);
+      __bang_cycle_mul(work_a + t0 * 64, work_a + t0 * 64, sc_use + g * 64,
+                       count, 64);
+    }
+
+    if (nk < bk)
+      __bang_write_value(work_a + nk * 64, (bk - nk) * 64, (half)0.0f);
+
+    if (identity_perm) {
+      __bang_transpose((unsigned short *)trans_f16,
+                       (const unsigned short *)work_a, bk, 64);
+    } else {
+      __bang_transpose((unsigned short *)work_b,
+                       (const unsigned short *)work_a, bk, 64);
+      __sync_compute();
+      int row_bytes = bk * (int)sizeof(half);
+      int stride8 = 8 * row_bytes;
+      for (int sub = 0; sub < 8; ++sub) {
+        int slot = shifts[sub] >> 2;
+        __memcpy_async(trans_f16 + sub * bk, work_b + slot * bk, row_bytes,
+                       NRAM2NRAM, stride8, stride8, 7);
+      }
+      __sync_move();
+    }
+    if (nc < 64)
+      __bang_write_value(trans_f16 + nc * bk, (64 - nc) * bk, (half)0.0f);
+    return;
+  }
 
   __nram__ half _zp_all[256] __attribute__((aligned(128)));
-  int num_grp = (kk_mod_block + nk - 1) / block_elems + 1;
   if (has_zero && num_grp <= 4 && bn == 64) {
     for (int g = 0; g < num_grp; ++g) {
       half *zp_g = _zp_all + g * 64;
@@ -237,8 +312,6 @@ __mlu_func__ void quant_decode_grouped_rhs_f16(
                      total_bytes);
   __bang_lut((int *)work_a, idx_scratch, lut256, total_bytes, 256);
 
-  bool identity_perm = (s0 == 0 && s1 == 4 && s2 == 8 && s3 == 12 &&
-                        s4 == 16 && s5 == 20 && s6 == 24 && s7 == 28);
   half *right_f16 = work_a;
   if (!identity_perm) {
     int rows32 = n_words >> 2;

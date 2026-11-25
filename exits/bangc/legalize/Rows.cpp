@@ -118,6 +118,7 @@ struct RowLowerer {
   bool wide = false;
   int64_t depth = 1;
   int64_t batch = 1;
+  int64_t minPitch = INT64_MAX;
   bool multiMember = true;
   Operation *constAnchor = nullptr;
   llvm::DenseMap<int64_t, Value> constI64Map;
@@ -144,7 +145,9 @@ struct RowLowerer {
     int64_t maxRows = 1;
     if (auto rowsAttr = layout.getAs<ArrayAttr>("rows")) {
       for (auto a : rowsAttr) {
-        auto id = cast<DictionaryAttr>(a).getAs<IntegerAttr>("id");
+        auto alloc = cast<DictionaryAttr>(a);
+        auto id = alloc.getAs<IntegerAttr>("id");
+        minPitch = std::min(minPitch, alloc.getAs<IntegerAttr>("pitch").getInt());
         for (auto cfg : fn->getAttrOfType<ArrayAttr>("block.configs")) {
           auto row = cast<DictionaryAttr>(cfg);
           if (row.get("id") == id)
@@ -152,6 +155,8 @@ struct RowLowerer {
         }
       }
     }
+    if (minPitch == INT64_MAX)
+      minPitch = 0;
     multiMember = (maxRows * batch) > 1;
   }
 
@@ -334,14 +339,23 @@ struct RowLowerer {
                   {ptrType(b.getContext(), elemTy, 1)})
         ->getResult(0);
   }
-  Value phaseByteOffset(DenseI64ArrayAttr parts) {
-    Value gTerm = cI64(parts[0] * depth);
+  Value phaseByteOffset(DenseI64ArrayAttr parts, int64_t groupedShift = 0) {
+    Value gTerm = cI64((parts[0] + groupedShift) * depth);
     gTerm = b.create<arith::MulIOp>(loc, gTerm, symEB);
     Value lTerm = cI64(parts[1]);
     if (wide)
       lTerm = b.create<arith::MulIOp>(loc, lTerm, symEB);
     Value elems = b.create<arith::AddIOp>(loc, gTerm, lTerm);
     return b.create<arith::MulIOp>(loc, symP, elems);
+  }
+  static bool blockHasCompute(Block &body) {
+    for (auto &inst : body) {
+      StringRef n = inst.getName().stripDialect();
+      if (n != "window" && n != "member_axis" && n != "slab_axis" &&
+          n != "await" && n != "write_back" && n != "drain" && n != "complete")
+        return true;
+    }
+    return false;
   }
   Value localVar(Type elemTy, StringRef extent) {
     return makeOp("local_var", {}, {ptrType(b.getContext(), elemTy, 2)},
@@ -963,7 +977,8 @@ struct RowLowerer {
                             Value iterPos, Value slot, Value outerGroup,
                             Value carrySlot, bool carryIsMoment, bool packed,
                             const llvm::DenseMap<Operation *, Value> &copyBuffers,
-                            const llvm::DenseMap<Operation *, Value> &writeBuffers) {
+                            const llvm::DenseMap<Operation *, Value> &writeBuffers,
+                            int64_t groupedShift = 0) {
     auto [row0, col] = phaseCoords(iterPos, outerGroup);
     Value remN = b.create<arith::SubIOp>(loc, symN, col);
     Value live = b.create<arith::MinSIOp>(
@@ -971,6 +986,14 @@ struct RowLowerer {
     Value remM = b.create<arith::SubIOp>(loc, symM, row0);
     Value count = b.create<arith::MinSIOp>(
         loc, b.create<arith::MaxSIOp>(loc, remM, cI64(0)), symEB);
+    bool bodyHasCompute = blockHasCompute(body);
+    int64_t numRowSums = 0;
+    for (auto &inst : body) {
+      if (inst.getName().stripDialect() == "reduce" &&
+          inst.getAttrOfType<StringAttr>("bangc.primitive") == "row_sum")
+        ++numRowSums;
+    }
+    int64_t maxStageSlots = minPitch / 32;
 
     auto emitBodyMembers = [&]() -> LogicalResult {
       Value rowLanes = b.create<arith::AndIOp>(
@@ -1160,7 +1183,8 @@ struct RowLowerer {
                         : nramAt(elemTy,
                                  phaseByteOffset(
                                      inst.getAttrOfType<DenseI64ArrayAttr>(
-                                         "bangc.scratch")));
+                                         "bangc.scratch"),
+                                     groupedShift));
               ifThenElse(
                   canTrans,
                   [&]() {
@@ -1243,6 +1267,63 @@ struct RowLowerer {
           emitMemberStores();
         };
 
+        struct StagedRowSum {
+          Value resVal;
+          Value outSlice;
+          Value slotScratch;
+          Value inputPtr;
+          Attribute inputOffsetAttr;
+        };
+        SmallVector<StagedRowSum, 16> stagedSums;
+        SmallVector<Operation *, 16> deferredRank1Ops;
+        auto emitRank1Expr = [&](Operation &r1Inst) {
+          StringRef r1Name = r1Inst.getName().stripDialect();
+          StringRef r1Prim =
+              r1Inst.getAttrOfType<StringAttr>("bangc.primitive").getValue();
+          Value r1Res = r1Inst.getResult(0);
+          Type r1Elem = elemOf(r1Res.getType());
+          Value arr = localVar(r1Elem, "EB");
+          forLoop(cI64(0), members, cI64(1), [&](Value h) {
+            Value jh = b.create<arith::AddIOp>(loc, j, h);
+            SmallVector<Value> scOps;
+            for (Value opnd : r1Inst.getOperands()) {
+              Value mv = getVal(opnd);
+              scOps.push_back(rankOf(opnd.getType()) == 1 ? loadAt(mv, jh)
+                                                          : mv);
+            }
+            Value outSc;
+            if (failed(evalScalarExpr(
+                    r1Name, r1Prim, scOps, r1Elem,
+                    r1Inst.getAttrOfType<TypedAttr>("value"), outSc))) {
+              bodyStatus = failure();
+              return;
+            }
+            storeAt(arr, jh, outSc);
+          });
+          localMap[r1Res] = arr;
+        };
+        auto flushStagedSums = [&]() {
+          if (stagedSums.empty())
+            return;
+          sync("compute");
+          for (auto &sr : stagedSums) {
+            makeOp("row_reduce",
+                   {sr.outSlice, sr.slotScratch, sr.inputPtr, members, symP,
+                    live},
+                   {},
+                   {b.getNamedAttr("algebra", b.getStringAttr("sum")),
+                    b.getNamedAttr("mode", b.getStringAttr("finish"))},
+                   "row-reduce");
+          }
+          stagedSums.clear();
+          for (Operation *defInst : deferredRank1Ops) {
+            if (failed(bodyStatus))
+              break;
+            emitRank1Expr(*defInst);
+          }
+          deferredRank1Ops.clear();
+        };
+
         for (auto &inst : body) {
           if (failed(bodyStatus))
             break;
@@ -1251,6 +1332,68 @@ struct RowLowerer {
           StringRef n = inst.getName().stripDialect();
           if (n == "window" || n == "member_axis" || n == "slab_axis")
             continue;
+          if (!stagedSums.empty()) {
+            if (inst.getNumResults() == 1 &&
+                rankOf(inst.getResult(0).getType()) == 1 &&
+                (n == "add" || n == "sub" || n == "mul")) {
+              deferredRank1Ops.push_back(&inst);
+              continue;
+            }
+            bool needFlush = false;
+            for (Value opnd : inst.getOperands()) {
+              for (auto &sr : stagedSums)
+                if (opnd == sr.resVal)
+                  needFlush = true;
+              for (Operation *defOp : deferredRank1Ops)
+                if (opnd == defOp->getResult(0))
+                  needFlush = true;
+            }
+            if (!needFlush) {
+              if (n == "await") {
+                needFlush = false;
+              } else if (n == "reduce" &&
+                         inst.getAttrOfType<StringAttr>("bangc.primitive") ==
+                             "row_sum") {
+                if (static_cast<int64_t>(stagedSums.size()) >= maxStageSlots)
+                  needFlush = true;
+              } else if ((n == "add" || n == "sub" || n == "mul" ||
+                          n == "cast") &&
+                         inst.getNumResults() == 1 &&
+                         rankOf(inst.getResult(0).getType()) == 2) {
+                StringRef pr =
+                    inst.getAttrOfType<StringAttr>("bangc.primitive").getValue();
+                Type dEl = elemOf(inst.getResult(0).getType());
+                bool pureVec = false;
+                if (n == "cast") {
+                  Type sEl = elemOf(inst.getOperand(0).getType());
+                  pureVec = (pr != "certified_half_quotient" &&
+                             pr != "bf16_round" && pr != "bf16_widen" &&
+                             ((dEl.isF16() && sEl.isF32()) ||
+                              (dEl.isF32() && sEl.isF16())));
+                } else {
+                  int r0 = rankOf(inst.getOperand(0).getType());
+                  int r1 = rankOf(inst.getOperand(1).getType());
+                  pureVec = pr != "bf16_product" &&
+                            (dEl.isF32() || dEl.isF16() || dEl.isInteger(32)) &&
+                            ((r0 == 2 && r1 == 2) || (r0 == 2 && r1 == 0) ||
+                             (r0 == 0 && r1 == 2) || (r0 == 2 && r1 == 1) ||
+                             (r0 == 1 && r1 == 2 && (n == "add" || n == "mul")));
+                }
+                if (!pureVec) {
+                  needFlush = true;
+                } else if (!directWriteDst.count(&inst)) {
+                  Attribute dstOff = inst.getAttr("bangc.offset");
+                  for (auto &sr : stagedSums)
+                    if (sr.inputOffsetAttr && dstOff == sr.inputOffsetAttr)
+                      needFlush = true;
+                }
+              } else {
+                needFlush = true;
+              }
+            }
+            if (needFlush)
+              flushStagedSums();
+          }
           if (n == "await") {
             localMap[inst.getResult(0)] = getVal(inst.getOperand(0));
             continue;
@@ -1424,7 +1567,8 @@ struct RowLowerer {
           }
           if (n == "drain") {
             if (!deferredAsyncWrites.empty()) {
-              sync("compute");
+              if (bodyHasCompute)
+                sync("compute");
               for (auto &dw : deferredAsyncWrites)
                 emitWriteBack(*dw.inst, dw.ptr, dw.src, true);
               deferredAsyncWrites.clear();
@@ -1447,7 +1591,8 @@ struct RowLowerer {
             Value scratch = nramAt(
                 b.getF32Type(),
                 phaseByteOffset(
-                    inst.getAttrOfType<DenseI64ArrayAttr>("bangc.scratch")));
+                    inst.getAttrOfType<DenseI64ArrayAttr>("bangc.scratch"),
+                    groupedShift));
             Value m = makeOp("summary_reduce",
                              {getVal(inst.getOperand(0)), scratch, live},
                              {momentTuple(b.getContext())}, {},
@@ -1521,12 +1666,36 @@ struct RowLowerer {
             Value scratch = nramAt(
                 b.getF32Type(),
                 phaseByteOffset(
-                    inst.getAttrOfType<DenseI64ArrayAttr>("bangc.offset")));
+                    inst.getAttrOfType<DenseI64ArrayAttr>("bangc.offset"),
+                    groupedShift));
             StringRef alg = prim == "row_sum" ? "sum" : "max_num";
+            Value inPtr = getVal(inst.getOperand(0));
+            if (alg == "sum" && numRowSums >= 2 && maxStageSlots >= 2) {
+              int64_t slotIdx = static_cast<int64_t>(stagedSums.size());
+              Value slotScratch =
+                  slotIdx == 0
+                      ? scratch
+                      : makeAddr(
+                            scratch,
+                            {b.create<arith::MulIOp>(loc, members,
+                                                     cI64(slotIdx * 32))},
+                            {cI64(1)}, 1);
+              makeOp("row_reduce",
+                     {outSlice, slotScratch, inPtr, members, symP, live}, {},
+                     {b.getNamedAttr("algebra", b.getStringAttr("sum")),
+                      b.getNamedAttr("mode", b.getStringAttr("stage"))},
+                     "row-reduce");
+              Attribute inOffAttr;
+              if (Operation *inDef = inst.getOperand(0).getDefiningOp())
+                inOffAttr = inDef->getAttr("bangc.offset");
+              stagedSums.push_back(
+                  {resVal, outSlice, slotScratch, inPtr, inOffAttr});
+              localMap[resVal] = outArr;
+              continue;
+            }
             makeOp("row_reduce",
-                   {outSlice, scratch, getVal(inst.getOperand(0)), members,
-                    symP, live},
-                   {}, {b.getNamedAttr("algebra", b.getStringAttr(alg))},
+                   {outSlice, scratch, inPtr, members, symP, live}, {},
+                   {b.getNamedAttr("algebra", b.getStringAttr(alg))},
                    "row-reduce");
             localMap[resVal] = outArr;
             continue;
@@ -1541,7 +1710,8 @@ struct RowLowerer {
                     : nramAt(dstElem,
                              phaseByteOffset(
                                  inst.getAttrOfType<DenseI64ArrayAttr>(
-                                     "bangc.offset")));
+                                     "bangc.offset"),
+                                 groupedShift));
             localMap[resVal] = dst;
 
             if (prim == "quotient_for_narrow")
@@ -1553,7 +1723,8 @@ struct RowLowerer {
               Value scratch = nramAt(
                   b.getF32Type(),
                   phaseByteOffset(
-                      inst.getAttrOfType<DenseI64ArrayAttr>("bangc.scratch")));
+                      inst.getAttrOfType<DenseI64ArrayAttr>("bangc.scratch"),
+                      groupedShift));
               Value num = getVal(divOp->getOperand(0));
               Value divIn = getVal(divOp->getOperand(1));
               Value divSlice;
@@ -1866,8 +2037,10 @@ struct RowLowerer {
             if (prim == "row_inclusive_sum") {
               Value scratch = nramAt(
                   dstElem,
-                  phaseByteOffset(inst.getAttrOfType<DenseI64ArrayAttr>(
-                      "bangc.scan_scratch")));
+                  phaseByteOffset(
+                      inst.getAttrOfType<DenseI64ArrayAttr>(
+                          "bangc.scan_scratch"),
+                      groupedShift));
               makeOp("scan_sum",
                      {dst, getVal(inst.getOperand(0)), scratch, lanes, live},
                      {}, {}, "inclusive-scan");
@@ -1886,7 +2059,8 @@ struct RowLowerer {
                 Value scratch = nramAt(
                     b.getBF16Type(),
                     phaseByteOffset(
-                        inst.getAttrOfType<DenseI64ArrayAttr>("bangc.scratch")));
+                        inst.getAttrOfType<DenseI64ArrayAttr>("bangc.scratch"),
+                        groupedShift));
                 Value oneRow = b.create<arith::CmpIOp>(
                     loc, arith::CmpIPredicate::eq, members, cI64(1));
                 Value activeElems = b.create<arith::SelectOp>(
@@ -1980,7 +2154,8 @@ struct RowLowerer {
               Value scratch = nramAt(
                   b.getF32Type(),
                   phaseByteOffset(
-                      inst.getAttrOfType<DenseI64ArrayAttr>("bangc.scratch")));
+                      inst.getAttrOfType<DenseI64ArrayAttr>("bangc.scratch"),
+                      groupedShift));
               Value oneRow = b.create<arith::CmpIOp>(
                   loc, arith::CmpIPredicate::eq, members, cI64(1));
               Value activeElems = b.create<arith::SelectOp>(
@@ -1997,7 +2172,8 @@ struct RowLowerer {
               Value scratch = nramAt(
                   b.getF32Type(),
                   phaseByteOffset(
-                      inst.getAttrOfType<DenseI64ArrayAttr>("bangc.scratch")));
+                      inst.getAttrOfType<DenseI64ArrayAttr>("bangc.scratch"),
+                      groupedShift));
               Value oneRow = b.create<arith::CmpIOp>(
                   loc, arith::CmpIPredicate::eq, members, cI64(1));
               Value activeElems = b.create<arith::SelectOp>(
@@ -2015,7 +2191,8 @@ struct RowLowerer {
               Value scratch = nramAt(
                   b.getF32Type(),
                   phaseByteOffset(
-                      inst.getAttrOfType<DenseI64ArrayAttr>("bangc.scratch")));
+                      inst.getAttrOfType<DenseI64ArrayAttr>("bangc.scratch"),
+                      groupedShift));
               Value oneRow = b.create<arith::CmpIOp>(
                   loc, arith::CmpIPredicate::eq, members, cI64(1));
               Value activeElems = b.create<arith::SelectOp>(
@@ -2034,7 +2211,8 @@ struct RowLowerer {
               Value scratch = nramAt(
                   b.getF32Type(),
                   phaseByteOffset(
-                      inst.getAttrOfType<DenseI64ArrayAttr>("bangc.scratch")));
+                      inst.getAttrOfType<DenseI64ArrayAttr>("bangc.scratch"),
+                      groupedShift));
               Value oneRow = b.create<arith::CmpIOp>(
                   loc, arith::CmpIPredicate::eq, members, cI64(1));
               Value activeElems = b.create<arith::SelectOp>(
@@ -2056,16 +2234,29 @@ struct RowLowerer {
               if (r0 == 2 && r1 == 1) {
                 Value lhsIn = getVal(inst.getOperand(0));
                 Value rhsIn = getVal(inst.getOperand(1));
-                forLoop(cI64(0), members, cI64(1), [&](Value h) {
-                  Value dH = makeAddr(dst, {h}, {symP}, 1);
-                  Value sH = makeAddr(lhsIn, {h}, {symP}, 1);
-                  Value scVal =
-                      loadAt(rhsIn, b.create<arith::AddIOp>(loc, j, h));
+                if (wide) {
+                  int64_t rhsSp = 2;
+                  if (auto spAttr = dyn_cast_or_null<IntegerAttr>(
+                          cast<MemRefType>(rhsIn.getType()).getMemorySpace()))
+                    rhsSp = spAttr.getInt();
+                  Value rhsSlice = makeAddr(rhsIn, {j}, {cI64(1)}, rhsSp);
                   makeOp("vec_div_rn",
-                         {dH, sH, scVal, scratch, live, rowLanes}, {},
-                         {b.getNamedAttr("mode", b.getStringAttr("vs"))},
+                         {dst, lhsIn, rhsSlice, scratch, members, symP, live,
+                          rowLanes},
+                         {}, {b.getNamedAttr("mode", b.getStringAttr("vg"))},
                          "ieee-div-rn");
-                });
+                } else {
+                  forLoop(cI64(0), members, cI64(1), [&](Value h) {
+                    Value dH = makeAddr(dst, {h}, {symP}, 1);
+                    Value sH = makeAddr(lhsIn, {h}, {symP}, 1);
+                    Value scVal =
+                        loadAt(rhsIn, b.create<arith::AddIOp>(loc, j, h));
+                    makeOp("vec_div_rn",
+                           {dH, sH, scVal, scratch, live, rowLanes}, {},
+                           {b.getNamedAttr("mode", b.getStringAttr("vs"))},
+                           "ieee-div-rn");
+                  });
+                }
                 continue;
               }
             }
@@ -2192,6 +2383,7 @@ struct RowLowerer {
           }
           localMap[resVal] = outSc;
         }
+        flushStagedSums();
       });
       return bodyStatus;
     };
@@ -2218,7 +2410,95 @@ struct RowLowerer {
     return emitBodyMembers();
   }
 
-  LogicalResult emitPhase(Operation &phaseOp, Value outerGroup) {
+  static bool sameCopyInSpec(Operation &a, Operation &b) {
+    if (a.getOperand(0) != b.getOperand(0) ||
+        a.getNumOperands() != b.getNumOperands() ||
+        a.getAttr("bangc.primitive") != b.getAttr("bangc.primitive") ||
+        a.hasAttr("dsa.shared") || b.hasAttr("dsa.shared"))
+      return false;
+    for (unsigned i = 2; i < a.getNumOperands(); ++i) {
+      auto ra = cast<OpResult>(a.getOperand(i));
+      auto rb = cast<OpResult>(b.getOperand(i));
+      Operation *da = ra.getOwner(), *db = rb.getOwner();
+      if (da->getName() != db->getName() ||
+          ra.getResultNumber() != rb.getResultNumber())
+        return false;
+      StringRef dn = da->getName().getStringRef();
+      if (dn == "dsa.lookup_axis")
+        return false;
+      if ((dn == "dsa.member_axis" || dn == "dsa.slab_axis") &&
+          (da->getOperand(1) != db->getOperand(1) ||
+           da->getAttr("axis") != db->getAttr("axis")))
+        return false;
+    }
+    return true;
+  }
+
+  static bool isPureReductionPhase(Operation &phaseOp, int64_t &outGrouped,
+                                   int64_t &outMaxLocal) {
+    if (phaseOp.getName().getStringRef() != "dsa.phase" ||
+        phaseOp.getNumResults() != 1 ||
+        isa<TupleType>(phaseOp.getResult(0).getType()) ||
+        phaseOp.hasAttr("bangc.empty_count_slot"))
+      return false;
+    auto &fetch = phaseOp.getRegion(0).front();
+    auto &body = phaseOp.getRegion(1).front();
+    outGrouped = 0;
+    for (auto &c : fetch.without_terminator()) {
+      StringRef cn = c.getName().getStringRef();
+      if (cn == "dsa.window" || cn == "dsa.member_axis" ||
+          cn == "dsa.slab_axis")
+        continue;
+      if (cn != "dsa.copy_in" || c.hasAttr("dsa.shared"))
+        return false;
+      outGrouped += llvm::divideCeil(
+          cast<MemRefType>(c.getOperand(0).getType()).getElementTypeBitWidth(),
+          8u);
+    }
+    outMaxLocal = 0;
+    for (auto &inst : body) {
+      StringRef n = inst.getName().stripDialect();
+      if (n == "window" || n == "member_axis" || n == "slab_axis" ||
+          n == "await" || n == "complete")
+        continue;
+      if (n == "drain") {
+        if (inst.getNumOperands() != 0)
+          return false;
+        continue;
+      }
+      if (n == "reduce") {
+        if (auto off = inst.getAttrOfType<DenseI64ArrayAttr>("bangc.offset"))
+          outMaxLocal = std::max<int64_t>(outMaxLocal, off[1] + 4);
+        continue;
+      }
+      if (n == "add" || n == "sub" || n == "mul" || n == "cast" ||
+          n == "constant") {
+        StringRef pr =
+            inst.getAttrOfType<StringAttr>("bangc.primitive").getValue();
+        if (pr == "certified_half_quotient" || pr == "bf16_product" ||
+            pr == "bf16_round")
+          return false;
+        if (auto off = inst.getAttrOfType<DenseI64ArrayAttr>("bangc.offset")) {
+          int64_t eb = llvm::divideCeil(
+              elemOf(inst.getResult(0).getType()).getIntOrFloatBitWidth(), 8u);
+          outMaxLocal = std::max<int64_t>(outMaxLocal, off[1] + eb);
+        }
+        continue;
+      }
+      return false;
+    }
+    return outGrouped > 0;
+  }
+
+  struct FusedFollower {
+    Operation *op;
+    int64_t groupedShift;
+    Value carrySlot;
+    llvm::DenseMap<Operation *, Value> copyBuffers;
+  };
+
+  LogicalResult emitPhase(Operation &phaseOp, Value outerGroup,
+                          ArrayRef<std::pair<Operation *, int64_t>> followers = {}) {
     auto &fetch = phaseOp.getRegion(0).front();
     auto &body = phaseOp.getRegion(1).front();
     auto &sched = phaseOp.getRegion(2).front();
@@ -2243,6 +2523,28 @@ struct RowLowerer {
       copyBuffers[&copy] = buf;
     }
 
+    SmallVector<FusedFollower, 4> fInfos;
+    for (auto [fOp, gShift] : followers) {
+      FusedFollower fi;
+      fi.op = fOp;
+      fi.groupedShift = gShift;
+      fi.carrySlot = mapped.lookup(fOp->getOperand(0));
+      mapped[fOp->getResult(0)] = fi.carrySlot;
+      for (auto &fCopy : fOp->getRegion(0).front().without_terminator()) {
+        if (fCopy.getName().getStringRef() != "dsa.copy_in")
+          continue;
+        for (auto &lCopy : fetch.without_terminator()) {
+          if (lCopy.getName().getStringRef() == "dsa.copy_in" &&
+              sameCopyInSpec(lCopy, fCopy)) {
+            fi.copyBuffers[&fCopy] = copyBuffers.lookup(&lCopy);
+            break;
+          }
+        }
+      }
+      fInfos.push_back(std::move(fi));
+    }
+
+    bool bodyHasCompute = blockHasCompute(body);
     bool phaseHasAsyncWrite = false;
     llvm::DenseMap<Operation *, Value> writeBuffers;
     for (auto &inst : body) {
@@ -2334,7 +2636,7 @@ struct RowLowerer {
             emitIssue(fetch, pos, sl, outerGroup, copyBuffers);
           });
         } else if (n == "iterate") {
-          if (phaseHasAsyncWrite && &steps == &sched)
+          if (phaseHasAsyncWrite && bodyHasCompute && &steps == &sched)
             sync("compute");
           Value lo = sMap.lookup(op.getOperand(0)),
                 hi = sMap.lookup(op.getOperand(1)),
@@ -2362,12 +2664,27 @@ struct RowLowerer {
         } else if (n == "compute_members") {
           bool isPacked = op.getAttrOfType<StringAttr>("bangc.primitive") ==
                           "packed_pointwise";
-          if (failed(emitCompute(fetch, body, &phaseOp,
-                                 sMap.lookup(op.getOperand(0)),
-                                 sMap.lookup(op.getOperand(1)), outerGroup,
-                                 carrySlot, carryIsMoment, isPacked,
+          Value curPos = sMap.lookup(op.getOperand(0));
+          Value curSlot = sMap.lookup(op.getOperand(1));
+          if (failed(emitCompute(fetch, body, &phaseOp, curPos, curSlot,
+                                 outerGroup, carrySlot, carryIsMoment, isPacked,
                                  copyBuffers, writeBuffers)))
             return failure();
+          llvm::DenseMap<Operation *, Value> emptyWrites;
+          for (auto &fi : fInfos) {
+            bool fPacked = isPacked;
+            fi.op->getRegion(2).front().walk([&](Operation *sOp) {
+              if (sOp->getName().stripDialect() == "compute_members")
+                fPacked = sOp->getAttrOfType<StringAttr>("bangc.primitive") ==
+                          "packed_pointwise";
+            });
+            if (failed(emitCompute(fi.op->getRegion(0).front(),
+                                   fi.op->getRegion(1).front(), fi.op, curPos,
+                                   curSlot, outerGroup, fi.carrySlot, false,
+                                   fPacked, fi.copyBuffers, emptyWrites,
+                                   fi.groupedShift)))
+              return failure();
+          }
         } else if (n == "advance") {
           b.create<scf::YieldOp>(loc,
                                  ValueRange{sMap.lookup(op.getOperand(0))});
@@ -2385,8 +2702,8 @@ struct RowLowerer {
 
   LogicalResult emitOuterOps(ArrayRef<Operation *> ops, Value outerGroup) {
     llvm::DenseMap<Value, Value> rangeMap;
-    for (Operation *opPtr : ops) {
-      Operation &op = *opPtr;
+    for (size_t idx = 0; idx < ops.size(); ++idx) {
+      Operation &op = *ops[idx];
       StringRef code = op.getName().stripDialect();
       if (code == "range") {
         rangeMap[op.getResult(0)] = symTaskId;
@@ -2405,7 +2722,56 @@ struct RowLowerer {
         if (failed(inner))
           return failure();
       } else if (code == "phase") {
-        if (failed(emitPhase(op, outerGroup)))
+        SmallVector<std::pair<Operation *, int64_t>, 4> followers;
+        int64_t g0 = 0, l0 = 0;
+        if (!resident && !independent && isPureReductionPhase(op, g0, l0)) {
+          int64_t leaderUnits = g0 * depth + l0;
+          SmallVector<Value, 4> fusedResults{op.getResult(0)};
+          SmallVector<Value, 4> fusedCarries{op.getOperand(0)};
+          while (idx + 1 < ops.size()) {
+            Operation &cand = *ops[idx + 1];
+            int64_t gc = 0, lc = 0;
+            if (!isPureReductionPhase(cand, gc, lc) || gc > g0)
+              break;
+            if (llvm::is_contained(fusedCarries, cand.getOperand(0)))
+              break;
+            bool usesPrior = false;
+            cand.walk([&](Operation *uOp) {
+              for (Value v : uOp->getOperands())
+                if (llvm::is_contained(fusedResults, v))
+                  usesPrior = true;
+            });
+            if (usesPrior)
+              break;
+            if ((g0 - gc) * depth + lc > leaderUnits)
+              break;
+            bool allCopiesMatch = true;
+            for (auto &fCopy :
+                 cand.getRegion(0).front().without_terminator()) {
+              if (fCopy.getName().getStringRef() != "dsa.copy_in")
+                continue;
+              bool matched = false;
+              for (auto &lCopy : op.getRegion(0).front().without_terminator()) {
+                if (lCopy.getName().getStringRef() == "dsa.copy_in" &&
+                    sameCopyInSpec(lCopy, fCopy)) {
+                  matched = true;
+                  break;
+                }
+              }
+              if (!matched) {
+                allCopiesMatch = false;
+                break;
+              }
+            }
+            if (!allCopiesMatch)
+              break;
+            followers.push_back({&cand, g0 - gc});
+            fusedResults.push_back(cand.getResult(0));
+            fusedCarries.push_back(cand.getOperand(0));
+            ++idx;
+          }
+        }
+        if (failed(emitPhase(op, outerGroup, followers)))
           return failure();
       } else if (code == "owner_rows") {
         mapped[op.getResult(0)] = outerGroup;

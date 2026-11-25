@@ -8,6 +8,9 @@ struct MatrixStorage {
   int64_t (*privateBytes)(int64_t rows, int64_t columns, int64_t depth,
                           llvm::StringRef computation);
   int64_t wramBytes = 0;
+  int64_t sramBytes = 0;
+  int64_t clusters = 0;
+  int64_t coresPerCluster = 0;
   std::string libraryF16Impl;
   std::string libraryFtzImpl;
   std::string libraryEstimator;

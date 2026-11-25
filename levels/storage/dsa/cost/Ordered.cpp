@@ -71,8 +71,10 @@ void ownerSupplyCost(compilerinfra::Unit &u) {
             e.terms["memory_access_sites"] = {double(reads + writes + slices),
                                               "count"};
             e.terms["private_slab_bytes"] = {double(b), "B"};
-            if (bw && lat)
+            if (bw && lat) {
               e.timeNs = transfers * *lat + bytesPerOwner / *bw;
+              e.rows["0"] = {e.terms, e.timeNs};
+            }
             return e;
           }
           auto streams = intentdsl::dsa::ownerStreams(fn, ctx.target);
@@ -93,8 +95,10 @@ void ownerSupplyCost(compilerinfra::Unit &u) {
           e.terms["memory_access_sites"] = {double(reads + writes + slices),
                                             "count"};
           e.terms["private_slab_bytes"] = {double(b), "B"};
-          if (bw && lat)
+          if (bw && lat) {
             e.timeNs = transfers * *lat + totalBytes / *bw;
+            e.rows["0"] = {e.terms, e.timeNs};
+          }
           return e;
         }},
        COMPILERINFRA_SOURCE});

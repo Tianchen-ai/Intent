@@ -8,6 +8,23 @@
 namespace CI_UNIT_NAMESPACE {
 static int64_t matrixPrivateBytes(int64_t rows, int64_t columns, int64_t depth,
                                   llvm::StringRef computation) {
+  if (rows == 512 && columns == 512) {
+    // 2x2 cluster-cooperative tile: each of the 4 IPU cores owns a 256x256
+    // quadrant (4 x [256, 64] accumulators + Split-M 2 x [128, depth] NRAM
+    // staging + per-mode conversion/guard/LUT scratch).
+    int64_t coreAcc = 4 * 256 * 64 * 4;
+    int64_t coreLhs = 2 * 128 * depth * 2;
+    int64_t extra = (computation == "quant_contract" ||
+                     computation == "scaled_contract")
+                        ? 131072
+                        : 81920;
+    return coreAcc + coreLhs + extra;
+  }
+  if (rows == 256 && columns == 64 && computation == "quant_contract") {
+    // 256x64x128 grouped-RHS contraction: [256, 64] f32 acc + [256, depth] f16
+    // lhs + [64, depth] decoded rhs + LUT/unpack work buffers.
+    return 256 * 64 * 4 + 256 * depth * 2 + 64 * depth * 2 + 114688;
+  }
   // Upper bound shared by the supported convolution, record and scaled-dot
   // microkernels, including conversion and record scratch.
   return 256 + 4 * (rows * depth + 2 * depth * columns + 2 * rows * columns) +
@@ -18,6 +35,7 @@ static int64_t matrixPrivateBytes(int64_t rows, int64_t columns, int64_t depth,
 llvm::Expected<compilerinfra::TargetProfile>
 capabilities(const llvm::json::Object &opts) {
   compilerinfra::TargetProfile profile;
+  profile.reuse = compilerinfra::Reuse::Library;
   profile.services.calibrationProfile =
       opts.getString("calibration").value_or("mlu370").str();
   if (opts.empty())
@@ -36,27 +54,38 @@ capabilities(const llvm::json::Object &opts) {
                      {32, 64, 128, "{}"},
                      {64, 64, 128, "{}"},
                      {128, 64, 128, "{}", "quant_contract"},
+                     {256, 64, 128, "{}", "quant_contract", 2},
                      {16, 64, 256, "{}", "contract"},
                      {32, 64, 256, "{}", "contract"},
                      {64, 64, 256, "{}", "contract"},
                      {128, 64, 256, "{}"},
+                     {512, 512, 256, "{}", "contract", 2},
+                     {512, 512, 128, "{}", "scaled_contract", 1},
                      {64, 64, 64, "{}", "window_contract"},
                      {32, 64, 64, "{}", "window_contract"}};
-  auto wram=opts.getInteger("wram_bytes");
-  // Only admit implementations that fit both physical owners. A row-only
-  // offline profile can still compile its original row programs.
+  auto wram = opts.getInteger("wram_bytes");
+  auto sram = opts.getInteger("sram_bytes");
+  // Only admit implementations that fit physical owners (and cluster SRAM for
+  // 512x512 Union4 cooperative tiles). A row-only offline profile can still
+  // compile its original row programs.
   llvm::erase_if(matrices->tiles, [&](auto &t) {
-    return !wram || 2 * t.k * t.n > *wram ||
-           matrixPrivateBytes(t.m, t.n, t.k, t.operation) >
-               std::min<int64_t>(*nram / 3 * 2, 512 * 1024);
+    bool isCluster = (t.m == 512 && t.n == 512);
+    int64_t coreWramCols = isCluster ? (t.n / 2) : t.n;
+    if (!wram || 2 * t.k * coreWramCols > *wram)
+      return true;
+    if (isCluster &&
+        (!sram || *sram < 2097152 || *clusters != 4 || *cores != 4))
+      return true;
+    return matrixPrivateBytes(t.m, t.n, t.k, t.operation) >
+           std::min<int64_t>(*nram / 3 * 2, 512 * 1024);
   });
   if (opts.getBoolean("cnnl_runtime").value_or(true))
     profile.features.insert("cnnl_runtime");
   matrices->estimate="exits/bangc::matrix-transfer";
   if(auto e=profile.services.provide<intentdsl::dsa::MatrixStorage>(
       std::make_shared<intentdsl::dsa::MatrixStorage>(intentdsl::dsa::MatrixStorage{
-          matrixPrivateBytes, wram.value_or(0),
-          "exits/bangc::cnnl-matmul-f16", "exits/bangc::cnnl-matmul-ftz",
+          matrixPrivateBytes, wram.value_or(0), sram.value_or(0), *clusters,
+          *cores, "exits/bangc::cnnl-matmul-f16", "exits/bangc::cnnl-matmul-ftz",
           "exits/bangc::cnnl-matmul-cost"})))return e;
   if(auto e=profile.services.provide<intentdsl::block::MatrixTarget>(matrices))return e;
   if(auto error=caps->bind(opts))return error;

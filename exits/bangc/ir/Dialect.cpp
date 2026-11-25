@@ -405,6 +405,10 @@ void WramBufferOp::getEffects(EffectList &effects) {
   effects.emplace_back(MemoryEffects::Allocate::get(),
                        getOperation()->getOpResult(0));
 }
+void SramBufferOp::getEffects(EffectList &effects) {
+  effects.emplace_back(MemoryEffects::Allocate::get(),
+                       getOperation()->getOpResult(0));
+}
 void NramAllocOp::getEffects(EffectList &effects) {
   effects.emplace_back(MemoryEffects::Allocate::get(),
                        getOperation()->getOpResult(0));
@@ -772,6 +776,16 @@ void SymbolOp::inferResultRanges(ArrayRef<ConstantIntRanges>,
       }
       if (sym == "taskDim") {
         setResultRange(getValue(), nonNegRange64(1, tasks.getInt()));
+        return;
+      }
+      if (sym == "clusterId") {
+        int64_t nCl = std::max<int64_t>(1, tasks.getInt() / 4);
+        setResultRange(getValue(), nonNegRange64(0, nCl - 1));
+        return;
+      }
+      if (sym == "clusterDim") {
+        int64_t nCl = std::max<int64_t>(1, tasks.getInt() / 4);
+        setResultRange(getValue(), nonNegRange64(nCl, nCl));
         return;
       }
     }
