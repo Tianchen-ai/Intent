@@ -5,13 +5,12 @@ using namespace compilerinfra;
 using namespace mlir;
 void supplyCost(Unit &u) {
   u.costModels.push_back(
-      {{"pipeline-time", u.qualify("supply"), "1",
+      {{"pipeline-time", u.qualify("supply"), "2",
         [](Operation *op, const StructuralCandidate &c,
            CostContext &ctx) -> llvm::Expected<CostEstimate> {
           auto d = cast<DictionaryAttr>(c.value);
+          auto *caps = ctx.target.services.get<intentdsl::dsa::LocalSupply>();
           if (d.contains("library_impl")) {
-            auto *caps =
-                ctx.target.services.get<intentdsl::dsa::LocalSupply>();
             if (!caps || caps->libraryEstimator.empty())
               return llvm::createStringError(
                   "missing target library supply estimator");
@@ -29,25 +28,68 @@ void supplyCost(Unit &u) {
                launch = intentdsl::quantity(ctx, "launch", "ns"),
                vector = intentdsl::quantity(ctx, "compute", "lane/ns");
           auto startup = intentdsl::quantity(ctx, "first_io", "ns");
-          auto [keys,segmentWork]=intentdsl::block::realizedTraffic(op,*facts);
+          auto optQty = [&](llvm::StringRef name,
+                            llvm::StringRef unit) -> std::optional<double> {
+            if (!ctx.target.services.facts.find(name))
+              return std::nullopt;
+            return intentdsl::quantity(ctx, name, unit);
+          };
+          auto rtIn = optQty("dma_in_sync_latency", "ns"),
+               rtOut = optQty("dma_out_sync_latency", "ns"),
+               singleInBw = optQty("dma_in_single_bw", "B/ns"),
+               singleOutBw = optQty("dma_out_single_bw", "B/ns"),
+               fullInBw = optQty("dma_in_bw", "B/ns"),
+               fullOutBw = optQty("dma_out_bw", "B/ns"),
+               inLat = optQty("dma_in_latency", "ns"),
+               outLat = optQty("dma_out_latency", "ns"),
+               scatterBw = optQty("write_16", "B/ns");
+          double maxConsumers = caps && caps->consumers > 0
+                                    ? double(caps->consumers)
+                                    : 16.;
+          auto [keys, segmentWork] = intentdsl::block::realizedTraffic(op, *facts);
           auto depth = d.getAs<IntegerAttr>("depth").getInt();
           double participants = d.getAs<IntegerAttr>("participants").getInt();
           double batch = d.getAs<IntegerAttr>("batch")
                              ? d.getAs<IntegerAttr>("batch").getInt()
                              : 1.;
           auto configs = op->getAttrOfType<ArrayAttr>("block.configs");
-          unsigned ops = 0;
-          unsigned summaries = 0, scans = 0, atomics=0;
+          unsigned vecOps = 0, scalarOps = 0;
+          unsigned summaries = 0, scans = 0, atomics = 0;
           bool hasIndexed = false;
           op->walk([&](Operation *i) {
             auto k = i->getName().stripDialect();
-            ops += k == "mul" || k == "add" || k == "reduce" || k == "exp" ||
-                   k == "rsqrt" || k == "div";
             summaries += k == "summary_reduce";
             scans += k == "scan_sum";
             atomics += k == "atomic_add_at";
             hasIndexed |= k == "indexed_tile_read";
+            if (k == "reduce") {
+              ++vecOps;
+              return;
+            }
+            bool isArith = k == "add" || k == "sub" || k == "mul" ||
+                           k == "div" || k == "exp" || k == "exp2" ||
+                           k == "rsqrt" || k == "sqrt" || k == "maximum" ||
+                           k == "minimum" || k == "select" || k == "cast";
+            if (isArith && i->getNumResults() == 1) {
+              if (auto rTy =
+                      dyn_cast<RankedTensorType>(i->getResult(0).getType());
+                  rTy && rTy.getRank() >= 2)
+                ++vecOps;
+              else
+                ++scalarOps;
+            }
           });
+          bool hasDetailedTransfer =
+              rtIn && rtOut && fullInBw && fullOutBw && inLat && outLat &&
+              scatterBw && e.terms.count("step_in_bytes") &&
+              e.terms.count("step_out_bytes") &&
+              e.terms.count("step_scatter_bytes") &&
+              e.terms.count("shared_in_bytes") &&
+              e.terms.count("shared_in_requests") &&
+              e.terms.count("grouped_in_requests") &&
+              e.terms.count("per_row_in_requests") &&
+              e.terms.count("grouped_out_requests") &&
+              e.terms.count("per_row_out_requests");
           e.timeNs.reset();
           for (auto a : d.getAs<ArrayAttr>("rows")) {
             auto row = cast<DictionaryAttr>(a);
@@ -58,37 +100,91 @@ void supplyCost(Unit &u) {
             double group =
                 cast<DictionaryAttr>(*it).getAs<IntegerAttr>("rows").getInt();
             double effGroup = group * batch;
-            double steps = std::ceil(std::ceil(m / effGroup) / participants);
+            double groupsTotal = std::ceil(m / effGroup);
             double tileFraction = 1.;
-            if(d.contains("independent_columns")){
-              auto width=cast<DictionaryAttr>(*it).getAs<IntegerAttr>("width").getInt();
-              steps=std::ceil(std::ceil(m/effGroup)*std::ceil(n/width)/participants);
-              tileFraction = std::min(1., double(width) / std::max(1., double(n)));
+            if (d.contains("independent_columns")) {
+              auto width =
+                  cast<DictionaryAttr>(*it).getAs<IntegerAttr>("width").getInt();
+              groupsTotal *= std::ceil(n / width);
+              tileFraction =
+                  std::min(1., double(width) / std::max(1., double(n)));
             }
+            double steps = std::ceil(groupsTotal / participants);
+            double activeParticipants =
+                std::min(participants, std::max(1., groupsTotal));
             RowPrediction pred;
             pred.terms = dma->terms;
             pred.terms["steps"] = {steps, "count"};
-            if(segmentWork)pred.terms["packed_member_reads"]={segmentWork,"B"};
-            if(keys)pred.terms["key_input_bytes"]={keys,"B"};
+            if (segmentWork)
+              pred.terms["packed_member_reads"] = {segmentWork, "B"};
+            if (keys)
+              pred.terms["key_input_bytes"] = {keys, "B"};
             double merges = effGroup * std::max(0., n - 1.) * summaries;
             pred.terms["summary_merges_per_group"] = {merges, "count"};
-            pred.terms["serial_prefix_adds"]={effGroup*std::max(0.,n-1.)*scans,"count"};
-            if(atomics)pred.terms["atomic_updates_per_group"]={effGroup*n*atomics,"count"};
+            pred.terms["serial_prefix_adds"] = {
+                effGroup * std::max(0., n - 1.) * scans, "count"};
+            if (atomics)
+              pred.terms["atomic_updates_per_group"] = {
+                  effGroup * n * atomics, "count"};
             pred.terms["working_set"] = {
                 double(row.getAs<IntegerAttr>("bytes").getInt()), "B"};
             if (dma->timeNs && launch && sync && vector && startup) {
-              double fetch = effGroup * tileFraction * e.terms.at("fetch").value,
-                     compute = tileFraction * ((effGroup * n * std::max(0.,ops-e.terms.at("native_operations").value) + 8 * merges + pred.terms["serial_prefix_adds"].value) / *vector + effGroup * e.terms.at("native_compute").value),
-                     write = effGroup * tileFraction * e.terms.at("writeback").value;
-              double overlapPool =
-                  d.contains("async_writeback") ? (fetch + write) : fetch;
+              double fetch = 0., write = 0., sharedPrologue = 0., firstIo = 0.;
+              if (hasDetailedTransfer) {
+                double bwIn =
+                    singleInBw
+                        ? std::min(*singleInBw,
+                                   (maxConsumers * (*fullInBw)) /
+                                       activeParticipants)
+                        : *fullInBw;
+                double bwOut =
+                    singleOutBw
+                        ? std::min(*singleOutBw,
+                                   (maxConsumers * (*fullOutBw)) /
+                                       activeParticipants)
+                        : *fullOutBw;
+                double stepInB = e.terms.at("step_in_bytes").value;
+                double stepOutB = e.terms.at("step_out_bytes").value;
+                double stepScatB = e.terms.at("step_scatter_bytes").value;
+                double gInR = e.terms.at("grouped_in_requests").value;
+                double rInR = e.terms.at("per_row_in_requests").value;
+                double gOutR = e.terms.at("grouped_out_requests").value;
+                double rOutR = e.terms.at("per_row_out_requests").value;
+                bool hasStepIn = stepInB > 0. || gInR > 0. || rInR > 0.;
+                bool hasStepOut =
+                    stepOutB > 0. || stepScatB > 0. || gOutR > 0. || rOutR > 0.;
+                fetch = (hasStepIn ? *rtIn : 0.) +
+                        effGroup * tileFraction * (stepInB / bwIn) +
+                        (gInR + effGroup * rInR) * (*inLat);
+                write = (hasStepOut ? *rtOut : 0.) +
+                        effGroup * tileFraction *
+                            (stepOutB / bwOut + stepScatB / (*scatterBw)) +
+                        (gOutR + effGroup * rOutR) * (*outLat);
+                double sharedInB = e.terms.at("shared_in_bytes").value;
+                double sharedInR = e.terms.at("shared_in_requests").value;
+                if (steps > 0. && (sharedInB > 0. || sharedInR > 0.))
+                  sharedPrologue = sharedInB / bwIn + sharedInR * (*inLat);
+              } else {
+                fetch = effGroup * tileFraction * e.terms.at("fetch").value;
+                write = effGroup * tileFraction * e.terms.at("writeback").value;
+                firstIo = steps ? *startup : 0.;
+              }
+              double compute =
+                  tileFraction *
+                  ((effGroup * n *
+                        std::max(0., double(vecOps) -
+                                         e.terms.at("native_operations").value) +
+                    effGroup * double(scalarOps) + 8 * merges +
+                    pred.terms["serial_prefix_adds"].value) /
+                       *vector +
+                   effGroup * e.terms.at("native_compute").value);
               double overlap =
                   depth == 2
                       ? std::max(0., steps - 1) *
                             (hasIndexed && d.contains("async_writeback")
-                                 ? std::max(std::min(overlapPool, compute),
+                                 ? std::max(std::min(fetch, compute),
                                             0.25 * std::min(fetch, write))
-                                 : std::min(overlapPool, compute))
+                                 : std::min(fetch, compute))
                       : 0.;
               double waitNs =
                   (depth == 2 || hasIndexed) ? steps * *sync : 0.;
@@ -96,10 +192,13 @@ void supplyCost(Unit &u) {
               pred.terms["fill"] = {fetch, "ns"};
               pred.terms["drain"] = {compute + write, "ns"};
               pred.terms["launch"] = {*launch, "ns"};
-              pred.terms["first_io_excess"] = {*startup, "ns"};
+              pred.terms["first_io_excess"] = {firstIo, "ns"};
+              if (sharedPrologue > 0.)
+                pred.terms["shared_prologue"] = {sharedPrologue, "ns"};
               pred.terms["wait"] = {waitNs, "ns"};
-              pred.timeNs = *launch + (steps ? *startup : 0.) + steps * (fetch + compute + write) -
-                            overlap + waitNs;
+              pred.timeNs = *launch + firstIo + sharedPrologue +
+                            steps * (fetch + compute + write) - overlap +
+                            waitNs;
               if(atomics)pred.timeNs=*pred.timeNs+steps*effGroup*n*atomics*(*sync);
               if(segmentWork || keys){
                 auto rate=intentdsl::quantity(ctx,"read_1","B/ns");

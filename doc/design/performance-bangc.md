@@ -37,19 +37,19 @@ MLU370 没有类似 oneDNN BRGeMM 微核的厂商微核接口，CNNL 是唯一�
 ## 3. 代价项与局部估算器
 
 - **节点级代价模型**：
-  - `levels/storage/dsa::supply-cost`：结合每核工作集、工作集所处缓存层级（private / mid / shared 带宽）、DMA 启动固定延迟、双缓冲重叠收益及共享向量广播复用给分。
+  - `levels/storage/dsa::pipeline-time`（v2）：按实际 rank-2 向量算子数（区分 per-row rank-1 标量算子）、每步同步 DMA 往返延迟（`dma_in_sync_latency` / `dma_out_sync_latency`）、按活跃核数受限的片外带宽屋顶线（`min(dma_*_single_bw, consumers * dma_*_bw / active_participants)`）、不参与循环重叠的一次性 `persistent` 共享向量预载（`shared_prologue`），以及与计算实际重叠的异步预取池（仅覆盖每步异步取数，不把尾同步写回或预载计入重叠）综合估算完整调用耗时。
   - `levels/storage/dsa::matrix-supply-cost`：比较各 `(BM, BN, BK)` 面板的 GDRAM→NRAM→WRAM 搬运次数、核间负载均衡与尾块填充浪费。
   - `levels/storage/dsa::owner-supply-cost`：比较 `panel-fold` 的片上分数重放 + WRAM 吞吐、`packed` 流的连续向量化收益与 `general` 流的逐步访存开销。
 - **出口局部估算器**：
-  - `exits/bangc::dma`：按校准的 1 核 / 16 核读写带宽、DMA 同步壁垒与向量集体归约吞吐估算局部阶段耗时。
+  - `exits/bangc::dma`（v2）：分离每步连续/分组 DMA 与一次性 `persistent` 共享读字节数及请求数，统计融合原生原语（如 `div + cast(f16)` 覆盖的 2 个 rank-2 算子）及校准向量归约/超越函数耗时。
   - `exits/bangc::matrix-transfer`：估算 NRAM 转置、`NRAM2WRAM` 滤波装载、`__bang_conv` 矩阵发射及 BF16 指数窗守卫开销。
 
 ## 4. 机器参数与校准来源
 
-校准文件：`exits/bangc/capabilities/mlu370.calibration.json`（配置名 `mlu370`，版本 `4`）。
-所有参数均在 MLU370（`mtp_372`，`cncc v4.7.2`，16 block tasks，CNRT notifier）上通过独立合成微基准实测采集：
-- 启动与同步固定开销：`launch`、DMA `sync_io` 壁垒；
-- 分工作集（64 KiB / 1 MiB / 8 MiB / 256 MiB）与分并发（1 核 / 16 核）连续及跨步读写带宽：`read_{1,16}_{private,mid,shared}_bw`、`write_{1,16}_{private,mid,shared}_bw`；
+校准文件：`exits/bangc/capabilities/mlu370.calibration.json`（配置名 `mlu370`，版本 `5`）。
+所有参数均在 MLU370（`mtp_372`，`cncc v4.7.2`，16 block tasks 与单核对比，CNRT notifier）上通过独立合成微基准实测采集：
+- 启动与同步固定开销：`launch`、DMA `sync_io` 壁垒、以及 128−16 差分拟合的每步同步读写往返延迟（`dma_in_sync_latency`、`dma_out_sync_latency`）；
+- 分工作集（64 KiB / 1 MiB / 8 MiB / 256 MiB）连续及跨步读写带宽、`16` 核与单核流式 DMA 读写带宽（`dma_in_bw` / `dma_out_bw`、`dma_in_single_bw` / `dma_out_single_bw`）；
 - 向量超越函数、归约与 WRAM 卷积吞吐。
 
 ## 5. 验证程序与迭代闭环

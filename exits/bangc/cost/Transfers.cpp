@@ -5,7 +5,7 @@ using namespace mlir;
 using namespace compilerinfra;
 void dmaCost(Unit &u) {
   u.costModels.push_back(
-      {{"dma", "levels/storage/dsa::supply", "1",
+      {{"dma", "levels/storage/dsa::supply", "2",
         [](Operation *op, const StructuralCandidate &c,
            CostContext &ctx) -> llvm::Expected<CostEstimate> {
           CostEstimate e;
@@ -34,6 +34,9 @@ void dmaCost(Unit &u) {
             }
           }
           double in = 0, out = 0, r = 0, w = 0, scatter = 0;
+          double stepIn = 0, sharedIn = 0, sharedReqs = 0;
+          double groupedInReqs = 0, perRowInReqs = 0;
+          double groupedOutReqs = 0, perRowOutReqs = 0;
           op->walk([&](Operation *i) {
             auto k = i->getName().stripDialect();
             if (k != "load" && k != "store" && k != "indexed_tile_read")
@@ -42,7 +45,9 @@ void dmaCost(Unit &u) {
             double bytes = n * view.getElementTypeBitWidth() / 8;
             if (k == "indexed_tile_read") {
               in += bytes + 8.;
+              stepIn += bytes + 8.;
               r += 1.;
+              perRowInReqs += 1.;
             } else if (k == "load") {
               double frequency = 1.;
               if (choice.getAs<BoolAttr>("persistent").getValue() &&
@@ -55,9 +60,18 @@ void dmaCost(Unit &u) {
                                           .getInt()));
                 in += frequency * bytes;
                 r += frequency;
+                sharedIn += bytes;
+                sharedReqs += 1.;
               } else {
                 in += bytes;
-                r += view.getRank() >= 2 ? 1. / batch : 1.;
+                stepIn += bytes;
+                if (view.getRank() >= 2) {
+                  r += 1. / batch;
+                  groupedInReqs += 1.;
+                } else {
+                  r += 1.;
+                  perRowInReqs += 1.;
+                }
               }
             } else {
               out += bytes;
@@ -68,7 +82,13 @@ void dmaCost(Unit &u) {
                 scatter += canTileTranspose ? 0.85 * bytes : bytes;
                 permuted = !canTileTranspose;
               }
-              w += (!permuted && view.getRank() >= 2) ? 1. / batch : 1.;
+              if (!permuted && view.getRank() >= 2) {
+                w += 1. / batch;
+                groupedOutReqs += 1.;
+              } else {
+                w += 1.;
+                perRowOutReqs += 1.;
+              }
             }
           });
           auto bi = intentdsl::quantity(ctx, "dma_in_bw", "B/ns"),
@@ -78,7 +98,16 @@ void dmaCost(Unit &u) {
                bw = intentdsl::quantity(ctx, "write_16", "B/ns");
           e.terms = {{"incoming", {in, "B"}},
                      {"outgoing", {out, "B"}},
-                     {"requests", {r + w, "count"}}};
+                     {"requests", {r + w, "count"}},
+                     {"step_in_bytes", {stepIn, "B"}},
+                     {"step_out_bytes", {out - scatter, "B"}},
+                     {"step_scatter_bytes", {scatter, "B"}},
+                     {"shared_in_bytes", {sharedIn, "B"}},
+                     {"shared_in_requests", {sharedReqs, "count"}},
+                     {"grouped_in_requests", {groupedInReqs, "count"}},
+                     {"per_row_in_requests", {perRowInReqs, "count"}},
+                     {"grouped_out_requests", {groupedOutReqs, "count"}},
+                     {"per_row_out_requests", {perRowOutReqs, "count"}}};
           double specialized = 0, count = 0;
           double mathPasses = 0;
           double lanes = n * batch;
@@ -94,11 +123,12 @@ void dmaCost(Unit &u) {
               mathPasses += passes;
               if (auto rate = intentdsl::quantity(ctx, "compute", "lane/ns")) {
                 specialized += passes * n / *rate;
-                if (code == "div") ++count;
+                ++count;
               }
               return;
             }
             std::string primitive;
+            double replacedOps = 1.;
             if(code=="reduce"){
               auto algebra=i->getAttrOfType<StringAttr>("algebra");
               if(algebra=="max_num")primitive="max";
@@ -107,8 +137,10 @@ void dmaCost(Unit &u) {
             else if (code=="div" && i->hasOneUse()){
               Operation *consumer=*i->getUsers().begin();
               auto ty=consumer->getNumResults()==1?dyn_cast<ShapedType>(consumer->getResult(0).getType()):ShapedType{};
-              if(consumer->getName().stripDialect()=="cast" && ty && ty.getElementType().isF16())
+              if(consumer->getName().stripDialect()=="cast" && ty && ty.getElementType().isF16()) {
                 primitive="quotient";
+                replacedOps = 2.;
+              }
             }
             if(primitive.empty())return;
             int low = lanes <= 512 ? 64 : 512, high = lanes <= 512 ? 512 : 2048;
@@ -120,7 +152,7 @@ void dmaCost(Unit &u) {
                              ? std::clamp((lanes - low) / (high - low), 0., 1.)
                              : (lanes - low) / (high - low);
               specialized += ((*a) + ((*b) - (*a)) * u) / batch;
-              ++count;
+              count += replacedOps;
             }
           });
           e.terms["native_compute"]={specialized,"ns"};
