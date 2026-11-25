@@ -85,6 +85,8 @@ TerminalPrinter tilePrinter() {
   p.operations["math.exp2"] = PrintRule::format("$r0 = tl.exp2($0)");
   p.operations["arith.select"] = PrintRule::format("$r0 = tl.where($operands)");
   p.operations["triton_src.transpose"] = PrintRule::format("$r0 = tl.trans($0)");
+  p.operations["triton_src.scan_sum"] =
+      PrintRule::format("$r0 = tl.cumsum($0,axis=1)");
   p.operations["triton_src.scaled_mma"] = PrintRule::format(
       "$r0 = tl.dot_scaled($0,$1.to(tl.uint8),'e4m3',$2,$3.to(tl.uint8),'e4m3',$4)");
 

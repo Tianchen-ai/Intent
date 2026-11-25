@@ -124,6 +124,9 @@ llvm::Error describeArtifact(func::FuncOp fn, llvm::raw_pwrite_stream &out) {
           2, out);
     }
     int64_t warps = 4;
+    int64_t ownerRows = 1;
+    if (auto ot = entry.getAttrOfType<IntegerAttr>("block.owner_tile"))
+      ownerRows = std::max<int64_t>(1, ot.getInt());
     if (auto ts = entry.getAttrOfType<IntegerAttr>("block.token_span");
         ts && ts.getInt() >= 1024)
       warps = 8;
@@ -131,7 +134,9 @@ llvm::Error describeArtifact(func::FuncOp fn, llvm::raw_pwrite_stream &out) {
       entry.walk([&](Operation *op) {
         if (op->getName().stripDialect() == "tile_axis")
           if (auto rt = dyn_cast<RankedTensorType>(op->getResult(0).getType());
-              rt && rt.getRank() == 1 && rt.getDimSize(0) >= 1024)
+              rt && rt.getRank() == 1 &&
+              (rt.getDimSize(0) >= 1024 ||
+               ownerRows * rt.getDimSize(0) >= 2048))
             warps = 8;
       });
     }
@@ -141,6 +146,9 @@ llvm::Error describeArtifact(func::FuncOp fn, llvm::raw_pwrite_stream &out) {
   }
   if (intentdsl::kir::orderedOwners(fn)) {
     int64_t warps = 4;
+    int64_t ownerRows = 1;
+    if (auto ot = entry.getAttrOfType<IntegerAttr>("block.owner_tile"))
+      ownerRows = std::max<int64_t>(1, ot.getInt());
     if (auto ts = entry.getAttrOfType<IntegerAttr>("block.token_span");
         ts && ts.getInt() >= 1024)
       warps = 8;
@@ -148,7 +156,9 @@ llvm::Error describeArtifact(func::FuncOp fn, llvm::raw_pwrite_stream &out) {
       entry.walk([&](Operation *op) {
         if (op->getName().stripDialect() == "tile_axis")
           if (auto rt = dyn_cast<RankedTensorType>(op->getResult(0).getType());
-              rt && rt.getRank() == 1 && rt.getDimSize(0) >= 1024)
+              rt && rt.getRank() == 1 &&
+              (rt.getDimSize(0) >= 1024 ||
+               ownerRows * rt.getDimSize(0) >= 2048))
             warps = 8;
       });
     }

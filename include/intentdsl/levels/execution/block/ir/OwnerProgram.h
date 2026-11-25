@@ -17,6 +17,7 @@ struct OwnerAccess {
   mlir::Value (*panel)(Tiles &, mlir::Operation &, llvm::ArrayRef<mlir::Value>,
                        mlir::Value start, int64_t span,
                        int64_t width) = nullptr;
+  bool scalarBroadcastRead = false;
 };
 void expandOwnerProgram(mlir::func::FuncOp fn, llvm::StringRef unit,
                         OwnerAccess access = {});

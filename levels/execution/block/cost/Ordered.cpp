@@ -25,6 +25,15 @@ void orderedCost(Unit &u) {
                       lanes, (*sh)[axis->second].getAsInteger().value_or(1));
               }
           });
+          int64_t triLanes = 1;
+          for (auto loop : op->getRegion(0).front().getOps<mlir::scf::ForOp>()) {
+            intentdsl::block::TriangularRecurrenceInfo tri;
+            if (intentdsl::block::matchTriangularRecurrence(
+                    loop, op->getParentOfType<mlir::func::FuncOp>(), f, &tri))
+              triLanes = std::max<int64_t>(
+                  triLanes,
+                  llvm::PowerOf2Ceil(std::max<int64_t>(2, tri.extent)));
+          }
           int64_t foldLanes = intentdsl::block::foldBodyLanes(op, *f);
           auto issue = caps ? caps->parallelMembers : 1;
           double blocks = llvm::divideCeil(n, w),
@@ -41,7 +50,9 @@ void orderedCost(Unit &u) {
           bool isMatrixFoldEarly =
               choice.getAs<mlir::StringAttr>("memory") == "matrix-fold";
           double issueGroups = std::ceil(
-              double(w) * (span && !isMatrixFoldEarly ? foldLanes : lanes) /
+              double(w) *
+              (span && !isMatrixFoldEarly ? foldLanes
+                                          : std::max(lanes, triLanes)) /
               issue);
           double dependency = 1;
           // A slice indexed by the fold induction variable is loaded once per
@@ -357,28 +368,99 @@ void orderedCost(Unit &u) {
           }
           double waveSetup = 0;
           if (!span && choice.getAs<mlir::StringAttr>("memory") == "direct") {
-            dependency *= 1. + std::max(0., double(w) * lanes / 4096. - 1.);
+            auto fnOp = op->getParentOfType<mlir::func::FuncOp>();
+            dependency *= 1. + std::max(0., double(w) * std::max(lanes, triLanes) /
+                                                4096. -
+                                                1.);
+            double panelBucketSteps = 0;
+            bool hasPanelBucket = false;
             for (auto loop :
                  op->getRegion(0).front().getOps<mlir::scf::ForOp>()) {
               intentdsl::block::OrderedSelectionInfo selInfo;
               if (intentdsl::block::matchOrderedSelectionChain(loop,
                                                                &selInfo)) {
-                int64_t ext = 1024;
-                if (auto d =
-                        loop.getUpperBound().getDefiningOp<mlir::memref::DimOp>();
-                    d && d.getConstantIndex())
-                  if (auto *sh = f->shapeOf(d.getSource()))
-                    ext = (*sh)[*d.getConstantIndex()]
-                              .getAsInteger()
-                              .value_or(1024);
+                int64_t ext =
+                    intentdsl::block::orderedStaticLoopExtent(loop, fnOp, f)
+                        .value_or(1024);
                 int64_t panelW = std::clamp<int64_t>(
                     llvm::PowerOf2Ceil(std::max<int64_t>(1, ext)), 64, 1024);
                 if (w == 1)
                   dependency *= std::max<double>(1.0, 2.0 * selInfo.k) / panelW;
                 else
                   dependency *= std::max<double>(1.0, double(ext) / 16.0);
+                continue;
+              }
+              intentdsl::block::TriangularRecurrenceInfo triInfo;
+              if (intentdsl::block::matchTriangularRecurrence(loop, fnOp, f,
+                                                              &triInfo)) {
+                dependency *= std::max<double>(1.0, double(triInfo.extent) / 64.0);
+                double coeffBytes =
+                    0.5 * double(triInfo.extent) * double(triInfo.extent + 1) *
+                    4.0 * blocks;
+                double sectorPenalty =
+                    32.0 / std::min<double>(32.0, double(w) * 4.0);
+                double stateBytes =
+                    2.0 * double(triInfo.extent) * 4.0 * double(n) *
+                    sectorPenalty;
+                readCost += coeffBytes + stateBytes;
+                continue;
+              }
+              intentdsl::block::ExclusiveScanLoopInfo scanInfo;
+              if (intentdsl::block::matchExclusiveScanLoop(loop, fnOp, f,
+                                                           &scanInfo)) {
+                hasPanelBucket = true;
+                panelBucketSteps += (w == 1) ? 1.0 : double(scanInfo.extent);
+                continue;
+              }
+              intentdsl::block::BoundedHistogramLoopInfo histInfo;
+              if (intentdsl::block::matchBoundedHistogramLoop(loop, fnOp, f,
+                                                              &histInfo)) {
+                hasPanelBucket = true;
+                int64_t ext =
+                    intentdsl::block::orderedStaticLoopExtent(loop, fnOp, f)
+                        .value_or(1024);
+                panelBucketSteps +=
+                    (w == 1) ? std::ceil(double(ext) / 64.0) : double(ext);
+                continue;
+              }
+              intentdsl::block::BoundedScatterLoopInfo scatInfo;
+              if (intentdsl::block::matchBoundedScatterLoop(loop, fnOp, f,
+                                                            &scatInfo)) {
+                hasPanelBucket = true;
+                int64_t ext =
+                    intentdsl::block::orderedStaticLoopExtent(loop, fnOp, f)
+                        .value_or(1024);
+                panelBucketSteps +=
+                    (w == 1) ? std::ceil(double(ext) / 32.0) : double(ext);
+                continue;
+              }
+              if (!loop->hasAttr("kir.reassociate") && lanes == 1 &&
+                  triLanes == 1 && loop.getNumRegionIterArgs() == 0) {
+                bool hasIndirectStore = false;
+                for (auto &inst : loop.getBody()->without_terminator())
+                  if (auto st = mlir::dyn_cast<mlir::memref::StoreOp>(inst))
+                    if (st.getIndices().empty() ||
+                        st.getIndices().back() != loop.getInductionVar())
+                      hasIndirectStore = true;
+                if (hasIndirectStore) {
+                  if (auto ext = intentdsl::block::orderedStaticLoopExtent(
+                          loop, fnOp, f);
+                      ext && *ext >= 64) {
+                    double warpsInCta = std::ceil(double(w) / 32.0);
+                    double activeSm = std::min<double>(
+                        blocks, std::max<int64_t>(1, f->participants));
+                    double smUnderutil =
+                        std::max<double>(1, f->participants) / activeSm;
+                    double sectorPenalty =
+                        16.0 / std::min<double>(16.0, double(w) * 4.0);
+                    dependency *= warpsInCta * smUnderutil * sectorPenalty *
+                                  (double(*ext) / 64.0);
+                  }
+                }
               }
             }
+            if (hasPanelBucket)
+              dependency *= std::max<double>(1.0, panelBucketSteps);
             waveSetup = waves;
           }
           if (launch && sync)

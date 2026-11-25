@@ -338,7 +338,7 @@ void registerOrdered(Unit &u) {
            b.getNamedAttr("memory", b.getStringAttr("columns"))});
       cs.push_back({"columns-1", "column-prefix", d, {"disjoint-owners"}});
     }
-    for (int w : {1, 4, 8, 32, 64, 128}) {
+    for (int w : {1, 4, 8, 16, 32, 64, 128}) {
       auto a = b.getI64IntegerAttr(w);
       if (!block::legalWidth(a, count))
         continue;

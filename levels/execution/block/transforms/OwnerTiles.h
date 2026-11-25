@@ -46,6 +46,16 @@ struct OwnerTiles : Tiles {
   };
   bool canVectorizeIndependentLoop(scf::ForOp loop);
   void vectorizedLoop(scf::ForOp loop, const Values &env, Value mask);
+  void triangularLoop(scf::ForOp loop, const TriangularRecurrenceInfo &tri,
+                      const Values &env, Value mask);
+  SmallVector<Value> exclusiveScanLoop(scf::ForOp loop,
+                                       const ExclusiveScanLoopInfo &scan,
+                                       const Values &env, Value mask);
+  void boundedHistogramLoop(scf::ForOp loop,
+                            const BoundedHistogramLoopInfo &hist,
+                            const Values &env, Value mask);
+  void boundedScatterLoop(scf::ForOp loop, const BoundedScatterLoopInfo &scat,
+                          const Values &env, Value mask);
   SmallVector<Value> selectionLoop(scf::ForOp loop,
                                    const OrderedSelectionInfo &sel,
                                    const Values &env, Value mask);

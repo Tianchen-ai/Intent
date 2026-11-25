@@ -76,6 +76,8 @@ TerminalPrinter cutilePrinter() {
       "$r0 = ct.astype(ct.bitcast(ct.astype($0|($1<<8),ct.uint16),ct.float16),ct.float32)");
   p.operations["ct_src.transpose"] =
       PrintRule::format("$r0 = ct.transpose($0)");
+  p.operations["ct_src.scan_sum"] =
+      PrintRule::format("$r0 = ct.cumsum($0,axis=1)");
   p.operations["ct_src.scaled_mma"] = PrintRule::format(
       "$r0 = ct.mma_scaled($0,ct.bitcast($1,ct.float8_e8m0fnu),$2,ct.bitcast($3,ct.float8_e8m0fnu),$4)");
   p.operations["math.roundeven"] = PrintRule::format(
