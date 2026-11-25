@@ -168,6 +168,9 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
       isRvv ? std::max<int64_t>(32, 4 * v) : (*bits == 128 ? 32 : 64);
   int64_t midGrain = (*bits == 1024 || (*bits == 256 && v100)) ? 2 : 4;
   caps->rows = {{1, columns}, {midGrain, columns}, {8, columns}, {32, columns}};
+  caps->segmentWidths = (!isRvv && v >= 16) ? SmallVector<int64_t, 2>{8, 16}
+                                            : SmallVector<int64_t, 2>{8};
+  caps->estimate = "exits/weft::row-primitive";
   if (auto e = p.services.provide<intentdsl::cpu::RowMachine>(caps))
     return e;
   return p;

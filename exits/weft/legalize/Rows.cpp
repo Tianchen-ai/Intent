@@ -905,7 +905,7 @@ struct RowTaskBuilder {
     }
 
     constexpr int kSegVec = 8;
-    auto canVecGatherOp = [&](Operation &segOp) -> bool {
+    auto canVecGatherOp = [&](Operation &segOp, int64_t width) -> bool {
       if (segOp.getName().stripDialect() != "ordered_sum" ||
           segOp.getNumRegions() != 1 || segOp.getRegion(0).empty())
         return false;
@@ -925,7 +925,7 @@ struct RowTaskBuilder {
             return false;
           unsigned slot = ba.getArgNumber() - 1;
           if (slotFacts[slot].indirectExtents.size() != 1 ||
-              slotFacts[slot].indirectExtents[0] <= kSegVec)
+              slotFacts[slot].indirectExtents[0] <= width)
             return false;
           Value cVal = scOp.getOperand(1);
           if (cVal != segBb.getArgument(0) && !vecVals.contains(cVal))
@@ -960,32 +960,20 @@ struct RowTaskBuilder {
         ++segCnt;
         onlySeg = opPtr;
       }
-      if (segCnt == 1 && onlySeg && canVecGatherOp(*onlySeg)) {
+      int64_t segVec = kSegVec;
+      if (segCnt == 1 && onlySeg) {
+        const bool reassocSeg =
+            intentdsl::kir::hasFastMath(onlySeg, arith::FastMathFlags::reassoc);
+        if (reassocSeg) {
+          if (auto swAttr = task.getAttrOfType<IntegerAttr>("cpu.segment_width"))
+            segVec = swAttr.getInt();
+        }
+      }
+      if (segCnt == 1 && onlySeg && canVecGatherOp(*onlySeg, segVec)) {
         Operation &op = *onlySeg;
         const bool reassocSeg =
             intentdsl::kir::hasFastMath(&op, arith::FastMathFlags::reassoc);
         auto &segBb = op.getRegion(0).front();
-        int64_t segVec = kSegVec;
-        if (reassocSeg) {
-          int64_t offLen = 0, directNnz = 0, minExt = INT64_MAX;
-          if (auto offBa = dyn_cast<BlockArgument>(op.getOperand(0))) {
-            unsigned oSlot = offBa.getArgNumber() - 1;
-            if (!slotFacts[oSlot].indirectExtents.empty())
-              offLen = slotFacts[oSlot].indirectExtents[0];
-          }
-          for (Operation &scOp : segBb) {
-            if (scOp.getName().stripDialect() != "member_load")
-              continue;
-            unsigned mSlot =
-                cast<BlockArgument>(scOp.getOperand(0)).getArgNumber() - 1;
-            int64_t ext = slotFacts[mSlot].indirectExtents[0];
-            minExt = std::min(minExt, ext);
-            if (scOp.getOperand(1) == segBb.getArgument(0))
-              directNnz = std::max(directNnz, ext);
-          }
-          if (offLen > 1 && directNnz >= (offLen - 1) * 16 && minExt > 16)
-            segVec = 16;
-        }
         const std::string f32SegVecTy = regionType("value", "f32", 1, segVec, 2);
         TaskTerm zeroSegVec = reassocSeg ? splatOp(zeroF32, f32SegVecTy) : TaskTerm{};
         bool flat =
@@ -1364,34 +1352,7 @@ struct RowTaskBuilder {
                   lit(std::to_string(-segVec), "si64"), "si64"),
               "index");
           TaskTerm rowInitAccs[2];
-          if (reassocSeg) {
-            ArrayAttr v2Tys = b.getArrayAttr(
-                {b.getStringAttr(f32SegVecTy), b.getStringAttr(f32SegVecTy)});
-            Operation *v2For = makeOp(
-                b, loc, "task_for",
-                {zeroIdx.v, commonV.v, stepV.v, zeroSegVec.v, zeroSegVec.v},
-                {b.getIndexType(), b.getIndexType()},
-                {b.getNamedAttr("iter_types", v2Tys)}, 1);
-            {
-              Block &v2Bb = v2For->getRegion(0).emplaceBlock();
-              TaskTerm tOff{v2Bb.addArgument(b.getIndexType(), loc), "index"};
-              TaskTerm curVecs[2] = {
-                  {v2Bb.addArgument(b.getIndexType(), loc), f32SegVecTy},
-                  {v2Bb.addArgument(b.getIndexType(), loc), f32SegVecTy}};
-              OpBuilder::InsertionGuard v2g(b);
-              b.setInsertionPointToEnd(&v2Bb);
-              TaskTerm prods[2];
-              for (int u = 0; u < 2; ++u)
-                prods[u] = evalVecStepInBlock(bin("add", los[u], tOff, "index"),
-                                              cols2[u]);
-              for (int u = 0; u < 2; ++u)
-                curVecs[u] = bin("add", curVecs[u], prods[u], f32SegVecTy);
-              makeOp(b, loc, "task_yield", {curVecs[0].v, curVecs[1].v}, {},
-                     {b.getNamedAttr("val_types", v2Tys)});
-            }
-            for (int u = 0; u < 2; ++u)
-              rowInitAccs[u] = reduceSegVec({v2For->getResult(u), f32SegVecTy});
-          } else {
+          {
             ArrayAttr f2Tys =
                 b.getArrayAttr({b.getStringAttr("f32"), b.getStringAttr("f32")});
             Operation *v2For = makeOp(

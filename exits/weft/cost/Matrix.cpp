@@ -269,5 +269,77 @@ void nativePanelCost(compilerinfra::Unit &u) {
           return e;
         }},
        COMPILERINFRA_SOURCE});
+
+  u.costModels.push_back(
+      {{"row-primitive", "levels/execution/cpu::partition", "1",
+        [](mlir::Operation *op, const compilerinfra::StructuralCandidate &c,
+           compilerinfra::CostContext &ctx)
+            -> llvm::Expected<compilerinfra::CostEstimate> {
+          compilerinfra::CostEstimate e;
+          e.scope = "row task";
+          e.bottleneck = "segment gather and horizontal reduction";
+          auto d = mlir::cast<mlir::DictionaryAttr>(c.value);
+          auto segAttr = d.getAs<mlir::IntegerAttr>("segment_width");
+          if (!segAttr)
+            return e;
+          mlir::Operation *segOp = nullptr;
+          op->walk([&](mlir::Operation *v) {
+            if (v->getName().stripDialect() == "ordered_sum") {
+              segOp = v;
+              return mlir::WalkResult::interrupt();
+            }
+            return mlir::WalkResult::advance();
+          });
+          if (!segOp || segOp->getNumRegions() != 1 ||
+              segOp->getRegion(0).empty())
+            return e;
+          auto *facts = ctx.target.services.get<intentdsl::CallFacts>();
+          auto *rm = ctx.target.services.get<intentdsl::cpu::RowMachine>();
+          if (!facts || !rm)
+            return e;
+          int64_t segW = segAttr.getInt();
+          double nativeLanes = std::max(1.0, double(rm->vectorBits) / 32.0);
+          double offLen = 0.0, directNnz = 0.0;
+          if (auto *oShape = facts->shapeOf(segOp->getOperand(0));
+              oShape && !oShape->empty())
+            offLen = double((*oShape)[0].getAsInteger().value_or(0));
+          double ops = 0.0;
+          auto &segBb = segOp->getRegion(0).front();
+          for (mlir::Operation &scOp : segBb) {
+            auto code = scOp.getName().stripDialect();
+            if (code == "member_load" &&
+                scOp.getOperand(1) == segBb.getArgument(0)) {
+              if (auto *mShape = facts->shapeOf(scOp.getOperand(0));
+                  mShape && !mShape->empty())
+                directNnz = std::max(
+                    directNnz, double((*mShape)[0].getAsInteger().value_or(0)));
+            } else if (code == "mul" || code == "add" || code == "cast") {
+              ops += 1.0;
+            }
+          }
+          ops = std::max(2.0, ops);
+          double numRows = offLen > 1.0 ? (offLen - 1.0)
+                                        : std::max(1.0, facts->geometry(op).first);
+          double avgLen = directNnz > 0.0 ? (directNnz / numRows) : double(segW);
+          double vecSteps = std::floor(avgLen / double(segW));
+          double tailElems = avgLen - vecSteps * double(segW);
+          double reduceSteps = std::log2(std::max(1.0, double(segW)));
+          double laneOpsPerRow =
+              vecSteps * (nativeLanes * (ops + 1.0) + double(segW)) +
+              tailElems * nativeLanes * (ops + 1.0) +
+              reduceSteps * nativeLanes;
+          double totalLaneOps = numRows * laneOpsPerRow;
+          e.terms["segment_width"] = {double(segW), "lane"};
+          e.terms["avg_segment_length"] = {avgLen, "element"};
+          e.terms["segment_vec_steps"] = {numRows * vecSteps, "count"};
+          e.terms["segment_scalar_tail"] = {numRows * tailElems, "element"};
+          e.terms["segment_reduce_steps"] = {numRows * reduceSteps,
+                                             "instruction"};
+          auto rate = intentdsl::quantity(ctx, "vector", "FLOP/ns");
+          double effRate = rate.value_or(std::max(1.0, nativeLanes * 2.0));
+          e.timeNs = totalLaneOps / effRate;
+          return e;
+        }},
+       COMPILERINFRA_SOURCE});
 }
 } // namespace CI_UNIT_NAMESPACE

@@ -1,3 +1,4 @@
+#include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
 #include "intentdsl/levels/execution/cpu/ir/IndexedEffects.h"
 #include "llvm/ADT/DenseSet.h"
@@ -209,11 +210,43 @@ void registerPartition(Unit &u,bool permuted) {
         return llvm::createStringError("illegal CPU sweep unroll factor");
       unroll = uAttr.getInt();
     }
+    if (d && d.get("segment_width")) {
+      auto wAttr = d.getAs<IntegerAttr>("segment_width");
+      Operation *segOp = nullptr;
+      op->walk([&](Operation *v) {
+        if (v->getName().stripDialect() == "ordered_sum") {
+          segOp = v;
+          return WalkResult::interrupt();
+        }
+        return WalkResult::advance();
+      });
+      if (!wAttr || !machine || !machine->acceptsSegmentWidth(wAttr.getInt()) ||
+          walk != "source" || !segOp ||
+          !intentdsl::kir::hasFastMath(segOp, arith::FastMathFlags::reassoc))
+        return llvm::createStringError("illegal CPU segment vector width");
+      int64_t segW = wAttr.getInt();
+      if (segW > machine->segmentWidths.front()) {
+        auto *facts = p.services.get<intentdsl::CallFacts>();
+        if (!facts || segOp->getNumRegions() != 1 ||
+            segOp->getRegion(0).empty())
+          return llvm::createStringError(
+              "segment vector width exceeds verified input extents");
+        for (Operation &scOp : segOp->getRegion(0).front()) {
+          if (scOp.getName().stripDialect() != "member_load")
+            continue;
+          auto *shape = facts->shapeOf(scOp.getOperand(0));
+          if (!shape || shape->size() != 1 || !(*shape)[0].getAsInteger() ||
+              *(*shape)[0].getAsInteger() <= segW)
+            return llvm::createStringError(
+                "segment vector width exceeds verified input extents");
+        }
+      }
+    }
     if (!walk || (walk!="source" && ( (walk!="destination" && walk!="tile") || !intentdsl::cpu::rectangularCopy(op))) || !d.getAs<IntegerAttr>("tile") || d.getAs<IntegerAttr>("tile").getInt()!=(walk=="tile"?32:1) || !machine || !machine->accepts(d.getAs<ArrayAttr>("rows")))
       return llvm::createStringError("illegal CPU work partition");
     return llvm::Error::success();
   };
-  partition.verifyCandidate=[](Operation *op,const StructuralCandidate &c,const TargetProfile &)->llvm::Error{
+  partition.verifyCandidate=[](Operation *op,const StructuralCandidate &c,const TargetProfile &p)->llvm::Error{
     auto d=cast<DictionaryAttr>(c.value);
     auto walk=d.getAs<StringAttr>("walk");
     int64_t unroll = d.getAs<IntegerAttr>("unroll")
@@ -221,6 +254,16 @@ void registerPartition(Unit &u,bool permuted) {
                          : 1;
     std::string suffix =
         unroll > 1 ? ("-unroll" + std::to_string(unroll)) : "";
+    auto *machine = p.services.get<intentdsl::cpu::RowMachine>();
+    int64_t baseSegW =
+        (machine && !machine->segmentWidths.empty())
+            ? machine->segmentWidths.front()
+            : 8;
+    int64_t segW = d.getAs<IntegerAttr>("segment_width")
+                       ? d.getAs<IntegerAttr>("segment_width").getInt()
+                       : baseSegW;
+    std::string segSuffix =
+        segW > baseSegW ? ("-w" + std::to_string(segW)) : "";
     if(c.id=="range-reservations" && c.topology==c.id && c.preconditions==std::vector<std::string>{"independent-relaxed-unit-tickets"} &&
        d.getAs<IntegerAttr>("batch_extent"))return llvm::Error::success();
     if(c.id=="key-owners" && c.topology==c.id && walk=="source" && c.preconditions==std::vector<std::string>{"disjoint-key-ranges"} &&
@@ -232,7 +275,7 @@ void registerPartition(Unit &u,bool permuted) {
     if(c.id=="levels/execution/cpu::row-scan" && c.topology==c.id && walk=="source" && c.preconditions.empty() &&
        op->walk([](Operation *v){return v->getName().getStringRef()=="cpu.scan_sum"?WalkResult::interrupt():WalkResult::advance();}).wasInterrupted())return llvm::Error::success();
     if(c.topology==walk.getValue() && c.id==(walk.str()+suffix) && c.preconditions==std::vector<std::string>{walk=="source"?"row-independent":"bijective-rectangular-copy"})return llvm::Error::success();
-    if(c.topology.find("reduction")!=std::string::npos && c.id==(c.topology+suffix) && walk=="source" && c.preconditions.empty())return llvm::Error::success();
+    if(c.topology.find("reduction")!=std::string::npos && c.id==(c.topology+suffix+segSuffix) && walk=="source" && c.preconditions.empty())return llvm::Error::success();
     return llvm::createStringError("CPU topology disagrees with its parameter domain");};
   u.families.push_back(
       {{partition, "cpu@formed", "cpu@formed"}, COMPILERINFRA_SOURCE});
@@ -247,6 +290,7 @@ void registerPartition(Unit &u,bool permuted) {
           if(auto keys=d.get("key_extent"))op->setAttr("cpu.key_extent",keys);
           if(auto bins=d.get("batch_extent"))op->setAttr("cpu.batch_extent",bins);
           if(auto unroll=d.get("unroll"))op->setAttr("cpu.unroll",unroll);
+          if(auto segW=d.get("segment_width"))op->setAttr("cpu.segment_width",segW);
           op->setAttr("cpu.row_groups",d.get("rows"));op->setAttr("cpu.walk",d.get("walk"));op->setAttr("cpu.tile",d.get("tile"));
           op->removeAttr(carrier);
           return llvm::Error::success();

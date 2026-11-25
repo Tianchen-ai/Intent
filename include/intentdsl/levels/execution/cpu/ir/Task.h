@@ -10,6 +10,7 @@ struct RowMachine {
   unsigned packedOwners = 0;
   llvm::SmallVector<RowConfig> rows;
   llvm::SmallVector<int64_t, 2> unrollFactors = {1};
+  llvm::SmallVector<int64_t, 2> segmentWidths = {8};
   std::string estimate;
   bool structuredRows = false;
   bool boundWidening = false;
@@ -22,6 +23,9 @@ struct RowMachine {
   bool accepts(mlir::ArrayAttr) const;
   bool acceptsUnroll(int64_t factor) const {
     return llvm::is_contained(unrollFactors, factor);
+  }
+  bool acceptsSegmentWidth(int64_t width) const {
+    return llvm::is_contained(segmentWidths, width);
   }
 };
 mlir::LogicalResult verifyTask(mlir::ModuleOp,

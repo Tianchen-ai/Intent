@@ -43,6 +43,11 @@ LogicalResult verifyTask(ModuleOp m, const TargetProfile &profile,
     if (!uInt || !machine->acceptsUnroll(uInt.getInt()))
       return task.emitError("invalid row sweep unroll factor");
   }
+  if (auto segW = task.getAttr("cpu.segment_width")) {
+    auto sInt = dyn_cast<IntegerAttr>(segW);
+    if (!sInt || !machine->acceptsSegmentWidth(sInt.getInt()))
+      return task.emitError("invalid segment vector width");
+  }
   if (!llvm::hasSingleElement(task.getRegion(0)))
     return task.emitError("expected one task body");
   auto &body = task.getRegion(0).front();
@@ -220,6 +225,7 @@ struct Construct : PassWrapper<Construct, OperationPass<ModuleOp>> {
     if(auto keys=loop->getAttr("cpu.key_extent"))s.addAttribute("cpu.key_extent",keys);
     if(auto bins=loop->getAttr("cpu.batch_extent"))s.addAttribute("cpu.batch_extent",bins);
     if(auto unroll=loop->getAttr("cpu.unroll"))s.addAttribute("cpu.unroll",unroll);
+    if(auto segW=loop->getAttr("cpu.segment_width"))s.addAttribute("cpu.segment_width",segW);
     s.addAttribute("cpu.tile",loop->getAttr("cpu.tile"));
     s.addAttribute("rows", loop->getAttr("cpu.row_groups"));
     s.addAttribute(
@@ -354,6 +360,12 @@ void bind(Unit &u) {
               if (!uInt || !caps->acceptsUnroll(uInt.getInt()))
                 return op.emitError(
                     "formed row unroll factor is outside target capabilities");
+            }
+            if (auto sw = op.getAttr("cpu.segment_width")) {
+              auto sInt = dyn_cast<IntegerAttr>(sw);
+              if (!sInt || !caps->acceptsSegmentWidth(sInt.getInt()))
+                return op.emitError(
+                    "formed segment vector width is outside target capabilities");
             }
             return success();
           }},
