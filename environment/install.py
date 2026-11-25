@@ -23,7 +23,7 @@ def declaration(path, name):
 
 def installations():
     root = REPOSITORY / "python"
-    components = declaration(root / "intent/targets/components.py", "COMPONENTS")
+    components = json.loads((root / "intent/targets/components.json").read_text(encoding="utf-8"))
     result = {}
     for name, module in components.items():
         path = root.joinpath(*module.split("."))
