@@ -155,8 +155,18 @@ bool canNarrowCutileAddress(Operation &op) {
         res = SignedSpan{0, sz - 1};
     } else if (n == "ct_src.tile_broadcast" || n == "ct_src.tile_prefix" ||
                n == "ct_src.drop_unit_owner" || n == "ct_src.reshape" ||
-               isa<arith::IndexCastOp, arith::ExtSIOp>(def)) {
+               isa<arith::IndexCastOp>(def)) {
       res = range(def->getOperand(0));
+    } else if (auto es = dyn_cast<arith::ExtSIOp>(def)) {
+      res = range(es.getIn());
+      if (auto it =
+              dyn_cast<IntegerType>(getElementTypeOrSelf(es.getIn().getType()));
+          it && it.getWidth() > 0 && it.getWidth() <= 32) {
+        int64_t lo = -(int64_t(1) << (it.getWidth() - 1));
+        int64_t hi = (int64_t(1) << (it.getWidth() - 1)) - 1;
+        res = res ? SignedSpan{std::max(res->lo, lo), std::min(res->hi, hi)}
+                  : SignedSpan{lo, hi};
+      }
     } else if (auto eu = dyn_cast<arith::ExtUIOp>(def)) {
       if (auto it =
               dyn_cast<IntegerType>(getElementTypeOrSelf(eu.getIn().getType()));
@@ -177,9 +187,12 @@ bool canNarrowCutileAddress(Operation &op) {
         res = a->lo >= 0 ? SignedSpan{0, std::min(a->hi, b->lo - 1)}
                          : SignedSpan{-(b->lo - 1), b->lo - 1};
     } else if (isa<arith::RemUIOp>(def)) {
-      auto a = range(def->getOperand(0)), b = range(def->getOperand(1));
-      if (a && b && a->lo >= 0 && b->lo > 0 && b->lo == b->hi)
-        res = SignedSpan{0, b->lo - 1};
+      auto b = range(def->getOperand(1));
+      if (b && b->lo > 0 && b->lo == b->hi && b->lo <= INT32_MAX) {
+        auto a = range(def->getOperand(0));
+        res = SignedSpan{0, (a && a->lo >= 0) ? std::min(a->hi, b->lo - 1)
+                                              : (b->lo - 1)};
+      }
     } else if (isa<arith::DivUIOp>(def)) {
       auto a = range(def->getOperand(0)), b = range(def->getOperand(1));
       if (a && b && a->lo >= 0 && b->lo > 0 && b->lo == b->hi)
@@ -1137,12 +1150,279 @@ struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
     fn->setAttr("ct_src.index_bits", b.getI32IntegerAttr(bits));
     fn->setAttr("ct_src.extra_params", computeCutileExtraParams(fn));
     stampCutileCarryIds(fn);
-    if (bits == 32)
+    if (bits == 32) {
       fn.walk([&](Operation *op) {
         if (op->getName().getStringRef() == "ct_src.tile_address" &&
             canNarrowCutileAddress(*op))
           op->setAttr("index_bits", b.getI32IntegerAttr(32));
       });
+      // Narrow proven-bounded i64 coordinate chains (rooted at i32 extui/extsi)
+      // feeding narrowed tile_address/cmpi/trunci directly to i32 to cut 64-bit
+      // register pressure in unrolled multi-axis indexing loops.
+      if (fn.front().front().getName().getStringRef() ==
+          "ct_src.tile_program") {
+        auto &progBlock = fn.front().front().getRegion(0).front();
+        llvm::DenseMap<Value, std::pair<int64_t, int64_t>> bounds;
+        llvm::DenseMap<Value, Value> narrowed;
+        llvm::DenseMap<Value, bool> constBool;
+        constexpr int64_t kSafeLim = 1LL << 29;
+        auto inSafe = [](int64_t lo, int64_t hi) {
+          return lo >= -kSafeLim && hi <= kSafeLim && lo <= hi;
+        };
+        auto getConstI64 = [](Value v) -> std::optional<int64_t> {
+          auto c = v.getDefiningOp<arith::ConstantOp>();
+          if (!c)
+            return std::nullopt;
+          if (auto ia = dyn_cast<IntegerAttr>(c.getValue());
+              ia && ia.getType().isInteger(64))
+            return ia.getInt();
+          if (auto da = dyn_cast<DenseIntElementsAttr>(c.getValue());
+              da && da.isSplat() && da.getElementType().isInteger(64))
+            return da.getSplatValue<APInt>().getSExtValue();
+          return std::nullopt;
+        };
+        auto i32Of = [&](Type t) -> Type {
+          if (auto rt = dyn_cast<RankedTensorType>(t))
+            return rt.clone(b.getI32Type());
+          return b.getI32Type();
+        };
+        auto makeConstI32 = [&](OpBuilder &nb, Location loc, Type ty,
+                                int64_t val) -> Value {
+          if (auto rt = dyn_cast<RankedTensorType>(ty))
+            return nb.create<arith::ConstantOp>(
+                loc, rt, DenseElementsAttr::get(rt, nb.getI32IntegerAttr(val)));
+          return nb.create<arith::ConstantIntOp>(loc, val, 32);
+        };
+        for (Operation &op : llvm::make_early_inc_range(progBlock)) {
+          if (auto eu = dyn_cast<arith::ExtUIOp>(&op)) {
+            if (getElementTypeOrSelf(eu.getType()).isInteger(64) &&
+                getElementTypeOrSelf(eu.getIn().getType()).isInteger(32)) {
+              if (auto rem = eu.getIn().getDefiningOp<arith::RemUIOp>()) {
+                if (auto c = rem.getRhs().getDefiningOp<arith::ConstantOp>()) {
+                  std::optional<int64_t> rv;
+                  if (auto ia = dyn_cast<IntegerAttr>(c.getValue()))
+                    rv = ia.getInt();
+                  else if (auto da = dyn_cast<DenseIntElementsAttr>(c.getValue());
+                           da && da.isSplat())
+                    rv = da.getSplatValue<APInt>().getSExtValue();
+                  if (rv && *rv > 0 && *rv <= kSafeLim) {
+                    bounds[eu.getResult()] = {0, *rv - 1};
+                    narrowed[eu.getResult()] = eu.getIn();
+                  }
+                } else if (auto bc = rem.getRhs().getDefiningOp();
+                           bc && bc->getName().getStringRef() ==
+                                     "ct_src.tile_broadcast") {
+                  if (auto c = bc->getOperand(0)
+                                   .getDefiningOp<arith::ConstantOp>()) {
+                    if (auto ia = dyn_cast<IntegerAttr>(c.getValue());
+                        ia && ia.getInt() > 0 && ia.getInt() <= kSafeLim) {
+                      bounds[eu.getResult()] = {0, ia.getInt() - 1};
+                      narrowed[eu.getResult()] = eu.getIn();
+                    }
+                  }
+                }
+              }
+            }
+            continue;
+          }
+          if (op.getName().getStringRef() == "ct_src.tile_broadcast" &&
+              getElementTypeOrSelf(op.getResult(0).getType()).isInteger(64)) {
+            Value src = op.getOperand(0);
+            if (auto it = narrowed.find(src); it != narrowed.end()) {
+              OpBuilder nb(&op);
+              OperationState st(op.getLoc(), "ct_src.tile_broadcast");
+              st.addOperands(it->second);
+              st.addAttributes(op.getAttrs());
+              st.addTypes(i32Of(op.getResult(0).getType()));
+              Value nv = nb.create(st)->getResult(0);
+              narrowed[op.getResult(0)] = nv;
+              bounds[op.getResult(0)] = bounds[src];
+            } else if (auto cv = getConstI64(src); cv && inSafe(*cv, *cv)) {
+              OpBuilder nb(&op);
+              Value nv = makeConstI32(nb, op.getLoc(),
+                                      i32Of(op.getResult(0).getType()), *cv);
+              narrowed[op.getResult(0)] = nv;
+              bounds[op.getResult(0)] = {*cv, *cv};
+            }
+            continue;
+          }
+          if (isa<arith::AddIOp, arith::SubIOp>(&op) &&
+              getElementTypeOrSelf(op.getResult(0).getType()).isInteger(64)) {
+            auto resolve = [&](Value v)
+                -> std::optional<std::pair<Value, std::pair<int64_t, int64_t>>> {
+              if (auto it = narrowed.find(v); it != narrowed.end())
+                return std::pair{it->second, bounds[v]};
+              if (auto cv = getConstI64(v); cv && inSafe(*cv, *cv)) {
+                OpBuilder nb(&op);
+                return std::pair{
+                    makeConstI32(nb, op.getLoc(), i32Of(v.getType()), *cv),
+                    std::pair{*cv, *cv}};
+              }
+              if (auto bc = v.getDefiningOp();
+                  bc && bc->getName().getStringRef() == "ct_src.tile_broadcast") {
+                if (auto cv = getConstI64(bc->getOperand(0));
+                    cv && inSafe(*cv, *cv)) {
+                  OpBuilder nb(&op);
+                  return std::pair{
+                      makeConstI32(nb, op.getLoc(), i32Of(v.getType()), *cv),
+                      std::pair{*cv, *cv}};
+                }
+              }
+              return std::nullopt;
+            };
+            auto l = resolve(op.getOperand(0)), r = resolve(op.getOperand(1));
+            if (l && r) {
+              int64_t lo = isa<arith::AddIOp>(&op)
+                               ? (l->second.first + r->second.first)
+                               : (l->second.first - r->second.second);
+              int64_t hi = isa<arith::AddIOp>(&op)
+                               ? (l->second.second + r->second.second)
+                               : (l->second.second - r->second.first);
+              if (inSafe(lo, hi)) {
+                OpBuilder nb(&op);
+                Value nv =
+                    isa<arith::AddIOp>(&op)
+                        ? Value(nb.create<arith::AddIOp>(op.getLoc(), l->first,
+                                                         r->first))
+                        : Value(nb.create<arith::SubIOp>(op.getLoc(), l->first,
+                                                         r->first));
+                narrowed[op.getResult(0)] = nv;
+                bounds[op.getResult(0)] = {lo, hi};
+              }
+            }
+            continue;
+          }
+          if (auto cmp = dyn_cast<arith::CmpIOp>(&op);
+              cmp && getElementTypeOrSelf(cmp.getLhs().getType()).isInteger(64)) {
+            auto resolveWithBounds = [&](Value v)
+                -> std::optional<std::pair<Value, std::pair<int64_t, int64_t>>> {
+              if (auto it = narrowed.find(v); it != narrowed.end())
+                return std::pair{it->second, bounds[v]};
+              if (auto cv = getConstI64(v); cv && inSafe(*cv, *cv)) {
+                OpBuilder nb(cmp);
+                return std::pair{
+                    makeConstI32(nb, cmp.getLoc(), i32Of(v.getType()), *cv),
+                    std::pair{*cv, *cv}};
+              }
+              if (auto bc = v.getDefiningOp();
+                  bc && bc->getName().getStringRef() == "ct_src.tile_broadcast") {
+                if (auto cv = getConstI64(bc->getOperand(0));
+                    cv && inSafe(*cv, *cv)) {
+                  OpBuilder nb(cmp);
+                  return std::pair{
+                      makeConstI32(nb, cmp.getLoc(), i32Of(v.getType()), *cv),
+                      std::pair{*cv, *cv}};
+                }
+              }
+              return std::nullopt;
+            };
+            if (narrowed.count(cmp.getLhs()) || narrowed.count(cmp.getRhs())) {
+              auto l = resolveWithBounds(cmp.getLhs());
+              auto r = resolveWithBounds(cmp.getRhs());
+              if (l && r) {
+                auto [lLo, lHi] = l->second;
+                auto [rLo, rHi] = r->second;
+                std::optional<bool> folded;
+                switch (cmp.getPredicate()) {
+                case arith::CmpIPredicate::sge:
+                  if (lLo >= rHi)
+                    folded = true;
+                  else if (lHi < rLo)
+                    folded = false;
+                  break;
+                case arith::CmpIPredicate::sle:
+                  if (lHi <= rLo)
+                    folded = true;
+                  else if (lLo > rHi)
+                    folded = false;
+                  break;
+                case arith::CmpIPredicate::slt:
+                  if (lHi < rLo)
+                    folded = true;
+                  else if (lLo >= rHi)
+                    folded = false;
+                  break;
+                case arith::CmpIPredicate::sgt:
+                  if (lLo > rHi)
+                    folded = true;
+                  else if (lHi <= rLo)
+                    folded = false;
+                  break;
+                default:
+                  break;
+                }
+                OpBuilder nb(cmp);
+                Value nc;
+                if (folded) {
+                  Type resTy = cmp.getType();
+                  if (auto rt = dyn_cast<RankedTensorType>(resTy))
+                    nc = nb.create<arith::ConstantOp>(
+                        cmp.getLoc(), rt,
+                        DenseElementsAttr::get(rt, nb.getBoolAttr(*folded)));
+                  else
+                    nc = nb.create<arith::ConstantIntOp>(cmp.getLoc(),
+                                                         *folded ? 1 : 0, 1);
+                  constBool[nc] = *folded;
+                } else {
+                  nc = nb.create<arith::CmpIOp>(cmp.getLoc(),
+                                                cmp.getPredicate(), l->first,
+                                                r->first);
+                }
+                cmp.replaceAllUsesWith(nc);
+                cmp.erase();
+              }
+            }
+            continue;
+          }
+          if (auto andOp = dyn_cast<arith::AndIOp>(&op);
+              andOp &&
+              getElementTypeOrSelf(andOp.getType()).isInteger(1)) {
+            auto lb = constBool.find(andOp.getLhs());
+            auto rb = constBool.find(andOp.getRhs());
+            if (lb != constBool.end()) {
+              if (lb->second) {
+                andOp.replaceAllUsesWith(andOp.getRhs());
+                andOp.erase();
+              } else {
+                andOp.replaceAllUsesWith(andOp.getLhs());
+                andOp.erase();
+              }
+            } else if (rb != constBool.end()) {
+              if (rb->second) {
+                andOp.replaceAllUsesWith(andOp.getLhs());
+                andOp.erase();
+              } else {
+                andOp.replaceAllUsesWith(andOp.getRhs());
+                andOp.erase();
+              }
+            }
+            continue;
+          }
+          if (op.getName().getStringRef() == "ct_src.tile_address") {
+            auto ib = op.getAttrOfType<IntegerAttr>("index_bits");
+            if (ib && ib.getInt() == 32) {
+              for (unsigned i = 1; i < op.getNumOperands(); ++i) {
+                if (auto it = narrowed.find(op.getOperand(i));
+                    it != narrowed.end())
+                  op.setOperand(i, it->second);
+              }
+            }
+          }
+        }
+        bool changed = true;
+        while (changed) {
+          changed = false;
+          for (Operation &op :
+               llvm::make_early_inc_range(llvm::reverse(progBlock))) {
+            if (op.use_empty() && isMemoryEffectFree(&op) &&
+                op.getNumRegions() == 0 && !op.hasTrait<OpTrait::IsTerminator>()) {
+              op.erase();
+              changed = true;
+            }
+          }
+        }
+      }
+    }
     const auto *facts = profile.services.get<intentdsl::CallFacts>();
     fn.walk([&](Operation *op){
       if(op->getName().getDialectNamespace()!="ct_src")return;

@@ -10,7 +10,8 @@ namespace intentdsl::block {
 struct OwnerTiles : Tiles {
   Operation &space;
   int64_t rows, logical;
-  Value active;
+  bool exactOwners = false;
+  Value active, singleOwnerScalar;
   OwnerAccess access;
   using Values = llvm::DenseMap<Value, Value>;
   Values outer;

@@ -18,6 +18,9 @@ struct OwnerAccess {
                        mlir::Value start, int64_t span,
                        int64_t width) = nullptr;
   bool scalarBroadcastRead = false;
+  bool nativeTileGather = false;
+  bool nativeTileHistogram = false;
+  bool blockAtomicMemoryBins = false;
 };
 void expandOwnerProgram(mlir::func::FuncOp fn, llvm::StringRef unit,
                         OwnerAccess access = {});

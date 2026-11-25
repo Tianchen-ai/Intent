@@ -78,6 +78,10 @@ Range evaluateTileRange(Value v, Operation *scopeRoot,
              n == "triton_src.reshape" ||
              isa<arith::IndexCastOp, arith::ExtSIOp>(op)) {
     res = evaluateTileRange(op->getOperand(0), scopeRoot, ranges, memo);
+  } else if (n == "triton_src.tile_reduce") {
+    auto alg = op->getAttrOfType<StringAttr>("algebra");
+    if (alg && (alg.getValue() == "min" || alg.getValue() == "max"))
+      res = evaluateTileRange(op->getOperand(0), scopeRoot, ranges, memo);
   } else if (auto eu = dyn_cast<arith::ExtUIOp>(op)) {
     if (auto it =
             dyn_cast<IntegerType>(getElementTypeOrSelf(eu.getIn().getType()));

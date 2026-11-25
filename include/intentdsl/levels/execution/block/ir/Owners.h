@@ -13,6 +13,7 @@ struct OwnerMachine {
   int64_t operandGroupRows = 0;
   int maxWarpgroups = 1;
   int maxGroupReads = 16;
+  bool nativeTileGather = false;
 };
 bool canForwardOwners(mlir::Operation *, const compilerinfra::TargetProfile &);
 mlir::LogicalResult forwardOwners(mlir::func::FuncOp);

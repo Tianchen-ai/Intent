@@ -112,6 +112,59 @@ struct Tiles {
                           b.getContext(), arith::FastMathFlags::reassoc)));
     op("tile_atomic_add", args, {}, attrs);
   }
+  Value atomicFetchAdd(Value base, Value addr, Value val, Value mask,
+                       StringRef order, StringRef scope) {
+    SmallVector<Value> args{base, addr, val};
+    if (mask)
+      args.push_back(mask);
+    SmallVector<NamedAttribute, 4> attrs{
+        b.getNamedAttr("order", b.getStringAttr(order)),
+        b.getNamedAttr("scope", b.getStringAttr(scope)),
+        b.getNamedAttr(
+            "ci.implementation",
+            b.getStringAttr((unit + "::tile-atomic-fetch-add").str()))};
+    if (isa<FloatType>(elem(val.getType())))
+      attrs.push_back(b.getNamedAttr(
+          "fastmath", arith::FastMathFlagsAttr::get(
+                          b.getContext(), arith::FastMathFlags::reassoc)));
+    return op("tile_atomic_fetch_add", args, val.getType(), attrs)
+        ->getResult(0);
+  }
+  void atomicXchg(Value base, Value addr, Value val, Value mask,
+                  StringRef order, StringRef scope) {
+    SmallVector<Value> args{base, addr, val};
+    if (mask)
+      args.push_back(mask);
+    SmallVector<NamedAttribute, 3> attrs{
+        b.getNamedAttr("order", b.getStringAttr(order)),
+        b.getNamedAttr("scope", b.getStringAttr(scope)),
+        b.getNamedAttr("ci.implementation",
+                       b.getStringAttr((unit + "::tile-atomic-xchg").str()))};
+    op("tile_atomic_xchg", args, {}, attrs);
+  }
+  Value tileGather(Value src, Value indices, int64_t axis) {
+    auto sTy = cast<RankedTensorType>(src.getType());
+    auto iTy = cast<RankedTensorType>(indices.getType());
+    Type outTy = iTy.clone(sTy.getElementType());
+    return op("tile_gather", {src, indices}, outTy,
+              {b.getNamedAttr("axis", b.getI64IntegerAttr(axis)),
+               b.getNamedAttr(
+                   "ci.implementation",
+                   b.getStringAttr((unit + "::tile-gather").str()))})
+        ->getResult(0);
+  }
+  Value tileHistogram(Value keys, Value mask, int64_t bins) {
+    Type outTy = shaped({bins}, b.getI32Type());
+    return op("tile_histogram", {keys, mask}, outTy,
+              {b.getNamedAttr("bins", b.getI64IntegerAttr(bins)),
+               b.getNamedAttr(
+                   "ci.implementation",
+                   b.getStringAttr((unit + "::tile-histogram").str()))})
+        ->getResult(0);
+  }
+  Value reshapeTile(Value val, ArrayRef<int64_t> dims) {
+    return op("reshape", val, shaped(dims, elem(val.getType())))->getResult(0);
+  }
   Value dot(Value a, Value rhs, bool trans, Value acc = {}) {
     auto l = cast<RankedTensorType>(a.getType()),
          r = cast<RankedTensorType>(rhs.getType());

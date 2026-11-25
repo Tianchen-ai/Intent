@@ -15,6 +15,13 @@ def TileWrite : TileInstruction<"tile_write", [MemoryEffects<[MemWrite]>]> {
 def TileAtomicAdd : TileInstruction<"tile_atomic_add"> {
   let arguments=(ins Arg<AnyMemRef, "", [MemRead, MemWrite]>:$view, AnyType:$offset, AnyType:$fragment, Optional<AnyType>:$mask);
 }
+def TileAtomicFetchAdd : TileInstruction<"tile_atomic_fetch_add"> {
+  let arguments=(ins Arg<AnyMemRef, "", [MemRead, MemWrite]>:$view, AnyType:$offset, AnyType:$fragment, Optional<AnyType>:$mask, StrAttr:$order, StrAttr:$scope);
+  let results=(outs AnyType:$old);
+}
+def TileAtomicXchg : TileInstruction<"tile_atomic_xchg"> {
+  let arguments=(ins Arg<AnyMemRef, "", [MemRead, MemWrite]>:$view, AnyType:$offset, AnyType:$fragment, Optional<AnyType>:$mask, StrAttr:$order, StrAttr:$scope);
+}
 def TileAxis : TileInstruction<"tile_axis", [Pure]> {let results=(outs AnyRankedTensor:$lane);}
 def DropOwner : TileInstruction<"drop_unit_owner", [Pure]> {let arguments=(ins AnyRankedTensor:$tile);let results=(outs AnyRankedTensor:$members);}
 def TilePid : TileInstruction<"tile_pid", [Pure]> {let arguments=(ins I64Attr:$axis);let results=(outs I64:$id);}

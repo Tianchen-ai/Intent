@@ -249,6 +249,15 @@ def Itsrc_ScaledMMA : Op<Itsrc_Dialect, "scaled_mma", [Pure]> {
                        AnyRankedTensor:$acc);
   let results = (outs AnyRankedTensor:$value);
 }
+def Itsrc_TileGather : Op<Itsrc_Dialect, "tile_gather", [Pure]> {
+  let arguments = (ins AnyRankedTensor:$src, AnyRankedTensor:$indices,
+                       I64Attr:$axis);
+  let results = (outs AnyRankedTensor:$result);
+}
+def Itsrc_TileHistogram : Op<Itsrc_Dialect, "tile_histogram", [Pure]> {
+  let arguments = (ins AnyRankedTensor:$keys, I1Tensor:$mask, I64Attr:$bins);
+  let results = (outs I32Tensor:$counts);
+}
 def Itsrc_RuntimeSource : Op<Itsrc_Dialect,"runtime_source"> {
   let arguments=(ins StrAttr:$implementation);
 }

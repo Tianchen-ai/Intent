@@ -27,6 +27,8 @@ std::string dtype(Type t) {
     return "tl.float8e4nv";
   if (t.isF32())
     return "tl.float32";
+  if (t.isInteger(16))
+    return "tl.int16";
   if (t.isInteger(32))
     return "tl.int32";
   if (t.isIndex() || t.isInteger(64))
@@ -86,6 +88,10 @@ TerminalPrinter tilePrinter() {
   p.operations["triton_src.transpose"] = PrintRule::format("$r0 = tl.trans($0)");
   p.operations["triton_src.scan_sum"] =
       PrintRule::format("$r0 = tl.cumsum($0,axis=1)");
+  p.operations["triton_src.tile_gather"] =
+      PrintRule::format("$r0 = tl.gather($0,$1,axis={axis})");
+  p.operations["triton_src.tile_histogram"] =
+      PrintRule::format("$r0 = tl.histogram($0,{bins},mask=$1)");
 
   // Local rules (LocalOpView only)
   leaf("triton_src.scaled_mma", [](const LocalOpView &v) {
@@ -200,6 +206,26 @@ TerminalPrinter tilePrinter() {
             v.operand(2) +
             (v.numOperands() == 4 ? ",mask=" + v.operand(3) : "") +
             ",sem='relaxed')")
+        .str();
+  });
+  leaf("triton_src.tile_atomic_fetch_add", [](const LocalOpView &v) {
+    auto ord = v.attrOfType<StringAttr>("order").getValue();
+    auto sc = v.attrOfType<StringAttr>("scope").getValue();
+    std::string scope = sc == "block" ? "cta" : "gpu";
+    return ("tl.atomic_add(" + v.operand(0) + "+" + v.operand(1) + "," +
+            v.operand(2) +
+            (v.numOperands() == 4 ? ",mask=" + v.operand(3) : "") + ",sem='" +
+            ord.str() + "',scope='" + scope + "')")
+        .str();
+  });
+  leaf("triton_src.tile_atomic_xchg", [](const LocalOpView &v) {
+    auto ord = v.attrOfType<StringAttr>("order").getValue();
+    auto sc = v.attrOfType<StringAttr>("scope").getValue();
+    std::string scope = sc == "block" ? "cta" : "gpu";
+    return ("tl.atomic_xchg(" + v.operand(0) + "+" + v.operand(1) + "," +
+            v.operand(2) +
+            (v.numOperands() == 4 ? ",mask=" + v.operand(3) : "") + ",sem='" +
+            ord.str() + "',scope='" + scope + "')")
         .str();
   });
   leaf("triton_src.tile_broadcast", [](const LocalOpView &v) {

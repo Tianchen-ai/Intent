@@ -1003,7 +1003,9 @@ Value tritonScaledPanels(Tiles &t, MatrixAccess &p) {
 }
 
 intentdsl::block::OwnerAccess tritonOwnerViews() {
-  return {ownerRectangle, ownerPanel, /*scalarBroadcastRead=*/true};
+  return {ownerRectangle, ownerPanel, /*scalarBroadcastRead=*/true,
+          /*nativeTileGather=*/true, /*nativeTileHistogram=*/true,
+          /*blockAtomicMemoryBins=*/false};
 }
 
 LogicalResult verifyTritonGeometry(func::FuncOp fn,

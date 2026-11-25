@@ -349,5 +349,75 @@ void registerContracts(Unit &unit) {
     };
     unit.implementations.push_back({std::move(ac), COMPILERINFRA_SOURCE});
   }
+  for (bool isXchg : {false, true}) {
+    ImplementationContract ac;
+    ac.name = isXchg ? "tile-atomic-xchg" : "tile-atomic-fetch-add";
+    ac.operation = isXchg ? "ct_src.tile_atomic_xchg"
+                          : "ct_src.tile_atomic_fetch_add";
+    ac.symbol = isXchg ? "ct.atomic_xchg" : "ct.atomic_add";
+    ac.source = ImplementationSource::Builtin;
+    ac.minimum = Reuse::Native;
+    ac.operands = "target array, projected coordinate tuple, f32/i32 operand, optional i1 mask";
+    ac.layout = "global array coordinates with declared atomic order and scope";
+    ac.accumulator = "FP32 (with reassoc) or INT32";
+    ac.effects = "global read-modify-write";
+    ac.numerical = isXchg ? "atomic exchange" : "atomic fetch-add";
+    ac.estimator = "exits/cutile::collective-steps";
+    ac.costParameters = {"rows", "width"};
+    TypedContract tc;
+    tc.effects = EffectMask::ReadWrite;
+    tc.shape.minOperands = 3;
+    tc.shape.maxOperands = 4;
+    tc.shape.minResults = isXchg ? 0 : 1;
+    tc.shape.maxResults = isXchg ? 0 : 1;
+    tc.operandTypes = {ScalarTypeKind::I1, ScalarTypeKind::I32,
+                       ScalarTypeKind::I64, ScalarTypeKind::F32};
+    if (!isXchg)
+      tc.resultTypes = {ScalarTypeKind::I32, ScalarTypeKind::F32};
+    tc.accumulatorTypes = {ScalarTypeKind::I32, ScalarTypeKind::F32};
+    ac.typed = std::move(tc);
+    ac.available = [](const TargetProfile &profile) -> llvm::Error {
+      if (!profile.services.get<intentdsl::cutile::ArrayIndices>())
+        return llvm::createStringError("missing cuTile target capability");
+      return llvm::Error::success();
+    };
+    ac.verify = [isXchg](Operation *op) -> LogicalResult {
+      if (op->getNumResults() != (isXchg ? 0u : 1u) ||
+          (op->getNumOperands() != 3 && op->getNumOperands() != 4))
+        return failure();
+      auto ord = op->getAttrOfType<StringAttr>("order");
+      auto sc = op->getAttrOfType<StringAttr>("scope");
+      if (!ord || (ord != "relaxed" && ord != "acq_rel") || !sc ||
+          (sc != "block" && sc != "device"))
+        return failure();
+      auto mem = dyn_cast<MemRefType>(op->getOperand(0).getType());
+      Type elem = getElementTypeOrSelf(op->getOperand(2).getType());
+      auto shapeOf = [](Type t) -> ArrayRef<int64_t> {
+        if (auto rt = dyn_cast<RankedTensorType>(t))
+          return rt.getShape();
+        return {};
+      };
+      if (!mem || mem.getElementType() != elem ||
+          (!elem.isF32() && !elem.isInteger(32)) ||
+          shapeOf(op->getOperand(1).getType()) !=
+              shapeOf(op->getOperand(2).getType()))
+        return failure();
+      if (!isXchg && op->getResult(0).getType() != op->getOperand(2).getType())
+        return failure();
+      if (op->getNumOperands() == 4 &&
+          (!getElementTypeOrSelf(op->getOperand(3).getType()).isInteger(1) ||
+           shapeOf(op->getOperand(3).getType()) !=
+               shapeOf(op->getOperand(1).getType())))
+        return failure();
+      if (!isXchg && elem.isF32()) {
+        auto fm = op->getAttrOfType<arith::FastMathFlagsAttr>("fastmath");
+        if (!fm ||
+            !bitEnumContainsAll(fm.getValue(), arith::FastMathFlags::reassoc))
+          return failure();
+      }
+      return success();
+    };
+    unit.implementations.push_back({std::move(ac), COMPILERINFRA_SOURCE});
+  }
 }
 } // namespace CI_UNIT_NAMESPACE

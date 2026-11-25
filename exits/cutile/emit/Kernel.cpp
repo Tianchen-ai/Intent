@@ -36,6 +36,17 @@ llvm::Error describeArtifact(ModuleOp m, llvm::raw_pwrite_stream &out) {
               llvm::json::Object{{"num_ctas", 1}, {"occupancy", 2}, {"opt_level", 3}},
               llvm::json::Object{{"num_ctas", 1}, {"occupancy", 4}, {"opt_level", 3}}},
           3, out);
+    bool hasFetchAdd = false;
+    fn.walk([&](Operation *op) {
+      if (op->getName().getStringRef() == "ct_src.tile_atomic_fetch_add")
+        hasFetchAdd = true;
+    });
+    if (hasFetchAdd)
+      return intentdsl::block::emitOwnerArtifact(
+          fn, "",
+          llvm::json::Object{
+              {"num_ctas", 1}, {"occupancy", 4}, {"opt_level", 3}},
+          3, out);
     return intentdsl::block::emitOwnerArtifact(fn, "", llvm::json::Object{}, 3, out);
   }
 

@@ -13,11 +13,11 @@ cuTile 出口面向 `cuda.tile` / `tileiras` 编译器，其执行吞吐由四�
    - 稠密、转置右操作数（`transpose_rhs` → `ct.transpose`）、批处理、路由、窗口与分组打包权重（`GroupedWeightRhs` 紧凑 `rect_read` + 多维重塑移位解包）收缩降为 `ct.mma` 并绑定 `{num_ctas, occupancy, opt_level}` 参数行；Blackwell `sm120` 在 MX8/E8M0 安全指数窗内启用原生硬件 FP8（`e4m3`）与打包 FP4（`e2m1`）`ct_src.scaled_mma`（`ct.mma_scaled`），Hopper `sm90` 因硬件无块缩放 MMA 原语，按能力表自动降为安全窗内 `BF16` `ct.mma`。
 3. **Tile-IR 循环形态合法化与展开预算控制**：
    - `exits/cutile/legalize/Views.cpp` 在编译期显式判定每个 `scf.for` 的 `ct_src.loop_kind`（`range_const`、`range_i32` 或 `while`）：平坦 `i32` 循环生成原生 `range(...)` 启用 `tileiras` 软件流水；含嵌套 `scf.for` 且高循环携带寄存器字数（`≥ 16384`）的动态边界外层循环合法化为 `while`，避免 `tileiras` 跨嵌套循环流水化造成整核 `occupancy = 2` 寄存器溢出。
-   - 针对 `tileiras` 中每个 tile 访存携带独立 CTA 描述符的特性，`OwnerMachine` 将分组预取上界设为 `maxGroupReads = 4`（配合 `ArrayPanels` 连续 1D `rect_read` + 寄存器广播），对大标量无别名空间开放 `owners-256` / `owners-512`，对可重结合 `I.segment_sum` 开放 `segment-tile-{32,64}` 批处理，并复用单次 `i64` `Q8_K` argmax（保留紧凑位平面读 `flatRecordBitPlanes = false`）。
-   - 终端打印器全部由声明式规则（`68` 条）与 `LocalOpView` 局部规则（`75` 条）构成，**`PrintRule::custom` 为 `0`**。
+   - 针对 `tileiras` 中每个 tile 访存携带独立 CTA 描述符的特性，`OwnerMachine` 将分组预取上界设为 `maxGroupReads = 4`（配合 `ArrayPanels` 连续 1D `rect_read` + 寄存器广播），对大标量无别名空间开放 `owners-256` / `owners-512`，对可重结合 `I.segment_sum` 开放 `segment-tile-{32,64}` 批处理，复用单次 `i64` `Q8_K` argmax（保留紧凑位平面读 `flatRecordBitPlanes = false`），并通过类型化合同 `tile-atomic-xchg` / `tile-atomic-fetch-add`（块级 `ACQ_REL` 围栏 + 循环内 `RELAXED` `BLOCK` 原子 + `occupancy = 4`）加速有界桶直方图与稳定游标散射。
+   - 终端打印器全部由声明式规则（`68` 条）与 `LocalOpView` 局部规则（`77` 条）构成，**`PrintRule::custom` 为 `0`**。
 4. **数值合同、寄存器预算精确半精度折叠与有界地址收窄**：
    - 除法与指数严格区分 MLIR `FastMathFlags`（`arcp` / `afn`）与函数级 `denormal-fp-math`（仅在显式允许次正规冲零时附带 `ct_src.ftz` / `flush_to_zero=True`，绝不将 `nsz` 误作 FTZ）。
-   - 当面板 FP32 中间转换通道数超出 `OwnerMachine::residentRegisters` 预算（如 `sm120` `24,576` 字）且整数码经区间分析证明落在目标半精度精确整数域（`f16` `[-2048, 2048]`、`bf16` `[-128, 128]`）时，`Views.cpp` 将 `truncf(mulf(sitofp(x → f32), extf(s → f32)))` 零误差折叠为半精度 `mulf(sitofp(x → half), s)` 以消除寄存器溢出；同时结合 `proveNarrowAddress` 与有界余数区间将 `ct_src.tile_address` 收窄至 `ct.int32`。
+   - 分组打包无符号权重（`≤10-bit`）经 `EncodedPanels` 直接走 IEEE-754 位精确 FP16 `0x6400` 魔数偏置解码；通用面板中当 FP32 中间转换通道数超出 `OwnerMachine::residentRegisters` 预算且整数码证明落在目标半精度精确整数域时，`Views.cpp` 零误差折叠为半精度算术；同时结合 `proveNarrowAddress`、有界 `remui`/`extsi(i32)` 区间分析与静态整除 `exactOwners` 掩码消去，将多维坐标链窄化至 `ct.int32` 并折叠可证永真/永假边界比较。
 
 ## 2. 候选空间（Decision Families）
 

@@ -424,10 +424,41 @@ void orderedCost(Unit &u) {
               intentdsl::block::TriangularRecurrenceInfo triInfo;
               if (intentdsl::block::matchTriangularRecurrence(loop, fnOp, f,
                                                               &triInfo)) {
-                dependency *= std::max<double>(1.0, double(triInfo.extent) / 64.0);
-                double coeffBytes =
-                    0.5 * double(triInfo.extent) * double(triInfo.extent + 1) *
-                    4.0 * blocks;
+                double regBudget = (caps && caps->residentRegisters)
+                                       ? double(caps->residentRegisters)
+                                       : 32768.0;
+                double residentPerSm = std::clamp(
+                    regBudget /
+                        std::max(1.0, double(w) * double(triLanes) * 2.0),
+                    1.0, 4.0);
+                double sms = std::max<double>(1.0, f->participants);
+                double concurrentBlocks =
+                    std::max<double>(1.0, sms * residentPerSm);
+                double activeCtas = std::min<double>(blocks, concurrentBlocks);
+                double latencyHide = std::min<double>(
+                    2.0, std::max<double>(1.0, activeCtas / sms));
+                bool hasNativeGather = caps && caps->nativeTileGather;
+                // Without native tile gather, each step reduces a full [w, K]
+                // tile per CTA; fewer CTAs halve both reduction barriers and
+                // shared column loads. With native gather, extra resident CTAs
+                // per SM hide serial loop latency directly.
+                double reduceOverhead = hasNativeGather
+                                            ? (1.0 / latencyHide)
+                                            : (1.0 + 4.0 / double(std::max<int64_t>(1, w))) /
+                                                  std::sqrt(latencyHide);
+                waves = std::ceil(blocks / sms);
+                e.terms["issue_waves"] = {waves, "count"};
+                dependency *=
+                    std::max<double>(1.0, double(triInfo.extent) / 64.0) *
+                    reduceOverhead;
+                double sharedBatches = std::min<double>(
+                    blocks,
+                    hasNativeGather
+                        ? std::max<double>(1.0, double(n) / 64.0)
+                        : blocks);
+                double coeffBytes = 0.5 * double(triInfo.extent) *
+                                    double(triInfo.extent + 1) * 4.0 *
+                                    sharedBatches;
                 double sectorPenalty =
                     32.0 / std::min<double>(32.0, double(w) * 4.0);
                 double stateBytes =

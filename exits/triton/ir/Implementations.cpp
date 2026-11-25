@@ -411,5 +411,173 @@ void tileContracts(Unit &unit) {
     };
     unit.implementations.push_back({std::move(ac), COMPILERINFRA_SOURCE});
   }
+  {
+    ImplementationContract gc;
+    gc.name = "tile-gather";
+    gc.operation = "triton_src.tile_gather";
+    gc.symbol = "tl.gather";
+    gc.source = ImplementationSource::Builtin;
+    gc.minimum = Reuse::Native;
+    gc.operands = "source tile, in-bounds i32 index tile, gather axis";
+    gc.layout = "in-register / shared-memory indexed gather along declared axis";
+    gc.accumulator = "element type preserved from source tile";
+    gc.effects = "pure within program instance";
+    gc.numerical = "exact element selection";
+    gc.estimator = "exits/triton::collective-steps";
+    gc.costParameters = {"participants", "width"};
+    TypedContract tc;
+    tc.effects = EffectMask::None;
+    tc.shape.minOperands = 2;
+    tc.shape.maxOperands = 2;
+    tc.shape.minResults = 1;
+    tc.shape.maxResults = 1;
+    tc.operandTypes = {ScalarTypeKind::I32, ScalarTypeKind::I64,
+                       ScalarTypeKind::F16, ScalarTypeKind::BF16,
+                       ScalarTypeKind::F32};
+    tc.resultTypes = {ScalarTypeKind::I32, ScalarTypeKind::I64,
+                      ScalarTypeKind::F16, ScalarTypeKind::BF16,
+                      ScalarTypeKind::F32};
+    gc.typed = std::move(tc);
+    gc.available = [](const TargetProfile &p) -> llvm::Error {
+      if (!p.services.get<intentdsl::block::OwnerMachine>())
+        return llvm::createStringError("missing CUDA execution capabilities");
+      return llvm::Error::success();
+    };
+    gc.verify = [](Operation *o) -> LogicalResult {
+      if (!isMemoryEffectFree(o) || o->getNumOperands() != 2 ||
+          o->getNumResults() != 1)
+        return failure();
+      auto src = dyn_cast<RankedTensorType>(o->getOperand(0).getType());
+      auto idx = dyn_cast<RankedTensorType>(o->getOperand(1).getType());
+      auto res = dyn_cast<RankedTensorType>(o->getResult(0).getType());
+      auto axAttr = o->getAttrOfType<IntegerAttr>("axis");
+      if (!src || !idx || !res || !axAttr ||
+          !idx.getElementType().isInteger(32) ||
+          src.getRank() != idx.getRank() || res != idx.clone(src.getElementType()))
+        return failure();
+      int64_t ax = axAttr.getInt();
+      if (ax < 0 || ax >= src.getRank())
+        return failure();
+      for (int64_t d = 0; d < src.getRank(); ++d)
+        if (d != ax && src.getDimSize(d) != idx.getDimSize(d))
+          return failure();
+      return success();
+    };
+    unit.implementations.push_back({std::move(gc), COMPILERINFRA_SOURCE});
+  }
+  {
+    ImplementationContract hc;
+    hc.name = "tile-histogram";
+    hc.operation = "triton_src.tile_histogram";
+    hc.symbol = "tl.histogram";
+    hc.source = ImplementationSource::Builtin;
+    hc.minimum = Reuse::Native;
+    hc.operands = "1D i32 key tile, 1D i1 validity mask, power-of-2 bin count";
+    hc.layout = "CTA-local shared-memory histogram";
+    hc.accumulator = "i32 per-bin counts";
+    hc.effects = "pure within program instance";
+    hc.numerical = "exact integer counting over masked lanes";
+    hc.estimator = "exits/triton::collective-steps";
+    hc.costParameters = {"participants", "width"};
+    TypedContract tc;
+    tc.effects = EffectMask::None;
+    tc.shape.minOperands = 2;
+    tc.shape.maxOperands = 2;
+    tc.shape.minResults = 1;
+    tc.shape.maxResults = 1;
+    tc.shape.operandRanks = {1, 1};
+    tc.shape.resultRanks = {1};
+    tc.operandTypes = {ScalarTypeKind::I32, ScalarTypeKind::I1};
+    tc.resultTypes = {ScalarTypeKind::I32};
+    hc.typed = std::move(tc);
+    hc.available = [](const TargetProfile &p) -> llvm::Error {
+      if (!p.services.get<intentdsl::block::OwnerMachine>())
+        return llvm::createStringError("missing CUDA execution capabilities");
+      return llvm::Error::success();
+    };
+    hc.verify = [](Operation *o) -> LogicalResult {
+      if (!isMemoryEffectFree(o) || o->getNumOperands() != 2 ||
+          o->getNumResults() != 1)
+        return failure();
+      auto keys = dyn_cast<RankedTensorType>(o->getOperand(0).getType());
+      auto mask = dyn_cast<RankedTensorType>(o->getOperand(1).getType());
+      auto res = dyn_cast<RankedTensorType>(o->getResult(0).getType());
+      auto binsAttr = o->getAttrOfType<IntegerAttr>("bins");
+      if (!keys || !mask || !res || !binsAttr || keys.getRank() != 1 ||
+          mask.getRank() != 1 || res.getRank() != 1 ||
+          !keys.getElementType().isInteger(32) ||
+          !mask.getElementType().isInteger(1) ||
+          !res.getElementType().isInteger(32) ||
+          keys.getShape() != mask.getShape())
+        return failure();
+      int64_t bins = binsAttr.getInt();
+      return success(bins > 0 && llvm::isPowerOf2_64(bins) &&
+                     res.getDimSize(0) == bins);
+    };
+    unit.implementations.push_back({std::move(hc), COMPILERINFRA_SOURCE});
+  }
+  for (bool isXchg : {false, true}) {
+    ImplementationContract ac;
+    ac.name = isXchg ? "tile-atomic-xchg" : "tile-atomic-fetch-add";
+    ac.operation = isXchg ? "triton_src.tile_atomic_xchg"
+                          : "triton_src.tile_atomic_fetch_add";
+    ac.symbol = isXchg ? "tl.atomic_xchg" : "tl.atomic_add";
+    ac.source = ImplementationSource::Builtin;
+    ac.minimum = Reuse::Native;
+    ac.operands = "target view, projected tile address, f32/i32 operand, optional i1 mask";
+    ac.layout = "global view address with declared atomic order and scope";
+    ac.accumulator = "f32 (with reassoc) or i32";
+    ac.effects = "global read-modify-write";
+    ac.numerical = isXchg ? "atomic exchange" : "atomic fetch-add";
+    ac.estimator = "exits/triton::collective-steps";
+    ac.costParameters = {"participants", "width"};
+    TypedContract tc;
+    tc.effects = EffectMask::ReadWrite;
+    tc.shape.minOperands = 3;
+    tc.shape.maxOperands = 4;
+    tc.shape.minResults = isXchg ? 0 : 1;
+    tc.shape.maxResults = isXchg ? 0 : 1;
+    tc.operandTypes = {ScalarTypeKind::I1, ScalarTypeKind::I32,
+                       ScalarTypeKind::I64, ScalarTypeKind::F32};
+    if (!isXchg)
+      tc.resultTypes = {ScalarTypeKind::I32, ScalarTypeKind::F32};
+    tc.accumulatorTypes = {ScalarTypeKind::I32, ScalarTypeKind::F32};
+    ac.typed = std::move(tc);
+    ac.available = [](const TargetProfile &p) -> llvm::Error {
+      if (!p.services.get<intentdsl::block::OwnerMachine>())
+        return llvm::createStringError("missing CUDA execution capabilities");
+      return llvm::Error::success();
+    };
+    ac.verify = [isXchg](Operation *o) -> LogicalResult {
+      if (o->getNumResults() != (isXchg ? 0u : 1u) ||
+          (o->getNumOperands() != 3 && o->getNumOperands() != 4))
+        return failure();
+      auto ord = o->getAttrOfType<StringAttr>("order");
+      auto sc = o->getAttrOfType<StringAttr>("scope");
+      if (!ord || (ord != "relaxed" && ord != "acq_rel") || !sc ||
+          (sc != "block" && sc != "device"))
+        return failure();
+      auto mem = dyn_cast<MemRefType>(o->getOperand(0).getType());
+      Type elem = getElementTypeOrSelf(o->getOperand(2).getType());
+      if (!mem || mem.getElementType() != elem ||
+          (!elem.isF32() && !elem.isInteger(32)) ||
+          shape(o->getOperand(1).getType()) != shape(o->getOperand(2).getType()))
+        return failure();
+      if (!isXchg && o->getResult(0).getType() != o->getOperand(2).getType())
+        return failure();
+      if (o->getNumOperands() == 4 &&
+          (!getElementTypeOrSelf(o->getOperand(3).getType()).isInteger(1) ||
+           shape(o->getOperand(3).getType()) != shape(o->getOperand(1).getType())))
+        return failure();
+      if (!isXchg && elem.isF32()) {
+        auto fm = o->getAttrOfType<arith::FastMathFlagsAttr>("fastmath");
+        if (!fm ||
+            !bitEnumContainsAll(fm.getValue(), arith::FastMathFlags::reassoc))
+          return failure();
+      }
+      return success();
+    };
+    unit.implementations.push_back({std::move(ac), COMPILERINFRA_SOURCE});
+  }
 }
 } // namespace CI_UNIT_NAMESPACE

@@ -494,10 +494,16 @@ void OwnerTiles::triangularLoop(scf::ForOp loop,
                : Value(b.create<arith::CmpIOp>(
                      loc, arith::CmpIPredicate::slt, lanesRPre,
                      like(integer(N), lanesRPre.getType())));
-  Value validState2D = broadcast(mask, tileBool, 0);
-  if (inBoundsPre)
+  Value effMask = (exactOwners && mask == active) ? Value() : mask;
+  Value validState2D;
+  if (effMask && inBoundsPre)
     validState2D = b.create<arith::AndIOp>(
-        loc, validState2D, broadcast(inBoundsPre, tileBool, 1));
+        loc, broadcast(effMask, tileBool, 0),
+        broadcast(inBoundsPre, tileBool, 1));
+  else if (effMask)
+    validState2D = broadcast(effMask, tileBool, 0);
+  else if (inBoundsPre)
+    validState2D = broadcast(inBoundsPre, tileBool, 1);
 
   auto colLoop = b.create<scf::ForOp>(loc, integer(0), integer(N), integer(1),
                                       ValueRange{zero2D});
@@ -507,12 +513,19 @@ void OwnerTiles::triangularLoop(scf::ForOp loop,
   Value c = colLoop.getInductionVar();
   Value acc = colLoop.getRegionIterArgs()[0];
 
-  Value isC1D =
-      b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, lanesRPre,
-                              like(c, lanesRPre.getType()));
-  Value isC2D = broadcast(isC1D, tileBool, 1);
-  Value accC =
-      reduce(b.create<arith::SelectOp>(loc, isC2D, acc, zero2D), "sum", 1);
+  Value accC;
+  if (access.nativeTileGather) {
+    Value c32 = castElement(c, b.getI32Type());
+    Value idx2D =
+        broadcast(c32, shaped({rows, 1}, b.getI32Type()), /*axis=*/-1);
+    accC = reshapeTile(tileGather(acc, idx2D, 1), {rows});
+  } else {
+    Value isC1D =
+        b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, lanesRPre,
+                                like(c, lanesRPre.getType()));
+    Value isC2D = broadcast(isC1D, tileBool, 1);
+    accC = reduce(b.create<arith::SelectOp>(loc, isC2D, acc, zero2D), "sum", 1);
+  }
 
   SmallVector<Value, 4> stCoords;
   SmallVector<int64_t, 4> stAxes;
@@ -522,7 +535,7 @@ void OwnerTiles::triangularLoop(scf::ForOp loop,
     stAxes.push_back(0);
   }
   Value stPtr = address(tri.state, stCoords, stAxes);
-  Value rhsC = read(tri.state, stPtr, mask);
+  Value rhsC = read(tri.state, stPtr, effMask);
   Value diffC = apply(*tri.subOp, {rhsC, accC}, rowF32);
   Value solC = diffC;
   if (tri.divOp) {
@@ -536,10 +549,10 @@ void OwnerTiles::triangularLoop(scf::ForOp loop,
       dCoords.push_back(broadcast(coordVal, rowI64));
       dAxes.push_back(0);
     }
-    Value diagC = read(tri.coeff, address(tri.coeff, dCoords, dAxes), mask);
+    Value diagC = read(tri.coeff, address(tri.coeff, dCoords, dAxes), effMask);
     solC = apply(*tri.divOp, {diffC, diagC}, rowF32);
   }
-  write(tri.state, stPtr, solC, mask);
+  write(tri.state, stPtr, solC, effMask);
   Value sol2D = broadcast(solC, accTy, 0);
 
   bool uniformCoeff = true;
@@ -615,13 +628,9 @@ void OwnerTiles::triangularLoop(scf::ForOp loop,
                        .getRegionIterArgs()[0])
                       ? apply(*tri.addOp, {acc, prod}, accTy)
                       : apply(*tri.addOp, {prod, acc}, accTy);
-  Value gtC1D =
-      b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, lanesRPre,
-                              like(c, lanesRPre.getType()));
-  Value belowDiag = b.create<arith::AndIOp>(loc, validState2D,
-                                            broadcast(gtC1D, tileBool, 1));
-  Value updated = b.create<arith::SelectOp>(loc, belowDiag, nextAcc, acc);
-  b.create<scf::YieldOp>(loc, ValueRange{updated});
+  // Column c is consumed before this update and never read again; writing the
+  // full vector avoids a per-step mask broadcast and select on every iteration.
+  b.create<scf::YieldOp>(loc, ValueRange{nextAcc});
   b.setInsertionPointAfter(colLoop);
 }
 
@@ -636,6 +645,8 @@ SmallVector<Value> OwnerTiles::exclusiveScanLoop(
   Type idxVecTy = shaped({W}, b.getI64Type());
 
   auto toScalar = [&](Value orig) -> Value {
+    if (singleOwnerScalar && orig == space.getRegion(0).front().getArgument(0))
+      return singleOwnerScalar;
     Value pv = at(orig, parent);
     if (isa<RankedTensorType>(pv.getType()))
       pv = reduce(pv, "max", 0);
@@ -644,12 +655,19 @@ SmallVector<Value> OwnerTiles::exclusiveScanLoop(
     return pv;
   };
 
-  Value activeScalar = reduce(mask, "max", 0);
+  bool exactMask = exactOwners && mask == active;
+  Value activeScalar =
+      exactMask ? Value(b.create<arith::ConstantIntOp>(loc, 1, 1))
+                : reduce(mask, "max", 0);
   Value lanesB = lanes(W);
-  Value inB = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, lanesB,
-                                      like(integer(B), idxVecTy));
-  Value validB =
-      b.create<arith::AndIOp>(loc, like(activeScalar, inB.getType()), inB);
+  Value validB;
+  if (!exactMask || B != W) {
+    Value inB = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, lanesB,
+                                        like(integer(B), idxVecTy));
+    validB = exactMask ? inB
+                       : Value(b.create<arith::AndIOp>(
+                             loc, like(activeScalar, inB.getType()), inB));
+  }
 
   memref::LoadOp srcLd = scan.srcLoad;
   SmallVector<Value, 4> ldCoords;
@@ -705,8 +723,13 @@ void OwnerTiles::boundedHistogramLoop(scf::ForOp loop,
                                       const Values &parent, Value mask) {
   int64_t B = hist.bins;
   int64_t B_pad = std::max<int64_t>(2, llvm::PowerOf2Ceil(B));
-  int64_t P = 64;
   Type elemT = hist.addOp->getResult(0).getType();
+  bool unitI32 =
+      elemT.isInteger(32) && matchPattern(hist.deltaVal, m_One());
+  bool useNativeHist = access.nativeTileHistogram && unitI32;
+  bool useAtomicBins = !useNativeHist && access.blockAtomicMemoryBins &&
+                       (elemT.isInteger(32) || elemT.isF32());
+  int64_t P = useAtomicBins ? 512 : (useNativeHist ? 256 : 64);
   Type histVecTy = shaped({B_pad}, elemT);
   Type pIdxTy = shaped({P}, b.getI64Type());
   Type pI32Ty = shaped({P}, b.getI32Type());
@@ -715,21 +738,37 @@ void OwnerTiles::boundedHistogramLoop(scf::ForOp loop,
   Type bpBoolTy = shaped({B_pad, P}, b.getI1Type());
   Type bpI32Ty = shaped({B_pad, P}, b.getI32Type());
 
+  llvm::DenseMap<Value, Value> scalarCache;
+  scf::ForOp pLoop;
   auto toScalar = [&](Value orig) -> Value {
+    if (singleOwnerScalar && orig == space.getRegion(0).front().getArgument(0))
+      return singleOwnerScalar;
+    if (auto it = scalarCache.find(orig); it != scalarCache.end())
+      return it->second;
+    OpBuilder::InsertionGuard g(b);
+    if (pLoop)
+      b.setInsertionPoint(pLoop);
     Value pv = at(orig, parent);
     if (isa<RankedTensorType>(pv.getType()))
       pv = reduce(pv, "max", 0);
     if (pv.getType().isIndex())
       pv = castElement(pv, b.getI64Type());
+    scalarCache[orig] = pv;
     return pv;
   };
 
-  Value activeScalar = reduce(mask, "max", 0);
+  bool exactMask = exactOwners && mask == active;
+  Value activeScalar =
+      exactMask ? Value() : reduce(mask, "max", 0);
   Value lanesB = lanes(B_pad);
-  Value inB = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, lanesB,
-                                      like(integer(B), bIdxTy));
-  Value validB =
-      b.create<arith::AndIOp>(loc, like(activeScalar, inB.getType()), inB);
+  Value validB;
+  if (!exactMask || B != B_pad) {
+    Value inB = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, lanesB,
+                                        like(integer(B), bIdxTy));
+    validB = exactMask ? inB
+                       : Value(b.create<arith::AndIOp>(
+                             loc, like(activeScalar, inB.getType()), inB));
+  }
 
   memref::LoadOp histLd = hist.histLoad;
   memref::StoreOp histSt = hist.histStore;
@@ -741,23 +780,32 @@ void OwnerTiles::boundedHistogramLoop(scf::ForOp loop,
   }
   hCoords.push_back(lanesB);
   hAxes.push_back(0);
-  Value histInit = read(histSt.getMemRef(),
-                        address(histSt.getMemRef(), hCoords, hAxes),
-                        validB);
+  Value hAddr = address(histSt.getMemRef(), hCoords, hAxes);
+  Value histInit = read(histSt.getMemRef(), hAddr, validB);
+  if (useAtomicBins)
+    atomicXchg(histSt.getMemRef(), hAddr, histInit, validB, "acq_rel", "block");
 
   Value hiScalar = toScalar(loop.getUpperBound());
-  auto pLoop = b.create<scf::ForOp>(loc, integer(0), hiScalar, integer(P),
-                                    ValueRange{histInit});
+  auto staticHi = orderedStaticLoopExtent(loop, fn, nullptr);
+  bool exactP = exactMask && staticHi && *staticHi > 0 && (*staticHi % P == 0);
+  pLoop = useAtomicBins
+              ? b.create<scf::ForOp>(loc, integer(0), hiScalar, integer(P))
+              : b.create<scf::ForOp>(loc, integer(0), hiScalar, integer(P),
+                                     ValueRange{histInit});
   pLoop->setAttr(symbol("runtime_range"), b.getUnitAttr());
   b.setInsertionPointToStart(pLoop.getBody());
 
   Value base = pLoop.getInductionVar();
-  Value curHist = pLoop.getRegionIterArgs()[0];
+  Value curHist = useAtomicBins ? Value() : pLoop.getRegionIterArgs()[0];
   Value colVec = stepped(base, P);
-  Value inExt = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, colVec,
-                                        like(hiScalar, pIdxTy));
-  Value validP =
-      b.create<arith::AndIOp>(loc, like(activeScalar, inExt.getType()), inExt);
+  Value validP;
+  if (!exactP) {
+    Value inExt = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt,
+                                          colVec, like(hiScalar, pIdxTy));
+    validP = exactMask ? inExt
+                       : Value(b.create<arith::AndIOp>(
+                             loc, like(activeScalar, inExt.getType()), inExt));
+  }
 
   Value iv = loop.getInductionVar();
   llvm::DenseMap<Value, Value> vecEnv;
@@ -825,39 +873,67 @@ void OwnerTiles::boundedHistogramLoop(scf::ForOp loop,
                                       like(integer(0), pIdxTy));
   Value ltB = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, bin1D,
                                       like(integer(B), pIdxTy));
-  Value validBinP = b.create<arith::AndIOp>(
-      loc, validP, b.create<arith::AndIOp>(loc, ge0, ltB));
+  Value inBin = b.create<arith::AndIOp>(loc, ge0, ltB);
+  Value validBinP =
+      validP ? Value(b.create<arith::AndIOp>(loc, validP, inBin)) : inBin;
+
+  if (useAtomicBins) {
+    SmallVector<Value, 4> stepCoords;
+    SmallVector<int64_t, 4> stepAxes;
+    for (Value idx : histSt.getIndices().drop_back()) {
+      stepCoords.push_back(like(toScalar(idx), pIdxTy));
+      stepAxes.push_back(0);
+    }
+    stepCoords.push_back(bin1D);
+    stepAxes.push_back(0);
+    Value stepAddr = address(histSt.getMemRef(), stepCoords, stepAxes);
+    Value delta1D = lift1D(hist.deltaVal);
+    (void)atomicFetchAdd(histSt.getMemRef(), stepAddr, delta1D, validBinP,
+                         "relaxed", "block");
+    b.setInsertionPointAfter(pLoop);
+    Value zeroVal = elemT.isF32()
+                        ? scalar(0.0f)
+                        : Value(b.create<arith::ConstantIntOp>(loc, 0, 32));
+    Value histFinal = atomicFetchAdd(histSt.getMemRef(), hAddr,
+                                     like(zeroVal, histVecTy), validB,
+                                     "acq_rel", "block");
+    write(histSt.getMemRef(), hAddr, histFinal, validB);
+    return;
+  }
 
   Value binI32 = b.create<arith::TruncIOp>(loc, pI32Ty, bin1D);
-  Value lanesBI32 = b.create<arith::TruncIOp>(loc, bI32Ty, lanes(B_pad));
-  Value matchBP = b.create<arith::AndIOp>(
-      loc,
-      b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
-                              broadcast(lanesBI32, bpI32Ty, 0),
-                              broadcast(binI32, bpI32Ty, 1)),
-      broadcast(validBinP, bpBoolTy, 1));
-
   Value panelCounts;
-  if (elemT.isInteger(32) && matchPattern(hist.deltaVal, m_One())) {
-    Value matchI32 = b.create<arith::ExtUIOp>(loc, bpI32Ty, matchBP);
-    panelCounts = reduce(matchI32, "sum", 1);
+  if (useNativeHist) {
+    Value zeroP32 = like(b.create<arith::ConstantIntOp>(loc, 0, 32), pI32Ty);
+    Value safeBin = select(validBinP, binI32, zeroP32);
+    panelCounts = tileHistogram(safeBin, validBinP, B_pad);
   } else {
-    Type bpValTy = shaped({B_pad, P}, elemT);
-    Value zeroScalar = elemT.isF32()
-                           ? scalar(0.0f)
-                           : Value(b.create<arith::ConstantIntOp>(loc, 0, 32));
-    Value delta2D = broadcast(lift1D(hist.deltaVal), bpValTy, 1);
-    Value contrib = b.create<arith::SelectOp>(loc, matchBP, delta2D,
-                                              like(zeroScalar, bpValTy));
-    panelCounts = reduce(contrib, "sum", 1);
+    Value lanesBI32 = b.create<arith::TruncIOp>(loc, bI32Ty, lanes(B_pad));
+    Value matchBP = b.create<arith::AndIOp>(
+        loc,
+        b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                broadcast(lanesBI32, bpI32Ty, 0),
+                                broadcast(binI32, bpI32Ty, 1)),
+        broadcast(validBinP, bpBoolTy, 1));
+    if (unitI32) {
+      Value matchI32 = b.create<arith::ExtUIOp>(loc, bpI32Ty, matchBP);
+      panelCounts = reduce(matchI32, "sum", 1);
+    } else {
+      Type bpValTy = shaped({B_pad, P}, elemT);
+      Value zeroScalar = elemT.isF32()
+                             ? scalar(0.0f)
+                             : Value(b.create<arith::ConstantIntOp>(loc, 0, 32));
+      Value delta2D = broadcast(lift1D(hist.deltaVal), bpValTy, 1);
+      Value contrib = b.create<arith::SelectOp>(loc, matchBP, delta2D,
+                                                like(zeroScalar, bpValTy));
+      panelCounts = reduce(contrib, "sum", 1);
+    }
   }
   Value nextHist = apply(*hist.addOp, {curHist, panelCounts}, histVecTy);
   b.create<scf::YieldOp>(loc, ValueRange{nextHist});
   b.setInsertionPointAfter(pLoop);
 
-  write(histSt.getMemRef(),
-        address(histSt.getMemRef(), hCoords, hAxes), pLoop.getResult(0),
-        validB);
+  write(histSt.getMemRef(), hAddr, pLoop.getResult(0), validB);
 }
 
 void OwnerTiles::boundedScatterLoop(scf::ForOp loop,
@@ -865,7 +941,10 @@ void OwnerTiles::boundedScatterLoop(scf::ForOp loop,
                                     const Values &parent, Value mask) {
   int64_t B = scat.bins;
   int64_t B_pad = std::max<int64_t>(2, llvm::PowerOf2Ceil(B));
-  int64_t P = 32;
+  bool useNativeGatherHist =
+      access.nativeTileGather && access.nativeTileHistogram;
+  bool useAtomicCursors = !useNativeGatherHist && access.blockAtomicMemoryBins;
+  int64_t P = useAtomicCursors ? 64 : 32;
   Type pIdxTy = shaped({P}, b.getI64Type());
   Type pI32Ty = shaped({P}, b.getI32Type());
   Type bIdxTy = shaped({B_pad}, b.getI64Type());
@@ -875,21 +954,36 @@ void OwnerTiles::boundedScatterLoop(scf::ForOp loop,
   Type ppBoolTy = shaped({P, P}, b.getI1Type());
   Type ppI32Ty = shaped({P, P}, b.getI32Type());
 
+  llvm::DenseMap<Value, Value> scalarCache;
+  scf::ForOp pLoop;
   auto toScalar = [&](Value orig) -> Value {
+    if (singleOwnerScalar && orig == space.getRegion(0).front().getArgument(0))
+      return singleOwnerScalar;
+    if (auto it = scalarCache.find(orig); it != scalarCache.end())
+      return it->second;
+    OpBuilder::InsertionGuard g(b);
+    if (pLoop)
+      b.setInsertionPoint(pLoop);
     Value pv = at(orig, parent);
     if (isa<RankedTensorType>(pv.getType()))
       pv = reduce(pv, "max", 0);
     if (pv.getType().isIndex())
       pv = castElement(pv, b.getI64Type());
+    scalarCache[orig] = pv;
     return pv;
   };
 
-  Value activeScalar = reduce(mask, "max", 0);
+  bool exactMask = exactOwners && mask == active;
+  Value activeScalar = exactMask ? Value() : reduce(mask, "max", 0);
   Value lanesB = lanes(B_pad);
-  Value inB = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, lanesB,
-                                      like(integer(B), bIdxTy));
-  Value validB =
-      b.create<arith::AndIOp>(loc, like(activeScalar, inB.getType()), inB);
+  Value validB;
+  if (!exactMask || B != B_pad) {
+    Value inB = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, lanesB,
+                                        like(integer(B), bIdxTy));
+    validB = exactMask ? inB
+                       : Value(b.create<arith::AndIOp>(
+                             loc, like(activeScalar, inB.getType()), inB));
+  }
 
   memref::LoadOp curLd = scat.cursorLoad;
   memref::StoreOp curSt = scat.cursorStore;
@@ -901,23 +995,32 @@ void OwnerTiles::boundedScatterLoop(scf::ForOp loop,
   }
   cCoords.push_back(lanesB);
   cAxes.push_back(0);
-  Value curInit = read(curSt.getMemRef(),
-                       address(curSt.getMemRef(), cCoords, cAxes),
-                       validB);
+  Value cAddr = address(curSt.getMemRef(), cCoords, cAxes);
+  Value curInit = read(curSt.getMemRef(), cAddr, validB);
+  if (useAtomicCursors)
+    atomicXchg(curSt.getMemRef(), cAddr, curInit, validB, "acq_rel", "block");
 
   Value hiScalar = toScalar(loop.getUpperBound());
-  auto pLoop = b.create<scf::ForOp>(loc, integer(0), hiScalar, integer(P),
-                                    ValueRange{curInit});
+  auto staticHi = orderedStaticLoopExtent(loop, fn, nullptr);
+  bool exactP = exactMask && staticHi && *staticHi > 0 && (*staticHi % P == 0);
+  pLoop = useAtomicCursors
+              ? b.create<scf::ForOp>(loc, integer(0), hiScalar, integer(P))
+              : b.create<scf::ForOp>(loc, integer(0), hiScalar, integer(P),
+                                     ValueRange{curInit});
   pLoop->setAttr(symbol("runtime_range"), b.getUnitAttr());
   b.setInsertionPointToStart(pLoop.getBody());
 
   Value base = pLoop.getInductionVar();
-  Value curVec = pLoop.getRegionIterArgs()[0];
+  Value curVec = useAtomicCursors ? Value() : pLoop.getRegionIterArgs()[0];
   Value colVec = stepped(base, P);
-  Value inExt = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, colVec,
-                                        like(hiScalar, pIdxTy));
-  Value validP =
-      b.create<arith::AndIOp>(loc, like(activeScalar, inExt.getType()), inExt);
+  Value validP;
+  if (!exactP) {
+    Value inExt = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt,
+                                          colVec, like(hiScalar, pIdxTy));
+    validP = exactMask ? inExt
+                       : Value(b.create<arith::AndIOp>(
+                             loc, like(activeScalar, inExt.getType()), inExt));
+  }
 
   Value iv = loop.getInductionVar();
   llvm::DenseMap<Value, Value> vecEnv;
@@ -986,24 +1089,43 @@ void OwnerTiles::boundedScatterLoop(scf::ForOp loop,
                                       like(integer(0), pIdxTy));
   Value ltB = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, bin1D,
                                       like(integer(B), pIdxTy));
-  Value validBinP = b.create<arith::AndIOp>(
-      loc, validP, b.create<arith::AndIOp>(loc, ge0, ltB));
+  Value inBin = b.create<arith::AndIOp>(loc, ge0, ltB);
+  Value validBinP =
+      validP ? Value(b.create<arith::AndIOp>(loc, validP, inBin)) : inBin;
 
   Value binI32 = b.create<arith::TruncIOp>(loc, pI32Ty, bin1D);
-  Value lanesBI32 = b.create<arith::TruncIOp>(loc, bI32Ty, lanes(B_pad));
-  Value matchBP = b.create<arith::AndIOp>(
-      loc,
-      b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
-                              broadcast(lanesBI32, bpI32Ty, 0),
-                              broadcast(binI32, bpI32Ty, 1)),
-      broadcast(validBinP, bpBoolTy, 1));
-
-  Value zeroBP =
-      like(b.create<arith::ConstantIntOp>(loc, 0, 32), bpI32Ty);
-  Value baseCursor1D = reduce(
-      b.create<arith::SelectOp>(loc, matchBP, broadcast(curVec, bpI32Ty, 0),
-                                zeroBP),
-      "sum", 0);
+  Value baseCursor1D, matchBP, safeBin, stepCurAddr;
+  if (useNativeGatherHist) {
+    Value zeroP32 = like(b.create<arith::ConstantIntOp>(loc, 0, 32), pI32Ty);
+    safeBin = select(validBinP, binI32, zeroP32);
+    baseCursor1D = tileGather(curVec, safeBin, 0);
+  } else if (useAtomicCursors) {
+    SmallVector<Value, 4> stepCoords;
+    SmallVector<int64_t, 4> stepAxes;
+    for (Value idx : curSt.getIndices().drop_back()) {
+      stepCoords.push_back(like(toScalar(idx), pIdxTy));
+      stepAxes.push_back(0);
+    }
+    stepCoords.push_back(bin1D);
+    stepAxes.push_back(0);
+    stepCurAddr = address(curSt.getMemRef(), stepCoords, stepAxes);
+    Value zeroP32 = like(b.create<arith::ConstantIntOp>(loc, 0, 32), pI32Ty);
+    baseCursor1D = atomicFetchAdd(curSt.getMemRef(), stepCurAddr, zeroP32,
+                                  validBinP, "relaxed", "block");
+  } else {
+    Value lanesBI32 = b.create<arith::TruncIOp>(loc, bI32Ty, lanes(B_pad));
+    matchBP = b.create<arith::AndIOp>(
+        loc,
+        b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                broadcast(lanesBI32, bpI32Ty, 0),
+                                broadcast(binI32, bpI32Ty, 1)),
+        broadcast(validBinP, bpBoolTy, 1));
+    Value zeroBP = like(b.create<arith::ConstantIntOp>(loc, 0, 32), bpI32Ty);
+    baseCursor1D = reduce(
+        b.create<arith::SelectOp>(loc, matchBP, broadcast(curVec, bpI32Ty, 0),
+                                  zeroBP),
+        "sum", 0);
+  }
 
   Value lanesPI32 = b.create<arith::TruncIOp>(loc, pI32Ty, lanes(P));
   Value sameBinPP =
@@ -1036,15 +1158,27 @@ void OwnerTiles::boundedScatterLoop(scf::ForOp loop,
           lift1D(st.getValue()), validBinP);
   }
 
+  if (useAtomicCursors) {
+    Value oneP32 = like(b.create<arith::ConstantIntOp>(loc, 1, 32), pI32Ty);
+    (void)atomicFetchAdd(curSt.getMemRef(), stepCurAddr, oneP32, validBinP,
+                         "relaxed", "block");
+    b.setInsertionPointAfter(pLoop);
+    Value zeroB32 = like(b.create<arith::ConstantIntOp>(loc, 0, 32), bI32Ty);
+    Value curFinal = atomicFetchAdd(curSt.getMemRef(), cAddr, zeroB32, validB,
+                                    "acq_rel", "block");
+    write(curSt.getMemRef(), cAddr, curFinal, validB);
+    return;
+  }
+
   Value panelCounts =
-      reduce(b.create<arith::ExtUIOp>(loc, bpI32Ty, matchBP), "sum", 1);
+      useNativeGatherHist
+          ? tileHistogram(safeBin, validBinP, B_pad)
+          : reduce(b.create<arith::ExtUIOp>(loc, bpI32Ty, matchBP), "sum", 1);
   Value nextCur = b.create<arith::AddIOp>(loc, curVec, panelCounts);
   b.create<scf::YieldOp>(loc, ValueRange{nextCur});
   b.setInsertionPointAfter(pLoop);
 
-  write(curSt.getMemRef(),
-        address(curSt.getMemRef(), cCoords, cAxes),
-        pLoop.getResult(0), validB);
+  write(curSt.getMemRef(), cAddr, pLoop.getResult(0), validB);
 }
 
 SmallVector<Value> OwnerTiles::selectionLoop(scf::ForOp loop,
@@ -1217,8 +1351,7 @@ void OwnerTiles::associativeScatterLoop(
   for (auto [k, v] : parent)
     if (isa<RankedTensorType>(v.getType()))
       ownerDep.insert(k);
-  bool separable2D =
-      (access.scalarBroadcastRead && rows >= 16 && info.extent >= 32);
+  bool separable2D = (rows >= 16 && info.extent >= 32);
   for (Operation &inst : loop.getBody()->without_terminator()) {
     if (skipOps.contains(&inst))
       continue;
@@ -2057,16 +2190,26 @@ SmallVector<Value> OwnerTiles::lowerBody(Block &body, Values env, Value mask) {
       bool thenEff = hasEffects(branch.getThenRegion());
       bool elseEff = !branch.getElseRegion().empty() &&
                      hasEffects(branch.getElseRegion());
+      bool trivialMask = exactOwners && mask == active;
       Value pos = thenEff
-                      ? Value(b.create<arith::AndIOp>(loc, mask, cond))
+                      ? (trivialMask
+                             ? cond
+                             : Value(b.create<arith::AndIOp>(loc, mask, cond)))
                       : mask;
-      Value neg = elseEff
-                      ? Value(b.create<arith::XOrIOp>(
-                            loc, mask,
-                            thenEff ? pos
-                                    : Value(b.create<arith::AndIOp>(loc, mask,
-                                                                    cond))))
-                      : mask;
+      Value neg =
+          elseEff
+              ? (trivialMask
+                     ? Value(b.create<arith::XOrIOp>(
+                           loc, cond,
+                           like(b.create<arith::ConstantIntOp>(loc, 1, 1),
+                                cond.getType())))
+                     : Value(b.create<arith::XOrIOp>(
+                           loc, mask,
+                           thenEff
+                               ? pos
+                               : Value(b.create<arith::AndIOp>(loc, mask,
+                                                               cond)))))
+              : mask;
       auto yes = lowerBody(*branch.thenBlock(), env, pos);
       SmallVector<Value> no;
       if (!branch.getElseRegion().empty())
@@ -2127,13 +2270,14 @@ SmallVector<Value> OwnerTiles::lowerBody(Block &body, Values env, Value mask) {
           axes.push_back(0);
         }
         auto ptr = address(base, coords, axes);
+        Value effMask = (exactOwners && mask == active) ? Value() : mask;
         if (w) {
           write(base, ptr,
                 broadcast(arg(0), shaped({rows}, elem(arg(0).getType()))),
-                mask);
+                effMask);
           continue;
         }
-        v = read(base, ptr, mask);
+        v = read(base, ptr, effMask);
       }
     } else {
       SmallVector<Value> args;
@@ -2197,6 +2341,10 @@ LogicalResult OwnerTiles::build() {
     }
   }
   Value start = b.create<arith::MulIOp>(loc, blockId, integer(logical));
+  exactOwners = (rows == logical) && (count > 0) && (count % rows == 0);
+  if (rows == 1 && logical == 1 &&
+      space.getRegion(0).front().getNumArguments() == 1)
+    singleOwnerScalar = blockId;
   auto r = lanes(rows);
   auto lane = rows == logical
                   ? r
@@ -2268,6 +2416,56 @@ LogicalResult OwnerTiles::build() {
   }
   lowerBody(space.getRegion(0).front(), outer, active);
   op("end");
+  // Fold redundant zero-selects over zero-padded tile_read ops and eliminate
+  // dead pure operations left behind by folded guards or unrolled bodies.
+  auto isZeroVal = [](Value v) -> bool {
+    if (auto bc = v.getDefiningOp();
+        bc && bc->getName().stripDialect() == "tile_broadcast")
+      v = bc->getOperand(0);
+    if (auto c = v.getDefiningOp<arith::ConstantOp>()) {
+      if (auto fa = dyn_cast<FloatAttr>(c.getValue()))
+        return fa.getValue().isPosZero();
+      if (auto ia = dyn_cast<IntegerAttr>(c.getValue()))
+        return ia.getInt() == 0;
+      if (auto df = dyn_cast<DenseFPElementsAttr>(c.getValue());
+          df && df.isSplat())
+        return df.getSplatValue<APFloat>().isPosZero();
+      if (auto di = dyn_cast<DenseIntElementsAttr>(c.getValue());
+          di && di.isSplat())
+        return di.getSplatValue<APInt>().isZero();
+    }
+    return false;
+  };
+  auto maskImplies = [](Value loadMask, Value cond) -> bool {
+    if (loadMask == cond)
+      return true;
+    if (auto a = loadMask.getDefiningOp<arith::AndIOp>())
+      return a.getLhs() == cond || a.getRhs() == cond;
+    return false;
+  };
+  program->walk([&](arith::SelectOp sel) {
+    if (!isZeroVal(sel.getFalseValue()))
+      return;
+    Operation *rd = sel.getTrueValue().getDefiningOp();
+    if (!rd || rd->getName().stripDialect() != "tile_read" ||
+        rd->getNumOperands() != 3)
+      return;
+    if (maskImplies(rd->getOperand(2), sel.getCondition()))
+      sel.replaceAllUsesWith(sel.getTrueValue());
+  });
+  bool dceChanged = true;
+  while (dceChanged) {
+    dceChanged = false;
+    program->walk<WalkOrder::PostOrder>([&](Operation *inst) {
+      if (inst == program || inst->getNumRegions() != 0 ||
+          inst->hasTrait<OpTrait::IsTerminator>())
+        return;
+      if (inst->use_empty() && isMemoryEffectFree(inst)) {
+        inst->erase();
+        dceChanged = true;
+      }
+    });
+  }
   return success();
 }
 } // namespace intentdsl::block

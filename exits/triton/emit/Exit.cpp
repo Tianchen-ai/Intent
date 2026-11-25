@@ -216,14 +216,20 @@ llvm::Error describeArtifact(func::FuncOp fn, llvm::raw_pwrite_stream &out) {
         ts && ts.getInt() >= 1024)
       warps = 8;
     else {
+      bool hasHistogram = false;
+      int64_t maxAxis = 0;
       entry.walk([&](Operation *op) {
-        if (op->getName().stripDialect() == "tile_axis")
+        auto k = op->getName().stripDialect();
+        if (k == "tile_histogram")
+          hasHistogram = true;
+        if (k == "tile_axis")
           if (auto rt = dyn_cast<RankedTensorType>(op->getResult(0).getType());
-              rt && rt.getRank() == 1 &&
-              (rt.getDimSize(0) >= 256 ||
-               ownerRows * rt.getDimSize(0) >= 2048))
-            warps = 8;
+              rt && rt.getRank() == 1)
+            maxAxis = std::max(maxAxis, rt.getDimSize(0));
       });
+      if ((maxAxis >= 256 || ownerRows * maxAxis >= 2048) &&
+          !(hasHistogram && maxAxis <= 512))
+        warps = 8;
     }
     return intentdsl::block::emitOwnerArtifact(
         fn, "", llvm::json::Object{{"num_warps", warps}, {"num_stages", 1}}, 2,
@@ -238,14 +244,20 @@ llvm::Error describeArtifact(func::FuncOp fn, llvm::raw_pwrite_stream &out) {
         ts && ts.getInt() >= 1024)
       warps = 8;
     else {
+      bool hasHistogram = false;
+      int64_t maxAxis = 0;
       entry.walk([&](Operation *op) {
-        if (op->getName().stripDialect() == "tile_axis")
+        auto k = op->getName().stripDialect();
+        if (k == "tile_histogram")
+          hasHistogram = true;
+        if (k == "tile_axis")
           if (auto rt = dyn_cast<RankedTensorType>(op->getResult(0).getType());
-              rt && rt.getRank() == 1 &&
-              (rt.getDimSize(0) >= 256 ||
-               ownerRows * rt.getDimSize(0) >= 2048))
-            warps = 8;
+              rt && rt.getRank() == 1)
+            maxAxis = std::max(maxAxis, rt.getDimSize(0));
       });
+      if ((maxAxis >= 256 || ownerRows * maxAxis >= 2048) &&
+          !(hasHistogram && maxAxis <= 512))
+        warps = 8;
     }
     return intentdsl::block::emitOwnerArtifact(
         fn, "", llvm::json::Object{{"num_warps", warps}, {"num_stages", 1}}, 2,

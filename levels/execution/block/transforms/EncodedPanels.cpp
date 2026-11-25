@@ -1027,7 +1027,10 @@ struct Panel {
           if (!lhs)
             lhs = t.read(a, t.address(a, {row, member}, {0, 1}),
                          pairMask(validRow, validK));
-          Value rhsMask = pairMask(validK, validCol);
+          Value rhsMask =
+              (!compactPackCols || !uniformGroup || !exactRhsBounds)
+                  ? pairMask(validK, validCol)
+                  : Value();
           Value qwRaw;
           if (compactPackCols) {
             Value qwCompact =
@@ -1063,6 +1066,7 @@ struct Panel {
                     : b.create<arith::DivUIOp>(loc, it,
                                                t.integer(panelsPerGroup))
                           .getResult();
+            Value zCode1D;
             if (spec->hasZeroView) {
               Value qz = p.dot.getOperand(3);
               Value qzCompact1D = readPackedI32(
@@ -1072,26 +1076,63 @@ struct Panel {
                   expandAxis(qzCompact1D, {packCols, spec->packFactor}, 1),
                   {p.tile[1]});
               Type colI32Ty = t.shaped({p.tile[1]}, b.getI32Type());
-              Value zCode1D = b.create<arith::AndIOp>(
+              zCode1D = b.create<arith::AndIOp>(
                   loc, b.create<arith::ShRUIOp>(loc, qz1D, colShift1D),
                   lit(codeMaskVal, colI32Ty));
-              wCode = b.create<arith::SubIOp>(
-                  loc, wCode, t.like(zCode1D, rhsI32Ty, 1));
             }
-            if (spec->zeroBias != 0)
-              wCode = b.create<arith::SubIOp>(loc, wCode,
-                                              lit(spec->zeroBias, rhsI32Ty));
             Value scPtr = t.address(sc, {grpScalar, col}, {-1, 0});
             Value sc1D = exactRhsBounds ? t.read(sc, scPtr)
                                         : t.read(sc, scPtr, validCol);
-            Value wF32 = decodeQuantCode(wCode, *spec);
-            if (!t.elem(sc1D.getType()).isF32())
-              sc1D = castTo("arith.extf", sc1D, b.getF32Type());
-            Value rhsF32 = b.create<arith::MulFOp>(
-                loc, wF32, t.like(sc1D, wF32.getType(), 1));
-            rhsCast = lhsElem.isF32()
-                          ? rhsF32
-                          : castTo("arith.truncf", rhsF32, lhsElem);
+            // For unsigned integer codes of <=10 bits with FP16 scales and LHS,
+            // IEEE-754 half-precision bit pattern (0x6400 | code) equals exact
+            // 1024.0 + code; subtracting (0x6400 | zero) is exact by Sterbenz's
+            // lemma and avoids 32-bit int->f32->f16 conversion traffic.
+            bool exactHalfBiasDecode =
+                lhsElem.isF16() && t.elem(sc1D.getType()).isF16() &&
+                spec->valueCode == kir::QuantValueCode::UnsignedAffine &&
+                spec->packBits > 0 && spec->packBits <= 10 &&
+                spec->zeroBias >= 0 && spec->zeroBias <= 1023 &&
+                !(spec->hasZeroView && spec->zeroBias != 0);
+            if (exactHalfBiasDecode) {
+              constexpr int32_t kFp16Exp1024 = 0x6400;
+              auto biasToF16 = [&](Value uCode) -> Value {
+                Value biased = b.create<arith::OrIOp>(
+                    loc, uCode, lit(kFp16Exp1024, uCode.getType()));
+                Value i16 = castTo("arith.trunci", biased, b.getI16Type());
+                auto f16Ty =
+                    cast<RankedTensorType>(i16.getType()).clone(b.getF16Type());
+                return b.create<arith::BitcastOp>(loc, f16Ty, i16);
+              };
+              Value wF16 = biasToF16(wCode);
+              Value zF16;
+              if (spec->hasZeroView) {
+                zF16 = t.like(biasToF16(zCode1D), rhsTy, 1);
+              } else {
+                Value zConst = b.create<arith::ConstantOp>(
+                    loc, b.getF16Type(),
+                    b.getFloatAttr(b.getF16Type(),
+                                   double(1024 + spec->zeroBias)));
+                zF16 = t.like(zConst, rhsTy);
+              }
+              Value diffF16 = b.create<arith::SubFOp>(loc, wF16, zF16);
+              rhsCast = b.create<arith::MulFOp>(
+                  loc, diffF16, t.like(sc1D, rhsTy, 1));
+            } else {
+              if (spec->hasZeroView)
+                wCode = b.create<arith::SubIOp>(
+                    loc, wCode, t.like(zCode1D, rhsI32Ty, 1));
+              if (spec->zeroBias != 0)
+                wCode = b.create<arith::SubIOp>(loc, wCode,
+                                                lit(spec->zeroBias, rhsI32Ty));
+              Value wF32 = decodeQuantCode(wCode, *spec);
+              if (!t.elem(sc1D.getType()).isF32())
+                sc1D = castTo("arith.extf", sc1D, b.getF32Type());
+              Value rhsF32 = b.create<arith::MulFOp>(
+                  loc, wF32, t.like(sc1D, wF32.getType(), 1));
+              rhsCast = lhsElem.isF32()
+                            ? rhsF32
+                            : castTo("arith.truncf", rhsF32, lhsElem);
+            }
           } else {
             Value grp = b.create<arith::DivUIOp>(
                 loc, member, lit(spec->blockElements, member.getType()));

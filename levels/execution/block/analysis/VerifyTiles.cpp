@@ -142,7 +142,8 @@ verifyTileProgram(func::FuncOp fn, const TargetProfile &profile,
         auto coord = shape(type);
         auto axis = axes[i];
         if ((*native)[i].getAsInteger() != strides[i] ||
-            !getElementTypeOrSelf(type).isInteger(64) ||
+            (!getElementTypeOrSelf(type).isInteger(64) &&
+             !(bits == 32 && getElementTypeOrSelf(type).isInteger(32))) ||
             (coord.empty()
                  ? axis != -1
                  : (coord.size() != 1 || axis < 0 ||
@@ -176,7 +177,8 @@ verifyTileProgram(func::FuncOp fn, const TargetProfile &profile,
                WalkResult::interrupt();
     }
     if (name == "tile_read" || name == "tile_write" ||
-        name == "tile_atomic_add") {
+        name == "tile_atomic_add" || name == "tile_atomic_fetch_add" ||
+        name == "tile_atomic_xchg") {
       auto offset = op->getOperand(1);
       auto *addr = offset.getDefiningOp();
       bool load = name == "tile_read";
@@ -198,11 +200,12 @@ verifyTileProgram(func::FuncOp fn, const TargetProfile &profile,
               cast<MemRefType>(op->getOperand(0).getType()).getElementType())
         return op->emitError("tile access does not match its verified view"),
                WalkResult::interrupt();
-      if (name == "tile_atomic_add") {
+      if (name == "tile_atomic_add" || name == "tile_atomic_fetch_add" ||
+          name == "tile_atomic_xchg") {
         Type elemTy = getElementTypeOrSelf(val.getType());
         auto impl = op->getAttrOfType<StringAttr>("ci.implementation");
         if ((!elemTy.isF32() && !elemTy.isInteger(32)) || !impl)
-          return op->emitError("tile_atomic_add requires contracted f32/i32 update"),
+          return op->emitError("tile atomic op requires contracted f32/i32 update"),
                  WalkResult::interrupt();
         if (auto err = profile.checkImplementation(impl.getValue()))
           return op->emitError() << llvm::toString(std::move(err)),
@@ -210,6 +213,17 @@ verifyTileProgram(func::FuncOp fn, const TargetProfile &profile,
         if (failed(compilerinfra::verifyContractOp(op, profile)))
           return WalkResult::interrupt();
       }
+    }
+    if (name == "tile_gather" || name == "tile_histogram") {
+      auto impl = op->getAttrOfType<StringAttr>("ci.implementation");
+      if (!impl)
+        return op->emitError("tile collective requires bound implementation contract"),
+               WalkResult::interrupt();
+      if (auto err = profile.checkImplementation(impl.getValue()))
+        return op->emitError() << llvm::toString(std::move(err)),
+               WalkResult::interrupt();
+      if (failed(compilerinfra::verifyContractOp(op, profile)))
+        return WalkResult::interrupt();
     }
     if (auto cmp = dyn_cast<arith::CmpIOp>(op);
         cmp && cmp.getPredicate() != arith::CmpIPredicate::eq &&

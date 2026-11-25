@@ -77,8 +77,10 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
         {64, 64, 32, R"({"num_warps":4,"num_stages":3})"},
         {64, 128, 64, R"({"num_warps":8,"num_stages":3})"},
         {32, 128, 128, R"({"num_warps":4,"num_stages":3})", "quant_contract", 2},
+        {64, 64, 64, R"({"num_warps":4,"num_stages":3})", "quant_contract", 2},
         {64, 64, 128, R"({"num_warps":4,"num_stages":3})", "quant_contract", 2},
         {64, 128, 128, R"({"num_warps":8,"num_stages":3})", "quant_contract", 2},
+        {128, 64, 128, R"({"num_warps":4,"num_stages":3})", "quant_contract", 2},
         {128, 128, 64, R"({"num_warps":8,"num_stages":3})", "quant_contract", 2},
         {64, 64, 128, R"({"num_warps":4,"num_stages":3})", "scaled_contract"},
         {64, 128, 128, R"({"num_warps":8,"num_stages":3})", "scaled_contract"},
@@ -96,8 +98,10 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
         {64, 64, 64, R"({"num_warps":4,"num_stages":3})"},
         {64, 128, 64, R"({"num_warps":8,"num_stages":2})"},
         {32, 128, 128, R"({"num_warps":4,"num_stages":3})", "quant_contract", 2},
+        {64, 64, 64, R"({"num_warps":4,"num_stages":3})", "quant_contract", 2},
         {64, 64, 128, R"({"num_warps":4,"num_stages":3})", "quant_contract", 2},
         {64, 128, 128, R"({"num_warps":8,"num_stages":3})", "quant_contract", 2},
+        {128, 64, 128, R"({"num_warps":4,"num_stages":3})", "quant_contract", 2},
         {128, 128, 64, R"({"num_warps":8,"num_stages":3})", "quant_contract", 2},
         {128, 128, 64, R"({"num_warps":8,"num_stages":3})", "contract", 2},
         {64, 64, 128, R"({"num_warps":4,"num_stages":3})", "scaled_contract"},
@@ -150,7 +154,7 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
                   *arch == 90
                       ? options.getInteger("registers").value_or(0) * 7 / 16
                       : options.getInteger("registers").value_or(0) * 3 / 8,
-                  *arch == 90 ? 64 : 0, *arch == 90 ? 2 : 1})))
+                  *arch == 90 ? 64 : 0, *arch == 90 ? 2 : 1, 16, true})))
     return err;
   std::string cal = options.getString("calibration")
                         .value_or(*arch == 90 ? "sm90" : "sm120")

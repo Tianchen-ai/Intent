@@ -242,12 +242,15 @@ TerminalPrinter cutilePrinter() {
   localExpr("ct_src.tile_address", [](const LocalOpView &v) {
     auto axes = v.attrOfType<DenseI64ArrayAttr>("projection");
     auto type = dyn_cast<RankedTensorType>(v.resultType(0));
-    StringRef idxTy =
-        v.attrOfType<IntegerAttr>("index_bits").getInt() == 32 ? "ct.int32"
-                                                               : "ct.int64";
+    bool narrow = v.attrOfType<IntegerAttr>("index_bits").getInt() == 32;
+    StringRef idxTy = narrow ? "ct.int32" : "ct.int64";
     SmallVector<std::string> coords;
     for (auto [i, a] : llvm::enumerate(axes.asArrayRef())) {
-      std::string n = ("ct.astype(" + v.operand(i + 1) + "," + idxTy + ")").str();
+      bool alreadyI32 =
+          narrow && getElementTypeOrSelf(v.operandType(i + 1)).isInteger(32);
+      std::string n =
+          alreadyI32 ? v.operand(i + 1).str()
+                     : ("ct.astype(" + v.operand(i + 1) + "," + idxTy + ")").str();
       if (type && type.getRank() == 2 && a >= 0)
         n = expand(n, 1 - a);
       coords.push_back(n);
@@ -284,6 +287,37 @@ TerminalPrinter cutilePrinter() {
             v.operand(2) + ",memory_order=ct.MemoryOrder.RELAXED)")
         .str();
   });
+  auto atomicFmt = [](const LocalOpView &v, StringRef fnName) -> std::string {
+    auto ord = v.attrOfType<StringAttr>("order").getValue();
+    auto sc = v.attrOfType<StringAttr>("scope").getValue();
+    std::string mo = ord == "acq_rel" ? "ct.MemoryOrder.ACQ_REL"
+                                      : "ct.MemoryOrder.RELAXED";
+    std::string ms = sc == "block" ? "ct.MemoryScope.BLOCK"
+                                   : "ct.MemoryScope.DEVICE";
+    if (v.numOperands() == 4) {
+      int rank = cast<MemRefType>(v.operandType(0)).getRank();
+      SmallVector<std::string, 4> masked;
+      for (int i = 0; i < rank; ++i)
+        masked.push_back("ct.where(" + v.operand(3).str() + "," +
+                         v.operand(1).str() + "[" + std::to_string(i) +
+                         "],-1)");
+      return (fnName + "(" + v.operand(0) + ",(" + llvm::join(masked, ",") +
+              ",)," + v.operand(2) + ",check_bounds=True,memory_order=" + mo +
+              ",memory_scope=" + ms + ")")
+          .str();
+    }
+    return (fnName + "(" + v.operand(0) + "," + v.operand(1) + "," +
+            v.operand(2) + ",memory_order=" + mo + ",memory_scope=" + ms + ")")
+        .str();
+  };
+  localExpr("ct_src.tile_atomic_fetch_add",
+            [atomicFmt](const LocalOpView &v) {
+              return atomicFmt(v, "ct.atomic_add");
+            });
+  localExpr("ct_src.tile_atomic_xchg",
+            [atomicFmt](const LocalOpView &v) {
+              return atomicFmt(v, "ct.atomic_xchg");
+            });
   localExpr("ct_src.tile_dot", [](const LocalOpView &v) {
     auto type = v.resultType(0);
     auto rhs = v.attrOfType<BoolAttr>("transpose_rhs").getValue()

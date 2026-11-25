@@ -88,15 +88,18 @@ struct TritonPureContractModel
     : public compilerinfra::ContractOpInterface::ExternalModel<
           TritonPureContractModel<ConcreteOp>, ConcreteOp> {};
 
-struct TritonAtomicAddContractModel
+template <typename ConcreteOp, bool RequireReassoc>
+struct TritonAtomicContractModel
     : public compilerinfra::ContractOpInterface::ExternalModel<
-          TritonAtomicAddContractModel, intentdsl::itsrc::TileAtomicAdd> {
+          TritonAtomicContractModel<ConcreteOp, RequireReassoc>, ConcreteOp> {
   Type getAccumulatorType(Operation *op) const {
     return op->getNumOperands() >= 3
                ? getElementTypeOrSelf(op->getOperand(2).getType())
                : Type{};
   }
   arith::FastMathFlags getRequiredFastMath(Operation *op) const {
+    if constexpr (!RequireReassoc)
+      return arith::FastMathFlags::none;
     Type acc = getAccumulatorType(op);
     return (acc && isa<FloatType>(acc)) ? arith::FastMathFlags::reassoc
                                         : arith::FastMathFlags::none;
@@ -473,7 +476,14 @@ void intentdsl::itsrc::ItsrcDialect::initialize() {
   MLIRContext *ctx = getContext();
   TileDot::attachInterface<TritonDotContractModel>(*ctx);
   ScaledMMA::attachInterface<TritonScaledMMAContractModel>(*ctx);
-  TileAtomicAdd::attachInterface<TritonAtomicAddContractModel>(*ctx);
+  TileAtomicAdd::attachInterface<
+      TritonAtomicContractModel<TileAtomicAdd, true>>(*ctx);
+  TileAtomicFetchAdd::attachInterface<
+      TritonAtomicContractModel<TileAtomicFetchAdd, true>>(*ctx);
+  TileAtomicXchg::attachInterface<
+      TritonAtomicContractModel<TileAtomicXchg, false>>(*ctx);
+  TileGather::attachInterface<TritonPureContractModel<TileGather>>(*ctx);
+  TileHistogram::attachInterface<TritonPureContractModel<TileHistogram>>(*ctx);
   TileReduce::attachInterface<TritonPureContractModel<TileReduce>>(*ctx);
   RowReduce::attachInterface<TritonPureContractModel<RowReduce>>(*ctx);
   BinCount::attachInterface<TritonPureContractModel<BinCount>>(*ctx);

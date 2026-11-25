@@ -35,15 +35,18 @@ struct CutilePureContractModel
     : public compilerinfra::ContractOpInterface::ExternalModel<
           CutilePureContractModel<ConcreteOp>, ConcreteOp> {};
 
-struct CutileAtomicAddContractModel
+template <typename ConcreteOp, bool RequireReassoc>
+struct CutileAtomicContractModel
     : public compilerinfra::ContractOpInterface::ExternalModel<
-          CutileAtomicAddContractModel, intentdsl::cutile::TileAtomicAdd> {
+          CutileAtomicContractModel<ConcreteOp, RequireReassoc>, ConcreteOp> {
   Type getAccumulatorType(Operation *op) const {
     return op->getNumOperands() >= 3
                ? getElementTypeOrSelf(op->getOperand(2).getType())
                : Type{};
   }
   arith::FastMathFlags getRequiredFastMath(Operation *op) const {
+    if constexpr (!RequireReassoc)
+      return arith::FastMathFlags::none;
     Type acc = getAccumulatorType(op);
     return (acc && isa<FloatType>(acc)) ? arith::FastMathFlags::reassoc
                                         : arith::FastMathFlags::none;
@@ -385,7 +388,12 @@ void intentdsl::cutile::TileSource::initialize() {
   TileDot::attachInterface<CutileMatrixContractModel<TileDot>>(*ctx);
   NativeScaleMMA::attachInterface<CutileMatrixContractModel<NativeScaleMMA>>(
       *ctx);
-  TileAtomicAdd::attachInterface<CutileAtomicAddContractModel>(*ctx);
+  TileAtomicAdd::attachInterface<
+      CutileAtomicContractModel<TileAtomicAdd, true>>(*ctx);
+  TileAtomicFetchAdd::attachInterface<
+      CutileAtomicContractModel<TileAtomicFetchAdd, true>>(*ctx);
+  TileAtomicXchg::attachInterface<
+      CutileAtomicContractModel<TileAtomicXchg, false>>(*ctx);
   TileReduce::attachInterface<CutilePureContractModel<TileReduce>>(*ctx);
   RowReduce::attachInterface<CutilePureContractModel<RowReduce>>(*ctx);
   Reduce::attachInterface<CutilePureContractModel<Reduce>>(*ctx);

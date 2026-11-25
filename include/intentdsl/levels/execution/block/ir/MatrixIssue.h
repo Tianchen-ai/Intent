@@ -14,6 +14,7 @@ matrixIssues(mlir::Operation *domain,
   estimate.scope = "one panel";
   estimate.bottleneck = "matrix instructions";
   bool records = false;
+  bool groupedRhs = false;
   bool quadFlat64 = false;
   double blockElems = 256.0;
   for (mlir::Operation &o : domain->getRegion(0).front()) {
@@ -21,19 +22,24 @@ matrixIssues(mlir::Operation *domain,
     if (kind == "q4k_dot") {
       records = true;
     } else if (kind == "quant_contract") {
-      if (const auto *spec = intentdsl::kir::quantFormatSpec(o);
-          spec &&
-          spec->roleLayout == intentdsl::kir::QuantRoleLayout::RecordGemv) {
-        records = true;
-        blockElems = spec->blockElements;
-        quadFlat64 = spec->blockElements == 256 && spec->numBitPlanes == 2 &&
-                     spec->subScaleOffset >= 0 && spec->subBlockElements == 16 &&
-                     spec->planes[0].halfStride == 64 &&
-                     spec->planes[0].quadByteStep == 32 &&
-                     spec->planes[0].quadShiftMode == 0 &&
-                     spec->planes[1].halfStride == 32 &&
-                     spec->planes[1].quadByteStep == 0 &&
-                     spec->planes[1].quadShiftMode == 1;
+      if (const auto *spec = intentdsl::kir::quantFormatSpec(o); spec) {
+        if (spec->roleLayout == intentdsl::kir::QuantRoleLayout::RecordGemv) {
+          records = true;
+          blockElems = spec->blockElements;
+          quadFlat64 = spec->blockElements == 256 && spec->numBitPlanes == 2 &&
+                       spec->subScaleOffset >= 0 &&
+                       spec->subBlockElements == 16 &&
+                       spec->planes[0].halfStride == 64 &&
+                       spec->planes[0].quadByteStep == 32 &&
+                       spec->planes[0].quadShiftMode == 0 &&
+                       spec->planes[1].halfStride == 32 &&
+                       spec->planes[1].quadByteStep == 0 &&
+                       spec->planes[1].quadShiftMode == 1;
+        } else if (spec->roleLayout ==
+                   intentdsl::kir::QuantRoleLayout::GroupedWeightRhs) {
+          groupedRhs = true;
+          blockElems = spec->blockElements;
+        }
       }
     }
   }
@@ -62,6 +68,29 @@ matrixIssues(mlir::Operation *domain,
         std::ceil(double(t[0]) / m) * std::ceil(double(t[1]) / n) *
             std::ceil(double(t[2]) / k),
         "count"};
+    if (groupedRhs) {
+      // Grouped packed-weight contractions decode (BN * BK) RHS lanes per
+      // panel in registers; tiles that reuse each decoded weight panel across
+      // more M-rows reduce total dequantization traffic and register pressure.
+      double rhsElems = double(t[1]) * double(t[2]);
+      double pressure = std::max(1.0, rhsElems / 8192.0);
+      double groupAlign =
+          (t[2] > 0 && blockElems >= double(t[2]))
+              ? (blockElems / double(t[2]))
+              : 1.5;
+      estimate.terms["grouped_rhs_decode_lanes"] = {rhsElems, "count"};
+      if (auto sbw = intentdsl::quantity(ctx, "read_1_shared_bw", "B/ns")) {
+        auto f = ctx.target.services.get<intentdsl::CallFacts>();
+        double smBw = *sbw / std::max<int64_t>(1, f ? f->participants : 1);
+        estimate.timeNs =
+            rhsElems * 4.0 * pressure * pressure * groupAlign / smBw;
+      } else if (auto rate = intentdsl::quantity(ctx, "compute", "lane/ns")) {
+        auto f = ctx.target.services.get<intentdsl::CallFacts>();
+        double sms = std::max<double>(1.0, f ? f->participants : 1);
+        estimate.timeNs = rhsElems * 12.0 * pressure * pressure * groupAlign *
+                          sms / *rate;
+      }
+    }
   }
   return estimate;
 }

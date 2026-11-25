@@ -34,23 +34,31 @@ void matrixCost(Unit &u) {
                         std::ceil(shape->n / tn);
           double panels = records ? std::ceil(shape->k / recordElems)
                                   : std::ceil(shape->k / tk);
+          bool groupedRhs =
+              qSpec && qSpec->roleLayout ==
+                           intentdsl::kir::QuantRoleLayout::GroupedWeightRhs;
+          double groupedRhsB =
+              groupedRhs ? (qSpec->packBits / 8.0 +
+                            2.5 / std::max(1, qSpec->blockElements))
+                         : 0.0;
           double panelBytes =
               records ? (tm * recordBytes + recordElems * 4.0)
               : (qSpec && qSpec->roleLayout ==
                               intentdsl::kir::QuantRoleLayout::BlockScaledPair)
                   ? ((tm + tn) * tk * (qSpec->packBits / 8.0 +
                                        1.0 / std::max(1, qSpec->blockElements)))
-              : (qSpec && qSpec->roleLayout ==
-                              intentdsl::kir::QuantRoleLayout::GroupedWeightRhs)
-                  ? (tm * tk * 2.0 +
-                     tn * tk * (qSpec->packBits / 8.0 +
-                                2.5 / std::max(1, qSpec->blockElements)))
+              : groupedRhs
+                  ? (tm * tk * 2.0 + tn * tk * groupedRhsB)
                   : ((tm + tn) * tk * 2.0);
           double mBlocks = shape->batches * std::ceil(shape->m / tm);
           double read =
               records ? (panels * (shape->batches * shape->m * recordBytes +
                                    mBlocks * recordElems * 4.0))
-                      : (jobs * panels * panelBytes);
+              : groupedRhs
+                  ? (shape->batches *
+                     (shape->m * shape->k * 2.0 +
+                      shape->n * shape->k * groupedRhsB * mBlocks))
+                  : (jobs * panels * panelBytes);
           double waves =
               std::ceil(jobs / std::max<int64_t>(1, f->participants));
           CostEstimate e;
@@ -60,6 +68,7 @@ void matrixCost(Unit &u) {
           e.terms["output_tiles"] = {jobs, "count"};
           e.terms["matrix_panel_waves"] = {waves * panels, "count"};
           auto bw = intentdsl::quantity(ctx, "read_1", "B/ns"),
+               sbw = intentdsl::quantity(ctx, "read_1_shared_bw", "B/ns"),
                startup = intentdsl::quantity(ctx, "launch", "ns");
           // A panel has two issue operations even when widening K leaves the
           // number of operand bytes unchanged; record dots amortize activation
@@ -72,10 +81,22 @@ void matrixCost(Unit &u) {
                              std::max<int64_t>(1, f->participants) +
                          recordElems * 4.0)
                       : (panelBytes * std::max<int64_t>(1, f->participants));
-          if (bw && startup)
-            e.timeNs = *startup + read / *bw +
-                       waves * panels * waveBytes / *bw +
-                       (sync ? issues * *sync : 0);
+          if (bw && startup) {
+            if (groupedRhs) {
+              double l2Bw = sbw.value_or(*bw * 4.0);
+              double l2Traffic = jobs * panels * panelBytes;
+              double activeSms = std::min<double>(
+                  jobs, std::max<int64_t>(1, f->participants));
+              double smUnderutil =
+                  std::max<double>(1, f->participants) / std::max(1.0, activeSms);
+              e.timeNs = *startup + read / *bw + l2Traffic / l2Bw +
+                         (sync ? issues * *sync * smUnderutil : 0);
+            } else {
+              e.timeNs = *startup + read / *bw +
+                         waves * panels * waveBytes / *bw +
+                         (sync ? issues * *sync : 0);
+            }
+          }
           const auto &est =
               ctx.target.services.get<intentdsl::block::MatrixTarget>()
                   ->estimate;

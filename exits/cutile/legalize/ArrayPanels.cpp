@@ -315,5 +315,9 @@ bool nativeMatrixWrite(Tiles &t, intentdsl::block::MatrixAccess &p, Value y,
   t.op("rect_write", args);
   return true;
 }
-intentdsl::block::OwnerAccess nativeOwnerViews() { return {rectangle, panel}; }
+intentdsl::block::OwnerAccess nativeOwnerViews() {
+  return {rectangle, panel, /*scalarBroadcastRead=*/false,
+          /*nativeTileGather=*/false, /*nativeTileHistogram=*/false,
+          /*blockAtomicMemoryBins=*/true};
+}
 } // namespace CI_UNIT_NAMESPACE
