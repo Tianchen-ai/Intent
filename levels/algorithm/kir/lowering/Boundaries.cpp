@@ -422,6 +422,14 @@ struct Canonicalize : PassWrapper<Canonicalize, OperationPass<ModuleOp>> {
         }
       }
       fn->setAttr("denormal-fp-math", StringAttr::get(ctx, targetDenorm));
+      if (policy.denormalFpMath != "ieee")
+        fn.walk([&](Operation *op) {
+          if ((op->getName().getStringRef() == "kir.lane_sum" ||
+               op->getName().getStringRef() == "kir.sqrt" ||
+               op->getName().getStringRef() == "kir.div") &&
+              op->getAttrOfType<StringAttr>("denormal-fp-math") == "ieee")
+            op->setAttr("denormal-fp-math", StringAttr::get(ctx, policy.denormalFpMath));
+        });
       if (policy.defaultFlags != arith::FastMathFlags::none) {
         fn.walk([&](Operation *op) {
           if (!intentdsl::kir::isFloatingMathOp(op))

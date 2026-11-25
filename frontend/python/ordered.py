@@ -25,6 +25,7 @@ class Ordered:
         self.fn = fn
         self.ns = namespace(fn)
         self.default_flags, self.denormal_mode = kernel_math_policy(fn)
+        self.kernel_denormal_mode = self.denormal_mode
         self.args = signature(fn)
         self.slots = {a["name"]: a for a in self.args}
         self.env = {
@@ -96,6 +97,9 @@ class Ordered:
             items.append(f"axis={axis}:i64")
         if fastmath:
             items.append(f"fastmath={fastmath}")
+        if op == "lane_sum":
+            # Per-expression FTZ on exp/div does not license the dot reduction.
+            items.append(f'"denormal-fp-math"="{self.kernel_denormal_mode}"')
         attrs = f' {{{", ".join(items)}}}' if items else ""
         text = (
             f'"kir.{op}"('
