@@ -13,7 +13,7 @@ static int64_t matrixPrivateBytes(int64_t rows, int64_t columns, int64_t depth,
   return 256 + 4 * (rows * depth + 2 * depth * columns + 2 * rows * columns) +
          2 * 292 +
          (computation == "window_contract" ? 4 * depth * (columns + 3) : 0) +
-         (computation == "quant_contract" ? 32768 : 0);
+         (computation == "quant_contract" ? 98304 : 0);
 }
 llvm::Expected<compilerinfra::TargetProfile>
 capabilities(const llvm::json::Object &opts) {
@@ -35,10 +35,11 @@ capabilities(const llvm::json::Object &opts) {
                      {16, 64, 128, "{}"},
                      {32, 64, 128, "{}"},
                      {64, 64, 128, "{}"},
+                     {128, 64, 128, "{}", "quant_contract"},
                      {16, 64, 256, "{}", "contract"},
                      {32, 64, 256, "{}", "contract"},
                      {64, 64, 256, "{}", "contract"},
-                     {128, 64, 256, "{}", "contract"},
+                     {128, 64, 256, "{}"},
                      {64, 64, 64, "{}", "window_contract"},
                      {32, 64, 64, "{}", "window_contract"}};
   auto wram=opts.getInteger("wram_bytes");

@@ -260,6 +260,76 @@ def RowExp2Op : BangcOp<"row_exp2",
                        I64:$active, I64:$lanes);
 }
 
+def RowLogOp : BangcOp<"row_log",
+                       [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments = (ins AnyMemRef:$out, AnyMemRef:$scratch, AnyMemRef:$input,
+                       I64:$active, I64:$lanes);
+}
+
+def VecCmpMaskOp : BangcOp<"vec_cmpf_mask",
+                           [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments = (ins AnyMemRef:$mask_out, AnyMemRef:$scratch, AnyMemRef:$lhs,
+                       AnyType:$rhs, I64:$lanes, I32Attr:$pred_code,
+                       BoolAttr:$rhs_is_vec);
+}
+
+def VecBitSelectOp : BangcOp<"vec_bitselect",
+                             [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments = (ins AnyMemRef:$dst, AnyMemRef:$scratch, AnyMemRef:$mask,
+                       AnyType:$true_val, AnyType:$false_val, I64:$lanes,
+                       StrAttr:$mode);
+}
+
+def QuantInitLutOp : BangcOp<"quant_init_lut",
+                             [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments = (ins AnyMemRef:$lut, I32:$value_code, I32:$pack_bits,
+                       I32:$zero_bias, I32:$s0, I32:$s1);
+}
+
+def QuantInitRecordLutOp : BangcOp<"quant_init_record_lut",
+                                   [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments = (ins AnyMemRef:$lut, I32:$sunit0, I32:$bits0,
+                       I32:$zero_bias, I32:$sunit1, I32:$bits1, I32:$doff1);
+}
+
+def QuantE8m0GuardOp : BangcOp<"quant_e8m0_ok",
+                               [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments = (ins AnyMemRef:$sa, I64:$na, AnyMemRef:$sb, I64:$nb,
+                       AnyMemRef:$scratch, I32:$min_exp, I32:$max_exp);
+  let results = (outs I1:$ok);
+}
+
+def QuantDecodeBlockScaledOp
+    : BangcOp<"quant_decode_block_scaled",
+              [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments = (ins AnyMemRef:$dst, AnyMemRef:$raw, AnyMemRef:$scales,
+                       AnyMemRef:$lut, AnyMemRef:$idx_scratch,
+                       AnyMemRef:$scale_scratch, AnyMemRef:$tr_scratch,
+                       I64:$active_rows, I64:$padded_rows,
+                       I64:$groups_per_panel, I64:$block_elems,
+                       I32:$scale_bias, I32:$col_major);
+}
+
+def QuantDecodeGroupedRhsOp
+    : BangcOp<"quant_decode_grouped_rhs",
+              [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments = (ins AnyMemRef:$trans_f16, AnyMemRef:$qw_bytes,
+                       AnyMemRef:$sc_f16, AnyMemRef:$qz_words, AnyMemRef:$lut,
+                       AnyMemRef:$idx_scratch, AnyMemRef:$work_a,
+                       AnyMemRef:$work_b, I64:$nk, I64:$nc, I64:$bk, I64:$bn,
+                       I64:$block_elems, I64:$kk_mod_block, I32:$has_zero,
+                       DenseI32ArrayAttr:$lane_shifts);
+}
+
+def QuantRecordGemvOp
+    : BangcOp<"quant_record_gemv",
+              [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments = (ins AnyMemRef:$acc, AnyMemRef:$rec_panel, AnyMemRef:$rec_t,
+                       AnyMemRef:$q_act_f32, AnyMemRef:$lut, AnyMemRef:$idx16,
+                       AnyMemRef:$w16, AnyMemRef:$h16, AnyMemRef:$wf32,
+                       F32:$ds, I64:$nr, DenseI32ArrayAttr:$plane_params);
+}
+
 def Reduce32SumOp : BangcOp<"reduce32_sum",
                             [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let arguments = (ins AnyMemRef:$buffer);

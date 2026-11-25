@@ -5,7 +5,7 @@ __mlu_func__ unsigned char ordinary_panel(const unsigned short *v, int n,
     int count = n - i < 4096 ? n - i : 4096;
     __bang_band_scalar(mag, v + i, (unsigned short)0x7fff, count);
     __bang_sub_scalar(flag, mag, (unsigned short)((127 - 48) << 7), count);
-    __bang_ge_scalar(flag, flag, (unsigned short)(95 << 7), count);
+    __bang_ge_scalar(flag, flag, (unsigned short)(91 << 7), count);
     __bang_mul(flag, mag, flag, count);
     if (__bang_count(flag, count) != 0)
       return 0;
@@ -122,9 +122,200 @@ __mlu_func__ unsigned add_binary32_ieee(unsigned a, unsigned b) {
          (m < (1u << 23) ? m : ((unsigned)e << 23) | (m & 0x7fffffu));
 }
 
+__mlu_func__ unsigned scale_down_64_ieee(unsigned bits) {
+  unsigned sign = bits & 0x80000000u;
+  unsigned mag = bits & 0x7fffffffu;
+  if (!mag)
+    return sign;
+  int e = (int)(mag >> 23);
+  if (e == 255)
+    return bits;
+  unsigned m = (mag & 0x7fffffu) | (e ? (1u << 23) : 0u);
+  int new_e = (e ? e : 1) - 64;
+  if (new_e >= 1)
+    return sign | ((unsigned)new_e << 23) | (m & 0x7fffffu);
+  int shift = 1 - new_e;
+  if (shift > 25)
+    return sign;
+  unsigned q = m >> shift;
+  unsigned rem = m & ((1u << shift) - 1u);
+  unsigned half_way = 1u << (shift - 1);
+  return sign | (q + (rem > half_way || (rem == half_way && (q & 1u))));
+}
+
 __mlu_func__ void bf16_ieee_dot_panel(float *acc, const unsigned short *lhs,
                                       const unsigned short *rhs_t, int nr,
                                       int nc, int nk, int bk, int bn) {
+  int bm_pad = nr <= 16 ? 16 : (nr <= 32 ? 32 : 64);
+  if (nr > 0 && nr <= 64 && nc > 0 && nc <= bn && nk > 0 && nk <= bk &&
+      (bn == 64 || bn == 128) && (bk == 64 || bk == 128) &&
+      bm_pad * bk <= 8192) {
+    __nram__ unsigned short _ieee_u16_a[8192] __attribute__((aligned(128)));
+    __nram__ unsigned short _ieee_u16_b[8192] __attribute__((aligned(128)));
+    __nram__ int _ieee_sc[8192] __attribute__((aligned(128)));
+    __nram__ float _ieee_part[8192] __attribute__((aligned(128)));
+    __wram__ bfloat16_t _ieee_wram_flt[8192] __attribute__((aligned(128)));
+
+    int n_lhs = bm_pad * bk;
+    const unsigned short *lhs_src = lhs;
+    if (nr < bm_pad || nk < bk) {
+      unsigned short *pad_lhs = (unsigned short *)_ieee_sc;
+      __bang_write_value(pad_lhs, n_lhs, (unsigned short)0);
+      __sync_compute();
+      for (int i = 0; i < nr; ++i)
+        for (int k = 0; k < nk; ++k)
+          pad_lhs[i * bk + k] = lhs[i * bk + k];
+      __sync();
+      lhs_src = pad_lhs;
+    }
+
+    __bang_band_scalar(_ieee_u16_a, lhs_src, (unsigned short)0x7fff, n_lhs);
+    __bang_ge_scalar(_ieee_u16_b, _ieee_u16_a,
+                     (unsigned short)(((127 + 12) << 7) + 1), n_lhs);
+    bool lhs_ok = (__bang_count(_ieee_u16_b, n_lhs) == 0);
+    bool rhs_all_ok = lhs_ok;
+    for (int fOff = 0; rhs_all_ok && fOff < nc; fOff += 64) {
+      int cur_nc = (nc - fOff < 64) ? (nc - fOff) : 64;
+      const unsigned short *rhs_chunk = rhs_t + fOff * bk;
+      if (cur_nc == 64 && nk == bk) {
+        if (!ordinary_panel(rhs_chunk, 64 * bk, _ieee_u16_a, _ieee_u16_b))
+          rhs_all_ok = false;
+      } else {
+        unsigned short *pad_rhs = ((unsigned short *)_ieee_sc) + 8192;
+        __bang_write_value(pad_rhs, 64 * bk, (unsigned short)0);
+        __sync_compute();
+        for (int j = 0; j < cur_nc; ++j)
+          for (int k = 0; k < nk; ++k)
+            pad_rhs[j * bk + k] = rhs_chunk[j * bk + k];
+        __sync();
+        if (!ordinary_panel(pad_rhs, 64 * bk, _ieee_u16_a, _ieee_u16_b))
+          rhs_all_ok = false;
+      }
+    }
+
+    if (rhs_all_ok) {
+      __bang_band_scalar(_ieee_u16_a, lhs_src, (unsigned short)0x7fff, n_lhs);
+      __bang_lt_scalar(_ieee_u16_b, _ieee_u16_a, (unsigned short)0x0080, n_lhs);
+      __bang_mul(_ieee_u16_b, _ieee_u16_a, _ieee_u16_b, n_lhs);
+      if (__bang_count(_ieee_u16_b, n_lhs) == 0) {
+        __bang_int162int32((int *)_ieee_part, (const short *)lhs_src, n_lhs, 0,
+                           16);
+        __bang_mul_scalar(_ieee_part, _ieee_part, 18446744073709551616.0f,
+                          n_lhs);
+      } else {
+        __sync_compute();
+        union {
+          unsigned u;
+          float f;
+        } k2m69;
+        k2m69.u = 58u << 23; // exact 2^-69 = 2^(-133 + 64)
+        for (int idx = 0; idx < n_lhs; ++idx) {
+          unsigned l = lhs_src[idx];
+          unsigned lm = l & 0x7fffu;
+          if (lm == 0u) {
+            ((unsigned *)_ieee_part)[idx] = (l & 0x8000u) << 16;
+          } else if (lm >= 0x0080u) {
+            ((unsigned *)_ieee_part)[idx] =
+                ((l & 0x8000u) << 16) | ((lm + (64u << 7)) << 16);
+          } else {
+            float mf = (float)lm * k2m69.f;
+            _ieee_part[idx] = (l & 0x8000u) ? -mf : mf;
+          }
+        }
+        __sync();
+      }
+      __bang_float2bfloat16_rn((bfloat16_t *)_ieee_u16_a, _ieee_part, n_lhs);
+      __sync_compute();
+
+      for (int fOff = 0; fOff < nc; fOff += 64) {
+        int cur_nc = (nc - fOff < 64) ? (nc - fOff) : 64;
+        const unsigned short *rhs_chunk = rhs_t + fOff * bk;
+        const unsigned short *flt_src = rhs_chunk;
+        if (cur_nc < 64 || nk < bk) {
+          unsigned short *pad_rhs = ((unsigned short *)_ieee_sc) + 8192;
+          __bang_write_value(pad_rhs, 64 * bk, (unsigned short)0);
+          __sync_compute();
+          for (int j = 0; j < cur_nc; ++j)
+            for (int k = 0; k < nk; ++k)
+              pad_rhs[j * bk + k] = rhs_chunk[j * bk + k];
+          __sync();
+          flt_src = pad_rhs;
+        }
+        __memcpy(_ieee_wram_flt, flt_src, 64 * bk * (int)sizeof(unsigned short),
+                 NRAM2WRAM);
+        __sync_io();
+        int n_out64 = bm_pad * 64;
+        __bang_conv(_ieee_part, (bfloat16_t *)_ieee_u16_a, _ieee_wram_flt, bk,
+                    bm_pad, 1, 1, 1, 1, 1, 64);
+        if (nr == bm_pad && cur_nc == 64) {
+          const int *pb = (const int *)_ieee_part;
+          __bang_band_scalar(_ieee_sc, pb, 0x7fffffff, n_out64);
+          __bang_sub_scalar(_ieee_sc, _ieee_sc, 1, n_out64);
+          __bang_lt_scalar((unsigned int *)_ieee_sc,
+                           (const unsigned int *)_ieee_sc,
+                           ((127u - 61u) << 23) - 1u, n_out64);
+          __bang_int322float((float *)_ieee_sc, _ieee_sc, n_out64, 0);
+          int tiny_cnt = __bang_count((float *)_ieee_sc, n_out64);
+          int sub_acc = 0, huge_acc = 0;
+          if (bn == 64) {
+            const int *ab = (const int *)acc;
+            __bang_band_scalar(_ieee_sc, ab, 0x7fffffff, n_out64);
+            __bang_sub_scalar(_ieee_sc, _ieee_sc, 1, n_out64);
+            __bang_lt_scalar((unsigned int *)_ieee_sc,
+                             (const unsigned int *)_ieee_sc, 0x007fffffu,
+                             n_out64);
+            __bang_int322float((float *)_ieee_sc, _ieee_sc, n_out64, 0);
+            sub_acc = __bang_count((float *)_ieee_sc, n_out64);
+            __bang_band_scalar(_ieee_sc, ab, 0x7fffffff, n_out64);
+            __bang_ge_scalar(_ieee_sc, _ieee_sc, 0x7f000001, n_out64);
+            __bang_int322float((float *)_ieee_sc, _ieee_sc, n_out64, 0);
+            huge_acc = __bang_count((float *)_ieee_sc, n_out64);
+          } else {
+            const int *ab = (const int *)acc;
+            int tot_acc = nr * bn;
+            __bang_band_scalar(_ieee_sc, ab, 0x7fffffff, tot_acc);
+            __bang_sub_scalar(_ieee_sc, _ieee_sc, 1, tot_acc);
+            __bang_lt_scalar((unsigned int *)_ieee_sc,
+                             (const unsigned int *)_ieee_sc, 0x007fffffu,
+                             tot_acc);
+            __bang_int322float((float *)_ieee_sc, _ieee_sc, tot_acc, 0);
+            sub_acc = __bang_count((float *)_ieee_sc, tot_acc);
+            __bang_band_scalar(_ieee_sc, ab, 0x7fffffff, tot_acc);
+            __bang_ge_scalar(_ieee_sc, _ieee_sc, 0x7f000001, tot_acc);
+            __bang_int322float((float *)_ieee_sc, _ieee_sc, tot_acc, 0);
+            huge_acc = __bang_count((float *)_ieee_sc, tot_acc);
+          }
+          if (tiny_cnt == 0 && sub_acc == 0 && huge_acc == 0) {
+            __bang_mul_scalar(_ieee_part, _ieee_part, 5.421010862427522e-20f,
+                              n_out64);
+            if (bn == 64) {
+              __bang_add(acc, acc, _ieee_part, n_out64);
+            } else {
+              for (int i = 0; i < nr; ++i)
+                __bang_add(acc + i * bn + fOff, acc + i * bn + fOff,
+                           _ieee_part + i * 64, 64);
+            }
+            __sync_compute();
+            continue;
+          }
+        }
+        __sync_compute();
+        unsigned *acc_u = (unsigned *)acc;
+        const unsigned *part_u = (const unsigned *)_ieee_part;
+        for (int i = 0; i < nr; ++i) {
+          for (int j = 0; j < cur_nc; ++j) {
+            unsigned pu = part_u[i * 64 + j];
+            unsigned *dst_u = &acc_u[i * bn + fOff + j];
+            if (!(pu & 0x7fffffffu) && *dst_u != 0x80000000u)
+              continue;
+            *dst_u = add_binary32_ieee(*dst_u, scale_down_64_ieee(pu));
+          }
+        }
+        __sync();
+      }
+      return;
+    }
+  }
   unsigned *acc_bits = (unsigned *)acc;
   for (int i = 0; i < nr; ++i) {
     for (int j = 0; j < nc; ++j) {
@@ -157,6 +348,7 @@ __mlu_func__ void bf16_ieee_dot_panel(float *acc, const unsigned short *lhs,
       acc_bits[i * bn + j] = z;
     }
   }
+  __sync();
 }
 
 __mlu_func__ unsigned short narrow_bf16_bits(unsigned w) {

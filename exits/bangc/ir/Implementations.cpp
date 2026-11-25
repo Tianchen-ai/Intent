@@ -401,6 +401,164 @@ void rowContracts(Unit &unit) {
                        inTy.getElementType().isF32());
       });
 
+  add("validated-log", "row_log", "row_log", "exp.mlu",
+      "NRAM f32 input, NRAM f32 scratch and NRAM f32 output",
+      "128-byte aligned NRAM vector lanes", "f32",
+      "writes NRAM f32 scratch and output buffer",
+      "__bang_active_loghp in [2^-120, 2^+120) with exact scalar logf repair "
+      "outside",
+      makeTyped(5, 5, 0, {STK::F32, STK::I64}, {}, {STK::F32},
+                EffectMask::ReadWrite, 64, 1),
+      [](Operation *op) {
+        auto outTy = dyn_cast<MemRefType>(op->getOperand(0).getType());
+        auto scTy = dyn_cast<MemRefType>(op->getOperand(1).getType());
+        auto inTy = dyn_cast<MemRefType>(op->getOperand(2).getType());
+        return success(isSpace(op->getOperand(0), 1) &&
+                       isSpace(op->getOperand(1), 1) &&
+                       isSpace(op->getOperand(2), 1) &&
+                       outTy.getElementType().isF32() &&
+                       scTy.getElementType().isF32() &&
+                       inTy.getElementType().isF32());
+      });
+
+  add("ieee-vec-cmpf", "vec_cmpf_mask", "vec_cmpf_mask_vs/vec_cmpf_mask_vv",
+      "exp.mlu",
+      "NRAM i32 mask output, NRAM scratch, NRAM f32 lhs and f32/NRAM rhs",
+      "64-lane aligned NRAM vector fragment", "i32",
+      "writes NRAM scratch and NRAM i32 all-ones/zero lane mask",
+      "IEEE-754 binary32 ordered/unordered predicate preserving subnormals, "
+      "signed zero, Inf and NaN",
+      makeTyped(5, 5, 0, {STK::I32, STK::F32, STK::I64}, {}, {STK::I32},
+                EffectMask::ReadWrite, 64, 1),
+      [](Operation *op) {
+        auto mTy = dyn_cast<MemRefType>(op->getOperand(0).getType());
+        auto lTy = dyn_cast<MemRefType>(op->getOperand(2).getType());
+        return success(isSpace(op->getOperand(0), 1) &&
+                       isSpace(op->getOperand(1), 1) &&
+                       isSpace(op->getOperand(2), 1) && mTy && lTy &&
+                       mTy.getElementType().isInteger(32) &&
+                       lTy.getElementType().isF32());
+      });
+
+  add("ieee-vec-bitselect", "vec_bitselect",
+      "vec_bitselect_vv/vec_bitselect_vs/vec_bitselect_sv", "exp.mlu",
+      "NRAM f32 destination, NRAM scratch, NRAM i32 mask and f32/NRAM arms",
+      "64-lane aligned NRAM vector fragment", "i32",
+      "writes NRAM scratch and bitwise-selected NRAM f32 destination",
+      "exact 32-bit lane selection immune to NaN/Inf on unselected branch",
+      makeTyped(6, 6, 0, {STK::F32, STK::I32, STK::I64}, {}, {STK::I32},
+                EffectMask::ReadWrite, 64, 1),
+      [](Operation *op) {
+        auto dTy = dyn_cast<MemRefType>(op->getOperand(0).getType());
+        auto mTy = dyn_cast<MemRefType>(op->getOperand(2).getType());
+        return success(isSpace(op->getOperand(0), 1) &&
+                       isSpace(op->getOperand(1), 1) &&
+                       isSpace(op->getOperand(2), 1) && dTy && mTy &&
+                       dTy.getElementType().isF32() &&
+                       mTy.getElementType().isInteger(32));
+      });
+
+  add("quant-lut-init", "quant_init_lut", "quant_init_byte_lut_f16",
+      "quant.mlu", "256-entry NRAM i32 byte-pair LUT and format parameters",
+      "aligned 256-entry NRAM LUT", "i32", "writes 256-entry NRAM LUT",
+      "exact 256-byte to half2 codebook initialization from format descriptor",
+      makeTyped(6, 6, 0, {STK::I32}, {}, {STK::I32}, EffectMask::Write, 64, 1),
+      [](Operation *op) {
+        auto lut = dyn_cast<MemRefType>(op->getOperand(0).getType());
+        return success(isSpace(op->getOperand(0), 1) && lut &&
+                       lut.getElementType().isInteger(32));
+      });
+
+  add("quant-record-lut-init", "quant_init_record_lut",
+      "quant_init_record_2plane_lut", "quant.mlu",
+      "1536-entry NRAM i16 bit-plane LUT and plane shift/width parameters",
+      "aligned NRAM i16 LUT table", "i16", "writes NRAM i16 bit-plane LUT",
+      "exact multi-plane integer unpack LUT initialization from format "
+      "descriptor",
+      makeTyped(7, 7, 0, {STK::I16, STK::I32}, {}, {STK::I16},
+                EffectMask::Write, 64, 1),
+      [](Operation *op) {
+        auto lut = dyn_cast<MemRefType>(op->getOperand(0).getType());
+        return success(isSpace(op->getOperand(0), 1) && lut &&
+                       lut.getElementType().isInteger(16));
+      });
+
+  add("quant-e8m0-guard", "quant_e8m0_ok", "quant_e8m0_panel_ok", "quant.mlu",
+      "two NRAM u8 E8M0 scale panels and NRAM scratch",
+      "contiguous NRAM u8 scale panels", "i16",
+      "writes NRAM scratch and returns i1 finite FP16-representable flag",
+      "certifies E8M0 block scales lie in exact FP16 normal exponent window",
+      makeTyped(7, 7, 1,
+                {STK::F16, STK::I8, STK::UI8, STK::I16, STK::I32, STK::I64},
+                {STK::I1}, {STK::I16}, EffectMask::ReadWrite, 64, 1),
+      [](Operation *op) {
+        return success(isSpace(op->getOperand(0), 1) &&
+                       isSpace(op->getOperand(2), 1) &&
+                       isSpace(op->getOperand(4), 1) &&
+                       op->getResult(0).getType().isInteger(1));
+      });
+
+  add("quant-block-scaled", "quant_decode_block_scaled",
+      "quant_decode_block_scaled_f16", "quant.mlu",
+      "NRAM f16 panel output, NRAM packed bytes, NRAM E8M0 scales, LUT and "
+      "NRAM scratch",
+      "NRAM 2D tile [padded_rows, groups_per_panel * block_elems]", "f32",
+      "writes NRAM scratch and decoded NRAM f16 operand panel",
+      "exact __bang_lut nibble unpack + exact power-of-two FP16 block scaling",
+      makeTyped(13, 13, 0,
+                {STK::F16, STK::I8, STK::UI8, STK::I32, STK::I64}, {},
+                {STK::F32}, EffectMask::ReadWrite, 64, 1),
+      [](Operation *op) {
+        auto dst = dyn_cast<MemRefType>(op->getOperand(0).getType());
+        return success(isSpace(op->getOperand(0), 1) &&
+                       isSpace(op->getOperand(1), 1) &&
+                       isSpace(op->getOperand(2), 1) &&
+                       isSpace(op->getOperand(3), 1) && dst &&
+                       dst.getElementType().isF16());
+      });
+
+  add("quant-grouped-rhs", "quant_decode_grouped_rhs",
+      "quant_decode_grouped_rhs_f16", "quant.mlu",
+      "NRAM f16 filter-major rhs output, NRAM packed weights, NRAM f16 scales, "
+      "NRAM packed zeros, LUT and NRAM scratch",
+      "NRAM filter-major [BN=64, BK] f16 panel", "f32",
+      "writes NRAM scratch and decoded filter-major f16 rhs panel",
+      "__bang_lut 4-bit unpack + lane permutation + grouped zero-point & scale",
+      makeTyped(15, 15, 0,
+                {STK::F16, STK::I8, STK::UI8, STK::I32, STK::I64,
+                 STK::AnyInteger},
+                {}, {STK::F32}, EffectMask::ReadWrite, 64, 1),
+      [](Operation *op) {
+        auto dst = dyn_cast<MemRefType>(op->getOperand(0).getType());
+        return success(isSpace(op->getOperand(0), 1) &&
+                       isSpace(op->getOperand(1), 1) &&
+                       isSpace(op->getOperand(2), 1) &&
+                       isSpace(op->getOperand(3), 1) &&
+                       isSpace(op->getOperand(4), 1) && dst &&
+                       dst.getElementType().isF16());
+      });
+
+  add("quant-record-gemv", "quant_record_gemv", "quant_record_gemv_2plane_q8k",
+      "quant.mlu",
+      "NRAM f32[64] accumulator, NRAM 64-row record panel, NRAM quantized "
+      "activation, bit-plane LUT and NRAM scratch",
+      "64-row pitched 256B NRAM record panel", "f32",
+      "updates NRAM f32[64] row accumulator in place",
+      "exact 2-plane __bang_lut unpack + __bang_sumpool sub-block integer dot "
+      "+ super-block FP32 accumulation",
+      makeTyped(11, 11, 0,
+                {STK::F32, STK::I8, STK::UI8, STK::I16, STK::I32, STK::I64}, {},
+                {STK::F32}, EffectMask::ReadWrite, 64, 1),
+      [](Operation *op) {
+        auto acc = dyn_cast<MemRefType>(op->getOperand(0).getType());
+        return success(isSpace(op->getOperand(0), 1) &&
+                       isSpace(op->getOperand(1), 1) &&
+                       isSpace(op->getOperand(2), 1) &&
+                       isSpace(op->getOperand(3), 1) &&
+                       isSpace(op->getOperand(4), 1) && acc &&
+                       acc.getElementType().isF32());
+      });
+
   addBuiltin("reduce32-sum", "reduce32_sum", "__bang_reduce_sum",
              "exits/bangc::dma", "32-lane NRAM f32 buffer",
              "32-element aligned NRAM f32 vector", "f32",

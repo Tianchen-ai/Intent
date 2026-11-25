@@ -90,6 +90,15 @@ void loadRuntimeSources(TerminalPrinter &p) {
       {"exits/bangc::row-reduce", "runtime/bangc/kernels/reduce.mlu"},
       {"exits/bangc::validated-exp", "runtime/bangc/kernels/exp.mlu"},
       {"exits/bangc::validated-exp2", "runtime/bangc/kernels/exp.mlu"},
+      {"exits/bangc::validated-log", "runtime/bangc/kernels/exp.mlu"},
+      {"exits/bangc::ieee-vec-cmpf", "runtime/bangc/kernels/exp.mlu"},
+      {"exits/bangc::ieee-vec-bitselect", "runtime/bangc/kernels/exp.mlu"},
+      {"exits/bangc::quant-lut-init", "runtime/bangc/kernels/quant.mlu"},
+      {"exits/bangc::quant-record-lut-init", "runtime/bangc/kernels/quant.mlu"},
+      {"exits/bangc::quant-e8m0-guard", "runtime/bangc/kernels/quant.mlu"},
+      {"exits/bangc::quant-block-scaled", "runtime/bangc/kernels/quant.mlu"},
+      {"exits/bangc::quant-grouped-rhs", "runtime/bangc/kernels/quant.mlu"},
+      {"exits/bangc::quant-record-gemv", "runtime/bangc/kernels/quant.mlu"},
       {"exits/bangc::nram-transpose", "runtime/bangc/kernels/transpose.mlu"},
       {"exits/bangc::certified-half-quotient",
        "runtime/bangc/kernels/quotient.mlu"},
@@ -171,6 +180,19 @@ TerminalPrinter rowPrinter() {
       PrintRule::format("row_exp($0, $1, $2, (int)($3), (int)($4));");
   rules["bangc_src.row_exp2"] =
       PrintRule::format("row_exp2($0, $1, $2, (int)($3), (int)($4));");
+  rules["bangc_src.row_log"] =
+      PrintRule::format("row_log($0, $1, $2, (int)($3), (int)($4));");
+  rules["bangc_src.quant_init_lut"] = PrintRule::format(
+      "quant_init_byte_lut_f16($0, $1, $2, $3, $4, $5);");
+  rules["bangc_src.quant_init_record_lut"] = PrintRule::format(
+      "quant_init_record_2plane_lut($0, $1, $2, $3, $4, $5, $6);");
+  rules["bangc_src.quant_e8m0_ok"] = PrintRule::format(
+      "unsigned char $r0 = quant_e8m0_panel_ok((const unsigned char *)$0, "
+      "(int)($1), (const unsigned char *)$2, (int)($3), (short *)$4, $5, $6);");
+  rules["bangc_src.quant_decode_block_scaled"] = PrintRule::format(
+      "quant_decode_block_scaled_f16($0, (const unsigned char *)$1, "
+      "(unsigned char *)$2, $3, (unsigned int *)$4, $5, $6, (int)($7), "
+      "(int)($8), (int)($9), (int)($10), $11, $12);");
   rules["bangc_src.reduce32_sum"] = PrintRule::format(
       "__bang_reduce_sum($0, $0, 32); __sync_compute(); float $r0 = ((volatile "
       "float *)$0)[0];");
@@ -560,6 +582,81 @@ TerminalPrinter rowPrinter() {
                       ", " + view.operand(3).str() + ", (int)(" +
                       view.operand(4).str() + "), (int)(" +
                       view.operand(5).str() + "));");
+               return llvm::Error::success();
+             });
+
+  enterLocal("bangc_src.vec_cmpf_mask",
+             [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
+               bool isVec = view.attrOfType<BoolAttr>("rhs_is_vec").getValue();
+               int32_t pc =
+                   view.attrOfType<IntegerAttr>("pred_code").getInt();
+               std::string fnName =
+                   isVec ? "vec_cmpf_mask_vv" : "vec_cmpf_mask_vs";
+               c.line(fnName + "((int *)" + view.operand(0).str() +
+                      ", (int *)" + view.operand(1).str() + ", " +
+                      view.operand(2).str() + ", " + view.operand(3).str() +
+                      ", (int)(" + view.operand(4).str() + "), " +
+                      std::to_string(pc) + ");");
+               return llvm::Error::success();
+             });
+
+  enterLocal("bangc_src.vec_bitselect",
+             [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
+               auto mode = view.attrOfType<StringAttr>("mode").getValue();
+               std::string fnName = mode == "vv"   ? "vec_bitselect_vv"
+                                    : mode == "vs" ? "vec_bitselect_vs"
+                                                   : "vec_bitselect_sv";
+               c.line(fnName + "(" + view.operand(0).str() + ", (int *)" +
+                      view.operand(1).str() + ", (const int *)" +
+                      view.operand(2).str() + ", " + view.operand(3).str() +
+                      ", " + view.operand(4).str() + ", (int)(" +
+                      view.operand(5).str() + "));");
+               return llvm::Error::success();
+             });
+
+  enterLocal("bangc_src.quant_decode_grouped_rhs",
+             [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
+               auto sh = view.attrOfType<DenseI32ArrayAttr>("lane_shifts");
+               if (!sh || sh.size() != 8)
+                 return llvm::createStringError(
+                     "quant_decode_grouped_rhs requires 8 lane_shifts");
+               std::string shArgs;
+               for (int i = 0; i < 8; ++i)
+                 shArgs += ", " + std::to_string(sh[i]);
+               c.line("quant_decode_grouped_rhs_f16(" + view.operand(0).str() +
+                      ", (const unsigned char *)" + view.operand(1).str() +
+                      ", " + view.operand(2).str() + ", (const int *)" +
+                      view.operand(3).str() + ", " + view.operand(4).str() +
+                      ", (unsigned int *)" + view.operand(5).str() + ", " +
+                      view.operand(6).str() + ", " + view.operand(7).str() +
+                      ", (int)(" + view.operand(8).str() + "), (int)(" +
+                      view.operand(9).str() + "), (int)(" +
+                      view.operand(10).str() + "), (int)(" +
+                      view.operand(11).str() + "), (int)(" +
+                      view.operand(12).str() + "), (int)(" +
+                      view.operand(13).str() + "), " + view.operand(14).str() +
+                      shArgs + ");");
+               return llvm::Error::success();
+             });
+
+  enterLocal("bangc_src.quant_record_gemv",
+             [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
+               auto pp = view.attrOfType<DenseI32ArrayAttr>("plane_params");
+               if (!pp || pp.size() != 10)
+                 return llvm::createStringError(
+                     "quant_record_gemv requires 10 plane_params");
+               std::string pArgs;
+               for (int i = 0; i < 10; ++i)
+                 pArgs += ", " + std::to_string(pp[i]);
+               c.line("quant_record_gemv_2plane_q8k(" + view.operand(0).str() +
+                      ", (const unsigned char *)" + view.operand(1).str() +
+                      ", (unsigned char *)" + view.operand(2).str() + ", " +
+                      view.operand(3).str() + ", " + view.operand(4).str() +
+                      ", (unsigned short *)" + view.operand(5).str() + ", " +
+                      view.operand(6).str() + ", " + view.operand(7).str() +
+                      ", " + view.operand(8).str() + ", " +
+                      view.operand(9).str() + ", (int)(" +
+                      view.operand(10).str() + ")" + pArgs + ");");
                return llvm::Error::success();
              });
 

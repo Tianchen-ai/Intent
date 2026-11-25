@@ -19,19 +19,48 @@ __mlu_func__ void row_exp(float *out, float *scratch, const float *in, int live,
     __sync_compute();
     repair = !(((volatile float *)scratch)[0] <= 80.0f);
   }
-  if (repair) {
-    for (int k = 0; k < live; ++k)
-      scratch[k] = in[k];
+  if (!repair) {
+    __bang_active_exphp(out, in, lanes);
+    return;
   }
-  __bang_active_exphp(out, in, lanes);
-  if (repair) {
-    __sync_compute();
-    for (int k = 0; k < live; ++k) {
-      float x = scratch[k];
-      if (x < -80.0f || x > 80.0f)
-        out[k] = x == -INFINITY ? 0.0f : (x == INFINITY ? INFINITY : expf(x));
+  if (live == lanes && lanes >= 64 && (lanes % 64 == 0) && out != in) {
+    const int *ib = (const int *)in;
+    int *sc = (int *)scratch;
+    int *oc = (int *)out;
+    // Bad iff: (ib > 0x42a00000) || (ib in [0xff800001, 0xffffffff]) || (ib in [0xc2a00001, 0xc2cfffff]).
+    __bang_sub_scalar(sc, ib, (int)0xff800001u, lanes);
+    __bang_lt_scalar((unsigned int *)sc, (const unsigned int *)sc, 0x007fffffu,
+                     lanes);
+    __bang_ge_scalar(oc, ib, 0x42a00001, lanes);
+    __bang_bor(sc, sc, oc, lanes);
+    __bang_sub_scalar(oc, ib, (int)0xc2a00001u, lanes);
+    __bang_lt_scalar((unsigned int *)oc, (const unsigned int *)oc, 0x002fffffu,
+                     lanes);
+    __bang_bor(sc, sc, oc, lanes);
+    __bang_int322float((float *)sc, sc, lanes, 0);
+    if (__bang_count((float *)sc, lanes) == 0) {
+      __bang_sub_scalar(sc, ib, (int)0xc2d00000u, lanes);
+      __bang_ge_scalar((unsigned int *)sc, (const unsigned int *)sc,
+                       0x3cb00001u, lanes);
+      __bang_mul_scalar(sc, sc, -1, lanes);
+      __bang_band(oc, ib, sc, lanes);
+      __bang_active_exphp(out, (const float *)oc, lanes);
+      __bang_band((int *)out, (const int *)out, sc, lanes);
+      return;
     }
   }
+  __sync_compute();
+  for (int k = 0; k < live; ++k)
+    scratch[k] = in[k];
+  __sync();
+  __bang_active_exphp(out, in, lanes);
+  __sync_compute();
+  for (int k = 0; k < live; ++k) {
+    float x = scratch[k];
+    if (!(x >= -80.0f && x <= 80.0f))
+      out[k] = x <= -104.0f ? 0.0f : (x == INFINITY ? INFINITY : expf(x));
+  }
+  __sync();
 }
 
 __mlu_func__ void row_exp2(float *out, float *scratch, const float *in,
@@ -55,18 +84,216 @@ __mlu_func__ void row_exp2(float *out, float *scratch, const float *in,
     __sync_compute();
     repair = !(((volatile float *)scratch)[0] <= 115.0f);
   }
+  if (!repair) {
+    __bang_mul_scalar(out, in, 0.6931471805599453f, lanes);
+    __bang_active_exphp(out, out, lanes);
+    return;
+  }
+  if (live == lanes && lanes >= 64 && (lanes % 64 == 0) && out != in) {
+    const int *ib = (const int *)in;
+    int *sc = (int *)scratch;
+    int *oc = (int *)out;
+    // Bad iff: (ib > 0x42e60000) || (ib in [0xff800001, 0xffffffff]) || (ib in [0xc2e60001, 0xc315ffff]).
+    __bang_sub_scalar(sc, ib, (int)0xff800001u, lanes);
+    __bang_lt_scalar((unsigned int *)sc, (const unsigned int *)sc, 0x007fffffu,
+                     lanes);
+    __bang_ge_scalar(oc, ib, 0x42e60001, lanes);
+    __bang_bor(sc, sc, oc, lanes);
+    __bang_sub_scalar(oc, ib, (int)0xc2e60001u, lanes);
+    __bang_lt_scalar((unsigned int *)oc, (const unsigned int *)oc, 0x002fffffu,
+                     lanes);
+    __bang_bor(sc, sc, oc, lanes);
+    __bang_int322float((float *)sc, sc, lanes, 0);
+    if (__bang_count((float *)sc, lanes) == 0) {
+      // Underflow [-Inf, -150]: ib in [0xc3160000, 0xff800000] -> span 0x3c6a0000u.
+      __bang_sub_scalar(sc, ib, (int)0xc3160000u, lanes);
+      __bang_ge_scalar((unsigned int *)sc, (const unsigned int *)sc,
+                       0x3c6a0001u, lanes);
+      __bang_mul_scalar(sc, sc, -1, lanes);
+      __bang_band(oc, ib, sc, lanes);
+      __bang_mul_scalar(out, out, 0.6931471805599453f, lanes);
+      __bang_active_exphp(out, out, lanes);
+      __bang_band((int *)out, (const int *)out, sc, lanes);
+      return;
+    }
+  }
+  __sync_compute();
+  for (int k = 0; k < live; ++k)
+    scratch[k] = in[k];
+  __sync();
+  __bang_mul_scalar(out, in, 0.6931471805599453f, lanes);
+  __bang_active_exphp(out, out, lanes);
+  __sync_compute();
+  for (int k = 0; k < live; ++k) {
+    float x = scratch[k];
+    if (!(x >= -115.0f && x <= 115.0f))
+      out[k] = x <= -150.0f ? 0.0f : (x == INFINITY ? INFINITY : exp2f(x));
+  }
+  __sync();
+}
+
+__mlu_func__ void row_log(float *out, float *scratch, const float *in, int live,
+                          int lanes) {
+  bool repair = true;
+  if (live == lanes && lanes >= 64 && (lanes % 64 == 0)) {
+    const int *ib = (const int *)in;
+    int *sc = (int *)scratch;
+    __bang_sub_scalar(sc, ib, 0x03800000, lanes);
+    __bang_ge_scalar((unsigned int *)sc, (const unsigned int *)sc, 0x78000000u,
+                     lanes);
+    __bang_int322float((float *)sc, sc, lanes, 0);
+    repair = (__bang_count((float *)sc, lanes) != 0);
+  } else {
+    __sync_compute();
+    repair = false;
+    for (int k = 0; k < live; ++k) {
+      union {
+        float f;
+        int i;
+      } u;
+      u.f = in[k];
+      if (u.i < 0x03800000 || u.i >= 0x7b800000) {
+        repair = true;
+        break;
+      }
+    }
+  }
   if (repair) {
     for (int k = 0; k < live; ++k)
       scratch[k] = in[k];
+    __sync();
   }
-  __bang_mul_scalar(out, in, 0.6931471805599453f, lanes);
-  __bang_active_exphp(out, out, lanes);
+  __bang_active_loghp(out, in, lanes);
   if (repair) {
     __sync_compute();
     for (int k = 0; k < live; ++k) {
-      float x = scratch[k];
-      if (!(x >= -115.0f && x <= 115.0f))
-        out[k] = x == -INFINITY ? 0.0f : (x == INFINITY ? INFINITY : exp2f(x));
+      union {
+        float f;
+        int i;
+      } u;
+      u.f = scratch[k];
+      if (u.i < 0x03800000 || u.i >= 0x7b800000)
+        out[k] = logf(u.f);
+    }
+    __sync();
+  }
+}
+
+__mlu_func__ bool eval_cmpf_scalar_ieee(float a, float b, int pred_code) {
+  switch (pred_code) {
+  case 1:
+    return a == b;
+  case 2:
+    return a > b;
+  case 3:
+    return a >= b;
+  case 4:
+    return a < b;
+  case 5:
+    return a <= b;
+  case 6:
+    return !isnan(a) && !isnan(b) && a != b;
+  default:
+    return a != b;
+  }
+}
+
+__mlu_func__ void vec_cmpf_mask_vs(int *mask_out, int *scratch,
+                                   const float *lhs, float rhs, int lanes,
+                                   int pred_code) {
+  const int *lb = (const int *)lhs;
+  union {
+    float f;
+    unsigned u;
+  } ru;
+  ru.f = rhs;
+  // Exact 3-instruction fast path for (lhs > 0.0f), including subnormals, -0.0f, Inf, NaN!
+  if (pred_code == 2 && (ru.u & 0x7fffffffu) == 0u && (lanes % 64 == 0)) {
+    __bang_sub_scalar(mask_out, lb, 1, lanes);
+    __bang_lt_scalar((unsigned int *)mask_out, (const unsigned int *)mask_out,
+                     0x7f800000u, lanes);
+    __bang_mul_scalar(mask_out, mask_out, -1, lanes);
+    return;
+  }
+  unsigned rmag = ru.u & 0x7fffffffu;
+  bool rhs_normal = (rmag >= 0x00800000u && rmag <= 0x7f800000u);
+  if (rhs_normal && (lanes % 64 == 0)) {
+    __bang_band_scalar(scratch, lb, 0x7fffffff, lanes);
+    __bang_sub_scalar(scratch, scratch, 0x00800000, lanes);
+    __bang_ge_scalar((unsigned int *)scratch, (const unsigned int *)scratch,
+                     0x7f000001u, lanes);
+    __bang_int322float((float *)scratch, scratch, lanes, 0);
+    if (__bang_count((float *)scratch, lanes) == 0) {
+      float *mf = (float *)mask_out;
+      if (pred_code == 1)
+        __bang_eq_scalar(mf, lhs, rhs, lanes);
+      else if (pred_code == 2)
+        __bang_gt_scalar(mf, lhs, rhs, lanes);
+      else if (pred_code == 3)
+        __bang_ge_scalar(mf, lhs, rhs, lanes);
+      else if (pred_code == 4)
+        __bang_lt_scalar(mf, lhs, rhs, lanes);
+      else if (pred_code == 5)
+        __bang_le_scalar(mf, lhs, rhs, lanes);
+      else
+        __bang_ne_scalar(mf, lhs, rhs, lanes);
+      __bang_float2int32_tz(mask_out, mf, lanes, 0);
+      __bang_mul_scalar(mask_out, mask_out, -1, lanes);
+      return;
     }
   }
+  __sync_compute();
+  for (int i = 0; i < lanes; ++i)
+    mask_out[i] = eval_cmpf_scalar_ieee(lhs[i], rhs, pred_code) ? -1 : 0;
+  __sync();
+}
+
+__mlu_func__ void vec_cmpf_mask_vv(int *mask_out, int *scratch,
+                                   const float *lhs, const float *rhs,
+                                   int lanes, int pred_code) {
+  __sync_compute();
+  for (int i = 0; i < lanes; ++i)
+    mask_out[i] = eval_cmpf_scalar_ieee(lhs[i], rhs[i], pred_code) ? -1 : 0;
+  __sync();
+}
+
+__mlu_func__ void vec_bitselect_vv(float *dst, int *scratch, const int *mask,
+                                   const float *t_val, const float *f_val,
+                                   int lanes) {
+  __bang_band(scratch, (const int *)t_val, mask, lanes);
+  __bang_bnot((int *)dst, mask, lanes);
+  __bang_band((int *)dst, (const int *)f_val, (const int *)dst, lanes);
+  __bang_bor((int *)dst, (const int *)dst, scratch, lanes);
+}
+
+__mlu_func__ void vec_bitselect_vs(float *dst, int *scratch, const int *mask,
+                                   const float *t_val, float f_scalar,
+                                   int lanes) {
+  union {
+    float f;
+    int i;
+  } fu;
+  fu.f = f_scalar;
+  if (fu.i == 0) {
+    __bang_band((int *)dst, (const int *)t_val, mask, lanes);
+    return;
+  }
+  __bang_band(scratch, (const int *)t_val, mask, lanes);
+  __bang_bnot((int *)dst, mask, lanes);
+  __bang_band_scalar((int *)dst, (const int *)dst, fu.i, lanes);
+  __bang_bor((int *)dst, (const int *)dst, scratch, lanes);
+}
+
+__mlu_func__ void vec_bitselect_sv(float *dst, int *scratch, const int *mask,
+                                   float t_scalar, const float *f_val,
+                                   int lanes) {
+  union {
+    float f;
+    int i;
+  } tu;
+  tu.f = t_scalar;
+  __bang_band_scalar(scratch, mask, tu.i, lanes);
+  __bang_bnot((int *)dst, mask, lanes);
+  __bang_band((int *)dst, (const int *)f_val, (const int *)dst, lanes);
+  __bang_bor((int *)dst, (const int *)dst, scratch, lanes);
 }

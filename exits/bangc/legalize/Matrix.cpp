@@ -618,7 +618,10 @@ struct MatrixLowerer {
   // Handles RecordGemv, BlockScaledPair, and GroupedWeightRhs from QuantFormatSpec
   // with zero per-format branches.
   LogicalResult emitQuantizedFromDescriptor(Value acc, Value r, Value c,
-                                            Value nr, Value nc) {
+                                            Value nr, Value nc, Value quantLut,
+                                            Value quantRecLut,
+                                            Value qActAllF32, Value dsAll,
+                                            Value zeroAll) {
     const auto *spec = intentdsl::kir::quantFormatSpec(p.dot);
     if (!spec)
       return p.dot.emitError("missing quantized format descriptor");
@@ -630,6 +633,182 @@ struct MatrixLowerer {
       Value x = spec->q8kActivation
                     ? p.dot.getOperand(1).getDefiningOp()->getOperand(0)
                     : p.dot.getOperand(1);
+      int64_t recordGroups = shapeK / spec->blockElements;
+      int64_t xSt1 = p.stride(x, 1), wSt2 = p.stride(w, 2);
+
+      if (quantRecLut) {
+        Value actBuf = qActAllF32 ? Value{} : nramBuf(b.getF32Type(), 256);
+        Value qActF32 = qActAllF32 ? Value{} : nramBuf(b.getF32Type(), 256);
+        Value recPanel = nramBuf(b.getI8Type(), 64 * 256);
+        Value recTrans = nramBuf(b.getI8Type(), 64 * 256);
+        Value idx16Buf = nramBuf(b.getI16Type(), 1024);
+        Value w16Buf = nramBuf(b.getI16Type(), 1024);
+        Value h16Buf = nramBuf(b.getI16Type(), 1024);
+        Value wf32Buf = nramBuf(b.getF32Type(), 1024);
+        fillVec(acc, cI64(std::max<int64_t>(bm, 64)), cF32(0.0f));
+        sync("compute");
+
+        intentdsl::kir::Q8KRecord q8;
+        const auto &p0 = spec->planes[0], &p1 = spec->planes[1];
+        SmallVector<int32_t, 10> pp = {
+            spec->subScaleOffset, spec->superScaleOffset,
+            p0.baseByte,          p0.halfStride,
+            p0.quadByteStep,      p0.quadShiftMode,
+            p1.baseByte,          p1.halfStride,
+            p1.quadByteStep,      p1.quadShiftMode};
+
+        forLoop(cI64(0), cI64(recordGroups), cI64(1), [&](Value gq) {
+          Value isZero, preDs;
+          if (qActAllF32) {
+            isZero = b.create<arith::CmpIOp>(
+                loc, arith::CmpIPredicate::ne,
+                loadAt(zeroAll, gq, b.getI32Type()), cI32(0));
+            preDs = loadAt(dsAll, gq, b.getF32Type());
+          } else {
+            if (xSt1 == 1) {
+              memcpy1D(actBuf, globalPtr(x, {gq, cI64(0)}), cI64(256),
+                       "GDRAM2NRAM");
+              sync("io");
+            } else {
+              forLoop(cI64(0), cI64(256), cI64(1), [&](Value k) {
+                storeAt(actBuf, k,
+                        loadAt(globalPtr(x, {gq, k}), cI64(0), b.getF32Type()));
+              });
+              sync("all");
+            }
+            auto maxLoop = forLoopCarry(
+                cI64(0), cI64(256), cI64(1), ValueRange{cF32(0.0f)},
+                [&](Value k, ValueRange iter) {
+                  Value xk = loadAt(actBuf, k, b.getF32Type());
+                  Value ax =
+                      makeOp("scalar_math", {xk}, {b.getF32Type()},
+                             {b.getNamedAttr("op", b.getStringAttr("fabs"))})
+                          ->getResult(0);
+                  Value ae =
+                      makeOp("scalar_math", {iter[0]}, {b.getF32Type()},
+                             {b.getNamedAttr("op", b.getStringAttr("fabs"))})
+                          ->getResult(0);
+                  Value gt = b.create<arith::CmpFOp>(
+                      loc, arith::CmpFPredicate::OGT, ax, ae);
+                  Value next =
+                      b.create<arith::SelectOp>(loc, gt, xk, iter[0]);
+                  b.create<scf::YieldOp>(loc, ValueRange{next});
+                });
+            Value e = maxLoop.getResult(0);
+            isZero = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OEQ, e,
+                                             cF32(0.0f));
+            preDs = e;
+          }
+          ifThenElse(
+              isZero, {},
+              [&]() {
+                if (spec->scaleCode ==
+                    intentdsl::kir::QuantScaleCode::LeHalfAtOffset) {
+                  sync("all");
+                  forLoop(cI64(0), nr, cI64(1), [&](Value i) {
+                    Value ri = b.create<arith::AddIOp>(loc, r, i);
+                    Value dHiPtr = globalPtr(
+                        w, {ri, gq, cI64(spec->superScaleOffset + 1)});
+                    Value dHi = b.create<arith::ExtUIOp>(
+                        loc, b.getI32Type(),
+                        loadAt(dHiPtr, cI64(0), b.getI8Type()));
+                    Value c7c = cI32(0x7c);
+                    Value nf = b.create<arith::CmpIOp>(
+                        loc, arith::CmpIPredicate::eq,
+                        b.create<arith::AndIOp>(loc, dHi, c7c), c7c);
+                    Value nanF = cF32(std::numeric_limits<float>::quiet_NaN());
+                    Value delta =
+                        b.create<arith::SelectOp>(loc, nf, nanF, cF32(0.0f));
+                    storeAt(acc, i,
+                            b.create<arith::AddFOp>(loc, loadAt(acc, i),
+                                                    delta));
+                  });
+                  sync("all");
+                }
+              },
+              [&]() {
+                Value curQAct, ds;
+                if (qActAllF32) {
+                  curQAct = makeAddr(
+                      qActAllF32,
+                      {b.create<arith::MulIOp>(loc, gq, cI64(256))}, {cI64(1)},
+                      1);
+                  ds = preDs;
+                } else {
+                  Value maxQuant =
+                      cF32(-float((1 << (q8.elementBits - 1)) - 1));
+                  Value inv = b.create<arith::DivFOp>(loc, maxQuant, preDs);
+                  ds = b.create<arith::DivFOp>(loc, cF32(1.0f), inv);
+                  int32_t qMin = -(1 << (q8.elementBits - 1));
+                  int32_t qMax = (1 << (q8.elementBits - 1)) - 1;
+                  forLoop(cI64(0), cI64(256), cI64(1), [&](Value k) {
+                    Value xk = loadAt(actBuf, k, b.getF32Type());
+                    Value f = b.create<arith::MulFOp>(loc, xk, inv);
+                    Value fl =
+                        makeOp("scalar_math", {f}, {b.getF32Type()},
+                               {b.getNamedAttr("op", b.getStringAttr("floor"))})
+                            ->getResult(0);
+                    Value lo =
+                        b.create<arith::FPToSIOp>(loc, b.getI32Type(), fl);
+                    Value frac = b.create<arith::SubFOp>(loc, f, fl);
+                    Value gtHalf = b.create<arith::CmpFOp>(
+                        loc, arith::CmpFPredicate::OGT, frac, cF32(0.5f));
+                    Value eqHalf = b.create<arith::CmpFOp>(
+                        loc, arith::CmpFPredicate::OEQ, frac, cF32(0.5f));
+                    Value odd = b.create<arith::CmpIOp>(
+                        loc, arith::CmpIPredicate::ne,
+                        b.create<arith::AndIOp>(loc, lo, cI32(1)), cI32(0));
+                    Value bump = b.create<arith::OrIOp>(
+                        loc, gtHalf,
+                        b.create<arith::AndIOp>(loc, eqHalf, odd));
+                    Value inc =
+                        b.create<arith::SelectOp>(loc, bump, cI32(1), cI32(0));
+                    Value rnd = b.create<arith::AddIOp>(loc, lo, inc);
+                    Value cl = b.create<arith::MinSIOp>(
+                        loc, b.create<arith::MaxSIOp>(loc, rnd, cI32(qMin)),
+                        cI32(qMax));
+                    storeAt(qActF32, k,
+                            b.create<arith::SIToFPOp>(loc, b.getF32Type(), cl));
+                  });
+                  sync("all");
+                  curQAct = qActF32;
+                }
+                forLoop(cI64(0), nr, cI64(64), [&](Value sub) {
+                  Value curNr = b.create<arith::MinSIOp>(
+                      loc, b.create<arith::SubIOp>(loc, nr, sub), cI64(64));
+                  Value rSub = b.create<arith::AddIOp>(loc, r, sub);
+                  Value accSub = makeAddr(acc, {sub}, {cI64(1)}, 1);
+                  Value wBase =
+                      globalPtr(w, {rSub, gq, cI64(0)}, b.getI8Type());
+                  ifThenElse(
+                      b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                              curNr, cI64(1)),
+                      {},
+                      [&]() {
+                        memcpy1D(recPanel, wBase, cI64(spec->recordBytes),
+                                 "GDRAM2NRAM");
+                      },
+                      [&]() {
+                        memcpy2D(recPanel, wBase, cI64(spec->recordBytes),
+                                 cI64(256), cI64(p.stride(w, 0)),
+                                 b.create<arith::SubIOp>(loc, curNr, cI64(1)),
+                                 "GDRAM2NRAM");
+                      });
+                  sync("io");
+                  makeOp("quant_record_gemv",
+                         {accSub, recPanel, recTrans, curQAct, quantRecLut,
+                          idx16Buf, w16Buf, h16Buf, wf32Buf, ds, curNr},
+                         {},
+                         {b.getNamedAttr("plane_params",
+                                         b.getDenseI32ArrayAttr(pp))},
+                         "quant-record-gemv");
+                  sync("compute");
+                });
+              });
+        });
+        return success();
+      }
+
       Value rec = nramBuf(b.getI8Type(), llvm::alignTo(spec->recordBytes, 64));
       Value actBuf =
           nramBuf(b.getF32Type(), llvm::alignTo(spec->blockElements, 64));
@@ -639,9 +818,6 @@ struct MatrixLowerer {
               : Value{};
       forLoop(cI64(0), nr, cI64(1),
               [&](Value i) { storeAt(acc, i, cF32(0.0f)); });
-
-      int64_t recordGroups = shapeK / spec->blockElements;
-      int64_t xSt1 = p.stride(x, 1), wSt2 = p.stride(w, 2);
       forLoop(cI64(0), cI64(recordGroups), cI64(1), [&](Value gq) {
         if (xSt1 == 1) {
           memcpy1D(actBuf, globalPtr(x, {gq, cI64(0)}),
@@ -1065,6 +1241,25 @@ struct MatrixLowerer {
       Value wFilter = wramBuf(b.getF16Type(), bn * convK);
       Value rightBuf = nramBuf(b.getF32Type(), spec->blockElements * bn);
       Value tmpBuf = nramBuf(b.getF32Type(), bn);
+      bool useLutSimd = quantLut && spec->packBits == 4 &&
+                        spec->packFactor == 2 && bn == 64 &&
+                        panelElems == convK;
+      Value idxScratch =
+          useLutSimd
+              ? nramBuf(b.getI32Type(),
+                        llvm::alignTo(std::max(bm, bn) * panelRecBytes, 64))
+              : Value{};
+      Value scScratch =
+          useLutSimd
+              ? nramBuf(b.getF16Type(),
+                        std::max<int64_t>(
+                            8192,
+                            llvm::alignTo(std::max(bm, bn) * groupsPerPanel * 2,
+                                          64)))
+              : Value{};
+      Value trScratch =
+          useLutSimd ? nramBuf(b.getF16Type(), std::max(bm, bn) * convK)
+                     : Value{};
       fillVec(acc, cI64(bm * bn), cF32(0.0f));
 
       int32_t codeMask = (1 << spec->packBits) - 1;
@@ -1162,7 +1357,9 @@ struct MatrixLowerer {
           });
         }
 
-        // Stage rightScale into sbBuf laid out as [nc, groupsPerPanel].
+        // Stage rightScale into sbBuf. When rightScale is [G, N] contiguous and
+        // nc == bn, load [groupsPerPanel, bn] via a single DMA (col_major = 2).
+        Value rhsColMode = cI32(1);
         if (rightScale.column == 0 && p.stride(rightScale.view, 1) == 1) {
           Value sbBase =
               globalPtr(rightScale.view, {c, u0}, b.getI8Type());
@@ -1179,6 +1376,40 @@ struct MatrixLowerer {
                          cI64(p.stride(rightScale.view, 0)),
                          b.create<arith::SubIOp>(loc, nc, cI64(1)),
                          "GDRAM2NRAM");
+              });
+        } else if (useLutSimd && rightScale.column == 1 &&
+                   p.stride(rightScale.view, 1) == 1) {
+          Value fullCols =
+              b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, nc, cI64(bn));
+          rhsColMode =
+              b.create<arith::SelectOp>(loc, fullCols, cI32(2), cI32(1));
+          ifThenElse(
+              fullCols, {},
+              [&]() {
+                Value sbBase =
+                    globalPtr(rightScale.view, {u0, c}, b.getI8Type());
+                if (groupsPerPanel == 1)
+                  memcpy1D(sbBuf, sbBase, cI64(bn), "GDRAM2NRAM");
+                else
+                  memcpy2D(sbBuf, sbBase, cI64(bn), cI64(bn),
+                           cI64(p.stride(rightScale.view, 0)),
+                           cI64(groupsPerPanel - 1), "GDRAM2NRAM");
+              },
+              [&]() {
+                forLoop(cI64(0), nc, cI64(1), [&](Value j) {
+                  Value cj = b.create<arith::AddIOp>(loc, c, j);
+                  forLoop(cI64(0), cI64(groupsPerPanel), cI64(1), [&](Value g) {
+                    Value ug = b.create<arith::AddIOp>(loc, u0, g);
+                    Value idx = b.create<arith::AddIOp>(
+                        loc,
+                        b.create<arith::MulIOp>(loc, j, cI64(groupsPerPanel)),
+                        g);
+                    storeAt(
+                        sbBuf, idx,
+                        loadAt(globalPtr(rightScale.view, {ug, cj}, b.getI8Type()),
+                               cI64(0), b.getI8Type()));
+                  });
+                });
               });
         } else {
           forLoop(cI64(0), nc, cI64(1), [&](Value j) {
@@ -1199,39 +1430,77 @@ struct MatrixLowerer {
         }
         sync("io");
 
-        auto okA = forLoopCarry(
-            cI64(0), b.create<arith::MulIOp>(loc, nr, cI64(groupsPerPanel)),
-            cI64(1), ValueRange{cI1(bn == 64)}, [&](Value idx, ValueRange st) {
-              Value sb = b.create<arith::ExtUIOp>(
-                  loc, b.getI32Type(), loadAt(saBuf, idx, b.getI8Type()));
-              Value inWin = b.create<arith::AndIOp>(
-                  loc,
-                  b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge, sb,
-                                          cI32(f16MinExp)),
-                  b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sle, sb,
-                                          cI32(f16MaxExp)));
-              b.create<scf::YieldOp>(
-                  loc, ValueRange{b.create<arith::AndIOp>(loc, st[0], inWin)});
-            });
-        auto okAB = forLoopCarry(
-            cI64(0), b.create<arith::MulIOp>(loc, nc, cI64(groupsPerPanel)),
-            cI64(1), ValueRange{okA.getResult(0)},
-            [&](Value idx, ValueRange st) {
-              Value sb = b.create<arith::ExtUIOp>(
-                  loc, b.getI32Type(), loadAt(sbBuf, idx, b.getI8Type()));
-              Value inWin = b.create<arith::AndIOp>(
-                  loc,
-                  b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge, sb,
-                                          cI32(f16MinExp)),
-                  b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sle, sb,
-                                          cI32(f16MaxExp)));
-              b.create<scf::YieldOp>(
-                  loc, ValueRange{b.create<arith::AndIOp>(loc, st[0], inWin)});
-            });
+        Value okVal;
+        if (useLutSimd) {
+          Value na = b.create<arith::MulIOp>(loc, nr, cI64(groupsPerPanel));
+          Value nb = b.create<arith::MulIOp>(loc, nc, cI64(groupsPerPanel));
+          okVal = makeOp("quant_e8m0_ok",
+                         {saBuf, na, sbBuf, nb, scScratch, cI32(f16MinExp),
+                          cI32(f16MaxExp)},
+                         {b.getI1Type()}, {}, "quant-e8m0-guard")
+                      ->getResult(0);
+        } else {
+          auto okA = forLoopCarry(
+              cI64(0), b.create<arith::MulIOp>(loc, nr, cI64(groupsPerPanel)),
+              cI64(1), ValueRange{cI1(bn == 64)}, [&](Value idx, ValueRange st) {
+                Value sb = b.create<arith::ExtUIOp>(
+                    loc, b.getI32Type(), loadAt(saBuf, idx, b.getI8Type()));
+                Value inWin = b.create<arith::AndIOp>(
+                    loc,
+                    b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge, sb,
+                                            cI32(f16MinExp)),
+                    b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sle, sb,
+                                            cI32(f16MaxExp)));
+                b.create<scf::YieldOp>(
+                    loc, ValueRange{b.create<arith::AndIOp>(loc, st[0], inWin)});
+              });
+          auto okAB = forLoopCarry(
+              cI64(0), b.create<arith::MulIOp>(loc, nc, cI64(groupsPerPanel)),
+              cI64(1), ValueRange{okA.getResult(0)},
+              [&](Value idx, ValueRange st) {
+                Value sb = b.create<arith::ExtUIOp>(
+                    loc, b.getI32Type(), loadAt(sbBuf, idx, b.getI8Type()));
+                Value inWin = b.create<arith::AndIOp>(
+                    loc,
+                    b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge, sb,
+                                            cI32(f16MinExp)),
+                    b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sle, sb,
+                                            cI32(f16MaxExp)));
+                b.create<scf::YieldOp>(
+                    loc, ValueRange{b.create<arith::AndIOp>(loc, st[0], inWin)});
+              });
+          okVal = okAB.getResult(0);
+        }
 
         ifThenElse(
-            okAB.getResult(0), {},
+            okVal, {},
             [&]() {
+              if (useLutSimd) {
+                makeOp("quant_decode_block_scaled",
+                       {transF16, bRawBuf, sbBuf, quantLut, idxScratch,
+                        scScratch, trScratch, nc, cI64(bn),
+                        cI64(groupsPerPanel), cI64(spec->blockElements),
+                        cI32(spec->scaleBias), rhsColMode},
+                       {}, {}, "quant-block-scaled");
+                makeOp("quant_decode_block_scaled",
+                       {leftF16, aRawBuf, saBuf, quantLut, idxScratch,
+                        scScratch, trScratch, nr, cI64(bm),
+                        cI64(groupsPerPanel), cI64(spec->blockElements),
+                        cI32(spec->scaleBias), cI32(0)},
+                       {}, {}, "quant-block-scaled");
+                sync("compute");
+                memcpy1D(wFilter, transF16, cI64(bn * convK), "NRAM2WRAM");
+                Value accum = b.create<arith::CmpIOp>(
+                    loc, arith::CmpIPredicate::ne, u0, cI64(0));
+                makeOp("wram_conv", {acc, leftF16, wFilter, accum}, {},
+                       {b.getNamedAttr("bm", b.getI64IntegerAttr(bm)),
+                        b.getNamedAttr("bn", b.getI64IntegerAttr(bn)),
+                        b.getNamedAttr("bk", b.getI64IntegerAttr(convK)),
+                        b.getNamedAttr("mode", b.getStringAttr("f16"))},
+                       "wram-conv-f16");
+                sync("compute");
+                return;
+              }
               Value zeroHalf = b.create<arith::ConstantOp>(
                   loc, b.getZeroAttr(b.getF16Type()));
               if (panelElems < convK) {
@@ -1480,16 +1749,29 @@ struct MatrixLowerer {
     Value wFilter = lhsElem.isF16() ? wramBuf(lhsElem, bn * bk) : Value{};
     Value qwBuf =
         nramBuf(packElem, llvm::alignTo(bk * packCols, 16));
-    Value scBuf =
-        nramBuf(scElem, llvm::alignTo(maxGroupsInPanel * bn, 64));
+    int64_t scCap = llvm::alignTo(maxGroupsInPanel * bn, 64);
+    Value scBuf = nramBuf(scElem, scCap);
     Value qzBuf = spec->hasZeroView
                       ? nramBuf(packElem,
                                 llvm::alignTo(maxGroupsInPanel * packCols, 32))
                       : Value{};
+    bool useGrpSimd = quantLut && spec->packBits == 4 &&
+                      spec->packFactor == 8 && lhsElem.isF16() &&
+                      scElem.isF16() &&
+                      packElem.getIntOrFloatBitWidth() == 32 && bn == 64;
+    Value idxScratch =
+        useGrpSimd ? nramBuf(b.getI32Type(), bk * packCols * 4) : Value{};
+    Value workA = useGrpSimd ? nramBuf(b.getF16Type(), bk * bn) : Value{};
+    Value workB = useGrpSimd ? nramBuf(b.getF16Type(), bk * bn) : Value{};
+    Value qzDummy =
+        (useGrpSimd && !spec->hasZeroView) ? nramBuf(b.getI32Type(), 16) : Value{};
     Value tmpF32 = !lhsElem.isF16() ? nramBuf(b.getF32Type(), bn) : Value{};
     Value rightF32 =
         !lhsElem.isF16() ? nramBuf(b.getF32Type(), bk * bn) : Value{};
     fillVec(acc, cI64(bm * bn), cF32(0.0f));
+    if (useGrpSimd)
+      fillVec(scBuf, cI64(scCap),
+              b.create<arith::ConstantOp>(loc, b.getZeroAttr(scElem)));
 
     int32_t codeMask = (1 << spec->packBits) - 1;
     forLoop(cI64(0), cI64(shapeK), cI64(bk), [&](Value kk) {
@@ -1623,6 +1905,34 @@ struct MatrixLowerer {
         }
       }
       sync("io");
+
+      if (useGrpSimd) {
+        Value kkMod =
+            b.create<arith::RemSIOp>(loc, kk, cI64(spec->blockElements));
+        SmallVector<int32_t, 8> lShifts(spec->laneBitShifts,
+                                        spec->laneBitShifts + 8);
+        makeOp("quant_decode_grouped_rhs",
+               {transBuf, qwBuf, scBuf, spec->hasZeroView ? qzBuf : qzDummy,
+                quantLut, idxScratch, workA, workB, nk, nc, cI64(bk), cI64(bn),
+                cI64(spec->blockElements), kkMod,
+                cI32(spec->hasZeroView ? 1 : 0)},
+               {},
+               {b.getNamedAttr("lane_shifts",
+                               b.getDenseI32ArrayAttr(lShifts))},
+               "quant-grouped-rhs");
+        Value accum =
+            b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, kk, cI64(0));
+        sync("compute");
+        memcpy1D(wFilter, transBuf, cI64(bk * bn), "NRAM2WRAM");
+        makeOp("wram_conv", {acc, leftBuf, wFilter, accum}, {},
+               {b.getNamedAttr("bm", b.getI64IntegerAttr(bm)),
+                b.getNamedAttr("bn", b.getI64IntegerAttr(bn)),
+                b.getNamedAttr("bk", b.getI64IntegerAttr(bk)),
+                b.getNamedAttr("mode", b.getStringAttr("f16"))},
+               "wram-conv-f16");
+        sync("compute");
+        return;
+      }
 
       if (lhsElem.isF16() && bn == 64) {
         ifThen(
@@ -2361,6 +2671,134 @@ struct MatrixLowerer {
           biasBuf = nramBuf(carrierElemType(ep.bias), bn);
     }
 
+    Value quantLut, quantRecLut, qActAllF32, dsAll, zeroAll;
+    if (mode == "quant-format") {
+      if (const auto *qSpec = intentdsl::kir::quantFormatSpec(p.dot)) {
+        if ((qSpec->roleLayout ==
+                 intentdsl::kir::QuantRoleLayout::BlockScaledPair ||
+             qSpec->roleLayout ==
+                 intentdsl::kir::QuantRoleLayout::GroupedWeightRhs) &&
+            qSpec->packBits == 4) {
+          quantLut = nramBuf(b.getI32Type(), 256);
+          int32_t vc =
+              qSpec->valueCode == intentdsl::kir::QuantValueCode::Fp4E2M1 ? 1
+                                                                          : 0;
+          int32_t s0 =
+              qSpec->packFactor == 2 ? qSpec->laneBitShifts[0] : 0;
+          int32_t s1 =
+              qSpec->packFactor == 2 ? qSpec->laneBitShifts[1] : 4;
+          makeOp("quant_init_lut",
+                 {quantLut, cI32(vc), cI32(qSpec->packBits),
+                  cI32(qSpec->zeroBias), cI32(s0), cI32(s1)},
+                 {}, {}, "quant-lut-init");
+        } else if (qSpec->roleLayout ==
+                       intentdsl::kir::QuantRoleLayout::RecordGemv &&
+                   qSpec->q8kActivation && qSpec->numBitPlanes == 2 &&
+                   qSpec->blockElements == 256 &&
+                   qSpec->subBlockElements == 16 && bm <= 128 &&
+                   bm * bn >= std::max<int64_t>(bm, 64) &&
+                   p.stride(p.dot.getOperand(0), 2) == 1) {
+          quantRecLut = nramBuf(b.getI16Type(), 1536);
+          const auto &p0 = qSpec->planes[0], &p1 = qSpec->planes[1];
+          makeOp("quant_init_record_lut",
+                 {quantRecLut, cI32(p0.shiftUnit), cI32(p0.bitWidth),
+                  cI32(qSpec->zeroBias), cI32(p1.shiftUnit), cI32(p1.bitWidth),
+                  cI32(p1.destBitOffset)},
+                 {}, {}, "quant-record-lut-init");
+          int64_t recGroups = shapeK / 256;
+          if (recGroups > 0 && recGroups <= 64) {
+            Value xView = p.dot.getOperand(1).getDefiningOp()->getOperand(0);
+            int64_t xSt1 = p.stride(xView, 1);
+            Value actTmp = nramBuf(b.getF32Type(), 256);
+            qActAllF32 = nramBuf(b.getF32Type(), recGroups * 256);
+            dsAll = nramBuf(b.getF32Type(), llvm::alignTo(recGroups, 32));
+            zeroAll = nramBuf(b.getI32Type(), llvm::alignTo(recGroups, 32));
+            intentdsl::kir::Q8KRecord q8;
+            int32_t qMin = -(1 << (q8.elementBits - 1));
+            int32_t qMax = (1 << (q8.elementBits - 1)) - 1;
+            forLoop(cI64(0), cI64(recGroups), cI64(1), [&](Value gq) {
+              if (xSt1 == 1) {
+                memcpy1D(actTmp, globalPtr(xView, {gq, cI64(0)}), cI64(256),
+                         "GDRAM2NRAM");
+                sync("io");
+              } else {
+                forLoop(cI64(0), cI64(256), cI64(1), [&](Value k) {
+                  storeAt(
+                      actTmp, k,
+                      loadAt(globalPtr(xView, {gq, k}), cI64(0), b.getF32Type()));
+                });
+                sync("all");
+              }
+              auto maxLp = forLoopCarry(
+                  cI64(0), cI64(256), cI64(1), ValueRange{cF32(0.0f)},
+                  [&](Value k, ValueRange iter) {
+                    Value xk = loadAt(actTmp, k, b.getF32Type());
+                    Value ax =
+                        makeOp("scalar_math", {xk}, {b.getF32Type()},
+                               {b.getNamedAttr("op", b.getStringAttr("fabs"))})
+                            ->getResult(0);
+                    Value ae =
+                        makeOp("scalar_math", {iter[0]}, {b.getF32Type()},
+                               {b.getNamedAttr("op", b.getStringAttr("fabs"))})
+                            ->getResult(0);
+                    Value gt = b.create<arith::CmpFOp>(
+                        loc, arith::CmpFPredicate::OGT, ax, ae);
+                    Value next =
+                        b.create<arith::SelectOp>(loc, gt, xk, iter[0]);
+                    b.create<scf::YieldOp>(loc, ValueRange{next});
+                  });
+              Value e = maxLp.getResult(0);
+              Value isZ = b.create<arith::CmpFOp>(
+                  loc, arith::CmpFPredicate::OEQ, e, cF32(0.0f));
+              storeAt(zeroAll, gq,
+                      b.create<arith::SelectOp>(loc, isZ, cI32(1), cI32(0)));
+              ifThenElse(
+                  isZ, {},
+                  [&]() { storeAt(dsAll, gq, cF32(0.0f)); },
+                  [&]() {
+                    Value maxQ = cF32(-float((1 << (q8.elementBits - 1)) - 1));
+                    Value inv = b.create<arith::DivFOp>(loc, maxQ, e);
+                    Value ds = b.create<arith::DivFOp>(loc, cF32(1.0f), inv);
+                    storeAt(dsAll, gq, ds);
+                    Value gBase = b.create<arith::MulIOp>(loc, gq, cI64(256));
+                    forLoop(cI64(0), cI64(256), cI64(1), [&](Value k) {
+                      Value xk = loadAt(actTmp, k, b.getF32Type());
+                      Value f = b.create<arith::MulFOp>(loc, xk, inv);
+                      Value fl =
+                          makeOp(
+                              "scalar_math", {f}, {b.getF32Type()},
+                              {b.getNamedAttr("op", b.getStringAttr("floor"))})
+                              ->getResult(0);
+                      Value lo =
+                          b.create<arith::FPToSIOp>(loc, b.getI32Type(), fl);
+                      Value frac = b.create<arith::SubFOp>(loc, f, fl);
+                      Value gtHalf = b.create<arith::CmpFOp>(
+                          loc, arith::CmpFPredicate::OGT, frac, cF32(0.5f));
+                      Value eqHalf = b.create<arith::CmpFOp>(
+                          loc, arith::CmpFPredicate::OEQ, frac, cF32(0.5f));
+                      Value odd = b.create<arith::CmpIOp>(
+                          loc, arith::CmpIPredicate::ne,
+                          b.create<arith::AndIOp>(loc, lo, cI32(1)), cI32(0));
+                      Value bump = b.create<arith::OrIOp>(
+                          loc, gtHalf,
+                          b.create<arith::AndIOp>(loc, eqHalf, odd));
+                      Value inc = b.create<arith::SelectOp>(loc, bump, cI32(1),
+                                                            cI32(0));
+                      Value rnd = b.create<arith::AddIOp>(loc, lo, inc);
+                      Value cl = b.create<arith::MinSIOp>(
+                          loc, b.create<arith::MaxSIOp>(loc, rnd, cI32(qMin)),
+                          cI32(qMax));
+                      storeAt(qActAllF32, b.create<arith::AddIOp>(loc, gBase, k),
+                              b.create<arith::SIToFPOp>(loc, b.getF32Type(), cl));
+                    });
+                  });
+            });
+            sync("all");
+          }
+        }
+      }
+    }
+
     int64_t mb =
         std::max<int64_t>(1, llvm::divideCeil(uint64_t(shapeM), uint64_t(bm)));
     int64_t nb =
@@ -2411,7 +2849,9 @@ struct MatrixLowerer {
           if (failed(emitScaledMX8(acc, r, c, nr, nc)))
             status = failure();
         } else if (mode == "quant-format") {
-          if (failed(emitQuantizedFromDescriptor(acc, r, c, nr, nc)))
+          if (failed(emitQuantizedFromDescriptor(
+                  acc, r, c, nr, nc, quantLut, quantRecLut, qActAllF32, dsAll,
+                  zeroAll)))
             status = failure();
         } else {
           fillVec(acc, cI64(bm * bn),

@@ -451,6 +451,81 @@ void RowExp2Op::getEffects(EffectList &effects) {
   addRead(effects, op, 2);
 }
 
+void RowLogOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  addWrite(effects, op, 0);
+  addReadWrite(effects, op, 1);
+  addRead(effects, op, 2);
+}
+
+void VecCmpMaskOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  addWrite(effects, op, 0);
+  addReadWrite(effects, op, 1);
+  addRead(effects, op, 2);
+  addRead(effects, op, 3);
+}
+
+void VecBitSelectOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  addWrite(effects, op, 0);
+  addReadWrite(effects, op, 1);
+  addRead(effects, op, 2);
+  addRead(effects, op, 3);
+  addRead(effects, op, 4);
+}
+
+void QuantInitLutOp::getEffects(EffectList &effects) {
+  addWrite(effects, getOperation(), 0);
+}
+
+void QuantInitRecordLutOp::getEffects(EffectList &effects) {
+  addWrite(effects, getOperation(), 0);
+}
+
+void QuantE8m0GuardOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  addRead(effects, op, 0);
+  addRead(effects, op, 2);
+  addReadWrite(effects, op, 4);
+}
+
+void QuantDecodeBlockScaledOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  addWrite(effects, op, 0);
+  addRead(effects, op, 1);
+  addReadWrite(effects, op, 2);
+  addRead(effects, op, 3);
+  addReadWrite(effects, op, 4);
+  addReadWrite(effects, op, 5);
+  addReadWrite(effects, op, 6);
+}
+
+void QuantDecodeGroupedRhsOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  addWrite(effects, op, 0);
+  addRead(effects, op, 1);
+  addRead(effects, op, 2);
+  addRead(effects, op, 3);
+  addRead(effects, op, 4);
+  addReadWrite(effects, op, 5);
+  addReadWrite(effects, op, 6);
+  addReadWrite(effects, op, 7);
+}
+
+void QuantRecordGemvOp::getEffects(EffectList &effects) {
+  Operation *op = getOperation();
+  addReadWrite(effects, op, 0);
+  addRead(effects, op, 1);
+  addReadWrite(effects, op, 2);
+  addRead(effects, op, 3);
+  addRead(effects, op, 4);
+  addReadWrite(effects, op, 5);
+  addReadWrite(effects, op, 6);
+  addReadWrite(effects, op, 7);
+  addReadWrite(effects, op, 8);
+}
+
 void Reduce32SumOp::getEffects(EffectList &effects) {
   addReadWrite(effects, getOperation(), 0);
 }
@@ -680,6 +755,18 @@ void BangcSrcDialect::initialize() {
   RowReduceOp::attachInterface<RowReduceContract>(*ctx);
   RowExpOp::attachInterface<F32AccContract<RowExpOp>>(*ctx);
   RowExp2Op::attachInterface<F32AccContract<RowExp2Op>>(*ctx);
+  RowLogOp::attachInterface<F32AccContract<RowLogOp>>(*ctx);
+  VecCmpMaskOp::attachInterface<I32AccContract<VecCmpMaskOp>>(*ctx);
+  VecBitSelectOp::attachInterface<I32AccContract<VecBitSelectOp>>(*ctx);
+  QuantInitLutOp::attachInterface<I32AccContract<QuantInitLutOp>>(*ctx);
+  QuantInitRecordLutOp::attachInterface<I16AccContract<QuantInitRecordLutOp>>(
+      *ctx);
+  QuantE8m0GuardOp::attachInterface<I16AccContract<QuantE8m0GuardOp>>(*ctx);
+  QuantDecodeBlockScaledOp::attachInterface<
+      F32AccContract<QuantDecodeBlockScaledOp>>(*ctx);
+  QuantDecodeGroupedRhsOp::attachInterface<
+      F32AccContract<QuantDecodeGroupedRhsOp>>(*ctx);
+  QuantRecordGemvOp::attachInterface<F32AccContract<QuantRecordGemvOp>>(*ctx);
   Reduce32SumOp::attachInterface<F32AccContract<Reduce32SumOp>>(*ctx);
   SumpoolOp::attachInterface<F32AccContract<SumpoolOp>>(*ctx);
   TileTransposeOp::attachInterface<TileTransposeContract>(*ctx);

@@ -1,0 +1,380 @@
+__mlu_func__ float quant_decode_nibble_scalar(int c, int value_code,
+                                              int pack_bits, int zero_bias) {
+  int mask = (1 << pack_bits) - 1;
+  c &= mask;
+  if (value_code == 1) {
+    int s = (c >> 3) & 1;
+    int e = (c >> 1) & 3;
+    int m = c & 1;
+    int mag2 = e == 0 ? m : ((m + 2) << (e - 1));
+    return (s ? -0.5f : 0.5f) * (float)mag2;
+  }
+  return (float)(c - zero_bias);
+}
+
+__mlu_func__ void quant_init_byte_lut_f16(int *lut256, int value_code,
+                                          int pack_bits, int zero_bias, int s0,
+                                          int s1) {
+  int mask = (1 << pack_bits) - 1;
+  for (int b = 0; b < 256; ++b) {
+    union {
+      int i;
+      half h[2];
+    } u;
+    u.h[0] = (half)quant_decode_nibble_scalar((b >> s0) & mask, value_code,
+                                              pack_bits, zero_bias);
+    u.h[1] = (half)quant_decode_nibble_scalar((b >> s1) & mask, value_code,
+                                              pack_bits, zero_bias);
+    lut256[b] = u.i;
+  }
+  __sync();
+}
+
+__mlu_func__ void quant_init_record_2plane_lut(
+    short *lut_table, int sunit0, int bits0, int zero_bias, int sunit1,
+    int bits1, int doff1) {
+  int mask0 = (1 << bits0) - 1;
+  int mask1 = (1 << bits1) - 1;
+  for (int qm = 0; qm < 2; ++qm) {
+    int sh = qm * sunit0;
+    for (int b = 0; b < 256; ++b)
+      lut_table[qm * 256 + b] = (short)(((b >> sh) & mask0) - zero_bias);
+  }
+  for (int q = 0; q < 4; ++q) {
+    int sh = q * sunit1;
+    for (int b = 0; b < 256; ++b)
+      lut_table[(2 + q) * 256 + b] = (short)(((b >> sh) & mask1) << doff1);
+  }
+  __sync();
+}
+
+__mlu_func__ unsigned char quant_e8m0_panel_ok(const unsigned char *sa, int na,
+                                               const unsigned char *sb, int nb,
+                                               short *scratch, int min_exp,
+                                               int max_exp) {
+  int span = max_exp - min_exp + 1;
+  int full_a = (na / 64) * 64;
+  int full_b = (nb / 64) * 64;
+  if (full_a == na && full_b == nb && full_a > 0 && full_b > 0 &&
+      full_a + full_b <= 4096) {
+    __bang_int82int16(scratch, (const signed char *)sa, full_a, 0, 0);
+    __bang_int82int16(scratch + full_a, (const signed char *)sb, full_b, 0, 0);
+    int tot = full_a + full_b;
+    __bang_band_scalar(scratch, (const short *)scratch, (short)0xff, tot);
+    __bang_sub_scalar(scratch, (const short *)scratch, (short)min_exp, tot);
+    __bang_ge_scalar((unsigned short *)scratch, (const unsigned short *)scratch,
+                     (unsigned short)span, tot);
+    return __bang_count((unsigned short *)scratch, tot) == 0;
+  }
+  if (full_a > 0) {
+    __bang_int82int16(scratch, (const signed char *)sa, full_a, 0, 0);
+    __bang_band_scalar(scratch, (const short *)scratch, (short)0xff, full_a);
+    __bang_sub_scalar(scratch, (const short *)scratch, (short)min_exp, full_a);
+    __bang_ge_scalar((unsigned short *)scratch, (const unsigned short *)scratch,
+                     (unsigned short)span, full_a);
+    if (__bang_count((unsigned short *)scratch, full_a) != 0)
+      return 0;
+  }
+  for (int i = full_a; i < na; ++i) {
+    int v = (int)sa[i];
+    if (v < min_exp || v > max_exp)
+      return 0;
+  }
+  int full_b2 = (nb / 64) * 64;
+  if (full_b2 > 0) {
+    __bang_int82int16(scratch, (const signed char *)sb, full_b2, 0, 0);
+    __bang_band_scalar(scratch, (const short *)scratch, (short)0xff, full_b2);
+    __bang_sub_scalar(scratch, (const short *)scratch, (short)min_exp, full_b2);
+    __bang_ge_scalar((unsigned short *)scratch, (const unsigned short *)scratch,
+                     (unsigned short)span, full_b2);
+    if (__bang_count((unsigned short *)scratch, full_b2) != 0)
+      return 0;
+  }
+  for (int i = full_b2; i < nb; ++i) {
+    int v = (int)sb[i];
+    if (v < min_exp || v > max_exp)
+      return 0;
+  }
+  return 1;
+}
+
+__mlu_func__ void quant_decode_block_scaled_f16(
+    half *dst, const unsigned char *raw, unsigned char *scales,
+    const int *lut256, unsigned int *idx_scratch, half *scale_scratch,
+    half *tr_scratch, int active_rows, int padded_rows, int groups_per_panel,
+    int block_elems, int scale_bias, int col_major) {
+  int rec_bytes = block_elems >> 1;
+  int panel_rec_bytes = groups_per_panel * rec_bytes;
+  int panel_elems = groups_per_panel * block_elems;
+  int total_bytes = padded_rows * panel_rec_bytes;
+  int total_blocks = padded_rows * groups_per_panel;
+
+  if (active_rows < padded_rows && col_major != 2) {
+    for (int i = active_rows * groups_per_panel; i < total_blocks; ++i)
+      scales[i] = (unsigned char)scale_bias;
+    __sync();
+  }
+
+  __bang_int82int32((int *)idx_scratch, (const signed char *)raw, total_bytes,
+                    0, 0);
+  __bang_band_scalar((int *)idx_scratch, (const int *)idx_scratch, 0xff,
+                     total_bytes);
+
+  int aligned_blocks = ((total_blocks + 63) / 64) * 64;
+  __bang_int82int16((short *)scale_scratch, (const signed char *)scales,
+                    aligned_blocks, 0, 0);
+  __bang_band_scalar((short *)scale_scratch, (const short *)scale_scratch,
+                     (short)0xff, aligned_blocks);
+  __bang_add_scalar((short *)scale_scratch, (const short *)scale_scratch,
+                    (short)(15 - scale_bias), aligned_blocks);
+  __bang_mul_scalar((short *)scale_scratch, (const short *)scale_scratch,
+                    (short)1024, aligned_blocks);
+
+  if (col_major == 2 && padded_rows == 64 && block_elems == 32 &&
+      panel_rec_bytes % 16 == 0 && aligned_blocks <= 1024) {
+    __bang_lut((int *)tr_scratch, idx_scratch, lut256, total_bytes, 256);
+    int *sc_lo = (int *)(scale_scratch + 1024);
+    int *sc_hi = sc_lo + aligned_blocks;
+    __bang_int162int32(sc_lo, (const short *)scale_scratch, aligned_blocks, 0,
+                       0);
+    __bang_band_scalar(sc_lo, sc_lo, 0x0000ffff, aligned_blocks);
+    __bang_int162int32(sc_hi, (const short *)scale_scratch, aligned_blocks, 0,
+                       16);
+    __bang_bor(sc_lo, sc_lo, sc_hi, aligned_blocks);
+    for (int g = 0; g < groups_per_panel; ++g) {
+      __bang_cycle_mul(((half *)tr_scratch) + g * 2048,
+                       ((const half *)tr_scratch) + g * 2048,
+                       ((const half *)sc_lo) + g * 128, 2048, 128);
+    }
+    __bang_transpose((float *)dst, (const float *)tr_scratch, panel_rec_bytes,
+                     64);
+    if (active_rows < padded_rows) {
+      __bang_write_value(dst + active_rows * panel_elems,
+                         (padded_rows - active_rows) * panel_elems, (half)0.0f);
+    }
+    return;
+  }
+
+  if (col_major) {
+    __bang_lut((int *)tr_scratch, idx_scratch, lut256, total_bytes, 256);
+    if (panel_rec_bytes % 16 == 0 && padded_rows % 16 == 0) {
+      __bang_transpose((float *)dst, (const float *)tr_scratch, panel_rec_bytes,
+                       padded_rows);
+    } else {
+      __sync_compute();
+      const int *src32 = (const int *)tr_scratch;
+      int *dst32 = (int *)dst;
+      for (int gz = 0; gz < panel_rec_bytes; ++gz)
+        for (int j = 0; j < padded_rows; ++j)
+          dst32[j * panel_rec_bytes + gz] = src32[gz * padded_rows + j];
+      __sync();
+    }
+  } else {
+    __bang_lut((int *)dst, idx_scratch, lut256, total_bytes, 256);
+  }
+
+  if (col_major == 2 && groups_per_panel > 1) {
+    __sync_compute();
+    for (int i = 0; i < total_blocks; ++i)
+      tr_scratch[i] = scale_scratch[i];
+    for (int g = 0; g < groups_per_panel; ++g)
+      for (int j = 0; j < padded_rows; ++j)
+        scale_scratch[j * groups_per_panel + g] =
+            tr_scratch[g * padded_rows + j];
+    __sync();
+  }
+
+  if (total_blocks % 32 == 0 && block_elems % 32 == 0) {
+    __bang_transpose((unsigned short *)tr_scratch, (const unsigned short *)dst,
+                     total_blocks, block_elems);
+    __bang_cycle_mul(tr_scratch, tr_scratch, scale_scratch,
+                     total_blocks * block_elems, total_blocks);
+    __bang_transpose((unsigned short *)dst, (const unsigned short *)tr_scratch,
+                     block_elems, total_blocks);
+  } else {
+    __sync_compute();
+    for (int b = 0; b < active_rows * groups_per_panel; ++b)
+      __bang_mul_scalar(dst + b * block_elems, dst + b * block_elems,
+                        ((volatile half *)scale_scratch)[b], block_elems);
+  }
+
+  if (active_rows < padded_rows) {
+    __bang_write_value(dst + active_rows * panel_elems,
+                       (padded_rows - active_rows) * panel_elems, (half)0.0f);
+  }
+}
+
+__mlu_func__ void quant_decode_grouped_rhs_f16(
+    half *trans_f16, const unsigned char *qw_bytes, const half *sc_f16,
+    const int *qz_words, const int *lut256, unsigned int *idx_scratch,
+    half *work_a, half *work_b, int nk, int nc, int bk, int bn,
+    int block_elems, int kk_mod_block, int has_zero, int s0, int s1, int s2,
+    int s3, int s4, int s5, int s6, int s7) {
+  int pack_cols = bn >> 3;
+  int n_words = bk * pack_cols;
+  int total_bytes = n_words << 2;
+  int shifts[8] = {s0, s1, s2, s3, s4, s5, s6, s7};
+
+  __nram__ half _zp_all[256] __attribute__((aligned(128)));
+  int num_grp = (kk_mod_block + nk - 1) / block_elems + 1;
+  if (has_zero && num_grp <= 4 && bn == 64) {
+    for (int g = 0; g < num_grp; ++g) {
+      half *zp_g = _zp_all + g * 64;
+      for (int p = 0; p < pack_cols; ++p) {
+        int zw = qz_words[g * pack_cols + p];
+        for (int sub = 0; sub < 8; ++sub) {
+          int zc = (zw >> shifts[sub]) & 0xf;
+          zp_g[p * 8 + sub] = (half)(-(float)zc);
+        }
+      }
+    }
+    __sync();
+  }
+
+  __bang_int82int32((int *)idx_scratch, (const signed char *)qw_bytes,
+                    total_bytes, 0, 0);
+  __bang_band_scalar((int *)idx_scratch, (const int *)idx_scratch, 0xff,
+                     total_bytes);
+  __bang_lut((int *)work_a, idx_scratch, lut256, total_bytes, 256);
+
+  bool identity_perm = (s0 == 0 && s1 == 4 && s2 == 8 && s3 == 12 &&
+                        s4 == 16 && s5 == 20 && s6 == 24 && s7 == 28);
+  half *right_f16 = work_a;
+  if (!identity_perm) {
+    int rows32 = n_words >> 2;
+    __bang_transpose((unsigned short *)work_b, (const unsigned short *)work_a,
+                     rows32, 32);
+    __sync_compute();
+    int row_bytes = rows32 * (int)sizeof(half);
+    int stride8 = 8 * row_bytes;
+    for (int sub = 0; sub < 8; ++sub) {
+      int slot = shifts[sub] >> 2;
+      __memcpy(work_a + sub * rows32, work_b + slot * rows32, row_bytes,
+               NRAM2NRAM, stride8, stride8, 3);
+    }
+    __sync_io();
+    __bang_transpose((unsigned short *)work_b, (const unsigned short *)work_a,
+                     32, rows32);
+    right_f16 = work_b;
+  }
+
+  for (int g = 0; g < num_grp; ++g) {
+    int t0 = g * block_elems - kk_mod_block;
+    if (t0 < 0)
+      t0 = 0;
+    int t1 = (g + 1) * block_elems - kk_mod_block;
+    if (t1 > nk)
+      t1 = nk;
+    if (t0 >= t1)
+      continue;
+    int count = (t1 - t0) * bn;
+    if (has_zero) {
+      if (num_grp <= 4 && bn == 64) {
+        __bang_cycle_add(right_f16 + t0 * bn, right_f16 + t0 * bn,
+                         _zp_all + g * 64, count, bn);
+      } else {
+        __sync_compute();
+        for (int p = 0; p < pack_cols; ++p) {
+          int zw = qz_words[g * pack_cols + p];
+          for (int sub = 0; sub < 8; ++sub) {
+            int zc = (zw >> shifts[sub]) & 0xf;
+            _zp_all[p * 8 + sub] = (half)(-(float)zc);
+          }
+        }
+        __sync();
+        __bang_cycle_add(right_f16 + t0 * bn, right_f16 + t0 * bn, _zp_all,
+                         count, bn);
+      }
+    }
+    __bang_cycle_mul(right_f16 + t0 * bn, right_f16 + t0 * bn, sc_f16 + g * bn,
+                     count, bn);
+  }
+
+  if (nk < bk) {
+    __bang_write_value(right_f16 + nk * bn, (bk - nk) * bn, (half)0.0f);
+  }
+  __bang_transpose((unsigned short *)trans_f16,
+                   (const unsigned short *)right_f16, bk, bn);
+  if (nc < bn) {
+    __bang_write_value(trans_f16 + nc * bk, (bn - nc) * bk, (half)0.0f);
+  }
+}
+
+__mlu_func__ void quant_record_gemv_2plane_q8k(
+    float *acc, const unsigned char *rec_panel, unsigned char *rec_t,
+    const float *q_act_f32, const short *lut_table, unsigned short *idx16,
+    short *w16, short *h16, float *wf32, float ds, int nr,
+    int sub_scale_offset, int super_scale_offset, int base0, int hstride0,
+    int qstep0, int qmode0, int base1, int hstride1, int qstep1, int qmode1) {
+  __nram__ int _row_acc_i32[64] __attribute__((aligned(128)));
+  __nram__ float _tmp64[64] __attribute__((aligned(128)));
+  __nram__ float _sc64[64] __attribute__((aligned(128)));
+  __nram__ float _d64[64] __attribute__((aligned(128)));
+
+  __bang_transpose((signed char *)rec_t, (const signed char *)rec_panel, 64,
+                   256);
+  __bang_write_value(_row_acc_i32, 64, 0);
+  __sync_compute();
+
+  for (int r = 0; r < nr; ++r) {
+    union {
+      unsigned short u;
+      half h;
+    } dh;
+    dh.u = (unsigned short)rec_t[super_scale_offset * 64 + r] |
+           ((unsigned short)rec_t[(super_scale_offset + 1) * 64 + r] << 8);
+    _d64[r] = (float)dh.h;
+  }
+  for (int r = nr; r < 64; ++r)
+    _d64[r] = 0.0f;
+  __sync();
+
+  for (int half_idx = 0; half_idx < 2; ++half_idx) {
+    for (int q = 0; q < 4; ++q) {
+      int p0_idx = (qmode0 == 0 ? (q >> 1) : q);
+      int p1_idx = 2 + (qmode1 == 0 ? (q >> 1) : q);
+      for (int sb = 0; sb < 2; ++sb) {
+        int in_half_off = q * 32 + sb * 16;
+        int c_off0 =
+            base0 + half_idx * hstride0 + (q & 1) * qstep0 + sb * 16;
+        int c_off1 =
+            base1 + half_idx * hstride1 + (q & 1) * qstep1 + sb * 16;
+
+        __bang_int82int16((short *)idx16,
+                          (const signed char *)(rec_t + c_off0 * 64), 1024, 0,
+                          0);
+        __bang_band_scalar((short *)idx16, (const short *)idx16, (short)0xff,
+                           1024);
+        __bang_lut(w16, idx16, lut_table + p0_idx * 256, 1024, 256);
+
+        __bang_int82int16((short *)idx16,
+                          (const signed char *)(rec_t + c_off1 * 64), 1024, 0,
+                          0);
+        __bang_band_scalar((short *)idx16, (const short *)idx16, (short)0xff,
+                           1024);
+        __bang_lut(h16, idx16, lut_table + p1_idx * 256, 1024, 256);
+
+        __bang_add(w16, w16, h16, 1024);
+        __bang_int162float(wf32, w16, 1024, 0);
+
+        const float *qa = q_act_f32 + half_idx * 128 + in_half_off;
+        for (int l = 0; l < 16; ++l)
+          __bang_mul_scalar(wf32 + l * 64, wf32 + l * 64, qa[l], 64);
+
+        __bang_sumpool(_tmp64, wf32, 64, 16, 1, 16, 1, 1, 1);
+
+        int sub_idx = sub_scale_offset + half_idx * 8 + (in_half_off >> 4);
+        __bang_int82float(_sc64, (const signed char *)(rec_t + sub_idx * 64),
+                          64, 0);
+        __bang_mul(_tmp64, _tmp64, _sc64, 64);
+        __bang_float2int32_rn((int *)_sc64, _tmp64, 64, 0);
+        __bang_add(_row_acc_i32, _row_acc_i32, (const int *)_sc64, 64);
+      }
+    }
+  }
+
+  __bang_int322float(_tmp64, _row_acc_i32, 64, 0);
+  __bang_mul(_tmp64, _tmp64, _d64, 64);
+  __bang_mul_scalar(_tmp64, _tmp64, ds, 64);
+  __bang_add(acc, acc, _tmp64, 64);
+}
