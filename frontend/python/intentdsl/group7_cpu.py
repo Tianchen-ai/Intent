@@ -77,9 +77,11 @@ def triangular_solve_inplace(
 ):
     for b in I.parallel(x.dim(0)):
         for col in I.parallel(x.dim(2)):
+            # Row axis r has a true forward-substitution RAW recurrence;
+            # inner column dot product over 0..r-1 is reassociable (LAPACK/cuSOLVER trsm).
             for r in I.ordered(x.dim(1)):
                 dot = I.f32(0)
-                for c in I.ordered(r):
+                for c in I.fold(r):
                     dot = dot + l[b, r, c] * x[b, c, col]
                 x[b, r, col] = (x[b, r, col] - dot) / l[b, r, r]
 
