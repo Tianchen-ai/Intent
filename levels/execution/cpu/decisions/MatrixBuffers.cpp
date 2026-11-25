@@ -137,6 +137,15 @@ llvm::Error materializeMatrixBuffers(func::FuncOp fn, RewriterBase &rw,
               rw.getNamedAttr("panel_cols", rw.getI64IntegerAttr(nr)),
               rw.getNamedAttr("k_block", rw.getI64IntegerAttr(kBlk))});
   } else if (packing == "f32-panels-per-call") {
+    auto b = dot.getOperand(1);
+    int64_t bb = dot.getAttrOfType<IntegerAttr>("rhs_batch").getInt();
+    int64_t rhsBanks = bb < 0 ? 1 : G;
+    Value rhs = allocBuf("heap", clampCount(rhsBanks, tiles, K, nr), 4,
+                         "rhs-panels", f32Ty);
+    emitPrep({b, rhs}, "widen-pack-rhs-f32",
+             {rw.getNamedAttr("rhs_k", dot.getAttr("rhs_k")),
+              rw.getNamedAttr("rhs_batch", dot.getAttr("rhs_batch")),
+              rw.getNamedAttr("panel_cols", rw.getI64IntegerAttr(nr))});
     if (!routed) {
       auto a = dot.getOperand(0);
       int64_t ab = dot.getAttrOfType<IntegerAttr>("lhs_batch").getInt();
@@ -147,15 +156,6 @@ llvm::Error materializeMatrixBuffers(func::FuncOp fn, RewriterBase &rw,
                {rw.getNamedAttr("lhs_k", dot.getAttr("lhs_k")),
                 rw.getNamedAttr("lhs_batch", dot.getAttr("lhs_batch"))});
     }
-    auto b = dot.getOperand(1);
-    int64_t bb = dot.getAttrOfType<IntegerAttr>("rhs_batch").getInt();
-    int64_t rhsBanks = bb < 0 ? 1 : G;
-    Value rhs = allocBuf("heap", clampCount(rhsBanks, tiles, K, nr), 4,
-                         "rhs-panels", f32Ty);
-    emitPrep({b, rhs}, "widen-pack-rhs-f32",
-             {rw.getNamedAttr("rhs_k", dot.getAttr("rhs_k")),
-              rw.getNamedAttr("rhs_batch", dot.getAttr("rhs_batch")),
-              rw.getNamedAttr("panel_cols", rw.getI64IntegerAttr(nr))});
   } else if (packing == "decoded-f32-per-call") {
     auto mxAttr =
         rw.getNamedAttr("kir.storage", TypeAttr::get(kir::MX8Type::get(fn.getContext())));

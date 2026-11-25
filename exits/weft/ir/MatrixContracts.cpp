@@ -70,8 +70,8 @@ void registerWeftMatrixContracts(Unit &u) {
       auto ftz = op->getAttrOfType<BoolAttr>("allow_subnormal_ftz");
       auto kind = op->getAttrOfType<StringAttr>("kind");
       auto acc = op->getAttrOfType<StringAttr>("acc_type");
-      if (!eng || eng.getValue() != "auto" || !ftz || ftz.getValue() ||
-          op->hasAttr("kir.storage") || !kind || !acc)
+      if (!eng || (eng.getValue() != "auto" && eng.getValue() != "vector") ||
+          !ftz || ftz.getValue() || op->hasAttr("kir.storage") || !kind || !acc)
         return failure();
       if ((op->getNumOperands() == 2 && kind.getValue() != "outer_contract") ||
           (op->getNumOperands() == 3 && kind.getValue() != "fma"))
@@ -381,14 +381,20 @@ void populateWeftMatrixContracts(intentdsl::cpu::MatrixMachine &m, int64_t v,
   };
 
   // Native Q4_K/Q8_K fused record contraction precedes per-subgroup u8s8 fallback
-  for (int64_t r : {16, 8, 64})
-    add(r, 1, 256, v, "weft-q4k-dot", "q4k-panels", "q4k");
+  if (isRvv) {
+    for (int64_t r : {64, 256, 512, 16, 8})
+      add(r, 1, 256, v, "weft-q4k-dot", "q4k-panels", "q4k");
+  } else {
+    for (int64_t r : {16, 8, 64})
+      add(r, 1, 256, v, "weft-q4k-dot", "q4k-panels", "q4k");
+  }
 
   if (!isRvv) {
     // Vendor triton-weft oneDNN BRGeMM builtin candidates on x86-64
     for (auto [r, c, d] :
          std::initializer_list<std::tuple<int64_t, int64_t, int64_t>>{
-             {6, 4 * v, 64}, {8, 3 * v, 64}, {4, 2 * v, 64}, {16, 4 * v, 64}}) {
+             {6, 4 * v, 64}, {8, 3 * v, 64}, {12, 2 * v, 64}, {14, 2 * v, 64},
+             {8, 2 * v, 64}, {4, 2 * v, 64}}) {
       add(r, c, d, v, "onednn-brgemm-f32", "brgemm-panels", "f32", 1, true,
           false);
       add(r, c, d, v, "onednn-brgemm-f16", "brgemm-panels", "f16", 1, true,

@@ -19,7 +19,7 @@ using namespace mlir;
 namespace CI_UNIT_NAMESPACE {
 LogicalResult lowerMojoMatrix(func::FuncOp);
 LogicalResult lowerMojoOrdered(func::FuncOp);
-LogicalResult lowerMojoRow(func::FuncOp, int64_t);
+LogicalResult lowerMojoRow(func::FuncOp, int64_t, int64_t);
 void dialect(DialectRegistry &r) {
   r.insert<intentdsl::rowmojo::RowMojoDialect, mlir::arith::ArithDialect,
            mlir::math::MathDialect, mlir::scf::SCFDialect>();
@@ -604,7 +604,7 @@ struct Realize : PassWrapper<Realize, OperationPass<ModuleOp>> {
         Columns(op).run(effLanes, knownCols);
       }
     }
-    if (failed(lowerMojoRow(fn, effLanes)))
+    if (failed(lowerMojoRow(fn, effLanes, lanes)))
       signalPassFailure();
   }
 };

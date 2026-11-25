@@ -38,7 +38,7 @@ def MojoMatrixProgram : RowInst<"matrix_program",[SingleBlock]> {
   let regions=(region AnyRegion:$panel, AnyRegion:$host);
 }
 def MojoPanelFn : RowInst<"panel_fn",[SingleBlock, IsolatedFromAbove]> {
-  let arguments=(ins ArrayAttr:$param_dtypes, BoolAttr:$uses_brgemm, BoolAttr:$uses_round_bf16, BoolAttr:$uses_vnni, BoolAttr:$uses_stack, OptionalAttr<DenseI64ArrayAttr>:$tile_bounds);
+  let arguments=(ins ArrayAttr:$param_dtypes, BoolAttr:$uses_brgemm, BoolAttr:$uses_round_bf16, BoolAttr:$uses_vnni, BoolAttr:$uses_stack, OptionalAttr<DenseI64ArrayAttr>:$tile_bounds, OptionalAttr<BoolAttr>:$external_c_buf);
   let regions=(region AnyRegion:$body);
 }
 def MojoIfFullTile : RowInst<"if_full_tile",[SingleBlock]> {
@@ -172,7 +172,8 @@ def MojoEnd : RowInst<"end",[Pure, ReturnLike, Terminator]> {}
 def MojoHostFn : RowInst<"host_fn",[SingleBlock]> {
   let arguments=(ins StrAttr:$params, DenseI64ArrayAttr:$extents, DenseI64ArrayAttr:$tile,
                      BoolAttr:$uses_brgemm, BoolAttr:$uses_q8k, BoolAttr:$uses_bf16_math,
-                     BoolAttr:$uses_f16_math, BoolAttr:$uses_mx8_math, I64Attr:$panel_arity);
+                     BoolAttr:$uses_f16_math, BoolAttr:$uses_mx8_math, I64Attr:$panel_arity,
+                     OptionalAttr<BoolAttr>:$external_c_buf);
   let regions=(region AnyRegion:$body);
 }
 def MojoHostAlloc : RowInst<"host_alloc"> {
@@ -189,7 +190,8 @@ def MojoHostOmpParallel : RowInst<"host_omp_parallel",[SingleBlock]> {
 }
 def MojoHostOmpFor : RowInst<"host_omp_for",[SingleBlock]> {
   let arguments=(ins StrAttr:$iv, StrAttr:$lb, StrAttr:$ub, StrAttr:$step,
-                     BoolAttr:$parallel, BoolAttr:$nowait, BoolAttr:$simd, StrAttr:$if_cond);
+                     BoolAttr:$parallel, BoolAttr:$nowait, BoolAttr:$simd, StrAttr:$if_cond,
+                     OptionalAttr<StrAttr>:$schedule);
   let regions=(region AnyRegion:$body);
 }
 def MojoHostFor : RowInst<"host_for",[SingleBlock]> {
@@ -218,14 +220,16 @@ def MojoHostElemOp : RowInst<"host_elem_op"> {
 def MojoHostPanelYield : RowInst<"host_panel_yield"> {
   let arguments=(ins AnyType:$value, BoolAttr:$widen_bf16, StrAttr:$dst_expr);
 }
-def MojoHostBrgemmPlanDecl : RowInst<"host_brgemm_plan_decl"> {}
+def MojoHostBrgemmPlanDecl : RowInst<"host_brgemm_plan_decl"> {
+  let arguments=(ins OptionalAttr<BoolAttr>:$kc_split);
+}
 def MojoHostBrgemmMarkRows : RowInst<"host_brgemm_mark_rows"> {
   let arguments=(ins StrAttr:$len_expr);
 }
 def MojoHostBrgemmLookup : RowInst<"host_brgemm_lookup"> {
   let arguments=(ins I64Attr:$a_dt, I64Attr:$b_dt, I64Attr:$c_dt,
                      StrAttr:$lda_expr, StrAttr:$ldb_expr, StrAttr:$n_expr, StrAttr:$k_expr,
-                     ArrayAttr:$cleanup);
+                     ArrayAttr:$cleanup, OptionalAttr<StrAttr>:$plan_var, OptionalAttr<I64Attr>:$add_c);
 }
 def MojoHostThreadScratchAlloc : RowInst<"host_thread_scratch_alloc"> {
   let arguments=(ins I64Attr:$stack_bytes, I64Attr:$alignment, StrAttr:$size_var);
@@ -234,10 +238,15 @@ def MojoHostThreadScratchFree : RowInst<"host_thread_scratch_free"> {
   let arguments=(ins I64Attr:$stack_bytes);
 }
 def MojoHostBrgemmCtxDecl : RowInst<"host_brgemm_ctx_decl"> {}
-def MojoHostBrgemmCtxSwitch : RowInst<"host_brgemm_ctx_switch"> {}
+def MojoHostBrgemmCtxSwitch : RowInst<"host_brgemm_ctx_switch"> {
+  let arguments=(ins OptionalAttr<StrAttr>:$plan_var);
+}
+def MojoHostBrgemmAccCall : RowInst<"host_brgemm_acc_call"> {
+  let arguments=(ins StrAttr:$a_expr, StrAttr:$b_expr, StrAttr:$c_expr);
+}
 def MojoHostBrgemmCtxRelease : RowInst<"host_brgemm_ctx_release"> {}
 def MojoHostTileCoords : RowInst<"host_tile_coords"> {
-  let arguments=(ins BoolAttr:$windowed, I64Attr:$head_extent, I64Attr:$chunk_extent);
+  let arguments=(ins BoolAttr:$windowed, BoolAttr:$grouped, I64Attr:$head_extent, I64Attr:$chunk_extent, I64Attr:$col_group);
 }
 def MojoHostGroupedBounds : RowInst<"host_grouped_bounds"> {
   let arguments=(ins I64Attr:$offsets_slot, I64Attr:$offsets_stride);
@@ -249,7 +258,7 @@ def MojoHostViewPtr : RowInst<"host_view_ptr"> {
   let arguments=(ins I64Attr:$index, StrAttr:$source_kind, StrAttr:$expr);
 }
 def MojoHostCallPanel : RowInst<"host_call_panel"> {
-  let arguments=(ins I64Attr:$arity, BoolAttr:$uses_brgemm);
+  let arguments=(ins I64Attr:$arity, BoolAttr:$uses_brgemm, OptionalAttr<StrAttr>:$c_buf_expr);
 }
 def MojoHostFree : RowInst<"host_free"> {
   let arguments=(ins StrAttr:$buf_name);
@@ -280,6 +289,10 @@ def MojoStoreScalar : RowInst<"store_scalar"> {
 }
 def MojoLoadSlice : RowInst<"load_slice"> {
   let arguments=(ins AnyType:$ptr, Index:$offset, I64Attr:$width, OptionalAttr<I64Attr>:$slice_axis);
+  let results=(outs AnyType:$value);
+}
+def MojoGatherSlice : RowInst<"gather_slice"> {
+  let arguments=(ins AnyType:$ptr, AnyType:$offsets);
   let results=(outs AnyType:$value);
 }
 def MojoStoreSlice : RowInst<"store_slice"> {

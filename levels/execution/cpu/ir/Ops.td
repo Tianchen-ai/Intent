@@ -7,14 +7,14 @@ def Cpu_Dialect : Dialect {
 }
 class Inst<string mnemonic, list<Trait> traits = []>
     : Op<Cpu_Dialect, mnemonic, traits>;
-def CPU_WelfordOp : Inst<"welford"> { let arguments=(ins AnyRankedTensor:$samples); let results=(outs AnyTuple:$summary); }
-def CPU_FieldOp : Inst<"field"> { let arguments=(ins AnyTuple:$summary,I64Attr:$position); let results=(outs AnyType:$element); }
+def CPU_WelfordOp : Inst<"welford", [Pure]> { let arguments=(ins AnyRankedTensor:$samples); let results=(outs AnyTuple:$summary); }
+def CPU_FieldOp : Inst<"field", [Pure]> { let arguments=(ins AnyTuple:$summary,I64Attr:$position); let results=(outs AnyType:$element); }
 def Cpu_parallel : Inst<"parallel"> {
   let arguments = (ins AnyMemRef:$domain);
   let results = (outs);
   let regions = (region AnyRegion:$body);
 }
-def Cpu_end : Inst<"end", [Terminator]> {
+def Cpu_end : Inst<"end", [Pure, Terminator]> {
   let arguments = (ins);
   let results = (outs);
 }
@@ -32,39 +32,39 @@ def Cpu_write : Inst<"write"> {
   let arguments = (ins AnyMemRef:$view, Index:$row, AnyTensor:$value);
   let results = (outs);
 }
-def Cpu_cast : Inst<"cast"> {
+def Cpu_cast : Inst<"cast", [Pure]> {
   let arguments = (ins AnyType:$input);
   let results = (outs AnyType:$result);
 }
-def Cpu_add : Inst<"add"> {
+def Cpu_add : Inst<"add", [Pure]> {
   let arguments = (ins AnyType:$lhs, AnyType:$rhs);
   let results = (outs AnyType:$result);
 }
-def Cpu_sub : Inst<"sub"> {
+def Cpu_sub : Inst<"sub", [Pure]> {
   let arguments = (ins AnyType:$lhs, AnyType:$rhs);
   let results = (outs AnyType:$result);
 }
-def Cpu_mul : Inst<"mul"> {
+def Cpu_mul : Inst<"mul", [Pure]> {
   let arguments = (ins AnyType:$lhs, AnyType:$rhs);
   let results = (outs AnyType:$result);
 }
-def Cpu_div : Inst<"div"> {
+def Cpu_div : Inst<"div", [Pure]> {
   let arguments = (ins AnyType:$lhs, AnyType:$rhs);
   let results = (outs AnyType:$result);
 }
-def Cpu_exp : Inst<"exp"> {
+def Cpu_exp : Inst<"exp", [Pure]> {
   let arguments = (ins AnyType:$input);
   let results = (outs AnyType:$result);
 }
-def Cpu_rsqrt : Inst<"rsqrt"> {
+def Cpu_rsqrt : Inst<"rsqrt", [Pure]> {
   let arguments = (ins AnyType:$input);
   let results = (outs AnyType:$result);
 }
-def Cpu_sum : Inst<"sum"> {
+def Cpu_sum : Inst<"sum", [Pure]> {
   let arguments = (ins AnyTensor:$input);
   let results = (outs AnyType:$result);
 }
-def Cpu_max_num : Inst<"max_num"> {
+def Cpu_max_num : Inst<"max_num", [Pure]> {
   let arguments = (ins AnyTensor:$input);
   let results = (outs AnyType:$result);
 }
@@ -76,27 +76,27 @@ def Cpu_task : Inst<"task", [IsolatedFromAbove, SingleBlock]> {
 }
 def Cpu_join : Inst<"join"> { let arguments=(ins Index:$completion); }
 
-def Cpu_constant : Inst<"constant"> {let arguments=(ins AnyAttr:$value);let results=(outs AnyType:$result);}
-def Cpu_maximum : Inst<"maximum"> {let arguments=(ins AnyType:$lhs,AnyType:$rhs);let results=(outs AnyType:$result);}
+def Cpu_constant : Inst<"constant", [Pure]> {let arguments=(ins AnyAttr:$value);let results=(outs AnyType:$result);}
+def Cpu_maximum : Inst<"maximum", [Pure]> {let arguments=(ins AnyType:$lhs,AnyType:$rhs);let results=(outs AnyType:$result);}
 
 foreach mnemonic=["xor","and","shl","shr","gt"] in {
-  def Cpu_#mnemonic#Op : Op<Cpu_Dialect,mnemonic> {
+  def Cpu_#mnemonic#Op : Op<Cpu_Dialect,mnemonic,[Pure]> {
     let arguments=(ins AnyType:$lhs,AnyType:$rhs); let results=(outs AnyType:$result);
   }
 }
-def Cpu_select : Op<Cpu_Dialect,"select"> {
+def Cpu_select : Op<Cpu_Dialect,"select",[Pure]> {
   let arguments=(ins AnyType:$predicate,AnyType:$onTrue,AnyType:$onFalse); let results=(outs AnyType:$result);
 }
-def Cpu_ordinal : Op<Cpu_Dialect,"ordinal"> {
+def Cpu_ordinal : Op<Cpu_Dialect,"ordinal",[Pure]> {
   let arguments=(ins AnyMemRef:$domain,Index:$row); let results=(outs AnyType:$result);
 }
 
-def Cpu_sqrt : Inst<"sqrt"> { let arguments=(ins AnyType:$input); let results=(outs AnyType:$result); }
+def Cpu_sqrt : Inst<"sqrt", [Pure]> { let arguments=(ins AnyType:$input); let results=(outs AnyType:$result); }
 
-def Cpu_uniform : Inst<"uniform"> {
+def Cpu_uniform : Inst<"uniform", [Pure]> {
   let arguments=(ins UI64:$seed,AnyTensor:$counter);let results=(outs AnyTensor:$result);
 }
-def Cpu_Dialect_ScanSum : Op<Cpu_Dialect, "scan_sum", [SameOperandsAndResultType]> {
+def Cpu_Dialect_ScanSum : Op<Cpu_Dialect, "scan_sum", [Pure, SameOperandsAndResultType]> {
   let arguments=(ins AnyRankedTensor:$input); let results=(outs AnyRankedTensor:$prefix);
 }
 def Cpu_Dialect_GatherRow : Op<Cpu_Dialect,"gather_row"> {
@@ -112,15 +112,15 @@ def Cpu_Dialect_Length : Op<Cpu_Dialect,"segment_length"> {
 def Cpu_Dialect_MemberLoad : Op<Cpu_Dialect,"member_load"> {
   let arguments=(ins AnyMemRef:$source,Variadic<AnyType>:$coordinates);let results=(outs AnyType:$value);
 }
-def Cpu_Dialect_Term : Op<Cpu_Dialect,"term",[Terminator]> {let arguments=(ins F32:$value);}
+def Cpu_Dialect_Term : Op<Cpu_Dialect,"term",[Pure, Terminator]> {let arguments=(ins F32:$value);}
 def Cpu_Dialect_CountKeys : Op<Cpu_Dialect,"count_keys"> {
   let arguments=(ins AnyMemRef:$source,Index:$owner,I64Attr:$span);let results=(outs I32Tensor:$counts);
 }
 def Cpu_Dialect_ColumnSum : Op<Cpu_Dialect,"column_sum"> {
   let arguments=(ins AnyMemRef:$source,Index:$owner);let results=(outs I32Tensor:$counts);
 }
-def Cpu_Dialect_Different : Op<Cpu_Dialect,"ne"> {let arguments=(ins AnyType:$lhs,AnyType:$rhs);let results=(outs AnyTensor:$mask);}
-def Cpu_Dialect_ColumnsI32 : Op<Cpu_Dialect,"member_index"> {let arguments=(ins AnyMemRef:$domain,Index:$row);let results=(outs I32Tensor:$members);}
+def Cpu_Dialect_Different : Op<Cpu_Dialect,"ne",[Pure]> {let arguments=(ins AnyType:$lhs,AnyType:$rhs);let results=(outs AnyTensor:$mask);}
+def Cpu_Dialect_ColumnsI32 : Op<Cpu_Dialect,"member_index",[Pure]> {let arguments=(ins AnyMemRef:$domain,Index:$row);let results=(outs I32Tensor:$members);}
 def Cpu_Dialect_PrefixScatter : Op<Cpu_Dialect,"prefix_scatter"> {let arguments=(ins AnyMemRef:$output,AnyMemRef:$counts,Index:$owner,I1Tensor:$predicate,I32Tensor:$prefix,I32Tensor:$values,I32Attr:$fill);}
 def CpuPackTraversal : Op<Cpu_Dialect,"pack_members"> {let arguments=(ins AnyMemRef:$input,AnyMemRef:$output,AnyMemRef:$counts,F32Attr:$threshold,I32Attr:$fill);}
 def Cpu_Dialect_Input : Op<Cpu_Dialect,"index_read"> {let arguments=(ins AnyMemRef:$base,I32Tensor:$key,UnitAttr:$in_bounds);let results=(outs I32Tensor:$values);}

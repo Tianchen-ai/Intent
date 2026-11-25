@@ -4,14 +4,12 @@
 namespace CI_UNIT_NAMESPACE {
 inline int64_t laneCount(mlir::Operation *task, int64_t vectorBits) {
   if (task->hasAttr("cpu.member_tasks")) {
-    bool hasSeg = task->walk([](mlir::Operation *o) {
-                    auto n = o->getName().stripDialect();
-                    return (n == "ordered_sum" || n == "segment_fold" ||
-                            n == "segment_size")
-                               ? mlir::WalkResult::interrupt()
-                               : mlir::WalkResult::advance();
-                  }).wasInterrupted();
-    if (hasSeg)
+    bool hasSegSize = task->walk([](mlir::Operation *o) {
+                        auto n = o->getName().stripDialect();
+                        return n == "segment_size" ? mlir::WalkResult::interrupt()
+                                                   : mlir::WalkResult::advance();
+                      }).wasInterrupted();
+    if (hasSegSize)
       return 1;
   }
   // Keep the mixed-precision accumulation width. Uniform half arithmetic

@@ -192,8 +192,8 @@ def TaskYieldOp : Op<WeftHost_Dialect, "task_yield", [Pure, ReturnLike, Terminat
 }
 
 def TaskSubquantLevelOp : Op<WeftHost_Dialect, "task_subquant_level"> {
-  let arguments = (ins Index:$root_dom, Index:$init_s, Index:$init_t);
-  let results = (outs Index:$res_s, Index:$res_t);
+  let arguments = (ins Index:$root_dom, Variadic<Index>:$inits);
+  let results = (outs Variadic<Index>:$results);
   let regions = (region AnyRegion:$body);
 }
 
@@ -203,8 +203,14 @@ def TaskExtractOp : Op<WeftHost_Dialect, "task_extract"> {
   let results = (outs Index:$res);
 }
 
+def TaskLookupOp : Op<WeftHost_Dialect, "task_lookup"> {
+  let arguments = (ins Index:$table, Index:$indices, StrAttr:$bounds,
+                       StrAttr:$table_type, StrAttr:$idx_type, StrAttr:$val_type);
+  let results = (outs Index:$res);
+}
+
 def TaskHandoffOp : Op<WeftHost_Dialect, "task_handoff", [Pure, ReturnLike, Terminator]> {
-  let arguments = (ins Index:$val_s, Index:$val_t);
+  let arguments = (ins Variadic<Index>:$vals);
 }
 
 def TaskCommitOp : Op<WeftHost_Dialect, "task_commit"> {
@@ -267,11 +273,18 @@ def HostIfOp : Op<WeftHost_Dialect, "host_if"> {
   let regions = (region AnyRegion:$body);
 }
 
+def HostOmpParallelOp : Op<WeftHost_Dialect, "host_omp_parallel"> {
+  let arguments = (ins Variadic<Index>:$vals, StrAttr:$num_threads,
+                       StrAttr:$if_cond, BoolAttr:$release_hw_ctx);
+  let regions = (region AnyRegion:$body);
+}
+
 def HostOmpForOp : Op<WeftHost_Dialect, "host_omp_for"> {
   let arguments = (ins Variadic<Index>:$vals, StrAttr:$iv, StrAttr:$lb,
                        StrAttr:$ub, StrAttr:$step, BoolAttr:$parallel,
                        BoolAttr:$simd, BoolAttr:$x86_simd, StrAttr:$schedule,
-                       StrAttr:$num_threads, StrAttr:$if_cond);
+                       StrAttr:$num_threads, StrAttr:$if_cond,
+                       OptionalAttr<BoolAttr>:$nowait);
   let regions = (region AnyRegion:$body);
 }
 

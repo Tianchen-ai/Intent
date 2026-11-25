@@ -117,15 +117,35 @@ void matrixCost(Unit &u) {
               !packCode && scatteredBytes == 0. && translationBytes == 0.;
           if (t.size() == 6) {
             double rhsPanelBytes = double(t[1]) * g->k * elemReadBytes;
+            double lhsTileBytes = double(t[0]) * g->k * elemReadBytes;
+            double colGroup = 1.;
+            if (packCode != 0 && !g->grouped &&
+                dot.getName().stripDialect() == "contract") {
+              constexpr double kL2TileBudget = 1.75 * 1024. * 1024.;
+              int64_t ncInt = int64_t(nc);
+              if (ncInt >= 4 && 4. * rhsPanelBytes + lhsTileBytes <= kL2TileBudget)
+                colGroup = 4.;
+              else if (ncInt >= 3 &&
+                       3. * rhsPanelBytes + lhsTileBytes <= kL2TileBudget)
+                colGroup = 3.;
+              else if (ncInt >= 2 &&
+                       2. * rhsPanelBytes + lhsTileBytes <= kL2TileBudget)
+                colGroup = 2.;
+            }
             if ((packCode != 0 || contiguousUnpacked) &&
-                rhsPanelBytes <= kPrivateL2Bytes) {
+                colGroup * rhsPanelBytes <= kPrivateL2Bytes) {
               double workerPanels =
                   waves > 0
                       ? std::min(nc * g->batches,
-                                 std::ceil(waves / std::max(1., mb)) + 1.)
+                                 colGroup *
+                                     (std::ceil(waves /
+                                                std::max(1., mb * colGroup)) +
+                                      1.))
                       : 0.;
               rhsReads = workerPanels * rhsPanelBytes;
             }
+            if (colGroup > 1.)
+              lhsReads /= colGroup;
             reads = lhsReads + rhsReads;
           }
           CostEstimate e;

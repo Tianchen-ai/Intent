@@ -126,8 +126,19 @@ TerminalPrinter weftTerminalPrinter() {
       PrintRule::format("%$r0=\"weft_kernel.fold2\"(%$0):({in_type})->{val_type}");
   rules["weft_host.task_extract"] = PrintRule::format(
       "%$r0=\"weft_kernel.extract\"(%$0,%$1) <{{selectors=[\"{selector}\"]}}>:({in_type},{point_type})->{val_type}");
-  rules["weft_host.task_handoff"] =
-      PrintRule::format("\"weft_kernel.handoff\"(%$0,%$1):(si32,si32)->()");
+  rules["weft_host.task_lookup"] = PrintRule::format(
+      "%$r0=\"weft_kernel.lookup\"(%$0,%$1) <{{bounds=\"{bounds}\"}}>:({table_type},{idx_type})->{val_type}");
+  enterLocal("weft_host.task_handoff",
+             [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
+               SmallVector<std::string, 4> ops, tys;
+               for (unsigned i = 0; i < view.numOperands(); ++i) {
+                 ops.push_back(irId(view.operand(i)));
+                 tys.push_back("si32");
+               }
+               c.line("\"weft_kernel.handoff\"(" + llvm::join(ops, ",") +
+                      "):(" + llvm::join(tys, ",") + ")->()");
+               return llvm::Error::success();
+             });
   rules["weft_host.task_commit"] = PrintRule::format(
       "\"weft_kernel.commit\"(%$0,%$1):({val_type},{slice_type})->()");
 
@@ -686,10 +697,14 @@ TerminalPrinter weftTerminalPrinter() {
 
   rules["weft_host.task_subquant_level"] = PrintRule::local(
       [](const LocalOpView &view, PrintPoint at, PrintContext &c) -> llvm::Error {
-        std::string spec = "\"subquant.1\",1,0,3,\"blocks\",\"exact\"";
+        auto domNumAttr = view.attrOfType<IntegerAttr>("domain_num");
+        int64_t domNum = domNumAttr ? domNumAttr.getInt() : 1;
+        std::string spec = "\"subquant." + std::to_string(domNum) + "\"," +
+                           std::to_string(domNum) + ",0,3,\"blocks\",\"exact\"";
         std::string domTy = "!weft_kernel.domain<" + spec + ">";
         std::string ptTy = "!weft_kernel.point<<" + spec + ">>";
         std::string base = irId(view.result(0));
+        unsigned nCarry = view.numResults();
         if (at == PrintPoint::BeginBlock) {
           auto bArgs = view.blockArguments();
           c.line(base + "_e=arith.constant 256:index");
@@ -700,24 +715,39 @@ TerminalPrinter weftTerminalPrinter() {
                  "_c):(!weft_kernel.domain<\"root\",0,-1,0,\"root\",\"exact\">,"
                  "index,index,index)->" +
                  domTy);
-          c.line(base + "_p:2=\"weft_kernel.level\"(" + base + "_d," +
-                 irId(view.operand(1)) + "," + irId(view.operand(2)) +
-                 ") ({^bb0(%b0:" + ptTy +
+          SmallVector<std::string, 4> inOps, blkHdr{irId(bArgs[0]) + ":" + ptTy};
+          for (unsigned i = 0; i < nCarry; ++i) {
+            inOps.push_back(irId(view.operand(1 + i)));
+            blkHdr.push_back(irId(bArgs[1 + i]) + ":si32");
+          }
+          std::string resPack =
+              nCarry > 1 ? (base + "_p:" + std::to_string(nCarry))
+                         : (base + "_p");
+          c.line(resPack + "=\"weft_kernel.level\"(" + base + "_d," +
+                 llvm::join(inOps, ",") + ") ({^bb0(%b0:" + ptTy +
                  "):\n\"weft_kernel.births_yield\"():()->()\n},"
                  "{^bb0(%b1:" +
                  ptTy + "):\n\"weft_kernel.births_yield\"():()->()\n},"
                  "{^bb0(" +
-                 irId(bArgs[0]) + ":" + ptTy + "," + irId(bArgs[1]) + ":si32," +
-                 irId(bArgs[2]) + ":si32):");
+                 llvm::join(blkHdr, ",") + "):");
           c.indent++;
         } else if (at == PrintPoint::EndBlock) {
           c.indent--;
-          c.line("}):(" + domTy + ",si32,si32)->(si32,si32)");
+          SmallVector<std::string, 5> inTys{domTy}, outTys;
+          for (unsigned i = 0; i < nCarry; ++i) {
+            inTys.push_back("si32");
+            outTys.push_back("si32");
+          }
+          std::string outSig =
+              nCarry > 1 ? ("(" + llvm::join(outTys, ",") + ")") : "si32";
+          c.line("}):(" + llvm::join(inTys, ",") + ")->" + outSig);
           c.line(base + "_z=\"weft_kernel.constant\"() <{value=0:si32}>:()->si32");
-          c.line(irId(view.result(0)) + "=\"weft_kernel.binary\"(" + base +
-                 "_p#0," + base + "_z) <{kind=\"add\"}>:(si32,si32)->si32");
-          c.line(irId(view.result(1)) + "=\"weft_kernel.binary\"(" + base +
-                 "_p#1," + base + "_z) <{kind=\"add\"}>:(si32,si32)->si32");
+          for (unsigned i = 0; i < nCarry; ++i) {
+            std::string src =
+                nCarry > 1 ? (base + "_p#" + std::to_string(i)) : (base + "_p");
+            c.line(irId(view.result(i)) + "=\"weft_kernel.binary\"(" + src +
+                   "," + base + "_z) <{kind=\"add\"}>:(si32,si32)->si32");
+          }
         }
         return llvm::Error::success();
       });
@@ -771,6 +801,7 @@ TerminalPrinter weftTerminalPrinter() {
           c.line("#include <immintrin.h>");
           c.line("#endif");
           c.line("#include \"task_bridge.h\"");
+          c.line("__attribute__((weak)) void weft_kernel_release_hw_context(void);");
 
           c.line("struct IntentWsSlot { void *ptr; size_t cap; int busy; };");
           c.line("static _Thread_local struct IntentWsSlot g_intent_ws[4];");
@@ -936,6 +967,31 @@ TerminalPrinter weftTerminalPrinter() {
                return llvm::Error::success();
              });
 
+  rules["weft_host.host_omp_parallel"] = PrintRule::local(
+      [substVals](const LocalOpView &view, PrintPoint at,
+                  PrintContext &c) -> llvm::Error {
+        if (at == PrintPoint::Enter) {
+          std::string nt = view.attrOfType<StringAttr>("num_threads").str();
+          std::string ic = substVals(
+              view.attrOfType<StringAttr>("if_cond").getValue(), view);
+          std::string pragma = "#pragma omp parallel";
+          if (!nt.empty())
+            pragma += " num_threads(" + nt + ")";
+          if (!ic.empty())
+            pragma += " if(" + ic + ")";
+          c.line(pragma);
+          c.line("{");
+        } else if (at == PrintPoint::BeginBlock) {
+          c.indent++;
+        } else if (at == PrintPoint::EndBlock) {
+          if (view.attrOfType<BoolAttr>("release_hw_ctx").getValue())
+            c.line("if (weft_kernel_release_hw_context) weft_kernel_release_hw_context();");
+          c.indent--;
+          c.line("}");
+        }
+        return llvm::Error::success();
+      });
+
   rules["weft_host.host_omp_for"] = PrintRule::local(
       [substVals](const LocalOpView &view, PrintPoint at,
                   PrintContext &c) -> llvm::Error {
@@ -943,6 +999,8 @@ TerminalPrinter weftTerminalPrinter() {
           bool par = view.attrOfType<BoolAttr>("parallel").getValue();
           bool simd = view.attrOfType<BoolAttr>("simd").getValue();
           bool x86Simd = view.attrOfType<BoolAttr>("x86_simd").getValue();
+          auto nwAttr = view.attrOfType<BoolAttr>("nowait");
+          bool nowait = nwAttr && nwAttr.getValue();
           std::string sched = view.attrOfType<StringAttr>("schedule").str();
           std::string nt = view.attrOfType<StringAttr>("num_threads").str();
           std::string ic = substVals(
@@ -972,8 +1030,12 @@ TerminalPrinter weftTerminalPrinter() {
               pragma += " if(" + ic + ")";
             c.line(pragma);
           } else {
-            c.line("#pragma omp for schedule(" +
-                   (sched.empty() ? std::string("static") : sched) + ")");
+            std::string pragma =
+                "#pragma omp for schedule(" +
+                (sched.empty() ? std::string("static") : sched) + ")";
+            if (nowait)
+              pragma += " nowait";
+            c.line(pragma);
           }
           c.line("for (int64_t " + iv + "=" + lb + "; " + iv + "<" + ub + "; " +
                  iv + "+=" + st + ") {");

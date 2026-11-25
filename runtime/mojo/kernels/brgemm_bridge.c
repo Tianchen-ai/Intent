@@ -11,7 +11,7 @@
 
 typedef struct IntentBrgemmKey {
   int64_t M, N, K, lda, ldb, ldc;
-  int32_t a_dt, b_dt, c_dt;
+  int32_t a_dt, b_dt, c_dt, add_c;
 } IntentBrgemmKey;
 
 typedef struct IntentBrgemmEntry {
@@ -53,31 +53,33 @@ static uint64_t hash_key(const IntentBrgemmKey *k) {
   h = (h ^ (uint64_t)(uint32_t)k->a_dt) * 1099511628211ULL;
   h = (h ^ (uint64_t)(uint32_t)k->b_dt) * 1099511628211ULL;
   h = (h ^ (uint64_t)(uint32_t)k->c_dt) * 1099511628211ULL;
+  h = (h ^ (uint64_t)(uint32_t)k->add_c) * 1099511628211ULL;
   return h;
 }
 
 static int same_key(const IntentBrgemmKey *a, const IntentBrgemmKey *b) {
   return a->M == b->M && a->N == b->N && a->K == b->K && a->lda == b->lda &&
          a->ldb == b->ldb && a->ldc == b->ldc && a->a_dt == b->a_dt &&
-         a->b_dt == b->b_dt && a->c_dt == b->c_dt;
+         a->b_dt == b->b_dt && a->c_dt == b->c_dt && a->add_c == b->add_c;
 }
 
-const void *intent_brgemm_get(int64_t M, int64_t N, int64_t K, int64_t lda,
-                              int64_t ldb, int64_t ldc, int32_t a_dt,
-                              int32_t b_dt, int32_t c_dt) {
-  static __thread const IntentBrgemmEntry *tls_cache[4];
+const void *intent_brgemm_get_ex(int64_t M, int64_t N, int64_t K, int64_t lda,
+                                 int64_t ldb, int64_t ldc, int32_t a_dt,
+                                 int32_t b_dt, int32_t c_dt, int32_t add_c) {
+  static __thread const IntentBrgemmEntry *tls_cache[8];
   static __thread unsigned tls_slot;
   static __thread uint64_t tls_epoch;
   if (M <= 0 || N <= 0 || K <= 0)
     return NULL;
-  IntentBrgemmKey key = {M, N, K, lda, ldb, ldc, a_dt, b_dt, c_dt};
+  add_c = add_c ? 1 : 0;
+  IntentBrgemmKey key = {M, N, K, lda, ldb, ldc, a_dt, b_dt, c_dt, add_c};
   uint64_t cur_epoch = __atomic_load_n(&g_epoch, __ATOMIC_ACQUIRE);
   if (tls_epoch != cur_epoch) {
-    for (unsigned i = 0; i < 4; ++i)
+    for (unsigned i = 0; i < 8; ++i)
       tls_cache[i] = NULL;
     tls_epoch = cur_epoch;
   } else {
-    for (unsigned i = 0; i < 4; ++i) {
+    for (unsigned i = 0; i < 8; ++i) {
       const IntentBrgemmEntry *ce = tls_cache[i];
       if (ce && same_key(&ce->key, &key))
         return ce;
@@ -90,7 +92,7 @@ const void *intent_brgemm_get(int64_t M, int64_t N, int64_t K, int64_t lda,
     if (same_key(&e->key, &key)) {
       pthread_rwlock_unlock(&g_lock);
       tls_epoch = cur_epoch;
-      tls_cache[tls_slot++ & 3u] = e;
+      tls_cache[tls_slot++ & 7u] = e;
       return e;
     }
   }
@@ -102,13 +104,14 @@ const void *intent_brgemm_get(int64_t M, int64_t N, int64_t K, int64_t lda,
     if (same_key(&e->key, &key)) {
       pthread_rwlock_unlock(&g_lock);
       tls_epoch = cur_epoch;
-      tls_cache[tls_slot++ & 3u] = e;
+      tls_cache[tls_slot++ & 7u] = e;
       return e;
     }
   }
   dnnl_brgemm_t brg = NULL;
   if (dnnl_brgemm_create(&brg, M, N, K, 1, lda, ldb, ldc, map_dtype(a_dt),
                          map_dtype(b_dt), map_dtype(c_dt)) != dnnl_success ||
+      (add_c && dnnl_brgemm_set_add_C(brg, 1) != dnnl_success) ||
       dnnl_brgemm_finalize(brg) != dnnl_success ||
       dnnl_brgemm_generate(brg) != dnnl_success) {
     if (brg)
@@ -138,8 +141,14 @@ const void *intent_brgemm_get(int64_t M, int64_t N, int64_t K, int64_t lda,
   g_buckets[idx] = entry;
   pthread_rwlock_unlock(&g_lock);
   tls_epoch = cur_epoch;
-  tls_cache[tls_slot++ & 3u] = entry;
+  tls_cache[tls_slot++ & 7u] = entry;
   return entry;
+}
+
+const void *intent_brgemm_get(int64_t M, int64_t N, int64_t K, int64_t lda,
+                              int64_t ldb, int64_t ldc, int32_t a_dt,
+                              int32_t b_dt, int32_t c_dt) {
+  return intent_brgemm_get_ex(M, N, K, lda, ldb, ldc, a_dt, b_dt, c_dt, 0);
 }
 
 void intent_brgemm_cache_clear(void) {

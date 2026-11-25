@@ -111,6 +111,9 @@ struct OrderedLowerer {
   OpBuilder &b;
   Location loc;
   int64_t batch = 1;
+  OrderedLowerer(func::FuncOp fn, Operation &space, OpBuilder &b, Location loc,
+                 int64_t batch)
+      : fn(fn), space(space), b(b), loc(loc), batch(batch) {}
   Value localStackBuf;
   BlockArgument innerOwnerArg;
   bool batchSimd = false;
@@ -2058,6 +2061,34 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn) {
     }
   }
 
+  bool hasVariableOwnerTrip =
+      space
+          .walk([&](scf::ForOp loop) {
+            auto isOwnerInvariant = [&](Value v) {
+              if (!v)
+                return true;
+              if (auto *def = v.getDefiningOp()) {
+                if (isa<arith::ConstantOp, arith::ConstantIndexOp>(def))
+                  return true;
+                if (!space.isProperAncestor(def))
+                  return true;
+                return false;
+              }
+              return !space.getRegion(0).isAncestor(v.getParentRegion());
+            };
+            if (!isOwnerInvariant(loop.getLowerBound()) ||
+                !isOwnerInvariant(loop.getUpperBound()))
+              return WalkResult::interrupt();
+            return WalkResult::advance();
+          })
+          .wasInterrupted();
+  if (hasVariableOwnerTrip && owners >= 2 * batch) {
+    int64_t targetGrain = std::max<int64_t>(batch, owners / 64);
+    targetGrain = ((targetGrain + batch - 1) / batch) * batch;
+    grain = std::min(grain, targetGrain);
+  }
+  bool useCyclic = hasVariableOwnerTrip && owners > grain;
+
   OrderedLowerer lowerer{fn, space, b, loc, batch};
   lowerer.batchSimd = batch >= 2 && llvm::isPowerOf2_64(uint64_t(batch));
   lowerer.analyzeChunkableWideMode();
@@ -2242,7 +2273,7 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn) {
       b, loc, "c_omp_for", {}, {},
       {b.getNamedAttr("count", b.getI64IntegerAttr(owners)),
        b.getNamedAttr("grain", b.getI64IntegerAttr(grain)),
-       b.getNamedAttr("cyclic", b.getBoolAttr(false))},
+       b.getNamedAttr("cyclic", b.getBoolAttr(useCyclic))},
       1);
   makeOp(b, loc, "end");
 
@@ -2250,7 +2281,7 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn) {
   b.setInsertionPointToEnd(&ompBb);
   makeOp(b, loc, "c_owner_call", {}, {},
          {b.getNamedAttr("call_args", b.getStringAttr(llvm::join(callArgs, ","))),
-          b.getNamedAttr("cyclic", b.getBoolAttr(false)),
+          b.getNamedAttr("cyclic", b.getBoolAttr(useCyclic)),
           b.getNamedAttr("count", b.getI64IntegerAttr(owners)),
           b.getNamedAttr("grain", b.getI64IntegerAttr(grain))});
   makeOp(b, loc, "end");

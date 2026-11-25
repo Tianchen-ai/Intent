@@ -3,7 +3,7 @@ include "mlir/Interfaces/SideEffectInterfaces.td"
 // Each coordinate identifies an independent logical owner. Its body can keep
 // SSA values across ordered scf.for iterations and read or write captured views.
 multiclass OrderedOwners<Dialect d> {
-  def OwnerSpace : Op<d,"owner_space",[SingleBlock]> {
+  def OwnerSpace : Op<d,"owner_space",[RecursiveMemoryEffects, SingleBlock]> {
     let arguments=(ins Variadic<AnyMemRef>:$views,DenseI64ArrayAttr:$axes);
     let regions=(region AnyRegion:$body);
   }

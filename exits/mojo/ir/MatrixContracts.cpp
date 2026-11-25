@@ -598,9 +598,10 @@ void populateMojoMatrixContracts(intentdsl::cpu::MatrixMachine &m, int64_t v) {
     add(r, 1, 256, v, "q4k-simd", "q4k-simd-row", "q4k");
   }
 
-  // Vendor oneDNN BRGeMM candidates
+  // Vendor oneDNN BRGeMM candidates (AVX-512 32-ZMM bounded vs AMX 8-TMM)
   for (auto [r, c, d] : std::initializer_list<std::tuple<int64_t, int64_t, int64_t>>{
-           {4, 2 * v, 64}, {8, 2 * v, 64}, {6, 4 * v, 64}, {8, 3 * v, 64}}) {
+           {4, 2 * v, 64}, {8, 2 * v, 64}, {12, 2 * v, 64}, {14, 2 * v, 64},
+           {6, 4 * v, 64}, {8, 3 * v, 64}}) {
     add(r, c, d, v, "onednn-brgemm-f32", "brgemm-tile", "f32", 1, true, false);
     add(r, c, d, v, "onednn-brgemm-f16", "brgemm-tile", "f16", 1, true, false);
   }

@@ -240,11 +240,10 @@ void nativePanelCost(compilerinfra::Unit &u) {
 
           e.bottleneck = "zero-copy JIT AVX-512 BRGeMM microkernel";
           double columns = std::ceil(double(t[1]) / t[3]);
-          double live = t[0] * columns + columns + 2.0;
-          double spill =
-              std::max(0.0, live - (t[3] == 16 ? 32.0 : 16.0)) * t[3] * 4.0 *
-              2.0 * g->k;
-          double l1Loads = double(g->k) * (t[0] + columns);
+          double live = std::min<double>(t[3] == 16 ? 32.0 : 16.0,
+                                         t[0] * columns + columns + 2.0);
+          double aCacheLines = double(t[0]) / double(t[3]);
+          double l1Loads = double(g->k) * (aCacheLines + columns);
           double inTileConvert =
               (impl.dtype == "f16" && !ctx.target.features.count("amx_fp16"))
                   ? double(g->k) * (t[0] + columns)
@@ -253,8 +252,7 @@ void nativePanelCost(compilerinfra::Unit &u) {
           e.terms["live_vectors"] = {live, "count"};
           if (read && write && rate) {
             double widths = workers * t[3];
-            e.timeNs = kTlsLookupNs +
-                       (spill / 2.0) * workers * (1.0 / *read + 1.0 / *write) +
+            e.timeNs = kTlsLookupNs + 120.0 / waves +
                        (tileOutBytes * workers) / *write +
                        ((l1Loads * 0.25 + inTileConvert) * widths) / *rate;
           }

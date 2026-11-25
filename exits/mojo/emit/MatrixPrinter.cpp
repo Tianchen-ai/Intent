@@ -116,6 +116,8 @@ TerminalPrinter mojoMatrixPrinter() {
       "if (brg_scratch != (void*)brg_scratch_stk) free(brg_scratch);");
   rules["mojo_row.host_brgemm_ctx_decl"] =
       PrintRule::format("const void *brg_active = NULL;");
+  rules["mojo_row.host_brgemm_acc_call"] = PrintRule::format(
+      "if (intent_brgemm_tile(bh, {a_expr}, {b_expr}, {c_expr}, brg_scratch) != 0) {{ rc |= 4; thr_ok = 0; continue; }}");
   rules["mojo_row.host_brgemm_ctx_release"] =
       PrintRule::format("if (brg_active) intent_brgemm_thread_leave();");
   rules["mojo_row.host_brgemm_mark_rows"] = PrintRule::format(
@@ -127,6 +129,8 @@ TerminalPrinter mojoMatrixPrinter() {
       PrintRule::format("$0[unsafe_offset=$1] = $2");
   rules["mojo_row.load_slice"] = PrintRule::format(
       "var $r0 = $0.unsafe_offset($1).unsafe_load[width={width}]()");
+  rules["mojo_row.gather_slice"] =
+      PrintRule::format("var $r0 = $0.gather($1)");
   rules["mojo_row.store_slice"] =
       PrintRule::format("$0.unsafe_offset($1).unsafe_store($2)");
   rules["mojo_row.acc_insert_lane"] = PrintRule::format("$0[$1] = $2");
@@ -498,6 +502,12 @@ TerminalPrinter mojoMatrixPrinter() {
                              ": Pointer[UInt8,MutUntrackedOrigin]");
             params.push_back(bArgs[base + 3] +
                              ": Pointer[UInt8,MutUntrackedOrigin]");
+            if (auto extC = view.attrOfType<BoolAttr>("external_c_buf");
+                extC && extC.getValue()) {
+              params.push_back(
+                  bArgs[base + 4] +
+                  ": Pointer[Scalar[DType.float32],MutUntrackedOrigin]");
+            }
           }
           c.line("@export(\"intent_panel\")");
           c.line("def intent_panel(" + llvm::join(params, ", ") +
@@ -896,10 +906,15 @@ TerminalPrinter mojoMatrixPrinter() {
           if (usesBrg) {
             ptypes.push_back("const void*");
             ptypes.push_back("void*");
+            if (auto extC = view.attrOfType<BoolAttr>("external_c_buf");
+                extC && extC.getValue())
+              ptypes.push_back("float*");
             c.line("extern const void *intent_brgemm_get(int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int32_t,int32_t,int32_t);");
+            c.line("extern const void *intent_brgemm_get_ex(int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int32_t,int32_t,int32_t,int32_t);");
             c.line("extern int64_t intent_brgemm_scratch_bytes(const void*);");
             c.line("extern int32_t intent_brgemm_thread_enter(const void*);");
             c.line("extern void intent_brgemm_thread_leave(void);");
+            c.line("extern int32_t intent_brgemm_tile(const void*,const void*,const void*,void*,void*);");
           }
           c.line("extern int32_t intent_panel(" + llvm::join(ptypes, ",") +
                  ");");
@@ -949,6 +964,27 @@ TerminalPrinter mojoMatrixPrinter() {
             c.line("  }");
             c.line("}");
           }
+          if (view.attrOfType<BoolAttr>("uses_bf16_math").getValue() ||
+              view.attrOfType<BoolAttr>("uses_f16_math").getValue()) {
+            c.line("#if defined(__AVX512F__)");
+            c.line("static inline void transpose16x16_ps(const __m512 *r, float *out, int64_t ldo){");
+            c.line("  __m512 t[16], u[16];");
+            c.line("  for (int m = 0; m < 8; ++m) { t[2*m] = _mm512_unpacklo_ps(r[2*m], r[2*m+1]); t[2*m+1] = _mm512_unpackhi_ps(r[2*m], r[2*m+1]); }");
+            c.line("  for (int g = 0; g < 4; ++g) {");
+            c.line("    u[4*g+0] = _mm512_shuffle_ps(t[4*g+0], t[4*g+2], 0x44); u[4*g+1] = _mm512_shuffle_ps(t[4*g+0], t[4*g+2], 0xEE);");
+            c.line("    u[4*g+2] = _mm512_shuffle_ps(t[4*g+1], t[4*g+3], 0x44); u[4*g+3] = _mm512_shuffle_ps(t[4*g+1], t[4*g+3], 0xEE);");
+            c.line("  }");
+            c.line("  for (int j = 0; j < 4; ++j) {");
+            c.line("    __m512 v0 = _mm512_shuffle_f32x4(u[j], u[4+j], 0x88), v1 = _mm512_shuffle_f32x4(u[8+j], u[12+j], 0x88);");
+            c.line("    __m512 v2 = _mm512_shuffle_f32x4(u[j], u[4+j], 0xDD), v3 = _mm512_shuffle_f32x4(u[8+j], u[12+j], 0xDD);");
+            c.line("    _mm512_storeu_ps(out + (0+j)*ldo, _mm512_shuffle_f32x4(v0, v1, 0x88));");
+            c.line("    _mm512_storeu_ps(out + (4+j)*ldo, _mm512_shuffle_f32x4(v2, v3, 0x88));");
+            c.line("    _mm512_storeu_ps(out + (8+j)*ldo, _mm512_shuffle_f32x4(v0, v1, 0xDD));");
+            c.line("    _mm512_storeu_ps(out + (12+j)*ldo, _mm512_shuffle_f32x4(v2, v3, 0xDD));");
+            c.line("  }");
+            c.line("}");
+            c.line("#endif");
+          }
           if (view.attrOfType<BoolAttr>("uses_bf16_math").getValue()) {
             c.line("static inline float expand_bf(uint16_t v){uint32_t b=(uint32_t)v<<16;float f;memcpy(&f,&b,4);return f;}");
             c.line("static inline uint16_t narrow_bf(float f){uint32_t b;memcpy(&b,&f,4);if((b&0x7fffffff)>0x7f800000)return (b>>16)|64;return (b+32767+((b>>16)&1))>>16;}");
@@ -956,9 +992,27 @@ TerminalPrinter mojoMatrixPrinter() {
             c.line("static inline void widen_bf16_span(float *out, const uint16_t *src, int64_t n){");
             c.line("  if (n <= 0) return; size_t i=0, un=(size_t)n;");
             c.line("#if defined(__AVX512F__)");
+            c.line("  for (; i + 64 <= un; i += 64) {");
+            c.line("    for (size_t u = 0; u < 64; u += 16) { __m256i h = _mm256_loadu_si256((const __m256i*)(src+i+u)); _mm512_storeu_ps(out+i+u, _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(h), 16))); }");
+            c.line("  }");
             c.line("  for (; i + 16 <= un; i += 16) { __m256i h = _mm256_loadu_si256((const __m256i*)(src+i)); _mm512_storeu_ps(out+i, _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(h), 16))); }");
             c.line("#endif");
             c.line("  for (; i<un; ++i) out[i] = expand_bf(src[i]);");
+            c.line("}");
+            c.line("static inline void widen_transpose_bf16_panel(float *out, const uint16_t *src, int64_t K, int64_t valid, int64_t nr, int64_t ldn){");
+            c.line("  int64_t jb = 0;");
+            c.line("#if defined(__AVX512F__)");
+            c.line("  for (; jb + 16 <= valid; jb += 16) {");
+            c.line("    int64_t kb = 0;");
+            c.line("    for (; kb + 16 <= K; kb += 16) {");
+            c.line("      __m512 r[16];");
+            c.line("      for (int i = 0; i < 16; ++i) { __m256i h = _mm256_loadu_si256((const __m256i*)(src + (jb + i)*ldn + kb)); r[i] = _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(h), 16)); }");
+            c.line("      transpose16x16_ps(r, out + kb*nr + jb, nr);");
+            c.line("    }");
+            c.line("    for (; kb < K; ++kb) { float *dst = out + kb*nr + jb; for (int i = 0; i < 16; ++i) dst[i] = expand_bf(src[(jb + i)*ldn + kb]); }");
+            c.line("  }");
+            c.line("#endif");
+            c.line("  if (jb < valid || valid < nr) { for (int64_t k = 0; k < K; ++k) { float *dst = out + k*nr; for (int64_t j = jb; j < valid; ++j) dst[j] = expand_bf(src[j*ldn + k]); if (valid < nr) memset(dst + valid, 0, (size_t)(nr - valid) * sizeof(float)); } }");
             c.line("}");
           }
           if (view.attrOfType<BoolAttr>("uses_f16_math").getValue()) {
@@ -976,9 +1030,27 @@ TerminalPrinter mojoMatrixPrinter() {
             c.line("static inline void widen_f16_span(float *out, const uint16_t *src, int64_t n){");
             c.line("  if (n <= 0) return; size_t i=0, un=(size_t)n;");
             c.line("#if defined(__AVX512F__) && defined(__F16C__)");
+            c.line("  for (; i + 64 <= un; i += 64) {");
+            c.line("    for (size_t u = 0; u < 64; u += 16) { __m256i h = _mm256_loadu_si256((const __m256i*)(src+i+u)); _mm512_storeu_ps(out+i+u, _mm512_cvtph_ps(h)); }");
+            c.line("  }");
             c.line("  for (; i + 16 <= un; i += 16) { __m256i h = _mm256_loadu_si256((const __m256i*)(src+i)); _mm512_storeu_ps(out+i, _mm512_cvtph_ps(h)); }");
             c.line("#endif");
             c.line("  for (; i<un; ++i) out[i] = expand_f16(src[i]);");
+            c.line("}");
+            c.line("static inline void widen_transpose_f16_panel(float *out, const uint16_t *src, int64_t K, int64_t valid, int64_t nr, int64_t ldn){");
+            c.line("  int64_t jb = 0;");
+            c.line("#if defined(__AVX512F__) && defined(__F16C__)");
+            c.line("  for (; jb + 16 <= valid; jb += 16) {");
+            c.line("    int64_t kb = 0;");
+            c.line("    for (; kb + 16 <= K; kb += 16) {");
+            c.line("      __m512 r[16];");
+            c.line("      for (int i = 0; i < 16; ++i) { __m256i h = _mm256_loadu_si256((const __m256i*)(src + (jb + i)*ldn + kb)); r[i] = _mm512_cvtph_ps(h); }");
+            c.line("      transpose16x16_ps(r, out + kb*nr + jb, nr);");
+            c.line("    }");
+            c.line("    for (; kb < K; ++kb) { float *dst = out + kb*nr + jb; for (int i = 0; i < 16; ++i) dst[i] = expand_f16(src[(jb + i)*ldn + kb]); }");
+            c.line("  }");
+            c.line("#endif");
+            c.line("  if (jb < valid || valid < nr) { for (int64_t k = 0; k < K; ++k) { float *dst = out + k*nr; for (int64_t j = jb; j < valid; ++j) dst[j] = expand_f16(src[j*ldn + k]); if (valid < nr) memset(dst + valid, 0, (size_t)(nr - valid) * sizeof(float)); } }");
             c.line("}");
           }
           if (view.attrOfType<BoolAttr>("uses_mx8_math").getValue()) {
@@ -1082,12 +1154,21 @@ TerminalPrinter mojoMatrixPrinter() {
           std::string st = view.attrOfType<StringAttr>("step").str();
           if (simd)
             c.line("#pragma omp simd");
-          else if (par)
-            c.line("#pragma omp parallel for num_threads(workers) schedule(static)" +
-                   (ic.empty() ? "" : " if(" + ic + ")"));
-          else
-            c.line(std::string("#pragma omp for schedule(static)") +
+          else if (par) {
+            auto scAttr = view.attrOfType<StringAttr>("schedule");
+            std::string sc =
+                (scAttr && !scAttr.getValue().empty()) ? scAttr.getValue().str()
+                                                       : "static";
+            c.line("#pragma omp parallel for num_threads(workers) schedule(" +
+                   sc + ")" + (ic.empty() ? "" : " if(" + ic + ")"));
+          } else {
+            auto scAttr = view.attrOfType<StringAttr>("schedule");
+            std::string sc =
+                (scAttr && !scAttr.getValue().empty()) ? scAttr.getValue().str()
+                                                       : "static";
+            c.line("#pragma omp for schedule(" + sc + ")" +
                    (nw ? " nowait" : ""));
+          }
           c.line("for (int64_t " + iv + "=" + lb + "; " + iv + "<" + ub + "; " +
                  iv + "+=" + st + ") {");
         } else if (at == PrintPoint::BeginBlock) {
@@ -1126,6 +1207,12 @@ TerminalPrinter mojoMatrixPrinter() {
                else if (kind == "widen_f16")
                  c.line("widen_f16_span(" + dst + ", " + src + ", " + cnt +
                         ");");
+               else if (kind == "widen_transpose_bf16")
+                 c.line("widen_transpose_bf16_panel(" + dst + ", " + src +
+                        ", K, valid, nr, " + cnt + ");");
+               else if (kind == "widen_transpose_f16")
+                 c.line("widen_transpose_f16_panel(" + dst + ", " + src +
+                        ", K, valid, nr, " + cnt + ");");
                else if (kind == "memcpy")
                  c.line("memcpy(" + dst + ", " + src + ", (size_t)(" + cnt +
                         ") * " + std::to_string(eb) + "ULL);");
@@ -1173,8 +1260,13 @@ TerminalPrinter mojoMatrixPrinter() {
              });
 
   enterLocal("mojo_row.host_brgemm_plan_decl",
-             [](const LocalOpView &, PrintContext &c) -> llvm::Error {
+             [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
                c.line("const void *brg_plan[2*(mr+1)]; memset(brg_plan, 0, sizeof(brg_plan));");
+               if (auto kc = view.attrOfType<BoolAttr>("kc_split");
+                   kc && kc.getValue()) {
+                 c.line("const void *brg_kc0[2*(mr+1)]; memset(brg_kc0, 0, sizeof(brg_kc0));");
+                 c.line("const void *brg_kc1[2*(mr+1)]; memset(brg_kc1, 0, sizeof(brg_kc1));");
+               }
                c.line("int64_t brg_scratch_bytes = 64;");
                c.line("uint8_t r_seen[mr+1]; memset(r_seen, 0, sizeof(r_seen));");
                return llvm::Error::success();
@@ -1189,6 +1281,12 @@ TerminalPrinter mojoMatrixPrinter() {
                std::string ldb = view.attrOfType<StringAttr>("ldb_expr").str();
                std::string nE = view.attrOfType<StringAttr>("n_expr").str();
                std::string kE = view.attrOfType<StringAttr>("k_expr").str();
+               auto pvAttr = view.attrOfType<StringAttr>("plan_var");
+               std::string pVar =
+                   (pvAttr && !pvAttr.getValue().empty()) ? pvAttr.str()
+                                                          : "brg_plan";
+               auto addCAttr = view.attrOfType<IntegerAttr>("add_c");
+               int64_t addC = addCAttr ? addCAttr.getInt() : 0;
                std::string frees;
                for (Attribute a : view.attrOfType<ArrayAttr>("cleanup")) {
                  std::string prev = cast<StringAttr>(a).str();
@@ -1199,14 +1297,14 @@ TerminalPrinter mojoMatrixPrinter() {
                  frees += "intent_ws_release(" + std::to_string(pSlot) + ", " +
                           prev + ");";
                }
-               c.line("const void *h = intent_brgemm_get(rt, " + nE + ", " +
+               c.line("{ const void *h = intent_brgemm_get_ex(rt, " + nE + ", " +
                       kE + ", " + lda + ", " + ldb + ", " + nE + ", " +
                       std::to_string(aDt) + ", " + std::to_string(bDt) + ", " +
-                      std::to_string(cDt) + ");");
-               c.line("int64_t sb = intent_brgemm_scratch_bytes(h);");
-               c.line("if (!h || sb < 0) { " + frees + "return 3; }");
-               c.line("brg_plan[ci*(mr+1) + rt] = h;");
-               c.line("if (sb > brg_scratch_bytes) brg_scratch_bytes = sb;");
+                      std::to_string(cDt) + ", " + std::to_string(addC) + ");");
+               c.line("  int64_t sb = intent_brgemm_scratch_bytes(h);");
+               c.line("  if (!h || sb < 0) { " + frees + "return 3; }");
+               c.line("  " + pVar + "[ci*(mr+1) + rt] = h;");
+               c.line("  if (sb > brg_scratch_bytes) brg_scratch_bytes = sb; }");
                return llvm::Error::success();
              });
 
@@ -1228,18 +1326,39 @@ TerminalPrinter mojoMatrixPrinter() {
              });
 
   enterLocal("mojo_row.host_brgemm_ctx_switch",
-             [](const LocalOpView &, PrintContext &c) -> llvm::Error {
-               c.line("const void *bh = brg_plan[(C == nr ? 0 : 1)*(mr+1) + R];");
+             [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
+               auto pvAttr = view.attrOfType<StringAttr>("plan_var");
+               std::string pVar =
+                   (pvAttr && !pvAttr.getValue().empty()) ? pvAttr.str()
+                                                          : "brg_plan";
+               c.line("const void *bh = " + pVar + "[(C == nr ? 0 : 1)*(mr+1) + R];");
                c.line("if (bh != brg_active) { if (intent_brgemm_thread_enter(bh) != 0) { rc |= 3; thr_ok = 0; continue; } brg_active = bh; }");
                return llvm::Error::success();
              });
 
   enterLocal("mojo_row.host_tile_coords",
              [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
-               c.line("const int64_t g = job / (nc * mb), rem = job % (nc * mb);");
-               c.line("const int64_t c = (rem / mb) * nr;");
-               c.line("int64_t r = (rem % mb) * mr, end = M;");
-               if (view.attrOfType<BoolAttr>("windowed").getValue()) {
+               bool win = view.attrOfType<BoolAttr>("windowed").getValue();
+               bool grp = view.attrOfType<BoolAttr>("grouped").getValue();
+               int64_t cg = view.attrOfType<IntegerAttr>("col_group").getInt();
+               if (!win && !grp && cg > 1) {
+                 std::string cgS = std::to_string(cg);
+                 c.line("const int64_t g = job / (nc * mb), rem = job % (nc * mb);");
+                 c.line("const int64_t full_cg = (nc / " + cgS + ") * " + cgS + ";");
+                 c.line("int64_t c, r, end = M;");
+                 c.line("if (rem < full_cg * mb) {");
+                 c.line("  const int64_t cg_idx = rem / (" + cgS + " * mb), cg_rem = rem % (" + cgS + " * mb);");
+                 c.line("  c = (cg_idx * " + cgS + " + cg_rem % " + cgS + ") * nr; r = (cg_rem / " + cgS + ") * mr;");
+                 c.line("} else {");
+                 c.line("  const int64_t trem = rem - full_cg * mb;");
+                 c.line("  c = (full_cg + trem / mb) * nr; r = (trem % mb) * mr;");
+                 c.line("}");
+               } else {
+                 c.line("const int64_t g = job / (nc * mb), rem = job % (nc * mb);");
+                 c.line("const int64_t c = (rem / mb) * nr;");
+                 c.line("int64_t r = (rem % mb) * mr, end = M;");
+               }
+               if (win) {
                  int64_t H =
                      view.attrOfType<IntegerAttr>("head_extent").getInt();
                  int64_t chunks =
@@ -1312,6 +1431,9 @@ TerminalPrinter mojoMatrixPrinter() {
                if (usesBrg) {
                  args.push_back("bh");
                  args.push_back("brg_scratch");
+                 if (auto cbe = view.attrOfType<StringAttr>("c_buf_expr");
+                     cbe && !cbe.getValue().empty())
+                   args.push_back(cbe.str());
                  c.line("const int32_t panel_rc = intent_panel(" +
                         llvm::join(args, ", ") + ");");
                  c.line("if (panel_rc != 0) { rc |= (int)panel_rc; thr_ok = 0; continue; }");

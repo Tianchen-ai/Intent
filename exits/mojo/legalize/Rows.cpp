@@ -206,6 +206,7 @@ struct RowLowerer {
   OpBuilder &b;
   Location loc;
   int64_t fullWidth = 1;
+  int64_t simdWidth = 1;
 
   SmallVector<ArgSlotInfo> slots;
   Value firstIdx, stopIdx, colsIdx, colBlockIdx, keyLoIdx, keyHiIdx;
@@ -229,6 +230,14 @@ struct RowLowerer {
     if (info.boundStrides && info.boundStrides.size() == coords.size())
       return makeStaticAddr(b, loc, info.ptrVal, coords,
                             info.boundStrides.asArrayRef());
+    if (forceUnitStride && coords.size() == size_t(info.rank)) {
+      if (info.rank == 1)
+        return makeStaticAddr(b, loc, info.ptrVal, coords, {1});
+      SmallVector<Value, 4> st(info.strideVals.begin(),
+                               info.strideVals.begin() + coords.size());
+      st.back() = constIdx(b, loc, 1);
+      return makeDynAddr(b, loc, info.ptrVal, coords, st);
+    }
     SmallVector<Value, 4> st(info.strideVals.begin(),
                              info.strideVals.begin() + coords.size());
     return makeDynAddr(b, loc, info.ptrVal, coords, st);
@@ -1384,6 +1393,13 @@ struct RowLowerer {
     bool flatDomain = cast<MemRefType>(fn.getArgument(domArg).getType()).getRank() == 1;
     bool memberTasks = task.hasAttr("cpu.member_tasks");
     llvm::DenseMap<Value, Value> ordinalScalarBases;
+    llvm::DenseSet<unsigned> writtenInBb;
+    for (Operation &wop : bb) {
+      auto wc = wop.getName().stripDialect();
+      if (wc == "write" || wc == "owner_write")
+        writtenInBb.insert(slotIndex(wop.getOperand(0)));
+    }
+    std::map<std::pair<unsigned, bool>, Value> readCache;
 
     for (Operation &op : bb) {
       auto code = op.getName().stripDialect();
@@ -1495,6 +1511,8 @@ struct RowLowerer {
         continue;
       }
       if (code == "segment_fold" || code == "segment_size") {
+        if (map.contains(op.getResult(0)))
+          continue;
         unsigned offIdx = slotIndex(op.getOperand(0));
         auto loadOff = [&](Value idxVal) {
           Value a = emitViewAddr(offIdx, {idxVal});
@@ -1682,7 +1700,7 @@ struct RowLowerer {
           Value sAcc = declScalarSlot(b.getF32Type(), constF32(b, loc, 0));
 
           SmallVector<unsigned, 4> rank1Slots;
-          bool allRank1 = w == 1 && slots[offIdx].rank == 1;
+          bool allRank1 = slots[offIdx].rank == 1;
           if (allRank1) {
             rank1Slots.push_back(offIdx);
             for (Operation &v : terms) {
@@ -1698,117 +1716,245 @@ struct RowLowerer {
             }
           }
 
-          auto emitScalarRange = [&](Value start, Value end) -> llvm::Error {
+          auto canVecSegTerms = [&]() -> bool {
+            if (!forceUnitStride || !allRank1 || simdWidth < 8)
+              return false;
+            llvm::DenseSet<Value> vecVals;
+            vecVals.insert(terms.getArgument(0));
+            for (Operation &v : terms) {
+              auto tn = v.getName().stripDialect();
+              if (tn == "term")
+                return vecVals.contains(v.getOperand(0));
+              if (tn == "member_load") {
+                if (v.getNumOperands() != 2)
+                  return false;
+                unsigned mIdx = slotIndex(v.getOperand(0));
+                if (slots[mIdx].rank != 1)
+                  return false;
+                Value cVal = v.getOperand(1);
+                if (cVal != terms.getArgument(0))
+                  return false;
+                vecVals.insert(v.getResult(0));
+              } else if (tn == "cast") {
+                if (!vecVals.contains(v.getOperand(0)))
+                  return false;
+                Type srcT = v.getOperand(0).getType(),
+                     dstT = v.getResult(0).getType();
+                if (!((isa<FloatType>(srcT) && dstT.isF32()) || srcT == dstT))
+                  return false;
+                vecVals.insert(v.getResult(0));
+              } else if (tn == "mul" || tn == "add") {
+                if (!v.getResult(0).getType().isF32())
+                  return false;
+                vecVals.insert(v.getResult(0));
+              } else {
+                return false;
+              }
+            }
+            return false;
+          };
+
+          auto evalVecSegAt = [&](Value m0, Value laneCol, int64_t kW) -> Value {
+            IRMapping vMap;
+            auto vecF32 = VectorType::get({kW}, b.getF32Type());
+            for (Operation &v : terms) {
+              auto tn = v.getName().stripDialect();
+              if (tn == "term")
+                return vMap.lookup(v.getOperand(0));
+              if (tn == "member_load") {
+                unsigned mIdx = slotIndex(v.getOperand(0));
+                Type eTy = slots[mIdx].elemTy;
+                auto vTy = VectorType::get({kW}, eTy);
+                Value cVal = v.getOperand(1);
+                Value loaded;
+                if (cVal == terms.getArgument(0)) {
+                  Value mAddr =
+                      makeStaticAddr(b, loc, slots[mIdx].ptrVal, {m0}, {1});
+                  loaded = makeOp(b, loc, "load_slice",
+                                  {slots[mIdx].ptrVal, mAddr}, {vTy},
+                                  {b.getNamedAttr("width",
+                                                  b.getI64IntegerAttr(kW))})
+                               ->getResult(0);
+                } else {
+                  Value idxVec = vMap.lookup(cVal);
+                  loaded = makeOp(b, loc, "gather_slice",
+                                  {slots[mIdx].ptrVal, idxVec}, {vTy})
+                               ->getResult(0);
+                }
+                vMap.map(v.getResult(0), loaded);
+              } else if (tn == "cast") {
+                Value inV = vMap.lookup(v.getOperand(0));
+                Type inElem = cast<VectorType>(inV.getType()).getElementType();
+                vMap.map(v.getResult(0),
+                         inElem.isF32()
+                             ? inV
+                             : b.create<arith::ExtFOp>(loc, vecF32, inV)
+                                   .getResult());
+              } else if (tn == "mul" || tn == "add") {
+                auto getVecOpnd = [&](Value opnd) -> Value {
+                  if (Value mapped = vMap.lookupOrNull(opnd))
+                    return mapped;
+                  Value sc = opnd == terms.getArgument(1) ? laneCol
+                                                          : map.lookup(opnd);
+                  return makeOp(b, loc, "splat_scalar", {sc}, {vecF32},
+                                {b.getNamedAttr("dtype",
+                                                b.getStringAttr("float32")),
+                                 b.getNamedAttr("width",
+                                                b.getI64IntegerAttr(kW))})
+                      ->getResult(0);
+                };
+                Value lhs = getVecOpnd(v.getOperand(0));
+                Value rhs = getVecOpnd(v.getOperand(1));
+                Value res = tn == "mul"
+                                ? b.create<arith::MulFOp>(loc, lhs, rhs)
+                                      .getResult()
+                                : b.create<arith::AddFOp>(loc, lhs, rhs)
+                                      .getResult();
+                vMap.map(v.getResult(0), res);
+              }
+            }
+            return {};
+          };
+
+          auto emitVec16SegLoopAt = [&](Value start, Value stop16,
+                                        Value laneCol, Value accSlot) -> bool {
+            if (!canVecSegTerms())
+              return false;
+            const int64_t kW = simdWidth >= 16 ? 16 : 8;
+            Value stepW = constIdx(b, loc, kW);
+            auto *mVecLoop =
+                makeOp(b, loc, "for_range", {start, stop16, stepW}, {}, {}, 1);
+            Block &mvBb = mVecLoop->getRegion(0).emplaceBlock();
+            Value m0 = mvBb.addArgument(b.getIndexType(), loc);
+            OpBuilder::InsertionGuard mvg(b);
+            b.setInsertionPointToEnd(&mvBb);
+            Value prodVec = evalVecSegAt(m0, laneCol, kW);
+            Value accVal = readScalarSlot(accSlot);
+            for (int64_t lane = 0; lane < kW; ++lane) {
+              Value lv =
+                  makeOp(b, loc, "extract_lane", {prodVec}, {b.getF32Type()},
+                         {b.getNamedAttr("lane", b.getI64IntegerAttr(lane))})
+                      ->getResult(0);
+              accVal = b.create<arith::AddFOp>(loc, accVal, lv);
+            }
+            writeScalarSlot(accSlot, accVal);
+            makeOp(b, loc, "end");
+            return true;
+          };
+
+          auto emitScalarRangeAt = [&](Value start, Value end, Value laneCol,
+                                       Value accSlot) -> llvm::Error {
+            Value rawSpan = b.create<arith::SubIOp>(loc, end, start);
+            Value span = b.create<arith::MaxSIOp>(loc, c0, rawSpan);
+            const int64_t segW = simdWidth >= 16 ? 16 : 8;
+            Value alignedW =
+                b.create<arith::AndIOp>(loc, span, constIdx(b, loc, -segW));
+            Value stopW = b.create<arith::AddIOp>(loc, start, alignedW);
+            Value tailStart = start;
+            if (emitVec16SegLoopAt(start, stopW, laneCol, accSlot)) {
+              tailStart = stopW;
+            } else {
+              Value aligned8 =
+                  b.create<arith::AndIOp>(loc, span, constIdx(b, loc, -8));
+              Value stop8 = b.create<arith::AddIOp>(loc, start, aligned8);
+              Value c8 = constIdx(b, loc, 8);
+              {
+                auto *m8Loop =
+                    makeOp(b, loc, "for_range", {start, stop8, c8}, {}, {}, 1);
+                Block &m8Bb = m8Loop->getRegion(0).emplaceBlock();
+                Value m0 = m8Bb.addArgument(b.getIndexType(), loc);
+                OpBuilder::InsertionGuard m8g(b);
+                b.setInsertionPointToEnd(&m8Bb);
+                Value prevJ = j;
+                j = laneCol;
+                Value tVals[8];
+                for (int u = 0; u < 8; ++u) {
+                  Value mu = u == 0
+                                 ? m0
+                                 : b.create<arith::AddIOp>(loc, m0,
+                                                           constIdx(b, loc, u))
+                                       .getResult();
+                  auto tv = evalTermAt(mu);
+                  if (!tv) {
+                    j = prevJ;
+                    return tv.takeError();
+                  }
+                  tVals[u] = *tv;
+                }
+                j = prevJ;
+                Value accVal = readScalarSlot(accSlot);
+                for (int u = 0; u < 8; ++u)
+                  accVal = b.create<arith::AddFOp>(loc, accVal, tVals[u]);
+                writeScalarSlot(accSlot, accVal);
+                makeOp(b, loc, "end");
+              }
+              tailStart = stop8;
+            }
             auto *mLoop =
-                makeOp(b, loc, "for_range", {start, end, c1}, {}, {}, 1);
+                makeOp(b, loc, "for_range", {tailStart, end, c1}, {}, {}, 1);
             Block &mBb = mLoop->getRegion(0).emplaceBlock();
             Value member = mBb.addArgument(b.getIndexType(), loc);
             OpBuilder::InsertionGuard mg(b);
             b.setInsertionPointToEnd(&mBb);
             Value prevJ = j;
-            j = colCoord;
+            j = laneCol;
             auto tVal = evalTermAt(member);
             j = prevJ;
             if (!tVal)
               return tVal.takeError();
-            Value cur = readScalarSlot(sAcc);
-            writeScalarSlot(sAcc, b.create<arith::AddFOp>(loc, cur, *tVal));
+            Value cur = readScalarSlot(accSlot);
+            writeScalarSlot(accSlot, b.create<arith::AddFOp>(loc, cur, *tVal));
             makeOp(b, loc, "end");
             return llvm::Error::success();
           };
 
+          auto emitScalarRange = [&](Value start, Value end) -> llvm::Error {
+            return emitScalarRangeAt(start, end, colCoord, sAcc);
+          };
+
           if (allRank1) {
+            auto loadOffUnit = [&](Value idxVal) {
+              Value a =
+                  makeStaticAddr(b, loc, slots[offIdx].ptrVal, {idxVal}, {1});
+              Value raw = makeOp(b, loc, "load_scalar",
+                                 {slots[offIdx].ptrVal, a}, {b.getI32Type()})
+                              ->getResult(0);
+              return asInt(b, loc, raw);
+            };
             Value allUnit;
             for (unsigned sIdx : rank1Slots) {
-              if (slots[sIdx].boundStrides && slots[sIdx].boundStrides[0] == 1)
+              if (forceUnitStride ||
+                  (slots[sIdx].boundStrides && slots[sIdx].boundStrides[0] == 1))
                 continue;
               Value eq1 = b.create<arith::CmpIOp>(
                   loc, arith::CmpIPredicate::eq, slots[sIdx].strideVals[0], c1);
               allUnit = allUnit ? b.create<arith::AndIOp>(loc, allUnit, eq1).getResult()
                                 : eq1;
             }
-            if (!allUnit)
-              allUnit = b.create<arith::ConstantIntOp>(loc, 1, 1);
+            if (!allUnit) {
+              bool prevFast = forceUnitStride;
+              forceUnitStride = true;
+              Value start = loadOffUnit(segOwner);
+              Value end =
+                  loadOffUnit(b.create<arith::AddIOp>(loc, segOwner, c1));
+              if (auto err = emitScalarRange(start, end)) {
+                forceUnitStride = prevFast;
+                return std::move(err);
+              }
+              forceUnitStride = prevFast;
+              return readScalarSlot(sAcc);
+            }
             auto ifUnit = b.create<scf::IfOp>(loc, TypeRange{}, allUnit, true);
             {
               OpBuilder::InsertionGuard tg(b);
               b.setInsertionPointToStart(&ifUnit.getThenRegion().front());
               bool prevFast = forceUnitStride;
               forceUnitStride = true;
-              auto loadOffUnit = [&](Value idxVal) {
-                Value a = makeStaticAddr(b, loc, slots[offIdx].ptrVal, {idxVal}, {1});
-                Value raw = makeOp(b, loc, "load_scalar",
-                                   {slots[offIdx].ptrVal, a}, {b.getI32Type()})
-                                ->getResult(0);
-                return asInt(b, loc, raw);
-              };
               Value start = loadOffUnit(segOwner);
               Value end = loadOffUnit(b.create<arith::AddIOp>(loc, segOwner, c1));
-              Value c4 = constIdx(b, loc, 4), c2 = constIdx(b, loc, 2),
-                    c3 = constIdx(b, loc, 3);
-              auto *w4 = makeOp(b, loc, "while_lt", {start, end, c4}, {},
-                                {b.getNamedAttr("check_step", b.getBoolAttr(true))},
-                                1);
-              Block &w4Bb = w4->getRegion(0).emplaceBlock();
-              Value m0 = w4Bb.addArgument(b.getIndexType(), loc);
-              {
-                OpBuilder::InsertionGuard wg(b);
-                b.setInsertionPointToEnd(&w4Bb);
-                Value prevJ = j;
-                j = colCoord;
-                auto t0 = evalTermAt(m0);
-                auto t1 = evalTermAt(b.create<arith::AddIOp>(loc, m0, c1));
-                auto t2 = evalTermAt(b.create<arith::AddIOp>(loc, m0, c2));
-                auto t3 = evalTermAt(b.create<arith::AddIOp>(loc, m0, c3));
-                j = prevJ;
-                if (!t0) {
-                  forceUnitStride = prevFast;
-                  return t0.takeError();
-                }
-                if (!t1) {
-                  forceUnitStride = prevFast;
-                  return t1.takeError();
-                }
-                if (!t2) {
-                  forceUnitStride = prevFast;
-                  return t2.takeError();
-                }
-                if (!t3) {
-                  forceUnitStride = prevFast;
-                  return t3.takeError();
-                }
-                Value a0 = b.create<arith::AddFOp>(loc, readScalarSlot(sAcc), *t0);
-                Value a1 = b.create<arith::AddFOp>(loc, a0, *t1);
-                Value a2 = b.create<arith::AddFOp>(loc, a1, *t2);
-                Value a3 = b.create<arith::AddFOp>(loc, a2, *t3);
-                writeScalarSlot(sAcc, a3);
-                makeOp(b, loc, "end");
-              }
-              Value span = b.create<arith::MaxSIOp>(
-                  loc, c0, b.create<arith::SubIOp>(loc, end, start));
-              Value done4 = b.create<arith::AddIOp>(
-                  loc, start,
-                  b.create<arith::MulIOp>(
-                      loc, b.create<arith::DivSIOp>(loc, span, c4), c4));
-              auto *w1 = makeOp(b, loc, "while_lt", {done4, end, c1}, {},
-                                {b.getNamedAttr("check_step", b.getBoolAttr(false))},
-                                1);
-              Block &w1Bb = w1->getRegion(0).emplaceBlock();
-              Value mRem = w1Bb.addArgument(b.getIndexType(), loc);
-              {
-                OpBuilder::InsertionGuard rg(b);
-                b.setInsertionPointToEnd(&w1Bb);
-                Value prevJ = j;
-                j = colCoord;
-                auto tRem = evalTermAt(mRem);
-                j = prevJ;
-                if (!tRem) {
-                  forceUnitStride = prevFast;
-                  return tRem.takeError();
-                }
-                writeScalarSlot(
-                    sAcc, b.create<arith::AddFOp>(loc, readScalarSlot(sAcc), *tRem));
-                makeOp(b, loc, "end");
+              if (auto err = emitScalarRange(start, end)) {
+                forceUnitStride = prevFast;
+                return std::move(err);
               }
               forceUnitStride = prevFast;
             }
@@ -1838,10 +1984,47 @@ struct RowLowerer {
           map.map(op.getResult(0), *valOrErr);
         } else {
           Value vecSlot = declVecSlot(resTy, w);
-          auto *lLoop = makeOp(b, loc, "for_range", {c0, cW, c1}, {}, {}, 1);
-          Block &lBb = lLoop->getRegion(0).emplaceBlock();
-          Value lane = lBb.addArgument(b.getIndexType(), loc);
-          {
+          auto &terms = op.getRegion(0).front();
+          SmallVector<unsigned, 4> vecRank1Slots;
+          bool vecAllRank1 =
+              code == "segment_fold" && w >= 4 && w % 4 == 0 &&
+              simdWidth >= 8 && slots[offIdx].rank == 1 &&
+              cast<VectorType>(resTy).getElementType().isF32();
+          if (vecAllRank1) {
+            vecRank1Slots.push_back(offIdx);
+            for (Operation &v : terms) {
+              auto tn = v.getName().stripDialect();
+              if (tn == "term")
+                break;
+              if (tn == "member_load") {
+                if (v.getNumOperands() != 2) {
+                  vecAllRank1 = false;
+                  break;
+                }
+                unsigned mIdx = slotIndex(v.getOperand(0));
+                if (slots[mIdx].rank != 1) {
+                  vecAllRank1 = false;
+                  break;
+                }
+                Value cVal = v.getOperand(1);
+                if (cVal != terms.getArgument(0) &&
+                    !cVal.getType().isInteger(32) &&
+                    !cVal.getType().isInteger(64)) {
+                  vecAllRank1 = false;
+                  break;
+                }
+                if (!llvm::is_contained(vecRank1Slots, mIdx))
+                  vecRank1Slots.push_back(mIdx);
+              } else if (tn != "cast" && tn != "mul" && tn != "add") {
+                vecAllRank1 = false;
+                break;
+              }
+            }
+          }
+          auto emitSerialLanes = [&]() -> LogicalResult {
+            auto *lLoop = makeOp(b, loc, "for_range", {c0, cW, c1}, {}, {}, 1);
+            Block &lBb = lLoop->getRegion(0).emplaceBlock();
+            Value lane = lBb.addArgument(b.getIndexType(), loc);
             OpBuilder::InsertionGuard lg(b);
             b.setInsertionPointToEnd(&lBb);
             auto valOrErr = emitOneSegLane(lane);
@@ -1850,6 +2033,153 @@ struct RowLowerer {
                      failure();
             makeOp(b, loc, "acc_insert_lane", {vecSlot, lane, *valOrErr});
             makeOp(b, loc, "end");
+            return success();
+          };
+          auto emitLockstep4Lanes = [&]() -> LogicalResult {
+            auto loadOffUnit = [&](Value idxVal) {
+              Value a =
+                  makeStaticAddr(b, loc, slots[offIdx].ptrVal, {idxVal}, {1});
+              Value raw = makeOp(b, loc, "load_scalar",
+                                 {slots[offIdx].ptrVal, a}, {b.getI32Type()})
+                              ->getResult(0);
+              return asInt(b, loc, raw);
+            };
+            const int lockK = (w >= 8 && w % 8 == 0) ? 8 : 4;
+            Value c4 = constIdx(b, loc, 4);
+            Value mask4 = constIdx(b, loc, -4);
+            bool prevFast = forceUnitStride;
+            forceUnitStride = true;
+            SmallVector<Value, 16> laneVals;
+            for (int64_t g = 0; g < w; g += lockK) {
+              Value colsK[8], segsK[8], startsK[8], endsK[8], spansK[8], accsK[8];
+              for (int u = 0; u < lockK; ++u) {
+                Value laneOff = constIdx(b, loc, g + u);
+                colsK[u] = (g + u == 0)
+                               ? j
+                               : b.create<arith::AddIOp>(loc, j, laneOff).getResult();
+                segsK[u] =
+                    flatDomain
+                        ? (memberTasks
+                               ? b.create<arith::AddIOp>(loc, r, colsK[u]).getResult()
+                               : colsK[u])
+                        : r;
+                startsK[u] = (u > 0 && flatDomain) ? endsK[u - 1]
+                                                   : loadOffUnit(segsK[u]);
+                endsK[u] =
+                    loadOffUnit(b.create<arith::AddIOp>(loc, segsK[u], c1));
+                spansK[u] = b.create<arith::MaxSIOp>(
+                    loc, c0, b.create<arith::SubIOp>(loc, endsK[u], startsK[u]));
+                accsK[u] = declScalarSlot(b.getF32Type(), constF32(b, loc, 0));
+              }
+              Value minSpan = spansK[0];
+              for (int u = 1; u < lockK; ++u)
+                minSpan = b.create<arith::MinSIOp>(loc, minSpan, spansK[u]);
+              Value common4 = b.create<arith::AndIOp>(loc, minSpan, mask4);
+              {
+                auto *m4Loop =
+                    makeOp(b, loc, "for_range", {c0, common4, c4}, {}, {}, 1);
+                Block &mvBb = m4Loop->getRegion(0).emplaceBlock();
+                Value tOff = mvBb.addArgument(b.getIndexType(), loc);
+                OpBuilder::InsertionGuard mvg(b);
+                b.setInsertionPointToEnd(&mvBb);
+                Value curAccs[8], ps[8];
+                for (int u = 0; u < lockK; ++u) {
+                  curAccs[u] = readScalarSlot(accsK[u]);
+                  ps[u] = b.create<arith::AddIOp>(loc, startsK[u], tOff);
+                }
+                for (int ln = 0; ln < 4; ++ln) {
+                  Value lnOff = constIdx(b, loc, ln);
+                  for (int u = 0; u < lockK; ++u) {
+                    Value mu = ln == 0
+                                   ? ps[u]
+                                   : b.create<arith::AddIOp>(loc, ps[u], lnOff)
+                                         .getResult();
+                    Value prevJ = j;
+                    j = colsK[u];
+                    auto tv = evalTermAt(mu);
+                    j = prevJ;
+                    if (!tv) {
+                      forceUnitStride = prevFast;
+                      return op.emitError() << llvm::toString(tv.takeError()),
+                             failure();
+                    }
+                    curAccs[u] = b.create<arith::AddFOp>(loc, curAccs[u], *tv);
+                  }
+                }
+                for (int u = 0; u < lockK; ++u)
+                  writeScalarSlot(accsK[u], curAccs[u]);
+                makeOp(b, loc, "end");
+              }
+              for (int u = 0; u < lockK; ++u) {
+                Value remStart =
+                    b.create<arith::AddIOp>(loc, startsK[u], common4);
+                auto *rtLoop = makeOp(b, loc, "for_range",
+                                      {remStart, endsK[u], c1}, {}, {}, 1);
+                Block &rtBb = rtLoop->getRegion(0).emplaceBlock();
+                Value member = rtBb.addArgument(b.getIndexType(), loc);
+                {
+                  OpBuilder::InsertionGuard rtg(b);
+                  b.setInsertionPointToEnd(&rtBb);
+                  Value prevJ = j;
+                  j = colsK[u];
+                  auto tv = evalTermAt(member);
+                  j = prevJ;
+                  if (!tv) {
+                    forceUnitStride = prevFast;
+                    return op.emitError() << llvm::toString(tv.takeError()),
+                           failure();
+                  }
+                  writeScalarSlot(
+                      accsK[u],
+                      b.create<arith::AddFOp>(loc, readScalarSlot(accsK[u]), *tv));
+                  makeOp(b, loc, "end");
+                }
+                laneVals.push_back(readScalarSlot(accsK[u]));
+              }
+            }
+            forceUnitStride = prevFast;
+            Value packed =
+                makeOp(b, loc, "pack_apply", laneVals, {resTy},
+                       {b.getNamedAttr("in_dtype", b.getStringAttr("float32")),
+                        b.getNamedAttr("out_dtype", b.getStringAttr("float32")),
+                        b.getNamedAttr("kind", b.getStringAttr("id"))})
+                    ->getResult(0);
+            writeVecSlot(vecSlot, packed);
+            return success();
+          };
+          if (vecAllRank1) {
+            Value allUnit;
+            for (unsigned sIdx : vecRank1Slots) {
+              if (forceUnitStride ||
+                  (slots[sIdx].boundStrides && slots[sIdx].boundStrides[0] == 1))
+                continue;
+              Value eq1 = b.create<arith::CmpIOp>(
+                  loc, arith::CmpIPredicate::eq, slots[sIdx].strideVals[0], c1);
+              allUnit = allUnit
+                            ? b.create<arith::AndIOp>(loc, allUnit, eq1).getResult()
+                            : eq1;
+            }
+            if (!allUnit) {
+              if (failed(emitLockstep4Lanes()))
+                return failure();
+            } else {
+              auto ifUnit = b.create<scf::IfOp>(loc, TypeRange{}, allUnit, true);
+              {
+                OpBuilder::InsertionGuard tg(b);
+                b.setInsertionPointToStart(&ifUnit.getThenRegion().front());
+                if (failed(emitLockstep4Lanes()))
+                  return failure();
+              }
+              {
+                OpBuilder::InsertionGuard eg(b);
+                b.setInsertionPointToStart(&ifUnit.getElseRegion().front());
+                if (failed(emitSerialLanes()))
+                  return failure();
+              }
+            }
+          } else {
+            if (failed(emitSerialLanes()))
+              return failure();
           }
           map.map(op.getResult(0), readVecSlot(vecSlot));
         }
@@ -1922,7 +2252,20 @@ struct RowLowerer {
         continue;
       }
       if (code == "read") {
-        map.map(op.getResult(0), emitSweepRead(op, r, j, w));
+        unsigned sIdx = slotIndex(op.getOperand(0));
+        bool swap = op.hasAttr("axes");
+        std::pair<unsigned, bool> rKey{sIdx, swap};
+        if (!writtenInBb.contains(sIdx)) {
+          auto it = readCache.find(rKey);
+          if (it != readCache.end()) {
+            map.map(op.getResult(0), it->second);
+            continue;
+          }
+        }
+        Value loaded = emitSweepRead(op, r, j, w);
+        if (!writtenInBb.contains(sIdx))
+          readCache[rKey] = loaded;
+        map.map(op.getResult(0), loaded);
         continue;
       }
       if (code == "write") {
@@ -2729,8 +3072,7 @@ struct RowLowerer {
               --curLive;
           }
         }
-        int64_t overlapLanes =
-            (isStore || deferCrossLaneStores) ? 4 : 2;
+        int64_t overlapLanes = deferCrossLaneStores ? 4 : 2;
         return hoistedVecs + sharedPolyRegs + 4 * int64_t(numReds) +
                3 * deferredPerLane + overlapLanes * std::max<int64_t>(1, lanePeak);
       };
@@ -2778,8 +3120,15 @@ struct RowLowerer {
                 estimateUnroll4VecRegisters(true) <= archVecRegs;
             Value cW2 = constIdx(b, loc, 2 * w), cW3 = constIdx(b, loc, 3 * w),
                   cW4 = constIdx(b, loc, 4 * w);
-            Value unrollStop = b.create<arith::MulIOp>(
-                loc, b.create<arith::DivSIOp>(loc, fullStop, cW4), cW4);
+            Value unrollStop =
+                llvm::isPowerOf2_64(uint64_t(4 * w))
+                    ? b.create<arith::AndIOp>(loc, fullStop,
+                                              constIdx(b, loc, -(4 * w)))
+                          .getResult()
+                    : b.create<arith::MulIOp>(
+                           loc, b.create<arith::DivSIOp>(loc, fullStop, cW4),
+                           cW4)
+                          .getResult();
             {
               auto *uLoop =
                   makeOp(b, loc, "for_range", {c0, unrollStop, cW4}, {}, {}, 1);
@@ -2949,8 +3298,14 @@ struct RowLowerer {
               extraAccs[u].push_back(declVecSlot(vecF32Ty, w, initVal));
           Value cW2 = constIdx(b, loc, 2 * w), cW3 = constIdx(b, loc, 3 * w),
                 cW4 = constIdx(b, loc, 4 * w);
-          Value unrollStop = b.create<arith::MulIOp>(
-              loc, b.create<arith::DivSIOp>(loc, fullStop, cW4), cW4);
+          Value unrollStop =
+              llvm::isPowerOf2_64(uint64_t(4 * w))
+                  ? b.create<arith::AndIOp>(loc, fullStop,
+                                            constIdx(b, loc, -(4 * w)))
+                        .getResult()
+                  : b.create<arith::MulIOp>(
+                         loc, b.create<arith::DivSIOp>(loc, fullStop, cW4), cW4)
+                        .getResult();
           {
             auto *uLoop =
                 makeOp(b, loc, "for_range", {c0, unrollStop, cW4}, {}, {}, 1);
@@ -3025,16 +3380,35 @@ struct RowLowerer {
       if (!ownerAxis) {
         for (Operation &sop : loop.getRegion(0).front()) {
           auto scode = sop.getName().stripDialect();
-          if (scode == "segment_fold" && sop.hasAttr("feature_vector")) {
-            auto &terms = sop.getRegion(0).front();
-            Operation *ldOp = terms.back().getOperand(0).getDefiningOp();
-            if (ldOp->getName().stripDialect() == "cast")
-              ldOp = ldOp->getOperand(0).getDefiningOp();
-            unsigned fIdx = slotIndex(ldOp->getOperand(0));
-            if (!slots[fIdx].boundStrides && slots[fIdx].rank == 2) {
-              std::pair<unsigned, int64_t> key{fIdx, 1};
-              if (!llvm::is_contained(dynFastAxes, key))
-                dynFastAxes.push_back(key);
+          if (scode == "segment_fold") {
+            if (sop.hasAttr("feature_vector")) {
+              auto &terms = sop.getRegion(0).front();
+              Operation *ldOp = terms.back().getOperand(0).getDefiningOp();
+              if (ldOp->getName().stripDialect() == "cast")
+                ldOp = ldOp->getOperand(0).getDefiningOp();
+              unsigned fIdx = slotIndex(ldOp->getOperand(0));
+              if (!slots[fIdx].boundStrides && slots[fIdx].rank == 2) {
+                std::pair<unsigned, int64_t> key{fIdx, 1};
+                if (!llvm::is_contained(dynFastAxes, key))
+                  dynFastAxes.push_back(key);
+              }
+            } else if (!sop.hasAttr("segment_size")) {
+              unsigned oIdx = slotIndex(sop.getOperand(0));
+              if (!slots[oIdx].boundStrides && slots[oIdx].rank == 1) {
+                std::pair<unsigned, int64_t> key{oIdx, 0};
+                if (!llvm::is_contained(dynFastAxes, key))
+                  dynFastAxes.push_back(key);
+              }
+              for (Operation &v : sop.getRegion(0).front()) {
+                if (v.getName().stripDialect() == "member_load") {
+                  unsigned mIdx = slotIndex(v.getOperand(0));
+                  if (!slots[mIdx].boundStrides && slots[mIdx].rank == 1) {
+                    std::pair<unsigned, int64_t> key{mIdx, 0};
+                    if (!llvm::is_contained(dynFastAxes, key))
+                      dynFastAxes.push_back(key);
+                  }
+                }
+              }
             }
             continue;
           }
@@ -3172,7 +3546,8 @@ llvm::Error describeMojoRowPackage(func::FuncOp fn, Operation &prog,
   return llvm::Error::success();
 }
 
-LogicalResult lowerMojoRow(func::FuncOp fn, int64_t fullWidth) {
+LogicalResult lowerMojoRow(func::FuncOp fn, int64_t fullWidth,
+                           int64_t simdWidth) {
   auto &task = fn.front().front();
   auto &body = task.getRegion(0).front();
   Location loc = task.getLoc();
@@ -3277,7 +3652,7 @@ LogicalResult lowerMojoRow(func::FuncOp fn, int64_t fullWidth) {
     fnBb.addArgument(bt, loc);
   b.setInsertionPointToEnd(&fnBb);
 
-  RowLowerer lowerer{fn, task, b, loc, fullWidth};
+  RowLowerer lowerer{fn, task, b, loc, fullWidth, simdWidth};
   lowerer.projected = fn->hasAttr("kir.iteration") && !fn->hasAttr("kir.owner_axis");
   if (lowerer.projected) {
     if (auto m0 = dyn_cast<MemRefType>(fn.getArgument(0).getType());

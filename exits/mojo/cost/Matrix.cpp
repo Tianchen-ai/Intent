@@ -175,15 +175,14 @@ void registerBlockCost(compilerinfra::Unit &u) {
 
           e.bottleneck = "JIT AVX-512 BRGeMM microkernel";
           double columns = std::ceil(double(t[1]) / t[3]);
-          double live = t[0] * columns + columns + 2;
-          double spill = std::max(0., live - (t[3] == 16 ? 32 : 16)) * t[3] *
-                         4 * 2 * g->k;
-          double l1Loads = double(g->k) * (t[0] + columns);
+          double live = std::min<double>(t[3] == 16 ? 32 : 16,
+                                         t[0] * columns + columns + 2);
+          double spill = 0.;
+          double aCacheLines = double(t[0]) / double(t[3]);
+          double l1Loads = double(g->k) * (aCacheLines + columns);
           double inTileConvert = 0.;
           if (impl.dtype == "f16" &&
               !ctx.target.features.count("amx_fp16")) {
-            // Without AMX-FP16, AVX-512 converts f16->f32 inside the O(M*N*K)
-            // tile loop rather than accumulating native f16->f32 products.
             inTileConvert = double(g->k) * (t[0] + columns);
           }
           double tileBytes = double(t[0]) * t[1] * 4.;
@@ -196,7 +195,7 @@ void registerBlockCost(compilerinfra::Unit &u) {
           if (read && write && rate) {
             double widths = workers * t[3];
             e.timeNs = planNs / waves + ffiCallNs +
-                       (spill / 2. + tileBytes / 2.) * workers *
+                       (tileBytes / 2.) * workers *
                            (1. / *read + 1. / *write) +
                        ((l1Loads * 0.5 + inTileConvert) * widths) / *rate;
           }
@@ -224,10 +223,9 @@ void registerBlockCost(compilerinfra::Unit &u) {
           int64_t unroll = d.getAs<mlir::IntegerAttr>("unroll")
                                ? d.getAs<mlir::IntegerAttr>("unroll").getInt()
                                : 1;
-          double sweeps = m * std::ceil(n / lanes);
-          double treeDepth = std::log2(std::max(1., lanes));
           unsigned uniforms = 0, moments = 0, scans = 0, reds = 0, exps = 0,
                    divs = 0, reads = 0, writes = 0, bodyValues = 0;
+          bool scalarSweep = d.contains("single_dispatcher");
           op->walk([&](mlir::Operation *i) {
             auto k = i->getName().stripDialect();
             uniforms += (k == "uniform");
@@ -238,16 +236,23 @@ void registerBlockCost(compilerinfra::Unit &u) {
             divs += (k == "div" || k == "sqrt" || k == "rsqrt");
             reads += (k == "read" || k == "read_owner");
             writes += (k == "write");
+            if (k == "atomic_add" || k == "unique_put" || k == "fill_ranges" ||
+                k == "write_offsets" || k == "pack_members" ||
+                k == "ordered_sum" || k == "tally_keys")
+              scalarSweep = true;
             if (i != op && k != "end" && k != "constant" &&
                 i->getNumResults() == 1)
               ++bodyValues;
           });
+          double sweeps = scalarSweep ? std::ceil((m * n) / lanes)
+                                      : m * std::ceil(n / lanes);
+          double treeDepth = std::log2(std::max(1., lanes));
           double archVecRegs = lanes >= 16. ? 32. : 16.;
           double polyRegs = exps > 0 ? 6. : 0.;
           double opScratch = exps > 0 ? 2. : (divs > 0 ? 1. : 0.);
           double lanePeak = std::min<double>(
-              10., std::max<double>(1., double(reads) + opScratch +
-                                            0.25 * double(bodyValues)));
+              8., std::max<double>(1., 0.5 * double(reads) + opScratch +
+                                           0.2 * double(bodyValues)));
           double overlap =
               unroll > 1 ? (reds > 0 ? 2. : 4.) : 1.;
           double liveVecs =

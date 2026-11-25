@@ -9,21 +9,30 @@ CostEstimate vectorCost(Operation *op, const StructuralCandidate &c, CostContext
   auto d = cast<DictionaryAttr>(c.value);
   if (d.getAs<StringAttr>("walk") == "destination")
     std::swap(m, n);
+  if (d.contains("member_tasks")) {
+    n = m * n;
+    m = 1.;
+  }
   auto lanes = ctx.target.services.get<intentdsl::cpu::RowMachine>()
                    ->vectorBits /
                32;
   unsigned ops = 0, moments = 0, scans = 0;
+  bool scalarSweep = d.contains("single_dispatcher");
   op->walk([&](Operation *i) {
     auto k = i->getName().stripDialect();
     ops += k == "add" || k == "mul" || k == "exp" || k == "sum" ||
            k == "max_num";
     moments += k == "welford";
     scans += k == "scan_sum";
+    if (k == "atomic_add" || k == "unique_put" || k == "fill_ranges" ||
+        k == "write_offsets" || k == "pack_members" || k == "ordered_sum" ||
+        k == "tally_keys")
+      scalarSweep = true;
   });
   CostEstimate e;
   e.scope = "vector loop";
   e.bottleneck = "vector issue";
-  double issued = m * std::ceil(n / lanes) * lanes;
+  double issued = scalarSweep ? (m * n) : (m * std::ceil(n / lanes) * lanes);
   e.terms["padded_lanes"] = {issued - m * n, "lane"};
   // A merge computes delta, the mean update and the corrected second moment.
   // Count integer bookkeeping and ordered dependencies separately from FLOPs.

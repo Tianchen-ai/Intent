@@ -468,9 +468,13 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
     multiplicity = argShape(slotOf(dstArg))[1];
   }
 
+  int64_t rowsDim =
+      (!grouped && !routed && M > 0 && mr > 0)
+          ? (M <= mr ? M : (M % mr == 0 ? mr : -1))
+          : -1;
   int64_t cols = N <= nr ? N : (N % nr == 0 ? nr : -2);
   bool isPack32 = (packing == "vnni-pack32-panels");
-  if (isPack32)
+  if (isPack32 && (cols < 0 || cols % 16 != 0))
     cols = -2;
 
   bool isQ4k = (kind == "q4k_dot");
@@ -514,7 +518,7 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
       unsigned wSlot = slotOf(dot.getOperand(0));
       auto wSt = argStrides(wSlot);
       if (useEncodedRecords) {
-        slots.push_back({{"Q4_K", {-1, ng, q4.elements}, {1, 4, 3}},
+        slots.push_back({{"Q4_K", {rowsDim, ng, q4.elements}, {1, 4, 3}},
                          "a" + std::to_string(wSlot),
                          0,
                          {{CoordTag::Src, wSt[0]}},
@@ -567,7 +571,7 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
         if (bAx >= 0)
           tags[bAx] = CoordTag::G;
         addArgSlot(v, "",
-                   isLhs ? SmallVector<int64_t>{-1, K}
+                   isLhs ? SmallVector<int64_t>{rowsDim, K}
                          : SmallVector<int64_t>{K, cols},
                    isLhs ? SmallVector<int64_t>{1, 3}
                          : SmallVector<int64_t>{3, 2},
@@ -609,11 +613,11 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
         int64_t kb = K / kBlk;
         int64_t kPad = kb * kBlk;
         int64_t lhsRowSt = slots[0].panelStrides[0];
-        slots[0].t.dims = {-1, kb, kBlk};
+        slots[0].t.dims = {rowsDim, kb, kBlk};
         slots[0].t.axes = {1, 3, 4};
         slots[0].panelStrides = {lhsRowSt, kBlk, 1};
 
-        slots[1].t.dims = {kb, -2, kBlk};
+        slots[1].t.dims = {kb, cols, kBlk};
         slots[1].t.axes = {3, 2, 4};
         slots[1].baseExpr = "rhs";
         slots[1].addrTerms.clear();
@@ -623,7 +627,7 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
         slots[1].panelStrides = {nr * kBlk, kBlk, 1};
       }
     } else if (kind == "window_contract") {
-      addArgSlot(dot.getOperand(0), "", {-1, K}, {1, 3},
+      addArgSlot(dot.getOperand(0), "", {rowsDim, K}, {1, 3},
                  {CoordTag::Batch, CoordTag::ChunkTimesK, CoordTag::Head,
                   CoordTag::Src},
                  {3, 1});
@@ -640,7 +644,7 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
         slots[0].panelStrides = {K, 1};
       }
     } else if (kind == "scaled_contract") {
-      slots.push_back({{"f32", {-1, K}, {1, 3}},
+      slots.push_back({{"f32", {rowsDim, K}, {1, 3}},
                        "left",
                        0,
                        {{CoordTag::Src, K}},
@@ -661,7 +665,7 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
     if (n == "add_columns") {
       unsigned bIdx = slots.size();
       if (dstRank == 1)
-        addArgSlot(op.getOperand(1), "", {-1}, {1}, {CoordTag::Dest}, {0});
+        addArgSlot(op.getOperand(1), "", {rowsDim}, {1}, {CoordTag::Dest}, {0});
       else
         addArgSlot(op.getOperand(1), "", {cols}, {2}, {CoordTag::C}, {0});
       epilogue.push_back({EpilogueItem::Bias, bIdx, ""});
@@ -672,7 +676,7 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
   }
 
   if (kind == "window_contract") {
-    addArgSlot(dstArg, "", {-1, cols}, {1, 2},
+    addArgSlot(dstArg, "", {rowsDim, cols}, {1, 2},
                {CoordTag::Batch, CoordTag::Chunk, CoordTag::Head,
                 CoordTag::Dest, CoordTag::C},
                {3, 4}, true);
@@ -688,12 +692,12 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
                      true,
                      mr * nr * dstBytes});
   } else if (dstRank == 1) {
-    addArgSlot(dstArg, "", {-1}, {1}, {CoordTag::Dest}, {0}, true);
+    addArgSlot(dstArg, "", {rowsDim}, {1}, {CoordTag::Dest}, {0}, true);
   } else if (dstRank == 2) {
-    addArgSlot(dstArg, "", {-1, cols}, {1, 2}, {CoordTag::Dest, CoordTag::C},
+    addArgSlot(dstArg, "", {rowsDim, cols}, {1, 2}, {CoordTag::Dest, CoordTag::C},
                {0, 1}, true);
   } else {
-    addArgSlot(dstArg, "", {-1, cols}, {1, 2},
+    addArgSlot(dstArg, "", {rowsDim, cols}, {1, 2},
                {CoordTag::G, CoordTag::Dest, CoordTag::C}, {1, 2}, true);
   }
 
@@ -986,28 +990,8 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
              {b.getNamedAttr("val_types", b.getArrayAttr({}))});
       b.setInsertionPointToEnd(&tkBb);
     } else if (useEncodedRecords) {
-      auto z = tb.idx(0), one = tb.idx(1), endG = tb.idx(ng);
+      auto z = tb.idx(0), one = tb.idx(1), four = tb.idx(4), endG = tb.idx(ng);
       auto fz = tb.lit("0.0", "f32"), iz = tb.lit("0", "si32");
-      OperationState rFor(loc, "weft_host.task_for");
-      rFor.addOperands({z.v, symR, one.v});
-      rFor.addAttribute("iter_types", b.getArrayAttr({}));
-      Block &rBb = rFor.addRegion()->emplaceBlock();
-      Value rIv = rBb.addArgument(b.getIndexType(), loc);
-      b.create(rFor);
-      b.setInsertionPointToEnd(&rBb);
-
-      OperationState gFor(loc, "weft_host.task_for");
-      gFor.addOperands({z.v, endG.v, one.v, fz.v});
-      gFor.addTypes({b.getIndexType()});
-      gFor.addAttribute("iter_types", b.getArrayAttr({b.getStringAttr("f32")}));
-      Block &gBb = gFor.addRegion()->emplaceBlock();
-      Value gIv = gBb.addArgument(b.getIndexType(), loc);
-      Value gAcc = gBb.addArgument(b.getIndexType(), loc);
-      Operation *gLoopOp = b.create(gFor);
-      b.setInsertionPointToEnd(&gBb);
-
-      TaskTerm w = tb.sliceSlot(viewArgs[0], slots[0].t, {rIv, gIv, std::nullopt}, true);
-      TaskTerm x = tb.sliceSlot(viewArgs[1], slots[1].t, {gIv, std::nullopt}, true);
       auto field = [&](TaskTerm rec, StringRef name, StringRef elem,
                        int n = 1) -> TaskTerm {
         std::string fTy =
@@ -1022,113 +1006,191 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
                 ->getResult(0);
         return {fv, fTy};
       };
-      TaskTerm d = tb.castOp("cast", field(w, "d", "f16"), "f32");
-      TaskTerm dm = tb.castOp("cast", field(w, "dmin", "f16"), "f32");
       auto nonzero = [&](TaskTerm t) {
         auto bits = tb.castOp("bitcast", t, "si32");
         auto mag = tb.bin("and", bits, tb.lit("2147483647", "si32"), "si32");
         return tb.cmp("ne", mag, iz, "i1");
       };
-      TaskTerm live = tb.bin("or", nonzero(d), nonzero(dm), "i1");
-
-      OperationState ifSt(loc, "weft_host.task_if");
-      ifSt.addOperands({live.v});
-      ifSt.addTypes({b.getIndexType()});
-      ifSt.addAttribute("res_types", b.getArrayAttr({b.getStringAttr("f32")}));
-      Block &thenBb = ifSt.addRegion()->emplaceBlock();
-      Block &elseBb = ifSt.addRegion()->emplaceBlock();
-      Operation *ifOp = b.create(ifSt);
-
-      b.setInsertionPointToEnd(&thenBb);
-      TaskTerm wq = field(w, "q", "ui4", 256), xq = field(x, "q", "si8", 256);
-      TaskTerm sc = field(w, "sc", "ui6", 8), mn = field(w, "m", "ui6", 8);
-      TaskTerm bsum = field(x, "bsum", "si16", 16);
       std::string grpTy = WeftTypeSpec{"i32", {8}, {3}}.format("value");
-      Value sumsVal =
-          makeOp(b, loc, "task_fold2", {bsum.v}, {b.getIndexType()},
-                 {b.getNamedAttr("in_type", b.getStringAttr(bsum.type)),
-                  b.getNamedAttr("val_type", b.getStringAttr(grpTy))})
-              ->getResult(0);
-      TaskTerm sums{sumsVal, grpTy};
 
-      OperationState lvlSt(loc, "weft_host.task_subquant_level");
-      lvlSt.addOperands({rootDom, iz.v, iz.v});
-      lvlSt.addTypes({b.getIndexType(), b.getIndexType()});
-      Block &lvlBb = lvlSt.addRegion()->emplaceBlock();
-      Value ptArg = lvlBb.addArgument(b.getIndexType(), loc);
-      Value aS = lvlBb.addArgument(b.getIndexType(), loc);
-      Value aT = lvlBb.addArgument(b.getIndexType(), loc);
-      Operation *lvlOp = b.create(lvlSt);
+      auto emitEncodedRecordRows = [&](Value lb, Value ub, int unrollR,
+                                       int domNum) {
+        std::string ptTy = "!weft_kernel.point<<\"subquant." +
+                           std::to_string(domNum) + "\"," +
+                           std::to_string(domNum) + ",0,3,\"blocks\",\"exact\">>";
+        TaskTerm rStep = tb.idx(unrollR);
+        OperationState rFor(loc, "weft_host.task_for");
+        rFor.addOperands({lb, ub, rStep.v});
+        rFor.addAttribute("iter_types", b.getArrayAttr({}));
+        Block &rBb = rFor.addRegion()->emplaceBlock();
+        Value rIv = rBb.addArgument(b.getIndexType(), loc);
+        b.create(rFor);
+        b.setInsertionPointToEnd(&rBb);
 
-      b.setInsertionPointToEnd(&lvlBb);
-      std::string ptTy =
-          "!weft_kernel.point<<\"subquant.1\",1,0,3,\"blocks\",\"exact\">>";
-      auto extract = [&](TaskTerm src, StringRef outTy, bool subDom) -> TaskTerm {
-        Value ev =
-            makeOp(b, loc, "task_extract", {src.v, ptArg}, {b.getIndexType()},
-                   {b.getNamedAttr("selector",
-                                   b.getStringAttr(subDom ? "domain"
-                                                          : "group_index")),
-                    b.getNamedAttr("in_type", b.getStringAttr(src.type)),
-                    b.getNamedAttr("point_type", b.getStringAttr(ptTy)),
-                    b.getNamedAttr("val_type", b.getStringAttr(outTy))})
+        SmallVector<Value, 4> rowIvs;
+        for (int k = 0; k < unrollR; ++k) {
+          rowIvs.push_back(
+              k == 0 ? rIv
+                     : tb.bin("add", {rIv, "index"}, tb.idx(k), "index").v);
+        }
+
+        OperationState gFor(loc, "weft_host.task_for");
+        SmallVector<Value, 8> gOps{z.v, endG.v, one.v};
+        SmallVector<Type, 4> gResTys;
+        SmallVector<Attribute, 4> gIterTys;
+        for (int k = 0; k < unrollR; ++k) {
+          gOps.push_back(fz.v);
+          gResTys.push_back(b.getIndexType());
+          gIterTys.push_back(b.getStringAttr("f32"));
+        }
+        gFor.addOperands(gOps);
+        gFor.addTypes(gResTys);
+        gFor.addAttribute("iter_types", b.getArrayAttr(gIterTys));
+        Block &gBb = gFor.addRegion()->emplaceBlock();
+        Value gIv = gBb.addArgument(b.getIndexType(), loc);
+        SmallVector<Value, 4> gAccs;
+        for (int k = 0; k < unrollR; ++k)
+          gAccs.push_back(gBb.addArgument(b.getIndexType(), loc));
+        Operation *gLoopOp = b.create(gFor);
+        b.setInsertionPointToEnd(&gBb);
+
+        TaskTerm x =
+            tb.sliceSlot(viewArgs[1], slots[1].t, {gIv, std::nullopt}, true);
+        TaskTerm xds = field(x, "ds", "f32");
+        TaskTerm xq = field(x, "q", "si8", 256);
+        TaskTerm bsum = field(x, "bsum", "si16", 16);
+        Value sumsVal =
+            makeOp(b, loc, "task_fold2", {bsum.v}, {b.getIndexType()},
+                   {b.getNamedAttr("in_type", b.getStringAttr(bsum.type)),
+                    b.getNamedAttr("val_type", b.getStringAttr(grpTy))})
                 ->getResult(0);
-        return {ev, outTy.str()};
+        TaskTerm sums{sumsVal, grpTy};
+
+        SmallVector<TaskTerm, 4> ds, dms, lives, wqs, scs;
+        SmallVector<Value, 4> negSums;
+        for (int k = 0; k < unrollR; ++k) {
+          TaskTerm w = tb.sliceSlot(viewArgs[0], slots[0].t,
+                                    {rowIvs[k], gIv, std::nullopt}, true);
+          TaskTerm d = tb.castOp("cast", field(w, "d", "f16"), "f32");
+          TaskTerm dm = tb.castOp("cast", field(w, "dmin", "f16"), "f32");
+          ds.push_back(d);
+          dms.push_back(dm);
+          lives.push_back(tb.bin("or", nonzero(d), nonzero(dm), "i1"));
+          wqs.push_back(field(w, "q", "ui4", 256));
+          scs.push_back(field(w, "sc", "ui6", 8));
+          TaskTerm mn = field(w, "m", "ui6", 8);
+          TaskTerm mnW = tb.castOp("widen", mn, grpTy);
+          TaskTerm negProd = tb.bin("mul", sums, mnW, grpTy);
+          Value negSum =
+              makeOp(b, loc, "task_reduce", {negProd.v}, {b.getIndexType()},
+                     {b.getNamedAttr("kind", b.getStringAttr("add")),
+                      b.getNamedAttr("axis", b.getI64IntegerAttr(0)),
+                      b.getNamedAttr("in_type", b.getStringAttr(grpTy)),
+                      b.getNamedAttr("val_type", b.getStringAttr("si32"))})
+                  ->getResult(0);
+          negSums.push_back(negSum);
+        }
+
+        OperationState lvlSt(loc, "weft_host.task_subquant_level");
+        lvlSt.addAttribute("domain_num", b.getI64IntegerAttr(domNum));
+        SmallVector<Value, 5> lvlOps{rootDom};
+        SmallVector<Type, 4> lvlResTys;
+        for (int k = 0; k < unrollR; ++k) {
+          lvlOps.push_back(iz.v);
+          lvlResTys.push_back(b.getIndexType());
+        }
+        lvlSt.addOperands(lvlOps);
+        lvlSt.addTypes(lvlResTys);
+        Block &lvlBb = lvlSt.addRegion()->emplaceBlock();
+        Value ptArg = lvlBb.addArgument(b.getIndexType(), loc);
+        SmallVector<Value, 4> aSs;
+        for (int k = 0; k < unrollR; ++k)
+          aSs.push_back(lvlBb.addArgument(b.getIndexType(), loc));
+        Operation *lvlOp = b.create(lvlSt);
+
+        b.setInsertionPointToEnd(&lvlBb);
+        auto extract = [&](TaskTerm src, StringRef outTy,
+                           bool subDom) -> TaskTerm {
+          Value ev =
+              makeOp(b, loc, "task_extract", {src.v, ptArg}, {b.getIndexType()},
+                     {b.getNamedAttr("selector",
+                                     b.getStringAttr(subDom ? "domain"
+                                                            : "group_index")),
+                      b.getNamedAttr("in_type", b.getStringAttr(src.type)),
+                      b.getNamedAttr("point_type", b.getStringAttr(ptTy)),
+                      b.getNamedAttr("val_type", b.getStringAttr(outTy))})
+                  ->getResult(0);
+          return {ev, outTy.str()};
+        };
+        TaskTerm v =
+            extract(xq, WeftTypeSpec{"i8", {32}, {3}}.format("value"), true);
+        std::string uSubTy = WeftTypeSpec{"ui4", {32}, {3}}.format("value");
+        SmallVector<Value, 4> nextSs;
+        for (int k = 0; k < unrollR; ++k) {
+          TaskTerm u = extract(wqs[k], uSubTy, true);
+          Value dotVal =
+              makeOp(b, loc, "task_contract", {u.v, v.v}, {b.getIndexType()},
+                     {b.getNamedAttr("kind", b.getStringAttr("contract")),
+                      b.getNamedAttr("over", b.getDenseI64ArrayAttr({3})),
+                      b.getNamedAttr("acc_type", b.getStringAttr("si32")),
+                      b.getNamedAttr("engine", b.getStringAttr("auto")),
+                      b.getNamedAttr("allow_subnormal_ftz",
+                                     b.getBoolAttr(false)),
+                      b.getNamedAttr(
+                          "in_types",
+                          b.getArrayAttr({b.getStringAttr(u.type),
+                                          b.getStringAttr(v.type)})),
+                      b.getNamedAttr("val_type", b.getStringAttr("si32")),
+                      implNamedAttr, q4StorageAttr})
+                  ->getResult(0);
+          TaskTerm scW = tb.castOp("widen", extract(scs[k], "ui6", false), "si32");
+          TaskTerm nextS =
+              tb.bin("add", {aSs[k], "si32"},
+                     tb.bin("mul", {dotVal, "si32"}, scW, "si32"), "si32");
+          nextSs.push_back(nextS.v);
+        }
+        makeOp(b, loc, "task_handoff", nextSs);
+
+        b.setInsertionPointToEnd(&gBb);
+        SmallVector<Value, 4> nAccs;
+        for (int k = 0; k < unrollR; ++k) {
+          TaskTerm pos = tb.bin(
+              "mul", ds[k],
+              tb.castOp("cast", {lvlOp->getResult(k), "si32"}, "f32"), "f32");
+          TaskTerm neg = tb.bin(
+              "mul", dms[k],
+              tb.castOp("cast", {negSums[k], "si32"}, "f32"), "f32");
+          TaskTerm rawRec =
+              tb.bin("mul", xds, tb.bin("sub", pos, neg, "f32"), "f32");
+          TaskTerm vrec = tb.sel(lives[k], rawRec, fz);
+          nAccs.push_back(tb.bin("add", {gAccs[k], "f32"}, vrec, "f32").v);
+        }
+        makeOp(b, loc, "task_yield", nAccs, {},
+               {b.getNamedAttr("val_types", b.getArrayAttr(gIterTys))});
+
+        b.setInsertionPointToEnd(&rBb);
+        for (int k = 0; k < unrollR; ++k) {
+          TaskTerm finalRow =
+              applyEpilogue({gLoopOp->getResult(k), "f32"}, {}, {}, rowIvs[k]);
+          tb.commit(
+              finalRow,
+              tb.sliceSlot(viewArgs.back(), slots.back().t, {rowIvs[k]}, false));
+        }
+        makeOp(b, loc, "task_yield", {}, {},
+               {b.getNamedAttr("val_types", b.getArrayAttr({}))});
+        b.setInsertionPointToEnd(&tkBb);
       };
-      TaskTerm u =
-          extract(wq, WeftTypeSpec{"ui4", {32}, {3}}.format("value"), true);
-      TaskTerm v =
-          extract(xq, WeftTypeSpec{"i8", {32}, {3}}.format("value"), true);
-      Value dotVal =
-          makeOp(b, loc, "task_contract", {u.v, v.v}, {b.getIndexType()},
-                 {b.getNamedAttr("kind", b.getStringAttr("contract")),
-                  b.getNamedAttr("over", b.getDenseI64ArrayAttr({3})),
-                  b.getNamedAttr("acc_type", b.getStringAttr("si32")),
-                  b.getNamedAttr("engine", b.getStringAttr("auto")),
-                  b.getNamedAttr("allow_subnormal_ftz", b.getBoolAttr(false)),
-                  b.getNamedAttr(
-                      "in_types",
-                      b.getArrayAttr({b.getStringAttr(u.type),
-                                      b.getStringAttr(v.type)})),
-                  b.getNamedAttr("val_type", b.getStringAttr("si32")),
-                  implNamedAttr, q4StorageAttr})
-              ->getResult(0);
-      TaskTerm scW = tb.castOp("widen", extract(sc, "ui6", false), "si32");
-      TaskTerm mnW = tb.castOp("widen", extract(mn, "ui6", false), "si32");
-      TaskTerm nextS = tb.bin("add", {aS, "si32"},
-                              tb.bin("mul", {dotVal, "si32"}, scW, "si32"), "si32");
-      TaskTerm nextT =
-          tb.bin("add", {aT, "si32"},
-                 tb.bin("mul", extract(sums, "si32", false), mnW, "si32"), "si32");
-      makeOp(b, loc, "task_handoff", {nextS.v, nextT.v});
 
-      b.setInsertionPointToEnd(&thenBb);
-      TaskTerm pos = tb.bin(
-          "mul", d, tb.castOp("cast", {lvlOp->getResult(0), "si32"}, "f32"), "f32");
-      TaskTerm neg = tb.bin(
-          "mul", dm, tb.castOp("cast", {lvlOp->getResult(1), "si32"}, "f32"), "f32");
-      TaskTerm vrec = tb.bin("mul", field(x, "ds", "f32"),
-                             tb.bin("sub", pos, neg, "f32"), "f32");
-      makeOp(b, loc, "task_yield", {vrec.v}, {},
-             {b.getNamedAttr("val_types", b.getArrayAttr({b.getStringAttr("f32")}))});
-
-      b.setInsertionPointToEnd(&elseBb);
-      makeOp(b, loc, "task_yield", {fz.v}, {},
-             {b.getNamedAttr("val_types", b.getArrayAttr({b.getStringAttr("f32")}))});
-
-      b.setInsertionPointToEnd(&gBb);
-      TaskTerm nAcc =
-          tb.bin("add", {gAcc, "f32"}, {ifOp->getResult(0), "f32"}, "f32");
-      makeOp(b, loc, "task_yield", {nAcc.v}, {},
-             {b.getNamedAttr("val_types", b.getArrayAttr({b.getStringAttr("f32")}))});
-
-      b.setInsertionPointToEnd(&rBb);
-      TaskTerm finalRow = applyEpilogue({gLoopOp->getResult(0), "f32"}, {}, {}, rIv);
-      tb.commit(finalRow,
-                tb.sliceSlot(viewArgs.back(), slots.back().t, {rIv}, false));
-      makeOp(b, loc, "task_yield", {}, {},
-             {b.getNamedAttr("val_types", b.getArrayAttr({}))});
-      b.setInsertionPointToEnd(&tkBb);
+      int rUnroll = !boundWidening ? 4 : (tile[3] >= 32 ? 4 : (tile[3] >= 8 ? 2 : 1));
+      if (rUnroll <= 1) {
+        emitEncodedRecordRows(z.v, symR, 1, 1);
+      } else {
+        TaskTerm uStep = tb.idx(rUnroll);
+        TaskTerm rVecCnt = tb.bin("div", {symR, "index"}, uStep, "index");
+        TaskTerm rVecEnd = tb.bin("mul", rVecCnt, uStep, "index");
+        emitEncodedRecordRows(z.v, rVecEnd.v, rUnroll, 1);
+        emitEncodedRecordRows(rVecEnd.v, symR, 1, 2);
+      }
     } else if (!boundWidening) {
       // Multi-row Q4_K subgroup contraction across all R rows in parallel!
       // Identical Canonical IR for both native ("auto") and vendor ("onednn-brgemm-u8s8").
@@ -1475,9 +1537,10 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
       }
       SmallVector<int64_t> overAxes = isPack32 ? SmallVector<int64_t>{3, 4}
                                                : SmallVector<int64_t>{3};
+      int64_t outRowDim = slots.back().t.dims[0];
       int64_t outColDim = slots.back().t.dims[1];
       std::string accValTy =
-          WeftTypeSpec{accCarrier, {-1, outColDim}, {1, 2}}.format("value");
+          WeftTypeSpec{accCarrier, {outRowDim, outColDim}, {1, 2}}.format("value");
       std::string reqEngine = usesBrgemm ? shortImpl.str() : "auto";
       bool emitFtz = usesBrgemm && allowSubnormalFtz && !isInt;
       Value accVal =
@@ -1494,7 +1557,7 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
                   b.getNamedAttr("val_type", b.getStringAttr(accValTy)),
                   implNamedAttr})
               ->getResult(0);
-      TaskTerm outVal = applyEpilogue({accVal, accValTy}, {-1, outColDim},
+      TaskTerm outVal = applyEpilogue({accVal, accValTy}, {outRowDim, outColDim},
                                       {1, 2}, std::nullopt);
       tb.commit(outVal, tb.sliceSlot(viewArgs.back(), slots.back().t,
                                      {std::nullopt, std::nullopt}, false));
@@ -1678,24 +1741,35 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
          b.getNamedAttr("ub", b.getStringAttr(ub)),
          b.getNamedAttr("step", b.getStringAttr(step))});
   };
+  auto makeHostOmpParallel = [&](StringRef numThreads, StringRef ifCond,
+                                 bool releaseHwCtx) -> Block * {
+    return openHostRegionOpWithVals(
+        "host_omp_parallel", {},
+        {b.getNamedAttr("num_threads", b.getStringAttr(numThreads)),
+         b.getNamedAttr("if_cond", b.getStringAttr(ifCond)),
+         b.getNamedAttr("release_hw_ctx", b.getBoolAttr(releaseHwCtx))});
+  };
   auto makeHostOmpFor = [&](StringRef iv, StringRef lb, StringRef ub,
                             StringRef step, bool parallel, bool simd,
                             bool x86Simd, StringRef ifCond,
                             StringRef schedule = "static",
-                            StringRef numThreads = "workers") -> Block * {
-    return openHostRegionOpWithVals(
-        "host_omp_for", {},
-        {b.getNamedAttr("iv", b.getStringAttr(iv)),
-         b.getNamedAttr("lb", b.getStringAttr(lb)),
-         b.getNamedAttr("ub", b.getStringAttr(ub)),
-         b.getNamedAttr("step", b.getStringAttr(step)),
-         b.getNamedAttr("parallel", b.getBoolAttr(parallel)),
-         b.getNamedAttr("simd", b.getBoolAttr(simd)),
-         b.getNamedAttr("x86_simd", b.getBoolAttr(x86Simd)),
-         b.getNamedAttr("schedule", b.getStringAttr(schedule)),
-         b.getNamedAttr("num_threads",
-                        b.getStringAttr(parallel ? numThreads : StringRef())),
-         b.getNamedAttr("if_cond", b.getStringAttr(ifCond))});
+                            StringRef numThreads = "workers",
+                            bool nowait = false) -> Block * {
+    SmallVector<NamedAttribute, 11> attrs{
+        b.getNamedAttr("iv", b.getStringAttr(iv)),
+        b.getNamedAttr("lb", b.getStringAttr(lb)),
+        b.getNamedAttr("ub", b.getStringAttr(ub)),
+        b.getNamedAttr("step", b.getStringAttr(step)),
+        b.getNamedAttr("parallel", b.getBoolAttr(parallel)),
+        b.getNamedAttr("simd", b.getBoolAttr(simd)),
+        b.getNamedAttr("x86_simd", b.getBoolAttr(x86Simd)),
+        b.getNamedAttr("schedule", b.getStringAttr(schedule)),
+        b.getNamedAttr("num_threads",
+                       b.getStringAttr(parallel ? numThreads : StringRef())),
+        b.getNamedAttr("if_cond", b.getStringAttr(ifCond))};
+    if (nowait && !parallel && !simd)
+      attrs.push_back(b.getNamedAttr("nowait", b.getBoolAttr(true)));
+    return openHostRegionOpWithVals("host_omp_for", {}, attrs);
   };
   auto emitLet = [&](StringRef name, StringRef expr, ValueRange vals = {},
                      bool isMut = false) {
@@ -1746,9 +1820,28 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
             b.getNamedAttr("elem_bytes", b.getI64IntegerAttr(eb))});
   };
 
+  bool fuseHostParallel =
+      !prepOps.empty() && llvm::all_of(prepOps, [](Operation *pop) {
+        StringRef pk = pop->getAttrOfType<StringAttr>("kind").getValue();
+        return pk == "widen-lhs-f32" || pk == "widen-pack-rhs-f32" ||
+               pk == "pack-rhs-panels" || pk == "pack-vnni";
+      });
+  Block *teamRootBb = &hBb;
+  if (fuseHostParallel) {
+    b.setInsertionPointToEnd(&hBb);
+    teamRootBb = makeHostOmpParallel(
+        "workers",
+        "workers > 1 && (jobs > 1 || (G > 0 ? G : 1LL)*M*K >= 8192 || "
+        "(G > 0 ? G : 1LL)*nc*K*nr >= 8192)",
+        usesBrgemm);
+  }
+
   for (Operation *pop : prepOps) {
     OpBuilder::InsertionGuard prepGuard(b);
-    b.setInsertionPointToEnd(&hBb);
+    if (teamRootBb == &hBb)
+      b.setInsertionPointToEnd(&hBb);
+    else
+      enterHostBlock(teamRootBb);
     StringRef pk = pop->getAttrOfType<StringAttr>("kind").getValue();
     std::string dst = bufNames[pop->getOperands().back()];
     SmallVector<int64_t> opSlots;
@@ -1991,9 +2084,11 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
       while (am == ak || am == ab)
         ++am;
       std::string banks = ab < 0 ? "1LL" : "G";
-      Block *rBb = makeHostOmpFor("row", "0", "(" + banks + ")*M", "1", true,
-                                  false, false,
-                                  "(" + banks + ")*M*K > 131072");
+      Block *rBb = makeHostOmpFor(
+          "row", "0", "(" + banks + ")*M", "1", !fuseHostParallel, false, false,
+          fuseHostParallel
+              ? ""
+              : ("(" + banks + ")*M*K >= 16384 && (" + banks + ")*M >= 2"));
       enterHostBlock(rBb);
       emitLet("g", "M ? row / M : 0");
       emitLet("m", "M ? row % M : 0");
@@ -2020,8 +2115,10 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
         ++bn;
       std::string banks = bb < 0 ? "1LL" : "G";
       Block *pBb = makeHostOmpFor(
-          "p", "0", "(" + banks + ")*nc", "1", true, false, false,
-          "(" + banks + ")*nc*K*nr > 131072 && (" + banks + ")*nc >= 4");
+          "p", "0", "(" + banks + ")*nc", "1", !fuseHostParallel, false, false,
+          fuseHostParallel
+              ? ""
+              : ("(" + banks + ")*nc*K*nr >= 16384 && (" + banks + ")*nc >= 2"));
       enterHostBlock(pBb);
       emitLet("g", "nc ? p / nc : 0");
       emitLet("c", "(nc ? p % nc : 0)*nr");
@@ -2058,8 +2155,10 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
         ++bn;
       std::string banks = bb < 0 ? "1LL" : "G";
       Block *pBb = makeHostOmpFor(
-          "p", "0", "(" + banks + ")*nc", "1", true, false, false,
-          "(" + banks + ")*nc*K*nr > 131072 && (" + banks + ")*nc >= 4");
+          "p", "0", "(" + banks + ")*nc", "1", !fuseHostParallel, false, false,
+          fuseHostParallel
+              ? ""
+              : ("(" + banks + ")*nc*K*nr >= 16384 && (" + banks + ")*nc >= 2"));
       enterHostBlock(pBb);
       emitLet("g", "nc ? p / nc : 0");
       emitLet("c", "(nc ? p % nc : 0)*nr");
@@ -2097,8 +2196,10 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
         ++bn;
       std::string banks = bb < 0 ? "1LL" : "G";
       Block *pBb = makeHostOmpFor(
-          "p", "0", "(" + banks + ")*nc", "1", true, false, false,
-          "(" + banks + ")*nc*K*nr > 131072 && (" + banks + ")*nc >= 4");
+          "p", "0", "(" + banks + ")*nc", "1", !fuseHostParallel, false, false,
+          fuseHostParallel
+              ? ""
+              : ("(" + banks + ")*nc*K*nr >= 16384 && (" + banks + ")*nc >= 2"));
       enterHostBlock(pBb);
       emitLet("g", "nc ? p / nc : 0");
       emitLet("c", "(nc ? p % nc : 0)*nr");
@@ -2299,15 +2400,28 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
     chunkExt = std::max<int64_t>(1, outSh[1]);
   }
 
-  b.setInsertionPointToEnd(&hBb);
+  if (teamRootBb == &hBb)
+    b.setInsertionPointToEnd(&hBb);
+  else
+    enterHostBlock(teamRootBb);
   auto extentHi = [](int64_t e) -> int64_t {
     return e < 0 ? -1 : (e == 0 ? 0 : e - 1);
   };
   Block *jobsIfBb = makeHostIf("jobs > 0");
   enterHostBlock(jobsIfBb);
-  emitLet("nt", "jobs < workers ? jobs : workers");
-  Block *ptBb = makeHostOmpFor("job", "0", "jobs", "1", true, false, false,
-                               "nt > 1", "static", "nt");
+  Block *ptBb = nullptr;
+  if (fuseHostParallel) {
+    ptBb = makeHostOmpFor("job", "0", "jobs", "1", /*parallel=*/false,
+                          /*simd=*/false, /*x86Simd=*/false, "", "static", "",
+                          /*nowait=*/true);
+  } else {
+    emitLet("nt", "jobs < workers ? jobs : workers");
+    Block *parBb = makeHostOmpParallel("nt", "nt > 1", usesBrgemm);
+    enterHostBlock(parBb);
+    ptBb = makeHostOmpFor("job", "0", "jobs", "1", /*parallel=*/false,
+                          /*simd=*/false, /*x86Simd=*/false, "", "static", "",
+                          /*nowait=*/true);
+  }
   enterHostBlock(ptBb);
   emitGuardContinue("__atomic_load_n(&intent_status, __ATOMIC_RELAXED) != 0");
   Value vG = emitDef("job / (nc * mb)", extentHi(G));
@@ -2581,7 +2695,8 @@ LogicalResult verifyWeftMatrix(ModuleOp m, const TargetProfile &p,
                return WalkResult::interrupt();
              }
            }
-         } else if (name == "weft_host.host_omp_for" ||
+         } else if (name == "weft_host.host_omp_parallel" ||
+                    name == "weft_host.host_omp_for" ||
                     name == "weft_host.host_for" ||
                     name == "weft_host.host_if") {
            if (op->getNumRegions() != 1 || op->getRegion(0).empty() ||
