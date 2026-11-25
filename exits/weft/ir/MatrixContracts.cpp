@@ -399,8 +399,8 @@ void populateWeftMatrixContracts(intentdsl::cpu::MatrixMachine &m, int64_t v,
     // Vendor triton-weft oneDNN BRGeMM builtin candidates on x86-64
     for (auto [r, c, d] :
          std::initializer_list<std::tuple<int64_t, int64_t, int64_t>>{
-             {6, 4 * v, 64}, {8, 3 * v, 64}, {12, 2 * v, 64}, {14, 2 * v, 64},
-             {8, 2 * v, 64}, {4, 2 * v, 64}}) {
+             {6, 4 * v, 64}, {12, 4 * v, 64}, {8, 3 * v, 64}, {12, 3 * v, 64},
+             {12, 2 * v, 64}, {14, 2 * v, 64}, {8, 2 * v, 64}, {4, 2 * v, 64}}) {
       add(r, c, d, v, "onednn-brgemm-f32", "brgemm-panels", "f32", 1, true,
           false);
       add(r, c, d, v, "onednn-brgemm-f16", "brgemm-panels", "f16", 1, true,

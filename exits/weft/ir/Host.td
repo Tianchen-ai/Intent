@@ -96,6 +96,10 @@ def TaskCompareOp : Op<WeftHost_Dialect, "task_compare"> {
   let results = (outs Index:$res);
 }
 
+def TaskAssumeOp : Op<WeftHost_Dialect, "task_assume"> {
+  let arguments = (ins Index:$cond);
+}
+
 def TaskSelectOp : Op<WeftHost_Dialect, "task_select"> {
   let arguments = (ins Index:$cond, Index:$true_val, Index:$false_val,
                        StrAttr:$cond_type, OptionalAttr<StrAttr>:$true_type,

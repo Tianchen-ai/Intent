@@ -717,13 +717,14 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
         if (packing == "f32-panels-per-call")
           slots[0].t.carrier = "f32";
       } else if (packing == "f32-panels-per-call") {
+        int64_t lhsStride = intentdsl::cpu::paddedLhsPanelStride(K);
         slots[0].t.carrier = "f32";
         slots[0].baseExpr = "left";
-        slots[0].addrTerms = ab < 0
-                                 ? SmallVector<AddrTerm>{{CoordTag::Src, K}}
-                                 : SmallVector<AddrTerm>{{CoordTag::G, M * K},
-                                                         {CoordTag::Src, K}};
-        slots[0].panelStrides = {K, 1};
+        slots[0].addrTerms =
+            ab < 0 ? SmallVector<AddrTerm>{{CoordTag::Src, lhsStride}}
+                   : SmallVector<AddrTerm>{{CoordTag::G, M * lhsStride},
+                                           {CoordTag::Src, lhsStride}};
+        slots[0].panelStrides = {lhsStride, 1};
       }
 
       if (packing == "rhs-panels-per-call" || packing == "f32-panels-per-call") {
@@ -967,6 +968,25 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
 
   b.setInsertionPointToEnd(&tkBb);
   TaskBuilder tb{b, loc};
+  auto emitDimAssume = [&](Value sym, StringRef pred, int64_t boundVal) {
+    TaskTerm cst = tb.idx(boundVal);
+    Value cond =
+        makeOp(b, loc, "task_compare", {sym, cst.v}, {b.getIndexType()},
+               {b.getNamedAttr("predicate", b.getStringAttr(pred)),
+                b.getNamedAttr("lhs_type", b.getStringAttr("index")),
+                b.getNamedAttr("rhs_type", b.getStringAttr("index")),
+                b.getNamedAttr("val_type", b.getStringAttr("i1"))})
+            ->getResult(0);
+    makeOp(b, loc, "task_assume", {cond}, {});
+  };
+  if (mr > 0) {
+    emitDimAssume(symR, "gt", 0);
+    emitDimAssume(symR, "le", mr);
+  }
+  if (nr > 0) {
+    emitDimAssume(symC, "gt", 0);
+    emitDimAssume(symC, "le", nr);
+  }
 
   auto applyEpilogue = [&](TaskTerm acc, ArrayRef<int64_t> outDims,
                            ArrayRef<int64_t> outAxes,
@@ -2278,6 +2298,30 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
   b.create(hfnState);
   makeOp(b, loc, "end");
 
+  Operation *tlsLhsPrep = nullptr, *tlsRhsPrep = nullptr;
+  for (Operation *pop : prepOps) {
+    StringRef pk = pop->getAttrOfType<StringAttr>("kind").getValue();
+    if (pk == "widen-lhs-f32")
+      tlsLhsPrep = pop;
+    else if (pk == "widen-pack-rhs-f32")
+      tlsRhsPrep = pop;
+  }
+  int64_t mbStatic = mr > 0 ? (M + mr - 1) / mr : 0;
+  int64_t ncStatic = nr > 0 ? (N + nr - 1) / nr : 0;
+  bool useTlsPanelStream = false;
+  if (usesBrgemm && shortImpl == "onednn-brgemm-f32" &&
+      packing == "f32-panels-per-call" && G == 1 && !grouped && !routed &&
+      kind != "window_contract" && prepOps.size() == 2 && tlsLhsPrep &&
+      tlsRhsPrep && ncStatic >= 8 && M * K >= 262144) {
+    auto stA = argStrides(slotOf(tlsLhsPrep->getOperand(0)));
+    int64_t ak = tlsLhsPrep->getAttrOfType<IntegerAttr>("lhs_k").getInt();
+    std::string dtA = argDtype(slotOf(tlsLhsPrep->getOperand(0)));
+    if (stA[ak] == 1 && (dtA == "f16" || dtA == "bf16"))
+      useTlsPanelStream = true;
+  }
+  int64_t tlsCg = std::clamp<int64_t>(
+      1310720 / std::max<int64_t>(1, K * nr * 4), 1, 4);
+
   b.setInsertionPointToEnd(&hBb);
   llvm::DenseMap<Value, std::string> bufNames;
   SmallVector<Attribute> activeHeap;
@@ -2293,6 +2337,8 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
                        : role == "routed-lhs"  ? "members"
                                                : ("buf" + std::to_string(bufCounter++));
     bufNames[aop->getResult(0)] = name;
+    if (useTlsPanelStream && (name == "left" || name == "rhs"))
+      continue;
     std::string cType = name == "packed" ? "struct Record"
                         : elemBytes == 4 ? "float"
                         : elemBytes == 2 ? "uint16_t"
@@ -2426,7 +2472,7 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
           "encode-q8k" &&
       K <= 8192;
   bool fuseHostParallel =
-      !prepOps.empty() && !smallSingleQ8k &&
+      !useTlsPanelStream && !prepOps.empty() && !smallSingleQ8k &&
       llvm::all_of(prepOps, [](Operation *pop) {
         StringRef pk = pop->getAttrOfType<StringAttr>("kind").getValue();
         return pk == "widen-lhs-f32" || pk == "widen-pack-rhs-f32" ||
@@ -2447,6 +2493,8 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
   }
 
   for (auto [popIdx, pop] : llvm::enumerate(prepOps)) {
+    if (useTlsPanelStream)
+      continue;
     bool hasNextPrep = fuseHostParallel && (popIdx + 1 < prepOps.size());
     OpBuilder::InsertionGuard prepGuard(b);
     if (teamRootBb == &hBb)
@@ -2704,7 +2752,11 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
       enterHostBlock(rBb);
       emitLet("g", "M ? row / M : 0");
       emitLet("m", "M ? row % M : 0");
-      emitPtr("float", "out", dst, "row*K");
+      int64_t rowStride = K;
+      if (auto rs = pop->getAttrOfType<IntegerAttr>("row_stride"))
+        rowStride = rs.getInt();
+      emitPtr("float", "out", dst,
+              "row*" + std::to_string(rowStride) + "LL");
       if (dt == "f32") {
         emitPtr("const float", "src", "a" + std::to_string(opSlots[0]),
                 "g*" + std::to_string(ab < 0 ? 0 : st[ab]) + "LL + m*" +
@@ -3146,26 +3198,163 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
   };
   Block *jobsIfBb = makeHostIf("jobs > 0");
   enterHostBlock(jobsIfBb);
-  Block *ptBb = nullptr;
-  if (fuseHostParallel) {
-    ptBb = makeHostOmpFor("job", "0", "jobs", "1", /*parallel=*/false,
-                          /*simd=*/false, /*x86Simd=*/false, "", "static", "",
-                          /*nowait=*/true);
+  bool use2DGrid = usesBrgemm && G == 1 && !grouped && !routed && !windowed &&
+                   mbStatic >= 8 && ncStatic >= 8;
+  Block *tlsParBb = nullptr;
+  Value vG, vC, vR, vCiLocal;
+  if (useTlsPanelStream) {
+    int64_t ldaPad = intentdsl::cpu::paddedLhsPanelStride(K);
+    std::string ldaPadS = std::to_string(ldaPad);
+    std::string cgS = std::to_string(tlsCg);
+    emitLet("nt", "nc < workers ? nc : workers");
+    tlsParBb = makeHostOmpParallel("nt", "nt > 1", usesBrgemm);
+    enterHostBlock(tlsParBb);
+    emitLet("tid", "intent_omp_tid()");
+    emitLet("nth", "intent_omp_nth()");
+    emitLet("c0_t", "(nc * tid) / nth");
+    emitLet("c1_t", "(nc * (tid + 1)) / nth");
+    makeOp(b, loc, "host_alloc", {}, {},
+           {b.getNamedAttr("buf_name", b.getStringAttr("b_grp")),
+            b.getNamedAttr("placement", b.getStringAttr("tls")),
+            b.getNamedAttr("c_type", b.getStringAttr("float")),
+            b.getNamedAttr("count_expr",
+                           b.getStringAttr(std::to_string(tlsCg * K * nr) + "ULL")),
+            b.getNamedAttr("elem_bytes", b.getI64IntegerAttr(4)),
+            b.getNamedAttr("cleanup", b.getArrayAttr({}))});
+    makeOp(b, loc, "host_alloc", {}, {},
+           {b.getNamedAttr("buf_name", b.getStringAttr("a_tile")),
+            b.getNamedAttr("placement", b.getStringAttr("tls")),
+            b.getNamedAttr("c_type", b.getStringAttr("float")),
+            b.getNamedAttr("count_expr",
+                           b.getStringAttr(std::to_string(mr * ldaPad) + "ULL")),
+            b.getNamedAttr("elem_bytes", b.getI64IntegerAttr(4)),
+            b.getNamedAttr("cleanup", b.getArrayAttr({}))});
+    Block *okIf = makeHostIf("b_grp && a_tile");
+    enterHostBlock(okIf);
+    Block *cbBb = makeHostFor("cb", "c0_t", "c1_t", cgS);
+    enterHostBlock(cbBb);
+    emitLet("ce", "cb + " + cgS + " < c1_t ? cb + " + cgS + " : c1_t");
+    {
+      unsigned rhsSlot = slotOf(tlsRhsPrep->getOperand(0));
+      auto stB = argStrides(rhsSlot);
+      std::string dtB = argDtype(rhsSlot);
+      int64_t bk = tlsRhsPrep->getAttrOfType<IntegerAttr>("rhs_k").getInt();
+      int64_t bb = tlsRhsPrep->getAttrOfType<IntegerAttr>("rhs_batch").getInt();
+      int64_t bn = 0;
+      while (bn == bk || bn == bb)
+        ++bn;
+      Block *pbBb = makeHostFor("ci", "cb", "ce", "1");
+      enterHostBlock(pbBb);
+      emitLet("c", "ci * nr");
+      emitLet("valid", "N - c < nr ? N - c : nr");
+      if (stB[bn] != 1 && stB[bk] == 1) {
+        emitPtr("const uint16_t", "src", "a" + std::to_string(rhsSlot),
+                "c*" + std::to_string(stB[bn]) + "LL");
+        emitPtr("float", "out", "b_grp", "(ci - cb)*K*nr");
+        emitSpan(dtB == "bf16" ? "widen_transpose_bf16" : "widen_transpose_f16",
+                 "out", "src", std::to_string(stB[bn]) + "LL", 4);
+      } else {
+        Block *kBb = makeHostFor("k", "0", "K", "1");
+        enterHostBlock(kBb);
+        emitPtr("const uint16_t", "src", "a" + std::to_string(rhsSlot),
+                "k*" + std::to_string(stB[bk]) + "LL + c*" +
+                    std::to_string(stB[bn]) + "LL");
+        emitPtr("float", "out", "b_grp", "((ci - cb)*K + k)*nr");
+        if (stB[bn] == 1) {
+          emitSpan(dtB == "bf16" ? "widen_bf16" : "widen_f16", "out", "src",
+                   "valid", 4);
+        } else {
+          Block *jBb = makeHostFor("j", "0", "valid", "1");
+          enterHostBlock(jBb);
+          emitElem(dtB == "bf16" ? "expand_bf" : "expand_f16", "out[j]",
+                   "src[j*" + std::to_string(stB[bn]) + "LL]", "", 4);
+          enterHostBlock(kBb);
+        }
+        Block *zBb = makeHostFor("j", "valid", "nr", "1");
+        enterHostBlock(zBb);
+        emitElem("assign", "out[j]", "0.0f", "", 4);
+      }
+    }
+    enterHostBlock(cbBb);
+    Block *riBb = makeHostFor("ri", "0", "mb", "1");
+    enterHostBlock(riBb);
+    emitGuardContinue("__atomic_load_n(&intent_status, __ATOMIC_RELAXED) != 0");
+    emitLet("r_w", "ri * mr");
+    emitLet("R_w", "M - r_w < mr ? M - r_w : mr");
+    {
+      unsigned lhsSlot = slotOf(tlsLhsPrep->getOperand(0));
+      auto stA = argStrides(lhsSlot);
+      std::string dtA = argDtype(lhsSlot);
+      int64_t ak = tlsLhsPrep->getAttrOfType<IntegerAttr>("lhs_k").getInt();
+      int64_t ab = tlsLhsPrep->getAttrOfType<IntegerAttr>("lhs_batch").getInt();
+      int64_t am = 0;
+      while (am == ak || am == ab)
+        ++am;
+      Block *rwBb = makeHostFor("rw", "0", "R_w", "1");
+      enterHostBlock(rwBb);
+      emitPtr("const uint16_t", "a_in", "a" + std::to_string(lhsSlot),
+              "(r_w + rw)*" + std::to_string(stA[am]) + "LL");
+      emitPtr("float", "a_out", "a_tile", "rw*" + ldaPadS + "LL");
+      emitSpan(dtA == "bf16" ? "widen_bf16" : "widen_f16", "a_out", "a_in",
+               "K", 4);
+    }
+    enterHostBlock(riBb);
+    Block *ciBb = makeHostFor("ci", "cb", "ce", "1");
+    enterHostBlock(ciBb);
+    emitGuardContinue("__atomic_load_n(&intent_status, __ATOMIC_RELAXED) != 0");
+    vG = emitDef("0LL", 0);
+    vC = emitDef("ci * nr", extentHi(N));
+    vR = emitDef("ri * mr", extentHi(M));
+    vCiLocal = emitDef("ci - cb", tlsCg - 1);
+    emitLet("end", "M");
+  } else if (use2DGrid) {
+    if (!fuseHostParallel) {
+      emitLet("nt", "jobs < workers ? jobs : workers");
+      Block *parBb = makeHostOmpParallel("nt", "nt > 1", usesBrgemm);
+      enterHostBlock(parBb);
+    }
+    emitLet("tid", "intent_omp_tid()");
+    emitLet("nth", "intent_omp_nth()");
+    emitLet("tn",
+            "(nth % 4 == 0 && nc >= 4) ? 4 : ((nth % 2 == 0 && nc >= 2) ? 2 : 1)");
+    emitLet("tm", "nth / tn");
+    emitLet("tx", "tid % tn");
+    emitLet("ty", "tid / tn");
+    emitLet("c0_t", "(nc * tx) / tn");
+    emitLet("c1_t", "(nc * (tx + 1)) / tn");
+    emitLet("r0_t", "(mb * ty) / tm");
+    emitLet("r1_t", "(mb * (ty + 1)) / tm");
+    Block *ciBb = makeHostFor("ci", "c0_t", "c1_t", "1");
+    enterHostBlock(ciBb);
+    Block *riBb = makeHostFor("ri", "r0_t", "r1_t", "1");
+    enterHostBlock(riBb);
+    emitGuardContinue("__atomic_load_n(&intent_status, __ATOMIC_RELAXED) != 0");
+    vG = emitDef("0LL", 0);
+    vC = emitDef("ci * nr", extentHi(N));
+    vR = emitDef("ri * mr", extentHi(M));
+    emitLet("end", "M");
   } else {
-    emitLet("nt", "jobs < workers ? jobs : workers");
-    Block *parBb = makeHostOmpParallel("nt", "nt > 1", usesBrgemm);
-    enterHostBlock(parBb);
-    ptBb = makeHostOmpFor("job", "0", "jobs", "1", /*parallel=*/false,
-                          /*simd=*/false, /*x86Simd=*/false, "", "static", "",
-                          /*nowait=*/true);
+    Block *ptBb = nullptr;
+    if (fuseHostParallel) {
+      ptBb = makeHostOmpFor("job", "0", "jobs", "1", /*parallel=*/false,
+                            /*simd=*/false, /*x86Simd=*/false, "", "static", "",
+                            /*nowait=*/true);
+    } else {
+      emitLet("nt", "jobs < workers ? jobs : workers");
+      Block *parBb = makeHostOmpParallel("nt", "nt > 1", usesBrgemm);
+      enterHostBlock(parBb);
+      ptBb = makeHostOmpFor("job", "0", "jobs", "1", /*parallel=*/false,
+                            /*simd=*/false, /*x86Simd=*/false, "", "static", "",
+                            /*nowait=*/true);
+    }
+    enterHostBlock(ptBb);
+    emitGuardContinue("__atomic_load_n(&intent_status, __ATOMIC_RELAXED) != 0");
+    vG = emitDef("job / (nc * mb)", extentHi(G));
+    emitLet("rem", "job % (nc * mb)");
+    vC = emitDef("(rem / mb) * nr", extentHi(N));
+    vR = emitDef("(rem % mb) * mr", grouped ? -1 : extentHi(M), {}, grouped);
+    emitLet("end", "M", {}, grouped);
   }
-  enterHostBlock(ptBb);
-  emitGuardContinue("__atomic_load_n(&intent_status, __ATOMIC_RELAXED) != 0");
-  Value vG = emitDef("job / (nc * mb)", extentHi(G));
-  emitLet("rem", "job % (nc * mb)");
-  Value vC = emitDef("(rem / mb) * nr", extentHi(N));
-  Value vR = emitDef("(rem % mb) * mr", grouped ? -1 : extentHi(M), {}, grouped);
-  emitLet("end", "M", {}, grouped);
 
   auto cIdx = [&](int64_t val) {
     return b.create<arith::ConstantIndexOp>(loc, val).getResult();
@@ -3252,6 +3441,27 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
               b.getNamedAttr("routed_temp", b.getUnitAttr())});
       continue;
     }
+    if (useTlsPanelStream && i == 0) {
+      makeOp(b, loc, "host_view_ptr", {}, {},
+             {b.getNamedAttr("index", b.getI64IntegerAttr(i)),
+              b.getNamedAttr("c_ptr_type", b.getStringAttr(cPtrTy)),
+              b.getNamedAttr("base_expr", b.getStringAttr("a_tile")),
+              b.getNamedAttr("byte_offset", b.getI64IntegerAttr(0))});
+      continue;
+    }
+    if (useTlsPanelStream && i == 1) {
+      Value offVal =
+          makeOp(b, loc, "address", {vCiLocal}, {b.getIndexType()},
+                 {b.getNamedAttr("strides", b.getDenseI64ArrayAttr({K * nr})),
+                  b.getNamedAttr("index_bits", b.getI32IntegerAttr(64))})
+              ->getResult(0);
+      makeOp(b, loc, "host_view_ptr", {offVal}, {},
+             {b.getNamedAttr("index", b.getI64IntegerAttr(i)),
+              b.getNamedAttr("c_ptr_type", b.getStringAttr(cPtrTy)),
+              b.getNamedAttr("base_expr", b.getStringAttr("b_grp")),
+              b.getNamedAttr("byte_offset", b.getI64IntegerAttr(0))});
+      continue;
+    }
     SmallVector<Value> addrCoords;
     SmallVector<int64_t> addrStrides;
     int64_t elemScale = sl.t.carrier == "Q4_K" ? 1 : 1;
@@ -3311,11 +3521,21 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
     }
   }
 
+  if (useTlsPanelStream && tlsParBb) {
+    enterHostBlock(tlsParBb);
+    makeOp(b, loc, "host_free", {}, {},
+           {b.getNamedAttr("buf_name", b.getStringAttr("a_tile"))});
+    makeOp(b, loc, "host_free", {}, {},
+           {b.getNamedAttr("buf_name", b.getStringAttr("b_grp"))});
+  }
+
   b.setInsertionPointToEnd(&hBb);
   for (Operation *rop : releaseOps) {
+    const std::string &rName = bufNames[rop->getOperand(0)];
+    if (useTlsPanelStream && (rName == "left" || rName == "rhs"))
+      continue;
     makeOp(b, loc, "host_free", {}, {},
-           {b.getNamedAttr("buf_name",
-                           b.getStringAttr(bufNames[rop->getOperand(0)]))});
+           {b.getNamedAttr("buf_name", b.getStringAttr(rName))});
   }
   makeOp(b, loc, "end");
 

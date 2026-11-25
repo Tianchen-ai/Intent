@@ -32,6 +32,11 @@ llvm::Error materializeMatrixBuffers(
 mlir::LogicalResult verifyMatrixBuffers(
     mlir::func::FuncOp, const compilerinfra::TargetProfile &,
     llvm::StringRef realization = "private-values");
+// Pad f32-widened LHS row stride by 16 floats (64 B) when K is a large multiple
+// of 128 floats (512 B) to break 4K/8K L1D set-associativity aliasing.
+inline int64_t paddedLhsPanelStride(int64_t K) {
+  return (K >= 512 && K % 128 == 0) ? (K + 16) : K;
+}
 // Host ABI follows runtime/cpu's typed slot order for CPU containers.
 std::string matrixHostParams(mlir::func::FuncOp);
 } // namespace intentdsl::cpu

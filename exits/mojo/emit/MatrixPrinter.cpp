@@ -131,7 +131,7 @@ TerminalPrinter mojoMatrixPrinter() {
   rules["mojo_row.load_slice"] = PrintRule::format(
       "var $r0 = $0.unsafe_offset($1).unsafe_load[width={width}]()");
   rules["mojo_row.gather_slice"] =
-      PrintRule::format("var $r0 = $0.gather($1)");
+      PrintRule::format("var $r0 = $0.unsafe_gather($1)");
   rules["mojo_row.store_slice"] =
       PrintRule::format("$0.unsafe_offset($1).unsafe_store($2)");
   rules["mojo_row.acc_insert_lane"] = PrintRule::format("$0[$1] = $2");
@@ -929,7 +929,7 @@ TerminalPrinter mojoMatrixPrinter() {
           c.line("extern int32_t intent_panel(" + llvm::join(ptypes, ",") +
                  ");");
           c.line("typedef struct { void *ptr; size_t cap; int busy; } IntentWsSlot;");
-          c.line("static IntentWsSlot g_intent_ws[4];");
+          c.line("static _Thread_local IntentWsSlot g_intent_ws[4];");
           c.line("static inline void *intent_ws_acquire(int slot, size_t bytes) {");
           c.line("  size_t need = bytes ? ((bytes + 63u) & ~(size_t)63u) : 64u;");
           c.line("  if ((unsigned)slot < 4u && __atomic_exchange_n(&g_intent_ws[slot].busy, 1, __ATOMIC_ACQUIRE) == 0) {");
@@ -953,22 +953,24 @@ TerminalPrinter mojoMatrixPrinter() {
           }
           if (view.attrOfType<BoolAttr>("uses_bf16_math").getValue() ||
               view.attrOfType<BoolAttr>("uses_f16_math").getValue()) {
-            c.line("#if defined(__AVX512F__)");
-            c.line("static inline void transpose16x16_ps(const __m512 *r, float *out, int64_t ldo){");
-            c.line("  __m512 t[16], u[16];");
-            c.line("  for (int m = 0; m < 8; ++m) { t[2*m] = _mm512_unpacklo_ps(r[2*m], r[2*m+1]); t[2*m+1] = _mm512_unpackhi_ps(r[2*m], r[2*m+1]); }");
-            c.line("  for (int g = 0; g < 4; ++g) {");
-            c.line("    u[4*g+0] = _mm512_shuffle_ps(t[4*g+0], t[4*g+2], 0x44); u[4*g+1] = _mm512_shuffle_ps(t[4*g+0], t[4*g+2], 0xEE);");
-            c.line("    u[4*g+2] = _mm512_shuffle_ps(t[4*g+1], t[4*g+3], 0x44); u[4*g+3] = _mm512_shuffle_ps(t[4*g+1], t[4*g+3], 0xEE);");
-            c.line("  }");
-            c.line("  for (int j = 0; j < 4; ++j) {");
-            c.line("    __m512 v0 = _mm512_shuffle_f32x4(u[j], u[4+j], 0x88), v1 = _mm512_shuffle_f32x4(u[8+j], u[12+j], 0x88);");
-            c.line("    __m512 v2 = _mm512_shuffle_f32x4(u[j], u[4+j], 0xDD), v3 = _mm512_shuffle_f32x4(u[8+j], u[12+j], 0xDD);");
-            c.line("    _mm512_storeu_ps(out + (0+j)*ldo, _mm512_shuffle_f32x4(v0, v1, 0x88));");
-            c.line("    _mm512_storeu_ps(out + (4+j)*ldo, _mm512_shuffle_f32x4(v2, v3, 0x88));");
-            c.line("    _mm512_storeu_ps(out + (8+j)*ldo, _mm512_shuffle_f32x4(v0, v1, 0xDD));");
-            c.line("    _mm512_storeu_ps(out + (12+j)*ldo, _mm512_shuffle_f32x4(v2, v3, 0xDD));");
-            c.line("  }");
+            c.line("#if defined(__AVX2__)");
+            c.line("static inline void transpose8x8_ps(__m256 r0, __m256 r1, __m256 r2, __m256 r3, __m256 r4, __m256 r5, __m256 r6, __m256 r7, float *out, int64_t ldo){");
+            c.line("  __m256 t0 = _mm256_unpacklo_ps(r0, r1), t1 = _mm256_unpackhi_ps(r0, r1);");
+            c.line("  __m256 t2 = _mm256_unpacklo_ps(r2, r3), t3 = _mm256_unpackhi_ps(r2, r3);");
+            c.line("  __m256 t4 = _mm256_unpacklo_ps(r4, r5), t5 = _mm256_unpackhi_ps(r4, r5);");
+            c.line("  __m256 t6 = _mm256_unpacklo_ps(r6, r7), t7 = _mm256_unpackhi_ps(r6, r7);");
+            c.line("  __m256 s0 = _mm256_shuffle_ps(t0, t2, 0x44), s1 = _mm256_shuffle_ps(t0, t2, 0xEE);");
+            c.line("  __m256 s2 = _mm256_shuffle_ps(t1, t3, 0x44), s3 = _mm256_shuffle_ps(t1, t3, 0xEE);");
+            c.line("  __m256 s4 = _mm256_shuffle_ps(t4, t6, 0x44), s5 = _mm256_shuffle_ps(t4, t6, 0xEE);");
+            c.line("  __m256 s6 = _mm256_shuffle_ps(t5, t7, 0x44), s7 = _mm256_shuffle_ps(t5, t7, 0xEE);");
+            c.line("  _mm256_storeu_ps(out + 0*ldo, _mm256_permute2f128_ps(s0, s4, 0x20));");
+            c.line("  _mm256_storeu_ps(out + 1*ldo, _mm256_permute2f128_ps(s1, s5, 0x20));");
+            c.line("  _mm256_storeu_ps(out + 2*ldo, _mm256_permute2f128_ps(s2, s6, 0x20));");
+            c.line("  _mm256_storeu_ps(out + 3*ldo, _mm256_permute2f128_ps(s3, s7, 0x20));");
+            c.line("  _mm256_storeu_ps(out + 4*ldo, _mm256_permute2f128_ps(s0, s4, 0x31));");
+            c.line("  _mm256_storeu_ps(out + 5*ldo, _mm256_permute2f128_ps(s1, s5, 0x31));");
+            c.line("  _mm256_storeu_ps(out + 6*ldo, _mm256_permute2f128_ps(s2, s6, 0x31));");
+            c.line("  _mm256_storeu_ps(out + 7*ldo, _mm256_permute2f128_ps(s3, s7, 0x31));");
             c.line("}");
             c.line("#endif");
           }
@@ -988,18 +990,26 @@ TerminalPrinter mojoMatrixPrinter() {
             c.line("}");
             c.line("static inline void widen_transpose_bf16_panel(float *out, const uint16_t *src, int64_t K, int64_t valid, int64_t nr, int64_t ldn){");
             c.line("  int64_t jb = 0;");
-            c.line("#if defined(__AVX512F__)");
-            c.line("  for (; jb + 16 <= valid; jb += 16) {");
-            c.line("    int64_t kb = 0;");
-            c.line("    for (; kb + 16 <= K; kb += 16) {");
-            c.line("      __m512 r[16];");
-            c.line("      for (int i = 0; i < 16; ++i) { __m256i h = _mm256_loadu_si256((const __m256i*)(src + (jb + i)*ldn + kb)); r[i] = _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(h), 16)); }");
-            c.line("      transpose16x16_ps(r, out + kb*nr + jb, nr);");
+            c.line("#if defined(__AVX2__)");
+            c.line("  for (; jb + 8 <= valid; jb += 8) {");
+            c.line("    const uint16_t *s0 = src + (jb+0)*ldn, *s1 = src + (jb+1)*ldn, *s2 = src + (jb+2)*ldn, *s3 = src + (jb+3)*ldn;");
+            c.line("    const uint16_t *s4 = src + (jb+4)*ldn, *s5 = src + (jb+5)*ldn, *s6 = src + (jb+6)*ldn, *s7 = src + (jb+7)*ldn;");
+            c.line("    size_t kb = 0, uK = K > 0 ? (size_t)K : 0;");
+            c.line("    for (; kb + 8 <= uK; kb += 8) {");
+            c.line("      __m256 r0 = _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i*)(s0 + kb))), 16));");
+            c.line("      __m256 r1 = _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i*)(s1 + kb))), 16));");
+            c.line("      __m256 r2 = _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i*)(s2 + kb))), 16));");
+            c.line("      __m256 r3 = _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i*)(s3 + kb))), 16));");
+            c.line("      __m256 r4 = _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i*)(s4 + kb))), 16));");
+            c.line("      __m256 r5 = _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i*)(s5 + kb))), 16));");
+            c.line("      __m256 r6 = _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i*)(s6 + kb))), 16));");
+            c.line("      __m256 r7 = _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i*)(s7 + kb))), 16));");
+            c.line("      transpose8x8_ps(r0, r1, r2, r3, r4, r5, r6, r7, out + (size_t)kb * (size_t)nr + (size_t)jb, nr);");
             c.line("    }");
-            c.line("    for (; kb < K; ++kb) { float *dst = out + kb*nr + jb; for (int i = 0; i < 16; ++i) dst[i] = expand_bf(src[(jb + i)*ldn + kb]); }");
+            c.line("    for (; kb < uK; ++kb) { float *dst = out + kb * (size_t)nr + (size_t)jb; dst[0]=expand_bf(s0[kb]); dst[1]=expand_bf(s1[kb]); dst[2]=expand_bf(s2[kb]); dst[3]=expand_bf(s3[kb]); dst[4]=expand_bf(s4[kb]); dst[5]=expand_bf(s5[kb]); dst[6]=expand_bf(s6[kb]); dst[7]=expand_bf(s7[kb]); }");
             c.line("  }");
             c.line("#endif");
-            c.line("  if (jb < valid || valid < nr) { for (int64_t k = 0; k < K; ++k) { float *dst = out + k*nr; for (int64_t j = jb; j < valid; ++j) dst[j] = expand_bf(src[j*ldn + k]); if (valid < nr) memset(dst + valid, 0, (size_t)(nr - valid) * sizeof(float)); } }");
+            c.line("  if (jb < valid || valid < nr) { for (int64_t k = 0; k < K; ++k) { float *dst = out + (size_t)k * (size_t)nr; for (int64_t j = jb; j < valid; ++j) dst[j] = expand_bf(src[j*ldn + k]); if (valid < nr) memset(dst + valid, 0, (size_t)(nr - valid) * sizeof(float)); } }");
             c.line("}");
           }
           if (view.attrOfType<BoolAttr>("uses_f16_math").getValue()) {
@@ -1026,18 +1036,26 @@ TerminalPrinter mojoMatrixPrinter() {
             c.line("}");
             c.line("static inline void widen_transpose_f16_panel(float *out, const uint16_t *src, int64_t K, int64_t valid, int64_t nr, int64_t ldn){");
             c.line("  int64_t jb = 0;");
-            c.line("#if defined(__AVX512F__) && defined(__F16C__)");
-            c.line("  for (; jb + 16 <= valid; jb += 16) {");
-            c.line("    int64_t kb = 0;");
-            c.line("    for (; kb + 16 <= K; kb += 16) {");
-            c.line("      __m512 r[16];");
-            c.line("      for (int i = 0; i < 16; ++i) { __m256i h = _mm256_loadu_si256((const __m256i*)(src + (jb + i)*ldn + kb)); r[i] = _mm512_cvtph_ps(h); }");
-            c.line("      transpose16x16_ps(r, out + kb*nr + jb, nr);");
+            c.line("#if defined(__AVX2__) && defined(__F16C__)");
+            c.line("  for (; jb + 8 <= valid; jb += 8) {");
+            c.line("    const uint16_t *s0 = src + (jb+0)*ldn, *s1 = src + (jb+1)*ldn, *s2 = src + (jb+2)*ldn, *s3 = src + (jb+3)*ldn;");
+            c.line("    const uint16_t *s4 = src + (jb+4)*ldn, *s5 = src + (jb+5)*ldn, *s6 = src + (jb+6)*ldn, *s7 = src + (jb+7)*ldn;");
+            c.line("    size_t kb = 0, uK = K > 0 ? (size_t)K : 0;");
+            c.line("    for (; kb + 8 <= uK; kb += 8) {");
+            c.line("      __m256 r0 = _mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(s0 + kb)));");
+            c.line("      __m256 r1 = _mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(s1 + kb)));");
+            c.line("      __m256 r2 = _mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(s2 + kb)));");
+            c.line("      __m256 r3 = _mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(s3 + kb)));");
+            c.line("      __m256 r4 = _mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(s4 + kb)));");
+            c.line("      __m256 r5 = _mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(s5 + kb)));");
+            c.line("      __m256 r6 = _mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(s6 + kb)));");
+            c.line("      __m256 r7 = _mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(s7 + kb)));");
+            c.line("      transpose8x8_ps(r0, r1, r2, r3, r4, r5, r6, r7, out + (size_t)kb * (size_t)nr + (size_t)jb, nr);");
             c.line("    }");
-            c.line("    for (; kb < K; ++kb) { float *dst = out + kb*nr + jb; for (int i = 0; i < 16; ++i) dst[i] = expand_f16(src[(jb + i)*ldn + kb]); }");
+            c.line("    for (; kb < uK; ++kb) { float *dst = out + kb * (size_t)nr + (size_t)jb; dst[0]=expand_f16(s0[kb]); dst[1]=expand_f16(s1[kb]); dst[2]=expand_f16(s2[kb]); dst[3]=expand_f16(s3[kb]); dst[4]=expand_f16(s4[kb]); dst[5]=expand_f16(s5[kb]); dst[6]=expand_f16(s6[kb]); dst[7]=expand_f16(s7[kb]); }");
             c.line("  }");
             c.line("#endif");
-            c.line("  if (jb < valid || valid < nr) { for (int64_t k = 0; k < K; ++k) { float *dst = out + k*nr; for (int64_t j = jb; j < valid; ++j) dst[j] = expand_f16(src[j*ldn + k]); if (valid < nr) memset(dst + valid, 0, (size_t)(nr - valid) * sizeof(float)); } }");
+            c.line("  if (jb < valid || valid < nr) { for (int64_t k = 0; k < K; ++k) { float *dst = out + (size_t)k * (size_t)nr; for (int64_t j = jb; j < valid; ++j) dst[j] = expand_f16(src[j*ldn + k]); if (valid < nr) memset(dst + valid, 0, (size_t)(nr - valid) * sizeof(float)); } }");
             c.line("}");
           }
           if (view.attrOfType<BoolAttr>("uses_mx8_math").getValue()) {
@@ -1096,13 +1114,18 @@ TerminalPrinter mojoMatrixPrinter() {
                auto place = view.attrOfType<StringAttr>("placement").getValue();
                auto cType = view.attrOfType<StringAttr>("c_type").str();
                auto count = view.attrOfType<StringAttr>("count_expr").str();
-               int wsSlot = name == "left"      ? 0
-                            : name == "rhs"     ? 1
-                            : name == "members" ? 2
-                                                : 3;
+               int wsSlot = (name == "left" || name == "a_tile") ? 0
+                            : (name == "rhs" || name == "b_grp") ? 1
+                            : name == "members"                  ? 2
+                                                                 : 3;
                if (place == "stack") {
                  c.line("_Alignas(64) " + cType + " " + name + "[" + count +
                         "];");
+               } else if (place == "tls") {
+                 c.line(cType + " *" + name + " = (" + cType +
+                        "*)intent_ws_acquire(" + std::to_string(wsSlot) +
+                        ", (size_t)(" + count + ") * sizeof(" + cType + "));");
+                 c.line("if (!" + name + ") { rc |= 2; thr_ok = 0; }");
                } else {
                  std::string frees;
                  for (Attribute a : view.attrOfType<ArrayAttr>("cleanup")) {
@@ -1351,8 +1374,14 @@ TerminalPrinter mojoMatrixPrinter() {
                std::string pVar =
                    (pvAttr && !pvAttr.getValue().empty()) ? pvAttr.str()
                                                           : "brg_plan";
+               auto onceAttr = view.attrOfType<BoolAttr>("enter_once");
+               bool enterOnce = onceAttr && onceAttr.getValue();
                c.line("const void *bh = " + pVar + "[(C == nr ? 0 : 1)*(mr+1) + R];");
-               c.line("if (bh != brg_active) { if (intent_brgemm_thread_enter(bh) != 0) { rc |= 3; thr_ok = 0; continue; } brg_active = bh; }");
+               if (enterOnce) {
+                 c.line("if (!brg_active) { if (intent_brgemm_thread_enter(bh) != 0) { rc |= 3; thr_ok = 0; continue; } brg_active = bh; }");
+               } else {
+                 c.line("if (bh != brg_active) { if (intent_brgemm_thread_enter(bh) != 0) { rc |= 3; thr_ok = 0; continue; } brg_active = bh; }");
+               }
                return llvm::Error::success();
              });
 
@@ -1468,10 +1497,10 @@ TerminalPrinter mojoMatrixPrinter() {
   enterLocal("mojo_row.host_free",
              [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
                std::string name = view.attrOfType<StringAttr>("buf_name").str();
-               int wsSlot = name == "left"      ? 0
-                            : name == "rhs"     ? 1
-                            : name == "members" ? 2
-                                                : 3;
+               int wsSlot = (name == "left" || name == "a_tile") ? 0
+                            : (name == "rhs" || name == "b_grp") ? 1
+                            : name == "members"                  ? 2
+                                                                 : 3;
                c.line("intent_ws_release(" + std::to_string(wsSlot) + ", " +
                       name + ");");
                return llvm::Error::success();

@@ -150,11 +150,13 @@ llvm::Error materializeMatrixBuffers(func::FuncOp fn, RewriterBase &rw,
       auto a = dot.getOperand(0);
       int64_t ab = dot.getAttrOfType<IntegerAttr>("lhs_batch").getInt();
       int64_t lhsBanks = ab < 0 ? 1 : G;
-      Value left =
-          allocBuf("heap", clampCount(lhsBanks, M, K), 4, "lhs-panels", f32Ty);
+      int64_t lhsStride = paddedLhsPanelStride(K);
+      Value left = allocBuf("heap", clampCount(lhsBanks, M, lhsStride), 4,
+                            "lhs-panels", f32Ty);
       emitPrep({a, left}, "widen-lhs-f32",
                {rw.getNamedAttr("lhs_k", dot.getAttr("lhs_k")),
-                rw.getNamedAttr("lhs_batch", dot.getAttr("lhs_batch"))});
+                rw.getNamedAttr("lhs_batch", dot.getAttr("lhs_batch")),
+                rw.getNamedAttr("row_stride", rw.getI64IntegerAttr(lhsStride))});
     }
   } else if (packing == "decoded-f32-per-call") {
     auto mxAttr =
@@ -194,7 +196,8 @@ llvm::Error materializeMatrixBuffers(func::FuncOp fn, RewriterBase &rw,
     } else {
       emitPrep({dot.getOperand(0), left}, "widen-lhs-f32",
                {rw.getNamedAttr("lhs_k", rw.getI64IntegerAttr(1)),
-                rw.getNamedAttr("lhs_batch", rw.getI64IntegerAttr(-1))});
+                rw.getNamedAttr("lhs_batch", rw.getI64IntegerAttr(-1)),
+                rw.getNamedAttr("row_stride", rw.getI64IntegerAttr(K))});
       SmallVector<Value, 4> rhsOps{dot.getOperand(1), dot.getOperand(2)};
       if (spec->hasZeroView)
         rhsOps.push_back(dot.getOperand(3));

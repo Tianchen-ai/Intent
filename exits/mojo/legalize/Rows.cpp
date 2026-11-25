@@ -1,6 +1,7 @@
 #include "compilerinfra/Assembly.h"
 #include "compilerinfra/Proofs.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
+#include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
 #include "intentdsl/levels/algorithm/kir/ir/Literal.h"
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -1716,6 +1717,9 @@ struct RowLowerer {
             }
           }
 
+          const bool reassocSeg =
+              (code == "segment_fold") &&
+              intentdsl::kir::hasFastMath(&op, arith::FastMathFlags::reassoc);
           auto canVecSegTerms = [&]() -> bool {
             if (!forceUnitStride || !allRank1 || simdWidth < 8)
               return false;
@@ -1732,8 +1736,12 @@ struct RowLowerer {
                 if (slots[mIdx].rank != 1)
                   return false;
                 Value cVal = v.getOperand(1);
-                if (cVal != terms.getArgument(0))
-                  return false;
+                if (cVal != terms.getArgument(0)) {
+                  if (!reassocSeg || !vecVals.contains(cVal) ||
+                      (!cVal.getType().isInteger(32) &&
+                       !cVal.getType().isInteger(64)))
+                    return false;
+                }
                 vecVals.insert(v.getResult(0));
               } else if (tn == "cast") {
                 if (!vecVals.contains(v.getOperand(0)))
@@ -1822,6 +1830,31 @@ struct RowLowerer {
               return false;
             const int64_t kW = simdWidth >= 16 ? 16 : 8;
             Value stepW = constIdx(b, loc, kW);
+            if (reassocSeg) {
+              auto vecF32 = VectorType::get({kW}, b.getF32Type());
+              Value vAccSlot = declVecSlot(vecF32, kW);
+              auto *mVecLoop =
+                  makeOp(b, loc, "for_range", {start, stop16, stepW}, {}, {}, 1);
+              Block &mvBb = mVecLoop->getRegion(0).emplaceBlock();
+              Value m0 = mvBb.addArgument(b.getIndexType(), loc);
+              {
+                OpBuilder::InsertionGuard mvg(b);
+                b.setInsertionPointToEnd(&mvBb);
+                Value prodVec = evalVecSegAt(m0, laneCol, kW);
+                writeVecSlot(vAccSlot,
+                             b.create<arith::AddFOp>(loc, readVecSlot(vAccSlot),
+                                                     prodVec));
+                makeOp(b, loc, "end");
+              }
+              Value redSum =
+                  makeOp(b, loc, "lane_sum", {readVecSlot(vAccSlot)},
+                         {b.getF32Type()})
+                      ->getResult(0);
+              writeScalarSlot(accSlot,
+                              b.create<arith::AddFOp>(loc, readScalarSlot(accSlot),
+                                                      redSum));
+              return true;
+            }
             auto *mVecLoop =
                 makeOp(b, loc, "for_range", {start, stop16, stepW}, {}, {}, 1);
             Block &mvBb = mVecLoop->getRegion(0).emplaceBlock();
@@ -2044,6 +2077,187 @@ struct RowLowerer {
                               ->getResult(0);
               return asInt(b, loc, raw);
             };
+            const bool reassocLock =
+                intentdsl::kir::hasFastMath(&op, arith::FastMathFlags::reassoc);
+            bool canVecLock = reassocLock && simdWidth >= 8;
+            if (canVecLock) {
+              llvm::DenseSet<Value> vecVals;
+              vecVals.insert(terms.getArgument(0));
+              for (Operation &v : terms) {
+                auto tn = v.getName().stripDialect();
+                if (tn == "term") {
+                  canVecLock = vecVals.contains(v.getOperand(0));
+                  break;
+                }
+                if (tn == "member_load") {
+                  Value cVal = v.getOperand(1);
+                  if (cVal != terms.getArgument(0) && !vecVals.contains(cVal)) {
+                    canVecLock = false;
+                    break;
+                  }
+                  vecVals.insert(v.getResult(0));
+                } else if (tn == "cast") {
+                  Type srcT = v.getOperand(0).getType(),
+                       dstT = v.getResult(0).getType();
+                  if (!vecVals.contains(v.getOperand(0)) ||
+                      !((isa<FloatType>(srcT) && dstT.isF32()) || srcT == dstT)) {
+                    canVecLock = false;
+                    break;
+                  }
+                  vecVals.insert(v.getResult(0));
+                } else if (tn == "mul" || tn == "add") {
+                  if (!v.getResult(0).getType().isF32()) {
+                    canVecLock = false;
+                    break;
+                  }
+                  vecVals.insert(v.getResult(0));
+                } else {
+                  canVecLock = false;
+                  break;
+                }
+              }
+            }
+            if (canVecLock) {
+              bool hasGather = false;
+              for (Operation &v : terms)
+                if (v.getName().stripDialect() == "member_load" &&
+                    v.getOperand(1) != terms.getArgument(0))
+                  hasGather = true;
+              const int64_t kW = (hasGather || simdWidth < 16) ? 8 : 16;
+              auto vecF32 = VectorType::get({kW}, b.getF32Type());
+              Value cWStep = constIdx(b, loc, kW);
+              Value maskW = constIdx(b, loc, -kW);
+              auto evalVecTerm = [&](Value m0, Value laneCol) -> Value {
+                IRMapping vMap;
+                for (Operation &v : terms) {
+                  auto tn = v.getName().stripDialect();
+                  if (tn == "term")
+                    return vMap.lookup(v.getOperand(0));
+                  if (tn == "member_load") {
+                    unsigned mIdx = slotIndex(v.getOperand(0));
+                    Type eTy = slots[mIdx].elemTy;
+                    auto vTy = VectorType::get({kW}, eTy);
+                    Value cVal = v.getOperand(1);
+                    Value loaded;
+                    if (cVal == terms.getArgument(0)) {
+                      Value mAddr = makeStaticAddr(b, loc, slots[mIdx].ptrVal,
+                                                   {m0}, {1});
+                      loaded = makeOp(b, loc, "load_slice",
+                                      {slots[mIdx].ptrVal, mAddr}, {vTy},
+                                      {b.getNamedAttr("width",
+                                                      b.getI64IntegerAttr(kW))})
+                                   ->getResult(0);
+                    } else {
+                      Value idxVec = vMap.lookup(cVal);
+                      loaded = makeOp(b, loc, "gather_slice",
+                                      {slots[mIdx].ptrVal, idxVec}, {vTy})
+                                   ->getResult(0);
+                    }
+                    vMap.map(v.getResult(0), loaded);
+                  } else if (tn == "cast") {
+                    Value inV = vMap.lookup(v.getOperand(0));
+                    Type inElem =
+                        cast<VectorType>(inV.getType()).getElementType();
+                    vMap.map(v.getResult(0),
+                             inElem.isF32()
+                                 ? inV
+                                 : b.create<arith::ExtFOp>(loc, vecF32, inV)
+                                       .getResult());
+                  } else if (tn == "mul" || tn == "add") {
+                    auto getVecOpnd = [&](Value opnd) -> Value {
+                      if (Value mapped = vMap.lookupOrNull(opnd))
+                        return mapped;
+                      Value sc = opnd == terms.getArgument(1) ? laneCol
+                                                              : map.lookup(opnd);
+                      return makeOp(b, loc, "splat_scalar", {sc}, {vecF32},
+                                    {b.getNamedAttr("dtype",
+                                                    b.getStringAttr("float32")),
+                                     b.getNamedAttr("width",
+                                                    b.getI64IntegerAttr(kW))})
+                          ->getResult(0);
+                    };
+                    Value lhs = getVecOpnd(v.getOperand(0));
+                    Value rhs = getVecOpnd(v.getOperand(1));
+                    Value res = tn == "mul"
+                                    ? b.create<arith::MulFOp>(loc, lhs, rhs)
+                                          .getResult()
+                                    : b.create<arith::AddFOp>(loc, lhs, rhs)
+                                          .getResult();
+                    vMap.map(v.getResult(0), res);
+                  }
+                }
+                return {};
+              };
+              bool prevFast = forceUnitStride;
+              forceUnitStride = true;
+              auto *lLoop =
+                  makeOp(b, loc, "for_range", {c0, cW, c1}, {}, {}, 1);
+              {
+                Block &lBb = lLoop->getRegion(0).emplaceBlock();
+                Value lane = lBb.addArgument(b.getIndexType(), loc);
+                OpBuilder::InsertionGuard lg(b);
+                b.setInsertionPointToEnd(&lBb);
+                Value col = b.create<arith::AddIOp>(loc, j, lane);
+                Value seg =
+                    flatDomain
+                        ? (memberTasks ? b.create<arith::AddIOp>(loc, r, col)
+                                             .getResult()
+                                       : col)
+                        : r;
+                Value start = loadOffUnit(seg);
+                Value end =
+                    loadOffUnit(b.create<arith::AddIOp>(loc, seg, c1));
+                Value span = b.create<arith::MaxSIOp>(
+                    loc, c0, b.create<arith::SubIOp>(loc, end, start));
+                Value aligned = b.create<arith::AndIOp>(loc, span, maskW);
+                Value vecEnd = b.create<arith::AddIOp>(loc, start, aligned);
+                Value vAcc = declVecSlot(vecF32, kW);
+                {
+                  auto *mvLoop = makeOp(b, loc, "for_range",
+                                        {start, vecEnd, cWStep}, {}, {}, 1);
+                  Block &mvBb = mvLoop->getRegion(0).emplaceBlock();
+                  Value m0 = mvBb.addArgument(b.getIndexType(), loc);
+                  OpBuilder::InsertionGuard mvg(b);
+                  b.setInsertionPointToEnd(&mvBb);
+                  Value pv = evalVecTerm(m0, col);
+                  writeVecSlot(
+                      vAcc,
+                      b.create<arith::AddFOp>(loc, readVecSlot(vAcc), pv));
+                  makeOp(b, loc, "end");
+                }
+                Value redSum =
+                    makeOp(b, loc, "lane_sum", {readVecSlot(vAcc)},
+                           {b.getF32Type()})
+                        ->getResult(0);
+                Value sAcc = declScalarSlot(b.getF32Type(), redSum);
+                {
+                  auto *rtLoop =
+                      makeOp(b, loc, "for_range", {vecEnd, end, c1}, {}, {}, 1);
+                  Block &rtBb = rtLoop->getRegion(0).emplaceBlock();
+                  Value member = rtBb.addArgument(b.getIndexType(), loc);
+                  OpBuilder::InsertionGuard rtg(b);
+                  b.setInsertionPointToEnd(&rtBb);
+                  Value prevJ = j;
+                  j = col;
+                  auto tv = evalTermAt(member);
+                  j = prevJ;
+                  if (!tv) {
+                    forceUnitStride = prevFast;
+                    return op.emitError() << llvm::toString(tv.takeError()),
+                           failure();
+                  }
+                  writeScalarSlot(
+                      sAcc,
+                      b.create<arith::AddFOp>(loc, readScalarSlot(sAcc), *tv));
+                  makeOp(b, loc, "end");
+                }
+                makeOp(b, loc, "acc_insert_lane",
+                       {vecSlot, lane, readScalarSlot(sAcc)});
+                makeOp(b, loc, "end");
+              }
+              forceUnitStride = prevFast;
+              return success();
+            }
             const int lockK = (w >= 8 && w % 8 == 0) ? 8 : 4;
             Value c4 = constIdx(b, loc, 4);
             Value mask4 = constIdx(b, loc, -4);

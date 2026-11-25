@@ -239,7 +239,8 @@ def MojoHostThreadScratchFree : RowInst<"host_thread_scratch_free"> {
 }
 def MojoHostBrgemmCtxDecl : RowInst<"host_brgemm_ctx_decl"> {}
 def MojoHostBrgemmCtxSwitch : RowInst<"host_brgemm_ctx_switch"> {
-  let arguments=(ins OptionalAttr<StrAttr>:$plan_var);
+  let arguments=(ins OptionalAttr<StrAttr>:$plan_var,
+                     OptionalAttr<BoolAttr>:$enter_once);
 }
 def MojoHostBrgemmAccCall : RowInst<"host_brgemm_acc_call"> {
   let arguments=(ins StrAttr:$a_expr, StrAttr:$b_expr, StrAttr:$c_expr);

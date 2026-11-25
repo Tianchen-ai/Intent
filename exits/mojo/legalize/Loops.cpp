@@ -65,8 +65,12 @@ class Columns {
         op->getRegion(0).cloneInto(s.addRegion(), mapping);
       }
       auto *physical = b.create(s);
-      if (fold && intentdsl::kir::contiguousFeatureRead(physical))
-        physical->setAttr("feature_vector", b.getUnitAttr());
+      if (fold) {
+        if (auto fm = op->getAttr("fastmath"))
+          physical->setAttr("fastmath", fm);
+        if (intentdsl::kir::contiguousFeatureRead(physical))
+          physical->setAttr("feature_vector", b.getUnitAttr());
+      }
       result = physical->getResult(0);
     } else if (n == "count_keys" || n == "column_sum") {
       result = make(n == "count_keys" ? "key_counts" : "sum_columns",

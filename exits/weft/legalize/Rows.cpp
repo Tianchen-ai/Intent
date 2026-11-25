@@ -1,6 +1,7 @@
 #include "Rows.h"
 #include "compilerinfra/Proofs.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
+#include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
 #include "intentdsl/levels/algorithm/kir/ir/ProjectedLayout.h"
 #include "intentdsl/levels/execution/cpu/ir/IndexedEffects.h"
 #include "intentdsl/levels/execution/cpu/ir/Pack.h"
@@ -961,7 +962,32 @@ struct RowTaskBuilder {
       }
       if (segCnt == 1 && onlySeg && canVecGatherOp(*onlySeg)) {
         Operation &op = *onlySeg;
+        const bool reassocSeg =
+            intentdsl::kir::hasFastMath(&op, arith::FastMathFlags::reassoc);
         auto &segBb = op.getRegion(0).front();
+        int64_t segVec = kSegVec;
+        if (reassocSeg) {
+          int64_t offLen = 0, directNnz = 0, minExt = INT64_MAX;
+          if (auto offBa = dyn_cast<BlockArgument>(op.getOperand(0))) {
+            unsigned oSlot = offBa.getArgNumber() - 1;
+            if (!slotFacts[oSlot].indirectExtents.empty())
+              offLen = slotFacts[oSlot].indirectExtents[0];
+          }
+          for (Operation &scOp : segBb) {
+            if (scOp.getName().stripDialect() != "member_load")
+              continue;
+            unsigned mSlot =
+                cast<BlockArgument>(scOp.getOperand(0)).getArgNumber() - 1;
+            int64_t ext = slotFacts[mSlot].indirectExtents[0];
+            minExt = std::min(minExt, ext);
+            if (scOp.getOperand(1) == segBb.getArgument(0))
+              directNnz = std::max(directNnz, ext);
+          }
+          if (offLen > 1 && directNnz >= (offLen - 1) * 16 && minExt > 16)
+            segVec = 16;
+        }
+        const std::string f32SegVecTy = regionType("value", "f32", 1, segVec, 2);
+        TaskTerm zeroSegVec = reassocSeg ? splatOp(zeroF32, f32SegVecTy) : TaskTerm{};
         bool flat =
             cast<MemRefType>(
                 task.getOperand(
@@ -999,10 +1025,19 @@ struct RowTaskBuilder {
           return scalarSlice(src, coords, true,
                              weftSpelling(vt.getElementType()));
         };
+        auto reduceSegVec = [&](TaskTerm vecAcc) -> TaskTerm {
+          Value v =
+              makeOp(b, loc, "task_reduce", {vecAcc.v}, {b.getIndexType()},
+                     {b.getNamedAttr("kind", b.getStringAttr("add")),
+                      b.getNamedAttr("axis", b.getI64IntegerAttr(0)),
+                      b.getNamedAttr("in_type", b.getStringAttr(vecAcc.type)),
+                      b.getNamedAttr("val_type", b.getStringAttr("f32"))})
+                  ->getResult(0);
+          return {v, "f32"};
+        };
         auto evalVecStepInBlock = [&](TaskTerm m0,
                                       TaskTerm colTerm) -> TaskTerm {
           llvm::DenseMap<Value, TaskTerm> vMap;
-          std::string f32VecTy = regionType("value", "f32", 1, kSegVec, 2);
           for (Operation &scOp : segBb) {
             StringRef scCode = scOp.getName().stripDialect();
             if (scCode == "term")
@@ -1010,10 +1045,8 @@ struct RowTaskBuilder {
             if (scCode == "member_load") {
               Value view = scOp.getOperand(0);
               auto vt = cast<MemRefType>(view.getType());
-              unsigned slot = cast<BlockArgument>(view).getArgNumber() - 1;
-              int64_t ext = slotFacts[slot].indirectExtents[0];
               std::string eSp = weftSpelling(vt.getElementType());
-              std::string valVecTy = regionType("value", eSp, 1, kSegVec, 2);
+              std::string valVecTy = regionType("value", eSp, 1, segVec, 2);
               Value cVal = scOp.getOperand(1);
               if (cVal == segBb.getArgument(0)) {
                 TaskTerm baseSl = hoistedDirectSlices.at(view);
@@ -1021,7 +1054,7 @@ struct RowTaskBuilder {
                     makeOp(b, loc, "task_subview", {baseSl.v, m0.v},
                            {b.getIndexType()},
                            {b.getNamedAttr("static_extent",
-                                           b.getI64IntegerAttr(kSegVec)),
+                                           b.getI64IntegerAttr(segVec)),
                             b.getNamedAttr("slice_type",
                                            b.getStringAttr(baseSl.type)),
                             b.getNamedAttr("val_type",
@@ -1033,7 +1066,7 @@ struct RowTaskBuilder {
                 TaskTerm idxSigned = vMap.at(cVal);
                 std::string uElem =
                     cVal.getType().isInteger(64) ? "ui64" : "ui32";
-                std::string uVecTy = regionType("value", uElem, 1, kSegVec, 2);
+                std::string uVecTy = regionType("value", uElem, 1, segVec, 2);
                 Value idxU =
                     makeOp(b, loc, "task_cast", {idxSigned.v},
                            {b.getIndexType()},
@@ -1043,8 +1076,12 @@ struct RowTaskBuilder {
                             b.getNamedAttr("val_type",
                                            b.getStringAttr(uVecTy))})
                         ->getResult(0);
+                // Keep admit in the same block as lookup so Weft lowers it via
+                // indexedSnapshotLookup (direct gather) instead of copying the table.
+                unsigned slot = cast<BlockArgument>(view).getArgNumber() - 1;
+                int64_t ext = slotFacts[slot].indirectExtents[0];
                 TaskTerm viewTerm = terms.lookup(view);
-                std::string tblSlTy = regionType("slice", eSp, 1, ext, 2);
+                std::string slTy = regionType("slice", eSp, 1, ext, 2);
                 std::string tblValTy = regionType("value", eSp, 1, ext, 2);
                 Value tblVal =
                     makeOp(b, loc, "task_slice", {viewTerm.v},
@@ -1053,10 +1090,8 @@ struct RowTaskBuilder {
                                            b.getStringAttr(viewTerm.type)),
                             b.getNamedAttr("selectors",
                                            b.getArrayAttr({b.getStringAttr("all")})),
-                            b.getNamedAttr("slice_type",
-                                           b.getStringAttr(tblSlTy)),
-                            b.getNamedAttr("val_type",
-                                           b.getStringAttr(tblValTy)),
+                            b.getNamedAttr("slice_type", b.getStringAttr(slTy)),
+                            b.getNamedAttr("val_type", b.getStringAttr(tblValTy)),
                             b.getNamedAttr("admit", b.getBoolAttr(true))})
                         ->getResult(0);
                 Value gathered =
@@ -1074,7 +1109,7 @@ struct RowTaskBuilder {
               }
             } else if (scCode == "cast") {
               std::string dt = weftSpelling(scOp.getResult(0).getType());
-              std::string dstVecTy = regionType("value", dt, 1, kSegVec, 2);
+              std::string dstVecTy = regionType("value", dt, 1, segVec, 2);
               TaskTerm inV = vMap.at(scOp.getOperand(0));
               vMap[scOp.getResult(0)] =
                   inV.type == dstVecTy ? inV : castOp(inV, dstVecTy);
@@ -1085,7 +1120,7 @@ struct RowTaskBuilder {
                 return v == segBb.getArgument(1) ? colTerm : terms.lookup(v);
               };
               vMap[scOp.getResult(0)] = bin(scCode, getVOp(scOp.getOperand(0)),
-                                            getVOp(scOp.getOperand(1)), f32VecTy);
+                                            getVOp(scOp.getOperand(1)), f32SegVecTy);
             }
           }
           return {};
@@ -1139,40 +1174,63 @@ struct RowTaskBuilder {
             TaskTerm rawRem = bin("sub", hiBnd, remLo, "index");
             TaskTerm alV = castOp(
                 bin("and", castOp(rawRem, "si64"),
-                    lit(std::to_string(-kSegVec), "si64"), "si64"),
+                    lit(std::to_string(-segVec), "si64"), "si64"),
                 "index");
             TaskTerm stV = bin("add", remLo, alV, "index");
-            TaskTerm stepV = idx(kSegVec);
-            Operation *rvFor = makeOp(
-                b, loc, "task_for", {remLo.v, stV.v, stepV.v, initAcc.v},
-                {b.getIndexType()},
-                {b.getNamedAttr("iter_types", rTy)}, 1);
-            {
-              Block &rvBb = rvFor->getRegion(0).emplaceBlock();
-              TaskTerm m0{rvBb.addArgument(b.getIndexType(), loc), "index"};
-              TaskTerm accV{rvBb.addArgument(b.getIndexType(), loc), "f32"};
-              OpBuilder::InsertionGuard rvg(b);
-              b.setInsertionPointToEnd(&rvBb);
-              TaskTerm pv = evalVecStepInBlock(m0, colTerm);
-              TaskTerm cur = accV;
-              for (int ln = 0; ln < kSegVec; ++ln) {
-                TaskTerm lnIdx = idx(ln);
-                Value lv =
-                    makeOp(b, loc, "task_extract", {pv.v, lnIdx.v},
-                           {b.getIndexType()},
-                           {b.getNamedAttr("selector", b.getStringAttr("index")),
-                            b.getNamedAttr("in_type", b.getStringAttr(pv.type)),
-                            b.getNamedAttr("point_type", b.getStringAttr("index")),
-                            b.getNamedAttr("val_type", b.getStringAttr("f32"))})
-                        ->getResult(0);
-                cur = bin("add", cur, {lv, "f32"}, "f32");
+            TaskTerm stepV = idx(segVec);
+            TaskTerm afterVecAcc;
+            if (reassocSeg) {
+              ArrayAttr rvTy = b.getArrayAttr({b.getStringAttr(f32SegVecTy)});
+              Operation *rvFor = makeOp(
+                  b, loc, "task_for", {remLo.v, stV.v, stepV.v, zeroSegVec.v},
+                  {b.getIndexType()},
+                  {b.getNamedAttr("iter_types", rvTy)}, 1);
+              {
+                Block &rvBb = rvFor->getRegion(0).emplaceBlock();
+                TaskTerm m0{rvBb.addArgument(b.getIndexType(), loc), "index"};
+                TaskTerm accVec{rvBb.addArgument(b.getIndexType(), loc), f32SegVecTy};
+                OpBuilder::InsertionGuard rvg(b);
+                b.setInsertionPointToEnd(&rvBb);
+                TaskTerm pv = evalVecStepInBlock(m0, colTerm);
+                TaskTerm nxtVec = bin("add", accVec, pv, f32SegVecTy);
+                makeOp(b, loc, "task_yield", {nxtVec.v}, {},
+                       {b.getNamedAttr("val_types", rvTy)});
               }
-              makeOp(b, loc, "task_yield", {cur.v}, {},
-                     {b.getNamedAttr("val_types", rTy)});
+              TaskTerm redSum = reduceSegVec({rvFor->getResult(0), f32SegVecTy});
+              afterVecAcc = bin("add", initAcc, redSum, "f32");
+            } else {
+              Operation *rvFor = makeOp(
+                  b, loc, "task_for", {remLo.v, stV.v, stepV.v, initAcc.v},
+                  {b.getIndexType()},
+                  {b.getNamedAttr("iter_types", rTy)}, 1);
+              {
+                Block &rvBb = rvFor->getRegion(0).emplaceBlock();
+                TaskTerm m0{rvBb.addArgument(b.getIndexType(), loc), "index"};
+                TaskTerm accV{rvBb.addArgument(b.getIndexType(), loc), "f32"};
+                OpBuilder::InsertionGuard rvg(b);
+                b.setInsertionPointToEnd(&rvBb);
+                TaskTerm pv = evalVecStepInBlock(m0, colTerm);
+                TaskTerm cur = accV;
+                for (int ln = 0; ln < segVec; ++ln) {
+                  TaskTerm lnIdx = idx(ln);
+                  Value lv =
+                      makeOp(b, loc, "task_extract", {pv.v, lnIdx.v},
+                             {b.getIndexType()},
+                             {b.getNamedAttr("selector", b.getStringAttr("index")),
+                              b.getNamedAttr("in_type", b.getStringAttr(pv.type)),
+                              b.getNamedAttr("point_type", b.getStringAttr("index")),
+                              b.getNamedAttr("val_type", b.getStringAttr("f32"))})
+                          ->getResult(0);
+                  cur = bin("add", cur, {lv, "f32"}, "f32");
+                }
+                makeOp(b, loc, "task_yield", {cur.v}, {},
+                       {b.getNamedAttr("val_types", rTy)});
+              }
+              afterVecAcc = {rvFor->getResult(0), "f32"};
             }
             Operation *rtFor = makeOp(
                 b, loc, "task_for",
-                {stV.v, hiBnd.v, oneIdx.v, rvFor->getResult(0)},
+                {stV.v, hiBnd.v, oneIdx.v, afterVecAcc.v},
                 {b.getIndexType()},
                 {b.getNamedAttr("iter_types", rTy)}, 1);
             {
@@ -1206,11 +1264,79 @@ struct RowTaskBuilder {
           return success();
         };
 
+        if (reassocSeg) {
+          TaskTerm stepV = idx(segVec);
+          ArrayAttr v1Ty = b.getArrayAttr({b.getStringAttr(f32SegVecTy)});
+          ArrayAttr s1Ty = b.getArrayAttr({b.getStringAttr("f32")});
+          Operation *m1For =
+              makeOp(b, loc, "task_for", {zeroIdx.v, columns.v, oneIdx.v}, {},
+                     {b.getNamedAttr("iter_types", b.getArrayAttr({}))}, 1);
+          {
+            Block &m1Bb = m1For->getRegion(0).emplaceBlock();
+            TaskTerm mCol{m1Bb.addArgument(b.getIndexType(), loc), "index"};
+            OpBuilder::InsertionGuard m1g(b);
+            b.setInsertionPointToEnd(&m1Bb);
+            TaskTerm own = bin("add", origin, flat ? mCol : row, "index");
+            TaskTerm lo = castOp(readScalar(op.getOperand(0), {own}), "index");
+            TaskTerm hi = castOp(
+                readScalar(op.getOperand(0), {bin("add", own, oneIdx, "index")}),
+                "index");
+            TaskTerm rawSp = bin("sub", hi, lo, "index");
+            TaskTerm span =
+                sel(cmp("gt", hi, lo, "i1"), rawSp, zeroIdx, "index");
+            TaskTerm alV = castOp(
+                bin("and", castOp(span, "si64"),
+                    lit(std::to_string(-segVec), "si64"), "si64"),
+                "index");
+            TaskTerm stV = bin("add", lo, alV, "index");
+            Operation *vFor = makeOp(
+                b, loc, "task_for", {lo.v, stV.v, stepV.v, zeroSegVec.v},
+                {b.getIndexType()}, {b.getNamedAttr("iter_types", v1Ty)}, 1);
+            {
+              Block &vBb = vFor->getRegion(0).emplaceBlock();
+              TaskTerm m0{vBb.addArgument(b.getIndexType(), loc), "index"};
+              TaskTerm accVec{vBb.addArgument(b.getIndexType(), loc),
+                              f32SegVecTy};
+              OpBuilder::InsertionGuard vg(b);
+              b.setInsertionPointToEnd(&vBb);
+              TaskTerm prod = evalVecStepInBlock(m0, mCol);
+              TaskTerm nxtVec = bin("add", accVec, prod, f32SegVecTy);
+              makeOp(b, loc, "task_yield", {nxtVec.v}, {},
+                     {b.getNamedAttr("val_types", v1Ty)});
+            }
+            TaskTerm redSum = reduceSegVec({vFor->getResult(0), f32SegVecTy});
+            Operation *tFor = makeOp(
+                b, loc, "task_for", {stV.v, hi.v, oneIdx.v, redSum.v},
+                {b.getIndexType()}, {b.getNamedAttr("iter_types", s1Ty)}, 1);
+            {
+              Block &tBb = tFor->getRegion(0).emplaceBlock();
+              TaskTerm segMem{tBb.addArgument(b.getIndexType(), loc), "index"};
+              TaskTerm segCarry{tBb.addArgument(b.getIndexType(), loc), "f32"};
+              OpBuilder::InsertionGuard tg(b);
+              b.setInsertionPointToEnd(&tBb);
+              auto sc = evalScalarStep(segMem, mCol);
+              if (failed(sc))
+                return failure();
+              TaskTerm tot = bin("add", segCarry, *sc, "f32");
+              makeOp(b, loc, "task_yield", {tot.v}, {},
+                     {b.getNamedAttr("val_types", s1Ty)});
+            }
+            Operation *wPtr = sw.writes[0];
+            StringRef wn = wPtr->getName().stripDialect();
+            TaskTerm addr = memberSlice(wPtr->getOperand(0), row, mCol,
+                                        wn == "write_owner", false);
+            commitOp({tFor->getResult(0), "f32"}, addr);
+            makeOp(b, loc, "task_yield", {}, {},
+                   {b.getNamedAttr("val_types", b.getArrayAttr({}))});
+          }
+          return success();
+        }
+
         TaskTerm colAligned2 = castOp(
             bin("and", castOp(columns, "si64"), lit("-2", "si64"), "si64"),
             "index");
         TaskTerm step2 = idx(2);
-        TaskTerm stepV = idx(kSegVec);
+        TaskTerm stepV = idx(segVec);
         Operation *m2For =
             makeOp(b, loc, "task_for", {zeroIdx.v, colAligned2.v, step2.v}, {},
                    {b.getNamedAttr("iter_types", b.getArrayAttr({}))}, 1);
@@ -1235,50 +1361,81 @@ struct RowTaskBuilder {
               sel(cmp("lt", spans[0], spans[1], "i1"), spans[0], spans[1], "index");
           TaskTerm commonV = castOp(
               bin("and", castOp(minAll, "si64"),
-                  lit(std::to_string(-kSegVec), "si64"), "si64"),
+                  lit(std::to_string(-segVec), "si64"), "si64"),
               "index");
-          ArrayAttr f2Tys =
-              b.getArrayAttr({b.getStringAttr("f32"), b.getStringAttr("f32")});
-          Operation *v2For = makeOp(
-              b, loc, "task_for",
-              {zeroIdx.v, commonV.v, stepV.v, zeroF32.v, zeroF32.v},
-              {b.getIndexType(), b.getIndexType()},
-              {b.getNamedAttr("iter_types", f2Tys)}, 1);
-          {
-            Block &v2Bb = v2For->getRegion(0).emplaceBlock();
-            TaskTerm tOff{v2Bb.addArgument(b.getIndexType(), loc), "index"};
-            TaskTerm curAccs[2] = {
-                {v2Bb.addArgument(b.getIndexType(), loc), "f32"},
-                {v2Bb.addArgument(b.getIndexType(), loc), "f32"}};
-            OpBuilder::InsertionGuard v2g(b);
-            b.setInsertionPointToEnd(&v2Bb);
-            TaskTerm prods[2];
-            for (int u = 0; u < 2; ++u)
-              prods[u] = evalVecStepInBlock(bin("add", los[u], tOff, "index"),
-                                            cols2[u]);
-            for (int ln = 0; ln < kSegVec; ++ln) {
-              TaskTerm lnIdx = idx(ln);
-              for (int u = 0; u < 2; ++u) {
-                Value lv =
-                    makeOp(b, loc, "task_extract", {prods[u].v, lnIdx.v},
-                           {b.getIndexType()},
-                           {b.getNamedAttr("selector", b.getStringAttr("index")),
-                            b.getNamedAttr("in_type",
-                                           b.getStringAttr(prods[u].type)),
-                            b.getNamedAttr("point_type",
-                                           b.getStringAttr("index")),
-                            b.getNamedAttr("val_type", b.getStringAttr("f32"))})
-                        ->getResult(0);
-                curAccs[u] = bin("add", curAccs[u], {lv, "f32"}, "f32");
-              }
+          TaskTerm rowInitAccs[2];
+          if (reassocSeg) {
+            ArrayAttr v2Tys = b.getArrayAttr(
+                {b.getStringAttr(f32SegVecTy), b.getStringAttr(f32SegVecTy)});
+            Operation *v2For = makeOp(
+                b, loc, "task_for",
+                {zeroIdx.v, commonV.v, stepV.v, zeroSegVec.v, zeroSegVec.v},
+                {b.getIndexType(), b.getIndexType()},
+                {b.getNamedAttr("iter_types", v2Tys)}, 1);
+            {
+              Block &v2Bb = v2For->getRegion(0).emplaceBlock();
+              TaskTerm tOff{v2Bb.addArgument(b.getIndexType(), loc), "index"};
+              TaskTerm curVecs[2] = {
+                  {v2Bb.addArgument(b.getIndexType(), loc), f32SegVecTy},
+                  {v2Bb.addArgument(b.getIndexType(), loc), f32SegVecTy}};
+              OpBuilder::InsertionGuard v2g(b);
+              b.setInsertionPointToEnd(&v2Bb);
+              TaskTerm prods[2];
+              for (int u = 0; u < 2; ++u)
+                prods[u] = evalVecStepInBlock(bin("add", los[u], tOff, "index"),
+                                              cols2[u]);
+              for (int u = 0; u < 2; ++u)
+                curVecs[u] = bin("add", curVecs[u], prods[u], f32SegVecTy);
+              makeOp(b, loc, "task_yield", {curVecs[0].v, curVecs[1].v}, {},
+                     {b.getNamedAttr("val_types", v2Tys)});
             }
-            makeOp(b, loc, "task_yield", {curAccs[0].v, curAccs[1].v}, {},
-                   {b.getNamedAttr("val_types", f2Tys)});
+            for (int u = 0; u < 2; ++u)
+              rowInitAccs[u] = reduceSegVec({v2For->getResult(u), f32SegVecTy});
+          } else {
+            ArrayAttr f2Tys =
+                b.getArrayAttr({b.getStringAttr("f32"), b.getStringAttr("f32")});
+            Operation *v2For = makeOp(
+                b, loc, "task_for",
+                {zeroIdx.v, commonV.v, stepV.v, zeroF32.v, zeroF32.v},
+                {b.getIndexType(), b.getIndexType()},
+                {b.getNamedAttr("iter_types", f2Tys)}, 1);
+            {
+              Block &v2Bb = v2For->getRegion(0).emplaceBlock();
+              TaskTerm tOff{v2Bb.addArgument(b.getIndexType(), loc), "index"};
+              TaskTerm curAccs[2] = {
+                  {v2Bb.addArgument(b.getIndexType(), loc), "f32"},
+                  {v2Bb.addArgument(b.getIndexType(), loc), "f32"}};
+              OpBuilder::InsertionGuard v2g(b);
+              b.setInsertionPointToEnd(&v2Bb);
+              TaskTerm prods[2];
+              for (int u = 0; u < 2; ++u)
+                prods[u] = evalVecStepInBlock(bin("add", los[u], tOff, "index"),
+                                              cols2[u]);
+              for (int ln = 0; ln < segVec; ++ln) {
+                TaskTerm lnIdx = idx(ln);
+                for (int u = 0; u < 2; ++u) {
+                  Value lv =
+                      makeOp(b, loc, "task_extract", {prods[u].v, lnIdx.v},
+                             {b.getIndexType()},
+                             {b.getNamedAttr("selector", b.getStringAttr("index")),
+                              b.getNamedAttr("in_type",
+                                             b.getStringAttr(prods[u].type)),
+                              b.getNamedAttr("point_type",
+                                             b.getStringAttr("index")),
+                              b.getNamedAttr("val_type", b.getStringAttr("f32"))})
+                          ->getResult(0);
+                  curAccs[u] = bin("add", curAccs[u], {lv, "f32"}, "f32");
+                }
+              }
+              makeOp(b, loc, "task_yield", {curAccs[0].v, curAccs[1].v}, {},
+                     {b.getNamedAttr("val_types", f2Tys)});
+            }
+            for (int u = 0; u < 2; ++u)
+              rowInitAccs[u] = {v2For->getResult(u), "f32"};
           }
           for (int u = 0; u < 2; ++u) {
             TaskTerm remLo = bin("add", los[u], commonV, "index");
-            if (failed(emitRemAndStore(remLo, his[u],
-                                       {v2For->getResult(u), "f32"}, cols2[u])))
+            if (failed(emitRemAndStore(remLo, his[u], rowInitAccs[u], cols2[u])))
               return failure();
           }
           makeOp(b, loc, "task_yield", {}, {},

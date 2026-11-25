@@ -18,8 +18,16 @@ void matrixCost(Unit &u) {
           double jobs = mb * nc * g->batches;
           auto workers =
               ctx.target.services.get<intentdsl::cpu::RowMachine>()->workers;
-          double waves = jobs > 0 ? std::ceil(jobs / workers) : 0.;
           int64_t packCode = t[4];
+          bool tlsPanelStream =
+              t.size() == 6 && packCode == 3 &&
+              dot.getName().stripDialect() == "contract" && g->batches == 1 &&
+              !g->grouped && !g->routed && nc >= double(workers) &&
+              double(g->m) * g->k >= 262144.;
+          double waves = jobs > 0
+                             ? (tlsPanelStream ? (std::ceil(nc / workers) * mb)
+                                               : std::ceil(jobs / workers))
+                             : 0.;
           double elemReadBytes = packCode == 3 ? 4. : 2.;
           if (dot.getName().stripDialect() == "contract") {
             auto inBytes =

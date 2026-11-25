@@ -1,5 +1,6 @@
 #include "Ordered.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
+#include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
 #include "intentdsl/levels/algorithm/kir/ir/Ordered.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
 #include "intentdsl/levels/execution/cpu/ir/OwnerTraversal.h"
@@ -1880,8 +1881,19 @@ struct OrderedLowerer {
                                       "[" + std::to_string(B) + "," +
                                           std::to_string(subDV) + "]");
               }
-              for (int64_t dv0 = 0; dv0 < plan.DV; dv0 += subDV) {
-                TaskTerm dv0Idx = idx(dv0);
+              // Runtime loop over subDV strips avoids duplicating Pass 2b and
+              // keeps the compiled owner task well inside the 32 KB L1I cache.
+              TaskTerm c0Idx = idx(0), cDvIdx = idx(plan.DV),
+                       cSubDvIdx = idx(subDV);
+              Operation *dvFor = makeOp(
+                  b, loc, "task_for", {c0Idx.v, cDvIdx.v, cSubDvIdx.v}, {},
+                  {b.getNamedAttr("iter_types", b.getArrayAttr({}))}, 1);
+              {
+                Block &dvBb = dvFor->getRegion(0).emplaceBlock();
+                TaskTerm dv0Idx{dvBb.addArgument(b.getIndexType(), loc),
+                                "index"};
+                OpBuilder::InsertionGuard dvg(b);
+                b.setInsertionPointToEnd(&dvBb);
                 Operation *p2SubMain = makeOp(
                     b, loc, "task_for", {lb.v, tMain.v, cT.v, zeroSubO.v},
                     {b.getIndexType()},
@@ -1934,25 +1946,13 @@ struct OrderedLowerer {
                                        b.getStringAttr(finalSub.type)),
                         b.getNamedAttr("slice_type",
                                        b.getStringAttr(commitSubSlTy))});
+                makeOp(b, loc, "task_yield", {}, {},
+                       {b.getNamedAttr("val_types", b.getArrayAttr({}))});
               }
               directSubCommitted = true;
               return {msFinal, TaskTerm{}};
             }
 
-            std::string idxDVTy = "!weft_kernel.value<index,[" +
-                                  std::to_string(plan.DV) + "],[" +
-                                  std::to_string(plan.axDV) + "]>";
-            std::string si64DVTy = "!weft_kernel.value<si64,[" +
-                                   std::to_string(plan.DV) + "],[" +
-                                   std::to_string(plan.axDV) + "]>";
-            Value idvIdx =
-                makeOp(b, loc, "task_iota", {}, {b.getIndexType()},
-                       {b.getNamedAttr("start", b.getI64IntegerAttr(0)),
-                        b.getNamedAttr("end", b.getI64IntegerAttr(plan.DV)),
-                        b.getNamedAttr("val_type", b.getStringAttr(idxDVTy))})
-                    ->getResult(0);
-            TaskTerm iotaDV64 = castOp({idvIdx, idxDVTy}, si64DVTy);
-            TaskTerm cDV64 = lit(std::to_string(plan.DV), "si64");
             std::string subMaskOutTy =
                 "!weft_kernel.value<i1,[" + std::to_string(B) + "," +
                 std::to_string(subDV) + "],[" + std::to_string(plan.axOwn) +
@@ -1976,11 +1976,11 @@ struct OrderedLowerer {
                     ->getResult(0);
             TaskTerm iotaSubAxDV64 =
                 castOp({isAxDV, idxSubOnAxDVTy}, si64SubOnAxDVTy);
+            TaskTerm cDV64 = lit(std::to_string(plan.DV), "si64");
             TaskTerm subOutSlotOff = bin(
                 "add", bin("mul", iotaOwn64, cDV64, si64BTy), iotaSubAxDV64,
                 subSi64OutTy);
             TaskTerm trueSubO = newVec(true1, subMaskOutTy);
-
             for (int64_t dv0 = 0; dv0 < plan.DV; dv0 += subDV) {
               TaskTerm dv0Idx = idx(dv0);
               Operation *p2SubMain = makeOp(
@@ -1999,17 +1999,16 @@ struct OrderedLowerer {
                 TaskTerm off64 = castOp(offIdx, "si64");
                 TaskTerm baseOff = bin("mul", off64, cB64, "si64");
                 TaskTerm wOff = bin("add", tileSlotOff, baseOff, si64MatTy);
-                Value wLd = makeOp(
-                                b, loc, "task_ptr_load",
-                                {tiledScoreBuf.v, wOff.v, trueM.v, zeroM.v},
-                                {b.getIndexType()},
-                                {b.getNamedAttr(
-                                     "ptr_type",
-                                     b.getStringAttr(
-                                         "!weft_kernel.pointer<f32>")),
-                                 b.getNamedAttr("val_type",
-                                                b.getStringAttr(scoreMatTy))})
-                                ->getResult(0);
+                Value wLd =
+                    makeOp(b, loc, "task_ptr_load",
+                           {tiledScoreBuf.v, wOff.v, trueM.v, zeroM.v},
+                           {b.getIndexType()},
+                           {b.getNamedAttr(
+                                "ptr_type",
+                                b.getStringAttr("!weft_kernel.pointer<f32>")),
+                            b.getNamedAttr("val_type",
+                                           b.getStringAttr(scoreMatTy))})
+                        ->getResult(0);
                 TaskTerm wFull{wLd, scoreMatTy};
                 TaskTerm vRawSub = subview2D(vSl2D, tIv.v, dv0Idx.v, T, subDV,
                                              true, vSubRawMatTy);
@@ -2023,19 +2022,31 @@ struct OrderedLowerer {
                        {b.getNamedAttr("val_types", subIterTys)});
               }
               TaskTerm subRes{p2SubMain->getResult(0), subOutTy};
-              TaskTerm outStoreOff =
-                  dv0 == 0
-                      ? subOutSlotOff
-                      : bin("add", subOutSlotOff,
-                            lit(std::to_string(dv0), "si64"), subSi64OutTy);
+              TaskTerm storeOff =
+                  dv0 == 0 ? subOutSlotOff
+                           : bin("add", subOutSlotOff,
+                                 lit(std::to_string(dv0), "si64"), subSi64OutTy);
               makeOp(b, loc, "task_ptr_store",
-                     {tiledOutBuf.v, outStoreOff.v, trueSubO.v, subRes.v}, {},
+                     {tiledOutBuf.v, storeOff.v, trueSubO.v, subRes.v}, {},
                      {b.getNamedAttr(
                           "ptr_type",
                           b.getStringAttr("!weft_kernel.pointer<f32>")),
                       b.getNamedAttr("val_type", b.getStringAttr(subOutTy))});
             }
 
+            std::string idxDVTy = "!weft_kernel.value<index,[" +
+                                  std::to_string(plan.DV) + "],[" +
+                                  std::to_string(plan.axDV) + "]>";
+            std::string si64DVTy = "!weft_kernel.value<si64,[" +
+                                   std::to_string(plan.DV) + "],[" +
+                                   std::to_string(plan.axDV) + "]>";
+            Value idvIdx =
+                makeOp(b, loc, "task_iota", {}, {b.getIndexType()},
+                       {b.getNamedAttr("start", b.getI64IntegerAttr(0)),
+                        b.getNamedAttr("end", b.getI64IntegerAttr(plan.DV)),
+                        b.getNamedAttr("val_type", b.getStringAttr(idxDVTy))})
+                    ->getResult(0);
+            TaskTerm iotaDV64 = castOp({idvIdx, idxDVTy}, si64DVTy);
             std::string si64OutMatTy =
                 "!weft_kernel.value<si64,[" + std::to_string(B) + "," +
                 std::to_string(plan.DV) + "],[" + std::to_string(plan.axOwn) +
@@ -3195,7 +3206,8 @@ LogicalResult lowerWeftOrdered(func::FuncOp fn,
   b.setInsertionPointToEnd(&tkBb);
   makeOp(b, loc, "end");
 
-  int64_t targetCausalGrain = std::max<int64_t>(16, batch);
+  int64_t targetCausalGrain =
+      std::max<int64_t>((owners >= 2048 ? 64 : 16), batch);
   int64_t hostGrain =
       (lowerer.anyTightenedCausalLoop && grain > targetCausalGrain &&
        grain % targetCausalGrain == 0)

@@ -114,7 +114,7 @@ def embedding(table:I.In[I.bf16,("V","D")], ids:I.In[I.i64,("T",)], output:I.Out
 def csr_spmv(offsets:I.In[I.i32,(32769,)], indices:I.In[I.i32,("Z",)], data:I.In[I.f32,("Z",)],
              x:I.In[I.f32,(32768,)], y:I.Out[I.f32,(32768,)]):
     for row in I.parallel(y.dim(0)):
-        y[row] = I.ordered_sum(I.segment(offsets,row),lambda p:data[p]*x[indices[p]])
+        y[row] = I.segment_sum(I.segment(offsets,row),lambda p:data[p]*x[indices[p]])
 
 @I.kernel
 def jagged_mean(values:I.In[I.f32,("T","D")], offsets:I.In[I.i32,(513,)], output:I.Out[I.f32,(512,"D")]):
