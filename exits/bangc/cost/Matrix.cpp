@@ -105,7 +105,7 @@ void panelCost(compilerinfra::Unit &u) {
         }},
        COMPILERINFRA_SOURCE});
   u.costModels.push_back(
-      {{"cnnl-matmul-cost", "levels/storage/dsa::panel-supply", "1",
+      {{"cnnl-matmul-cost", "levels/storage/dsa::panel-supply", "2",
         [](mlir::Operation *op, const compilerinfra::StructuralCandidate &,
            compilerinfra::CostContext &ctx) {
           intentdsl::block::MatrixAccess a(mlir::cast<mlir::func::FuncOp>(op));
@@ -123,11 +123,15 @@ void panelCost(compilerinfra::Unit &u) {
           e.bottleneck = "external library";
           e.terms["bytes"] = {totalBytes, "B"};
           e.terms["flops"] = {flops, "count"};
+          auto elem = mlir::cast<mlir::MemRefType>(a.dot.getOperand(0).getType())
+                          .getElementType();
+          double launches = elem.isBF16() && B <= INT32_MAX ? 1 : B;
+          e.terms["queue_submissions"] = {launches, "count"};
           auto bw = intentdsl::quantity(ctx, "read_1", "B/ns"),
                launch = intentdsl::quantity(ctx, "launch", "ns");
           if (bw && launch) {
             double peakOpsPerNs = elemBytes <= 2.0 ? 48000.0 : 12000.0;
-            e.timeNs = 1.8 * B * (*launch) + totalBytes / (*bw) +
+            e.timeNs = 1.8 * launches * (*launch) + totalBytes / (*bw) +
                        flops / peakOpsPerNs;
             e.rows["0"] = {e.terms, e.timeNs};
           }

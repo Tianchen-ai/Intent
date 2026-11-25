@@ -11,7 +11,8 @@ enum PlanKind {
   PLAN_MATMUL = 1,
   PLAN_TRANSPOSE = 2,
   PLAN_SOFTMAX = 3,
-  PLAN_LAYERNORM = 4
+  PLAN_LAYERNORM = 4,
+  PLAN_STRIDED_MATMUL = 5
 };
 
 struct PlanKey {
@@ -119,6 +120,50 @@ static CachedPlan *findLocked(const PlanKey &k) {
   }
   return nullptr;
 }
+
+// CNNL describes each batch operand by its complete accessible span. Queue,
+// type and spans fully determine these descriptors; strides are call operands.
+static int stridedMatmul(const void *a, const void *b, void *c, int batch,
+                         int m, int n, int k, bool ta, bool tb, int64_t sa,
+                         int64_t sb, int64_t sc, cnnlDataType_t dt, void *q) {
+  int64_t span[3], planes[] = {int64_t(m) * k, int64_t(k) * n, int64_t(m) * n};
+  int64_t strides[] = {sa, sb, sc};
+  for (int i = 0; i < 3; ++i)
+    if (strides[i] < 0 ||
+        __builtin_mul_overflow(int64_t(batch - 1), strides[i], &span[i]) ||
+        __builtin_add_overflow(span[i], planes[i], &span[i]))
+      return CNNL_STATUS_BAD_PARAM;
+  PlanKey key{PLAN_STRIDED_MATMUL, q, span[0], span[1], span[2], 0, 0, dt, dt};
+  pthread_mutex_lock(&g_registry.mu);
+  CachedPlan *p = findLocked(key);
+  if (!p) {
+    p = new CachedPlan();
+    p->key = key;
+    cnnlStatus_t st = cnnlCreate(&p->handle);
+    if (st == CNNL_STATUS_SUCCESS)
+      st = cnnlSetQueue(p->handle, (cnrtQueue_t)q);
+    cnnlTensorDescriptor_t *views[] = {&p->t0, &p->t1, &p->t2};
+    for (int i = 0; i < 3 && st == CNNL_STATUS_SUCCESS; ++i) {
+      st = cnnlCreateTensorDescriptor(views[i]);
+      if (st == CNNL_STATUS_SUCCESS)
+        st = cnnlSetTensorDescriptor_v2(*views[i], CNNL_LAYOUT_ARRAY, dt, 1, &span[i]);
+    }
+    if (st == CNNL_STATUS_SUCCESS)
+      st = cnnlSetTensorDescriptorOnchipDataType(p->t2, CNNL_DTYPE_FLOAT);
+    if (st != CNNL_STATUS_SUCCESS) {
+      delete p;
+      pthread_mutex_unlock(&g_registry.mu);
+      return st;
+    }
+    p->next = g_registry.head;
+    g_registry.head = p;
+  }
+  cnnlStatus_t st = cnnlStrideBatchMatMul(p->handle, ta, tb, m, n, k, batch,
+      1, p->t0, a, ta ? m : k, sa, p->t1, b, tb ? k : n, sb,
+      0, p->t2, c, n, sc);
+  pthread_mutex_unlock(&g_registry.mu);
+  return st;
+}
 } // namespace
 
 extern "C" void intent_cnnl_cleanup() {
@@ -140,6 +185,11 @@ extern "C" int intent_cnnl_matmul(const void *lhs, const void *rhs, void *dst,
     return 0;
   if (M > INT_MAX || N > INT_MAX || K > INT_MAX)
     return (int)CNNL_STATUS_BAD_PARAM;
+  if (B > 1 && B <= INT_MAX && in_dtype == CNNL_DTYPE_BFLOAT16 &&
+      out_dtype == CNNL_DTYPE_BFLOAT16)
+    return stridedMatmul(lhs, rhs, dst, B, M, N, K, trans_a, trans_b,
+                         lhs_batch_stride, rhs_batch_stride, dst_batch_stride,
+                         CNNL_DTYPE_BFLOAT16, queue);
 
   PlanKey key{PLAN_MATMUL, queue, M, N, K, trans_a, trans_b, in_dtype, out_dtype};
   pthread_mutex_lock(&g_registry.mu);

@@ -993,7 +993,7 @@ void rowContracts(Unit &unit) {
         "GDRAM bf16/f32[M,K]/[K,M] lhs, bf16/f32[K,N]/[N,K] rhs -> bf16/f32[M,N]",
         "contiguous or transposed 2D/3D GDRAM tensors", "f32",
         "reads GDRAM lhs/rhs and writes GDRAM bf16/f32 output on CNRT queue",
-        "Cambricon CNNL cnnlMatMul_v2 with CNNL_DTYPE_FLOAT compute/onchip "
+        "Cambricon CNNL cnnlMatMul_v2 or strided BF16 batch with f32 accumulation "
         "(ALLOW_TF32=0); flushes binary32 subnormals (requires denormal-fp-math FTZ)",
         std::move(ftzMm), [](Operation *op) {
           auto dt = op->getAttrOfType<IntegerAttr>("in_dtype");
