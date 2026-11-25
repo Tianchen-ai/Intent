@@ -129,6 +129,7 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
   auto caps = std::make_shared<intentdsl::cpu::RowMachine>();
   caps->vectorBits = *bits;
   caps->structuredRows = false;
+  caps->orderedDotTokens = intentdsl::cpu::RowMachine::streamedDotTokens;
   caps->workers = *workers;
   if (isRvv) {
     // Software f32->bf16 RNE requires (4 * groups + 1) <= vector_registers.

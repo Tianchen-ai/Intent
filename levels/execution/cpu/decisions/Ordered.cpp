@@ -1,9 +1,10 @@
 #include "compilerinfra/Proofs.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
-#include "intentdsl/levels/execution/cpu/ir/Owners.h"
-#include "intentdsl/levels/execution/cpu/ir/ScoreCache.h"
-#include "intentdsl/levels/execution/cpu/ir/RepeatedScore.h"
+#include "intentdsl/levels/execution/cpu/ir/OrderedDot.h"
 #include "intentdsl/levels/execution/cpu/ir/OwnerTraversal.h"
+#include "intentdsl/levels/execution/cpu/ir/Owners.h"
+#include "intentdsl/levels/execution/cpu/ir/RepeatedScore.h"
+#include "intentdsl/levels/execution/cpu/ir/ScoreCache.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
 using namespace mlir;
@@ -135,7 +136,26 @@ LogicalResult verifyOwnerGrain(func::FuncOp fn, Operation &space,
       panel ? panel->record : (window && repeat ? repeat->record : nullptr);
   Operation *expectedReplay =
       panel ? panel->replay : (window && repeat ? repeat->replay : nullptr);
+  auto inner = space.getAttrOfType<IntegerAttr>("cpu.innermost_owner");
+  auto dotPanel =
+      window && inner && batch
+          ? selectOrderedDot(space, p, inner.getInt(), batch.getInt())
+          : std::nullopt;
+  auto scoreTile = space.getAttrOfType<IntegerAttr>("cpu.score_tile");
+  auto maxTile = p.services.get<RowMachine>()->orderedDotTokens;
+  if (scoreTile && (!dotPanel || scoreTile.getInt() <= 0 ||
+                    scoreTile.getInt() > dotPanel->tokens ||
+                    (maxTile ? scoreTile.getInt() != maxTile &&
+                                   scoreTile.getInt() != 2 * maxTile &&
+                                   scoreTile.getInt() != 4 * maxTile
+                             : scoreTile.getInt() != dotPanel->tokens)))
+    return space.emitError("invalid ordered dot tile");
+  auto implId = Builder(fn.getContext())
+                    .getStringAttr("exits/" + p.name + "::onednn-brgemm-bf16");
   auto marks = space.walk([&](Operation *v) {
+    if (v->getAttr("cpu.panel_engine") !=
+        ((scoreTile && dotPanel && v == dotPanel->dot) ? implId : StringAttr{}))
+      return WalkResult::interrupt();
     if (v->hasAttr("cpu.record_score") != (v == expectedRecord) ||
         v->hasAttr("cpu.replay_score") != (v == expectedReplay))
       return WalkResult::interrupt();
@@ -808,8 +828,21 @@ void ownerTasks(Unit &u) {
              grain = d.getAs<IntegerAttr>("grain");
         auto w = batch ? batch.getInt() : 0;
         auto retained = d.getAs<IntegerAttr>("window");
+        bool brg = bool(d.get("engine"));
+        auto tile = d.getAs<IntegerAttr>("score_tile");
+        auto nativeTile = p.services.get<cpu::RowMachine>()->orderedDotTokens;
+        auto panel = brg ? cpu::selectOrderedDot(*o, p, inner.getInt(), w)
+                         : std::nullopt;
         if (!reuse || reuse->axis != inner.getInt() ||
-            d.size() != (retained ? 4u : 3u) || w < 2 ||
+            (brg &&
+             (!retained ||
+              d.getAs<StringAttr>("engine") != "onednn-brgemm-bf16" || !panel ||
+              !tile || tile.getInt() <= 0 || tile.getInt() > panel->tokens ||
+              (nativeTile ? (tile.getInt() != nativeTile &&
+                             tile.getInt() != 2 * nativeTile &&
+                             tile.getInt() != 4 * nativeTile)
+                          : tile.getInt() != panel->tokens))) ||
+            d.size() != (retained ? 4u : 3u) + 2 * brg || w < 2 ||
             !llvm::isPowerOf2_64(w) ||
             w > p.services.get<cpu::RowMachine>()->packedOwners || !grain ||
             grain.getInt() % w || reuse->group % w || reuse->extent % w ||
@@ -831,16 +864,22 @@ void ownerTasks(Unit &u) {
     return llvm::Error::success();
   };
   f.verifyCandidate = [](Operation *, const StructuralCandidate &c,
-                         const TargetProfile &) -> llvm::Error {
+                         const TargetProfile &p) -> llvm::Error {
     if (auto d = dyn_cast<DictionaryAttr>(c.value)) {
       auto w = d.getAs<IntegerAttr>("grain");
       bool shared = bool(d.getAs<IntegerAttr>("inner"));
       auto batch = d.getAs<IntegerAttr>("batch");
+      auto tile = d.getAs<IntegerAttr>("score_tile");
+      auto tw = p.services.get<cpu::RowMachine>()->orderedDotTokens;
       if (!w || shared != bool(batch) ||
           c.id != (shared ? "shared-" : "retained-") +
                       std::to_string(w.getInt()) +
                       (shared ? "x" + std::to_string(batch.getInt()) : "") +
-                      (d.get("window") ? "-scores" : "") ||
+                      (d.get("window") ? "-scores" : "") +
+                      (d.get("engine") ? "-brgemm" : "") +
+                      (tile && tw && tile.getInt() != tw
+                           ? "-" + std::to_string(tile.getInt())
+                           : "") ||
           c.topology !=
               (shared ? "shared-interval-owners" : "retained-scores") ||
           c.preconditions != std::vector<std::string>{"exclusive-output"})
@@ -912,9 +951,13 @@ void ownerTasks(Unit &u) {
       }
     o->removeAttr("cpu.owner_choice");
     int64_t ownerBatch = 1;
+    bool useBrgemm = false;
     if (auto d = dyn_cast<DictionaryAttr>(a)) {
       if (auto axis = d.getAs<IntegerAttr>("inner")) {
         o->setAttr("cpu.innermost_owner", axis);
+        useBrgemm = d.contains("engine");
+        if (useBrgemm)
+          o->setAttr("cpu.score_tile", d.get("score_tile"));
         ownerBatch = d.getAs<IntegerAttr>("batch").getInt();
         if (auto win = d.get("window")) {
           o->setAttr("cpu.batch_score_window", win);
@@ -939,6 +982,16 @@ void ownerTasks(Unit &u) {
     o->setAttr("cpu.owner_batch", b.getI64IntegerAttr(ownerBatch));
     o->setAttr("cpu.grain", a);
     o->setAttr("cpu.owners", b.getI64IntegerAttr(count));
+    if (useBrgemm) {
+      auto panel = cpu::selectOrderedDot(
+          *o, p, o->getAttrOfType<IntegerAttr>("cpu.innermost_owner").getInt(),
+          ownerBatch);
+      if (!panel)
+        return llvm::createStringError("unsupported ordered contraction panel");
+      panel->dot->setAttr(
+          "cpu.panel_engine",
+          b.getStringAttr("exits/" + p.name + "::onednn-brgemm-bf16"));
+    }
     return llvm::Error::success();
   };
   u.realizers.push_back({std::move(r), COMPILERINFRA_SOURCE});

@@ -1510,6 +1510,9 @@ TerminalPrinter mojoMatrixPrinter() {
   rules["mojo_row.owner_fn"] = PrintRule::local(
       [](const LocalOpView &view, PrintPoint at, PrintContext &c) -> llvm::Error {
         if (at == PrintPoint::BeginBlock) {
+          bool brg = bool(view.attrOfType<UnitAttr>("brgemm"));
+          if (brg)
+            c.line("from std.ffi import external_call");
           c.line("from std.math import exp, sqrt, rsqrt, exp2, log, max, isnan");
           c.line("from std.memory import bitcast");
           if (view.attrOfType<BoolAttr>("uses_stack").getValue())
@@ -1523,8 +1526,15 @@ TerminalPrinter mojoMatrixPrinter() {
           size_t base = ptypes.size();
           params.push_back(bArgs[base] + ": Int64");
           params.push_back(bArgs[base + 1] + ": Int64");
+          if (brg) {
+            params.push_back(bArgs[base + 2] +
+                             ": Pointer[UInt8,MutUntrackedOrigin]");
+            params.push_back(bArgs[base + 3] +
+                             ": Pointer[UInt8,MutUntrackedOrigin]");
+          }
           c.line("@export(\"owner_task\")");
-          c.line("def owner_task(" + llvm::join(params, ", ") + ") abi(\"C\"):");
+          c.line("def owner_task(" + llvm::join(params, ", ") +
+                 (brg ? ") abi(\"C\") -> Int32:" : ") abi(\"C\"):"));
           c.indent++;
         } else if (at == PrintPoint::EndBlock) {
           c.indent--;
@@ -1578,6 +1588,12 @@ TerminalPrinter mojoMatrixPrinter() {
                return llvm::Error::success();
              });
 
+  rules["mojo_row.owner_brgemm_plan"] = PrintRule::format(
+      "const void *bh = "
+      "intent_brgemm_get({rows},{cols},{depth},{depth},{cols},{cols},1,1,0);\n"
+      "if (!bh) return 1;\n"
+      "int64_t scratch_bytes=intent_brgemm_scratch_bytes(bh);\n"
+      "if (scratch_bytes <= 0) return 2;\nint status=0;");
   rules["mojo_row.c_host_fn"] = PrintRule::local(
       [](const LocalOpView &view, PrintPoint at, PrintContext &c) -> llvm::Error {
         if (at == PrintPoint::Enter) {
@@ -1589,7 +1605,8 @@ TerminalPrinter mojoMatrixPrinter() {
         } else if (at == PrintPoint::BeginBlock) {
           c.indent++;
         } else if (at == PrintPoint::EndBlock) {
-          c.line("return 0;");
+          c.line(view.attrOfType<UnitAttr>("brgemm") ? "return status;"
+                                                     : "return 0;");
           c.indent--;
           c.line("}");
         }
@@ -1604,12 +1621,19 @@ TerminalPrinter mojoMatrixPrinter() {
         if (at == PrintPoint::Enter) {
           if (cyclic) {
             int64_t chunks = (count + grain - 1) / grain;
-            c.line("#pragma omp parallel for num_threads(workers) schedule(dynamic, 1) if(workers>1 && " +
-                   std::to_string(chunks) + ">1)");
+            c.line(
+                std::string("#pragma omp parallel for ") +
+                (view.attrOfType<UnitAttr>("brgemm") ? "reduction(|:status) "
+                                                     : "") +
+                "num_threads(workers) schedule(dynamic, 1) if(workers>1 && " +
+                std::to_string(chunks) + ">1)");
             c.line("for (int64_t ch=0; ch<" + std::to_string(chunks) +
                    "LL; ++ch) {");
           } else {
-            c.line("#pragma omp parallel for num_threads(workers) schedule(static) if(workers>1 && " +
+            c.line(std::string("#pragma omp parallel for ") +
+                   (view.attrOfType<UnitAttr>("brgemm") ? "reduction(|:status) "
+                                                        : "") +
+                   "num_threads(workers) schedule(static) if(workers>1 && " +
                    std::to_string(count) + ">" + std::to_string(grain) + ")");
             c.line("for (int64_t lo=0; lo<" + std::to_string(count) +
                    "LL; lo+=" + std::to_string(grain) + "LL) {");
@@ -1635,9 +1659,19 @@ TerminalPrinter mojoMatrixPrinter() {
                    "(" + std::to_string(count) + "LL-" + loExpr + "<" +
                    std::to_string(grain) + "LL?" + std::to_string(count) +
                    "LL:" + loExpr + "+" + std::to_string(grain) + "LL)";
-               c.line("owner_task(" + callArgs +
-                      (callArgs.empty() ? "" : ",") + loExpr + ", " + hiExpr +
-                      ");");
+               bool brg = bool(view.attrOfType<UnitAttr>("brgemm"));
+               if (brg) {
+                 c.line("int rc=intent_brgemm_thread_enter(bh);");
+                 c.line("if (rc) { status |= rc; continue; }");
+                 c.line("unsigned char scratch[scratch_bytes] "
+                        "__attribute__((aligned(64)));");
+               }
+               c.line(
+                   std::string(brg ? "status |= owner_task(" : "owner_task(") +
+                   callArgs + (callArgs.empty() ? "" : ",") + loExpr + ", " +
+                   hiExpr + (brg ? ", bh, scratch);" : ");"));
+               if (brg)
+                 c.line("intent_brgemm_thread_leave();");
                return llvm::Error::success();
              });
 

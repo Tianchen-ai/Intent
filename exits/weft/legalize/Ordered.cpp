@@ -316,8 +316,9 @@ std::optional<TightenedLoopBound> analyzeCausalLoop(func::FuncOp fn,
 }
 
 struct TiledTwoPassPlan {
+  StringAttr scoreEngine;
   int64_t innerAx = -1;
-  int64_t tokenTile = 16;
+  int64_t tokenTile = intentdsl::cpu::RowMachine::streamedDotTokens;
   Operation *qReadOp = nullptr;
   Operation *qExtOp = nullptr;
   Value qMem;
@@ -554,21 +555,27 @@ struct OrderedLowerer {
   }
 
   TaskTerm outerContractOp(TaskTerm lhs, TaskTerm rhs, int64_t overAx,
-                           StringRef outTy) {
-    Value v = makeOp(b, loc, "task_contract", {lhs.v, rhs.v}, {b.getIndexType()},
-                     {b.getNamedAttr("ci.implementation",
-                                     b.getStringAttr("exits/weft::weft-simd-fma")),
-                      b.getNamedAttr("kind", b.getStringAttr("outer_contract")),
-                      b.getNamedAttr("over", b.getDenseI64ArrayAttr({overAx})),
-                      b.getNamedAttr("acc_type", b.getStringAttr("f32")),
-                      b.getNamedAttr("engine",
-                                     b.getStringAttr(isRvv ? "vector" : "auto")),
-                      b.getNamedAttr("allow_subnormal_ftz", b.getBoolAttr(false)),
-                      b.getNamedAttr("in_types",
-                                     b.getArrayAttr({b.getStringAttr(lhs.type),
-                                                     b.getStringAttr(rhs.type)})),
-                      b.getNamedAttr("val_type", b.getStringAttr(outTy))})
-                  ->getResult(0);
+                           StringRef outTy, StringAttr engine = {}) {
+    Value v =
+        makeOp(
+            b, loc, "task_contract", {lhs.v, rhs.v}, {b.getIndexType()},
+            {b.getNamedAttr("ci.implementation",
+                            engine
+                                ? engine
+                                : b.getStringAttr("exits/weft::weft-simd-fma")),
+             b.getNamedAttr("kind", b.getStringAttr("outer_contract")),
+             b.getNamedAttr("over", b.getDenseI64ArrayAttr({overAx})),
+             b.getNamedAttr("acc_type", b.getStringAttr("f32")),
+             b.getNamedAttr("engine",
+                            b.getStringAttr(engine  ? "onednn-brgemm-bf16"
+                                            : isRvv ? "vector"
+                                                    : "auto")),
+             b.getNamedAttr("allow_subnormal_ftz", b.getBoolAttr(bool(engine))),
+             b.getNamedAttr("in_types",
+                            b.getArrayAttr({b.getStringAttr(lhs.type),
+                                            b.getStringAttr(rhs.type)})),
+             b.getNamedAttr("val_type", b.getStringAttr(outTy))})
+            ->getResult(0);
     return {v, outTy.str()};
   }
 
@@ -927,6 +934,10 @@ struct OrderedLowerer {
     Operation *laneSum = dotVal.getDefiningOp();
     if (!laneSum || laneSum->getName().stripDialect() != "lane_sum")
       return false;
+    plan.scoreEngine = laneSum->getAttrOfType<StringAttr>("cpu.panel_engine");
+    if (plan.scoreEngine)
+      plan.tokenTile =
+          space.getAttrOfType<IntegerAttr>("cpu.score_tile").getInt();
     auto dotMul = laneSum->getOperand(0).getDefiningOp<arith::MulFOp>();
     if (!dotMul)
       return false;
@@ -1920,7 +1931,8 @@ struct OrderedLowerer {
               subview2D(kSl2D, tIv.v, c0.v, T, plan.D, true, kRawMatTy);
           TaskTerm kForC =
               (nativeQK || kElem == "f32") ? kRaw : castOp(kRaw, kF32MatTy);
-          TaskTerm sc = outerContractOp(qForContract, kForC, plan.axD, scoreMatTy);
+          TaskTerm sc = outerContractOp(qForContract, kForC, plan.axD,
+                                        scoreMatTy, plan.scoreEngine);
           sc = applyScoreAffine2D(sc, tIv);
           if (plan.hasScoreBuffer) {
             TaskTerm offIdx = loC && *loC == 0 ? tIv : bin("sub", tIv, lb, "index");
@@ -2430,8 +2442,8 @@ struct OrderedLowerer {
                   subview2D(kSl2D, tIv.v, c0.v, T, plan.D, true, kRawMatTy);
               TaskTerm kForC =
                   (nativeQK || kElem == "f32") ? kRaw : castOp(kRaw, kF32MatTy);
-              TaskTerm sc =
-                  outerContractOp(qForContract, kForC, plan.axD, scoreMatTy);
+              TaskTerm sc = outerContractOp(qForContract, kForC, plan.axD,
+                                            scoreMatTy, plan.scoreEngine);
               sc = applyScoreAffine2D(sc, tIv);
               TaskTerm diff =
                   applyPostSubScale(bin("sub", sc, peakVec, scoreMatTy),
@@ -2671,7 +2683,8 @@ struct OrderedLowerer {
                   subview2D(kSl2D, tIv.v, c0.v, T, plan.D, true, kRawMatTy);
               TaskTerm kForC =
                   (nativeQK || kElem == "f32") ? kRaw : castOp(kRaw, kF32MatTy);
-              sc = outerContractOp(qForContract, kForC, plan.axD, scoreMatTy);
+              sc = outerContractOp(qForContract, kForC, plan.axD, scoreMatTy,
+                                   plan.scoreEngine);
               sc = applyScoreAffine2D(sc, tIv);
             }
             TaskTerm diff =

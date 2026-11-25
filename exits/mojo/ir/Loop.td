@@ -350,6 +350,9 @@ def MojoCOmpFor : RowInst<"c_omp_for",[SingleBlock]> {
   let arguments=(ins I64Attr:$count, I64Attr:$grain, BoolAttr:$cyclic);
   let regions=(region AnyRegion:$body);
 }
+def MojoOwnerBrgemmPlan : RowInst<"owner_brgemm_plan"> {
+  let arguments=(ins I64Attr:$rows, I64Attr:$cols, I64Attr:$depth);
+}
 def MojoCOwnerCall : RowInst<"c_owner_call"> {
   let arguments=(ins StrAttr:$call_args, BoolAttr:$cyclic, I64Attr:$count, I64Attr:$grain);
 }

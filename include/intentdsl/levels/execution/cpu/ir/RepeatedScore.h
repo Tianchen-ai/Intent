@@ -96,6 +96,7 @@ inline std::optional<RepeatedScore> repeatedScore(mlir::Operation &space) {
     SmallVector<NamedAttribute, 4> res;
     for (auto attr : op->getAttrs())
       if (attr.getName() != "cpu.record_score" &&
+          attr.getName() != "cpu.panel_engine" &&
           attr.getName() != "cpu.replay_score" &&
           attr.getName() != "cpu.owner_common" &&
           attr.getName() != "mojo_row.contiguous_simd" &&

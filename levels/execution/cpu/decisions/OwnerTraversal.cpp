@@ -1,4 +1,5 @@
 #include "intentdsl/levels/execution/cpu/ir/OwnerTraversal.h"
+#include "intentdsl/levels/execution/cpu/ir/OrderedDot.h"
 #include "intentdsl/levels/execution/cpu/ir/RepeatedScore.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -318,6 +319,9 @@ void sharedOwnerTraversal(compilerinfra::Unit &u) {
       return cs;
     Builder b(op->getContext());
     bool repeat = bool(intentdsl::cpu::repeatedScore(*op));
+    auto panel =
+        repeat ? intentdsl::cpu::selectOrderedDot(*op, p, reuse->axis, maximum)
+               : std::nullopt;
     for (int grain : {2, 4, 8, 16, 32, 128, 256}) {
       for (unsigned batch : {2u, 4u, 8u, 16u}) {
         if (batch > maximum || grain % batch || reuse->group % batch ||
@@ -340,6 +344,25 @@ void sharedOwnerTraversal(compilerinfra::Unit &u) {
                         "shared-interval-owners",
                         row.getDictionary(b.getContext()),
                         {"exclusive-output"}});
+          if (panel && batch == maximum) {
+            row.set("engine", b.getStringAttr("onednn-brgemm-bf16"));
+            auto base = cs.back().id + "-brgemm";
+            int64_t width =
+                p.services.get<intentdsl::cpu::RowMachine>()->orderedDotTokens;
+            for (int mult : {1, 2, 4}) {
+              int64_t tile = width * mult;
+              if ((!width && mult > 1) || tile > panel->tokens)
+                continue;
+              row.set("score_tile",
+                      b.getI64IntegerAttr(tile ? tile : panel->tokens));
+              cs.push_back(
+                  {base + (mult == 1 ? "" : "-" + std::to_string(tile)),
+                   "shared-interval-owners",
+                   row.getDictionary(b.getContext()),
+                   {"exclusive-output"},
+                   {"exits/" + p.name + "::onednn-brgemm-bf16"}});
+            }
+          }
         }
       }
     }

@@ -1,7 +1,8 @@
+#include "intentdsl/levels/algorithm/kir/ir/Ordered.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
-#include "intentdsl/levels/algorithm/kir/ir/Ordered.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
+#include "intentdsl/levels/execution/cpu/ir/OrderedDot.h"
 #include "intentdsl/levels/execution/cpu/ir/OwnerTraversal.h"
 #include "intentdsl/levels/execution/cpu/ir/RepeatedScore.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -129,6 +130,8 @@ struct OrderedLowerer {
   int64_t accStride = 0;
   Value invPrepackBuf;
   Value wideAccBuf;
+  std::optional<intentdsl::cpu::OrderedDotPanel> dotPanel;
+  Value brgHandle, brgScratch, packedQueries, dots;
   Value vAddrBuf;
   bool inTiledReplayPassA = false;
   Operation *tiledVReadOp = nullptr;
@@ -1278,10 +1281,68 @@ struct OrderedLowerer {
     return true;
   }
 
+  void emitDotPanel(scf::ForOp loop, SmallVectorImpl<IRMapping> &lanes) {
+    auto &p = *dotPanel;
+    auto address = [&](Operation *read, unsigned lane) {
+      SmallVector<Value> coords;
+      for (auto x : read->getOperands().drop_front()) {
+        if (x == loop.getInductionVar())
+          coords.push_back(constIdx(b, loc, 0));
+        else {
+          materializeScalarLanes(x, lanes);
+          coords.push_back(lanes[lane].lookup(x));
+        }
+      }
+      Value view = read->getOperand(0);
+      return makeAddr(
+          b, loc, lanes[lane].lookup(view), coords,
+          argArray(view, "cpu.strides").asArrayRef().take_front(coords.size()));
+    };
+    Value q = lanes[0].lookup(p.query->getOperand(0));
+    SmallVector<Value> rowBase;
+    for (int i = 0; i < batch; ++i)
+      rowBase.push_back(address(p.query, i));
+    auto *pack = makeOp(b, loc, "for_range",
+                        {constIdx(b, loc, 0), constIdx(b, loc, p.depth / 2),
+                         constIdx(b, loc, 1)},
+                        {}, {}, 1);
+    {
+      OpBuilder::InsertionGuard guard(b);
+      Block &body = pack->getRegion(0).emplaceBlock();
+      Value pair = body.addArgument(b.getIndexType(), loc);
+      b.setInsertionPointToStart(&body);
+      for (int i = 0; i < batch; ++i) {
+        Value src = makeAddr(b, loc, q, {rowBase[i], pair}, {1, 2});
+        Value dst = makeAddr(b, loc, packedQueries, {pair, constIdx(b, loc, i)},
+                             {2 * batch, 2});
+        makeOp(b, loc, "store_slice",
+               {packedQueries, dst,
+                loadContiguousSlice(q, src, b.getBF16Type(), 2)});
+      }
+      makeOp(b, loc, "end");
+    }
+    Value keyBase = address(p.key, 0);
+    Value keys = makeOp(b, loc, "ptr_offset",
+                        {lanes[0].lookup(p.key->getOperand(0)), keyBase},
+                        {b.getIndexType()})
+                     ->getResult(0);
+    Value status =
+        makeOp(b, loc, "brgemm_call",
+               {brgHandle, keys, packedQueries, dots, brgScratch},
+               {b.getI32Type()},
+               {b.getNamedAttr("allow_subnormal_ftz", b.getBoolAttr(true)),
+                b.getNamedAttr("ci.implementation",
+                               p.dot->getAttr("cpu.panel_engine"))})
+            ->getResult(0);
+    makeOp(b, loc, "check_status", {status});
+  }
+
   LogicalResult lowerBlock(Block &srcBb, SmallVectorImpl<IRMapping> &lanes) {
     const bool vecActive = batchSimd && lanes.size() == size_t(batch);
     for (Operation &op : srcBb.without_terminator()) {
       if (auto loop = dyn_cast<scf::ForOp>(op)) {
+        if (dotPanel && dotPanel->dot->getParentOp() == &op)
+          emitDotPanel(loop, lanes);
         if (!vecActive && lanes.size() == 1 &&
             tryLowerVectorizedInnerLoop(loop, lanes[0]))
           continue;
@@ -1910,6 +1971,14 @@ struct OrderedLowerer {
       }
 
       // Batched chunked wide dot product: lane_sum(mulf(wideA, wideB))
+      if (dotPanel && dotPanel->dot == &op) {
+        auto loop = cast<scf::ForOp>(op.getParentOp());
+        Value offset = makeAddr(
+            b, loc, dots, {lanes[0].lookup(loop.getInductionVar())}, {batch});
+        batchVecs[op.getResult(0)] =
+            loadContiguousSlice(dots, offset, b.getF32Type(), batch);
+        continue;
+      }
       if (op.getName().stripDialect() == "lane_sum" &&
           isWideVal(op.getOperand(0))) {
         auto mul = op.getOperand(0).getDefiningOp<arith::MulFOp>();
@@ -2261,12 +2330,14 @@ llvm::Error describeMojoOrderedPackage(func::FuncOp fn, Operation &prog,
       {"rows",
        llvm::json::Array{llvm::json::Object{{"grain", grain}, {"columns", 1}}}},
       {"returns_status", true},
+      {"onednn", prog.hasAttr("brgemm")},
       {"source", ""},
       {"host", ""}});
   return llvm::Error::success();
 }
 
-LogicalResult lowerMojoOrdered(func::FuncOp fn) {
+LogicalResult lowerMojoOrdered(func::FuncOp fn,
+                               const intentdsl::CallFacts &facts) {
   auto &task = fn.front().front();
   auto &space = task.getRegion(0).front().front();
   Location loc = space.getLoc();
@@ -2318,6 +2389,13 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn) {
   OrderedLowerer lowerer{fn, space, b, loc, batch};
   lowerer.batchSimd = batch >= 2 && llvm::isPowerOf2_64(uint64_t(batch));
   lowerer.analyzeChunkableWideMode();
+  auto innerAxis = space.getAttrOfType<IntegerAttr>("cpu.innermost_owner");
+  auto panel = innerAxis ? intentdsl::cpu::orderedDotPanel(
+                               space, facts, innerAxis.getInt(), batch)
+                         : std::nullopt;
+  if (panel && panel->dot->hasAttr("cpu.panel_engine") && lowerer.chunkedMode)
+    lowerer.dotPanel = panel;
+  bool brg = bool(lowerer.dotPanel);
   lowerer.wideViews.resize(batch);
   lowerer.wideSplats.resize(batch);
   bool usesStack = foundLocalBuf != nullptr || lowerer.invFloatsPerLane > 0 ||
@@ -2366,8 +2444,25 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn) {
     paramVals.push_back(fnBb.addArgument(arg.getType(), loc));
   Value loArg = fnBb.addArgument(b.getI64Type(), loc);
   Value hiArg = fnBb.addArgument(b.getI64Type(), loc);
+  if (brg) {
+    prog->setAttr("brgemm", b.getUnitAttr());
+    ownerFn->setAttr("brgemm", b.getUnitAttr());
+    lowerer.brgHandle = fnBb.addArgument(b.getIndexType(), loc);
+    lowerer.brgScratch = fnBb.addArgument(b.getIndexType(), loc);
+  }
 
   b.setInsertionPointToEnd(&fnBb);
+
+  if (brg) {
+    auto buffer = [&](StringRef dtype, int64_t count) {
+      return makeOp(b, loc, "stack_alloc", {}, {b.getIndexType()},
+                    {b.getNamedAttr("dtype", b.getStringAttr(dtype)),
+                     b.getNamedAttr("count", b.getI64IntegerAttr(count))})
+          ->getResult(0);
+    };
+    lowerer.packedQueries = buffer("bfloat16", batch * panel->depth);
+    lowerer.dots = buffer("float32", batch * panel->tokens);
+  }
 
   if (foundLocalBuf) {
     int64_t slots =
@@ -2478,6 +2573,9 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn) {
     return failure();
   makeOp(b, loc, "end");
   b.setInsertionPointToEnd(&fnBb);
+  if (brg)
+    makeOp(b, loc, "panel_return", {}, {},
+           {b.getNamedAttr("code", b.getI32IntegerAttr(0))});
   makeOp(b, loc, "end");
   if (lowerer.usesReduce16x16) {
     OpBuilder::InsertionGuard rg(b);
@@ -2493,6 +2591,15 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn) {
   std::string externDecl =
       "extern void owner_task(" + llvm::join(externCParams, ",") +
       (externCParams.empty() ? "" : ",") + "int64_t,int64_t);";
+  if (brg)
+    externDecl = "extern int owner_task(" + llvm::join(externCParams, ",") +
+                 ",int64_t,int64_t,const void*,void*);\n"
+                 "extern const void "
+                 "*intent_brgemm_get(int64_t,int64_t,int64_t,int64_t,int64_t,"
+                 "int64_t,int32_t,int32_t,int32_t);\n"
+                 "extern int64_t intent_brgemm_scratch_bytes(const void*);\n"
+                 "extern int32_t intent_brgemm_thread_enter(const "
+                 "void*);\nextern void intent_brgemm_thread_leave(void);";
   auto *cFn = makeOp(
       b, loc, "c_host_fn", {}, {},
       {b.getNamedAttr("params",
@@ -2503,6 +2610,13 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn) {
 
   Block &cFnBb = cFn->getRegion(0).emplaceBlock();
   b.setInsertionPointToEnd(&cFnBb);
+  if (brg) {
+    cFn->setAttr("brgemm", b.getUnitAttr());
+    makeOp(b, loc, "owner_brgemm_plan", {}, {},
+           {b.getNamedAttr("rows", b.getI64IntegerAttr(panel->tokens)),
+            b.getNamedAttr("cols", b.getI64IntegerAttr(batch)),
+            b.getNamedAttr("depth", b.getI64IntegerAttr(panel->depth))});
+  }
   auto *ompFor = makeOp(
       b, loc, "c_omp_for", {}, {},
       {b.getNamedAttr("count", b.getI64IntegerAttr(owners)),
@@ -2512,12 +2626,17 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn) {
   makeOp(b, loc, "end");
 
   Block &ompBb = ompFor->getRegion(0).emplaceBlock();
+  if (brg)
+    ompFor->setAttr("brgemm", b.getUnitAttr());
   b.setInsertionPointToEnd(&ompBb);
-  makeOp(b, loc, "c_owner_call", {}, {},
-         {b.getNamedAttr("call_args", b.getStringAttr(llvm::join(callArgs, ","))),
-          b.getNamedAttr("cyclic", b.getBoolAttr(useCyclic)),
-          b.getNamedAttr("count", b.getI64IntegerAttr(owners)),
-          b.getNamedAttr("grain", b.getI64IntegerAttr(grain))});
+  auto *invoke = makeOp(
+      b, loc, "c_owner_call", {}, {},
+      {b.getNamedAttr("call_args", b.getStringAttr(llvm::join(callArgs, ","))),
+       b.getNamedAttr("cyclic", b.getBoolAttr(useCyclic)),
+       b.getNamedAttr("count", b.getI64IntegerAttr(owners)),
+       b.getNamedAttr("grain", b.getI64IntegerAttr(grain))});
+  if (brg)
+    invoke->setAttr("brgemm", b.getUnitAttr());
   makeOp(b, loc, "end");
 
   SmallVector<Operation *> toErase;

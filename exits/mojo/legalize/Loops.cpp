@@ -18,7 +18,7 @@ using namespace mlir;
 #include "Lanes.h"
 namespace CI_UNIT_NAMESPACE {
 LogicalResult lowerMojoMatrix(func::FuncOp);
-LogicalResult lowerMojoOrdered(func::FuncOp);
+LogicalResult lowerMojoOrdered(func::FuncOp, const intentdsl::CallFacts &);
 LogicalResult lowerMojoRow(func::FuncOp, int64_t, int64_t);
 void dialect(DialectRegistry &r) {
   r.insert<intentdsl::rowmojo::RowMojoDialect, mlir::arith::ArithDialect,
@@ -507,7 +507,8 @@ struct Realize : PassWrapper<Realize, OperationPass<ModuleOp>> {
       getContext().getOrLoadDialect<mlir::arith::ArithDialect>();
       getContext().getOrLoadDialect<mlir::math::MathDialect>();
       getContext().getOrLoadDialect<mlir::scf::SCFDialect>();
-      if (failed(memberAccesses(fn, true)) || failed(lowerMojoOrdered(fn)))
+      if (failed(memberAccesses(fn, true)) ||
+          failed(lowerMojoOrdered(fn, facts)))
         signalPassFailure();
       return;
     }

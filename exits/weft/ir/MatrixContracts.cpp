@@ -6,6 +6,49 @@
 #include <cstdlib>
 
 namespace CI_UNIT_NAMESPACE {
+// Match an admitted pair of BF16 [M,K], [N,K] views and the published
+// [M,N] result, including the common reduction axis and its pair alignment.
+static bool validOrderedBrgemm(mlir::Operation *op, int64_t axis) {
+  using namespace mlir;
+  std::array<int64_t, 2> freeDims{}, freeAxes{};
+  int64_t depth = 0;
+  auto inputs = op->getAttrOfType<ArrayAttr>("in_types");
+  if (!inputs || inputs.size() != 2 || op->getNumOperands() != 2)
+    return false;
+  for (unsigned i = 0; i < 2; ++i) {
+    auto *view = op->getOperand(i).getDefiningOp();
+    if (!view || view->getName().getStringRef() != "weft_host.task_subview" ||
+        view->getAttr("val_type") != inputs[i])
+      return false;
+    auto dims = view->getAttrOfType<DenseI64ArrayAttr>("static_extents");
+    auto admit = view->getAttrOfType<BoolAttr>("admit");
+    if (!admit || !admit.getValue() || !dims || dims.size() != 2 ||
+        dims[0] <= 0 || dims[1] <= 0 || dims[1] % 2 || (i && depth != dims[1]))
+      return false;
+    depth = dims[1];
+    freeDims[i] = dims[0];
+    auto spelling = dyn_cast<StringAttr>(inputs[i]);
+    if (!spelling)
+      return false;
+    StringRef suffix = spelling.getValue();
+    std::string prefix = "!weft_kernel.value<bf16,[" + std::to_string(dims[0]) +
+                         "," + std::to_string(depth) + "],[";
+    if (!suffix.consume_front(prefix) || !suffix.consume_back("]>"))
+      return false;
+    auto [free, red] = suffix.split(',');
+    int64_t reduced;
+    if (red.getAsInteger(10, reduced) || reduced != axis ||
+        free.getAsInteger(10, freeAxes[i]) || freeAxes[i] == reduced)
+      return false;
+  }
+  auto expected = "!weft_kernel.value<f32,[" + std::to_string(freeDims[0]) +
+                  "," + std::to_string(freeDims[1]) + "],[" +
+                  std::to_string(freeAxes[0]) + "," +
+                  std::to_string(freeAxes[1]) + "]>";
+  auto out = op->getAttrOfType<StringAttr>("val_type");
+  return freeAxes[0] != freeAxes[1] && out && out.getValue() == expected &&
+         compilerinfra::allowsSubnormalFlush(op);
+}
 using namespace compilerinfra;
 using namespace mlir;
 
@@ -265,10 +308,17 @@ void registerWeftMatrixContracts(Unit &u) {
       auto over = op->getAttrOfType<DenseI64ArrayAttr>("over");
       const int64_t singleAxis[] = {3};
       const int64_t packAxes[] = {3, 4};
+      bool ownerDot = false;
+      for (auto *parent = op->getParentOp(); parent;
+           parent = parent->getParentOp())
+        if (parent->getName().getStringRef() == "weft_host.owner_program")
+          ownerDot = contractName == "onednn-brgemm-bf16";
       ArrayRef<int64_t> expectedOver =
           vnniPack > 1 ? ArrayRef<int64_t>(packAxes)
                        : ArrayRef<int64_t>(singleAxis);
-      if (!over || over.asArrayRef() != expectedOver)
+      if (!over ||
+          (ownerDot ? over.size() != 1 || !validOrderedBrgemm(op, over[0])
+                    : over.asArrayRef() != expectedOver))
         return failure();
       auto accAttr = op->getAttrOfType<StringAttr>("acc_type");
       if (!accAttr || accAttr.getValue() != expectedAcc)
@@ -287,7 +337,7 @@ void registerWeftMatrixContracts(Unit &u) {
           !valTy.getValue().starts_with("!weft_kernel.value<" + expectedAcc +
                                         ",["))
         return failure();
-      if (vnniPack > 1) {
+      if (!ownerDot && vnniPack > 1) {
         std::string packSuffix = "," + std::to_string(vnniPack) + "],[";
         if (!lhsTy.getValue().contains(packSuffix) ||
             !rhsTy.getValue().contains(packSuffix))
@@ -308,7 +358,7 @@ void registerWeftMatrixContracts(Unit &u) {
       if (isQ4k ? (op->getAttr("kir.storage") != q4kAttr)
                 : op->hasAttr("kir.storage"))
         return failure();
-      if (!checkMatrixProgram(op, qualifiedId, true))
+      if (!ownerDot && !checkMatrixProgram(op, qualifiedId, true))
         return failure();
       return success();
     };

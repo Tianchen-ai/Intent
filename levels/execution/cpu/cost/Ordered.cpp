@@ -8,7 +8,7 @@ namespace CI_UNIT_NAMESPACE {
 using namespace compilerinfra;
 void ownerCost(Unit &u) {
   u.costModels.push_back(
-      {{"ordered-tasks", u.qualify("ordered-owners"), "1",
+      {{"ordered-tasks", u.qualify("ordered-owners"), "2",
         [](mlir::Operation *o, const StructuralCandidate &c,
            CostContext &ctx) -> llvm::Expected<CostEstimate> {
           auto f = ctx.target.services.get<intentdsl::CallFacts>();
@@ -46,7 +46,38 @@ void ownerCost(Unit &u) {
                                panel->keys));
             double dots = double(n) * panel->keys * (retained ? 1 : 2);
             e.terms["score_dot_products"] = {dots, "count"};
-            *e.timeNs += 2. * dots * panel->depth / rateVal;
+            double flop = 2. * dots * panel->depth;
+            if (cache && cache.get("engine")) {
+              auto batch = cache.getAs<mlir::IntegerAttr>("batch").getInt();
+              int64_t tokens =
+                  cache.getAs<mlir::IntegerAttr>("score_tile").getInt();
+              double panels = std::ceil(double(n) / batch) *
+                              std::ceil(double(panel->keys) / tokens);
+              double pack = panels * batch * panel->depth * sizeof(uint16_t);
+              // AMX reduces BF16 pairs across a complete owner tile. Every
+              // invocation pays the hardware context transition and packing.
+              double sync =
+                  intentdsl::quantity(ctx, "sync", "ns").value_or(launchVal);
+              e.terms["brgemm_calls"] = {panels, "count"};
+              e.terms["query_pack_bytes"] = {pack, "B"};
+              // A dense downstream tile is admitted and transposed to VNNI
+              // with scalar addressing and a padded destination. The native
+              // owner task instead keeps its transposed query panel across
+              // keys.
+              if (rm->orderedDotTokens) {
+                double packedElements = panels * tokens * panel->depth;
+                double scalarRate = rateVal / (rm->vectorBits / 32);
+                e.terms["strided_pack_elements"] = {packedElements, "count"};
+                *e.timeNs += 3 * packedElements / scalarRate;
+              }
+              double contexts = tasks;
+              e.terms["brgemm_contexts"] = {contexts, "count"};
+              double transition = 4 * launchVal + 2 * sync;
+              *e.timeNs +=
+                  flop / (batch * rateVal) + 2 * pack / bwVal +
+                  (transition * contexts + panels * sync * 0.15) / workers;
+            } else
+              *e.timeNs += flop / rateVal;
             if (!shared)
               *e.timeNs += ((retained ? 0. : panel->readBytes) +
                             (retained ? 8. : 0.)) *
