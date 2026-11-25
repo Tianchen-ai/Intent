@@ -2503,7 +2503,7 @@ struct RowLowerer {
     for (auto &inst : body) {
       StringRef n = inst.getName().stripDialect();
       if (n == "window" || n == "member_axis" || n == "slab_axis" ||
-          n == "await" || n == "complete")
+          n == "await" || n == "complete" || n == "combine")
         continue;
       if (n == "drain") {
         if (inst.getNumOperands() != 0)
@@ -2745,6 +2745,19 @@ struct RowLowerer {
   }
 
   LogicalResult emitOuterOps(ArrayRef<Operation *> ops, Value outerGroup) {
+    // Allocate independent carry identities before their consumers. This lets
+    // adjacent reductions share one fetch even when their initializers were
+    // interleaved with the phases in program order.
+    for (auto *op : ops) {
+      if (op->getName().getStringRef() != "block.identity")
+        continue;
+      Value arr = localVar(b.getF32Type(), "R");
+      bool sum = op->getAttrOfType<StringAttr>("algebra") == "sum";
+      Value init = sum ? cF32(0.0f)
+                       : cF32(-std::numeric_limits<float>::infinity());
+      forLoop(cI64(0), symR, cI64(1), [&](Value j) { storeAt(arr, j, init); });
+      mapped[op->getResult(0)] = arr;
+    }
     llvm::DenseMap<Value, Value> rangeMap;
     for (size_t idx = 0; idx < ops.size(); ++idx) {
       Operation &op = *ops[idx];
@@ -2774,6 +2787,10 @@ struct RowLowerer {
           SmallVector<Value, 4> fusedCarries{op.getOperand(0)};
           while (idx + 1 < ops.size()) {
             Operation &cand = *ops[idx + 1];
+            if (cand.getName().getStringRef() == "block.identity") {
+              ++idx;
+              continue;
+            }
             int64_t gc = 0, lc = 0;
             if (!isPureReductionPhase(cand, gc, lc) || gc > g0)
               break;
@@ -2854,13 +2871,7 @@ struct RowLowerer {
                    {b.getNamedAttr("extent", b.getStringAttr("R"))})
                 ->getResult(0);
       } else if (code == "identity") {
-        Value arr = localVar(b.getF32Type(), "R");
-        bool sum = op.getAttrOfType<StringAttr>("algebra") == "sum";
-        Value init = sum ? cF32(0.0f)
-                         : cF32(-std::numeric_limits<float>::infinity());
-        forLoop(cI64(0), symR, cI64(1),
-                [&](Value j) { storeAt(arr, j, init); });
-        mapped[op.getResult(0)] = arr;
+        continue;
       } else if (code == "cast" || code == "summary_field" || code == "div" ||
                  code == "mul" || code == "add" || code == "sub" ||
                  code == "rsqrt" || code == "constant") {
