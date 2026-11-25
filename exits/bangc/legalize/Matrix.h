@@ -1,4 +1,5 @@
 #pragma once
+#include "../capabilities/ScaledPanels.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 #include "intentdsl/levels/storage/dsa/ir/Matrix.h"
@@ -34,6 +35,12 @@ inline mlir::LogicalResult bindMatrix(mlir::func::FuncOp fn, unsigned phase,
       p, setup.getAttrOfType<IntegerAttr>("participants").getInt(), *ms);
   bool isClusterTile = placement == "shared-tile";
   bool shared = isClusterTile || placement == "shared-lhs";
+  auto local = profile.services.get<intentdsl::dsa::LocalSupply>();
+  auto groups = residentQuantGroups(p, placement, *ms,
+                                    std::min(local->capacity, local->budget));
+  if ((write || setup.hasAttr("bangc.resident_groups")) &&
+      !field(setup, "bangc.resident_groups", b.getI64IntegerAttr(groups)))
+    return setup.emitError("resident panel depth disagrees with view or storage budget");
   StringRef spaceName = shared ? "cluster.sram" : "private.nram";
   StringRef workerName = shared ? "cluster-union4" : "task-stride";
   if (!field(setup, "bangc.space", b.getStringAttr(spaceName)) ||

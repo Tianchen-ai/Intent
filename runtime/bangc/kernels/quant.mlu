@@ -52,23 +52,25 @@ __mlu_func__ unsigned char quant_e8m0_panel_ok(const unsigned char *sa, int na,
                                                const unsigned char *sb, int nb,
                                                short *scratch, int min_exp,
                                                int max_exp) {
+  if (sa == sb && na == nb)
+    nb = 0;
   int span = max_exp - min_exp + 1;
   int full_a = (na / 64) * 64;
   int full_b = (nb / 64) * 64;
   if (full_a == na && full_b == nb && full_a > 0 && full_b > 0 &&
       full_a + full_b <= 4096) {
-    __bang_int82int16(scratch, (const signed char *)sa, full_a, 0, 0);
-    __bang_int82int16(scratch + full_a, (const signed char *)sb, full_b, 0, 0);
+    __bang_uchar2int16(scratch, sa, full_a, 0);
+    __bang_uchar2int16(scratch + full_a, sb, full_b, 0);
     int tot = full_a + full_b;
-    __bang_band_scalar(scratch, (const short *)scratch, (short)0xff, tot);
+
     __bang_sub_scalar(scratch, (const short *)scratch, (short)min_exp, tot);
     __bang_ge_scalar((unsigned short *)scratch, (const unsigned short *)scratch,
                      (unsigned short)span, tot);
     return __bang_count((unsigned short *)scratch, tot) == 0;
   }
   if (full_a > 0) {
-    __bang_int82int16(scratch, (const signed char *)sa, full_a, 0, 0);
-    __bang_band_scalar(scratch, (const short *)scratch, (short)0xff, full_a);
+    __bang_uchar2int16(scratch, sa, full_a, 0);
+
     __bang_sub_scalar(scratch, (const short *)scratch, (short)min_exp, full_a);
     __bang_ge_scalar((unsigned short *)scratch, (const unsigned short *)scratch,
                      (unsigned short)span, full_a);
@@ -82,8 +84,8 @@ __mlu_func__ unsigned char quant_e8m0_panel_ok(const unsigned char *sa, int na,
   }
   int full_b2 = (nb / 64) * 64;
   if (full_b2 > 0) {
-    __bang_int82int16(scratch, (const signed char *)sb, full_b2, 0, 0);
-    __bang_band_scalar(scratch, (const short *)scratch, (short)0xff, full_b2);
+    __bang_uchar2int16(scratch, sb, full_b2, 0);
+
     __bang_sub_scalar(scratch, (const short *)scratch, (short)min_exp, full_b2);
     __bang_ge_scalar((unsigned short *)scratch, (const unsigned short *)scratch,
                      (unsigned short)span, full_b2);
@@ -115,16 +117,12 @@ __mlu_func__ void quant_decode_block_scaled_f16(
     __sync();
   }
 
-  __bang_int82int32((int *)idx_scratch, (const signed char *)raw, total_bytes,
-                    0, 0);
-  __bang_band_scalar((int *)idx_scratch, (const int *)idx_scratch, 0xff,
-                     total_bytes);
+  __bang_uchar2int32((int *)idx_scratch, raw, total_bytes, 0);
+
 
   int aligned_blocks = ((total_blocks + 63) / 64) * 64;
-  __bang_int82int16((short *)scale_scratch, (const signed char *)scales,
-                    aligned_blocks, 0, 0);
-  __bang_band_scalar((short *)scale_scratch, (const short *)scale_scratch,
-                     (short)0xff, aligned_blocks);
+  __bang_uchar2int16((short *)scale_scratch, scales, aligned_blocks, 0);
+
   __bang_add_scalar((short *)scale_scratch, (const short *)scale_scratch,
                     (short)(15 - scale_bias), aligned_blocks);
   __bang_mul_scalar((short *)scale_scratch, (const short *)scale_scratch,
@@ -225,15 +223,13 @@ __mlu_func__ void quant_decode_grouped_rhs_f16(
     __nram__ half _zp_nat[256] __attribute__((aligned(128)));
     __nram__ half _sc_nat[256] __attribute__((aligned(128)));
 
-    __bang_int82int32((int *)idx_scratch, (const signed char *)qw_bytes,
-                      total_bytes, 0, 0);
-    __bang_band_scalar((int *)idx_scratch, (const int *)idx_scratch, 0xff,
-                       total_bytes);
+    __bang_uchar2int32((int *)idx_scratch, qw_bytes, total_bytes, 0);
+
     __bang_lut((int *)work_a, idx_scratch, lut256, total_bytes, 256);
 
     if (has_zero) {
-      __bang_int82int32(_zp_idx, (const signed char *)qz_words, 128, 0, 0);
-      __bang_band_scalar(_zp_idx, _zp_idx, 0xff, 128);
+      __bang_uchar2int32(_zp_idx, (const unsigned char *)qz_words, 128, 0);
+
       __bang_lut((int *)_zp_nat, (unsigned int *)_zp_idx, lut256, 128, 256);
       __bang_mul_scalar(_zp_nat, _zp_nat, (half)(-1.0f), 256);
     }
@@ -306,10 +302,8 @@ __mlu_func__ void quant_decode_grouped_rhs_f16(
     __sync();
   }
 
-  __bang_int82int32((int *)idx_scratch, (const signed char *)qw_bytes,
-                    total_bytes, 0, 0);
-  __bang_band_scalar((int *)idx_scratch, (const int *)idx_scratch, 0xff,
-                     total_bytes);
+  __bang_uchar2int32((int *)idx_scratch, qw_bytes, total_bytes, 0);
+
   __bang_lut((int *)work_a, idx_scratch, lut256, total_bytes, 256);
 
   half *right_f16 = work_a;
@@ -413,18 +407,12 @@ __mlu_func__ void quant_record_gemv_2plane_q8k(
         int c_off1 =
             base1 + half_idx * hstride1 + (q & 1) * qstep1 + sb * 16;
 
-        __bang_int82int16((short *)idx16,
-                          (const signed char *)(rec_t + c_off0 * 64), 1024, 0,
-                          0);
-        __bang_band_scalar((short *)idx16, (const short *)idx16, (short)0xff,
-                           1024);
+        __bang_uchar2int16((short *)idx16, (const unsigned char *)(rec_t + c_off0 * 64), 1024, 0);
+
         __bang_lut(w16, idx16, lut_table + p0_idx * 256, 1024, 256);
 
-        __bang_int82int16((short *)idx16,
-                          (const signed char *)(rec_t + c_off1 * 64), 1024, 0,
-                          0);
-        __bang_band_scalar((short *)idx16, (const short *)idx16, (short)0xff,
-                           1024);
+        __bang_uchar2int16((short *)idx16, (const unsigned char *)(rec_t + c_off1 * 64), 1024, 0);
+
         __bang_lut(h16, idx16, lut_table + p1_idx * 256, 1024, 256);
 
         __bang_add(w16, w16, h16, 1024);

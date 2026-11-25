@@ -220,6 +220,25 @@ struct MatrixLowerer {
     makeOp("sync", {}, {}, {b.getNamedAttr("domain", b.getStringAttr(dom))});
   }
 
+  // Pack several consecutive reduction panels in a single rectangular DMA.
+  // Both pitches and offsets are in source elements. Packing changes only
+  // the physical row stride, so the same reader serves bytes and packed words.
+  void copyRectangle(Value dst, Value src, int64_t rows, int64_t width,
+                     int64_t dstPitch, int64_t srcPitch, StringRef dir,
+                     bool async = false) {
+    if (rows == 1 || (width == dstPitch && width == srcPitch))
+      memcpy1D(dst, src, cI64(rows * width), dir, async);
+    else
+      memcpy2D(dst, src, cI64(width), cI64(dstPitch), cI64(srcPitch),
+               cI64(rows - 1), dir, async);
+  }
+
+  Value panelAddress(Value buffer, Value row, Value column, int64_t pitch) {
+    return makeAddr(buffer, {row, column}, {cI64(pitch), cI64(1)}, 4);
+  }
+
+  int64_t residentGroups = 0;
+
   void fillVec(Value dst, Value lanes, Value val) {
     makeOp("fill", {dst, lanes, val});
   }
@@ -633,7 +652,8 @@ struct MatrixLowerer {
                                             Value zeroAll,
                                             Value sharedLhsSram0 = {},
                                             Value sharedLhsSram1 = {},
-                                            Value useSramLhs = {}) {
+                                            Value useSramLhs = {},
+                                            Value residentWeights = {}) {
     const auto *spec = intentdsl::kir::quantFormatSpec(p.dot);
     if (!spec)
       return p.dot.emitError("missing quantized format descriptor");
@@ -657,6 +677,9 @@ struct MatrixLowerer {
         Value w16Buf = nramBuf(b.getI16Type(), 1024);
         Value h16Buf = nramBuf(b.getI16Type(), 1024);
         Value wf32Buf = nramBuf(b.getF32Type(), 1024);
+        int64_t recordPitch = residentGroups * spec->recordBytes;
+        Value records = residentGroups ? nramBuf(b.getI8Type(), bm * recordPitch)
+                                       : Value{};
         fillVec(acc, cI64(std::max<int64_t>(bm, 64)), cF32(0.0f));
         sync("compute");
 
@@ -670,6 +693,20 @@ struct MatrixLowerer {
             p1.quadByteStep,      p1.quadShiftMode};
 
         forLoop(cI64(0), cI64(recordGroups), cI64(1), [&](Value gq) {
+          Value localGroup;
+          if (records) {
+            localGroup = b.create<arith::RemSIOp>(loc, gq, cI64(residentGroups));
+            ifThen(b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                          localGroup, cI64(0)), [&]() {
+              Value span = b.create<arith::MinSIOp>(
+                  loc, b.create<arith::SubIOp>(loc, cI64(recordGroups), gq),
+                  cI64(residentGroups));
+              Value width = b.create<arith::MulIOp>(loc, span, cI64(spec->recordBytes));
+              memcpy2D(records, globalPtr(w, {r, gq, cI64(0)}, b.getI8Type()),
+                       width, cI64(recordPitch), cI64(p.stride(w, 0)),
+                       b.create<arith::SubIOp>(loc, nr, cI64(1)), "GDRAM2NRAM");
+            });
+          }
           Value isZero, preDs;
           if (qActAllF32) {
             isZero = b.create<arith::CmpIOp>(
@@ -790,21 +827,24 @@ struct MatrixLowerer {
                       loc, b.create<arith::SubIOp>(loc, nr, sub), cI64(64));
                   Value rSub = b.create<arith::AddIOp>(loc, r, sub);
                   Value accSub = makeAddr(acc, {sub}, {cI64(1)}, 1);
-                  Value wBase =
-                      globalPtr(w, {rSub, gq, cI64(0)}, b.getI8Type());
+                  Value wBase = records
+                      ? makeAddr(records, {sub, localGroup},
+                                 {cI64(recordPitch), cI64(spec->recordBytes)}, 1)
+                      : globalPtr(w, {rSub, gq, cI64(0)}, b.getI8Type());
+                  StringRef dir = records ? "NRAM2NRAM" : "GDRAM2NRAM";
                   ifThenElse(
                       b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
                                               curNr, cI64(1)),
                       {},
                       [&]() {
                         memcpy1D(recPanel, wBase, cI64(spec->recordBytes),
-                                 "GDRAM2NRAM");
+                                 dir);
                       },
                       [&]() {
                         memcpy2D(recPanel, wBase, cI64(spec->recordBytes),
-                                 cI64(256), cI64(p.stride(w, 0)),
+                                 cI64(256), cI64(records ? recordPitch : p.stride(w, 0)),
                                  b.create<arith::SubIOp>(loc, curNr, cI64(1)),
-                                 "GDRAM2NRAM");
+                                 dir);
                       });
                   sync("io");
                   makeOp("quant_record_gemv",
@@ -1831,7 +1871,10 @@ struct MatrixLowerer {
                       bn % spec->packFactor == 0 && p.stride(scView, 1) == 1 &&
                       (!spec->hasZeroView ||
                        p.stride(p.dot.getOperand(3), 1) == 1);
-      if (sharedLhsSram0 && useSramLhs) {
+      if (residentWeights) {
+        Value src = panelAddress(sharedLhsSram0, cI64(0), kk, shapeK);
+        copyRectangle(leftBuf, src, bm, bk, bk, shapeK, "SRAM2NRAM", asyncRhs);
+      } else if (sharedLhsSram0 && useSramLhs) {
         ifThenElse(
             useSramLhs, {},
             [&]() {
@@ -1855,7 +1898,12 @@ struct MatrixLowerer {
           cI64(spec->packFactor));
       Value cPackBase =
           b.create<arith::DivSIOp>(loc, c, cI64(spec->packFactor));
-      if (p.stride(qwView, 1) == 1 && bn % spec->packFactor == 0) {
+      if (residentWeights) {
+        Value col = b.create<arith::RemSIOp>(loc, cPackBase, cI64(4 * packCols));
+        Value src = panelAddress(residentWeights, kk, col, 4 * packCols);
+        copyRectangle(qwBuf, src, bk, packCols, packCols, 4 * packCols,
+                      "SRAM2NRAM", asyncRhs);
+      } else if (p.stride(qwView, 1) == 1 && bn % spec->packFactor == 0) {
         Value qBase = globalPtr(qwView, {kk, cPackBase}, packElem);
         ifThenElse(
             b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, nk, cI64(1)),
@@ -1953,7 +2001,7 @@ struct MatrixLowerer {
         sync("io");
       }
 
-      if (sharedLhsSram0 && useSramLhs) {
+      if (sharedLhsSram0 && useSramLhs && !residentWeights) {
         sync("cluster");
         Value sIdx = b.create<arith::DivSIOp>(loc, kk, cI64(bk));
         Value nxtKk = b.create<arith::AddIOp>(loc, kk, cI64(bk));
@@ -2007,7 +2055,8 @@ struct MatrixLowerer {
         if (sharedLhsSram0 && useSramLhs) {
           Value isMpu = makeOp("is_mpu", {}, {b.getI1Type()})->getResult(0);
           ifThen(b.create<arith::XOrIOp>(loc, isMpu, cI1(true)), runSimdDecode);
-          sync("cluster");
+          if (!residentWeights)
+            sync("cluster");
         } else {
           runSimdDecode();
         }
@@ -2823,6 +2872,8 @@ struct MatrixLowerer {
     bool isUnion4 =
         setup.getAttrOfType<StringAttr>("bangc.worker") == "cluster-union4";
     bool isCluster512 = isUnion4 && bm == 512 && bn == 512;
+    if (auto depth = setup.getAttrOfType<IntegerAttr>("bangc.resident_groups"))
+      residentGroups = depth.getInt();
 
     symGrid = makeSym("grid");
     symTaskId = makeSym("taskId");
@@ -3767,7 +3818,24 @@ struct MatrixLowerer {
               1, llvm::divideCeil(uint64_t(shapeN), uint64_t(CN)));
           int64_t tilesPerBatch = cmb * cnb;
 
+          Value packedA, scalesA, packedB, scalesB;
+          int64_t panelKBytes = groups * recBytes;
+          if (residentGroups) {
+            packedA = sramBuf(b.getI8Type(), CM * panelKBytes);
+            packedB = sramBuf(b.getI8Type(), CN * panelKBytes);
+            scalesA = sramBuf(b.getI8Type(), CM * groups);
+            scalesB = sramBuf(b.getI8Type(), CN * groups);
+          }
           auto stageASlice = [&](Value rS, Value nrS, Value u0) {
+            if (packedA) {
+              Value row = b.create<arith::RemSIOp>(loc, rS, cI64(CM));
+              Value byte = b.create<arith::MulIOp>(loc, u0, cI64(recBytes));
+              copyRectangle(aRawBuf, panelAddress(packedA, row, byte, panelKBytes),
+                            HM, panelRecBytes, panelRecBytes, panelKBytes, "SRAM2NRAM");
+              copyRectangle(saBuf, panelAddress(scalesA, row, u0, groups),
+                            HM, groupsPerPanel, groupsPerPanel, groups, "SRAM2NRAM");
+              return;
+            }
             if (p.stride(a, 2) == 1 && p.stride(a, 1) == recBytes) {
               Value aBase = globalPtr(a, {rS, u0, cI64(0)}, b.getI8Type());
               ifThenElse(
@@ -3834,6 +3902,15 @@ struct MatrixLowerer {
           };
 
           auto stageB64Slice = [&](Value cS, Value ncS, Value u0) -> Value {
+            if (packedB) {
+              Value col = b.create<arith::RemSIOp>(loc, cS, cI64(CN));
+              Value byte = b.create<arith::MulIOp>(loc, u0, cI64(recBytes));
+              copyRectangle(bRawBuf, panelAddress(packedB, byte, col, CN),
+                            panelRecBytes, 64, 64, CN, "SRAM2NRAM");
+              copyRectangle(sbBuf, panelAddress(scalesB, u0, col, CN),
+                            groupsPerPanel, 64, 64, CN, "SRAM2NRAM");
+              return cI32(2);
+            }
             if (p.stride(rhs, 2) == 1 &&
                 p.stride(rhs, 0) == recBytes * p.stride(rhs, 1)) {
               Value bBase = globalPtr(rhs, {u0, cI64(0), cS}, b.getI8Type());
@@ -3957,6 +4034,20 @@ struct MatrixLowerer {
                 loc, b.create<arith::SubIOp>(loc, cI64(shapeN), cc), cI64(CN));
 
             Value isMpu = makeOp("is_mpu", {}, {b.getI1Type()})->getResult(0);
+            if (packedA) {
+              ifThen(isMpu, [&]() {
+                Value z = cI64(0);
+                copyRectangle(packedA, globalPtr(a, {cr, z, z}), CM, panelKBytes,
+                              panelKBytes, p.stride(a, 0), "GDRAM2SRAM");
+                copyRectangle(scalesA, globalPtr(sa, {cr, z}), CM, groups,
+                              groups, p.stride(sa, 0), "GDRAM2SRAM");
+                copyRectangle(packedB, globalPtr(rhs, {z, z, cc}), panelKBytes, CN,
+                              CN, p.stride(rhs, 1), "GDRAM2SRAM");
+                copyRectangle(scalesB, globalPtr(rightScale.view, {z, cc}), groups,
+                              CN, CN, p.stride(rightScale.view, 0), "GDRAM2SRAM");
+              });
+              sync("cluster");
+            }
             Value coreId =
                 b.create<arith::AndIOp>(loc, makeSym("coreId"), cI64(3));
             Value subM = b.create<arith::MulIOp>(
@@ -4692,11 +4783,19 @@ struct MatrixLowerer {
           biasBuf = nramBuf(carrierElemType(ep.bias), bn);
     }
 
-    Value rowShareSram0, rowShareSram1;
+    Value rowShareSram0, rowShareSram1, residentWeights;
     if (isUnion4 && !isCluster512 && mode == "quant-format") {
       Type lhsElem = carrierElemType(p.dot.getOperand(0));
-      rowShareSram0 = sramBuf(lhsElem, bm * bk);
-      rowShareSram1 = sramBuf(lhsElem, bm * bk);
+      const auto *spec = intentdsl::kir::quantFormatSpec(p.dot);
+      Value weights = p.dot.getOperand(1);
+      int64_t words = 4 * bn / spec->packFactor;
+      if (residentGroups) {
+        rowShareSram0 = sramBuf(lhsElem, bm * shapeK);
+        residentWeights = sramBuf(carrierElemType(weights), shapeK * words);
+      } else {
+        rowShareSram0 = sramBuf(lhsElem, bm * bk);
+        rowShareSram1 = sramBuf(lhsElem, bm * bk);
+      }
     }
 
     Value quantLut, quantRecLut, qActAllF32, dsAll, zeroAll;
@@ -4849,6 +4948,15 @@ struct MatrixLowerer {
         rowShareSram0 ? b.create<arith::DivSIOp>(loc, symGrid, cI64(4)).getResult()
                       : symGrid;
     Value iterStep = rowShareSram0 ? makeSym("clusterDim") : symTaskDim;
+    bool invariantLhs = residentWeights && mb == 1;
+    if (invariantLhs) {
+      Value lhs = p.dot.getOperand(0);
+      Value mpu = makeOp("is_mpu", {}, {b.getI1Type()})->getResult(0);
+      ifThen(mpu, [&]() {
+        copyRectangle(rowShareSram0, globalPtr(lhs, {cI64(0), cI64(0)}),
+                      bm, shapeK, shapeK, p.stride(lhs, 0), "GDRAM2SRAM");
+      });
+    }
 
     forLoop(iterStart, iterBound, iterStep, [&](Value jobIter) {
       Value job = jobIter;
@@ -4913,7 +5021,19 @@ struct MatrixLowerer {
             Value isMpu = makeOp("is_mpu", {}, {b.getI1Type()})->getResult(0);
             ifThen(b.create<arith::AndIOp>(loc, isMpu, canShare), [&]() {
               Value lBase = globalPtr(lhsView, {r, cI64(0)}, lhsElem);
-              if (p.stride(lhsView, 0) == bk)
+              if (residentWeights) {
+                Value weights = p.dot.getOperand(1);
+                const auto *spec = intentdsl::kir::quantFormatSpec(p.dot);
+                int64_t words = 4 * bn / spec->packFactor;
+                // The MPU handles the same aligned four-column-tile group as the IPUs.
+                Value group = b.create<arith::DivSIOp>(loc, c, cI64(4 * bn));
+                Value col = b.create<arith::MulIOp>(loc, group, cI64(words));
+                if (!invariantLhs)
+                  copyRectangle(rowShareSram0, lBase, bm, shapeK, shapeK,
+                                p.stride(lhsView, 0), "GDRAM2SRAM");
+                copyRectangle(residentWeights, globalPtr(weights, {cI64(0), col}),
+                              shapeK, words, words, p.stride(weights, 0), "GDRAM2SRAM");
+              } else if (p.stride(lhsView, 0) == bk)
                 memcpy1D(rowShareSram0, lBase, cI64(bm * bk), "GDRAM2SRAM");
               else
                 memcpy2D(rowShareSram0, lBase, cI64(bk), cI64(bk),
@@ -4923,7 +5043,8 @@ struct MatrixLowerer {
             sync("cluster");
             if (failed(emitQuantizedFromDescriptor(
                     acc, r, c, nr, nc, quantLut, quantRecLut, qActAllF32,
-                    dsAll, zeroAll, rowShareSram0, rowShareSram1, canShare)))
+                    dsAll, zeroAll, rowShareSram0, rowShareSram1, canShare,
+                    residentWeights)))
               status = failure();
           } else {
             if (failed(emitQuantizedFromDescriptor(
