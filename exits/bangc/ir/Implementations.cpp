@@ -1002,6 +1002,19 @@ void rowContracts(Unit &unit) {
   }
 
   addCnnl(
+      "cnnl-gather-rows", "cnnl_row_op", "intent_cnnl_gather_rows",
+      "exits/bangc::cnnl-row-cost", {"m", "n"},
+      "table[V,N], in-bounds signed indices[M] -> rows[M,N]",
+      "contiguous table, index vector and output with disjoint writes", "none",
+      "reads the index vector and addressed rows and writes the output",
+      "bitwise row copy via CNNL embedding forward with padding and normalization disabled",
+      makeTyped(3, 3, 0, {STK::AnyInteger, STK::AnyFloat}, {}, {},
+                EffectMask::ReadWrite, 0, std::nullopt),
+      [](Operation *op) {
+        return success(op->getAttrOfType<StringAttr>("kind") == "gather_rows");
+      });
+
+  addCnnl(
       "cnnl-transpose", "cnnl_row_op", "intent_cnnl_transpose",
       "exits/bangc::cnnl-row-cost", {"m", "n"},
       "GDRAM [M, N] source and GDRAM [N, M] destination (8/16/32-bit elements)",

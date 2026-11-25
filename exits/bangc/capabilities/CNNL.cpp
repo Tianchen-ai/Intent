@@ -78,6 +78,7 @@ llvm::json::Object probeCNNL() {
       "cnnlGetMatMulHeuristicResult",
       "cnnlMatMul_v2",
       "cnnlStrideBatchMatMul",
+      "cnnlEmbeddingForward_v2",
       "cnnlSoftmaxForward_v2",
       "cnnlLayerNormForward",
       "cnnlGetLayerNormOpWorkspaceSize",

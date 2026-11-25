@@ -267,7 +267,8 @@ struct CnnlRowContract
     : public compilerinfra::ContractOpInterface::ExternalModel<
           CnnlRowContract, CnnlRowOp> {
   Type getAccumulatorType(Operation *op) const {
-    if (cast<CnnlRowOp>(op).getKind() == "transpose")
+    auto kind = cast<CnnlRowOp>(op).getKind();
+    if (kind == "transpose" || kind == "gather_rows")
       return {};
     return Float32Type::get(op->getContext());
   }
@@ -283,6 +284,21 @@ struct CnnlRowContract
   LogicalResult verifyShapeAndTypes(Operation *op) const {
     auto rop = cast<CnnlRowOp>(op);
     StringRef k = rop.getKind();
+    if (k == "gather_rows") {
+      if (op->getNumOperands() != 3)
+        return failure();
+      auto table = dyn_cast<MemRefType>(op->getOperand(0).getType());
+      auto ids = dyn_cast<MemRefType>(op->getOperand(1).getType());
+      auto out = dyn_cast<MemRefType>(op->getOperand(2).getType());
+      auto bytes = rop.getElemBytes();
+      return success(table && ids && out && table.getRank() == 2 &&
+                     ids.getRank() == 1 && out.getRank() == 2 &&
+                     (ids.getElementType().isSignlessInteger(32) ||
+                      ids.getElementType().isSignlessInteger(64)) &&
+                     table.getElementType() == out.getElementType() &&
+                     (bytes == 1 || bytes == 2 || bytes == 4 || bytes == 8) &&
+                     table.getElementTypeBitWidth() == 8 * bytes);
+    }
     if (k == "transpose") {
       if (op->getNumOperands() != 2)
         return failure();
@@ -721,7 +737,11 @@ void CnnlMatmulOp::getEffects(EffectList &effects) {
 
 void CnnlRowOp::getEffects(EffectList &effects) {
   Operation *op = getOperation();
-  if (getKind() == "layer_norm") {
+  if (getKind() == "gather_rows") {
+    addRead(effects, op, 0);
+    addRead(effects, op, 1);
+    addWrite(effects, op, 2);
+  } else if (getKind() == "layer_norm") {
     addRead(effects, op, 0);
     addRead(effects, op, 1);
     addRead(effects, op, 2);

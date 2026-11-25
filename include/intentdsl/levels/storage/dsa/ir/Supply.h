@@ -12,6 +12,7 @@ struct LocalSupply {
   std::string librarySoftmaxImpl;
   std::string libraryLayerNormImpl;
   std::string libraryEstimator;
+  std::string libraryGatherImpl;
 };
 bool projectsConsecutiveRows(mlir::Operation *access, unsigned maskIndex);
 bool projectsTransposed2D(mlir::Operation *op);

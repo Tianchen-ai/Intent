@@ -12,7 +12,8 @@ enum PlanKind {
   PLAN_TRANSPOSE = 2,
   PLAN_SOFTMAX = 3,
   PLAN_LAYERNORM = 4,
-  PLAN_STRIDED_MATMUL = 5
+  PLAN_STRIDED_MATMUL = 5,
+  PLAN_GATHER_ROWS = 6
 };
 
 struct PlanKey {
@@ -285,6 +286,52 @@ extern "C" int intent_cnnl_matmul(const void *lhs, const void *rhs, void *dst,
   }
   pthread_mutex_unlock(&g_registry.mu);
   return (int)runSt;
+}
+
+extern "C" int intent_cnnl_gather_rows(const void *table, const void *ids,
+                                      void *out, long long rows, long long m,
+                                      long long n, int bytes, int indexBits,
+                                      void *queue) {
+  if (!m || !n)
+    return 0;
+  if (rows <= 0 || m < 0 || n < 0 || rows > INT_MAX || m > INT_MAX ||
+      n > INT_MAX || m * n > UINT32_MAX || (indexBits != 32 && indexBits != 64))
+    return CNNL_STATUS_BAD_PARAM;
+  cnnlDataType_t dt = bytes == 1 ? CNNL_DTYPE_UINT8 : bytes == 2 ? CNNL_DTYPE_UINT16 :
+                      bytes == 4 ? CNNL_DTYPE_INT32 : bytes == 8 ? CNNL_DTYPE_INT64 :
+                                                                    CNNL_DTYPE_INVALID;
+  if (dt == CNNL_DTYPE_INVALID)
+    return CNNL_STATUS_BAD_PARAM;
+  cnnlDataType_t id = indexBits == 64 ? CNNL_DTYPE_INT64 : CNNL_DTYPE_INT32;
+  PlanKey key{PLAN_GATHER_ROWS, queue, rows, m, n, 0, 0, dt, id};
+  pthread_mutex_lock(&g_registry.mu);
+  CachedPlan *p = findLocked(key);
+  if (!p) {
+    p = new CachedPlan();
+    p->key = key;
+    cnnlStatus_t st = cnnlCreate(&p->handle);
+    if (st == CNNL_STATUS_SUCCESS)
+      st = cnnlSetQueue(p->handle, (cnrtQueue_t)queue);
+    int shape[][2] = {{(int)rows, (int)n}, {(int)m, 0}, {(int)m, (int)n}};
+    cnnlTensorDescriptor_t *descs[] = {&p->t0, &p->t1, &p->t2};
+    for (int i = 0; i < 3 && st == CNNL_STATUS_SUCCESS; ++i) {
+      st = cnnlCreateTensorDescriptor(descs[i]);
+      if (st == CNNL_STATUS_SUCCESS)
+        st = cnnlSetTensorDescriptor(*descs[i], CNNL_LAYOUT_ARRAY,
+                                     i == 1 ? id : dt, i == 1 ? 1 : 2, shape[i]);
+    }
+    if (st != CNNL_STATUS_SUCCESS) {
+      delete p;
+      pthread_mutex_unlock(&g_registry.mu);
+      return st;
+    }
+    p->next = g_registry.head;
+    g_registry.head = p;
+  }
+  cnnlStatus_t st = cnnlEmbeddingForward_v2(p->handle, p->t0, table, p->t1, ids,
+                                            -1, nullptr, nullptr, p->t2, out);
+  pthread_mutex_unlock(&g_registry.mu);
+  return st;
 }
 
 extern "C" int intent_cnnl_transpose(const void *x, void *y, long long M,

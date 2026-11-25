@@ -338,6 +338,22 @@ TerminalPrinter rowPrinter() {
                auto kind = view.attrOfType<StringAttr>("kind").getValue();
                auto dt = view.attrOfType<IntegerAttr>("dtype_code").getInt();
                auto eb = view.attrOfType<IntegerAttr>("elem_bytes").getInt();
+               if (kind == "gather_rows") {
+                 auto table = view.operand(0).str();
+                 auto ids = cast<MemRefType>(view.operandType(1));
+                 c.line("extern \"C\" int intent_cnnl_gather_rows(const void *, const void *, "
+                        "void *, long long, long long, long long, int, int, void *);");
+                 c.line("extern \"C\" int intent_enqueue(" + formatArgs(view, true) +
+                        ", int cores, void *queue) {");
+                 ++c.indent;
+                 c.line("return intent_cnnl_gather_rows(" + table + ", " + view.operand(1).str() +
+                        ", " + view.operand(2).str() + ", " + table + "_d0, M, N, " +
+                        std::to_string(eb) + ", " +
+                        std::to_string(ids.getElementTypeBitWidth()) + ", queue);");
+                 --c.indent;
+                 c.line("}");
+                 return llvm::Error::success();
+               }
                if (kind == "transpose") {
                  c.line("extern \"C\" int intent_cnnl_transpose(const void *, "
                         "void *, long long, long long, int, void *);");

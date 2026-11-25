@@ -415,6 +415,59 @@ bool isLoadOf1D(Value v, Value expectedArg, Type workElem) {
          op->getOperand(0) == expectedArg;
 }
 
+bool gatherLayout(func::FuncOp fn, const CallFacts &facts, int64_t m, int64_t n) {
+  if (fn.getNumArguments() != 3 || m * n > UINT32_MAX ||
+      intentdsl::domainSlot(fn) != 2)
+    return false;
+  auto table = dyn_cast<MemRefType>(fn.getArgument(0).getType());
+  auto ids = dyn_cast<MemRefType>(fn.getArgument(1).getType());
+  auto out = dyn_cast<MemRefType>(fn.getArgument(2).getType());
+  if (!table || !ids || !out || table.getElementType() != out.getElementType() ||
+      !(ids.getElementType().isSignlessInteger(32) ||
+        ids.getElementType().isSignlessInteger(64)))
+    return false;
+  auto dims = facts.shapeOf(fn.getArgument(0));
+  auto rows = dims && dims->size() == 2 ? (*dims)[0].getAsInteger() : std::nullopt;
+  auto bits = table.getElementTypeBitWidth();
+  auto t = aliasGroupOf(facts, 0), i = aliasGroupOf(facts, 1), o = aliasGroupOf(facts, 2);
+  return (bits == 8 || bits == 16 || bits == 32 || bits == 64) &&
+         rows && *rows > 0 && *rows <= INT32_MAX &&
+         t && i && o && t != o && i != o &&
+         isContiguous2D(fn, facts, 0, *rows, n) &&
+         isContiguous1D(fn, facts, 1, m) && isContiguous2D(fn, facts, 2, m, n);
+}
+
+bool matchGatherRows(func::FuncOp fn) {
+  Operation *read = nullptr, *store = nullptr;
+  auto walk = fn.walk([&](Operation *op) {
+    StringRef name = op->getName().getStringRef();
+    if (name == "block.indexed_tile_read" && !read)
+      read = op;
+    else if (name == "block.store" && !store)
+      store = op;
+    else if (!llvm::is_contained(ArrayRef<StringRef>{"func.func", "func.return",
+                "block.pid", "block.zero", "block.rows", "block.columns",
+                "block.active", "block.tiles", "block.yield"}, name))
+      return WalkResult::interrupt();
+    return WalkResult::advance();
+  });
+  if (walk.wasInterrupted() || !read || !store || read->getBlock() != store->getBlock() ||
+      read->getOperand(0) != fn.getArgument(0) || read->getOperand(1) != fn.getArgument(1) ||
+      store->getOperand(0) != fn.getArgument(2) || store->getOperand(4) != read->getResult(0) ||
+      store->hasAttr("block.member_axes"))
+    return false;
+  auto *active = store->getOperand(3).getDefiningOp();
+  auto *rows = store->getOperand(1).getDefiningOp();
+  auto *columns = store->getOperand(2).getDefiningOp();
+  return active && active->getName().getStringRef() == "block.active" &&
+         rows && rows->getName().getStringRef() == "block.rows" &&
+         columns && columns->getName().getStringRef() == "block.columns" &&
+         active->getOperand(0) == fn.getArgument(2) &&
+         active->getOperand(1) == store->getOperand(1) &&
+         active->getOperand(2) == store->getOperand(2) &&
+         read->getOperands().drop_front(2) == store->getOperands().slice(1, 3);
+}
+
 bool matchTransposePattern(func::FuncOp fn, const CallFacts &facts, int64_t m,
                            int64_t n) {
   if (fn.getNumArguments() != 2)
@@ -744,7 +797,10 @@ std::optional<DictionaryAttr> planLibrary(func::FuncOp fn,
       return std::nullopt;
     kind = kAttr.getValue().str();
     impl = iAttr.getValue().str();
-    if (kind == "transpose") {
+    if (kind == "gather_rows") {
+      if (impl != caps->libraryGatherImpl || !gatherLayout(fn, *facts, m, n))
+        return std::nullopt;
+    } else if (kind == "transpose") {
       if (impl != caps->libraryTransposeImpl || fn.getNumArguments() != 2 ||
           !isContiguous2D(fn, *facts, 0, m, n) ||
           !isContiguous2D(fn, *facts, 1, n, m))
@@ -764,6 +820,10 @@ std::optional<DictionaryAttr> planLibrary(func::FuncOp fn,
     } else {
       return std::nullopt;
     }
+  } else if (!caps->libraryGatherImpl.empty() && gatherLayout(fn, *facts, m, n) &&
+             matchGatherRows(fn)) {
+    kind = "gather_rows";
+    impl = caps->libraryGatherImpl;
   } else if (!caps->libraryTransposeImpl.empty() &&
              matchTransposePattern(fn, *facts, m, n)) {
     kind = "transpose";

@@ -120,7 +120,7 @@ void dmaCost(Unit &u) {
         }},
        COMPILERINFRA_SOURCE});
   u.costModels.push_back(
-      {{"cnnl-row-cost", "levels/storage/dsa::supply", "1",
+      {{"cnnl-row-cost", "levels/storage/dsa::supply", "2",
         [](Operation *op, const StructuralCandidate &c,
            CostContext &ctx) -> llvm::Expected<CostEstimate> {
           auto *facts = ctx.target.services.get<intentdsl::CallFacts>();
@@ -132,6 +132,8 @@ void dmaCost(Unit &u) {
           for (Value arg : fn.getArguments())
             if (isa<MemRefType>(arg.getType()))
               bytes += facts->viewBytes(arg);
+          if (kind == "gather_rows")
+            bytes = facts->viewBytes(fn.getArgument(1)) + 2 * facts->viewBytes(fn.getArgument(2));
           CostEstimate e;
           e.scope = "full_call";
           e.bottleneck = "external library";
@@ -142,7 +144,7 @@ void dmaCost(Unit &u) {
                vec = intentdsl::quantity(ctx, "compute", "lane/ns");
           if (bw && launch && startup && vec) {
             double computeNs =
-                kind == "transpose"
+                (kind == "transpose" || kind == "gather_rows")
                     ? 0.0
                     : (3.0 * m * n) /
                           (std::max(1.0, double(facts->participants)) * (*vec));
