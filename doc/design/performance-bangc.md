@@ -54,5 +54,7 @@ MLU370 没有类似 oneDNN BRGeMM 微核的厂商微核接口，CNNL 是唯一�
 
 ## 5. 验证程序与迭代闭环
 
+短面板回归复用 `group7/mxfp4_gemm` 的作者程序、输入生成器和数值裁判，取 `M=512, N=4096, K=32`。此前选中簇级块后，单个缩放组只解码出 32 个 FP16 值，合法化落到私有实现并超出 NRAM 预算。协作实现现在在 SRAM 初始化时为每个 WRAM 行预留并清零填充部分，随后用带行距的 DMA 写入解码出的有效列。K 可以含一个或奇数个缩放组。
+
 - **校准与留出划分**：微基准独立拟合 `mlu370.calibration.json`；使用 `softmax`、`weighted_rms_norm`、`layer_norm`、`fused_add_rms_norm`、`transpose`、`gemm`、`batched_gemm`、`attention` 等跨类别程序检验候选排序与留出集 `model-accuracy`（所选/最佳比与成对排序准确率）。
 - **单步派生与回滚纪律**：针对慢路径通过 `compilerinfra-dev derive` 派生候选或调整局部估算器，先在同一测量协议下核对 `check_protocol` 与第 1–6 组数值回归，再执行 `adopt`；若留出集退化或完整调用未获益，立即通过 `revert` 原子恢复至已验证安装指纹。

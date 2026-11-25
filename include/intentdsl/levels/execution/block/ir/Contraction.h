@@ -10,6 +10,8 @@ struct MatrixTile {
   std::string native;
   std::string operation = {};
   int64_t maxOperandBytes = 0;
+  bool (*accepts)(mlir::Operation *domain, int64_t depth,
+                  const CallFacts &facts) = nullptr;
 };
 struct MatrixTarget {
   std::vector<MatrixTile> tiles;
@@ -18,7 +20,8 @@ struct MatrixTarget {
   bool flatRecordBitPlanes = false;
 };
 const MatrixTile *findMatrixTile(mlir::Operation *, llvm::ArrayRef<int64_t>,
-                                 const compilerinfra::TargetProfile &);
+                                 const compilerinfra::TargetProfile &,
+                                 std::optional<llvm::StringRef> native = std::nullopt);
 bool supportsMatrixTile(mlir::Operation *, mlir::Attribute,
                         const compilerinfra::TargetProfile &);
 

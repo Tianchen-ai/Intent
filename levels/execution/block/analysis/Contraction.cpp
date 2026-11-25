@@ -73,16 +73,20 @@ static bool domainMatchesTileOperation(Operation *domain, StringRef requiredOp,
       .wasInterrupted();
 }
 const MatrixTile *findMatrixTile(Operation *domain, ArrayRef<int64_t> dims,
-                                 const compilerinfra::TargetProfile &profile) {
+                                 const compilerinfra::TargetProfile &profile,
+                                 std::optional<StringRef> native) {
   auto target = profile.services.get<MatrixTarget>();
   if (dims.size() != 3 || !target)
     return nullptr;
   int64_t operandBytes = contractionOperandBytes(domain);
   bool explicitRecordTiles = target->implementations.count("q4k_dot") != 0;
+  auto facts = profile.services.get<CallFacts>();
   for (const MatrixTile &t : target->tiles) {
     if (dims == ArrayRef<int64_t>{t.m, t.n, t.k} &&
+        (!native || *native == t.native) &&
         (!t.maxOperandBytes || operandBytes <= t.maxOperandBytes) &&
-        domainMatchesTileOperation(domain, t.operation, explicitRecordTiles))
+        domainMatchesTileOperation(domain, t.operation, explicitRecordTiles) &&
+        (!t.accepts || (facts && t.accepts(domain, t.k, *facts))))
       return &t;
   }
   return nullptr;
@@ -146,19 +150,8 @@ LogicalResult verifyTiledMatrix(func::FuncOp fn,
   auto actual = matrixShape(op, *p.services.get<CallFacts>());
   if (!actual)
     return fn.emitError() << llvm::toString(actual.takeError());
-  auto target = p.services.get<MatrixTarget>();
   auto native = op->getAttrOfType<StringAttr>("block.native_row");
-  int64_t operandBytes = contractionOperandBytes(op);
-  bool explicitRecordTiles =
-      target && target->implementations.count("q4k_dot") != 0;
-  if (!tile || tile.size() != 3 || !target || !native ||
-      !llvm::any_of(target->tiles, [&](auto &t) {
-        if (tile.asArrayRef() != ArrayRef<int64_t>{t.m, t.n, t.k} ||
-            native.getValue() != t.native ||
-            (t.maxOperandBytes && operandBytes > t.maxOperandBytes))
-          return false;
-        return domainMatchesTileOperation(op, t.operation, explicitRecordTiles);
-      }))
+  if (!native || !findMatrixTile(op, tile.asArrayRef(), p, native.getValue()))
     return op->emitError("tile is not supported on this target");
   if (!dims ||
       dims.asArrayRef() !=

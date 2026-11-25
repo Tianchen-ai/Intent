@@ -1,5 +1,5 @@
 #include "intentdsl/levels/algorithm/kir/ir/Performance.h"
-#include "intentdsl/levels/algorithm/kir/ir/Storage.h"
+#include "ScaledPanels.h"
 #include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
 #include "intentdsl/levels/execution/block/ir/Contraction.h"
 #include "intentdsl/levels/execution/block/ir/Owners.h"
@@ -7,6 +7,20 @@
 #include "intentdsl/levels/storage/dsa/ir/Supply.h"
 
 namespace CI_UNIT_NAMESPACE {
+static bool supportsSharedDecode(mlir::Operation *domain, int64_t depth,
+                                 const intentdsl::CallFacts &facts) {
+  return domain->walk([&](mlir::Operation *op) {
+    if (op->getName().stripDialect() != "quant_contract")
+      return mlir::WalkResult::advance();
+    auto *shape = facts.shapeOf(op->getOperand(0));
+    if (shape && shape->size() == 3 &&
+        sharedDecodeGroups(intentdsl::kir::quantFormatSpec(*op),
+                           (*shape)[1].getAsInteger().value_or(0), depth))
+      return mlir::WalkResult::interrupt();
+    return mlir::WalkResult::advance();
+  }).wasInterrupted();
+}
+
 static llvm::StringRef panelPlacement(intentdsl::block::MatrixAccess &a,
                                       int64_t participants,
                                       const intentdsl::dsa::MatrixStorage &ms) {
@@ -82,7 +96,7 @@ capabilities(const llvm::json::Object &opts) {
                      {64, 64, 256, "{}", "contract"},
                      {128, 64, 256, "{}"},
                      {512, 512, 256, "{}", "contract", 2},
-                     {512, 512, 128, "{}", "scaled_contract", 1},
+                     {512, 512, 128, "{}", "scaled_contract", 1, supportsSharedDecode},
                      {64, 64, 64, "{}", "window_contract"},
                      {32, 64, 64, "{}", "window_contract"}};
   auto wram = opts.getInteger("wram_bytes");

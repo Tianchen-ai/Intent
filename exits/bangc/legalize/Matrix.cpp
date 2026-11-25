@@ -1,3 +1,4 @@
+#include "../capabilities/ScaledPanels.h"
 #include "Matrix.h"
 #include "Rows.h"
 #include "intentdsl/exits/bangc/ir/Dialect.h"
@@ -3679,11 +3680,10 @@ struct MatrixLowerer {
           spec->packBits == 4 && spec->packFactor == 2 && !isRagged &&
           !isRouted) {
         int64_t groups = shapeK / spec->blockElements;
-        int64_t groupsPerPanel = std::gcd(
-            groups, std::max<int64_t>(1, bk / spec->blockElements));
+        int64_t groupsPerPanel = sharedDecodeGroups(spec, groups, bk);
         int64_t panelElems = groupsPerPanel * spec->blockElements;
         int64_t convK = std::max<int64_t>(panelElems, 64);
-        if (panelElems == convK) {
+        if (groupsPerPanel) {
           constexpr int64_t CM = 512, CN = 512, coreBM = 256, coreBN = 256,
                             HM = 128;
           int64_t recBytes = spec->recordBytes;
@@ -3732,6 +3732,18 @@ struct MatrixLowerer {
 
           Value isMpuInit = makeOp("is_mpu", {}, {b.getI1Type()})->getResult(0);
           ifThen(b.create<arith::XOrIOp>(loc, isMpuInit, cI1(true)), [&]() {
+            if (panelElems < convK) {
+              // Each IPU owns HM rows in both shared panels. Pitched copies
+              // below update only decoded lanes, so zero the padding once.
+              auto core = b.create<arith::AndIOp>(loc, makeSym("coreId"), cI64(3));
+              auto start = b.create<arith::MulIOp>(loc, core, cI64(HM * convK));
+              auto zero = b.create<arith::ConstantOp>(loc, b.getZeroAttr(b.getF16Type()));
+              fillVec(left0, cI64(HM * convK), zero);
+              sync("compute");
+              for (auto panel : {sA, sB})
+                memcpy1D(makeAddr(panel, {start}, {cI64(1)}, 4), left0,
+                         cI64(HM * convK), "NRAM2SRAM");
+            }
             int32_t vc =
                 spec->valueCode == intentdsl::kir::QuantValueCode::Fp4E2M1 ? 1
                                                                            : 0;
@@ -4034,7 +4046,7 @@ struct MatrixLowerer {
                                   cI64(0)),
                               cI64(64));
                           Value dstH = makeAddr(
-                              left1, {cI64(h * 64 * convK)}, {cI64(1)}, 1);
+                              left1, {cI64(h * 64 * panelElems)}, {cI64(1)}, 1);
                           auto okBIf = ifThenElse(
                               b.create<arith::CmpIOp>(
                                   loc, arith::CmpIPredicate::sgt, ncDec,
@@ -4064,7 +4076,7 @@ struct MatrixLowerer {
                                 b.create<scf::YieldOp>(loc, ValueRange{okB});
                               },
                               [&]() {
-                                fillVec(dstH, cI64(64 * convK), zeroHalf);
+                                fillVec(dstH, cI64(64 * panelElems), zeroHalf);
                                 b.create<scf::YieldOp>(loc,
                                                        ValueRange{cI1(true)});
                               },
@@ -4079,10 +4091,16 @@ struct MatrixLowerer {
                         ifThen(okCore, [&]() {
                           Value sOff = b.create<arith::MulIOp>(
                               loc, coreId, cI64(HM * convK));
-                          memcpy1D(makeAddr(sA, {sOff}, {cI64(1)}, 4), left0,
-                                   cI64(HM * convK), "NRAM2SRAM");
-                          memcpy1D(makeAddr(sB, {sOff}, {cI64(1)}, 4), left1,
-                                   cI64(HM * convK), "NRAM2SRAM");
+                          auto publish = [&](Value panel, Value decoded) {
+                            Value dst = makeAddr(panel, {sOff}, {cI64(1)}, 4);
+                            if (convK == panelElems)
+                              memcpy1D(dst, decoded, cI64(HM * convK), "NRAM2SRAM");
+                            else
+                              memcpy2D(dst, decoded, cI64(panelElems), cI64(convK),
+                                       cI64(panelElems), cI64(HM - 1), "NRAM2SRAM");
+                          };
+                          publish(sA, left0);
+                          publish(sB, left1);
                           sync("all");
                         });
                       });
@@ -4641,6 +4659,8 @@ struct MatrixLowerer {
       }
     }
 
+    if (isCluster512)
+      return p.dot.emitError("no cooperative implementation for the selected matrix tile");
     Type accElem = (mode == "exact-i8-conv") ? Type(b.getI32Type())
                                              : Type(b.getF32Type());
     Value acc = nramBuf(accElem, bm * bn);
