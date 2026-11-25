@@ -323,6 +323,10 @@ struct TiledTwoPassPlan {
   Value qMem;
   int64_t qOwnMemAx = -1, qVecMemAx = -1, D = 0, axOwn = -1, axD = -1;
   Value scaleVal;
+  Value outerScaleVal;
+  Value postScaleVal;
+  Value biasSlopeVal;
+  bool biasNegate = false;
 
   scf::ForOp loop1;
   Value kMem;
@@ -557,7 +561,8 @@ struct OrderedLowerer {
                       b.getNamedAttr("kind", b.getStringAttr("outer_contract")),
                       b.getNamedAttr("over", b.getDenseI64ArrayAttr({overAx})),
                       b.getNamedAttr("acc_type", b.getStringAttr("f32")),
-                      b.getNamedAttr("engine", b.getStringAttr("vector")),
+                      b.getNamedAttr("engine",
+                                     b.getStringAttr(isRvv ? "vector" : "auto")),
                       b.getNamedAttr("allow_subnormal_ftz", b.getBoolAttr(false)),
                       b.getNamedAttr("in_types",
                                      b.getArrayAttr({b.getStringAttr(lhs.type),
@@ -798,6 +803,7 @@ struct OrderedLowerer {
     if (!stepScore)
       return false;
     Value rawScore = stepScore;
+    Operation *pass1CausalIf = nullptr;
     if (auto selOp = stepScore.getDefiningOp<arith::SelectOp>()) {
       Value bnd;
       bool incl = true, inTrue = true;
@@ -810,18 +816,114 @@ struct OrderedLowerer {
       plan.hasCausal = true;
       plan.causalBoundVal = bnd;
       plan.causalInclusive = incl;
+    } else if (auto ifOp = stepScore.getDefiningOp<scf::IfOp>()) {
+      if (ifOp->getBlock() != loop1.getBody() || ifOp.getNumResults() != 1 ||
+          ifOp.getElseRegion().empty())
+        return false;
+      auto pureBlock = [](Block *bb) {
+        return llvm::all_of(bb->without_terminator(), [](Operation &o) {
+          return isMemoryEffectFree(&o) && o.getNumRegions() == 0;
+        });
+      };
+      if (!pureBlock(ifOp.thenBlock()) || !pureBlock(ifOp.elseBlock()))
+        return false;
+      Value bnd;
+      bool incl = true, inTrue = true;
+      if (!extractCausalCond(ifOp.getCondition(), iv1, bnd, incl, inTrue))
+        return false;
+      Value tVal = ifOp.thenYield().getOperand(0);
+      Value eVal = ifOp.elseYield().getOperand(0);
+      Value outVal = inTrue ? eVal : tVal;
+      if (!isNegInfConst(outVal))
+        return false;
+      rawScore = inTrue ? tVal : eVal;
+      pass1CausalIf = ifOp.getOperation();
+      plan.hasCausal = true;
+      plan.causalBoundVal = bnd;
+      plan.causalInclusive = incl;
     }
 
-    Value dotVal = rawScore;
-    if (auto mulSc = rawScore.getDefiningOp<arith::MulFOp>()) {
-      if (isTopCommon(isTopCommon, mulSc.getRhs())) {
-        dotVal = mulSc.getLhs();
-        plan.scaleVal = mulSc.getRhs();
-      } else if (isTopCommon(isTopCommon, mulSc.getLhs())) {
-        dotVal = mulSc.getRhs();
-        plan.scaleVal = mulSc.getLhs();
+    auto isFloatOfIndex = [](Value v, Value targetIdx) {
+      auto sit = v.getDefiningOp<arith::SIToFPOp>();
+      if (!sit)
+        return false;
+      auto ic = sit.getIn().getDefiningOp<arith::IndexCastOp>();
+      return ic && ic.getIn() == targetIdx;
+    };
+    auto matchScoreExpr = [&](Value expr, Value tokIv, Value &dotOut,
+                              Value &preScaleOut, Value &outerScaleOut,
+                              Value &slopeOut, bool &negOut) -> bool {
+      Value cur = expr;
+      preScaleOut = Value{};
+      outerScaleOut = Value{};
+      slopeOut = Value{};
+      negOut = false;
+      Value maybeOuter;
+      if (auto mulOuter = cur.getDefiningOp<arith::MulFOp>()) {
+        if (isTopCommon(isTopCommon, mulOuter.getRhs())) {
+          maybeOuter = mulOuter.getRhs();
+          cur = mulOuter.getLhs();
+        } else if (isTopCommon(isTopCommon, mulOuter.getLhs())) {
+          maybeOuter = mulOuter.getLhs();
+          cur = mulOuter.getRhs();
+        }
       }
-    }
+      if (auto addBias = cur.getDefiningOp<arith::AddFOp>()) {
+        auto tryBiasTerm = [&](Value candBias, Value candDot) -> bool {
+          auto mBias = candBias.getDefiningOp<arith::MulFOp>();
+          if (!mBias)
+            return false;
+          Value sl, df;
+          if (isTopCommon(isTopCommon, mBias.getLhs())) {
+            sl = mBias.getLhs();
+            df = mBias.getRhs();
+          } else if (isTopCommon(isTopCommon, mBias.getRhs())) {
+            sl = mBias.getRhs();
+            df = mBias.getLhs();
+          } else {
+            return false;
+          }
+          auto subPos = df.getDefiningOp<arith::SubFOp>();
+          if (!subPos)
+            return false;
+          if (isFloatOfIndex(subPos.getLhs(), tokIv) &&
+              isFloatOfIndex(subPos.getRhs(), innerArg)) {
+            slopeOut = sl;
+            negOut = false;
+          } else if (isFloatOfIndex(subPos.getLhs(), innerArg) &&
+                     isFloatOfIndex(subPos.getRhs(), tokIv)) {
+            slopeOut = sl;
+            negOut = true;
+          } else {
+            return false;
+          }
+          outerScaleOut = maybeOuter;
+          cur = candDot;
+          if (auto mulPre = cur.getDefiningOp<arith::MulFOp>()) {
+            if (isTopCommon(isTopCommon, mulPre.getRhs())) {
+              preScaleOut = mulPre.getRhs();
+              cur = mulPre.getLhs();
+            } else if (isTopCommon(isTopCommon, mulPre.getLhs())) {
+              preScaleOut = mulPre.getLhs();
+              cur = mulPre.getRhs();
+            }
+          }
+          return true;
+        };
+        if (!tryBiasTerm(addBias.getRhs(), addBias.getLhs()) &&
+            !tryBiasTerm(addBias.getLhs(), addBias.getRhs()))
+          return false;
+      } else {
+        preScaleOut = maybeOuter;
+      }
+      dotOut = cur;
+      return true;
+    };
+
+    Value dotVal;
+    if (!matchScoreExpr(rawScore, iv1, dotVal, plan.scaleVal, plan.outerScaleVal,
+                        plan.biasSlopeVal, plan.biasNegate))
+      return false;
     Operation *laneSum = dotVal.getDefiningOp();
     if (!laneSum || laneSum->getName().stripDialect() != "lane_sum")
       return false;
@@ -970,6 +1072,8 @@ struct OrderedLowerer {
         if (!okOff)
           return false;
       } else if (auto ifOp = dyn_cast<scf::IfOp>(op)) {
+        if (&op == pass1CausalIf)
+          continue;
         if (!ifOp->hasAttr("cpu.window_guard") || !ifOp.getElseRegion().empty())
           return false;
         plan.windowGuarded = true;
@@ -1041,21 +1145,48 @@ struct OrderedLowerer {
         return false;
 
       Value expVal = weightVal;
+      Operation *pass2CausalIf = nullptr;
       if (plan.hasCausal) {
-        auto sel2 = weightVal.getDefiningOp<arith::SelectOp>();
-        if (!sel2)
+        if (auto sel2 = weightVal.getDefiningOp<arith::SelectOp>()) {
+          Value bnd2;
+          bool incl2 = true, inTrue2 = true;
+          if (!extractCausalCond(sel2.getCondition(), iv2, bnd2, incl2,
+                                 inTrue2) ||
+              bnd2 != plan.causalBoundVal || incl2 != plan.causalInclusive)
+            return false;
+          Value zVal = inTrue2 ? sel2.getFalseValue() : sel2.getTrueValue();
+          if (!isZeroFloatConst(zVal))
+            return false;
+          expVal = inTrue2 ? sel2.getTrueValue() : sel2.getFalseValue();
+        } else if (auto if2 = weightVal.getDefiningOp<scf::IfOp>()) {
+          if (if2->getBlock() != lp2.getBody() || if2.getNumResults() != 1 ||
+              if2.getElseRegion().empty())
+            return false;
+          auto pureBlock = [](Block *bb) {
+            return llvm::all_of(bb->without_terminator(), [](Operation &o) {
+              return isMemoryEffectFree(&o) && o.getNumRegions() == 0;
+            });
+          };
+          if (!pureBlock(if2.thenBlock()) || !pureBlock(if2.elseBlock()))
+            return false;
+          Value bnd2;
+          bool incl2 = true, inTrue2 = true;
+          if (!extractCausalCond(if2.getCondition(), iv2, bnd2, incl2,
+                                 inTrue2) ||
+              bnd2 != plan.causalBoundVal || incl2 != plan.causalInclusive)
+            return false;
+          Value tVal = if2.thenYield().getOperand(0);
+          Value eVal = if2.elseYield().getOperand(0);
+          Value zVal = inTrue2 ? eVal : tVal;
+          if (!isZeroFloatConst(zVal))
+            return false;
+          expVal = inTrue2 ? tVal : eVal;
+          pass2CausalIf = if2.getOperation();
+        } else {
           return false;
-        Value bnd2;
-        bool incl2 = true, inTrue2 = true;
-        if (!extractCausalCond(sel2.getCondition(), iv2, bnd2, incl2,
-                               inTrue2) ||
-            bnd2 != plan.causalBoundVal || incl2 != plan.causalInclusive)
-          return false;
-        Value zVal = inTrue2 ? sel2.getFalseValue() : sel2.getTrueValue();
-        if (!isZeroFloatConst(zVal))
-          return false;
-        expVal = inTrue2 ? sel2.getTrueValue() : sel2.getFalseValue();
-      } else if (isa<arith::SelectOp>(weightVal.getDefiningOp())) {
+        }
+      } else if (isa_and_nonnull<arith::SelectOp, scf::IfOp>(
+                     weightVal.getDefiningOp())) {
         return false;
       }
 
@@ -1069,7 +1200,23 @@ struct OrderedLowerer {
       else if (plan.useExp2 != isExp2)
         return false;
 
-      auto diffSub = expOp->getOperand(0).getDefiningOp<arith::SubFOp>();
+      Value expArg = expOp->getOperand(0);
+      Value postSc;
+      if (auto mulPost = expArg.getDefiningOp<arith::MulFOp>()) {
+        if (isTopCommon(isTopCommon, mulPost.getRhs())) {
+          expArg = mulPost.getLhs();
+          postSc = mulPost.getRhs();
+        } else if (isTopCommon(isTopCommon, mulPost.getLhs())) {
+          expArg = mulPost.getRhs();
+          postSc = mulPost.getLhs();
+        }
+      }
+      if (recordV)
+        plan.postScaleVal = postSc;
+      else if (plan.postScaleVal != postSc)
+        return false;
+
+      auto diffSub = expArg.getDefiningOp<arith::SubFOp>();
       if (!diffSub || diffSub.getRhs() != loop1.getResult(0))
         return false;
       Value score2 = diffSub.getLhs();
@@ -1085,18 +1232,12 @@ struct OrderedLowerer {
         if (!okOff)
           return false;
       } else {
-        Value dot2 = score2;
-        if (plan.scaleVal) {
-          auto m2 = score2.getDefiningOp<arith::MulFOp>();
-          if (!m2)
-            return false;
-          if (m2.getRhs() == plan.scaleVal)
-            dot2 = m2.getLhs();
-          else if (m2.getLhs() == plan.scaleVal)
-            dot2 = m2.getRhs();
-          else
-            return false;
-        }
+        Value dot2, sc2, osc2, sl2;
+        bool neg2 = false;
+        if (!matchScoreExpr(score2, iv2, dot2, sc2, osc2, sl2, neg2) ||
+            sc2 != plan.scaleVal || osc2 != plan.outerScaleVal ||
+            sl2 != plan.biasSlopeVal || neg2 != plan.biasNegate)
+          return false;
         Operation *ls2 = dot2.getDefiningOp();
         if (!ls2 || ls2->getName().stripDialect() != "lane_sum")
           return false;
@@ -1214,6 +1355,8 @@ struct OrderedLowerer {
       for (Operation &op : lp2.getBody()->without_terminator()) {
         StringRef n = op.getName().getStringRef();
         StringRef sn = op.getName().stripDialect();
+        if (&op == pass2CausalIf)
+          continue;
         if (op.getNumRegions() != 0)
           return false;
         if (n != "cpu.buffer_load" && sn != "slice_read" &&
@@ -1362,6 +1505,8 @@ struct OrderedLowerer {
     const std::string si64TTy = "!weft_kernel.value<si64,[" +
                                 std::to_string(T) + "],[" +
                                 std::to_string(plan.axTok) + "]>";
+    const std::string vecTTy = "!weft_kernel.value<f32,[" + std::to_string(T) +
+                               "],[" + std::to_string(plan.axTok) + "]>";
     const std::string scoreMatTy =
         "!weft_kernel.value<f32,[" + std::to_string(B) + "," +
         std::to_string(T) + "],[" + std::to_string(plan.axOwn) + "," +
@@ -1455,8 +1600,145 @@ struct OrderedLowerer {
     if (plan.yTruncOp)
       skipOps.insert(plan.yTruncOp);
 
-    TaskTerm qScaled, scaleTerm, peakVec, massVec, outMat;
+    TaskTerm qForContract, qRawSaved, scaleTerm, outerScaleTerm, postScaleTerm,
+        effBiasSlopeTerm, qBiasTerm, qPosF32, peakVec, massVec, outMat;
     bool directSubCommitted = false;
+    bool outInTiledBuf = false;
+    const bool nativeQK =
+        !isRvv && (qElem == "f32" || qElem == "bf16" || qElem == "f16") &&
+        (kElem == "f32" || kElem == "bf16" || kElem == "f16");
+    const bool nativeV =
+        !isRvv && (vElem == "f32" || vElem == "bf16" || vElem == "f16");
+    const int64_t subDV = (B <= 8 && plan.DV % 32 == 0) ? 32 : 16;
+    const bool useTiledOut =
+        tiledOutBuf.v && plan.DV > 16 && plan.DV % subDV == 0;
+    const std::string subOutTy =
+        "!weft_kernel.value<f32,[" + std::to_string(B) + "," +
+        std::to_string(subDV) + "],[" + std::to_string(plan.axOwn) + "," +
+        std::to_string(plan.axDV) + "]>";
+    const std::string subMaskOutTy =
+        "!weft_kernel.value<i1,[" + std::to_string(B) + "," +
+        std::to_string(subDV) + "],[" + std::to_string(plan.axOwn) + "," +
+        std::to_string(plan.axDV) + "]>";
+    const std::string subSi64OutTy =
+        "!weft_kernel.value<si64,[" + std::to_string(B) + "," +
+        std::to_string(subDV) + "],[" + std::to_string(plan.axOwn) + "," +
+        std::to_string(plan.axDV) + "]>";
+    const std::string vSubRawMatTy =
+        "!weft_kernel.value<" + vElem + ",[" + std::to_string(T) + "," +
+        std::to_string(subDV) + "],[" + std::to_string(plan.axTok) + "," +
+        std::to_string(plan.axDV) + "]>";
+    const std::string vSubF32MatTy =
+        "!weft_kernel.value<f32,[" + std::to_string(T) + "," +
+        std::to_string(subDV) + "],[" + std::to_string(plan.axTok) + "," +
+        std::to_string(plan.axDV) + "]>";
+    const std::string vSubRaw1DTy =
+        "!weft_kernel.value<" + vElem + ",[" + std::to_string(subDV) + "],[" +
+        std::to_string(plan.axDV) + "]>";
+    const std::string vSubF321DTy =
+        "!weft_kernel.value<f32,[" + std::to_string(subDV) + "],[" +
+        std::to_string(plan.axDV) + "]>";
+    const std::string ySubMatTy =
+        "!weft_kernel.value<" + yElem + ",[" + std::to_string(B) + "," +
+        std::to_string(subDV) + "],[" + std::to_string(plan.axOwn) + "," +
+        std::to_string(plan.axDV) + "]>";
+    TaskTerm subOutSlotOff, trueSubO, zeroSubO;
+    if (useTiledOut) {
+      std::string idxSubOnAxDVTy = "!weft_kernel.value<index,[" +
+                                   std::to_string(subDV) + "],[" +
+                                   std::to_string(plan.axDV) + "]>";
+      std::string si64SubOnAxDVTy = "!weft_kernel.value<si64,[" +
+                                    std::to_string(subDV) + "],[" +
+                                    std::to_string(plan.axDV) + "]>";
+      Value isAxDV =
+          makeOp(b, loc, "task_iota", {}, {b.getIndexType()},
+                 {b.getNamedAttr("start", b.getI64IntegerAttr(0)),
+                  b.getNamedAttr("end", b.getI64IntegerAttr(subDV)),
+                  b.getNamedAttr("val_type", b.getStringAttr(idxSubOnAxDVTy))})
+              ->getResult(0);
+      TaskTerm iotaSubAxDV64 =
+          castOp({isAxDV, idxSubOnAxDVTy}, si64SubOnAxDVTy);
+      TaskTerm cDV64 = lit(std::to_string(plan.DV), "si64");
+      subOutSlotOff = bin("add", bin("mul", iotaOwn64, cDV64, si64BTy),
+                          iotaSubAxDV64, subSi64OutTy);
+      trueSubO = newVec(true1, subMaskOutTy);
+      zeroSubO = newVec(zeroS, subOutTy);
+    }
+    auto applyScoreAffine2D = [&](TaskTerm sc, TaskTerm tIv) -> TaskTerm {
+      if (scaleTerm.v)
+        sc = bin("mul", sc, scaleTerm, scoreMatTy);
+      if (effBiasSlopeTerm.v) {
+        TaskTerm t64 = castOp(tIv, "si64");
+        TaskTerm tPosF32 =
+            castOp(bin("add", iotaTok64, t64, si64TTy), vecTTy);
+        TaskTerm tBias = bin("mul", tPosF32, effBiasSlopeTerm, vecTTy);
+        sc = bin("add", sc, qBiasTerm, scoreMatTy);
+        sc = bin("sub", sc, tBias, scoreMatTy);
+      }
+      if (outerScaleTerm.v)
+        sc = bin("mul", sc, outerScaleTerm, scoreMatTy);
+      return sc;
+    };
+    auto applyScoreAffine1D = [&](TaskTerm sc1D, TaskTerm tIv) -> TaskTerm {
+      if (scaleTerm.v)
+        sc1D = bin("mul", sc1D, scaleTerm, vecBTy);
+      if (effBiasSlopeTerm.v) {
+        TaskTerm tPosS = castOp(castOp(tIv, "si64"), "f32");
+        TaskTerm tBiasS = bin("mul", tPosS, effBiasSlopeTerm, "f32");
+        sc1D = bin("add", sc1D, qBiasTerm, vecBTy);
+        sc1D = bin("sub", sc1D, tBiasS, vecBTy);
+      }
+      if (outerScaleTerm.v)
+        sc1D = bin("mul", sc1D, outerScaleTerm, vecBTy);
+      return sc1D;
+    };
+    auto applyPostSubScale = [&](TaskTerm diff, StringRef ty) -> TaskTerm {
+      if (postScaleTerm.v)
+        diff = bin("mul", diff, postScaleTerm, ty);
+      return diff;
+    };
+    const bool allowExpFtz = !isRvv && intentdsl::kir::allowsSubnormalFtz(fn);
+    TaskTerm ftzMinS = allowExpFtz
+                           ? lit(plan.useExp2 ? "-126.0" : "-87.33", "f32")
+                           : TaskTerm{};
+    auto emitExpWeight2D = [&](TaskTerm diff, TaskTerm tIv, TaskTerm boundVec64,
+                               StringRef causalPred) -> TaskTerm {
+      if (plan.useExp2 && isRvv)
+        diff = bin("mul", diff, ln2S, scoreMatTy);
+      TaskTerm keepMask;
+      if (allowExpFtz) {
+        keepMask = cmp("ge", diff, ftzMinS, maskMatTy);
+        diff = bin("max", diff, ftzMinS, scoreMatTy);
+      }
+      TaskTerm ex = (plan.useExp2 && !isRvv) ? unaryOp("exp2", diff)
+                                             : unaryOp("exp", diff);
+      if (plan.hasCausal) {
+        TaskTerm t64 = castOp(tIv, "si64");
+        TaskTerm tVec64 = bin("add", iotaTok64, t64, si64TTy);
+        TaskTerm cm = cmp(causalPred, boundVec64, tVec64, maskMatTy);
+        keepMask = keepMask.v ? bin("and", cm, keepMask, maskMatTy) : cm;
+      }
+      return keepMask.v ? sel(keepMask, ex, zeroM, scoreMatTy) : ex;
+    };
+    auto emitExpWeight1D = [&](TaskTerm diff1D, TaskTerm tIv,
+                               TaskTerm boundVec64,
+                               StringRef causalPred) -> TaskTerm {
+      if (plan.useExp2 && isRvv)
+        diff1D = bin("mul", diff1D, ln2S, vecBTy);
+      TaskTerm keepMask;
+      if (allowExpFtz) {
+        keepMask = cmp("ge", diff1D, ftzMinS, maskBTy);
+        diff1D = bin("max", diff1D, ftzMinS, vecBTy);
+      }
+      TaskTerm ex1D = (plan.useExp2 && !isRvv) ? unaryOp("exp2", diff1D)
+                                               : unaryOp("exp", diff1D);
+      if (plan.hasCausal) {
+        TaskTerm t64 = castOp(tIv, "si64");
+        TaskTerm cm = cmp(causalPred, boundVec64, t64, maskBTy);
+        keepMask = keepMask.v ? bin("and", cm, keepMask, maskBTy) : cm;
+      }
+      return keepMask.v ? sel(keepMask, ex1D, zeroV, vecBTy) : ex1D;
+    };
     auto computeInvVec = [&](TaskTerm mv) -> TaskTerm {
       if (plan.hasDirectRecip)
         return bin("div", oneS, mv, vecBTy);
@@ -1565,9 +1847,32 @@ struct OrderedLowerer {
         TaskTerm c0 = idx(0), c1 = idx(1), cT = idx(T);
         TaskTerm qRaw = subview2D(qSl, lanes[0].at(innerArg).v, c0.v, B, plan.D,
                                   true, qRawMatTy);
-        TaskTerm qMatF32 = (qElem == "f32") ? qRaw : castOp(qRaw, qF32MatTy);
+        qRawSaved = qRaw;
+        qForContract =
+            (nativeQK || qElem == "f32") ? qRaw : castOp(qRaw, qF32MatTy);
         scaleTerm = plan.scaleVal ? lanes[0].at(plan.scaleVal) : TaskTerm{};
-        qScaled = qMatF32;
+        outerScaleTerm =
+            plan.outerScaleVal ? lanes[0].at(plan.outerScaleVal) : TaskTerm{};
+        postScaleTerm =
+            plan.postScaleVal ? lanes[0].at(plan.postScaleVal) : TaskTerm{};
+        if (plan.biasSlopeVal) {
+          TaskTerm rawSlope = lanes[0].at(plan.biasSlopeVal);
+          effBiasSlopeTerm = plan.biasNegate
+                                 ? rawSlope
+                                 : bin("sub", zeroS, rawSlope, "f32");
+          if (outerScaleTerm.v) {
+            if (scaleTerm.v)
+              scaleTerm = bin("mul", scaleTerm, outerScaleTerm, "f32");
+            else
+              scaleTerm = outerScaleTerm;
+            effBiasSlopeTerm =
+                bin("mul", effBiasSlopeTerm, outerScaleTerm, "f32");
+            outerScaleTerm = TaskTerm{};
+          }
+          TaskTerm qb64 = castOp(lanes[0].at(innerArg), "si64");
+          qPosF32 = castOp(bin("add", iotaOwn64, qb64, si64BTy), vecBTy);
+          qBiasTerm = bin("mul", qPosF32, effBiasSlopeTerm, vecBTy);
+        }
 
         SmallVector<Value, 4> kOtherCoords;
         for (auto [pos, c] : llvm::enumerate(plan.kCoords))
@@ -1613,10 +1918,10 @@ struct OrderedLowerer {
           b.setInsertionPointToEnd(&fBb);
           TaskTerm kRaw =
               subview2D(kSl2D, tIv.v, c0.v, T, plan.D, true, kRawMatTy);
-          TaskTerm kF = (kElem == "f32") ? kRaw : castOp(kRaw, kF32MatTy);
-          TaskTerm sc = outerContractOp(qScaled, kF, plan.axD, scoreMatTy);
-          if (scaleTerm.v)
-            sc = bin("mul", sc, scaleTerm, scoreMatTy);
+          TaskTerm kForC =
+              (nativeQK || kElem == "f32") ? kRaw : castOp(kRaw, kF32MatTy);
+          TaskTerm sc = outerContractOp(qForContract, kForC, plan.axD, scoreMatTy);
+          sc = applyScoreAffine2D(sc, tIv);
           if (plan.hasScoreBuffer) {
             TaskTerm offIdx = loC && *loC == 0 ? tIv : bin("sub", tIv, lb, "index");
             TaskTerm off64 = castOp(offIdx, "si64");
@@ -1663,70 +1968,88 @@ struct OrderedLowerer {
         peakVec = {p1Main->getResult(0), vecBTy};
 
         if (!exactTiles) {
-          Operation *p1Tail = makeOp(
-              b, loc, "task_for", {tMain.v, ub.v, c1.v, peakVec.v},
-              {b.getIndexType()},
-              {b.getNamedAttr("iter_types",
-                              b.getArrayAttr({b.getStringAttr(vecBTy)}))},
-              1);
+          TaskTerm hasTail =
+              cmp("lt", castOp(tMain, "si64"), castOp(ub, "si64"), "i1");
+          ArrayAttr pkResTy = b.getArrayAttr({b.getStringAttr(vecBTy)});
+          Operation *tailIf =
+              makeOp(b, loc, "task_if", {hasTail.v}, {b.getIndexType()},
+                     {b.getNamedAttr("res_types", pkResTy)}, 2);
           {
-            Block &fBb = p1Tail->getRegion(0).emplaceBlock();
-            TaskTerm tIv{fBb.addArgument(b.getIndexType(), loc), "index"};
-            TaskTerm pkIter{fBb.addArgument(b.getIndexType(), loc), vecBTy};
-            OpBuilder::InsertionGuard g(b);
-            b.setInsertionPointToEnd(&fBb);
-            TaskTerm kRaw1D =
-                slice1DAtTok(plan.kMem, plan.kCoords, plan.kTokCoordPos, tIv.v,
-                             plan.kVecMemAx, kRaw1DTy);
-            TaskTerm kF1D =
-                (kElem == "f32") ? kRaw1D : castOp(kRaw1D, kF321DTy);
-            TaskTerm prod = bin("mul", qScaled, kF1D, qF32MatTy);
-            TaskTerm sc1D = reduceOp(prod, "add", 1, vecBTy);
-            if (scaleTerm.v)
-              sc1D = bin("mul", sc1D, scaleTerm, vecBTy);
-            if (plan.hasScoreBuffer) {
-              TaskTerm offIdx =
-                  loC && *loC == 0 ? tIv : bin("sub", tIv, lb, "index");
-              TaskTerm off64 = castOp(offIdx, "si64");
-              TaskTerm baseOff = bin("mul", off64, cB64, "si64");
-              TaskTerm pOff1D = bin("add", qSlotOff, baseOff, si64BTy);
-              auto emitStore1D = [&]() {
-                makeOp(b, loc, "task_ptr_store",
-                       {tiledScoreBuf.v, pOff1D.v, trueB.v, sc1D.v}, {},
-                       {b.getNamedAttr(
-                            "ptr_type",
-                            b.getStringAttr("!weft_kernel.pointer<f32>")),
-                        b.getNamedAttr("val_type", b.getStringAttr(vecBTy))});
-              };
-              if (staticallyFitsWindow) {
-                emitStore1D();
-              } else {
-                TaskTerm inW = cmp("lt", off64,
-                                   lit(std::to_string(plan.scoreSlots), "si64"),
-                                   "i1");
-                Operation *wIf = makeOp(
-                    b, loc, "task_if", {inW.v}, {},
-                    {b.getNamedAttr("res_types", b.getArrayAttr({}))}, 2);
-                Block &wBb = wIf->getRegion(0).emplaceBlock();
-                OpBuilder::InsertionGuard wg(b);
-                b.setInsertionPointToEnd(&wBb);
-                emitStore1D();
-                makeOp(b, loc, "task_yield", {}, {},
-                       {b.getNamedAttr("val_types", b.getArrayAttr({}))});
+            Block &tIfBb = tailIf->getRegion(0).emplaceBlock();
+            OpBuilder::InsertionGuard ig(b);
+            b.setInsertionPointToEnd(&tIfBb);
+            TaskTerm qTailF32 =
+                (qElem == "f32") ? qRawSaved : castOp(qRawSaved, qF32MatTy);
+            Operation *p1Tail = makeOp(
+                b, loc, "task_for", {tMain.v, ub.v, c1.v, peakVec.v},
+                {b.getIndexType()},
+                {b.getNamedAttr("iter_types", pkResTy)}, 1);
+            {
+              Block &fBb = p1Tail->getRegion(0).emplaceBlock();
+              TaskTerm tIv{fBb.addArgument(b.getIndexType(), loc), "index"};
+              TaskTerm pkIter{fBb.addArgument(b.getIndexType(), loc), vecBTy};
+              OpBuilder::InsertionGuard g(b);
+              b.setInsertionPointToEnd(&fBb);
+              TaskTerm kRaw1D =
+                  slice1DAtTok(plan.kMem, plan.kCoords, plan.kTokCoordPos,
+                               tIv.v, plan.kVecMemAx, kRaw1DTy);
+              TaskTerm kF1D =
+                  (kElem == "f32") ? kRaw1D : castOp(kRaw1D, kF321DTy);
+              TaskTerm prod = bin("mul", qTailF32, kF1D, qF32MatTy);
+              TaskTerm sc1D = reduceOp(prod, "add", 1, vecBTy);
+              sc1D = applyScoreAffine1D(sc1D, tIv);
+              if (plan.hasScoreBuffer) {
+                TaskTerm offIdx =
+                    loC && *loC == 0 ? tIv : bin("sub", tIv, lb, "index");
+                TaskTerm off64 = castOp(offIdx, "si64");
+                TaskTerm baseOff = bin("mul", off64, cB64, "si64");
+                TaskTerm pOff1D = bin("add", qSlotOff, baseOff, si64BTy);
+                auto emitStore1D = [&]() {
+                  makeOp(b, loc, "task_ptr_store",
+                         {tiledScoreBuf.v, pOff1D.v, trueB.v, sc1D.v}, {},
+                         {b.getNamedAttr(
+                              "ptr_type",
+                              b.getStringAttr("!weft_kernel.pointer<f32>")),
+                          b.getNamedAttr("val_type", b.getStringAttr(vecBTy))});
+                };
+                if (staticallyFitsWindow) {
+                  emitStore1D();
+                } else {
+                  TaskTerm inW = cmp("lt", off64,
+                                     lit(std::to_string(plan.scoreSlots), "si64"),
+                                     "i1");
+                  Operation *wIf = makeOp(
+                      b, loc, "task_if", {inW.v}, {},
+                      {b.getNamedAttr("res_types", b.getArrayAttr({}))}, 2);
+                  Block &wBb = wIf->getRegion(0).emplaceBlock();
+                  OpBuilder::InsertionGuard wg(b);
+                  b.setInsertionPointToEnd(&wBb);
+                  emitStore1D();
+                  makeOp(b, loc, "task_yield", {}, {},
+                         {b.getNamedAttr("val_types", b.getArrayAttr({}))});
+                }
               }
+              TaskTerm msc1D = sc1D;
+              if (plan.hasCausal) {
+                TaskTerm t64 = castOp(tIv, "si64");
+                TaskTerm m1D = cmp(causalPred, boundVec64, t64, maskBTy);
+                msc1D = sel(m1D, sc1D, ninfV, vecBTy);
+              }
+              TaskTerm npk = bin("max", pkIter, msc1D, vecBTy);
+              makeOp(b, loc, "task_yield", {npk.v}, {},
+                     {b.getNamedAttr("val_types", pkResTy)});
             }
-            TaskTerm msc1D = sc1D;
-            if (plan.hasCausal) {
-              TaskTerm t64 = castOp(tIv, "si64");
-              TaskTerm m1D = cmp(causalPred, boundVec64, t64, maskBTy);
-              msc1D = sel(m1D, sc1D, ninfV, vecBTy);
-            }
-            TaskTerm npk = bin("max", pkIter, msc1D, vecBTy);
-            makeOp(b, loc, "task_yield", {npk.v}, {},
-                   {b.getNamedAttr("val_types",
-                                   b.getArrayAttr({b.getStringAttr(vecBTy)}))});
+            makeOp(b, loc, "task_yield", {p1Tail->getResult(0)}, {},
+                   {b.getNamedAttr("val_types", pkResTy)});
           }
-          peakVec = {p1Tail->getResult(0), vecBTy};
+          {
+            Block &eIfBb = tailIf->getRegion(1).emplaceBlock();
+            OpBuilder::InsertionGuard eg(b);
+            b.setInsertionPointToEnd(&eIfBb);
+            makeOp(b, loc, "task_yield", {peakVec.v}, {},
+                   {b.getNamedAttr("val_types", pkResTy)});
+          }
+          peakVec = {tailIf->getResult(0), vecBTy};
         }
         if (llvm::any_of(plan.loop1.getResult(0).getUsers(), [&](Operation *u) {
               return !plan.stage2Op->isAncestor(u);
@@ -1785,9 +2108,7 @@ struct OrderedLowerer {
 
         auto emitPass2 =
             [&](bool fromBuffer) -> std::pair<TaskTerm, TaskTerm> {
-          if (fromBuffer && tiledOutBuf.v && exactTiles && plan.DV > 16 &&
-              plan.DV % 16 == 0) {
-            constexpr int64_t subDV = 16;
+          if (fromBuffer && useTiledOut) {
             ArrayAttr wIterTys = b.getArrayAttr({b.getStringAttr(vecBTy)});
             Operation *p2WMain = makeOp(
                 b, loc, "task_for", {lb.v, tMain.v, cT.v, zeroV.v},
@@ -1815,18 +2136,10 @@ struct OrderedLowerer {
                                              b.getStringAttr(scoreMatTy))})
                              ->getResult(0);
               TaskTerm sc{ld, scoreMatTy};
-              TaskTerm diff = bin("sub", sc, peakVec, scoreMatTy);
-              if (plan.useExp2 && isRvv)
-                diff = bin("mul", diff, ln2S, scoreMatTy);
-              TaskTerm ex = (plan.useExp2 && !isRvv) ? unaryOp("exp2", diff)
-                                                     : unaryOp("exp", diff);
-              TaskTerm wt = ex;
-              if (plan.hasCausal) {
-                TaskTerm t64 = castOp(tIv, "si64");
-                TaskTerm tVec64 = bin("add", iotaTok64, t64, si64TTy);
-                TaskTerm m = cmp(causalPred, boundVec64, tVec64, maskMatTy);
-                wt = sel(m, ex, zeroM, scoreMatTy);
-              }
+              TaskTerm diff =
+                  applyPostSubScale(bin("sub", sc, peakVec, scoreMatTy),
+                                    scoreMatTy);
+              TaskTerm wt = emitExpWeight2D(diff, tIv, boundVec64, causalPred);
               TaskTerm rsum = reduceOp(wt, "add", 1, vecBTy);
               TaskTerm nms = bin("add", msIter, rsum, vecBTy);
               TaskTerm wF = plan.weightRoundType
@@ -1842,38 +2155,71 @@ struct OrderedLowerer {
                      {b.getNamedAttr("val_types", wIterTys)});
             }
             TaskTerm msFinal{p2WMain->getResult(0), vecBTy};
+            if (!exactTiles) {
+              Operation *p2WTail = makeOp(
+                  b, loc, "task_for", {tMain.v, ub.v, c1.v, msFinal.v},
+                  {b.getIndexType()},
+                  {b.getNamedAttr("iter_types", wIterTys)}, 1);
+              {
+                Block &fBb = p2WTail->getRegion(0).emplaceBlock();
+                TaskTerm tIv{fBb.addArgument(b.getIndexType(), loc), "index"};
+                TaskTerm msIter{fBb.addArgument(b.getIndexType(), loc), vecBTy};
+                OpBuilder::InsertionGuard g(b);
+                b.setInsertionPointToEnd(&fBb);
+                TaskTerm offIdx =
+                    loC && *loC == 0 ? tIv : bin("sub", tIv, lb, "index");
+                TaskTerm off64 = castOp(offIdx, "si64");
+                TaskTerm baseOff = bin("mul", off64, cB64, "si64");
+                TaskTerm pOff1D = bin("add", qSlotOff, baseOff, si64BTy);
+                Value ld =
+                    makeOp(b, loc, "task_ptr_load",
+                           {tiledScoreBuf.v, pOff1D.v, trueB.v, zeroV.v},
+                           {b.getIndexType()},
+                           {b.getNamedAttr(
+                                "ptr_type",
+                                b.getStringAttr("!weft_kernel.pointer<f32>")),
+                            b.getNamedAttr("val_type", b.getStringAttr(vecBTy))})
+                        ->getResult(0);
+                TaskTerm sc1D{ld, vecBTy};
+                TaskTerm diff1D =
+                    applyPostSubScale(bin("sub", sc1D, peakVec, vecBTy),
+                                      vecBTy);
+                TaskTerm wt1D =
+                    emitExpWeight1D(diff1D, tIv, boundVec64, causalPred);
+                TaskTerm nms = bin("add", msIter, wt1D, vecBTy);
+                TaskTerm wF1D = plan.weightRoundType
+                                    ? castOp(castOp(wt1D, narrowVecBTy), vecBTy)
+                                    : wt1D;
+                makeOp(b, loc, "task_ptr_store",
+                       {tiledScoreBuf.v, pOff1D.v, trueB.v, wF1D.v}, {},
+                       {b.getNamedAttr(
+                            "ptr_type",
+                            b.getStringAttr("!weft_kernel.pointer<f32>")),
+                        b.getNamedAttr("val_type", b.getStringAttr(vecBTy))});
+                makeOp(b, loc, "task_yield", {nms.v}, {},
+                       {b.getNamedAttr("val_types", wIterTys)});
+              }
+              msFinal = {p2WTail->getResult(0), vecBTy};
+            }
 
-            std::string vSubRawMatTy =
-                "!weft_kernel.value<" + vElem + ",[" + std::to_string(T) + "," +
-                std::to_string(subDV) + "],[" + std::to_string(plan.axTok) +
-                "," + std::to_string(plan.axDV) + "]>";
-            std::string vSubF32MatTy =
-                "!weft_kernel.value<f32,[" + std::to_string(T) + "," +
-                std::to_string(subDV) + "],[" + std::to_string(plan.axTok) +
-                "," + std::to_string(plan.axDV) + "]>";
-            std::string subOutTy =
-                "!weft_kernel.value<f32,[" + std::to_string(B) + "," +
-                std::to_string(subDV) + "],[" + std::to_string(plan.axOwn) +
-                "," + std::to_string(plan.axDV) + "]>";
-            TaskTerm zeroSubO = newVec(zeroS, subOutTy);
             ArrayAttr subIterTys = b.getArrayAttr({b.getStringAttr(subOutTy)});
-
-            if (staticallyFitsWindow) {
-              TaskTerm invVec =
-                  plan.yMulOp ? computeInvVec(msFinal) : TaskTerm{};
-              std::string ySubMatTy =
-                  "!weft_kernel.value<" + yElem + ",[" + std::to_string(B) +
-                  "," + std::to_string(subDV) + "],[" +
-                  std::to_string(plan.axOwn) + "," + std::to_string(plan.axDV) +
-                  "]>";
+            TaskTerm c0Idx = idx(0), cDvIdx = idx(plan.DV),
+                     cSubDvIdx = idx(subDV);
+            bool directCommitHere = staticallyFitsWindow;
+            TaskTerm invVec =
+                (directCommitHere && plan.yMulOp) ? computeInvVec(msFinal)
+                                                  : TaskTerm{};
+            TaskTerm ySl2D;
+            std::string commitSubSlTy;
+            if (directCommitHere) {
               SmallVector<Value, 4> yOtherCoords;
               for (auto [pos, c] :
                    llvm::enumerate(plan.yWriteOp->getOperands().drop_front(2)))
                 if (int64_t(pos) != plan.yOwnMemAx)
                   yOtherCoords.push_back(c);
-              TaskTerm ySl2D = slice2D(plan.yMem, yOtherCoords, plan.yOwnMemAx,
-                                       plan.yVecMemAx);
-              std::string commitSubSlTy = ySl2D.type;
+              ySl2D = slice2D(plan.yMem, yOtherCoords, plan.yOwnMemAx,
+                              plan.yVecMemAx);
+              commitSubSlTy = ySl2D.type;
               if (auto brk = commitSubSlTy.rfind(">,[");
                   brk != std::string::npos) {
                 auto cls = commitSubSlTy.find(']', brk + 2);
@@ -1881,108 +2227,15 @@ struct OrderedLowerer {
                                       "[" + std::to_string(B) + "," +
                                           std::to_string(subDV) + "]");
               }
-              // Runtime loop over subDV strips avoids duplicating Pass 2b and
-              // keeps the compiled owner task well inside the 32 KB L1I cache.
-              TaskTerm c0Idx = idx(0), cDvIdx = idx(plan.DV),
-                       cSubDvIdx = idx(subDV);
-              Operation *dvFor = makeOp(
-                  b, loc, "task_for", {c0Idx.v, cDvIdx.v, cSubDvIdx.v}, {},
-                  {b.getNamedAttr("iter_types", b.getArrayAttr({}))}, 1);
-              {
-                Block &dvBb = dvFor->getRegion(0).emplaceBlock();
-                TaskTerm dv0Idx{dvBb.addArgument(b.getIndexType(), loc),
-                                "index"};
-                OpBuilder::InsertionGuard dvg(b);
-                b.setInsertionPointToEnd(&dvBb);
-                Operation *p2SubMain = makeOp(
-                    b, loc, "task_for", {lb.v, tMain.v, cT.v, zeroSubO.v},
-                    {b.getIndexType()},
-                    {b.getNamedAttr("iter_types", subIterTys)}, 1);
-                {
-                  Block &fBb = p2SubMain->getRegion(0).emplaceBlock();
-                  TaskTerm tIv{fBb.addArgument(b.getIndexType(), loc), "index"};
-                  TaskTerm subAcc{fBb.addArgument(b.getIndexType(), loc),
-                                  subOutTy};
-                  OpBuilder::InsertionGuard g(b);
-                  b.setInsertionPointToEnd(&fBb);
-                  TaskTerm offIdx =
-                      loC && *loC == 0 ? tIv : bin("sub", tIv, lb, "index");
-                  TaskTerm off64 = castOp(offIdx, "si64");
-                  TaskTerm baseOff = bin("mul", off64, cB64, "si64");
-                  TaskTerm wOff = bin("add", tileSlotOff, baseOff, si64MatTy);
-                  Value wLd =
-                      makeOp(b, loc, "task_ptr_load",
-                             {tiledScoreBuf.v, wOff.v, trueM.v, zeroM.v},
-                             {b.getIndexType()},
-                             {b.getNamedAttr(
-                                  "ptr_type",
-                                  b.getStringAttr("!weft_kernel.pointer<f32>")),
-                              b.getNamedAttr("val_type",
-                                             b.getStringAttr(scoreMatTy))})
-                          ->getResult(0);
-                  TaskTerm wFull{wLd, scoreMatTy};
-                  TaskTerm vRawSub = subview2D(vSl2D, tIv.v, dv0Idx.v, T, subDV,
-                                               true, vSubRawMatTy);
-                  TaskTerm vFSub = (vElem == "f32")
-                                       ? vRawSub
-                                       : castOp(vRawSub, vSubF32MatTy);
-                  TaskTerm dSub =
-                      outerContractOp(wFull, vFSub, plan.axTok, subOutTy);
-                  TaskTerm nSub = bin("add", subAcc, dSub, subOutTy);
-                  makeOp(b, loc, "task_yield", {nSub.v}, {},
-                         {b.getNamedAttr("val_types", subIterTys)});
-                }
-                TaskTerm subRes{p2SubMain->getResult(0), subOutTy};
-                TaskTerm scaledSub =
-                    plan.yMulOp ? bin("mul", subRes, invVec, subOutTy) : subRes;
-                TaskTerm finalSub = (yElem == "f32")
-                                        ? scaledSub
-                                        : castOp(scaledSub, ySubMatTy);
-                TaskTerm ySubTile = subview2D(ySl2D, lanes[0].at(innerArg).v,
-                                              dv0Idx.v, B, subDV, false,
-                                              ySl2D.type);
-                makeOp(b, loc, "task_commit", {finalSub.v, ySubTile.v}, {},
-                       {b.getNamedAttr("val_type",
-                                       b.getStringAttr(finalSub.type)),
-                        b.getNamedAttr("slice_type",
-                                       b.getStringAttr(commitSubSlTy))});
-                makeOp(b, loc, "task_yield", {}, {},
-                       {b.getNamedAttr("val_types", b.getArrayAttr({}))});
-              }
-              directSubCommitted = true;
-              return {msFinal, TaskTerm{}};
             }
-
-            std::string subMaskOutTy =
-                "!weft_kernel.value<i1,[" + std::to_string(B) + "," +
-                std::to_string(subDV) + "],[" + std::to_string(plan.axOwn) +
-                "," + std::to_string(plan.axDV) + "]>";
-            std::string subSi64OutTy =
-                "!weft_kernel.value<si64,[" + std::to_string(B) + "," +
-                std::to_string(subDV) + "],[" + std::to_string(plan.axOwn) +
-                "," + std::to_string(plan.axDV) + "]>";
-            std::string idxSubOnAxDVTy = "!weft_kernel.value<index,[" +
-                                         std::to_string(subDV) + "],[" +
-                                         std::to_string(plan.axDV) + "]>";
-            std::string si64SubOnAxDVTy = "!weft_kernel.value<si64,[" +
-                                          std::to_string(subDV) + "],[" +
-                                          std::to_string(plan.axDV) + "]>";
-            Value isAxDV =
-                makeOp(b, loc, "task_iota", {}, {b.getIndexType()},
-                       {b.getNamedAttr("start", b.getI64IntegerAttr(0)),
-                        b.getNamedAttr("end", b.getI64IntegerAttr(subDV)),
-                        b.getNamedAttr("val_type",
-                                       b.getStringAttr(idxSubOnAxDVTy))})
-                    ->getResult(0);
-            TaskTerm iotaSubAxDV64 =
-                castOp({isAxDV, idxSubOnAxDVTy}, si64SubOnAxDVTy);
-            TaskTerm cDV64 = lit(std::to_string(plan.DV), "si64");
-            TaskTerm subOutSlotOff = bin(
-                "add", bin("mul", iotaOwn64, cDV64, si64BTy), iotaSubAxDV64,
-                subSi64OutTy);
-            TaskTerm trueSubO = newVec(true1, subMaskOutTy);
-            for (int64_t dv0 = 0; dv0 < plan.DV; dv0 += subDV) {
-              TaskTerm dv0Idx = idx(dv0);
+            Operation *dvFor = makeOp(
+                b, loc, "task_for", {c0Idx.v, cDvIdx.v, cSubDvIdx.v}, {},
+                {b.getNamedAttr("iter_types", b.getArrayAttr({}))}, 1);
+            {
+              Block &dvBb = dvFor->getRegion(0).emplaceBlock();
+              TaskTerm dv0Idx{dvBb.addArgument(b.getIndexType(), loc), "index"};
+              OpBuilder::InsertionGuard dvg(b);
+              b.setInsertionPointToEnd(&dvBb);
               Operation *p2SubMain = makeOp(
                   b, loc, "task_for", {lb.v, tMain.v, cT.v, zeroSubO.v},
                   {b.getIndexType()},
@@ -2012,63 +2265,369 @@ struct OrderedLowerer {
                 TaskTerm wFull{wLd, scoreMatTy};
                 TaskTerm vRawSub = subview2D(vSl2D, tIv.v, dv0Idx.v, T, subDV,
                                              true, vSubRawMatTy);
-                TaskTerm vFSub = (vElem == "f32")
+                TaskTerm vForC = (nativeV || vElem == "f32")
                                      ? vRawSub
                                      : castOp(vRawSub, vSubF32MatTy);
                 TaskTerm dSub =
-                    outerContractOp(wFull, vFSub, plan.axTok, subOutTy);
+                    outerContractOp(wFull, vForC, plan.axTok, subOutTy);
                 TaskTerm nSub = bin("add", subAcc, dSub, subOutTy);
                 makeOp(b, loc, "task_yield", {nSub.v}, {},
                        {b.getNamedAttr("val_types", subIterTys)});
               }
               TaskTerm subRes{p2SubMain->getResult(0), subOutTy};
-              TaskTerm storeOff =
-                  dv0 == 0 ? subOutSlotOff
-                           : bin("add", subOutSlotOff,
-                                 lit(std::to_string(dv0), "si64"), subSi64OutTy);
+              if (!exactTiles) {
+                Operation *p2SubTail = makeOp(
+                    b, loc, "task_for", {tMain.v, ub.v, c1.v, subRes.v},
+                    {b.getIndexType()},
+                    {b.getNamedAttr("iter_types", subIterTys)}, 1);
+                {
+                  Block &fBb = p2SubTail->getRegion(0).emplaceBlock();
+                  TaskTerm tIv{fBb.addArgument(b.getIndexType(), loc), "index"};
+                  TaskTerm subAcc{fBb.addArgument(b.getIndexType(), loc),
+                                  subOutTy};
+                  OpBuilder::InsertionGuard g(b);
+                  b.setInsertionPointToEnd(&fBb);
+                  TaskTerm offIdx =
+                      loC && *loC == 0 ? tIv : bin("sub", tIv, lb, "index");
+                  TaskTerm off64 = castOp(offIdx, "si64");
+                  TaskTerm baseOff = bin("mul", off64, cB64, "si64");
+                  TaskTerm pOff1D = bin("add", qSlotOff, baseOff, si64BTy);
+                  Value wLd =
+                      makeOp(b, loc, "task_ptr_load",
+                             {tiledScoreBuf.v, pOff1D.v, trueB.v, zeroV.v},
+                             {b.getIndexType()},
+                             {b.getNamedAttr(
+                                  "ptr_type",
+                                  b.getStringAttr("!weft_kernel.pointer<f32>")),
+                              b.getNamedAttr("val_type",
+                                             b.getStringAttr(vecBTy))})
+                          ->getResult(0);
+                  TaskTerm wF1D{wLd, vecBTy};
+                  // 1D slice at token tIv, then subview [subDV] at dv0Idx
+                  std::string vSl1DTy =
+                      "!weft_kernel.slice<!weft_kernel.encoding<\"" +
+                      carrierType(
+                          cast<MemRefType>(plan.vMem.getType()).getElementType()) +
+                      "\",\"dense\",\"dense." +
+                      carrierType(
+                          cast<MemRefType>(plan.vMem.getType()).getElementType()) +
+                      "\",[]>,[" + std::to_string(plan.DV) + "],[" +
+                      std::to_string(plan.axDV) + "]>";
+                  SmallVector<Value, 6> slOps{lanes[0].at(plan.vMem).v};
+                  SmallVector<Attribute, 6> sels;
+                  for (auto [idxC, cVal] : llvm::enumerate(plan.vCoords)) {
+                    slOps.push_back(int64_t(idxC) == plan.vTokCoordPos
+                                        ? tIv.v
+                                        : lanes[0].at(cVal).v);
+                    sels.push_back(b.getStringAttr("index"));
+                  }
+                  sels.insert(sels.begin() + plan.vVecMemAx,
+                              b.getStringAttr("all"));
+                  Value vSl1D =
+                      makeOp(b, loc, "task_slice", slOps, {b.getIndexType()},
+                             {b.getNamedAttr(
+                                  "view_type",
+                                  b.getStringAttr(lanes[0].at(plan.vMem).type)),
+                              b.getNamedAttr("selectors", b.getArrayAttr(sels)),
+                              b.getNamedAttr("slice_type",
+                                             b.getStringAttr(vSl1DTy)),
+                              b.getNamedAttr("val_type",
+                                             b.getStringAttr(vSl1DTy)),
+                              b.getNamedAttr("admit", b.getBoolAttr(false))})
+                          ->getResult(0);
+                  Value vRawSub1D =
+                      makeOp(b, loc, "task_subview", {vSl1D, dv0Idx.v},
+                             {b.getIndexType()},
+                             {b.getNamedAttr("static_extent",
+                                             b.getI64IntegerAttr(subDV)),
+                              b.getNamedAttr("slice_type",
+                                             b.getStringAttr(vSl1DTy)),
+                              b.getNamedAttr("val_type",
+                                             b.getStringAttr(vSubRaw1DTy)),
+                              b.getNamedAttr("admit", b.getBoolAttr(true))})
+                          ->getResult(0);
+                  TaskTerm vFSub1D =
+                      (vElem == "f32")
+                          ? TaskTerm{vRawSub1D, vSubRaw1DTy}
+                          : castOp({vRawSub1D, vSubRaw1DTy}, vSubF321DTy);
+                  TaskTerm dSub = bin("mul", wF1D, vFSub1D, subOutTy);
+                  TaskTerm nSub = bin("add", subAcc, dSub, subOutTy);
+                  makeOp(b, loc, "task_yield", {nSub.v}, {},
+                         {b.getNamedAttr("val_types", subIterTys)});
+                }
+                subRes = {p2SubTail->getResult(0), subOutTy};
+              }
+              if (directCommitHere) {
+                TaskTerm scaledSub =
+                    plan.yMulOp ? bin("mul", subRes, invVec, subOutTy) : subRes;
+                TaskTerm finalSub = (yElem == "f32")
+                                        ? scaledSub
+                                        : castOp(scaledSub, ySubMatTy);
+                TaskTerm ySubTile = subview2D(ySl2D, lanes[0].at(innerArg).v,
+                                              dv0Idx.v, B, subDV, false,
+                                              ySl2D.type);
+                makeOp(b, loc, "task_commit", {finalSub.v, ySubTile.v}, {},
+                       {b.getNamedAttr("val_type",
+                                       b.getStringAttr(finalSub.type)),
+                        b.getNamedAttr("slice_type",
+                                       b.getStringAttr(commitSubSlTy))});
+              } else {
+                TaskTerm storeOff = bin("add", subOutSlotOff,
+                                        castOp(dv0Idx, "si64"), subSi64OutTy);
+                makeOp(b, loc, "task_ptr_store",
+                       {tiledOutBuf.v, storeOff.v, trueSubO.v, subRes.v}, {},
+                       {b.getNamedAttr(
+                            "ptr_type",
+                            b.getStringAttr("!weft_kernel.pointer<f32>")),
+                        b.getNamedAttr("val_type", b.getStringAttr(subOutTy))});
+              }
+              makeOp(b, loc, "task_yield", {}, {},
+                     {b.getNamedAttr("val_types", b.getArrayAttr({}))});
+            }
+            if (directCommitHere)
+              directSubCommitted = true;
+            else
+              outInTiledBuf = true;
+            return {msFinal, TaskTerm{}};
+          }
+
+          if (!fromBuffer && useTiledOut) {
+            TaskTerm kSl2D = slice2D(plan.kMem, kOtherCoords, plan.kTokMemAx,
+                                     plan.kVecMemAx);
+            TaskTerm c0Idx = idx(0), cDvIdx = idx(plan.DV),
+                     cSubDvIdx = idx(subDV);
+            Operation *zeroDvFor = makeOp(
+                b, loc, "task_for", {c0Idx.v, cDvIdx.v, cSubDvIdx.v}, {},
+                {b.getNamedAttr("iter_types", b.getArrayAttr({}))}, 1);
+            {
+              Block &zBb = zeroDvFor->getRegion(0).emplaceBlock();
+              TaskTerm dv0Idx{zBb.addArgument(b.getIndexType(), loc), "index"};
+              OpBuilder::InsertionGuard zg(b);
+              b.setInsertionPointToEnd(&zBb);
+              TaskTerm storeOff = bin("add", subOutSlotOff,
+                                      castOp(dv0Idx, "si64"), subSi64OutTy);
               makeOp(b, loc, "task_ptr_store",
-                     {tiledOutBuf.v, storeOff.v, trueSubO.v, subRes.v}, {},
+                     {tiledOutBuf.v, storeOff.v, trueSubO.v, zeroSubO.v}, {},
                      {b.getNamedAttr(
                           "ptr_type",
                           b.getStringAttr("!weft_kernel.pointer<f32>")),
                       b.getNamedAttr("val_type", b.getStringAttr(subOutTy))});
+              makeOp(b, loc, "task_yield", {}, {},
+                     {b.getNamedAttr("val_types", b.getArrayAttr({}))});
             }
-
-            std::string idxDVTy = "!weft_kernel.value<index,[" +
-                                  std::to_string(plan.DV) + "],[" +
-                                  std::to_string(plan.axDV) + "]>";
-            std::string si64DVTy = "!weft_kernel.value<si64,[" +
-                                   std::to_string(plan.DV) + "],[" +
-                                   std::to_string(plan.axDV) + "]>";
-            Value idvIdx =
-                makeOp(b, loc, "task_iota", {}, {b.getIndexType()},
-                       {b.getNamedAttr("start", b.getI64IntegerAttr(0)),
-                        b.getNamedAttr("end", b.getI64IntegerAttr(plan.DV)),
-                        b.getNamedAttr("val_type", b.getStringAttr(idxDVTy))})
-                    ->getResult(0);
-            TaskTerm iotaDV64 = castOp({idvIdx, idxDVTy}, si64DVTy);
-            std::string si64OutMatTy =
-                "!weft_kernel.value<si64,[" + std::to_string(B) + "," +
-                std::to_string(plan.DV) + "],[" + std::to_string(plan.axOwn) +
-                "," + std::to_string(plan.axDV) + "]>";
-            std::string maskOutMatTy =
-                "!weft_kernel.value<i1,[" + std::to_string(B) + "," +
-                std::to_string(plan.DV) + "],[" + std::to_string(plan.axOwn) +
-                "," + std::to_string(plan.axDV) + "]>";
-            TaskTerm fullOutOff =
-                bin("add", bin("mul", iotaOwn64, cDV64, si64BTy), iotaDV64,
-                    si64OutMatTy);
-            TaskTerm trueO = newVec(true1, maskOutMatTy);
-            Value fullLd =
-                makeOp(b, loc, "task_ptr_load",
-                       {tiledOutBuf.v, fullOutOff.v, trueO.v, zeroO.v},
-                       {b.getIndexType()},
+            ArrayAttr msIterTys = b.getArrayAttr({b.getStringAttr(vecBTy)});
+            Operation *p2Main = makeOp(
+                b, loc, "task_for", {lb.v, tMain.v, cT.v, zeroV.v},
+                {b.getIndexType()},
+                {b.getNamedAttr("iter_types", msIterTys)}, 1);
+            {
+              Block &fBb = p2Main->getRegion(0).emplaceBlock();
+              TaskTerm tIv{fBb.addArgument(b.getIndexType(), loc), "index"};
+              TaskTerm msIter{fBb.addArgument(b.getIndexType(), loc), vecBTy};
+              OpBuilder::InsertionGuard g(b);
+              b.setInsertionPointToEnd(&fBb);
+              TaskTerm kRaw =
+                  subview2D(kSl2D, tIv.v, c0.v, T, plan.D, true, kRawMatTy);
+              TaskTerm kForC =
+                  (nativeQK || kElem == "f32") ? kRaw : castOp(kRaw, kF32MatTy);
+              TaskTerm sc =
+                  outerContractOp(qForContract, kForC, plan.axD, scoreMatTy);
+              sc = applyScoreAffine2D(sc, tIv);
+              TaskTerm diff =
+                  applyPostSubScale(bin("sub", sc, peakVec, scoreMatTy),
+                                    scoreMatTy);
+              TaskTerm wt = emitExpWeight2D(diff, tIv, boundVec64, causalPred);
+              TaskTerm rsum = reduceOp(wt, "add", 1, vecBTy);
+              TaskTerm nms = bin("add", msIter, rsum, vecBTy);
+              bool passNarrowW =
+                  !isRvv && plan.weightRoundType &&
+                  (plan.weightRoundType->isBF16() ||
+                   plan.weightRoundType->isF16());
+              TaskTerm wForPV =
+                  passNarrowW
+                      ? castOp(wt, narrowScoreMatTy)
+                      : (plan.weightRoundType
+                             ? castOp(castOp(wt, narrowScoreMatTy), scoreMatTy)
+                             : wt);
+              Operation *dvFor = makeOp(
+                  b, loc, "task_for", {c0Idx.v, cDvIdx.v, cSubDvIdx.v}, {},
+                  {b.getNamedAttr("iter_types", b.getArrayAttr({}))}, 1);
+              {
+                Block &dvBb = dvFor->getRegion(0).emplaceBlock();
+                TaskTerm dv0Idx{dvBb.addArgument(b.getIndexType(), loc),
+                                "index"};
+                OpBuilder::InsertionGuard dvg(b);
+                b.setInsertionPointToEnd(&dvBb);
+                TaskTerm slotOff = bin("add", subOutSlotOff,
+                                       castOp(dv0Idx, "si64"), subSi64OutTy);
+                Value accLd =
+                    makeOp(b, loc, "task_ptr_load",
+                           {tiledOutBuf.v, slotOff.v, trueSubO.v, zeroSubO.v},
+                           {b.getIndexType()},
+                           {b.getNamedAttr(
+                                "ptr_type",
+                                b.getStringAttr("!weft_kernel.pointer<f32>")),
+                            b.getNamedAttr("val_type",
+                                           b.getStringAttr(subOutTy))})
+                        ->getResult(0);
+                TaskTerm vRawSub = subview2D(vSl2D, tIv.v, dv0Idx.v, T, subDV,
+                                             true, vSubRawMatTy);
+                TaskTerm vForC = (nativeV || vElem == "f32")
+                                     ? vRawSub
+                                     : castOp(vRawSub, vSubF32MatTy);
+                TaskTerm dSub =
+                    outerContractOp(wForPV, vForC, plan.axTok, subOutTy);
+                TaskTerm nSub = bin("add", {accLd, subOutTy}, dSub, subOutTy);
+                makeOp(b, loc, "task_ptr_store",
+                       {tiledOutBuf.v, slotOff.v, trueSubO.v, nSub.v}, {},
                        {b.getNamedAttr(
                             "ptr_type",
                             b.getStringAttr("!weft_kernel.pointer<f32>")),
-                        b.getNamedAttr("val_type", b.getStringAttr(outMatTy))})
-                    ->getResult(0);
-            return {msFinal, {fullLd, outMatTy}};
+                        b.getNamedAttr("val_type", b.getStringAttr(subOutTy))});
+                makeOp(b, loc, "task_yield", {}, {},
+                       {b.getNamedAttr("val_types", b.getArrayAttr({}))});
+              }
+              makeOp(b, loc, "task_yield", {nms.v}, {},
+                     {b.getNamedAttr("val_types", msIterTys)});
+            }
+            TaskTerm msFinal{p2Main->getResult(0), vecBTy};
+            if (!exactTiles) {
+              TaskTerm hasTail =
+                  cmp("lt", castOp(tMain, "si64"), castOp(ub, "si64"), "i1");
+              Operation *tailIf =
+                  makeOp(b, loc, "task_if", {hasTail.v}, {b.getIndexType()},
+                         {b.getNamedAttr("res_types", msIterTys)}, 2);
+              {
+                Block &tIfBb = tailIf->getRegion(0).emplaceBlock();
+                OpBuilder::InsertionGuard ig(b);
+                b.setInsertionPointToEnd(&tIfBb);
+                TaskTerm qTailF32 = (qElem == "f32")
+                                        ? qRawSaved
+                                        : castOp(qRawSaved, qF32MatTy);
+                Operation *p2Tail = makeOp(
+                    b, loc, "task_for", {tMain.v, ub.v, c1.v, msFinal.v},
+                    {b.getIndexType()},
+                    {b.getNamedAttr("iter_types", msIterTys)}, 1);
+                {
+                  Block &fBb = p2Tail->getRegion(0).emplaceBlock();
+                  TaskTerm tIv{fBb.addArgument(b.getIndexType(), loc), "index"};
+                  TaskTerm msIter{fBb.addArgument(b.getIndexType(), loc), vecBTy};
+                  OpBuilder::InsertionGuard g(b);
+                  b.setInsertionPointToEnd(&fBb);
+                  TaskTerm kRaw1D =
+                      slice1DAtTok(plan.kMem, plan.kCoords, plan.kTokCoordPos,
+                                   tIv.v, plan.kVecMemAx, kRaw1DTy);
+                  TaskTerm kF1D =
+                      (kElem == "f32") ? kRaw1D : castOp(kRaw1D, kF321DTy);
+                  TaskTerm prod = bin("mul", qTailF32, kF1D, qF32MatTy);
+                  TaskTerm sc1D =
+                      applyScoreAffine1D(reduceOp(prod, "add", 1, vecBTy), tIv);
+                  TaskTerm diff1D =
+                      applyPostSubScale(bin("sub", sc1D, peakVec, vecBTy),
+                                        vecBTy);
+                  TaskTerm wt1D =
+                      emitExpWeight1D(diff1D, tIv, boundVec64, causalPred);
+                  TaskTerm nms = bin("add", msIter, wt1D, vecBTy);
+                  TaskTerm wF1D = plan.weightRoundType
+                                      ? castOp(castOp(wt1D, narrowVecBTy), vecBTy)
+                                      : wt1D;
+                  std::string vSl1DTy =
+                      "!weft_kernel.slice<!weft_kernel.encoding<\"" +
+                      carrierType(
+                          cast<MemRefType>(plan.vMem.getType()).getElementType()) +
+                      "\",\"dense\",\"dense." +
+                      carrierType(
+                          cast<MemRefType>(plan.vMem.getType()).getElementType()) +
+                      "\",[]>,[" + std::to_string(plan.DV) + "],[" +
+                      std::to_string(plan.axDV) + "]>";
+                  SmallVector<Value, 6> slOps{lanes[0].at(plan.vMem).v};
+                  SmallVector<Attribute, 6> sels;
+                  for (auto [idxC, cVal] : llvm::enumerate(plan.vCoords)) {
+                    slOps.push_back(int64_t(idxC) == plan.vTokCoordPos
+                                        ? tIv.v
+                                        : lanes[0].at(cVal).v);
+                    sels.push_back(b.getStringAttr("index"));
+                  }
+                  sels.insert(sels.begin() + plan.vVecMemAx,
+                              b.getStringAttr("all"));
+                  Value vSl1D =
+                      makeOp(b, loc, "task_slice", slOps, {b.getIndexType()},
+                             {b.getNamedAttr(
+                                  "view_type",
+                                  b.getStringAttr(lanes[0].at(plan.vMem).type)),
+                              b.getNamedAttr("selectors", b.getArrayAttr(sels)),
+                              b.getNamedAttr("slice_type",
+                                             b.getStringAttr(vSl1DTy)),
+                              b.getNamedAttr("val_type",
+                                             b.getStringAttr(vSl1DTy)),
+                              b.getNamedAttr("admit", b.getBoolAttr(false))})
+                          ->getResult(0);
+                  Operation *dvFor = makeOp(
+                      b, loc, "task_for", {c0Idx.v, cDvIdx.v, cSubDvIdx.v}, {},
+                      {b.getNamedAttr("iter_types", b.getArrayAttr({}))}, 1);
+                  {
+                    Block &dvBb = dvFor->getRegion(0).emplaceBlock();
+                    TaskTerm dv0Idx{dvBb.addArgument(b.getIndexType(), loc),
+                                    "index"};
+                    OpBuilder::InsertionGuard dvg(b);
+                    b.setInsertionPointToEnd(&dvBb);
+                    TaskTerm slotOff = bin("add", subOutSlotOff,
+                                           castOp(dv0Idx, "si64"), subSi64OutTy);
+                    Value accLd =
+                        makeOp(b, loc, "task_ptr_load",
+                               {tiledOutBuf.v, slotOff.v, trueSubO.v, zeroSubO.v},
+                               {b.getIndexType()},
+                               {b.getNamedAttr(
+                                    "ptr_type",
+                                    b.getStringAttr("!weft_kernel.pointer<f32>")),
+                                b.getNamedAttr("val_type",
+                                               b.getStringAttr(subOutTy))})
+                            ->getResult(0);
+                    Value vRawSub1D =
+                        makeOp(b, loc, "task_subview", {vSl1D, dv0Idx.v},
+                               {b.getIndexType()},
+                               {b.getNamedAttr("static_extent",
+                                               b.getI64IntegerAttr(subDV)),
+                                b.getNamedAttr("slice_type",
+                                               b.getStringAttr(vSl1DTy)),
+                                b.getNamedAttr("val_type",
+                                               b.getStringAttr(vSubRaw1DTy)),
+                                b.getNamedAttr("admit", b.getBoolAttr(true))})
+                            ->getResult(0);
+                    TaskTerm vFSub1D =
+                        (vElem == "f32")
+                            ? TaskTerm{vRawSub1D, vSubRaw1DTy}
+                            : castOp({vRawSub1D, vSubRaw1DTy}, vSubF321DTy);
+                    TaskTerm dSub = bin("mul", wF1D, vFSub1D, subOutTy);
+                    TaskTerm nSub =
+                        bin("add", {accLd, subOutTy}, dSub, subOutTy);
+                    makeOp(b, loc, "task_ptr_store",
+                           {tiledOutBuf.v, slotOff.v, trueSubO.v, nSub.v}, {},
+                           {b.getNamedAttr(
+                                "ptr_type",
+                                b.getStringAttr("!weft_kernel.pointer<f32>")),
+                            b.getNamedAttr("val_type",
+                                           b.getStringAttr(subOutTy))});
+                    makeOp(b, loc, "task_yield", {}, {},
+                           {b.getNamedAttr("val_types", b.getArrayAttr({}))});
+                  }
+                  makeOp(b, loc, "task_yield", {nms.v}, {},
+                         {b.getNamedAttr("val_types", msIterTys)});
+                }
+                makeOp(b, loc, "task_yield", {p2Tail->getResult(0)}, {},
+                       {b.getNamedAttr("val_types", msIterTys)});
+              }
+              {
+                Block &eIfBb = tailIf->getRegion(1).emplaceBlock();
+                OpBuilder::InsertionGuard eg(b);
+                b.setInsertionPointToEnd(&eIfBb);
+                makeOp(b, loc, "task_yield", {msFinal.v}, {},
+                       {b.getNamedAttr("val_types", msIterTys)});
+              }
+              msFinal = {tailIf->getResult(0), vecBTy};
+            }
+            outInTiledBuf = true;
+            return {msFinal, TaskTerm{}};
           }
 
           TaskTerm kSl2D =
@@ -2110,32 +2669,33 @@ struct OrderedLowerer {
             } else {
               TaskTerm kRaw =
                   subview2D(kSl2D, tIv.v, c0.v, T, plan.D, true, kRawMatTy);
-              TaskTerm kF = (kElem == "f32") ? kRaw : castOp(kRaw, kF32MatTy);
-              sc = outerContractOp(qScaled, kF, plan.axD, scoreMatTy);
-              if (scaleTerm.v)
-                sc = bin("mul", sc, scaleTerm, scoreMatTy);
+              TaskTerm kForC =
+                  (nativeQK || kElem == "f32") ? kRaw : castOp(kRaw, kF32MatTy);
+              sc = outerContractOp(qForContract, kForC, plan.axD, scoreMatTy);
+              sc = applyScoreAffine2D(sc, tIv);
             }
-            TaskTerm diff = bin("sub", sc, peakVec, scoreMatTy);
-            if (plan.useExp2 && isRvv)
-              diff = bin("mul", diff, ln2S, scoreMatTy);
-            TaskTerm ex = (plan.useExp2 && !isRvv) ? unaryOp("exp2", diff)
-                                                   : unaryOp("exp", diff);
-            TaskTerm wt = ex;
-            if (plan.hasCausal) {
-              TaskTerm t64 = castOp(tIv, "si64");
-              TaskTerm tVec64 = bin("add", iotaTok64, t64, si64TTy);
-              TaskTerm m = cmp(causalPred, boundVec64, tVec64, maskMatTy);
-              wt = sel(m, ex, zeroM, scoreMatTy);
-            }
+            TaskTerm diff =
+                applyPostSubScale(bin("sub", sc, peakVec, scoreMatTy),
+                                  scoreMatTy);
+            TaskTerm wt = emitExpWeight2D(diff, tIv, boundVec64, causalPred);
             TaskTerm rsum = reduceOp(wt, "add", 1, vecBTy);
             TaskTerm nms = bin("add", msIter, rsum, vecBTy);
-            TaskTerm wF = plan.weightRoundType
-                              ? castOp(castOp(wt, narrowScoreMatTy), scoreMatTy)
-                              : wt;
+            bool passNarrowW =
+                !isRvv && plan.weightRoundType &&
+                (plan.weightRoundType->isBF16() ||
+                 plan.weightRoundType->isF16());
+            TaskTerm wForPV =
+                passNarrowW
+                    ? castOp(wt, narrowScoreMatTy)
+                    : (plan.weightRoundType
+                           ? castOp(castOp(wt, narrowScoreMatTy), scoreMatTy)
+                           : wt);
             TaskTerm vRaw =
                 subview2D(vSl2D, tIv.v, c0.v, T, plan.DV, true, vRawMatTy);
-            TaskTerm vF = (vElem == "f32") ? vRaw : castOp(vRaw, vF32MatTy);
-            TaskTerm dO = outerContractOp(wF, vF, plan.axTok, outMatTy);
+            TaskTerm vForC = (nativeV || vElem == "f32")
+                                 ? vRaw
+                                 : castOp(vRaw, vF32MatTy);
+            TaskTerm dO = outerContractOp(wForPV, vForC, plan.axTok, outMatTy);
             TaskTerm nacc = bin("add", accIter, dO, outMatTy);
             makeOp(b, loc, "task_yield", {nms.v, nacc.v}, {},
                    {b.getNamedAttr("val_types", p2IterTys)});
@@ -2145,6 +2705,10 @@ struct OrderedLowerer {
           if (exactTiles)
             return {msMain, accMain};
 
+          TaskTerm qTailF32 =
+              fromBuffer ? TaskTerm{}
+                         : ((qElem == "f32") ? qRawSaved
+                                             : castOp(qRawSaved, qF32MatTy));
           Operation *p2Tail = makeOp(
               b, loc, "task_for",
               {tMain.v, ub.v, c1.v, msMain.v, accMain.v},
@@ -2181,22 +2745,14 @@ struct OrderedLowerer {
                                tIv.v, plan.kVecMemAx, kRaw1DTy);
               TaskTerm kF1D =
                   (kElem == "f32") ? kRaw1D : castOp(kRaw1D, kF321DTy);
-              TaskTerm prod = bin("mul", qScaled, kF1D, qF32MatTy);
-              sc1D = reduceOp(prod, "add", 1, vecBTy);
-              if (scaleTerm.v)
-                sc1D = bin("mul", sc1D, scaleTerm, vecBTy);
+              TaskTerm prod = bin("mul", qTailF32, kF1D, qF32MatTy);
+              sc1D =
+                  applyScoreAffine1D(reduceOp(prod, "add", 1, vecBTy), tIv);
             }
-            TaskTerm diff1D = bin("sub", sc1D, peakVec, vecBTy);
-            if (plan.useExp2 && isRvv)
-              diff1D = bin("mul", diff1D, ln2S, vecBTy);
-            TaskTerm ex1D = (plan.useExp2 && !isRvv) ? unaryOp("exp2", diff1D)
-                                                     : unaryOp("exp", diff1D);
-            TaskTerm wt1D = ex1D;
-            if (plan.hasCausal) {
-              TaskTerm t64 = castOp(tIv, "si64");
-              TaskTerm m1D = cmp(causalPred, boundVec64, t64, maskBTy);
-              wt1D = sel(m1D, ex1D, zeroV, vecBTy);
-            }
+            TaskTerm diff1D =
+                applyPostSubScale(bin("sub", sc1D, peakVec, vecBTy), vecBTy);
+            TaskTerm wt1D =
+                emitExpWeight1D(diff1D, tIv, boundVec64, causalPred);
             TaskTerm nms = bin("add", msIter, wt1D, vecBTy);
             TaskTerm wF1D = plan.weightRoundType
                                 ? castOp(castOp(wt1D, narrowVecBTy), vecBTy)
@@ -2219,6 +2775,34 @@ struct OrderedLowerer {
           std::tie(massVec, outMat) = emitPass2(true);
         } else if (!plan.hasScoreBuffer) {
           std::tie(massVec, outMat) = emitPass2(false);
+        } else if (useTiledOut) {
+          TaskTerm fits =
+              cmp("le", castOp(span, "si64"),
+                  lit(std::to_string(plan.scoreSlots), "si64"), "i1");
+          ArrayAttr resTys = b.getArrayAttr({b.getStringAttr(vecBTy)});
+          Operation *wIf =
+              makeOp(b, loc, "task_if", {fits.v}, {b.getIndexType()},
+                     {b.getNamedAttr("res_types", resTys)}, 2);
+          {
+            Block &tBb = wIf->getRegion(0).emplaceBlock();
+            OpBuilder::InsertionGuard tg(b);
+            b.setInsertionPointToEnd(&tBb);
+            auto [mT, _oT] = emitPass2(true);
+            (void)_oT;
+            makeOp(b, loc, "task_yield", {mT.v}, {},
+                   {b.getNamedAttr("val_types", resTys)});
+          }
+          {
+            Block &eBb = wIf->getRegion(1).emplaceBlock();
+            OpBuilder::InsertionGuard eg(b);
+            b.setInsertionPointToEnd(&eBb);
+            auto [mE, _oE] = emitPass2(false);
+            (void)_oE;
+            makeOp(b, loc, "task_yield", {mE.v}, {},
+                   {b.getNamedAttr("val_types", resTys)});
+          }
+          massVec = {wIf->getResult(0), vecBTy};
+          outInTiledBuf = true;
         } else {
           TaskTerm fits =
               cmp("le", castOp(span, "si64"),
@@ -2260,6 +2844,62 @@ struct OrderedLowerer {
       if (&op == plan.yWriteOp) {
         if (directSubCommitted)
           continue;
+        if (outInTiledBuf) {
+          TaskTerm invVec = plan.yMulOp ? computeInvVec(massVec) : TaskTerm{};
+          SmallVector<Value, 4> yOtherCoords;
+          for (auto [pos, c] :
+               llvm::enumerate(plan.yWriteOp->getOperands().drop_front(2)))
+            if (int64_t(pos) != plan.yOwnMemAx)
+              yOtherCoords.push_back(c);
+          TaskTerm ySl2D =
+              slice2D(plan.yMem, yOtherCoords, plan.yOwnMemAx, plan.yVecMemAx);
+          std::string commitSubSlTy = ySl2D.type;
+          if (auto brk = commitSubSlTy.rfind(">,[");
+              brk != std::string::npos) {
+            auto cls = commitSubSlTy.find(']', brk + 2);
+            commitSubSlTy.replace(brk + 2, cls - (brk + 2) + 1,
+                                  "[" + std::to_string(B) + "," +
+                                      std::to_string(subDV) + "]");
+          }
+          TaskTerm c0Idx = idx(0), cDvIdx = idx(plan.DV),
+                   cSubDvIdx = idx(subDV);
+          Operation *dvFor = makeOp(
+              b, loc, "task_for", {c0Idx.v, cDvIdx.v, cSubDvIdx.v}, {},
+              {b.getNamedAttr("iter_types", b.getArrayAttr({}))}, 1);
+          {
+            Block &dvBb = dvFor->getRegion(0).emplaceBlock();
+            TaskTerm dv0Idx{dvBb.addArgument(b.getIndexType(), loc), "index"};
+            OpBuilder::InsertionGuard dvg(b);
+            b.setInsertionPointToEnd(&dvBb);
+            TaskTerm slotOff = bin("add", subOutSlotOff,
+                                   castOp(dv0Idx, "si64"), subSi64OutTy);
+            Value accLd =
+                makeOp(b, loc, "task_ptr_load",
+                       {tiledOutBuf.v, slotOff.v, trueSubO.v, zeroSubO.v},
+                       {b.getIndexType()},
+                       {b.getNamedAttr(
+                            "ptr_type",
+                            b.getStringAttr("!weft_kernel.pointer<f32>")),
+                        b.getNamedAttr("val_type", b.getStringAttr(subOutTy))})
+                    ->getResult(0);
+            TaskTerm scaledSub =
+                plan.yMulOp ? bin("mul", {accLd, subOutTy}, invVec, subOutTy)
+                            : TaskTerm{accLd, subOutTy};
+            TaskTerm finalSub = (yElem == "f32")
+                                    ? scaledSub
+                                    : castOp(scaledSub, ySubMatTy);
+            TaskTerm ySubTile = subview2D(ySl2D, lanes[0].at(innerArg).v,
+                                          dv0Idx.v, B, subDV, false,
+                                          ySl2D.type);
+            makeOp(b, loc, "task_commit", {finalSub.v, ySubTile.v}, {},
+                   {b.getNamedAttr("val_type", b.getStringAttr(finalSub.type)),
+                    b.getNamedAttr("slice_type",
+                                   b.getStringAttr(commitSubSlTy))});
+            makeOp(b, loc, "task_yield", {}, {},
+                   {b.getNamedAttr("val_types", b.getArrayAttr({}))});
+          }
+          continue;
+        }
         TaskTerm scaledOut =
             plan.yMulOp ? bin("mul", outMat, computeInvVec(massVec), outMatTy)
                         : outMat;
@@ -2319,6 +2959,546 @@ struct OrderedLowerer {
     return success();
   }
 
+  bool tryLowerVectorizedInnerLoop(scf::ForOp loop, int64_t laneStart) {
+    if (isRvv)
+      return false;
+    if (staticIndexVal(fn, loop.getStep()) != 1 ||
+        loop.getNumRegionIterArgs() > 1 || analyzeCausalLoop(fn, loop))
+      return false;
+
+    const bool isRed = loop.getNumRegionIterArgs() == 1;
+    bool isAdd = false;
+    Operation *redOp = nullptr;
+    Value iterArg, stepTerm;
+    if (isRed) {
+      if (!loop->hasAttr("kir.reassociate") ||
+          !loop.getResult(0).getType().isF32())
+        return false;
+      iterArg = loop.getRegionIterArgs()[0];
+      if (!iterArg.hasOneUse())
+        return false;
+      Value yVal = loop.getBody()->getTerminator()->getOperand(0);
+      redOp = yVal.getDefiningOp();
+      if (!redOp || redOp->getBlock() != loop.getBody())
+        return false;
+      if (auto add = dyn_cast<arith::AddFOp>(redOp)) {
+        isAdd = true;
+        stepTerm = add.getLhs() == iterArg
+                       ? add.getRhs()
+                       : (add.getRhs() == iterArg ? add.getLhs() : Value{});
+      } else if (isa<arith::MaxNumFOp, arith::MaximumFOp>(redOp)) {
+        isAdd = false;
+        stepTerm = redOp->getOperand(0) == iterArg
+                       ? redOp->getOperand(1)
+                       : (redOp->getOperand(1) == iterArg ? redOp->getOperand(0)
+                                                          : Value{});
+      } else {
+        return false;
+      }
+      if (!stepTerm || stepTerm == iterArg)
+        return false;
+    }
+
+    auto vecElemOk = [](Type t) {
+      return t.isF32() || t.isBF16() || t.isF16() || t.isIndex() ||
+             t.isInteger(1) || t.isInteger(32) || t.isInteger(64) ||
+             t.isUnsignedInteger(64);
+    };
+    constexpr int64_t W = 16;
+    Value ivOrig = loop.getInductionVar();
+
+    llvm::DenseSet<Value> writtenViews;
+    for (Operation &bop : loop.getBody()->without_terminator()) {
+      if (auto st = dyn_cast<memref::StoreOp>(bop)) {
+        if (isRed || !isa<BlockArgument>(st.getMemref()))
+          return false;
+        writtenViews.insert(st.getMemref());
+      }
+    }
+    if (!isRed && writtenViews.empty())
+      return false;
+
+    auto pureVecOpOk = [&](Operation &bop) -> bool {
+      if (bop.getNumRegions() != 0 || bop.getNumResults() != 1 ||
+          isa<ShapedType>(bop.getResult(0).getType()) ||
+          !vecElemOk(bop.getResult(0).getType()))
+        return false;
+      if (isa<arith::AddFOp, arith::SubFOp, arith::MulFOp, arith::DivFOp,
+              arith::MaxNumFOp, arith::MaximumFOp, arith::MinNumFOp,
+              arith::MinimumFOp, arith::AddIOp, arith::SubIOp, arith::MulIOp,
+              arith::AndIOp, arith::OrIOp, arith::XOrIOp>(bop))
+        return vecElemOk(bop.getOperand(0).getType()) &&
+               vecElemOk(bop.getOperand(1).getType());
+      if (isa<math::ExpOp, math::Exp2Op, math::LogOp, math::SqrtOp,
+              math::RsqrtOp, arith::ExtFOp, arith::TruncFOp,
+              arith::IndexCastOp, arith::SIToFPOp, arith::FPToSIOp>(bop))
+        return vecElemOk(bop.getOperand(0).getType());
+      if (auto ci = dyn_cast<arith::CmpIOp>(bop)) {
+        auto p = ci.getPredicate();
+        return vecElemOk(ci.getLhs().getType()) &&
+               (p == arith::CmpIPredicate::eq ||
+                p == arith::CmpIPredicate::ne ||
+                p == arith::CmpIPredicate::slt ||
+                p == arith::CmpIPredicate::sle ||
+                p == arith::CmpIPredicate::sgt ||
+                p == arith::CmpIPredicate::sge ||
+                p == arith::CmpIPredicate::ult ||
+                p == arith::CmpIPredicate::ule ||
+                p == arith::CmpIPredicate::ugt ||
+                p == arith::CmpIPredicate::uge);
+      }
+      if (auto cf = dyn_cast<arith::CmpFOp>(bop))
+        return vecElemOk(cf.getLhs().getType());
+      if (auto selOp = dyn_cast<arith::SelectOp>(bop))
+        return selOp.getCondition().getType().isInteger(1) &&
+               vecElemOk(selOp.getTrueValue().getType());
+      return false;
+    };
+
+    llvm::DenseSet<Value> dependsOnIv{ivOrig};
+    int64_t vecAxisId = -1;
+    bool hasContigMem = false;
+    bool needsIvIota = false;
+    SmallVector<Operation *, 4> contigMemOps;
+
+    for (Operation &bop : loop.getBody()->without_terminator()) {
+      if (&bop == redOp)
+        continue;
+      if (isRed && llvm::is_contained(bop.getOperands(), iterArg))
+        return false;
+      if (auto ld = dyn_cast<memref::LoadOp>(bop)) {
+        if (writtenViews.contains(ld.getMemref()))
+          return false;
+        bool anyIv = llvm::any_of(
+            ld.getIndices(), [&](Value v) { return dependsOnIv.contains(v); });
+        if (!anyIv)
+          continue;
+        Value mem = ld.getMemref();
+        if (!isa<BlockArgument>(mem))
+          return false;
+        int64_t rank = cast<MemRefType>(mem.getType()).getRank();
+        if (ld.getIndices().empty() || ld.getIndices().back() != ivOrig ||
+            dimOf(mem, "cpu.strides", rank - 1) != 1 ||
+            dimOf(mem, "cpu.shape", rank - 1) < W ||
+            !vecElemOk(ld.getResult().getType()) ||
+            llvm::any_of(ld.getIndices().drop_back(),
+                         [&](Value v) { return dependsOnIv.contains(v); }))
+          return false;
+        int64_t ax = axesMap.at(mem)[rank - 1];
+        if (vecAxisId < 0)
+          vecAxisId = ax;
+        else if (vecAxisId != ax)
+          return false;
+        hasContigMem = true;
+        contigMemOps.push_back(&bop);
+        dependsOnIv.insert(ld.getResult());
+        continue;
+      }
+      if (auto st = dyn_cast<memref::StoreOp>(bop)) {
+        Value mem = st.getMemref();
+        int64_t rank = cast<MemRefType>(mem.getType()).getRank();
+        if (st.getIndices().empty() || st.getIndices().back() != ivOrig ||
+            dimOf(mem, "cpu.strides", rank - 1) != 1 ||
+            dimOf(mem, "cpu.shape", rank - 1) < W ||
+            !vecElemOk(st.getValue().getType()) ||
+            llvm::any_of(st.getIndices().drop_back(),
+                         [&](Value v) { return dependsOnIv.contains(v); }))
+          return false;
+        int64_t ax = axesMap.at(mem)[rank - 1];
+        if (vecAxisId < 0)
+          vecAxisId = ax;
+        else if (vecAxisId != ax)
+          return false;
+        hasContigMem = true;
+        contigMemOps.push_back(&bop);
+        continue;
+      }
+      if (auto ifOp = dyn_cast<scf::IfOp>(bop)) {
+        if (ifOp.getNumResults() != 1 || ifOp.getElseRegion().empty() ||
+            isa<ShapedType>(ifOp.getResult(0).getType()) ||
+            !vecElemOk(ifOp.getResult(0).getType()))
+          return false;
+        auto checkBranch = [&](Block *brBb) -> bool {
+          for (Operation &sub : brBb->without_terminator()) {
+            if (isRed && llvm::is_contained(sub.getOperands(), iterArg))
+              return false;
+            if (isa<arith::ConstantOp, arith::ConstantIndexOp, memref::DimOp>(
+                    sub))
+              continue;
+            if (!pureVecOpOk(sub))
+              return false;
+            if (llvm::is_contained(sub.getOperands(), ivOrig))
+              needsIvIota = true;
+          }
+          return true;
+        };
+        if (!checkBranch(ifOp.thenBlock()) || !checkBranch(ifOp.elseBlock()))
+          return false;
+        if (ifOp.getCondition() == ivOrig)
+          needsIvIota = true;
+        dependsOnIv.insert(ifOp.getResult(0));
+        continue;
+      }
+      if (bop.getNumRegions() != 0)
+        return false;
+      if (isa<memref::DimOp, arith::ConstantOp, arith::ConstantIndexOp>(bop))
+        continue;
+      bool anyIv = llvm::any_of(
+          bop.getOperands(), [&](Value v) { return dependsOnIv.contains(v); });
+      if (!anyIv)
+        continue;
+      if (!pureVecOpOk(bop))
+        return false;
+      if (llvm::is_contained(bop.getOperands(), ivOrig))
+        needsIvIota = true;
+      dependsOnIv.insert(bop.getResult(0));
+    }
+    if (!hasContigMem || vecAxisId < 0)
+      return false;
+
+    auto vecTyStr = [&](StringRef elemSp) {
+      return "!weft_kernel.value<" + elemSp.str() + ",[" + std::to_string(W) +
+             "],[" + std::to_string(vecAxisId) + "]>";
+    };
+    const std::string f32VecTy = vecTyStr("f32");
+    const std::string i1VecTy = vecTyStr("i1");
+    const std::string si64VecTy = vecTyStr("si64");
+
+    TaskTerm lbTerm = lanes[laneStart].at(loop.getLowerBound());
+    TaskTerm ubTerm = lanes[laneStart].at(loop.getUpperBound());
+    TaskTerm c0 = idx(0), c1 = idx(1), cW = idx(W);
+    bool exact = isStaticMultipleOf(fn, loop.getLowerBound(), W) &&
+                 isStaticMultipleOf(fn, loop.getUpperBound(), W);
+    TaskTerm vecEnd = ubTerm;
+    if (!exact) {
+      TaskTerm span = bin("sub", ubTerm, lbTerm, "index");
+      TaskTerm span64 = castOp(span, "si64");
+      TaskTerm geW = cmp("ge", span64, lit(std::to_string(W), "si64"), "i1");
+      TaskTerm aligned = bin("mul", bin("div", span, cW, "index"), cW, "index");
+      TaskTerm vecSpan = sel(geW, aligned, c0, "index");
+      vecEnd = bin("add", lbTerm, vecSpan, "index");
+    }
+
+    // Hoist loop-invariant 1D row slices (admit=false) for contiguous accesses.
+    llvm::DenseMap<Operation *, std::pair<TaskTerm, std::string>> hoistedSlices;
+    for (Operation *mOp : contigMemOps) {
+      Value mem = isa<memref::LoadOp>(mOp) ? cast<memref::LoadOp>(mOp).getMemref()
+                                           : cast<memref::StoreOp>(mOp).getMemref();
+      ValueRange idxs = isa<memref::LoadOp>(mOp)
+                            ? cast<memref::LoadOp>(mOp).getIndices()
+                            : cast<memref::StoreOp>(mOp).getIndices();
+      int64_t rank = cast<MemRefType>(mem.getType()).getRank();
+      TaskTerm rowSl =
+          sliceView(laneStart, mem, idxs.drop_back(), rank - 1, false);
+      std::string subSlTy = rowSl.type;
+      if (auto brk = subSlTy.rfind(">,["); brk != std::string::npos) {
+        auto cls = subSlTy.find(']', brk + 2);
+        subSlTy.replace(brk + 2, cls - (brk + 2) + 1,
+                        "[" + std::to_string(W) + "]");
+      }
+      hoistedSlices[mOp] = {rowSl, subSlTy};
+    }
+
+    TaskTerm iotaW64;
+    if (needsIvIota) {
+      std::string idxVecTy = vecTyStr("index");
+      Value io = makeOp(b, loc, "task_iota", {}, {b.getIndexType()},
+                        {b.getNamedAttr("start", b.getI64IntegerAttr(0)),
+                         b.getNamedAttr("end", b.getI64IntegerAttr(W)),
+                         b.getNamedAttr("val_type", b.getStringAttr(idxVecTy))})
+                     ->getResult(0);
+      iotaW64 = castOp({io, idxVecTy}, si64VecTy);
+    }
+
+    SmallVector<Value> vForOps{lbTerm.v, vecEnd.v, cW.v};
+    SmallVector<Attribute> vIterTys;
+    SmallVector<Type> vResTys;
+    if (isRed) {
+      TaskTerm identS =
+          isAdd ? lit("0.0", "f32") : lit("0xFF800000", "f32");
+      TaskTerm identV = newVec(identS, f32VecTy);
+      vForOps.push_back(identV.v);
+      vIterTys.push_back(b.getStringAttr(f32VecTy));
+      vResTys.push_back(b.getIndexType());
+    }
+
+    Operation *vFor =
+        makeOp(b, loc, "task_for", vForOps, vResTys,
+               {b.getNamedAttr("iter_types", b.getArrayAttr(vIterTys))}, 1);
+    {
+      Block &vBb = vFor->getRegion(0).emplaceBlock();
+      TaskTerm ivVec{vBb.addArgument(b.getIndexType(), loc), "index"};
+      TaskTerm vAccIter;
+      if (isRed)
+        vAccIter = {vBb.addArgument(b.getIndexType(), loc), f32VecTy};
+      OpBuilder::InsertionGuard g(b);
+      b.setInsertionPointToEnd(&vBb);
+
+      llvm::DenseMap<Value, TaskTerm> vMap;
+      if (needsIvIota)
+        vMap[ivOrig] = bin("add", iotaW64, castOp(ivVec, "si64"), si64VecTy);
+
+      auto isVecTerm = [](const TaskTerm &t) {
+        return StringRef(t.type).starts_with("!weft_kernel.value<");
+      };
+      auto getTerm = [&](Value orig) -> TaskTerm {
+        if (auto it = vMap.find(orig); it != vMap.end())
+          return it->second;
+        return lanes[laneStart].at(orig);
+      };
+      auto asVec = [&](TaskTerm t, StringRef targetVecTy) -> TaskTerm {
+        if (isVecTerm(t))
+          return t;
+        return newVec(t, targetVecTy);
+      };
+      auto elemOfVecTy = [](StringRef ty) -> StringRef {
+        if (ty.starts_with("!weft_kernel.value<")) {
+          auto rest = ty.drop_front(19);
+          return rest.take_until([](char c) { return c == ','; });
+        }
+        return ty;
+      };
+
+      auto lowerVecPureOp = [&](Operation &bop,
+                                std::optional<TaskTerm> guardMask) -> TaskTerm {
+        StringRef opN = bop.getName().getStringRef();
+        StringRef opK = bop.getName().stripDialect();
+        if (auto d = dyn_cast<memref::DimOp>(bop))
+          return idx(dimOf(d.getSource(), "cpu.shape", *d.getConstantIndex()));
+        if (auto c = dyn_cast<arith::ConstantOp>(bop)) {
+          if (c.getType().isIndex())
+            return idx(cast<IntegerAttr>(c.getValue()).getInt());
+          if (auto ia = dyn_cast<IntegerAttr>(c.getValue()))
+            return lit(c.getType().isInteger(1)
+                           ? (ia.getInt() ? "true" : "false")
+                           : std::to_string(ia.getInt()),
+                       scalarType(c.getType()));
+          return lit(stripTypeSuffix(c.getValue()), scalarType(c.getType()));
+        }
+        std::string resElem = scalarType(bop.getResult(0).getType());
+        if (resElem == "index")
+          resElem = "si64";
+        std::string resVTy = vecTyStr(resElem);
+        if (isa<arith::ExtFOp, arith::TruncFOp, arith::IndexCastOp,
+                arith::SIToFPOp, arith::FPToSIOp>(bop)) {
+          TaskTerm in = getTerm(bop.getOperand(0));
+          if (!isVecTerm(in))
+            return castOp(in, scalarType(bop.getResult(0).getType()));
+          if (in.type == resVTy)
+            return in;
+          return castOp(in, resVTy);
+        }
+        if (isa<math::ExpOp, math::Exp2Op, math::LogOp, math::SqrtOp,
+                math::RsqrtOp>(bop)) {
+          TaskTerm in = getTerm(bop.getOperand(0));
+          if (guardMask && isVecTerm(in) &&
+              isa<math::LogOp, math::SqrtOp, math::RsqrtOp>(bop)) {
+            TaskTerm oneV = newVec(lit("1.0", "f32"), in.type);
+            in = sel(*guardMask, in, oneV, in.type);
+          }
+          return unaryOp(opK, in);
+        }
+        if (auto selOp = dyn_cast<arith::SelectOp>(bop)) {
+          TaskTerm cT = getTerm(selOp.getCondition());
+          TaskTerm tT = getTerm(selOp.getTrueValue());
+          TaskTerm fT = getTerm(selOp.getFalseValue());
+          if (isVecTerm(cT) || isVecTerm(tT) || isVecTerm(fT))
+            return sel(asVec(cT, i1VecTy), asVec(tT, resVTy), asVec(fT, resVTy),
+                       resVTy);
+          return sel(cT, tT, fT, scalarType(bop.getResult(0).getType()));
+        }
+        if (auto ci = dyn_cast<arith::CmpIOp>(bop)) {
+          TaskTerm a = getTerm(ci.getLhs()), r = getTerm(ci.getRhs());
+          bool vec = isVecTerm(a) || isVecTerm(r);
+          if (vec) {
+            if (a.type == "index")
+              a = castOp(a, "si64");
+            if (r.type == "index")
+              r = castOp(r, "si64");
+          } else if (a.type == "index" &&
+                     ci.getPredicate() != arith::CmpIPredicate::eq &&
+                     ci.getPredicate() != arith::CmpIPredicate::ne) {
+            a = castOp(a, "si64");
+            r = castOp(r, "si64");
+          }
+          StringRef pred = "eq";
+          switch (ci.getPredicate()) {
+          case arith::CmpIPredicate::eq: pred = "eq"; break;
+          case arith::CmpIPredicate::ne: pred = "ne"; break;
+          case arith::CmpIPredicate::slt:
+          case arith::CmpIPredicate::ult: pred = "lt"; break;
+          case arith::CmpIPredicate::sle:
+          case arith::CmpIPredicate::ule: pred = "le"; break;
+          case arith::CmpIPredicate::sgt:
+          case arith::CmpIPredicate::ugt: pred = "gt"; break;
+          case arith::CmpIPredicate::sge:
+          case arith::CmpIPredicate::uge: pred = "ge"; break;
+          }
+          return cmp(pred, a, r, vec ? StringRef(i1VecTy) : StringRef("i1"));
+        }
+        if (auto cf = dyn_cast<arith::CmpFOp>(bop)) {
+          TaskTerm a = getTerm(cf.getLhs()), r = getTerm(cf.getRhs());
+          bool vec = isVecTerm(a) || isVecTerm(r);
+          StringRef pred = "eq";
+          switch (cf.getPredicate()) {
+          case arith::CmpFPredicate::OEQ:
+          case arith::CmpFPredicate::UEQ: pred = "eq"; break;
+          case arith::CmpFPredicate::ONE:
+          case arith::CmpFPredicate::UNE: pred = "ne"; break;
+          case arith::CmpFPredicate::OLT:
+          case arith::CmpFPredicate::ULT: pred = "lt"; break;
+          case arith::CmpFPredicate::OLE:
+          case arith::CmpFPredicate::ULE: pred = "le"; break;
+          case arith::CmpFPredicate::OGT:
+          case arith::CmpFPredicate::UGT: pred = "gt"; break;
+          default: pred = "ge"; break;
+          }
+          return cmp(pred, a, r, vec ? StringRef(i1VecTy) : StringRef("i1"));
+        }
+        TaskTerm a = getTerm(bop.getOperand(0)), r = getTerm(bop.getOperand(1));
+        bool vec = isVecTerm(a) || isVecTerm(r);
+        if (vec) {
+          if (a.type == "index")
+            a = castOp(a, "si64");
+          if (r.type == "index")
+            r = castOp(r, "si64");
+        }
+        StringRef tok = llvm::StringSwitch<StringRef>(opN)
+                            .Cases("arith.addf", "arith.addi", "add")
+                            .Cases("arith.subf", "arith.subi", "sub")
+                            .Cases("arith.mulf", "arith.muli", "mul")
+                            .Case("arith.divf", "div")
+                            .Cases("arith.maxnumf", "arith.maximumf", "max")
+                            .Cases("arith.minnumf", "arith.minimumf", "min")
+                            .Case("arith.andi", "and")
+                            .Case("arith.ori", "or")
+                            .Case("arith.xori", "xor")
+                            .Default("add");
+        std::string outTy =
+            vec ? vecTyStr(elemOfVecTy(isVecTerm(a) ? a.type : r.type))
+                : a.type;
+        return bin(tok, a, r, outTy);
+      };
+
+      for (Operation &bop : loop.getBody()->without_terminator()) {
+        if (&bop == redOp)
+          continue;
+        if (auto ld = dyn_cast<memref::LoadOp>(bop)) {
+          if (auto it = hoistedSlices.find(&bop); it != hoistedSlices.end()) {
+            std::string vTy = vecTyStr(scalarType(ld.getType()));
+            Value val =
+                makeOp(b, loc, "task_subview", {it->second.first.v, ivVec.v},
+                       {b.getIndexType()},
+                       {b.getNamedAttr("static_extent", b.getI64IntegerAttr(W)),
+                        b.getNamedAttr("slice_type",
+                                       b.getStringAttr(it->second.first.type)),
+                        b.getNamedAttr("val_type", b.getStringAttr(vTy)),
+                        b.getNamedAttr("admit", b.getBoolAttr(true))})
+                    ->getResult(0);
+            vMap[ld.getResult()] = {val, vTy};
+          } else {
+            vMap[ld.getResult()] = sliceView(laneStart, ld.getMemref(),
+                                             ld.getIndices(), -1, true,
+                                             scalarType(ld.getType()));
+          }
+          continue;
+        }
+        if (auto st = dyn_cast<memref::StoreOp>(bop)) {
+          auto &[rowSl, subSlTy] = hoistedSlices.at(&bop);
+          std::string vTy = vecTyStr(scalarType(st.getValue().getType()));
+          TaskTerm valVec = asVec(getTerm(st.getValue()), vTy);
+          Value subSl =
+              makeOp(b, loc, "task_subview", {rowSl.v, ivVec.v},
+                     {b.getIndexType()},
+                     {b.getNamedAttr("static_extent", b.getI64IntegerAttr(W)),
+                      b.getNamedAttr("slice_type", b.getStringAttr(rowSl.type)),
+                      b.getNamedAttr("val_type", b.getStringAttr(subSlTy)),
+                      b.getNamedAttr("admit", b.getBoolAttr(false))})
+                  ->getResult(0);
+          makeOp(b, loc, "task_commit", {valVec.v, subSl}, {},
+                 {b.getNamedAttr("val_type", b.getStringAttr(valVec.type)),
+                  b.getNamedAttr("slice_type", b.getStringAttr(subSlTy))});
+          continue;
+        }
+        if (auto ifOp = dyn_cast<scf::IfOp>(bop)) {
+          TaskTerm condV = asVec(getTerm(ifOp.getCondition()), i1VecTy);
+          TaskTerm notCondV = sel(condV, newVec(lit("false", "i1"), i1VecTy),
+                                  newVec(lit("true", "i1"), i1VecTy), i1VecTy);
+          for (Operation &sub : ifOp.thenBlock()->without_terminator())
+            vMap[sub.getResult(0)] = lowerVecPureOp(sub, condV);
+          for (Operation &sub : ifOp.elseBlock()->without_terminator())
+            vMap[sub.getResult(0)] = lowerVecPureOp(sub, notCondV);
+          std::string resElem = scalarType(ifOp.getResult(0).getType());
+          if (resElem == "index")
+            resElem = "si64";
+          std::string resVTy = vecTyStr(resElem);
+          TaskTerm tRes = asVec(getTerm(ifOp.thenYield().getOperand(0)), resVTy);
+          TaskTerm eRes = asVec(getTerm(ifOp.elseYield().getOperand(0)), resVTy);
+          vMap[ifOp.getResult(0)] = sel(condV, tRes, eRes, resVTy);
+          continue;
+        }
+        vMap[bop.getResult(0)] = lowerVecPureOp(bop, std::nullopt);
+      }
+
+      if (isRed) {
+        TaskTerm stepV = asVec(getTerm(stepTerm), f32VecTy);
+        TaskTerm nextV =
+            bin(isAdd ? "add" : "max", vAccIter, stepV, f32VecTy);
+        makeOp(b, loc, "task_yield", {nextV.v}, {},
+               {b.getNamedAttr("val_types", b.getArrayAttr(vIterTys))});
+      } else {
+        makeOp(b, loc, "task_yield", {}, {},
+               {b.getNamedAttr("val_types", b.getArrayAttr({}))});
+      }
+    }
+
+    TaskTerm curScalar;
+    if (isRed) {
+      TaskTerm initS = lanes[laneStart].at(loop.getInitArgs()[0]);
+      TaskTerm vFinal{vFor->getResult(0), f32VecTy};
+      TaskTerm redS = reduceOp(vFinal, isAdd ? "add" : "max", 0, "f32");
+      TaskTerm ran = cmp("gt", castOp(vecEnd, "si64"), castOp(lbTerm, "si64"),
+                         "i1");
+      TaskTerm combined = bin(isAdd ? "add" : "max", initS, redS, "f32");
+      curScalar = sel(ran, combined, initS, "f32");
+    }
+
+    if (!exact) {
+      SmallVector<Value> tForOps{vecEnd.v, ubTerm.v, c1.v};
+      SmallVector<Attribute> tIterTys;
+      SmallVector<Type> tResTys;
+      if (isRed) {
+        tForOps.push_back(curScalar.v);
+        tIterTys.push_back(b.getStringAttr("f32"));
+        tResTys.push_back(b.getIndexType());
+      }
+      Operation *tFor =
+          makeOp(b, loc, "task_for", tForOps, tResTys,
+                 {b.getNamedAttr("iter_types", b.getArrayAttr(tIterTys))}, 1);
+      Block &tBb = tFor->getRegion(0).emplaceBlock();
+      Value tIv = tBb.addArgument(b.getIndexType(), loc);
+      lanes[laneStart][ivOrig] = {tIv, "index"};
+      if (isRed)
+        lanes[laneStart][iterArg] = {tBb.addArgument(b.getIndexType(), loc),
+                                     "f32"};
+      OpBuilder::InsertionGuard tg(b);
+      b.setInsertionPointToEnd(&tBb);
+      if (failed(lowerBlock(*loop.getBody(), 1, laneStart)))
+        return false;
+      if (tBb.empty() ||
+          tBb.back().getName().getStringRef() != "weft_host.task_yield") {
+        makeOp(b, loc, "task_yield", {}, {},
+               {b.getNamedAttr("val_types", b.getArrayAttr({}))});
+      }
+      if (isRed)
+        curScalar = {tFor->getResult(0), "f32"};
+    }
+
+    if (isRed)
+      lanes[laneStart][loop.getResult(0)] = curScalar;
+    return true;
+  }
+
   LogicalResult lowerOp(Operation &op, int64_t activeLanes, int64_t laneStart) {
     StringRef name = op.getName().getStringRef();
     StringRef kind = op.getName().stripDialect();
@@ -2341,6 +3521,8 @@ struct OrderedLowerer {
     }
 
       if (auto loop = dyn_cast<scf::ForOp>(op)) {
+        if (activeLanes == 1 && tryLowerVectorizedInnerLoop(loop, laneStart))
+          return success();
         TaskTerm lbTerm = lanes[laneStart].at(loop.getLowerBound());
         TaskTerm ubTerm = lanes[laneStart].at(loop.getUpperBound());
         Value lb = lbTerm.v;
@@ -3072,11 +4254,16 @@ LogicalResult lowerWeftOrdered(func::FuncOp fn,
         std::to_string(tiledPlan.DV) + "],[" +
         std::to_string(tiledPlan.axOwn) + "," +
         std::to_string(tiledPlan.axDV) + "]>";
+    const bool needTiledOut =
+        !rvv && batch % 4 == 0 && batch * tiledPlan.DV >= 512 &&
+        tiledPlan.DV > 16 && tiledPlan.DV % 16 == 0;
     lowerer.ninfV = lowerer.newVec(lowerer.ninfS, vecBTy);
-    lowerer.ninfM = lowerer.newVec(lowerer.ninfS, scoreMatTy);
+    if (tiledPlan.hasCausal)
+      lowerer.ninfM = lowerer.newVec(lowerer.ninfS, scoreMatTy);
     lowerer.zeroV = lowerer.newVec(lowerer.zeroS, vecBTy);
     lowerer.zeroM = lowerer.newVec(lowerer.zeroS, scoreMatTy);
-    lowerer.zeroO = lowerer.newVec(lowerer.zeroS, outMatTy);
+    if (!needTiledOut)
+      lowerer.zeroO = lowerer.newVec(lowerer.zeroS, outMatTy);
     if (tiledPlan.hasScoreBuffer) {
       lowerer.trueM = lowerer.newVec(lowerer.true1, maskMatTy);
       lowerer.trueB = lowerer.newVec(lowerer.true1, maskBTy);
@@ -3111,8 +4298,26 @@ LogicalResult lowerWeftOrdered(func::FuncOp fn,
       int64_t allocSlots = tiledPlan.scoreSlots;
       auto loC = staticIndexVal(fn, tiledPlan.loop1.getLowerBound());
       auto hiMax = maxStaticIndexVal(fn, tiledPlan.loop1.getUpperBound());
-      if (loC && hiMax && (*hiMax - *loC) <= tiledPlan.scoreSlots)
+      bool staticFit = loC && hiMax && (*hiMax - *loC) <= tiledPlan.scoreSlots;
+      if (staticFit)
         allocSlots = std::max<int64_t>(tiledPlan.tokenTile, *hiMax - *loC);
+      // Reserve ample headroom inside triton-weft's 64 KiB x86 private stack
+      // budget so temporary ArrayStorage / AMX packed panels promote to stack
+      // instead of falling back to heap malloc/free inside the inner token loop.
+      if (!rvv && tiledPlan.windowGuarded && !staticFit) {
+        int64_t outBufBytes = needTiledOut ? (batch * tiledPlan.DV * 4) : 0;
+        const int64_t localAllocBudgetBytes =
+            (batch >= 8) ? (16 * 1024) : (20 * 1024);
+        int64_t maxScoreBytes =
+            std::max<int64_t>(0, localAllocBudgetBytes - outBufBytes);
+        int64_t maxSlots = maxScoreBytes / (4 * batch);
+        maxSlots = (maxSlots / tiledPlan.tokenTile) * tiledPlan.tokenTile;
+        maxSlots = std::max<int64_t>(tiledPlan.tokenTile, maxSlots);
+        if (maxSlots < tiledPlan.scoreSlots) {
+          tiledPlan.scoreSlots = maxSlots;
+          allocSlots = maxSlots;
+        }
+      }
       Value ptr =
           makeOp(b, loc, "task_local_alloc", {}, {b.getIndexType()},
                  {b.getNamedAttr("elements",
@@ -3132,18 +4337,17 @@ LogicalResult lowerWeftOrdered(func::FuncOp fn,
           std::to_string(tiledPlan.axOwn) + "," +
           std::to_string(tiledPlan.axTok) + "]>";
       tileSlotOff = lowerer.bin("add", qTileOff, iotaTok64, si64MatTy);
-      if (!rvv && batch >= 8 && batch % 4 == 0 && batch * tiledPlan.DV > 512) {
-        Value outPtr =
-            makeOp(b, loc, "task_local_alloc", {}, {b.getIndexType()},
-                   {b.getNamedAttr("elements",
-                                   b.getI64IntegerAttr(batch * tiledPlan.DV)),
-                    b.getNamedAttr("alignment", b.getI64IntegerAttr(64)),
-                    b.getNamedAttr(
-                        "ptr_type",
-                        b.getStringAttr("!weft_kernel.pointer<f32>"))})
-                ->getResult(0);
-        lowerer.tiledOutBuf = {outPtr, "!weft_kernel.pointer<f32>"};
-      }
+    }
+    if (needTiledOut) {
+      Value outPtr =
+          makeOp(b, loc, "task_local_alloc", {}, {b.getIndexType()},
+                 {b.getNamedAttr("elements",
+                                 b.getI64IntegerAttr(batch * tiledPlan.DV)),
+                  b.getNamedAttr("alignment", b.getI64IntegerAttr(64)),
+                  b.getNamedAttr("ptr_type",
+                                 b.getStringAttr("!weft_kernel.pointer<f32>"))})
+              ->getResult(0);
+      lowerer.tiledOutBuf = {outPtr, "!weft_kernel.pointer<f32>"};
     }
   } else if (localBufOp) {
     int64_t slots =
