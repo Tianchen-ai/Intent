@@ -21,6 +21,12 @@ struct OwnerAccess {
   bool nativeTileGather = false;
   bool nativeTileHistogram = false;
   bool blockAtomicMemoryBins = false;
+  int64_t minMmaRows = 0;
+  bool (*groupedPanel)(Tiles &, mlir::Value view,
+                       llvm::ArrayRef<mlir::Value> coords, int64_t panelAxis,
+                       mlir::Value panelBase, int64_t panelSpan,
+                       int64_t sliceAxis, int64_t sliceWidth, int64_t rows,
+                       llvm::SmallVectorImpl<mlir::Value> &slices) = nullptr;
 };
 void expandOwnerProgram(mlir::func::FuncOp fn, llvm::StringRef unit,
                         OwnerAccess access = {});

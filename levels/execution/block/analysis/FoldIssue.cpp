@@ -122,14 +122,93 @@ bool fullFoldPanels(scf::ForOp loop, const CallFacts &facts, int64_t span) {
     }
     return std::nullopt;
   };
+  std::function<bool(Value, Value, unsigned)> samePureExpr =
+      [&](Value x, Value y, unsigned depth) -> bool {
+    if (x == y)
+      return true;
+    if (depth > 8)
+      return false;
+    if (auto cx = staticVal(x), cy = staticVal(y); cx && cy)
+      return *cx == *cy;
+    if (auto dx = x.getDefiningOp<memref::DimOp>(),
+        dy = y.getDefiningOp<memref::DimOp>();
+        dx && dy)
+      return dx.getSource() == dy.getSource() && dx.getConstantIndex() &&
+             dx.getConstantIndex() == dy.getConstantIndex();
+    Operation *ox = x.getDefiningOp(), *oy = y.getDefiningOp();
+    if (!ox || !oy || ox->getName() != oy->getName() ||
+        ox->getNumOperands() != oy->getNumOperands() ||
+        ox->getNumRegions() != 0 || oy->getNumRegions() != 0 ||
+        ox->getName().getDialectNamespace() != "arith")
+      return false;
+    if (ox->getNumOperands() == 2 && isa<arith::AddIOp, arith::MulIOp>(ox))
+      return (samePureExpr(ox->getOperand(0), oy->getOperand(0), depth + 1) &&
+              samePureExpr(ox->getOperand(1), oy->getOperand(1), depth + 1)) ||
+             (samePureExpr(ox->getOperand(0), oy->getOperand(1), depth + 1) &&
+              samePureExpr(ox->getOperand(1), oy->getOperand(0), depth + 1));
+    for (auto [ax, ay] : llvm::zip(ox->getOperands(), oy->getOperands()))
+      if (!samePureExpr(ax, ay, depth + 1))
+        return false;
+    return true;
+  };
+  auto isPureIndexRegion = [](Block *blk) -> bool {
+    for (Operation &inst : blk->without_terminator())
+      if (!isa<memref::DimOp>(inst) &&
+          !(inst.getName().getDialectNamespace() == "arith" &&
+            inst.getNumRegions() == 0))
+        return false;
+    return true;
+  };
+  auto extractMinClamp = [&](Value v, Value &a, Value &b) -> bool {
+    if (auto mn = v.getDefiningOp<arith::MinSIOp>()) {
+      a = mn.getLhs();
+      b = mn.getRhs();
+      return true;
+    }
+    auto matchCmp = [&](Value cond, Value tVal, Value fVal) -> bool {
+      auto cmp = cond.getDefiningOp<arith::CmpIOp>();
+      if (!cmp)
+        return false;
+      auto pred = cmp.getPredicate();
+      Value lhs = cmp.getLhs(), rhs = cmp.getRhs();
+      if ((pred == arith::CmpIPredicate::slt ||
+           pred == arith::CmpIPredicate::sle) &&
+          samePureExpr(tVal, lhs, 0) && samePureExpr(fVal, rhs, 0)) {
+        a = lhs;
+        b = rhs;
+        return true;
+      }
+      if ((pred == arith::CmpIPredicate::sgt ||
+           pred == arith::CmpIPredicate::sge) &&
+          samePureExpr(tVal, rhs, 0) && samePureExpr(fVal, lhs, 0)) {
+        a = lhs;
+        b = rhs;
+        return true;
+      }
+      return false;
+    };
+    if (auto sel = v.getDefiningOp<arith::SelectOp>())
+      return matchCmp(sel.getCondition(), sel.getTrueValue(),
+                      sel.getFalseValue());
+    if (auto br = v.getDefiningOp<scf::IfOp>();
+        br && br.getNumResults() == 1 && !br.getElseRegion().empty() &&
+        isPureIndexRegion(br.thenBlock()) && isPureIndexRegion(br.elseBlock()))
+      return matchCmp(br.getCondition(), br.thenYield().getOperand(0),
+                      br.elseYield().getOperand(0));
+    return false;
+  };
   auto staticCap = [&](Value v) -> std::optional<int64_t> {
     if (auto c = staticVal(v))
       return c;
-    if (auto mn = v.getDefiningOp<arith::MinSIOp>()) {
-      if (auto c = staticVal(mn.getLhs()))
-        return c;
-      if (auto c = staticVal(mn.getRhs()))
-        return c;
+    Value a, b;
+    if (extractMinClamp(v, a, b)) {
+      auto ca = staticVal(a), cb = staticVal(b);
+      if (ca && cb)
+        return std::min(*ca, *cb);
+      if (ca)
+        return ca;
+      if (cb)
+        return cb;
     }
     if (auto sel = v.getDefiningOp<arith::SelectOp>()) {
       auto a = staticVal(sel.getTrueValue()), b = staticVal(sel.getFalseValue());
@@ -207,9 +286,13 @@ bool fullFoldPanels(scf::ForOp loop, const CallFacts &facts, int64_t span) {
       return;
     }
     if (Operation *def = v.getDefiningOp()) {
-      if (isa<arith::MinSIOp, arith::AddIOp, arith::SubIOp, arith::MulIOp,
-              arith::FloorDivSIOp, arith::DivUIOp, arith::RemSIOp,
-              arith::RemUIOp, arith::IndexCastOp>(def))
+      Value ma, mb;
+      if (extractMinClamp(v, ma, mb)) {
+        collectOwners(ma, depth + 1);
+        collectOwners(mb, depth + 1);
+      } else if (isa<arith::MinSIOp, arith::AddIOp, arith::SubIOp,
+                     arith::MulIOp, arith::FloorDivSIOp, arith::DivUIOp,
+                     arith::RemSIOp, arith::RemUIOp, arith::IndexCastOp>(def))
         for (Value opnd : def->getOperands())
           collectOwners(opnd, depth + 1);
       else if (auto sel = dyn_cast<arith::SelectOp>(def)) {
@@ -238,9 +321,10 @@ bool fullFoldPanels(scf::ForOp loop, const CallFacts &facts, int64_t span) {
       return trackLocal(b.create<arith::ConstantIndexOp>(loc, *c))
           ->getResult(0);
     }
-    if (auto mn = v.getDefiningOp<arith::MinSIOp>()) {
-      Value lhs = materialize(mn.getLhs(), depth + 1);
-      Value rhs = materialize(mn.getRhs(), depth + 1);
+    Value ma, mb;
+    if (extractMinClamp(v, ma, mb)) {
+      Value lhs = materialize(ma, depth + 1);
+      Value rhs = materialize(mb, depth + 1);
       Value cmp =
           trackLocal(b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt,
                                              lhs, rhs))
@@ -286,7 +370,10 @@ bool fullFoldPanels(scf::ForOp loop, const CallFacts &facts, int64_t span) {
           ->getResult(0);
     return v;
   };
-  auto proveAligned = [&](Value bound) -> bool {
+  std::function<bool(Value, unsigned)> proveAligned =
+      [&](Value bound, unsigned depth) -> bool {
+    if (depth > 4)
+      return false;
     OpBuilder::InsertionGuard guard(b);
     Value startIdx;
     if (auto bc = staticVal(bound); bc && *bc == *cap) {
@@ -308,10 +395,15 @@ bool fullFoldPanels(scf::ForOp loop, const CallFacts &facts, int64_t span) {
         ArrayRef<OpFoldResult>{b.getIndexAttr(1)});
     auto proof = compilerinfra::proveTailAccess(sub.getOperation());
     probe.erase();
-    return proof.proven && proof.kind == compilerinfra::TailKind::ExactInBounds;
+    if (proof.proven && proof.kind == compilerinfra::TailKind::ExactInBounds)
+      return true;
+    Value ma, mb;
+    if (extractMinClamp(bound, ma, mb))
+      return proveAligned(ma, depth + 1) && proveAligned(mb, depth + 1);
+    return false;
   };
-  bool ok = proveAligned(loop.getLowerBound()) &&
-            proveAligned(loop.getUpperBound());
+  bool ok = proveAligned(loop.getLowerBound(), 0) &&
+            proveAligned(loop.getUpperBound(), 0);
   if (!ownerLoops.empty())
     ownerLoops.front().erase();
   for (auto it = tempOps.rbegin(); it != tempOps.rend(); ++it)

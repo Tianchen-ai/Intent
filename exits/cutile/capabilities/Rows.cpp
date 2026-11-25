@@ -55,6 +55,7 @@ capabilities(const llvm::json::Object &options) {
   indices->bits = *bits;
   indices->scaledMma=*architecture>=100;
   indices->permitTma = options.getBoolean("allow_tma").value_or(false);
+  indices->sm = int(*architecture);
   if(auto registers=options.getInteger("registers"))
     if(auto err=profile.services.facts.query("register_file",{*registers,"reg32","CUDA",llvm::json::Object{{"source","device properties"}}}))return err;
   if (auto err = profile.services.provide<intentdsl::block::OwnerMachine>(
@@ -69,7 +70,7 @@ capabilities(const llvm::json::Object &options) {
                       : options.getInteger("registers").value_or(0) * 3 / 8,
                   *architecture == 90 ? 64 : 0,
                   /*maxWarpgroups=*/1,
-                  /*maxGroupReads=*/4})))
+                  /*maxGroupReads=*/16})))
     return err;
   std::string cal = options.getString("calibration")
                         .value_or(*architecture == 90 ? "sm90" : "sm120")
@@ -199,10 +200,14 @@ capabilities(const llvm::json::Object &options) {
           occupancies.push_back(4u);
       } else {
         occupancies.push_back(
-            rows == 1 && width >= 32 && width <= 256 ? 2u : std::min(rows, 2u));
+            rows == 1 && ((width >= 32 && width <= 256) || width >= 1024)
+                ? 2u
+                : std::min(rows, 2u));
         if (rows == 1 && ((width >= 32 && width <= 256) || width >= 512))
-          occupancies.push_back(rows == 1 && width >= 32 && width <= 256 ? 4u
-                                                                         : 2u);
+          occupancies.push_back(
+              rows == 1 && ((width >= 32 && width <= 256) || width >= 1024)
+                  ? 4u
+                  : 2u);
       }
       for (auto [idx, occupancy] : llvm::enumerate(occupancies)) {
         std::string rowOptions;

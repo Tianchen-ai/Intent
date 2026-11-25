@@ -1776,6 +1776,124 @@ SmallVector<Value> OwnerTiles::serialLoop(scf::ForOp loop, const Values &parent,
   env[loop.getInductionVar()] = iv;
   for (auto [a, v] : llvm::zip(loop.getRegionIterArgs(), l.getRegionIterArgs()))
     env[a] = v;
+  if (access.groupedPanel && !ragged && rows > 0 &&
+      llvm::isPowerOf2_64(rows)) {
+    auto constVal = [](Value v) -> std::optional<int64_t> {
+      if (auto c = v.getDefiningOp<arith::ConstantOp>())
+        if (auto ia = dyn_cast<IntegerAttr>(c.getValue());
+            ia && ia.getValue().getSignificantBits() <= 64)
+          return ia.getInt();
+      return std::nullopt;
+    };
+    auto loVal = constVal(start), hiVal = constVal(limit),
+         stVal = constVal(step);
+    if (loVal && hiVal && stVal && *loVal == 0 && *stVal >= 4 &&
+        llvm::isPowerOf2_64(*stVal) && *hiVal > 0 && *hiVal % *stVal == 0) {
+      int64_t G = *stVal;
+      auto ivOffset = [&](Value c) -> std::optional<int64_t> {
+        if (c == loop.getInductionVar())
+          return 0;
+        if (auto add = c.getDefiningOp<arith::AddIOp>()) {
+          if (add.getLhs() == loop.getInductionVar())
+            if (auto k = constVal(add.getRhs()); k && *k >= 0 && *k < G)
+              return k;
+          if (add.getRhs() == loop.getInductionVar())
+            if (auto k = constVal(add.getLhs()); k && *k >= 0 && *k < G)
+              return k;
+        }
+        return std::nullopt;
+      };
+      struct ReadGroup {
+        Value base;
+        int64_t sliceAxis;
+        int64_t panelAxis;
+        SmallVector<Value, 4> outerCoords;
+        SmallVector<SmallVector<Operation *, 2>> slots;
+      };
+      SmallVector<ReadGroup, 4> groups;
+      for (Operation &inst : loop.getBody()->without_terminator()) {
+        auto k = inst.getName().stripDialect();
+        if (isa<memref::StoreOp, scf::ForOp, scf::IfOp>(inst) ||
+            k == "slice_write")
+          break;
+        bool isSlice = k == "slice_read";
+        if (!isSlice && !isa<memref::LoadOp>(inst))
+          continue;
+        Value base = inst.getOperand(0);
+        auto mt = dyn_cast<MemRefType>(base.getType());
+        if (!mt)
+          continue;
+        int64_t rank = mt.getRank();
+        int64_t sliceAxis =
+            isSlice ? inst.getAttrOfType<IntegerAttr>("axis").getInt() : -1;
+        SmallVector<Value, 4> fullCoords;
+        auto rawCoords = inst.getOperands().drop_front();
+        unsigned ci = 0;
+        for (int64_t d = 0; d < rank; ++d) {
+          if (d == sliceAxis)
+            fullCoords.push_back(Value());
+          else if (ci < rawCoords.size())
+            fullCoords.push_back(rawCoords[ci++]);
+        }
+        if (int64_t(fullCoords.size()) != rank)
+          continue;
+        int64_t pAxis = -1;
+        int64_t slotIdx = -1;
+        bool valid = true;
+        for (int64_t d = 0; d < rank; ++d) {
+          if (d == sliceAxis)
+            continue;
+          if (auto off = ivOffset(fullCoords[d])) {
+            if (pAxis >= 0) {
+              valid = false;
+              break;
+            }
+            pAxis = d;
+            slotIdx = *off;
+          } else if (!loop.isDefinedOutsideOfLoop(fullCoords[d])) {
+            valid = false;
+            break;
+          }
+        }
+        if (!valid || pAxis < 0)
+          continue;
+        SmallVector<Value, 4> keyCoords = fullCoords;
+        keyCoords[pAxis] = Value();
+        ReadGroup *found = nullptr;
+        for (auto &g : groups) {
+          if (g.base == base && g.sliceAxis == sliceAxis &&
+              g.panelAxis == pAxis && g.outerCoords == keyCoords) {
+            found = &g;
+            break;
+          }
+        }
+        if (!found) {
+          groups.push_back({base, sliceAxis, pAxis, std::move(keyCoords),
+                            SmallVector<SmallVector<Operation *, 2>>(G)});
+          found = &groups.back();
+        }
+        found->slots[slotIdx].push_back(&inst);
+      }
+      for (auto &g : groups) {
+        if (!llvm::all_of(g.slots, [](const auto &s) { return !s.empty(); }))
+          continue;
+        int64_t sliceWidth =
+            g.sliceAxis >= 0 ? shape(g.base)[g.sliceAxis] : 0;
+        SmallVector<Value, 4> mappedCoords;
+        mappedCoords.reserve(g.outerCoords.size());
+        for (Value c : g.outerCoords)
+          mappedCoords.push_back(c ? widen(at(c, env)) : Value());
+        SmallVector<Value> slices;
+        if (access.groupedPanel(*this, g.base, mappedCoords, g.panelAxis, iv, G,
+                                g.sliceAxis, sliceWidth, rows, slices) &&
+            int64_t(slices.size()) == G) {
+          for (int64_t u = 0; u < G; ++u)
+            for (Operation *readOp : g.slots[u])
+              env[readOp->getResult(0)] = slices[u];
+        }
+      }
+    }
+  }
   auto next = lowerBody(*loop.getBody(), env, live);
   for (auto [i, arg] : llvm::enumerate(l.getRegionIterArgs())) {
     next[i] = broadcast(next[i], arg.getType());
@@ -2102,6 +2220,8 @@ SmallVector<Value> OwnerTiles::lowerBody(Block &body, Values env, Value mask) {
     }
     if (code == "end")
       break;
+    if (op.getNumResults() == 1 && env.count(op.getResult(0)))
+      continue;
     if (isa<arith::ExtFOp>(op) && !op.use_empty() &&
         llvm::all_of(op.getUsers(), [](Operation *u) {
           auto fl = dyn_cast_or_null<scf::ForOp>(u->getParentOp());

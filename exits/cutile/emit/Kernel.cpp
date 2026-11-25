@@ -36,16 +36,26 @@ llvm::Error describeArtifact(ModuleOp m, llvm::raw_pwrite_stream &out) {
               llvm::json::Object{{"num_ctas", 1}, {"occupancy", 2}, {"opt_level", 3}},
               llvm::json::Object{{"num_ctas", 1}, {"occupancy", 4}, {"opt_level", 3}}},
           3, out);
-    bool hasFetchAdd = false;
+    bool hasFetchAdd = false, hasPanelExtract = false;
     fn.walk([&](Operation *op) {
-      if (op->getName().getStringRef() == "ct_src.tile_atomic_fetch_add")
+      auto name = op->getName().getStringRef();
+      if (name == "ct_src.tile_atomic_fetch_add")
         hasFetchAdd = true;
+      else if (name == "ct_src.panel_extract")
+        hasPanelExtract = true;
     });
     if (hasFetchAdd)
       return intentdsl::block::emitOwnerArtifact(
           fn, "",
           llvm::json::Object{
               {"num_ctas", 1}, {"occupancy", 4}, {"opt_level", 3}},
+          3, out);
+    if (fn.front().front().hasAttr("block.token_span") || hasPanelExtract)
+      return intentdsl::block::emitOwnerArtifact(
+          fn, "",
+          ArrayRef<llvm::json::Object>{
+              llvm::json::Object{{"num_ctas", 1}, {"occupancy", 2}, {"opt_level", 3}},
+              llvm::json::Object{{"num_ctas", 1}, {"occupancy", 4}, {"opt_level", 3}}},
           3, out);
     return intentdsl::block::emitOwnerArtifact(fn, "", llvm::json::Object{}, 3, out);
   }

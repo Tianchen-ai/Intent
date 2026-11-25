@@ -25,13 +25,52 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
   };
   Value lower = at(loop.getLowerBound(), parent),
         upper = at(loop.getUpperBound(), parent);
-  auto tileType = [&](Type e) { return shaped({rows, span}, e); };
+  bool full = loop->hasAttr("block.full_panels");
+  bool transMma = false;
+  if (access.minMmaRows > 0 && paired && online && !online->condVal && full &&
+      rows < access.minMmaRows && span >= access.minMmaRows &&
+      !loop->hasAttr("block.repair_masked_nan")) {
+    bool okDims = true;
+    unsigned dotCount = 0;
+    for (auto &o : loop.getBody()->without_terminator()) {
+      if (o.hasAttr("block.pair_dot")) {
+        ++dotCount;
+        auto ops = intentdsl::block::tileDot(&o, loop);
+        if (!ops) {
+          okDims = false;
+          break;
+        }
+        auto qTy = dyn_cast<RankedTensorType>(at(ops->rows, parent).getType());
+        if (!qTy || qTy.getRank() != 2 || qTy.getDimSize(1) < access.minMmaRows) {
+          okDims = false;
+          break;
+        }
+      }
+    }
+    unsigned matCarries = 0;
+    for (Value r : loop.getBody()->getTerminator()->getOperands()) {
+      auto *comb = r.getDefiningOp();
+      if (comb && comb->hasAttr("block.masked_dot_update")) {
+        ++matCarries;
+        auto rt = dyn_cast<RankedTensorType>(lifted(r));
+        if (!rt || rt.getRank() != 2 || rt.getDimSize(1) < access.minMmaRows) {
+          okDims = false;
+          break;
+        }
+      }
+    }
+    transMma = okDims && dotCount > 0 && matCarries > 0;
+  }
+  int tokAxis = transMma ? 0 : 1;
+  auto tileType = [&](Type e) {
+    return transMma ? shaped({span, rows}, e) : shaped({rows, span}, e);
+  };
   auto plane = [&](Fragment x) -> Value {
-    return broadcast(x.value, tileType(elem(x.value.getType())),
-                     x.axis == Axis::Token ? 1 : 0);
+    int bAxis = transMma ? (x.axis == Axis::Token ? 0 : 1)
+                         : (x.axis == Axis::Token ? 1 : 0);
+    return broadcast(x.value, tileType(elem(x.value.getType())), bAxis);
   };
   auto uniform = [&](Value v) { return asScalar(v, "min"); };
-  bool full = loop->hasAttr("block.full_panels");
   Value width = integer(span), lo = uniform(lower), hi = asScalar(upper, "max");
   if (online && online->causalUpper) {
     Value maxBnd = asScalar(at(online->causalUpper, parent), "max");
@@ -91,9 +130,43 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
       }
     }
   }
-  for (auto v : loop.getInitArgs()) {
+  llvm::DenseMap<Value, Value> hoistedTransQ;
+  if (transMma) {
+    for (auto &o : loop.getBody()->without_terminator()) {
+      if (!o.hasAttr("block.pair_dot"))
+        continue;
+      auto ops = *intentdsl::block::tileDot(&o, loop);
+      if (hoistedTransQ.count(ops.rows))
+        continue;
+      Value qVal = at(ops.rows, parent);
+      auto qTy = cast<RankedTensorType>(qVal.getType());
+      Value qt =
+          op("transpose", qVal,
+             shaped({qTy.getDimSize(1), qTy.getDimSize(0)},
+                    qTy.getElementType()))
+              ->getResult(0);
+      hoistedTransQ[ops.rows] = qt;
+    }
+  }
+  auto yieldedEarly = loop.getBody()->getTerminator()->getOperands();
+  SmallVector<bool> carryTransposed;
+  for (auto [idx, v] : llvm::enumerate(loop.getInitArgs())) {
+    auto *comb = yieldedEarly[idx].getDefiningOp();
+    bool isMatCarry =
+        transMma && comb && comb->hasAttr("block.masked_dot_update");
+    carryTransposed.push_back(isMatCarry);
     auto t = lifted(v);
-    init.push_back(broadcast(at(v, parent), t));
+    Value iv = at(v, parent);
+    if (isMatCarry) {
+      auto rt = cast<RankedTensorType>(t);
+      auto tt = shaped({rt.getDimSize(1), rt.getDimSize(0)},
+                       rt.getElementType());
+      if (auto ivTy = dyn_cast<RankedTensorType>(iv.getType());
+          ivTy && ivTy.getRank() == 2)
+        iv = op("transpose", iv, tt)->getResult(0);
+      t = tt;
+    }
+    init.push_back(broadcast(iv, t));
     types.push_back(t);
   }
   Value begin = start, end = hi, stride = width;
@@ -332,7 +405,8 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
           onlineSeenNew = b.create<arith::OrIOp>(loc, seenPrev, rowValid);
         }
         Value mPanel =
-            broadcast(reduce(sMasked, "max", paired ? 1 : 0), mPrev.getType());
+            broadcast(reduce(sMasked, "max", paired ? tokAxis : 0),
+                      mPrev.getType());
         onlineMNew =
             b.create<arith::MaxNumFOp>(loc, mPrev, mPanel, online->maxFlags);
         Value negInfRow = broadcast(scalar(-INFINITY), onlineMNew.getType());
@@ -486,9 +560,14 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
                   Axis::Token};
       } else if (old.hasAttr("block.pair_dot")) {
         auto operands = *intentdsl::block::tileDot(&old, loop);
-        result = {
-            dot(value(operands.rows).value, value(operands.tokens).value, true),
-            Axis::Both};
+        if (transMma) {
+          Value qt = hoistedTransQ.lookup(operands.rows);
+          result = {dot(value(operands.tokens).value, qt, false), Axis::Both};
+        } else {
+          result = {
+              dot(value(operands.rows).value, value(operands.tokens).value, true),
+              Axis::Both};
+        }
       } else if (code == "lane_splat") {
         auto x = operand(0);
         int64_t n = std::max<int64_t>(
@@ -531,12 +610,15 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
       next.push_back(onlineSeenNew);
   }
   auto accIterArgs = l.getRegionIterArgs().drop_front(onlineHead);
-  for (auto [ret, rawAcc] : llvm::zip(yielded, accIterArgs)) {
+  for (auto [idx, ret, rawAcc] : llvm::enumerate(yielded, accIterArgs)) {
     auto *comb = ret.getDefiningOp();
     auto combFlags = intentdsl::kir::getFastMathFlags(comb);
+    bool isMatCarry = carryTransposed[idx];
     Value acc =
         online ? Value(b.create<arith::MulFOp>(
-                     loc, rawAcc, broadcast(onlineAlpha, rawAcc.getType(), 0),
+                     loc, rawAcc,
+                     broadcast(onlineAlpha, rawAcc.getType(),
+                               isMatCarry ? 1 : 0),
                      combFlags & (online->subFlags | online->expFlags)))
                : rawAcc;
     auto rhs = comb->getOperand(1);
@@ -554,7 +636,17 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
                          : select(live, w, broadcast(zero, w.getType()));
       auto w16 = castElement(guarded, elem(v.getType()));
       if (!loop->hasAttr("block.repair_masked_nan")) {
-        next.push_back(dot(w16, v, false, acc));
+        if (isMatCarry) {
+          auto vTy = cast<RankedTensorType>(v.getType());
+          Value vt =
+              op("transpose", v,
+                 shaped({vTy.getDimSize(1), vTy.getDimSize(0)},
+                        vTy.getElementType()))
+                  ->getResult(0);
+          next.push_back(dot(vt, w16, false, acc));
+        } else {
+          next.push_back(dot(w16, v, false, acc));
+        }
       } else {
         Operation *valRead = operands.values.getDefiningOp();
         bool canRereadV =
@@ -722,7 +814,7 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
           full ? x
                : select(keep, x,
                         broadcast(scalar(max ? -INFINITY : 0.f), x.getType()));
-      auto partial = reduce(term, max ? "max" : "sum", paired ? 1 : 0);
+      auto partial = reduce(term, max ? "max" : "sum", paired ? tokAxis : 0);
       if (!paired && isa<ShapedType>(rhs.getType()))
         partial = broadcast(partial, acc.getType(), 1);
       else
@@ -768,7 +860,15 @@ SmallVector<Value> OwnerTiles::panelLoop(scf::ForOp loop, const Values &parent,
       b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OEQ, finalM, negInfM);
   Value allValidNegInf = b.create<arith::AndIOp>(loc, hasValid, mIsNegInf);
   SmallVector<Value> outs{finalM};
-  for (Value res : l.getResults().drop_front(onlineHead)) {
+  for (auto [idx, resVal] : llvm::enumerate(l.getResults().drop_front(onlineHead))) {
+    Value res = resVal;
+    if (carryTransposed[idx]) {
+      auto rt = cast<RankedTensorType>(res.getType());
+      res = op("transpose", res,
+               shaped({rt.getDimSize(1), rt.getDimSize(0)},
+                      rt.getElementType()))
+                ->getResult(0);
+    }
     auto resTy = cast<RankedTensorType>(res.getType());
     Value nanMask = resTy.getRank() == 2
                         ? broadcast(allValidNegInf, resTy.clone(b.getI1Type()), 0)

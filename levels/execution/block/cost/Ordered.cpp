@@ -308,8 +308,17 @@ void orderedCost(Unit &u) {
             auto fetch = choice.getAs<mlir::IntegerAttr>("prefetch");
             double span = fetch ? fetch.getInt() : 1;
             double independentLoads = 0, wordsPerStep = 0, carryWords = 0;
+            double loopSteps = 16.0;
             for (auto loop :
                  op->getRegion(0).front().getOps<mlir::scf::ForOp>()) {
+              if (auto bd =
+                      loop.getUpperBound().getDefiningOp<mlir::memref::DimOp>();
+                  bd && bd.getConstantIndex()) {
+                if (auto *sh = f->shapeOf(bd.getSource()))
+                  if (auto ext = (*sh)[*bd.getConstantIndex()].getAsInteger();
+                      ext && *ext > 0)
+                    loopSteps = std::max(loopSteps, double(*ext));
+              }
               for (auto t : loop.getResultTypes()) {
                 if (auto st = mlir::dyn_cast<mlir::ShapedType>(t))
                   carryWords += lanes * (st.getElementTypeBitWidth() / 32.0);
@@ -333,8 +342,23 @@ void orderedCost(Unit &u) {
               });
             }
             double live = w * (carryWords + span * wordsPerStep);
-            dependency = (1 + independentLoads / span) *
-                         (1 + std::max(0., live - 6144) / 2048);
+            double sms = std::max<double>(1.0, f->participants);
+            double residentPerSm = std::clamp(
+                std::floor(double(issue) /
+                           std::max<double>(1.0, double(w) * lanes)),
+                1.0, 4.0);
+            double concurrentCtas = std::max<double>(1.0, sms * residentPerSm);
+            waves = std::ceil(blocks / concurrentCtas);
+            e.terms["issue_waves"] = {waves, "count"};
+            double targetCtas = std::min<double>(double(n), sms);
+            double activeCtas = std::min<double>(blocks, sms);
+            double smUnderutil = targetCtas / std::max<double>(1.0, activeCtas);
+            // Model serial loop latency, concurrent narrow-CTA residency per
+            // SM, and SM underutilization when widening owners drops CTAs below
+            // SM count.
+            dependency = (loopSteps / 16.0) * smUnderutil *
+                         (1.0 + independentLoads / span) *
+                         (1.0 + std::max(0., live - 6144.) / 2048.);
             e.terms["grouped_read_elements"] = {live, "count"};
           }
           double readCost = 0;

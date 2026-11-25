@@ -54,6 +54,7 @@ public:
     else if (resident)
       tile(make("zero", {}, rw.getIndexType())->getResult(0));
     SmallVector<Operation*> ownerStores;
+    unsigned reductionCount = 0;
     for (auto &operation : body.without_terminator()) {
       auto code=operation.getName().stripDialect();
       if(code=="fill_ranges"){
@@ -83,6 +84,7 @@ public:
       if (operation.getName().stripDialect() == "write")
         writes.push_back(&operation);
       else if (isReduction(&operation)) {
+        ++reductionCount;
         if (resident)
           fixed.map(operation.getResult(0), reduce(&operation));
         else
@@ -91,10 +93,63 @@ public:
     }
     if (!writes.empty()) {
       if (resident || gridTiles) {
-        for (auto *write : writes)
-          expr(write->getOperand(2));
-        for (auto *write : writes)
-          store(write);
+        // When a resident multi-reduction body accumulates many distinct input
+        // views, caching every pre-reduction read across the reduction barrier
+        // overflows the CTA register file. Rematerialize reads from L1 in the
+        // write pass and emit each non-aliasing store immediately to keep peak
+        // live tile count bounded.
+        bool rematWrites = resident && reductionCount >= 4 &&
+                           localReads.size() >= 8;
+        bool disjointWrites = false;
+        if (rematWrites) {
+          llvm::DenseMap<Value, unsigned> readCounts;
+          body.walk([&](Operation *inst) {
+            if (inst->getName().stripDialect() == "read")
+              ++readCounts[inst->getOperand(0)];
+          });
+          local.clear();
+          SmallVector<Value, 16> dropViews;
+          for (auto &[view, tileVal] : localReads)
+            if (readCounts.lookup(view) < 4)
+              dropViews.push_back(view);
+          for (Value view : dropViews)
+            localReads.erase(view);
+          auto fn = anchor->getParentOfType<func::FuncOp>();
+          disjointWrites = true;
+          if (auto abiAttr = fn->getAttrOfType<StringAttr>("kir.abi")) {
+            if (auto abi = llvm::json::parse(abiAttr.getValue())) {
+              for (auto &slot : *abi->getAsArray())
+                if (slot.getAsObject()->getString("direction") == "InOut")
+                  disjointWrites = false;
+            } else {
+              llvm::consumeError(abi.takeError());
+              disjointWrites = false;
+            }
+          } else {
+            disjointWrites = false;
+          }
+          if (disjointWrites) {
+            llvm::SmallDenseSet<Value, 16> readViews;
+            body.walk([&](Operation *inst) {
+              if (inst->getName().stripDialect() == "read")
+                readViews.insert(inst->getOperand(0));
+            });
+            for (auto *write : writes)
+              if (readViews.contains(write->getOperand(0)))
+                disjointWrites = false;
+          }
+        }
+        if (disjointWrites) {
+          for (auto *write : writes) {
+            expr(write->getOperand(2));
+            store(write);
+          }
+        } else {
+          for (auto *write : writes)
+            expr(write->getOperand(2));
+          for (auto *write : writes)
+            store(write);
+        }
       } else
         sweep(writes.front());
     }

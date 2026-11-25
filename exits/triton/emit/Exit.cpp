@@ -230,6 +230,15 @@ llvm::Error describeArtifact(func::FuncOp fn, llvm::raw_pwrite_stream &out) {
       if ((maxAxis >= 256 || ownerRows * maxAxis >= 2048) &&
           !(hasHistogram && maxAxis <= 512))
         warps = 8;
+      if (ownerRows == 1 && maxAxis <= 64 && !hasHistogram &&
+          !entry.hasAttr("block.token_span"))
+        return intentdsl::block::emitOwnerArtifact(
+            fn, "",
+            ArrayRef<llvm::json::Object>{
+                llvm::json::Object{{"num_warps", 1}, {"num_stages", 1}},
+                llvm::json::Object{{"num_warps", 2}, {"num_stages", 1}},
+                llvm::json::Object{{"num_warps", 4}, {"num_stages", 1}}},
+            2, out);
     }
     return intentdsl::block::emitOwnerArtifact(
         fn, "", llvm::json::Object{{"num_warps", warps}, {"num_stages", 1}}, 2,
@@ -258,6 +267,15 @@ llvm::Error describeArtifact(func::FuncOp fn, llvm::raw_pwrite_stream &out) {
       if ((maxAxis >= 256 || ownerRows * maxAxis >= 2048) &&
           !(hasHistogram && maxAxis <= 512))
         warps = 8;
+      if (ownerRows == 1 && maxAxis <= 64 && !hasHistogram &&
+          !entry.hasAttr("block.token_span"))
+        return intentdsl::block::emitOwnerArtifact(
+            fn, "",
+            ArrayRef<llvm::json::Object>{
+                llvm::json::Object{{"num_warps", 1}, {"num_stages", 1}},
+                llvm::json::Object{{"num_warps", 2}, {"num_stages", 1}},
+                llvm::json::Object{{"num_warps", 4}, {"num_stages", 1}}},
+            2, out);
     }
     return intentdsl::block::emitOwnerArtifact(
         fn, "", llvm::json::Object{{"num_warps", warps}, {"num_stages", 1}}, 2,

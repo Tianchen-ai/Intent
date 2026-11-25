@@ -132,6 +132,7 @@ def NativeScaleMMA : Op<TileSource,"scaled_mma",[Pure]> {
 }
 def ArrayReshape : Inst<"reshape",(ins AnyRankedTensor:$value),(outs AnyRankedTensor:$result),[Pure]>;
 def ArrayTranspose : Inst<"transpose",(ins AnyRankedTensor:$value),(outs AnyRankedTensor:$result),[Pure]>;
+def PanelExtract : Inst<"panel_extract",(ins AnyRankedTensor:$panel,I64Attr:$axis,I64Attr:$index),(outs AnyRankedTensor:$slice),[Pure]>;
 def ExpandScale : Inst<"expand_scale",(ins AnyRankedTensor:$value,I64Attr:$axis),(outs AnyRankedTensor:$result),[Pure]>;
 include "intentdsl/levels/execution/block/ir/RowInstructions.td"
 def RuntimeSource : Op<TileSource,"runtime_source"> {let arguments=(ins StrAttr:$implementation);}

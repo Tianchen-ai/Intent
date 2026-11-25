@@ -134,7 +134,7 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
     os << llvm::json::Value(llvm::json::Object{
         {"num_warps", int64_t(r.warps)}, {"num_stages", int64_t(r.stages)}});
     for(unsigned width=1; width<=8192; width*=2) {
-      if (r.id == 2 && width < 2048)
+      if (r.id == 2 && width < 1024)
         continue;
       unsigned rowId = r.id < 2 ? (width * 2 + r.id) : (262144u + width);
       caps->rows.push_back({rowId, r.rows, width, payload});

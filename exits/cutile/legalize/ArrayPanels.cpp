@@ -150,6 +150,116 @@ Value panel(Tiles &t, Operation &op, ArrayRef<Value> coords, Value start,
   bool tma = op.hasAttr(page ? "ct_src.page_tma" : "ct_src.panel_tma");
   return reshape(t, load(t, op.getOperand(0), at, dims, tma), {span, width});
 }
+bool matchOwnerTileStart(Value coord, int64_t rows, Value &startOut) {
+  if (!isa<RankedTensorType>(coord.getType()))
+    return false;
+  if (auto add = coord.getDefiningOp<arith::AddIOp>()) {
+    for (int side : {0, 1}) {
+      Operation *bcast = add->getOperand(side).getDefiningOp();
+      Operation *axis = add->getOperand(1 - side).getDefiningOp();
+      if (bcast && axis &&
+          bcast->getName().stripDialect() == "tile_broadcast" &&
+          bcast->getAttrOfType<IntegerAttr>("axis").getInt() == -1 &&
+          !isa<ShapedType>(bcast->getOperand(0).getType()) &&
+          axis->getName().stripDialect() == "tile_axis" &&
+          cast<RankedTensorType>(axis->getResult(0).getType()).getDimSize(0) ==
+              rows) {
+        startOut = bcast->getOperand(0);
+        return true;
+      }
+    }
+  }
+  return false;
+}
+bool isKnownMultiple(Value v, int64_t d) {
+  if (d <= 1)
+    return true;
+  if (auto c = v.getDefiningOp<arith::ConstantOp>())
+    if (auto ia = dyn_cast<IntegerAttr>(c.getValue());
+        ia && ia.getValue().getSignificantBits() <= 64)
+      return ia.getInt() % d == 0;
+  if (auto mul = v.getDefiningOp<arith::MulIOp>())
+    return isKnownMultiple(mul.getLhs(), d) ||
+           isKnownMultiple(mul.getRhs(), d);
+  return false;
+}
+bool groupedPanel(Tiles &t, Value view, ArrayRef<Value> coords,
+                  int64_t panelAxis, Value panelStart, int64_t panelSpan,
+                  int64_t sliceAxis, int64_t sliceWidth, int64_t rows,
+                  SmallVectorImpl<Value> &slices) {
+  if (panelSpan <= 1 || !llvm::isPowerOf2_64(panelSpan) || rows <= 0 ||
+      !llvm::isPowerOf2_64(rows))
+    return false;
+  auto viewTy = dyn_cast<MemRefType>(view.getType());
+  if (!viewTy)
+    return false;
+  int64_t rank = viewTy.getRank();
+  auto sh = t.shape(view);
+  if (!sh || sh.size() != size_t(rank) || panelAxis < 0 || panelAxis >= rank)
+    return false;
+  if (sh[panelAxis] <= 0 || sh[panelAxis] % panelSpan != 0)
+    return false;
+  if (sliceAxis >= 0) {
+    if (sliceAxis >= rank || sliceAxis == panelAxis || sliceWidth <= 0 ||
+        !llvm::isPowerOf2_64(sliceWidth) || sh[sliceAxis] != sliceWidth)
+      return false;
+  }
+  SmallVector<Value> at;
+  at.reserve(rank);
+  SmallVector<int64_t> dims(rank, 1);
+  int64_t ownerAxis = -1;
+  for (int64_t d = 0; d < rank; ++d) {
+    if (d == panelAxis) {
+      at.push_back(blockIndex(t, panelStart, panelSpan));
+      dims[d] = panelSpan;
+    } else if (d == sliceAxis) {
+      at.push_back(t.integer(0));
+      dims[d] = sliceWidth;
+    } else {
+      Value c = coords[d];
+      if (!c)
+        return false;
+      Value start;
+      if (!isa<RankedTensorType>(c.getType())) {
+        at.push_back(c);
+      } else if (Operation *def = c.getDefiningOp();
+                 def && def->getName().stripDialect() == "tile_broadcast" &&
+                 def->getAttrOfType<IntegerAttr>("axis").getInt() == -1 &&
+                 !isa<ShapedType>(def->getOperand(0).getType())) {
+        at.push_back(def->getOperand(0));
+      } else if (matchOwnerTileStart(c, rows, start)) {
+        if (rows == 1) {
+          at.push_back(start);
+        } else {
+          if (ownerAxis >= 0 || (sliceAxis >= 0 && d > sliceAxis) ||
+              sh[d] <= 0 || sh[d] % rows != 0 || !isKnownMultiple(start, rows))
+            return false;
+          ownerAxis = d;
+          dims[d] = rows;
+          at.push_back(blockIndex(t, start, rows));
+        }
+      } else if (rows == 1) {
+        at.push_back(scalarIndex(t, c));
+      } else {
+        return false;
+      }
+    }
+  }
+  Value panelTile = load(t, view, at, dims, /*tma=*/false);
+  Type elemTy = viewTy.getElementType();
+  Type outTy = sliceAxis >= 0 ? t.shaped({rows, sliceWidth}, elemTy)
+                              : t.shaped({rows}, elemTy);
+  slices.clear();
+  slices.reserve(panelSpan);
+  for (int64_t u = 0; u < panelSpan; ++u) {
+    slices.push_back(
+        t.op("panel_extract", panelTile, outTy,
+             {t.b.getNamedAttr("axis", t.b.getI64IntegerAttr(panelAxis)),
+              t.b.getNamedAttr("index", t.b.getI64IntegerAttr(u))})
+            ->getResult(0));
+  }
+  return true;
+}
 } // namespace
 mlir::Value nativeMatrixRead(Tiles &t, intentdsl::block::MatrixAccess &p,
                              bool left, Value group, Value panel) {
@@ -315,9 +425,14 @@ bool nativeMatrixWrite(Tiles &t, intentdsl::block::MatrixAccess &p, Value y,
   t.op("rect_write", args);
   return true;
 }
-intentdsl::block::OwnerAccess nativeOwnerViews() {
-  return {rectangle, panel, /*scalarBroadcastRead=*/false,
-          /*nativeTileGather=*/false, /*nativeTileHistogram=*/false,
-          /*blockAtomicMemoryBins=*/true};
+intentdsl::block::OwnerAccess nativeOwnerViews(int sm) {
+  return {rectangle,
+          panel,
+          /*scalarBroadcastRead=*/false,
+          /*nativeTileGather=*/false,
+          /*nativeTileHistogram=*/false,
+          /*blockAtomicMemoryBins=*/true,
+          /*minMmaRows=*/sm == 90 ? 64 : 0,
+          groupedPanel};
 }
 } // namespace CI_UNIT_NAMESPACE

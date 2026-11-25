@@ -39,7 +39,7 @@ bool nativeMatrixWrite(intentdsl::block::Tiles &,
                        intentdsl::block::MatrixAccess &, Value, Value,
                        ArrayRef<Value>);
 LogicalResult verifyArrayGeometry(func::FuncOp,const TargetProfile &);
-intentdsl::block::OwnerAccess nativeOwnerViews();
+intentdsl::block::OwnerAccess nativeOwnerViews(int sm);
 namespace {
 std::optional<int64_t> ownerRectangleAxis(Operation *op, func::FuncOp fn) {
   auto kind = op->getName().stripDialect();
@@ -541,16 +541,17 @@ bool tileLoadStorePermitsTma(Value viewArg, func::FuncOp fn,
                              bool permitTma) {
   if (!permitTma)
     return false;
-  auto configs = fn->getAttrOfType<ArrayAttr>("block.configs");
-  if (configs && !configs.empty() && llvm::all_of(configs, [](Attribute row) {
-        return cast<DictionaryAttr>(row).getAs<IntegerAttr>("rows").getInt() ==
-               1;
-      }))
-    return false;
   auto arg = dyn_cast<BlockArgument>(viewArg);
   if (!arg || arg.getOwner() != &fn.front())
     return false;
   int rank = cast<MemRefType>(arg.getType()).getRank();
+  auto configs = fn->getAttrOfType<ArrayAttr>("block.configs");
+  if (rank <= 2 && configs && !configs.empty() &&
+      llvm::all_of(configs, [](Attribute row) {
+        return cast<DictionaryAttr>(row).getAs<IntegerAttr>("rows").getInt() ==
+               1;
+      }))
+    return false;
   unsigned slot = arg.getArgNumber();
   if (rank <= 2 && !fn.getArgAttr(slot, "kir.indexing"))
     return true;
@@ -875,7 +876,13 @@ struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
     auto fn = *getOperation().getOps<func::FuncOp>().begin();
     Builder b(&getContext());
     getContext().loadDialect<arith::ArithDialect,scf::SCFDialect>();
-    if(intentdsl::kir::orderedOwners(fn)) intentdsl::block::expandOwnerProgram(fn,"exits/cutile",nativeOwnerViews());
+    if (intentdsl::kir::orderedOwners(fn)) {
+      int sm = 0;
+      if (auto *cap = profile.services.get<intentdsl::cutile::ArrayIndices>())
+        sm = cap->sm;
+      intentdsl::block::expandOwnerProgram(fn, "exits/cutile",
+                                           nativeOwnerViews(sm));
+    }
     else if(intentdsl::kir::matrixDomain(fn)){
       intentdsl::block::MatrixAccess p(fn);
       if(auto flat=p.dot.getAttrOfType<DenseI64ArrayAttr>("ct_src.flat_groups")){

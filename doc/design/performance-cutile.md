@@ -8,13 +8,13 @@ cuTile 出口面向 `cuda.tile` / `tileiras` 编译器，其执行吞吐由四�
 
 1. **结构化矩形视图（`rect_read` / `rect_write`）与硬件 TMA 门控**：
    - 凡经 `proveTailAccess` 证明对齐无越界且满足 16B 步长对齐的 2D–5D 矩阵面板、owner 矩形、行/条带切片及跨 owner 共享的连续 2 幂 `slice_read`，均在 `exits/cutile/legalize` 中降为结构化 `ct_src.rect_read` / `ct_src.rect_write`（`ct.load` / `ct.store`），避免通用散射/聚集 `ct.gather` / `ct.scatter` 的逐通道地址展开开销。
-   - 多行驻留与收缩面板在单 tile `≤ 16 KiB` 且非单行（`rows > 1`）时开启 `allow_tma=True`；单行（`rows = 1`）块及紧接流水化 TMA 读循环后的 4D 写回自动关闭冗余 TMA，规避共享内存往返开销与 `tileiras 1.6` mbarrier 同步限制。
+   - 多行驻留、收缩面板及对齐的 rank ≥ 3 投影视图在满足 `proveTailAccess` 精确边界与 16B 对齐且单 tile `≤ 16 KiB` 时开启 `allow_tma=True`；单行（`rows = 1`）2D 块及紧接流水化 TMA 读循环后的 4D 写回自动关闭冗余 TMA，规避共享内存往返开销与 `tileiras 1.6` mbarrier 同步限制；`sm120` 对 `rows = 1 ∧ width ≥ 1024` 同步开放 `occupancy = {2, 4}`，Hopper `sm90` 上无掩码窄 M 协同矩阵折叠（`rows < 64 ≤ span`）在 `FoldTiles` 自动转置为 `(span, rows)` / `(D, span)` 方向以命中 WGMMA。
 2. **Tensor Core 块缩放收缩与架构分级能力**：
    - 稠密、转置右操作数（`transpose_rhs` → `ct.transpose`）、批处理、路由、窗口与分组打包权重（`GroupedWeightRhs` 紧凑 `rect_read` + 多维重塑移位解包）收缩降为 `ct.mma` 并绑定 `{num_ctas, occupancy, opt_level}` 参数行；Blackwell `sm120` 在 MX8/E8M0 安全指数窗内启用原生硬件 FP8（`e4m3`）与打包 FP4（`e2m1`）`ct_src.scaled_mma`（`ct.mma_scaled`），Hopper `sm90` 因硬件无块缩放 MMA 原语，按能力表自动降为安全窗内 `BF16` `ct.mma`。
 3. **Tile-IR 循环形态合法化与展开预算控制**：
    - `exits/cutile/legalize/Views.cpp` 在编译期显式判定每个 `scf.for` 的 `ct_src.loop_kind`（`range_const`、`range_i32` 或 `while`）：平坦 `i32` 循环生成原生 `range(...)` 启用 `tileiras` 软件流水；含嵌套 `scf.for` 且高循环携带寄存器字数（`≥ 16384`）的动态边界外层循环合法化为 `while`，避免 `tileiras` 跨嵌套循环流水化造成整核 `occupancy = 2` 寄存器溢出。
-   - 针对 `tileiras` 中每个 tile 访存携带独立 CTA 描述符的特性，`OwnerMachine` 将分组预取上界设为 `maxGroupReads = 4`（配合 `ArrayPanels` 连续 1D `rect_read` + 寄存器广播），对大标量无别名空间开放 `owners-256` / `owners-512`，对可重结合 `I.segment_sum` 开放 `segment-tile-{32,64}` 批处理，复用单次 `i64` `Q8_K` argmax（保留紧凑位平面读 `flatRecordBitPlanes = false`），并通过类型化合同 `tile-atomic-xchg` / `tile-atomic-fetch-add`（块级 `ACQ_REL` 围栏 + 循环内 `RELAXED` `BLOCK` 原子 + `occupancy = 4`）加速有界桶直方图与稳定游标散射。
-   - 终端打印器全部由声明式规则（`68` 条）与 `LocalOpView` 局部规则（`77` 条）构成，**`PrintRule::custom` 为 `0`**。
+   - 针对 `tileiras` 中分组预取循环的连续面板读，Block `OwnerTiles` 与 `ArrayPanels` 将跨 `G` 步的规则加载合并为单次 `ct_src.rect_read` + `ct_src.panel_extract`（支持单/多 owner 连续切片及无额外广播指令的单位轴扩维，配套 `occupancy = {2, 4}, opt_level = 3`），由此将 `OwnerMachine::maxGroupReads` 提升至 `16` 而不触发描述符与寄存器溢出；对大标量无别名空间开放 `owners-256` / `owners-512`，对可重结合 `I.segment_sum` 开放 `segment-tile-{32,64}` 批处理，复用单次 `i64` `Q8_K` argmax（保留紧凑位平面读 `flatRecordBitPlanes = false`），并通过类型化合同 `tile-atomic-xchg` / `tile-atomic-fetch-add`（块级 `ACQ_REL` 围栏 + 循环内 `RELAXED` `BLOCK` 原子 + `occupancy = 4`）加速有界桶直方图与稳定游标散射。
+   - 终端打印器全部由声明式规则（`68` 条）与 `LocalOpView` 局部规则（`78` 条）构成，**`PrintRule::custom` 为 `0`**。
 4. **数值合同、寄存器预算精确半精度折叠与有界地址收窄**：
    - 除法与指数严格区分 MLIR `FastMathFlags`（`arcp` / `afn`）与函数级 `denormal-fp-math`（仅在显式允许次正规冲零时附带 `ct_src.ftz` / `flush_to_zero=True`，绝不将 `nsz` 误作 FTZ）。
    - 分组打包无符号权重（`≤10-bit`）经 `EncodedPanels` 直接走 IEEE-754 位精确 FP16 `0x6400` 魔数偏置解码；通用面板中当 FP32 中间转换通道数超出 `OwnerMachine::residentRegisters` 预算且整数码证明落在目标半精度精确整数域时，`Views.cpp` 零误差折叠为半精度算术；同时结合 `proveNarrowAddress`、有界 `remui`/`extsi(i32)` 区间分析与静态整除 `exactOwners` 掩码消去，将多维坐标链窄化至 `ct.int32` 并折叠可证永真/永假边界比较。
@@ -24,12 +24,12 @@ cuTile 出口面向 `cuda.tile` / `tileiras` 编译器，其执行吞吐由四�
 | 决策族 | 位置 | 枚举候选 | 影响范围 |
 |---|---|---|---|
 | `levels/execution/block::contraction` | `block@decided` → `block@realized` | 架构合法 `(BM, BN, BK)` 块及 `{num_ctas, occupancy, opt_level}` 行（`sm120` 含 FP8/FP4 `scaled-mma`） | `gemm`、`gemm_nt`、`batched_gemm`、`ragged_gemm`、`int8_gemm`、`fp8_gemm`、`mxfp4_gemm`、`awq_int4_gemm`、`q4_projection`、`q6k_gemv`、`mamba_chunk_state` |
-| `levels/execution/block::ordered-owners` | `block@decided` → `block@realized` | `pair-WxS`、`tokens-S`（至 `4096`）、`scatter-WxS`（可结合 1D 合并散射累加 `ct.atomic_add`）、`prefetch4-W`、`shared-W`、`resident-W`、`columns-1`、`owners-W`（大标量空间至 `512`） | 注意力全族、`cross_entropy`、`topk_rows`、`index_add`、`log_softmax_kl`、`retention_recurrence`、`gated_delta`、`triangular_solve`、`radix_pass`、`depthwise_conv2d`、`cholesky` |
+| `levels/execution/block::ordered-owners` | `block@decided` → `block@realized` | `pair-WxS`、`tokens-S`（至 `4096`）、`scatter-WxS`（可结合 1D 合并散射累加 `ct.atomic_add`）、`prefetch{4,16}-W`、`shared-W`、`resident-W`、`columns-1`、`owners-W`（大标量空间至 `512`） | 注意力全族、`cross_entropy`、`topk_rows`、`index_add`、`log_softmax_kl`、`retention_recurrence`、`gated_delta`、`triangular_solve`、`radix_pass`、`depthwise_conv2d`、`cholesky` |
 | `levels/execution/block::structure` | `block@decided` → `block@realized` | `resident-R` / `stream-R`、`global-atomic` 分区直方图（`tileiras` 无片上原子原语）、`source` / `destination` / `grid-tile` / `column-panels` / `segment-*` | 逐元素、`transpose`、`softmax`、`layer_norm`、`qk_norm_rope`、`histogram`、`embedding_bag`、`jagged_mean` |
 
 ## 3. 代价项与局部估算器
 
-- **节点级代价模型**：与 Triton 共用 `levels/execution/block::{tile-time, matrix-time, owner-issue}`，通过 `OwnerMachine`（`sm90` / `sm120` 寄存器文件比例、共享内存上限、`maxGroupReads = 4`）与 `RowCapacity`（`storeSectorBytes = 32`、独立列宽 `{8..128}`、无片上共享桶原子）向公共代价模型注入目标约束。
+- **节点级代价模型**：与 Triton 共用 `levels/execution/block::{tile-time, matrix-time, owner-issue}`，通过 `OwnerMachine`（`sm90` / `sm120` 寄存器文件比例、共享内存上限、`maxGroupReads = 16`、并发窄 CTA 驻留波次建模）与 `RowCapacity`（`storeSectorBytes = 32`、独立列宽 `{8..128}`、无片上共享桶原子）向公共代价模型注入目标约束。
 - **出口局部估算器与类型化合同**：
   - `exits/cutile::matrix-issues`：按 `ct.mma` / `ct.mma_scaled` 及 `row-collective`（`warpRowCap = 4` 对齐 `occupancy = 4` 行片段容量，超出时按每 SM 共享内存带宽计入跨 warp 归约代价）估算矩阵收缩发射代价。
   - `exits/cutile::collective-steps`：估算 `ct.sum` / `ct.max` / `ct.cumsum`、Welford 归并及全局原子分区归并步数。

@@ -218,6 +218,34 @@ TerminalPrinter cutilePrinter() {
     return ("ct.reshape(" + v.operand(0) + "," + dims(v.resultType(0)) + ")")
         .str();
   });
+  localExpr("ct_src.panel_extract", [](const LocalOpView &v) {
+    auto inTy = cast<RankedTensorType>(v.operandType(0));
+    auto outTy = cast<RankedTensorType>(v.resultType(0));
+    int64_t ax = v.attrOfType<IntegerAttr>("axis").getInt();
+    int64_t idx = v.attrOfType<IntegerAttr>("index").getInt();
+    SmallVector<std::string> coords, extDims;
+    int64_t extElems = 1;
+    for (int64_t i = 0; i < inTy.getRank(); ++i) {
+      int64_t d = i == ax ? 1 : inTy.getDimSize(i);
+      coords.push_back(i == ax ? std::to_string(idx) : "0");
+      extDims.push_back(std::to_string(d));
+      extElems *= d;
+    }
+    int64_t outElems = 1;
+    for (int64_t d : outTy.getShape())
+      outElems *= d;
+    std::string extracted = "ct.extract(" + v.operand(0).str() + ",(" +
+                            llvm::join(coords, ",") + ",),shape=(" +
+                            llvm::join(extDims, ",") + ",))";
+    if (extElems == outElems)
+      return "ct.reshape(" + extracted + "," + dims(outTy) + ")";
+    std::string unitShape =
+        outTy.getRank() == 2
+            ? "(1," + std::to_string(outTy.getDimSize(1)) + ")"
+            : "(1,)";
+    return "ct.broadcast_to(ct.reshape(" + extracted + "," + unitShape + ")," +
+           dims(outTy) + ")";
+  });
   localExpr("ct_src.rect_read", [](const LocalOpView &v) {
     auto coords = llvm::join(llvm::drop_begin(v.operands()), ",");
     return ("ct.load(" + v.operand(0) + ",(" + coords +
