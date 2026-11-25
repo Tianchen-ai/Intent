@@ -1,6 +1,7 @@
 #include "intentdsl/levels/execution/block/ir/Contraction.h"
 #include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 #include "mlir/IR/PatternMatch.h"
+#include "llvm/ADT/StringSet.h"
 namespace CI_UNIT_NAMESPACE {
 using namespace mlir;
 using namespace compilerinfra;
@@ -64,6 +65,7 @@ void registerContraction(Unit &u) {
           if (spec->roleLayout == kir::QuantRoleLayout::RecordGemv) {
             addFallback("q4k_dot");
           } else if (spec->roleLayout == kir::QuantRoleLayout::BlockScaledPair) {
+            addFallback("scaled_contract");
             addFallback("contract");
             addFallback("q4k_dot");
           } else {
@@ -72,12 +74,16 @@ void registerContraction(Unit &u) {
         }
       }
     }
+    llvm::StringSet<> seen;
     for (auto &t : caps->tiles) {
       auto choice = b.getDenseI64ArrayAttr({t.m, t.n, t.k});
       if (!block::supportsMatrixTile(op, choice, p))
         continue;
-      rows.push_back({std::to_string(t.m) + "x" + std::to_string(t.n) + "x" +
-                          std::to_string(t.k),
+      std::string id = std::to_string(t.m) + "x" + std::to_string(t.n) + "x" +
+                       std::to_string(t.k);
+      if (!seen.insert(id).second)
+        continue;
+      rows.push_back({std::move(id),
                       "output-stationary",
                       choice,
                       {"independent-output-tiles"},
@@ -131,9 +137,8 @@ void registerContraction(Unit &u) {
       yield.addOperands(calc.getResult(0));
       b.create(yield);
     }
-    for (auto &r : p.services.get<block::MatrixTarget>()->tiles)
-      if (tile.asArrayRef() == ArrayRef<int64_t>{r.m, r.n, r.k})
-        op->setAttr("block.native_row", b.getStringAttr(r.native));
+    if (const auto *matched = block::findMatrixTile(op, tile.asArrayRef(), p))
+      op->setAttr("block.native_row", b.getStringAttr(matched->native));
     op->removeAttr("block.contraction");
     return llvm::Error::success();
   };

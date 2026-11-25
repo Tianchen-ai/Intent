@@ -332,23 +332,29 @@ void tileContracts(Unit &unit) {
       auto resTy = dyn_cast<RankedTensorType>(o->getResult(0).getType());
       if (!aTy || !lsTy || !bTy || !rsTy || !resTy)
         return failure();
+      auto fmtAttr = o->getAttrOfType<StringAttr>("format");
+      bool isFp4 = fmtAttr && fmtAttr.getValue() == "e2m1";
       auto g = intentdsl::kir::MX8Block::group;
+      int64_t kElems = isFp4 ? aTy.getDimSize(1) * 2 : aTy.getDimSize(1);
+      bool elemOk = isFp4 ? (aTy.getElementType().isInteger(8) &&
+                             bTy.getElementType().isInteger(8))
+                          : (isa<Float8E4M3FNType>(aTy.getElementType()) &&
+                             isa<Float8E4M3FNType>(bTy.getElementType()));
       return success(
           aTy.getRank() == 2 && bTy.getRank() == 2 && resTy.getRank() == 2 &&
-          isa<Float8E4M3FNType>(aTy.getElementType()) &&
-          isa<Float8E4M3FNType>(bTy.getElementType()) &&
+          elemOk && (!fmtAttr || isFp4 || fmtAttr.getValue() == "e4m3") &&
           resTy.getElementType().isF32() &&
           o->getOperand(4).getType() == resTy &&
-          aTy.getDimSize(1) > 0 && aTy.getDimSize(1) % g == 0 &&
+          kElems > 0 && kElems % g == 0 &&
           aTy.getDimSize(1) == bTy.getDimSize(0) &&
           resTy.getDimSize(0) == aTy.getDimSize(0) &&
           resTy.getDimSize(1) == bTy.getDimSize(1) &&
           lsTy.getElementType().isInteger(8) &&
           rsTy.getElementType().isInteger(8) &&
           lsTy.getShape() ==
-              ArrayRef<int64_t>{aTy.getDimSize(0), aTy.getDimSize(1) / g} &&
+              ArrayRef<int64_t>{aTy.getDimSize(0), kElems / g} &&
           rsTy.getShape() ==
-              ArrayRef<int64_t>{bTy.getDimSize(1), aTy.getDimSize(1) / g});
+              ArrayRef<int64_t>{bTy.getDimSize(1), kElems / g});
     };
     unit.implementations.push_back({std::move(sc), COMPILERINFRA_SOURCE});
   }

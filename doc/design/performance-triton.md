@@ -15,14 +15,14 @@ Triton 出口的执行吞吐由四项显式 IR 决定支配：
 3. **行程序驻留、条带折叠与片上原子**：
    - 行与集体归约在满足寄存器文件预算时选 `resident-R` 整行驻留（跨 `R` 行复用广播权重与位置表），超预算时切为 `stream-R` 分片归约；等距同构投影折叠为 `triton_src.stripe_loop`；256-bin 直方图支持 `private-merge`（片上 `tl.histogram` + 纵向归并）与 `global-atomic` 双候选择优。
 4. **数值合同与范围证明**：
-   - 默认严格履行 `div_rn` / `sqrt_rn` / IEEE `exp` 及被掩码通道非有限值修复；MX8/E8M0 块缩放 FP8 在指数安全窗 `[87, 163]` 内走 `triton_src.scaled_mma`（`tl.dot_scaled`），异常指数回退精确解码；`exits/triton::narrow-proven-addresses` 基于 `proveNarrowAddress` 将有界 64 位坐标与步长分解窄化为 32 位算术。
+   - 默认严格履行 `div_rn` / `sqrt_rn` / IEEE `exp` 及被掩码通道非有限值修复；MX8/E8M0 块缩放收缩在安全指数窗内统一驱动 FP8（`e4m3`）与打包 FP4（`e2m1`）`triton_src.scaled_mma`（`tl.dot_scaled`），异常指数按单组步长（`K = 32`）流式回退精确解码以受控共享内存占用；分组打包权重量化（`GroupedWeightRhs`）对紧凑打包 `i32` 块走 TMA `desc_read` 与三维重塑移位解包；大标量无别名 owner 空间（`owners ≥ 65536` 且内层循环有界短程）开放 `owners-256` / `owners-512` 宽合并线程块，并由 `exits/triton::narrow-proven-addresses` 基于 `proveNarrowAddress` 与有界无符号余数区间分析将多维坐标窄化为 32 位算术。
 
 ## 2. 候选空间（Decision Families）
 
 | 决策族 | 位置 | 枚举候选 | 影响范围 |
 |---|---|---|---|
-| `levels/execution/block::contraction` | `block@decided` → `block@realized` | 目标合法 `(BM, BN, BK)` 驻留块及 `{num_warps, num_stages}` 参数行（含 `scaled_contract`、`window_contract`、`q4k_dot`） | `gemm`、`batched_gemm`、`ragged_gemm`、`int8_gemm`、`fp8_gemm`、`q4_projection`、`mamba_chunk_state` |
-| `levels/execution/block::ordered-owners` | `block@decided` → `block@realized` | `pair-WxS`（至 `128×64`）、`tokens-S`（至 `4096`）、`scatter-WxS`（可结合二维散射累加 `tl.atomic_add`）、`prefetch{4,16}-W`、`shared-W`、`resident-W`、`columns-1`、`owners-W` | 注意力全族、`cross_entropy`、`topk_rows`、`index_add`、`log_softmax_kl`、`retention_recurrence`、`gated_delta`、`triangular_solve`、`radix_pass`、`cholesky` |
+| `levels/execution/block::contraction` | `block@decided` → `block@realized` | 目标合法 `(BM, BN, BK)` 驻留块及 `{num_warps, num_stages}` 参数行（含 `scaled_contract`、`quant_contract`、`window_contract`、`q4k_dot`） | `gemm`、`gemm_nt`、`batched_gemm`、`ragged_gemm`、`int8_gemm`、`fp8_gemm`、`mxfp4_gemm`、`awq_int4_gemm`、`q4_projection`、`q6k_gemv`、`mamba_chunk_state` |
+| `levels/execution/block::ordered-owners` | `block@decided` → `block@realized` | `pair-WxS`（至 `128×64`）、`tokens-S`（至 `4096`）、`scatter-WxS`（可结合二维散射累加 `tl.atomic_add`）、`prefetch{4,16}-W`、`shared-W`、`resident-W`、`columns-1`、`owners-W`（大标量空间至 `512`） | 注意力全族、`cross_entropy`、`topk_rows`、`index_add`、`log_softmax_kl`、`retention_recurrence`、`gated_delta`、`triangular_solve`、`radix_pass`、`depthwise_conv2d`、`cholesky` |
 | `levels/execution/block::structure` | `block@decided` → `block@realized` | `resident-R` / `stream-R`（1–8 warps）、`private-merge` / `global-atomic`、`source` / `destination` / `grid-tile` / `column-panels` / `segment-*` | 逐元素、`transpose`、`softmax`、`layer_norm`、`qk_norm_rope`、`histogram`、`embedding_bag`、`jagged_mean` |
 | `exits/triton::narrow-proven-addresses` | `triton@callable` | 经 `proveNarrowAddress` 证明有符号不溢出的 `i32` 地址窄化 vs `i64` 保持 | Tile 指针寻址与多轴展平坐标分解 |
 
@@ -30,10 +30,10 @@ Triton 出口的执行吞吐由四项显式 IR 决定支配：
 
 - **节点级代价模型**：
   - `levels/execution/block::tile-time`：建模有效读写字节（按 `1/rows` 分摊跨行广播只读张量）、并发上限下的波次量化（`waveQuant >= 1`）、单 CTA `16K` 寄存器溢出上限、活跃线程束欠饱和惩罚及原子冲突步数。
-  - `levels/execution/block::matrix-time`：结合 `(BM, BN, BK)` 尾块利用率、SM 驻留波次、L2/共享面板字节与局部矩阵发射代价。
+  - `levels/execution/block::matrix-time`：结合 `(BM, BN, BK)` 尾块利用率、SM 驻留波次、按 `QuantFormatSpec` 角色布局折算的打包面板字节与局部矩阵发射代价。
   - `levels/execution/block::owner-issue`：解耦折叠体内外向量宽度（`foldBodyLanes`），计入循环携带状态与预取输入实占寄存器字数（`6144` 字预算）、CTA 内 L1 合并共享切片带宽、双 warpgroup 片段容量、下三角列消元步数及单 owner 面板化步数。
 - **出口局部估算器与类型化合同**：
-  - `exits/triton::matrix-issues`：按 Tensor Core 指令粒度估算 `native-dot`、`scaled-mma` 与 `row-collective` 发射步数。
+  - `exits/triton::matrix-issues`：按 Tensor Core 指令粒度估算 `native-dot`、`scaled-mma` 发射步数，并对超块记录归约（`RecordGemv`）在行数超出单 warp 行容量（`warpRowCap = 2`）时按每 SM 共享内存带宽（`read_1_shared_bw / participants`）计入跨 warp 树归约交换代价。
   - `exits/triton::collective-steps`：估算跨 warp 树归约、包容扫描（`tl.cumsum`）、Welford 归并及片上直方图代价。
   - 类型化合同注册于 `exits/triton/ir/Implementations.cpp`（覆盖 `native-dot`、`scaled-mma`、`row-collective`、`moments-reduce`、`moments-merge`、`inclusive-scan`、`philox-uniform`、`cta-histogram` 等，parity `9/9` 全部实现）。
 

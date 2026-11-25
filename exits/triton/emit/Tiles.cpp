@@ -87,10 +87,20 @@ TerminalPrinter tilePrinter() {
   p.operations["triton_src.transpose"] = PrintRule::format("$r0 = tl.trans($0)");
   p.operations["triton_src.scan_sum"] =
       PrintRule::format("$r0 = tl.cumsum($0,axis=1)");
-  p.operations["triton_src.scaled_mma"] = PrintRule::format(
-      "$r0 = tl.dot_scaled($0,$1.to(tl.uint8),'e4m3',$2,$3.to(tl.uint8),'e4m3',$4)");
 
   // Local rules (LocalOpView only)
+  leaf("triton_src.scaled_mma", [](const LocalOpView &v) {
+    auto fmtAttr = v.attrOfType<StringAttr>("format");
+    bool fp4 = fmtAttr && fmtAttr.getValue() == "e2m1";
+    std::string fmt = fp4 ? "'e2m1'" : "'e4m3'";
+    std::string lhs =
+        fp4 ? (v.operand(0).str() + ".to(tl.uint8)") : v.operand(0).str();
+    std::string rhs =
+        fp4 ? (v.operand(2).str() + ".to(tl.uint8)") : v.operand(2).str();
+    return ("tl.dot_scaled(" + lhs + "," + v.operand(1).str() +
+            ".to(tl.uint8)," + fmt + "," + rhs + "," + v.operand(3).str() +
+            ".to(tl.uint8)," + fmt + "," + v.operand(4).str() + ")");
+  });
   leaf("triton_src.reshape", [](const LocalOpView &v) {
     return ("tl.reshape(" + v.operand(0) + "," + tuple(v.resultType(0)) + ")")
         .str();

@@ -1,3 +1,4 @@
+#include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 #include "intentdsl/levels/execution/block/ir/OwnerProgram.h"
 #include "intentdsl/levels/execution/block/ir/TileBuilder.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -152,11 +153,17 @@ Value panel(Tiles &t, Operation &op, ArrayRef<Value> coords, Value start,
 } // namespace
 mlir::Value nativeMatrixRead(Tiles &t, intentdsl::block::MatrixAccess &p,
                              bool left, Value group, Value panel) {
-  if (left && p.dot.getNumOperands() > 2)
+  bool isQuant = p.dot.getName().stripDialect() == "quant_contract";
+  const auto *qSpec = isQuant ? intentdsl::kir::quantFormatSpec(p.dot) : nullptr;
+  if ((!isQuant && left && p.dot.getNumOperands() > 2) ||
+      (isQuant && (!qSpec ||
+                   qSpec->roleLayout !=
+                       intentdsl::kir::QuantRoleLayout::GroupedWeightRhs)))
     return {};
   auto view = p.dot.getOperand(left ? 0 : 1);
-  int rank = p.rank(view), batch = p.axis(left ? "lhs_batch" : "rhs_batch"),
-      inner = p.axis(left ? "lhs_k" : "rhs_k");
+  int rank = p.rank(view);
+  int batch = isQuant ? -1 : p.axis(left ? "lhs_batch" : "rhs_batch");
+  int inner = isQuant ? (left ? 1 : 0) : p.axis(left ? "lhs_k" : "rhs_k");
   if ((rank != 2 && rank != 3) || (batch != -1 && batch != 0))
     return {};
   SmallVector<Value> at(rank);
@@ -165,11 +172,19 @@ mlir::Value nativeMatrixRead(Tiles &t, intentdsl::block::MatrixAccess &p,
     at[0] = group;
     dims[0] = 1;
   }
-  auto free = p.freeAxis(view, inner, batch);
+  auto free = isQuant ? (left ? 0 : 1) : p.freeAxis(view, inner, batch);
+  int64_t freeDim = p.tile[left ? 0 : 1];
+  if (isQuant && !left) {
+    if (qSpec->packFactor <= 0 || freeDim % qSpec->packFactor != 0)
+      return {};
+    freeDim /= qSpec->packFactor;
+  }
+  if (!llvm::isPowerOf2_64(freeDim) || !llvm::isPowerOf2_64(p.tile[2]))
+    return {};
   at[inner] = panel;
   dims[inner] = p.tile[2];
   at[free] = t.pid(left ? 0 : 1);
-  dims[free] = p.tile[left ? 0 : 1];
+  dims[free] = freeDim;
   auto value = load(t, view, at, dims, t.fn->hasAttr("ct_src.tma"));
   if (rank == 3)
     value = reshape(t, value, ArrayRef<int64_t>(dims).drop_front());

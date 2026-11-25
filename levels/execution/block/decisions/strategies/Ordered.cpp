@@ -8,8 +8,45 @@
 using namespace mlir;
 using namespace compilerinfra;
 namespace intentdsl::block {
-static bool legalWidth(IntegerAttr width, int64_t owners) {
-  return width && width.getInt() > 0 && width.getInt() <= 128 &&
+static bool isLargeScalarOwnerSpace(Operation *space, const TargetProfile &p,
+                                    int64_t owners) {
+  auto caps = p.services.get<OwnerMachine>();
+  if (!caps || caps->parallelMembers < 128 || owners < 65536)
+    return false;
+  auto constIdx = [](Value v) -> std::optional<int64_t> {
+    while (auto cast = v.getDefiningOp<arith::IndexCastOp>())
+      v = cast.getIn();
+    if (auto c = v.getDefiningOp<arith::ConstantOp>())
+      if (auto ia = dyn_cast<IntegerAttr>(c.getValue());
+          ia && (ia.getType().isIndex() ||
+                 (ia.getType().isIntOrFloat() &&
+                  ia.getType().getIntOrFloatBitWidth() <= 64)))
+        return ia.getInt();
+    return std::nullopt;
+  };
+  return !space
+              ->walk([&](Operation *inst) {
+                auto n = inst->getName().stripDialect();
+                if (n == "slice_read" || n == "slice_write" ||
+                    n == "lane_sum" || n == "lane_splat")
+                  return WalkResult::interrupt();
+                if (auto loop = dyn_cast<scf::ForOp>(inst)) {
+                  auto lb = constIdx(loop.getLowerBound());
+                  auto ub = constIdx(loop.getUpperBound());
+                  auto st = constIdx(loop.getStep());
+                  if (!lb || !ub || !st || *st <= 0 ||
+                      (*ub - *lb + *st - 1) / *st > 16)
+                    return WalkResult::interrupt();
+                  for (Type rt : loop.getResultTypes())
+                    if (isa<ShapedType>(rt))
+                      return WalkResult::interrupt();
+                }
+                return WalkResult::advance();
+              })
+              .wasInterrupted();
+}
+static bool legalWidth(IntegerAttr width, int64_t owners, int64_t maxW = 128) {
+  return width && width.getInt() > 0 && width.getInt() <= maxW &&
          llvm::isPowerOf2_64(width.getInt()) &&
          width.getInt() <= std::max<int64_t>(1, llvm::PowerOf2Ceil(owners));
 }
@@ -137,10 +174,15 @@ LogicalResult verifyOwnerMap(func::FuncOp fn, const TargetProfile &p,
   }
   if (phase == "formed")
     return success(!tile && !choice && !space.hasAttr("block.fold_split"));
+  int64_t maxDirectWidth =
+      isLargeScalarOwnerSpace(&space, p, owners) ? 512 : 128;
   if (phase == "decided")
     return success(
         !tile && choice && !space.hasAttr("block.fold_split") &&
-        legalWidth(choice.getAs<IntegerAttr>("width"), owners) &&
+        legalWidth(choice.getAs<IntegerAttr>("width"), owners,
+                   choice.getAs<StringAttr>("memory") == "direct"
+                       ? maxDirectWidth
+                       : 128) &&
         choice.getAs<StringAttr>("memory") &&
         (choice.getAs<StringAttr>("memory") == "direct" ||
          (choice.getAs<StringAttr>("memory") == "scatter-fold" &&
@@ -173,7 +215,7 @@ LogicalResult verifyOwnerMap(func::FuncOp fn, const TargetProfile &p,
     if (!tile || !canSplitAssociativeScatter(&space, facts, tile.getInt(),
                                              fs.getInt()))
       return space.emitError("invalid associative scatter fold split");
-  if (choice || !legalWidth(tile, owners) ||
+  if (choice || !legalWidth(tile, owners, maxDirectWidth) ||
       space.getAttr("block.owners") !=
           Builder(fn.getContext()).getI64IntegerAttr(owners))
     return space.emitError("unrealized or invalid owner tile");
@@ -279,8 +321,13 @@ void registerOrdered(Unit &u) {
             d.getAs<IntegerAttr>("width").getInt(),
             d.getAs<IntegerAttr>("split").getInt()))
       return llvm::Error::success();
+    int64_t maxDirectW =
+        block::isLargeScalarOwnerSpace(o, p, count) ? 512 : 128;
     if (count < 0 || !d || !d.getAs<StringAttr>("memory") ||
-        !block::legalWidth(d.getAs<IntegerAttr>("width"), count) ||
+        !block::legalWidth(d.getAs<IntegerAttr>("width"), count,
+                           d.getAs<StringAttr>("memory") == "direct"
+                               ? maxDirectW
+                               : 128) ||
         !(d.getAs<StringAttr>("memory") == "direct" ||
           (d.getAs<StringAttr>("memory") == "shared" &&
            block::legalSharedReads(o, p, d)) ||
@@ -370,9 +417,11 @@ void registerOrdered(Unit &u) {
            b.getNamedAttr("memory", b.getStringAttr("columns"))});
       cs.push_back({"columns-1", "column-prefix", d, {"disjoint-owners"}});
     }
-    for (int w : {1, 4, 8, 16, 32, 64, 128}) {
+    int64_t maxDirectW =
+        block::isLargeScalarOwnerSpace(o, p, count) ? 512 : 128;
+    for (int w : {1, 4, 8, 16, 32, 64, 128, 256, 512}) {
       auto a = b.getI64IntegerAttr(w);
-      if (!block::legalWidth(a, count))
+      if (!block::legalWidth(a, count, maxDirectW))
         continue;
       if (w <= 32)
         for (auto group : {4, 16})
@@ -399,7 +448,7 @@ void registerOrdered(Unit &u) {
                       d,
                       {"disjoint-owners"}});
       }
-      if (w >= 32) {
+      if (w >= 32 && w <= 128) {
         for (int64_t split : {16, 64, 256, 512, 1024, 2048}) {
           if (!block::canSplitAssociativeScatter(
                   o, p.services.get<CallFacts>(), w, split))

@@ -1,4 +1,5 @@
 #include "intentdsl/levels/execution/block/ir/Contraction.h"
+#include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/TypeUtilities.h"
 
@@ -7,9 +8,17 @@ namespace intentdsl::block {
 static int64_t contractionOperandBytes(Operation *domain) {
   int64_t maxBytes = 0;
   domain->walk([&](Operation *op) {
-    if (!kir::isContraction(op->getName().stripDialect()))
+    auto kind = op->getName().stripDialect();
+    if (!kir::isContraction(kind))
       return;
-    for (unsigned i = 0; i < std::min(2u, op->getNumOperands()); ++i) {
+    unsigned limit = std::min(2u, op->getNumOperands());
+    if (kind == "quant_contract") {
+      if (const auto *spec = kir::quantFormatSpec(*op)) {
+        if (spec->roleLayout == kir::QuantRoleLayout::GroupedWeightRhs)
+          limit = std::min(1u, op->getNumOperands());
+      }
+    }
+    for (unsigned i = 0; i < limit; ++i) {
       Type elem = getElementTypeOrSelf(op->getOperand(i).getType());
       if (elem.isIntOrFloat())
         maxBytes = std::max<int64_t>(
@@ -18,24 +27,70 @@ static int64_t contractionOperandBytes(Operation *domain) {
   });
   return maxBytes;
 }
+static bool domainMatchesTileOperation(Operation *domain, StringRef requiredOp,
+                                       bool explicitRecordTiles) {
+  if (explicitRecordTiles) {
+    bool isRecord =
+        domain
+            ->walk([&](Operation *op) {
+              auto kind = op->getName().stripDialect();
+              if (kind == "q4k_dot")
+                return WalkResult::interrupt();
+              if (kind == "quant_contract") {
+                if (const auto *spec = kir::quantFormatSpec(*op);
+                    spec &&
+                    spec->roleLayout == kir::QuantRoleLayout::RecordGemv)
+                  return WalkResult::interrupt();
+              }
+              return WalkResult::advance();
+            })
+            .wasInterrupted();
+    if (isRecord)
+      return requiredOp == "q4k_dot";
+  }
+  if (requiredOp.empty())
+    return true;
+  return domain
+      ->walk([&](Operation *op) {
+        auto kind = op->getName().stripDialect();
+        if (kind == "quant_contract") {
+          if (const auto *spec = kir::quantFormatSpec(*op)) {
+            if (spec->roleLayout == kir::QuantRoleLayout::RecordGemv)
+              return requiredOp == "q4k_dot" ? WalkResult::interrupt()
+                                             : WalkResult::advance();
+            if (spec->roleLayout == kir::QuantRoleLayout::BlockScaledPair)
+              return requiredOp == "scaled_contract" ? WalkResult::interrupt()
+                                                     : WalkResult::advance();
+            if (spec->roleLayout == kir::QuantRoleLayout::GroupedWeightRhs)
+              return requiredOp == "quant_contract" ? WalkResult::interrupt()
+                                                    : WalkResult::advance();
+          }
+        }
+        if (kind == requiredOp)
+          return WalkResult::interrupt();
+        return WalkResult::advance();
+      })
+      .wasInterrupted();
+}
+const MatrixTile *findMatrixTile(Operation *domain, ArrayRef<int64_t> dims,
+                                 const compilerinfra::TargetProfile &profile) {
+  auto target = profile.services.get<MatrixTarget>();
+  if (dims.size() != 3 || !target)
+    return nullptr;
+  int64_t operandBytes = contractionOperandBytes(domain);
+  bool explicitRecordTiles = target->implementations.count("q4k_dot") != 0;
+  for (const MatrixTile &t : target->tiles) {
+    if (dims == ArrayRef<int64_t>{t.m, t.n, t.k} &&
+        (!t.maxOperandBytes || operandBytes <= t.maxOperandBytes) &&
+        domainMatchesTileOperation(domain, t.operation, explicitRecordTiles))
+      return &t;
+  }
+  return nullptr;
+}
 bool supportsMatrixTile(Operation *domain, Attribute choice,
                         const compilerinfra::TargetProfile &profile) {
   auto dims = dyn_cast_or_null<DenseI64ArrayAttr>(choice);
-  auto target = profile.services.get<MatrixTarget>();
-  int64_t operandBytes = contractionOperandBytes(domain);
-  return dims && dims.size() == 3 && target &&
-         llvm::any_of(target->tiles, [&](const MatrixTile &t) {
-           return dims.asArrayRef() == ArrayRef<int64_t>{t.m, t.n, t.k} &&
-                  (!t.maxOperandBytes || operandBytes <= t.maxOperandBytes) &&
-                  (t.operation.empty() ||
-                   domain
-                       ->walk([&](Operation *op) {
-                         return op->getName().stripDialect() == t.operation
-                                    ? WalkResult::interrupt()
-                                    : WalkResult::advance();
-                       })
-                       .wasInterrupted());
-         });
+  return dims && findMatrixTile(domain, dims.asArrayRef(), profile) != nullptr;
 }
 llvm::Expected<kir::ContractionShape> matrixShape(Operation *region,
                                                   const CallFacts &f) {
@@ -94,18 +149,15 @@ LogicalResult verifyTiledMatrix(func::FuncOp fn,
   auto target = p.services.get<MatrixTarget>();
   auto native = op->getAttrOfType<StringAttr>("block.native_row");
   int64_t operandBytes = contractionOperandBytes(op);
+  bool explicitRecordTiles =
+      target && target->implementations.count("q4k_dot") != 0;
   if (!tile || tile.size() != 3 || !target || !native ||
       !llvm::any_of(target->tiles, [&](auto &t) {
         if (tile.asArrayRef() != ArrayRef<int64_t>{t.m, t.n, t.k} ||
             native.getValue() != t.native ||
             (t.maxOperandBytes && operandBytes > t.maxOperandBytes))
           return false;
-        return t.operation.empty() ||
-               op->walk([&](Operation *child) {
-                   return child->getName().stripDialect() == t.operation
-                              ? WalkResult::interrupt()
-                              : WalkResult::advance();
-                 }).wasInterrupted();
+        return domainMatchesTileOperation(op, t.operation, explicitRecordTiles);
       }))
     return op->emitError("tile is not supported on this target");
   if (!dims ||

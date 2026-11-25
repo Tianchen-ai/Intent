@@ -9,6 +9,7 @@
 #include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
 #include "intentdsl/levels/algorithm/kir/ir/KeyReduction.h"
 #include "intentdsl/levels/algorithm/kir/ir/ProjectedLayout.h"
+#include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 #include "intentdsl/levels/execution/block/decisions/Verify.h"
 #include "intentdsl/levels/execution/block/ir/Access.h"
 #include "intentdsl/levels/execution/block/ir/Contraction.h"
@@ -123,24 +124,24 @@ bool canNarrowCutileAddress(Operation &op) {
         if (auto cr = intRanges.query(v))
           res = fit64(cr->smin().getSExtValue(), cr->smax().getSExtValue());
       }
-      memo[v] = res;
-      return res;
-    }
-    Type elemTy = getElementTypeOrSelf(v.getType());
-    if (auto it = dyn_cast<IntegerType>(elemTy);
-        it && it.isSignless() && it.getWidth() > 0 && it.getWidth() <= 32) {
-      unsigned w = it.getWidth();
-      res = SignedSpan{-(int64_t(1) << (w - 1)), (int64_t(1) << (w - 1)) - 1};
-      memo[v] = res;
-      return res;
+      if (res) {
+        memo[v] = res;
+        return res;
+      }
     }
     Operation *def = v.getDefiningOp();
     if (!def)
       return std::nullopt;
     if (auto c = dyn_cast<arith::ConstantOp>(def)) {
-      if (auto da = dyn_cast<DenseIntElementsAttr>(c.getValue());
-          da && da.isSplat() &&
-          da.getElementType().getIntOrFloatBitWidth() <= 64) {
+      if (auto ia = dyn_cast<IntegerAttr>(c.getValue());
+          ia && (ia.getType().isIndex() ||
+                 (ia.getType().isIntOrFloat() &&
+                  ia.getType().getIntOrFloatBitWidth() <= 64))) {
+        int64_t val = ia.getInt();
+        res = SignedSpan{val, val};
+      } else if (auto da = dyn_cast<DenseIntElementsAttr>(c.getValue());
+                 da && da.isSplat() &&
+                 da.getElementType().getIntOrFloatBitWidth() <= 64) {
         int64_t val = da.getSplatValue<APInt>().getSExtValue();
         res = SignedSpan{val, val};
       }
@@ -159,16 +160,22 @@ bool canNarrowCutileAddress(Operation &op) {
     } else if (auto eu = dyn_cast<arith::ExtUIOp>(def)) {
       if (auto it =
               dyn_cast<IntegerType>(getElementTypeOrSelf(eu.getIn().getType()));
-          it && it.getWidth() > 0 && it.getWidth() < 32)
+          it && it.getWidth() > 0 && it.getWidth() < 32) {
         res = SignedSpan{0, (int64_t(1) << it.getWidth()) - 1};
+      } else if (auto rem = eu.getIn().getDefiningOp<arith::RemUIOp>()) {
+        auto bR = range(rem.getRhs());
+        if (bR && bR->lo > 0 && bR->hi <= INT32_MAX)
+          res = SignedSpan{0, bR->hi - 1};
+      }
     } else if (n == "ct_src.tile_reduce") {
       auto alg = def->getAttrOfType<StringAttr>("algebra");
       if (alg && (alg.getValue() == "min" || alg.getValue() == "max"))
         res = range(def->getOperand(0));
     } else if (isa<arith::RemSIOp>(def)) {
-      auto b = range(def->getOperand(1));
-      if (b && b->lo > 0 && b->lo == b->hi && range(def->getOperand(0)))
-        res = SignedSpan{-(b->lo - 1), b->lo - 1};
+      auto a = range(def->getOperand(0)), b = range(def->getOperand(1));
+      if (a && b && b->lo > 0 && b->lo == b->hi)
+        res = a->lo >= 0 ? SignedSpan{0, std::min(a->hi, b->lo - 1)}
+                         : SignedSpan{-(b->lo - 1), b->lo - 1};
     } else if (isa<arith::RemUIOp>(def)) {
       auto a = range(def->getOperand(0)), b = range(def->getOperand(1));
       if (a && b && a->lo >= 0 && b->lo > 0 && b->lo == b->hi)
@@ -202,6 +209,15 @@ bool canNarrowCutileAddress(Operation &op) {
         }
       }
     }
+    if (!res) {
+      Type elemTy = getElementTypeOrSelf(v.getType());
+      if (auto it = dyn_cast<IntegerType>(elemTy);
+          it && it.isSignless() && it.getWidth() > 0 && it.getWidth() <= 32) {
+        unsigned w = it.getWidth();
+        res = SignedSpan{-(int64_t(1) << (w - 1)),
+                         (int64_t(1) << (w - 1)) - 1};
+      }
+    }
     memo[v] = res;
     return res;
   };
@@ -209,28 +225,39 @@ bool canNarrowCutileAddress(Operation &op) {
   narrowOpts.targetBitwidth = 32;
   narrowOpts.isSigned = true;
   if (llvm::none_of(op.getOperands().drop_front(),
-                    [](Value v) { return isa<ShapedType>(v.getType()); }))
-    return compilerinfra::proveNarrowAddress(&op, narrowOpts, &intRanges).proven;
+                    [](Value v) { return isa<ShapedType>(v.getType()); }) &&
+      compilerinfra::proveNarrowAddress(&op, narrowOpts, &intRanges).proven)
+    return true;
   for (Value coord : op.getOperands().drop_front()) {
-    if (!isa<ShapedType>(coord.getType())) {
-      if (!compilerinfra::proveNarrowAddress(coord, narrowOpts, &intRanges)
-               .proven)
-        return false;
+    if (!isa<ShapedType>(coord.getType()) &&
+        compilerinfra::proveNarrowAddress(coord, narrowOpts, &intRanges).proven)
       continue;
-    }
     auto r = range(coord);
     if (!r || r->lo < INT32_MIN || r->hi > INT32_MAX)
       return false;
   }
   return true;
 }
+bool isBlockScaledFp4Quant(Operation *op) {
+  if (op->getName().stripDialect() != "quant_contract")
+    return false;
+  const auto *spec = intentdsl::kir::quantFormatSpec(*op);
+  return spec &&
+         spec->roleLayout == intentdsl::kir::QuantRoleLayout::BlockScaledPair &&
+         spec->valueCode == intentdsl::kir::QuantValueCode::Fp4E2M1 &&
+         spec->scaleCode == intentdsl::kir::QuantScaleCode::E8M0;
+}
 DenseI64ArrayAttr adjacentScaleGroups(Operation *op,func::FuncOp fn){
+  int64_t groupSpan = 32;
+  if (const auto *spec = intentdsl::kir::quantFormatSpec(*op))
+    if (spec->roleLayout == intentdsl::kir::QuantRoleLayout::BlockScaledPair)
+      groupSpan = spec->recordBytes;
   SmallVector<int64_t> slots;
   for(unsigned pos:{0u,2u}){
     auto i=cast<BlockArgument>(op->getOperand(pos)).getArgNumber();
     auto s=fn.getArgAttrOfType<DenseI64ArrayAttr>(i,"block.strides");
     int axis=pos==0?1:0;
-    if(s && s.size()==3 && s[axis]==32*s[axis+1])slots.push_back(i);
+    if(s && s.size()==3 && s[axis]==groupSpan*s[axis+1])slots.push_back(i);
   }
   return Builder(fn.getContext()).getDenseI64ArrayAttr(slots);
 }
@@ -545,8 +572,10 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
         if (ownerRectPermitsTma(op, fn, facts, tma))
           s.addAttribute("ct_src.owner_tma", b.getUnitAttr());
       }
-      if (code == "scaled_contract") {
+      if (code == "scaled_contract" || isBlockScaledFp4Quant(op)) {
         s.addAttribute("ct_src.flat_groups", adjacentScaleGroups(op, fn));
+        if (code == "quant_contract" && scaledMma)
+          s.addAttribute("ct_src.scaled_mma", b.getUnitAttr());
       }
       if (code == "sum_columns") {
         auto extent = op->getAttrOfType<IntegerAttr>("extent").getInt();
@@ -747,10 +776,27 @@ struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
     else if(intentdsl::kir::matrixDomain(fn)){
       intentdsl::block::MatrixAccess p(fn);
       if(auto flat=p.dot.getAttrOfType<DenseI64ArrayAttr>("ct_src.flat_groups")){
-        llvm::json::Object views;
-        for(auto slot:flat.asArrayRef())
-          views[std::to_string(slot)]=slot==p.slot(p.dot.getOperand(0))?llvm::json::Array{p.shape[0],p.shape[2]}:llvm::json::Array{p.shape[2],p.shape[1]};
-        fn->setAttr("ct_src.native_views",b.getStringAttr(llvm::formatv("{0}",llvm::json::Value(std::move(views))).str()));
+        bool canUseFlat = true;
+        int64_t packedK = p.shape[2];
+        if (p.dot.getName().stripDialect() == "quant_contract") {
+          const auto *spec = intentdsl::kir::quantFormatSpec(p.dot);
+          int64_t totalGroups = p.shape[2] / 32;
+          canUseFlat = spec && spec->packFactor == 2 && p.tile[2] >= 32 &&
+                       p.tile[2] % 32 == 0 && p.shape[0] > 0 &&
+                       p.shape[0] % p.tile[0] == 0 && p.shape[1] > 0 &&
+                       p.shape[1] % p.tile[1] == 0 && p.shape[2] > 0 &&
+                       p.shape[2] % p.tile[2] == 0 && totalGroups > 0 &&
+                       totalGroups <= 256 &&
+                       llvm::isPowerOf2_64(totalGroups) && flat.size() == 2;
+          if (canUseFlat)
+            packedK = p.shape[2] / spec->packFactor;
+        }
+        if (canUseFlat) {
+          llvm::json::Object views;
+          for(auto slot:flat.asArrayRef())
+            views[std::to_string(slot)]=slot==p.slot(p.dot.getOperand(0))?llvm::json::Array{p.shape[0],packedK}:llvm::json::Array{packedK,p.shape[1]};
+          fn->setAttr("ct_src.native_views",b.getStringAttr(llvm::formatv("{0}",llvm::json::Value(std::move(views))).str()));
+        }
       }
       intentdsl::block::expandMatrixProgram(fn, "exits/cutile", scaledPanels,
                                             nativeMatrixRead,
@@ -860,6 +906,121 @@ struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
                         b.getI64IntegerAttr(ownerAttr.getInt()));
         }
       });
+    }
+    if (const auto *om = profile.services.get<intentdsl::block::OwnerMachine>();
+        om && om->residentRegisters > 0) {
+      std::function<std::optional<std::pair<int64_t, int64_t>>(Value, unsigned)>
+          smallRange = [&](Value v, unsigned depth)
+          -> std::optional<std::pair<int64_t, int64_t>> {
+        if (!v || depth > 12)
+          return std::nullopt;
+        Operation *d = v.getDefiningOp();
+        if (!d)
+          return std::nullopt;
+        if (auto c = dyn_cast<arith::ConstantOp>(d)) {
+          if (auto ia = dyn_cast<IntegerAttr>(c.getValue());
+              ia && ia.getValue().getSignificantBits() <= 32) {
+            int64_t x = ia.getInt();
+            return std::pair{x, x};
+          }
+          if (auto da = dyn_cast<DenseIntElementsAttr>(c.getValue());
+              da && da.isSplat() &&
+              da.getElementType().getIntOrFloatBitWidth() <= 32) {
+            int64_t x = da.getSplatValue<APInt>().getSExtValue();
+            return std::pair{x, x};
+          }
+          return std::nullopt;
+        }
+        StringRef dn = d->getName().getStringRef();
+        if (dn == "ct_src.tile_broadcast" || dn == "ct_src.reshape")
+          return smallRange(d->getOperand(0), depth + 1);
+        if (auto andOp = dyn_cast<arith::AndIOp>(d)) {
+          if (auto r = smallRange(andOp.getRhs(), depth + 1);
+              r && r->first >= 0 && r->first == r->second && r->second <= 4096)
+            return std::pair{int64_t(0), r->second};
+        }
+        if (auto subOp = dyn_cast<arith::SubIOp>(d)) {
+          auto l = smallRange(subOp.getLhs(), depth + 1),
+               r = smallRange(subOp.getRhs(), depth + 1);
+          if (l && r)
+            return std::pair{l->first - r->second, l->second - r->first};
+        }
+        if (auto addOp = dyn_cast<arith::AddIOp>(d)) {
+          auto l = smallRange(addOp.getLhs(), depth + 1),
+               r = smallRange(addOp.getRhs(), depth + 1);
+          if (l && r)
+            return std::pair{l->first + r->first, l->second + r->second};
+        }
+        return std::nullopt;
+      };
+      SmallVector<arith::TruncFOp> truncs;
+      fn.walk([&](arith::TruncFOp tr) { truncs.push_back(tr); });
+      for (arith::TruncFOp tr : truncs) {
+        auto outTy = dyn_cast<RankedTensorType>(tr.getType());
+        if (!outTy ||
+            (!outTy.getElementType().isF16() &&
+             !outTy.getElementType().isBF16()) ||
+            outTy.getNumElements() * 2 <= om->residentRegisters)
+          continue;
+        auto mul = tr.getIn().getDefiningOp<arith::MulFOp>();
+        if (!mul || !mul->hasOneUse())
+          continue;
+        int64_t maxExact = outTy.getElementType().isF16() ? 2048 : 128;
+        arith::SIToFPOp i2f;
+        Value other;
+        for (int side : {0, 1}) {
+          if (auto cand = mul->getOperand(side).getDefiningOp<arith::SIToFPOp>();
+              cand && cand->hasOneUse()) {
+            if (auto r = smallRange(cand.getIn(), 0);
+                r && r->first >= -maxExact && r->second <= maxExact) {
+              i2f = cand;
+              other = mul->getOperand(1 - side);
+              break;
+            }
+          }
+        }
+        if (!i2f)
+          continue;
+        Value halfScale;
+        OpBuilder nb(tr);
+        if (auto ext = other.getDefiningOp<arith::ExtFOp>();
+            ext && ext.getIn().getType() == outTy) {
+          halfScale = ext.getIn();
+        } else if (Operation *bc = other.getDefiningOp();
+                   bc &&
+                   bc->getName().getStringRef() == "ct_src.tile_broadcast") {
+          if (auto ext = bc->getOperand(0).getDefiningOp<arith::ExtFOp>();
+              ext && getElementTypeOrSelf(ext.getIn().getType()) ==
+                         outTy.getElementType()) {
+            OperationState bs(tr.getLoc(), "ct_src.tile_broadcast");
+            bs.addOperands(ext.getIn());
+            bs.addAttributes(bc->getAttrs());
+            bs.addTypes(outTy);
+            halfScale = nb.create(bs)->getResult(0);
+          }
+        }
+        if (!halfScale)
+          continue;
+        Value wHalf =
+            nb.create<arith::SIToFPOp>(tr.getLoc(), outTy, i2f.getIn());
+        auto newMul = nb.create<arith::MulFOp>(tr.getLoc(), wHalf, halfScale,
+                                               mul.getFastmathAttr());
+        tr.replaceAllUsesWith(newMul.getResult());
+        tr.erase();
+        if (mul->use_empty())
+          mul.erase();
+        if (Operation *od = other.getDefiningOp();
+            od && isMemoryEffectFree(od) && od->use_empty()) {
+          Value inner = od->getNumOperands() ? od->getOperand(0) : Value();
+          od->erase();
+          if (inner)
+            if (Operation *id = inner.getDefiningOp();
+                id && isMemoryEffectFree(id) && id->use_empty())
+              id->erase();
+        }
+        if (i2f->use_empty())
+          i2f.erase();
+      }
     }
     bool fnFtz = intentdsl::kir::allowsSubnormalFtz(fn);
     fn.walk([&](Operation *op) {
@@ -1063,9 +1224,17 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
     if(callable && matrix->getAttr("ct_src.index_bits")!=Builder(matrix.getContext()).getI32IntegerAttr(profile.services.get<intentdsl::cutile::ArrayIndices>()->bits))
       return matrix.emitError("matrix index width disagrees with the target");
     return success(!matrix.walk([&](Operation *op){
-      return op->getName().getStringRef()=="ct_src.scaled_contract" &&
-        op->getAttr("ct_src.flat_groups")!=adjacentScaleGroups(op,matrix)?
-        WalkResult::interrupt():WalkResult::advance();}).wasInterrupted());
+      if (op->getName().getStringRef() == "ct_src.scaled_contract")
+        return op->getAttr("ct_src.flat_groups") != adjacentScaleGroups(op, matrix)
+                   ? WalkResult::interrupt()
+                   : WalkResult::advance();
+      if (isBlockScaledFp4Quant(op))
+        return (op->getAttr("ct_src.flat_groups") !=
+                    adjacentScaleGroups(op, matrix) ||
+                op->hasAttr("ct_src.scaled_mma") != arrayCap->scaledMma)
+                   ? WalkResult::interrupt()
+                   : WalkResult::advance();
+      return WalkResult::advance();}).wasInterrupted());
   }
   if (failed(intentdsl::verifyMapping(module, profile, "ct_src")))
     return failure();

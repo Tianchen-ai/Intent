@@ -68,14 +68,18 @@ struct TritonScaledMMAContractModel
         !rs.hasStaticShape() || !m.hasStaticShape() ||
         op->getOperand(4).getType() != m)
       return failure();
-    return success(l.getDimSize(1) > 0 && l.getDimSize(1) % 32 == 0 &&
+    auto fmtAttr = op->getAttrOfType<StringAttr>("format");
+    int64_t kElems = (fmtAttr && fmtAttr.getValue() == "e2m1")
+                         ? l.getDimSize(1) * 2
+                         : l.getDimSize(1);
+    return success(kElems > 0 && kElems % 32 == 0 &&
                    l.getDimSize(1) == r.getDimSize(0) &&
                    m.getDimSize(0) == l.getDimSize(0) &&
                    m.getDimSize(1) == r.getDimSize(1) &&
                    ls.getDimSize(0) == l.getDimSize(0) &&
-                   ls.getDimSize(1) == l.getDimSize(1) / 32 &&
+                   ls.getDimSize(1) == kElems / 32 &&
                    rs.getDimSize(0) == r.getDimSize(1) &&
-                   rs.getDimSize(1) == l.getDimSize(1) / 32);
+                   rs.getDimSize(1) == kElems / 32);
   }
 };
 

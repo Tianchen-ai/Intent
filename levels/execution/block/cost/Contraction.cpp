@@ -46,9 +46,10 @@ void matrixCost(Unit &u) {
                      tn * tk * (qSpec->packBits / 8.0 +
                                 2.5 / std::max(1, qSpec->blockElements)))
                   : ((tm + tn) * tk * 2.0);
+          double mBlocks = shape->batches * std::ceil(shape->m / tm);
           double read =
-              records ? (shape->batches * panels *
-                         (shape->m * recordBytes + recordElems * 4.0))
+              records ? (panels * (shape->batches * shape->m * recordBytes +
+                                   mBlocks * recordElems * 4.0))
                       : (jobs * panels * panelBytes);
           double waves =
               std::ceil(jobs / std::max<int64_t>(1, f->participants));
@@ -61,8 +62,8 @@ void matrixCost(Unit &u) {
           auto bw = intentdsl::quantity(ctx, "read_1", "B/ns"),
                startup = intentdsl::quantity(ctx, "launch", "ns");
           // A panel has two issue operations even when widening K leaves the
-          // number of operand bytes unchanged; row-collective record dots stay
-          // warp-local without shared-memory panel barriers.
+          // number of operand bytes unchanged; record dots amortize activation
+          // quantization collectives across tm rows per CTA panel.
           double issues = records ? 0.0 : (2 * waves * panels);
           e.terms["panel_load_issues"] = {issues, "count"};
           auto sync = intentdsl::quantity(ctx, "sync", "ns");

@@ -69,7 +69,8 @@ LogicalResult matrix(Operation *o) {
     return failure();
   auto e = aTy.getElementType(), accum = resTy.getElementType();
   if (e != bTy.getElementType() ||
-      !(e.isInteger(8) ? accum.isInteger(32) : accum.isF32()))
+      !(scaled ? accum.isF32()
+               : (e.isInteger(8) ? accum.isInteger(32) : accum.isF32())))
     return failure();
   if (!scaled)
     return success((e.isInteger(8) || e.isF16() || e.isBF16() || e.isF32() ||
@@ -80,13 +81,18 @@ LogicalResult matrix(Operation *o) {
   auto rsTy = dyn_cast<RankedTensorType>(o->getOperand(3).getType());
   if (!lsTy || !rsTy)
     return failure();
+  auto fmtAttr = o->getAttrOfType<StringAttr>("format");
+  bool isFp4 = fmtAttr && fmtAttr.getValue() == "e2m1";
   auto g = intentdsl::kir::MX8Block::group;
+  int64_t kElems = isFp4 ? x[1] * 2 : x[1];
   return success(
-      isa<Float8E4M3FNType>(e) && x[1] > 0 && x[1] % g == 0 &&
+      (isFp4 ? e.isInteger(8) : isa<Float8E4M3FNType>(e)) &&
+      (!fmtAttr || isFp4 || fmtAttr.getValue() == "e4m3") &&
+      kElems > 0 && kElems % g == 0 &&
       o->getOperand(4).getType() == resTy &&
       lsTy.getElementType().isInteger(8) && rsTy.getElementType().isInteger(8) &&
-      lsTy.getShape() == ArrayRef<int64_t>{x[0], x[1] / g} &&
-      rsTy.getShape() == ArrayRef<int64_t>{x[1] / g, z[1]});
+      lsTy.getShape() == ArrayRef<int64_t>{x[0], kElems / g} &&
+      rsTy.getShape() == ArrayRef<int64_t>{kElems / g, z[1]});
 }
 } // namespace
 void registerContracts(Unit &unit) {

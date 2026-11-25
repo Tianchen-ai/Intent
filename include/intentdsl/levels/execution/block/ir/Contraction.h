@@ -16,6 +16,8 @@ struct MatrixTarget {
   std::string estimate;
   std::map<std::string, std::vector<std::string>> implementations;
 };
+const MatrixTile *findMatrixTile(mlir::Operation *, llvm::ArrayRef<int64_t>,
+                                 const compilerinfra::TargetProfile &);
 bool supportsMatrixTile(mlir::Operation *, mlir::Attribute,
                         const compilerinfra::TargetProfile &);
 

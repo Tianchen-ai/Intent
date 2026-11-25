@@ -364,11 +364,18 @@ bool tritonPagePermitsTma(Operation *op, func::FuncOp fn, bool permitTma) {
 
 Value tritonMatrixRead(Tiles &t, MatrixAccess &p, bool left, Value group,
                        Value panel) {
-  if (!t.fn->hasAttr("triton_src.tma") || (left && p.dot.getNumOperands() > 2))
+  bool isQuant = p.dot.getName().stripDialect() == "quant_contract";
+  const auto *qSpec = isQuant ? intentdsl::kir::quantFormatSpec(p.dot) : nullptr;
+  if (!t.fn->hasAttr("triton_src.tma") ||
+      (!isQuant && left && p.dot.getNumOperands() > 2) ||
+      (isQuant && (!qSpec ||
+                   qSpec->roleLayout !=
+                       intentdsl::kir::QuantRoleLayout::GroupedWeightRhs)))
     return {};
   Value view = p.dot.getOperand(left ? 0 : 1);
-  int rank = p.rank(view), batch = p.axis(left ? "lhs_batch" : "rhs_batch"),
-      inner = p.axis(left ? "lhs_k" : "rhs_k");
+  int rank = p.rank(view);
+  int batch = isQuant ? -1 : p.axis(left ? "lhs_batch" : "rhs_batch");
+  int inner = isQuant ? (left ? 1 : 0) : p.axis(left ? "lhs_k" : "rhs_k");
   if ((rank != 2 && rank != 3) || (batch != -1 && batch != 0))
     return {};
   SmallVector<int64_t> viewShape, viewStrides;
@@ -377,8 +384,13 @@ Value tritonMatrixRead(Tiles &t, MatrixAccess &p, bool left, Value group,
     return {};
   auto &b = t.b;
   auto loc = t.loc;
-  int freeAx = p.freeAxis(view, inner, batch);
+  int freeAx = isQuant ? (left ? 0 : 1) : p.freeAxis(view, inner, batch);
   int64_t freeTile = p.tile[left ? 0 : 1], kTile = p.tile[2];
+  if (isQuant && !left) {
+    if (qSpec->packFactor <= 0 || freeTile % qSpec->packFactor != 0)
+      return {};
+    freeTile /= qSpec->packFactor;
+  }
   Value freeOff =
       b.create<arith::MulIOp>(loc, t.pid(left ? 0 : 1), t.integer(freeTile));
   Value kOff = b.create<arith::MulIOp>(loc, panel, t.integer(kTile));
@@ -553,6 +565,288 @@ bool tritonMatrixWrite(Tiles &t, MatrixAccess &p, Value y, Value val,
 Value tritonScaledPanels(Tiles &t, MatrixAccess &p) {
   auto &b = t.b;
   auto loc = t.loc;
+  if (p.dot.getName().stripDialect() == "quant_contract") {
+    const auto *spec = intentdsl::kir::quantFormatSpec(p.dot);
+    if (!spec ||
+        spec->roleLayout != intentdsl::kir::QuantRoleLayout::BlockScaledPair ||
+        spec->valueCode != intentdsl::kir::QuantValueCode::Fp4E2M1 ||
+        spec->scaleCode != intentdsl::kir::QuantScaleCode::E8M0 ||
+        spec->packFactor != 2 || spec->blockElements != 32)
+      return {};
+    int64_t m = p.tile[0], n = p.tile[1], k = p.tile[2];
+    int64_t totalM = p.shape[0], totalN = p.shape[1], totalK = p.shape[2];
+    if (k < 32 || k % 32 != 0 || totalK <= 0 || totalK % k != 0)
+      return {};
+    int64_t g = k / 32, kBytes = k / 2;
+    int64_t totalGroups = totalK / 32, totalKBytes = totalK / 2;
+    if (totalGroups <= 0 || totalGroups > 256 ||
+        !llvm::isPowerOf2_64(totalGroups))
+      return {};
+    bool allowTma = t.fn->hasAttr("triton_src.tma");
+    Value a = p.dot.getOperand(0), sa = p.dot.getOperand(1),
+          rhs = p.dot.getOperand(2);
+    intentdsl::kir::RightScale scale(p.dot);
+    auto castTo = [&](StringRef opName, Value v, Type e) {
+      OperationState st(loc, opName);
+      st.addOperands(v);
+      st.addTypes(cast<RankedTensorType>(v.getType()).clone(e));
+      return b.create(st)->getResult(0);
+    };
+    auto lit = [&](int64_t val, Type ty) {
+      return t.like(
+          b.create<arith::ConstantOp>(loc, b.getIntegerAttr(t.elem(ty), val)),
+          ty);
+    };
+    auto cmpLt = [&](Value x, Value bound) {
+      return b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, x,
+                                     t.like(bound, x.getType()));
+    };
+    auto pairMask = [&](Value r, Value c) {
+      auto ty = t.shaped({cast<RankedTensorType>(r.getType()).getDimSize(0),
+                          cast<RankedTensorType>(c.getType()).getDimSize(0)},
+                         b.getI1Type());
+      return b.create<arith::AndIOp>(loc, t.like(r, ty, 0), t.like(c, ty, 1));
+    };
+    Value rowBase = b.create<arith::MulIOp>(loc, t.pid(0), t.integer(m));
+    Value colBase = b.create<arith::MulIOp>(loc, t.pid(1), t.integer(n));
+    Value row = t.stepped(rowBase, m);
+    Value col = t.stepped(colBase, n);
+    Value validRow = cmpLt(row, t.integer(totalM));
+    Value validCol = cmpLt(col, t.integer(totalN));
+    Value biasI8 = b.create<arith::ConstantOp>(
+        loc, b.getIntegerAttr(b.getI8Type(), spec->scaleBias));
+
+    SmallVector<int64_t> aShape, aStrides, rShape, rStrides;
+    int64_t aBytes = 0, rBytes = 0;
+    bool aFlatTma = false, rFlatTma = false;
+    if (allowTma && directViewLayout(a, t.fn, aShape, aStrides, aBytes) &&
+        aShape.size() == 3 && aStrides[1] == spec->recordBytes * aStrides[2] &&
+        aStrides[2] == 1)
+      aFlatTma =
+          tmaViewCompatible({totalM, totalKBytes}, {aStrides[0], 1}, {m, kBytes}, 1);
+    if (allowTma && directViewLayout(rhs, t.fn, rShape, rStrides, rBytes) &&
+        rShape.size() == 3 && rStrides[0] == spec->recordBytes * rStrides[1] &&
+        rStrides[2] == 1)
+      rFlatTma =
+          tmaViewCompatible({totalKBytes, totalN}, {rStrides[1], 1}, {kBytes, n}, 1);
+
+    Value allGrp = t.lanes(totalGroups);
+    Value maskAllLS =
+        t.like(validRow, t.shaped({m, totalGroups}, b.getI1Type()), 0);
+    Value rawAllLS = t.read(sa, t.address(sa, {row, allGrp}, {0, 1}), maskAllLS);
+    Value allLS = b.create<arith::SelectOp>(
+        loc, maskAllLS, rawAllLS,
+        t.like(biasI8, cast<RankedTensorType>(rawAllLS.getType())));
+    Value allRS;
+    if (scale.column == 0) {
+      Value maskAllRS =
+          t.like(validCol, t.shaped({n, totalGroups}, b.getI1Type()), 0);
+      Value rawAllRS = t.read(
+          scale.view, t.address(scale.view, {col, allGrp}, {0, 1}), maskAllRS);
+      allRS = b.create<arith::SelectOp>(
+          loc, maskAllRS, rawAllRS,
+          t.like(biasI8, cast<RankedTensorType>(rawAllRS.getType())));
+    } else {
+      Value maskAllRS =
+          t.like(validCol, t.shaped({totalGroups, n}, b.getI1Type()), 1);
+      Value rawAllRS = t.read(
+          scale.view, t.address(scale.view, {allGrp, col}, {0, 1}), maskAllRS);
+      allRS = b.create<arith::SelectOp>(
+          loc, maskAllRS, rawAllRS,
+          t.like(biasI8, cast<RankedTensorType>(rawAllRS.getType())));
+    }
+    auto inside = [&](Value sTile) {
+      auto count = cast<RankedTensorType>(sTile.getType()).getNumElements();
+      Value codes =
+          castTo("arith.extui", reshapeTile(t, sTile, {count}), b.getI32Type());
+      codes = b.create<arith::AndIOp>(loc, codes, lit(255, codes.getType()));
+      return b.create<arith::AndIOp>(
+          loc,
+          b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge,
+                                  t.reduce(codes, "min", 0),
+                                  b.create<arith::ConstantIntOp>(loc, 2, 32)),
+          b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt,
+                                  t.reduce(codes, "max", 0),
+                                  b.create<arith::ConstantIntOp>(loc, 253, 32)));
+    };
+    Value validScales =
+        b.create<arith::AndIOp>(loc, inside(allLS), inside(allRS));
+    auto matrix = t.shaped({m, n}, b.getF32Type());
+    auto branch = b.create<scf::IfOp>(loc, TypeRange{matrix}, validScales, true);
+    auto emitLoop = [&](bool fast) -> Value {
+      int64_t stepK = fast ? k : 32;
+      int64_t stepG = stepK / 32;
+      int64_t stepKBytes = stepK / 2;
+      bool useAFlatTma =
+          fast ? aFlatTma
+               : (allowTma && aShape.size() == 3 &&
+                  aStrides[1] == spec->recordBytes * aStrides[2] &&
+                  aStrides[2] == 1 &&
+                  tmaViewCompatible({totalM, totalKBytes}, {aStrides[0], 1},
+                                    {m, stepKBytes}, 1));
+      bool useRFlatTma =
+          fast ? rFlatTma
+               : (allowTma && rShape.size() == 3 &&
+                  rStrides[0] == spec->recordBytes * rStrides[1] &&
+                  rStrides[2] == 1 &&
+                  tmaViewCompatible({totalKBytes, totalN}, {rStrides[1], 1},
+                                    {stepKBytes, n}, 1));
+      auto loop = b.create<scf::ForOp>(
+          loc, t.integer(0), t.integer(totalK / stepK), t.integer(1),
+          ValueRange{t.like(t.scalar(0), matrix)});
+      loop->setAttr(t.symbol("runtime_range"), b.getUnitAttr());
+      OpBuilder::InsertionGuard ig(b);
+      b.setInsertionPointToStart(loop.getBody());
+      Value iv = loop.getInductionVar(), acc = loop.getRegionIterArgs()[0];
+      Value grpBase = b.create<arith::MulIOp>(loc, iv, t.integer(stepG));
+      Value grp = t.stepped(grpBase, stepG);
+      Value maskLS = t.like(validRow, t.shaped({m, stepG}, b.getI1Type()), 0);
+      Value rawLS = t.read(sa, t.address(sa, {row, grp}, {0, 1}), maskLS);
+      Value leftScale = b.create<arith::SelectOp>(
+          loc, maskLS, rawLS,
+          t.like(biasI8, cast<RankedTensorType>(rawLS.getType())));
+      Value rightScaleNG, rightScaleGN;
+      if (scale.column == 0) {
+        Value maskRS = t.like(validCol, t.shaped({n, stepG}, b.getI1Type()), 0);
+        Value rawRS = t.read(
+            scale.view, t.address(scale.view, {col, grp}, {0, 1}), maskRS);
+        rightScaleNG = b.create<arith::SelectOp>(
+            loc, maskRS, rawRS,
+            t.like(biasI8, cast<RankedTensorType>(rawRS.getType())));
+        rightScaleGN = transposeTile(t, rightScaleNG);
+      } else {
+        Value maskRS = t.like(validCol, t.shaped({stepG, n}, b.getI1Type()), 1);
+        Value rawRS = t.read(
+            scale.view, t.address(scale.view, {grp, col}, {0, 1}), maskRS);
+        rightScaleGN = b.create<arith::SelectOp>(
+            loc, maskRS, rawRS,
+            t.like(biasI8, cast<RankedTensorType>(rawRS.getType())));
+        rightScaleNG = transposeTile(t, rightScaleGN);
+      }
+      Value kByteBase = b.create<arith::MulIOp>(loc, iv, t.integer(stepKBytes));
+      Value kb = t.stepped(kByteBase, stepKBytes);
+      Value kbGrp =
+          b.create<arith::DivUIOp>(loc, kb, lit(spec->recordBytes, kb.getType()));
+      Value kbLane =
+          b.create<arith::RemUIOp>(loc, kb, lit(spec->recordBytes, kb.getType()));
+      Value lhsBytes =
+          useAFlatTma
+              ? emitDescRead(t, a, {rowBase, kByteBase}, {totalM, totalKBytes},
+                             {aStrides[0], 1}, {m, stepKBytes})
+              : t.read(
+                    a, t.address(a, {row, kbGrp, kbLane}, {0, 1, 1}),
+                    t.like(validRow, t.shaped({m, stepKBytes}, b.getI1Type()), 0));
+      Value rhsBytes =
+          useRFlatTma
+              ? emitDescRead(t, rhs, {kByteBase, colBase}, {totalKBytes, totalN},
+                             {rStrides[1], 1}, {stepKBytes, n})
+              : t.read(rhs, t.address(rhs, {kbGrp, kbLane, col}, {0, 0, 1}),
+                       t.like(validCol, t.shaped({stepKBytes, n}, b.getI1Type()),
+                              1));
+      Value next;
+      if (fast) {
+        next = t
+                   .op("scaled_mma",
+                       {lhsBytes, leftScale, rhsBytes, rightScaleNG, acc},
+                       matrix,
+                       {b.getNamedAttr("format", b.getStringAttr("e2m1")),
+                        b.getNamedAttr(
+                            "ci.implementation",
+                            b.getStringAttr("exits/triton::scaled-mma"))})
+                   ->getResult(0);
+      } else {
+        Value kk = t.lanes(stepK);
+        Value odd = b.create<arith::RemUIOp>(loc, kk, lit(2, kk.getType()));
+        Value sh1D = castTo(
+            "arith.trunci",
+            b.create<arith::MulIOp>(loc, odd, lit(4, kk.getType())),
+            b.getI32Type());
+        auto decodeFp4 = [&](Value codeI32) {
+          Type ty = codeI32.getType();
+          Type fTy = cast<RankedTensorType>(ty).clone(b.getF32Type());
+          Value s = b.create<arith::AndIOp>(
+              loc, b.create<arith::ShRUIOp>(loc, codeI32, lit(3, ty)), lit(1, ty));
+          Value e = b.create<arith::AndIOp>(
+              loc, b.create<arith::ShRUIOp>(loc, codeI32, lit(1, ty)), lit(3, ty));
+          Value mant = b.create<arith::AndIOp>(loc, codeI32, lit(1, ty));
+          Value isSub = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                                e, lit(0, ty));
+          Value safeShift = b.create<arith::SelectOp>(
+              loc, isSub, lit(0, ty),
+              b.create<arith::SubIOp>(loc, e, lit(1, ty)));
+          Value normDbl = b.create<arith::ShLIOp>(
+              loc, b.create<arith::AddIOp>(loc, mant, lit(2, ty)), safeShift);
+          Value magF = castTo(
+              "arith.sitofp",
+              b.create<arith::SelectOp>(loc, isSub, mant, normDbl),
+              b.getF32Type());
+          Value neg = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne, s,
+                                              lit(0, ty));
+          Value halfS = b.create<arith::SelectOp>(
+              loc, neg, t.like(t.scalar(-0.5f), fTy),
+              t.like(t.scalar(0.5f), fTy));
+          return b.create<arith::MulFOp>(loc, halfS, magF);
+        };
+        Value aU32 = castTo("arith.extui", lhsBytes, b.getI32Type());
+        aU32 = b.create<arith::AndIOp>(loc, aU32, lit(255, aU32.getType()));
+        Value aDup = reshapeTile(
+            t,
+            t.op("expand_scale", aU32,
+                 t.shaped({m, stepKBytes, 2}, b.getI32Type()),
+                 {b.getNamedAttr("axis", b.getI64IntegerAttr(2))})
+                ->getResult(0),
+            {m, stepK});
+        Value aNib = b.create<arith::AndIOp>(
+            loc,
+            b.create<arith::ShRUIOp>(loc, aDup, t.like(sh1D, aDup.getType(), 1)),
+            lit(15, aDup.getType()));
+        Value rU32 = castTo("arith.extui", rhsBytes, b.getI32Type());
+        rU32 = b.create<arith::AndIOp>(loc, rU32, lit(255, rU32.getType()));
+        Value rDup = reshapeTile(
+            t,
+            t.op("expand_scale", rU32,
+                 t.shaped({stepKBytes, 2, n}, b.getI32Type()),
+                 {b.getNamedAttr("axis", b.getI64IntegerAttr(1))})
+                ->getResult(0),
+            {stepK, n});
+        Value rNib = b.create<arith::AndIOp>(
+            loc,
+            b.create<arith::ShRUIOp>(loc, rDup, t.like(sh1D, rDup.getType(), 0)),
+            lit(15, rDup.getType()));
+        auto rescaleFp4 = [&](Value valF32, Value sTile, ArrayRef<int64_t> dims,
+                              int axis) {
+          Value codes = castTo("arith.extui", sTile, b.getI32Type());
+          codes = b.create<arith::AndIOp>(loc, codes, lit(255, codes.getType()));
+          Value factor =
+              t.op("e8m0", codes,
+                   cast<RankedTensorType>(sTile.getType()).clone(b.getF32Type()))
+                  ->getResult(0);
+          Value reshaped = reshapeTile(t, valF32, dims);
+          Value scaled =
+              t.op("expand_scale", factor, reshaped.getType(),
+                   {b.getNamedAttr("axis", b.getI64IntegerAttr(axis))})
+                  ->getResult(0);
+          return b.create<arith::MulFOp>(loc, reshaped, scaled);
+        };
+        next = t.dot(
+            reshapeTile(
+                t, rescaleFp4(decodeFp4(aNib), leftScale, {m, stepG, 32}, 2),
+                {m, stepK}),
+            reshapeTile(
+                t, rescaleFp4(decodeFp4(rNib), rightScaleGN, {stepG, 32, n}, 1),
+                {stepK, n}),
+            false, acc);
+      }
+      b.create<scf::YieldOp>(loc, next);
+      return loop.getResult(0);
+    };
+    b.setInsertionPointToStart(branch.thenBlock());
+    b.create<scf::YieldOp>(loc, emitLoop(true));
+    b.setInsertionPointToStart(branch.elseBlock());
+    b.create<scf::YieldOp>(loc, emitLoop(false));
+    b.setInsertionPointAfter(branch);
+    return branch.getResult(0);
+  }
   auto format = cast<intentdsl::kir::MX8Type>(
                     p.dot.getAttrOfType<TypeAttr>("kir.storage").getValue())
                     .getLayout();

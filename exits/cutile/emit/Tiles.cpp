@@ -78,8 +78,6 @@ TerminalPrinter cutilePrinter() {
       PrintRule::format("$r0 = ct.transpose($0)");
   p.operations["ct_src.scan_sum"] =
       PrintRule::format("$r0 = ct.cumsum($0,axis=1)");
-  p.operations["ct_src.scaled_mma"] = PrintRule::format(
-      "$r0 = ct.mma_scaled($0,ct.bitcast($1,ct.float8_e8m0fnu),$2,ct.bitcast($3,ct.float8_e8m0fnu),$4)");
   p.operations["math.roundeven"] = PrintRule::format(
       "$r0 = ct.floor($0)+ct.astype((($0-ct.floor($0))>0.5)|((($0-ct.floor($0))==0.5)&((ct.astype(ct.floor($0),ct.int32)&1)!=0)),ct.float32)");
   p.operations["ct_src.tile_pid"] =
@@ -115,6 +113,32 @@ TerminalPrinter cutilePrinter() {
   p.operations["math.absf"] = PrintRule::format("$r0 = ct.abs($operands)");
 
   // Local rules (LocalOpView only)
+  localExpr("ct_src.scaled_mma", [](const LocalOpView &v) {
+    auto fmtAttr = v.attrOfType<StringAttr>("format");
+    if (fmtAttr && fmtAttr.getValue() == "e2m1") {
+      auto aTy = cast<RankedTensorType>(v.operandType(0));
+      auto bTy = cast<RankedTensorType>(v.operandType(2));
+      int64_t m = aTy.getDimSize(0), kHalf = aTy.getDimSize(1), k = kHalf * 2,
+              n = bTy.getDimSize(1);
+      std::string lhs = "ct.reshape(unpack_from_bytes(ct.reshape(" +
+                        v.operand(0).str() + ",(" + std::to_string(m * kHalf) +
+                        ",)),ct.float4_e2m1fn),(" + std::to_string(m) + "," +
+                        std::to_string(k) + "))";
+      std::string rhs =
+          "ct.transpose(ct.reshape(unpack_from_bytes(ct.reshape(ct.transpose(" +
+          v.operand(2).str() + "),(" + std::to_string(n * kHalf) +
+          ",)),ct.float4_e2m1fn),(" + std::to_string(n) + "," +
+          std::to_string(k) + ")))";
+      return ("ct.mma_scaled(" + lhs + ",ct.bitcast(" + v.operand(1).str() +
+              ",ct.float8_e8m0fnu)," + rhs + ",ct.bitcast(" +
+              v.operand(3).str() + ",ct.float8_e8m0fnu)," +
+              v.operand(4).str() + ")");
+    }
+    return ("ct.mma_scaled(" + v.operand(0).str() + ",ct.bitcast(" +
+            v.operand(1).str() + ",ct.float8_e8m0fnu)," + v.operand(2).str() +
+            ",ct.bitcast(" + v.operand(3).str() + ",ct.float8_e8m0fnu)," +
+            v.operand(4).str() + ")");
+  });
   localExpr("math.exp", [](const LocalOpView &v) {
     if (viewHasFastMath(v, arith::FastMathFlags::afn)) {
       std::string ftz = v.attr("ct_src.ftz") ? ",flush_to_zero=True" : "";
@@ -128,6 +152,7 @@ TerminalPrinter cutilePrinter() {
         if (at == PrintPoint::Enter) {
           c.file = "kernel.py";
           c.line("import cuda.tile as ct");
+          c.line("from cuda.tile._stub import unpack_from_bytes");
         }
         return llvm::Error::success();
       });

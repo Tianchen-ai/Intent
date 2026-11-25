@@ -6,7 +6,7 @@ namespace intentdsl::block {
 using namespace mlir;
 
 void encodedTiles(Tiles &, MatrixAccess &, ScaledPanelLowering,
-                  WindowPanelLowering, MatrixPanelWrite);
+                  MatrixPanelRead, WindowPanelLowering, MatrixPanelWrite);
 namespace {
 // Lower the chosen panel loop with a loop-carried accumulator. The pointers
 // for both transposed and contiguous operands use their verified ABI strides.
@@ -171,7 +171,7 @@ void expandMatrixProgram(func::FuncOp fn, StringRef unit,
     if (p.dot.getName().stripDialect() == "contract")
       matrixTiles(tiles, p, native, write);
     else
-      encodedTiles(tiles, p, scaled, window, write);
+      encodedTiles(tiles, p, scaled, native, window, write);
     tiles.op("end");
     root.erase();
   }

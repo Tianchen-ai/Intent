@@ -7,7 +7,8 @@ namespace intentdsl::block {
 inline compilerinfra::CostEstimate
 matrixIssues(mlir::Operation *domain,
              const compilerinfra::StructuralCandidate &candidate,
-             compilerinfra::CostContext &ctx, int m, int n, int k) {
+             compilerinfra::CostContext &ctx, int m, int n, int k,
+             int warpRowCap = 4) {
   auto t = mlir::cast<mlir::DenseI64ArrayAttr>(candidate.value);
   compilerinfra::CostEstimate estimate;
   estimate.scope = "one panel";
@@ -29,10 +30,20 @@ matrixIssues(mlir::Operation *domain,
   }
   if (records) {
     double lanes = double(t[0]) * blockElems;
-    double pressure = t[0] > 4 ? (double(t[0]) / 4.0) : 1.0;
     estimate.terms["record_decode_lanes"] = {lanes, "count"};
-    if (auto rate = intentdsl::quantity(ctx, "compute", "lane/ns"))
-      estimate.timeNs = lanes * 16.0 * pressure / *rate;
+    if (t[0] > warpRowCap) {
+      double crossWarpBytes = double(t[0] - warpRowCap) * blockElems * 8.0;
+      if (auto sbw = intentdsl::quantity(ctx, "read_1_shared_bw", "B/ns")) {
+        auto f = ctx.target.services.get<intentdsl::CallFacts>();
+        double smBw = *sbw / std::max<int64_t>(1, f ? f->participants : 1);
+        estimate.timeNs = crossWarpBytes / smBw;
+      } else if (auto rate = intentdsl::quantity(ctx, "compute", "lane/ns")) {
+        double pressure = double(t[0]) / double(warpRowCap);
+        estimate.timeNs = lanes * 16.0 * pressure / *rate;
+      }
+    } else if (auto rate = intentdsl::quantity(ctx, "compute", "lane/ns")) {
+      estimate.timeNs = lanes * 16.0 / *rate;
+    }
   } else {
     estimate.terms["native_matrix_fragments"] = {
         std::ceil(double(t[0]) / m) * std::ceil(double(t[1]) / n) *

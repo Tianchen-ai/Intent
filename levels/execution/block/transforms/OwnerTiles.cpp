@@ -51,9 +51,38 @@ Value OwnerTiles::widen(Value v) { return castElement(v, b.getI64Type()); }
 Value OwnerTiles::broadcast(Value v, Type dest, int axis) {
   return like(v, dest, isa<ShapedType>(v.getType()) ? axis : -1);
 }
+static std::optional<int64_t> constIntVal(Value v) {
+  Operation *op = v.getDefiningOp();
+  while (op && op->getName().stripDialect() == "tile_broadcast") {
+    v = op->getOperand(0);
+    op = v.getDefiningOp();
+  }
+  auto c = dyn_cast_or_null<arith::ConstantOp>(op);
+  if (!c)
+    return std::nullopt;
+  if (auto ia = dyn_cast<IntegerAttr>(c.getValue());
+      ia && (ia.getType().isIndex() ||
+             (ia.getType().isIntOrFloat() &&
+              ia.getType().getIntOrFloatBitWidth() <= 64)))
+    return ia.getInt();
+  if (auto da = dyn_cast<DenseIntElementsAttr>(c.getValue());
+      da && da.isSplat() && da.getElementType().getIntOrFloatBitWidth() <= 64)
+    return da.getSplatValue<APInt>().getSExtValue();
+  return std::nullopt;
+}
 Value OwnerTiles::select(Value mask, Value yes, Value no) {
-  return b.create<arith::SelectOp>(
-      loc, broadcast(mask, retype(yes.getType(), b.getI1Type())), yes, no);
+  Value condBool = broadcast(mask, retype(yes.getType(), b.getI1Type()));
+  if (auto inner = yes.getDefiningOp<arith::SelectOp>()) {
+    auto kF1 = constIntVal(inner.getFalseValue());
+    auto kF2 = constIntVal(no);
+    if ((inner.getFalseValue() == no || (kF1 && kF2 && *kF1 == *kF2)) &&
+        inner.getCondition().getType() == condBool.getType()) {
+      Value both =
+          b.create<arith::AndIOp>(loc, inner.getCondition(), condBool);
+      return b.create<arith::SelectOp>(loc, both, inner.getTrueValue(), no);
+    }
+  }
+  return b.create<arith::SelectOp>(loc, condBool, yes, no);
 }
 Value OwnerTiles::constant(arith::ConstantOp c) {
   if (auto i = dyn_cast<IntegerAttr>(c.getValue())) {
@@ -70,6 +99,84 @@ Value OwnerTiles::apply(Operation &old, ValueRange args, Type dst) {
   auto code = old.getName().stripDialect();
   if (code == "index_cast" || code == "extf" || code == "truncf")
     return castElement(args[0], elem(dst));
+  if (!isa<ShapedType>(dst) && args.size() == 2) {
+    auto c0 = args[0].getDefiningOp<arith::ConstantOp>();
+    auto c1 = args[1].getDefiningOp<arith::ConstantOp>();
+    auto i0 = c0 ? dyn_cast<IntegerAttr>(c0.getValue()) : IntegerAttr();
+    auto i1 = c1 ? dyn_cast<IntegerAttr>(c1.getValue()) : IntegerAttr();
+    if (i0 && i1 && i0.getType().isInteger(64) && i1.getType().isInteger(64)) {
+      int64_t a = i0.getInt(), rhsVal = i1.getInt();
+      auto floorDiv64 = [](int64_t x, int64_t d) -> int64_t {
+        int64_t q = x / d, r = x % d;
+        return (r != 0 && ((r < 0) != (d < 0))) ? q - 1 : q;
+      };
+      if (dst.isInteger(64)) {
+        if (code == "addi")
+          return integer(a + rhsVal);
+        if (code == "subi")
+          return integer(a - rhsVal);
+        if (code == "muli")
+          return integer(a * rhsVal);
+        if (code == "divui" && a >= 0 && rhsVal > 0)
+          return integer(a / rhsVal);
+        if (code == "remui" && a >= 0 && rhsVal > 0)
+          return integer(a % rhsVal);
+        if (code == "floordivsi" && rhsVal > 0)
+          return integer(floorDiv64(a, rhsVal));
+        if (code == "remsi" && rhsVal > 0)
+          return integer(a % rhsVal);
+      } else if (dst.isInteger(1) && isa<arith::CmpIOp>(old)) {
+        auto pred = cast<arith::CmpIOp>(old).getPredicate();
+        bool res = false;
+        switch (pred) {
+        case arith::CmpIPredicate::eq: res = (a == rhsVal); break;
+        case arith::CmpIPredicate::ne: res = (a != rhsVal); break;
+        case arith::CmpIPredicate::slt: res = (a < rhsVal); break;
+        case arith::CmpIPredicate::sle: res = (a <= rhsVal); break;
+        case arith::CmpIPredicate::sgt: res = (a > rhsVal); break;
+        case arith::CmpIPredicate::sge: res = (a >= rhsVal); break;
+        default: res = false; break;
+        }
+        if (pred == arith::CmpIPredicate::eq || pred == arith::CmpIPredicate::ne ||
+            pred == arith::CmpIPredicate::slt || pred == arith::CmpIPredicate::sle ||
+            pred == arith::CmpIPredicate::sgt || pred == arith::CmpIPredicate::sge)
+          return b.create<arith::ConstantOp>(loc, b.getBoolAttr(res));
+      }
+    }
+  }
+  if (args.size() == 2 && elem(dst).isIntOrIndex()) {
+    auto c0Val = constIntVal(args[0]);
+    auto c1Val = constIntVal(args[1]);
+    if (code == "addi") {
+      if (c1Val && *c1Val == 0)
+        return broadcast(args[0], dst);
+      if (c0Val && *c0Val == 0)
+        return broadcast(args[1], dst);
+    } else if (code == "subi" && c1Val && *c1Val == 0) {
+      return broadcast(args[0], dst);
+    } else if (elem(dst).isInteger(1) && isa<arith::CmpIOp>(old)) {
+      auto pred = cast<arith::CmpIOp>(old).getPredicate();
+      if ((pred == arith::CmpIPredicate::eq ||
+           pred == arith::CmpIPredicate::ne) &&
+          c1Val) {
+        if (auto sel = args[0].getDefiningOp<arith::SelectOp>()) {
+          auto kT = constIntVal(sel.getTrueValue());
+          auto kF = constIntVal(sel.getFalseValue());
+          if (kT && kF && *kT != *kF) {
+            bool isEq = pred == arith::CmpIPredicate::eq;
+            if ((*c1Val == *kT && isEq) || (*c1Val == *kF && !isEq))
+              return broadcast(sel.getCondition(), dst);
+            if ((*c1Val == *kF && isEq) || (*c1Val == *kT && !isEq)) {
+              Value cB = broadcast(sel.getCondition(), dst);
+              Value one = like(b.create<arith::ConstantOp>(loc, b.getBoolAttr(true)),
+                               dst);
+              return b.create<arith::XOrIOp>(loc, cB, one);
+            }
+          }
+        }
+      }
+    }
+  }
   OperationState st(loc, old.getName());
   st.addAttributes(old.getAttrs());
   st.addTypes(dst);
@@ -1467,6 +1574,49 @@ SmallVector<Value> OwnerTiles::serialLoop(scf::ForOp loop, const Values &parent,
        hi = at(loop.getUpperBound(), parent), step = at(loop.getStep(), parent);
   bool ragged = isa<RankedTensorType>(lo.getType()) ||
                 isa<RankedTensorType>(hi.getType());
+  if (!ragged &&
+      llvm::none_of(loop.getInitArgs(),
+                    [](Value v) { return isa<ShapedType>(v.getType()); })) {
+    auto cLo = lo.getDefiningOp<arith::ConstantOp>();
+    auto cHi = hi.getDefiningOp<arith::ConstantOp>();
+    auto cStep = step.getDefiningOp<arith::ConstantOp>();
+    auto iLo = cLo ? dyn_cast<IntegerAttr>(cLo.getValue()) : IntegerAttr();
+    auto iHi = cHi ? dyn_cast<IntegerAttr>(cHi.getValue()) : IntegerAttr();
+    auto iStep =
+        cStep ? dyn_cast<IntegerAttr>(cStep.getValue()) : IntegerAttr();
+    if (iLo && iHi && iStep && iLo.getInt() == 0 && iStep.getInt() == 1 &&
+        iHi.getInt() >= 1 && iHi.getInt() <= 16) {
+      unsigned bodyOps = 0;
+      bool canUnroll = true;
+      loop.walk([&](Operation *inner) {
+        if (inner == loop.getOperation())
+          return WalkResult::advance();
+        ++bodyOps;
+        if (bodyOps > 48 || isa<scf::ForOp, memref::StoreOp>(inner) ||
+            inner->getName().stripDialect() == "slice_write") {
+          canUnroll = false;
+          return WalkResult::interrupt();
+        }
+        return WalkResult::advance();
+      });
+      if (canUnroll) {
+        SmallVector<Value> state;
+        for (Value v : loop.getInitArgs())
+          state.push_back(broadcast(at(v, parent), lifted(v)));
+        int64_t tripCount = iHi.getInt();
+        for (int64_t stepIdx = 0; stepIdx < tripCount; ++stepIdx) {
+          Values stepEnv = parent;
+          stepEnv[loop.getInductionVar()] = integer(stepIdx);
+          for (auto [a, v] : llvm::zip(loop.getRegionIterArgs(), state))
+            stepEnv[a] = v;
+          auto next = lowerBody(*loop.getBody(), stepEnv, mask);
+          for (size_t i = 0; i < state.size(); ++i)
+            state[i] = broadcast(next[i], state[i].getType());
+        }
+        return state;
+      }
+    }
+  }
   auto ownerType = shaped({rows}, b.getI64Type());
   Value start = lo, limit = hi;
   if (ragged) {
@@ -1880,9 +2030,43 @@ SmallVector<Value> OwnerTiles::lowerBody(Block &body, Values env, Value mask) {
         env[old] = val;
       continue;
     } else if (auto branch = dyn_cast<scf::IfOp>(op)) {
-      auto cond = broadcast(arg(0), mask.getType());
-      auto pos = b.create<arith::AndIOp>(loc, mask, cond);
-      auto neg = b.create<arith::XOrIOp>(loc, mask, pos);
+      Value rawCond = arg(0);
+      if (!isa<ShapedType>(rawCond.getType())) {
+        if (auto cst = rawCond.getDefiningOp<arith::ConstantOp>())
+          if (auto ba = dyn_cast<BoolAttr>(cst.getValue())) {
+            SmallVector<Value> chosen;
+            if (ba.getValue())
+              chosen = lowerBody(*branch.thenBlock(), env, mask);
+            else if (!branch.getElseRegion().empty())
+              chosen = lowerBody(*branch.elseBlock(), env, mask);
+            for (auto [ret, val] : llvm::zip(op.getResults(), chosen))
+              env[ret] = broadcast(val, lifted(ret));
+            continue;
+          }
+      }
+      auto hasEffects = [](Region &reg) {
+        return reg
+            .walk([](Operation *inst) {
+              return (!isa<scf::YieldOp>(inst) && !isMemoryEffectFree(inst))
+                         ? WalkResult::interrupt()
+                         : WalkResult::advance();
+            })
+            .wasInterrupted();
+      };
+      auto cond = broadcast(rawCond, mask.getType());
+      bool thenEff = hasEffects(branch.getThenRegion());
+      bool elseEff = !branch.getElseRegion().empty() &&
+                     hasEffects(branch.getElseRegion());
+      Value pos = thenEff
+                      ? Value(b.create<arith::AndIOp>(loc, mask, cond))
+                      : mask;
+      Value neg = elseEff
+                      ? Value(b.create<arith::XOrIOp>(
+                            loc, mask,
+                            thenEff ? pos
+                                    : Value(b.create<arith::AndIOp>(loc, mask,
+                                                                    cond))))
+                      : mask;
       auto yes = lowerBody(*branch.thenBlock(), env, pos);
       SmallVector<Value> no;
       if (!branch.getElseRegion().empty())
@@ -1918,20 +2102,39 @@ SmallVector<Value> OwnerTiles::lowerBody(Block &body, Values env, Value mask) {
     } else if (isa<memref::LoadOp, memref::StoreOp>(op)) {
       bool w = isa<memref::StoreOp>(op);
       auto base = arg(w ? 1 : 0);
-      SmallVector<Value> coords;
-      SmallVector<int64_t> axes;
-      auto ix = shaped({rows}, b.getI64Type());
+      SmallVector<Value, 4> mapped;
+      bool allScalar = true;
       for (auto c : op.getOperands().drop_front(w ? 2 : 1)) {
-        coords.push_back(broadcast(widen(at(c, env)), ix));
-        axes.push_back(0);
+        Value mc = widen(at(c, env));
+        if (isa<RankedTensorType>(mc.getType()))
+          allScalar = false;
+        mapped.push_back(mc);
       }
-      auto ptr = address(base, coords, axes);
-      if (w) {
-        write(base, ptr,
-              broadcast(arg(0), shaped({rows}, elem(arg(0).getType()))), mask);
-        continue;
+      auto ownersAttr = program->getAttrOfType<IntegerAttr>("block.owners");
+      if (!w && allScalar && access.scalarBroadcastRead && mask == active &&
+          ownersAttr && ownersAttr.getInt() > 0) {
+        SmallVector<int64_t, 4> sAxes(mapped.size(), -1);
+        Value sVal = read(base, address(base, mapped, sAxes));
+        v = broadcast(
+            sVal,
+            shaped({rows}, cast<MemRefType>(base.getType()).getElementType()));
+      } else {
+        SmallVector<Value> coords;
+        SmallVector<int64_t> axes;
+        auto ix = shaped({rows}, b.getI64Type());
+        for (auto mc : mapped) {
+          coords.push_back(broadcast(mc, ix));
+          axes.push_back(0);
+        }
+        auto ptr = address(base, coords, axes);
+        if (w) {
+          write(base, ptr,
+                broadcast(arg(0), shaped({rows}, elem(arg(0).getType()))),
+                mask);
+          continue;
+        }
+        v = read(base, ptr, mask);
       }
-      v = read(base, ptr, mask);
     } else {
       SmallVector<Value> args;
       Type shapeHint;
@@ -2036,10 +2239,31 @@ LogicalResult OwnerTiles::build() {
     // The first owner is aligned to logical. Dividing its consecutive
     // lanes by a multiple of logical gives one shared outer coordinate.
     Value base = pitch % logical == 0 ? start : Value(owner);
-    auto coord = b.create<arith::DivUIOp>(loc, base,
-                                          like(integer(pitch), base.getType()));
-    outer[space.getRegion(0).front().getArgument(i)] = b.create<arith::RemUIOp>(
-        loc, coord, like(integer(size), base.getType()));
+    if (count > 0 && count <= INT32_MAX && pitch <= INT32_MAX &&
+        size <= INT32_MAX) {
+      Value base32 = castElement(base, b.getI32Type());
+      auto c32 = [&](int64_t val) {
+        return like(b.create<arith::ConstantIntOp>(loc, val, 32),
+                    base32.getType());
+      };
+      Value coord32 =
+          pitch == 1
+              ? base32
+              : Value(b.create<arith::DivUIOp>(loc, base32, c32(pitch)));
+      coord32 = b.create<arith::RemUIOp>(loc, coord32, c32(size));
+      outer[space.getRegion(0).front().getArgument(i)] =
+          b.create<arith::ExtUIOp>(loc, retype(coord32.getType(), b.getI64Type()),
+                                   coord32);
+    } else {
+      auto coord =
+          pitch == 1
+              ? base
+              : Value(b.create<arith::DivUIOp>(loc, base,
+                                               like(integer(pitch), base.getType())));
+      outer[space.getRegion(0).front().getArgument(i)] =
+          b.create<arith::RemUIOp>(loc, coord,
+                                   like(integer(size), base.getType()));
+    }
     pitch *= size;
   }
   lowerBody(space.getRegion(0).front(), outer, active);
