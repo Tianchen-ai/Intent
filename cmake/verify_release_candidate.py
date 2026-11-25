@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Repeatable release-candidate full verification & scoreboard pipeline for V2-6.R.
 
+Copy cmake/rc-targets.example.json to ~/.config/intentdsl/rc-targets.json and
+set the controller paths and the environments for your machines. Select a
+different configuration with --target-config or INTENTDSL_RC_TARGETS. Worker
+modes receive the resolved settings from the controller.
+
 Covers:
   1. Standalone clean-venv RC wheel installation (`setup`, `doctor`, offline bilingual `manual`, `skills`,
      and isolated `_bundled/lib/libintentdsl.so` verification with `PYTHONPATH` / `INTENTDSL_LIBRARY` unset).
@@ -138,211 +143,24 @@ class TargetSpec:
     needs_controller_oracle: bool = False
 
 
-TARGETS: dict[str, TargetSpec] = {
-    "mlu370": TargetSpec(
-        name="mlu370",
-        profile="mlu-native",
-        backends=("bangc",),
-        device_kind="mlu",
-        wheel_glob="intentdsl-2.0.0-*-manylinux_2_31_x86_64.whl",
-        base_python="/srv/rc/site-2/intentdsl_bench/output/build/runtime/bin/python",
-        host="rc-user@rc-host.example.invalid",
-        remote_output_root="/srv/rc/site-2/intentdsl_bench/output",
-        standalone_env=(
-            ("NEUWARE_HOME", "/usr/local/neuware"),
-            ("PATH", "/usr/local/neuware/bin:/usr/local/bin:/usr/bin:/bin"),
-        ),
-        worker_env=(
-            ("NEUWARE_HOME", "/usr/local/neuware"),
-            ("PATH", "/usr/local/neuware/bin:/usr/local/bin:/usr/bin:/bin"),
-        ),
-        worker_launcher=(
-            "/srv/rc/site-2/.cache/intentdsl/tmo-pt25-runtime/system-libs/ld-linux-x86-64.so.2",
-            "--library-path",
-            "/srv/rc/site-2/.cache/intentdsl/tmo-pt25-runtime/system-libs:"
-            "/srv/rc/site-2/.cache/intentdsl/tmo-pt25-runtime/neuware/lib64:"
-            "/srv/rc/site-2/.cache/intentdsl/tmo-pt25-runtime/site-packages/torch/lib",
-        ),
-        extra_site_dirs=(
-            "/srv/rc/site-2/.cache/intentdsl/tmo-pt25-runtime/site-packages",
-            "/srv/rc/site-2/intentdsl_bench/output/build/runtime/lib/python3.10/site-packages",
-        ),
-        captures_layout="remote_v262",
-    ),
-    "5090d": TargetSpec(
-        name="5090d",
-        profile="local-gpu",
-        backends=("triton", "cutile"),
-        device_kind="cuda",
-        wheel_glob="intentdsl-2.0.0-*-linux_x86_64.whl",
-        base_python="/srv/rc/site-1/.venvs/intentdsl-cutile/bin/python",
-        worker_env=(("TMPDIR", "/tmp"), ("INTENT_CACHE_DIR", "/srv/rc/site-1/phdworks/intentdsl_bench/output/cache/v26-rc-5090d")),
-        captures_layout="local_flat",
-    ),
-    "h100": TargetSpec(
-        name="h100",
-        profile="h100",
-        backends=("triton", "cutile"),
-        device_kind="cuda",
-        wheel_glob="intentdsl-2.0.0-*-manylinux_2_31_x86_64.whl",
-        base_python="/srv/rc/site-1/.venvs/intentdsl-cutile/bin/python",
-        host="rc-host.example.invalid",
-        remote_output_root="/srv/rc/site-1/phdworks/intentdsl_bench/output",
-        captures_layout="remote_v262",
-    ),
-    "x86-mojo": TargetSpec(
-        name="x86-mojo",
-        profile="local-cpu",
-        backends=("mojo",),
-        device_kind="cpu_x86",
-        wheel_glob="intentdsl-2.0.0-*-linux_x86_64.whl",
-        base_python="/srv/rc/site-1/.venvs/intentdsl-cutile/bin/python",
-        standalone_env=(
-            ("PATH", "/srv/rc/site-1/.venvs/intentdsl-mojo/bin:/usr/local/bin:/usr/bin:/bin"),
-            ("ONEDNN_ROOT", "/opt/rc-dependencies/onednn-3.13.4"),
-            ("LD_LIBRARY_PATH", "/opt/rc-dependencies/onednn-3.13.4/lib:/srv/rc/site-1/phdworks/intentdsl_bench/output/build/onednn-install/lib"),
-        ),
-        worker_env=(
-            ("PATH", "/srv/rc/site-1/.venvs/intentdsl-mojo/bin:/usr/local/bin:/usr/bin:/bin"),
-            ("ONEDNN_ROOT", "/opt/rc-dependencies/onednn-3.13.4"),
-            ("LD_LIBRARY_PATH", "/opt/rc-dependencies/onednn-3.13.4/lib:/srv/rc/site-1/phdworks/intentdsl_bench/output/build/onednn-install/lib"),
-            ("INTENT_CPU_THREADS", "8"),
-            ("OPENBLAS_NUM_THREADS", "1"),
-        ),
-        worker_launcher=("taskset", "-c", "0-7"),
-        captures_layout="local_flat",
-    ),
-    "x86-weft": TargetSpec(
-        name="x86-weft",
-        profile="weft-x86",
-        backends=("weft",),
-        device_kind="cpu_x86",
-        wheel_glob="intentdsl-2.0.0-*-linux_x86_64.whl",
-        base_python="/srv/rc/site-1/phdworks/intentdsl_bench/output/work/v2-weft-env/bin/python",
-        standalone_env=(
-            ("ONEDNN_ROOT", "/opt/rc-dependencies/onednn-3.13.4"),
-            ("LD_LIBRARY_PATH", "/opt/rc-dependencies/onednn-3.13.4/lib"),
-        ),
-        worker_env=(
-            ("ONEDNN_ROOT", "/opt/rc-dependencies/onednn-3.13.4"),
-            ("LD_LIBRARY_PATH", "/opt/rc-dependencies/onednn-3.13.4/lib"),
-            ("INTENT_CPU_THREADS", "8"),
-            ("OPENBLAS_NUM_THREADS", "1"),
-        ),
-        worker_launcher=("taskset", "-c", "0-7"),
-        captures_layout="local_flat",
-    ),
-    "sg2044": TargetSpec(
-        name="sg2044",
-        profile="rvv-native",
-        backends=("weft",),
-        device_kind="cpu_rvv",
-        wheel_glob="intentdsl-2.0.0-*-linux_riscv64.whl",
-        base_python="/srv/rc/site-3/intentdsl_bench/output/work/v2-weft-env/bin/python",
-        host="rc-host.example.invalid",
-        remote_output_root="/srv/rc/site-3/intentdsl_bench/output",
-        standalone_env=(
-            (
-                "LD_LIBRARY_PATH",
-                "/srv/rc/site-3/intentdsl_bench/output/work/weft-env/lib/bench-deps:"
-                "/usr/local/llvm-22.1.8/lib:/srv/rc/site-3/.cache/weft/toolchains/llvm20-build/lib",
-            ),
-        ),
-        worker_env=(
-            (
-                "LD_LIBRARY_PATH",
-                "/srv/rc/site-3/intentdsl_bench/output/work/weft-env/lib/bench-deps:"
-                "/usr/local/llvm-22.1.8/lib:/srv/rc/site-3/.cache/weft/toolchains/llvm20-build/lib",
-            ),
-            ("INTENT_CPU_THREADS", "1"),
-            ("OPENBLAS_NUM_THREADS", "1"),
-        ),
-        worker_launcher=("taskset", "-c", "48"),
-        captures_layout="remote_v262",
-        needs_controller_oracle=True,
-    ),
-    "rvv-v100": TargetSpec(
-        name="rvv-v100",
-        profile="rvv-v100",
-        backends=("weft",),
-        device_kind="cpu_rvv",
-        wheel_glob="intentdsl-2.0.0-*-linux_riscv64.whl",
-        base_python="/srv/rc/site-4/intentdsl_bench/output/work/weft-env/bin/python",
-        host="rc-host.example.invalid",
-        remote_output_root="/srv/rc/site-4/intentdsl_bench/output",
-        standalone_env=(
-            (
-                "LD_LIBRARY_PATH",
-                "/srv/rc/site-4/intentdsl_bench/output/work/weft-env/lib/bench-deps:"
-                "/usr/local/llvm-22.1.8/lib:/srv/rc/site-3/.cache/weft/toolchains/llvm20-build/lib",
-            ),
-        ),
-        worker_env=(
-            (
-                "LD_LIBRARY_PATH",
-                "/srv/rc/site-4/intentdsl_bench/output/work/weft-env/lib/bench-deps:"
-                "/usr/local/llvm-22.1.8/lib:/srv/rc/site-3/.cache/weft/toolchains/llvm20-build/lib",
-            ),
-            ("INTENT_CPU_THREADS", "1"),
-            ("OPENBLAS_NUM_THREADS", "1"),
-        ),
-        worker_launcher=("taskset", "-c", "0"),
-        captures_layout="remote_v262",
-        needs_controller_oracle=True,
-    ),
-    "k3-x100": TargetSpec(
-        name="k3-x100",
-        profile="k3-x100",
-        backends=("weft",),
-        device_kind="cpu_rvv",
-        wheel_glob="intentdsl-2.0.0-*-linux_riscv64.whl",
-        base_python="/srv/rc/site-1/intentdsl_bench/output/work/weft-env/bin/python",
-        host="rc-user@rc-host.example.invalid",
-        remote_output_root="/srv/rc/site-1/intentdsl_bench/output",
-        worker_env=(
-            ("LD_LIBRARY_PATH", "/srv/rc/site-1/weft-bench/k3/current/paper/deps/llama-vendor-normal/bin"),
-            ("INTENT_CPU_THREADS", "1"),
-            ("OPENBLAS_NUM_THREADS", "1"),
-        ),
-        worker_launcher=(
-            "/srv/rc/site-1/intentdsl_bench/output/work/weft-env/bin/python",
-            "-m",
-            "triton.tools.cpu",
-            "--cpus",
-            "0",
-            "--exec",
-            "--",
-        ),
-        captures_layout="remote_v262",
-        needs_controller_oracle=True,
-    ),
-    "k3-a100": TargetSpec(
-        name="k3-a100",
-        profile="k3-a100",
-        backends=("weft",),
-        device_kind="cpu_rvv",
-        wheel_glob="intentdsl-2.0.0-*-linux_riscv64.whl",
-        base_python="/srv/rc/site-1/intentdsl_bench/output/work/weft-env/bin/python",
-        host="rc-user@rc-host.example.invalid",
-        remote_output_root="/srv/rc/site-1/intentdsl_bench/output",
-        worker_env=(
-            ("LD_LIBRARY_PATH", "/srv/rc/site-1/weft-bench/k3/current/paper/deps/llama-vendor-normal/bin"),
-            ("INTENT_CPU_THREADS", "1"),
-            ("OPENBLAS_NUM_THREADS", "1"),
-        ),
-        worker_launcher=(
-            "/srv/rc/site-1/intentdsl_bench/output/work/weft-env/bin/python",
-            "-m",
-            "triton.tools.cpu",
-            "--cpus",
-            "8",
-            "--exec",
-            "--",
-        ),
-        captures_layout="remote_v262",
-        needs_controller_oracle=True,
-    ),
-}
+def load_target_config(path: Path) -> tuple[dict[str, TargetSpec], dict[str, str]]:
+    """Read controller settings. Staged workers receive their settings in the batch."""
+    config = json.loads(path.expanduser().read_text(encoding="utf-8"))
+    targets = {}
+    for name, settings in config["targets"].items():
+        values = dict(settings)
+        for key in ("worker_env", "standalone_env"):
+            values[key] = tuple(values.get(key, {}).items())
+        for key in ("backends", "worker_launcher", "extra_site_dirs"):
+            if key in values:
+                values[key] = tuple(values[key])
+        target = TargetSpec(name=name, **values)
+        if bool(target.host) != bool(target.remote_output_root):
+            raise ValueError(f"{name}: set host and remote_output_root together")
+        targets[name] = target
+    if not targets:
+        raise ValueError("targets must contain at least one RC target")
+    return targets, {key: config[key] for key in ("bench_root", "wheel_dir", "oracle_python")}
 
 
 def responsible_unit(backend: str, workload: str, case: str = "") -> str:
@@ -1115,7 +933,7 @@ def check_device_idle(spec: TargetSpec) -> tuple[bool, str]:
         ]
         return (not active, f"5090d busy: {'; '.join(active)}" if active else "idle")
     if spec.name == "h100":
-        r = _ssh("rc-host.example.invalid", "nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader", capture=True, check=False, timeout=15)
+        r = _ssh(spec.host, "nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader", capture=True, check=False, timeout=15)
         if r.returncode != 0:
             return False, f"h100 unreachable: {r.stderr.strip()}"
         busy = r.stdout.strip()
@@ -1162,6 +980,7 @@ def execute_target(
     *,
     wheel_dir: Path,
     bench_root: Path,
+    oracle_python: str,
     experiment_tag: str,
     workloads_filter: list[str] | None,
     resume: bool,
@@ -1178,6 +997,7 @@ def execute_target(
             spec,
             wheel_dir=wheel_dir,
             bench_root=bench_root,
+            oracle_python=oracle_python,
             experiment_tag=experiment_tag,
             workloads_filter=workloads_filter,
             resume=resume,
@@ -1191,6 +1011,7 @@ def _execute_target_locked(
     *,
     wheel_dir: Path,
     bench_root: Path,
+    oracle_python: str,
     experiment_tag: str,
     workloads_filter: list[str] | None,
     resume: bool,
@@ -1449,12 +1270,12 @@ export TMPDIR="$RWORK"
             raise RuntimeError(f"Failed transferring results from {spec.name}")
 
     if spec.needs_controller_oracle:
-        _validate_rvv_captures(local_exp_root, bench_root)
+        _validate_rvv_captures(local_exp_root, bench_root, oracle_python)
 
     return local_exp_root
 
 
-def _validate_rvv_captures(target_exp_dir: Path, bench_root: Path) -> None:
+def _validate_rvv_captures(target_exp_dir: Path, bench_root: Path, oracle_python: str) -> None:
     """Validate captured RVV actual outputs on the controller's PyTorch CPU oracle (isolated from cores 0..7)."""
     validator_code = """
 from dataclasses import replace
@@ -1495,7 +1316,7 @@ print(f"Validated {count} RVV oracle captures under {target_dir}", flush=True)
 """
     env = {**os.environ, "PYTHONPATH": str((bench_root / "src").resolve())}
     subprocess.run(
-        ["/srv/rc/site-1/.venvs/intentdsl-cutile/bin/python", "-c", validator_code, str(target_exp_dir)],
+        [oracle_python, "-c", validator_code, str(target_exp_dir)],
         env=env,
         check=True,
     )
@@ -1529,7 +1350,7 @@ def _classify_row_stages(row: dict[str, Any]) -> dict[str, bool]:
     }
 
 
-def summarize_experiment(bench_root: Path, experiment_tag: str) -> tuple[dict[str, Any], str]:
+def summarize_experiment(bench_root: Path, experiment_tag: str, targets: dict[str, TargetSpec]) -> tuple[dict[str, Any], str]:
     exp_root = bench_root / "output" / "experiments" / experiment_tag
     summary: dict[str, Any] = {
         "experiment_tag": experiment_tag,
@@ -1549,7 +1370,7 @@ def summarize_experiment(bench_root: Path, experiment_tag: str) -> tuple[dict[st
         "|---|---|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
 
-    for target_name, spec in TARGETS.items():
+    for target_name, spec in targets.items():
         tdir = exp_root / target_name
         if not tdir.exists():
             continue
@@ -1877,9 +1698,11 @@ def main() -> int:
     parser.add_argument("--run-one", type=Path, help="Internal: run single workload JSON config")
     parser.add_argument("--worker-batch", type=Path, help="Internal: run batch JSON config on target host")
 
-    parser.add_argument("--targets", nargs="+", help=f"Targets to execute ({', '.join(TARGETS)} or 'all')")
-    parser.add_argument("--wheel-dir", type=Path, default=Path("/srv/rc/site-1/phdworks/compilerinfra/.work/release/v2-6-final"))
-    parser.add_argument("--bench-root", type=Path, default=Path("/srv/rc/site-1/phdworks/intentdsl_bench"))
+    parser.add_argument("--target-config", type=Path, default=os.environ.get("INTENTDSL_RC_TARGETS", "~/.config/intentdsl/rc-targets.json"),
+                        help="Controller configuration (see cmake/rc-targets.example.json)")
+    parser.add_argument("--targets", nargs="+", help="Configured targets to execute, or 'all'")
+    parser.add_argument("--wheel-dir", type=Path, help="Override the configured wheel directory")
+    parser.add_argument("--bench-root", type=Path, help="Override the configured Bench checkout")
     parser.add_argument("--tag", default="v2-6-final", help="Experiment tag under bench output/experiments/")
     parser.add_argument("--workloads", nargs="+", help="Optional subset of workloads to run")
     parser.add_argument("--resume", action="store_true", help="Reuse completed workload results.json files")
@@ -1896,16 +1719,23 @@ def main() -> int:
     if args.worker_batch:
         return run_worker_batch(args.worker_batch)
 
-    bench_root = Path(os.path.abspath(args.bench_root))
-    wheel_dir = Path(os.path.abspath(args.wheel_dir))
+    try:
+        targets, paths = load_target_config(args.target_config)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        parser.error(f"cannot load {args.target_config}: {exc}")
+    bench_root = Path(args.bench_root or paths["bench_root"]).expanduser().resolve()
+    wheel_dir = Path(args.wheel_dir or paths["wheel_dir"]).expanduser().resolve()
 
     if not args.summarize_only:
-        raw_targets = args.targets or ["mlu370"]
+        raw_targets = args.targets or (["mlu370"] if "mlu370" in targets else [next(iter(targets))])
         if "all" in raw_targets:
             # Default full suite: GPU (5090d, h100), CPU x86 (mojo, weft), RVV (sg2044, rvv-v100, k3-x100, k3-a100), MLU (mlu370)
-            target_names = list(TARGETS.keys())
+            target_names = list(targets)
         else:
             target_names = raw_targets
+            unknown = set(target_names) - targets.keys()
+            if unknown:
+                parser.error("unconfigured targets: " + ", ".join(sorted(unknown)))
 
         # Partition remote/GPU targets (can run concurrently on independent machines) vs local x86 CPU targets (serial on cpus 0..7)
         serial_local_cpu = [t for t in target_names if t in ("x86-mojo", "x86-weft")]
@@ -1915,9 +1745,10 @@ def main() -> int:
         def _run_group(names: list[str]) -> None:
             for n in names:
                 execute_target(
-                    TARGETS[n],
+                    targets[n],
                     wheel_dir=wheel_dir,
                     bench_root=bench_root,
+                    oracle_python=paths["oracle_python"],
                     experiment_tag=args.tag,
                     workloads_filter=args.workloads,
                     resume=args.resume,
@@ -1938,7 +1769,7 @@ def main() -> int:
         if serial_local_cpu:
             _run_group(serial_local_cpu)
 
-    _, md_text = summarize_experiment(bench_root, args.tag)
+    _, md_text = summarize_experiment(bench_root, args.tag, targets)
     print("\n" + md_text, flush=True)
     return 0
 

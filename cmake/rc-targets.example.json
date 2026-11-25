@@ -1,0 +1,25 @@
+{
+  "wheel_dir": "/srv/releases/intentdsl",
+  "bench_root": "/srv/intentdsl_bench",
+  "oracle_python": "/opt/bench/bin/python",
+  "targets": {
+    "5090d": {
+      "profile": "local-gpu",
+      "backends": ["triton", "cutile"],
+      "device_kind": "cuda",
+      "wheel_glob": "intentdsl-*-linux_x86_64.whl",
+      "base_python": "/opt/gpu/bin/python",
+      "captures_layout": "local_flat"
+    },
+    "mlu370": {
+      "profile": "mlu-native",
+      "backends": ["bangc"],
+      "device_kind": "mlu",
+      "wheel_glob": "intentdsl-*-manylinux_2_31_x86_64.whl",
+      "base_python": "/opt/mlu/bin/python",
+      "host": "mlu-runner.example.invalid",
+      "remote_output_root": "/srv/intentdsl_bench/output",
+      "worker_env": {"NEUWARE_HOME": "/usr/local/neuware"}
+    }
+  }
+}

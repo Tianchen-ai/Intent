@@ -43,4 +43,4 @@ cuTile 出口面向 `cuda.tile` / `tileiras` 编译器，其执行吞吐由四�
 ## 5. 验证程序与迭代闭环
 
 - **模型准确度（`model-accuracy`）**：在未参与校准的留出形状（`transpose 353×701`、`rms_norm 257×2048`、`softmax 512×1536`、`swiglu 384×1536`）上通过 `compilerinfra.performance.accuracy` 检验 `selected_over_best` 与成对排序准确率（`intentdsl_bench/output/experiments/v052-gpu-readiness/{5090d,h100}/`）。
-- **代表性验证程序**：覆盖第 1–6 组全部 30 个 `program/*` 与第 7 组泛化算子，通过 `derive → compare → measure → adopt → revert` 与 [test_gpu_audit_mig.py](file:///srv/rc/site-1/phdworks/intentdsl_bench/tests/test_gpu_audit_mig.py) 最小重现集持续验证。
+- **代表性验证程序**：覆盖第 1–6 组全部 30 个 `program/*` 与第 7 组泛化算子，通过 `derive → compare → measure → adopt → revert` 与 `<bench_root>/tests/test_gpu_audit_mig.py` 最小重现集持续验证。
