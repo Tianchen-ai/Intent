@@ -30,7 +30,9 @@ class Capture:
         fm = format_fastmath_attr((*self.default_flags, *extra))
         attrs = [f"fastmath = {fm}"] if fm else []
         if flush is not None:
-            mode = "preserve-sign" if flush and self.kernel_denormal_mode == "ieee" else self.kernel_denormal_mode
+            mode = self.kernel_denormal_mode
+            if flush and mode == "ieee":
+                mode = "preserve-sign"
             attrs.append(f'"denormal-fp-math" = "{mode}"')
         return "{" + ", ".join(attrs) + "}" if attrs else ""
 
@@ -130,7 +132,8 @@ class Capture:
             ty = next((t for _, t in args if t.startswith("tensor")), args[0][1])
             elem = ty.removeprefix("tensor<?x").removesuffix(">")
             is_fp = elem in ("f16", "bf16", "f32")
-            return self.emit(op, args, ty, self.fm_attr(flush=False if op == "div" else None) if is_fp else "")
+            flush = False if op == "div" else None
+            return self.emit(op, args, ty, self.fm_attr(flush=flush) if is_fp else "")
         if isinstance(n, ast.Call):
             fn = spelling(n.func, self.namespace)
             if fn in ("atomic_add", "gather"):
@@ -232,7 +235,7 @@ class Capture:
                 extra = ("afn", "arcp") if approx else ()
                 return self.emit("div", args, ty, self.fm_attr(extra, flush=ftz))
             count = 2 if fn == "cast" else 1
-            if len(n.args) != count or (fn not in ("sum", "reduce", "exp") and n.keywords):
+            if len(n.args) != count or (fn not in ("sum", "reduce", "exp", "sqrt") and n.keywords):
                 raise ValueError(f"unsupported arguments for {fn}")
             v = self.expr(n.args[0])
             if fn in ("sum", "reduce"):
@@ -277,7 +280,8 @@ class Capture:
                 if ftz and self.denormal_mode == "ieee":
                     self.denormal_mode = "preserve-sign"
                 extra = ("afn",) if approx else ()
-                return self.emit(fn, [v], v[1], self.fm_attr(extra, flush=ftz if fn == "sqrt" else None))
+                flush = ftz if fn == "sqrt" else None
+                return self.emit(fn, [v], v[1], self.fm_attr(extra, flush=flush))
         raise ValueError(
             f"unsupported author expression at line {n.lineno}: {ast.unparse(n)}"
         )
