@@ -5,11 +5,22 @@ using namespace mlir;
 using namespace compilerinfra;
 namespace intentdsl::cpu {
 bool groupedI8(Operation &dot, const TargetProfile &p, int64_t width);
+static const kir::QuantFormatSpec *quantSpec(Operation &dot) {
+  if (dot.getName().stripDialect() != "quant_contract")
+    return nullptr;
+  auto fmt = dot.getAttrOfType<StringAttr>("format");
+  return fmt ? kir::lookupQuantFormat(fmt.getValue()) : nullptr;
+}
 static ArrayRef<MatrixImplementation> available(Operation &region,
                                                 const MatrixMachine &caps) {
-  return calculation(region).getName().stripDialect() == "q4k_dot"
-             ? caps.records
-             : caps.choices;
+  auto &dot = calculation(region);
+  auto kind = dot.getName().stripDialect();
+  if (kind == "q4k_dot")
+    return caps.records;
+  if (const auto *spec = quantSpec(dot);
+      spec && spec->roleLayout == kir::QuantRoleLayout::RecordGemv)
+    return caps.records;
+  return caps.choices;
 }
 static std::string inputDtype(Operation &dot, func::FuncOp fn) {
   auto abi = fn->getAttrOfType<StringAttr>("kir.abi");
@@ -38,11 +49,21 @@ static std::string candidateName(const MatrixImplementation &impl,
   return std::to_string(impl.rows) + "x" + std::to_string(impl.cols) + "x" +
          std::to_string(impl.depth) + "-" + shortId.str() + suffix;
 }
-static bool validContractPacking(StringRef kind, StringRef inType,
+static bool validContractPacking(Operation &dot, StringRef kind,
+                                 StringRef inType,
                                  const MatrixImplementation &impl,
                                  int64_t packCode) {
   if (kind == "q4k_dot")
     return impl.dtype == "q4k" && packCode == 0;
+  if (kind == "quant_contract") {
+    const auto *spec = quantSpec(dot);
+    if (!spec)
+      return false;
+    if (spec->roleLayout == kir::QuantRoleLayout::RecordGemv)
+      return impl.dtype == "q4k" && packCode == 0 &&
+             !llvm::StringRef(impl.id).contains("onednn-brgemm-u8s8");
+    return (impl.dtype == "any" || impl.dtype == "f32") && packCode == 0;
+  }
   if (kind == "scaled_contract")
     return (impl.dtype == "any" || impl.dtype == "f32") && packCode == 0;
   if (kind == "window_contract") {
@@ -68,10 +89,18 @@ static bool validContractPacking(StringRef kind, StringRef inType,
     return inType == "i8" && packCode == 4;
   return false;
 }
-static std::string packingFor(StringRef kind, int64_t packCode,
+static std::string packingFor(Operation &dot, StringRef kind, int64_t packCode,
                               const MatrixMachine &caps) {
   if (kind == "q4k_dot")
     return "shared-q8k-per-call";
+  if (kind == "quant_contract") {
+    const auto *spec = quantSpec(dot);
+    if (!spec)
+      return "";
+    if (spec->roleLayout == kir::QuantRoleLayout::RecordGemv)
+      return spec->q8kActivation ? "shared-q8k-per-call" : "";
+    return "decoded-f32-panels";
+  }
   if (kind == "scaled_contract")
     return "decoded-f32-per-call";
   if (kind == "window_contract")
@@ -250,7 +279,7 @@ LogicalResult verifyMatrixPartition(func::FuncOp fn, Operation &region,
       if (c.id == implAttr.getValue() &&
           tile.asArrayRef() ==
               ArrayRef<int64_t>{c.rows, c.cols, c.depth, c.lanes} &&
-          validContractPacking(kind, inType, c, packCode)) {
+          validContractPacking(dot, kind, inType, c, packCode)) {
         matched = &c;
         break;
       }
@@ -270,6 +299,7 @@ LogicalResult verifyMatrixPartition(func::FuncOp fn, Operation &region,
              : bool(routing))
     return region.emitError("routed matrix requires member-ordered input and "
                             "disjoint output scatter");
+  const auto *qSpec = quantSpec(dot);
   bool validPack = false;
   if (kind == "contract") {
     validPack = !packing || packing == "rhs-panels-per-call" ||
@@ -285,6 +315,15 @@ LogicalResult verifyMatrixPartition(func::FuncOp fn, Operation &region,
                     packing == "mapped-f32-panels");
   } else if (kind == "q4k_dot") {
     validPack = packing && packing == "shared-q8k-per-call";
+  } else if (kind == "quant_contract") {
+    if (qSpec) {
+      if (qSpec->roleLayout == kir::QuantRoleLayout::RecordGemv)
+        validPack = qSpec->q8kActivation
+                        ? (packing && packing == "shared-q8k-per-call")
+                        : !packing;
+      else
+        validPack = packing && packing == "decoded-f32-panels";
+    }
   } else {
     validPack = packing && packing == "decoded-f32-per-call";
   }
@@ -293,8 +332,16 @@ LogicalResult verifyMatrixPartition(func::FuncOp fn, Operation &region,
   if (!s)
     return region.emitError() << llvm::toString(s.takeError());
   auto placement = region.getAttrOfType<StringAttr>("cpu.record_storage");
-  if (kind == "q4k_dot"
-          ? (!placement || placement != (s->k / 256 > 32 ? "heap" : "stack"))
+  bool needsQ8kRecord =
+      kind == "q4k_dot" ||
+      (kind == "quant_contract" && qSpec &&
+       qSpec->roleLayout == kir::QuantRoleLayout::RecordGemv &&
+       qSpec->q8kActivation);
+  int64_t recBlock =
+      (qSpec && qSpec->blockElements > 0) ? qSpec->blockElements : 256;
+  if (needsQ8kRecord
+          ? (!placement ||
+             placement != (s->k / recBlock > 32 ? "heap" : "stack"))
           : bool(placement))
     return region.emitError("invalid Q8_K record workspace placement");
   auto sh = region.getAttrOfType<DenseI64ArrayAttr>("cpu.extents");
@@ -377,7 +424,8 @@ void matrixTasks(Unit &u) {
     auto fn = op->getParentOfType<func::FuncOp>();
     if (t.asArrayRef().take_front(4) !=
             ArrayRef<int64_t>{impl.rows, impl.cols, impl.depth, impl.lanes} ||
-        !cpu::validContractPacking(kind, cpu::inputDtype(dot, fn), impl, t[4]))
+        !cpu::validContractPacking(dot, kind, cpu::inputDtype(dot, fn), impl,
+                                   t[4]))
       return llvm::createStringError("unsupported CPU contraction block");
     return llvm::Error::success();
   };
@@ -444,7 +492,7 @@ void matrixTasks(Unit &u) {
     auto inType = cpu::inputDtype(dot, fn);
     for (auto [idx, impl] : llvm::enumerate(caps->contracts)) {
       for (int64_t pack : {0, 1, 2, 3, 4}) {
-        if (!cpu::validContractPacking(kind, inType, impl, pack))
+        if (!cpu::validContractPacking(dot, kind, inType, impl, pack))
           continue;
         StructuralCandidate cand;
         cand.id = cpu::candidateName(impl, pack);
@@ -478,7 +526,7 @@ void matrixTasks(Unit &u) {
     auto *caps = p.services.get<cpu::MatrixMachine>();
     op->setAttr("cpu.output_tile",
                 b.getDenseI64ArrayAttr(row.asArrayRef().take_front(4)));
-    auto pack = cpu::packingFor(kind, row[4], *caps);
+    auto pack = cpu::packingFor(dot, kind, row[4], *caps);
     if (!pack.empty())
       op->setAttr("cpu.packing", b.getStringAttr(pack));
     if (row.size() == 6)
@@ -486,9 +534,17 @@ void matrixTasks(Unit &u) {
                   b.getStringAttr(caps->contracts[row[5]].id));
     op->setAttr("cpu.extents",
                 b.getDenseI64ArrayAttr({g->m, g->n, g->k, g->batches}));
-    if (kind == "q4k_dot")
+    const auto *qSpec = cpu::quantSpec(dot);
+    if (kind == "q4k_dot") {
       op->setAttr("cpu.record_storage",
                   b.getStringAttr(g->k / 256 > 32 ? "heap" : "stack"));
+    } else if (kind == "quant_contract" && qSpec &&
+               qSpec->roleLayout == kir::QuantRoleLayout::RecordGemv &&
+               qSpec->q8kActivation) {
+      int64_t blk = qSpec->blockElements > 0 ? qSpec->blockElements : 256;
+      op->setAttr("cpu.record_storage",
+                  b.getStringAttr(g->k / blk > 32 ? "heap" : "stack"));
+    }
     auto fn = op->getParentOfType<func::FuncOp>();
     for (auto [i, v] : llvm::enumerate(fn.getArguments())) {
       for (auto key : {"shape", "strides"}) {

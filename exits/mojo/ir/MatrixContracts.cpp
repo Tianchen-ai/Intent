@@ -121,10 +121,17 @@ void registerMatrixContracts(Unit &u) {
     };
     c.verify = [](Operation *op) -> LogicalResult {
       auto vnni = op->getAttrOfType<BoolAttr>("use_vnni");
-      return success(
-          (!vnni || !vnni.getValue()) &&
-          op->getAttr("kir.storage") ==
-              TypeAttr::get(intentdsl::kir::Q4KType::get(op->getContext())));
+      if (vnni && vnni.getValue())
+        return failure();
+      if (op->getAttr("kir.storage") ==
+          TypeAttr::get(intentdsl::kir::Q4KType::get(op->getContext())))
+        return success();
+      auto fmt = op->getAttrOfType<StringAttr>("format");
+      const auto *spec =
+          fmt ? intentdsl::kir::lookupQuantFormat(fmt.getValue()) : nullptr;
+      return success(spec &&
+                     spec->roleLayout ==
+                         intentdsl::kir::QuantRoleLayout::RecordGemv);
     };
     TypedContract tc;
     tc.shape.minOperands = 4;
@@ -164,10 +171,17 @@ void registerMatrixContracts(Unit &u) {
     };
     c.verify = [](Operation *op) -> LogicalResult {
       auto vnni = op->getAttrOfType<BoolAttr>("use_vnni");
-      return success(
-          vnni && vnni.getValue() &&
-          op->getAttr("kir.storage") ==
-              TypeAttr::get(intentdsl::kir::Q4KType::get(op->getContext())));
+      if (!vnni || !vnni.getValue())
+        return failure();
+      if (op->getAttr("kir.storage") ==
+          TypeAttr::get(intentdsl::kir::Q4KType::get(op->getContext())))
+        return success();
+      auto fmt = op->getAttrOfType<StringAttr>("format");
+      const auto *spec =
+          fmt ? intentdsl::kir::lookupQuantFormat(fmt.getValue()) : nullptr;
+      return success(spec &&
+                     spec->roleLayout ==
+                         intentdsl::kir::QuantRoleLayout::RecordGemv);
     };
     TypedContract tc;
     tc.shape.minOperands = 4;

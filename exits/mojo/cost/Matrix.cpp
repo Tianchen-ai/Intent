@@ -13,6 +13,15 @@ void registerBlockCost(compilerinfra::Unit &u) {
           e.bottleneck = "SIMD register file";
           if (dot.getName().stripDialect() == "q4k_dot")
             return e;
+          if (dot.getName().stripDialect() == "quant_contract") {
+            auto fmt = dot.getAttrOfType<mlir::StringAttr>("format");
+            const auto *spec =
+                fmt ? intentdsl::kir::lookupQuantFormat(fmt.getValue())
+                    : nullptr;
+            if (spec && spec->roleLayout ==
+                            intentdsl::kir::QuantRoleLayout::RecordGemv)
+              return e;
+          }
           auto g = intentdsl::kir::contractionShape(
               dot, op->getOperand(0),
               *ctx.target.services.get<intentdsl::CallFacts>());
@@ -32,7 +41,8 @@ void registerBlockCost(compilerinfra::Unit &u) {
                                       : g->k * (t[0] + columns));
           bool needsWiden = false;
           if (t[4] != 2 && t[4] != 3 &&
-              dot.getName().stripDialect() != "scaled_contract") {
+              dot.getName().stripDialect() != "scaled_contract" &&
+              dot.getName().stripDialect() != "quant_contract") {
             auto inBytes =
                 mlir::cast<mlir::MemRefType>(dot.getOperand(0).getType())
                     .getElementTypeBitWidth() /

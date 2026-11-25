@@ -17,6 +17,15 @@ void nativePanelCost(compilerinfra::Unit &u) {
           e.bottleneck = "SIMD/RVV register file and local array supply";
           if (dot.getName().stripDialect() == "q4k_dot")
             return e;
+          if (dot.getName().stripDialect() == "quant_contract") {
+            auto fmt = dot.getAttrOfType<mlir::StringAttr>("format");
+            const auto *spec =
+                fmt ? intentdsl::kir::lookupQuantFormat(fmt.getValue())
+                    : nullptr;
+            if (spec && spec->roleLayout ==
+                            intentdsl::kir::QuantRoleLayout::RecordGemv)
+              return e;
+          }
           auto g = intentdsl::kir::contractionShape(
               dot, op->getOperand(0),
               *ctx.target.services.get<intentdsl::CallFacts>());
@@ -62,7 +71,8 @@ void nativePanelCost(compilerinfra::Unit &u) {
 
           int64_t packCode = t.size() > 4 ? t[4] : 0;
           double rawElemBytes =
-              dot.getName().stripDialect() == "scaled_contract"
+              (dot.getName().stripDialect() == "scaled_contract" ||
+               dot.getName().stripDialect() == "quant_contract")
                   ? 4.0
                   : double(lhsElem.getIntOrFloatBitWidth()) / 8.0;
           double inBytes = (packCode == 3 ||

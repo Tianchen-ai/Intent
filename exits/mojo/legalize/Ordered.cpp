@@ -370,6 +370,48 @@ struct OrderedLowerer {
         ->getResult(0);
   }
 
+  bool isLaneUniformVal(Value v, ArrayRef<IRMapping> lanes) const {
+    if (isa_and_nonnull<arith::ConstantOp, arith::ConstantIndexOp>(
+            v.getDefiningOp()))
+      return true;
+    if (!lanes[0].contains(v))
+      return false;
+    Value ref = lanes[0].lookup(v);
+    return llvm::all_of(
+        lanes, [&](const IRMapping &m) { return m.lookupOrNull(v) == ref; });
+  }
+
+  bool isContiguousLaneIndex(Value v, ArrayRef<IRMapping> lanes) const {
+    if (!innerOwnerArg || !lanes[0].contains(innerOwnerArg))
+      return false;
+    if (v == innerOwnerArg)
+      return true;
+    if (auto add = v.getDefiningOp<arith::AddIOp>())
+      return (isContiguousLaneIndex(add.getLhs(), lanes) &&
+              isLaneUniformVal(add.getRhs(), lanes)) ||
+             (isLaneUniformVal(add.getLhs(), lanes) &&
+              isContiguousLaneIndex(add.getRhs(), lanes));
+    if (auto sub = v.getDefiningOp<arith::SubIOp>())
+      return isContiguousLaneIndex(sub.getLhs(), lanes) &&
+             isLaneUniformVal(sub.getRhs(), lanes);
+    return false;
+  }
+
+  Value evalScalarIndexLane0(Value v, IRMapping &m0) {
+    if (m0.contains(v))
+      return m0.lookup(v);
+    if (auto it = batchVecs.find(v); it != batchVecs.end()) {
+      Value s = makeOp(b, loc, "extract_lane", {it->second}, {b.getI64Type()},
+                       {b.getNamedAttr("lane", b.getI64IntegerAttr(0))})
+                    ->getResult(0);
+      if (v.getType().isIndex())
+        s = b.create<arith::IndexCastOp>(loc, b.getIndexType(), s);
+      m0.map(v, s);
+      return s;
+    }
+    return Value{};
+  }
+
   bool tryLowerBatchVecOp(Operation &op, SmallVectorImpl<IRMapping> &lanes) {
     if (!batchSimd || lanes.size() != size_t(batch) ||
         op.hasAttr("cpu.owner_common"))
@@ -406,23 +448,23 @@ struct OrderedLowerer {
     }
     if (auto load = dyn_cast<memref::LoadOp>(op)) {
       auto strides = argArray(load.getMemref(), "cpu.strides");
-      if (!innerOwnerArg || load.getIndices().empty() ||
-          load.getIndices().back() != innerOwnerArg || strides.empty() ||
+      if (!innerOwnerArg || load.getIndices().empty() || strides.empty() ||
           strides[strides.size() - 1] != 1 ||
           !canBatchVecType(load.getResult().getType()) ||
-          !lanes[0].contains(innerOwnerArg))
+          !isContiguousLaneIndex(load.getIndices().back(), lanes))
         return false;
       for (Value idx : load.getIndices().drop_back()) {
-        if (!lanes[0].contains(idx) ||
-            !llvm::all_of(lanes, [&](const IRMapping &m) {
-              return m.lookupOrNull(idx) == lanes[0].lookup(idx);
-            }))
+        if (!isLaneUniformVal(idx, lanes))
           return false;
       }
       Value ptr = lanes[0].lookup(load.getMemref());
       SmallVector<Value> idxs;
-      for (Value idx : load.getIndices())
-        idxs.push_back(lanes[0].lookup(idx));
+      for (Value idx : load.getIndices()) {
+        Value v0 = evalScalarIndexLane0(idx, lanes[0]);
+        if (!v0)
+          return false;
+        idxs.push_back(v0);
+      }
       Value addr = makeAddr(b, loc, ptr, idxs, strides.asArrayRef());
       batchVecs[load.getResult()] = loadContiguousSlice(
           ptr, addr, vecElemType(load.getResult().getType()), batch);
@@ -1560,9 +1602,193 @@ struct OrderedLowerer {
       }
 
       if (auto branch = dyn_cast<scf::IfOp>(op)) {
-        materializeScalarLanes(branch.getCondition(), lanes);
         unsigned numRes = branch.getNumResults();
         bool hasElse = !branch.getElseRegion().empty();
+        // Pure scalar/vector conditional value selection (`a if cond else b`):
+        // lower directly to SIMD select when both regions only materialize
+        // side-effect-free constants.
+        if (vecActive && numRes == 1 && hasElse &&
+            !isWideVal(branch.thenYield().getOperand(0)) &&
+            canBatchVecType(branch.getResult(0).getType()) &&
+            !branch.getResult(0).getType().isInteger(1) &&
+            batchVecs.contains(branch.getCondition())) {
+          auto onlyConsts = [](Block &blk) {
+            return llvm::all_of(blk.without_terminator(), [](Operation &inner) {
+              return isa<arith::ConstantOp, arith::ConstantIndexOp>(inner);
+            });
+          };
+          if (onlyConsts(branch.getThenRegion().front()) &&
+              onlyConsts(branch.getElseRegion().front())) {
+            for (Operation &cOp :
+                 branch.getThenRegion().front().without_terminator())
+              for (size_t l = 0; l < lanes.size(); ++l)
+                (void)lowerSingleOp(cOp, l, lanes[l]);
+            for (Operation &cOp :
+                 branch.getElseRegion().front().without_terminator())
+              for (size_t l = 0; l < lanes.size(); ++l)
+                (void)lowerSingleOp(cOp, l, lanes[l]);
+            Type resTy = branch.getResult(0).getType();
+            batchVecs[branch.getResult(0)] =
+                makeOp(b, loc, "simd_select",
+                       {getBatchVec(branch.getCondition(), lanes),
+                        getBatchVec(branch.thenYield().getOperand(0), lanes),
+                        getBatchVec(branch.elseYield().getOperand(0), lanes)},
+                       {batchVecType(resTy)})
+                    ->getResult(0);
+            continue;
+          }
+        }
+        // Fast path for masked unit-stride stencil/window loads across batched
+        // contiguous lanes: when all lanes are in-bounds (interior tiles),
+        // issue a single SIMD load_slice; when all lanes are out-of-bounds,
+        // splat the else value; only scalarize on partial boundary tiles.
+        if (vecActive && numRes == 1 && hasElse &&
+            !isWideVal(branch.thenYield().getOperand(0)) &&
+            canBatchVecType(branch.getResult(0).getType()) &&
+            !branch.getResult(0).getType().isInteger(1) &&
+            batchVecs.contains(branch.getCondition()) &&
+            branch.getElseRegion().front().without_terminator().empty()) {
+          memref::LoadOp theLoad;
+          bool thenPurePlusOneLoad = true;
+          for (Operation &top :
+               branch.getThenRegion().front().without_terminator()) {
+            if (auto ld = dyn_cast<memref::LoadOp>(top)) {
+              if (theLoad) {
+                thenPurePlusOneLoad = false;
+                break;
+              }
+              theLoad = ld;
+            } else if (!isa<arith::ConstantOp, arith::ConstantIndexOp,
+                            arith::AddIOp, arith::SubIOp,
+                            arith::IndexCastOp>(top)) {
+              thenPurePlusOneLoad = false;
+              break;
+            }
+          }
+          if (thenPurePlusOneLoad && theLoad &&
+              branch.thenYield().getOperand(0) == theLoad.getResult()) {
+            auto strides = argArray(theLoad.getMemref(), "cpu.strides");
+            auto checkContigInThen = [&](auto &self, Value v) -> bool {
+              if (!branch->isProperAncestor(
+                      v.getParentRegion()->getParentOp()))
+                return isContiguousLaneIndex(v, lanes);
+              if (auto add = v.getDefiningOp<arith::AddIOp>())
+                return (self(self, add.getLhs()) &&
+                        isLaneUniformVal(add.getRhs(), lanes)) ||
+                       (isLaneUniformVal(add.getLhs(), lanes) &&
+                        self(self, add.getRhs()));
+              if (auto sub = v.getDefiningOp<arith::SubIOp>())
+                return self(self, sub.getLhs()) &&
+                       isLaneUniformVal(sub.getRhs(), lanes);
+              return false;
+            };
+            bool leadUniform = llvm::all_of(
+                theLoad.getIndices().drop_back(), [&](Value idx) {
+                  return !branch->isProperAncestor(
+                             idx.getParentRegion()->getParentOp()) &&
+                         isLaneUniformVal(idx, lanes);
+                });
+            if (!strides.empty() && strides[strides.size() - 1] == 1 &&
+                !theLoad.getIndices().empty() && leadUniform &&
+                checkContigInThen(checkContigInThen,
+                                  theLoad.getIndices().back())) {
+              Type resTy = branch.getResult(0).getType();
+              Value condVec = getBatchVec(branch.getCondition(), lanes);
+              Value elseVec =
+                  getBatchVec(branch.elseYield().getOperand(0), lanes);
+              Value vecSlot = declBatchVecSlot(batchVecType(resTy), elseVec);
+              Value allCond =
+                  makeOp(b, loc, "lane_all", {condVec}, {b.getI1Type()})
+                      ->getResult(0);
+              auto fastIf =
+                  b.create<scf::IfOp>(loc, TypeRange{}, allCond, true);
+              {
+                OpBuilder::InsertionGuard fg(b);
+                b.setInsertionPointToStart(&fastIf.getThenRegion().front());
+                IRMapping m0 = lanes[0];
+                for (Value idx : theLoad.getIndices())
+                  if (!branch->isProperAncestor(
+                          idx.getParentRegion()->getParentOp()))
+                    evalScalarIndexLane0(idx, m0);
+                bool ok0 = true;
+                for (Operation &top :
+                     branch.getThenRegion().front().without_terminator()) {
+                  if (&top == theLoad.getOperation())
+                    continue;
+                  for (Value opd : top.getOperands())
+                    if (!m0.contains(opd))
+                      evalScalarIndexLane0(opd, m0);
+                  if (failed(lowerSingleOp(top, 0, m0))) {
+                    ok0 = false;
+                    break;
+                  }
+                }
+                if (ok0) {
+                  Value ptr = m0.lookup(theLoad.getMemref());
+                  SmallVector<Value> idxs;
+                  for (Value idx : theLoad.getIndices())
+                    idxs.push_back(m0.lookup(idx));
+                  Value addr = makeAddr(b, loc, ptr, idxs, strides.asArrayRef());
+                  Value loadedVec = loadContiguousSlice(
+                      ptr, addr, vecElemType(resTy), batch);
+                  writeSlot(vecSlot, loadedVec);
+                }
+              }
+              {
+                OpBuilder::InsertionGuard eg(b);
+                b.setInsertionPointToStart(&fastIf.getElseRegion().front());
+                Value anyCond =
+                    makeOp(b, loc, "lane_any", {condVec}, {b.getI1Type()})
+                        ->getResult(0);
+                auto partialIf =
+                    b.create<scf::IfOp>(loc, TypeRange{}, anyCond, false);
+                OpBuilder::InsertionGuard pg(b);
+                b.setInsertionPointToStart(&partialIf.getThenRegion().front());
+                materializeScalarLanes(branch.getCondition(), lanes);
+                materializeScalarLanes(branch.elseYield().getOperand(0), lanes);
+                branch.walk([&](Operation *inner) {
+                  for (Value operand : inner->getOperands())
+                    if (!branch->isProperAncestor(
+                            operand.getParentRegion()->getParentOp()))
+                      materializeScalarLanes(operand, lanes);
+                });
+                Value elseScalar0 =
+                    lanes[0].lookup(branch.elseYield().getOperand(0));
+                SmallVector<Value, 16> scSlots;
+                for (size_t l = 0; l < lanes.size(); ++l)
+                  scSlots.push_back(
+                      declSlot(resTy, elseScalar0,
+                               branch.elseYield().getOperand(0)));
+                for (size_t l = 0; l < lanes.size(); ++l) {
+                  SmallVector<IRMapping, 1> single{lanes[l]};
+                  auto lIf = b.create<scf::IfOp>(
+                      loc, TypeRange{}, single[0].lookup(branch.getCondition()),
+                      false);
+                  OpBuilder::InsertionGuard lg(b);
+                  b.setInsertionPointToStart(&lIf.getThenRegion().front());
+                  if (succeeded(
+                          lowerBlock(branch.getThenRegion().front(), single)))
+                    writeSlot(scSlots[l],
+                              single[0].lookup(branch.thenYield().getOperand(0)));
+                }
+                SmallVector<Value, 16> scVals;
+                for (size_t l = 0; l < lanes.size(); ++l)
+                  scVals.push_back(readSlot(scSlots[l]));
+                StringRef dtStr = dtypeBare(vecElemType(resTy));
+                Value packed =
+                    makeOp(b, loc, "pack_apply", scVals, {batchVecType(resTy)},
+                           {b.getNamedAttr("in_dtype", b.getStringAttr(dtStr)),
+                            b.getNamedAttr("out_dtype", b.getStringAttr(dtStr)),
+                            b.getNamedAttr("kind", b.getStringAttr("id"))})
+                        ->getResult(0);
+                writeSlot(vecSlot, packed);
+              }
+              batchVecs[branch.getResult(0)] = readSlot(vecSlot);
+              continue;
+            }
+          }
+        }
+        materializeScalarLanes(branch.getCondition(), lanes);
         bool sharedCond = llvm::all_of(lanes, [&](IRMapping &m) {
           return m.lookup(branch.getCondition()) ==
                  lanes[0].lookup(branch.getCondition());
@@ -2212,13 +2438,21 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn) {
     Value base =
         pitch == 1
             ? owner
-            : b.create<arith::DivSIOp>(loc, owner, constIdx(b, loc, pitch))
-                  .getResult();
+            : (llvm::isPowerOf2_64(uint64_t(pitch))
+                   ? b.create<arith::ShRUIOp>(
+                          loc, owner,
+                          constIdx(b, loc, llvm::Log2_64(uint64_t(pitch))))
+                         .getResult()
+                   : b.create<arith::DivSIOp>(loc, owner, constIdx(b, loc, pitch))
+                         .getResult());
     Value coord =
         ext <= 1
             ? constIdx(b, loc, 0)
-            : b.create<arith::RemSIOp>(loc, base, constIdx(b, loc, ext))
-                  .getResult();
+            : (llvm::isPowerOf2_64(uint64_t(ext))
+                   ? b.create<arith::AndIOp>(loc, base, constIdx(b, loc, ext - 1))
+                         .getResult()
+                   : b.create<arith::RemSIOp>(loc, base, constIdx(b, loc, ext))
+                         .getResult());
     for (int64_t l = 0; l < batch; ++l) {
       Value laneCoord = coord;
       if (batch > 1 && pitch == 1 && innerAttr &&

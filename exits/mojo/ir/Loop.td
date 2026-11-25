@@ -317,6 +317,14 @@ def MojoLaneMax : RowInst<"lane_max"> {
   let arguments=(ins AnyType:$input, I64Attr:$width);
   let results=(outs F32:$result);
 }
+def MojoLaneAll : RowInst<"lane_all", [Pure]> {
+  let arguments=(ins AnyType:$input);
+  let results=(outs I1:$result);
+}
+def MojoLaneAny : RowInst<"lane_any", [Pure]> {
+  let arguments=(ins AnyType:$input);
+  let results=(outs I1:$result);
+}
 def MojoReduceSum16x16 : RowInst<"reduce_sum_16x16", [Pure]> {
   let arguments=(ins Variadic<AnyType>:$inputs);
   let results=(outs AnyType:$result);

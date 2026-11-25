@@ -232,10 +232,17 @@ struct MojoQ4KContract
   }
   LogicalResult verifyLayoutAndAddressSpace(Operation *op) const {
     auto bs = op->getAttrOfType<IntegerAttr>("byte_stride");
-    return success(
-        bs && bs.getInt() >= 1 &&
-        op->getAttr("kir.storage") ==
-            TypeAttr::get(intentdsl::kir::Q4KType::get(op->getContext())));
+    if (!bs || bs.getInt() < 1)
+      return failure();
+    if (op->getAttr("kir.storage") ==
+        TypeAttr::get(intentdsl::kir::Q4KType::get(op->getContext())))
+      return success();
+    auto fmt = op->getAttrOfType<StringAttr>("format");
+    const auto *spec =
+        fmt ? intentdsl::kir::lookupQuantFormat(fmt.getValue()) : nullptr;
+    return success(spec &&
+                   spec->roleLayout ==
+                       intentdsl::kir::QuantRoleLayout::RecordGemv);
   }
 };
 

@@ -170,6 +170,39 @@ llvm::Error materializeMatrixBuffers(func::FuncOp fn, RewriterBase &rw,
                               rw.getI64IntegerAttr(rs.column)),
               rw.getNamedAttr("scale_group_axis",
                               rw.getI64IntegerAttr(rs.group))});
+  } else if (packing == "decoded-f32-panels") {
+    auto fmtStr = dot.getAttrOfType<StringAttr>("format");
+    const auto *spec =
+        fmtStr ? kir::lookupQuantFormat(fmtStr.getValue()) : nullptr;
+    if (!spec)
+      return llvm::createStringError("unknown quantized contraction format");
+    auto fmtAttr = rw.getNamedAttr("format", fmtStr);
+    Value left = allocBuf("heap", clampCount(M, K), 4, "lhs-panels", f32Ty);
+    Value right =
+        allocBuf("heap", clampCount(tiles, K, nr), 4, "rhs-panels", f32Ty);
+    if (spec->roleLayout == kir::QuantRoleLayout::BlockScaledPair) {
+      emitPrep({dot.getOperand(0), dot.getOperand(1), left},
+               "decode-quant-block-lhs", {fmtAttr});
+      kir::RightScale rs(dot);
+      emitPrep({dot.getOperand(2), rs.view, right}, "decode-quant-block-rhs",
+               {fmtAttr,
+                rw.getNamedAttr("scale_column_axis",
+                                rw.getI64IntegerAttr(rs.column)),
+                rw.getNamedAttr("scale_group_axis",
+                                rw.getI64IntegerAttr(rs.group)),
+                rw.getNamedAttr("panel_cols", rw.getI64IntegerAttr(nr))});
+    } else {
+      emitPrep({dot.getOperand(0), left}, "widen-lhs-f32",
+               {rw.getNamedAttr("lhs_k", rw.getI64IntegerAttr(1)),
+                rw.getNamedAttr("lhs_batch", rw.getI64IntegerAttr(-1))});
+      SmallVector<Value, 4> rhsOps{dot.getOperand(1), dot.getOperand(2)};
+      if (spec->hasZeroView)
+        rhsOps.push_back(dot.getOperand(3));
+      rhsOps.push_back(right);
+      emitPrep(rhsOps, "decode-quant-grouped-rhs",
+               {fmtAttr,
+                rw.getNamedAttr("panel_cols", rw.getI64IntegerAttr(nr))});
+    }
   } else if (packing == "shared-q8k-per-call") {
     auto placement =
         domain.getAttrOfType<StringAttr>("cpu.record_storage").getValue();
@@ -276,6 +309,11 @@ LogicalResult verifyMatrixBuffers(func::FuncOp fn, const TargetProfile &p,
             op.getAttr("kir.storage") !=
                 TypeAttr::get(kir::Q8KType::get(fn.getContext())))
           return op.emitError("Q8_K panel encode missing kir.storage");
+        if (k.starts_with("decode-quant-")) {
+          auto fmt = op.getAttrOfType<StringAttr>("format");
+          if (!fmt || !kir::lookupQuantFormat(fmt.getValue()))
+            return op.emitError("quantized panel decode missing format spec");
+        }
         continue;
       }
       if (name == "cpu.join") {

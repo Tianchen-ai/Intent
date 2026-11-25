@@ -193,6 +193,7 @@ std::optional<OwnerReuse> sharedInterval(Operation *space,
       }
     }
     if (bytes <= 0 && !quotient) {
+      bool hasDivergentMemIf = false;
       for (auto loop : body.getOps<scf::ForOp>()) {
         if (!sameInterval(loop.getLowerBound(), h, Value{}) ||
             !sameInterval(loop.getUpperBound(), h, Value{}) ||
@@ -201,6 +202,15 @@ std::optional<OwnerReuse> sharedInterval(Operation *space,
           break;
         }
         loop.walk([&](Operation *op) {
+          if (auto ifOp = dyn_cast<scf::IfOp>(op)) {
+            if (!sameInterval(ifOp.getCondition(), h, Value{})) {
+              ifOp.walk([&](Operation *inner) {
+                if (isa<memref::LoadOp, memref::StoreOp>(inner))
+                  hasDivergentMemIf = true;
+              });
+            }
+            return;
+          }
           double weight = (isa<scf::ForOp>(op->getParentOp()) &&
                            op->getParentOp() != loop.getOperation())
                               ? 8.0
@@ -233,6 +243,8 @@ std::optional<OwnerReuse> sharedInterval(Operation *space,
           }
         });
       }
+      if (hasDivergentMemIf)
+        bytes *= 0.25;
     }
     if (bytes <= 0)
       return {};
@@ -299,14 +311,14 @@ void sharedOwnerTraversal(compilerinfra::Unit &u) {
   s.enumerate = [](Operation *op, const TargetProfile &p, AnalysisManager &)
       -> llvm::Expected<std::vector<StructuralCandidate>> {
     std::vector<StructuralCandidate> cs;
-    auto reuse = intentdsl::cpu::sharedInterval(
-        op, *p.services.get<intentdsl::CallFacts>());
+    const auto &facts = *p.services.get<intentdsl::CallFacts>();
+    auto reuse = intentdsl::cpu::sharedInterval(op, facts);
     auto maximum = p.services.get<intentdsl::cpu::RowMachine>()->packedOwners;
     if (!reuse || !maximum)
       return cs;
     Builder b(op->getContext());
     bool repeat = bool(intentdsl::cpu::repeatedScore(*op));
-    for (int grain : {2, 4, 8, 16, 32, 128, 256})
+    for (int grain : {2, 4, 8, 16, 32, 128, 256}) {
       for (unsigned batch : {2u, 4u, 8u, 16u}) {
         if (batch > maximum || grain % batch || reuse->group % batch ||
             reuse->extent % batch)
@@ -330,6 +342,7 @@ void sharedOwnerTraversal(compilerinfra::Unit &u) {
                         {"exclusive-output"}});
         }
       }
+    }
     return cs;
   };
   u.strategies.push_back({std::move(s), COMPILERINFRA_SOURCE});

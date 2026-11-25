@@ -29,6 +29,14 @@ void matrixCost(Unit &u) {
             elemReadBytes = packCode == 3 ? 4. : inBytes;
           } else if (dot.getName().stripDialect() == "scaled_contract") {
             elemReadBytes = 4.;
+          } else if (dot.getName().stripDialect() == "quant_contract") {
+            auto fmt = dot.getAttrOfType<mlir::StringAttr>("format");
+            const auto *spec =
+                fmt ? intentdsl::kir::lookupQuantFormat(fmt.getValue())
+                    : nullptr;
+            if (spec && spec->roleLayout !=
+                            intentdsl::kir::QuantRoleLayout::RecordGemv)
+              elemReadBytes = 4.;
           }
           double reads = waves * (t[0] + t[1]) * g->k * elemReadBytes;
           double ops = waves * t[0] * std::ceil(double(t[1]) / t[3]) * g->k;
@@ -40,6 +48,8 @@ void matrixCost(Unit &u) {
               ops /= ctx.target.features.count("amx_int8") ? 16. : 4.;
             else if (impl.dtype == "bf16")
               ops /= ctx.target.features.count("amx_bf16") ? 8. : 2.;
+            else if (impl.dtype == "f16")
+              ops /= ctx.target.features.count("amx_fp16") ? 8. : 1.;
           }
           double packBytes = 0, translationBytes = 0, scatteredBytes = 0;
           double widenOps = 0;
@@ -119,8 +129,18 @@ void matrixCost(Unit &u) {
             double rhsPanelBytes = double(t[1]) * g->k * elemReadBytes;
             double lhsTileBytes = double(t[0]) * g->k * elemReadBytes;
             double colGroup = 1.;
-            if (packCode != 0 && !g->grouped &&
-                dot.getName().stripDialect() == "contract") {
+            bool hasPanelPack =
+                (packCode != 0 && dot.getName().stripDialect() == "contract") ||
+                (dot.getName().stripDialect() == "quant_contract" &&
+                 [&]() {
+                   auto fmt = dot.getAttrOfType<mlir::StringAttr>("format");
+                   const auto *sp =
+                       fmt ? intentdsl::kir::lookupQuantFormat(fmt.getValue())
+                           : nullptr;
+                   return sp && sp->roleLayout !=
+                                    intentdsl::kir::QuantRoleLayout::RecordGemv;
+                 }());
+            if (hasPanelPack && !g->grouped) {
               constexpr double kL2TileBudget = 1.75 * 1024. * 1024.;
               int64_t ncInt = int64_t(nc);
               if (ncInt >= 4 && 4. * rhsPanelBytes + lhsTileBytes <= kL2TileBudget)
@@ -233,15 +253,32 @@ void matrixCost(Unit &u) {
                          (rate ? (ops * t[3] + widenOps * workers) / *rate : 0);
             }
           }
-          if (dot.getName().stripDialect() == "q4k_dot" && bw) {
-            double bytes = waves * t[0] * (g->k / 256) * 144;
-            auto dispatch = intentdsl::quantity(ctx, "launch", "ns");
-            auto syncNs = intentdsl::quantity(ctx, "sync", "ns");
-            e.terms["record_bytes_per_worker"] = {bytes, "B"};
-            e.timeNs =
-                bytes * workers / *bw +
-                ((jobs > 1. && dispatch) ? *dispatch : 0.) +
-                (syncNs ? waves * *syncNs * 0.02 : 0.);
+          if (bw) {
+            int64_t recBlk = 0, recBytes = 0;
+            if (dot.getName().stripDialect() == "q4k_dot") {
+              recBlk = 256;
+              recBytes = 144;
+            } else if (dot.getName().stripDialect() == "quant_contract") {
+              auto fmt = dot.getAttrOfType<mlir::StringAttr>("format");
+              if (const auto *spec =
+                      fmt ? intentdsl::kir::lookupQuantFormat(fmt.getValue())
+                          : nullptr;
+                  spec && spec->roleLayout ==
+                              intentdsl::kir::QuantRoleLayout::RecordGemv) {
+                recBlk = spec->blockElements > 0 ? spec->blockElements : 256;
+                recBytes = spec->recordBytes;
+              }
+            }
+            if (recBlk > 0 && recBytes > 0) {
+              double bytes = waves * t[0] * (g->k / recBlk) * recBytes;
+              auto dispatch = intentdsl::quantity(ctx, "launch", "ns");
+              auto syncNs = intentdsl::quantity(ctx, "sync", "ns");
+              e.terms["record_bytes_per_worker"] = {bytes, "B"};
+              e.timeNs =
+                  bytes * workers / *bw +
+                  ((jobs > 1. && dispatch) ? *dispatch : 0.) +
+                  (syncNs ? waves * *syncNs * 0.02 : 0.);
+            }
           }
           const std::string &name =
               t.size() == 6 ? caps->contracts[t[5]].estimator : caps->estimate;

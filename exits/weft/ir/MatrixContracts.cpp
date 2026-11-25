@@ -192,8 +192,14 @@ void registerWeftMatrixContracts(Unit &u) {
           kind.getValue() != "contract" || !acc || acc.getValue() != "si32")
         return failure();
       if (op->getAttr("kir.storage") !=
-          TypeAttr::get(intentdsl::kir::Q4KType::get(op->getContext())))
-        return failure();
+          TypeAttr::get(intentdsl::kir::Q4KType::get(op->getContext()))) {
+        auto fmt = op->getAttrOfType<StringAttr>("format");
+        const auto *spec =
+            fmt ? intentdsl::kir::lookupQuantFormat(fmt.getValue()) : nullptr;
+        if (!spec ||
+            spec->roleLayout != intentdsl::kir::QuantRoleLayout::RecordGemv)
+          return failure();
+      }
       return success(checkMatrixProgram(op, "exits/weft::weft-q4k-dot", false));
     };
     TypedContract tc;

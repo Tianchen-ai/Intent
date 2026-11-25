@@ -1,5 +1,6 @@
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/Storage.h"
+#include "intentdsl/levels/execution/cpu/ir/QuantDecode.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -140,6 +141,8 @@ TerminalPrinter mojoMatrixPrinter() {
   rules["mojo_row.lane_sum"] = PrintRule::format("var $r0 = $0.reduce_add()");
   rules["mojo_row.lane_max"] = PrintRule::format(
       "var $r0 = bitcast[DType.float32](UInt32(0x7fc00000)) if $0.ne($0).reduce_or() else $0.reduce_max()");
+  rules["mojo_row.lane_all"] = PrintRule::format("var $r0 = $0.reduce_and()");
+  rules["mojo_row.lane_any"] = PrintRule::format("var $r0 = $0.reduce_or()");
   rules["mojo_row.reduce_sum_16x16"] =
       PrintRule::format("var $r0 = reduce_sum_16x16($operands)");
   rules["mojo_row.simd_cmpi"] = PrintRule::format("var $r0 = $0.{pred}($1)");
@@ -684,6 +687,16 @@ TerminalPrinter mojoMatrixPrinter() {
                    view.attrOfType<IntegerAttr>("byte_stride").getInt();
                bool useVnni =
                    view.attrOfType<BoolAttr>("use_vnni").getValue();
+               if (auto fmtAttr = view.attrOfType<StringAttr>("format")) {
+                 const auto *spec =
+                     intentdsl::kir::lookupQuantFormat(fmtAttr.getValue());
+                 if (!spec)
+                   return llvm::createStringError(
+                       "unknown quantized record format");
+                 intentdsl::cpu::emitMojoQuantRecordSuperblock(
+                     *spec, wp, qp, wb, g, res, bs, useVnni, c);
+                 return llvm::Error::success();
+               }
                auto wByte = [&](const std::string &off) {
                  return "UInt16(" + wp + "[unsafe_offset=" + wb + "+(" + off +
                         ")*" + std::to_string(bs) + "])";
@@ -891,12 +904,9 @@ TerminalPrinter mojoMatrixPrinter() {
           c.line("#include <stdlib.h>");
           c.line("#include <string.h>");
           c.line("#include <omp.h>");
-          if (view.attrOfType<BoolAttr>("uses_f16_math").getValue() ||
-              view.attrOfType<BoolAttr>("uses_bf16_math").getValue()) {
-            c.line("#if defined(__AVX512F__) || defined(__F16C__)");
-            c.line("#include <immintrin.h>");
-            c.line("#endif");
-          }
+          c.line("#if defined(__x86_64__)");
+          c.line("#include <immintrin.h>");
+          c.line("#endif");
           int64_t arity =
               view.attrOfType<IntegerAttr>("panel_arity").getInt();
           bool usesBrg = view.attrOfType<BoolAttr>("uses_brgemm").getValue();
@@ -939,30 +949,7 @@ TerminalPrinter mojoMatrixPrinter() {
           c.line("}");
 
           if (view.attrOfType<BoolAttr>("uses_q8k").getValue()) {
-            using Q8 = intentdsl::kir::Q8KRecord;
-            c.line("struct Record { float d; int8_t q[" +
-                   std::to_string(Q8::elements) + "]; int16_t sums[" +
-                   std::to_string(Q8::elements / Q8::sumGroup) + "]; };");
-            c.line("_Static_assert(sizeof(struct Record)==" +
-                   std::to_string(Q8::bytes) + ", \"Q8_K record ABI\");");
-            c.line("static inline void pack_q8_record(struct Record *out, const float *x, int64_t stride) {");
-            c.line("  float extreme=0.0f;");
-            c.line("  for (int64_t k=0; k<256; ++k) { float v=x[k*stride]; if (fabsf(v)>fabsf(extreme)) extreme=v; }");
-            c.line("  float inv=extreme==0.0f ? 0.0f : -127.0f/extreme;");
-            c.line("  out->d=extreme==0.0f ? 0.0f : 1.0f/inv;");
-            c.line("  #pragma omp simd");
-            c.line("  for (int64_t k=0; k<256; ++k) {");
-            c.line("    float v=x[k*stride]*inv; int q=(int)v; float fraction=fabsf(v-(float)q);");
-            c.line("    if (fraction>0.5f || (fraction==0.5f && (q&1))) q+=v<0 ? -1 : 1;");
-            c.line("    out->q[k]=(int8_t)(q>127 ? 127 : q);");
-            c.line("  }");
-            c.line("  for (int group=0; group<16; ++group) {");
-            c.line("    int sum=0;");
-            c.line("    #pragma omp simd reduction(+:sum)");
-            c.line("    for (int64_t k=16*group; k<16*group+16; ++k) sum+=out->q[k];");
-            c.line("    out->sums[group]=(int16_t)sum;");
-            c.line("  }");
-            c.line("}");
+            intentdsl::cpu::emitPackQ8KHelperC(c);
           }
           if (view.attrOfType<BoolAttr>("uses_bf16_math").getValue() ||
               view.attrOfType<BoolAttr>("uses_f16_math").getValue()) {
@@ -1064,6 +1051,18 @@ TerminalPrinter mojoMatrixPrinter() {
             c.line("  float factor;memcpy(&factor,&sbits,4);return v*factor;");
             c.line("}");
           }
+          if (auto u16Tr = view.attrOfType<BoolAttr>("uses_u16_pack_transpose");
+              u16Tr && u16Tr.getValue()) {
+            intentdsl::cpu::emitPackTransposeU16HelperC(c);
+          }
+          SmallVector<const intentdsl::kir::QuantFormatSpec *, 4> qSpecs;
+          if (auto qfs = view.attrOfType<ArrayAttr>("quant_formats")) {
+            for (Attribute a : qfs)
+              if (const auto *sp = intentdsl::kir::lookupQuantFormat(
+                      cast<StringAttr>(a).getValue()))
+                qSpecs.push_back(sp);
+            intentdsl::cpu::emitQuantHostHelpersC(qSpecs, c);
+          }
 
           auto ext = view.attrOfType<DenseI64ArrayAttr>("extents");
           auto tl = view.attrOfType<DenseI64ArrayAttr>("tile");
@@ -1077,6 +1076,9 @@ TerminalPrinter mojoMatrixPrinter() {
                  ", nr=" + std::to_string(tl[1]) + ";");
           c.line("const int64_t mb=(M+mr-1)/mr, nc=(N+nr-1)/nr, jobs=G*mb*nc;");
           c.line("int rc=0;");
+          for (const auto *sp : qSpecs)
+            c.line("ensure_quant_tables_" +
+                   intentdsl::cpu::sanitizeQuantIdent(sp->name) + "();");
           c.indent--;
         } else if (at == PrintPoint::BeginBlock) {
           c.indent++;
@@ -1213,7 +1215,25 @@ TerminalPrinter mojoMatrixPrinter() {
                else if (kind == "widen_transpose_f16")
                  c.line("widen_transpose_f16_panel(" + dst + ", " + src +
                         ", K, valid, nr, " + cnt + ");");
-               else if (kind == "memcpy")
+               else if (kind == "pack_transpose_u16")
+                 c.line("pack_transpose_u16_panel(" + dst + ", " + src +
+                        ", K, valid, nr, " + cnt + ");");
+               else if (kind == "decode_quant_block_lhs") {
+                 auto id = intentdsl::cpu::sanitizeQuantIdent(
+                     view.attrOfType<StringAttr>("format").getValue());
+                 c.line("intent_decode_block_lhs_row_" + id + "(" + dst +
+                        ", " + src + ", " + cnt + ");");
+               } else if (kind == "decode_quant_block_rhs") {
+                 auto id = intentdsl::cpu::sanitizeQuantIdent(
+                     view.attrOfType<StringAttr>("format").getValue());
+                 c.line("intent_decode_block_rhs_panel_" + id + "(" + dst +
+                        ", " + src + ", " + cnt + ");");
+               } else if (kind == "decode_quant_grouped_rhs") {
+                 auto id = intentdsl::cpu::sanitizeQuantIdent(
+                     view.attrOfType<StringAttr>("format").getValue());
+                 c.line("intent_decode_grouped_rhs_panel_" + id + "(" + dst +
+                        ", " + src + ", " + cnt + ");");
+               } else if (kind == "memcpy")
                  c.line("memcpy(" + dst + ", " + src + ", (size_t)(" + cnt +
                         ") * " + std::to_string(eb) + "ULL);");
                else if (kind == "zero")

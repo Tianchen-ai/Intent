@@ -1,5 +1,6 @@
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/Storage.h"
+#include "intentdsl/levels/execution/cpu/ir/QuantDecode.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/JSON.h"
@@ -797,7 +798,7 @@ TerminalPrinter weftTerminalPrinter() {
           c.line("#include <stdint.h>");
           c.line("#include <stdlib.h>");
           c.line("#include <string.h>");
-          c.line("#if defined(__x86_64__) && (defined(__AVX512F__) || defined(__F16C__))");
+          c.line("#if defined(__x86_64__)");
           c.line("#include <immintrin.h>");
           c.line("#endif");
           c.line("#include \"task_bridge.h\"");
@@ -824,35 +825,29 @@ TerminalPrinter weftTerminalPrinter() {
           c.line("}");
 
           if (view.attrOfType<BoolAttr>("uses_q8k").getValue()) {
-            using Q8 = intentdsl::kir::Q8KRecord;
-            const std::string q8Elems = std::to_string(Q8::elements);
-            const std::string q8Groups =
-                std::to_string(Q8::elements / Q8::sumGroup);
-            const std::string q8GrpSz = std::to_string(Q8::sumGroup);
-            c.line("struct Record { float d; int8_t q[" + q8Elems +
-                   "]; int16_t sums[" + q8Groups + "]; };");
-            c.line("_Static_assert(sizeof(struct Record)==" +
-                   std::to_string(Q8::bytes) + ", \"Q8_K record ABI\");");
-            c.line("static inline void pack_q8_record(struct Record *out, const float *x, int64_t stride) {");
-            c.line("  float extreme=0.0f;");
-            c.line("  for (int64_t k=0; k<" + q8Elems +
-                   "; ++k) { float v=x[k*stride]; if (fabsf(v)>fabsf(extreme)) extreme=v; }");
-            c.line("  float inv=extreme==0.0f ? 0.0f : -127.0f/extreme;");
-            c.line("  out->d=extreme==0.0f ? 0.0f : 1.0f/inv;");
-            c.line("  for (int group=0; group<" + q8Groups + "; ++group) {");
-            c.line("    int sum=0;");
+            intentdsl::cpu::emitPackQ8KHelperC(c);
+          }
+          if (view.attrOfType<BoolAttr>("uses_bf16_math").getValue() ||
+              view.attrOfType<BoolAttr>("uses_f16_math").getValue()) {
             c.line("#if defined(__x86_64__)");
-            c.line("    #pragma omp simd reduction(+:sum)");
-            c.line("#endif");
-            c.line("    for (int64_t k=" + q8GrpSz + "*group; k<" + q8GrpSz +
-                   "*group+" + q8GrpSz + "; ++k) {");
-            c.line("      float v=x[k*stride]*inv; int q=(int)v; float fraction=fabsf(v-(float)q);");
-            c.line("      if (fraction>0.5f || (fraction==0.5f && (q&1))) q+=v<0 ? -1 : 1;");
-            c.line("      out->q[k]=(int8_t)(q>127 ? 127 : q); sum+=out->q[k];");
-            c.line("    }");
-            c.line("    out->sums[group]=(int16_t)sum;");
+            c.line("__attribute__((target(\"avx512f\")))");
+            c.line("static void transpose16x16_ps(const __m512 *r, float *out, int64_t ldo){");
+            c.line("  __m512 t[16], u[16];");
+            c.line("  for (int m = 0; m < 8; ++m) { t[2*m] = _mm512_unpacklo_ps(r[2*m], r[2*m+1]); t[2*m+1] = _mm512_unpackhi_ps(r[2*m], r[2*m+1]); }");
+            c.line("  for (int g = 0; g < 4; ++g) {");
+            c.line("    u[4*g+0] = _mm512_shuffle_ps(t[4*g+0], t[4*g+2], 0x44); u[4*g+1] = _mm512_shuffle_ps(t[4*g+0], t[4*g+2], 0xEE);");
+            c.line("    u[4*g+2] = _mm512_shuffle_ps(t[4*g+1], t[4*g+3], 0x44); u[4*g+3] = _mm512_shuffle_ps(t[4*g+1], t[4*g+3], 0xEE);");
+            c.line("  }");
+            c.line("  for (int j = 0; j < 4; ++j) {");
+            c.line("    __m512 v0 = _mm512_shuffle_f32x4(u[j], u[4+j], 0x88), v1 = _mm512_shuffle_f32x4(u[8+j], u[12+j], 0x88);");
+            c.line("    __m512 v2 = _mm512_shuffle_f32x4(u[j], u[4+j], 0xDD), v3 = _mm512_shuffle_f32x4(u[8+j], u[12+j], 0xDD);");
+            c.line("    _mm512_storeu_ps(out + (0+j)*ldo, _mm512_shuffle_f32x4(v0, v1, 0x88));");
+            c.line("    _mm512_storeu_ps(out + (4+j)*ldo, _mm512_shuffle_f32x4(v2, v3, 0x88));");
+            c.line("    _mm512_storeu_ps(out + (8+j)*ldo, _mm512_shuffle_f32x4(v0, v1, 0xDD));");
+            c.line("    _mm512_storeu_ps(out + (12+j)*ldo, _mm512_shuffle_f32x4(v2, v3, 0xDD));");
             c.line("  }");
             c.line("}");
+            c.line("#endif");
           }
           if (view.attrOfType<BoolAttr>("uses_bf16_math").getValue()) {
             c.line("static inline float expand_bf(uint16_t v){uint32_t b=(uint32_t)v<<16;float f;memcpy(&f,&b,4);return f;}");
@@ -864,6 +859,25 @@ TerminalPrinter weftTerminalPrinter() {
             c.line("  for (; i <= n - 16; i += 16) { __m256i h = _mm256_loadu_si256((const __m256i*)(src+i)); _mm512_storeu_ps(out+i, _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(h), 16))); }");
             c.line("#endif");
             c.line("  for (; i<n; ++i) out[i] = expand_bf(src[i]);");
+            c.line("}");
+            c.line("#if defined(__x86_64__)");
+            c.line("__attribute__((target(\"avx512f\")))");
+            c.line("static void widen_transpose_bf16_avx512(float *out, const uint16_t *src, int64_t K, int64_t valid, int64_t nr, int64_t ldn, int64_t *jb_out){");
+            c.line("  int64_t jb = 0;");
+            c.line("  for (; jb + 16 <= valid; jb += 16) {");
+            c.line("    int64_t kb = 0;");
+            c.line("    for (; kb + 16 <= K; kb += 16) { __m512 r[16]; for (int i = 0; i < 16; ++i) { __m256i h = _mm256_loadu_si256((const __m256i*)(src + (jb + i)*ldn + kb)); r[i] = _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(h), 16)); } transpose16x16_ps(r, out + kb*nr + jb, nr); }");
+            c.line("    for (; kb < K; ++kb) { float *dst = out + kb*nr + jb; for (int i = 0; i < 16; ++i) dst[i] = expand_bf(src[(jb + i)*ldn + kb]); }");
+            c.line("  }");
+            c.line("  *jb_out = jb;");
+            c.line("}");
+            c.line("#endif");
+            c.line("static inline void widen_transpose_bf16_panel(float *out, const uint16_t *src, int64_t K, int64_t valid, int64_t nr, int64_t ldn){");
+            c.line("  int64_t jb = 0;");
+            c.line("#if defined(__x86_64__)");
+            c.line("  if (__builtin_cpu_supports(\"avx512f\")) widen_transpose_bf16_avx512(out, src, K, valid, nr, ldn, &jb);");
+            c.line("#endif");
+            c.line("  if (jb < valid || valid < nr) { for (int64_t k = 0; k < K; ++k) { float *dst = out + k*nr; for (int64_t j = jb; j < valid; ++j) dst[j] = expand_bf(src[j*ldn + k]); if (valid < nr) memset(dst + valid, 0, (size_t)(nr - valid) * sizeof(float)); } }");
             c.line("}");
           }
           if (view.attrOfType<BoolAttr>("uses_f16_math").getValue()) {
@@ -878,12 +892,37 @@ TerminalPrinter weftTerminalPrinter() {
             c.line("  float f; memcpy(&f,&bits,4); return f;");
             c.line("#endif");
             c.line("}");
-            c.line("static inline void widen_f16_span(float *out, const uint16_t *src, int64_t n){");
-            c.line("  if (n <= 0) return; int64_t i=0;");
-            c.line("#if defined(__AVX512F__) && defined(__F16C__)");
+            c.line("#if defined(__x86_64__)");
+            c.line("__attribute__((target(\"avx512f,f16c\")))");
+            c.line("static void widen_f16_span_avx512(float *out, const uint16_t *src, int64_t n){");
+            c.line("  int64_t i = 0;");
             c.line("  for (; i <= n - 16; i += 16) { __m256i h = _mm256_loadu_si256((const __m256i*)(src+i)); _mm512_storeu_ps(out+i, _mm512_cvtph_ps(h)); }");
+            c.line("  for (; i < n; ++i) out[i] = _cvtsh_ss(src[i]);");
+            c.line("}");
+            c.line("__attribute__((target(\"avx512f,f16c\")))");
+            c.line("static void widen_transpose_f16_avx512(float *out, const uint16_t *src, int64_t K, int64_t valid, int64_t nr, int64_t ldn, int64_t *jb_out){");
+            c.line("  int64_t jb = 0;");
+            c.line("  for (; jb + 16 <= valid; jb += 16) {");
+            c.line("    int64_t kb = 0;");
+            c.line("    for (; kb + 16 <= K; kb += 16) { __m512 r[16]; for (int i = 0; i < 16; ++i) { __m256i h = _mm256_loadu_si256((const __m256i*)(src + (jb + i)*ldn + kb)); r[i] = _mm512_cvtph_ps(h); } transpose16x16_ps(r, out + kb*nr + jb, nr); }");
+            c.line("    for (; kb < K; ++kb) { float *dst = out + kb*nr + jb; for (int i = 0; i < 16; ++i) dst[i] = _cvtsh_ss(src[(jb + i)*ldn + kb]); }");
+            c.line("  }");
+            c.line("  *jb_out = jb;");
+            c.line("}");
             c.line("#endif");
-            c.line("  for (; i<n; ++i) out[i] = expand_f16(src[i]);");
+            c.line("static inline void widen_f16_span(float *out, const uint16_t *src, int64_t n){");
+            c.line("  if (n <= 0) return;");
+            c.line("#if defined(__x86_64__)");
+            c.line("  if (__builtin_cpu_supports(\"avx512f\") && __builtin_cpu_supports(\"f16c\")) { widen_f16_span_avx512(out, src, n); return; }");
+            c.line("#endif");
+            c.line("  for (int64_t i=0; i<n; ++i) out[i] = expand_f16(src[i]);");
+            c.line("}");
+            c.line("static inline void widen_transpose_f16_panel(float *out, const uint16_t *src, int64_t K, int64_t valid, int64_t nr, int64_t ldn){");
+            c.line("  int64_t jb = 0;");
+            c.line("#if defined(__x86_64__)");
+            c.line("  if (__builtin_cpu_supports(\"avx512f\") && __builtin_cpu_supports(\"f16c\")) widen_transpose_f16_avx512(out, src, K, valid, nr, ldn, &jb);");
+            c.line("#endif");
+            c.line("  if (jb < valid || valid < nr) { for (int64_t k = 0; k < K; ++k) { float *dst = out + k*nr; for (int64_t j = jb; j < valid; ++j) dst[j] = expand_f16(src[j*ldn + k]); if (valid < nr) memset(dst + valid, 0, (size_t)(nr - valid) * sizeof(float)); } }");
             c.line("}");
           }
           if (view.attrOfType<BoolAttr>("uses_mx8_math").getValue()) {
@@ -902,6 +941,18 @@ TerminalPrinter weftTerminalPrinter() {
             c.line("  }");
             c.line("  __atomic_store_n(&g_mx8_ready, 1, __ATOMIC_RELEASE);");
             c.line("}");
+          }
+          if (auto u16Tr = view.attrOfType<BoolAttr>("uses_u16_pack_transpose");
+              u16Tr && u16Tr.getValue()) {
+            intentdsl::cpu::emitPackTransposeU16HelperC(c);
+          }
+          SmallVector<const intentdsl::kir::QuantFormatSpec *, 4> qSpecs;
+          if (auto qfs = view.attrOfType<ArrayAttr>("quant_formats")) {
+            for (Attribute a : qfs)
+              if (const auto *sp = intentdsl::kir::lookupQuantFormat(
+                      cast<StringAttr>(a).getValue()))
+                qSpecs.push_back(sp);
+            intentdsl::cpu::emitQuantHostHelpersC(qSpecs, c);
           }
 
           auto ext = view.attrOfType<DenseI64ArrayAttr>("extents");
@@ -923,6 +974,9 @@ TerminalPrinter weftTerminalPrinter() {
           c.line("(void)rows; (void)columns; (void)grain; (void)panel;");
           if (view.attrOfType<BoolAttr>("uses_mx8_math").getValue())
             c.line("ensure_mx8_tables();");
+          for (const auto *sp : qSpecs)
+            c.line("ensure_quant_tables_" +
+                   intentdsl::cpu::sanitizeQuantIdent(sp->name) + "();");
           c.indent--;
         } else if (at == PrintPoint::BeginBlock) {
           c.indent++;
@@ -1077,7 +1131,31 @@ TerminalPrinter weftTerminalPrinter() {
                else if (kind == "widen_f16")
                  c.line("widen_f16_span(" + dst + ", " + src + ", " + cnt +
                         ");");
-               else if (kind == "memcpy")
+               else if (kind == "widen_transpose_bf16")
+                 c.line("widen_transpose_bf16_panel(" + dst + ", " + src +
+                        ", K, valid, nr, " + cnt + ");");
+               else if (kind == "widen_transpose_f16")
+                 c.line("widen_transpose_f16_panel(" + dst + ", " + src +
+                        ", K, valid, nr, " + cnt + ");");
+               else if (kind == "pack_transpose_u16")
+                 c.line("pack_transpose_u16_panel(" + dst + ", " + src +
+                        ", K, valid, nr, " + cnt + ");");
+               else if (kind == "decode_quant_block_lhs") {
+                 auto id = intentdsl::cpu::sanitizeQuantIdent(
+                     view.attrOfType<StringAttr>("format").getValue());
+                 c.line("intent_decode_block_lhs_row_" + id + "(" + dst +
+                        ", " + src + ", " + cnt + ");");
+               } else if (kind == "decode_quant_block_rhs") {
+                 auto id = intentdsl::cpu::sanitizeQuantIdent(
+                     view.attrOfType<StringAttr>("format").getValue());
+                 c.line("intent_decode_block_rhs_panel_" + id + "(" + dst +
+                        ", " + src + ", " + cnt + ");");
+               } else if (kind == "decode_quant_grouped_rhs") {
+                 auto id = intentdsl::cpu::sanitizeQuantIdent(
+                     view.attrOfType<StringAttr>("format").getValue());
+                 c.line("intent_decode_grouped_rhs_panel_" + id + "(" + dst +
+                        ", " + src + ", " + cnt + ");");
+               } else if (kind == "memcpy")
                  c.line("memcpy(" + dst + ", " + src + ", (size_t)(" + cnt +
                         ") * " + std::to_string(eb) + "ULL);");
                else if (kind == "zero")
