@@ -47,7 +47,7 @@ def index_add_accumulate(
     out: I.InOut[I.f32, ("M", "D")],
 ):
     for d in I.parallel(out.dim(1)):
-        for n in I.ordered(src.dim(0)):
+        for n in I.fold(src.dim(0)):
             idx = I.cast(indices[n], I.index)
             out[idx, d] = out[idx, d] + src[n, d]
 

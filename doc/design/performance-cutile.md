@@ -22,7 +22,7 @@ cuTile 出口面向 `cuda.tile` / `tileiras` 编译器，其执行吞吐由四�
 | 决策族 | 位置 | 枚举候选 | 影响范围 |
 |---|---|---|---|
 | `levels/execution/block::contraction` | `block@decided` → `block@realized` | 架构合法 `(BM, BN, BK)` 块及 `{num_ctas, occupancy, opt_level}` 行（`sm120` 含 `scaled-mma`） | `gemm`、`batched_gemm`、`ragged_gemm`、`int8_gemm`、`fp8_gemm`、`q4_projection`、`mamba_chunk_state` |
-| `levels/execution/block::ordered-owners` | `block@decided` → `block@realized` | `pair-WxS`、`tokens-S`（至 `4096`）、`prefetch4-W`、`shared-W`、`resident-W`、`columns-1`、`owners-W` | 注意力全族、`cross_entropy`、`topk_rows`、`log_softmax_kl`、`retention_recurrence`、`gated_delta`、`triangular_solve`、`radix_pass`、`cholesky` |
+| `levels/execution/block::ordered-owners` | `block@decided` → `block@realized` | `pair-WxS`、`tokens-S`（至 `4096`）、`scatter-WxS`（可结合 1D 合并散射累加 `ct.atomic_add`）、`prefetch4-W`、`shared-W`、`resident-W`、`columns-1`、`owners-W` | 注意力全族、`cross_entropy`、`topk_rows`、`index_add`、`log_softmax_kl`、`retention_recurrence`、`gated_delta`、`triangular_solve`、`radix_pass`、`cholesky` |
 | `levels/execution/block::structure` | `block@decided` → `block@realized` | `resident-R` / `stream-R`、`global-atomic` 分区直方图（`tileiras` 无片上原子原语）、`source` / `destination` / `grid-tile` / `column-panels` / `segment-*` | 逐元素、`transpose`、`softmax`、`layer_norm`、`qk_norm_rope`、`histogram`、`embedding_bag`、`jagged_mean` |
 
 ## 3. 代价项与局部估算器

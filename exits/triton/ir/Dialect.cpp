@@ -84,6 +84,21 @@ struct TritonPureContractModel
     : public compilerinfra::ContractOpInterface::ExternalModel<
           TritonPureContractModel<ConcreteOp>, ConcreteOp> {};
 
+struct TritonAtomicAddContractModel
+    : public compilerinfra::ContractOpInterface::ExternalModel<
+          TritonAtomicAddContractModel, intentdsl::itsrc::TileAtomicAdd> {
+  Type getAccumulatorType(Operation *op) const {
+    return op->getNumOperands() >= 3
+               ? getElementTypeOrSelf(op->getOperand(2).getType())
+               : Type{};
+  }
+  arith::FastMathFlags getRequiredFastMath(Operation *op) const {
+    Type acc = getAccumulatorType(op);
+    return (acc && isa<FloatType>(acc)) ? arith::FastMathFlags::reassoc
+                                        : arith::FastMathFlags::none;
+  }
+};
+
 struct TritonTilePidRangeModel
     : public InferIntRangeInterface::ExternalModel<TritonTilePidRangeModel,
                                                    intentdsl::itsrc::TilePid> {
@@ -119,6 +134,10 @@ struct TritonTilePidRangeModel
         if (owners && tile && tile.getInt() > 0)
           hi = std::max<int64_t>(
               0, llvm::divideCeil(owners.getInt(), tile.getInt()) - 1);
+      } else if (mode && mode.getValue() == "owners" && ax == 1) {
+        if (auto fs = prog->getAttrOfType<IntegerAttr>("block.fold_split");
+            fs && fs.getInt() > 0)
+          hi = std::max<int64_t>(0, fs.getInt() - 1);
       }
     }
     hi = std::min<int64_t>(hi, INT32_MAX);
@@ -450,6 +469,7 @@ void intentdsl::itsrc::ItsrcDialect::initialize() {
   MLIRContext *ctx = getContext();
   TileDot::attachInterface<TritonDotContractModel>(*ctx);
   ScaledMMA::attachInterface<TritonScaledMMAContractModel>(*ctx);
+  TileAtomicAdd::attachInterface<TritonAtomicAddContractModel>(*ctx);
   TileReduce::attachInterface<TritonPureContractModel<TileReduce>>(*ctx);
   RowReduce::attachInterface<TritonPureContractModel<RowReduce>>(*ctx);
   BinCount::attachInterface<TritonPureContractModel<BinCount>>(*ctx);

@@ -313,7 +313,8 @@ inline bool panelFolds(mlir::Operation *o,
   for (auto loop : body.getOps<mlir::scf::ForOp>()) {
     if (!loop->hasAttr("kir.reassociate"))
       continue;
-    if (!mlir::matchPattern(loop.getStep(), mlir::m_One()))
+    if (!mlir::matchPattern(loop.getStep(), mlir::m_One()) ||
+        loop.getNumRegionIterArgs() == 0)
       return false;
     for (auto [idx, v] :
          llvm::enumerate(loop.getBody()->getTerminator()->getOperands())) {
@@ -335,7 +336,7 @@ inline bool hasReassociativeNormalization(mlir::Operation &space) {
   unsigned reassocLoops = 0;
   bool hasReassocExpShift = false;
   for (auto loop : space.getRegion(0).front().getOps<mlir::scf::ForOp>()) {
-    if (!loop->hasAttr("kir.reassociate"))
+    if (!loop->hasAttr("kir.reassociate") || loop.getNumRegionIterArgs() == 0)
       continue;
     bool combinersReassoc = llvm::all_of(
         loop.getBody()->getTerminator()->getOperands(), [](mlir::Value y) {
@@ -1030,6 +1031,141 @@ inline bool matchBoundedScatterLoop(mlir::scf::ForOp loop, mlir::func::FuncOp fn
     out->binIdx = binIdx;
     out->scatterStores = std::move(scatters);
   }
+  return true;
+}
+
+struct AssociativeScatterUpdate {
+  mlir::BlockArgument targetView;
+  mlir::memref::LoadOp pairedLoad;
+  mlir::Operation *combiner = nullptr;
+  mlir::memref::StoreOp store;
+  mlir::Value contribution;
+};
+
+struct AssociativeScatterLoopInfo {
+  int64_t extent = 0;
+  llvm::SmallVector<AssociativeScatterUpdate, 2> updates;
+};
+
+inline bool matchAssociativeScatterLoop(mlir::scf::ForOp loop,
+                                        mlir::func::FuncOp fn,
+                                        const CallFacts *facts,
+                                        AssociativeScatterLoopInfo *out = nullptr) {
+  if (!loop || !fn || !loop->hasAttr("kir.reassociate") ||
+      loop.getNumRegionIterArgs() != 0 ||
+      !mlir::matchPattern(loop.getLowerBound(), mlir::m_Zero()) ||
+      !mlir::matchPattern(loop.getStep(), mlir::m_One()) ||
+      !loop.isDefinedOutsideOfLoop(loop.getUpperBound()))
+    return false;
+  auto ubDef = loop.getUpperBound().getDefiningOp();
+  if (!ubDef ||
+      !mlir::isa<mlir::arith::ConstantOp, mlir::arith::ConstantIndexOp,
+                 mlir::memref::DimOp>(ubDef))
+    return false;
+  auto extOpt = orderedStaticLoopExtent(loop, fn, facts);
+  if (!extOpt || *extOpt <= 0)
+    return false;
+
+  llvm::SmallVector<mlir::memref::StoreOp, 2> stores;
+  llvm::SmallVector<mlir::memref::LoadOp, 4> loads;
+  for (mlir::Operation &inst : loop.getBody()->without_terminator()) {
+    if (inst.getNumRegions() != 0)
+      return false;
+    if (auto st = mlir::dyn_cast<mlir::memref::StoreOp>(inst)) {
+      stores.push_back(st);
+    } else if (auto ld = mlir::dyn_cast<mlir::memref::LoadOp>(inst)) {
+      loads.push_back(ld);
+    } else if (!mlir::isa<mlir::memref::DimOp>(inst) &&
+               !mlir::isMemoryEffectFree(&inst)) {
+      return false;
+    }
+  }
+  if (stores.empty())
+    return false;
+
+  llvm::SmallVector<AssociativeScatterUpdate, 2> updates;
+  llvm::SmallPtrSet<mlir::Operation *, 4> pairedLoads;
+  llvm::SmallDenseSet<mlir::Value, 4> targets;
+  for (auto st : stores) {
+    auto target = mlir::dyn_cast<mlir::BlockArgument>(st.getMemRef());
+    if (!target || target.getOwner() != &fn.front() ||
+        !targets.insert(target).second || !st.getValue().hasOneUse())
+      return false;
+    mlir::Type elemTy =
+        mlir::cast<mlir::MemRefType>(target.getType()).getElementType();
+    if (!elemTy.isF32() && !elemTy.isInteger(32))
+      return false;
+    mlir::Operation *comb = st.getValue().getDefiningOp();
+    if (!comb || comb->getBlock() != loop.getBody())
+      return false;
+    if (elemTy.isInteger(32)) {
+      if (!mlir::isa<mlir::arith::AddIOp>(comb))
+        return false;
+    } else {
+      if (!mlir::isa<mlir::arith::AddFOp>(comb) ||
+          !intentdsl::kir::hasFastMath(comb,
+                                       mlir::arith::FastMathFlags::reassoc))
+        return false;
+    }
+    auto ld = comb->getOperand(0).getDefiningOp<mlir::memref::LoadOp>();
+    if (!ld || ld->getBlock() != loop.getBody() || !ld.getResult().hasOneUse() ||
+        ld.getMemRef() != target || ld.getIndices() != st.getIndices())
+      return false;
+    mlir::Value contrib = comb->getOperand(1);
+    if (orderedValueDependsOn(contrib, ld, loop.getBody()))
+      return false;
+    pairedLoads.insert(ld.getOperation());
+    updates.push_back({target, ld, comb, st, contrib});
+  }
+
+  for (auto ld : loads) {
+    if (pairedLoads.contains(ld.getOperation()))
+      continue;
+    for (const auto &u : updates)
+      if (!orderedViewsDisjoint(fn, facts, u.targetView, ld.getMemRef()))
+        return false;
+  }
+
+  if (out) {
+    out->extent = *extOpt;
+    out->updates = std::move(updates);
+  }
+  return true;
+}
+
+inline bool canSplitAssociativeScatter(mlir::Operation *space,
+                                       const CallFacts *facts, int64_t width,
+                                       int64_t foldSplit,
+                                       AssociativeScatterLoopInfo *out = nullptr) {
+  if (!space || space->getNumRegions() != 1 ||
+      !space->getRegion(0).hasOneBlock() || width < 1 || foldSplit < 2 ||
+      !llvm::isPowerOf2_64(foldSplit))
+    return false;
+  auto fn = space->getParentOfType<mlir::func::FuncOp>();
+  if (!fn)
+    return false;
+  mlir::scf::ForOp soleLoop;
+  for (mlir::Operation &inst : space->getRegion(0).front().without_terminator()) {
+    if (auto lp = mlir::dyn_cast<mlir::scf::ForOp>(inst)) {
+      if (soleLoop)
+        return false;
+      soleLoop = lp;
+      continue;
+    }
+    if (!mlir::isa<mlir::memref::DimOp>(inst) &&
+        !mlir::isMemoryEffectFree(&inst))
+      return false;
+  }
+  if (!soleLoop)
+    return false;
+  AssociativeScatterLoopInfo info;
+  if (!matchAssociativeScatterLoop(soleLoop, fn, facts, &info))
+    return false;
+  if (foldSplit > int64_t(llvm::PowerOf2Ceil(std::max<int64_t>(2, info.extent))) ||
+      llvm::divideCeil(info.extent, foldSplit) < 4)
+    return false;
+  if (out)
+    *out = std::move(info);
   return true;
 }
 } // namespace intentdsl::block

@@ -56,6 +56,9 @@ struct OwnerTiles : Tiles {
                             const Values &env, Value mask);
   void boundedScatterLoop(scf::ForOp loop, const BoundedScatterLoopInfo &scat,
                           const Values &env, Value mask);
+  void associativeScatterLoop(scf::ForOp loop,
+                              const AssociativeScatterLoopInfo &info,
+                              const Values &env, Value mask);
   SmallVector<Value> selectionLoop(scf::ForOp loop,
                                    const OrderedSelectionInfo &sel,
                                    const Values &env, Value mask);

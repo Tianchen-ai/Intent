@@ -352,5 +352,58 @@ void tileContracts(Unit &unit) {
     };
     unit.implementations.push_back({std::move(sc), COMPILERINFRA_SOURCE});
   }
+  {
+    ImplementationContract ac;
+    ac.name = "tile-atomic-add";
+    ac.operation = "triton_src.tile_atomic_add";
+    ac.symbol = "tl.atomic_add";
+    ac.source = ImplementationSource::Builtin;
+    ac.minimum = Reuse::Native;
+    ac.operands = "target view, projected tile address, f32/i32 update, optional i1 mask";
+    ac.layout = "global view address with relaxed device-scope atomic RMW";
+    ac.accumulator = "f32 (with reassoc) or i32";
+    ac.effects = "global read-modify-write";
+    ac.numerical = "associative/commutative relaxed atomic addition";
+    ac.estimator = "exits/triton::collective-steps";
+    ac.costParameters = {"participants", "width"};
+    TypedContract tc;
+    tc.effects = EffectMask::ReadWrite;
+    tc.shape.minOperands = 3;
+    tc.shape.maxOperands = 4;
+    tc.shape.minResults = 0;
+    tc.shape.maxResults = 0;
+    tc.operandTypes = {ScalarTypeKind::I1, ScalarTypeKind::I32,
+                       ScalarTypeKind::I64, ScalarTypeKind::F32};
+    tc.accumulatorTypes = {ScalarTypeKind::I32, ScalarTypeKind::F32};
+    ac.typed = std::move(tc);
+    ac.available = [](const TargetProfile &p) -> llvm::Error {
+      if (!p.services.get<intentdsl::block::OwnerMachine>())
+        return llvm::createStringError("missing CUDA execution capabilities");
+      return llvm::Error::success();
+    };
+    ac.verify = [](Operation *o) -> LogicalResult {
+      if (o->getNumResults() != 0 ||
+          (o->getNumOperands() != 3 && o->getNumOperands() != 4))
+        return failure();
+      auto mem = dyn_cast<MemRefType>(o->getOperand(0).getType());
+      Type elem = getElementTypeOrSelf(o->getOperand(2).getType());
+      if (!mem || mem.getElementType() != elem ||
+          (!elem.isF32() && !elem.isInteger(32)) ||
+          shape(o->getOperand(1).getType()) != shape(o->getOperand(2).getType()))
+        return failure();
+      if (o->getNumOperands() == 4 &&
+          (!getElementTypeOrSelf(o->getOperand(3).getType()).isInteger(1) ||
+           shape(o->getOperand(3).getType()) != shape(o->getOperand(1).getType())))
+        return failure();
+      if (elem.isF32()) {
+        auto fm = o->getAttrOfType<arith::FastMathFlagsAttr>("fastmath");
+        if (!fm ||
+            !bitEnumContainsAll(fm.getValue(), arith::FastMathFlags::reassoc))
+          return failure();
+      }
+      return success();
+    };
+    unit.implementations.push_back({std::move(ac), COMPILERINFRA_SOURCE});
+  }
 }
 } // namespace CI_UNIT_NAMESPACE

@@ -277,22 +277,90 @@ LogicalResult verifyOwnerBody(func::FuncOp fn, Operation &op,
     }
     if (auto loop = dyn_cast<scf::ForOp>(child)) {
       if(loop->hasAttr("kir.reassociate")){
-        bool pure=loop->getAttrOfType<UnitAttr>("kir.reassociate") &&
-          !loop.getRegion().walk([](Operation *v){
-            bool read=isa<memref::LoadOp,memref::DimOp>(v) ||
-                      v->getName().stripDialect()=="slice_read";
-            return read || isMemoryEffectFree(v) || isa<scf::IfOp>(v) ?
-                WalkResult::advance() : WalkResult::interrupt();
-          }).wasInterrupted();
-        if(!pure || !loop.getNumRegionIterArgs()){
-          child->emitError("a reassociable fold requires read-only contributions and explicit accumulators");
+        if (!loop->getAttrOfType<UnitAttr>("kir.reassociate")) {
+          child->emitError("invalid kir.reassociate attribute");
           return WalkResult::interrupt();
         }
-        for(auto [arg,next]:llvm::zip(loop.getRegionIterArgs(),loop.getBody()->getTerminator()->getOperands())){
-          auto *combine=next.getDefiningOp();
-          if(!combine || !isa<arith::AddFOp,arith::MaxNumFOp>(combine) ||
-             !arg.hasOneUse() || !next.hasOneUse() || combine->getOperand(0)!=arg){
-            child->emitError("each fold state must feed only its own sum or maximum combiner");
+        if (loop.getNumRegionIterArgs() > 0) {
+          bool pure =
+              !loop.getRegion().walk([](Operation *v) {
+                bool read = isa<memref::LoadOp, memref::DimOp>(v) ||
+                            v->getName().stripDialect() == "slice_read";
+                return read || isMemoryEffectFree(v) || isa<scf::IfOp>(v)
+                           ? WalkResult::advance()
+                           : WalkResult::interrupt();
+              }).wasInterrupted();
+          if (!pure) {
+            child->emitError("a reassociable fold requires read-only contributions and explicit accumulators");
+            return WalkResult::interrupt();
+          }
+          for (auto [arg, next] :
+               llvm::zip(loop.getRegionIterArgs(),
+                         loop.getBody()->getTerminator()->getOperands())) {
+            auto *combine = next.getDefiningOp();
+            if (!combine || !isa<arith::AddFOp, arith::MaxNumFOp>(combine) ||
+                !arg.hasOneUse() || !next.hasOneUse() ||
+                combine->getOperand(0) != arg) {
+              child->emitError("each fold state must feed only its own sum or maximum combiner");
+              return WalkResult::interrupt();
+            }
+          }
+        } else {
+          llvm::SmallPtrSet<Operation *, 4> pairedLoads, pairedStores;
+          llvm::SmallDenseSet<Value, 4> accumViews;
+          for (Operation &inst : loop.getBody()->without_terminator()) {
+            auto st = dyn_cast<memref::StoreOp>(inst);
+            if (!st)
+              continue;
+            auto mem = dyn_cast<BlockArgument>(st.getMemRef());
+            if (!mem || mem.getOwner() != &fn.front() ||
+                entry(mem)->getString("direction") != "InOut" ||
+                !accumViews.insert(mem).second || !st.getValue().hasOneUse()) {
+              child->emitError("reassociable indexed fold requires distinct InOut target updates");
+              return WalkResult::interrupt();
+            }
+            Operation *comb = st.getValue().getDefiningOp();
+            bool validComb = false;
+            if (comb && comb->getBlock() == loop.getBody()) {
+              if (isa<arith::AddIOp>(comb)) {
+                validComb = true;
+              } else if (isa<arith::AddFOp, arith::MaxNumFOp>(comb)) {
+                auto fm = comb->getAttrOfType<arith::FastMathFlagsAttr>("fastmath");
+                validComb = fm && bitEnumContainsAll(
+                                      fm.getValue(),
+                                      arith::FastMathFlags::reassoc);
+              }
+            }
+            auto ld = validComb ? comb->getOperand(0).getDefiningOp<memref::LoadOp>()
+                                : memref::LoadOp();
+            if (!ld || ld->getBlock() != loop.getBody() ||
+                !ld.getResult().hasOneUse() || ld.getMemRef() != mem ||
+                ld.getIndices() != st.getIndices()) {
+              child->emitError("reassociable indexed fold requires paired load-combine-store with reassoc");
+              return WalkResult::interrupt();
+            }
+            pairedLoads.insert(ld.getOperation());
+            pairedStores.insert(st.getOperation());
+          }
+          bool validEffects =
+              !pairedStores.empty() &&
+              !loop.getRegion().walk([&](Operation *v) {
+                if (pairedStores.contains(v) || pairedLoads.contains(v))
+                  return WalkResult::advance();
+                if (auto ld = dyn_cast<memref::LoadOp>(v))
+                  return accumViews.contains(ld.getMemRef())
+                             ? WalkResult::interrupt()
+                             : WalkResult::advance();
+                if (v->getName().stripDialect() == "slice_read")
+                  return accumViews.contains(v->getOperand(0))
+                             ? WalkResult::interrupt()
+                             : WalkResult::advance();
+                return (isa<memref::DimOp, scf::IfOp>(v) || isMemoryEffectFree(v))
+                           ? WalkResult::advance()
+                           : WalkResult::interrupt();
+              }).wasInterrupted();
+          if (!validEffects) {
+            child->emitError("a reassociable fold requires read-only contributions and explicit accumulators");
             return WalkResult::interrupt();
           }
         }

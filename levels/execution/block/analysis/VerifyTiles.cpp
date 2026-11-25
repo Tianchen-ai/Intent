@@ -1,3 +1,4 @@
+#include "compilerinfra/Contract.h"
 #include "intentdsl/levels/execution/block/ir/Contraction.h"
 #include "intentdsl/levels/execution/block/ir/OwnerProgram.h"
 #include "intentdsl/levels/execution/block/ir/Owners.h"
@@ -34,8 +35,10 @@ verifyTileProgram(func::FuncOp fn, const TargetProfile &profile,
   auto rows = sp.getAttrOfType<IntegerAttr>("block.owner_tile"),
        owners = sp.getAttrOfType<IntegerAttr>("block.owners");
   if (mode == "owners") {
+    auto fs = sp.getAttrOfType<IntegerAttr>("block.fold_split");
     if (!rows || rows.getInt() < 1 || !owners ||
-        owners.getInt() != intentdsl::kir::ownerCount(&sp, *facts))
+        owners.getInt() != intentdsl::kir::ownerCount(&sp, *facts) ||
+        (fs && (fs.getInt() < 2 || !llvm::isPowerOf2_64(fs.getInt()))))
       return sp.emitError("invalid owner grid");
   } else if (mode == "matrix") {
     auto dims = sp.getAttrOfType<DenseI64ArrayAttr>("block.extents");
@@ -172,7 +175,8 @@ verifyTileProgram(func::FuncOp fn, const TargetProfile &profile,
         return op->emitError("invalid tile broadcast projection"),
                WalkResult::interrupt();
     }
-    if (name == "tile_read" || name == "tile_write") {
+    if (name == "tile_read" || name == "tile_write" ||
+        name == "tile_atomic_add") {
       auto offset = op->getOperand(1);
       auto *addr = offset.getDefiningOp();
       bool load = name == "tile_read";
@@ -194,6 +198,18 @@ verifyTileProgram(func::FuncOp fn, const TargetProfile &profile,
               cast<MemRefType>(op->getOperand(0).getType()).getElementType())
         return op->emitError("tile access does not match its verified view"),
                WalkResult::interrupt();
+      if (name == "tile_atomic_add") {
+        Type elemTy = getElementTypeOrSelf(val.getType());
+        auto impl = op->getAttrOfType<StringAttr>("ci.implementation");
+        if ((!elemTy.isF32() && !elemTy.isInteger(32)) || !impl)
+          return op->emitError("tile_atomic_add requires contracted f32/i32 update"),
+                 WalkResult::interrupt();
+        if (auto err = profile.checkImplementation(impl.getValue()))
+          return op->emitError() << llvm::toString(std::move(err)),
+                 WalkResult::interrupt();
+        if (failed(compilerinfra::verifyContractOp(op, profile)))
+          return WalkResult::interrupt();
+      }
     }
     if (auto cmp = dyn_cast<arith::CmpIOp>(op);
         cmp && cmp.getPredicate() != arith::CmpIPredicate::eq &&

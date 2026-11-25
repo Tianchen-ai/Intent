@@ -22,7 +22,7 @@ Triton 出口的执行吞吐由四项显式 IR 决定支配：
 | 决策族 | 位置 | 枚举候选 | 影响范围 |
 |---|---|---|---|
 | `levels/execution/block::contraction` | `block@decided` → `block@realized` | 目标合法 `(BM, BN, BK)` 驻留块及 `{num_warps, num_stages}` 参数行（含 `scaled_contract`、`window_contract`、`q4k_dot`） | `gemm`、`batched_gemm`、`ragged_gemm`、`int8_gemm`、`fp8_gemm`、`q4_projection`、`mamba_chunk_state` |
-| `levels/execution/block::ordered-owners` | `block@decided` → `block@realized` | `pair-WxS`（至 `128×64`）、`tokens-S`（至 `4096`）、`prefetch{4,16}-W`、`shared-W`、`resident-W`、`columns-1`、`owners-W` | 注意力全族、`cross_entropy`、`topk_rows`、`log_softmax_kl`、`retention_recurrence`、`gated_delta`、`triangular_solve`、`radix_pass`、`cholesky` |
+| `levels/execution/block::ordered-owners` | `block@decided` → `block@realized` | `pair-WxS`（至 `128×64`）、`tokens-S`（至 `4096`）、`scatter-WxS`（可结合二维散射累加 `tl.atomic_add`）、`prefetch{4,16}-W`、`shared-W`、`resident-W`、`columns-1`、`owners-W` | 注意力全族、`cross_entropy`、`topk_rows`、`index_add`、`log_softmax_kl`、`retention_recurrence`、`gated_delta`、`triangular_solve`、`radix_pass`、`cholesky` |
 | `levels/execution/block::structure` | `block@decided` → `block@realized` | `resident-R` / `stream-R`（1–8 warps）、`private-merge` / `global-atomic`、`source` / `destination` / `grid-tile` / `column-panels` / `segment-*` | 逐元素、`transpose`、`softmax`、`layer_norm`、`qk_norm_rope`、`histogram`、`embedding_bag`、`jagged_mean` |
 | `exits/triton::narrow-proven-addresses` | `triton@callable` | 经 `proveNarrowAddress` 证明有符号不溢出的 `i32` 地址窄化 vs `i64` 保持 | Tile 指针寻址与多轴展平坐标分解 |
 

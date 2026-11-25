@@ -1082,8 +1082,360 @@ SmallVector<Value> OwnerTiles::selectionLoop(scf::ForOp loop,
   return SmallVector<Value>(l.getResults());
 }
 
+void OwnerTiles::associativeScatterLoop(
+    scf::ForOp loop, const AssociativeScatterLoopInfo &info,
+    const Values &parent, Value mask) {
+  auto fsAttr = space.getAttrOfType<IntegerAttr>("block.fold_split");
+  int64_t foldSplit = fsAttr ? std::max<int64_t>(1, fsAttr.getInt()) : 1;
+  Value rawHi = widen(at(loop.getUpperBound(), parent));
+  Value hiScalar = isa<RankedTensorType>(rawHi.getType())
+                       ? reduce(rawHi, "max", 0)
+                       : rawHi;
+
+  llvm::SmallPtrSet<Operation *, 4> skipOps;
+  llvm::DenseMap<Operation *, const AssociativeScatterUpdate *> storeUpdates;
+  for (const auto &u : info.updates) {
+    memref::LoadOp pLd = u.pairedLoad;
+    memref::StoreOp sOp = u.store;
+    skipOps.insert(pLd.getOperation());
+    skipOps.insert(u.combiner);
+    storeUpdates[sOp.getOperation()] = &u;
+  }
+
+  // Check whether all memory coordinate expressions separate fold-axis (iv)
+  // and owner-axis dependencies so each CTA step can issue a 2D [P_n, rows]
+  // coalesced panel.
+  llvm::DenseSet<Value> ivDep{loop.getInductionVar()};
+  llvm::DenseSet<Value> ownerDep;
+  for (auto [k, v] : parent)
+    if (isa<RankedTensorType>(v.getType()))
+      ownerDep.insert(k);
+  bool separable2D =
+      (access.scalarBroadcastRead && rows >= 16 && info.extent >= 32);
+  for (Operation &inst : loop.getBody()->without_terminator()) {
+    if (skipOps.contains(&inst))
+      continue;
+    if (auto st = dyn_cast<memref::StoreOp>(inst)) {
+      for (Value c : st.getIndices())
+        if (ivDep.contains(c) && ownerDep.contains(c))
+          separable2D = false;
+      continue;
+    }
+    if (auto ld = dyn_cast<memref::LoadOp>(inst)) {
+      bool anyIv = false, anyOwn = false;
+      for (Value c : ld.getIndices()) {
+        bool ci = ivDep.contains(c), co = ownerDep.contains(c);
+        if (ci && co)
+          separable2D = false;
+        anyIv |= ci;
+        anyOwn |= co;
+      }
+      if (anyIv)
+        ivDep.insert(ld.getResult());
+      if (anyOwn)
+        ownerDep.insert(ld.getResult());
+      continue;
+    }
+    if (inst.getNumResults() == 1) {
+      bool anyIv = llvm::any_of(inst.getOperands(),
+                                [&](Value a) { return ivDep.contains(a); });
+      bool anyOwn = llvm::any_of(inst.getOperands(),
+                                 [&](Value a) { return ownerDep.contains(a); });
+      if (anyIv)
+        ivDep.insert(inst.getResult(0));
+      if (anyOwn)
+        ownerDep.insert(inst.getResult(0));
+    }
+  }
+
+  int64_t totalOwners =
+      space.getAttrOfType<IntegerAttr>("block.owners").getInt();
+  bool exactOwners = (mask == active && rows == logical && totalOwners > 0 &&
+                      totalOwners % rows == 0);
+
+  if (separable2D) {
+    constexpr int64_t P = 8;
+    int64_t itemsPerCta = llvm::divideCeil(info.extent, foldSplit);
+    int64_t stepsPerCta = std::max<int64_t>(1, llvm::divideCeil(itemsPerCta, P));
+    int64_t ctaSpan = stepsPerCta * P;
+    bool exactFold = (foldSplit * ctaSpan == info.extent);
+    bool unrollConst = (stepsPerCta <= 8);
+
+    Value ctaBase = foldSplit > 1
+                        ? Value(b.create<arith::MulIOp>(loc, pid(1),
+                                                        integer(ctaSpan)))
+                        : integer(0);
+    scf::ForOp l = b.create<scf::ForOp>(loc, integer(0), integer(stepsPerCta),
+                                        integer(1));
+    if (!unrollConst)
+      l->setAttr(symbol("runtime_range"), b.getUnitAttr());
+    b.setInsertionPointToStart(l.getBody());
+
+    Value stepBase = b.create<arith::AddIOp>(
+        loc, ctaBase,
+        b.create<arith::MulIOp>(loc, l.getInductionVar(), integer(P)));
+    Value nVec = stepped(stepBase, P);
+    Type bool2D = shaped({P, rows}, b.getI1Type());
+    Value validN;
+    if (!exactFold)
+      validN = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt, nVec,
+                                       like(hiScalar, nVec.getType()));
+    Value valid2D;
+    if (!exactFold || !exactOwners) {
+      Value mOwn = broadcast(mask, bool2D, 1);
+      valid2D = exactFold ? mOwn
+                : exactOwners
+                    ? broadcast(validN, bool2D, 0)
+                    : Value(b.create<arith::AndIOp>(
+                          loc, broadcast(validN, bool2D, 0), mOwn));
+    }
+
+    Type pIdxTy = shaped({P}, b.getI64Type());
+    Type rIdxTy = shaped({rows}, b.getI64Type());
+    Values env = parent;
+    env[loop.getInductionVar()] = nVec;
+
+    llvm::DenseSet<Value> isAxis0{nVec};
+    llvm::DenseSet<Value> isAxis1;
+    for (auto [k, v] : parent)
+      if (isa<RankedTensorType>(v.getType()))
+        isAxis1.insert(v);
+
+    auto projectTo2D = [&](Value v) -> Value {
+      Type elemTy = elem(v.getType());
+      Type dst = shaped({P, rows}, elemTy);
+      auto rt = dyn_cast<RankedTensorType>(v.getType());
+      if (!rt)
+        return like(v, dst, -1);
+      if (rt.getRank() == 2)
+        return v;
+      int ax = isAxis0.contains(v) ? 0 : 1;
+      return like(v, dst, ax);
+    };
+
+    for (Operation &inst : loop.getBody()->without_terminator()) {
+      if (skipOps.contains(&inst))
+        continue;
+      if (auto itUpd = storeUpdates.find(&inst); itUpd != storeUpdates.end()) {
+        const auto *u = itUpd->second;
+        memref::StoreOp stOp = u->store;
+        Value base = u->targetView;
+        SmallVector<Value, 4> coords;
+        SmallVector<int64_t, 4> axes;
+        bool saw0 = false, saw1 = false;
+        for (Value c : stOp.getIndices()) {
+          Value mc = widen(at(c, env));
+          if (ivDep.contains(c)) {
+            mc = isa<RankedTensorType>(mc.getType()) ? mc : like(mc, pIdxTy, -1);
+            coords.push_back(mc);
+            axes.push_back(0);
+            saw0 = true;
+          } else if (ownerDep.contains(c)) {
+            mc = isa<RankedTensorType>(mc.getType()) ? mc : like(mc, rIdxTy, -1);
+            coords.push_back(mc);
+            axes.push_back(1);
+            saw1 = true;
+          } else {
+            coords.push_back(mc);
+            axes.push_back(-1);
+          }
+        }
+        if (!saw0) {
+          // Ensure rank-2 [P, rows] tile if store index had no iv coord
+          coords[0] = like(coords[0], pIdxTy, -1);
+          axes[0] = 0;
+        }
+        (void)saw1;
+        Value ptr = address(base, coords, axes);
+        Value contrib2D = projectTo2D(at(u->contribution, env));
+        atomicAdd(base, ptr, contrib2D, valid2D);
+        continue;
+      }
+      if (auto c = dyn_cast<arith::ConstantOp>(inst)) {
+        env[inst.getResult(0)] = constant(c);
+        continue;
+      }
+      if (auto d = dyn_cast<memref::DimOp>(inst)) {
+        env[inst.getResult(0)] =
+            integer(shape(d.getSource())[*d.getConstantIndex()]);
+        continue;
+      }
+      if (auto ld = dyn_cast<memref::LoadOp>(inst)) {
+        Value base = ld.getMemRef();
+        SmallVector<Value, 4> coords;
+        SmallVector<int64_t, 4> axes;
+        bool has0 = false, has1 = false;
+        for (Value c : ld.getIndices()) {
+          if (ivDep.contains(c))
+            has0 = true;
+          else if (ownerDep.contains(c))
+            has1 = true;
+        }
+        for (Value c : ld.getIndices()) {
+          Value mc = widen(at(c, env));
+          if (ivDep.contains(c)) {
+            mc = isa<RankedTensorType>(mc.getType()) ? mc : like(mc, pIdxTy, -1);
+            coords.push_back(mc);
+            axes.push_back(0);
+          } else if (ownerDep.contains(c)) {
+            mc = isa<RankedTensorType>(mc.getType()) ? mc : like(mc, rIdxTy, -1);
+            coords.push_back(mc);
+            axes.push_back(has0 ? 1 : 0);
+          } else {
+            coords.push_back(mc);
+            axes.push_back(-1);
+          }
+        }
+        Value ldMask;
+        if (has0 && has1)
+          ldMask = valid2D;
+        else if (has0)
+          ldMask = validN;
+        else if (has1 && !exactOwners)
+          ldMask = mask;
+        Value res = read(base, address(base, coords, axes), ldMask);
+        if (has0 && !has1)
+          isAxis0.insert(res);
+        else if (has1 && !has0)
+          isAxis1.insert(res);
+        env[inst.getResult(0)] = res;
+        continue;
+      }
+      Type e = elem(inst.getResult(0).getType());
+      if (e.isIndex())
+        e = b.getI64Type();
+      bool res0 = ivDep.contains(inst.getResult(0));
+      bool res1 = ownerDep.contains(inst.getResult(0));
+      SmallVector<Value, 4> args;
+      Type dstTy = e;
+      if (res0 && res1) {
+        dstTy = shaped({P, rows}, e);
+        for (Value a : inst.getOperands())
+          args.push_back(projectTo2D(at(a, env)));
+      } else if (res0 || res1) {
+        int64_t len = res0 ? P : rows;
+        dstTy = shaped({len}, e);
+        for (Value a : inst.getOperands()) {
+          Value av = at(a, env);
+          args.push_back(isa<RankedTensorType>(av.getType())
+                             ? av
+                             : like(av, shaped({len}, elem(av.getType())), -1));
+        }
+      } else {
+        for (Value a : inst.getOperands())
+          args.push_back(at(a, env));
+      }
+      Value outVal = apply(inst, args, dstTy);
+      if (res0 && !res1)
+        isAxis0.insert(outVal);
+      else if (res1 && !res0)
+        isAxis1.insert(outVal);
+      env[inst.getResult(0)] = outVal;
+    }
+    b.setInsertionPointAfter(l);
+    return;
+  }
+
+  Value loScalar = integer(0), limScalar = hiScalar;
+  if (foldSplit > 1) {
+    int64_t chunk = llvm::divideCeil(info.extent, foldSplit);
+    loScalar = b.create<arith::MulIOp>(loc, pid(1), integer(chunk));
+    limScalar = b.create<arith::MinSIOp>(
+        loc, b.create<arith::AddIOp>(loc, loScalar, integer(chunk)), hiScalar);
+  }
+  auto l = b.create<scf::ForOp>(loc, loScalar, limScalar, integer(1));
+  l->setAttr(symbol("runtime_range"), b.getUnitAttr());
+  b.setInsertionPointToStart(l.getBody());
+
+  Type ixTy = shaped({rows}, b.getI64Type());
+
+  Values env = parent;
+  env[loop.getInductionVar()] = l.getInductionVar();
+  for (Operation &inst : loop.getBody()->without_terminator()) {
+    if (skipOps.contains(&inst))
+      continue;
+    if (auto itUpd = storeUpdates.find(&inst); itUpd != storeUpdates.end()) {
+      const auto *u = itUpd->second;
+      memref::StoreOp stOp = u->store;
+      Value base = u->targetView;
+      SmallVector<Value, 4> coords;
+      SmallVector<int64_t, 4> axes;
+      for (Value c : stOp.getIndices()) {
+        coords.push_back(broadcast(widen(at(c, env)), ixTy));
+        axes.push_back(0);
+      }
+      Value ptr = address(base, coords, axes);
+      Type valTy =
+          shaped({rows}, cast<MemRefType>(base.getType()).getElementType());
+      Value contribVal = broadcast(at(u->contribution, env), valTy);
+      atomicAdd(base, ptr, contribVal, exactOwners ? Value{} : mask);
+      continue;
+    }
+    if (auto c = dyn_cast<arith::ConstantOp>(inst)) {
+      env[inst.getResult(0)] = constant(c);
+      continue;
+    }
+    if (auto d = dyn_cast<memref::DimOp>(inst)) {
+      env[inst.getResult(0)] =
+          integer(shape(d.getSource())[*d.getConstantIndex()]);
+      continue;
+    }
+    if (auto ld = dyn_cast<memref::LoadOp>(inst)) {
+      Value base = ld.getMemRef();
+      SmallVector<Value, 4> mapped;
+      bool allScalar = true;
+      for (Value c : ld.getIndices()) {
+        Value mc = widen(at(c, env));
+        if (isa<RankedTensorType>(mc.getType()))
+          allScalar = false;
+        mapped.push_back(mc);
+      }
+      if (allScalar && access.scalarBroadcastRead) {
+        SmallVector<int64_t, 4> sAxes(mapped.size(), -1);
+        Value sVal = read(base, address(base, mapped, sAxes));
+        env[inst.getResult(0)] = broadcast(
+            sVal,
+            shaped({rows}, cast<MemRefType>(base.getType()).getElementType()));
+      } else {
+        SmallVector<Value, 4> coords;
+        SmallVector<int64_t, 4> axes;
+        for (Value mc : mapped) {
+          coords.push_back(broadcast(mc, ixTy));
+          axes.push_back(0);
+        }
+        env[inst.getResult(0)] = read(base, address(base, coords, axes),
+                                      exactOwners ? Value{} : mask);
+      }
+      continue;
+    }
+    SmallVector<Value, 4> args;
+    Type shapeHint;
+    for (Value a : inst.getOperands()) {
+      Value av = at(a, env);
+      args.push_back(av);
+      if (auto tt = dyn_cast<RankedTensorType>(av.getType());
+          tt && (!shapeHint ||
+                 tt.getRank() > cast<RankedTensorType>(shapeHint).getRank()))
+        shapeHint = tt;
+    }
+    Type e = elem(inst.getResult(0).getType());
+    if (e.isIndex())
+      e = b.getI64Type();
+    env[inst.getResult(0)] =
+        apply(inst, args, shapeHint ? retype(shapeHint, e) : e);
+  }
+  b.setInsertionPointAfter(l);
+}
+
 SmallVector<Value> OwnerTiles::serialLoop(scf::ForOp loop, const Values &parent,
                                           Value mask) {
+  if (space.hasAttr("block.fold_split")) {
+    AssociativeScatterLoopInfo assocInfo;
+    if (matchAssociativeScatterLoop(loop, fn, nullptr, &assocInfo)) {
+      associativeScatterLoop(loop, assocInfo, parent, mask);
+      return {};
+    }
+  }
   if (canVectorizeIndependentLoop(loop)) {
     vectorizedLoop(loop, parent, mask);
     return {};

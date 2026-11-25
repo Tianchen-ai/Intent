@@ -35,6 +35,7 @@ class Ordered:
         self.lanes = {}
         self.fold_carries = set()
         self.ordered_carries = set()
+        self.fold_depth = 0
 
     def fm_inline(self, extra=(), *, strip_reassoc=False):
         flags = [*self.default_flags, *extra]
@@ -352,6 +353,34 @@ class Ordered:
                     "expected a local assignment, buffer write or ordered loop"
                 )
             dest = stmt.targets[0]
+            if (
+                self.fold_depth > 0
+                and isinstance(dest, ast.Subscript)
+                and isinstance(stmt.value, ast.BinOp)
+                and isinstance(stmt.value.op, ast.Add)
+                and ast.unparse(stmt.value.left) == ast.unparse(dest)
+            ):
+                slot, coords, axes = self.access(dest)
+                if not axes and slot["direction"] == "InOut":
+                    view = self.env[slot["name"]]
+                    at = view.name + "[" + ", ".join(c.name for c in coords) + "]"
+                    lhs = self.emit(f"memref.load {at} : {view.type}", slot["dtype"])
+                    rhs = self.expr(stmt.value.right)
+                    if lhs.type != rhs.type or rhs in self.lanes:
+                        raise ValueError("mixed operands require an explicit cast")
+                    integer = lhs.type in ("index", "i32", "i64")
+                    op = "addi" if integer else "addf"
+                    fm = "" if integer else self.fm_inline(("reassoc",))
+                    v = self.emit(
+                        f"arith.{op} {lhs.name}, {rhs.name}{fm} : {lhs.type}",
+                        lhs.type,
+                    )
+                    self.lines.append(
+                        f"memref.store {v.name}, {view.name}["
+                        + ", ".join(c.name for c in coords)
+                        + f"] : {view.type}"
+                    )
+                    continue
             v = self.expr(stmt.value)
             if isinstance(dest, ast.Name):
                 self.env[dest.id] = v
@@ -424,7 +453,13 @@ class Ordered:
             )
             + " {"
         )
-        self.statements(stmt.body)
+        if is_fold:
+            self.fold_depth += 1
+        try:
+            self.statements(stmt.body)
+        finally:
+            if is_fold:
+                self.fold_depth -= 1
         self.fold_carries = saved_fold
         self.ordered_carries = saved_ord
         if any(self.env[k].type != saved[k].type for k in carry):

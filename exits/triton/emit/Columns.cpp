@@ -68,6 +68,8 @@ void registerColumnRules(TerminalPrinter &printer) {
           auto bound = [&](Value v) {
             if (auto i = v.getDefiningOp<arith::ConstantIndexOp>())
               return std::to_string(i.value());
+            if (auto c = v.getDefiningOp<arith::ConstantIntOp>())
+              return std::to_string(c.value());
             return p.name(v);
           };
           p.line("for " + p.name(loop.getInductionVar()) + syntax +

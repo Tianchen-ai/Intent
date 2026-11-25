@@ -164,7 +164,7 @@ GroupNorm 反向的第一个调用按 batch 和 group 归约空间成员，第�
 - **函数与收缩级次正规数属性 `"denormal-fp-math"`**：默认 `"ieee"`（禁止隐式冲零次正规数）；当作者声明 `contract(..., allow_subnormal_ftz=True)` 或 `@I.kernel(denormal_fp_math="preserve-sign")` 时，对应 `kir.contract` 与 `func.func` 标记 `"denormal-fp-math" = "preserve-sign"`，供 AMX BF16 等硬件快路在选型与合法化前读取。
 - **全局编译选项**：`I.jit(..., fpmath_mode="strict"|"relaxed"|"bf16"|"fast", fast_math=False, denormal_fp_math=...)` 通过目标编译选项在 `kir@canonical` 统一为浮点操作补齐默认 `fastmath` 标志与函数 `"denormal-fp-math"` 模式（显式 `I.ordered` 与 `I.ordered_sum` 的顺序约束不受 `reassoc` 覆盖）。
 - **验证器职责边界**：各层与检查点恢复 verifier 只检查当前 IR 的良构性（如属性类型合法、微核调用自身属性与契约一致），绝不追溯“历史改写是否曾获上层授权”。
-- **作者意图对齐原则**：作者程序只应在算法确实依赖固定顺序时使用 `I.ordered` / `I.ordered_sum`（如 `csr_spmv`、`cholesky`、状态递推 `gated_delta`/`causal_linear_attention`/`selective_state_scan` 及保序 top-k 选择 `topk_rows`）；无顺序依赖的分段或窗口求和（如 `jagged_mean` 的 `I.segment_sum`、`causal_convolution` 与 split-K `merge_splits`/`merge_grouped` 的 `I.fold`，以及第 7 组 `sliding_window_attention`、`alibi_attention`、`cross_entropy`、`attention_unscaled_max` 的 `I.fold` 归约）一律使用可重结合原语，CPU 与 MLU 等各出口自动共享并行归约收益。核查全部 30 个 V1 同名作者程序与第 7 组程序后：V1 作者显式声明 `approximate=True` 的操作（`swiglu`、前反向 `attention`、`paged_decode`/`paged_partials`/`merge_log2_splits`、`grouped_flash_decode`、`paged_mla_decode_partials`）均直接用 `I.fdiv(..., approximate=True)` 与 `I.exp2(..., approximate=True)` 表达为 op 级 `afn,arcp` / `afn` 标志（次正规数冲零仅由函数级 `"denormal-fp-math"` 控制，不与 `nsz` 混用）；V1 未声明近似的算子（如 `softmax`、`adamw`、`layer_norm`、`rms_norm`）保持默认严格语义（`none`，对应 IEEE RN `div_rn`/`sqrt_rn`）。
+- **作者意图对齐原则**：作者程序只应在算法确实依赖固定顺序时使用 `I.ordered` / `I.ordered_sum`（如 `csr_spmv`、`cholesky`、`triangular_solve`、状态递推 `gated_delta`/`causal_linear_attention`/`selective_state_scan`/`retention_recurrence`、稳定基数重排 `radix_pass` 及保序 top-k 选择 `topk_rows`）；无顺序依赖的分段、窗口或散射求和（如 `jagged_mean` 的 `I.segment_sum`、`causal_convolution` 与 split-K `merge_splits`/`merge_grouped` 的 `I.fold`，以及第 7 组 `sliding_window_attention`、`alibi_attention`、`cross_entropy`、`attention_unscaled_max`、`embedding_bag` 与含重复索引散射累加 `index_add` 的 `I.fold` 归约——对应 `torch.index_add_` 默认非确定性 `atomicAdd` 口径）一律使用可重结合原语，CPU 维持无锁多核尾轴 SIMD 累加，MLU 与 GPU 自动获得并行散射累加或分段合并收益。核查全部 30 个 V1 同名作者程序与第 7 组程序后：V1 作者显式声明 `approximate=True` 的操作（`swiglu`、前反向 `attention`、`paged_decode`/`paged_partials`/`merge_log2_splits`、`grouped_flash_decode`、`paged_mla_decode_partials`）均直接用 `I.fdiv(..., approximate=True)` 与 `I.exp2(..., approximate=True)` 表达为 op 级 `afn,arcp` / `afn` 标志（次正规数冲零仅由函数级 `"denormal-fp-math"` 控制，不与 `nsz` 混用）；V1 未声明近似的算子（如 `softmax`、`adamw`、`layer_norm`、`rms_norm`）保持默认严格语义（`none`，对应 IEEE RN `div_rn`/`sqrt_rn`）。
 
 ## 访问、成员与 effects 的验证合同
 
@@ -199,7 +199,7 @@ order 是操作属性，拒绝表外组合；一个逻辑原子地址上存在�
 
 ## Region 的 source 与 captures
 
-在独立 owner 内，`I.ordered` 保留迭代及累加顺序。`I.fold` 是作者对该循环的结合次序许可，入口生成带 `kir.reassociate` 的 `scf.for`。每个迭代参数只能进入自己的 sum 或 maximum_num，combine 的结果直接 yield。verifier 要求循环体只读、累加初值与返回类型匹配。它允许执行节点同时求一批贡献，也允许将点积和按概率加权的收缩映射到矩阵指令。概率窄化的舍入点和因果遮蔽仍在原表达式处生效。
+在独立 owner 内，`I.ordered` 保留迭代及累加顺序。`I.fold` 是作者对该循环的结合次序许可，入口生成带 `kir.reassociate` 的 `scf.for`。当循环携带显式 SSA 累加器时，每个迭代参数只能进入自己的 sum 或 maximum_num，combine 的结果直接 yield，verifier 要求循环体只读、累加初值与返回类型匹配；当循环对 `InOut` 视图做原地散射累加（如 `out[idx, d] = out[idx, d] + contrib`）时，verifier 要求每次写入仅与同坐标单次读取经可结合操作（整型 `addi` 或携带 `reassoc` 的浮点 `addf`/`maxnumf`）配对，且循环体内不得对该目标视图做其他读写。它允许执行节点同时求一批贡献、沿归约轴并行切分并通过原子累加或私有合并写回，也允许将点积和按概率加权的收缩映射到矩阵指令。概率窄化的舍入点和因果遮蔽仍在原表达式处生效。
 
 这项许可本身不包含在线归一化。当前 attention 显式先求最大值，再计算概率、分母与分子。可驻留的实现可复用同一份分数。在两个阶段间改变归一化基准、移动概率窄化或将 exp 换成 exp2，均不由上述许可推出。
 

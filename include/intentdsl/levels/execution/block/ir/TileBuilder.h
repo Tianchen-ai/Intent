@@ -99,6 +99,19 @@ struct Tiles {
       args.push_back(mask);
     op("tile_write", args);
   }
+  void atomicAdd(Value base, Value addr, Value val, Value mask = {}) {
+    SmallVector<Value> args{base, addr, val};
+    if (mask)
+      args.push_back(mask);
+    SmallVector<NamedAttribute, 2> attrs{
+        b.getNamedAttr("ci.implementation",
+                       b.getStringAttr((unit + "::tile-atomic-add").str()))};
+    if (isa<FloatType>(elem(val.getType())))
+      attrs.push_back(b.getNamedAttr(
+          "fastmath", arith::FastMathFlagsAttr::get(
+                          b.getContext(), arith::FastMathFlags::reassoc)));
+    op("tile_atomic_add", args, {}, attrs);
+  }
   Value dot(Value a, Value rhs, bool trans, Value acc = {}) {
     auto l = cast<RankedTensorType>(a.getType()),
          r = cast<RankedTensorType>(rhs.getType());

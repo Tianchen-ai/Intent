@@ -186,6 +186,13 @@ TerminalPrinter tilePrinter() {
             (v.numOperands() == 4 ? ",mask=" + v.operand(3) : "") + ")")
         .str();
   });
+  leaf("triton_src.tile_atomic_add", [](const LocalOpView &v) {
+    return ("tl.atomic_add(" + v.operand(0) + "+" + v.operand(1) + "," +
+            v.operand(2) +
+            (v.numOperands() == 4 ? ",mask=" + v.operand(3) : "") +
+            ",sem='relaxed')")
+        .str();
+  });
   leaf("triton_src.tile_broadcast", [](const LocalOpView &v) {
     auto axis = v.attrOfType<IntegerAttr>("axis").getInt();
     auto castExpr = "tl.cast(" + v.operand(0).str() + "," +

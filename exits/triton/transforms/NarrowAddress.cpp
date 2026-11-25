@@ -75,12 +75,15 @@ Range evaluateTileRange(Value v, Operation *scopeRoot,
              n == "triton_src.drop_unit_owner" ||
              isa<arith::IndexCastOp, arith::ExtSIOp>(op)) {
     res = evaluateTileRange(op->getOperand(0), scopeRoot, ranges, memo);
-  } else if (isa<arith::MulIOp, arith::AddIOp, arith::SubIOp>(op)) {
+  } else if (isa<arith::MulIOp, arith::AddIOp, arith::SubIOp, arith::MinSIOp>(
+                 op)) {
     auto a = evaluateTileRange(op->getOperand(0), scopeRoot, ranges, memo);
     auto b = evaluateTileRange(op->getOperand(1), scopeRoot, ranges, memo);
     if (a && b) {
       __int128 al = a->lo, ah = a->hi, bl = b->lo, bh = b->hi;
-      if (isa<arith::AddIOp>(op))
+      if (isa<arith::MinSIOp>(op))
+        res = fitI32(std::min(al, bl), std::min(ah, bh));
+      else if (isa<arith::AddIOp>(op))
         res = fitI32(al + bl, ah + bh);
       else if (isa<arith::SubIOp>(op))
         res = fitI32(al - bh, ah - bl);

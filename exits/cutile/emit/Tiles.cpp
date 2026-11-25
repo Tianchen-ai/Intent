@@ -233,6 +233,23 @@ TerminalPrinter cutilePrinter() {
             ")")
         .str();
   });
+  localExpr("ct_src.tile_atomic_add", [](const LocalOpView &v) {
+    if (v.numOperands() == 4) {
+      int rank = cast<MemRefType>(v.operandType(0)).getRank();
+      SmallVector<std::string, 4> masked;
+      for (int i = 0; i < rank; ++i)
+        masked.push_back("ct.where(" + v.operand(3).str() + "," +
+                         v.operand(1).str() + "[" + std::to_string(i) +
+                         "],-1)");
+      return ("ct.atomic_add(" + v.operand(0) + ",(" + llvm::join(masked, ",") +
+              ",)," + v.operand(2) +
+              ",check_bounds=True,memory_order=ct.MemoryOrder.RELAXED)")
+          .str();
+    }
+    return ("ct.atomic_add(" + v.operand(0) + "," + v.operand(1) + "," +
+            v.operand(2) + ",memory_order=ct.MemoryOrder.RELAXED)")
+        .str();
+  });
   localExpr("ct_src.tile_dot", [](const LocalOpView &v) {
     auto type = v.resultType(0);
     auto rhs = v.attrOfType<BoolAttr>("transpose_rhs").getValue()

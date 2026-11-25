@@ -136,13 +136,18 @@ LogicalResult verifyOwnerMap(func::FuncOp fn, const TargetProfile &p,
           "column tile requires a supported private square matrix");
   }
   if (phase == "formed")
-    return success(!tile && !choice);
+    return success(!tile && !choice && !space.hasAttr("block.fold_split"));
   if (phase == "decided")
     return success(
-        !tile && choice &&
+        !tile && choice && !space.hasAttr("block.fold_split") &&
         legalWidth(choice.getAs<IntegerAttr>("width"), owners) &&
         choice.getAs<StringAttr>("memory") &&
         (choice.getAs<StringAttr>("memory") == "direct" ||
+         (choice.getAs<StringAttr>("memory") == "scatter-fold" &&
+          choice.getAs<IntegerAttr>("split") &&
+          canSplitAssociativeScatter(
+              &space, facts, choice.getAs<IntegerAttr>("width").getInt(),
+              choice.getAs<IntegerAttr>("split").getInt())) ||
          (choice.getAs<StringAttr>("memory") == "matrix-fold" &&
           validPair(choice.getAs<IntegerAttr>("width"),
                     choice.getAs<IntegerAttr>("span"),
@@ -164,6 +169,10 @@ LogicalResult verifyOwnerMap(func::FuncOp fn, const TargetProfile &p,
            choice.getAs<IntegerAttr>("prefetch").getInt() == 16) &&
           canGroupReads(&space, p,
                         choice.getAs<IntegerAttr>("prefetch").getInt()))));
+  if (auto fs = space.getAttrOfType<IntegerAttr>("block.fold_split"))
+    if (!tile || !canSplitAssociativeScatter(&space, facts, tile.getInt(),
+                                             fs.getInt()))
+      return space.emitError("invalid associative scatter fold split");
   if (choice || !legalWidth(tile, owners) ||
       space.getAttr("block.owners") !=
           Builder(fn.getContext()).getI64IntegerAttr(owners))
@@ -197,6 +206,9 @@ llvm::Error emitOwnerArtifact(func::FuncOp fn, StringRef src,
   auto &sp = fn.front().front();
   auto tile = sp.getAttrOfType<IntegerAttr>("block.owner_tile").getInt();
   auto count = sp.getAttrOfType<IntegerAttr>("block.owners").getInt();
+  int64_t foldSplit = 1;
+  if (auto fs = sp.getAttrOfType<IntegerAttr>("block.fold_split"))
+    foldSplit = std::max<int64_t>(1, fs.getInt());
   auto abi = llvm::json::parse(fn->getAttrOfType<StringAttr>("kir.abi"));
   if (!abi)
     return abi.takeError();
@@ -213,7 +225,8 @@ llvm::Error emitOwnerArtifact(func::FuncOp fn, StringRef src,
       {"abi", std::move(*abi)},
       {"domain", publishDomain(fn)},
       {"guard", llvm::json::Object{{"min_width", 0}, {"max_width", nullptr}}},
-      {"grid", llvm::json::Array{int64_t(llvm::divideCeil(count, tile)), 1, 1}},
+      {"grid",
+       llvm::json::Array{int64_t(llvm::divideCeil(count, tile)), foldSplit, 1}},
       {"direct_views", true},
       {"rows", std::move(rows)}});
   return llvm::Error::success();
@@ -258,6 +271,14 @@ void registerOrdered(Unit &u) {
         d.getAs<IntegerAttr>("span") &&
         block::panelFolds(o, p, d.getAs<IntegerAttr>("span").getInt()))
       return llvm::Error::success();
+    if (d && d.getAs<StringAttr>("memory") == "scatter-fold" &&
+        count >= 0 && block::legalWidth(d.getAs<IntegerAttr>("width"), count) &&
+        d.getAs<IntegerAttr>("split") &&
+        block::canSplitAssociativeScatter(
+            o, p.services.get<CallFacts>(),
+            d.getAs<IntegerAttr>("width").getInt(),
+            d.getAs<IntegerAttr>("split").getInt()))
+      return llvm::Error::success();
     if (count < 0 || !d || !d.getAs<StringAttr>("memory") ||
         !block::legalWidth(d.getAs<IntegerAttr>("width"), count) ||
         !(d.getAs<StringAttr>("memory") == "direct" ||
@@ -300,6 +321,17 @@ void registerOrdered(Unit &u) {
           c.preconditions == std::vector<std::string>{"disjoint-owners"})
         return llvm::Error::success();
       return llvm::createStringError("invalid fold candidate");
+    }
+    if (d.getAs<StringAttr>("memory") == "scatter-fold") {
+      auto split = d.getAs<IntegerAttr>("split");
+      if (w && split && c.topology == "parallel-scatter-fold" &&
+          c.id == "scatter-" + std::to_string(w.getInt()) + "x" +
+                      std::to_string(split.getInt()) &&
+          c.preconditions ==
+              std::vector<std::string>{"disjoint-owners",
+                                       "reassociable-scatter"})
+        return llvm::Error::success();
+      return llvm::createStringError("invalid scatter fold candidate");
     }
     bool forward = d.getAs<StringAttr>("memory") == "forward";
     bool shared = d.getAs<StringAttr>("memory") == "shared";
@@ -367,6 +399,22 @@ void registerOrdered(Unit &u) {
                       d,
                       {"disjoint-owners"}});
       }
+      if (w >= 32) {
+        for (int64_t split : {16, 64, 256, 512, 1024, 2048}) {
+          if (!block::canSplitAssociativeScatter(
+                  o, p.services.get<CallFacts>(), w, split))
+            continue;
+          auto sd = b.getDictionaryAttr(
+              {b.getNamedAttr("width", a),
+               b.getNamedAttr("memory", b.getStringAttr("scatter-fold")),
+               b.getNamedAttr("split", b.getI64IntegerAttr(split))});
+          cs.push_back(
+              {"scatter-" + std::to_string(w) + "x" + std::to_string(split),
+               "parallel-scatter-fold",
+               sd,
+               {"disjoint-owners", "reassociable-scatter"}});
+        }
+      }
     }
     return cs;
   };
@@ -396,6 +444,8 @@ void registerOrdered(Unit &u) {
     o->removeAttr("block.owner_choice");
     o->setAttr("block.owner_tile", d.getAs<IntegerAttr>("width"));
     o->setAttr("block.owners", b.getI64IntegerAttr(block::ownerCount(o, *f)));
+    if (d.getAs<StringAttr>("memory") == "scatter-fold")
+      o->setAttr("block.fold_split", d.get("split"));
     if (d.getAs<StringAttr>("memory") == "matrix-fold")
       o->setAttr("block.pair_axis", d.get("axis"));
     if (d.getAs<StringAttr>("memory") == "token" ||

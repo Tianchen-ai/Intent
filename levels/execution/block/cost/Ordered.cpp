@@ -367,6 +367,36 @@ void orderedCost(Unit &u) {
             e.terms["group_input_bytes"] = {readCost, "B"};
           }
           double waveSetup = 0;
+          if (choice.getAs<mlir::StringAttr>("memory") == "scatter-fold") {
+            int64_t split = choice.getAs<mlir::IntegerAttr>("split").getInt();
+            intentdsl::block::AssociativeScatterLoopInfo assocInfo;
+            intentdsl::block::canSplitAssociativeScatter(op, f, w, split,
+                                                         &assocInfo);
+            double totalBlocks = blocks * double(split);
+            double residentPerSm =
+                std::clamp(1024.0 / std::max<int64_t>(32, w), 2.0, 8.0);
+            double concurrentBlocks = std::max<double>(
+                1.0, std::max<int64_t>(1, f->participants) * residentPerSm);
+            waves = std::ceil(totalBlocks / concurrentBlocks);
+            e.terms["independent_blocks"] = {totalBlocks, "count"};
+            e.terms["issue_waves"] = {waves, "count"};
+            double itemsPerCta =
+                std::ceil(double(std::max<int64_t>(1, assocInfo.extent)) /
+                          double(split));
+            double panelN = (w >= 16 && assocInfo.extent >= 32) ? 8.0 : 1.0;
+            double stepsPerCta = std::ceil(itemsPerCta / panelN);
+            double activeSlots = std::min<double>(totalBlocks, concurrentBlocks);
+            double smUnderutil = concurrentBlocks / activeSlots;
+            double sectorPenalty =
+                32.0 / std::min<double>(32.0, double(w) * 4.0);
+            dependency = stepsPerCta * smUnderutil * sectorPenalty;
+            waveSetup = 0.8 * waves;
+            double atomicBytes =
+                double(assocInfo.extent) *
+                (double(n) * 4.0 * sectorPenalty * 2.0 + 4.0 * blocks);
+            readCost += atomicBytes;
+            panelBytes = 0;
+          }
           if (!span && choice.getAs<mlir::StringAttr>("memory") == "direct") {
             auto fnOp = op->getParentOfType<mlir::func::FuncOp>();
             dependency *= 1. + std::max(0., double(w) * std::max(lanes, triLanes) /
@@ -434,8 +464,8 @@ void orderedCost(Unit &u) {
                     (w == 1) ? std::ceil(double(ext) / 32.0) : double(ext);
                 continue;
               }
-              if (!loop->hasAttr("kir.reassociate") && lanes == 1 &&
-                  triLanes == 1 && loop.getNumRegionIterArgs() == 0) {
+              if (lanes == 1 && triLanes == 1 &&
+                  loop.getNumRegionIterArgs() == 0) {
                 bool hasIndirectStore = false;
                 for (auto &inst : loop.getBody()->without_terminator())
                   if (auto st = mlir::dyn_cast<mlir::memref::StoreOp>(inst))
@@ -454,7 +484,9 @@ void orderedCost(Unit &u) {
                     double sectorPenalty =
                         16.0 / std::min<double>(16.0, double(w) * 4.0);
                     dependency *= warpsInCta * smUnderutil * sectorPenalty *
-                                  (double(*ext) / 64.0);
+                                  (loop->hasAttr("kir.reassociate")
+                                       ? double(*ext)
+                                       : double(*ext) / 64.0);
                   }
                 }
               }

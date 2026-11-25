@@ -283,5 +283,65 @@ void registerContracts(Unit &unit) {
     };
     unit.implementations.push_back({std::move(c), COMPILERINFRA_SOURCE});
   }
+  {
+    ImplementationContract ac;
+    ac.name = "tile-atomic-add";
+    ac.operation = "ct_src.tile_atomic_add";
+    ac.symbol = "ct.atomic_add";
+    ac.source = ImplementationSource::Builtin;
+    ac.minimum = Reuse::Native;
+    ac.operands = "target array, projected coordinate tuple, f32/i32 update, optional i1 mask";
+    ac.layout = "global array coordinates with relaxed device-scope atomic RMW";
+    ac.accumulator = "FP32 (with reassoc) or INT32";
+    ac.effects = "global read-modify-write";
+    ac.numerical = "associative/commutative relaxed atomic addition";
+    ac.estimator = "exits/cutile::collective-steps";
+    ac.costParameters = {"rows", "width"};
+    TypedContract tc;
+    tc.effects = EffectMask::ReadWrite;
+    tc.shape.minOperands = 3;
+    tc.shape.maxOperands = 4;
+    tc.shape.minResults = 0;
+    tc.shape.maxResults = 0;
+    tc.operandTypes = {ScalarTypeKind::I1, ScalarTypeKind::I32,
+                       ScalarTypeKind::I64, ScalarTypeKind::F32};
+    tc.accumulatorTypes = {ScalarTypeKind::I32, ScalarTypeKind::F32};
+    ac.typed = std::move(tc);
+    ac.available = [](const TargetProfile &profile) -> llvm::Error {
+      if (!profile.services.get<intentdsl::cutile::ArrayIndices>())
+        return llvm::createStringError("missing cuTile target capability");
+      return llvm::Error::success();
+    };
+    ac.verify = [](Operation *op) -> LogicalResult {
+      if (op->getNumResults() != 0 ||
+          (op->getNumOperands() != 3 && op->getNumOperands() != 4))
+        return failure();
+      auto mem = dyn_cast<MemRefType>(op->getOperand(0).getType());
+      Type elem = getElementTypeOrSelf(op->getOperand(2).getType());
+      auto shapeOf = [](Type t) -> ArrayRef<int64_t> {
+        if (auto rt = dyn_cast<RankedTensorType>(t))
+          return rt.getShape();
+        return {};
+      };
+      if (!mem || mem.getElementType() != elem ||
+          (!elem.isF32() && !elem.isInteger(32)) ||
+          shapeOf(op->getOperand(1).getType()) !=
+              shapeOf(op->getOperand(2).getType()))
+        return failure();
+      if (op->getNumOperands() == 4 &&
+          (!getElementTypeOrSelf(op->getOperand(3).getType()).isInteger(1) ||
+           shapeOf(op->getOperand(3).getType()) !=
+               shapeOf(op->getOperand(1).getType())))
+        return failure();
+      if (elem.isF32()) {
+        auto fm = op->getAttrOfType<arith::FastMathFlagsAttr>("fastmath");
+        if (!fm ||
+            !bitEnumContainsAll(fm.getValue(), arith::FastMathFlags::reassoc))
+          return failure();
+      }
+      return success();
+    };
+    unit.implementations.push_back({std::move(ac), COMPILERINFRA_SOURCE});
+  }
 }
 } // namespace CI_UNIT_NAMESPACE
