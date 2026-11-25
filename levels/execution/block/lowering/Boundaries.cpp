@@ -1,4 +1,5 @@
 #include "compilerinfra/Assembly.h"
+#include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
 #include "intentdsl/levels/algorithm/kir/ir/Permutation.h"
 #include "intentdsl/levels/algorithm/kir/ir/RowSemantics.h"
 #include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
@@ -153,9 +154,22 @@ void bind(Unit &unit) {
         return llvm::Error::success();
       }
       if(walk=="segment-tile" || walk=="segment-row" || walk=="segment-stream"){
-        bool fold=op->walk([](Operation *v){return v->getName().stripDialect()=="ordered_sum" ? WalkResult::interrupt():WalkResult::advance();}).wasInterrupted();
+        bool fold = false, reassoc = true;
+        op->walk([&](Operation *v) {
+          if (v->getName().stripDialect() == "ordered_sum") {
+            fold = true;
+            if (!intentdsl::kir::hasFastMath(v, arith::FastMathFlags::reassoc))
+              reassoc = false;
+          }
+        });
         auto batch=d.getAs<IntegerAttr>("member_batch");
-        if(!fold || c.id!=(batch?walk.str()+"-8":walk.str()) || c.topology!=walk.str() || (batch && (walk!="segment-tile" || batch.getInt()!=8)) ||
+        bool validBatch = !batch ||
+            (walk == "segment-tile" &&
+             (batch.getInt() == 8 ||
+              (reassoc && (batch.getInt() == 32 || batch.getInt() == 64))));
+        std::string expectedId =
+            batch ? walk.str() + "-" + std::to_string(batch.getInt()) : walk.str();
+        if(!fold || c.id!=expectedId || c.topology!=walk.str() || !validBatch ||
             c.preconditions!=std::vector<std::string>{"distinct-segment-outputs"} ||
             (walk!="segment-row")!=(topology=="stream"))return llvm::createStringError("invalid segment ownership");
         return llvm::Error::success();

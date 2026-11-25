@@ -11,8 +11,11 @@
 #include "intentdsl/levels/execution/block/ir/Contraction.h"
 #include "intentdsl/levels/execution/block/ir/Grid.h"
 #include "intentdsl/levels/execution/block/ir/Owners.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Pass/Pass.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/StringMap.h"
 #include <set>
 
@@ -45,6 +48,84 @@ LogicalResult verifyColumnViews(func::FuncOp);
 LogicalResult verifyMatrixExit(func::FuncOp,const TargetProfile &);
 llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &);
 namespace {
+ArrayAttr computeTritonRangeBounds(scf::ForOp loop) {
+  Builder b(loop.getContext());
+  SmallVector<Attribute, 3> bounds;
+  for (Value v : {loop.getLowerBound(), loop.getUpperBound(), loop.getStep()}) {
+    if (auto i = v.getDefiningOp<arith::ConstantIndexOp>())
+      bounds.push_back(b.getI64IntegerAttr(i.value()));
+    else if (auto c = v.getDefiningOp<arith::ConstantIntOp>())
+      bounds.push_back(b.getI64IntegerAttr(c.value()));
+    else
+      bounds.push_back(b.getUnitAttr());
+  }
+  return b.getArrayAttr(bounds);
+}
+
+bool isTritonCarryOwner(Operation *op) {
+  return isa<scf::ForOp, scf::IfOp>(op) ||
+         op->getName().getStringRef() == "triton_src.tiles";
+}
+
+bool isTritonCarryYield(Operation *op) {
+  return isa<scf::YieldOp>(op) ||
+         op->getName().getStringRef() == "triton_src.yield";
+}
+
+void stampTritonCarryAndLoops(func::FuncOp fn) {
+  Builder b(fn.getContext());
+  int64_t nextId = 0;
+  fn.walk([&](Operation *op) {
+    if (auto loop = dyn_cast<scf::ForOp>(op))
+      loop->setAttr("triton_src.range_bounds", computeTritonRangeBounds(loop));
+    if (isTritonCarryOwner(op) && op->getNumResults() > 0) {
+      auto idAttr = b.getI64IntegerAttr(nextId++);
+      op->setAttr("triton_src.carry_id", idAttr);
+      for (Region &reg : op->getRegions()) {
+        for (Block &blk : reg) {
+          if (blk.empty())
+            continue;
+          Operation &term = blk.back();
+          if (isTritonCarryYield(&term) && term.getNumOperands() > 0)
+            term.setAttr("triton_src.carry_id", idAttr);
+        }
+      }
+    }
+  });
+}
+
+LogicalResult verifyTritonCarryAndLoops(func::FuncOp fn) {
+  llvm::DenseSet<int64_t> seenIds;
+  auto res = fn.walk([&](Operation *op) {
+    if (auto loop = dyn_cast<scf::ForOp>(op)) {
+      if (loop->getAttr("triton_src.range_bounds") !=
+          computeTritonRangeBounds(loop)) {
+        loop.emitError("missing or mismatched triton_src.range_bounds on scf.for");
+        return WalkResult::interrupt();
+      }
+    }
+    if (isTritonCarryOwner(op) && op->getNumResults() > 0) {
+      auto idAttr = op->getAttrOfType<IntegerAttr>("triton_src.carry_id");
+      if (!idAttr || !seenIds.insert(idAttr.getInt()).second) {
+        op->emitError("missing or duplicate triton_src.carry_id");
+        return WalkResult::interrupt();
+      }
+    }
+    if (isTritonCarryYield(op) && op->getNumOperands() > 0) {
+      Operation *parent = op->getParentOp();
+      auto idAttr = op->getAttrOfType<IntegerAttr>("triton_src.carry_id");
+      if (!parent || !isTritonCarryOwner(parent) || !idAttr ||
+          parent->getAttr("triton_src.carry_id") != idAttr ||
+          parent->getNumResults() != op->getNumOperands()) {
+        op->emitError("triton_src.carry_id on yield disagrees with enclosing op");
+        return WalkResult::interrupt();
+      }
+    }
+    return WalkResult::advance();
+  });
+  return success(!res.wasInterrupted());
+}
+
 llvm::Error describeArtifact(func::FuncOp, llvm::raw_pwrite_stream &);
 struct BindCallable : PassWrapper<BindCallable, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(BindCallable)
@@ -56,10 +137,13 @@ struct BindCallable : PassWrapper<BindCallable, OperationPass<ModuleOp>> {
     if (intentdsl::kir::orderedOwners(fn))
       intentdsl::block::expandOwnerProgram(fn, "exits/triton",
                                            tritonOwnerViews());
-    else
+    else {
+      auto mt = profile.services.get<intentdsl::block::MatrixTarget>();
       intentdsl::block::expandMatrixProgram(
           fn, "exits/triton", tritonScaledPanels, tritonMatrixRead,
-          tritonWindowPanels, tritonMatrixWrite);
+          tritonWindowPanels, tritonMatrixWrite,
+          mt && mt->flatRecordBitPlanes);
+    }
     Builder b(fn.getContext());
     if (fn.front().front().getName().getStringRef() !=
             "triton_src.tile_program" &&
@@ -69,6 +153,7 @@ struct BindCallable : PassWrapper<BindCallable, OperationPass<ModuleOp>> {
       fn->setAttr("triton_src.max_width", b.getI64IntegerAttr(guard[1]));
       lowerRows(fn, profile);
     }
+    stampTritonCarryAndLoops(fn);
     std::set<std::string> seenResources;
     SmallVector<std::string> runtimeImpls;
     fn.walk([&](Operation *op) {
@@ -264,6 +349,8 @@ static LogicalResult verifyBoundary(ModuleOp m, const TargetProfile &profile,
   auto tritonCap = profile.services.get<intentdsl::itsrc::TritonTarget>();
   if (!tritonCap || fn->hasAttr("triton_src.tma") != tritonCap->permitTma)
     return fn.emitError("invalid Triton TMA transfer capability"), failure();
+  if (phase == "callable" && failed(verifyTritonCarryAndLoops(fn)))
+    return failure();
   if (fn.front().front().getName().getStringRef() == "triton_src.tile_program")
     return phase == "callable" ? verifyTileProgram(fn, profile) : failure();
   if (failed(verifyColumnViews(fn)))

@@ -122,13 +122,34 @@ bool fullFoldPanels(scf::ForOp loop, const CallFacts &facts, int64_t span) {
     }
     return std::nullopt;
   };
+  auto staticCap = [&](Value v) -> std::optional<int64_t> {
+    if (auto c = staticVal(v))
+      return c;
+    if (auto mn = v.getDefiningOp<arith::MinSIOp>()) {
+      if (auto c = staticVal(mn.getLhs()))
+        return c;
+      if (auto c = staticVal(mn.getRhs()))
+        return c;
+    }
+    if (auto sel = v.getDefiningOp<arith::SelectOp>()) {
+      auto a = staticVal(sel.getTrueValue()), b = staticVal(sel.getFalseValue());
+      if (a && b)
+        return std::max(*a, *b);
+    }
+    return std::nullopt;
+  };
   auto loCst = staticVal(loop.getLowerBound());
   auto hiCst = staticVal(loop.getUpperBound());
   if (loCst && hiCst && *loCst == *hiCst && *loCst >= 0 && *loCst % span == 0)
     return true;
-  if (!hiCst || *hiCst < span)
+  auto cap = staticCap(loop.getUpperBound());
+  if (!cap || *cap < span)
     return false;
-  if (loCst && (*loCst < 0 || *loCst > *hiCst - span))
+  if (loCst && (*loCst < 0 || *loCst > *cap))
+    return false;
+  if (hiCst && (*hiCst < 0 || *hiCst > *cap))
+    return false;
+  if (loCst && hiCst && *loCst > *hiCst - span)
     return false;
   auto *ctx = loop->getContext();
   ctx->getOrLoadDialect<arith::ArithDialect>();
@@ -136,30 +157,166 @@ bool fullFoldPanels(scf::ForOp loop, const CallFacts &facts, int64_t span) {
   ctx->getOrLoadDialect<scf::SCFDialect>();
   OpBuilder b(loop);
   Location loc = loop.getLoc();
+  SmallVector<Operation *, 16> tempOps;
+  auto track = [&](Operation *op) {
+    tempOps.push_back(op);
+    return op;
+  };
+  // Materialize static CallFacts extents (memref.dim), owner_space arguments
+  // (via unit-step scf.for ranges so MLIR IntegerRangeAnalysis propagates
+  // through arithmetic), and arith.minsi -> arith.select in temporary probe IR
+  // so CompilerInfra's proveTailAccess verifies alignment and bounds from IR.
+  Operation *space = loop->getParentOp();
+  auto spaceAxes =
+      space ? space->getAttrOfType<DenseI64ArrayAttr>("axes") : DenseI64ArrayAttr();
+  llvm::DenseMap<Value, Value> ownerRemap;
+  SmallVector<scf::ForOp, 4> ownerLoops;
+  auto trackLocal = [&](Operation *op) {
+    if (ownerLoops.empty())
+      tempOps.push_back(op);
+    return op;
+  };
+  std::function<void(Value, unsigned)> collectOwners = [&](Value v,
+                                                           unsigned depth) {
+    if (depth > 8 || ownerRemap.count(v))
+      return;
+    if (auto barg = dyn_cast<BlockArgument>(v)) {
+      if (space && space->getName().stripDialect() == "owner_space" &&
+          spaceAxes && barg.getOwner() == &space->getRegion(0).front()) {
+        unsigned idx = barg.getArgNumber();
+        if (idx < spaceAxes.size() && idx < space->getNumOperands()) {
+          if (auto sh = facts.shapeOf(space->getOperand(idx))) {
+            if (auto ext = (*sh)[spaceAxes[idx]].getAsInteger(); ext && *ext > 0) {
+              Value c0 =
+                  trackLocal(b.create<arith::ConstantIndexOp>(loc, 0))
+                      ->getResult(0);
+              Value cExt =
+                  trackLocal(b.create<arith::ConstantIndexOp>(loc, *ext))
+                      ->getResult(0);
+              Value c1 =
+                  trackLocal(b.create<arith::ConstantIndexOp>(loc, 1))
+                      ->getResult(0);
+              auto ol = b.create<scf::ForOp>(loc, c0, cExt, c1);
+              ownerLoops.push_back(ol);
+              ownerRemap[v] = ol.getInductionVar();
+              b.setInsertionPointToStart(ol.getBody());
+            }
+          }
+        }
+      }
+      return;
+    }
+    if (Operation *def = v.getDefiningOp()) {
+      if (isa<arith::MinSIOp, arith::AddIOp, arith::SubIOp, arith::MulIOp,
+              arith::FloorDivSIOp, arith::DivUIOp, arith::RemSIOp,
+              arith::RemUIOp, arith::IndexCastOp>(def))
+        for (Value opnd : def->getOperands())
+          collectOwners(opnd, depth + 1);
+      else if (auto sel = dyn_cast<arith::SelectOp>(def)) {
+        collectOwners(sel.getTrueValue(), depth + 1);
+        collectOwners(sel.getFalseValue(), depth + 1);
+      }
+    }
+  };
   auto buf = b.create<memref::AllocOp>(
-      loc, MemRefType::get({*hiCst}, b.getI8Type()));
-  Value loIdx = loop.getLowerBound();
-  Operation *loCast = nullptr;
-  if (!loIdx.getType().isIndex()) {
-    loIdx = b.create<arith::IndexCastOp>(loc, b.getIndexType(), loIdx);
-    loCast = loIdx.getDefiningOp();
-  }
-  Value cHi = b.create<arith::ConstantIndexOp>(loc, *hiCst);
-  Value cSpan = b.create<arith::ConstantIndexOp>(loc, span);
-  auto probeLoop = b.create<scf::ForOp>(loc, loIdx, cHi, cSpan);
-  b.setInsertionPointToStart(probeLoop.getBody());
-  auto sub = b.create<memref::SubViewOp>(
-      loc, buf, ArrayRef<OpFoldResult>{probeLoop.getInductionVar()},
-      ArrayRef<OpFoldResult>{b.getIndexAttr(span)},
-      ArrayRef<OpFoldResult>{b.getIndexAttr(1)});
-  auto proof = compilerinfra::proveTailAccess(sub.getOperation());
-  probeLoop.erase();
-  cSpan.getDefiningOp()->erase();
-  cHi.getDefiningOp()->erase();
-  if (loCast)
-    loCast->erase();
-  buf.erase();
-  return proof.proven && proof.kind == compilerinfra::TailKind::ExactInBounds;
+      loc, MemRefType::get({*cap}, b.getI8Type()));
+  track(buf);
+  Value cCap = track(b.create<arith::ConstantIndexOp>(loc, *cap))->getResult(0);
+  Value cSpan =
+      track(b.create<arith::ConstantIndexOp>(loc, span))->getResult(0);
+  collectOwners(loop.getLowerBound(), 0);
+  collectOwners(loop.getUpperBound(), 0);
+  std::function<Value(Value, unsigned)> materialize =
+      [&](Value v, unsigned depth) -> Value {
+    if (depth > 8)
+      return v;
+    if (auto it = ownerRemap.find(v); it != ownerRemap.end())
+      return it->second;
+    if (auto c = staticVal(v)) {
+      if (v.getDefiningOp<arith::ConstantIndexOp>())
+        return v;
+      return trackLocal(b.create<arith::ConstantIndexOp>(loc, *c))
+          ->getResult(0);
+    }
+    if (auto mn = v.getDefiningOp<arith::MinSIOp>()) {
+      Value lhs = materialize(mn.getLhs(), depth + 1);
+      Value rhs = materialize(mn.getRhs(), depth + 1);
+      Value cmp =
+          trackLocal(b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt,
+                                             lhs, rhs))
+              ->getResult(0);
+      return trackLocal(b.create<arith::SelectOp>(loc, cmp, lhs, rhs))
+          ->getResult(0);
+    }
+    if (auto sel = v.getDefiningOp<arith::SelectOp>()) {
+      Value t = materialize(sel.getTrueValue(), depth + 1);
+      Value f = materialize(sel.getFalseValue(), depth + 1);
+      if (t != sel.getTrueValue() || f != sel.getFalseValue())
+        return trackLocal(b.create<arith::SelectOp>(loc, sel.getCondition(), t,
+                                                    f))
+            ->getResult(0);
+    }
+    if (auto fd = v.getDefiningOp<arith::FloorDivSIOp>()) {
+      Value lhs = materialize(fd.getLhs(), depth + 1);
+      Value rhs = materialize(fd.getRhs(), depth + 1);
+      if (lhs != fd.getLhs() || rhs != fd.getRhs())
+        return trackLocal(b.create<arith::FloorDivSIOp>(loc, lhs, rhs))
+            ->getResult(0);
+    }
+    if (auto add = v.getDefiningOp<arith::AddIOp>()) {
+      Value lhs = materialize(add.getLhs(), depth + 1);
+      Value rhs = materialize(add.getRhs(), depth + 1);
+      if (lhs != add.getLhs() || rhs != add.getRhs())
+        return trackLocal(b.create<arith::AddIOp>(loc, lhs, rhs))->getResult(0);
+    }
+    if (auto sub = v.getDefiningOp<arith::SubIOp>()) {
+      Value lhs = materialize(sub.getLhs(), depth + 1);
+      Value rhs = materialize(sub.getRhs(), depth + 1);
+      if (lhs != sub.getLhs() || rhs != sub.getRhs())
+        return trackLocal(b.create<arith::SubIOp>(loc, lhs, rhs))->getResult(0);
+    }
+    if (auto mul = v.getDefiningOp<arith::MulIOp>()) {
+      Value lhs = materialize(mul.getLhs(), depth + 1);
+      Value rhs = materialize(mul.getRhs(), depth + 1);
+      if (lhs != mul.getLhs() || rhs != mul.getRhs())
+        return trackLocal(b.create<arith::MulIOp>(loc, lhs, rhs))->getResult(0);
+    }
+    if (!v.getType().isIndex())
+      return trackLocal(b.create<arith::IndexCastOp>(loc, b.getIndexType(), v))
+          ->getResult(0);
+    return v;
+  };
+  auto proveAligned = [&](Value bound) -> bool {
+    OpBuilder::InsertionGuard guard(b);
+    Value startIdx;
+    if (auto bc = staticVal(bound); bc && *bc == *cap) {
+      startIdx =
+          trackLocal(b.create<arith::ConstantIndexOp>(loc, 0))->getResult(0);
+    } else {
+      startIdx = materialize(bound, 0);
+      if (!startIdx.getType().isIndex())
+        startIdx = trackLocal(
+                       b.create<arith::IndexCastOp>(loc, b.getIndexType(),
+                                                    startIdx))
+                       ->getResult(0);
+    }
+    auto probe = b.create<scf::ForOp>(loc, startIdx, cCap, cSpan);
+    b.setInsertionPointToStart(probe.getBody());
+    auto sub = b.create<memref::SubViewOp>(
+        loc, buf, ArrayRef<OpFoldResult>{probe.getInductionVar()},
+        ArrayRef<OpFoldResult>{b.getIndexAttr(span)},
+        ArrayRef<OpFoldResult>{b.getIndexAttr(1)});
+    auto proof = compilerinfra::proveTailAccess(sub.getOperation());
+    probe.erase();
+    return proof.proven && proof.kind == compilerinfra::TailKind::ExactInBounds;
+  };
+  bool ok = proveAligned(loop.getLowerBound()) &&
+            proveAligned(loop.getUpperBound());
+  if (!ownerLoops.empty())
+    ownerLoops.front().erase();
+  for (auto it = tempOps.rbegin(); it != tempOps.rend(); ++it)
+    (*it)->erase();
+  return ok;
 }
 bool overlappingWindowBound(Value v, BlockArgument owner, scf::ForOp loop,
                             int64_t width) {

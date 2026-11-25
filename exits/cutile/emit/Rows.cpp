@@ -21,30 +21,18 @@ std::string memberCountExpr(Type viewTy, StringRef name, int64_t ownerAxis) {
   return product;
 }
 
-llvm::Error customRowRule(Operation &op, PrintPoint at, PrintContext &c) {
-  auto code = op.getName().stripDialect();
-  if (at != PrintPoint::Enter)
-    return llvm::Error::success();
-  if (code == "yield") {
-    if (op.getNumOperands()) {
-      SmallVector<std::string> lhs, rhs;
-      for (unsigned i = 0; i < op.getNumOperands(); ++i) {
-        lhs.push_back(c.name(op.getParentOp()->getResult(i)));
-        rhs.push_back(c.name(op.getOperand(i)));
-      }
-      c.line(llvm::join(lhs, ", ") + " = " + llvm::join(rhs, ", "));
-    }
-    return llvm::Error::success();
-  }
-  return llvm::createStringError("unexpected custom cuTile operation " + code);
-}
-
 llvm::Error localRowRule(const LocalOpView &v, PrintPoint at, PrintContext &c) {
   auto code = v.operation().split('.').second;
   if (code == "tiles") {
+    unsigned nRes = v.numResults();
+    auto idAttr = v.attrOfType<IntegerAttr>("ct_src.carry_id");
+    if (nRes > 0 && !idAttr)
+      return llvm::createStringError("ct_src.tiles requires ct_src.carry_id");
+    std::string prefix =
+        idAttr ? "_carry_" + std::to_string(idAttr.getInt()) + "_" : "";
     if (at == PrintPoint::Enter) {
-      for (unsigned i = 0; i < v.numResults(); ++i)
-        c.line((v.result(i) + " = " + v.operand(1 + i)).str());
+      for (unsigned i = 0; i < nRes; ++i)
+        c.line(prefix + std::to_string(i) + " = " + v.operand(1 + i).str());
     } else if (at == PrintPoint::BeginBlock) {
       auto owner = v.attrOfType<IntegerAttr>("ct_src.owner_axis");
       c.line("for " + v.blockArguments()[0] + " in range(ct.cdiv(" +
@@ -53,10 +41,28 @@ llvm::Error localRowRule(const LocalOpView &v, PrintPoint at, PrintContext &c) {
                     : (v.operand(0) + ".shape[-1]").str()) +
              ",W)):");
       ++c.indent;
-      for (unsigned i = 0; i < v.numResults(); ++i)
-        c.line((v.blockArguments()[1 + i] + " = " + v.result(i)).str());
-    } else if (at == PrintPoint::Leave) {
+      for (unsigned i = 0; i < nRes; ++i)
+        c.line(v.blockArguments()[1 + i] + " = " + prefix + std::to_string(i));
+    } else if (at == PrintPoint::EndBlock) {
       --c.indent;
+    } else if (at == PrintPoint::Leave) {
+      for (unsigned i = 0; i < nRes; ++i)
+        c.line(v.result(i).str() + " = " + prefix + std::to_string(i));
+    }
+    return llvm::Error::success();
+  }
+  if (code == "yield") {
+    if (at == PrintPoint::Enter && v.numOperands()) {
+      auto idAttr = v.attrOfType<IntegerAttr>("ct_src.carry_id");
+      if (!idAttr)
+        return llvm::createStringError("ct_src.yield requires ct_src.carry_id");
+      std::string prefix = "_carry_" + std::to_string(idAttr.getInt()) + "_";
+      SmallVector<std::string> lhs, rhs;
+      for (unsigned i = 0; i < v.numOperands(); ++i) {
+        lhs.push_back(prefix + std::to_string(i));
+        rhs.push_back(v.operand(i).str());
+      }
+      c.line(llvm::join(lhs, ", ") + " = " + llvm::join(rhs, ", "));
     }
     return llvm::Error::success();
   }
@@ -438,7 +444,7 @@ void rowRules(TerminalPrinter &printer) {
       "$r0 = ct.broadcast_to(ct.expand_dims(ct.gather($0,ct.astype($1,{index_type})*{stride}+$2),1),(R,W))");
 
   // Local rules (LocalOpView only)
-  for (auto op : {"tiles", "stripe_tile_load", "stripe_tile_store",
+  for (auto op : {"tiles", "yield", "stripe_tile_load", "stripe_tile_store",
                   "rect_slab_load", "rect_slab_store", "gather_slab",
                   "scatter_slab", "active", "linear_index", "pid", "div",
                   "bin_index", "zero_bins", "bin_panels", "read_bin_keys",
@@ -446,9 +452,5 @@ void rowRules(TerminalPrinter &printer) {
                   "axis_reduce", "map", "uniform", "constant", "tile_load",
                   "tile_store", "reduce", "identity", "combine", "cast"})
     ops["ct_src." + std::string(op)] = PrintRule::local(localRowRule);
-
-  // Audited custom rules with explicit structural reasons
-  ops["ct_src.yield"] = PrintRule::custom(
-      customRowRule, "assigns yielded values to enclosing ct_src.tiles results");
 }
 } // namespace CI_UNIT_NAMESPACE

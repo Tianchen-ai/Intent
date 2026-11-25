@@ -58,6 +58,7 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
   caps->globalAtomicBins=true;
   auto matrix=std::make_shared<intentdsl::block::MatrixTarget>();
   matrix->estimate="exits/triton::matrix-issues";
+  matrix->flatRecordBitPlanes = true;
   matrix->implementations = {
       {"contract", {"exits/triton::native-dot"}},
       {"window_contract", {"exits/triton::native-dot"}},
@@ -67,9 +68,9 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
       {"q4k_dot", {"exits/triton::row-collective"}}};
   if (*arch == 90)
     matrix->tiles = {
-        {2, 32, 256, R"({"num_warps":2,"num_stages":2})", "q4k_dot"},
-        {4, 32, 256, R"({"num_warps":4,"num_stages":2})", "q4k_dot"},
-        {8, 32, 256, R"({"num_warps":4,"num_stages":2})", "q4k_dot"},
+        {2, 32, 256, R"({"num_warps":1,"num_stages":2})", "q4k_dot"},
+        {4, 32, 256, R"({"num_warps":2,"num_stages":2})", "q4k_dot"},
+        {8, 32, 256, R"({"num_warps":2,"num_stages":2})", "q4k_dot"},
         {16, 32, 32, R"({"num_warps":4,"num_stages":2})"},
         {32, 64, 32, R"({"num_warps":4,"num_stages":3})"},
         {32, 64, 64, R"({"num_warps":4,"num_stages":3})", "contract"},
@@ -86,9 +87,9 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
         {128, 256, 64, R"({"num_warps":8,"num_stages":4})", "contract", 2}};
   else
     matrix->tiles = {
-        {2, 32, 256, R"({"num_warps":2,"num_stages":2})", "q4k_dot"},
-        {4, 32, 256, R"({"num_warps":4,"num_stages":2})", "q4k_dot"},
-        {8, 32, 256, R"({"num_warps":4,"num_stages":2})", "q4k_dot"},
+        {2, 32, 256, R"({"num_warps":1,"num_stages":2})", "q4k_dot"},
+        {4, 32, 256, R"({"num_warps":2,"num_stages":2})", "q4k_dot"},
+        {8, 32, 256, R"({"num_warps":2,"num_stages":2})", "q4k_dot"},
         {16, 32, 32, R"({"num_warps":4,"num_stages":2})"},
         {32, 64, 32, R"({"num_warps":4,"num_stages":2})"},
         {32, 64, 64, R"({"num_warps":4,"num_stages":3})", "contract"},

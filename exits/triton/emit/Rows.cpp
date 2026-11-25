@@ -19,18 +19,45 @@ bool viewHasFastMath(const LocalOpView &v, arith::FastMathFlags req) {
   return attr && bitEnumContainsAll(attr.getValue(), req);
 }
 
-llvm::Error customRowOp(Operation &op, PrintPoint point, PrintContext &c) {
-  auto n = op.getName().stripDialect();
+llvm::Error localRowOp(const LocalOpView &v, PrintPoint point,
+                       PrintContext &c) {
+  auto n = v.operation().split('.').second;
+  if (n == "tiles") {
+    unsigned nRes = v.numResults();
+    auto idAttr = v.attrOfType<IntegerAttr>("triton_src.carry_id");
+    if (nRes > 0 && !idAttr)
+      return llvm::createStringError("triton_src.tiles requires triton_src.carry_id");
+    std::string prefix =
+        idAttr ? "_carry_" + std::to_string(idAttr.getInt()) + "_" : "";
+    if (point == PrintPoint::Enter) {
+      for (unsigned i = 0; i < nRes; ++i)
+        c.line(prefix + std::to_string(i) + " = " + v.operand(1 + i).str());
+    } else if (point == PrintPoint::BeginBlock) {
+      c.line("for " + v.blockArguments()[0] + " in range(tl.cdiv(N, WIDTH)):");
+      ++c.indent;
+      for (unsigned i = 0; i < nRes; ++i)
+        c.line(v.blockArguments()[1 + i] + " = " + prefix + std::to_string(i));
+    } else if (point == PrintPoint::EndBlock) {
+      --c.indent;
+    } else if (point == PrintPoint::Leave) {
+      for (unsigned i = 0; i < nRes; ++i)
+        c.line(v.result(i).str() + " = " + prefix + std::to_string(i));
+    }
+    return llvm::Error::success();
+  }
   if (point != PrintPoint::Enter)
     return llvm::Error::success();
-  auto name = [&](Value v) { return c.name(v); };
-  auto arg = [&](unsigned i) { return name(op.getOperand(i)); };
+
   if (n == "yield") {
-    if (op.getNumOperands()) {
+    if (v.numOperands()) {
+      auto idAttr = v.attrOfType<IntegerAttr>("triton_src.carry_id");
+      if (!idAttr)
+        return llvm::createStringError("triton_src.yield requires triton_src.carry_id");
+      std::string prefix = "_carry_" + std::to_string(idAttr.getInt()) + "_";
       SmallVector<std::string> lhs, rhs;
-      for (unsigned i = 0; i < op.getNumOperands(); ++i) {
-        lhs.push_back(name(op.getParentOp()->getResult(i)));
-        rhs.push_back(arg(i));
+      for (unsigned i = 0; i < v.numOperands(); ++i) {
+        lhs.push_back(prefix + std::to_string(i));
+        rhs.push_back(v.operand(i).str());
       }
       c.line(llvm::join(lhs, ", ") + " = " + llvm::join(rhs, ", "));
     }
@@ -38,21 +65,20 @@ llvm::Error customRowOp(Operation &op, PrintPoint point, PrintContext &c) {
   }
   if (n == "pid") {
     std::string e = "tl.program_id(0).to(tl.int64)";
-    auto fn = op.getParentOfType<func::FuncOp>();
-    Builder b(fn.getContext());
-    if (fn->getAttr("block.grid") == intentdsl::block::grid(b, true))
-      e += op.getAttrOfType<IntegerAttr>("axis").getInt() == 0
+    auto g2d = v.attrOfType<BoolAttr>("grid_2d");
+    if (g2d && g2d.getValue())
+      e += v.attrOfType<IntegerAttr>("axis").getInt() == 0
                ? " // tl.cdiv(N,WIDTH)"
                : " % tl.cdiv(N,WIDTH)";
-    c.line(name(op.getResult(0)) + " = " + e);
+    c.line(v.result(0).str() + " = " + e);
     return llvm::Error::success();
   }
   if (n == "offsets") {
-    auto ownerAxis = op.getParentOfType<func::FuncOp>()
-                         ->getAttrOfType<IntegerAttr>("kir.owner_axis");
-    int dims = cast<MemRefType>(op.getOperand(0).getType()).getRank();
+    auto ownerAxis = v.attrOfType<IntegerAttr>("triton_src.owner_axis");
+    int dims = cast<MemRefType>(v.operandType(0)).getRank();
     bool narrow =
-        op.getAttrOfType<IntegerAttr>("index_bits").getInt() == 32;
+        v.attrOfType<IntegerAttr>("index_bits").getInt() == 32;
+    auto arg = [&](unsigned i) { return v.operand(i).str(); };
     std::string e;
     if (ownerAxis) {
       auto base = arg(0);
@@ -82,40 +108,18 @@ llvm::Error customRowOp(Operation &op, PrintPoint point, PrintContext &c) {
         row = "((" + row + ")//" + size + ")";
       }
     } else {
-      auto rank = op.getAttrOfType<BoolAttr>("matrix").getValue() ? 2 : 1;
-      bool swap = op.getAttrOfType<BoolAttr>("permuted") &&
-                  op.getAttrOfType<BoolAttr>("permuted").getValue();
+      auto rank = v.attrOfType<BoolAttr>("matrix").getValue() ? 2 : 1;
+      bool swap = v.attrOfType<BoolAttr>("permuted") &&
+                  v.attrOfType<BoolAttr>("permuted").getValue();
       auto base =
           rank == 2 ? arg(1) + "[:, None] * " + arg(0) + (swap ? "_s1" : "_s0")
                     : "tl.full((ROWS, 1), 0, tl.int64)";
       e = base + " + " + arg(2) + "[None, :] * " + arg(0) + "_s" +
           std::to_string(swap ? 0 : rank - 1);
     }
-    c.line(name(op.getResult(0)) + " = " + e);
+    c.line(v.result(0).str() + " = " + e);
     return llvm::Error::success();
   }
-  return llvm::createStringError("unhandled custom row operation " + n.str());
-}
-
-llvm::Error localRowOp(const LocalOpView &v, PrintPoint point,
-                       PrintContext &c) {
-  auto n = v.operation().split('.').second;
-  if (n == "tiles") {
-    if (point == PrintPoint::Enter) {
-      for (unsigned i = 0; i < v.numResults(); ++i)
-        c.line(v.result(i).str() + " = " + v.operand(1 + i).str());
-    } else if (point == PrintPoint::BeginBlock) {
-      c.line("for " + v.blockArguments()[0] + " in range(tl.cdiv(N, WIDTH)):");
-      ++c.indent;
-      for (unsigned i = 0; i < v.numResults(); ++i)
-        c.line(v.blockArguments()[1 + i] + " = " + v.result(i).str());
-    } else if (point == PrintPoint::Leave) {
-      --c.indent;
-    }
-    return llvm::Error::success();
-  }
-  if (point != PrintPoint::Enter)
-    return llvm::Error::success();
 
   auto alg = v.attrOfType<StringAttr>("algebra");
   if ((n == "reduce" || n == "identity" || n == "combine" ||
@@ -321,19 +325,12 @@ void addRowRules(TerminalPrinter &printer) {
   ops["triton_src.bin_count"] = PrintRule::format("$r0 = tl.histogram($0,WIDTH)");
 
   // Local rules (LocalOpView only)
-  for (auto n : {"tiles", "uniform", "linear_index", "constant", "neutralize",
-                 "reduce", "identity", "combine", "div", "sqrt", "cast"})
+  for (auto n : {"tiles", "yield", "pid", "offsets", "uniform", "linear_index",
+                 "constant", "neutralize", "reduce", "identity", "combine",
+                 "div", "sqrt", "cast"})
     ops["triton_src." + std::string(n)] = PrintRule::local(localRowOp);
   for (auto n :
        {"splat", "view_offset", "fetch_add", "extract_lane", "axis_reduce", "map"})
     ops["triton_src." + std::string(n)] = PrintRule::local(localDynamicTile);
-
-  // Audited custom rules with explicit structural reasons
-  ops["triton_src.yield"] = PrintRule::custom(
-      customRowOp, "assigns yielded values to enclosing triton_src.tiles results");
-  ops["triton_src.pid"] = PrintRule::custom(
-      customRowOp, "reads verified function block.grid attribute for 2D tile decomposition");
-  ops["triton_src.offsets"] = PrintRule::custom(
-      customRowOp, "reads verified function kir.owner_axis for multi-axis stride decomposition");
 }
 } // namespace CI_UNIT_NAMESPACE

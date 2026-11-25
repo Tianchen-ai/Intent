@@ -220,6 +220,8 @@ class Capture:
                 ftz = ast.literal_eval(kw["flush_to_zero"]) if "flush_to_zero" in kw else False
                 if type(approx) is not bool or type(ftz) is not bool:
                     raise ValueError("fdiv flags must be boolean literals")
+                if ftz and self.denormal_mode == "ieee":
+                    self.denormal_mode = "preserve-sign"
                 args = [self.expr(v) for v in n.args]
                 ty = next((t for _, t in args if t.startswith("tensor")), args[0][1])
                 extra = ("afn", "arcp") if approx else ()
@@ -267,6 +269,8 @@ class Capture:
                 ftz = ast.literal_eval(kw["flush_to_zero"]) if "flush_to_zero" in kw else False
                 if type(approx) is not bool or type(ftz) is not bool:
                     raise ValueError("math flags must be boolean literals")
+                if ftz and self.denormal_mode == "ieee":
+                    self.denormal_mode = "preserve-sign"
                 extra = ("afn",) if approx else ()
                 return self.emit(fn, [v], v[1], self.fm_attr(extra))
         raise ValueError(

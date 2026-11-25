@@ -55,51 +55,60 @@ void registerColumnRules(TerminalPrinter &printer) {
           p.line(view.blockArguments()[0] + " = tl.program_id(0).to(tl.int64)");
         return llvm::Error::success();
       });
-  rules["scf.for"] = PrintRule::custom(
-      [](Operation &op, PrintPoint at, PrintContext &p) {
-        auto loop = cast<scf::ForOp>(op);
+  rules["scf.for"] = PrintRule::local(
+      [](const LocalOpView &view, PrintPoint at, PrintContext &p) -> llvm::Error {
+        unsigned nRes = view.numResults();
+        auto idAttr = view.attrOfType<IntegerAttr>("triton_src.carry_id");
+        if (nRes > 0 && !idAttr)
+          return llvm::createStringError(
+              "scf.for with results requires triton_src.carry_id");
+        std::string prefix =
+            idAttr ? "_carry_" + std::to_string(idAttr.getInt()) + "_" : "";
         if (at == PrintPoint::Enter) {
-          for (auto [result, init] :
-               llvm::zip(loop.getResults(), loop.getInitArgs()))
-            p.line(p.name(result) + " = " + p.name(init));
-          auto syntax = loop->hasAttr("triton_src.runtime_range")
+          for (unsigned i = 0; i < nRes; ++i)
+            p.line(prefix + std::to_string(i) + " = " + view.operand(3 + i).str());
+        } else if (at == PrintPoint::BeginBlock) {
+          auto bounds = view.attrOfType<ArrayAttr>("triton_src.range_bounds");
+          auto syntax = view.attr("triton_src.runtime_range")
                             ? " in range("
                             : " in tl.static_range(";
-          auto bound = [&](Value v) {
-            if (auto i = v.getDefiningOp<arith::ConstantIndexOp>())
-              return std::to_string(i.value());
-            if (auto c = v.getDefiningOp<arith::ConstantIntOp>())
-              return std::to_string(c.value());
-            return p.name(v);
+          auto bound = [&](unsigned idx) -> std::string {
+            if (bounds && idx < bounds.size())
+              if (auto ia = dyn_cast<IntegerAttr>(bounds[idx]))
+                return std::to_string(ia.getInt());
+            return view.operand(idx).str();
           };
-          p.line("for " + p.name(loop.getInductionVar()) + syntax +
-                 bound(loop.getLowerBound()) + "," +
-                 bound(loop.getUpperBound()) + "," + bound(loop.getStep()) +
-                 "):");
+          p.line("for " + view.blockArguments()[0] + syntax + bound(0) + "," +
+                 bound(1) + "," + bound(2) + "):");
           ++p.indent;
-          for (auto [carry, result] :
-               llvm::zip(loop.getRegionIterArgs(), loop.getResults()))
-            p.line(p.name(carry) + " = " + p.name(result));
-        } else if (at == PrintPoint::Leave)
+          for (unsigned i = 0; i < nRes; ++i)
+            p.line(view.blockArguments()[1 + i] + " = " + prefix +
+                   std::to_string(i));
+        } else if (at == PrintPoint::EndBlock) {
           --p.indent;
-        return llvm::Error::success();
-      },
-      "binds scf.for carries and inlines ConstantIndexOp bounds into tl.static_range");
-  rules["scf.yield"] = PrintRule::custom(
-      [](Operation &op, PrintPoint at, PrintContext &p) {
-        if (at == PrintPoint::Enter) {
-          std::vector<std::string> lhs, rhs;
-          for (auto [result, next] :
-               llvm::zip(op.getParentOp()->getResults(), op.getOperands())) {
-            lhs.push_back(p.name(result));
-            rhs.push_back(p.name(next));
-          }
-          if (!lhs.empty())
-            p.line(llvm::join(lhs, ",") + " = " + llvm::join(rhs, ","));
+        } else if (at == PrintPoint::Leave) {
+          for (unsigned i = 0; i < nRes; ++i)
+            p.line(view.result(i).str() + " = " + prefix + std::to_string(i));
         }
         return llvm::Error::success();
-      },
-      "assigns yielded values to enclosing scf.for/scf.if SSA result names");
+      });
+  rules["scf.yield"] = PrintRule::local(
+      [](const LocalOpView &view, PrintPoint at, PrintContext &p) -> llvm::Error {
+        if (at == PrintPoint::Enter && view.numOperands()) {
+          auto idAttr = view.attrOfType<IntegerAttr>("triton_src.carry_id");
+          if (!idAttr)
+            return llvm::createStringError(
+                "value-carrying scf.yield requires triton_src.carry_id");
+          std::string prefix = "_carry_" + std::to_string(idAttr.getInt()) + "_";
+          std::vector<std::string> lhs, rhs;
+          for (unsigned i = 0; i < view.numOperands(); ++i) {
+            lhs.push_back(prefix + std::to_string(i));
+            rhs.push_back(view.operand(i).str());
+          }
+          p.line(llvm::join(lhs, ",") + " = " + llvm::join(rhs, ","));
+        }
+        return llvm::Error::success();
+      });
   for (bool store : {false, true}) {
     rules[store ? "triton_src.store_column" : "triton_src.read_owner_matrix"] =
         PrintRule::local([store](const LocalOpView &view, PrintPoint at,

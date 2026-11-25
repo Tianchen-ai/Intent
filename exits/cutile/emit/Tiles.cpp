@@ -102,6 +102,7 @@ TerminalPrinter cutilePrinter() {
     p.operations["arith." + std::string(n)] =
         PrintRule::format(std::string("$r0 = $0") + token + "$1");
   p.operations["arith.minsi"] = PrintRule::format("$r0 = ct.minimum($operands)");
+  p.operations["arith.maxsi"] = PrintRule::format("$r0 = ct.maximum($operands)");
   p.operations["arith.minimumf"] =
       PrintRule::format("$r0 = ct.minimum($operands,propagate_nan=True)");
   p.operations["arith.minnumf"] =
@@ -177,7 +178,7 @@ TerminalPrinter cutilePrinter() {
         return llvm::Error::success();
       });
   p.operations["scf.if"] = PrintRule::local(
-      [](const LocalOpView &v, PrintPoint at, PrintContext &c) {
+      [](const LocalOpView &v, PrintPoint at, PrintContext &c) -> llvm::Error {
         if (at == PrintPoint::Enter)
           c.line("if " + v.operand(0) + ":");
         if (at == PrintPoint::BeginRegion &&
@@ -188,6 +189,14 @@ TerminalPrinter cutilePrinter() {
         } else if (at == PrintPoint::EndRegion &&
                    c.region < v.numRegions() && v.numBlocks(c.region) > 0) {
           --c.indent;
+        } else if (at == PrintPoint::Leave && v.numResults() > 0) {
+          auto idAttr = v.attrOfType<IntegerAttr>("ct_src.carry_id");
+          if (!idAttr)
+            return llvm::createStringError(
+                "scf.if with results requires ct_src.carry_id");
+          std::string prefix = "_carry_" + std::to_string(idAttr.getInt()) + "_";
+          for (unsigned i = 0; i < v.numResults(); ++i)
+            c.line(v.result(i).str() + " = " + prefix + std::to_string(i));
         }
         return llvm::Error::success();
       });
@@ -348,6 +357,10 @@ TerminalPrinter cutilePrinter() {
       return ("ct.astype(" + v.operand(0) + "," + dtype(v.resultType(0)) + ")")
           .str();
     });
+  localExpr("arith.bitcast", [](const LocalOpView &v) {
+    return ("ct.bitcast(" + v.operand(0) + "," + dtype(v.resultType(0)) + ")")
+        .str();
+  });
   localExpr("math.exp2", [](const LocalOpView &v) {
     std::string ftz = v.attr("ct_src.ftz") ? ",flush_to_zero=True" : "";
     return "ct.exp2(" + llvm::join(v.operands(), ",") + ftz + ")";
@@ -414,76 +427,63 @@ TerminalPrinter cutilePrinter() {
         .str();
   });
 
-  // Audited custom rules with explicit structural reasons
-  p.operations["func.func"] = PrintRule::custom(
-      [](Operation &op, PrintPoint at, PrintContext &c) -> llvm::Error {
-        if (at == PrintPoint::Enter) {
+  p.operations["func.func"] = PrintRule::local(
+      [](const LocalOpView &v, PrintPoint at, PrintContext &c) -> llvm::Error {
+        if (at == PrintPoint::BeginBlock) {
           c.line("@ct.kernel");
-          auto fn = cast<func::FuncOp>(op);
+          int64_t idxBits =
+              v.attrOfType<IntegerAttr>("ct_src.index_bits").getInt();
           SmallVector<std::string> args;
-          for (auto a : fn.getArguments()) {
-            auto n = c.name(a);
-            if (isa<MemRefType>(a.getType()) &&
-                op.getAttrOfType<IntegerAttr>("ct_src.index_bits").getInt() ==
-                    64)
-              n += ": ct.IndexedWithInt64[ct.Array]";
-            args.push_back(n);
+          for (auto [name, ty] :
+               llvm::zip(v.blockArguments(), v.blockArgumentTypes())) {
+            std::string param = name;
+            if (isa<MemRefType>(ty) && idxBits == 64)
+              param += ": ct.IndexedWithInt64[ct.Array]";
+            args.push_back(std::move(param));
           }
-          auto convention = fn.front().front().getAttrOfType<StringAttr>(
-              "calling_convention");
-          bool matrix = convention && convention.getValue() == "matrix";
-          bool direct = convention || intentdsl::kir::orderedOwners(fn);
-          if (!direct) {
-            int rank = cast<MemRefType>(
-                           fn.getArgument(intentdsl::domainSlot(fn)).getType())
-                           .getRank();
-            if (rank > 2)
-              for (int i = 0; i < rank - 1; i++)
-                args.push_back("D" + std::to_string(i) + ":ct.Constant[int]");
-            Builder b(fn.getContext());
-            if (fn->getAttr("block.grid") == intentdsl::block::grid(b, true))
-              args.push_back("COLUMN_TILES:ct.Constant[int]");
-          }
-          args.push_back(matrix   ? "BM:ct.Constant[int]"
-                         : direct ? "ROWS:ct.Constant[int]"
-                                  : "R:ct.Constant[int]");
-          args.push_back(matrix   ? "BN:ct.Constant[int]"
-                         : direct ? "WIDTH:ct.Constant[int]"
-                                  : "W:ct.Constant[int]");
+          auto extra = v.attrOfType<ArrayAttr>("ct_src.extra_params");
+          if (!extra)
+            return llvm::createStringError("missing ct_src.extra_params");
+          for (Attribute a : extra)
+            args.push_back(cast<StringAttr>(a).str());
           c.line("def kernel(" + llvm::join(args, ",") + "):");
           ++c.indent;
-        } else if (at == PrintPoint::Leave)
+        } else if (at == PrintPoint::Leave) {
           --c.indent;
+        }
         return llvm::Error::success();
-      },
-      "entry signature inspects inner program calling_convention and domain rank");
-  p.operations["scf.for"] = PrintRule::custom(
-      [](Operation &op, PrintPoint at, PrintContext &c) -> llvm::Error {
-        auto loop = cast<scf::ForOp>(op);
-        auto kindAttr = loop->getAttrOfType<StringAttr>("ct_src.loop_kind");
+      });
+  p.operations["scf.for"] = PrintRule::local(
+      [](const LocalOpView &v, PrintPoint at, PrintContext &c) -> llvm::Error {
+        auto kindAttr = v.attrOfType<StringAttr>("ct_src.loop_kind");
         if (!kindAttr)
           return llvm::createStringError(
               "missing ct_src.loop_kind on scf.for");
         StringRef kind = kindAttr.getValue();
         bool native = kind == "range_i32";
         bool counted = kind == "range_const";
-        auto bounds = loop->getAttrOfType<ArrayAttr>("ct_src.range_bounds");
-        auto index = c.name(loop.getInductionVar());
+        auto bounds = v.attrOfType<ArrayAttr>("ct_src.range_bounds");
+        unsigned nRes = v.numResults();
+        auto idAttr = v.attrOfType<IntegerAttr>("ct_src.carry_id");
+        if (nRes > 0 && !idAttr)
+          return llvm::createStringError(
+              "scf.for with results requires ct_src.carry_id");
+        std::string prefix =
+            idAttr ? "_carry_" + std::to_string(idAttr.getInt()) + "_" : "";
         if (at == PrintPoint::Enter) {
-          for (auto [dst, src] :
-               llvm::zip(loop.getResults(), loop.getInitArgs()))
-            c.line(c.name(dst) + " = " + c.name(src));
+          for (unsigned i = 0; i < nRes; ++i)
+            c.line(prefix + std::to_string(i) + " = " + v.operand(3 + i).str());
+        } else if (at == PrintPoint::BeginBlock) {
+          auto index = v.blockArguments()[0];
           if (native) {
-            auto i32Bound = [&](unsigned idx, Value v) -> std::string {
+            auto i32Bound = [&](unsigned idx) -> std::string {
               if (bounds && idx < bounds.size())
                 if (auto ia = dyn_cast<IntegerAttr>(bounds[idx]))
                   return std::to_string(ia.getInt());
-              return "ct.astype(" + c.name(v) + ",ct.int32)";
+              return "ct.astype(" + v.operand(idx).str() + ",ct.int32)";
             };
-            c.line("for " + index + " in range(" +
-                   i32Bound(0, loop.getLowerBound()) + "," +
-                   i32Bound(1, loop.getUpperBound()) + "," +
-                   i32Bound(2, loop.getStep()) + "):");
+            c.line("for " + index + " in range(" + i32Bound(0) + "," +
+                   i32Bound(1) + "," + i32Bound(2) + "):");
           } else if (counted) {
             auto cstBound = [&](unsigned idx) {
               return std::to_string(cast<IntegerAttr>(bounds[idx]).getInt());
@@ -491,39 +491,50 @@ TerminalPrinter cutilePrinter() {
             c.line("for it_" + index + " in range(" + cstBound(0) + "," +
                    cstBound(1) + "," + cstBound(2) + "):");
           } else {
-            c.line(index + " = ct.astype(" + c.name(loop.getLowerBound()) +
-                   ",ct.int64)");
-            c.line("while " + index + " < " + c.name(loop.getUpperBound()) +
-                   ":");
+            std::string ivTy =
+                v.operandType(0).isInteger(32) ? "ct.int32" : "ct.int64";
+            c.line(index + " = ct.astype(" + v.operand(0).str() + "," + ivTy +
+                   ")");
+            c.line("while " + index + " < ct.astype(" + v.operand(1).str() +
+                   "," + ivTy + "):");
           }
           ++c.indent;
           if (!native && counted)
             c.line(index + " = ct.astype(it_" + index + ",ct.int64)");
-          for (auto [arg, res] :
-               llvm::zip(loop.getRegionIterArgs(), loop.getResults()))
-            c.line(c.name(arg) + " = " + c.name(res));
-        } else if (at == PrintPoint::Leave) {
-          if (!native && !counted)
-            c.line(index + " += " + c.name(loop.getStep()));
+          for (unsigned i = 0; i < nRes; ++i)
+            c.line(v.blockArguments()[1 + i] + " = " + prefix +
+                   std::to_string(i));
+        } else if (at == PrintPoint::EndBlock) {
+          if (!native && !counted) {
+            std::string ivTy =
+                v.operandType(0).isInteger(32) ? "ct.int32" : "ct.int64";
+            c.line(v.blockArguments()[0] + " += ct.astype(" +
+                   v.operand(2).str() + "," + ivTy + ")");
+          }
           --c.indent;
+        } else if (at == PrintPoint::Leave) {
+          for (unsigned i = 0; i < nRes; ++i)
+            c.line(v.result(i).str() + " = " + prefix + std::to_string(i));
         }
         return llvm::Error::success();
-      },
-      "binds scf.for loop-carried SSA results and region block arguments across Enter/Leave");
-  p.operations["scf.yield"] = PrintRule::custom(
-      [](Operation &op, PrintPoint at, PrintContext &c) {
-        if (at == PrintPoint::Enter && op.getNumOperands()) {
+      });
+  p.operations["scf.yield"] = PrintRule::local(
+      [](const LocalOpView &v, PrintPoint at, PrintContext &c) -> llvm::Error {
+        if (at == PrintPoint::Enter && v.numOperands()) {
+          auto idAttr = v.attrOfType<IntegerAttr>("ct_src.carry_id");
+          if (!idAttr)
+            return llvm::createStringError(
+                "value-carrying scf.yield requires ct_src.carry_id");
+          std::string prefix = "_carry_" + std::to_string(idAttr.getInt()) + "_";
           SmallVector<std::string> lhs, rhs;
-          for (auto [r, v] :
-               llvm::zip(op.getParentOp()->getResults(), op.getOperands())) {
-            lhs.push_back(c.name(r));
-            rhs.push_back(c.name(v));
+          for (unsigned i = 0; i < v.numOperands(); ++i) {
+            lhs.push_back(prefix + std::to_string(i));
+            rhs.push_back(v.operand(i).str());
           }
           c.line(llvm::join(lhs, ",") + " = " + llvm::join(rhs, ","));
         }
         return llvm::Error::success();
-      },
-      "assigns yielded values to enclosing scf.for/scf.if SSA result names");
+      });
 
   rowRules(p);
   p.package = [](DictionaryAttr attrs, const auto &files,

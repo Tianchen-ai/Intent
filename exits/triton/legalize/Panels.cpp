@@ -291,27 +291,13 @@ std::optional<int64_t> tritonOwnerRectangleAxis(Operation *op, func::FuncOp fn) 
 }
 
 bool tritonOwnerRectPermitsTma(Operation *op, func::FuncOp fn, bool permitTma) {
-  if (!permitTma)
-    return false;
-  auto rectPos = tritonOwnerRectangleAxis(op, fn);
-  if (!rectPos)
-    return false;
-  auto rows = fn.front().front().getAttrOfType<IntegerAttr>("block.owner_tile");
-  if (!rows || rows.getInt() < 16)
-    return false;
-  bool write = op->getName().stripDialect() == "slice_write";
-  Value base = op->getOperand(write ? 1 : 0);
-  SmallVector<int64_t> viewShape, viewStrides;
-  int64_t elemBytes = 0;
-  if (!directViewLayout(base, fn, viewShape, viewStrides, elemBytes))
-    return false;
-  int64_t depth = viewShape.back();
-  if (rows.getInt() * depth * elemBytes > 32768)
-    return false;
-  SmallVector<int64_t> blockShape(viewShape.size(), 1);
-  blockShape[*rectPos] = rows.getInt();
-  blockShape.back() = depth;
-  return tmaViewCompatible(viewShape, viewStrides, blockShape, elemBytes);
+  // Outer owner-rectangle transfers execute once per CTA outside the fold loop;
+  // device-side tl.make_tensor_descriptor creation and shared-memory staging
+  // only amortize on loop-carried panel/page transfers.
+  (void)op;
+  (void)fn;
+  (void)permitTma;
+  return false;
 }
 
 bool tritonPanelPermitsTma(Operation *op, func::FuncOp fn, bool permitTma) {
@@ -321,7 +307,7 @@ bool tritonPanelPermitsTma(Operation *op, func::FuncOp fn, bool permitTma) {
   auto span =
       parent ? parent->getAttrOfType<IntegerAttr>("block.contribution_width")
              : IntegerAttr();
-  if (!span || span.getInt() <= 0)
+  if (!span || span.getInt() < 64)
     return false;
   SmallVector<int64_t> viewShape, viewStrides;
   int64_t elemBytes = 0;
@@ -362,11 +348,18 @@ bool tritonPagePermitsTma(Operation *op, func::FuncOp fn, bool permitTma) {
   return tmaViewCompatible(viewShape, viewStrides, blockShape, elemBytes);
 }
 
+static bool matrixTmaAmortized(const MatrixAccess &p) {
+  if (p.shape[2] <= 0 || p.tile[2] <= 0)
+    return false;
+  int64_t kPanels = llvm::divideCeil(p.shape[2], p.tile[2]);
+  return kPanels >= 8 || (p.tile[0] * p.tile[1] >= 4096 && kPanels >= 4);
+}
+
 Value tritonMatrixRead(Tiles &t, MatrixAccess &p, bool left, Value group,
                        Value panel) {
   bool isQuant = p.dot.getName().stripDialect() == "quant_contract";
   const auto *qSpec = isQuant ? intentdsl::kir::quantFormatSpec(p.dot) : nullptr;
-  if (!t.fn->hasAttr("triton_src.tma") ||
+  if (!t.fn->hasAttr("triton_src.tma") || !matrixTmaAmortized(p) ||
       (!isQuant && left && p.dot.getNumOperands() > 2) ||
       (isQuant && (!qSpec ||
                    qSpec->roleLayout !=
@@ -536,7 +529,8 @@ Value tritonWindowPanels(Tiles &t, MatrixAccess &p, Value &batch, Value &chunk,
 
 bool tritonMatrixWrite(Tiles &t, MatrixAccess &p, Value y, Value val,
                        ArrayRef<Value> batchCoords) {
-  if (!t.fn->hasAttr("triton_src.tma") || p.shape[0] <= 0 || p.shape[1] <= 0)
+  if (!t.fn->hasAttr("triton_src.tma") || !matrixTmaAmortized(p) ||
+      p.shape[0] <= 0 || p.shape[1] <= 0)
     return false;
   int rank = p.rank(y);
   if (rank < 2 || batchCoords.size() + 2 != size_t(rank))

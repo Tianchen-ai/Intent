@@ -165,10 +165,15 @@ LogicalResult verifyMapping(ModuleOp m,const compilerinfra::TargetProfile &p,Str
       ok=isInput(op->getOperand(0)) && offsets.getRank()==1 && offsets.getElementType().isInteger(32) &&
         def(op->getOperand(3),"active") && mask->getOperand(0)==domain && mask->getOperand(1)==op->getOperand(1) &&
         mask->getOperand(2)==op->getOperand(2) && (n=="segment_size" || succeeded(kir::verifyMemberExpression(op,isInput)));
-      if(auto batch=op->getAttrOfType<IntegerAttr>("member_batch"))
-        ok &= n=="segment_fold" && batch.getInt()==8 && tiles && llvm::all_of(f->getAttrOfType<ArrayAttr>("block.configs"),[](Attribute attr){
-          auto row=cast<DictionaryAttr>(attr);return row.getAs<IntegerAttr>("rows").getInt()*row.getAs<IntegerAttr>("width").getInt()<=128;
+      if(auto batch=op->getAttrOfType<IntegerAttr>("member_batch")){
+        int64_t bv = batch.getInt();
+        bool validBv = bv == 8 || (!op->hasAttr("strict") && (bv == 32 || bv == 64));
+        ok &= n=="segment_fold" && validBv && tiles && llvm::all_of(f->getAttrOfType<ArrayAttr>("block.configs"),[&](Attribute attr){
+          auto row=cast<DictionaryAttr>(attr);
+          int64_t r=row.getAs<IntegerAttr>("rows").getInt(), w=row.getAs<IntegerAttr>("width").getInt();
+          return bv == 8 ? (r * w <= 128) : (r == 1 && w <= 128);
         });
+      }
     }
     if(dialect=="block" && (n=="load" || n=="store")){
       auto mask=op->getOperand(3).getDefiningOp();

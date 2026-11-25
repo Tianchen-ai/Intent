@@ -302,7 +302,20 @@ void computeCutileLoopAttrs(scf::ForOp loop, StringAttr &kindOut,
     return ia.getInt();
   };
   Value ops[3] = {loop.getLowerBound(), loop.getUpperBound(), loop.getStep()};
-  if (loop.getInductionVar().getType().isInteger(32)) {
+  bool hasNestedLoop =
+      loop.getBody()
+          ->walk([](scf::ForOp) { return WalkResult::interrupt(); })
+          .wasInterrupted();
+  int64_t carriedWords = 0;
+  for (Type rt : loop.getResultTypes()) {
+    if (auto st = dyn_cast<ShapedType>(rt); st && st.hasStaticShape())
+      carriedWords +=
+          st.getNumElements() *
+          std::max<int64_t>(1, llvm::divideCeil(st.getElementTypeBitWidth(), 32));
+  }
+  bool dynamicBounds = !constInt(ops[0]) || !constInt(ops[1]);
+  if (loop.getInductionVar().getType().isInteger(32) &&
+      !(hasNestedLoop && dynamicBounds && carriedWords >= 16384)) {
     kindOut = b.getStringAttr("range_i32");
     SmallVector<Attribute, 3> bounds;
     for (Value v : ops) {
@@ -324,6 +337,83 @@ void computeCutileLoopAttrs(scf::ForOp loop, StringAttr &kindOut,
   }
   kindOut = b.getStringAttr("while");
   boundsOut = {};
+}
+ArrayAttr computeCutileExtraParams(func::FuncOp fn) {
+  Builder b(fn.getContext());
+  SmallVector<Attribute> extra;
+  auto convention =
+      fn.front().front().getAttrOfType<StringAttr>("calling_convention");
+  bool matrix = convention && convention.getValue() == "matrix";
+  bool direct = convention || intentdsl::kir::orderedOwners(fn);
+  if (!direct) {
+    int rank = cast<MemRefType>(
+                   fn.getArgument(intentdsl::domainSlot(fn)).getType())
+                   .getRank();
+    if (rank > 2)
+      for (int i = 0; i < rank - 1; ++i)
+        extra.push_back(
+            b.getStringAttr("D" + std::to_string(i) + ":ct.Constant[int]"));
+    if (fn->getAttr("block.grid") == intentdsl::block::grid(b, true))
+      extra.push_back(b.getStringAttr("COLUMN_TILES:ct.Constant[int]"));
+  }
+  extra.push_back(b.getStringAttr(matrix   ? "BM:ct.Constant[int]"
+                                  : direct ? "ROWS:ct.Constant[int]"
+                                           : "R:ct.Constant[int]"));
+  extra.push_back(b.getStringAttr(matrix   ? "BN:ct.Constant[int]"
+                                  : direct ? "WIDTH:ct.Constant[int]"
+                                           : "W:ct.Constant[int]"));
+  return b.getArrayAttr(extra);
+}
+bool isCutileCarryOwner(Operation *op) {
+  return isa<scf::ForOp, scf::IfOp>(op) ||
+         op->getName().getStringRef() == "ct_src.tiles";
+}
+bool isCutileCarryYield(Operation *op) {
+  return isa<scf::YieldOp>(op) ||
+         op->getName().getStringRef() == "ct_src.yield";
+}
+void stampCutileCarryIds(func::FuncOp fn) {
+  Builder b(fn.getContext());
+  int64_t nextId = 0;
+  fn.walk([&](Operation *op) {
+    if (isCutileCarryOwner(op) && op->getNumResults() > 0) {
+      auto idAttr = b.getI64IntegerAttr(nextId++);
+      op->setAttr("ct_src.carry_id", idAttr);
+      for (Region &reg : op->getRegions()) {
+        for (Block &blk : reg) {
+          if (blk.empty())
+            continue;
+          Operation &term = blk.back();
+          if (isCutileCarryYield(&term) && term.getNumOperands() > 0)
+            term.setAttr("ct_src.carry_id", idAttr);
+        }
+      }
+    }
+  });
+}
+LogicalResult verifyCutileCarryIds(func::FuncOp fn) {
+  llvm::DenseSet<int64_t> seenIds;
+  auto res = fn.walk([&](Operation *op) {
+    if (isCutileCarryOwner(op) && op->getNumResults() > 0) {
+      auto idAttr = op->getAttrOfType<IntegerAttr>("ct_src.carry_id");
+      if (!idAttr || !seenIds.insert(idAttr.getInt()).second) {
+        op->emitError("missing or duplicate ct_src.carry_id");
+        return WalkResult::interrupt();
+      }
+    }
+    if (isCutileCarryYield(op) && op->getNumOperands() > 0) {
+      Operation *parent = op->getParentOp();
+      auto idAttr = op->getAttrOfType<IntegerAttr>("ct_src.carry_id");
+      if (!parent || !isCutileCarryOwner(parent) || !idAttr ||
+          parent->getAttr("ct_src.carry_id") != idAttr ||
+          parent->getNumResults() != op->getNumOperands()) {
+        op->emitError("ct_src.carry_id on yield disagrees with enclosing op");
+        return WalkResult::interrupt();
+      }
+    }
+    return WalkResult::advance();
+  });
+  return success(!res.wasInterrupted());
 }
 bool broadcastInner(Value viewArg, func::FuncOp fn) {
   auto arg = dyn_cast<BlockArgument>(viewArg);
@@ -630,7 +720,7 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
       Location loc = store->getLoc();
       auto extent = value->getAttrOfType<IntegerAttr>("extent").getInt();
       auto span = value->getAttrOfType<IntegerAttr>("span").getInt();
-      int64_t step = std::min<int64_t>(512, uint64_t(span) & -uint64_t(span));
+      int64_t step = std::min<int64_t>(256, uint64_t(span) & -uint64_t(span));
       int64_t panels = span / step;
       auto axes = store->getAttrOfType<DenseI64ArrayAttr>("block.member_axes");
       bool swap = axes && axes[0] == 1;
@@ -1045,6 +1135,8 @@ struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
     });
     fn->setAttr("ct_src.entry", b.getStringAttr("kernel"));
     fn->setAttr("ct_src.index_bits", b.getI32IntegerAttr(bits));
+    fn->setAttr("ct_src.extra_params", computeCutileExtraParams(fn));
+    stampCutileCarryIds(fn);
     if (bits == 32)
       fn.walk([&](Operation *op) {
         if (op->getName().getStringRef() == "ct_src.tile_address" &&
@@ -1160,6 +1252,13 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
   });
   if (commonWalk.wasInterrupted())
     return failure();
+  if (callable) {
+    if (matrix->getAttr("ct_src.extra_params") !=
+        computeCutileExtraParams(matrix))
+      return matrix.emitError("missing or mismatched ct_src.extra_params");
+    if (failed(verifyCutileCarryIds(matrix)))
+      return failure();
+  }
   if(matrix.front().front().getName().getStringRef()=="ct_src.tile_program"){
     if(!callable || failed(verifyArrayGeometry(matrix,profile)))return failure();
     return intentdsl::block::verifyTileProgram(

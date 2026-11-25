@@ -260,6 +260,8 @@ class Ordered:
                 ftz = ast.literal_eval(kw["flush_to_zero"]) if "flush_to_zero" in kw else False
                 if type(approx) is not bool or type(ftz) is not bool:
                     raise ValueError("fdiv flags must be boolean literals")
+                if ftz and self.denormal_mode == "ieee":
+                    self.denormal_mode = "preserve-sign"
                 a, b = self.expr(node.args[0]), self.expr(node.args[1])
                 if a in self.lanes and b not in self.lanes:
                     b = self.splat(b, *self.lanes[a])
@@ -334,6 +336,8 @@ class Ordered:
                 ftz = ast.literal_eval(kw["flush_to_zero"]) if "flush_to_zero" in kw else False
                 if type(approx) is not bool or type(ftz) is not bool:
                     raise ValueError("math flags must be boolean literals")
+                if ftz and self.denormal_mode == "ieee":
+                    self.denormal_mode = "preserve-sign"
                 a = self.expr(node.args[0])
                 if a.type != "f32":
                     raise ValueError("expected f32 operand")

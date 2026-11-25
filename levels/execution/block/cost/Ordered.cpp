@@ -259,7 +259,8 @@ void orderedCost(Unit &u) {
                                     ? caps->residentRegisters
                                     : file.value_or(0) / 2;
                 if (budget && physicalRows >= 128 &&
-                    caps->maxWarpgroups >= 2)
+                    caps->maxWarpgroups >= 2 && carries <= 1 &&
+                    projections <= 1)
                   budget *= 1.75;
                 // Resident matrix A/B operands, two score intermediates,
                 // and each live FP32 accumulator occupy the CTA register file.

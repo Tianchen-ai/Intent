@@ -1,4 +1,5 @@
 #include "compilerinfra/Assembly.h"
+#include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
 #include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
 
 namespace CI_UNIT_NAMESPACE {
@@ -10,8 +11,15 @@ void registerSegment(Unit &unit) {
   s.enumerate=[](Operation *op,const TargetProfile &profile,AnalysisManager &)
       ->llvm::Expected<std::vector<StructuralCandidate>> {
     std::vector<StructuralCandidate> candidates;
-    if (!op->walk([](Operation *v){return v->getName().stripDialect()=="ordered_sum" ?
-            WalkResult::interrupt():WalkResult::advance();}).wasInterrupted()) return candidates;
+    bool hasFold = false, reassoc = true;
+    op->walk([&](Operation *v) {
+      if (v->getName().stripDialect() == "ordered_sum") {
+        hasFold = true;
+        if (!intentdsl::kir::hasFastMath(v, arith::FastMathFlags::reassoc))
+          reassoc = false;
+      }
+    });
+    if (!hasFold) return candidates;
     auto *caps=profile.services.get<intentdsl::RowCapacity>();
     if(!caps)return llvm::createStringError("segment mapping requires target tile capacities");
     bool grid=!caps->independentWidths.empty();
@@ -43,6 +51,26 @@ void registerSegment(Unit &unit) {
       if(!panels.empty()){
         NamedAttrList panel(d);panel.set("member_batch",b.getI64IntegerAttr(8));panel.set("rows",b.getArrayAttr(panels));
         candidates.push_back({"segment-tile-8",walk.str(),panel.getDictionary(op->getContext()),{"distinct-segment-outputs"}});
+      }
+      if (reassoc) {
+        SmallVector<Attribute> widePanels;
+        for (auto a : rows) {
+          auto r = cast<DictionaryAttr>(a);
+          if (r.getAs<IntegerAttr>("rows").getInt() == 1 &&
+              r.getAs<IntegerAttr>("width").getInt() <= 128)
+            widePanels.push_back(a);
+        }
+        if (!widePanels.empty()) {
+          for (int64_t batch : {int64_t(32), int64_t(64)}) {
+            NamedAttrList panel(d);
+            panel.set("member_batch", b.getI64IntegerAttr(batch));
+            panel.set("rows", b.getArrayAttr(widePanels));
+            candidates.push_back(
+                {"segment-tile-" + std::to_string(batch), walk.str(),
+                 panel.getDictionary(op->getContext()),
+                 {"distinct-segment-outputs"}});
+          }
+        }
       }
     }
     return candidates;

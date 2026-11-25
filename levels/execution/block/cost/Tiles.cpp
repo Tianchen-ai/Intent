@@ -131,7 +131,12 @@ void registerCost(Unit &u) {
             double scheduled=gridTiles ? instances*tiles : instances;
             double serial=gridTiles ? 1 : tiles;
             v.terms["serial_tiles"]={serial,"count"};
-            double regs=(peak+summaryFields)*rows*width;
+            auto batchAttr = choice.getAs<IntegerAttr>("member_batch");
+            double batchExtra =
+                batchAttr && batchAttr.getInt() > 1
+                    ? double(batchAttr.getInt() - 1) * rows * width
+                    : 0.;
+            double regs = (peak + 1. + summaryFields) * rows * width + batchExtra;
             if (summaryFields) v.terms["summary_live_words"]={double(summaryFields*rows*width),"reg32"};
             double resident=regFile && regs>0?std::max(1.,std::floor(*regFile/regs)):1.;
             v.terms["fragment_register_estimate"]={regs,"reg32"};
@@ -168,10 +173,9 @@ void registerCost(Unit &u) {
                   (r - rRowBroadcast) + rRowBroadcast / std::max(1., rows);
               double effCap =
                   std::min(capacity, double(f->participants) * 2.);
-              double effActive =
-                  scheduled > 0 ? std::min(scheduled, std::max(1., effCap)) : 0.;
+              double effActive = std::max(1., effCap);
               double effRounds =
-                  effActive > 0 ? std::ceil(scheduled / effActive) : 0.;
+                  scheduled > 0 ? std::ceil(scheduled / effActive) : 0.;
               double waveQuant =
                   scheduled > 0 ? (effRounds * effActive / scheduled) : 0.;
               double usefulRows =

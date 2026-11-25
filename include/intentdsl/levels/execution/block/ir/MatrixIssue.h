@@ -14,6 +14,7 @@ matrixIssues(mlir::Operation *domain,
   estimate.scope = "one panel";
   estimate.bottleneck = "matrix instructions";
   bool records = false;
+  bool quadFlat64 = false;
   double blockElems = 256.0;
   for (mlir::Operation &o : domain->getRegion(0).front()) {
     auto kind = o.getName().stripDialect();
@@ -25,14 +26,26 @@ matrixIssues(mlir::Operation *domain,
           spec->roleLayout == intentdsl::kir::QuantRoleLayout::RecordGemv) {
         records = true;
         blockElems = spec->blockElements;
+        quadFlat64 = spec->blockElements == 256 && spec->numBitPlanes == 2 &&
+                     spec->subScaleOffset >= 0 && spec->subBlockElements == 16 &&
+                     spec->planes[0].halfStride == 64 &&
+                     spec->planes[0].quadByteStep == 32 &&
+                     spec->planes[0].quadShiftMode == 0 &&
+                     spec->planes[1].halfStride == 32 &&
+                     spec->planes[1].quadByteStep == 0 &&
+                     spec->planes[1].quadShiftMode == 1;
       }
     }
   }
   if (records) {
-    double lanes = double(t[0]) * blockElems;
+    auto mt = ctx.target.services.get<intentdsl::block::MatrixTarget>();
+    bool flat64 = quadFlat64 && mt && mt->flatRecordBitPlanes;
+    double decodeWidth = flat64 ? 64.0 : blockElems;
+    double lanes = double(t[0]) * decodeWidth;
     estimate.terms["record_decode_lanes"] = {lanes, "count"};
     if (t[0] > warpRowCap) {
-      double crossWarpBytes = double(t[0] - warpRowCap) * blockElems * 8.0;
+      double crossWarpBytes =
+          double(t[0] - warpRowCap) * blockElems * 8.0;
       if (auto sbw = intentdsl::quantity(ctx, "read_1_shared_bw", "B/ns")) {
         auto f = ctx.target.services.get<intentdsl::CallFacts>();
         double smBw = *sbw / std::max<int64_t>(1, f ? f->participants : 1);

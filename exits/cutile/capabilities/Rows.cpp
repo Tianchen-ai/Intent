@@ -187,13 +187,13 @@ capabilities(const llvm::json::Object &options) {
       llvm::SmallVector<unsigned, 2> occupancies;
       if (*architecture == 90) {
         occupancies.push_back(2u);
-        if (rows == 1 && ((width >= 32 && width <= 128) || width >= 1024))
+        if (rows == 1 && ((width >= 32 && width <= 256) || width >= 1024))
           occupancies.push_back(4u);
       } else {
         occupancies.push_back(
-            rows == 1 && width >= 32 && width <= 128 ? 2u : std::min(rows, 2u));
-        if (rows == 1 && ((width >= 32 && width <= 128) || width >= 256))
-          occupancies.push_back(rows == 1 && width >= 32 && width <= 128 ? 4u
+            rows == 1 && width >= 32 && width <= 256 ? 2u : std::min(rows, 2u));
+        if (rows == 1 && ((width >= 32 && width <= 256) || width >= 512))
+          occupancies.push_back(rows == 1 && width >= 32 && width <= 256 ? 4u
                                                                          : 2u);
       }
       for (auto [idx, occupancy] : llvm::enumerate(occupancies)) {

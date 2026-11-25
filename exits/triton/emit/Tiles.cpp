@@ -72,10 +72,9 @@ TerminalPrinter tilePrinter() {
   p.operations["math.roundeven"] = PrintRule::format("$r0 = libdevice.rint($0)");
   p.operations["arith.minnumf"] = PrintRule::format("$r0 = tl.minimum($operands)");
   p.operations["arith.shli"] = PrintRule::format("$r0 = $0<<$1");
-  p.operations["arith.shrui"] =
-      PrintRule::format("$r0 = ($0.to(tl.uint32)>>$1).to(tl.int32)");
   p.operations["arith.maxnumf"] = PrintRule::format("$r0 = tl.maximum($operands)");
   p.operations["arith.minsi"] = PrintRule::format("$r0 = tl.minimum($operands)");
+  p.operations["arith.maxsi"] = PrintRule::format("$r0 = tl.maximum($operands)");
   p.operations["arith.subi"] = PrintRule::format("$r0 = $0-$1");
   p.operations["arith.floordivsi"] = PrintRule::format("$r0 = $0//$1");
   p.operations["arith.remsi"] = PrintRule::format("$r0 = $0%$1");
@@ -313,7 +312,7 @@ TerminalPrinter tilePrinter() {
         .str();
   });
   p.operations["scf.if"] = PrintRule::local(
-      [](const LocalOpView &v, PrintPoint at, PrintContext &c) {
+      [](const LocalOpView &v, PrintPoint at, PrintContext &c) -> llvm::Error {
         if (at == PrintPoint::Enter)
           c.line("if " + v.operand(0) + ":");
         if (at == PrintPoint::BeginRegion &&
@@ -324,6 +323,14 @@ TerminalPrinter tilePrinter() {
         } else if (at == PrintPoint::EndRegion &&
                    c.region < v.numRegions() && v.numBlocks(c.region) > 0) {
           --c.indent;
+        } else if (at == PrintPoint::Leave && v.numResults() > 0) {
+          auto idAttr = v.attrOfType<IntegerAttr>("triton_src.carry_id");
+          if (!idAttr)
+            return llvm::createStringError(
+                "scf.if with results requires triton_src.carry_id");
+          std::string prefix = "_carry_" + std::to_string(idAttr.getInt()) + "_";
+          for (unsigned i = 0; i < v.numResults(); ++i)
+            c.line(v.result(i).str() + " = " + prefix + std::to_string(i));
         }
         return llvm::Error::success();
       });
@@ -334,6 +341,19 @@ TerminalPrinter tilePrinter() {
       return ("tl.cast(" + v.operand(0) + "," + dtype(v.resultType(0)) + ")")
           .str();
     });
+  leaf("arith.shrui", [](const LocalOpView &v) {
+    auto el = getElementTypeOrSelf(v.resultType(0));
+    std::string uTy = el.isInteger(64) ? "tl.uint64" : "tl.uint32";
+    std::string sTy = el.isInteger(64) ? "tl.int64" : "tl.int32";
+    return ("(tl.cast(" + v.operand(0) + "," + uTy + ")>>" + v.operand(1) +
+            ").to(" + sTy + ")")
+        .str();
+  });
+  leaf("arith.bitcast", [](const LocalOpView &v) {
+    return ("tl.cast(" + v.operand(0) + "," + dtype(v.resultType(0)) +
+            ",bitcast=True)")
+        .str();
+  });
   leaf("arith.extui", [](const LocalOpView &v) {
     auto inElem = getElementTypeOrSelf(v.operandType(0));
     std::string uTy = inElem.isInteger(8)    ? "tl.uint8"

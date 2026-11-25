@@ -6,6 +6,7 @@
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/Performance.h"
 #include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
+#include "intentdsl/levels/execution/block/ir/Grid.h"
 #include "intentdsl/levels/execution/block/ir/RowProgram.h"
 #include <climits>
 
@@ -63,17 +64,24 @@ static StringRef binding(StringRef op) {
 }
 void lowerRows(func::FuncOp fn, const compilerinfra::TargetProfile &profile) {
   int32_t coordBits = canNarrowRowCoordinates(fn, profile) ? 32 : 64;
-  fn.walk<WalkOrder::PostOrder>([coordBits](Operation *op) {
+  Builder fb(fn.getContext());
+  bool grid2d = fn->getAttr("block.grid") == intentdsl::block::grid(fb, true);
+  auto ownerAxis = fn->getAttrOfType<IntegerAttr>("kir.owner_axis");
+  fn.walk<WalkOrder::PostOrder>([&](Operation *op) {
     auto code = op->getName().getStringRef();
     auto implementation = binding(code);
     if (!implementation.empty()) {
-      Builder b(op->getContext());
       op->setAttr("ci.implementation",
-                  b.getStringAttr(("exits/triton::" + implementation).str()));
+                  fb.getStringAttr(("exits/triton::" + implementation).str()));
     }
-    if (code == "triton_src.offsets")
-      op->setAttr("index_bits",
-                  Builder(op->getContext()).getI32IntegerAttr(coordBits));
+    if (code == "triton_src.pid")
+      op->setAttr("grid_2d", fb.getBoolAttr(grid2d));
+    if (code == "triton_src.offsets") {
+      op->setAttr("index_bits", fb.getI32IntegerAttr(coordBits));
+      if (ownerAxis)
+        op->setAttr("triton_src.owner_axis",
+                    fb.getI64IntegerAttr(ownerAxis.getInt()));
+    }
     if (op->getName().getDialectNamespace() == "triton_src")
       intentdsl::block::expandRowOperation(*op, "exits/triton", true);
   });
@@ -83,10 +91,23 @@ LogicalResult verifyDynamicRows(func::FuncOp fn,
   int32_t expectedBits = canNarrowRowCoordinates(fn, profile) ? 32 : 64;
   Builder b(fn.getContext());
   auto expectedAttr = b.getI32IntegerAttr(expectedBits);
+  auto expectedGrid2d =
+      b.getBoolAttr(fn->getAttr("block.grid") == intentdsl::block::grid(b, true));
+  auto ownerAttr = fn->getAttrOfType<IntegerAttr>("kir.owner_axis");
+  Attribute expectedOwner =
+      ownerAttr ? Attribute(b.getI64IntegerAttr(ownerAttr.getInt()))
+                : Attribute();
   if (fn.walk([&](Operation *op) {
-          if (op->getName().getStringRef() == "triton_src.offsets" &&
-              op->getAttr("index_bits") != expectedAttr) {
-            op->emitError("triton_src.offsets index_bits disagrees with proven coordinate range");
+          auto code = op->getName().getStringRef();
+          if (code == "triton_src.pid" &&
+              op->getAttr("grid_2d") != expectedGrid2d) {
+            op->emitError("triton_src.pid grid_2d disagrees with block.grid");
+            return WalkResult::interrupt();
+          }
+          if (code == "triton_src.offsets" &&
+              (op->getAttr("index_bits") != expectedAttr ||
+               op->getAttr("triton_src.owner_axis") != expectedOwner)) {
+            op->emitError("triton_src.offsets attributes disagree with proven layout");
             return WalkResult::interrupt();
           }
           return WalkResult::advance();

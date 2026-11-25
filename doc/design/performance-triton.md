@@ -7,8 +7,10 @@
 Triton 出口的执行吞吐由四项显式 IR 决定支配：
 
 1. **CTA 数据归属、异步张量描述符（TMA）与双 Warpgroup 流水**：
-   - 稠密、批处理、路由与窗口矩阵收缩按 `(BM, BN, BK)` 切分输出驻留块，绑定 `{num_warps, num_stages}` 参数行；对满足 16B 起始与步长对齐的张量视图，在 `triton_src.tile_program` 入口块外提并去重 `triton_src.make_desc`（`tl.make_tensor_descriptor`），由 `desc_read` / `desc_write` 直接驱动 TMA 异步搬运与 WGMMA / MMA 指令流水，消除循环内逐迭代描述符构造栅栏。
-   - Hopper `sm90` 在 `OwnerMachine` 中开放双 warpgroup（`maxWarpgroups = 2`，`num_warps = 8`）协同矩阵面板（如 `pair-128x64`），按实占寄存器预算平衡双 warpgroup 计算吞吐与共享内存双缓冲驻留。
+   - 稠密、批处理、路由与窗口矩阵收缩按 `(BM, BN, BK)` 切分输出驻留块，绑定 `{num_warps, num_stages}` 参数行；对满足 16B 起始与步长对齐且在足够 `K` 面板上可摊薄描述符构造与共享内存暂存开销的视图（`kPanels ≥ 8` 或 `BM·BN ≥ 4096 ∧ kPanels ≥ 4`，跳过单次外层读与窄面板），在 `triton_src.tile_program` 入口块外提并去重 `triton_src.make_desc`（`tl.make_tensor_descriptor`），由 `desc_read` / `desc_write` 直接驱动 TMA 异步搬运与 WGMMA / MMA 指令流水。
+   - Hopper `sm90` 在 `OwnerMachine` 中对单 carry 单投影融合循环开放双 warpgroup（`maxWarpgroups = 2`，`num_warps = 8`）协同矩阵面板（如 `pair-128x64`），多 carry / 多投影循环保持单 warpgroup 预算以防 256 寄存器溢出；`FoldIssue::fullFoldPanels` 经 `proveTailAccess` 恢复分段因果内层完整面板。
+   - 超块记录量化（`RecordGemv`）按 `MatrixTarget::flatRecordBitPlanes = true` 生成四象限展平 `[tm, 64]` 单 warp（`num_warps = 1`）解码与单次位精确 `i64` 打包键 `Q8_K` argmax，消除 `reshape` 与跨 warp 共享内存栅栏。
+   - 终端打印器全部由声明式规则（`59` 条）与 `LocalOpView` 局部规则（`72` 条）构成，**`PrintRule::custom` 为 `0`**。
 2. **有序区域向量化与单趟融合**：
    - `block.owner_space` 统一比较单 owner 宽贡献面板（`tokens-S`，标量折叠扩展至 `4096`）、多 owner 协同矩阵面板（`pair-WxS`）、`K` 槽有序选择链并行选优归约、下三角前缀内积的寄存器驻留列消元代换（`O(N^2)` 串行访存依赖化为 `N` 步无回读向量消元）、以及有界桶计数直方图 / 前缀扫描 / 稳定秩散射面板化。
    - 当作者授予 `reassoc` 且 `proveValueReplay` 证明两次遍历间无别名写冲突时，在线 `(max, sum)` 重缩放融合为单趟扫描；在 `afn` 许可下将循环不变量 `scale * log2e` 外提至循环外直接发射硬件 SFU `exp2`。

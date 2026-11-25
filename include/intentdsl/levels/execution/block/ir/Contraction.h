@@ -15,6 +15,7 @@ struct MatrixTarget {
   std::vector<MatrixTile> tiles;
   std::string estimate;
   std::map<std::string, std::vector<std::string>> implementations;
+  bool flatRecordBitPlanes = false;
 };
 const MatrixTile *findMatrixTile(mlir::Operation *, llvm::ArrayRef<int64_t>,
                                  const compilerinfra::TargetProfile &);
