@@ -3,6 +3,7 @@
 #include "intentdsl/levels/algorithm/kir/ir/Permutation.h"
 #include "intentdsl/levels/algorithm/kir/ir/RowSemantics.h"
 #include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
+#include "intentdsl/levels/execution/block/decisions/KeyPanels.h"
 #include "intentdsl/levels/execution/block/decisions/Verify.h"
 #include "intentdsl/levels/execution/block/ir/Access.h"
 #include "intentdsl/levels/execution/block/ir/Contraction.h"
@@ -95,20 +96,38 @@ void bind(Unit &unit) {
       direct &= v->hasOneUse() && (*v->getUsers().begin())->getName().stripDialect()=="write";
     }});
     auto bins=d.getAs<StringAttr>("bins");
+    auto mapping = d.getAs<StringAttr>("walk");
+    bool binPanels = counts && mapping && mapping == "column-panels";
+    if (binPanels) {
+      auto rows = d.getAs<ArrayAttr>("rows");
+      auto panel = d.getAs<IntegerAttr>("key_panel");
+      if (!rows || rows.empty() || !panel || panel.getInt() <= 0 ||
+          bins != "private-merge" || d.getAs<StringAttr>("topology") != "stream" ||
+          !llvm::all_of(rows, [&](Attribute row) {
+            auto r = dyn_cast<DictionaryAttr>(row);
+            auto w = r ? r.getAs<IntegerAttr>("width") : IntegerAttr{};
+            auto group = r ? r.getAs<IntegerAttr>("rows") : IntegerAttr{};
+            return w && group && group.getInt() == 1 &&
+                   panel.getInt() == intentdsl::block::privateKeyPanel(op, profile, w.getInt());
+          }))
+        return llvm::createStringError("bin panels require disjoint compare/reduce columns within the target register budget");
+    } else if (d.get("key_panel")) {
+      return llvm::createStringError("key panel outside a band of private bins");
+    }
     if(counts){
       auto caps=profile.services.get<intentdsl::RowCapacity>();
       if(bins!="private-merge" && !(bins=="global-atomic" && caps && caps->globalAtomicBins && direct))
         return llvm::createStringError("keyed reduction needs a supported accumulation structure");
     }else if(bins)return llvm::createStringError("bin structure on a region without a keyed reduction");
     if(d.getAs<StringAttr>("topology")!="resident" &&
-       op->walk([](Operation *v){auto n=v->getName().stripDialect();return n=="prefix_scatter" || n=="scan_sum" || n=="count_keys" || n=="atomic_add" || n=="fill_ranges"?WalkResult::interrupt():WalkResult::advance();}).wasInterrupted())
+       op->walk([&](Operation *v){auto n=v->getName().stripDialect();return n=="prefix_scatter" || n=="scan_sum" || (n=="count_keys" && !binPanels) || n=="atomic_add" || n=="fill_ranges"?WalkResult::interrupt():WalkResult::advance();}).wasInterrupted())
       return llvm::createStringError("this row collective requires complete resident coverage");
     return intentdsl::verifyRows(op,d.getAs<ArrayAttr>("rows"),d.getAs<StringAttr>("topology"),d.getAs<DenseI64ArrayAttr>("guard"),profile);
   };
   f.verifyCandidate=[](Operation *op,const StructuralCandidate &c,const TargetProfile &profile)->llvm::Error{
     auto d=cast<DictionaryAttr>(c.value);auto topology=d.getAs<StringAttr>("topology").str();
     auto rows=d.getAs<ArrayAttr>("rows");auto group=cast<DictionaryAttr>(rows[0]).getAs<IntegerAttr>("rows");
-    if(auto bins=d.getAs<StringAttr>("bins")){
+    if(auto bins=d.getAs<StringAttr>("bins"); bins && !d.get("key_panel")){
       auto caps=profile.services.get<intentdsl::RowCapacity>();
       bool legal=topology=="resident" && group.getInt()==1 && c.id==bins.str() && c.topology==c.id &&
           c.preconditions==std::vector<std::string>{"exclusive-bin-row"} &&
@@ -123,6 +142,7 @@ void bind(Unit &unit) {
     if(auto walk=d.getAs<StringAttr>("walk")){
       if(walk=="column-panels"){
         bool hasColumnSum = op->walk([](Operation *v){return v->getName().stripDialect()=="column_sum"?WalkResult::interrupt():WalkResult::advance();}).wasInterrupted();
+        bool hasKeyCounts = op->walk([](Operation *v){return v->getName().stripDialect()=="count_keys"?WalkResult::interrupt():WalkResult::advance();}).wasInterrupted();
         auto fn = op->getParentOfType<func::FuncOp>();
         bool pureRank1Pointwise =
             !hasColumnSum &&
@@ -143,10 +163,10 @@ void bind(Unit &unit) {
         std::string expectedId =
             "column-panels-" + std::to_string(width ? width.getInt() : 0);
         std::vector<std::string> expectedPre{
-            hasColumnSum ? "independent-bins" : "independent-members"};
+            hasColumnSum || hasKeyCounts ? "independent-bins" : "independent-members"};
         if (c.topology != walk.str() || c.id != expectedId ||
             c.preconditions != expectedPre || topology != "stream" ||
-            (!hasColumnSum && !pureRank1Pointwise) ||
+            (!hasColumnSum && !hasKeyCounts && !pureRank1Pointwise) ||
             profile.services.get<intentdsl::RowCapacity>()
                 ->independentWidths.empty())
           return llvm::createStringError(

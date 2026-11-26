@@ -1047,7 +1047,7 @@ struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
       fn.walk<WalkOrder::PostOrder>([](Operation *op){
         if(op->getName().getDialectNamespace()!="ct_src") return;
         auto n=op->getName().stripDialect();
-        if(n=="key_counts")op->setAttr("native_panel",Builder(op->getContext()).getI64IntegerAttr(64));
+        if(n=="key_counts" && !op->hasAttr("native_panel"))op->setAttr("native_panel",Builder(op->getContext()).getI64IntegerAttr(64));
         if(n=="indexed_tile_read" || n=="fill_ranges_at" || n=="segment_fold" || n=="segment_size" || n=="scatter_fragment" ||
            n=="sum_columns" || n=="key_counts" || n=="publish_offsets" || n=="stripe_loop")
           intentdsl::block::expandRowOperation(*op,"exits/cutile",false);

@@ -205,9 +205,12 @@ void registerCost(Unit &u) {
               }
               if(auto mode=choice.getAs<StringAttr>("bins")){
                 auto caps=ctx.target.services.get<intentdsl::RowCapacity>();
-                double updates=0;
-                op->walk([&](Operation *k){if(k->getName().stripDialect()=="count_keys")
-                  updates+=f->viewBytes(k->getOperand(0))/(cast<MemRefType>(k->getOperand(0).getType()).getElementTypeBitWidth()/8.);});
+                double updates=0, keyBytes=0;
+                op->walk([&](Operation *k){if(k->getName().stripDialect()=="count_keys"){
+                  double bytes = f->viewBytes(k->getOperand(0));
+                  keyBytes += bytes;
+                  updates += bytes / (cast<MemRefType>(k->getOperand(0).getType()).getElementTypeBitWidth() / 8.);
+                }});
                 // With no distribution promise, estimate contention for
                 // uniform keys over the active bins in each partition.
                 double perBin=updates/std::max(1.,m*n);
@@ -217,19 +220,25 @@ void registerCost(Unit &u) {
                 if(caps->privateBinCapacity)v.terms["per_block_storage_limit"]={double(*caps->privateBinCapacity),"B"};
                 v.terms["bin_merge_bytes"]={local?4.*m*n:0.,"B"};
                 v.terms["contending_global_updates"]={local?0.:collisions,"count"};
+                double occupancy = caps->nativePrivateHistogram ? 1. :
+                    std::clamp(scheduled / f->participants, 1. / f->participants, 1.);
                 if(local){
                   auto rate=intentdsl::quantity(ctx,"compute","lane/ns");
-                  if(rate)*v.timeNs+=updates*(caps->nativePrivateHistogram?1.:width)/ *rate;
+                  double work = updates * (caps->nativePrivateHistogram ? 1. : n);
+                  if(rate)*v.timeNs+=work / *rate / occupancy;
                   if(!caps->nativePrivateHistogram){
                     // Compare/reduce materializes one i32 predicate per key
                     // and bin inside the tile. Use on-chip traffic as a proxy
                     // when the target has no collective instruction.
                     auto localRate=intentdsl::quantity(ctx,"read_1_shared_bw","B/ns").value_or(*read);
-                    *v.timeNs+=4.*updates*width/localRate;
-                    v.terms["local_predicate_bytes"]={4.*updates*width,"B"};
+                    double compareBytes = 4. * work;
+                    double replicatedKeys = keyBytes * (gridTiles ? tiles - 1 : 0);
+                    *v.timeNs += (compareBytes + replicatedKeys) / localRate / occupancy;
+                    v.terms["local_predicate_bytes"]={compareBytes,"B"};
+                    v.terms["replicated_key_bytes"]={replicatedKeys,"B"};
                   }
                   *v.timeNs+=4.*m*n/ *write;
-                }else *v.timeNs+=8.*updates/ *strided+4.*collisions/ *write;
+                }else *v.timeNs+=(8.*updates/ *strided+4.*collisions/ *write)/occupancy;
               }
               if(scanSteps){
                 auto rate=intentdsl::quantity(ctx,"compute","lane/ns");

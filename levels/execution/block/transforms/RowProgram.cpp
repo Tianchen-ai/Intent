@@ -1,4 +1,5 @@
 #include "intentdsl/levels/execution/block/ir/RowProgram.h"
+#include "intentdsl/levels/execution/block/ir/Grid.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -146,7 +147,10 @@ struct Row {
               lanes(width));
           Value partial;
           if (privateCounts) {
-            auto pid = op("tile_pid", {}, i64, num("axis", 0))->getResult(0);
+            // Row maps decode the physical block id when bins span grid tiles.
+            auto pid = fn->getAttr("block.grid") == grid(b, true)
+                           ? map("i64", arg(1).getDefiningOp()->getOperand(0), i64)
+                           : op("tile_pid", {}, i64, num("axis", 0))->getResult(0);
             auto pos = binary("add", binary("mul", pid, constant(span)), index);
             auto mask = binary("and", binary("lt", index, constant(span), i1),
                                binary("lt", pos, constant(n), i1));

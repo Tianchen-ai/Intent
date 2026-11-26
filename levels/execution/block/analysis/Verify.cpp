@@ -7,6 +7,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "llvm/ADT/DenseSet.h"
 #include "intentdsl/levels/execution/block/ir/Grid.h"
+#include "intentdsl/levels/execution/block/ir/Owners.h"
 namespace intentdsl {
 using namespace mlir;
 llvm::Error verifyRows(Operation *anchor,ArrayAttr rows,StringAttr topology,DenseI64ArrayAttr guard,const compilerinfra::TargetProfile &p){
@@ -134,7 +135,7 @@ LogicalResult verifyMapping(ModuleOp m,const compilerinfra::TargetProfile &p,Str
     if(n=="key_counts" || n=="sum_columns"){
       auto *window=op->getOperand(3).getDefiningOp();
       auto cfg=f->getAttrOfType<ArrayAttr>("block.configs");
-      ok=(topology=="resident" || (tiles && n=="sum_columns")) && def(op->getOperand(3),"active") && window->getOperand(0)==domain &&
+      ok=(topology=="resident" || (tiles && (n=="sum_columns" || op->getAttrOfType<StringAttr>("bin_mode")=="private-merge"))) && def(op->getOperand(3),"active") && window->getOperand(0)==domain &&
         window->getOperand(1)==op->getOperand(1) && window->getOperand(2)==op->getOperand(2) &&
         llvm::all_of(cfg,[](Attribute a){return cast<DictionaryAttr>(a).getAs<IntegerAttr>("rows").getInt()==1;});
       auto size=kir::keyExtent(op,*p.services.get<CallFacts>());
@@ -143,6 +144,18 @@ LogicalResult verifyMapping(ModuleOp m,const compilerinfra::TargetProfile &p,Str
       if(n=="key_counts"){
         auto mode=op->getAttrOfType<StringAttr>("bin_mode");
         ok &= mode && (mode=="private-merge" || mode=="global-atomic");
+        if (tiles) {
+          auto machine = p.services.get<block::OwnerMachine>();
+          auto caps = p.services.get<RowCapacity>();
+          auto panel = op->getAttrOfType<IntegerAttr>("native_panel");
+          auto span = op->getAttrOfType<IntegerAttr>("span");
+          ok &= caps && !caps->nativePrivateHistogram && machine && panel && span &&
+                panel.getInt() > 0 && llvm::isPowerOf2_64(panel.getInt()) &&
+                panel.getInt() <= span.getInt() && llvm::all_of(cfg, [&](Attribute a) {
+                  auto width = cast<DictionaryAttr>(a).getAs<IntegerAttr>("width").getInt();
+                  return panel.getInt() <= machine->residentRegisters / width;
+                });
+        }
         if(mode=="global-atomic"){
           auto caps=p.services.get<RowCapacity>();
           ok &= caps && caps->globalAtomicBins && op->hasOneUse();

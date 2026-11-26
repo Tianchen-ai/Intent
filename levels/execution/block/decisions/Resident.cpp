@@ -1,4 +1,5 @@
 #include "Resident.h"
+#include "intentdsl/levels/execution/block/decisions/KeyPanels.h"
 #include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
 #include <map>
 
@@ -12,7 +13,13 @@ llvm::Expected<std::vector<StructuralCandidate>> residentCandidates(Operation *o
     auto n=caps->width(op);if(!n)return n.takeError();
     unsigned width=0,last=0;
     for(auto &r:caps->rows)if(r.width>=*n && (!width || width>r.width))width=r.width;
-    if(!width)return llvm::createStringError("whole-row collective exceeds the available native tile widths");
+    if (!width) {
+      // These reductions may still cover the row with independent bin tiles.
+      if (!caps->independentWidths.empty() &&
+          (contains(op, {"column_sum"}) || intentdsl::block::privateKeyPanel(op, p, 1)))
+        return choices;
+      return llvm::createStringError("whole-row collective exceeds the available native tile widths");
+    }
     for(auto &r:caps->rows)if(r.width<width)last=std::max(last,r.width);
     Builder b(op->getContext());
     std::map<unsigned, SmallVector<Attribute>> groups;

@@ -40,6 +40,7 @@ public:
     fn->setAttr("block.topology", choice.get("topology"));
     batch=choice.getAs<IntegerAttr>("member_batch");
     binMode=choice.getAs<StringAttr>("bins");
+    keyPanel=choice.getAs<IntegerAttr>("key_panel");
   }
   void build() {
     rw.setInsertionPoint(anchor);
@@ -195,7 +196,7 @@ private:
   Location loc;
   Value domain, rows, cols, active;
   bool resident, gridTiles, pureTileReads = false;
-  IntegerAttr batch;
+  IntegerAttr batch, keyPanel;
   StringAttr binMode;
   SmallVector<Operation *> writes;
   IRMapping fixed, local;
@@ -259,7 +260,10 @@ private:
     if(n=="count_keys" || n=="column_sum"){
       auto fragment=make(n=="count_keys"?"key_counts":"sum_columns",{op->getOperand(0),rows,cols,active},
                          vector(rw.getI32Type(),2),op->getAttrs())->getResult(0);
-      if(n=="count_keys")fragment.getDefiningOp()->setAttr("bin_mode",binMode);
+      if(n=="count_keys"){
+        fragment.getDefiningOp()->setAttr("bin_mode",binMode);
+        if(keyPanel)fragment.getDefiningOp()->setAttr("native_panel",keyPanel);
+      }
       local.map(v,fragment);return fragment;
     }
     if (n == "field") {

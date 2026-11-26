@@ -1,5 +1,6 @@
 #include "../Resident.h"
 #include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
+#include "intentdsl/levels/execution/block/decisions/KeyPanels.h"
 namespace CI_UNIT_NAMESPACE {
 void registerKeyReduction(compilerinfra::Unit &unit) {
   using namespace mlir;
@@ -35,13 +36,16 @@ void registerKeyReduction(compilerinfra::Unit &unit) {
       -> llvm::Expected<std::vector<StructuralCandidate>> {
     std::vector<StructuralCandidate> cs;
     auto caps = p.services.get<intentdsl::RowCapacity>();
-    if (!contains(op, {"column_sum"}) || !caps ||
-        caps->independentWidths.empty())
+    bool keyed = contains(op, {"count_keys"});
+    if (!caps || caps->independentWidths.empty() ||
+        (!contains(op, {"column_sum"}) && !keyed))
       return cs;
     Builder b(op->getContext());
     unsigned elemBytes = 0;
     op->walk([&](Operation *k) {
-      if (k->getName().stripDialect() == "column_sum") {
+      if (k->getName().stripDialect() == "count_keys") {
+        elemBytes = sizeof(int32_t);
+      } else if (k->getName().stripDialect() == "column_sum") {
         auto ty = cast<MemRefType>(k->getOperand(0).getType());
         elemBytes = std::max<unsigned>(
             elemBytes, llvm::divideCeil(ty.getElementTypeBitWidth(), 8));
@@ -65,6 +69,15 @@ void registerKeyReduction(compilerinfra::Unit &unit) {
            b.getNamedAttr("walk", b.getStringAttr("column-panels")),
            b.getNamedAttr("topology", b.getStringAttr("stream")),
            b.getNamedAttr("guard", b.getDenseI64ArrayAttr({0, -1}))});
+      if (keyed) {
+        int64_t lanes = intentdsl::block::privateKeyPanel(op, p, width);
+        if (!lanes)
+          continue;
+        NamedAttrList params(d);
+        params.set("bins", b.getStringAttr("private-merge"));
+        params.set("key_panel", b.getI64IntegerAttr(lanes));
+        d = params.getDictionary(op->getContext());
+      }
       cs.push_back({"column-panels-" + std::to_string(width),
                     "column-panels",
                     d,
