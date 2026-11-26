@@ -191,7 +191,7 @@ LogicalResult verifyOwnerGrain(func::FuncOp fn, Operation &space,
 }
 
 llvm::Error materializeOwnerBuffers(func::FuncOp fn, RewriterBase &rw,
-                                    StringRef realization) {
+                                    const TargetProfile &profile, StringRef realization) {
   auto &task = fn.front().front();
   task.setAttr("cpu.realization", rw.getStringAttr(realization));
   task.removeAttr("cpu.storage");
@@ -454,8 +454,10 @@ llvm::Error materializeOwnerBuffers(func::FuncOp fn, RewriterBase &rw,
     }
   }
 
-  if (!cached && !window)
+  if (!cached && !window) {
+    screenRankedInsertions(body, rw, profile);
     return llvm::Error::success();
+  }
 
   Operation *recordOp = nullptr, *replayOp = nullptr;
   space.walk([&](Operation *op) {

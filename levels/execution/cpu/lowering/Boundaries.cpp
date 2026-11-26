@@ -136,7 +136,7 @@ LogicalResult verifyTask(ModuleOp m, const TargetProfile &profile,
   return success();
 }
 llvm::Error realizeLocalValues(Operation *op, Attribute value,
-                               const TargetProfile &, RewriterBase &rw,
+                               const TargetProfile &profile, RewriterBase &rw,
                                StringRef realization) {
   if (value != rw.getStringAttr("private-values"))
     return llvm::createStringError("unsupported storage contract");
@@ -145,7 +145,7 @@ llvm::Error realizeLocalValues(Operation *op, Attribute value,
                                     realization);
   if (op->getName().getStringRef() == "cpu.owner_task")
     return materializeOwnerBuffers(op->getParentOfType<func::FuncOp>(), rw,
-                                   realization);
+                                   profile, realization);
   op->setAttr("cpu.realization", rw.getStringAttr(realization));
   op->removeAttr("cpu.storage");
   auto &body = op->getRegion(0).front();

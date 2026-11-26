@@ -10,8 +10,10 @@ mlir::LogicalResult verifyOwnerBuffers(
     mlir::func::FuncOp, const compilerinfra::TargetProfile &,
     llvm::StringRef realization = "private-values");
 llvm::Error materializeOwnerBuffers(
-    mlir::func::FuncOp, mlir::RewriterBase &,
+    mlir::func::FuncOp, mlir::RewriterBase &, const compilerinfra::TargetProfile &,
     llvm::StringRef realization = "private-values");
+void screenRankedInsertions(mlir::Block &, mlir::RewriterBase &,
+                            const compilerinfra::TargetProfile &);
 mlir::LogicalResult verifyOwnerGrain(mlir::func::FuncOp, mlir::Operation &,
                                      const compilerinfra::TargetProfile &);
 } // namespace intentdsl::cpu
