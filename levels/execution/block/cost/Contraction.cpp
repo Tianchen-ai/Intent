@@ -141,6 +141,15 @@ void matrixCost(Unit &u) {
           }
           double jobs = shape->batches * std::ceil(shape->m / tm) *
                         std::ceil(shape->n / tn);
+          double launched = jobs;
+          if (shape->routed && shape->m > 0 && shape->batches > 0) {
+            // Offsets partition one route array. Every nonempty segment can
+            // add at most one incomplete row tile to the unsplit partition.
+            double rowTiles = std::min<double>(
+                shape->m, std::ceil(shape->m / tm) +
+                              std::min(shape->m, shape->batches) - 1);
+            jobs = rowTiles * std::ceil(shape->n / tn);
+          }
           double panels = records ? std::ceil(shape->k / recordElems)
                                   : std::ceil(shape->k / tk);
           double panelBytes =
@@ -152,6 +161,14 @@ void matrixCost(Unit &u) {
               : groupedRhs
                   ? (tm * tk * 2.0 + tn * tk * groupedRhsB)
                   : ((tm + tn) * tk * 2.0);
+          if (shape->routed) {
+            auto fn = op->getParentOfType<mlir::func::FuncOp>();
+            auto bytes = [&](unsigned slot) {
+              return mlir::cast<mlir::MemRefType>(fn.getArgument(slot).getType())
+                         .getElementTypeBitWidth() / 8.;
+            };
+            panelBytes = (tm * bytes(shape->lhs) + tn * bytes(shape->rhs)) * tk;
+          }
           double mBlocks = shape->batches * std::ceil(shape->m / tm);
           double read =
               records ? (panels * (shape->batches * shape->m * recordBytes +
@@ -181,7 +198,25 @@ void matrixCost(Unit &u) {
                          recordElems * 4.0)
                       : (panelBytes * std::max<int64_t>(1, f->participants));
           if (bw && startup) {
-            if (groupedRhs) {
+            if (shape->routed) {
+              // Rectangular launch slots beyond a segment's end execute its
+              // offset guard, but never enter the dot-product loop.
+              auto fn = op->getParentOfType<mlir::func::FuncOp>();
+              double uniqueBytes = f->viewBytes(fn.getArgument(shape->lhs)) +
+                                   f->viewBytes(fn.getArgument(shape->rhs));
+              double outputBytes = f->viewBytes(fn.getArgument(shape->dst));
+              double sharedBw = std::max(*bw, sbw.value_or(*bw));
+              double dramNs = uniqueBytes / *bw + outputBytes / wbw.value_or(*bw);
+              double panelNs = read / sharedBw;
+              double ops = 2. * jobs * tm * tn * tk * panels;
+              double active = std::max(1., std::min<double>(f->participants, jobs));
+              double mmaNs = mt->smMmaOpsPerNs > 0 ? ops / (active * mt->smMmaOpsPerNs) : 0.;
+              e.terms["launched_tiles"] = {launched, "count"};
+              e.terms["active_tile_upper_bound"] = {jobs, "count"};
+              e.terms["routed_matrix_ops"] = {ops, "count"};
+              e.timeNs = *startup + std::max({dramNs, panelNs, mmaNs}) +
+                         launched * 2 * sizeof(int32_t) / sharedBw;
+            } else if (groupedRhs) {
               double l2Bw = sbw.value_or(*bw * 4.0);
               double l2Traffic = jobs * panels * panelBytes;
               double activeSms = std::min<double>(
