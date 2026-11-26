@@ -104,6 +104,7 @@ class Artifact:
                     self.info[3],
                     "-O3",
                     "-fPIC",
+                    *isa_flags,
                     f"-I{onednn_inc}",
                     "-c",
                     str(_bridge_source()),

@@ -3,11 +3,35 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 #include "oneapi/dnnl/dnnl_ukernel.h"
 
 #ifndef DNNL_EXPERIMENTAL_UKERNEL
 #error "oneDNN ukernel support (DNNL_EXPERIMENTAL_UKERNEL) is required"
 #endif
+
+// oneDNN's BF16 BRGeMM B operand stores pairs of reduction elements
+// together, with columns contiguous between pairs. Source and destination
+// are disjoint, and stride is measured in BF16 elements.
+void intent_pack_bf16_rows(const uint16_t *restrict src, uint16_t *restrict dst,
+                           int64_t rows, int64_t cols, int64_t stride) {
+  for (int64_t p = 0; p < rows / 2; ++p) {
+    const uint16_t *first = src + 2 * p * stride;
+    const uint16_t *second = first + stride;
+    for (int64_t j = 0; j < cols; ++j) {
+      dst[2 * j] = first[j];
+      dst[2 * j + 1] = second[j];
+    }
+    dst += 2 * cols;
+  }
+  if (rows % 2) {
+    const uint16_t *last = src + (rows - 1) * stride;
+    for (int64_t j = 0; j < cols; ++j) {
+      dst[2 * j] = last[j];
+      dst[2 * j + 1] = 0;
+    }
+  }
+}
 
 typedef struct IntentBrgemmKey {
   int64_t M, N, K, lda, ldb, ldc;
@@ -198,4 +222,60 @@ int32_t intent_brgemm_tile(const void *handle, const void *A, const void *B,
                              offs, C, scratch) == dnnl_success
              ? 0
              : 4;
+}
+
+static float widen_bf16_ftz(uint16_t value) {
+  uint32_t bits = (uint32_t)value << 16;
+  if (!(bits & 0x7f800000u))
+    bits &= 0x80000000u;
+  float result;
+  memcpy(&result, &bits, sizeof(result));
+  return result;
+}
+
+// Multiply an M x K BF16 view by a pair-interleaved B panel, then restore
+// the caller's BRGeMM context before returning to its next contraction.
+int32_t intent_brgemm_bf16_prefix(const uint16_t *a, const uint16_t *b,
+                                 float *c, int64_t m, int64_t n, int64_t k,
+                                 int64_t lda, int64_t ldc, const void *restore,
+                                 void *caller_scratch) {
+  if (!a || !b || !c || m <= 0 || n <= 0 || k <= 0 || lda < k || ldc < n)
+    return 4;
+  const int64_t pairs = k & ~(int64_t)1;
+  if (pairs) {
+    const void *handle = intent_brgemm_get(m, n, pairs, lda, n, ldc, 1, 1, 0);
+    if (!handle)
+      return 1;
+    void *scratch = caller_scratch, *owned = NULL;
+    int64_t size = intent_brgemm_scratch_bytes(handle);
+    if (!scratch || size > intent_brgemm_scratch_bytes(restore)) {
+      if (posix_memalign(&owned, 64, (size_t)size) != 0)
+        return 2;
+      scratch = owned;
+    }
+    int32_t status = intent_brgemm_thread_enter(handle);
+    if (!status)
+      status = intent_brgemm_tile(handle, a, b, c, scratch);
+    if (restore)
+      status |= intent_brgemm_thread_enter(restore);
+    else
+      intent_brgemm_thread_leave();
+    free(owned);
+    if (status)
+      return status;
+  }
+
+  // oneDNN's BF16 B layout reduces pairs. Consume a real odd final term
+  // without speculatively reading masked or out-of-domain input values.
+  if (pairs < k) {
+    const uint16_t *last = b + pairs * n;
+    for (int64_t i = 0; i < m; ++i) {
+      float lhs = widen_bf16_ftz(a[i * lda + pairs]);
+      for (int64_t j = 0; j < n; ++j) {
+        float acc = pairs ? c[i * ldc + j] : 0.0f;
+        c[i * ldc + j] = acc + lhs * widen_bf16_ftz(last[2 * j]);
+      }
+    }
+  }
+  return 0;
 }
