@@ -9,6 +9,10 @@ mlir::LogicalResult bindWeftMemberStores(mlir::Operation &task, bool rvv,
 mlir::LogicalResult lowerWeftOrdered(mlir::func::FuncOp fn,
                                      const intentdsl::CallFacts &facts,
                                      bool rvv);
+void lowerInvocationPanels(
+    mlir::func::FuncOp fn, mlir::Operation &program, mlir::Operation &kernel,
+    mlir::Operation &team, mlir::DenseI64ArrayAttr slots,
+    const llvm::DenseMap<mlir::Value, llvm::SmallVector<int64_t>> &axes);
 bool hasWeftOwnerProgram(mlir::ModuleOp m);
 llvm::Error describeWeftOrderedPackage(mlir::func::FuncOp fn,
                                        mlir::Operation &prog,

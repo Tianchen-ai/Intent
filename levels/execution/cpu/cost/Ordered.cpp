@@ -1,3 +1,4 @@
+#include "intentdsl/levels/execution/cpu/cost/PanelLayout.h"
 #include "intentdsl/levels/execution/cpu/ir/OrderedValue.h"
 #include "intentdsl/levels/execution/cpu/ir/OwnerTraversal.h"
 #include "intentdsl/levels/execution/cpu/ir/Owners.h"
@@ -128,11 +129,12 @@ void ownerCost(Unit &u) {
             double dots = double(n) * keySpan * (retained ? 1 : 2);
             e.terms["score_dot_products"] = {dots, "count"};
             double flop = 2. * dots * panel->depth;
+            auto dot = shared ? intentdsl::cpu::orderedDotPanel(
+                                    *o, *f, shared->axis, rm->packedOwners)
+                              : std::nullopt;
+            auto value = dot ? intentdsl::cpu::orderedValuePanel(*o, *f, *dot)
+                             : std::nullopt;
             if (shared) {
-              auto dot = intentdsl::cpu::orderedDotPanel(*o, *f, shared->axis,
-                                                         rm->packedOwners);
-              auto value = dot ? intentdsl::cpu::orderedValuePanel(*o, *f, *dot)
-                               : std::nullopt;
               if (value) {
                 double valueFlop = 2. * n * keySpan * value->columns;
                 e.terms["value_contraction_work"] = {valueFlop, "FLOP"};
@@ -163,6 +165,25 @@ void ownerCost(Unit &u) {
               if (rm->orderedDotTokens) {
                 double packedElements = panels * tokens * panel->depth;
                 double scalarRate = rateVal / (rm->vectorBits / 32);
+                auto packingWork = [&](mlir::Operation *read, bool transpose,
+                                       double repeated) {
+                  if (!value || !cache.contains("value_width"))
+                    return repeated;
+                  auto arg =
+                      mlir::cast<mlir::BlockArgument>(read->getOperand(0));
+                  int64_t once = intentdsl::cpu::invocationPanelElements(
+                      *o, *f, *rm, arg, tokens, batch, transpose);
+                  if (!once)
+                    return repeated;
+                  e.terms[transpose ? "shared_key_pack_elements"
+                                    : "shared_value_pack_elements"] = {
+                      double(once), "count"};
+                  *e.timeNs +=
+                      (2. * once + repeated) * sizeof(uint16_t) / bwVal + sync;
+                  return double(once);
+                };
+                if (dot)
+                  packedElements = packingWork(dot->key, true, packedElements);
                 e.terms["strided_pack_elements"] = {packedElements, "count"};
                 *e.timeNs += 3 * packedElements / scalarRate;
                 if (auto cols = cache.getAs<mlir::IntegerAttr>("value_width")) {
@@ -194,6 +215,9 @@ void ownerCost(Unit &u) {
                   double liveBytes = std::max(scoreLive, valueLive);
                   double spill = std::max(0., liveBytes - rm->ownerStackBytes);
                   e.terms["matrix_spill_bytes"] = {2 * panels * spill, "B"};
+                  if (value)
+                    valueEntries =
+                        packingWork(value->read, false, valueEntries);
                   e.terms["value_vnni_pack_elements"] = {valueEntries, "count"};
                   e.terms["matrix_exchange_bytes"] = {packedBytes, "B"};
                   e.terms["matrix_tile_live_bytes"] = {liveBytes, "B"};

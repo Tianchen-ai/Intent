@@ -79,6 +79,11 @@ def TaskSubviewOp : Op<WeftHost_Dialect, "task_subview"> {
   let results = (outs Index:$res);
 }
 
+def TaskReshapeOp : Op<WeftHost_Dialect, "task_reshape"> {
+  let arguments = (ins Index:$input, StrAttr:$order, StrAttr:$in_type, StrAttr:$val_type);
+  let results = (outs Index:$res);
+}
+
 def TaskUnaryOp : Op<WeftHost_Dialect, "task_unary"> {
   let arguments = (ins Index:$input, StrAttr:$kind, StrAttr:$val_type);
   let results = (outs Index:$res);
@@ -364,5 +369,5 @@ def HostCallTaskOp : Op<WeftHost_Dialect, "host_call_task"> {
 }
 
 def HostFreeOp : Op<WeftHost_Dialect, "host_free"> {
-  let arguments = (ins StrAttr:$buf_name);
+  let arguments = (ins StrAttr:$buf_name, OptionalAttr<UnitAttr>:$invocation);
 }

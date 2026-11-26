@@ -8,6 +8,7 @@ compilerinfra_unit(SOURCES
   ir/MatrixContracts.cpp
   legalize/Matrix.cpp
   legalize/Ordered.cpp
+  legalize/OrderedPacking.cpp
   legalize/Rows.cpp
   transforms/NarrowAddress.cpp
   LINK_LIBRARIES ${cpu} ${algorithm}

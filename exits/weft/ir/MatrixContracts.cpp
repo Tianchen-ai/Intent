@@ -63,6 +63,49 @@ static bool validOrderedBrgemm(mlir::Operation *op, int64_t axis) {
          op->getAttrOfType<StringAttr>("val_type") == expected &&
          compilerinfra::allowsSubnormalFlush(op);
 }
+static bool validPackedOrderedBrgemm(mlir::Operation *op,
+                                     mlir::DenseI64ArrayAttr over) {
+  using namespace mlir;
+  if (!over || over.size() != 2 || over[0] == over[1])
+    return false;
+  auto inputs = op->getAttrOfType<ArrayAttr>("in_types");
+  if (!inputs || inputs.size() != 2)
+    return false;
+  std::array<SmallVector<int64_t>, 2> shape, axes;
+  for (unsigned i = 0; i < 2; ++i) {
+    auto *def = op->getOperand(i).getDefiningOp();
+    auto ty = dyn_cast<StringAttr>(inputs[i]);
+    if (!ty || !def ||
+        def->getName().stripDialect() != (i ? "task_slice" : "task_reshape") ||
+        def->getAttr("val_type") != ty)
+      return false;
+    auto s = ty.getValue();
+    if (!s.consume_front("!weft_kernel.value<bf16,[") || !s.consume_back("]>"))
+      return false;
+    auto [dims, ids] = s.split("],[");
+    auto parse = [](StringRef text, SmallVector<int64_t> &out) {
+      SmallVector<StringRef> fields;
+      text.split(fields, ',');
+      for (auto field : fields) {
+        int64_t n;
+        if (field.getAsInteger(10, n) || n <= 0)
+          return false;
+        out.push_back(n);
+      }
+      return out.size() == 3;
+    };
+    if (!parse(dims, shape[i]) || !parse(ids, axes[i]) ||
+        axes[i][2] != over[1] || axes[i][1 - i] != over[0] || shape[i][2] != 2)
+      return false;
+  }
+  auto expected = "!weft_kernel.value<f32,[" + std::to_string(shape[0][0]) +
+                  "," + std::to_string(shape[1][1]) + "],[" +
+                  std::to_string(axes[0][0]) + "," +
+                  std::to_string(axes[1][1]) + "]>";
+  return shape[0][1] == shape[1][0] && axes[0][0] != axes[1][1] &&
+         op->getAttrOfType<StringAttr>("val_type") == expected &&
+         compilerinfra::allowsSubnormalFlush(op);
+}
 using namespace compilerinfra;
 using namespace mlir;
 
@@ -317,7 +360,7 @@ void registerWeftMatrixContracts(Unit &u) {
       if (!eng || eng.getValue() != contractName)
         return failure();
       auto kind = op->getAttrOfType<StringAttr>("kind");
-      if (!kind || kind.getValue() != (isQ4k ? "contract" : "outer_contract"))
+      if (!kind)
         return failure();
       auto over = op->getAttrOfType<DenseI64ArrayAttr>("over");
       const int64_t singleAxis[] = {3};
@@ -330,9 +373,15 @@ void registerWeftMatrixContracts(Unit &u) {
       ArrayRef<int64_t> expectedOver =
           vnniPack > 1 ? ArrayRef<int64_t>(packAxes)
                        : ArrayRef<int64_t>(singleAxis);
-      if (!over ||
-          (ownerDot ? over.size() != 1 || !validOrderedBrgemm(op, over[0])
-                    : over.asArrayRef() != expectedOver))
+      bool packedOwner = ownerDot && kind == "contract";
+      if (packedOwner) {
+        if (!validPackedOrderedBrgemm(op, over))
+          return failure();
+      } else if (kind.getValue() != (isQ4k ? "contract" : "outer_contract") ||
+                 !over ||
+                 (ownerDot
+                      ? over.size() != 1 || !validOrderedBrgemm(op, over[0])
+                      : over.asArrayRef() != expectedOver))
         return failure();
       auto accAttr = op->getAttrOfType<StringAttr>("acc_type");
       if (!accAttr || accAttr.getValue() != expectedAcc)

@@ -4505,6 +4505,14 @@ LogicalResult lowerWeftOrdered(func::FuncOp fn,
           b.getNamedAttr("stride_exprs", b.getArrayAttr(strideExprs))});
   makeOp(b, loc, "end");
 
+  if (managed) {
+    auto geometry = space.getAttrOfType<DictionaryAttr>("cpu.vector_panel");
+    auto slots = geometry ? geometry.getAs<DenseI64ArrayAttr>("packed_slots")
+                          : DenseI64ArrayAttr{};
+    if (slots)
+      lowerInvocationPanels(fn, *prog, *tk, *pOwners->getParentOp(), slots,
+                            lowerer.axesMap);
+  }
   SmallVector<Operation *> toErase;
   for (Operation &op : fn.front())
     if (&op != prog && op.getName().getStringRef() != "func.return")

@@ -1,5 +1,6 @@
 #pragma once
-#include "intentdsl/levels/execution/cpu/ir/OrderedDot.h"
+#include "intentdsl/levels/execution/cpu/cost/PanelLayout.h"
+#include "intentdsl/levels/execution/cpu/ir/OrderedValue.h"
 #include <numeric>
 
 namespace intentdsl::cpu {
@@ -60,9 +61,28 @@ orderedGeometry(mlir::Operation &space, const compilerinfra::TargetProfile &p) {
           std::min(cached, std::max<int64_t>(1, budget / tileBytes) * tokens);
     }
   }
-  return b.getDictionaryAttr(
-      {b.getNamedAttr("token_tile", b.getI64IntegerAttr(tokens)),
-       b.getNamedAttr("value_width", b.getI64IntegerAttr(width)),
-       b.getNamedAttr("score_slots", b.getI64IntegerAttr(cached))});
+  NamedAttrList geometry;
+  geometry.set("token_tile", b.getI64IntegerAttr(tokens));
+  geometry.set("value_width", b.getI64IntegerAttr(width));
+  geometry.set("score_slots", b.getI64IntegerAttr(cached));
+  auto inner = space.getAttrOfType<IntegerAttr>("cpu.innermost_owner");
+  if (score && inner && machine->orderedDotTokens &&
+      space.hasAttr("cpu.value_width")) {
+    auto dot = orderedDotPanel(space, *facts, inner.getInt(), rows);
+    auto value = dot ? orderedValuePanel(space, *facts, *dot) : std::nullopt;
+    if (dot && value) {
+      SmallVector<int64_t> slots;
+      for (auto [read, transpose] :
+           {std::pair{dot->key, true}, std::pair{value->read, false}}) {
+        auto arg = cast<BlockArgument>(read->getOperand(0));
+        if (invocationPanelElements(space, *facts, *machine, arg, tokens, rows,
+                                    transpose))
+          slots.push_back(arg.getArgNumber());
+      }
+      if (!slots.empty())
+        geometry.set("packed_slots", b.getDenseI64ArrayAttr(slots));
+    }
+  }
+  return geometry.getDictionary(b.getContext());
 }
 } // namespace intentdsl::cpu

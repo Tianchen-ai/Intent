@@ -121,6 +121,9 @@ TerminalPrinter weftTerminalPrinter() {
       "%$r0=\"weft_kernel.compare\"(%$0,%$1) <{{predicate=\"{predicate}\"}}>:({lhs_type},{rhs_type})->{val_type}");
   rules["weft_host.task_assume"] =
       PrintRule::format("\"weft_kernel.assume\"(%$0):(i1)->()");
+  rules["weft_host.task_reshape"] = PrintRule::format(
+      "%$r0=\"weft_kernel.reshape\"(%$0) "
+      "<{{order=array<i64:{order}>}}>:({in_type})->{val_type}");
   rules["weft_host.task_cast"] = PrintRule::format(
       "%$r0=\"weft_kernel.{op_kind}\"(%$0):({in_type})->{val_type}");
   rules["weft_host.task_field"] = PrintRule::format(
@@ -1044,7 +1047,15 @@ TerminalPrinter weftTerminalPrinter() {
                             : (name == "rhs" || name == "b_grp") ? 1
                             : name == "members"                  ? 2
                                                                  : 3;
-               if (place == "stack") {
+               if (place == "invocation") {
+                 c.line(cType + " *" + name + " = (" + cType +
+                        "*)malloc((size_t)(" + count + ") * sizeof(" + cType +
+                        "));");
+                 std::string cleanup;
+                 for (auto prior : view.attrOfType<ArrayAttr>("cleanup"))
+                   cleanup += "free(" + cast<StringAttr>(prior).str() + "); ";
+                 c.line("if (!" + name + ") { " + cleanup + "return 2; }");
+               } else if (place == "stack") {
                  c.line("_Alignas(64) " + cType + " " + name + "[" + count +
                         "];");
                } else if (place == "tls") {
@@ -1304,6 +1315,10 @@ TerminalPrinter weftTerminalPrinter() {
   enterLocal("weft_host.host_free",
              [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
                std::string name = view.attrOfType<StringAttr>("buf_name").str();
+               if (view.attr("invocation")) {
+                 c.line("free(" + name + ");");
+                 return llvm::Error::success();
+               }
                int wsSlot = (name == "left" || name == "a_tile") ? 0
                             : (name == "rhs" || name == "b_grp") ? 1
                             : name == "members"                  ? 2
@@ -1391,6 +1406,7 @@ TerminalPrinter weftTerminalPrinter() {
       [](const LocalOpView &view, PrintPoint at, PrintContext &c) -> llvm::Error {
         bool checked = bool(view.attr("checked_tasks"));
         if (at == PrintPoint::Enter) {
+          c.line("#include <stdlib.h>");
           c.line("#include <stddef.h>");
           c.line("#include <stdint.h>");
           c.line("#include \"task_bridge.h\"");
