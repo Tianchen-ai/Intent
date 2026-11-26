@@ -23,6 +23,6 @@ with subprocess.Popen(
         built = request("compile", compiler=candidate, input=str(Path("doc/softmax.py")),
                         exit="triton", through="kir@canonical", author_input=True)
         events = request("explain", compilation_id=built["compilation_id"])
-        print(built["compilation_id"], len(events), "trace entries")
+        print(built["compilation_id"], len(events["events"]), "trace entries")
     finally:
         session.stdin.close()
