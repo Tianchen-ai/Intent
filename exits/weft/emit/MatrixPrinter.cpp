@@ -1378,15 +1378,35 @@ TerminalPrinter weftTerminalPrinter() {
                return llvm::Error::success();
              });
 
+  enterLocal("weft_host.host_collect_task_status",
+             [](const LocalOpView &, PrintContext &c) -> llvm::Error {
+               c.line("char message[512];");
+               c.line("int32_t status = weft_kernel_take_status(message, sizeof(message));");
+               c.line("int32_t expected = 0;");
+               c.line("if (status && __atomic_compare_exchange_n(&intent_status, &expected, status, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED))");
+               c.line("  memcpy(intent_error, message, sizeof(intent_error));");
+               return llvm::Error::success();
+             });
   rules["weft_host.host_owner_fn"] = PrintRule::local(
       [](const LocalOpView &view, PrintPoint at, PrintContext &c) -> llvm::Error {
+        bool checked = bool(view.attr("checked_tasks"));
         if (at == PrintPoint::Enter) {
           c.line("#include <stddef.h>");
           c.line("#include <stdint.h>");
           c.line("#include \"task_bridge.h\"");
+          if (checked) {
+            c.line("#include <string.h>");
+            c.line("void weft_kernel_release_hw_context(void);");
+            c.line("static _Thread_local char g_intent_last_error[512];");
+            c.line("const char *intent_last_error(void) { return g_intent_last_error; }");
+          }
           c.line("int32_t intent_entry(" +
                  view.attrOfType<StringAttr>("params").str() + ") {");
           c.indent++;
+          if (checked) {
+            c.line("int32_t intent_status = 0;");
+            c.line("char intent_error[512] = {0};");
+          }
           c.line("const int64_t count = " +
                  std::to_string(view.attrOfType<IntegerAttr>("owners").getInt()) +
                  "LL, tile = " +
@@ -1397,7 +1417,11 @@ TerminalPrinter weftTerminalPrinter() {
         } else if (at == PrintPoint::BeginBlock) {
           c.indent++;
         } else if (at == PrintPoint::EndBlock) {
-          c.line("return 0;");
+          if (checked) {
+            c.line("memcpy(g_intent_last_error, intent_error, sizeof(intent_error));");
+            c.line("return intent_status;");
+          } else
+            c.line("return 0;");
           c.indent--;
           c.line("}");
         }

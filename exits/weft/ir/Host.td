@@ -256,9 +256,12 @@ def HostCallRowTaskOp : Op<WeftHost_Dialect, "host_call_row_task"> {
 }
 
 def HostOwnerFnOp : Op<WeftHost_Dialect, "host_owner_fn", [IsolatedFromAbove]> {
-  let arguments = (ins StrAttr:$params, I64Attr:$owners, I64Attr:$grain);
+  let arguments = (ins StrAttr:$params, I64Attr:$owners, I64Attr:$grain,
+                       UnitAttr:$checked_tasks);
   let regions = (region AnyRegion:$body);
 }
+
+def HostCollectTaskStatusOp : Op<WeftHost_Dialect, "host_collect_task_status">;
 
 def HostCallOwnerTaskOp : Op<WeftHost_Dialect, "host_call_owner_task"> {
   let arguments = (ins Index:$lo, Index:$hi, StrAttr:$sym_name,

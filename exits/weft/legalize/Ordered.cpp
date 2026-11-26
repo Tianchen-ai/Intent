@@ -4434,42 +4434,48 @@ LogicalResult lowerWeftOrdered(func::FuncOp fn,
 
   Block &hFnBb = hFn->getRegion(0).emplaceBlock();
   b.setInsertionPointToEnd(&hFnBb);
-  Operation *pOwners = nullptr;
-  if (lowerer.anyTightenedCausalLoop) {
+  bool dynamic = lowerer.anyTightenedCausalLoop;
+  if (dynamic)
     makeOp(b, loc, "host_let_i64", {}, {},
            {b.getNamedAttr("name", b.getStringAttr("chunks")),
             b.getNamedAttr("expr",
                            b.getStringAttr("(count + tile - 1) / tile"))});
-    pOwners = makeOp(
-        b, loc, "host_omp_for", {}, {},
-        {b.getNamedAttr("iv", b.getStringAttr("ch_i")),
-         b.getNamedAttr("lb", b.getStringAttr("0")),
-         b.getNamedAttr("ub", b.getStringAttr("chunks")),
-         b.getNamedAttr("step", b.getStringAttr("1")),
-         b.getNamedAttr("parallel", b.getBoolAttr(true)),
-         b.getNamedAttr("simd", b.getBoolAttr(false)),
-         b.getNamedAttr("x86_simd", b.getBoolAttr(false)),
-         b.getNamedAttr("schedule", b.getStringAttr("dynamic, 1")),
+  StringRef parallelIf =
+      dynamic ? "workers > 1 && chunks > 1" : "workers > 1 && count > tile";
+  // The single-instance ABI bypasses Weft's grid launcher. End the same
+  // thread-local oneDNN context before returning an OpenMP worker to its pool.
+  bool managed = tkBb.walk([](Operation *op) {
+    auto engine = op->getAttrOfType<StringAttr>("engine");
+    return op->getName().getStringRef() == "weft_host.task_contract" &&
+                   engine && engine.getValue() != "vector"
+               ? WalkResult::interrupt() : WalkResult::advance();
+  }).wasInterrupted();
+  if (managed) {
+    hFn->setAttr("checked_tasks", b.getUnitAttr());
+    auto *team = makeOp(
+        b, loc, "host_omp_parallel", {}, {},
+        {b.getNamedAttr("release_hw_ctx", b.getBoolAttr(true)),
          b.getNamedAttr("num_threads", b.getStringAttr("workers")),
-         b.getNamedAttr("if_cond",
-                        b.getStringAttr("workers > 1 && chunks > 1"))},
+         b.getNamedAttr("if_cond", b.getStringAttr(parallelIf))},
         1);
-  } else {
-    pOwners = makeOp(
-        b, loc, "host_omp_for", {}, {},
-        {b.getNamedAttr("iv", b.getStringAttr("lo_i")),
-         b.getNamedAttr("lb", b.getStringAttr("0")),
-         b.getNamedAttr("ub", b.getStringAttr("count")),
-         b.getNamedAttr("step", b.getStringAttr("tile")),
-         b.getNamedAttr("parallel", b.getBoolAttr(true)),
-         b.getNamedAttr("simd", b.getBoolAttr(false)),
-         b.getNamedAttr("x86_simd", b.getBoolAttr(false)),
-         b.getNamedAttr("schedule", b.getStringAttr("static, 1")),
-         b.getNamedAttr("num_threads", b.getStringAttr("workers")),
-         b.getNamedAttr("if_cond",
-                        b.getStringAttr("workers > 1 && count > tile"))},
-        1);
+    makeOp(b, loc, "end");
+    b.setInsertionPointToStart(&team->getRegion(0).emplaceBlock());
   }
+  Operation *pOwners = makeOp(
+      b, loc, "host_omp_for", {}, {},
+      {b.getNamedAttr("iv", b.getStringAttr(dynamic ? "ch_i" : "lo_i")),
+       b.getNamedAttr("lb", b.getStringAttr("0")),
+       b.getNamedAttr("ub", b.getStringAttr(dynamic ? "chunks" : "count")),
+       b.getNamedAttr("step", b.getStringAttr(dynamic ? "1" : "tile")),
+       b.getNamedAttr("parallel", b.getBoolAttr(!managed)),
+       b.getNamedAttr("simd", b.getBoolAttr(false)),
+       b.getNamedAttr("x86_simd", b.getBoolAttr(false)),
+       b.getNamedAttr("schedule", b.getStringAttr(dynamic ? "dynamic, 1" : "static, 1")),
+       b.getNamedAttr("num_threads", b.getStringAttr(managed ? "" : "workers")),
+       b.getNamedAttr("if_cond", b.getStringAttr(managed ? "" : parallelIf))},
+      1);
+  if (managed)
+    makeOp(b, loc, "host_collect_task_status");
   makeOp(b, loc, "end");
 
   Block &pBb = pOwners->getRegion(0).emplaceBlock();
