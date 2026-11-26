@@ -42,7 +42,7 @@ __mlu_func__ void group_sum_finish(float *out, float *slot_scratch,
 
 __mlu_func__ void group_sum(float *out, float *scratch, const float *input,
                             int members, int pitch, int live) {
-  if (members >= 32 && (members % 32 == 0) && live == pitch &&
+  if (((unsigned long)out % 64 == 0) && members >= 32 && (members % 32 == 0) && live == pitch &&
       (pitch % 32 == 0)) {
     __bang_transpose(scratch, input, members, pitch);
     __bang_sumpool(out, scratch, members, pitch, 1, pitch, 1, 1, 1);
@@ -101,7 +101,7 @@ __mlu_func__ float row_max_num(float *scratch, const float *input, int count) {
 
 __mlu_func__ void group_max_num(float *out, float *scratch, const float *input,
                                 int members, int pitch, int live) {
-  if (members >= 32 && (members % 32 == 0) && live == pitch &&
+  if (((unsigned long)out % 64 == 0) && members >= 32 && (members % 32 == 0) && live == pitch &&
       (pitch % 32 == 0)) {
     int n = members * pitch;
     __bang_transpose(scratch, input, members, pitch);

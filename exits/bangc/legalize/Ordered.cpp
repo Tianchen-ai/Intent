@@ -120,12 +120,6 @@ struct OrderedLowerer {
     if (!contract.empty()) {
       st.addAttribute("ci.implementation",
                       b.getStringAttr(("exits/bangc::" + contract).str()));
-      if (llvm::any_of(operands,
-                       [](Value v) { return isa<MemRefType>(v.getType()); }) &&
-          llvm::none_of(attrs, [](const NamedAttribute &na) {
-            return na.getName() == "alignment";
-          }))
-        st.addAttribute("alignment", b.getI64IntegerAttr(64));
     }
     return b.create(st);
   }

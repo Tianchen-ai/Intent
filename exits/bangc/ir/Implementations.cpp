@@ -1,4 +1,5 @@
 #include "compilerinfra/Assembly.h"
+#include "Alignment.h"
 #include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
 #include "intentdsl/levels/storage/dsa/ir/Matrix.h"
 #include "intentdsl/levels/storage/dsa/ir/Supply.h"
@@ -42,6 +43,7 @@ TypedContract makeTyped(std::optional<unsigned> minIn,
   tc.resultTypes = std::move(outTypes);
   tc.accumulatorTypes = std::move(accTypes);
   tc.layout.minAlignmentBytes = minAlign;
+  tc.layout.knownTargetAlignment = intentdsl::bangc::storageAlignment;
   tc.layout.requiredMemorySpace = space;
   tc.effects = effects;
   tc.verifyEffectsInterface = true;
@@ -342,17 +344,19 @@ void rowContracts(Unit &unit) {
 
   add("row-reduce", "row_reduce", "group_sum/group_max_num", "reduce.mlu",
       "NRAM f32 pitched input, NRAM f32 scratch, per-member f32 output",
-      "contiguous pitched rows [members, pitch] in NRAM", "f32",
+      "64-byte aligned NRAM input and scratch, naturally aligned per-member f32 output", "f32",
       "writes NRAM scratch and per-member f32 reduction results",
       "sumpool+reduce_sum or maxpool+argmax with IEEE NaN/subnormal fallback",
       makeTyped(6, 6, 0, {STK::F32, STK::I64}, {}, {STK::F32},
-                EffectMask::ReadWrite, 64, std::nullopt),
+                EffectMask::ReadWrite, 4, std::nullopt),
       [](Operation *op) {
         auto alg = op->getAttrOfType<StringAttr>("algebra");
         auto inTy = dyn_cast<MemRefType>(op->getOperand(2).getType());
         auto scTy = dyn_cast<MemRefType>(op->getOperand(1).getType());
         auto outTy = dyn_cast<MemRefType>(op->getOperand(0).getType());
         return success(alg && (alg == "sum" || alg == "max_num") &&
+                       intentdsl::bangc::storageAlignment(op->getOperand(1)) >= 64 &&
+                       intentdsl::bangc::storageAlignment(op->getOperand(2)) >= 64 &&
                        isSpace(op->getOperand(1), 1) &&
                        isSpace(op->getOperand(2), 1) &&
                        (isSpace(op->getOperand(0), 1) ||
@@ -619,14 +623,17 @@ void rowContracts(Unit &unit) {
       "writes NRAM quotient/scratch and certified f16 output",
       "+-2 ULP f32 endpoint certification with exact RN f32->f16 fallback",
       makeTyped(9, 9, 0, {STK::F16, STK::F32, STK::I64}, {}, {STK::F32},
-                EffectMask::ReadWrite, 64, std::nullopt),
+                EffectMask::ReadWrite, 4, std::nullopt),
       [](Operation *op) {
         auto outTy = dyn_cast<MemRefType>(op->getOperand(0).getType());
         auto qTy = dyn_cast<MemRefType>(op->getOperand(1).getType());
         auto scTy = dyn_cast<MemRefType>(op->getOperand(2).getType());
         auto xTy = dyn_cast<MemRefType>(op->getOperand(3).getType());
         auto dTy = dyn_cast<MemRefType>(op->getOperand(4).getType());
-        return success(isSpace(op->getOperand(0), 1) &&
+        // The divisor array is indexed by member and loaded as a scalar.
+        return success(llvm::all_of(op->getOperands().take_front(4), [](Value v) {
+                         return intentdsl::bangc::storageAlignment(v) >= 64;
+                       }) && isSpace(op->getOperand(0), 1) &&
                        isSpace(op->getOperand(1), 1) &&
                        isSpace(op->getOperand(2), 1) &&
                        isSpace(op->getOperand(3), 1) &&
@@ -763,11 +770,16 @@ void rowContracts(Unit &unit) {
       "a' - r * b' with exact __cn_scalar_div_f32_rn fallback (a priori "
       "candidate accuracy only bounds fallback frequency)",
       makeTyped(6, 8, 0, {STK::F32, STK::I64}, {}, {STK::F32},
-                EffectMask::ReadWrite, 64, std::nullopt),
+                EffectMask::ReadWrite, 4, std::nullopt),
       [](Operation *op) {
         auto mode = op->getAttrOfType<StringAttr>("mode");
         auto dst = dyn_cast<MemRefType>(op->getOperand(0).getType());
         auto sc = dyn_cast<MemRefType>(op->getOperand(3).getType());
+        for (auto [i, value] : llvm::enumerate(op->getOperands().take_front(4))) {
+          if (isa<MemRefType>(value.getType()) && !(i == 2 && mode == "vg") &&
+              intentdsl::bangc::storageAlignment(value) < 64)
+            return failure();
+        }
         if (!mode || !isSpace(op->getOperand(0), 1) ||
             !isSpace(op->getOperand(3), 1) || !dst.getElementType().isF32() ||
             !sc.getElementType().isF32())

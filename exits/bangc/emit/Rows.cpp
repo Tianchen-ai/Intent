@@ -477,7 +477,7 @@ TerminalPrinter rowPrinter() {
              [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
                auto t = ctype(view.resultType(0));
                auto ext = view.attrOfType<StringAttr>("extent").str();
-               c.line(t + " " + view.result(0).str() + "[" + ext + "];");
+               c.line(t + " " + view.result(0).str() + "[" + ext + "] __attribute__((aligned(128)));" );
                return llvm::Error::success();
              });
 

@@ -1145,8 +1145,7 @@ std::optional<PanelFoldSupply> panelFoldSupply(
         auto dirB = db->getString("direction").value_or("");
         // Distinct In and Out public buffers never alias; InOut may alias.
         return (dirA == "In" && dirB == "Out") ||
-               (dirA == "Out" && dirB == "In") ||
-               (dirA == "In" && dirB == "In");
+               (dirA == "Out" && dirB == "In");
       }
       AliasResult alias(Value lhs, Value rhs) {
         if (lhs == rhs)
