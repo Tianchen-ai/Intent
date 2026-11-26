@@ -2678,46 +2678,9 @@ struct RowLowerer {
         else if (opKind == "mul")
           res = isFloat ? b.create<arith::MulFOp>(loc, lhs, rhs).getResult()
                         : b.create<arith::MulIOp>(loc, lhs, rhs).getResult();
-        else if (opKind == "div") {
-          Value exactInvScalar;
-          if (isFloat) {
-            if (Operation *rhsDef = op.getOperand(1).getDefiningOp()) {
-              if (rhsDef->getName().stripDialect() == "apply" &&
-                  rhsDef->getAttrOfType<StringAttr>("kind").getValue() ==
-                      "constant") {
-                if (auto fAttr = rhsDef->getAttrOfType<FloatAttr>("value")) {
-                  llvm::APFloat invVal(fAttr.getValue().getSemantics());
-                  if (fAttr.getValue().getExactInverse(&invVal)) {
-                    OpBuilder::InsertionGuard cg(b);
-                    if (sweepHoistBlock) {
-                      if (sweepHoistBefore)
-                        b.setInsertionPoint(sweepHoistBefore);
-                      else
-                        b.setInsertionPointToEnd(sweepHoistBlock);
-                    }
-                    exactInvScalar =
-                        makeOp(
-                            b, loc, "scalar_const", {}, {elemResTy},
-                            {b.getNamedAttr("dtype",
-                                            b.getStringAttr(dtypeBare(elemResTy))),
-                             b.getNamedAttr(
-                                 "literal",
-                                 b.getStringAttr(intentdsl::kir::literal(
-                                     FloatAttr::get(elemResTy, invVal))))})
-                            ->getResult(0);
-                  }
-                }
-              }
-            }
-          }
-          if (exactInvScalar) {
-            Value invRhs = splatIfScalar(exactInvScalar, targetTy, w);
-            res = b.create<arith::MulFOp>(loc, lhs, invRhs).getResult();
-          } else {
-            res = isFloat ? b.create<arith::DivFOp>(loc, lhs, rhs).getResult()
-                          : b.create<arith::DivSIOp>(loc, lhs, rhs).getResult();
-          }
-        }
+        else if (opKind == "div")
+          res = isFloat ? b.create<arith::DivFOp>(loc, lhs, rhs).getResult()
+                        : b.create<arith::DivSIOp>(loc, lhs, rhs).getResult();
         else if (opKind == "xor")
           res = b.create<arith::XOrIOp>(loc, lhs, rhs);
         else if (opKind == "and")

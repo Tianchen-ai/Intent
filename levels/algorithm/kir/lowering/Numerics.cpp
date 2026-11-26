@@ -72,7 +72,6 @@ void registerNumericalReferences(Unit &u) {
       bool arcp = mlir::arith::bitEnumContainsAll(flags, FastMathFlags::arcp);
       return SemanticChoice{arcp ? "reciprocal-eligible" : "rn", arcp ? "configuration" : "reference",
                             "fastmath.arcp", arcp ? "Explicit reciprocal permission, subject to target precision" : ""};
-    }, {"exits/mojo/legalize/Rows.cpp: proven exact inverse of a constant divisor",
-        "runtime/bangc/kernels/ieee_math.mlu: certified quotient and scalar fallback"}}, COMPILERINFRA_SOURCE});
+    }}, COMPILERINFRA_SOURCE});
 }
 } // namespace CI_UNIT_NAMESPACE

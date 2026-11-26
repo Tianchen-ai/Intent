@@ -757,6 +757,16 @@ void rowContracts(Unit &unit) {
                        sc.getElementType().isF32());
       });
 
+  unit.semantics.push_back(
+      {{"strict-quotient", "BANG C ieee-div-rn implementation",
+        "__cn_scalar_div_f32_rn", "rn",
+        "BANG C SDK __cn_scalar_div_f32_rn; ieee_math.mlu certification D1-D5",
+        [](const TargetProfile &, const llvm::json::Object &)
+            -> std::optional<SemanticChoice> {
+          return SemanticChoice{"rn", "reference", "__cn_scalar_div_f32_rn", ""};
+        },
+        {"runtime/bangc/kernels/ieee_math.mlu: certified quotient and scalar fallback"}},
+       COMPILERINFRA_SOURCE});
   add("ieee-div-rn", "vec_div_rn",
       "vec_div_rn/vec_div_scalar_rn/scalar_div_vec_rn/group_div_scalar_rn",
       "ieee_math.mlu",
