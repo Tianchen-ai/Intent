@@ -4,6 +4,9 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef __SSE2__
+#include <emmintrin.h>
+#endif
 #include "oneapi/dnnl/dnnl_ukernel.h"
 
 #ifndef DNNL_EXPERIMENTAL_UKERNEL
@@ -31,6 +34,48 @@ void intent_pack_bf16_rows(const uint16_t *restrict src, uint16_t *restrict dst,
       dst[2 * j + 1] = 0;
     }
   }
+}
+
+// Transpose BF16 payloads without converting or rounding. Blocking by columns
+// keeps a small number of destination lines live even for page-sized pitches.
+void intent_transpose_bf16(const uint16_t *restrict src, uint16_t *restrict dst,
+                           int64_t rows, int64_t cols, int64_t src_stride,
+                           int64_t dst_stride) {
+  int64_t j = 0;
+#ifdef __SSE2__
+  for (; j + 8 <= cols; j += 8) {
+    int64_t i = 0;
+    for (; i + 8 <= rows; i += 8) {
+      __m128i pairs[8], quads[8];
+      for (int p = 0; p < 4; ++p) {
+        const uint16_t *row = src + (i + 2 * p) * src_stride + j;
+        __m128i a = _mm_loadu_si128((const __m128i *)row);
+        __m128i b = _mm_loadu_si128((const __m128i *)(row + src_stride));
+        pairs[2*p] = _mm_unpacklo_epi16(a, b);
+        pairs[2*p+1] = _mm_unpackhi_epi16(a, b);
+      }
+      for (int g = 0; g < 2; ++g) {
+        for (int h = 0; h < 2; ++h) {
+          __m128i a = pairs[4*g+h], b = pairs[4*g+2+h];
+          quads[4*g+2*h] = _mm_unpacklo_epi32(a, b);
+          quads[4*g+2*h+1] = _mm_unpackhi_epi32(a, b);
+        }
+      }
+      for (int p = 0; p < 4; ++p) {
+        uint16_t *row = dst + (j + 2*p) * dst_stride + i;
+        _mm_storeu_si128((__m128i *)row, _mm_unpacklo_epi64(quads[p], quads[p+4]));
+        _mm_storeu_si128((__m128i *)(row + dst_stride),
+                         _mm_unpackhi_epi64(quads[p], quads[p+4]));
+      }
+    }
+    for (; i < rows; ++i)
+      for (int p = 0; p < 8; ++p)
+        dst[(j+p)*dst_stride+i] = src[i*src_stride+j+p];
+  }
+#endif
+  for (; j < cols; ++j)
+    for (int64_t i = 0; i < rows; ++i)
+      dst[j*dst_stride+i] = src[i*src_stride+j];
 }
 
 typedef struct IntentBrgemmKey {
