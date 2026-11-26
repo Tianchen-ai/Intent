@@ -14,7 +14,7 @@ def RowMath : TileInstruction<"map",[Pure]> {let arguments=(ins Variadic<AnyType
 def RowLanes : TileInstruction<"range",[Pure]> {let arguments=(ins I64Attr:$size);let results=(outs AnyRankedTensor:$lanes);}
 def BinCount : TileInstruction<"bin_count",[Pure]> {let arguments=(ins AnyRankedTensor:$keys);let results=(outs AnyRankedTensor:$counts);}
 def FetchAdd : TileInstruction<"fetch_add",[MemoryEffects<[MemRead,MemWrite]>]> {
-  let arguments=(ins AnyMemRef:$view, AnyType:$offset, AnyType:$delta, AnyType:$active, StrAttr:$scope);
+  let arguments=(ins AnyMemRef:$view, AnyType:$offset, AnyType:$delta, AnyType:$active, StrAttr:$scope, StrAttr:$order);
   let results=(outs AnyRankedTensor:$old);
 }
 def RowReduce : TileInstruction<"axis_reduce",[Pure]> {let arguments=(ins AnyRankedTensor:$input,I64Attr:$axis,StrAttr:$algebra);let results=(outs AnyType:$reduced);}

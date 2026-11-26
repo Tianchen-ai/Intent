@@ -13,7 +13,7 @@ def TileWrite : TileInstruction<"tile_write", [MemoryEffects<[MemWrite]>]> {
   let arguments=(ins AnyMemRef:$view, AnyType:$offset, AnyType:$fragment, Optional<AnyType>:$mask);
 }
 def TileAtomicAdd : TileInstruction<"tile_atomic_add"> {
-  let arguments=(ins Arg<AnyMemRef, "", [MemRead, MemWrite]>:$view, AnyType:$offset, AnyType:$fragment, Optional<AnyType>:$mask);
+  let arguments=(ins Arg<AnyMemRef, "", [MemRead, MemWrite]>:$view, AnyType:$offset, AnyType:$fragment, Optional<AnyType>:$mask, StrAttr:$order);
 }
 def TileAtomicFetchAdd : TileInstruction<"tile_atomic_fetch_add"> {
   let arguments=(ins Arg<AnyMemRef, "", [MemRead, MemWrite]>:$view, AnyType:$offset, AnyType:$fragment, Optional<AnyType>:$mask, StrAttr:$order, StrAttr:$scope);

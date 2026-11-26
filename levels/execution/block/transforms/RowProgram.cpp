@@ -337,7 +337,8 @@ struct Row {
       old.erase();
     } else
       replace(op("fetch_add", {arg(0), offset(arg(0), arg(1)), arg(2), arg(3)},
-                 old.getResult(0).getType(), str("scope", "device"))
+                 old.getResult(0).getType(), {str("scope", "device"),
+                     b.getNamedAttr("order", old.getAttr("ordering"))})
                   ->getResult(0));
   }
   void atomicBins() {
@@ -374,7 +375,7 @@ struct Row {
           auto keep = binary("and", binary("ge", key, constant(0), i1),
                              binary("lt", key, meta("N"), i1));
           op("fetch_add", {target, offset(target, dst(key)), constant(1), keep},
-             tile(1, i32), str("scope", "workgroup"));
+             tile(1, i32), {str("scope", "workgroup"), str("order", "relaxed")});
           return Value();
         });
       }

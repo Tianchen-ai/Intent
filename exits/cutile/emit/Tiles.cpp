@@ -310,11 +310,13 @@ TerminalPrinter cutilePrinter() {
                          "],-1)");
       return ("ct.atomic_add(" + v.operand(0) + ",(" + llvm::join(masked, ",") +
               ",)," + v.operand(2) +
-              ",check_bounds=True,memory_order=ct.MemoryOrder.RELAXED)")
+              ",check_bounds=True,memory_order=ct.MemoryOrder." +
+              v.attrOfType<StringAttr>("order").getValue().upper() + ")")
           .str();
     }
     return ("ct.atomic_add(" + v.operand(0) + "," + v.operand(1) + "," +
-            v.operand(2) + ",memory_order=ct.MemoryOrder.RELAXED)")
+            v.operand(2) + ",memory_order=ct.MemoryOrder." +
+            v.attrOfType<StringAttr>("order").getValue().upper() + ")")
         .str();
   });
   auto atomicFmt = [](const LocalOpView &v, StringRef fnName) -> std::string {

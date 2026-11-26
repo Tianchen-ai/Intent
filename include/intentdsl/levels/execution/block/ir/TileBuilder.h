@@ -117,7 +117,8 @@ struct Tiles {
       args.push_back(mask);
     SmallVector<NamedAttribute, 2> attrs{
         b.getNamedAttr("ci.implementation",
-                       b.getStringAttr((unit + "::tile-atomic-add").str()))};
+                       b.getStringAttr((unit + "::tile-atomic-add").str())),
+        b.getNamedAttr("order", b.getStringAttr("relaxed"))};
     if (isa<FloatType>(elem(val.getType())))
       attrs.push_back(b.getNamedAttr(
           "fastmath", arith::FastMathFlagsAttr::get(

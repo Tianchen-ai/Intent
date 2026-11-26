@@ -849,6 +849,7 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
       update.addAttribute("transposed", b.getBoolAttr(swap));
       update.addAttribute("checked_bounds", b.getBoolAttr(true));
       update.addAttribute("scope", b.getStringAttr("workgroup"));
+      update.addAttribute("order", b.getStringAttr("relaxed"));
       b.create(update);
 
       store->erase();

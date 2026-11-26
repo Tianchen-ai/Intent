@@ -119,7 +119,7 @@ llvm::Error localRowRule(const LocalOpView &v, PrintPoint at, PrintContext &c) {
     line("ct.atomic_add(" + arg(0) +
          (swap ? ",(" + arg(1) + ",ct.bid(0))" : ",(ct.bid(0)," + arg(1) + ")") +
          "," + arg(2) + ",check_bounds=" + (checked ? "True" : "False") +
-         ",memory_order=ct.MemoryOrder.RELAXED,memory_scope=" + memScope + ")");
+         ",memory_order=ct.MemoryOrder." + v.attrOfType<StringAttr>("order").getValue().upper() + ",memory_scope=" + memScope + ")");
     return llvm::Error::success();
   }
 
@@ -245,7 +245,7 @@ llvm::Error localRowRule(const LocalOpView &v, PrintPoint at, PrintContext &c) {
                   : " % COLUMN_TILES";
   } else if (code == "div") {
     bool approx = rowHasAnyFastMath(
-        v, arith::FastMathFlags::arcp | arith::FastMathFlags::afn);
+        v, arith::FastMathFlags::arcp);
     expr = "ct.truediv(" + arg(0) + ", " + arg(1) +
            (v.attr("ct_src.ftz") ? ", flush_to_zero=True" : "") +
            ", rounding_mode=ct.RoundingMode." + (approx ? "APPROX" : "RN") +
@@ -398,8 +398,15 @@ void rowRules(TerminalPrinter &printer) {
       PrintRule::format("ct.scatter($0,$1,$2,mask=$3)");
   ops["ct_src.index_read_at"] =
       PrintRule::format("$r0 = ct.gather($0,$1,mask=$2)");
-  ops["ct_src.atomic_add_at"] = PrintRule::format(
-      "$r0 = ct.atomic_add($0,ct.where($3,$1,0),ct.where($3,$2,0),memory_order=ct.MemoryOrder.RELAXED)");
+  ops["ct_src.atomic_add_at"] = PrintRule::local(
+      [](const LocalOpView &v, PrintPoint at, PrintContext &c) -> llvm::Error {
+        if (at == PrintPoint::Enter)
+          c.line(v.result(0) + " = ct.atomic_add(" + v.operand(0) +
+                 ",ct.where(" + v.operand(3) + "," + v.operand(1) + ",-1)," +
+                 v.operand(2) + ",check_bounds=True,memory_order=ct.MemoryOrder." +
+                 v.attrOfType<StringAttr>("ordering").getValue().upper() + ")");
+        return llvm::Error::success();
+      });
   ops["ct_src.ne"] = PrintRule::format("$r0 = $0!=$1");
   ops["ct_src.member_tile"] = PrintRule::format(
       "$r0 = ct.astype(ct.broadcast_to(ct.expand_dims($0,0),(R,W)),ct.int32)");

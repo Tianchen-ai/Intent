@@ -210,7 +210,7 @@ TerminalPrinter tilePrinter() {
     return ("tl.atomic_add(" + v.operand(0) + "+" + v.operand(1) + "," +
             v.operand(2) +
             (v.numOperands() == 4 ? ",mask=" + v.operand(3) : "") +
-            ",sem='relaxed')")
+            ",sem='" + v.attrOfType<StringAttr>("order").getValue() + "')")
         .str();
   });
   leaf("triton_src.tile_atomic_fetch_add", [](const LocalOpView &v) {

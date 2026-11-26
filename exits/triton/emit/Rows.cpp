@@ -162,8 +162,7 @@ llvm::Error localRowOp(const LocalOpView &v, PrintPoint point,
              : "tl.maximum(" + v.operand(0) + ", " + v.operand(1) + ")")
             .str();
   } else if (n == "div") {
-    e = (viewHasAnyFastMath(v, arith::FastMathFlags::arcp |
-                                   arith::FastMathFlags::afn)
+    e = (viewHasFastMath(v, arith::FastMathFlags::arcp)
              ? v.operand(0) + " / " + v.operand(1)
              : "tl.div_rn(" + v.operand(0) + ", " + v.operand(1) + ")")
             .str();
@@ -217,7 +216,8 @@ llvm::Error localDynamicTile(const LocalOpView &v, PrintPoint point,
                                      scope.str());
     std::string targetScope = scope == "workgroup" ? "cta" : "gpu";
     s = ("tl.atomic_add(" + v.operand(0) + "+" + v.operand(1) + "," +
-         v.operand(2) + ",mask=" + v.operand(3) + ",sem='relaxed',scope='" +
+         v.operand(2) + ",mask=" + v.operand(3) + ",sem='" +
+         v.attrOfType<StringAttr>("order").getValue() + "',scope='" +
          targetScope + "')")
             .str();
   } else if (n == "extract_lane") {
