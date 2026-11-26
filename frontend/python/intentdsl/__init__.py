@@ -139,6 +139,7 @@ def jit(
     fpmath_mode="strict",
     fast_math=False,
     denormal_fp_math=None,
+    numerics=None,
 ):
     from compilerinfra import Compiler
 
@@ -151,6 +152,10 @@ def jit(
     if denormal_fp_math is not None and denormal_fp_math not in _DENORMAL_MODES:
         raise ValueError(f"unsupported denormal_fp_math: {denormal_fp_math}")
     math_options = {"fpmath_mode": fpmath_mode, "fast_math": fast_math}
+    if numerics is not None:
+        if numerics not in ("source", "relaxed_normalization"):
+            raise ValueError(f"unsupported normalization policy: {numerics}")
+        math_options["numerics"] = numerics
     if denormal_fp_math is not None:
         math_options["denormal_fp_math"] = denormal_fp_math
     path = library_path(library)

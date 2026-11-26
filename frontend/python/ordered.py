@@ -9,6 +9,7 @@ from .intentdsl.signature import (
     format_fastmath_attr,
     format_fastmath_inline,
     kernel_math_policy,
+    kernel_numerics,
     namespace,
     signature,
 )
@@ -522,8 +523,9 @@ class Ordered:
         abi = json.dumps(json.dumps(self.args, separators=(",", ":")))
         bounds = ", ".join("%" + s["name"] for s in views)
         types = ", ".join(argument_type(s) for s in views)
+        normalization = ", kir.relaxed_normalization" if kernel_numerics(self.fn) == "relaxed_normalization" else ""
         return (
-            f'module {{func.func @{self.fn.name}({params}) attributes {{kir.abi={abi}, "denormal-fp-math"="{self.denormal_mode}"}} {{\n'
+            f'module {{func.func @{self.fn.name}({params}) attributes {{kir.abi={abi}, "denormal-fp-math"="{self.denormal_mode}"{normalization}}} {{\n'
             f'"kir.owner_space"({bounds}) ({{\n^bb0('
             + ", ".join(ivs)
             + "):\n"

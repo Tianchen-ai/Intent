@@ -10,6 +10,7 @@
 namespace intentdsl::kir {
 
 struct FastMathPolicy {
+  bool relaxedNormalization = false;
   mlir::arith::FastMathFlags defaultFlags = mlir::arith::FastMathFlags::none;
   std::string denormalFpMath = "ieee";
 };
@@ -117,6 +118,12 @@ inline llvm::Expected<FastMathPolicy>
 parseFastMathPolicy(const llvm::json::Object &options) {
   using FMF = mlir::arith::FastMathFlags;
   FastMathPolicy policy;
+  if (options.get("numerics")) {
+    auto mode = options.getString("numerics");
+    if (!mode || (*mode != "source" && *mode != "relaxed_normalization"))
+      return llvm::createStringError("numerics must be source or relaxed_normalization");
+    policy.relaxedNormalization = *mode == "relaxed_normalization";
+  }
   bool explicitDenormal = false;
   if (auto mode = options.getString("fpmath_mode")) {
     if (*mode == "strict") {
@@ -145,6 +152,8 @@ parseFastMathPolicy(const llvm::json::Object &options) {
                                      denorm->str() + "'");
     policy.denormalFpMath = denorm->str();
   }
+  if (policy.relaxedNormalization)
+    policy.defaultFlags = policy.defaultFlags | FMF::reassoc | FMF::afn;
   return policy;
 }
 

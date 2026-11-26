@@ -348,6 +348,9 @@ LogicalResult verifyLogicalRows(ModuleOp module,StringRef dialect,bool canonical
   if (!llvm::hasSingleElement(funcs))
     return module.emitError("expected one author kernel");
   auto fn = *funcs.begin();
+  if (auto permission = fn->getAttr("kir.relaxed_normalization");
+      permission && !isa<UnitAttr>(permission))
+    return fn.emitError("kir.relaxed_normalization must be a unit attribute");
   if (auto dm = fn->getAttr("denormal-fp-math")) {
     auto s = dyn_cast<StringAttr>(dm);
     if (!s || !kir::validDenormalMode(s.getValue()))
@@ -396,6 +399,8 @@ struct Canonicalize : PassWrapper<Canonicalize, OperationPass<ModuleOp>> {
   void runOnOperation() final {
     auto *ctx = &getContext();
     for(auto fn:getOperation().getOps<func::FuncOp>()) {
+      if (policy.relaxedNormalization && intentdsl::kir::orderedOwners(fn))
+        fn->setAttr("kir.relaxed_normalization", UnitAttr::get(ctx));
       auto owner=cast<BlockArgument>(fn.front().front().getOperand(0)).getArgNumber();
       fn->setAttr("kir.domain_arg", IntegerAttr::get(IntegerType::get(ctx,64),owner));
       llvm::StringRef fnDenorm = intentdsl::kir::getDenormalFpMath(fn);
