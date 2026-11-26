@@ -9,14 +9,12 @@ orderedGeometry(mlir::Operation &space, const compilerinfra::TargetProfile &p) {
   auto machine = p.services.get<RowMachine>();
   auto facts = p.services.get<CallFacts>();
   auto batch = space.getAttrOfType<IntegerAttr>("cpu.owner_batch");
-  if (!machine || !facts || !machine->ownerStackBytes || !batch ||
+  if (!machine || !facts || !machine->ownerRegisters || !batch ||
       batch.getInt() < 2)
     return {};
   int64_t rows = batch.getInt();
   auto score = space.getAttrOfType<IntegerAttr>("cpu.score_tile");
   int64_t tokens = score ? score.getInt() : machine->orderedDotTokens;
-  if (!tokens)
-    return {};
   int64_t columns = 0;
   space.walk([&](Operation *op) {
     if (op->getName().stripDialect() != "slice_write")
@@ -38,6 +36,13 @@ orderedGeometry(mlir::Operation &space, const compilerinfra::TargetProfile &p) {
     width = std::gcd(columns, lanes * std::max<int64_t>(1, registers / rows));
   }
   int64_t cached = 0;
+  Builder b(space.getContext());
+  if (!tokens || !machine->ownerStackBytes) {
+    if (!space.hasAttr("cpu.batch_score_window") || score || !columns)
+      return {};
+    return b.getDictionaryAttr(
+        {b.getNamedAttr("value_width", b.getI64IntegerAttr(width))});
+  }
   if (auto window =
           space.getAttrOfType<IntegerAttr>("cpu.batch_score_window")) {
     cached = window.getInt();
@@ -55,7 +60,6 @@ orderedGeometry(mlir::Operation &space, const compilerinfra::TargetProfile &p) {
           std::min(cached, std::max<int64_t>(1, budget / tileBytes) * tokens);
     }
   }
-  Builder b(space.getContext());
   return b.getDictionaryAttr(
       {b.getNamedAttr("token_tile", b.getI64IntegerAttr(tokens)),
        b.getNamedAttr("value_width", b.getI64IntegerAttr(width)),

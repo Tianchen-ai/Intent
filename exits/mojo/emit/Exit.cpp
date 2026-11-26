@@ -51,6 +51,8 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
     p.features.insert("onednn_runtime");
   auto caps = std::make_shared<intentdsl::cpu::RowMachine>();
   caps->vectorBits = *bits;
+  // The x86-64 AVX-512 encoding addresses 32 vector registers, AVX2 16.
+  caps->ownerRegisters = *bits == 512 ? 32 : *bits == 256 ? 16 : 0;
   caps->l2CacheBytes = options.getInteger("l2_cache_bytes").value_or(0);
   caps->packedOwners = std::clamp<int64_t>(*bits / 32, 4, 16);
   // The wide replay loop groups 16-lane chunks in pairs and stages

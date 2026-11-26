@@ -1614,33 +1614,36 @@ struct OrderedLowerer {
               }
             }
           } else {
-            // General Pass B: column-outer register-blocked accumulation [8 heads x 32 cols]
+            int64_t width = 32;
+            if (auto geometry =
+                    space.getAttrOfType<DictionaryAttr>("cpu.vector_panel")) {
+              int64_t planned = geometry.getAs<IntegerAttr>("value_width").getInt();
+              if (planned > 0 && planned % 16 == 0 && accExtent % planned == 0)
+                width = planned;
+            }
             for (size_t sub = 0; sub < lanes.size(); sub += 8) {
               size_t subEnd = std::min<size_t>(lanes.size(), sub + 8);
               size_t subLen = subEnd - sub;
               auto *cOuter = makeOp(
                   b, loc, "for_range",
                   {constIdx(b, loc, 0), constIdx(b, loc, accExtent),
-                   constIdx(b, loc, 32)},
+                   constIdx(b, loc, width)},
                   {}, {}, 1);
               Block &cBb = cOuter->getRegion(0).emplaceBlock();
               Value cIdx = cBb.addArgument(b.getIndexType(), loc);
               OpBuilder::InsertionGuard cg(b);
               b.setInsertionPointToEnd(&cBb);
-              Value cIdxHi = addIdx(b, loc, cIdx, 16);
-              SmallVector<Value, 8> accLo, accHi;
-              for (size_t s = 0; s < subLen; ++s) {
-                accLo.push_back(
-                    makeOp(b, loc, "acc_decl", {}, {f32x16},
-                           {b.getNamedAttr("dtype", b.getStringAttr("float32")),
-                            b.getNamedAttr("width", b.getI64IntegerAttr(16))})
-                        ->getResult(0));
-                accHi.push_back(
-                    makeOp(b, loc, "acc_decl", {}, {f32x16},
-                           {b.getNamedAttr("dtype", b.getStringAttr("float32")),
-                            b.getNamedAttr("width", b.getI64IntegerAttr(16))})
-                        ->getResult(0));
-              }
+              SmallVector<Value> columns;
+              for (int64_t c = 0; c < width; c += 16)
+                columns.push_back(c ? addIdx(b, loc, cIdx, c) : cIdx);
+              SmallVector<SmallVector<Value>> acc(subLen);
+              for (auto &row : acc)
+                for (size_t c = 0; c < columns.size(); ++c)
+                  row.push_back(
+                      makeOp(b, loc, "acc_decl", {}, {f32x16},
+                             {b.getNamedAttr("dtype", b.getStringAttr("float32")),
+                              b.getNamedAttr("width", b.getI64IntegerAttr(16))})
+                          ->getResult(0));
               {
                 auto *tInner = makeOp(
                     b, loc, "for_range",
@@ -1657,8 +1660,9 @@ struct OrderedLowerer {
                 Value vBase =
                     b.create<arith::IndexCastOp>(loc, b.getIndexType(), vBase64).getResult();
                 WideViewRef vRef{tiledVPtr, vBase, tiledVElemTy, accExtent};
-                Value vLo = loadWideChunkF32(vRef, cIdx, 16);
-                Value vHi = loadWideChunkF32(vRef, cIdxHi, 16);
+                SmallVector<Value> values;
+                for (Value column : columns)
+                  values.push_back(loadWideChunkF32(vRef, column, 16));
                 for (size_t s = 0; s < subLen; ++s) {
                   Value wAddr = makeAddr(b, loc, localStackBuf,
                                          {off, constIdx(b, loc, sub + s)},
@@ -1674,31 +1678,21 @@ struct OrderedLowerer {
                               b.getNamedAttr("width",
                                              b.getI64IntegerAttr(16))})
                           ->getResult(0);
-                  writeSlot(
-                      accLo[s],
-                      b.create<arith::AddFOp>(
-                          loc, readSlot(accLo[s]),
-                          b.create<arith::MulFOp>(loc, vLo, wVec)));
-                  writeSlot(
-                      accHi[s],
-                      b.create<arith::AddFOp>(
-                          loc, readSlot(accHi[s]),
-                          b.create<arith::MulFOp>(loc, vHi, wVec)));
+                  for (auto [slot, value] : llvm::zip_equal(acc[s], values))
+                    writeSlot(slot, b.create<arith::AddFOp>(
+                                        loc, readSlot(slot),
+                                        b.create<arith::MulFOp>(loc, value, wVec)));
                 }
                 makeOp(b, loc, "end");
               }
               for (size_t s = 0; s < subLen; ++s) {
                 int64_t laneBase = int64_t(sub + s) * accStride;
-                Value addrLo = makeAddr(
-                    b, loc, wideAccBuf, {constIdx(b, loc, laneBase), cIdx},
-                    {1, 1});
-                Value addrHi = makeAddr(
-                    b, loc, wideAccBuf, {constIdx(b, loc, laneBase), cIdxHi},
-                    {1, 1});
-                makeOp(b, loc, "store_slice",
-                       {wideAccBuf, addrLo, readSlot(accLo[s])});
-                makeOp(b, loc, "store_slice",
-                       {wideAccBuf, addrHi, readSlot(accHi[s])});
+                for (auto [slot, column] : llvm::zip_equal(acc[s], columns)) {
+                  Value addr = makeAddr(b, loc, wideAccBuf,
+                                        {constIdx(b, loc, laneBase), column},
+                                        {1, 1});
+                  makeOp(b, loc, "store_slice", {wideAccBuf, addr, readSlot(slot)});
+                }
               }
               makeOp(b, loc, "end");
             }
