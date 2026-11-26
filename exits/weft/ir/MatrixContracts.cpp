@@ -6,47 +6,61 @@
 #include <cstdlib>
 
 namespace CI_UNIT_NAMESPACE {
-// Match an admitted pair of BF16 [M,K], [N,K] views and the published
-// [M,N] result, including the common reduction axis and its pair alignment.
+// An ordered tile may contract a pair of admitted subviews (QK), or an
+// explicitly narrowed weight panel and an admitted value subview (PV).
 static bool validOrderedBrgemm(mlir::Operation *op, int64_t axis) {
   using namespace mlir;
-  std::array<int64_t, 2> freeDims{}, freeAxes{};
-  int64_t depth = 0;
   auto inputs = op->getAttrOfType<ArrayAttr>("in_types");
   if (!inputs || inputs.size() != 2 || op->getNumOperands() != 2)
     return false;
+  std::array<int64_t, 2> freeDims{}, freeAxes{};
+  int64_t depth = 0;
   for (unsigned i = 0; i < 2; ++i) {
-    auto *view = op->getOperand(i).getDefiningOp();
-    if (!view || view->getName().getStringRef() != "weft_host.task_subview" ||
-        view->getAttr("val_type") != inputs[i])
+    Operation *view = op->getOperand(i).getDefiningOp();
+    auto type = dyn_cast<StringAttr>(inputs[i]);
+    if (!view || !type || view->getAttr("val_type") != type)
       return false;
-    auto dims = view->getAttrOfType<DenseI64ArrayAttr>("static_extents");
-    auto admit = view->getAttrOfType<BoolAttr>("admit");
-    if (!admit || !admit.getValue() || !dims || dims.size() != 2 ||
-        dims[0] <= 0 || dims[1] <= 0 || dims[1] % 2 || (i && depth != dims[1]))
+    StringRef spelling = type.getValue();
+    if (!spelling.consume_front("!weft_kernel.value<bf16,[") ||
+        !spelling.consume_back("]>"))
       return false;
-    depth = dims[1];
-    freeDims[i] = dims[0];
-    auto spelling = dyn_cast<StringAttr>(inputs[i]);
-    if (!spelling)
+    auto [extents, axes] = spelling.split("],[");
+    auto pair = [](StringRef text, std::array<int64_t, 2> &v) {
+      auto [lhs, rhs] = text.split(',');
+      return !lhs.getAsInteger(10, v[0]) && !rhs.getAsInteger(10, v[1]);
+    };
+    std::array<int64_t, 2> dims, ids;
+    if (!pair(extents, dims) || !pair(axes, ids) || dims[0] <= 0 ||
+        dims[1] <= 0 || ids[0] == ids[1] || (ids[0] != axis && ids[1] != axis))
       return false;
-    StringRef suffix = spelling.getValue();
-    std::string prefix = "!weft_kernel.value<bf16,[" + std::to_string(dims[0]) +
-                         "," + std::to_string(depth) + "],[";
-    if (!suffix.consume_front(prefix) || !suffix.consume_back("]>"))
+    StringRef name = view->getName().getStringRef();
+    if (name == "weft_host.task_subview") {
+      auto admit = view->getAttrOfType<BoolAttr>("admit");
+      auto shape = view->getAttrOfType<DenseI64ArrayAttr>("static_extents");
+      if (!admit || !admit.getValue() || !shape ||
+          shape.asArrayRef() != ArrayRef<int64_t>(dims))
+        return false;
+    } else if (i == 0 && name == "weft_host.task_cast") {
+      auto input = view->getAttrOfType<StringAttr>("in_type");
+      if (!input ||
+          input.getValue() != ("!weft_kernel.value<f32,[" + spelling + "]>").str())
+        return false;
+    } else {
       return false;
-    auto [free, red] = suffix.split(',');
-    int64_t reduced;
-    if (red.getAsInteger(10, reduced) || reduced != axis ||
-        free.getAsInteger(10, freeAxes[i]) || freeAxes[i] == reduced)
+    }
+    unsigned red = ids[0] == axis ? 0 : 1;
+    if (dims[red] % 2 || (i && depth != dims[red]))
       return false;
+    depth = dims[red];
+    freeDims[i] = dims[1 - red];
+    freeAxes[i] = ids[1 - red];
   }
   auto expected = "!weft_kernel.value<f32,[" + std::to_string(freeDims[0]) +
                   "," + std::to_string(freeDims[1]) + "],[" +
                   std::to_string(freeAxes[0]) + "," +
                   std::to_string(freeAxes[1]) + "]>";
-  auto out = op->getAttrOfType<StringAttr>("val_type");
-  return freeAxes[0] != freeAxes[1] && out && out.getValue() == expected &&
+  return freeAxes[0] != freeAxes[1] &&
+         op->getAttrOfType<StringAttr>("val_type") == expected &&
          compilerinfra::allowsSubnormalFlush(op);
 }
 using namespace compilerinfra;

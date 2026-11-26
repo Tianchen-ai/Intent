@@ -128,8 +128,16 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
 
   auto caps = std::make_shared<intentdsl::cpu::RowMachine>();
   caps->vectorBits = *bits;
+  caps->l2CacheBytes = options.getInteger("l2_cache_bytes").value_or(0);
   caps->structuredRows = false;
   caps->orderedDotTokens = intentdsl::cpu::RowMachine::streamedDotTokens;
+  if (!isRvv) {
+    caps->ownerStackBytes = privStack;
+    caps->ownerRegisters = vecRegs;
+    // A packed contraction can cover the whole task grain. The CPU decision
+    // separately checks score capacity, dot depth and shared-input bounds.
+    caps->orderedMatrixOwners = p.features.count("amx_bf16") ? 256 : 0;
+  }
   caps->workers = *workers;
   if (isRvv) {
     // Software f32->bf16 RNE requires (4 * groups + 1) <= vector_registers.

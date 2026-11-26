@@ -316,9 +316,9 @@ std::optional<TightenedLoopBound> analyzeCausalLoop(func::FuncOp fn,
 }
 
 struct TiledTwoPassPlan {
-  StringAttr scoreEngine;
+  StringAttr scoreEngine, valueEngine;
   int64_t innerAx = -1;
-  int64_t tokenTile = intentdsl::cpu::RowMachine::streamedDotTokens;
+  int64_t tokenTile = 0, valueWidth = 0;
   Operation *qReadOp = nullptr;
   Operation *qExtOp = nullptr;
   Value qMem;
@@ -659,6 +659,11 @@ struct OrderedLowerer {
                                     TiledTwoPassPlan &plan) {
     if (isRvv || batch < 2 || !llvm::isPowerOf2_64(uint64_t(batch)))
       return false;
+    auto geometry = space.getAttrOfType<DictionaryAttr>("cpu.vector_panel");
+    if (!geometry)
+      return false;
+    plan.tokenTile = geometry.getAs<IntegerAttr>("token_tile").getInt();
+    plan.valueWidth = geometry.getAs<IntegerAttr>("value_width").getInt();
     auto innerAttr = space.getAttrOfType<IntegerAttr>("cpu.innermost_owner");
     auto axesAttr = space.getAttrOfType<DenseI64ArrayAttr>("axes");
     if (!innerAttr || !axesAttr)
@@ -935,9 +940,6 @@ struct OrderedLowerer {
     if (!laneSum || laneSum->getName().stripDialect() != "lane_sum")
       return false;
     plan.scoreEngine = laneSum->getAttrOfType<StringAttr>("cpu.panel_engine");
-    if (plan.scoreEngine)
-      plan.tokenTile =
-          space.getAttrOfType<IntegerAttr>("cpu.score_tile").getInt();
     auto dotMul = laneSum->getOperand(0).getDefiningOp<arith::MulFOp>();
     if (!dotMul)
       return false;
@@ -1111,8 +1113,9 @@ struct OrderedLowerer {
       if (bufStores != 1)
         return false;
       plan.hasScoreBuffer = true;
-      plan.scoreSlots =
-          localBufOp->getAttrOfType<IntegerAttr>("elements").getInt();
+      plan.scoreSlots = geometry.getAs<IntegerAttr>("score_slots").getInt();
+      if (!plan.scoreSlots)
+        plan.scoreSlots = localBufOp->getAttrOfType<IntegerAttr>("elements").getInt();
       if (plan.scoreSlots < plan.tokenTile ||
           plan.scoreSlots % plan.tokenTile != 0)
         return false;
@@ -1266,6 +1269,8 @@ struct OrderedLowerer {
       auto accAdd = y2.getOperand(1).getDefiningOp<arith::AddFOp>();
       if (!accAdd)
         return false;
+      if (auto engine = accAdd->getAttrOfType<StringAttr>("cpu.pv_engine"))
+        plan.valueEngine = engine;
       Value termVec = accAdd.getLhs() == iterAcc
                           ? accAdd.getRhs()
                           : (accAdd.getRhs() == iterAcc ? accAdd.getLhs()
@@ -1327,6 +1332,8 @@ struct OrderedLowerer {
         return false;
       int64_t dv = dimOf(vMem, "cpu.shape", vVecAx);
       if (dv < 16 || dv % 16 != 0)
+        return false;
+      if (plan.valueWidth <= 0 || dv % plan.valueWidth != 0)
         return false;
       int64_t vTokPos = -1;
       SmallVector<Value, 4> vCoords;
@@ -1620,9 +1627,8 @@ struct OrderedLowerer {
         (kElem == "f32" || kElem == "bf16" || kElem == "f16");
     const bool nativeV =
         !isRvv && (vElem == "f32" || vElem == "bf16" || vElem == "f16");
-    const int64_t subDV = (B <= 8 && plan.DV % 32 == 0) ? 32 : 16;
-    const bool useTiledOut =
-        tiledOutBuf.v && plan.DV > 16 && plan.DV % subDV == 0;
+    const int64_t subDV = plan.valueWidth;
+    const bool useTiledOut = bool(tiledOutBuf.v);
     const std::string subOutTy =
         "!weft_kernel.value<f32,[" + std::to_string(B) + "," +
         std::to_string(subDV) + "],[" + std::to_string(plan.axOwn) + "," +
@@ -2488,7 +2494,8 @@ struct OrderedLowerer {
                                      ? vRawSub
                                      : castOp(vRawSub, vSubF32MatTy);
                 TaskTerm dSub =
-                    outerContractOp(wForPV, vForC, plan.axTok, subOutTy);
+                    outerContractOp(wForPV, vForC, plan.axTok, subOutTy,
+                                    plan.valueEngine);
                 TaskTerm nSub = bin("add", {accLd, subOutTy}, dSub, subOutTy);
                 makeOp(b, loc, "task_ptr_store",
                        {tiledOutBuf.v, slotOff.v, trueSubO.v, nSub.v}, {},
@@ -2708,7 +2715,8 @@ struct OrderedLowerer {
             TaskTerm vForC = (nativeV || vElem == "f32")
                                  ? vRaw
                                  : castOp(vRaw, vF32MatTy);
-            TaskTerm dO = outerContractOp(wForPV, vForC, plan.axTok, outMatTy);
+            TaskTerm dO = outerContractOp(wForPV, vForC, plan.axTok, outMatTy,
+                                          plan.valueEngine);
             TaskTerm nacc = bin("add", accIter, dO, outMatTy);
             makeOp(b, loc, "task_yield", {nms.v, nacc.v}, {},
                    {b.getNamedAttr("val_types", p2IterTys)});
@@ -4267,9 +4275,7 @@ LogicalResult lowerWeftOrdered(func::FuncOp fn,
         std::to_string(tiledPlan.DV) + "],[" +
         std::to_string(tiledPlan.axOwn) + "," +
         std::to_string(tiledPlan.axDV) + "]>";
-    const bool needTiledOut =
-        !rvv && batch % 4 == 0 && batch * tiledPlan.DV >= 512 &&
-        tiledPlan.DV > 16 && tiledPlan.DV % 16 == 0;
+    const bool needTiledOut = tiledPlan.valueWidth < tiledPlan.DV;
     lowerer.ninfV = lowerer.newVec(lowerer.ninfS, vecBTy);
     if (tiledPlan.hasCausal)
       lowerer.ninfM = lowerer.newVec(lowerer.ninfS, scoreMatTy);
@@ -4314,23 +4320,6 @@ LogicalResult lowerWeftOrdered(func::FuncOp fn,
       bool staticFit = loC && hiMax && (*hiMax - *loC) <= tiledPlan.scoreSlots;
       if (staticFit)
         allocSlots = std::max<int64_t>(tiledPlan.tokenTile, *hiMax - *loC);
-      // Reserve ample headroom inside triton-weft's 64 KiB x86 private stack
-      // budget so temporary ArrayStorage / AMX packed panels promote to stack
-      // instead of falling back to heap malloc/free inside the inner token loop.
-      if (!rvv && tiledPlan.windowGuarded && !staticFit) {
-        int64_t outBufBytes = needTiledOut ? (batch * tiledPlan.DV * 4) : 0;
-        const int64_t localAllocBudgetBytes =
-            (batch >= 8) ? (16 * 1024) : (20 * 1024);
-        int64_t maxScoreBytes =
-            std::max<int64_t>(0, localAllocBudgetBytes - outBufBytes);
-        int64_t maxSlots = maxScoreBytes / (4 * batch);
-        maxSlots = (maxSlots / tiledPlan.tokenTile) * tiledPlan.tokenTile;
-        maxSlots = std::max<int64_t>(tiledPlan.tokenTile, maxSlots);
-        if (maxSlots < tiledPlan.scoreSlots) {
-          tiledPlan.scoreSlots = maxSlots;
-          allocSlots = maxSlots;
-        }
-      }
       Value ptr =
           makeOp(b, loc, "task_local_alloc", {}, {b.getIndexType()},
                  {b.getNamedAttr("elements",
