@@ -11,7 +11,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-dependencies = ["compilerinfra==0.5.3"]
+dependencies = ["compilerinfra==0.6.0"]
 
 [project.scripts]
 intentdsl = "intentdsl.cli:main"

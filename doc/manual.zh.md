@@ -2,7 +2,7 @@
 
 ## 1. 安装与诊断（install）
 
-按源码仓 README，从同一工作目录构建 CompilerInfra 0.5.3 静态 SDK，安装同版本 Python 绑定，然后安装 IntentDSL 2.0.0。源码构建需要 Python ≥3.10、CMake、Ninja、C++17 和 LLVM/MLIR 20.1.8 的 PIC 静态库。安装生成的 wheel 后，运行机使用包内的编译库。
+按源码仓 README，从同一工作目录构建 CompilerInfra 0.6.0 静态 SDK，安装同版本 Python 绑定，然后安装 IntentDSL 2.0.0。源码构建需要 Python ≥3.10、CMake、Ninja、C++17 和 LLVM/MLIR 20.1.8 的 PIC 静态库。安装生成的 wheel 后，运行机使用包内的编译库。
 
 ```sh
 intentdsl setup --backend triton

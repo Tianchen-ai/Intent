@@ -365,7 +365,7 @@ void registerWeftMatrixContracts(Unit &u) {
       if (!ftz || ftz.getValue() != requiresFtz)
         return failure();
       auto fn = op->getParentOfType<func::FuncOp>();
-      if (!fn || (requiresFtz && !intentdsl::kir::allowsSubnormalFtz(fn)))
+      if (!fn || (requiresFtz && !intentdsl::kir::allowsSubnormalFtz(op)))
         return failure();
       auto q4kAttr =
           TypeAttr::get(intentdsl::kir::Q4KType::get(op->getContext()));

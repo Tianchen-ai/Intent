@@ -2,7 +2,7 @@
 
 import ast
 import json
-from .intentdsl.signature import argument_type, spelling
+from .intentdsl.signature import argument_type, kernel_numeric_attributes, spelling
 
 
 class IndexedCapture:
@@ -184,7 +184,7 @@ class IndexedCapture:
         return (
             f"module {{ func.func @{c.fn.name}("
             + ", ".join(formals)
-            + f') attributes {{kir.abi={string(c.args)}, kir.public_abi={string(self.public)}, "denormal-fp-math"="{c.denormal_mode}", kir.iteration=array<i64:{bounds}>{owner}}} {{\n'
+            + f') attributes {{kir.abi={string(c.args)}, kir.public_abi={string(self.public)}{kernel_numeric_attributes(c.fn)}, kir.iteration=array<i64:{bounds}>{owner}}} {{\n'
             + f'"kir.parallel"(%{first["name"]}) ({{^bb0(%row:index):\n'
             + "\n".join(c.ops)
             + '\n"kir.end"():()->()\n}):('

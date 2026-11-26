@@ -274,6 +274,7 @@ void partitionOwnerReductions(func::FuncOp fn,
 }
 } // namespace
 
+void formOnlineReductions(func::FuncOp, const compilerinfra::TargetProfile &);
 struct Normalize : PassWrapper<Normalize, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(Normalize)
   compilerinfra::TargetProfile profile;
@@ -291,6 +292,7 @@ struct Normalize : PassWrapper<Normalize, OperationPass<ModuleOp>> {
           signalPassFailure();
           return;
         }
+        formOnlineReductions(fn, profile);
         partitionOwnerReductions(fn, profile);
       }
     }

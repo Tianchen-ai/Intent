@@ -4,6 +4,7 @@ struct Moment {
 };
 
 __mlu_func__ Moment merge_moments(Moment a, Moment b) {
+#pragma clang fp contract(off)
   if (!a.n)
     return b;
   if (!b.n)

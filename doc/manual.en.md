@@ -2,7 +2,7 @@
 
 ## 1. Installation and diagnostics (install)
 
-Follow the source checkout README to build the CompilerInfra 0.5.3 static SDK, install the matching Python bindings and install IntentDSL 2.0.0. Source builds need Python ≥3.10, CMake, Ninja, C++17 and PIC static archives for LLVM/MLIR 20.1.8. The resulting wheel includes the native product library.
+Follow the source checkout README to build the CompilerInfra 0.6.0 static SDK, install the matching Python bindings and install IntentDSL 2.0.0. Source builds need Python ≥3.10, CMake, Ninja, C++17 and PIC static archives for LLVM/MLIR 20.1.8. The resulting wheel includes the native product library.
 
 ```sh
 intentdsl setup --backend triton

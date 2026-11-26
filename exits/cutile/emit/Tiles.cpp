@@ -16,6 +16,8 @@ using namespace compilerinfra;
 namespace {
 std::string dtype(Type type) {
   type = getElementTypeOrSelf(type);
+  if (type.isF64())
+    return "ct.float64";
   if (type.isF32())
     return "ct.float32";
   if (type.isF16())
@@ -42,10 +44,6 @@ std::string axis(Type type) {
 }
 std::string expand(std::string x, int ax) {
   return "ct.expand_dims(" + x + "," + std::to_string(ax) + ")";
-}
-bool viewHasAnyFastMath(const LocalOpView &v, arith::FastMathFlags mask) {
-  auto attr = v.attrOfType<arith::FastMathFlagsAttr>("fastmath");
-  return attr && bitEnumContainsAny(attr.getValue(), mask);
 }
 bool viewHasFastMath(const LocalOpView &v, arith::FastMathFlags req) {
   auto attr = v.attrOfType<arith::FastMathFlagsAttr>("fastmath");
@@ -409,10 +407,7 @@ TerminalPrinter cutilePrinter() {
                                 {"subf", "sub", "-"},
                                 {"addf", "add", "+"}})
     localExpr("arith." + std::string(n), [method, tok](const LocalOpView &v) {
-      if (!v.attr("ct_src.round_nearest") &&
-          viewHasAnyFastMath(v, arith::FastMathFlags::contract |
-                                    arith::FastMathFlags::reassoc |
-                                    arith::FastMathFlags::afn))
+      if (!v.attr("ct_src.round_nearest"))
         return (v.operand(0) + tok + v.operand(1)).str();
       return "ct." + std::string(method) + "(" + llvm::join(v.operands(), ",") +
              ",rounding_mode=ct.RoundingMode.RN)";
@@ -432,8 +427,7 @@ TerminalPrinter cutilePrinter() {
     return "ct.exp2(" + llvm::join(v.operands(), ",") + ftz + ")";
   });
   localExpr("arith.divf", [](const LocalOpView &v) {
-    bool approx = viewHasAnyFastMath(
-        v, arith::FastMathFlags::arcp | arith::FastMathFlags::afn);
+    bool approx = v.attrOfType<StringAttr>("ct_src.division") == "approx";
     return "ct.truediv(" + llvm::join(v.operands(), ",") +
            (v.attr("ct_src.ftz") ? ",flush_to_zero=True" : "") +
            ",rounding_mode=ct.RoundingMode." + (approx ? "APPROX" : "RN") + ")";

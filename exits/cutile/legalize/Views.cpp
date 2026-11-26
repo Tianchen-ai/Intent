@@ -855,11 +855,10 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
       store->erase();
       value->erase();
     });
-    bool fnFtz = intentdsl::kir::allowsSubnormalFtz(fn);
     Builder fb(&getContext());
     fn.walk([&](Operation *op) {
       if (usesCutileFtzAttr(op)) {
-        if (fnFtz)
+        if (intentdsl::kir::allowsSignedFtz(op))
           op->setAttr("ct_src.ftz", fb.getUnitAttr());
         else
           op->removeAttr("ct_src.ftz");
@@ -869,6 +868,50 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
     });
   }
 };
+// cuTile 1.6 fuses two equal rounding modes even when RN is explicit.
+// Widen an unlicensed product at a contraction edge, then round it at the
+// original SSA definition. Products of two f16 (f32/bf16) values are exactly
+// representable in f32 (f64), including their full finite exponent range.
+static void preserveProductRounding(func::FuncOp f) {
+  SmallVector<Operation *> products;
+  f.walk([&](Operation *mul) {
+    auto name = mul->getName().getStringRef();
+    if (name != "ct_src.mul" && !isa<arith::MulFOp>(mul))
+      return;
+    auto elem = getElementTypeOrSelf(mul->getResult(0).getType());
+    if (!elem.isF16() && !elem.isBF16() && !elem.isF32())
+      return;
+    for (auto *use : mul->getUsers()) {
+      auto n = use->getName().getStringRef();
+      if ((n == "ct_src.add" || n == "ct_src.sub" || isa<arith::AddFOp, arith::SubFOp>(use)) &&
+          (mul->hasAttr("ct_src.round_nearest") || use->hasAttr("ct_src.round_nearest") ||
+           !compilerinfra::hasFastMath(mul, arith::FastMathFlags::contract) ||
+           !compilerinfra::hasFastMath(use, arith::FastMathFlags::contract))) {
+        products.push_back(mul);
+        break;
+      }
+    }
+  });
+  for (auto *mul : products) {
+    OpBuilder b(mul);
+    auto result = mul->getResult(0).getType();
+    Type wide = getElementTypeOrSelf(result).isF16() ? b.getF32Type() : b.getF64Type();
+    auto wider = [&](Type t) -> Type {
+      if (auto s = dyn_cast<ShapedType>(t))
+        return s.clone(wide);
+      return wide;
+    };
+    OperationState product(mul->getLoc(), mul->getName());
+    for (Value v : mul->getOperands())
+      product.addOperands(b.create<arith::ExtFOp>(mul->getLoc(), wider(v.getType()), v).getResult());
+    product.addTypes(wider(result));
+    auto *p = b.create(product);
+    auto rounded = b.create<arith::TruncFOp>(mul->getLoc(), result, p->getResult(0));
+    mul->replaceAllUsesWith(rounded.getOperation());
+    mul->erase();
+  }
+}
+
 struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(Signature)
   unsigned bits;
@@ -1223,8 +1266,18 @@ struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
     auto finalizeFunc = [&](func::FuncOp f) {
       if (cap && cap->permitTma)
         f->setAttr("ct_src.tma", b.getUnitAttr());
-      bool fFtz = intentdsl::kir::allowsSubnormalFtz(f);
       f.walk([&](Operation *op) {
+        auto code = op->getName().getStringRef();
+        if (code == "ct_src.div" || isa<arith::DivFOp>(op)) {
+          bool approx = getElementTypeOrSelf(op->getResult(0).getType()).isF32() &&
+                        compilerinfra::hasFastMath(op, arith::FastMathFlags::arcp);
+          op->setAttr("ct_src.division", b.getStringAttr(approx ? "approx" : "rn"));
+        }
+        if (llvm::is_contained(ArrayRef<StringRef>{"ct_src.add", "ct_src.sub", "ct_src.mul",
+                                                    "arith.addf", "arith.subf", "arith.mulf"}, code) &&
+            isa<FloatType>(getElementTypeOrSelf(op->getResult(0).getType())) &&
+            !compilerinfra::hasFastMath(op, arith::FastMathFlags::contract))
+          op->setAttr("ct_src.round_nearest", b.getUnitAttr());
         if (auto loop = dyn_cast<scf::ForOp>(op)) {
           StringAttr kind;
           ArrayAttr bounds;
@@ -1236,7 +1289,7 @@ struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
             loop->removeAttr("ct_src.range_bounds");
         }
         if (usesCutileFtzAttr(op)) {
-          if (fFtz)
+          if (intentdsl::kir::allowsSignedFtz(op))
             op->setAttr("ct_src.ftz", b.getUnitAttr());
           else
             op->removeAttr("ct_src.ftz");
@@ -1244,6 +1297,7 @@ struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
           op->removeAttr("ct_src.ftz");
         }
       });
+      preserveProductRounding(f);
       auto entryAttr = f->getAttrOfType<StringAttr>("block.entry");
       f->setAttr("ct_src.entry",
                  entryAttr ? entryAttr : b.getStringAttr("kernel"));
@@ -1637,10 +1691,9 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
   auto arrayCap=profile.services.get<intentdsl::cutile::ArrayIndices>();
   for (auto f : fns) {
     if(!arrayCap || f->hasAttr("ct_src.tma")!=arrayCap->permitTma)return f.emitError("invalid array transfer capability");
-    bool expectedFtz = intentdsl::kir::allowsSubnormalFtz(f);
     auto commonWalk = f.walk([&](Operation *op) {
-      if (op->hasAttr("ct_src.ftz") != (usesCutileFtzAttr(op) && expectedFtz)) {
-        op->emitError("ct_src.ftz disagrees with function denormal-fp-math mode");
+      if (op->hasAttr("ct_src.ftz") != (usesCutileFtzAttr(op) && intentdsl::kir::allowsSignedFtz(op))) {
+        op->emitError("ct_src.ftz disagrees with operation denormal-fp-math mode");
         return WalkResult::interrupt();
       }
       if (callable) {
@@ -1818,7 +1871,9 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
   if(callable && failed(intentdsl::block::verifyRowProgram(fn,"ct_src")))return failure();
   const auto *factsPtr = profile.services.get<intentdsl::CallFacts>();
   auto res = module.walk([&](Operation *op) {
-    if(callable && isa<arith::ConstantOp,arith::IndexCastOp,scf::ForOp,scf::YieldOp>(op))return WalkResult::advance();
+    if (callable && isa<arith::ConstantOp, arith::IndexCastOp, arith::ExtFOp, arith::TruncFOp,
+                        scf::ForOp, scf::YieldOp>(op))
+      return WalkResult::advance();
     if (op == module || op->getName().getDialectNamespace() == "func" ||
         (callable && op->getName().getStringRef() == "ct_src.runtime_source"))
       return WalkResult::advance();

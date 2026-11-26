@@ -2377,6 +2377,7 @@ llvm::Error describeMojoOrderedPackage(func::FuncOp fn, Operation &prog,
   int64_t grain = prog.getAttrOfType<IntegerAttr>("grain").getInt();
   out << llvm::json::Value(llvm::json::Object{
       {"version", 2},
+      {"fp_contract", fn->getAttrOfType<StringAttr>("mojo_row.fp_contract").str()},
       {"abi", std::move(*abi)},
       {"domain", intentdsl::publishDomain(fn)},
       {"rows",

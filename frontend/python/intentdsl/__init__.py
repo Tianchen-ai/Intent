@@ -6,6 +6,7 @@ from textwrap import dedent
 
 
 from .completion import Completion
+from .signature import valid_denormal_mode
 
 __version__ = "2.0.0"
 
@@ -44,7 +45,6 @@ class Definition:
     source: bytes
 
 
-_DENORMAL_MODES = ("ieee", "preserve-sign", "positive-zero", "dynamic")
 _FPMATH_MODES = ("strict", "relaxed", "bf16", "fast")
 
 
@@ -53,7 +53,7 @@ def kernel(fn=None, *, numerics="source", fast_math=False, denormal_fp_math="iee
         raise ValueError(f"unsupported kernel numerics: {numerics}")
     if type(fast_math) is not bool:
         raise ValueError("fast_math must be a boolean")
-    if denormal_fp_math not in _DENORMAL_MODES:
+    if not valid_denormal_mode(denormal_fp_math):
         raise ValueError(f"unsupported denormal_fp_math: {denormal_fp_math}")
 
     def wrap(f):
@@ -136,7 +136,8 @@ def jit(
     backend,
     library=None,
     configuration=None,
-    fpmath_mode="strict",
+    fpmath_mode=None,
+    float32_matmul_precision=None,
     fast_math=False,
     denormal_fp_math=None,
     numerics=None,
@@ -145,13 +146,21 @@ def jit(
 
     from .compiler import Kernel
 
-    if fpmath_mode not in _FPMATH_MODES:
+    if fpmath_mode is not None and fpmath_mode not in _FPMATH_MODES:
         raise ValueError(f"unsupported fpmath_mode: {fpmath_mode}")
     if type(fast_math) is not bool:
         raise ValueError("fast_math must be a boolean")
-    if denormal_fp_math is not None and denormal_fp_math not in _DENORMAL_MODES:
+    if denormal_fp_math is not None and not valid_denormal_mode(denormal_fp_math):
         raise ValueError(f"unsupported denormal_fp_math: {denormal_fp_math}")
-    math_options = {"fpmath_mode": fpmath_mode, "fast_math": fast_math}
+    math_options = {}
+    if fpmath_mode is not None:
+        math_options["fpmath_mode"] = fpmath_mode
+    if fast_math:
+        math_options["fast_math"] = True
+    if float32_matmul_precision is not None:
+        if float32_matmul_precision not in ("highest", "high"):
+            raise ValueError("float32_matmul_precision must be highest or high")
+        math_options["float32_matmul_precision"] = float32_matmul_precision
     if numerics is not None:
         if numerics not in ("source", "relaxed_normalization"):
             raise ValueError(f"unsupported normalization policy: {numerics}")

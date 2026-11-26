@@ -134,6 +134,7 @@ class Artifact:
                 "build",
                 "--emit",
                 "shared-lib",
+                "--fp-mode", "contract=" + self.data.get("fp_contract", "fast"),
                 str(source),
                 *link_args,
                 "-o",

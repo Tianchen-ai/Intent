@@ -37,10 +37,6 @@ std::string dtype(Type t) {
     return "tl.int8";
   return "tl.int1";
 }
-bool viewHasAnyFastMath(const LocalOpView &v, arith::FastMathFlags mask) {
-  auto attr = v.attrOfType<arith::FastMathFlagsAttr>("fastmath");
-  return attr && bitEnumContainsAny(attr.getValue(), mask);
-}
 bool viewHasFastMath(const LocalOpView &v, arith::FastMathFlags req) {
   auto attr = v.attrOfType<arith::FastMathFlagsAttr>("fastmath");
   return attr && bitEnumContainsAll(attr.getValue(), req);
@@ -249,7 +245,7 @@ TerminalPrinter tilePrinter() {
     return ("tl.dot(" + v.operand(0) + "," + rhs +
             (v.numOperands() == 3 ? "," + v.operand(2) : "") +
             (v.attr("triton_src.exact_acc") ? ",max_num_imprecise_acc=0" : "") +
-            ",input_precision='ieee',out_dtype=" + dtype(v.resultType(0)) + ")")
+            ",input_precision='" + v.attrOfType<StringAttr>("input_precision").getValue() + "',out_dtype=" + dtype(v.resultType(0)) + ")")
         .str();
   });
   leaf("triton_src.tile_reduce", [](const LocalOpView &v) {
@@ -306,8 +302,7 @@ TerminalPrinter tilePrinter() {
             .str();
       }
       if (v.operation() == "arith.divf" &&
-          !viewHasAnyFastMath(v, arith::FastMathFlags::arcp |
-                                     arith::FastMathFlags::afn))
+          v.attrOfType<StringAttr>("triton_src.division") != "reciprocal")
         return "tl.div_rn(" + llvm::join(v.operands(), ",") + ")";
       return (v.operand(0) + token + v.operand(1)).str();
     });

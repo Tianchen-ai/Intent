@@ -55,6 +55,7 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
           profile.services.provide<intentdsl::itsrc::TritonTarget>(target))
     return std::move(err);
   auto caps = std::make_shared<intentdsl::RowCapacity>();
+  caps->onlineRowReductions = true;
   caps->globalAtomicBins=true;
   auto matrix=std::make_shared<intentdsl::block::MatrixTarget>();
   matrix->estimate="exits/triton::matrix-issues";

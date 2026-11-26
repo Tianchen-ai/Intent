@@ -8,10 +8,6 @@ namespace CI_UNIT_NAMESPACE {
 using namespace mlir;
 using namespace compilerinfra;
 namespace {
-bool rowHasAnyFastMath(const LocalOpView &v, arith::FastMathFlags mask) {
-  auto attr = v.attrOfType<arith::FastMathFlagsAttr>("fastmath");
-  return attr && bitEnumContainsAny(attr.getValue(), mask);
-}
 
 std::string memberCountExpr(Type viewTy, StringRef name, int64_t ownerAxis) {
   std::string product = "1";
@@ -243,9 +239,13 @@ llvm::Error localRowRule(const LocalOpView &v, PrintPoint at, PrintContext &c) {
       expr += v.attrOfType<IntegerAttr>("axis").getInt() == 0
                   ? " // COLUMN_TILES"
                   : " % COLUMN_TILES";
+  } else if (code == "mul" || code == "sub" || code == "add") {
+    if (v.attr("ct_src.round_nearest"))
+      expr = "ct." + code.str() + "(" + arg(0) + "," + arg(1) + ",rounding_mode=ct.RoundingMode.RN)";
+    else
+      expr = arg(0) + (code == "mul" ? "*" : code == "sub" ? "-" : "+") + arg(1);
   } else if (code == "div") {
-    bool approx = rowHasAnyFastMath(
-        v, arith::FastMathFlags::arcp);
+    bool approx = v.attrOfType<StringAttr>("ct_src.division") == "approx";
     expr = "ct.truediv(" + arg(0) + ", " + arg(1) +
            (v.attr("ct_src.ftz") ? ", flush_to_zero=True" : "") +
            ", rounding_mode=ct.RoundingMode." + (approx ? "APPROX" : "RN") +
@@ -401,9 +401,12 @@ void rowRules(TerminalPrinter &printer) {
   ops["ct_src.atomic_add_at"] = PrintRule::local(
       [](const LocalOpView &v, PrintPoint at, PrintContext &c) -> llvm::Error {
         if (at == PrintPoint::Enter)
-          c.line(v.result(0) + " = ct.atomic_add(" + v.operand(0) +
-                 ",ct.where(" + v.operand(3) + "," + v.operand(1) + ",-1)," +
-                 v.operand(2) + ",check_bounds=True,memory_order=ct.MemoryOrder." +
+          c.line(v.result(0) + " = " + v.operand(0) +
+                 ".get_raw_memory().atomic_add_offset(ct.astype(" + v.operand(1) +
+                 ",ct.int64)*" + v.operand(0) + ".strides[0]," + v.operand(2) +
+                 ",mask=" + v.operand(3) + " & (" + v.operand(1) + ">=0) & (" +
+                 v.operand(1) + "<" + v.operand(0) +
+                 ".shape[0]),memory_order=ct.MemoryOrder." +
                  v.attrOfType<StringAttr>("ordering").getValue().upper() + ")");
         return llvm::Error::success();
       });
@@ -437,9 +440,6 @@ void rowRules(TerminalPrinter &printer) {
       PrintRule::format("$r0 = ct.maximum($0,$1,propagate_nan=True)");
   ops["ct_src.zero"] = PrintRule::format("$r0 = 0");
   ops["ct_src.broadcast_rows"] = PrintRule::format("$r0 = ct.expand_dims($0,1)");
-  ops["ct_src.mul"] = PrintRule::format("$r0 = $0 * $1");
-  ops["ct_src.sub"] = PrintRule::format("$r0 = $0 - $1");
-  ops["ct_src.add"] = PrintRule::format("$r0 = $0 + $1");
   ops["ct_src.sqrt"] = PrintRule::format("$r0 = ct.sqrt($0)");
   ops["ct_src.exp"] = PrintRule::format("$r0 = ct.exp($0)");
   ops["ct_src.rsqrt"] = PrintRule::format("$r0 = ct.rsqrt($0)");
@@ -453,7 +453,7 @@ void rowRules(TerminalPrinter &printer) {
   // Local rules (LocalOpView only)
   for (auto op : {"tiles", "yield", "stripe_tile_load", "stripe_tile_store",
                   "rect_slab_load", "rect_slab_store", "gather_slab",
-                  "scatter_slab", "active", "linear_index", "pid", "div",
+                  "scatter_slab", "active", "linear_index", "pid", "div", "mul", "add", "sub",
                   "bin_index", "zero_bins", "bin_panels", "read_bin_keys",
                   "atomic_bins", "splat", "view_offset", "extract_lane",
                   "axis_reduce", "map", "uniform", "constant", "tile_load",

@@ -67,6 +67,7 @@ class Call(PreparedLaunch):
                         row,
                         a.data["abi"],
                         cnnl=bool(a.data.get("cnnl")),
+                        fp_contract=a.data.get("fp_contract", "off"),
                     )
                 report.append(
                     dict(

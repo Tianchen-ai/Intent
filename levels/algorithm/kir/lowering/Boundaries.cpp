@@ -394,18 +394,34 @@ namespace {
 struct Canonicalize : PassWrapper<Canonicalize, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(Canonicalize)
   intentdsl::kir::FastMathPolicy policy;
-  explicit Canonicalize(intentdsl::kir::FastMathPolicy p = {})
-      : policy(std::move(p)) {}
+  const TargetProfile *target;
+  Canonicalize(intentdsl::kir::FastMathPolicy p, const TargetProfile &profile)
+      : policy(std::move(p)), target(&profile) {}
   void runOnOperation() final {
     auto *ctx = &getContext();
     for(auto fn:getOperation().getOps<func::FuncOp>()) {
-      if (policy.relaxedNormalization && intentdsl::kir::orderedOwners(fn))
-        fn->setAttr("kir.relaxed_normalization", UnitAttr::get(ctx));
+      if (fn->hasAttr("kir.relaxed_normalization"))
+        fn->setAttr("kir.normalization", StringAttr::get(ctx, "online-eligible"));
+      auto bind = [&](StringRef attr, StringRef name) {
+        return target->bindSemantic(fn, attr, ("levels/algorithm/kir::" + name).str());
+      };
+      for (auto [attr, ref] : {std::pair{"denormal-fp-math", "denormal"},
+                               {"kir.normalization", "normalization"},
+                               {"kir.matmul_precision", "matmul-precision"},
+                               {"kir.division", "division"}}) {
+        if (auto err = bind(attr, ref)) {
+          fn.emitError() << llvm::toString(std::move(err));
+          return signalPassFailure();
+        }
+      }
+      if (target->semanticDefaults.count("levels/algorithm/kir::" + target->name + "-fp-contract")) {
+        if (auto err = bind("kir.fp_contract", target->name + "-fp-contract")) {
+          fn.emitError() << llvm::toString(std::move(err));
+          return signalPassFailure();
+        }
+      }
       auto owner=cast<BlockArgument>(fn.front().front().getOperand(0)).getArgNumber();
       fn->setAttr("kir.domain_arg", IntegerAttr::get(IntegerType::get(ctx,64),owner));
-      llvm::StringRef fnDenorm = intentdsl::kir::getDenormalFpMath(fn);
-      std::string targetDenorm =
-          fnDenorm != "ieee" ? fnDenorm.str() : policy.denormalFpMath;
       if(intentdsl::kir::matrixDomain(fn)){
         auto &body=fn.front().front().getRegion(0).front();
         for(auto &op:llvm::make_early_inc_range(llvm::reverse(body))){
@@ -414,30 +430,43 @@ struct Canonicalize : PassWrapper<Canonicalize, OperationPass<ModuleOp>> {
           if (auto type = intentdsl::kir::storageFormat(op))
             op.setAttr("kir.storage", TypeAttr::get(type));
           if(op.getNumResults()==1 && op.getResult(0).use_empty()){op.erase();continue;}
-          if (op.getName().getStringRef() == "kir.contract") {
-            auto opDenorm = op.getAttrOfType<StringAttr>("denormal-fp-math");
-            if (opDenorm && opDenorm.getValue() != "ieee")
-              targetDenorm = opDenorm.getValue().str();
-            else if (targetDenorm != "ieee" &&
-                     mlir::isa<mlir::FloatType>(mlir::getElementTypeOrSelf(
-                         op.getResult(0).getType())))
-              op.setAttr("denormal-fp-math",
-                         StringAttr::get(ctx, targetDenorm));
-          }
         }
       }
-      fn->setAttr("denormal-fp-math", StringAttr::get(ctx, targetDenorm));
-      if (policy.denormalFpMath != "ieee")
-        fn.walk([&](Operation *op) {
-          if ((op->getName().getStringRef() == "kir.lane_sum" ||
-               op->getName().getStringRef() == "kir.sqrt" ||
-               op->getName().getStringRef() == "kir.div") &&
-              op->getAttrOfType<StringAttr>("denormal-fp-math") == "ieee")
-            op->setAttr("denormal-fp-math", StringAttr::get(ctx, policy.denormalFpMath));
-        });
-      if (policy.defaultFlags != arith::FastMathFlags::none) {
+      fn.walk([&](Operation *op) {
+        if (op->getName().getStringRef() == "kir.lane_sum" && !op->hasAttr("denormal-fp-math"))
+          op->setAttr("denormal-fp-math", fn->getAttr("denormal-fp-math"));
+      });
+      auto contraction = fn->getAttrOfType<StringAttr>("kir.fp_contract");
+      fn.walk([&](Operation *op) {
+        auto code = op->getName().stripDialect();
+        if (!contraction || !intentdsl::kir::isFloatingMathOp(op) ||
+            !llvm::is_contained(ArrayRef<StringRef>{"add", "addf", "sub", "subf", "mul", "mulf"}, code))
+          return;
+        // A serialized explicit fastmath=none is an operation override.
+        auto flags = op->getAttrOfType<arith::FastMathFlagsAttr>("fastmath");
+        if (flags && flags.getValue() == arith::FastMathFlags::none)
+          return;
+        if (contraction == "on")
+          intentdsl::kir::addFastMathFlags(op, arith::FastMathFlags::contract);
+        if (contraction == "expression") {
+          if (auto nested = op->getAttrOfType<DenseI64ArrayAttr>("kir.contract_operands"))
+            for (int64_t i : nested.asArrayRef()) {
+              if (i < 0 || i >= op->getNumOperands())
+                continue;
+              auto *mul = op->getOperand(i).getDefiningOp();
+              if (!mul || (mul->getName().stripDialect() != "mul" && !isa<arith::MulFOp>(mul)))
+                continue;
+              intentdsl::kir::addFastMathFlags(mul, arith::FastMathFlags::contract);
+              intentdsl::kir::addFastMathFlags(op, arith::FastMathFlags::contract);
+            }
+        }
+      });
+      if (!fn->hasAttr("kir.author_fastmath") && policy.defaultFlags != arith::FastMathFlags::none) {
         fn.walk([&](Operation *op) {
           if (!intentdsl::kir::isFloatingMathOp(op))
+            return;
+          if (auto flags = op->getAttrOfType<arith::FastMathFlagsAttr>("fastmath");
+              flags && flags.getValue() == arith::FastMathFlags::none)
             return;
           auto addFlags = policy.defaultFlags;
           if (op->getName().getStringRef() == "kir.ordered_sum" &&
@@ -464,7 +493,9 @@ struct Canonicalize : PassWrapper<Canonicalize, OperationPass<ModuleOp>> {
 };
 } // namespace
 namespace CI_UNIT_NAMESPACE {
+void registerNumericalReferences(Unit &);
 void bind(Unit &unit) {
+  registerNumericalReferences(unit);
   unit.dialects = [](DialectRegistry &r) {
     r.insert<intentdsl::kir::KirDialect, func::FuncDialect, arith::ArithDialect,
              scf::SCFDialect, memref::MemRefDialect, math::MathDialect>();
@@ -478,7 +509,7 @@ void bind(Unit &unit) {
               if (auto *svc =
                       profile.services.get<intentdsl::kir::FastMathPolicy>())
                 p = *svc;
-              if (profile.numerical.defaultFastMath !=
+              if (!p.explicitFastMath && profile.numerical.defaultFastMath !=
                   arith::FastMathFlags::none)
                 p.defaultFlags =
                     p.defaultFlags | profile.numerical.defaultFastMath;
@@ -487,7 +518,7 @@ void bind(Unit &unit) {
                       llvm::DenormalMode::getIEEE())
                 p.denormalFpMath = intentdsl::kir::canonicalDenormalName(
                     profile.numerical.defaultDenormal);
-              pm.addPass(std::make_unique<Canonicalize>(std::move(p)));
+              pm.addPass(std::make_unique<Canonicalize>(std::move(p), profile));
             }
             return llvm::Error::success();
           },

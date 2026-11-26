@@ -59,7 +59,7 @@ def _compile_cnnl_bridge_object(base: Path, sdk: Path) -> Path:
 
 
 class Native:
-    def __init__(self, source, row, abi, *, cnnl=False):
+    def __init__(self, source, row, abi, *, cnnl=False, fp_contract="off"):
         base = (
             Path(
                 os.environ.get("INTENT_CACHE_DIR", Path.home() / ".cache" / "intentdsl")
@@ -81,7 +81,7 @@ class Native:
             "--bang-mlu-arch=mtp_372",
             "-std=c++14",
             "-O2",
-            "-ffp-contract=off",
+            "-ffp-contract=" + fp_contract,
             "-shared",
             "-fPIC",
             *(

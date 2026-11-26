@@ -76,8 +76,20 @@ LogicalResult verifyMapping(ModuleOp m,const compilerinfra::TargetProfile &p,Str
       for(unsigned i=0;ok && i<count;++i){
         auto init=op->getOperand(1+i),result=body.back().getOperand(i);
         bool tuple=isa<TupleType>(init.getType());
+        Value previous = body.getArgument(1+i);
+        if (op->hasAttr("block.online_normalization") && i == 1) {
+          auto *sum = result.getDefiningOp();
+          if (count != 2 || !sum || sum->getNumOperands() != 2 ||
+              !def(sum->getOperand(0), "mul")) { ok = false; break; }
+          auto *scale = sum->getOperand(0).getDefiningOp();
+          if (scale->getOperand(0) != previous || !def(scale->getOperand(1), "exp") ||
+              f->getAttrOfType<StringAttr>("kir.normalization") != "online-eligible") {
+            ok = false; break;
+          }
+          previous = scale->getResult(0);
+        }
         ok=def(init,tuple?"summary_identity":"identity") && def(result,tuple?"summary_merge":"combine") &&
-           result.getDefiningOp()->getOperand(0)==body.getArgument(1+i) &&
+           result.getDefiningOp()->getOperand(0)==previous &&
            init.getDefiningOp()->getAttr("algebra")==result.getDefiningOp()->getAttr("algebra") &&
            init.getType()==result.getType() && init.getType()==op->getResult(i).getType();
       }

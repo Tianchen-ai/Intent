@@ -8,11 +8,10 @@ Write a tensor kernel in Python, choose a backend, and check the compiled result
 
 ## Build from source
 
-Start in an empty directory on Linux with Python ≥3.10, Git, CMake ≥3.22, Ninja, a C++17 compiler, and LLVM **and MLIR** 20.1.8 development packages, including TableGen tools and position-independent static archives. These commands install the CompilerInfra 0.5.3 SDK and matching Python packages into local directories. The Intent wheel built by pip bundles its compiler library.
+Start in an empty directory on Linux with Python ≥3.10, Git, CMake ≥3.22, Ninja, a C++17 compiler, and LLVM **and MLIR** 20.1.8 development packages, including TableGen tools and position-independent static archives. These commands install the CompilerInfra 0.6.0 SDK and matching Python packages into local directories. The Intent wheel built by pip bundles its compiler library.
 
 ```sh
 git clone https://github.com/Tianchen-ai/compilerinfra.git
-git -C compilerinfra checkout 0570f7169c42b6139448181e9af7d958edfd0ac9
 git clone https://github.com/Tianchen-ai/Intent.git
 git clone https://github.com/Tianchen-ai/Intent-Bench.git
 python3 -m venv .venv

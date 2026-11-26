@@ -320,7 +320,8 @@ void registerContracts(Unit &unit) {
       return llvm::Error::success();
     };
     ac.verify = [](Operation *op) -> LogicalResult {
-      if (op->getNumResults() != 0 ||
+      if (op->getAttrOfType<StringAttr>("order") != "relaxed" ||
+          op->getNumResults() != 0 ||
           (op->getNumOperands() != 3 && op->getNumOperands() != 4))
         return failure();
       auto mem = dyn_cast<MemRefType>(op->getOperand(0).getType());

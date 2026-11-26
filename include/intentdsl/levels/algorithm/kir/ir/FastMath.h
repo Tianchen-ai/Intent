@@ -1,4 +1,5 @@
 #pragma once
+#include "compilerinfra/Contract.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Math/IR/Math.h"
@@ -11,13 +12,15 @@ namespace intentdsl::kir {
 
 struct FastMathPolicy {
   bool relaxedNormalization = false;
+  bool explicitFastMath = false;
   mlir::arith::FastMathFlags defaultFlags = mlir::arith::FastMathFlags::none;
   std::string denormalFpMath = "ieee";
 };
 
 inline bool validDenormalMode(llvm::StringRef mode) {
-  return mode == "ieee" || mode == "preserve-sign" ||
-         mode == "positive-zero" || mode == "dynamic";
+  if (mode.empty() || mode.starts_with(",") || mode.ends_with(","))
+    return false;
+  return llvm::parseDenormalFPAttribute(mode).isValid();
 }
 
 inline std::string canonicalDenormalName(llvm::DenormalMode mode) {
@@ -47,7 +50,7 @@ inline llvm::StringRef getDenormalFpMath(mlir::Operation *op) {
 }
 
 inline bool allowsSubnormalFtz(mlir::Operation *op) {
-  return getDenormalFpMath(op) != "ieee";
+  return compilerinfra::allowsSubnormalFlush(op);
 }
 
 inline mlir::arith::FastMathFlags getFastMathFlags(mlir::Operation *op) {
@@ -86,6 +89,17 @@ inline bool hasAnyFastMath(mlir::Operation *op,
   return (getFastMathFlags(op) & mask) != mlir::arith::FastMathFlags::none;
 }
 
+// NVIDIA .ftz preserves the sign of a flushed operand and result.
+inline bool allowsSignedFtz(mlir::Operation *op) {
+  auto mode = compilerinfra::effectiveDenormalMode(op);
+  bool ignoreSign = compilerinfra::hasFastMath(op, mlir::arith::FastMathFlags::nsz);
+  auto compatible = [=](auto kind) {
+    return kind == llvm::DenormalMode::PreserveSign ||
+           (kind == llvm::DenormalMode::PositiveZero && ignoreSign);
+  };
+  return compatible(mode.Input) && compatible(mode.Output);
+}
+
 inline bool isFloatingMathOp(mlir::Operation *op) {
   if (!op || op->getNumResults() != 1)
     return false;
@@ -118,13 +132,18 @@ inline llvm::Expected<FastMathPolicy>
 parseFastMathPolicy(const llvm::json::Object &options) {
   using FMF = mlir::arith::FastMathFlags;
   FastMathPolicy policy;
+  policy.explicitFastMath = options.get("fpmath_mode") || options.get("fast_math");
   if (options.get("numerics")) {
     auto mode = options.getString("numerics");
     if (!mode || (*mode != "source" && *mode != "relaxed_normalization"))
       return llvm::createStringError("numerics must be source or relaxed_normalization");
     policy.relaxedNormalization = *mode == "relaxed_normalization";
   }
-  bool explicitDenormal = false;
+  if (options.get("float32_matmul_precision")) {
+    auto precision = options.getString("float32_matmul_precision");
+    if (precision != "highest" && precision != "high")
+      return llvm::createStringError("float32_matmul_precision must be highest or high");
+  }
   if (auto mode = options.getString("fpmath_mode")) {
     if (*mode == "strict") {
       policy.defaultFlags = FMF::none;
@@ -143,7 +162,7 @@ parseFastMathPolicy(const llvm::json::Object &options) {
   }
   if (auto fast = options.getBoolean("fast_math"); fast && *fast) {
     policy.defaultFlags = policy.defaultFlags | FMF::fast;
-    if (!explicitDenormal && policy.denormalFpMath == "ieee")
+    if (policy.denormalFpMath == "ieee")
       policy.denormalFpMath = "preserve-sign";
   }
   if (auto denorm = options.getString("denormal_fp_math")) {
@@ -152,8 +171,6 @@ parseFastMathPolicy(const llvm::json::Object &options) {
                                      denorm->str() + "'");
     policy.denormalFpMath = denorm->str();
   }
-  if (policy.relaxedNormalization)
-    policy.defaultFlags = policy.defaultFlags | FMF::reassoc | FMF::afn;
   return policy;
 }
 

@@ -4,6 +4,13 @@ import ast
 _DENORMAL_MODES = ("ieee", "preserve-sign", "positive-zero", "dynamic")
 
 
+def valid_denormal_mode(mode):
+    if not isinstance(mode, str):
+        return False
+    parts = mode.split(",")
+    return len(parts) <= 2 and all(part in _DENORMAL_MODES for part in parts)
+
+
 def _kernel_decorator(fn):
     for decorator in fn.decorator_list:
         if (
@@ -37,10 +44,37 @@ def _kernel_decorator(fn):
                 if "denormal_fp_math" in kw
                 else ("preserve-sign" if fm else "ieee")
             )
-            if dm not in _DENORMAL_MODES:
+            if not valid_denormal_mode(dm):
                 raise ValueError(f"unsupported denormal_fp_math: {dm}")
             return decorator.func.value.id, (val, fm, dm)
     raise ValueError("expected a qualified kernel decorator")
+
+
+def kernel_numeric_attributes(fn):
+    """Only write author overrides; target defaults are bound in canonical KIR."""
+    for decorator in fn.decorator_list:
+        if not isinstance(decorator, ast.Call) or getattr(decorator.func, "attr", None) != "kernel":
+            continue
+        keys = {kw.arg for kw in decorator.keywords}
+        numerics, fast, mode = _kernel_decorator(fn)[1]
+        attrs = []
+        if "denormal_fp_math" in keys or fast:
+            attrs.append(f'"denormal-fp-math"="{mode}"')
+        if "fast_math" in keys:
+            attrs.append(f'kir.fp_contract="{"on" if fast else "off"}"')
+            attrs.append("kir.author_fastmath")
+        if "numerics" in keys:
+            attrs.append(f'kir.normalization="{"online-eligible" if numerics == "relaxed_normalization" else "source"}"')
+        return "".join(", " + attr for attr in attrs)
+    return ""
+
+
+def expression_denormal(keywords, kernel_mode):
+    if "flush_to_zero" not in keywords:
+        return ""
+    enabled = ast.literal_eval(keywords["flush_to_zero"])
+    mode = ("preserve-sign" if kernel_mode == "ieee" else kernel_mode) if enabled else "ieee"
+    return f'"denormal-fp-math"="{mode}"'
 
 
 def namespace(fn):
@@ -56,8 +90,6 @@ def kernel_math_policy(fn):
     flags = ()
     if fast_math:
         flags = ("fast",)
-    elif numerics == "relaxed_normalization":
-        flags = ("reassoc", "afn")
     return flags, denormal
 
 

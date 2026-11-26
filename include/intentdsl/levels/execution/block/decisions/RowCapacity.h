@@ -53,6 +53,7 @@ struct RowCapacity {
   }
   // Rectangular tile consumers cannot span a carry between two projected
   // outer axes in one transfer. Other consumers linearize lanes separately.
+  bool onlineRowReductions = false;
   bool rectangularProjectedRows = false;
   llvm::SmallVector<unsigned> independentWidths;
   bool globalAtomicBins=false, nativePrivateHistogram=false;

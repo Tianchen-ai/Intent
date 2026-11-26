@@ -122,7 +122,7 @@ class Prepared(PreparedLaunch):
                     ROWS=self.pre_stage["rows"],
                     WIDTH=self.pre_stage["width"],
                     grid=pg,
-                    enable_fp_fusion=False,
+                    enable_fp_fusion=self.pre_stage.get("enable_fp_fusion", False),
                     **self.pre_stage["native"],
                 )
                 self.pre_launcher = pre_native[pg]
@@ -155,7 +155,7 @@ class Prepared(PreparedLaunch):
                         ROWS=r["rows"],
                         WIDTH=r["width"],
                         grid=g,
-                        enable_fp_fusion=False,
+                        enable_fp_fusion=self.artifact.data.get("enable_fp_fusion", False),
                         **r["native"],
                     )
                     self.launchers[r["id"]] = native[g]

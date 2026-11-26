@@ -257,6 +257,53 @@ void promoteSteppedTmaLoops(func::FuncOp fn) {
 
 llvm::Error describeArtifact(func::FuncOp, const TargetProfile &,
                              llvm::raw_pwrite_stream &);
+static bool canContract(Operation *op) {
+  return !op->hasAttr("triton_src.round_nearest") &&
+         compilerinfra::hasFastMath(op, arith::FastMathFlags::contract);
+}
+
+static void bindContraction(func::FuncOp f, const TargetProfile &profile) {
+  bool uniform = f->getAttrOfType<StringAttr>("kir.fp_contract") == "on";
+  f.walk([&](Operation *op) {
+    auto n = op->getName().stripDialect();
+    if (op->getNumResults() == 1 && isa<FloatType>(getElementTypeOrSelf(op->getResult(0).getType())) &&
+        llvm::is_contained(ArrayRef<StringRef>{"add", "sub", "mul", "addf", "subf", "mulf"}, n))
+      uniform &= canContract(op);
+    if (auto id = op->getAttrOfType<StringAttr>("ci.implementation")) {
+      auto it = profile.implementations.find(id.str());
+      if (it != profile.implementations.end() && it->second.source == ImplementationSource::Runtime)
+        uniform = false;
+    }
+    // Map operations and tile programs also contain generated arithmetic.
+    if (n == "map" || n == "tile_program")
+      uniform = false;
+  });
+  f->setAttr("triton_src.enable_fp_fusion", BoolAttr::get(f.getContext(), uniform));
+  if (uniform)
+    return;
+  f.walk([&](Operation *add) {
+    auto name = add->getName().getStringRef();
+    if ((name != "arith.addf" && name != "triton_src.add") || !canContract(add))
+      return;
+    for (unsigned i = 0; i < 2; ++i) {
+      auto *mul = add->getOperand(i).getDefiningOp();
+      if (!mul || !canContract(mul) || (mul->getName().getStringRef() != "triton_src.mul" &&
+                                        !isa<arith::MulFOp>(mul)))
+        continue;
+      OpBuilder b(add);
+      OperationState s(add->getLoc(), "triton_src.fma");
+      s.addOperands({mul->getOperand(0), mul->getOperand(1), add->getOperand(1-i)});
+      s.addTypes(add->getResultTypes());
+      auto *fma = b.create(s);
+      add->replaceAllUsesWith(fma);
+      add->erase();
+      if (mul->use_empty())
+        mul->erase();
+      break;
+    }
+  });
+}
+
 struct BindCallable : PassWrapper<BindCallable, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(BindCallable)
   TargetProfile profile;
@@ -291,7 +338,21 @@ struct BindCallable : PassWrapper<BindCallable, OperationPass<ModuleOp>> {
       if (tritonCap && tritonCap->permitTma)
         f->setAttr("triton_src.tma", b.getUnitAttr());
       promoteSteppedTmaLoops(f);
+      bindContraction(f, profile);
       stampTritonCarryAndLoops(f);
+      f.walk([&](Operation *op) {
+        auto name = op->getName().getStringRef();
+        if (name == "triton_src.div" || isa<arith::DivFOp>(op)) {
+          bool reciprocal = compilerinfra::hasFastMath(op, arith::FastMathFlags::arcp) &&
+                            intentdsl::kir::allowsSignedFtz(op);
+          op->setAttr("triton_src.division", b.getStringAttr(reciprocal ? "reciprocal" : "rn"));
+        }
+        if (name == "triton_src.tile_dot") {
+          bool tf32 = getElementTypeOrSelf(op->getOperand(0).getType()).isF32() &&
+                      f->getAttrOfType<StringAttr>("kir.matmul_precision") == "high";
+          op->setAttr("input_precision", b.getStringAttr(tf32 ? "tf32" : "ieee"));
+        }
+      });
     }
     std::set<std::string> seenResources;
     SmallVector<std::string> runtimeImpls;
@@ -379,8 +440,8 @@ llvm::Error emitTritonOwnerDefaults(func::FuncOp fn, Operation &entry,
       fn, "", llvm::json::Object{{"num_warps", warps}, {"num_stages", 1}}, 2,
       out);
 }
-llvm::Error describeArtifact(func::FuncOp fn, const TargetProfile &profile,
-                             llvm::raw_pwrite_stream &out) {
+llvm::Error describeKernel(func::FuncOp fn, const TargetProfile &profile,
+                           llvm::raw_pwrite_stream &out) {
   auto &entry = fn.front().front();
   if (entry.getName().getStringRef() == "triton_src.tile_program") {
     if (entry.getAttrOfType<StringAttr>("calling_convention") == "matrix")
@@ -454,6 +515,26 @@ llvm::Error describeArtifact(func::FuncOp fn, const TargetProfile &profile,
                       fn->getAttrOfType<IntegerAttr>("triton_src.max_width")
                           .getInt())
                 : llvm::json::Value(nullptr)}}}});
+  return llvm::Error::success();
+}
+llvm::Error describeArtifact(func::FuncOp fn, const TargetProfile &profile,
+                             llvm::raw_pwrite_stream &out) {
+  SmallVector<char> buffer;
+  llvm::raw_svector_ostream os(buffer);
+  if (auto err = describeKernel(fn, profile, os))
+    return err;
+  auto pkg = llvm::json::parse(StringRef(buffer.data(), buffer.size()));
+  if (!pkg)
+    return pkg.takeError();
+  auto enabled = fn->getAttrOfType<BoolAttr>("triton_src.enable_fp_fusion");
+  if (!enabled)
+    return llvm::createStringError("missing Triton FP fusion binding");
+  (*pkg->getAsObject())["enable_fp_fusion"] = enabled.getValue();
+  if (auto *pre = pkg->getAsObject()->getObject("pre_stage")) {
+    auto first = *fn->getParentOfType<ModuleOp>().getOps<func::FuncOp>().begin();
+    (*pre)["enable_fp_fusion"] = first->getAttrOfType<BoolAttr>("triton_src.enable_fp_fusion").getValue();
+  }
+  out << *pkg;
   return llvm::Error::success();
 }
 } // namespace
@@ -709,6 +790,14 @@ static LogicalResult verifyBoundary(ModuleOp m, const TargetProfile &profile,
 void matrixIssues(Unit &);
 void addressOptimization(Unit &);
 void bind(Unit &unit) {
+  unit.semantics.push_back({{"fp32-dot", "NVIDIA f32 dot operands", "tl.dot(input_precision)", "tf32",
+      "Triton language dot: default NVIDIA input_precision=tf32",
+      [](const TargetProfile &, const llvm::json::Object &o) -> std::optional<SemanticChoice> {
+        bool high = o.getString("float32_matmul_precision") == "high";
+        return SemanticChoice{high ? "tf32" : "ieee", high ? "configuration" : "author-language default",
+                              "tl.dot(input_precision)", high ? "Explicit high precision mode" :
+                              "PyTorch highest requires full f32 inputs"};
+      }}, COMPILERINFRA_SOURCE});
   matrixIssues(unit);
   addressOptimization(unit);
   tileContracts(unit);

@@ -182,11 +182,12 @@ llvm::Error describeMojoMatrixPackage(func::FuncOp fn, Operation &prog,
   bool usesBrgemm = prog.getAttrOfType<BoolAttr>("uses_brgemm").getValue();
   out << llvm::json::Value(llvm::json::Object{
       {"version", 2},
+      {"fp_contract", fn->getAttrOfType<StringAttr>("mojo_row.fp_contract").str()},
       {"source", ""},
       {"host", ""},
       {"returns_status", true},
       {"onednn", usesBrgemm},
-      {"allow_subnormal_ftz", intentdsl::kir::allowsSubnormalFtz(fn)},
+      {"allow_subnormal_ftz", intentdsl::kir::allowsSubnormalFtz(&prog)},
       {"domain", intentdsl::publishDomain(fn)},
       {"abi", std::move(*abi)},
       {"rows", llvm::json::Array{llvm::json::Object{{"grain", tile[0]},
@@ -397,6 +398,8 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
   progState.addAttribute("tile", tile);
   progState.addAttribute("extents", extents);
   progState.addAttribute("uses_brgemm", b.getBoolAttr(usesBrgemm));
+  progState.addAttribute("denormal-fp-math",
+                         b.getStringAttr(intentdsl::kir::getDenormalFpMath(&dot)));
   progState.addAttribute("implementation", implAttr);
   progState.addRegion();
   progState.addRegion();

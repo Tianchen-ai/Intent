@@ -505,6 +505,14 @@ void registerOrdered(Unit &u) {
       for (auto loop : o->getRegion(0).front().getOps<scf::ForOp>())
         if (loop->hasAttr("kir.reassociate")) {
           loop->setAttr("block.contribution_width", d.get("span"));
+          // A second traversal rereads the score inputs. One panel already
+          // fits locally; streaming several panels can amortize rescaling.
+          auto lo = block::panelRange(loop.getLowerBound(), *o, *f);
+          auto hi = block::panelRange(loop.getUpperBound(), *o, *f);
+          if (fn->getAttrOfType<StringAttr>("kir.normalization") == "online-eligible" &&
+              !o->hasAttr("block.fold_split") && lo && hi &&
+              (__int128(hi->hi) - lo->lo) > d.getAs<IntegerAttr>("span").getInt())
+            loop->setAttr("block.online_normalization", b.getUnitAttr());
           for (auto &op : loop.getBody()->without_terminator()) {
             if (block::rectangularTokenLoad(op, loop))
               op.setAttr("block.rectangular_tokens", b.getUnitAttr());

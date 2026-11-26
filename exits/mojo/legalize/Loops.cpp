@@ -112,6 +112,8 @@ class Columns {
         result.getDefiningOp()->setAttr("carry", b.getI64IntegerAttr(index));
       }
     }
+    if (auto flags = op->getAttr("fastmath"))
+      result.getDefiningOp()->setAttr("fastmath", flags);
     if (auto c = op->getAttr("value"))
       result.getDefiningOp()->setAttr("value", c);
     if (auto pos = op->getAttr("position"))

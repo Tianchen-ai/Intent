@@ -9,7 +9,8 @@ from .intentdsl.signature import (
     format_fastmath_attr,
     format_fastmath_inline,
     kernel_math_policy,
-    kernel_numerics,
+    kernel_numeric_attributes,
+    expression_denormal,
     namespace,
     signature,
 )
@@ -98,9 +99,6 @@ class Ordered:
             items.append(f"axis={axis}:i64")
         if fastmath:
             items.append(f"fastmath={fastmath}")
-        if op == "lane_sum":
-            # Per-expression FTZ on exp/div does not license the dot reduction.
-            items.append(f'"denormal-fp-math"="{self.kernel_denormal_mode}"')
         attrs = f' {{{", ".join(items)}}}' if items else ""
         text = (
             f'"kir.{op}"('
@@ -179,7 +177,13 @@ class Ordered:
                     ("reassoc",) if is_fold_carry and op == "addf" else (),
                     strip_reassoc=is_ordered_carry,
                 )
-            result = self.emit(f"arith.{op} {a.name}, {b.name}{fm} : {a.type}", a.type)
+            attrs = ""
+            if op in ("addf", "subf"):
+                nested = [i for i, term in enumerate((node.left, node.right))
+                          if isinstance(term, ast.BinOp) and isinstance(term.op, ast.Mult)]
+                if nested:
+                    attrs = " {kir.contract_operands=array<i64:" + ",".join(map(str, nested)) + ">}"
+            result = self.emit(f"arith.{op} {a.name}, {b.name}{fm}{attrs} : {a.type}", a.type)
             if a in self.lanes:
                 av, ax = self.lanes[a]
                 bv, bx = self.lanes[b]
@@ -265,8 +269,8 @@ class Ordered:
                 ftz = ast.literal_eval(kw["flush_to_zero"]) if "flush_to_zero" in kw else False
                 if type(approx) is not bool or type(ftz) is not bool:
                     raise ValueError("fdiv flags must be boolean literals")
-                if ftz and self.denormal_mode == "ieee":
-                    self.denormal_mode = "preserve-sign"
+                denorm = expression_denormal(kw, self.kernel_denormal_mode)
+                attr = f" {{{denorm}}}" if denorm else ""
                 a, b = self.expr(node.args[0]), self.expr(node.args[1])
                 if a in self.lanes and b not in self.lanes:
                     b = self.splat(b, *self.lanes[a])
@@ -276,7 +280,7 @@ class Ordered:
                     raise ValueError("fdiv requires matching floating operands")
                 extra = ("afn", "arcp") if approx else ()
                 result = self.emit(
-                    f"arith.divf {a.name}, {b.name}{self.fm_inline(extra)} : {a.type}",
+                    f"arith.divf {a.name}, {b.name}{self.fm_inline(extra)}{attr} : {a.type}",
                     a.type,
                 )
                 if a in self.lanes:
@@ -341,14 +345,14 @@ class Ordered:
                 ftz = ast.literal_eval(kw["flush_to_zero"]) if "flush_to_zero" in kw else False
                 if type(approx) is not bool or type(ftz) is not bool:
                     raise ValueError("math flags must be boolean literals")
-                if ftz and self.denormal_mode == "ieee":
-                    self.denormal_mode = "preserve-sign"
+                denorm = expression_denormal(kw, self.kernel_denormal_mode)
+                attr = f" {{{denorm}}}" if denorm else ""
                 a = self.expr(node.args[0])
                 if a.type != "f32":
                     raise ValueError("expected f32 operand")
                 extra = ("afn",) if approx else ()
                 return self.emit(
-                    f"math.{name} {a.name}{self.fm_inline(extra)} : f32", "f32"
+                    f"math.{name} {a.name}{self.fm_inline(extra)}{attr} : f32", "f32"
                 )
         raise ValueError("unsupported ordered expression: " + ast.unparse(node))
 
@@ -523,9 +527,8 @@ class Ordered:
         abi = json.dumps(json.dumps(self.args, separators=(",", ":")))
         bounds = ", ".join("%" + s["name"] for s in views)
         types = ", ".join(argument_type(s) for s in views)
-        normalization = ", kir.relaxed_normalization" if kernel_numerics(self.fn) == "relaxed_normalization" else ""
         return (
-            f'module {{func.func @{self.fn.name}({params}) attributes {{kir.abi={abi}, "denormal-fp-math"="{self.denormal_mode}"{normalization}}} {{\n'
+            f'module {{func.func @{self.fn.name}({params}) attributes {{kir.abi={abi}{kernel_numeric_attributes(self.fn)}}} {{\n'
             f'"kir.owner_space"({bounds}) ({{\n^bb0('
             + ", ".join(ivs)
             + "):\n"

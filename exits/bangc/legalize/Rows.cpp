@@ -2260,7 +2260,8 @@ struct RowLowerer {
                 rankOf(inst.getOperand(0).getType()) == 2) {
               if (prim == "approximate_sqrt") {
                 makeOp("vec_sqrt", {dst, getVal(inst.getOperand(0)), lanes}, {},
-                       {b.getNamedAttr("fastmath", inst.getAttr("fastmath"))},
+                       {b.getNamedAttr("fastmath", inst.getAttr("fastmath")),
+                        b.getNamedAttr("denormal-fp-math", b.getStringAttr(intentdsl::kir::getDenormalFpMath(&inst)))},
                        "approximate-sqrt");
                 continue;
               }
@@ -2311,7 +2312,8 @@ struct RowLowerer {
                           inst.getAttrOfType<DenseI64ArrayAttr>("bangc.scratch"), groupedShift));
                 makeOp("vec_div_approx",
                        {dst, getVal(inst.getOperand(0)), getVal(inst.getOperand(1)), reciprocal, lanes},
-                       {}, {b.getNamedAttr("fastmath", inst.getAttr("fastmath"))},
+                       {}, {b.getNamedAttr("fastmath", inst.getAttr("fastmath")),
+                            b.getNamedAttr("denormal-fp-math", b.getStringAttr(intentdsl::kir::getDenormalFpMath(&inst)))},
                        "reciprocal-product");
                 continue;
               }

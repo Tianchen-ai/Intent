@@ -2730,6 +2730,8 @@ struct RowLowerer {
                     : b.create<arith::ShRSIOp>(loc, lhs, rhs).getResult();
         else
           return op.emitError("unsupported Mojo row apply kind ") << opKind;
+        if (isFloat && (opKind == "add" || opKind == "sub" || opKind == "mul"))
+          compilerinfra::propagateNumericalFlags({&op}, res.getDefiningOp());
         map.map(op.getResult(0), res);
         continue;
       }
@@ -3751,6 +3753,7 @@ llvm::Error describeMojoRowPackage(func::FuncOp fn, Operation &prog,
   }
   out << llvm::json::Value(llvm::json::Object{
       {"version", 2},
+      {"fp_contract", fn->getAttrOfType<StringAttr>("mojo_row.fp_contract").str()},
       {"abi", std::move(*abi)},
       {"domain", intentdsl::publishDomain(fn)},
       {"rows", std::move(rows)},

@@ -296,6 +296,13 @@ struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
       : phase(step), target(p), facts(f), supply(s) {}
   void runOnOperation() final {
     auto f = *getOperation().getOps<func::FuncOp>().begin();
+    if (phase == 2) {
+      // Lowering spells scalar SSA definitions as separate C statements.
+      // CNCC's "on" permits contraction within a generated expression only.
+      auto policy = f->getAttrOfType<StringAttr>("kir.fp_contract");
+      getOperation()->setAttr("bangc.fp_contract", StringAttr::get(
+          f.getContext(), !policy || policy == "off" ? "off" : "on"));
+    }
     if(intentdsl::kir::matrixDomain(f)){
       if (phase == 2) {
         if (failed(lowerMatrixToCallable(getOperation(), target)))

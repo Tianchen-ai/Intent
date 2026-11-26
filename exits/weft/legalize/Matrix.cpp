@@ -536,8 +536,7 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
   StringRef packing = packingAttr ? packingAttr.getValue() : StringRef();
   bool routed = domain.hasAttr("cpu.route_storage");
   bool usesBrgemm = shortImpl.starts_with("onednn-brgemm");
-  bool allowSubnormalFtz = intentdsl::kir::allowsSubnormalFtz(&dot) ||
-                           intentdsl::kir::allowsSubnormalFtz(&domain);
+  bool allowSubnormalFtz = intentdsl::kir::allowsSubnormalFtz(&dot);
 
   int64_t M = extents[0], N = extents[1], K = extents[2], G = extents[3];
   int64_t mr = tile[0], nr = tile[1];
@@ -922,6 +921,8 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
   progState.addAttribute("extents", extents);
   progState.addAttribute("implementation", implAttr);
   progState.addAttribute("uses_brgemm", b.getBoolAttr(usesBrgemm));
+  progState.addAttribute("denormal-fp-math",
+                         b.getStringAttr(intentdsl::kir::getDenormalFpMath(&dot)));
   progState.addAttribute("task_slots_json", b.getArrayAttr(slotDicts));
   progState.addAttribute("task_ranks", b.getDenseI64ArrayAttr(taskRanks));
   progState.addAttribute("contiguous_slots", b.getDenseI64ArrayAttr(contigSlots));
@@ -2129,7 +2130,9 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
       std::string accValTy =
           WeftTypeSpec{accCarrier, {outRowDim, outColDim}, {1, 2}}.format("value");
       std::string reqEngine = usesBrgemm ? shortImpl.str() : "auto";
-      bool emitFtz = usesBrgemm && allowSubnormalFtz && !isInt;
+      bool emitFtz = shortImpl == "onednn-brgemm-bf16";
+      if (emitFtz && !allowSubnormalFtz)
+        return dot.emitError("BF16 BRGeMM requires input and output FTZ permission");
       Value accVal =
           makeOp(b, loc, "task_contract", {va.v, vb.v}, {b.getIndexType()},
                  {b.getNamedAttr("kind", b.getStringAttr("outer_contract")),

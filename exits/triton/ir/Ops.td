@@ -101,6 +101,10 @@ def Itsrc_cast : Inst<"cast"> {
   let arguments = (ins AnyType:$input);
   let results = (outs AnyType:$result);
 }
+def Itsrc_Fma : Inst<"fma", [Pure]> {
+  let arguments = (ins AnyType:$a, AnyType:$b, AnyType:$c);
+  let results = (outs AnyType:$result);
+}
 def Itsrc_add : Inst<"add"> {
   let arguments = (ins AnyType:$lhs, AnyType:$rhs);
   let results = (outs AnyType:$result);

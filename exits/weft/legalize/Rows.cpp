@@ -1,5 +1,6 @@
 #include "Rows.h"
 #include "compilerinfra/Proofs.h"
+#include "Arithmetic.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
 #include "intentdsl/levels/algorithm/kir/ir/ProjectedLayout.h"
@@ -812,8 +813,8 @@ struct RowTaskBuilder {
                  code == "shr" || code == "maximum" || code == "mul" ||
                  code == "add" || code == "div" || code == "sub") {
         StringRef bKind = code == "maximum" ? StringRef("max") : code;
-        localMap[op.getResult(0)] = bin(bKind, lookup(op.getOperand(0)),
-                                        lookup(op.getOperand(1)), outTy);
+        localMap[op.getResult(0)] = lowerBinary(*this, op, bKind, lookup(op.getOperand(0)),
+                                              lookup(op.getOperand(1)), outTy);
       } else {
         return op.emitError("unsupported Weft task operation ") << code;
       }

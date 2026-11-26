@@ -335,8 +335,10 @@ void splitGroupedRhsProgram(func::FuncOp fn, intentdsl::block::MatrixAccess &p,
       loc, "dequant_rhs", FunctionType::get(ctx, dqArgTypes, {}));
   dqFn->setAttr("block.entry", fb.getStringAttr("dequant_rhs"));
   dqFn->setAttr("kir.domain_arg", fb.getI64IntegerAttr(dqArgTypes.size() - 1));
-  if (auto dm = fn->getAttr("denormal-fp-math"))
-    dqFn->setAttr("denormal-fp-math", dm);
+  for (auto key : {"denormal-fp-math", "kir.fp_contract", "kir.matmul_precision",
+                   "kir.normalization", "kir.division", "ci.semantics"})
+    if (auto attr = fn->getAttr(key))
+      dqFn->setAttr(key, attr);
   {
     llvm::json::Array dqAbi;
     auto pushSlot = [&](StringRef name, Type memTy, StringRef dir) {

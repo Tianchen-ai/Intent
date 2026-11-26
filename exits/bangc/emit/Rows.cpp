@@ -1333,6 +1333,10 @@ TerminalPrinter rowPrinter() {
     auto file = files.find("kernel.mlu");
     if (!data->getAsObject() || file == files.end())
       return llvm::createStringError("incomplete BANG C kernel artifact");
+    auto contract = attrs.getAs<StringAttr>("bangc.fp_contract");
+    if (!contract || (contract != "on" && contract != "off"))
+      return llvm::createStringError("missing or invalid CNCC contraction binding");
+    (*data->getAsObject())["fp_contract"] = contract.str();
     (*data->getAsObject())["source"] = file->second;
     os << *data;
     return llvm::Error::success();

@@ -89,6 +89,7 @@ capabilities(const llvm::json::Object &options) {
           profile.services.provide<intentdsl::cutile::ArrayIndices>(indices))
     return e;
   auto table = std::make_shared<intentdsl::RowCapacity>();
+  table->onlineRowReductions = true;
   table->storeSectorBytes = 32;
   table->globalAtomicBins=true;
   auto matrix=std::make_shared<intentdsl::block::MatrixTarget>();

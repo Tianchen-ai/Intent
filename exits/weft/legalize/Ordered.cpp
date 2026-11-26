@@ -1,4 +1,5 @@
 #include "Ordered.h"
+#include "Arithmetic.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
 #include "intentdsl/levels/algorithm/kir/ir/Ordered.h"
@@ -3398,7 +3399,7 @@ struct OrderedLowerer {
         std::string outTy =
             vec ? vecTyStr(elemOfVecTy(isVecTerm(a) ? a.type : r.type))
                 : a.type;
-        return bin(tok, a, r, outTy);
+        return lowerBinary(*this, bop, tok, a, r, outTy);
       };
 
       for (Operation &bop : loop.getBody()->without_terminator()) {
@@ -4048,7 +4049,7 @@ struct OrderedLowerer {
                          .Default("");
           if (tok.empty())
             return op.emitError("unhandled ordered Weft instruction ") << name;
-          res = bin(tok, val(0), val(1), val(0).type);
+          res = lowerBinary(*this, op, tok, val(0), val(1), val(0).type);
         }
 
         if (emitOnce) {

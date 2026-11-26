@@ -5,6 +5,7 @@ from .intentdsl.signature import (
     argument_type,
     format_fastmath_attr,
     kernel_math_policy,
+    kernel_numeric_attributes,
     namespace,
     signature,
     spelling,
@@ -30,9 +31,7 @@ class Capture:
         fm = format_fastmath_attr((*self.default_flags, *extra))
         attrs = [f"fastmath = {fm}"] if fm else []
         if flush is not None:
-            mode = self.kernel_denormal_mode
-            if flush and mode == "ieee":
-                mode = "preserve-sign"
+            mode = ("preserve-sign" if self.kernel_denormal_mode == "ieee" else self.kernel_denormal_mode) if flush else "ieee"
             attrs.append(f'"denormal-fp-math" = "{mode}"')
         return "{" + ", ".join(attrs) + "}" if attrs else ""
 
@@ -132,8 +131,14 @@ class Capture:
             ty = next((t for _, t in args if t.startswith("tensor")), args[0][1])
             elem = ty.removeprefix("tensor<?x").removesuffix(">")
             is_fp = elem in ("f16", "bf16", "f32")
-            flush = False if op == "div" else None
-            return self.emit(op, args, ty, self.fm_attr(flush=flush) if is_fp else "")
+            attrs = self.fm_attr() if is_fp else ""
+            if is_fp and op in ("add", "sub"):
+                nested = [i for i, term in enumerate((n.left, n.right))
+                          if isinstance(term, ast.BinOp) and isinstance(term.op, ast.Mult)]
+                if nested:
+                    pair = "kir.contract_operands=array<i64:" + ",".join(map(str, nested)) + ">"
+                    attrs = attrs[:-1] + ", " + pair + "}" if attrs else "{" + pair + "}"
+            return self.emit(op, args, ty, attrs)
         if isinstance(n, ast.Call):
             fn = spelling(n.func, self.namespace)
             if fn in ("atomic_add", "gather"):
@@ -228,12 +233,10 @@ class Capture:
                 ftz = ast.literal_eval(kw["flush_to_zero"]) if "flush_to_zero" in kw else False
                 if type(approx) is not bool or type(ftz) is not bool:
                     raise ValueError("fdiv flags must be boolean literals")
-                if ftz and self.denormal_mode == "ieee":
-                    self.denormal_mode = "preserve-sign"
                 args = [self.expr(v) for v in n.args]
                 ty = next((t for _, t in args if t.startswith("tensor")), args[0][1])
                 extra = ("afn", "arcp") if approx else ()
-                return self.emit("div", args, ty, self.fm_attr(extra, flush=ftz))
+                return self.emit("div", args, ty, self.fm_attr(extra, flush=ftz if "flush_to_zero" in kw else None))
             count = 2 if fn == "cast" else 1
             if len(n.args) != count or (fn not in ("sum", "reduce", "exp", "sqrt") and n.keywords):
                 raise ValueError(f"unsupported arguments for {fn}")
@@ -277,10 +280,8 @@ class Capture:
                 ftz = ast.literal_eval(kw["flush_to_zero"]) if "flush_to_zero" in kw else False
                 if type(approx) is not bool or type(ftz) is not bool:
                     raise ValueError("math flags must be boolean literals")
-                if ftz and self.denormal_mode == "ieee":
-                    self.denormal_mode = "preserve-sign"
                 extra = ("afn",) if approx else ()
-                flush = ftz if fn == "sqrt" else None
+                flush = ftz if "flush_to_zero" in kw else None
                 return self.emit(fn, [v], v[1], self.fm_attr(extra, flush=flush))
         raise ValueError(
             f"unsupported author expression at line {n.lineno}: {ast.unparse(n)}"
@@ -367,7 +368,7 @@ class Capture:
         sig = ", ".join("%" + a["name"] + ": " + argument_type(a) for a in self.args)
         abi = json.dumps(json.dumps(self.args, separators=(",", ":")))
         return (
-            f'module {{ func.func @{self.fn.name}({sig}) attributes {{kir.abi = {abi}, "denormal-fp-math" = "{self.denormal_mode}"'
+            f'module {{ func.func @{self.fn.name}({sig}) attributes {{kir.abi = {abi}{kernel_numeric_attributes(self.fn)}'
             + (f", kir.owner_axis = {axis} : i64" if self.owner_axis is not None else "")
             + "} {\n"
             + f'"kir.parallel"(%{owner["name"]}) ({{^bb0(%row: index):\n'

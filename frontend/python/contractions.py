@@ -7,6 +7,7 @@ from .intentdsl.signature import (
     element_type,
     format_fastmath_attr,
     kernel_math_policy,
+    kernel_numeric_attributes,
     namespace,
     signature,
     spelling,
@@ -15,8 +16,7 @@ from .intentdsl.signature import (
 
 def capture(fn):
     api = namespace(fn)
-    default_flags, denormal_mode = kernel_math_policy(fn)
-    contract_ftz = [False]
+    default_flags, _ = kernel_math_policy(fn)
     args = signature(fn)
     slots = {a["name"]: a for a in args}
     outputs = [a for a in args if a["direction"] == "Out"]
@@ -128,10 +128,9 @@ def capture(fn):
         if ftz:
             if acc_ty == "i32":
                 raise ValueError("allow_subnormal_ftz requires floating-point operands")
-            contract_ftz[0] = True
             attr_items.append('"denormal-fp-math"="preserve-sign"')
         if acc_ty != "i32":
-            cfm = format_fastmath_attr((*default_flags, "reassoc", "contract", *(("nsz",) if ftz else ())))
+            cfm = format_fastmath_attr((*default_flags, "reassoc", "contract"))
             attr_items.append(f"fastmath={cfm}")
         attr_items.extend(f"{k}={v}:i64" for k, v in attrs.items())
         attr = "{"+", ".join(attr_items)+"}"
@@ -149,7 +148,6 @@ def capture(fn):
             emit("publish_matrix",[view(target,"Out"),value],None)
     sig=", ".join(f'%{a["name"]}: {argument_type(a)}' for a in args)
     abi=json.dumps(json.dumps(args,separators=(",",":")))
-    fn_denorm = "preserve-sign" if contract_ftz[0] and denormal_mode == "ieee" else denormal_mode
-    return (f'module {{func.func @{fn.name}({sig}) attributes {{kir.abi={abi}, "denormal-fp-math"="{fn_denorm}"}} {{\n'
+    return (f'module {{func.func @{fn.name}({sig}) attributes {{kir.abi={abi}{kernel_numeric_attributes(fn)}}} {{\n'
             f'"kir.matrix_domain"(%{out["name"]}) ({{\n'+'\n'.join(lines)+
             f'\n"kir.end"():()->()\n}}):({argument_type(out)})->()\nreturn\n}}}}').encode()

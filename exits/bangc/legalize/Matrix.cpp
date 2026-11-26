@@ -2783,6 +2783,7 @@ struct MatrixLowerer {
 
     b.setInsertionPointToStart(&fn.front());
     OperationState progState(loc, "bangc_src.matrix_program");
+    progState.addAttribute("denormal-fp-math", b.getStringAttr(intentdsl::kir::getDenormalFpMath(&p.dot)));
     progState.addAttribute("tile_m", b.getI64IntegerAttr(bm));
     progState.addAttribute("tile_n", b.getI64IntegerAttr(bn));
     progState.addAttribute("tile_k", b.getI64IntegerAttr(bk));

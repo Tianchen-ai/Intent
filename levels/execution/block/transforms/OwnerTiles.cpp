@@ -2049,7 +2049,9 @@ SmallVector<Value> OwnerTiles::serialLoop(scf::ForOp loop, const Values &parent,
 }
 std::optional<OwnerTiles::OnlinePanelFusion>
 OwnerTiles::matchOnlinePanelPair(scf::ForOp maxLoop, scf::ForOp sumLoop) {
-  if (!maxLoop->hasAttr("kir.reassociate") ||
+  if (!maxLoop->hasAttr("block.online_normalization") ||
+      !sumLoop->hasAttr("block.online_normalization") ||
+      !maxLoop->hasAttr("kir.reassociate") ||
       !sumLoop->hasAttr("kir.reassociate") ||
       maxLoop->getAttr("block.contribution_width") !=
           sumLoop->getAttr("block.contribution_width") ||
@@ -2220,8 +2222,7 @@ OwnerTiles::matchOnlinePanelPair(scf::ForOp maxLoop, scf::ForOp sumLoop) {
   }
   Operation *expOp = expOut.getDefiningOp();
   if (!expOp || !isa<math::ExpOp, math::Exp2Op>(expOp) ||
-      (guardOp && !expOut.hasOneUse()) ||
-      !intentdsl::kir::hasFastMath(expOp, arith::FastMathFlags::reassoc))
+      (guardOp && !expOut.hasOneUse()))
     return std::nullopt;
   Value expArg = expOp->getOperand(0);
   if (!expArg.hasOneUse())
@@ -2229,8 +2230,7 @@ OwnerTiles::matchOnlinePanelPair(scf::ForOp maxLoop, scf::ForOp sumLoop) {
   Operation *mulOp = nullptr;
   Value scaleVal;
   arith::FastMathFlags scaleFlags = arith::FastMathFlags::none;
-  if (auto m = expArg.getDefiningOp<arith::MulFOp>();
-      m && intentdsl::kir::hasFastMath(m, arith::FastMathFlags::reassoc)) {
+  if (auto m = expArg.getDefiningOp<arith::MulFOp>()) {
     for (int side : {0, 1}) {
       Value candSub = m->getOperand(side);
       Value other = m->getOperand(1 - side);
@@ -2245,8 +2245,7 @@ OwnerTiles::matchOnlinePanelPair(scf::ForOp maxLoop, scf::ForOp sumLoop) {
     }
   }
   auto subOp = expArg.getDefiningOp<arith::SubFOp>();
-  if (!subOp || !expArg.hasOneUse() || subOp.getRhs() != peakRes ||
-      !intentdsl::kir::hasFastMath(subOp, arith::FastMathFlags::reassoc))
+  if (!subOp || !expArg.hasOneUse() || subOp.getRhs() != peakRes)
     return std::nullopt;
   Value score2 = subOp.getLhs();
   if (guardOp && score2.getDefiningOp() &&

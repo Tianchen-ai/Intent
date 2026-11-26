@@ -10,10 +10,6 @@ namespace CI_UNIT_NAMESPACE {
 using namespace compilerinfra;
 using namespace mlir;
 namespace {
-bool viewHasAnyFastMath(const LocalOpView &v, arith::FastMathFlags mask) {
-  auto attr = v.attrOfType<arith::FastMathFlagsAttr>("fastmath");
-  return attr && bitEnumContainsAny(attr.getValue(), mask);
-}
 bool viewHasFastMath(const LocalOpView &v, arith::FastMathFlags req) {
   auto attr = v.attrOfType<arith::FastMathFlagsAttr>("fastmath");
   return attr && bitEnumContainsAll(attr.getValue(), req);
@@ -162,7 +158,7 @@ llvm::Error localRowOp(const LocalOpView &v, PrintPoint point,
              : "tl.maximum(" + v.operand(0) + ", " + v.operand(1) + ")")
             .str();
   } else if (n == "div") {
-    e = (viewHasFastMath(v, arith::FastMathFlags::arcp)
+    e = (v.attrOfType<StringAttr>("triton_src.division") == "reciprocal"
              ? v.operand(0) + " / " + v.operand(1)
              : "tl.div_rn(" + v.operand(0) + ", " + v.operand(1) + ")")
             .str();
@@ -309,6 +305,7 @@ void addRowRules(TerminalPrinter &printer) {
   ops["triton_src.store"] =
       PrintRule::format("tl.store($0 + $1, $3, mask=$2)");
   ops["triton_src.broadcast_rows"] = PrintRule::format("$r0 = $0[:, None]");
+  ops["triton_src.fma"] = PrintRule::format("$r0 = tl.fma($0,$1,$2)");
   ops["triton_src.add"] = PrintRule::format("$r0 = $0 + $1");
   ops["triton_src.sub"] = PrintRule::format("$r0 = $0 - $1");
   ops["triton_src.mul"] = PrintRule::format("$r0 = $0 * $1");

@@ -388,7 +388,8 @@ void tileContracts(Unit &unit) {
       return llvm::Error::success();
     };
     ac.verify = [](Operation *o) -> LogicalResult {
-      if (o->getNumResults() != 0 ||
+      if (o->getAttrOfType<StringAttr>("order") != "relaxed" ||
+          o->getNumResults() != 0 ||
           (o->getNumOperands() != 3 && o->getNumOperands() != 4))
         return failure();
       auto mem = dyn_cast<MemRefType>(o->getOperand(0).getType());

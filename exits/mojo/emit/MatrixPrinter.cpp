@@ -270,6 +270,7 @@ TerminalPrinter mojoMatrixPrinter() {
   binIdx("arith.divsi", "//", "/");
   binIdx("arith.floordivsi", "//", "/");
   binIdx("arith.remsi", "%", "%");
+  rules["math.fma"] = PrintRule::format("var $r0 = fma($0,$1,$2)");
   binIdx("arith.addf", "+", "+");
   binIdx("arith.subf", "-", "-");
   binIdx("arith.mulf", "*", "*");
@@ -1522,7 +1523,7 @@ TerminalPrinter mojoMatrixPrinter() {
           bool brg = bool(view.attrOfType<UnitAttr>("brgemm"));
           if (brg)
             c.line("from std.ffi import external_call");
-          c.line("from std.math import exp, sqrt, rsqrt, exp2, log, max, isnan");
+          c.line("from std.math import exp, sqrt, rsqrt, exp2, log, max, isnan, fma");
           c.line("from std.memory import bitcast");
           if (view.attrOfType<BoolAttr>("uses_stack").getValue())
             c.line("from std.memory import unsafe_stack_allocation");
@@ -1723,7 +1724,7 @@ TerminalPrinter mojoMatrixPrinter() {
   rules["mojo_row.row_fn"] = PrintRule::local(
       [](const LocalOpView &view, PrintPoint at, PrintContext &c) -> llvm::Error {
         if (at == PrintPoint::BeginBlock) {
-          c.line("from std.math import exp, sqrt, rsqrt, max, isnan");
+          c.line("from std.math import exp, sqrt, rsqrt, max, isnan, fma");
           c.line("from std.memory import bitcast");
           if (view.attrOfType<BoolAttr>("uses_atomic").getValue())
             c.line("from std.atomic import Atomic");

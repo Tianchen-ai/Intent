@@ -1,7 +1,7 @@
 {
   "name": "intentdsl",
   "version": "2.0.0",
-  "compilerinfra": "0.5.3",
+  "compilerinfra": "0.6.0",
   "levels": [
     {
       "name": "algorithm",

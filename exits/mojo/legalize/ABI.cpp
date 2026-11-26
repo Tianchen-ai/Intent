@@ -1,6 +1,7 @@
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/ProjectedLayout.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Pass/Pass.h"
 
 using namespace compilerinfra;
@@ -26,6 +27,30 @@ struct Publish : PassWrapper<Publish, OperationPass<ModuleOp>> {
   void runOnOperation() final {
     auto module = getOperation();
     auto fn = *module.getOps<func::FuncOp>().begin();
+    // The Mojo driver contracts across statements by default. Bind a global
+    // switch and materialize the licensed SSA pairs in an expression/mixed kernel.
+    bool fast = fn->getAttrOfType<StringAttr>("kir.fp_contract") == "on";
+    fn.walk([&](arith::MulFOp mul) {
+      fast &= compilerinfra::hasFastMath(mul, arith::FastMathFlags::contract);
+    });
+    fn->setAttr("mojo_row.fp_contract", StringAttr::get(&getContext(), fast ? "fast" : "off"));
+    if (!fast)
+      fn.walk([&](arith::AddFOp add) {
+        if (!compilerinfra::hasFastMath(add, arith::FastMathFlags::contract))
+          return;
+        for (unsigned i = 0; i < 2; ++i) {
+          auto mul = add->getOperand(i).getDefiningOp<arith::MulFOp>();
+          if (!mul || !compilerinfra::hasFastMath(mul, arith::FastMathFlags::contract))
+            continue;
+          OpBuilder b(add);
+          auto fused = b.create<math::FmaOp>(add.getLoc(), mul.getLhs(), mul.getRhs(), add->getOperand(1-i));
+          add.replaceAllUsesWith(fused.getResult());
+          add.erase();
+          if (mul->use_empty())
+            mul.erase();
+          break;
+        }
+      });
     fn->setAttr("mojo_row.entry",
                 StringAttr::get(&getContext(), "intent_entry"));
     llvm::SmallVector<char> metadata;
