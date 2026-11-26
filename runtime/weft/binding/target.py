@@ -1,5 +1,5 @@
 from runtime.cpu.launch.completion import submit
-from runtime.cpu.binding.profile import calibration
+from runtime.cpu.binding.profile import calibration, private_cache_bytes
 import os
 from functools import lru_cache
 from pathlib import Path
@@ -99,6 +99,7 @@ class Target:
             weft_brgemm_s8=bool(brg.get("s8")),
             weft_brgemm_u8s8=bool(brg.get("u8s8")),
             calibration=calibration(scope, self.workers, bits),
+            l2_cache_bytes=private_cache_bytes(scope),
         )
 
     def materialize(self, data):

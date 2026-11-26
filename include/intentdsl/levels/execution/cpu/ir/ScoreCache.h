@@ -78,7 +78,8 @@ inline bool dependsOnValue(mlir::Value v, mlir::Value target) {
 }
 } // namespace detail
 inline std::optional<ScoreCachePlan>
-reusableScores(mlir::Operation *o, const compilerinfra::TargetProfile &p) {
+reusableScores(mlir::Operation *o, const compilerinfra::TargetProfile &p,
+               int64_t slotLimit = 1024) {
   using namespace mlir;
   auto facts = p.services.get<CallFacts>();
   if (!facts)
@@ -88,7 +89,7 @@ reusableScores(mlir::Operation *o, const compilerinfra::TargetProfile &p) {
     return {};
   auto keys = detail::staticIndexValue(rep->first.getUpperBound(), *facts);
   // Each owner retains one fp32 score per key on the task's stack.
-  if (!keys || *keys <= 0 || *keys > 1024)
+  if (!keys || *keys <= 0 || *keys > slotLimit)
     return {};
 
   llvm::SmallPtrSet<Operation *, 16> sliceOps;

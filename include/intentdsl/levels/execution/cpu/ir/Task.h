@@ -8,9 +8,13 @@ struct RowConfig {
 struct RowMachine {
   int64_t vectorBits, workers;
   unsigned packedOwners = 0;
+  unsigned orderedMatrixOwners = 0;
+  unsigned orderedValueMinColumns = 1, orderedValueColumnMultiple = 1;
   // Width of a downstream score contraction. Zero covers the complete key
   // panel.
   unsigned orderedDotTokens = 0;
+  int64_t ownerStackBytes = 0, ownerRegisters = 0;
+  int64_t l2CacheBytes = 0;
   static constexpr unsigned streamedDotTokens = 16;
   llvm::SmallVector<RowConfig> rows;
   llvm::SmallVector<int64_t, 2> unrollFactors = {1};

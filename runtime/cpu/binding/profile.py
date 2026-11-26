@@ -3,6 +3,32 @@ from functools import lru_cache
 from pathlib import Path
 
 @lru_cache(maxsize=32)
+def private_cache_bytes(scope):
+    """Minimum unified L2 capacity across processors in this affinity mask."""
+    sizes = []
+    units = {"K": 1 << 10, "M": 1 << 20}
+    for cpu in scope:
+        root = Path(f"/sys/devices/system/cpu/cpu{cpu}/cache")
+        for entry in root.glob("index*"):
+            try:
+                if (entry / "level").read_text().strip() != "2":
+                    continue
+                if (entry / "type").read_text().strip() not in ("Unified", "Data"):
+                    continue
+                size = (entry / "size").read_text().strip()
+                if size and size[-1] in units:
+                    capacity = int(size[:-1]) * units[size[-1]]
+                else:
+                    capacity = int(size)
+            except (OSError, ValueError):
+                continue
+            sizes.append(capacity)
+            break
+        else:
+            return 0
+    return min(sizes, default=0)
+
+@lru_cache(maxsize=32)
 def calibration(scope,workers,bits):
     entries = {}
     for record in Path("/proc/cpuinfo").read_text().split("\n\n"):

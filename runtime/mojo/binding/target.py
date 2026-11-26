@@ -1,5 +1,5 @@
 from runtime.cpu.launch.completion import submit
-from runtime.cpu.binding.profile import calibration
+from runtime.cpu.binding.profile import calibration, private_cache_bytes
 import ctypes as ct
 import os
 from functools import lru_cache
@@ -152,6 +152,7 @@ class Target:
             vector_bits=bits,
             workers=self.workers,
             calibration=calibration(scope, self.workers, bits),
+            l2_cache_bytes=private_cache_bytes(scope),
             **feats,
         )
 

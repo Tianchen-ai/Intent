@@ -1,5 +1,5 @@
 #include "intentdsl/levels/execution/cpu/ir/OwnerTraversal.h"
-#include "intentdsl/levels/execution/cpu/ir/OrderedDot.h"
+#include "intentdsl/levels/execution/cpu/ir/OrderedValue.h"
 #include "intentdsl/levels/execution/cpu/ir/RepeatedScore.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -319,48 +319,76 @@ void sharedOwnerTraversal(compilerinfra::Unit &u) {
       return cs;
     Builder b(op->getContext());
     bool repeat = bool(intentdsl::cpu::repeatedScore(*op));
+    auto &machine = *p.services.get<intentdsl::cpu::RowMachine>();
+    auto score = repeat ? intentdsl::cpu::reusableScores(
+                              op, p, intentdsl::cpu::scoreSlotLimit(machine))
+                        : std::nullopt;
     auto panel =
         repeat ? intentdsl::cpu::selectOrderedDot(*op, p, reuse->axis, maximum)
                : std::nullopt;
     for (int grain : {2, 4, 8, 16, 32, 128, 256}) {
-      for (unsigned batch : {2u, 4u, 8u, 16u}) {
-        if (batch > maximum || grain % batch || reuse->group % batch ||
-            reuse->extent % batch)
+      unsigned limit =
+          panel ? std::max(maximum, machine.orderedMatrixOwners) : maximum;
+      for (unsigned batch = 2; batch <= limit && batch <= unsigned(grain);
+           batch *= 2) {
+        if (grain % batch || reuse->group % batch || reuse->extent % batch)
           continue;
+        bool matrixOnly = batch > maximum;
+        auto selectedPanel =
+            matrixOnly
+                ? intentdsl::cpu::selectOrderedDot(*op, p, reuse->axis, batch)
+                : panel;
+        if (matrixOnly && !selectedPanel)
+          continue;
+        std::string id =
+            "shared-" + std::to_string(grain) + "x" + std::to_string(batch);
         auto d = b.getDictionaryAttr(
             {b.getNamedAttr("grain", b.getI64IntegerAttr(grain)),
              b.getNamedAttr("inner", b.getI64IntegerAttr(reuse->axis)),
              b.getNamedAttr("batch", b.getI64IntegerAttr(batch))});
-        cs.push_back(
-            {"shared-" + std::to_string(grain) + "x" + std::to_string(batch),
-             "shared-interval-owners",
-             d,
-             {"exclusive-output"}});
+        if (!matrixOnly)
+          cs.push_back({id, "shared-interval-owners", d, {"exclusive-output"}});
         if (repeat) {
           NamedAttrList row(d);
-          row.set("window",
-                  b.getI64IntegerAttr(intentdsl::cpu::batchScoreSlots / batch));
-          cs.push_back({cs.back().id + "-scores",
-                        "shared-interval-owners",
-                        row.getDictionary(b.getContext()),
-                        {"exclusive-output"}});
-          if (panel && batch == maximum) {
+          int64_t slots = intentdsl::cpu::batchScoreSlots / batch;
+          if (score && score->keys > slots &&
+              score->keys <= intentdsl::cpu::scoreSlotLimit(machine) / batch)
+            slots = score->keys;
+          row.set("window", b.getI64IntegerAttr(slots));
+          if (!matrixOnly)
+            cs.push_back({id + "-scores",
+                          "shared-interval-owners",
+                          row.getDictionary(b.getContext()),
+                          {"exclusive-output"}});
+          if (selectedPanel && batch >= maximum) {
             row.set("engine", b.getStringAttr("onednn-brgemm-bf16"));
-            auto base = cs.back().id + "-brgemm";
+            auto base = id + "-scores-brgemm";
             int64_t width =
                 p.services.get<intentdsl::cpu::RowMachine>()->orderedDotTokens;
+            auto value = orderedValuePanel(*op, facts, *panel);
             for (int mult : {1, 2, 4}) {
               int64_t tile = width * mult;
               if ((!width && mult > 1) || tile > panel->tokens)
                 continue;
               row.set("score_tile",
                       b.getI64IntegerAttr(tile ? tile : panel->tokens));
-              cs.push_back(
-                  {base + (mult == 1 ? "" : "-" + std::to_string(tile)),
-                   "shared-interval-owners",
-                   row.getDictionary(b.getContext()),
-                   {"exclusive-output"},
-                   {"exits/" + p.name + "::onednn-brgemm-bf16"}});
+              auto candidate =
+                  base + (mult == 1 ? "" : "-" + std::to_string(tile));
+              if (!matrixOnly)
+                cs.push_back({candidate,
+                              "shared-interval-owners",
+                              row.getDictionary(b.getContext()),
+                              {"exclusive-output"},
+                              {"exits/" + p.name + "::onednn-brgemm-bf16"}});
+              if (value && value->supported(p) && slots >= panel->tokens) {
+                NamedAttrList pv(row);
+                pv.set("value_width", b.getI64IntegerAttr(value->columns));
+                cs.push_back({candidate + "-pv",
+                              "shared-interval-owners",
+                              pv.getDictionary(b.getContext()),
+                              {"exclusive-output"},
+                              {"exits/" + p.name + "::onednn-brgemm-bf16"}});
+              }
             }
           }
         }

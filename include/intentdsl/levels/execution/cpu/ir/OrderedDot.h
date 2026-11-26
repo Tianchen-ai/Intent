@@ -6,6 +6,11 @@ namespace intentdsl::cpu {
 // A batch of owners supplies adjacent BF16 rows of the left view. The fold
 // traverses rows of a common right view. Multiplication therefore gives a
 // [tokens, owners] score panel without narrowing either operand.
+inline int64_t scoreSlotLimit(const RowMachine &machine) {
+  // Leave space for the activation panel, value accumulators and index rows.
+  return std::max<int64_t>(batchScoreSlots,
+                           machine.l2CacheBytes / (4 * sizeof(float)));
+}
 struct OrderedDotPanel {
   mlir::Operation *dot, *query, *key;
   int64_t depth, tokens;
@@ -54,7 +59,7 @@ inline std::optional<OrderedDotPanel> orderedDotPanel(mlir::Operation &space,
             .wasInterrupted();
     if (writes)
       continue;
-    if (!tokens || *tokens <= 0 || *tokens > batchScoreSlots / batch)
+    if (!tokens || *tokens <= 0)
       continue;
     for (auto &dot : loop.getBody()->without_terminator()) {
       if (dot.getName().stripDialect() != "lane_sum" ||
@@ -133,7 +138,8 @@ selectOrderedDot(mlir::Operation &space, const compilerinfra::TargetProfile &p,
                  int64_t axis, int64_t batch) {
   auto *facts = p.services.get<CallFacts>();
   auto *machine = p.services.get<RowMachine>();
-  if (!facts || !machine || batch != machine->packedOwners ||
+  if (!facts || !machine || batch < machine->packedOwners ||
+      batch > std::max(machine->packedOwners, machine->orderedMatrixOwners) ||
       !p.features.count("amx_bf16"))
     return {};
   std::string impl = "exits/" + p.name + "::onednn-brgemm-bf16";
@@ -145,8 +151,9 @@ selectOrderedDot(mlir::Operation &space, const compilerinfra::TargetProfile &p,
   // Use a whole packed owner vector; amortize each VNNI-pair load across a
   // matrix panel. A four-vector reduction is the minimum wide-slice backend.
   auto lanes = machine->vectorBits / 32;
-  if (!panel || lanes <= 0 || panel->depth > 2 * batchScoreSlots / batch ||
-      panel->depth < 4 * lanes ||
+  if (!panel || lanes <= 0 ||
+      panel->tokens > scoreSlotLimit(*machine) / batch ||
+      panel->depth > 2 * batchScoreSlots / batch || panel->depth < 4 * lanes ||
       panel->depth % lanes || panel->tokens < batch)
     return {};
   return panel;

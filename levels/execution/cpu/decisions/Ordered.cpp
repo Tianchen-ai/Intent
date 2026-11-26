@@ -1,6 +1,7 @@
 #include "compilerinfra/Proofs.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
-#include "intentdsl/levels/execution/cpu/ir/OrderedDot.h"
+#include "intentdsl/levels/execution/cpu/ir/OrderedGeometry.h"
+#include "intentdsl/levels/execution/cpu/ir/OrderedValue.h"
 #include "intentdsl/levels/execution/cpu/ir/OwnerTraversal.h"
 #include "intentdsl/levels/execution/cpu/ir/Owners.h"
 #include "intentdsl/levels/execution/cpu/ir/RepeatedScore.h"
@@ -65,6 +66,9 @@ bool ownerTask(func::FuncOp fn) {
 }
 LogicalResult verifyOwnerGrain(func::FuncOp fn, Operation &space,
                                const TargetProfile &p) {
+  if (space.getAttr("cpu.vector_panel") != orderedGeometry(space, p))
+    return space.emitError(
+        "ordered vector panel disagrees with the target or view geometry");
   if (failed(kir::verifyOwnerBody(fn, space, "cpu")))
     return failure();
   auto facts = p.services.get<CallFacts>();
@@ -76,8 +80,11 @@ LogicalResult verifyOwnerGrain(func::FuncOp fn, Operation &space,
     int64_t w = batch ? batch.getInt() : 0;
     if (!reuse || axis.getInt() != reuse->axis || cached ||
         !llvm::isPowerOf2_64(w) || w < 2 ||
-        w > p.services.get<RowMachine>()->packedOwners || !grain ||
-        grain.getInt() % w || reuse->group % w || reuse->extent % w)
+        w > (space.hasAttr("cpu.value_width")
+                 ? std::max(p.services.get<RowMachine>()->orderedMatrixOwners,
+                            p.services.get<RowMachine>()->packedOwners)
+                 : p.services.get<RowMachine>()->packedOwners) ||
+        !grain || grain.getInt() % w || reuse->group % w || reuse->extent % w)
       return space.emitError("shared interval must project identical input "
                              "coordinates across independent owners");
     if (space.getRegion(0).hasOneBlock() && axis.getInt() >= 0 &&
@@ -129,8 +136,9 @@ LogicalResult verifyOwnerGrain(func::FuncOp fn, Operation &space,
       (batch && batch.getInt() > 1) ? repeatedScore(space) : std::nullopt;
   auto window = space.getAttrOfType<IntegerAttr>("cpu.batch_score_window");
   if (window &&
-      (!batch || batch.getInt() < 2 || !repeat ||
-       window.getInt() != batchScoreSlots / batch.getInt()))
+      (!batch || batch.getInt() < 2 || !repeat || window.getInt() <= 0 ||
+       window.getInt() >
+           scoreSlotLimit(*p.services.get<RowMachine>()) / batch.getInt()))
     return space.emitError("invalid private score window");
   Operation *expectedRecord =
       panel ? panel->record : (window && repeat ? repeat->record : nullptr);
@@ -152,7 +160,22 @@ LogicalResult verifyOwnerGrain(func::FuncOp fn, Operation &space,
     return space.emitError("invalid ordered dot tile");
   auto implId = Builder(fn.getContext())
                     .getStringAttr("exits/" + p.name + "::onednn-brgemm-bf16");
+  auto valueWidth = space.getAttrOfType<IntegerAttr>("cpu.value_width");
+  auto valuePanel = valueWidth && dotPanel
+                        ? orderedValuePanel(space, *facts, *dotPanel)
+                        : std::nullopt;
+  if (valueWidth && (!scoreTile || !valuePanel || !valuePanel->supported(p) ||
+                     !window || window.getInt() < valuePanel->tokens ||
+                     valuePanel->columns != valueWidth.getInt()))
+    return space.emitError("invalid ordered value panel");
+  if (space.hasAttr("cpu.worker_output_ftz") !=
+      (valuePanel && allowsWorkerOutputFtz(space, p)))
+    return space.emitError(
+        "worker flush mode requires uniform output denormal permission");
   auto marks = space.walk([&](Operation *v) {
+    if (v->getAttr("cpu.pv_engine") !=
+        (valuePanel && v == valuePanel->add ? implId : StringAttr{}))
+      return WalkResult::interrupt();
     if (v->getAttr("cpu.panel_engine") !=
         ((scoreTile && dotPanel && v == dotPanel->dot) ? implId : StringAttr{}))
       return WalkResult::interrupt();
@@ -551,6 +574,7 @@ llvm::Error materializeOwnerBuffers(func::FuncOp fn, RewriterBase &rw,
 
   // Else branch: move original loop2 for over-window recomputation
   replayOp->removeAttr("cpu.replay_score");
+  loop2.walk([](arith::AddFOp add) { add->removeAttr("cpu.pv_engine"); });
   loop2->replaceAllUsesWith(replayIf.getResults());
   {
     auto &elseBb = replayIf.getElseRegion().front();
@@ -586,6 +610,39 @@ LogicalResult verifyOwnerBuffers(func::FuncOp fn, const TargetProfile &p,
   if (failed(verifyOwnerLayouts(fn, space, p)))
     return failure();
 
+  auto valueWidth = space.getAttrOfType<IntegerAttr>("cpu.value_width");
+  if (space.hasAttr("cpu.worker_output_ftz") !=
+      (valueWidth && allowsWorkerOutputFtz(space, p)))
+    return space.emitError("invalid materialized worker denormal mode");
+  if (valueWidth) {
+    auto inner = space.getAttrOfType<IntegerAttr>("cpu.innermost_owner");
+    auto batch = space.getAttrOfType<IntegerAttr>("cpu.owner_batch");
+    auto qk = inner && batch
+                  ? selectOrderedDot(space, p, inner.getInt(), batch.getInt())
+                  : std::nullopt;
+    auto pv = qk ? orderedValuePanel(space, *p.services.get<CallFacts>(), *qk)
+                 : std::nullopt;
+    auto engine = b.getStringAttr("exits/" + p.name + "::onednn-brgemm-bf16");
+    if (!pv || !pv->supported(p) || pv->columns != valueWidth.getInt() ||
+        qk->dot->getAttr("cpu.panel_engine") != engine ||
+        space
+            .walk([&](Operation *op) {
+              return op->getAttr("cpu.pv_engine") ==
+                             (op == pv->add ? engine : StringAttr{})
+                         ? WalkResult::advance()
+                         : WalkResult::interrupt();
+            })
+            .wasInterrupted())
+      return space.emitError(
+          "materialized value projection must match the marked replay fold");
+  } else if (space
+                 .walk([](Operation *op) {
+                   return op->hasAttr("cpu.pv_engine") ? WalkResult::interrupt()
+                                                       : WalkResult::advance();
+                 })
+                 .wasInterrupted()) {
+    return space.emitError("value contraction requires an ordered value panel");
+  }
   // No unmaterialized score marks may remain at cpu@buffers
   bool lingeringMarks = space
                             .walk([](Operation *op) {
@@ -601,8 +658,10 @@ LogicalResult verifyOwnerBuffers(func::FuncOp fn, const TargetProfile &p,
   auto cached = space.getAttrOfType<IntegerAttr>("cpu.score_cache");
   auto window = space.getAttrOfType<IntegerAttr>("cpu.batch_score_window");
   auto batch = space.getAttrOfType<IntegerAttr>("cpu.owner_batch");
-  if (window && (!batch || batch.getInt() < 2 ||
-                 window.getInt() != batchScoreSlots / batch.getInt()))
+  if (window &&
+      (!batch || batch.getInt() < 2 || window.getInt() <= 0 ||
+       window.getInt() >
+           scoreSlotLimit(*p.services.get<RowMachine>()) / batch.getInt()))
     return space.emitError("invalid materialized score window");
 
   Operation *localBuf = nullptr;
@@ -833,7 +892,16 @@ void ownerTasks(Unit &u) {
         auto nativeTile = p.services.get<cpu::RowMachine>()->orderedDotTokens;
         auto panel = brg ? cpu::selectOrderedDot(*o, p, inner.getInt(), w)
                          : std::nullopt;
+        auto valueWidth = d.getAs<IntegerAttr>("value_width");
+        auto valuePanel = valueWidth && panel
+                              ? cpu::orderedValuePanel(
+                                    *o, *p.services.get<CallFacts>(), *panel)
+                              : std::nullopt;
         if (!reuse || reuse->axis != inner.getInt() ||
+            (valueWidth &&
+             (!valuePanel || !valuePanel->supported(p) || !retained ||
+              valuePanel->columns != valueWidth.getInt() ||
+              retained.getInt() < panel->tokens)) ||
             (brg &&
              (!retained ||
               d.getAs<StringAttr>("engine") != "onednn-brgemm-bf16" || !panel ||
@@ -842,12 +910,20 @@ void ownerTasks(Unit &u) {
                              tile.getInt() != 2 * nativeTile &&
                              tile.getInt() != 4 * nativeTile)
                           : tile.getInt() != panel->tokens))) ||
-            d.size() != (retained ? 4u : 3u) + 2 * brg || w < 2 ||
-            !llvm::isPowerOf2_64(w) ||
-            w > p.services.get<cpu::RowMachine>()->packedOwners || !grain ||
-            grain.getInt() % w || reuse->group % w || reuse->extent % w ||
-            (retained && (retained.getInt() != cpu::batchScoreSlots / w ||
-                          !cpu::repeatedScore(*o))))
+            d.size() != (retained ? 4u : 3u) + 2 * brg + bool(valueWidth) ||
+            w < 2 || !llvm::isPowerOf2_64(w) ||
+            w > (d.contains("value_width")
+                     ? std::max(p.services.get<cpu::RowMachine>()
+                                    ->orderedMatrixOwners,
+                                p.services.get<cpu::RowMachine>()->packedOwners)
+                     : p.services.get<cpu::RowMachine>()->packedOwners) ||
+            !grain || grain.getInt() % w || reuse->group % w ||
+            reuse->extent % w ||
+            (retained &&
+             (retained.getInt() <= 0 ||
+              retained.getInt() >
+                  cpu::scoreSlotLimit(*p.services.get<cpu::RowMachine>()) / w ||
+              !cpu::repeatedScore(*o))))
           return llvm::createStringError("invalid shared interval traversal");
       } else {
         auto s = cpu::reusableScores(o, p);
@@ -879,7 +955,8 @@ void ownerTasks(Unit &u) {
                       (d.get("engine") ? "-brgemm" : "") +
                       (tile && tw && tile.getInt() != tw
                            ? "-" + std::to_string(tile.getInt())
-                           : "") ||
+                           : "") +
+                      (d.contains("value_width") ? "-pv" : "") ||
           c.topology !=
               (shared ? "shared-interval-owners" : "retained-scores") ||
           c.preconditions != std::vector<std::string>{"exclusive-output"})
@@ -951,11 +1028,12 @@ void ownerTasks(Unit &u) {
       }
     o->removeAttr("cpu.owner_choice");
     int64_t ownerBatch = 1;
-    bool useBrgemm = false;
+    bool useBrgemm = false, usePV = false;
     if (auto d = dyn_cast<DictionaryAttr>(a)) {
       if (auto axis = d.getAs<IntegerAttr>("inner")) {
         o->setAttr("cpu.innermost_owner", axis);
         useBrgemm = d.contains("engine");
+        usePV = d.contains("value_width");
         if (useBrgemm)
           o->setAttr("cpu.score_tile", d.get("score_tile"));
         ownerBatch = d.getAs<IntegerAttr>("batch").getInt();
@@ -988,10 +1066,23 @@ void ownerTasks(Unit &u) {
           ownerBatch);
       if (!panel)
         return llvm::createStringError("unsupported ordered contraction panel");
+      if (usePV) {
+        auto v = cpu::orderedValuePanel(*o, *f, *panel);
+        if (!v)
+          return llvm::createStringError("invalid weighted value contraction");
+        v->add->setAttr(
+            "cpu.pv_engine",
+            b.getStringAttr("exits/" + p.name + "::onednn-brgemm-bf16"));
+        o->setAttr("cpu.value_width", b.getI64IntegerAttr(v->columns));
+        if (cpu::allowsWorkerOutputFtz(*o, p))
+          o->setAttr("cpu.worker_output_ftz", b.getUnitAttr());
+      }
       panel->dot->setAttr(
           "cpu.panel_engine",
           b.getStringAttr("exits/" + p.name + "::onednn-brgemm-bf16"));
     }
+    if (auto geometry = cpu::orderedGeometry(*o, p))
+      o->setAttr("cpu.vector_panel", geometry);
     return llvm::Error::success();
   };
   u.realizers.push_back({std::move(r), COMPILERINFRA_SOURCE});

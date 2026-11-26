@@ -1,6 +1,6 @@
-#include "intentdsl/levels/execution/cpu/ir/Owners.h"
-#include "intentdsl/levels/execution/cpu/ir/ScoreCache.h"
+#include "intentdsl/levels/execution/cpu/ir/OrderedValue.h"
 #include "intentdsl/levels/execution/cpu/ir/OwnerTraversal.h"
+#include "intentdsl/levels/execution/cpu/ir/Owners.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -36,7 +36,8 @@ void ownerCost(Unit &u) {
           e.timeNs = launchVal +
                      waves * (1 + std::min(w, n)) * workers / rateVal +
                      tasks / rateVal;
-          auto panel = intentdsl::cpu::reusableScores(o, ctx.target);
+          auto panel = intentdsl::cpu::reusableScores(
+              o, ctx.target, intentdsl::cpu::scoreSlotLimit(*rm));
           auto shared = intentdsl::cpu::sharedInterval(o, *f);
           if (panel) {
             bool retained =
@@ -47,6 +48,21 @@ void ownerCost(Unit &u) {
             double dots = double(n) * panel->keys * (retained ? 1 : 2);
             e.terms["score_dot_products"] = {dots, "count"};
             double flop = 2. * dots * panel->depth;
+            if (shared) {
+              auto dot = intentdsl::cpu::orderedDotPanel(*o, *f, shared->axis,
+                                                         rm->packedOwners);
+              auto value = dot ? intentdsl::cpu::orderedValuePanel(*o, *f, *dot)
+                               : std::nullopt;
+              if (value) {
+                double valueFlop = 2. * n * value->tokens * value->columns;
+                e.terms["value_contraction_work"] = {valueFlop, "FLOP"};
+                bool matrixPV = cache && cache.contains("value_width");
+                double width =
+                    matrixPV ? cache.getAs<mlir::IntegerAttr>("batch").getInt()
+                             : 1;
+                *e.timeNs += valueFlop / (width * rateVal);
+              }
+            }
             if (cache && cache.get("engine")) {
               auto batch = cache.getAs<mlir::IntegerAttr>("batch").getInt();
               int64_t tokens =
