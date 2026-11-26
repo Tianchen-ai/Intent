@@ -6,9 +6,70 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 namespace CI_UNIT_NAMESPACE {
 using namespace compilerinfra;
+namespace {
+// A masked maximum over token <= owner visits the prefix of the last owner
+// in the batch. Each downstream matrix panel rounds that prefix to its tile.
+double meanKeySpan(const intentdsl::cpu::ScoreCachePlan &panel,
+                   mlir::Value owner, int64_t owners, int64_t batch,
+                   int64_t tile) {
+  using namespace mlir;
+  auto loop = panel.record->getParentOfType<scf::ForOp>();
+  if (!loop || loop.getNumRegionIterArgs() != 1 || owners <= 0 ||
+      owners % batch || !llvm::isPowerOf2_64(tile) ||
+      !llvm::isPowerOf2_64(batch))
+    return panel.keys;
+  auto yield = cast<scf::YieldOp>(loop.getBody()->getTerminator());
+  auto maximum = yield.getOperand(0).getDefiningOp<arith::MaxNumFOp>();
+  if (!maximum)
+    return panel.keys;
+  Value carry = loop.getRegionIterArgs().front();
+  Value masked = maximum.getLhs() == carry   ? maximum.getRhs()
+                 : maximum.getRhs() == carry ? maximum.getLhs()
+                                             : Value{};
+  if (!masked)
+    return panel.keys;
+  Value pred, inactive;
+  if (auto branch = masked.getDefiningOp<scf::IfOp>();
+      branch && !branch.getElseRegion().empty()) {
+    pred = branch.getCondition();
+    inactive = branch.elseYield().getOperand(0);
+  } else if (auto sel = masked.getDefiningOp<arith::SelectOp>()) {
+    pred = sel.getCondition();
+    inactive = sel.getFalseValue();
+  }
+  auto cmp = pred ? pred.getDefiningOp<arith::CmpIOp>() : arith::CmpIOp{};
+  auto cst = inactive ? inactive.getDefiningOp<arith::ConstantOp>()
+                      : arith::ConstantOp{};
+  auto value = cst ? dyn_cast<FloatAttr>(cst.getValue()) : FloatAttr{};
+  if (!cmp || !value || !value.getValue().isNegInfinity())
+    return panel.keys;
+  Value iv = loop.getInductionVar();
+  bool prefix = (cmp.getLhs() == owner && cmp.getRhs() == iv &&
+                 cmp.getPredicate() == arith::CmpIPredicate::sge) ||
+                (cmp.getLhs() == iv && cmp.getRhs() == owner &&
+                 cmp.getPredicate() == arith::CmpIPredicate::sle);
+  if (!prefix)
+    return panel.keys;
+  // Sum ceil(min(j * batch, K) / tile) over complete query batches j.
+  // Group equal rounded extents instead of scanning a potentially long axis.
+  int64_t groups = owners / batch;
+  int64_t growing = std::min(groups, (panel.keys - 1) / batch);
+  double total;
+  if (batch >= tile)
+    total = double(batch) * growing * (growing + 1) * .5;
+  else {
+    int64_t equal = tile / batch, runs = growing / equal,
+            rest = growing % equal;
+    total = double(tile) * (double(equal) * runs * (runs + 1) * .5 +
+                            double(rest) * (runs + 1));
+  }
+  total += double(groups - growing) * llvm::divideCeil(panel.keys, tile) * tile;
+  return total / groups;
+}
+} // namespace
 void ownerCost(Unit &u) {
   u.costModels.push_back(
-      {{"ordered-tasks", u.qualify("ordered-owners"), "2",
+      {{"ordered-tasks", u.qualify("ordered-owners"), "3",
         [](mlir::Operation *o, const StructuralCandidate &c,
            CostContext &ctx) -> llvm::Expected<CostEstimate> {
           auto f = ctx.target.services.get<intentdsl::CallFacts>();
@@ -39,13 +100,32 @@ void ownerCost(Unit &u) {
           auto panel = intentdsl::cpu::reusableScores(
               o, ctx.target, intentdsl::cpu::scoreSlotLimit(*rm));
           auto shared = intentdsl::cpu::sharedInterval(o, *f);
+          double keySpan = panel ? panel->keys : 1.;
+          int64_t batch = cache && cache.contains("batch")
+                              ? cache.getAs<mlir::IntegerAttr>("batch").getInt()
+                              : 1;
+          int64_t tile =
+              cache && cache.contains("score_tile")
+                  ? cache.getAs<mlir::IntegerAttr>("score_tile").getInt()
+                  : rm->orderedDotTokens;
+          // The streamed backend uses a sequence of hardware tiles; extra
+          // owners beyond AMX's 16 physical tile rows issue more multiplies.
+          constexpr int64_t amxTileRows = 16;
+          double matrixWidth =
+              rm->orderedDotTokens ? std::min(batch, amxTileRows) : batch;
+          if (panel && shared && rm->orderedDotTokens && cache &&
+              cache.contains("window")) {
+            auto owner = o->getRegion(0).front().getArgument(shared->axis);
+            keySpan = meanKeySpan(*panel, owner, shared->extent, batch, tile);
+            e.terms["mean_key_span"] = {keySpan, "count"};
+          }
           if (panel) {
             bool retained =
                 cache && (cache.get("scores") ||
                           (cache.get("window") &&
                            cache.getAs<mlir::IntegerAttr>("window").getInt() >=
                                panel->keys));
-            double dots = double(n) * panel->keys * (retained ? 1 : 2);
+            double dots = double(n) * keySpan * (retained ? 1 : 2);
             e.terms["score_dot_products"] = {dots, "count"};
             double flop = 2. * dots * panel->depth;
             if (shared) {
@@ -54,21 +134,21 @@ void ownerCost(Unit &u) {
               auto value = dot ? intentdsl::cpu::orderedValuePanel(*o, *f, *dot)
                                : std::nullopt;
               if (value) {
-                double valueFlop = 2. * n * value->tokens * value->columns;
+                double valueFlop = 2. * n * keySpan * value->columns;
                 e.terms["value_contraction_work"] = {valueFlop, "FLOP"};
                 bool matrixPV = cache && cache.contains("value_width");
-                double width =
-                    matrixPV ? cache.getAs<mlir::IntegerAttr>("batch").getInt()
-                             : 1;
-                *e.timeNs += valueFlop / (width * rateVal);
+                *e.timeNs +=
+                    valueFlop / ((matrixPV ? matrixWidth : 1.) * rateVal);
               }
             }
             if (cache && cache.get("engine")) {
-              auto batch = cache.getAs<mlir::IntegerAttr>("batch").getInt();
+
               int64_t tokens =
                   cache.getAs<mlir::IntegerAttr>("score_tile").getInt();
-              double panels = std::ceil(double(n) / batch) *
-                              std::ceil(double(panel->keys) / tokens);
+              double tileTrips = keySpan == panel->keys
+                                     ? std::ceil(keySpan / tokens)
+                                     : keySpan / tokens;
+              double panels = std::ceil(double(n) / batch) * tileTrips;
               double pack = panels * batch * panel->depth * sizeof(uint16_t);
               // AMX reduces BF16 pairs across a complete owner tile. Every
               // invocation pays the hardware context transition and packing.
@@ -85,12 +165,50 @@ void ownerCost(Unit &u) {
                 double scalarRate = rateVal / (rm->vectorBits / 32);
                 e.terms["strided_pack_elements"] = {packedElements, "count"};
                 *e.timeNs += 3 * packedElements / scalarRate;
+                if (auto cols = cache.getAs<mlir::IntegerAttr>("value_width")) {
+                  // Two separately lowered vendor calls exchange FP32 scores
+                  // and BF16 weights through dense payload and validity arrays.
+                  double scoreEntries = panels * batch * tokens;
+                  double valueEntries = panels * tokens * cols.getInt();
+                  double packedBytes =
+                      2. * scoreEntries *
+                      (sizeof(float) + sizeof(uint16_t) + 2 * sizeof(uint8_t));
+                  double gather =
+                      intentdsl::quantity(ctx, "copy_gather_1_bw", "B/ns")
+                          .value_or(bwVal);
+                  double scatter =
+                      intentdsl::quantity(ctx, "copy_scatter_1_bw", "B/ns")
+                          .value_or(bwVal);
+                  double outBytes = double(batch) * cols.getInt() *
+                                    (sizeof(float) + sizeof(uint8_t));
+                  // The score and value projections execute in different loops.
+                  double scoreLive =
+                      double(batch) * tokens *
+                          (sizeof(float) + sizeof(uint8_t)) +
+                      double(batch + tokens) * panel->depth * sizeof(uint16_t);
+                  double valueLive =
+                      outBytes +
+                      double(batch) * tokens *
+                          (sizeof(uint16_t) + sizeof(uint8_t)) +
+                      double(tokens) * cols.getInt() * sizeof(uint16_t);
+                  double liveBytes = std::max(scoreLive, valueLive);
+                  double spill = std::max(0., liveBytes - rm->ownerStackBytes);
+                  e.terms["matrix_spill_bytes"] = {2 * panels * spill, "B"};
+                  e.terms["value_vnni_pack_elements"] = {valueEntries, "count"};
+                  e.terms["matrix_exchange_bytes"] = {packedBytes, "B"};
+                  e.terms["matrix_tile_live_bytes"] = {liveBytes, "B"};
+                  e.terms["brgemm_calls"] = {2 * panels, "count"};
+                  *e.timeNs += 3 * valueEntries / scalarRate +
+                               .5 * packedBytes * (1. / gather + 1. / scatter) +
+                               2 * panels * spill / bwVal +
+                               panels * sync * .15 / workers;
+                }
               }
               double contexts = tasks;
               e.terms["brgemm_contexts"] = {contexts, "count"};
               double transition = 4 * launchVal + 2 * sync;
               *e.timeNs +=
-                  flop / (batch * rateVal) + 2 * pack / bwVal +
+                  flop / (matrixWidth * rateVal) + 2 * pack / bwVal +
                   (transition * contexts + panels * sync * 0.15) / workers;
             } else
               *e.timeNs += flop / rateVal;
@@ -104,7 +222,7 @@ void ownerCost(Unit &u) {
             auto ownersPerLoad =
                 together ? cache.getAs<mlir::IntegerAttr>("batch").getInt()
                          : int64_t(1);
-            double trip = panel ? double(panel->keys) : 1.;
+            double trip = keySpan;
             int64_t regCarryFloats = 0;
             auto evalBound = [&](mlir::Value v) -> std::optional<int64_t> {
               if (auto cOp = v.getDefiningOp<mlir::arith::ConstantIndexOp>())
