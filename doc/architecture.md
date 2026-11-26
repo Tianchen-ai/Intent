@@ -1,8 +1,12 @@
 # IntentDSL V2 产品架构
 
-**状态**　Block 的 Triton 与 cuTile，以及 CPU 的 Weft、Mojo，已贯通行归约程序。DSA 与 BANG C 已在 MLU370 上用 softmax、weighted RMSNorm 完成同设备数值与性能校准。K3 两类核心仍待验证。[CPU](design/cpu.md) · [cuTile](design/cutile.md) · [DSA 与 BANG C](design/dsa.md)
+**状态**　Block 的 Triton 与 cuTile，以及 CPU 的 Weft、Mojo，已贯通行归约程序。DSA 与 BANG C 已在 MLU370 上用 softmax、weighted RMSNorm 完成同设备数值与性能校准。K3 两类核心仍待验证。[CPU](https://github.com/Tianchen-ai/Intent/blob/main/doc/design/cpu.md) · [cuTile](https://github.com/Tianchen-ai/Intent/blob/main/doc/design/cutile.md) · [DSA 与 BANG C](https://github.com/Tianchen-ai/Intent/blob/main/doc/design/dsa.md)
 
 **设计依据**　CompilerInfra `3ddeef2` 的 `lib/Assembly.cpp`、`include/compilerinfra/Decision.h` 和安装包的 Python 绑定决定了本设计可用的阶段顺序、策略接口和候选加载行为。语义对照为原版 IntentDSL `b0a19990` 的 `doc/dsl/types-numerics-and-effects.md`、`doc/dsl/quantized-operations.md` 与 `python/intent/examples/registry.py`。V1 的 Triton 经验行见 `lib/Target/Triton/Transforms/Configuration/TuningProfiles.json`；V2 建议的行值须在 V2 的产物上重新判断。
+
+![GPU 程序所有权、CPU 任务与 DSA 本地存储供数](images/paper-fig5-execution-models.png)
+
+V1 论文图 5 用同一逻辑工作说明三种执行模型。V2 中 GPU 由 Block 降到 Triton 或 cuTile，CPU 任务降到 Mojo 或 Weft，DSA 由 Block 经显式存储与供数降到 BANG C。[原图 PDF](images/paper-fig5-execution-models.pdf)
 
 ## 编译对象与职责
 
@@ -62,7 +66,7 @@ frontend/python
 
 ## 决策归属
 
-「决定 → 兑现」是同一节点或出口的两个边界，可以同名。策略返回一个完整 MLIR 属性，realizer 写入真实程序并消费该属性。对相关联的参数只接受同一合法行。下表列出 V2-1b 的决定归属；block 的承载 op 和约束见 [Block 设计](design/block.md)。
+「决定 → 兑现」是同一节点或出口的两个边界，可以同名。策略返回一个完整 MLIR 属性，realizer 写入真实程序并消费该属性。对相关联的参数只接受同一合法行。下表列出 V2-1b 的决定归属；block 的承载 op 和约束见 [Block 设计](https://github.com/Tianchen-ai/Intent/blob/main/doc/design/block.md)。
 
 | 决定的所有者及对象 | 边界 | 读取的事实 → 唯一输出责任 |
 |---|---|---|

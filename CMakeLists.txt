@@ -13,5 +13,9 @@ endif()
 install(DIRECTORY frontend/python/intentdsl
         DESTINATION "${CMAKE_INSTALL_LIBDIR}/python${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}/site-packages"
         FILES_MATCHING PATTERN "*.py")
-install(FILES doc/manual.zh.md doc/manual.en.md
+install(FILES doc/manual.zh.md doc/manual.en.md doc/index.md doc/index.en.md
+              doc/first-route.md doc/architecture.md doc/paper-results.md doc/softmax.py
         DESTINATION "${CMAKE_INSTALL_LIBDIR}/python${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}/site-packages/intentdsl/_manual")
+install(DIRECTORY doc/images examples
+        DESTINATION "${CMAKE_INSTALL_LIBDIR}/python${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}/site-packages/intentdsl/_manual"
+        PATTERN "__pycache__" EXCLUDE)

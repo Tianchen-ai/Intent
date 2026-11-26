@@ -1,35 +1,31 @@
-# 构建并运行第一条 GPU 路线
+# 从源码到第一次测量
 
-构建机需要 CompilerInfra 0.5.2 SDK、与该 SDK 匹配的 MLIR 和 C++ 工具链。执行机使用同一 ABI 的产品编译库、CompilerInfra Python 绑定、PyTorch 和适合本机 GPU 的 Triton。以运行产品的虚拟环境作为安装前缀时，可以直接导入公开包。
+从 [README](https://github.com/Tianchen-ai/Intent#build-from-source) 的三个并排检出开始。在同一终端激活虚拟环境，安装 SDK、Python 绑定、产品及 Bench。GPU 首测需要 CUDA 版 Torch 和 Triton。运行 `examples/first_kernel.py` 时，前端读取函数的源文件，按符号形状绑定输入，把每一行的最大值与和降为设备归约，再由 Triton 编译和启动。末尾的 Torch 比较覆盖整个输出。
+
+在 Linux 空目录运行以下命令。需预装 Git、Python ≥3.10、Ninja、CMake ≥3.22、C++17 编译器，以及带 PIC 静态库和 TableGen 的 LLVM/MLIR 20.1.8 开发包。
 
 ```sh
-cmake -S . -B build -G Ninja -DCMAKE_PREFIX_PATH="$COMPILERINFRA_PREFIX;$LLVM_PREFIX" \
-  -DCMAKE_INSTALL_PREFIX="$VIRTUAL_ENV" -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-cmake --install build
-intentdsl-compile --layout
+git clone https://github.com/Tianchen-ai/compilerinfra.git
+git clone https://github.com/Tianchen-ai/Intent.git
+git clone https://github.com/Tianchen-ai/Intent-Bench.git
+python3 -m venv .venv
+. .venv/bin/activate
+LLVM_PREFIX=$(llvm-config-20 --prefix)
+cmake -S compilerinfra -B build/sdk -G Ninja \
+  -DMLIR_DIR="$LLVM_PREFIX/lib/cmake/mlir" -DCMAKE_BUILD_TYPE=Release \
+  -DCOMPILERINFRA_LINK_MLIR_DYLIB=OFF -DCMAKE_INSTALL_PREFIX="$PWD/sdk"
+cmake --build build/sdk --parallel 8
+cmake --install build/sdk
+export CMAKE_PREFIX_PATH="$PWD/sdk:$LLVM_PREFIX"
+python -m pip install ./compilerinfra/python ./compilerinfra/agent
+python -m pip install ./Intent
+python -m pip install -e ./Intent-Bench
+python -m pip install torch triton
 ```
 
-```python
-import torch
-import intentdsl as intent
-from intentdsl.examples import softmax
+1. `intentdsl setup --backend triton` 检查打包的库、资产和前端。查看报告中的具体探针。
+2. `intentdsl doctor --backend triton` 报告所选出口的 `ready` 和 `missing`。补齐列出的驱动、编译器或 Python 包后重跑。
+3. 在三仓的父目录执行 `python Intent/examples/first_kernel.py`。看到 `softmax passed` 表示设备已编译、执行且数值通过。
+4. 按 README 进入 `Intent-Bench`，先运行带 `--check-only` 的命令，再运行计时命令。`intent-v2:triton` 是本产品，`triton` 是独立参考实现；数值裁判另行执行。用 `--output-root` 指定的目录查看 `latest` 下本次运行的 `results.json`，检查各行的 `status`、`correctness`、`median_ms` 与 `samples_ms`。
 
-x = torch.randn(64, 1024, dtype=torch.float16, device="cuda")
-kernel = intent.jit(softmax, backend="triton")
-y = kernel.run(x)
-call = kernel.prepare(x, outputs=y)
-call.compile()
-call.launch()
-torch.testing.assert_close(call.result(), torch.softmax(x, dim=-1))
-```
-
-实施范围为二维行并行、整行读写、权重向量广播、f16/f32 算术、max_num 和 sum。诊断或比较时可给 `jit` 显式传入安装好的产品库路径。安装在独立前缀时，将其 Python site-packages 加入执行环境；编译库随同该包定位。
-
-行归约实现位于 `levels/execution/block/decisions/strategies/RowReduction.cpp`。同一目录的 `<Pattern>.cpp` 通过函数 `register<Pattern>(Unit&)` 登记策略，链接由相邻 CMake 组装。默认顺序由 `cmake/default.json` 中的联合结构家族声明。出口经验行与硬件约束位于 `exits/triton/capabilities/`。
-
-开发工具的 `measure` 动作使用独立安装的 `intent_bench.compilerinfra_adapter`。在执行主机激活有 CUDA 依赖的 Python 环境，使 `python3`、CompilerInfra worker、Bench 和产品公共包均可用。负载选择例如：
-
-```json
-{"name":"softmax","cases":["64x1024-float16"],"environment":"local-gpu","implementations":["triton","intent:triton","intent-v2:triton"],"baseline":"triton"}
-```
+[中文工具书](index.md) · [English handbook](index.en.md)

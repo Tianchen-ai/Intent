@@ -1,34 +1,15 @@
-# IntentDSL User and Component Developer Manual (English)
+# IntentDSL Handbook
 
-## 1. Installation and Environment Setup (`install`)
+## 1. Installation and diagnostics (install)
 
-### Installing from Wheel (No LLVM Dev SDK Required)
-
-Release wheels statically link the required MLIR/LLVM libraries into `libintentdsl.so`; no runtime LLVM/MLIR SDK is needed on user machines:
+Follow the source checkout README to build the CompilerInfra 0.5.3 static SDK, install the matching Python bindings and install IntentDSL 2.0.0. Source builds need Python ≥3.10, CMake, Ninja, C++17 and PIC static archives for LLVM/MLIR 20.1.8. The resulting wheel includes the native product library.
 
 ```sh
-python -m venv .venv
-. .venv/bin/activate
-python -m pip install compilerinfra==0.5.2 intentdsl==2.0.0
-# Optional CLI / MCP compiler development host tools:
-python -m pip install compilerinfra-agent==0.5.2
+intentdsl setup --backend triton
+intentdsl doctor --backend triton
 ```
 
-Supported native wheel baselines:
-- **x86_64**: `manylinux_2_31_x86_64` (`glibc >= 2.31`, covering Ubuntu 20.04 MLU hosts and newer x86_64 Linux) and native `linux_x86_64`.
-- **riscv64**: `linux_riscv64` (`glibc >= 2.38`, verified natively on SG2044 and RVV V100 RVV 1.0 systems).
-
-Verify the bundled library, toolchains, and visible hardware offline:
-
-```sh
-intentdsl doctor
-intentdsl setup
-intentdsl manual --lang en
-```
-
-### External Backend Dependencies and Process Isolation
-
-Vendor compilers and device runtimes remain external user dependencies and are probed on demand:
+Setup verifies the assets and frontend. Doctor reports the selected backend’s dependencies and device. Install GPU Triton and CPU triton-weft in separate environments.
 
 | Backend (`backend`) | Execution Device | External Toolchains & Runtime Libraries |
 |---|---|---|
@@ -36,28 +17,7 @@ Vendor compilers and device runtimes remain external user dependencies and are p
 | `cutile` | NVIDIA GPU (`SM90`/`SM120`) | PyTorch (CUDA), `cuda-tile` (`cuda.tile`), `nvcc`, CUDA driver |
 | `mojo` | x86_64 CPU (`AVX2`/`AVX-512`/`AMX`) | `mojo` compiler (or `INTENT_MOJO`), `gcc` + `libgomp.so`; optional `oneDNN >=3.13,<4` (`ONEDNN_ROOT` or `INTENT_ONEDNN_LIB`) |
 | `weft` | x86_64 / riscv64 CPU | `triton-weft` + `weft_core`, C/C++ toolchain, homogeneous CPU affinity set (`taskset`) |
-| `bangc` | Cambricon MLU (`MLU370`) | `cncc` (`mtp_372`), `libcnrt.so`, `torch_mlu`, Cambricon driver (`/dev/cambricon_dev*`); `libcnnl.so` recorded as external reference dependency |
-
-**Triton Distribution Note**: GPU `triton` and CPU `triton-weft` both provide the top-level `triton` Python package and therefore cannot be imported in the same Python process; install GPU `triton`/`cutile` and CPU `weft` in separate virtual environments (`mojo` coexists in-process with either GPU `triton`/`cutile` or CPU `weft`; `bangc` runs independently on MLU hosts).
-
-### Rebuilding a Wheel from `sdist` in a Clean Environment
-
-Build prerequisites:
-- `CompilerInfra == 0.5.2` native SDK and Python package
-- `LLVM / MLIR == 20.1.8` (static archives built with `-fPIC`)
-- `CMake >= 3.22`, `Ninja`, C++17 compiler (`GCC >= 11` or `Clang >= 16`), `Python >= 3.10`
-
-```sh
-unset PYTHONPATH INTENTDSL_LIBRARY
-python -m venv /tmp/intentdsl-build-env
-/tmp/intentdsl-build-env/bin/pip install --upgrade pip build
-/tmp/intentdsl-build-env/bin/pip install compilerinfra-0.5.2-*.whl
-CMAKE_PREFIX_PATH="/path/to/compilerinfra-0.5.2:/path/to/llvm-20" \
-  /tmp/intentdsl-build-env/bin/pip wheel --no-build-isolation --no-deps \
-  intentdsl-2.0.0.tar.gz -w /tmp/dist
-```
-
----
+| `bangc` | Cambricon MLU (`MLU370`) | `cncc` (`mtp_372`), `libcnrt.so`, `torch_mlu`, Cambricon driver (`/dev/cambricon_dev*`); `libcnnl.so` used for library implementations |
 
 ## 2. Author Language and Numerical Contracts (`language`)
 
@@ -65,7 +25,7 @@ IntentDSL parses Python ASTs into typed `kir` IR; kernel bodies are never execut
 
 - **Directions and Symbolic Views**: `I.In[dtype, shape]`, `I.Out[dtype, shape]`, `I.InOut[dtype, shape]` with symbolic dimensions (`("M", "N")`) and typed scalars (`I.f32`, `I.i32`, `I.u64`).
 - **Domains and Collectives**: `I.parallel(...)` declares parallel instances; `I.domain(0, extent)` declares reduction/streaming member axes; `I.static_range(K)` declares compile-time unrolled stripes; collectives include `I.reduce`, `I.sum`, `I.welford`, `I.cumsum`, `I.reduce_by_key`, `I.ordered_sum`, contractions, and ordered recurrences.
-- **Strict Numerical Contracts**: IEEE-754 `f32` accumulation, NaN propagation, and round-to-nearest-even are preserved by default (including 0-ULP certified `div`/`sqrt` on MLU and exact BF16 rounding). Fast hardware paths that flush subnormals (such as AMX BF16) are admitted only when explicitly licensed by the author (e.g. `allow_subnormal_ftz=True`).
+- **Numerical contracts**: Each reduction declares its combiner and accumulator type. `I.max_num` and `I.maximum` differ on NaNs. Explicit `denormal_fp_math="preserve-sign"` can license flushing subnormals when the operand types and device capability also permit it.
 
 ```python
 import intentdsl as I
@@ -96,38 +56,32 @@ def rms_norm(
 
 ---
 
-## 4. Component Guide, Candidate Derivation, and Agent Integration (`components`)
+## 4. Component guide (components)
 
-### Extending an Existing Node or Exit
+Inspect the registered units before changing a strategy or microkernel. Follow its owning node or exit from the decision and cost model to legalization and runtime.
 
-1. **Locate Registered Units**: Run `layout` / `inspect` to inspect the `kir -> {block -> {triton, cutile, dsa -> bangc}, cpu -> {mojo, weft}}` tree, boundary contracts, and exact C++ source locations.
-2. **Adding a Node Strategy**: Implement candidate enumeration and `verify` in the owning unit (e.g., `levels/storage/dsa/decisions/Supply.cpp` or `levels/execution/block/decisions/strategies/`), update the unit's `cost/` model, and enable the strategy in `cmake/default.json`.
-3. **Adding an Exit Microkernel**: Place kernel source under `runtime/<exit>/kernels/`, register its `ImplementationContract` in `exits/<exit>/ir/` (operands, memory space, accumulator, numerical bound), lower to a terminal op in `legalize/`, and print op-by-op via `TerminalPrinter`.
-
-### Copy-Pasteable CLI and MCP Workflow Commands
-
-Given product checkout `$REPO`, installed library `$LIB` (`python -c "import intentdsl; print(intentdsl.library_path())"`), and out-of-tree scratch directory `/tmp/ci-dev`:
+Run the following commands from the Intent checkout with the agent package installed. The example reads the single-kernel author input in `doc/softmax.py`, derives a candidate, compiles to the KIR boundary and retrieves the trace by its returned compilation ID in the same session.
 
 ```sh
-# 1. Inspect compiled layout, frontend bindings, and manifest-verified skills
-compilerinfra-dev --library "$LIB" --workspace "$REPO" --output-dir /tmp/ci-dev inspect
-compilerinfra-dev --library "$LIB" --workspace "$REPO" --output-dir /tmp/ci-dev \
-  read-skill '{"name":"agent/skills/intentdsl-development.md"}'
-
-# 2. Derive a candidate, inspect doctor probes, compile/explain decisions, and measure in a persistent session
-compilerinfra-dev --library "$LIB" --workspace "$REPO" --output-dir /tmp/ci-dev << 'EOF'
-{"action":"derive","arguments":{"configuration":{"exits":{"bangc":{"options":{"isa":372,"nram_bytes":786432,"wram_bytes":524288,"clusters":4,"cores":4,"calibration":"mlu370"}}}}}}
-{"action":"doctor","arguments":{"compiler":"base"}}
-EOF
-
-# Using the returned handle <cid>, compile, explain decisions, and run external Bench measurement:
-# {"action":"compile","arguments":{"compiler":"<cid>","input":"softmax.py","exit":"triton","author_input":true}}
-# {"action":"explain","arguments":{"compilation_id":"<compilation_id>"}}
-# {"action":"measure","arguments":{"compiler":"<cid>","output_dir":"/tmp/bench-out","workload":{"name":"program/softmax","cases":[],"implementations":["intent-v2:triton"]}}}
-
-# 3. Generate Codex and Claude stdio MCP configurations exposing the exact same action catalog
-compilerinfra-dev host-config -- \
-  '{"host":"codex","library":"'"$LIB"'","workspace":"'"$REPO"'","output_dir":"/tmp/ci-dev"}'
-compilerinfra-dev host-config -- \
-  '{"host":"claude","library":"'"$LIB"'","workspace":"'"$REPO"'","output_dir":"/tmp/ci-dev"}'
+LIB=$(python -c 'import intentdsl; print(intentdsl.library_path())')
+compilerinfra-dev --library "$LIB" --workspace . --output-dir ../candidate-output inspect
+python examples/inspect_candidate.py
 ```
+
+## 5. Formulas and examples (formulas)
+
+From the checkout run `python examples/formulas.py` to compile the nine examples and compare each output to Torch. All functions are available from the installed `intentdsl.examples` module. Dimensions are symbolic; the row reductions below use the last axis.
+
+| Operator | Formula | Function and DSL primitives | Inputs → output |
+|---|---|---|---|
+| ReLU | max(x, 0) | `relu` · `I.maximum` | `f16[M,N] → f16[M,N]` |
+| Softmax | exp(x−max(x)) / Σ exp(x−max(x)) | `softmax` · `I.reduce, I.exp, I.sum` | `f16[M,N] → f16[M,N]` |
+| RMSNorm | x · rsqrt(Σx²/N + ε) · g | `rms_norm` · `I.sum, I.rsqrt` | `f32[M,N], g[N], 1/N, ε → f32[M,N]` |
+| LayerNorm | (x−μ) · rsqrt(E[x²]−μ²+ε) · g + b | `layer_norm` · `I.sum, I.rsqrt` | `f32[R,C], g[C], b[C], 1/C, ε → f32[R,C]` |
+| Transpose | Y[j,i] = X[i,j] | `transpose` · `I.parallel` | `f16[M,N] → f16[N,M]` |
+| Prefix sum | Y[i,j] = Σₖ≤ⱼ X[i,k] | `cumsum` · `I.cumsum` | `f32[M,N] → f32[M,N]` |
+| Embedding | Y[t,:] = W[ids[t],:] | `embedding` · `I.gather_row` | `bf16[V,D], i64[T] → bf16[T,D]` |
+| GEMM | C[i,j] = Σₖ A[i,k]B[k,j] | `gemm` · `I.contract` | `f16[M,K], f16[K,N] → f16[M,N]` |
+| Q6_K GEMV | y[i] = Σⱼ dequant(W[i,j]) · quant(x)[j] | `q6k_gemv` · `I.quantize_q8k, I.quant_contract` | `u8[N,G,210], f32[G,256] → f32[N]` |
+
+Each 210-byte Q6_K record holds 256 weights: 192 bytes of bit planes, 16 signed subgroup scales and an FP16 scale. Activations are quantized in groups of 256 to Q8_K. The contraction accumulates the scaled products into FP32.

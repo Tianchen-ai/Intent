@@ -28,12 +28,14 @@ ALLOWED_DIRS = (
     "include",
     "agent",
     "doc",
+    "examples",
 )
 ROOT_FILES = (
     "CMakeLists.txt",
     "product.json",
     "pyproject.toml",
     "README.md",
+    "mkdocs.yml",
     "AGENTS.md",
 )
 
@@ -300,10 +302,12 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
 
         man_dst = pkg_dst / "_manual"
         man_dst.mkdir(parents=True)
-        for lang in ("zh", "en"):
-            mfile = root / "doc" / f"manual.{lang}.md"
-            if mfile.is_file():
-                shutil.copy2(mfile, man_dst / mfile.name)
+        for page in ("manual.zh.md", "manual.en.md", "index.md", "index.en.md",
+                     "architecture.md", "paper-results.md", "first-route.md", "softmax.py"):
+            shutil.copy2(root / "doc" / page, man_dst / page)
+        shutil.copytree(root / "doc" / "images", man_dst / "images")
+        shutil.copytree(root / "examples", man_dst / "examples",
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
 
         # 2. Bundled native library, assets, compiler driver, and public ABI headers
         bundled = pkg_dst / "_bundled"

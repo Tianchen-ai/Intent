@@ -1,0 +1,11 @@
+# IntentDSL Handbook
+
+[中文工具书](index.md)
+
+- [Installation and diagnostics](manual.en.md#1-installation-and-diagnostics-install)
+- [Author language and numerical contracts](manual.en.md#2-author-language-and-numerical-contracts-language)
+- [Formula reference](manual.en.md#5-formulas-and-examples-formulas) with nine executable examples, input and output types, and the corresponding DSL primitives.
+- [Execution models](architecture.md) and [component development](manual.en.md#4-component-guide-components)
+- [Historical V1 evaluation](paper-results.md)
+
+Search by function name or primitive on the site, or read the offline reference with `intentdsl manual formulas --lang en`.

@@ -1,0 +1,16 @@
+site_name: IntentDSL 工具书 · Handbook
+docs_dir: doc
+site_dir: site
+exclude_docs: |
+  plan/
+  design/
+plugins:
+  - search
+nav:
+  - 中文: index.md
+  - English: index.en.md
+  - 第一次测量: first-route.md
+  - 用户手册: manual.zh.md
+  - User manual: manual.en.md
+  - Architecture: architecture.md
+  - V1 paper figures: paper-results.md
