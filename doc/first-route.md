@@ -6,6 +6,7 @@
 
 ```sh
 git clone https://github.com/Tianchen-ai/compilerinfra.git
+git -C compilerinfra checkout 0570f7169c42b6139448181e9af7d958edfd0ac9
 git clone https://github.com/Tianchen-ai/Intent.git
 git clone https://github.com/Tianchen-ai/Intent-Bench.git
 python3 -m venv .venv
