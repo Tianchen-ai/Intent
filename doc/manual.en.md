@@ -27,6 +27,8 @@ IntentDSL parses Python ASTs into typed `kir` IR; kernel bodies are never execut
 - **Domains and Collectives**: `I.parallel(...)` declares parallel instances; `I.domain(0, extent)` declares reduction/streaming member axes; `I.static_range(K)` declares compile-time unrolled stripes; collectives include `I.reduce`, `I.sum`, `I.welford`, `I.cumsum`, `I.reduce_by_key`, `I.ordered_sum`, contractions, and ordered recurrences.
 - **Numerical contracts**: Each reduction declares its combiner and accumulator type. `I.max_num` and `I.maximum` differ on NaNs. Explicit `denormal_fp_math="preserve-sign"` can license flushing subnormals when the operand types and device capability also permit it.
 
+Inspect `ci.semantics` at `kir@canonical` for effective defaults and their sources. Parallel reduction chains can use online normalization. Ordered loops retain their order. Use `I.jit(..., fpmath_mode="strict")` for separate multiply/add rounding and source-order normalization. See the [language and numerical contract](https://github.com/Tianchen-ai/Intent/blob/main/doc/design/kir.md).
+
 ```python
 import intentdsl as I
 

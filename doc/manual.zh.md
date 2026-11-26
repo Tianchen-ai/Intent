@@ -27,6 +27,8 @@ IntentDSL 只解析 Python AST 生成类型化 `kir` IR，不把内核体当作 
 - **结构化域与集合原语**：`I.parallel(...)` 声明并行实例域；`I.domain(0, extent)` 声明归约/流式成员轴；`I.static_range(K)` 声明编译期展开条带；内置 `I.reduce`、`I.sum`、`I.welford`、`I.cumsum`、`I.reduce_by_key`、`I.ordered_sum` 及矩阵/递推原语。
 - **数值合同**：每个归约声明其组合操作与累加类型。`I.max_num` 与 `I.maximum` 的 NaN 行为不同。可用 `denormal_fp_math="preserve-sign"` 显式授权相应次正规数冲零，出口还需检查类型与目标能力。
 
+在 `kir@canonical` 查看 `ci.semantics` 可追踪每项默认值和覆盖来源。并行归约链默认可考虑在线归一化。有序循环保留顺序。严格乘加和归约重放可通过 `I.jit(..., fpmath_mode="strict")` 请求。详见[语言与数值合同](https://github.com/Tianchen-ai/Intent/blob/main/doc/design/kir.md)。
+
 ```python
 import intentdsl as I
 

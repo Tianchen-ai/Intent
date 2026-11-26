@@ -1,1 +1,3 @@
 Read product.json and the installed compiler layout. Register changes in their owning unit. Use the development skill for derivation and measurement.
+
+For an unspecified semantic choice, start with a same-layer upstream default. Record evidence for tightening or relaxing it. Check installed sources first: PyTorch Inductor lowering/config, the Triton CUDA backend, LLVM/MLIR headers, oneDNN primitives and ukernels, and the CNCC/CNNL SDK. Register the reference at its owning unit and bind it in IR. Read the selected operation’s flags, denormal environment, memory effects and actual address when choosing an implementation. The user-facing specification is in doc/design/kir.md.
