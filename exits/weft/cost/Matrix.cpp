@@ -136,7 +136,7 @@ void nativePanelCost(compilerinfra::Unit &u) {
        COMPILERINFRA_SOURCE});
 
   u.costModels.push_back(
-      {{"q4k-panels", "levels/execution/cpu::matrix-partition", "1",
+      {{"q4k-panels", "levels/execution/cpu::matrix-partition", "2",
         [](mlir::Operation *op, const compilerinfra::StructuralCandidate &c,
            compilerinfra::CostContext &ctx)
             -> llvm::Expected<compilerinfra::CostEstimate> {
@@ -148,30 +148,50 @@ void nativePanelCost(compilerinfra::Unit &u) {
           if (!g)
             return g.takeError();
           compilerinfra::CostEstimate e;
-          e.scope = "one native Q4_K task";
-          e.bottleneck = "Q4_K subgroup unpack, widen, and SIMD dot";
-          double subgroups = double(g->k) / 32.0;
-          double ops = double(t[0]) * subgroups * 64.0;
-          auto *machine =
+          e.scope = "one native record task";
+          e.bottleneck = "packed weight decoding and subgroup dot products";
+          const auto *machine =
               ctx.target.services.get<intentdsl::cpu::RowMachine>();
-          int64_t workers = machine->workers;
-          double jobs = std::ceil(double(g->m) / t[0]) *
-                        std::ceil(double(g->n) / t[1]) * g->batches;
-          double waves = std::max(1.0, std::ceil(jobs / workers));
-          e.terms["subgroup_ops"] = {ops, "FLOP"};
+          const auto *fields = ctx.target.services.get<RecordFields>();
+          int64_t rows = std::min(t[0], g->m);
+          double dotWork = 2. * rows * g->k;
+          e.terms["subgroup_ops"] = {dotWork, "FLOP"};
+          double work = dotWork;
+          auto format = dot.getAttrOfType<mlir::StringAttr>("format");
+          const auto *spec =
+              format ? intentdsl::kir::lookupQuantFormat(format.getValue())
+                     : nullptr;
+          if (spec &&
+              spec->roleLayout == intentdsl::kir::QuantRoleLayout::RecordGemv &&
+              !fields->grouped) {
+            int64_t lanes = t[3], bits = lanes * 32;
+            int64_t parallel = fields->decodedRows(*spec, bits, t[0]);
+            double blocks = double(g->k) / spec->blockElements;
+            double groups = double(spec->blockElements) /
+                            RecordFields::subgroupWidth(*spec);
+            // Each input row supplies one activation record to all weight
+            // rows in its register block. Byte-plane reconstruction performs
+            // a shift and mask per plane, then merges adjacent planes.
+            double weightVectors =
+                rows * blocks * llvm::divideCeil(spec->blockElements * 8, bits);
+            double decode = weightVectors * (3 * spec->numBitPlanes - 1);
+            double scales = rows * blocks * std::ceil(groups / lanes) *
+                            (1 + (spec->zeroBias != 0));
+            double activationLoads =
+                llvm::divideCeil(rows, parallel) * blocks *
+                llvm::divideCeil(spec->blockElements * 8, bits);
+            e.terms["record_rows_per_group"] = {double(parallel), "count"};
+            e.terms["record_decode_vectors"] = {decode, "count"};
+            e.terms["record_scale_vectors"] = {scales, "count"};
+            e.terms["activation_vector_loads"] = {activationLoads, "count"};
+            work += (decode + scales + activationLoads) * lanes;
+          }
           auto rate = intentdsl::quantity(ctx, "vector", "FLOP/ns");
           double effRate =
-              rate ? (*rate / workers) : (double(machine->vectorBits) / 8.0);
-          double dispatchNs = 25.0;
-          // Cost Estimate returns per-task time (multiplied by jobs/workers ~= waves
-          // by the CPU matrix partition selector, or directly if task-scoped).
-          // Wait: check how CPU matrix partition scales e.timeNs!
-          e.timeNs = dispatchNs + ops / effRate;
-          if (rate) {
-            // Preserve calibrated per-task time + per-task dispatch amortized
-            e.timeNs = dispatchNs + (ops * workers) / *rate;
-          }
-          (void)waves;
+              rate ? *rate / machine->workers : machine->vectorBits / 8.;
+          // The common partition estimator scales the per-task issue time
+          // by the number of waves and separately accounts for record traffic.
+          e.timeNs = 25. + work / effRate;
           return e;
         }},
        COMPILERINFRA_SOURCE});

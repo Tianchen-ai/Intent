@@ -1,3 +1,4 @@
+#include "Matrix.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/algorithm/kir/ir/Storage.h"
@@ -515,7 +516,8 @@ llvm::Error describeWeftMatrixPackage(func::FuncOp fn, Operation &prog,
   return llvm::Error::success();
 }
 
-LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
+LogicalResult lowerWeftMatrix(func::FuncOp fn, const RecordFields &record) {
+  bool boundWidening = record.grouped;
   auto *task = intentdsl::cpu::findMatrixTask(fn);
   if (!task)
     return failure();
@@ -980,7 +982,9 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
             ->getResult(0);
     makeOp(b, loc, "task_assume", {cond}, {});
   };
-  if (mr > 0) {
+  if ((useQuantEncoded || useEncodedRecords) && rowsDim > 0) {
+    emitDimAssume(symR, "eq", rowsDim);
+  } else if (mr > 0) {
     emitDimAssume(symR, "gt", 0);
     emitDimAssume(symR, "le", mr);
   }
@@ -1721,8 +1725,7 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
   } else if (isQuantRec) {
     auto fmtNamedAttr = b.getNamedAttr("format", dot.getAttr("format"));
     int64_t ng = K / qSpec->blockElements;
-    int64_t subElems =
-        qSpec->subBlockElements > 0 ? qSpec->subBlockElements : 16;
+    int64_t subElems = RecordFields::subgroupWidth(*qSpec);
     int64_t numSub = qSpec->blockElements / subElems;
     if (useQuantEncoded) {
       auto z = tb.idx(0), one = tb.idx(1), endG = tb.idx(ng);
@@ -1908,7 +1911,7 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, bool boundWidening) {
         b.setInsertionPointToEnd(&tkBb);
       };
 
-      int rUnroll = !boundWidening ? 4 : 1;
+      int64_t rUnroll = record.decodedRows(*qSpec, tile[3] * 32, mr);
       if (rUnroll <= 1) {
         emitQuantRows(z.v, symR, 1);
       } else {

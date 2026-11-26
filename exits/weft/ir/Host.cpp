@@ -277,7 +277,7 @@ void intentdsl::wefthost::WeftHostDialect::initialize() {
 }
 
 namespace CI_UNIT_NAMESPACE {
-LogicalResult lowerWeftMatrix(func::FuncOp, bool);
+LogicalResult lowerWeftMatrix(func::FuncOp, const RecordFields &);
 bool hasWeftMatrixProgram(ModuleOp);
 LogicalResult verifyWeftMatrix(ModuleOp, const compilerinfra::TargetProfile &,
                                bool);
@@ -293,13 +293,11 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(Lower)
   std::string phase;
   intentdsl::CallFacts facts;
-  bool grouped;
+  RecordFields record;
   int64_t tailVecWidth;
-  int64_t privateStackBytes;
-  Lower(StringRef p, const intentdsl::CallFacts &f, bool g, int64_t tv,
-        int64_t ps)
-      : phase(p.str()), facts(f), grouped(g), tailVecWidth(tv),
-        privateStackBytes(ps) {}
+  Lower(StringRef p, const intentdsl::CallFacts &f, const RecordFields &r,
+        int64_t tv)
+      : phase(p.str()), facts(f), record(r), tailVecWidth(tv) {}
   void runOnOperation() final {
     ModuleOp m = getOperation();
     if (hasWeftMatrixProgram(m) || hasWeftRowProgram(m) ||
@@ -308,7 +306,7 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
     auto f = *m.getOps<func::FuncOp>().begin();
     if (phase == "legal") {
       if (intentdsl::cpu::ownerTask(f) &&
-          failed(bindWeftMemberStores(f.front().front(), grouped, true)))
+          failed(bindWeftMemberStores(f.front().front(), record.grouped, true)))
         signalPassFailure();
       return;
     }
@@ -319,14 +317,14 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
     getContext().getOrLoadDialect<arith::ArithDialect>();
     getContext().getOrLoadDialect<math::MathDialect>();
     if (intentdsl::cpu::matrixTask(f)) {
-      if (failed(lowerWeftMatrix(f, grouped)))
+      if (failed(lowerWeftMatrix(f, record)))
         signalPassFailure();
     } else if (intentdsl::cpu::ownerTask(f)) {
-      if (failed(lowerWeftOrdered(f, facts, grouped)))
+      if (failed(lowerWeftOrdered(f, facts, record.grouped)))
         signalPassFailure();
     } else {
-      if (failed(
-              lowerWeftRow(f, facts, grouped, tailVecWidth, privateStackBytes)))
+      if (failed(lowerWeftRow(f, facts, record.grouped, tailVecWidth,
+                              record.privateStackBytes)))
         signalPassFailure();
     }
   }
@@ -361,10 +359,9 @@ struct PublishWeftRowAndOrderedABI
 } // namespace
 
 void lower(OpPassManager &pm, StringRef phase,
-           const intentdsl::CallFacts &facts, bool grouped,
-           int64_t tailVecWidth, int64_t privateStackBytes) {
-  pm.addPass(std::make_unique<Lower>(phase, facts, grouped, tailVecWidth,
-                                     privateStackBytes));
+           const intentdsl::CallFacts &facts, const RecordFields &record,
+           int64_t tailVecWidth) {
+  pm.addPass(std::make_unique<Lower>(phase, facts, record, tailVecWidth));
 }
 
 void publishWeftABI(OpPassManager &pm) {

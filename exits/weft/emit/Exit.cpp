@@ -17,8 +17,8 @@ void populateWeftMatrixContracts(intentdsl::cpu::MatrixMachine &, int64_t,
                                  bool);
 void registerWeftAddressOptimization(Unit &);
 void publishWeftABI(OpPassManager &);
-void lower(OpPassManager &, StringRef, const intentdsl::CallFacts &, bool,
-           int64_t, int64_t);
+void lower(OpPassManager &, StringRef, const intentdsl::CallFacts &,
+           const RecordFields &, int64_t);
 LogicalResult verifyHost(ModuleOp, const TargetProfile &, StringRef);
 
 namespace {
@@ -288,8 +288,8 @@ void bind(Unit &u) {
             if (auto *rm = p.services.get<intentdsl::cpu::RowMachine>())
               tailVec = std::max<int64_t>(1, rm->vectorBits / 32);
             const auto *rf = p.services.get<RecordFields>();
-            lower(pm, phase, *p.services.get<intentdsl::CallFacts>(),
-                  rf->grouped, tailVec, rf->privateStackBytes);
+            lower(pm, phase, *p.services.get<intentdsl::CallFacts>(), *rf,
+                  tailVec);
             if (phase == "callable")
               publishWeftABI(pm);
             return llvm::Error::success();
