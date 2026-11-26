@@ -288,6 +288,125 @@ void registerMatrixContracts(Unit &u) {
         return llvm::Error::success();
       });
 
+  {
+    ImplementationContract c;
+    c.name = "pack-bf16-rows";
+    c.operation = "mojo_row.pack_value_table";
+    c.symbol = "intent_pack_bf16_rows";
+    c.source = ImplementationSource::External;
+    c.minimum = Reuse::Vendor;
+    c.dependencies = {"onednn"};
+    c.layout = "dense BF16 planes to VNNI row pairs";
+    c.numerical = "bit-preserving BF16 copy";
+    c.estimator = u.qualify("brgemm-tile");
+    c.costParameters = {"vector_bits", "workers"};
+    c.available = [](const TargetProfile &p) {
+      return p.checkImplementation("exits/mojo::onednn-brgemm-bf16");
+    };
+    c.verify = [](Operation *op) {
+      auto slot = op->getAttrOfType<IntegerAttr>("slot").getInt();
+      auto fn = op->getParentOfType<func::FuncOp>();
+      if (!fn || slot < 0 || slot >= fn.getNumArguments())
+        return failure();
+      auto view = dyn_cast<MemRefType>(fn.getArgument(slot).getType());
+      auto shape = fn.getArgAttrOfType<DenseI64ArrayAttr>(slot, "cpu.shape");
+      auto strides =
+          fn.getArgAttrOfType<DenseI64ArrayAttr>(slot, "cpu.strides");
+      if (!view || !view.getElementType().isBF16() || !shape || !strides ||
+          shape.size() < 2 || shape.size() != strides.size())
+        return failure();
+      int64_t count = 1;
+      for (int i = shape.size() - 1; i >= 0; --i)
+        if (shape[i] <= 0 || strides[i] != count ||
+            __builtin_mul_overflow(count, shape[i], &count))
+          return failure();
+      auto cols = shape.asArrayRef().back(), rows = shape[shape.size() - 2];
+      return success(
+          rows % 2 == 0 && count <= INT64_MAX / 2 &&
+          op->getAttrOfType<IntegerAttr>("rows").getInt() == count / cols &&
+          op->getAttrOfType<IntegerAttr>("plane_rows").getInt() == rows &&
+          op->getAttrOfType<IntegerAttr>("columns").getInt() == cols);
+    };
+    TypedContract t;
+    t.shape.minOperands = t.shape.maxOperands = 0;
+    t.shape.minResults = t.shape.maxResults = 0;
+    t.effects = EffectMask::Allocate | EffectMask::ReadWrite;
+    c.typed = std::move(t);
+    populateTypedContractSummaries(c);
+    add(std::move(c));
+  }
+
+  {
+    ImplementationContract c;
+    c.name = "transpose-bf16-weights";
+    c.operation = "mojo_row.transpose_weights";
+    c.symbol = "intent_transpose_bf16";
+    c.source = ImplementationSource::External;
+    c.minimum = Reuse::Vendor;
+    c.dependencies = {"onednn"};
+    c.operands = "BF16 source, BF16 destination, row count";
+    c.layout = "out-of-place rectangular transpose";
+    c.accumulator = "none";
+    c.numerical = "bit-preserving BF16 copy";
+    c.effects = "read source, write destination";
+    c.estimator = u.qualify("brgemm-tile");
+    c.costParameters = {"vector_bits", "workers"};
+    c.available = [](const TargetProfile &p) {
+      return p.checkImplementation("exits/mojo::onednn-brgemm-bf16");
+    };
+    c.verify = [](Operation *op) {
+      return success(op->getAttrOfType<IntegerAttr>("columns").getInt() > 0 &&
+                     op->getAttrOfType<IntegerAttr>("pitch").getInt() > 0);
+    };
+    TypedContract t;
+    t.shape.minOperands = t.shape.maxOperands = 3;
+    t.shape.minResults = t.shape.maxResults = 0;
+    t.operandTypes = {ScalarTypeKind::Index};
+    t.effects = EffectMask::ReadWrite;
+    c.typed = std::move(t);
+    populateTypedContractSummaries(c);
+    add(std::move(c));
+  }
+  {
+    ImplementationContract c;
+    c.name = "bf16-value-prefix";
+    c.operation = "mojo_row.value_prefix";
+    c.symbol = "intent_brgemm_bf16_prefix";
+    c.source = ImplementationSource::External;
+    c.minimum = Reuse::Vendor;
+    c.dependencies = {"onednn"};
+    c.operands = "BF16 weights[M,lda], VNNI packed BF16 [K/2,N,2], F32 "
+                 "output[M,ldc], active K, QK context and scratch";
+    c.layout = "dense weight rows and interleaved value pairs";
+    c.accumulator = "F32";
+    c.effects = "reads active prefix, writes output and scratch, restores the "
+                "QK hardware context";
+    c.numerical = "BF16 pair dot with f32 accumulator and flushed subnormals";
+    c.estimator = u.qualify("brgemm-tile");
+    c.costParameters = {"vector_bits", "workers"};
+    c.available = [](const TargetProfile &p) {
+      return p.checkImplementation("exits/mojo::onednn-brgemm-bf16");
+    };
+    c.verify = [](Operation *op) {
+      auto dim = [&](StringRef name) {
+        return op->getAttrOfType<IntegerAttr>(name).getInt();
+      };
+      return success(dim("rows") > 0 && dim("columns") > 0 && dim("lda") > 0 &&
+                     dim("ldc") >= dim("columns") && allowsSubnormalFlush(op));
+    };
+    TypedContract t;
+    t.shape.minOperands = t.shape.maxOperands = 6;
+    t.shape.minResults = t.shape.maxResults = 1;
+    t.operandTypes = {ScalarTypeKind::Index};
+    t.resultTypes = {ScalarTypeKind::I32};
+    t.accumulatorTypes = {ScalarTypeKind::F32};
+    t.effects = EffectMask::ReadWrite;
+    t.numerical.requireInputSubnormalFlush =
+        t.numerical.requireOutputSubnormalFlush = true;
+    c.typed = std::move(t);
+    populateTypedContractSummaries(c);
+    add(std::move(c));
+  }
   makeBrgemm(
       "onednn-brgemm-s8", "s8 x s8 -> s32",
       "LHS row-major (unit K stride, K%4==0), RHS VNNI pack32 [K/4, nr, 4]",

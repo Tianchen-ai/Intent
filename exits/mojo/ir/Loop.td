@@ -350,6 +350,17 @@ def MojoCOmpFor : RowInst<"c_omp_for",[SingleBlock]> {
   let arguments=(ins I64Attr:$count, I64Attr:$grain, BoolAttr:$cyclic);
   let regions=(region AnyRegion:$body);
 }
+def MojoPackValueTable : RowInst<"pack_value_table",[DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments=(ins I64Attr:$slot, I64Attr:$rows, I64Attr:$columns,I64Attr:$plane_rows);
+}
+def MojoTransposeWeights : RowInst<"transpose_weights",[DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments=(ins Index:$src,Index:$dst,Index:$rows,I64Attr:$columns,I64Attr:$pitch);
+}
+def MojoValuePrefix : RowInst<"value_prefix",[DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments=(ins Index:$weights,Index:$values,Index:$out,Index:$count,Index:$restore,Index:$scratch,
+    I64Attr:$rows,I64Attr:$columns,I64Attr:$lda,I64Attr:$ldc);
+  let results=(outs I32:$status);
+}
 def MojoOwnerBrgemmPlan : RowInst<"owner_brgemm_plan"> {
   let arguments=(ins I64Attr:$rows, I64Attr:$cols, I64Attr:$depth);
 }

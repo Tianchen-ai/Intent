@@ -136,8 +136,17 @@ TerminalPrinter mojoMatrixPrinter() {
       PrintRule::format("$0.unsafe_offset($1).unsafe_store($2)");
   rules["mojo_row.acc_insert_lane"] = PrintRule::format("$0[$1] = $2");
   rules["mojo_row.extract_lane_dyn"] = PrintRule::format("var $r0 = $0[$1]");
-  rules["mojo_row.splat_scalar"] =
-      PrintRule::format("var $r0 = SIMD[DType.{dtype},{width}]($0)");
+  enterLocal("mojo_row.splat_scalar",
+             [](const LocalOpView &v, PrintContext &c) -> llvm::Error {
+               auto dtype = v.attrOfType<StringAttr>("dtype").getValue();
+               auto width = v.attrOfType<IntegerAttr>("width").getInt();
+               // Mojo's scalar Bool uses the explicit broadcast constructor.
+               c.line("var " + v.result(0).str() + " = SIMD[DType." +
+                      dtype.str() + "," + std::to_string(width) + "](" +
+                      (dtype == "bool" ? "fill=" : "") + v.operand(0).str() +
+                      ")");
+               return llvm::Error::success();
+             });
   rules["mojo_row.lane_sum"] = PrintRule::format("var $r0 = $0.reduce_add()");
   rules["mojo_row.lane_max"] = PrintRule::format(
       "var $r0 = bitcast[DType.float32](UInt32(0x7fc00000)) if $0.ne($0).reduce_or() else $0.reduce_max()");
@@ -1532,6 +1541,9 @@ TerminalPrinter mojoMatrixPrinter() {
             params.push_back(bArgs[base + 3] +
                              ": Pointer[UInt8,MutUntrackedOrigin]");
           }
+          if (view.attrOfType<UnitAttr>("packed_values"))
+            params.push_back(bArgs[base + 4] +
+                             ": Pointer[BFloat16,MutUntrackedOrigin]");
           c.line("@export(\"owner_task\")");
           c.line("def owner_task(" + llvm::join(params, ", ") +
                  (brg ? ") abi(\"C\") -> Int32:" : ") abi(\"C\"):"));
@@ -1588,6 +1600,23 @@ TerminalPrinter mojoMatrixPrinter() {
                return llvm::Error::success();
              });
 
+  rules["mojo_row.pack_value_table"] = PrintRule::format(
+      "uint16_t *vp=(uint16_t*)malloc(sizeof(uint16_t)*{rows}LL*{columns});\n"
+      "if (!vp) return 2;\n"
+      "#pragma omp parallel for num_threads(workers) schedule(static) "
+      "if(workers>1)\n"
+      "for(int64_t r=0;r<{rows};r+={plane_rows})\n"
+      "    intent_pack_bf16_rows((const "
+      "uint16_t*)a{slot}+r*{columns},vp+r*{columns},{plane_rows},{columns},{"
+      "columns});");
+  rules["mojo_row.transpose_weights"] =
+      PrintRule::format("external_call[\"intent_transpose_bf16\", "
+                        "NoneType]($0,$1,Int64($2),Int64({columns}),Int64({"
+                        "columns}),Int64({pitch}))");
+  rules["mojo_row.value_prefix"] =
+      PrintRule::format("var $r0=external_call[\"intent_brgemm_bf16_prefix\", "
+                        "Int32]($0,$1,$2,Int64({rows}),Int64({columns}),Int64($"
+                        "3),Int64({lda}),Int64({ldc}),$4,$5)");
   rules["mojo_row.owner_brgemm_plan"] = PrintRule::format(
       "const void *bh = "
       "intent_brgemm_get({rows},{cols},{depth},{depth},{cols},{cols},1,1,0);\n"
@@ -1605,6 +1634,8 @@ TerminalPrinter mojoMatrixPrinter() {
         } else if (at == PrintPoint::BeginBlock) {
           c.indent++;
         } else if (at == PrintPoint::EndBlock) {
+          if (view.attrOfType<UnitAttr>("packed_values"))
+            c.line("free(vp);");
           c.line(view.attrOfType<UnitAttr>("brgemm") ? "return status;"
                                                      : "return 0;");
           c.indent--;
@@ -1666,10 +1697,23 @@ TerminalPrinter mojoMatrixPrinter() {
                  c.line("unsigned char scratch[scratch_bytes] "
                         "__attribute__((aligned(64)));");
                }
+               bool flush =
+                   bool(view.attrOfType<UnitAttr>("flush_output_denormals"));
+               if (flush) {
+                 c.line("unsigned saved_csr = _mm_getcsr();");
+                 c.line("_mm_setcsr(saved_csr | _MM_FLUSH_ZERO_ON);");
+               }
                c.line(
                    std::string(brg ? "status |= owner_task(" : "owner_task(") +
                    callArgs + (callArgs.empty() ? "" : ",") + loExpr + ", " +
-                   hiExpr + (brg ? ", bh, scratch);" : ");"));
+                   hiExpr +
+                   (view.attrOfType<UnitAttr>("packed_values")
+                        ? ", bh, scratch, vp);"
+                    : brg ? ", bh, scratch);"
+                          : ");"));
+               if (flush)
+                 c.line("_mm_setcsr(saved_csr | (_mm_getcsr() & "
+                        "_MM_EXCEPT_MASK));");
                if (brg)
                  c.line("intent_brgemm_thread_leave();");
                return llvm::Error::success();

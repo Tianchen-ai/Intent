@@ -51,7 +51,12 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
     p.features.insert("onednn_runtime");
   auto caps = std::make_shared<intentdsl::cpu::RowMachine>();
   caps->vectorBits = *bits;
+  caps->l2CacheBytes = options.getInteger("l2_cache_bytes").value_or(0);
   caps->packedOwners = std::clamp<int64_t>(*bits / 32, 4, 16);
+  // The wide replay loop groups 16-lane chunks in pairs and stages
+  // values larger than a single 32-element register block.
+  caps->orderedValueMinColumns = 64;
+  caps->orderedValueColumnMultiple = 32;
   caps->workers = *workers;
   int64_t v = *bits / 32;
   auto matrix = std::make_shared<intentdsl::cpu::MatrixMachine>();

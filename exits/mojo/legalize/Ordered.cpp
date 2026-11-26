@@ -2,7 +2,7 @@
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
-#include "intentdsl/levels/execution/cpu/ir/OrderedDot.h"
+#include "intentdsl/levels/execution/cpu/ir/OrderedValue.h"
 #include "intentdsl/levels/execution/cpu/ir/OwnerTraversal.h"
 #include "intentdsl/levels/execution/cpu/ir/RepeatedScore.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -132,7 +132,9 @@ struct OrderedLowerer {
   Value wideAccBuf;
   std::optional<intentdsl::cpu::OrderedDotPanel> dotPanel;
   Value brgHandle, brgScratch, packedQueries, dots;
-  Value vAddrBuf;
+  Value vAddrBuf, packedValues, weights, tokenWeights;
+  std::optional<intentdsl::cpu::OrderedValuePanel> valuePanel;
+  bool emittedValuePanel = false;
   bool inTiledReplayPassA = false;
   Operation *tiledVReadOp = nullptr;
   Value tiledVPtr;
@@ -844,7 +846,8 @@ struct OrderedLowerer {
       if (isWideVal(origVec)) {
         Type elemTy = cast<MemRefType>(origBase.getType()).getElementType();
         if (!write) {
-          if (inTiledReplayPassA && &op == tiledVReadOp && laneIdx == 0) {
+          if (inTiledReplayPassA && &op == tiledVReadOp && laneIdx == 0 &&
+              (!valuePanel || valuePanel->read != &op)) {
             auto loop = op.getParentOfType<scf::ForOp>();
             Value lb = map.lookup(loop.getLowerBound());
             Value iv = map.lookup(loop.getInductionVar());
@@ -1383,8 +1386,8 @@ struct OrderedLowerer {
         Operation *candVRead = nullptr;
         unsigned wideReads = 0, wideAdds = 0;
         bool canTileReplay = false;
-        if (hasWideIter && vAddrBuf && batch >= 2 && accExtent >= 32 &&
-            accExtent % 32 == 0) {
+        if (hasWideIter && (vAddrBuf || valuePanel) && batch >= 2 &&
+            accExtent >= 32 && accExtent % 32 == 0) {
           if (auto parentIf = dyn_cast<scf::IfOp>(loop->getParentOp())) {
             if (parentIf->hasAttr("cpu.window_branch") &&
                 loop->getParentRegion() == &parentIf.getThenRegion()) {
@@ -1424,7 +1427,8 @@ struct OrderedLowerer {
                     bodyOk = false;
                 }
               }
-              if (bodyOk && wideReads == 1 && wideAdds == 1 && candVRead)
+              if (bodyOk && wideReads == 1 && wideAdds == 1 && candVRead &&
+                  (vAddrBuf || candVRead == valuePanel->read))
                 canTileReplay = true;
             }
           }
@@ -1488,7 +1492,55 @@ struct OrderedLowerer {
         if (canTileReplay) {
           Value span = b.create<arith::SubIOp>(loc, ub, lb);
           auto f32x16 = RankedTensorType::get({16}, b.getF32Type());
-          if (accExtent == 64 && lanes.size() == 16) {
+          if (valuePanel && candVRead == valuePanel->read) {
+            emittedValuePanel = true;
+            // Pass B consumes only the keys the fold actually visits. The value
+            // table is immutable and was packed once before launching the
+            // tasks.
+            SmallVector<Value> coords;
+            for (Value x : candVRead->getOperands().drop_front().drop_back()) {
+              materializeScalarLanes(x, lanes);
+              coords.push_back(lanes[0].lookup(x));
+            }
+            auto view = candVRead->getOperand(0);
+            coords.push_back(lb);
+            auto base = makeAddr(b, loc, packedValues, coords,
+                                 argArray(view, "cpu.strides")
+                                     .asArrayRef()
+                                     .take_front(coords.size()));
+            auto ptr = makeOp(b, loc, "ptr_offset", {packedValues, base},
+                              {b.getIndexType()})
+                           ->getResult(0);
+            makeOp(
+                b, loc, "transpose_weights", {tokenWeights, weights, span}, {},
+                {b.getNamedAttr("columns", b.getI64IntegerAttr(batch)),
+                 b.getNamedAttr("pitch", b.getI64IntegerAttr(dotPanel->tokens)),
+                 b.getNamedAttr(
+                     "ci.implementation",
+                     b.getStringAttr("exits/mojo::transpose-bf16-weights"))});
+            auto positive = b.create<arith::CmpIOp>(
+                loc, arith::CmpIPredicate::sgt, span, constIdx(b, loc, 0));
+            auto guarded = b.create<scf::IfOp>(loc, positive, true);
+            OpBuilder::InsertionGuard cfg(b);
+            b.setInsertionPointToStart(guarded.elseBlock());
+            emitZeroWideAccBuf();
+            b.setInsertionPointToStart(guarded.thenBlock());
+            auto args = SmallVector<Value>{weights, ptr,       wideAccBuf,
+                                           span,    brgHandle, brgScratch};
+            auto status =
+                makeOp(
+                    b, loc, "value_prefix", args, {b.getI32Type()},
+                    {b.getNamedAttr("rows", b.getI64IntegerAttr(batch)),
+                     b.getNamedAttr("columns", b.getI64IntegerAttr(accExtent)),
+                     b.getNamedAttr("lda",
+                                    b.getI64IntegerAttr(dotPanel->tokens)),
+                     b.getNamedAttr("ldc", b.getI64IntegerAttr(accStride)),
+                     b.getNamedAttr(
+                         "ci.implementation",
+                         b.getStringAttr("exits/mojo::bf16-value-prefix"))})
+                    ->getResult(0);
+            makeOp(b, loc, "check_status", {status});
+          } else if (accExtent == 64 && lanes.size() == 16) {
             // [6, 6, 4] x 64-col full-width register-blocked accumulation
             // (24, 24, 16 ZMM accumulators: 3 passes instead of 4, 50% fewer w loads)
             const size_t starts[3] = {0, 6, 12};
@@ -2140,7 +2192,13 @@ struct OrderedLowerer {
           Value lb = lanes[0].lookup(loop.getLowerBound());
           Value iv = lanes[0].lookup(loop.getInductionVar());
           Value off = b.create<arith::SubIOp>(loc, iv, lb);
-          if (vecActive && wideBatchSplats.count(betaOrig)) {
+          if (valuePanel && op.hasAttr("cpu.pv_engine")) {
+            auto *splat = betaOrig.getDefiningOp();
+            auto ext = splat->getOperand(0).getDefiningOp<arith::ExtFOp>();
+            auto raw = getBatchVec(ext.getIn(), lanes);
+            Value offset = makeAddr(b, loc, tokenWeights, {off}, {batch});
+            makeOp(b, loc, "store_slice", {tokenWeights, offset, raw});
+          } else if (vecActive && wideBatchSplats.count(betaOrig)) {
             Value wAddr = makeAddr(b, loc, localStackBuf, {off}, {batch});
             makeOp(b, loc, "store_slice",
                    {localStackBuf, wAddr, wideBatchSplats[betaOrig]});
@@ -2396,6 +2454,15 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn,
   if (panel && panel->dot->hasAttr("cpu.panel_engine") && lowerer.chunkedMode)
     lowerer.dotPanel = panel;
   bool brg = bool(lowerer.dotPanel);
+  if (brg && space.hasAttr("cpu.value_width")) {
+    auto value = intentdsl::cpu::orderedValuePanel(space, facts, *panel);
+    if (!value)
+      return space.emitError("weighted contraction has no proven value view");
+    lowerer.valuePanel = value;
+  }
+  bool pv = bool(lowerer.valuePanel);
+  if (space.hasAttr("cpu.value_width") && !pv)
+    return space.emitError("selected value panel requires wide owner replay");
   lowerer.wideViews.resize(batch);
   lowerer.wideSplats.resize(batch);
   bool usesStack = foundLocalBuf != nullptr || lowerer.invFloatsPerLane > 0 ||
@@ -2449,6 +2516,10 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn,
     ownerFn->setAttr("brgemm", b.getUnitAttr());
     lowerer.brgHandle = fnBb.addArgument(b.getIndexType(), loc);
     lowerer.brgScratch = fnBb.addArgument(b.getIndexType(), loc);
+    if (pv) {
+      ownerFn->setAttr("packed_values", b.getUnitAttr());
+      lowerer.packedValues = fnBb.addArgument(b.getIndexType(), loc);
+    }
   }
 
   b.setInsertionPointToEnd(&fnBb);
@@ -2462,6 +2533,10 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn,
     };
     lowerer.packedQueries = buffer("bfloat16", batch * panel->depth);
     lowerer.dots = buffer("float32", batch * panel->tokens);
+    if (pv) {
+      lowerer.weights = buffer("bfloat16", batch * panel->tokens);
+      lowerer.tokenWeights = buffer("bfloat16", batch * panel->tokens);
+    }
   }
 
   if (foundLocalBuf) {
@@ -2478,7 +2553,7 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn,
     lowerer.localStackBuf =
         makeOp(b, loc, "stack_alloc", {}, {b.getIndexType()}, scoreAllocAttrs)
             ->getResult(0);
-    if (lowerer.chunkedMode && lowerer.accExtent >= 32 &&
+    if (!pv && lowerer.chunkedMode && lowerer.accExtent >= 32 &&
         lowerer.accExtent % 32 == 0) {
       int64_t paddedAddrCount = slots + ((slots * 8) % 4096 == 0 ? 24 : 0);
       SmallVector<NamedAttribute, 3> addrAllocAttrs{
@@ -2571,6 +2646,9 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn,
 
   if (failed(lowerer.lowerBlock(srcBody, lanes)))
     return failure();
+  if (pv && !lowerer.emittedValuePanel)
+    return space.emitError(
+        "selected matrix value contraction has no matching replay");
   makeOp(b, loc, "end");
   b.setInsertionPointToEnd(&fnBb);
   if (brg)
@@ -2593,13 +2671,22 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn,
       (externCParams.empty() ? "" : ",") + "int64_t,int64_t);";
   if (brg)
     externDecl = "extern int owner_task(" + llvm::join(externCParams, ",") +
-                 ",int64_t,int64_t,const void*,void*);\n"
-                 "extern const void "
+                 ",int64_t,int64_t,const void*,void*" +
+                 (pv ? ",const void*" : "") +
+                 ");\nextern const void "
                  "*intent_brgemm_get(int64_t,int64_t,int64_t,int64_t,int64_t,"
                  "int64_t,int32_t,int32_t,int32_t);\n"
                  "extern int64_t intent_brgemm_scratch_bytes(const void*);\n"
                  "extern int32_t intent_brgemm_thread_enter(const "
                  "void*);\nextern void intent_brgemm_thread_leave(void);";
+  if (pv) {
+
+    externDecl +=
+        "\n#include <stdlib.h>\nextern void intent_pack_bf16_rows(const "
+        "uint16_t*,uint16_t*,int64_t,int64_t,int64_t);";
+  }
+  if (pv && space.hasAttr("cpu.worker_output_ftz"))
+    externDecl += "\n#include <xmmintrin.h>";
   auto *cFn = makeOp(
       b, loc, "c_host_fn", {}, {},
       {b.getNamedAttr("params",
@@ -2616,6 +2703,19 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn,
            {b.getNamedAttr("rows", b.getI64IntegerAttr(panel->tokens)),
             b.getNamedAttr("cols", b.getI64IntegerAttr(batch)),
             b.getNamedAttr("depth", b.getI64IntegerAttr(panel->depth))});
+  }
+  if (pv) {
+    auto &value = *lowerer.valuePanel;
+    cFn->setAttr("packed_values", b.getUnitAttr());
+    auto arg = cast<BlockArgument>(value.read->getOperand(0));
+    makeOp(b, loc, "pack_value_table", {}, {},
+           {b.getNamedAttr("ci.implementation",
+                           b.getStringAttr("exits/mojo::pack-bf16-rows")),
+            b.getNamedAttr("slot", b.getI64IntegerAttr(arg.getArgNumber())),
+            b.getNamedAttr("rows",
+                           b.getI64IntegerAttr(value.elements / value.columns)),
+            b.getNamedAttr("columns", b.getI64IntegerAttr(value.columns)),
+            b.getNamedAttr("plane_rows", b.getI64IntegerAttr(value.tokens))});
   }
   auto *ompFor = makeOp(
       b, loc, "c_omp_for", {}, {},
@@ -2637,6 +2737,10 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn,
        b.getNamedAttr("grain", b.getI64IntegerAttr(grain))});
   if (brg)
     invoke->setAttr("brgemm", b.getUnitAttr());
+  if (pv)
+    invoke->setAttr("packed_values", b.getUnitAttr());
+  if (pv && space.hasAttr("cpu.worker_output_ftz"))
+    invoke->setAttr("flush_output_denormals", b.getUnitAttr());
   makeOp(b, loc, "end");
 
   SmallVector<Operation *> toErase;
@@ -2668,6 +2772,19 @@ LogicalResult verifyMojoOrdered(ModuleOp m, const TargetProfile &p,
       prog.getRegion(1).empty())
     return prog.emitError("incomplete mojo_row.ordered_program regions");
 
+  if (prog.walk([&](Operation *op) {
+            if (!op->hasAttr("flush_output_denormals"))
+              return WalkResult::advance();
+            return op->getName().getStringRef() == "mojo_row.c_owner_call" &&
+                           op->hasAttr("packed_values") &&
+                           intentdsl::cpu::allowsWorkerOutputFtz(prog, p)
+                       ? WalkResult::advance()
+                       : WalkResult::interrupt();
+          })
+          .wasInterrupted())
+    return prog.emitError(
+        "worker FTZ requires a common signed-output flush mode");
+
   // Independently verify windowed score buffer, replay, and over-window
   // zero-read invariants on resume (parity with CPU verifyOwnerBuffers).
   SmallVector<Operation *, 2> guards, branches;
@@ -2692,8 +2809,10 @@ LogicalResult verifyMojoOrdered(ModuleOp m, const TargetProfile &p,
   if (winAttr || batchAttr || !guards.empty() || !branches.empty() ||
       !winBufs.empty() || !addrBufs.empty()) {
     if (!winAttr || !batchAttr || batchAttr.getInt() < 2 ||
-        winAttr.getInt() !=
-            intentdsl::cpu::batchScoreSlots / batchAttr.getInt() ||
+        winAttr.getInt() <= 0 ||
+        winAttr.getInt() > intentdsl::cpu::scoreSlotLimit(
+                               *p.services.get<intentdsl::cpu::RowMachine>()) /
+                               batchAttr.getInt() ||
         guards.size() != 1 || branches.size() != 1 || winBufs.size() != 1 ||
         addrBufs.size() > 1)
       return prog.emitError(

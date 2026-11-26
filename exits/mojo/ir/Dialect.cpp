@@ -264,6 +264,13 @@ struct MojoI32AccContract
   }
 };
 
+struct MojoPrefixContract
+    : public compilerinfra::ContractOpInterface::ExternalModel<
+          MojoPrefixContract, MojoValuePrefix> {
+  Type getAccumulatorType(Operation *op) const {
+    return Float32Type::get(op->getContext());
+  }
+};
 struct MojoBrgemmContract
     : public compilerinfra::ContractOpInterface::ExternalModel<
           MojoBrgemmContract, MojoBrgemmCall> {
@@ -757,6 +764,21 @@ void MojoQ4KSuperblock::getEffects(EffectList &effects) {
   effects.emplace_back(MemoryEffects::Read::get());
 }
 
+void MojoPackValueTable::getEffects(EffectList &effects) {
+  effects.emplace_back(MemoryEffects::Allocate::get());
+  effects.emplace_back(MemoryEffects::Read::get());
+  effects.emplace_back(MemoryEffects::Write::get());
+}
+
+void MojoTransposeWeights::getEffects(EffectList &effects) {
+  effects.emplace_back(MemoryEffects::Read::get());
+  effects.emplace_back(MemoryEffects::Write::get());
+}
+void MojoValuePrefix::getEffects(EffectList &effects) {
+  effects.emplace_back(MemoryEffects::Read::get());
+  effects.emplace_back(MemoryEffects::Write::get());
+}
+
 void MojoBrgemmCall::getEffects(EffectList &effects) {
   effects.emplace_back(MemoryEffects::Read::get());
   effects.emplace_back(MemoryEffects::Write::get());
@@ -777,6 +799,7 @@ void intentdsl::rowmojo::RowMojoDialect::initialize() {
   MojoVnniDot4::attachInterface<MojoVnniDot4Contract>(*ctx);
   MojoQ4KSuperblock::attachInterface<MojoQ4KContract>(*ctx);
   MojoBrgemmCall::attachInterface<MojoBrgemmContract>(*ctx);
+  MojoValuePrefix::attachInterface<MojoPrefixContract>(*ctx);
   MojoUniform::attachInterface<MojoI32AccContract<MojoUniform>>(*ctx);
   MojoReduceSum16x16::attachInterface<MojoF32AccContract<MojoReduceSum16x16>>(
       *ctx);
