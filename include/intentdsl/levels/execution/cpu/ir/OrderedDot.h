@@ -63,7 +63,6 @@ inline std::optional<OrderedDotPanel> orderedDotPanel(mlir::Operation &space,
       continue;
     for (auto &dot : loop.getBody()->without_terminator()) {
       if (dot.getName().stripDialect() != "lane_sum" ||
-          !dot.hasAttr("denormal-fp-math") ||
           !compilerinfra::allowsSubnormalFlush(&dot) ||
           !arith::bitEnumContainsAll(kir::getFastMathFlags(&dot),
                                      arith::FastMathFlags::reassoc))

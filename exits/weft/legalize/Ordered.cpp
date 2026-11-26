@@ -349,6 +349,7 @@ struct TiledTwoPassPlan {
   Value stage2MassRes;
   Value stage2AccRes;
   bool useExp2 = true;
+  bool flushExpOutput = false;
   std::optional<Type> weightRoundType;
   Value vMem;
   SmallVector<Value, 4> vCoords;
@@ -1210,10 +1211,13 @@ struct OrderedLowerer {
                      expOp->getName().getStringRef() != "math.exp"))
         return false;
       bool isExp2 = expOp->getName().getStringRef() == "math.exp2";
-      if (recordV)
+      bool flushOutput = allowsOutputSubnormalFlush(expOp);
+      if (recordV) {
         plan.useExp2 = isExp2;
-      else if (plan.useExp2 != isExp2)
+        plan.flushExpOutput = flushOutput;
+      } else if (plan.useExp2 != isExp2 || plan.flushExpOutput != flushOutput) {
         return false;
+      }
 
       Value expArg = expOp->getOperand(0);
       Value postSc;
@@ -1715,47 +1719,45 @@ struct OrderedLowerer {
         diff = bin("mul", diff, postScaleTerm, ty);
       return diff;
     };
-    const bool allowExpFtz = !isRvv && intentdsl::kir::allowsSubnormalFtz(fn);
-    TaskTerm ftzMinS = allowExpFtz
-                           ? lit(plan.useExp2 ? "-126.0" : "-87.33", "f32")
-                           : TaskTerm{};
+    // First binary32 input whose exponential rounds to a normal result.
+    // For exp this is ceil_f32(log(2^-126 - 2^-150)); for exp2 it is -126.
+    TaskTerm firstNormal = !isRvv && plan.flushExpOutput
+                               ? lit(plan.useExp2 ? "-126.0" : "-87.33654022216796875", "f32")
+                               : TaskTerm{};
+    auto expWeight = [&](TaskTerm diff, TaskTerm zero, StringRef ty, StringRef maskTy) {
+      TaskTerm flush;
+      if (firstNormal.v) {
+        flush = cmp("lt", diff, firstNormal, maskTy);
+        // Avoid producing subnormals in the vector math library. With an
+        // ordered less-than, a NaN keeps its original argument and result.
+        diff = sel(flush, firstNormal, diff, ty);
+      }
+      TaskTerm weight = unaryOp(plan.useExp2 && !isRvv ? "exp2" : "exp", diff);
+      return flush.v ? sel(flush, zero, weight, ty) : weight;
+    };
     auto emitExpWeight2D = [&](TaskTerm diff, TaskTerm tIv, TaskTerm boundVec64,
                                StringRef causalPred) -> TaskTerm {
       if (plan.useExp2 && isRvv)
         diff = bin("mul", diff, ln2S, scoreMatTy);
-      TaskTerm keepMask;
-      if (allowExpFtz) {
-        keepMask = cmp("ge", diff, ftzMinS, maskMatTy);
-        diff = bin("max", diff, ftzMinS, scoreMatTy);
-      }
-      TaskTerm ex = (plan.useExp2 && !isRvv) ? unaryOp("exp2", diff)
-                                             : unaryOp("exp", diff);
+      TaskTerm ex = expWeight(diff, zeroM, scoreMatTy, maskMatTy);
       if (plan.hasCausal) {
         TaskTerm t64 = castOp(tIv, "si64");
         TaskTerm tVec64 = bin("add", iotaTok64, t64, si64TTy);
-        TaskTerm cm = cmp(causalPred, boundVec64, tVec64, maskMatTy);
-        keepMask = keepMask.v ? bin("and", cm, keepMask, maskMatTy) : cm;
+        return sel(cmp(causalPred, boundVec64, tVec64, maskMatTy), ex, zeroM, scoreMatTy);
       }
-      return keepMask.v ? sel(keepMask, ex, zeroM, scoreMatTy) : ex;
+      return ex;
     };
     auto emitExpWeight1D = [&](TaskTerm diff1D, TaskTerm tIv,
                                TaskTerm boundVec64,
                                StringRef causalPred) -> TaskTerm {
       if (plan.useExp2 && isRvv)
         diff1D = bin("mul", diff1D, ln2S, vecBTy);
-      TaskTerm keepMask;
-      if (allowExpFtz) {
-        keepMask = cmp("ge", diff1D, ftzMinS, maskBTy);
-        diff1D = bin("max", diff1D, ftzMinS, vecBTy);
-      }
-      TaskTerm ex1D = (plan.useExp2 && !isRvv) ? unaryOp("exp2", diff1D)
-                                               : unaryOp("exp", diff1D);
+      TaskTerm ex1D = expWeight(diff1D, zeroV, vecBTy, maskBTy);
       if (plan.hasCausal) {
         TaskTerm t64 = castOp(tIv, "si64");
-        TaskTerm cm = cmp(causalPred, boundVec64, t64, maskBTy);
-        keepMask = keepMask.v ? bin("and", cm, keepMask, maskBTy) : cm;
+        return sel(cmp(causalPred, boundVec64, t64, maskBTy), ex1D, zeroV, vecBTy);
       }
-      return keepMask.v ? sel(keepMask, ex1D, zeroV, vecBTy) : ex1D;
+      return ex1D;
     };
     auto computeInvVec = [&](TaskTerm mv) -> TaskTerm {
       if (plan.hasDirectRecip)

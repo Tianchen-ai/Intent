@@ -2,20 +2,11 @@
 #include "intentdsl/levels/execution/cpu/ir/OrderedDot.h"
 
 namespace intentdsl::cpu {
-// A hardware FTZ control applies to every instruction on the worker. Require
-// the target-wide permission as well as the effective mode of each operation.
-inline llvm::DenormalMode
-targetDenormalMode(const compilerinfra::TargetProfile &profile) {
-  auto policy = profile.services.get<kir::FastMathPolicy>();
-  return policy && policy->denormalFpMath != "ieee"
-             ? llvm::parseDenormalFPAttribute(policy->denormalFpMath)
-             : profile.numerical.defaultDenormal;
-}
+// A hardware FTZ control applies to every instruction on the worker. Check
+// the effective IR mode including nested overrides before changing MXCSR.
 inline bool allowsWorkerOutputFtz(mlir::Operation &scope,
                                   const compilerinfra::TargetProfile &profile) {
-  auto global = targetDenormalMode(profile);
-  if (!profile.features.count("amx_bf16") ||
-      global.Output != llvm::DenormalMode::PreserveSign)
+  if (!profile.features.count("amx_bf16"))
     return false;
   return !scope
               .walk([&](mlir::Operation *op) {
@@ -28,17 +19,13 @@ inline bool allowsWorkerOutputFtz(mlir::Operation &scope,
 }
 
 struct OrderedValuePanel {
-  mlir::Operation *add, *mul, *read;
+  mlir::Operation *add, *read;
   int64_t columns, tokens, elements;
   bool supported(const compilerinfra::TargetProfile &profile) const {
     auto &machine = *profile.services.get<RowMachine>();
-    auto global = targetDenormalMode(profile);
-    // Local flags on one dot or division do not authorize flushing the
-    // independently evaluated value projection.
-    bool explicitFtz =
-        (global.inputsAreZero() && global.outputsAreZero()) ||
-        (add->hasAttr("denormal-fp-math") && mul->hasAttr("denormal-fp-math"));
-    return explicitFtz && columns >= machine.orderedValueMinColumns &&
+    // orderedValuePanel already verified the effective FTZ mode of the
+    // multiply and its accumulator, including author and per-op overrides.
+    return columns >= machine.orderedValueMinColumns &&
            columns % machine.orderedValueColumnMultiple == 0;
   }
 };
@@ -148,7 +135,7 @@ orderedValuePanel(mlir::Operation &space, const CallFacts &facts,
               .wasInterrupted();
       if (!unsafe && extent <= INT64_MAX / 2)
         result = OrderedValuePanel{
-            add, mul, read, *shape->back().getAsInteger(), qk.tokens, extent};
+            add, read, *shape->back().getAsInteger(), qk.tokens, extent};
     }
   });
   return result;
