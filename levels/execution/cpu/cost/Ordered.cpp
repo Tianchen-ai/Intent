@@ -70,7 +70,7 @@ double meanKeySpan(const intentdsl::cpu::ScoreCachePlan &panel,
 } // namespace
 void ownerCost(Unit &u) {
   u.costModels.push_back(
-      {{"ordered-tasks", u.qualify("ordered-owners"), "4",
+      {{"ordered-tasks", u.qualify("ordered-owners"), "5",
         [](mlir::Operation *o, const StructuralCandidate &c,
            CostContext &ctx) -> llvm::Expected<CostEstimate> {
           auto f = ctx.target.services.get<intentdsl::CallFacts>();
@@ -230,11 +230,12 @@ void ownerCost(Unit &u) {
                         batch * tokens * (sizeof(float) + sizeof(uint16_t) + 2);
                     double coldBytes = std::max(0., active - rm->l1CacheBytes);
                     packedBytes += 2 * panels * coldBytes;
-                    // Over the downstream vector-value limit each intermediate
-                    // needs a separate payload and validity traversal.
+                    // Single-use pointwise chains share one packet loop. The
+                    // FP32 weights feeding both mass and PV still need their
+                    // private payload and validity read/write.
                     if (batch * tokens > rm->maxVectorElements)
                       packedBytes +=
-                          8 * scoreEntries * (sizeof(float) + sizeof(uint8_t));
+                          2 * scoreEntries * (sizeof(float) + sizeof(uint8_t));
                     if (batch * cols.getInt() > rm->maxVectorElements)
                       packedBytes += 2 * panels * outBytes;
                   }
