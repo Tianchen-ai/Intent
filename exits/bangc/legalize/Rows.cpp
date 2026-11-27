@@ -5,6 +5,7 @@
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/algorithm/kir/ir/Segment.h"
 #include "intentdsl/levels/execution/block/ir/Grid.h"
+#include "intentdsl/levels/storage/dsa/ir/Matrix.h"
 #include "intentdsl/levels/storage/dsa/ir/Supply.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -130,6 +131,7 @@ struct RowLowerer {
   llvm::DenseMap<std::tuple<Block *, Value, Value, int64_t>, Value>
       memberCoordCache;
   Value storage;
+  Value histogramRaw, histogramKeys, histogramFilters, histogramAxis;
   llvm::DenseMap<Value, Value> localBroadcasts;
   int64_t boundRows = 0, boundColumns = 0;
   int64_t widthMultiple = 0;
@@ -194,6 +196,35 @@ struct RowLowerer {
     if (minPitch == INT64_MAX)
       minPitch = 0;
     multiMember = (maxRows * batch) > 1;
+  }
+
+  void prepareHistogram(ArrayRef<Operation *> ops) {
+    auto panel = layout.getAs<DenseI64ArrayAttr>("histogram_panel");
+    if (!panel)
+      return;
+    Type elem;
+    for (auto *root : ops)
+      root->walk([&](Operation *op) {
+        if (op->getName().getStringRef() == "block.key_counts")
+          elem = elemOf(op->getOperand(0).getType());
+      });
+    auto samples = panel[0], bins = panel[1];
+    auto buffer = [&](Type t, int64_t n, bool filter = false) {
+      return makeOp(filter ? "wram_buffer" : "nram_buffer", {},
+                    {ptrType(b.getContext(), t, filter ? 3 : 1)},
+                    {b.getNamedAttr("elements", b.getI64IntegerAttr(n))})
+          ->getResult(0);
+    };
+    histogramRaw = buffer(elem, samples);
+    histogramKeys =
+        buffer(b.getI16Type(), samples * (elem.isInteger(64) ? 4 : 1));
+    histogramFilters = buffer(b.getI16Type(), 64 * 32, true);
+    histogramAxis = buffer(b.getI16Type(), bins * 32);
+    forLoop(cI64(0), cI64(bins), cI64(1), [&](Value bin) {
+      auto row = makeAddr(histogramAxis, {bin}, {cI64(32)}, 1);
+      fillVec(row, cI64(32),
+              b.create<arith::TruncIOp>(loc, b.getI16Type(), bin));
+    });
   }
 
   Value cI64(int64_t v) {
@@ -1891,6 +1922,24 @@ struct RowLowerer {
                 Value end = b.create<arith::MinSIOp>(
                     loc, b.create<arith::AddIOp>(loc, first, cI64(span)),
                     cI64(extent));
+                if (histogramRaw) {
+                  Value take = b.create<arith::MaxSIOp>(
+                      loc, cI64(0), b.create<arith::SubIOp>(loc, end, first));
+                  ifThen(b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt,
+                                                 take, cI64(0)),
+                         [&] {
+                           memcpy1D(histogramRaw,
+                                    makeAddr(ptr, {first}, {cI64(1)}, 0), take,
+                                    "GDRAM2NRAM", false);
+                           makeOp("key_histogram",
+                                  {dst, histogramRaw, histogramKeys,
+                                   histogramFilters, histogramAxis, take,
+                                   cI64(layout.getAs<DenseI64ArrayAttr>(
+                                       "histogram_panel")[1])},
+                                  {}, {}, "wram-key-count");
+                         });
+                  continue;
+                }
                 Value s0 = viewStride(ptr, 0);
                 forLoop(first, end, symP, [&](Value m) {
                   Value take = b.create<arith::MinSIOp>(
@@ -3080,6 +3129,7 @@ struct RowLowerer {
     if (!localBroadcasts.empty())
       sync("io");
 
+    prepareHistogram(oldOps);
     if (failed(emitOuterOps(oldOps, cI64(0))))
       return fn.emitError("failed to lower row program to bangc_src");
 

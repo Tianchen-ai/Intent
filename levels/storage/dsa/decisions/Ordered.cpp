@@ -247,6 +247,8 @@ LogicalResult verifyOwners(func::FuncOp fn, const TargetProfile &p,
     auto m = d ? d.getAs<StringAttr>("mode") : StringAttr();
     if (!b || !m)
       return space.emitError("missing supply decision");
+    if (m == "indexed-row-add")
+      return success(!b.getInt() && indexedRowAdd(fn, p).has_value());
     if (m == "panel-fold") {
       auto pf = panelFoldSupply(fn, p);
       return success(pf && b.getInt() == pf->wramBytes &&
@@ -271,6 +273,10 @@ LogicalResult verifyOwners(func::FuncOp fn, const TargetProfile &p,
   if (!transfers)
     return space.emitError("missing ordered transfers");
 
+  if (transfers == "indexed-row-add")
+    return success(bytes.getInt() == 0 && indexedRowAdd(fn, p).has_value() &&
+                   space.getAttrOfType<StringAttr>("dsa.schedule") ==
+                       "participant-stride");
   if (transfers == "panel-fold") {
     auto pf = panelFoldSupply(fn, p);
     auto rows = space.getAttrOfType<IntegerAttr>("dsa.panel_rows");
@@ -344,6 +350,11 @@ void ownerSupply(Unit &u) {
     auto mode = d ? d.getAs<StringAttr>("mode") : StringAttr();
     if (!b || !mode)
       return llvm::createStringError("missing ordered supply mode");
+    if (mode == "indexed-row-add") {
+      if (b.getInt() || !dsa::indexedRowAdd(fn, p))
+        return llvm::createStringError("invalid indexed row reduction");
+      return llvm::Error::success();
+    }
     if (mode == "panel-fold") {
       auto pf = dsa::panelFoldSupply(fn, p);
       if (!pf || b.getInt() != pf->wramBytes ||
@@ -395,6 +406,8 @@ void ownerSupply(Unit &u) {
     };
     add("direct", 0);
     auto fn = o->getParentOfType<func::FuncOp>();
+    if (dsa::indexedRowAdd(fn, p))
+      add("indexed-row-add", 0);
     if (auto bytes = dsa::privateBytes(fn, p);
         bytes && dsa::fits(fn, p, bytes))
       add("stage-slab", bytes);

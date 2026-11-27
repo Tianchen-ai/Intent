@@ -5,7 +5,7 @@ using namespace compilerinfra;
 using namespace mlir;
 void supplyCost(Unit &u) {
   u.costModels.push_back(
-      {{"pipeline-time", u.qualify("supply"), "2",
+      {{"pipeline-time", u.qualify("supply"), "3",
         [](Operation *op, const StructuralCandidate &c,
            CostContext &ctx) -> llvm::Expected<CostEstimate> {
           auto d = cast<DictionaryAttr>(c.value);
@@ -56,10 +56,13 @@ void supplyCost(Unit &u) {
           unsigned vecOps = 0, scalarOps = 0;
           unsigned summaries = 0, scans = 0, atomics = 0;
           bool hasIndexed = false;
+          int64_t keySpan = 0;
           op->walk([&](Operation *i) {
             auto k = i->getName().stripDialect();
             summaries += k == "summary_reduce";
             scans += k == "scan_sum";
+            if (k == "key_counts")
+              keySpan = i->getAttrOfType<IntegerAttr>("span").getInt();
             atomics += k == "atomic_add_at";
             hasIndexed |= k == "indexed_tile_read";
             if (k == "reduce") {
@@ -178,6 +181,17 @@ void supplyCost(Unit &u) {
                     pred.terms["serial_prefix_adds"].value) /
                        *vector +
                    effGroup * e.terms.at("native_compute").value);
+              if (keySpan) {
+                auto panel = d.getAs<DenseI64ArrayAttr>("histogram_panel");
+                double work = effGroup * keySpan;
+                if (panel) {
+                  double packets = std::ceil(panel[0] / 32.0);
+                  work = effGroup * packets * (1 + panel[1] / 64) +
+                         panel[1] / std::max(steps, 1.0);
+                }
+                pred.terms["key_count_operations"] = {work, "count"};
+                compute += work / *vector;
+              }
               double overlap =
                   depth == 2
                       ? std::max(0., steps - 1) *
@@ -199,10 +213,13 @@ void supplyCost(Unit &u) {
               pred.timeNs = *launch + firstIo + sharedPrologue +
                             steps * (fetch + compute + write) - overlap +
                             waitNs;
-              if(atomics)pred.timeNs=*pred.timeNs+steps*effGroup*n*atomics*(*sync);
+              if (atomics)
+                pred.timeNs =
+                    *pred.timeNs + steps * effGroup * n * atomics * (*sync);
               if(segmentWork || keys){
                 auto rate=intentdsl::quantity(ctx,"read_1","B/ns");
-                if(rate)*pred.timeNs+=(segmentWork+keys)/ *rate;
+                if (rate)
+                  *pred.timeNs += (segmentWork + keys) / *rate;
               }
               if (!e.timeNs || *pred.timeNs < *e.timeNs)
                 e.timeNs = pred.timeNs;

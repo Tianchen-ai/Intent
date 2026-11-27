@@ -192,6 +192,8 @@ LogicalResult verifyCallableRows(ModuleOp m, const TargetProfile &profile) {
   if (available < 0)
     return fn.emitError("row allocation exceeds private NRAM budget");
 
+  auto matrixStorage = profile.services.get<intentdsl::dsa::MatrixStorage>();
+  int64_t freeWram = matrixStorage ? matrixStorage->wramBytes : 0;
   compilerinfra::IntegerRangeContext rangeCtx(fn.getOperation());
   std::set<std::string> declaredResources, requiredResources;
   bool walkFailed = m.walk([&](Operation *op) {
@@ -203,6 +205,20 @@ LogicalResult verifyCallableRows(ModuleOp m, const TargetProfile &profile) {
                          return WalkResult::interrupt();
                        }
                        auto fullName = op->getName().getStringRef();
+                       if (fullName == "bangc_src.wram_buffer") {
+                         auto n = op->getAttrOfType<IntegerAttr>("elements")
+                                      .getInt();
+                         auto bytes =
+                             cast<MemRefType>(op->getResult(0).getType())
+                                 .getElementTypeBitWidth() /
+                             8;
+                         if (bytes <= 0 || n <= 0 || n > freeWram / bytes) {
+                           op->emitError(
+                               "row filters exceed private WRAM capacity");
+                           return WalkResult::interrupt();
+                         }
+                         freeWram -= n * bytes;
+                       }
                        if (fullName == "bangc_src.nram_buffer") {
                          auto elements =
                              op->getAttrOfType<IntegerAttr>("elements").getInt();

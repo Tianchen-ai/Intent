@@ -11,7 +11,8 @@ namespace CI_UNIT_NAMESPACE {
 // fits alongside every candidate's live NRAM allocation.
 inline llvm::SmallVector<std::pair<mlir::BlockArgument, int64_t>>
 broadcastSpans(mlir::func::FuncOp fn, const intentdsl::CallFacts &facts,
-               const intentdsl::dsa::LocalSupply &machine) {
+               const intentdsl::dsa::LocalSupply &machine,
+               mlir::DictionaryAttr layout = {}) {
   using namespace mlir;
   llvm::SmallVector<std::pair<BlockArgument, int64_t>> spans;
   auto signature = fn->getAttrOfType<StringAttr>("kir.public_abi");
@@ -39,7 +40,8 @@ broadcastSpans(mlir::func::FuncOp fn, const intentdsl::CallFacts &facts,
       return spans;
     writable.insert(*group);
   }
-  auto layout = fn->getAttrOfType<DictionaryAttr>("dsa.layout");
+  if (!layout)
+    layout = fn->getAttrOfType<DictionaryAttr>("dsa.layout");
   int64_t liveBytes = 0;
   for (auto cfg : layout.getAs<ArrayAttr>("rows"))
     liveBytes = std::max(liveBytes,

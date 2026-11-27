@@ -4688,6 +4688,32 @@ struct OrderedLowerer {
     return status;
   }
 
+  LogicalResult lowerIndexedRowAdd(const intentdsl::dsa::IndexedRowAdd &p) {
+    auto elem = cast<MemRefType>(p.source.getType()).getElementType();
+    auto keys = nramBuf(b.getI32Type(), p.batch);
+    auto rows = nramBuf(elem, p.batch * p.width);
+    auto old = nramBuf(elem, p.width);
+    forLoop(symTaskId, symGrid, symTaskDim, [&](Value job) {
+      Value first = b.create<arith::MulIOp>(loc, job, cI64(p.batch));
+      Value live = b.create<arith::MinSIOp>(
+          loc, cI64(p.batch),
+          b.create<arith::SubIOp>(loc, cI64(p.rows), first));
+      memcpy1D(keys, makeAddr(p.keys, {first}, {cI64(1)}, 0), live,
+               "GDRAM2NRAM");
+      Value count = b.create<arith::MulIOp>(loc, live, cI64(p.width));
+      memcpy1D(rows, makeAddr(p.source, {first}, {cI64(p.width)}, 0), count,
+               "GDRAM2NRAM");
+      forLoop(cI64(0), live, cI64(1), [&](Value i) {
+        Value target = toI64(loadAt(keys, i));
+        auto dest = makeAddr(p.destination, {target}, {cI64(p.width)}, 0);
+        auto delta = makeAddr(rows, {i}, {cI64(p.width)}, 1);
+        makeOp("atomic_add", {old, dest, delta, cI64(p.width)}, {}, {},
+               "native-row-atomic-add");
+      });
+    });
+    return success();
+  }
+
   LogicalResult run(ModuleOp m) {
     int64_t tile = space.getAttrOfType<IntegerAttr>("block.owner_tile").getInt();
     int64_t owners = space.getAttrOfType<IntegerAttr>("block.owners").getInt();
@@ -4703,14 +4729,23 @@ struct OrderedLowerer {
         transfers == "panel-fold"
             ? space.getAttrOfType<IntegerAttr>("dsa.panel_rows").getInt()
             : 1;
+    auto indexed = transfers == "indexed-row-add"
+                       ? intentdsl::dsa::indexedRowAdd(fn, profile)
+                       : std::nullopt;
+    if (transfers == "indexed-row-add" && !indexed)
+      return failure();
     std::optional<PlaneStencilPlan> stencilPlan;
-    if (transfers != "panel-fold" && pack <= 1)
+    if (!indexed && transfers != "panel-fold" && pack <= 1)
       stencilPlan = matchPlaneStencil();
     bool isGeneral = transfers != "panel-fold" && pack <= 1 && !stencilPlan;
     int64_t stencilTile = stencilPlan ? stencilPlan->H * stencilPlan->W : 1;
     int64_t launchTile =
         isGeneral ? 1 : std::max<int64_t>({tile, pack, panelM, stencilTile});
 
+    if (indexed) {
+      owners = indexed->rows;
+      launchTile = indexed->batch;
+    }
     b.setInsertionPointToStart(&fn.front());
     OperationState progState(loc, "bangc_src.ordered_program");
     progState.addAttribute("owner_tile", b.getI64IntegerAttr(launchTile));
@@ -4738,10 +4773,11 @@ struct OrderedLowerer {
     symTaskDim = makeSym("taskDim");
     constAnchor = symTaskDim.getDefiningOp();
 
-    LogicalResult st = transfers == "panel-fold" ? lowerPanelFold()
-                       : pack > 1                ? lowerPackedStreams(pack)
-                       : stencilPlan             ? lowerPlaneStencil(*stencilPlan)
-                                                 : lowerGeneral(launchTile);
+    LogicalResult st = indexed ? lowerIndexedRowAdd(*indexed)
+                       : transfers == "panel-fold" ? lowerPanelFold()
+                       : pack > 1                  ? lowerPackedStreams(pack)
+                       : stencilPlan ? lowerPlaneStencil(*stencilPlan)
+                                     : lowerGeneral(launchTile);
     if (failed(st))
       return failure();
 

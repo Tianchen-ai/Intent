@@ -216,6 +216,8 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
     if (!expected) {
       return fn.emitError() << llvm::toString(expected.takeError());
     }
+    if (d.contains("histogram_panel") && caps->keyPanel)
+      *expected = caps->keyPanel(fn, p, *expected);
     if (*expected != d)
       return fn.emitError("parameter rows or peak private allocation disagree "
                           "with live stages");

@@ -891,6 +891,8 @@ void supply(Unit &u) {
     if (!check)
       return check.takeError();
     if(!d.getAs<ArrayAttr>("rows") || d.getAs<ArrayAttr>("rows").empty())return llvm::createStringError("no legal private storage row or DMA completion");
+    if (d.contains("histogram_panel") && facts->keyPanel)
+      *check = facts->keyPanel(cast<func::FuncOp>(op), p, *check);
     if (*check != d)
       return llvm::createStringError(
           "supply row costs, exclusion reasons or wait capability changed");
@@ -914,6 +916,8 @@ void supply(Unit &u) {
     if(d.getAs<BoolAttr>("persistent").getValue())topology+="-shared";
     std::string expectedId = topology + "-" + std::to_string(count) +
                              (batch > 1 ? "-b" + std::to_string(batch) : "");
+    if (d.contains("histogram_panel"))
+      expectedId += "-key-panel";
     if (d.contains("approximate_math")) expectedId += "-approx";
     if(c.topology!=topology || c.id!=expectedId || c.preconditions!=std::vector<std::string>{"legal-private-supply"})return llvm::createStringError("supply topology or participants mismatch");
     return llvm::Error::success();};
@@ -947,6 +951,12 @@ void supply(Unit &u) {
           std::string id = topology + "-" + std::to_string(n) +
                            (batch > 1 ? "-b" + std::to_string(batch) : "");
           cs.push_back({id,topology,*d,{"legal-private-supply"}});
+          if (facts->keyPanel)
+            if (auto panel = facts->keyPanel(fn, p, *d))
+              cs.push_back({id + "-key-panel",
+                            topology,
+                            panel,
+                            {"legal-private-supply"}});
           if (canApproximate) {
             auto fast = intentdsl::dsa::plan(fn, *facts, depth, n, persistent, batch, true);
             if (!fast) return fast.takeError();

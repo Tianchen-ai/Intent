@@ -15,6 +15,9 @@ struct LocalSupply {
   std::string libraryGatherImpl;
   // Scratch bytes per lane for an authorized alternative to certified math.
   std::optional<int64_t> (*approxScratch)(mlir::Operation *) = nullptr;
+  mlir::DictionaryAttr (*keyPanel)(mlir::func::FuncOp,
+                                   const compilerinfra::TargetProfile &,
+                                   mlir::DictionaryAttr) = nullptr;
 };
 bool projectsConsecutiveRows(mlir::Operation *access, unsigned maskIndex);
 bool projectsTransposed2D(mlir::Operation *op);

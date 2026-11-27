@@ -6,7 +6,7 @@ namespace CI_UNIT_NAMESPACE {
 void ownerSupplyCost(compilerinfra::Unit &u) {
   using namespace compilerinfra;
   u.costModels.push_back(
-      {{"ordered-transfer", u.qualify("ordered-supply"), "1",
+      {{"ordered-transfer", u.qualify("ordered-supply"), "2",
         [](mlir::Operation *o, const StructuralCandidate &c,
            CostContext &ctx) -> llvm::Expected<CostEstimate> {
           auto fn = o->getParentOfType<mlir::func::FuncOp>();
@@ -58,6 +58,21 @@ void ownerSupplyCost(compilerinfra::Unit &u) {
           e.bottleneck = "state accesses";
           auto bw = intentdsl::quantity(ctx, "dma_in_bw", "B/ns"),
                lat = intentdsl::quantity(ctx, "dma_in_latency", "ns");
+          if (auto plan = intentdsl::dsa::indexedRowAdd(fn, ctx.target)) {
+            // Compare transfer issues and bytes on the same per-column basis.
+            bool atomic = c.id == "indexed-row-add";
+            double rows = plan->rows, width = plan->width;
+            double issues =
+                atomic ? (rows + 2. * std::ceil(rows / plan->batch)) / width
+                       : rows * (reads + writes);
+            double bytes = atomic ? rows * (12. + 4. / width) : rows * 16.;
+            e.bottleneck =
+                atomic ? "vector atomic updates" : "scalar indexed updates";
+            e.terms["transfer_issues_per_owner"] = {issues, "count"};
+            if (bw && lat)
+              e.timeNs = issues * *lat + bytes / *bw;
+            return e;
+          }
           if (c.id == "panel-fold") {
             auto pf = intentdsl::dsa::panelFoldSupply(fn, ctx.target);
             double m = pf ? double(std::max<int64_t>(1, pf->rows)) : 64.0;

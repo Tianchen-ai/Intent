@@ -219,6 +219,9 @@ def FillOp : BangcOp<"fill",
   let arguments = (ins AnyMemRef:$dst, I64:$lanes, AnyType:$value);
 }
 
+def KeyHistogramOp : BangcOp<"key_histogram", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments = (ins AnyMemRef:$dst, AnyMemRef:$samples, AnyMemRef:$narrow, AnyMemRef:$filters, AnyMemRef:$axis, I64:$count, I64:$bins);
+}
 def AtomicAddOp : BangcOp<"atomic_add",
                           [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let arguments = (ins AnyMemRef:$old_nram, AnyMemRef:$global_addr,

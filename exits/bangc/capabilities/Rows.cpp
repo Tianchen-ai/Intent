@@ -1,6 +1,7 @@
-#include "intentdsl/levels/algorithm/kir/ir/Performance.h"
+#include "Histogram.h"
 #include "ScaledPanels.h"
 #include "VectorMath.h"
+#include "intentdsl/levels/algorithm/kir/ir/Performance.h"
 #include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
 #include "intentdsl/levels/execution/block/ir/Contraction.h"
 #include "intentdsl/levels/execution/block/ir/Owners.h"
@@ -84,6 +85,8 @@ capabilities(const llvm::json::Object &opts) {
       !cores || *clusters <= 0 || *cores <= 0)
     return llvm::createStringError(
         "BANG C requires the MLU370 CNRT ISA, local capacity and core counts");
+  // cncc mtp_372 BANG C __bang_atomic_add: FP32 and I32 NRAM vector to GDRAM.
+  profile.features.insert("row_atomic_add");
   auto caps = std::make_shared<intentdsl::RowCapacity>();
   auto matrices=std::make_shared<intentdsl::block::MatrixTarget>();
   matrices->tiles = {{8, 64, 64, "{}"},
@@ -141,7 +144,7 @@ capabilities(const llvm::json::Object &opts) {
           (*clusters) * (*cores), sizeof(float), true, 16, 12, 8192,
           "exits/bangc::cnnl-transpose", "exits/bangc::cnnl-softmax",
           "exits/bangc::cnnl-layer-norm", "exits/bangc::cnnl-row-cost",
-          "exits/bangc::cnnl-gather-rows", approximateScratch});
+          "exits/bangc::cnnl-gather-rows", approximateScratch, keyPanel});
   caps->stagedInputBudget=std::min(resource->capacity,resource->budget);
   if (auto err = profile.services.provide<intentdsl::block::OwnerMachine>(
           std::make_shared<intentdsl::block::OwnerMachine>(

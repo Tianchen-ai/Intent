@@ -11,6 +11,12 @@ mlir::LogicalResult verifyOwners(mlir::func::FuncOp,
 
 bool ownerValueDependsOn(mlir::Value v, mlir::Value target);
 
+struct IndexedRowAdd {
+  mlir::Value keys, source, destination;
+  int64_t rows, width, batch;
+};
+std::optional<IndexedRowAdd>
+indexedRowAdd(mlir::func::FuncOp, const compilerinfra::TargetProfile &);
 struct StreamTransfer {
   mlir::Operation *access;
   int64_t offset, axis, steps, width, pack;

@@ -167,6 +167,8 @@ TerminalPrinter rowPrinter() {
       PrintRule::format("Moment $r0 = welford_row($0, $1, (int)($2));");
   rules["bangc_src.summary_merge"] =
       PrintRule::format("Moment $r0 = merge_moments($0, $1);");
+  rules["bangc_src.key_histogram"] =
+      PrintRule::format("tile_key_histogram($0,$1,$2,$3,$4,(int)$5,(int)$6);");
   rules["bangc_src.atomic_add"] =
       PrintRule::format("__bang_atomic_add($0, $1, $2, (int)($3));");
   rules["bangc_src.vec_binary"] =

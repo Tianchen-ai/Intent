@@ -512,6 +512,15 @@ void FillOp::getEffects(EffectList &effects) {
   addWrite(effects, getOperation(), 0);
 }
 
+void KeyHistogramOp::getEffects(EffectList &effects) {
+  auto *op = getOperation();
+  addWrite(effects, op, 0);
+  addRead(effects, op, 1);
+  addReadWrite(effects, op, 2);
+  addReadWrite(effects, op, 3);
+  addRead(effects, op, 4);
+}
+
 void AtomicAddOp::getEffects(EffectList &effects) {
   Operation *op = getOperation();
   addWrite(effects, op, 0);
@@ -908,6 +917,7 @@ void BangcSrcDialect::initialize() {
   Bf16IeeeDotOp::attachInterface<F32AccContract<Bf16IeeeDotOp>>(*ctx);
   Bf16AccNarrowOp::attachInterface<F32AccContract<Bf16AccNarrowOp>>(*ctx);
   I32ToBf16Op::attachInterface<I32AccContract<I32ToBf16Op>>(*ctx);
+  KeyHistogramOp::attachInterface<I32AccContract<KeyHistogramOp>>(*ctx);
   RowReduceOp::attachInterface<RowReduceContract>(*ctx);
   RowExpOp::attachInterface<F32AccContract<RowExpOp>>(*ctx);
   RowExp2Op::attachInterface<F32AccContract<RowExp2Op>>(*ctx);

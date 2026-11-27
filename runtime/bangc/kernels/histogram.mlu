@@ -1,0 +1,27 @@
+// BANG C Vector Operation Functions, __bang_histogram: one 64-byte WRAM
+// row per equality key, 64 independent int32 counts per invocation.
+__mlu_func__ void encode_histogram_keys(short *dst, const float *src, int count) {
+  __bang_float2int16_tz(dst, src, count, 0);
+}
+__mlu_func__ void encode_histogram_keys(short *dst, const long long *src, int count) {
+  // Compare all four words. The low word alone is sufficient only if all
+  // upper bits are zero. Signed negative low words cannot match a valid bin.
+  int padded = (count + 31) / 32 * 32;
+  __bang_transpose(dst, (const short *)src, padded, 4);
+  short *upper = dst + padded;
+  __bang_bor(upper, upper, dst + 2 * padded, padded);
+  __bang_bor(upper, upper, dst + 3 * padded, padded);
+  __bang_ne_scalar(upper, upper, (short)0, padded);
+  __bang_mul_scalar(upper, upper, (short)-1, padded);
+  __bang_bor(dst, dst, upper, padded);
+}
+template<class T>
+__mlu_func__ void tile_key_histogram(int *dst, const T *src, short *keys,
+                                     short *filters, const short *axis, int count, int bins) {
+  if (!count) return;
+  encode_histogram_keys(keys, src, count);
+  for (int i = 0; i < bins; i += 64) {
+    __memcpy(filters, axis + i * 32, 4096, NRAM2WRAM);
+    __bang_histogram(dst + i, keys, filters, count);
+  }
+}

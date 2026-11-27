@@ -115,6 +115,28 @@ void rowContracts(Unit &unit) {
   };
 
   addBuiltin(
+      "native-row-atomic-add", "atomic_add", "__bang_atomic_add",
+      "exits/bangc::dma",
+      "old NRAM row, global destination row, NRAM increments, length",
+      "contiguous elements", "destination element type",
+      "reads and updates GDRAM, writes old values to NRAM",
+      "per-element atomic addition, BANG C Vector Operation Functions, mtp_372",
+      makeTyped(4, 4, 0, {STK::F32, STK::I32, STK::I64}, {}, {},
+                EffectMask::ReadWrite, 1, std::nullopt),
+      hasNram, [](Operation *op) {
+        auto type =
+            cast<MemRefType>(op->getOperand(1).getType()).getElementType();
+        return success(
+            (type.isF32() || type.isInteger(32)) &&
+            isSpace(op->getOperand(0), 1) && isSpace(op->getOperand(1), 0) &&
+            isSpace(op->getOperand(2), 1) &&
+            cast<MemRefType>(op->getOperand(0).getType()).getElementType() ==
+                type &&
+            cast<MemRefType>(op->getOperand(2).getType()).getElementType() ==
+                type);
+      });
+
+  addBuiltin(
       "wram-conv-f16", "wram_conv", "__bang_conv/__bang_conv_partial",
       "exits/bangc::matrix-transfer",
       "NRAM f32[BM, BN] accumulator, NRAM f16[BM, BK] input, WRAM f16[BN, BK] "
@@ -786,6 +808,24 @@ void rowContracts(Unit &unit) {
         return failure();
       });
 
+  add("wram-key-count", "key_histogram", "tile_key_histogram", "histogram.mlu",
+      "i32 bins, f32 or i64 samples, i16 keys and WRAM comparison rows",
+      "64 bins per WRAM tile", "i32", "writes private counts and encoded keys",
+      "integer equality after truncation toward zero; invalid keys skipped",
+      makeTyped(7, 7, 0, {STK::I32, STK::F32, STK::I64, STK::I16}, {},
+                {STK::I32}, EffectMask::ReadWrite, 64, std::nullopt),
+      [](Operation *op) {
+        auto elem = [&](int i) {
+          return cast<MemRefType>(op->getOperand(i).getType()).getElementType();
+        };
+        return success(isSpace(op->getOperand(0), 1) &&
+                       isSpace(op->getOperand(1), 1) &&
+                       isSpace(op->getOperand(2), 1) &&
+                       isSpace(op->getOperand(3), 3) && elem(0).isInteger(32) &&
+                       (elem(1).isF32() || elem(1).isInteger(64)) &&
+                       isSpace(op->getOperand(4), 1) && elem(4).isInteger(16) &&
+                       elem(2).isInteger(16) && elem(3).isInteger(16));
+      });
   add("inclusive-scan", "scan_sum", "tile_prefix", "scan.mlu",
       "NRAM source, destination and scratch tiles of matching element type",
       "contiguous NRAM row fragment", "i32 or f32",
