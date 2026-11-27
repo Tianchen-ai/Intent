@@ -896,6 +896,19 @@ static void preserveProductRounding(func::FuncOp f) {
   for (auto *mul : products) {
     OpBuilder b(mul);
     auto result = mul->getResult(0).getType();
+    if (getElementTypeOrSelf(result).isF32()) {
+      // cuda.tile's fuse_mul_addsub matches an immediate floating multiply.
+      // Expose the rounded bits at this use so the tile frontend retains the
+      // separate operations without promoting a binary32 product to binary64.
+      b.setInsertionPointAfter(mul);
+      Type bits = b.getI32Type();
+      if (auto shape = dyn_cast<ShapedType>(result))
+        bits = shape.clone(bits);
+      auto raw = b.create<arith::BitcastOp>(mul->getLoc(), bits, mul->getResult(0));
+      auto rounded = b.create<arith::BitcastOp>(mul->getLoc(), result, raw);
+      mul->getResult(0).replaceAllUsesExcept(rounded, raw);
+      continue;
+    }
     Type wide = getElementTypeOrSelf(result).isF16() ? b.getF32Type() : b.getF64Type();
     auto wider = [&](Type t) -> Type {
       if (auto s = dyn_cast<ShapedType>(t))
@@ -1872,7 +1885,7 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
   if(callable && failed(intentdsl::block::verifyRowProgram(fn,"ct_src")))return failure();
   const auto *factsPtr = profile.services.get<intentdsl::CallFacts>();
   auto res = module.walk([&](Operation *op) {
-    if (callable && isa<arith::ConstantOp, arith::IndexCastOp, arith::ExtFOp, arith::TruncFOp,
+    if (callable && isa<arith::ConstantOp, arith::BitcastOp, arith::IndexCastOp, arith::ExtFOp, arith::TruncFOp,
                         scf::ForOp, scf::YieldOp>(op))
       return WalkResult::advance();
     if (op == module || op->getName().getDialectNamespace() == "func" ||
