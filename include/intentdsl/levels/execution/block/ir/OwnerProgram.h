@@ -30,6 +30,7 @@ struct OwnerAccess {
   int64_t scatterPanelWidth = 0;
   int64_t histogramPanelWidth = 0;
   int64_t minHistogramPanelWidth = 0;
+  int64_t scatterFragmentElements = 0;
 };
 void expandOwnerProgram(mlir::func::FuncOp fn, llvm::StringRef unit,
                         OwnerAccess access = {});

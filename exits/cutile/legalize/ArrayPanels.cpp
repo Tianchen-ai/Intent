@@ -430,16 +430,18 @@ bool nativeMatrixWrite(Tiles &t, intentdsl::block::MatrixAccess &p, Value y,
 }
 intentdsl::block::OwnerAccess
 nativeOwnerViews(const intentdsl::block::OwnerMachine *om) {
-  return {rectangle,
-          panel,
-          /*scalarBroadcastRead=*/false,
-          /*nativeTileGather=*/false,
-          /*nativeTileHistogram=*/false,
-          /*blockAtomicMemoryBins=*/true,
-          /*minMmaRows=*/om ? om->operandGroupRows : 0,
-          groupedPanel,
-          /*scatterPanelWidth=*/om ? om->scatterPanelWidth : 0,
-          /*histogramPanelWidth=*/om ? om->histogramPanelWidth : 0,
-          /*minHistogramPanelWidth=*/om ? om->minHistogramPanelWidth : 0};
+  return {
+      rectangle,
+      panel,
+      /*scalarBroadcastRead=*/false,
+      /*nativeTileGather=*/false,
+      /*nativeTileHistogram=*/false,
+      /*blockAtomicMemoryBins=*/true,
+      /*minMmaRows=*/om ? om->operandGroupRows : 0,
+      groupedPanel,
+      /*scatterPanelWidth=*/om ? om->scatterPanelWidth : 0,
+      /*histogramPanelWidth=*/om ? om->histogramPanelWidth : 0,
+      /*minHistogramPanelWidth=*/om ? om->minHistogramPanelWidth : 0,
+      /*scatterFragmentElements=*/om ? om->warpSize * om->maxGroupReads : 0};
 }
 } // namespace CI_UNIT_NAMESPACE

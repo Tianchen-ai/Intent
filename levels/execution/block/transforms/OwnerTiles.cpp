@@ -1536,8 +1536,15 @@ void OwnerTiles::associativeScatterLoop(
                       totalOwners % rows == 0);
 
   if (separable2D) {
-    constexpr int64_t P = 8;
     int64_t itemsPerCta = llvm::divideCeil(info.extent, foldSplit);
+    // Bound the live rectangle of scatter addresses and contributions.
+    int64_t budget = access.scatterFragmentElements;
+    int64_t P =
+        budget ? std::min<int64_t>(
+                     llvm::PowerOf2Ceil(std::max<int64_t>(1, itemsPerCta)),
+                     (int64_t{1}
+                      << llvm::Log2_64(std::max<int64_t>(1, budget / rows))))
+               : 8;
     int64_t stepsPerCta = std::max<int64_t>(1, llvm::divideCeil(itemsPerCta, P));
     int64_t ctaSpan = stepsPerCta * P;
     bool exactFold = (foldSplit * ctaSpan == info.extent);
