@@ -1734,8 +1734,8 @@ struct OrderedLowerer {
     auto scoreProduct = [&](TaskTerm left, TaskTerm right) {
       if (!isRvv || plan.fusedScore)
         return outerContractOp(left, right, plan.axD, scoreMatTy, plan.scoreEngine);
-      // RVV stream-contract uses vfmacc. A reassignable sum may still
-      // require each FP32 multiply to round before the reduction.
+      // RVV stream-contract uses vfmacc. Reassociation of the sum can still
+      // require each FP32 product to round before the reduction.
       std::string products = "!weft_kernel.value<f32,[" + std::to_string(B) + "," +
           std::to_string(plan.D) + "," + std::to_string(T) + "],[" +
           std::to_string(plan.axOwn) + "," + std::to_string(plan.axD) + "," +
