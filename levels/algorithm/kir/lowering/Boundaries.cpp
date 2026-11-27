@@ -188,7 +188,11 @@ LogicalResult verifyRowComputation(func::FuncOp fn, Block &row, ValueRange captu
     }
     if(name=="encode_q8k"){
       auto out=llvm::find(captures,op.getOperand(0));
-      if(out==captures.end() || axes.size()!=2 || !axes[0].getAsInteger() ||
+      const bool validRows =
+          !axes.empty() &&
+          ((axes[0].getAsInteger() && *axes[0].getAsInteger() > 0) ||
+           (axes[0].getAsString() && !axes[0].getAsString()->empty()));
+      if(out==captures.end() || axes.size()!=2 || !validRows ||
          axes[1].getAsInteger()!=kir::Q8KRecord::elements ||
          op.getOperand(1)!=row.getArgument(0) ||
          op.getOperand(2).getType()!=RankedTensorType::get({ShapedType::kDynamic},Float32Type::get(fn.getContext())))
