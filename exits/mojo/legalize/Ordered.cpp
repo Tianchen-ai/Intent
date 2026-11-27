@@ -1377,9 +1377,10 @@ struct OrderedLowerer {
     makeOp(b, loc, "check_status", {status});
   }
 
-  LogicalResult lowerBlock(Block &srcBb, SmallVectorImpl<IRMapping> &lanes,
-                           Operation *start = nullptr,
-                           Operation *stop = nullptr) {
+  LogicalResult
+  lowerBlock(Block &srcBb, SmallVectorImpl<IRMapping> &lanes,
+             Operation *start = nullptr, Operation *stop = nullptr,
+             const intentdsl::cpu::FoldRemainder *fringe = nullptr) {
     const bool vecActive = batchSimd && lanes.size() == size_t(batch);
     for (Operation &op : srcBb.without_terminator()) {
       if (&op == stop)
@@ -1389,7 +1390,7 @@ struct OrderedLowerer {
       if (auto loop = dyn_cast<scf::ForOp>(op)) {
         if (dotPanel && dotPanel->dot->getParentOp() == &op)
           emitDotPanel(loop, lanes);
-        if (!vecActive && lanes.size() == 1 &&
+        if (!fringe && !vecActive && lanes.size() == 1 &&
             tryLowerVectorizedInnerLoop(loop, lanes[0]))
           continue;
         materializeScalarLanes(loop.getLowerBound(), lanes);
@@ -1420,7 +1421,8 @@ struct OrderedLowerer {
           }
           materializeScalarLanes(initOrig, lanes);
           for (size_t l = 0; l < lanes.size(); ++l) {
-            Value init = lanes[l].lookup(initOrig);
+            Value init =
+                fringe ? fringe->initial[k] : lanes[l].lookup(initOrig);
             slots[l].push_back(declSlot(resTy, init, initOrig));
           }
         }
@@ -1480,8 +1482,10 @@ struct OrderedLowerer {
         if (hasWideIter && !canTileReplay)
           emitZeroWideAccBuf();
 
-        Value lb = lanes[0].lookup(loop.getLowerBound());
-        Value ub = lanes[0].lookup(loop.getUpperBound());
+        Value lb =
+            fringe ? fringe->lower : lanes[0].lookup(loop.getLowerBound());
+        Value ub =
+            fringe ? fringe->upper : lanes[0].lookup(loop.getUpperBound());
         Value step = lanes[0].lookup(loop.getStep());
         auto *forOp = makeOp(b, loc, "for_range", {lb, ub, step}, {}, {}, 1);
         Block &fBb = forOp->getRegion(0).emplaceBlock();

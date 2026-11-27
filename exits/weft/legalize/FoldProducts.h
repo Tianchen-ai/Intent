@@ -215,6 +215,10 @@ LogicalResult lowerFoldProducts(OrderedLowerer &l, Block &body, int64_t tokens,
   l.lanes[0][p.owner] = l.bin("add", owner0, lane, "index");
   if (failed(before(0)))
     return failure();
+  intentdsl::cpu::FoldRemainder fringeArgs{
+      p.prefix ? bound.v : l.lanes[0].at(p.loop.getLowerBound()).v,
+      p.prefix ? l.lanes[0].at(p.loop.getUpperBound()).v : bound.v,
+      {}};
   for (auto [i, initial] : llvm::enumerate(p.loop.getInitArgs())) {
     auto ty = l.vectorType(initial);
     auto *row = makeOp(b, l.loc, "task_extract", {fold->getResult(i), lane.v},
@@ -224,14 +228,10 @@ LogicalResult lowerFoldProducts(OrderedLowerer &l, Block &body, int64_t tokens,
                         b.getNamedAttr("in_type", b.getStringAttr(accTy)),
                         b.getNamedAttr("point_type", b.getStringAttr("index")),
                         b.getNamedAttr("val_type", b.getStringAttr(ty))});
-    l.lanes[0][initial] = {row->getResult(0), ty};
+    fringeArgs.initial.push_back(row->getResult(0));
   }
-  auto fringeBound = p.prefix ? p.loop.getLowerBound() : p.loop.getUpperBound();
-  auto original = l.lanes[0].at(fringeBound);
-  l.lanes[0][fringeBound] = bound;
-  if (failed(l.lowerOp(*p.loop, 1, 0)))
+  if (failed(l.lowerOp(*p.loop, 1, 0, &fringeArgs)))
     return failure();
-  l.lanes[0][fringeBound] = original;
   for (Operation *op = p.loop->getNextNode(); op; op = op->getNextNode())
     if (failed(l.lowerOp(*op, 1, 0)))
       return failure();

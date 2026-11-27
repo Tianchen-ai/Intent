@@ -3674,7 +3674,8 @@ struct OrderedLowerer {
     return true;
   }
 
-  LogicalResult lowerOp(Operation &op, int64_t activeLanes, int64_t laneStart) {
+  LogicalResult lowerOp(Operation &op, int64_t activeLanes, int64_t laneStart,
+                        const intentdsl::cpu::FoldRemainder *fringe = nullptr) {
     StringRef name = op.getName().getStringRef();
     StringRef kind = op.getName().stripDialect();
     if (kind == "end" || name == "cpu.local_buffer")
@@ -3696,10 +3697,15 @@ struct OrderedLowerer {
     }
 
       if (auto loop = dyn_cast<scf::ForOp>(op)) {
-        if (activeLanes == 1 && tryLowerVectorizedInnerLoop(loop, laneStart))
+        if (!fringe && activeLanes == 1 &&
+            tryLowerVectorizedInnerLoop(loop, laneStart))
           return success();
         TaskTerm lbTerm = lanes[laneStart].at(loop.getLowerBound());
         TaskTerm ubTerm = lanes[laneStart].at(loop.getUpperBound());
+        if (fringe) {
+          lbTerm.v = fringe->lower;
+          ubTerm.v = fringe->upper;
+        }
         Value lb = lbTerm.v;
         Value ub = ubTerm.v;
         Value st = lanes[laneStart].at(loop.getStep()).v;
@@ -3736,9 +3742,9 @@ struct OrderedLowerer {
         SmallVector<Attribute> iterTys;
         SmallVector<Type> resTypes;
         for (int64_t l = laneStart; l < laneStart + activeLanes; ++l) {
-          for (Value init : loop.getInitArgs()) {
+          for (auto [index, init] : llvm::enumerate(loop.getInitArgs())) {
             TaskTerm t = lanes[l].at(init);
-            forOps.push_back(t.v);
+            forOps.push_back(fringe ? fringe->initial[index] : t.v);
             iterTys.push_back(b.getStringAttr(t.type));
             resTypes.push_back(b.getIndexType());
           }

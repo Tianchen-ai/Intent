@@ -297,23 +297,30 @@ std::optional<FoldProducts> foldProducts(mlir::Operation &space,
   for (auto &op : body)
     if (needed.contains(&op))
       boundOps.push_back(&op);
-  bool monotone =
-      bound == owner ||
-      isa_and_nonnull<memref::DimOp, arith::ConstantOp>(bound.getDefiningOp());
+  auto invariantLimit = [&](Value v) {
+    if (auto dim = v.getDefiningOp<memref::DimOp>())
+      return dim.getConstantIndex().has_value() &&
+             facts.shapeOf(dim.getSource()) != nullptr;
+    return v.getParentBlock() == &fn.front() ||
+           isa_and_nonnull<arith::ConstantOp>(v.getDefiningOp());
+  };
+  bool monotone = bound == owner || invariantLimit(bound);
   if (auto select = bound.getDefiningOp<scf::IfOp>()) {
     auto cmp = select.getCondition().getDefiningOp<arith::CmpIOp>();
-    auto add = select.thenYield().getOperand(0).getDefiningOp<arith::AddIOp>();
-    Value cap = select.elseYield().getOperand(0);
+    unsigned index = cast<OpResult>(bound).getResultNumber();
+    auto add =
+        select.thenYield().getOperand(index).getDefiningOp<arith::AddIOp>();
+    Value cap = select.elseYield().getOperand(index);
     // min(owner+1, extent), with the same bound on both sides.
     if (cmp && add && cmp.getPredicate() == arith::CmpIPredicate::slt &&
         cmp.getLhs() == owner && add.getLhs() == owner &&
         matchPattern(add.getRhs(), m_One())) {
       auto a = cmp.getRhs().getDefiningOp<memref::DimOp>(),
            b = cap.getDefiningOp<memref::DimOp>();
-      monotone =
-          cmp.getRhs() == cap ||
-          (a && b && a.getSource() == b.getSource() && a.getConstantIndex() &&
-           a.getConstantIndex() == b.getConstantIndex());
+      monotone = (cmp.getRhs() == cap && invariantLimit(cap)) ||
+                 (a && b && invariantLimit(cap) &&
+                  a.getSource() == b.getSource() && a.getConstantIndex() &&
+                  a.getConstantIndex() == b.getConstantIndex());
     }
   }
   return FoldProducts{loop,

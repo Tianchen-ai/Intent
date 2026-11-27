@@ -15,6 +15,13 @@ struct FoldProducts {
   bool rectangular;
 };
 
+// Seed each remaining row loop by operand position. Two carries can have
+// distinct partial sums even when the source shares their zero initializer.
+struct FoldRemainder {
+  mlir::Value lower, upper;
+  llvm::SmallVector<mlir::Value> initial;
+};
+
 std::optional<FoldProducts> foldProducts(mlir::Operation &space,
                                          mlir::func::FuncOp fn,
                                          const CallFacts &facts);

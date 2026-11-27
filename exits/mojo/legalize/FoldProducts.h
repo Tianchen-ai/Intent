@@ -204,16 +204,15 @@ LogicalResult lowerFoldProducts(OrderedLowerer &l, Block &body,
     row[0].map(p.owner, sum(base, i));
     if (failed(l.lowerBlock(body, row, nullptr, p.loop)))
       return failure();
-    for (auto [n, init] : llvm::enumerate(p.loop.getInitArgs()))
-      row[0].map(init, l.loadContiguousSlice(accum[n], times(i, D),
-                                             b.getF32Type(), D));
-    auto fringeBound =
-        p.prefix ? p.loop.getLowerBound() : p.loop.getUpperBound();
-    auto original = row[0].lookup(fringeBound);
-    row[0].map(fringeBound, bound);
-    if (failed(l.lowerBlock(body, row, p.loop, p.loop->getNextNode())))
+    intentdsl::cpu::FoldRemainder fringe{
+        p.prefix ? bound : row[0].lookup(p.loop.getLowerBound()),
+        p.prefix ? row[0].lookup(p.loop.getUpperBound()) : bound,
+        {}};
+    for (Value panel : accum)
+      fringe.initial.push_back(
+          l.loadContiguousSlice(panel, times(i, D), b.getF32Type(), D));
+    if (failed(l.lowerBlock(body, row, p.loop, p.loop->getNextNode(), &fringe)))
       return failure();
-    row[0].map(fringeBound, original);
     return l.lowerBlock(body, row, p.loop->getNextNode());
   });
 }
