@@ -2811,7 +2811,7 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
           "!weft_kernel.slice<!weft_kernel.encoding<\"f32\",\"dense\",\"dense."
           "f32\",[]>,[256],[3]>";
       std::string inValTy = "!weft_kernel.value<f32,[256],[3]>";
-      std::string i32VecTy = "!weft_kernel.value<si32,[256],[3]>";
+      std::string u32VecTy = "!weft_kernel.value<ui32,[256],[3]>";
       std::string i1VecTy = "!weft_kernel.value<i1,[256],[3]>";
       std::string i8VecTy = "!weft_kernel.value<si8,[256],[3]>";
       auto sliceRow = [&](TaskTerm vw, StringRef slTy, StringRef resTy,
@@ -2853,30 +2853,30 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
           makeOp(b, loc, "task_iota", {}, {b.getIndexType()},
                  {b.getNamedAttr("start", b.getI64IntegerAttr(0)),
                   b.getNamedAttr("end", b.getI64IntegerAttr(256)),
-                  b.getNamedAttr("val_type", b.getStringAttr(i32VecTy))})
+                  b.getNamedAttr("val_type", b.getStringAttr(u32VecTy))})
               ->getResult(0),
-          i32VecTy};
-      TaskTerm sentinel = rb.splatOp(rb.lit("512", "si32"), i32VecTy);
+          u32VecTy};
+      TaskTerm sentinel = rb.splatOp(rb.lit("512", "ui32"), u32VecTy);
       TaskTerm posCand = rb.sel(rb.cmp("eq", x, maxAbs, i1VecTy), iota, sentinel,
-                                i32VecTy);
+                                u32VecTy);
       TaskTerm negCand = rb.sel(rb.cmp("eq", x, negMax, i1VecTy), iota, sentinel,
-                                i32VecTy);
+                                u32VecTy);
       TaskTerm minPos = {
           makeOp(b, loc, "task_reduce", {posCand.v}, {b.getIndexType()},
                  {b.getNamedAttr("kind", b.getStringAttr("min")),
                   b.getNamedAttr("axis", b.getI64IntegerAttr(0)),
-                  b.getNamedAttr("in_type", b.getStringAttr(i32VecTy)),
-                  b.getNamedAttr("val_type", b.getStringAttr("si32"))})
+                  b.getNamedAttr("in_type", b.getStringAttr(u32VecTy)),
+                  b.getNamedAttr("val_type", b.getStringAttr("ui32"))})
               ->getResult(0),
-          "si32"};
+          "ui32"};
       TaskTerm minNeg = {
           makeOp(b, loc, "task_reduce", {negCand.v}, {b.getIndexType()},
                  {b.getNamedAttr("kind", b.getStringAttr("min")),
                   b.getNamedAttr("axis", b.getI64IntegerAttr(0)),
-                  b.getNamedAttr("in_type", b.getStringAttr(i32VecTy)),
-                  b.getNamedAttr("val_type", b.getStringAttr("si32"))})
+                  b.getNamedAttr("in_type", b.getStringAttr(u32VecTy)),
+                  b.getNamedAttr("val_type", b.getStringAttr("ui32"))})
               ->getResult(0),
-          "si32"};
+          "ui32"};
       TaskTerm extreme = rb.sel(rb.cmp("lt", minNeg, minPos, "i1"), negMax,
                                 maxAbs, "f32");
       TaskTerm nz = rb.cmp("gt", maxAbs, rb.zeroF32, "i1");
