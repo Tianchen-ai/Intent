@@ -80,3 +80,40 @@ def expert_projection(x: I.In[I.bf16, ("T","K")], offsets: I.In[I.i32, ("E1",)],
     total = I.contract(x[:,:], weights[:,:,:], axes=((1,), (2,)), batch=((), (0,)),
                        offsets=offsets[:], routes=routes[:], acc=I.f32)
     out[:,:,:] = I.cast(total, I.bf16)
+
+
+@I.kernel
+def linear_f32(
+    x: I.In[I.f32, ("M", "K")],
+    w: I.In[I.f32, ("N", "K")],
+    out: I.Out[I.f32, ("M", "N")],
+):
+    out[:, :] = I.contract(x[:, :], w[:, :], axes=((1,), (1,)), acc=I.f32)
+
+
+@I.kernel
+def q4_projection_batched(
+    records: I.In[I.u8, ("N", "G", 144)],
+    x: I.In[I.f32, ("M", "G", 256)],
+    out: I.Out[I.f32, ("M", "N")],
+):
+    packed = I.quantize_q8k(x[:, :, :])
+    out[:, :] = I.q4k_dot(records[:, :, :], packed)
+
+
+@I.kernel
+def q4_dot(
+    records: I.In[I.u8, ("N", "G", 144)],
+    act: I.In[I.u8, ("G", 292)],
+    out: I.Out[I.f32, ("N",)],
+):
+    out[:] = I.q4k_dot(records[:, :, :], act[:, :])
+
+
+@I.kernel
+def q8_quantize(
+    values: I.In[I.f32, ("G", 256)],
+    out: I.Out[I.u8, ("G", 292)],
+):
+    for g in I.parallel(values.dim(0)):
+        I.encode_q8k(out, g, values[g, :])

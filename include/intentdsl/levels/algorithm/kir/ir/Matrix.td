@@ -26,7 +26,7 @@ multiclass MatrixExpressions<Dialect d> {
     let arguments=(ins AnyMemRef:$values);let results=(outs AnyRankedTensor:$records);
   }
   def RecordDot : Op<d,"q4k_dot"> {
-    let arguments=(ins AnyMemRef:$weights,AnyRankedTensor:$activation);
+    let arguments=(ins AnyMemRef:$weights,AnyTypeOf<[AnyMemRef,AnyRankedTensor]>:$activation);
     let results=(outs AnyRankedTensor:$sum);
   }
   def QuantContract : Op<d,"quant_contract"> {

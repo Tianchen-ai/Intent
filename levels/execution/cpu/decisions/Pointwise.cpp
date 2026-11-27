@@ -20,7 +20,7 @@ void registerPointwise(Unit &u,StringRef family) {
       hasCrossMember |= n == "atomic_add" || n == "unique_put" ||
                         n == "pack_members" || n == "fill_ranges" ||
                         n == "reserve_tickets" || n == "distribute_tickets" ||
-                        n == "write_offsets";
+                        n == "write_offsets" || n == "encode_q8k";
     });
     return !hasCrossMember;
   };
@@ -30,7 +30,7 @@ void registerPointwise(Unit &u,StringRef family) {
     bool hasWrite = false, hasSummary = false, hasGather=false;
     op->walk([&](Operation *o) {
       auto n = o->getName().stripDialect();
-      hasWrite |= n == "write";
+      hasWrite |= n == "write" || n == "encode_q8k";
       hasGather |= n=="gather_row";
       hasSummary |= n == "sum" || n == "max_num" || n == "welford" || n=="scan_sum" || n=="ordered_sum" || n=="count_keys" || n=="column_sum";
     });
@@ -42,7 +42,8 @@ void registerPointwise(Unit &u,StringRef family) {
     bool widens = false, needsCoordinates = false;
     unsigned writes = 0;
     op->walk([&](Operation *o) {
-      writes += o->getName().getStringRef() == "cpu.write";
+      writes += (o->getName().getStringRef() == "cpu.write" ||
+                 o->getName().getStringRef() == "cpu.encode_q8k");
       needsCoordinates |= o->getName().getStringRef() == "cpu.ordinal";
       if (o->getName().getStringRef() != "cpu.cast")
         return;

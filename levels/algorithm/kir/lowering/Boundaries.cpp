@@ -183,6 +183,22 @@ LogicalResult verifyRowComputation(func::FuncOp fn, Block &row, ValueRange captu
          !written.insert(o).second || !written.insert(t).second)return op.emitError("prefix must publish zero, all endpoints and its terminal count");
       sawWrite=true;continue;
     }
+    if(name=="encode_q8k"){
+      auto out=llvm::find(captures,op.getOperand(0));
+      if(out==captures.end() || axes.size()!=2 || !axes[0].getAsInteger() ||
+         axes[1].getAsInteger()!=kir::Q8KRecord::elements ||
+         op.getOperand(1)!=row.getArgument(0) ||
+         op.getOperand(2).getType()!=RankedTensorType::get({ShapedType::kDynamic},Float32Type::get(fn.getContext())))
+        return op.emitError("encode_q8k requires f32[256] row values");
+      auto o=out-captures.begin();
+      auto *a=(*args)[o].getAsObject();
+      auto dt=a ? a->getString("dtype").value_or("") : "";
+      if(!a || a->getString("direction")!="Out" || (dt!="u8" && dt!="i8") ||
+         *a->getArray("dims")!=llvm::json::Array{axes[0],kir::Q8KRecord::bytes} ||
+         !written.insert(o).second)
+        return op.emitError("encode_q8k output must match [G,292] bytes");
+      sawWrite=true;continue;
+    }
     if(name=="fill_ranges"){
       auto dest=llvm::find(captures,op.getOperand(0));
       if(dest==captures.end() || axes.size()!=1 || op.getOperand(1)!=captures[domainIndex] || op.getOperand(2)!=row.getArgument(0) ||

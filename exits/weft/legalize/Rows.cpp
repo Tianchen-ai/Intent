@@ -1,9 +1,11 @@
 #include "Rows.h"
+#include "Matrix.h"
 #include "compilerinfra/Proofs.h"
 #include "Arithmetic.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
 #include "intentdsl/levels/algorithm/kir/ir/ProjectedLayout.h"
+#include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 #include "intentdsl/levels/execution/cpu/ir/IndexedEffects.h"
 #include "intentdsl/levels/execution/cpu/ir/Pack.h"
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
@@ -2179,13 +2181,37 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
     }
   }
 
-  SmallVector<Attribute> viewTypes, argAccess;
+  Operation *encodeQ8kOp = nullptr;
+  int64_t encodeQ8kInSlot = -1, encodeQ8kOutSlot = -1;
+  for (Operation &op : bb.without_terminator()) {
+    if (op.getName().stripDialect() == "encode_q8k") {
+      if (encodeQ8kOp)
+        return op.emitError("expected at most one encode_q8k per row task");
+      encodeQ8kOp = &op;
+      auto outArg = dyn_cast<BlockArgument>(op.getOperand(0));
+      Operation *inRead = op.getOperand(2).getDefiningOp();
+      auto inArg =
+          inRead && inRead->getName().stripDialect() == "read"
+              ? dyn_cast<BlockArgument>(inRead->getOperand(0))
+              : BlockArgument();
+      if (!outArg || outArg.getOwner() != &bb || !outArg.getArgNumber() ||
+          !inArg || inArg.getOwner() != &bb || !inArg.getArgNumber())
+        return op.emitError("encode_q8k requires input row read and output buffer");
+      encodeQ8kOutSlot = outArg.getArgNumber() - 1;
+      encodeQ8kInSlot = inArg.getArgNumber() - 1;
+      if (!slotFacts[encodeQ8kOutSlot].contiguous)
+        return op.emitError("Q8_K encode output must be contiguous");
+    }
+  }
+
+  SmallVector<Attribute> viewTypes, argAccess, slotDicts;
   SmallVector<int64_t> argAliases, stridedSlots, contiguousSlots, taskRanks;
   SmallVector<std::string> viewTypeStrs;
   for (unsigned i = 0; i < fn.getNumArguments(); ++i) {
     Value captureArg = bb.getArgument(i + 1);
     const auto *a = abi[i].getAsObject();
-    std::string elem = a->getString("dtype")->str();
+    std::string rawDtype = a->getString("dtype")->str();
+    std::string elem = rawDtype;
     if (elem == "i32")
       elem = "si32";
     else if (elem == "i64")
@@ -2221,6 +2247,11 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
           "\",\"dense\",\"dense." + elem + "\",[]>,[" + llvm::join(shape, ",") +
           "],[" + llvm::join(axes, ",") + "]>";
     }
+    if (encodeQ8kOp && int64_t(i) == encodeQ8kInSlot) {
+      t = "!weft_kernel.view<!weft_kernel.encoding<\"f32\",\"dense\",\"dense.f32\",[]>,[-1,256],[1,3]>";
+    } else if (encodeQ8kOp && int64_t(i) == encodeQ8kOutSlot) {
+      t = "!weft_kernel.view<!weft_kernel.encoding<\"Q8_K\",\"base\",\"Q8_K\",[]>,[-1,256],[1,3]>";
+    }
     viewTypes.push_back(b.getStringAttr(t));
     viewTypeStrs.push_back(t);
 
@@ -2232,13 +2263,25 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
                         : dir == "InOut" ? "readwrite"
                                          : "read"));
     argAliases.push_back(rank ? 0 : -1);
+    if (encodeQ8kOp) {
+      SmallVector<NamedAttribute, 4> fields{
+          b.getNamedAttr("dtype", b.getStringAttr(rawDtype)),
+          b.getNamedAttr("direction", b.getStringAttr(*dir))};
+      if (int64_t(i) == encodeQ8kOutSlot)
+        fields.push_back(
+            b.getNamedAttr("encoding", b.getStringAttr("Q8_K")));
+      else if (rank)
+        fields.push_back(
+            b.getNamedAttr("encoding", b.getStringAttr("dense." + rawDtype)));
+      slotDicts.push_back(b.getDictionaryAttr(fields));
+    }
     if (rank) {
       if (slotFacts[i].contiguous)
         contiguousSlots.push_back(int64_t(i));
       else
         stridedSlots.push_back(int64_t(i));
     }
-    if (ownerAxis)
+    if (ownerAxis || encodeQ8kOp)
       taskRanks.push_back(slotFacts[i].rank);
   }
 
@@ -2249,6 +2292,8 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
   progSt.addAttribute("contiguous_slots",
                       b.getDenseI64ArrayAttr(contiguousSlots));
   progSt.addAttribute("task_ranks", b.getDenseI64ArrayAttr(taskRanks));
+  if (encodeQ8kOp)
+    progSt.addAttribute("task_slots_json", b.getArrayAttr(slotDicts));
   progSt.addRegion();
   progSt.addRegion();
   Operation *prog = b.create(progSt);
@@ -2256,6 +2301,11 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
   // ---------------- Region 0: task.weftir ----------------
   Block &tOuter = prog->getRegion(0).emplaceBlock();
   b.setInsertionPointToEnd(&tOuter);
+  if (encodeQ8kOp) {
+    Type q8Ty = intentdsl::kir::Q8KType::get(fn.getContext());
+    makeOp(b, loc, "encoding_decl", {}, {},
+           makeRecordEncodingAttrs(b, q8Ty, *deriveWeftRecordEncoding(q8Ty)));
+  }
   Operation *tk = makeOp(
       b, loc, "task_kernel", {}, {},
       {b.getNamedAttr("sym_name", b.getStringAttr("row_task")),
@@ -2483,7 +2533,7 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
         ownedWrites.push_back(&op);
       else if (n == "ordered_sum" || n == "segment_length" ||
                n == "scan_sum" || n == "count_keys" || n == "column_sum" ||
-               n == "gather_row")
+               n == "gather_row" || n == "encode_q8k")
         hasSpecialSweep = true;
     }
 
@@ -2753,7 +2803,174 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
     OpBuilder::InsertionGuard rowGuard(b);
     b.setInsertionPointToEnd(&rowBb);
 
-    if (isTransposeTile) {
+    if (encodeQ8kOp) {
+      TaskTerm inView = rb.terms.lookup(
+          encodeQ8kOp->getOperand(2).getDefiningOp()->getOperand(0));
+      TaskTerm outView = rb.terms.lookup(encodeQ8kOp->getOperand(0));
+      std::string inSlTy =
+          "!weft_kernel.slice<!weft_kernel.encoding<\"f32\",\"dense\",\"dense."
+          "f32\",[]>,[256],[3]>";
+      std::string inValTy = "!weft_kernel.value<f32,[256],[3]>";
+      std::string i32VecTy = "!weft_kernel.value<si32,[256],[3]>";
+      std::string i1VecTy = "!weft_kernel.value<i1,[256],[3]>";
+      std::string i8VecTy = "!weft_kernel.value<si8,[256],[3]>";
+      auto sliceRow = [&](TaskTerm vw, StringRef slTy, StringRef resTy,
+                          bool admit) -> TaskTerm {
+        Value s =
+            makeOp(b, loc, "task_slice", {vw.v, rowIv.v}, {b.getIndexType()},
+                   {b.getNamedAttr("view_type", b.getStringAttr(vw.type)),
+                    b.getNamedAttr("selectors",
+                                   b.getArrayAttr({b.getStringAttr("index"),
+                                                   b.getStringAttr("all")})),
+                    b.getNamedAttr("slice_type", b.getStringAttr(slTy)),
+                    b.getNamedAttr("val_type", b.getStringAttr(resTy)),
+                    b.getNamedAttr("admit", b.getBoolAttr(admit))})
+                ->getResult(0);
+        return {s, resTy.str()};
+      };
+      auto fieldOp = [&](TaskTerm rec, StringRef name,
+                         StringRef resTy) -> TaskTerm {
+        Value f = makeOp(b, loc, "task_field", {rec.v}, {b.getIndexType()},
+                         {b.getNamedAttr("field_name", b.getStringAttr(name)),
+                          b.getNamedAttr("in_type", b.getStringAttr(rec.type)),
+                          b.getNamedAttr("val_type", b.getStringAttr(resTy))})
+                      ->getResult(0);
+        return {f, resTy.str()};
+      };
+      TaskTerm inRow = sliceRow(inView, inSlTy, inSlTy, false);
+      TaskTerm x = sliceRow(inView, inSlTy, inValTy, true);
+      TaskTerm absX = rb.unaryOp("abs", x);
+      TaskTerm maxAbs = {
+          makeOp(b, loc, "task_reduce", {absX.v}, {b.getIndexType()},
+                 {b.getNamedAttr("kind", b.getStringAttr("max")),
+                  b.getNamedAttr("axis", b.getI64IntegerAttr(0)),
+                  b.getNamedAttr("in_type", b.getStringAttr(absX.type)),
+                  b.getNamedAttr("val_type", b.getStringAttr("f32"))})
+              ->getResult(0),
+          "f32"};
+      TaskTerm negMax = rb.unaryOp("neg", maxAbs);
+      TaskTerm iota = {
+          makeOp(b, loc, "task_iota", {}, {b.getIndexType()},
+                 {b.getNamedAttr("start", b.getI64IntegerAttr(0)),
+                  b.getNamedAttr("end", b.getI64IntegerAttr(256)),
+                  b.getNamedAttr("val_type", b.getStringAttr(i32VecTy))})
+              ->getResult(0),
+          i32VecTy};
+      TaskTerm sentinel = rb.splatOp(rb.lit("512", "si32"), i32VecTy);
+      TaskTerm posCand = rb.sel(rb.cmp("eq", x, maxAbs, i1VecTy), iota, sentinel,
+                                i32VecTy);
+      TaskTerm negCand = rb.sel(rb.cmp("eq", x, negMax, i1VecTy), iota, sentinel,
+                                i32VecTy);
+      TaskTerm minPos = {
+          makeOp(b, loc, "task_reduce", {posCand.v}, {b.getIndexType()},
+                 {b.getNamedAttr("kind", b.getStringAttr("min")),
+                  b.getNamedAttr("axis", b.getI64IntegerAttr(0)),
+                  b.getNamedAttr("in_type", b.getStringAttr(i32VecTy)),
+                  b.getNamedAttr("val_type", b.getStringAttr("si32"))})
+              ->getResult(0),
+          "si32"};
+      TaskTerm minNeg = {
+          makeOp(b, loc, "task_reduce", {negCand.v}, {b.getIndexType()},
+                 {b.getNamedAttr("kind", b.getStringAttr("min")),
+                  b.getNamedAttr("axis", b.getI64IntegerAttr(0)),
+                  b.getNamedAttr("in_type", b.getStringAttr(i32VecTy)),
+                  b.getNamedAttr("val_type", b.getStringAttr("si32"))})
+              ->getResult(0),
+          "si32"};
+      TaskTerm extreme = rb.sel(rb.cmp("lt", minNeg, minPos, "i1"), negMax,
+                                maxAbs, "f32");
+      TaskTerm nz = rb.cmp("gt", maxAbs, rb.zeroF32, "i1");
+      TaskTerm inv = rb.sel(nz, rb.bin("div", rb.lit("-127.0", "f32"), extreme, "f32"),
+                            rb.zeroF32, "f32");
+      TaskTerm ds = rb.sel(nz, rb.bin("div", rb.lit("1.0", "f32"), inv, "f32"),
+                           rb.zeroF32, "f32");
+
+      std::string q8RecSlTy =
+          "!weft_kernel.slice<!weft_kernel.encoding<\"Q8_K\",\"base\",\"Q8_"
+          "K\",[]>,[256],[3]>";
+      TaskTerm rec = sliceRow(outView, q8RecSlTy, q8RecSlTy, false);
+      std::string dsFieldTy =
+          "!weft_kernel.slice<!weft_kernel.encoding<\"f32\",\"dense\",\"dense."
+          "f32\",[]>,[],[]>";
+      rb.commitOp(ds, fieldOp(rec, "ds", dsFieldTy));
+
+      TaskTerm scaled = rb.bin("mul", x, inv, inValTy);
+      TaskTerm q = {
+          makeOp(b, loc, "task_narrow", {scaled.v}, {b.getIndexType()},
+                 {b.getNamedAttr("rounding", b.getStringAttr("rne")),
+                  b.getNamedAttr("saturate", b.getBoolAttr(true)),
+                  b.getNamedAttr("in_type", b.getStringAttr(scaled.type)),
+                  b.getNamedAttr("val_type", b.getStringAttr(i8VecTy))})
+              ->getResult(0),
+          i8VecTy};
+      std::string qFieldTy =
+          "!weft_kernel.slice<!weft_kernel.encoding<\"i8\",\"dense\",\"dense."
+          "i8\",[]>,[256],[3]>";
+      rb.commitOp(q, fieldOp(rec, "q", qFieldTy));
+
+      std::string bsumFieldTy =
+          "!weft_kernel.slice<!weft_kernel.encoding<\"i16\",\"dense\",\"dense."
+          "i16\",[]>,[16],[3]>";
+      TaskTerm bsumField = fieldOp(rec, "bsum", bsumFieldTy);
+      TaskTerm step16 = rb.idx(16);
+      Operation *gFor =
+          makeOp(b, loc, "task_for", {rb.zeroIdx.v, step16.v, rb.oneIdx.v}, {},
+                 {b.getNamedAttr("iter_types", b.getArrayAttr({}))}, 1);
+      Block &gBb = gFor->getRegion(0).emplaceBlock();
+      TaskTerm gIv{gBb.addArgument(b.getIndexType(), loc), "index"};
+      {
+        OpBuilder::InsertionGuard gg(b);
+        b.setInsertionPointToEnd(&gBb);
+        TaskTerm off = rb.bin("mul", gIv, step16, "index");
+        std::string f32SubTy = "!weft_kernel.value<f32,[16],[3]>";
+        std::string i8SubTy = "!weft_kernel.value<si8,[16],[3]>";
+        std::string i32SubTy = "!weft_kernel.value<si32,[16],[3]>";
+        TaskTerm xG = {
+            makeOp(b, loc, "task_subview", {inRow.v, off.v},
+                   {b.getIndexType()},
+                   {b.getNamedAttr("static_extent", b.getI64IntegerAttr(16)),
+                    b.getNamedAttr("slice_type", b.getStringAttr(inSlTy)),
+                    b.getNamedAttr("val_type", b.getStringAttr(f32SubTy)),
+                    b.getNamedAttr("admit", b.getBoolAttr(true))})
+                ->getResult(0),
+            f32SubTy};
+        TaskTerm scaledG = rb.bin("mul", xG, inv, f32SubTy);
+        TaskTerm qG = {
+            makeOp(b, loc, "task_narrow", {scaledG.v}, {b.getIndexType()},
+                   {b.getNamedAttr("rounding", b.getStringAttr("rne")),
+                    b.getNamedAttr("saturate", b.getBoolAttr(true)),
+                    b.getNamedAttr("in_type", b.getStringAttr(f32SubTy)),
+                    b.getNamedAttr("val_type", b.getStringAttr(i8SubTy))})
+                ->getResult(0),
+            i8SubTy};
+        TaskTerm qGI32 = rb.castOp(qG, i32SubTy);
+        TaskTerm sumGI32 = {
+            makeOp(b, loc, "task_reduce", {qGI32.v}, {b.getIndexType()},
+                   {b.getNamedAttr("kind", b.getStringAttr("add")),
+                    b.getNamedAttr("axis", b.getI64IntegerAttr(0)),
+                    b.getNamedAttr("in_type", b.getStringAttr(i32SubTy)),
+                    b.getNamedAttr("val_type", b.getStringAttr("si32"))})
+                ->getResult(0),
+            "si32"};
+        TaskTerm sumGI16 = rb.castOp(sumGI32, "si16");
+        std::string bsumElemTy =
+            "!weft_kernel.slice<!weft_kernel.encoding<\"i16\",\"dense\",\"dense."
+            "i16\",[]>,[],[]>";
+        Value bsumG =
+            makeOp(b, loc, "task_slice", {bsumField.v, gIv.v},
+                   {b.getIndexType()},
+                   {b.getNamedAttr("view_type", b.getStringAttr(bsumFieldTy)),
+                    b.getNamedAttr("selectors",
+                                   b.getArrayAttr({b.getStringAttr("index")})),
+                    b.getNamedAttr("slice_type", b.getStringAttr(bsumElemTy)),
+                    b.getNamedAttr("val_type", b.getStringAttr(bsumElemTy)),
+                    b.getNamedAttr("admit", b.getBoolAttr(false))})
+                ->getResult(0);
+        rb.commitOp(sumGI16, {bsumG, bsumElemTy});
+        makeOp(b, loc, "task_yield", {}, {},
+               {b.getNamedAttr("val_types", b.getArrayAttr({}))});
+      }
+    } else if (isTransposeTile) {
       Operation &tOp = bb.front();
       TaskTerm inView = rb.terms.lookup(tOp.getOperand(0));
       TaskTerm outView = rb.terms.lookup(tOp.getOperand(1));
@@ -4409,6 +4626,9 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
     StringRef dt = *a->getString("dtype");
     std::string cType = dt == "f16"    ? "_Float16"
                         : dt == "bf16" ? "uint16_t"
+                        : dt == "u8"   ? "uint8_t"
+                        : dt == "i8"   ? "int8_t"
+                        : dt == "i16"  ? "int16_t"
                         : dt == "i32"  ? "int32_t"
                         : dt == "i64"  ? "int64_t"
                         : dt == "u64"  ? "uint64_t"
@@ -4490,6 +4710,9 @@ LogicalResult lowerWeftRow(func::FuncOp fn, const intentdsl::CallFacts &facts,
     StringRef dt = *a->getString("dtype");
     std::string base = dt == "f16"    ? "_Float16"
                        : dt == "bf16" ? "uint16_t"
+                       : dt == "u8"   ? "uint8_t"
+                       : dt == "i8"   ? "int8_t"
+                       : dt == "i16"  ? "int16_t"
                        : dt == "i32"  ? "int32_t"
                        : dt == "i64"  ? "int64_t"
                        : dt == "u64"  ? "uint64_t"
@@ -4818,12 +5041,26 @@ llvm::Error describeWeftRowPackage(func::FuncOp fn, Operation &prog,
        prog.getAttrOfType<DenseI64ArrayAttr>("contiguous_slots").asArrayRef())
     compact.push_back(c);
   auto taskRanksAttr = prog.getAttrOfType<DenseI64ArrayAttr>("task_ranks");
+  auto taskSlotsAttr = prog.getAttrOfType<ArrayAttr>("task_slots_json");
 
   llvm::json::Object fields{{"version", 3},
                             {"shape_parameters", std::move(shapeParams)},
                             {"domain", intentdsl::publishDomain(fn)},
                             {"abi", std::move(*parsedAbi)},
                             {"rows", std::move(rows)}};
+  if (taskSlotsAttr) {
+    llvm::json::Array slots;
+    for (Attribute a : taskSlotsAttr) {
+      auto d = cast<DictionaryAttr>(a);
+      llvm::json::Object obj{
+          {"dtype", d.getAs<StringAttr>("dtype").getValue().str()},
+          {"direction", d.getAs<StringAttr>("direction").getValue().str()}};
+      if (auto enc = d.getAs<StringAttr>("encoding"))
+        obj["encoding"] = enc.getValue().str();
+      slots.push_back(std::move(obj));
+    }
+    fields["task_slots"] = std::move(slots);
+  }
   if (!compact.empty())
     fields["contiguous_slots"] = std::move(compact);
   if (!taskRanksAttr.empty()) {

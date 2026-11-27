@@ -3,6 +3,32 @@
 import intentdsl as I
 
 
+@I.kernel
+def causal_attention_f32(
+    q: I.In[I.f32, ("B", "Q", "D")],
+    k: I.In[I.f32, ("B", "K", "D")],
+    v: I.In[I.f32, ("B", "K", "DV")],
+    y: I.Out[I.f32, ("B", "Q", "DV")],
+    scale: I.f32,
+):
+    for batch in I.parallel(q.dim(0)):
+        for query in I.parallel(q.dim(1)):
+            query_vector = q[batch, query, :]
+            peak = -I.inf
+            for token in I.fold(k.dim(1)):
+                score = I.sum(query_vector * k[batch, token, :]) * scale
+                peak = I.maximum_num(peak, score if query >= token else -I.inf)
+            mass = I.f32(0)
+            weighted = I.zeros(v.dim(2), I.f32)
+            for token in I.fold(k.dim(1)):
+                score = I.sum(query_vector * k[batch, token, :]) * scale
+                weight = I.exp(score - peak) if query >= token else I.f32(0)
+                mass = mass + weight
+                weighted = weighted + v[batch, token, :] * weight
+            inverse = I.f32(0) if k.dim(1) == 0 else I.f32(1) / mass
+            y[batch, query, :] = weighted * inverse
+
+
 @I.kernel(numerics="relaxed_normalization")
 def attention(
     q: I.In[I.bf16, ("B", "HQ", "Q", "D")],

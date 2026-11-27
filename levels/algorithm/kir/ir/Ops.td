@@ -155,6 +155,7 @@ def Kir_Dialect_Input : Op<Kir_Dialect,"index_read"> {let arguments=(ins AnyMemR
 def Kir_Dialect_Ticket : Op<Kir_Dialect,"atomic_add"> {let arguments=(ins AnyMemRef:$base,I32Tensor:$key,I32:$delta,StrAttr:$ordering,UnitAttr:$in_bounds);let results=(outs I32Tensor:$values);}
 def Kir_Dialect_Put : Op<Kir_Dialect,"unique_put"> {let arguments=(ins AnyMemRef:$base,I32Tensor:$key,I32Tensor:$value,UnitAttr:$in_bounds);}
 def Kir_Dialect_WriteOffsets : Op<Kir_Dialect,"write_offsets"> {let arguments=(ins AnyMemRef:$offsets,AnyMemRef:$total,Index:$owner,I32Tensor:$prefix);}
+def Kir_Dialect_EncodeQ8K : Op<Kir_Dialect,"encode_q8k"> {let arguments=(ins AnyMemRef:$output,Index:$owner,F32Tensor:$values);}
 def Kir_Dialect_Ranges : Op<Kir_Dialect,"fill_ranges"> {let arguments=(ins AnyMemRef:$out,AnyMemRef:$offsets,Index:$owner,I64Attr:$unit,UnitAttr:$disjoint_in_bounds);}
 include "intentdsl/levels/algorithm/kir/ir/Matrix.td"
 defm Matrix : MatrixExpressions<Kir_Dialect>;

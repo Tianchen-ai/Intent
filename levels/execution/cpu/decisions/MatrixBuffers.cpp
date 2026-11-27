@@ -224,9 +224,13 @@ llvm::Error materializeMatrixBuffers(func::FuncOp fn, RewriterBase &rw,
     auto q8Attr =
         rw.getNamedAttr("kir.storage", TypeAttr::get(kir::Q8KType::get(fn.getContext())));
     Value x = dot.getOperand(1).getDefiningOp()->getOperand(0);
-    Value packed = allocBuf(placement, std::max<int64_t>(1, K / 256),
-                            kir::Q8KRecord::bytes, "q8k-records", i8Ty);
+    int64_t totalRecs =
+        std::max<int64_t>(1, G) * std::max<int64_t>(1, K / 256);
+    Value packed = allocBuf(placement, totalRecs, kir::Q8KRecord::bytes,
+                            "q8k-records", i8Ty);
     emitPrep({x, packed}, "encode-q8k", {q8Attr});
+  } else if (packing == "prepacked-q8k") {
+    // Activation Q8_K records are already provided by the caller.
   }
 
   if (routed) {

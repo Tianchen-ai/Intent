@@ -42,11 +42,12 @@ def calibration(scope,workers,bits):
             return "x86"
         if workers==1 and len(set(scope))==1:
             return "x86-1c"
-    if workers==1 and len(devices)==1:
+    if len(devices) == 1 and set(scope) and 1 <= workers <= len(set(scope)):
         return {
-            "0x5b7/0x80000000090c0d00":"sg2044",
-            "0x710/0x8000000058000002":"rvv-v100",
-            "Spacemit(R) X100":"k3-x100",
-            "Spacemit(R) A100":"k3-a100",
-        }.get(next(iter(devices)),"")
+            "0x5b7/0x80000000090c0d00": "sg2044",
+            "0x710/0x8000000058000002": "rvv-v100",
+            "Spacemit(R) X60": "k1",
+            "Spacemit(R) X100": "k3-x100",
+            "Spacemit(R) A100": "k3-a100",
+        }.get(next(iter(devices)), "")
     return ""

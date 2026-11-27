@@ -1,9 +1,32 @@
 #pragma once
 #include "intentdsl/levels/algorithm/kir/ir/StorageLayout.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/MathExtras.h"
+#include "mlir/IR/Builders.h"
+#include "mlir/IR/Types.h"
 #include <algorithm>
 #include <cstdint>
+#include <optional>
+#include <string>
 namespace CI_UNIT_NAMESPACE {
+struct RecordEncodingDesc {
+  std::string symName;
+  int64_t alignment = 0;
+  int64_t elements = 0;
+  int64_t storageBits = 0;
+  llvm::SmallVector<std::string, 6> fieldNames;
+  llvm::SmallVector<std::string, 6> fieldTypes;
+  llvm::SmallVector<int64_t, 6> fieldExtents;
+  llvm::SmallVector<std::string, 6> fieldLayouts;
+  llvm::SmallVector<int64_t, 6> fieldBitOffsets;
+  llvm::SmallVector<int64_t, 6> fieldStorageBits;
+};
+
+std::optional<RecordEncodingDesc> deriveWeftRecordEncoding(mlir::Type storageTy);
+llvm::SmallVector<mlir::NamedAttribute, 12>
+makeRecordEncodingAttrs(mlir::OpBuilder &b, mlir::Type storageTy,
+                        const RecordEncodingDesc &d);
+
 struct RecordFields {
   bool grouped;
   int64_t vectorRegisters = 32;

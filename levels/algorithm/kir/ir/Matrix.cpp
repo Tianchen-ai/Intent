@@ -223,17 +223,30 @@ LogicalResult verifyMatrixBody(func::FuncOp fn, Operation &domain,
       type = Float32Type::get(fn.getContext());
       ++dots;
     } else if (name == "quantize_q8k") {
-      if (A.size() != 2 || A[1].getAsInteger() != Q8KRecord::elements || !elem(a).isF32())
-        return op.emitError("Q8_K input must be f32[G,256]");
-      shape = {A[0], Q8KRecord::bytes};
+      if ((A.size() != 2 && A.size() != 3) ||
+          A.back().getAsInteger() != Q8KRecord::elements || !elem(a).isF32())
+        return op.emitError("Q8_K input must be f32[G,256] or f32[B,G,256]");
+      if (A.size() == 2)
+        shape = {A[0], Q8KRecord::bytes};
+      else
+        shape = {A[0], A[1], Q8KRecord::bytes};
       type = IntegerType::get(fn.getContext(), 8);
     } else if (name == "q4k_dot") {
-      auto *encoder = op.getOperand(1).getDefiningOp();
-      if (A.size() != 3 || A[2].getAsInteger() != Q4KRecord::bytes || dtype(a) != "u8" ||
-          !encoder || encoder->getName().stripDialect() != "quantize_q8k" ||
-          shapes.lookup(op.getOperand(1)) != Shape{A[1], Q8KRecord::bytes})
-        return op.emitError("expected Q4_K[N,G,144] and Q8_K[G,292]");
-      shape = {A[0]};
+      auto act = op.getOperand(1);
+      auto *encoder = act.getDefiningOp();
+      auto B = shapes.lookup(act);
+      bool validAct = encoder
+                          ? (encoder->getName().stripDialect() == "quantize_q8k")
+                          : (isa<BlockArgument>(act) &&
+                             (dtype(act) == "u8" || dtype(act) == "i8"));
+      if (A.size() != 3 || A[2].getAsInteger() != Q4KRecord::bytes ||
+          dtype(a) != "u8" || !validAct ||
+          (B.size() != 2 && B.size() != 3) ||
+          B[B.size() - 2] != A[1] ||
+          B.back().getAsInteger() != Q8KRecord::bytes)
+        return op.emitError(
+            "expected Q4_K[N,G,144] and Q8_K[G,292] or Q8_K[B,G,292]");
+      shape = B.size() == 2 ? Shape{A[0]} : Shape{B[0], A[0]};
       type = Float32Type::get(fn.getContext());
       ++dots;
     } else if (name == "quant_contract") {

@@ -136,6 +136,20 @@ TerminalPrinter weftTerminalPrinter() {
       "<{{order=array<i64:{order}>}}>:({in_type})->{val_type}");
   rules["weft_host.task_cast"] = PrintRule::format(
       "%$r0=\"weft_kernel.{op_kind}\"(%$0):({in_type})->{val_type}");
+  enterLocal("weft_host.task_narrow",
+             [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
+               std::string resId = irId(view.result(0));
+               std::string inId = irId(view.operand(0));
+               std::string rounding =
+                   view.attrOfType<StringAttr>("rounding").str();
+               bool sat = view.attrOfType<BoolAttr>("saturate").getValue();
+               std::string inTy = view.attrOfType<StringAttr>("in_type").str();
+               std::string valTy = view.attrOfType<StringAttr>("val_type").str();
+               c.line(resId + "=\"weft_kernel.narrow\"(" + inId +
+                      ") <{rounding=\"" + rounding + "\",saturate=" +
+                      (sat ? "true" : "false") + "}>:(" + inTy + ")->" + valTy);
+               return llvm::Error::success();
+             });
   rules["weft_host.task_field"] = PrintRule::format(
       "%$r0=\"weft_kernel.field\"(%$0) <{{name=\"{field_name}\"}}>:({in_type})->{val_type}");
   rules["weft_host.task_fold2"] =
@@ -827,6 +841,8 @@ TerminalPrinter weftTerminalPrinter() {
           c.line("#include <string.h>");
           c.line("#if defined(__x86_64__)");
           c.line("#include <immintrin.h>");
+          c.line("#elif defined(__riscv_vector)");
+          c.line("#include <riscv_vector.h>");
           c.line("#endif");
           c.line("#if defined(_OPENMP)");
           c.line("#include <omp.h>");
