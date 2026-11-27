@@ -1886,7 +1886,8 @@ struct RowLowerer {
               forLoop(cI64(0), live, cI64(1), [&](Value k) {
                 Value idx = toI64(loadAt(keys, k));
                 Value gAddr = makeAddr(base, {idx}, {s0}, 0);
-                makeOp("atomic_add", {oldBuf, gAddr, deltaBuf, cI64(1)});
+                makeOp("atomic_add", {oldBuf, gAddr, deltaBuf, cI64(1)}, {}, {},
+                       "native-row-atomic-add");
                 sync("all");
                 storeAt(dst, k, loadAt(oldBuf, cI64(0)));
               });
