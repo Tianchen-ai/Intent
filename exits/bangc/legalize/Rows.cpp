@@ -1,4 +1,5 @@
 #include "Rows.h"
+#include "../capabilities/SegmentGather.h"
 #include "Broadcast.h"
 #include "Slab.h"
 #include "intentdsl/exits/bangc/ir/Dialect.h"
@@ -166,6 +167,7 @@ struct RowLowerer {
       memberCoordCache;
   Value storage;
   Value ticketCounts, ticketBases, ticketValues;
+  Value segmentTable, segmentOffsets, segmentScratch;
   Value histogramRaw, histogramKeys, histogramFilters, histogramAxis;
   llvm::DenseMap<Value, Value> localBroadcasts;
   int64_t boundRows = 0, boundColumns = 0;
@@ -2160,6 +2162,21 @@ struct RowLowerer {
               continue;
             }
 
+            if (segmentTable && prim == "ordered_members") {
+              auto a = indexedProduct(&inst);
+              auto ptr =
+                  makeAddr(getVal(inst.getOperand(0)), {col}, {cI64(1)}, 0);
+              makeOp(
+                  "segment_product",
+                  {dst, ptr, getVal(a->weights), getVal(a->indices),
+                   segmentTable, segmentOffsets, segmentScratch, live,
+                   cI64(layout.getAs<DenseI64ArrayAttr>("segment_gather")[2]),
+                   cI64(llvm::alignTo(
+                       layout.getAs<DenseI64ArrayAttr>("segment_gather")[0],
+                       64))},
+                  {}, {}, "segmented-indexed-product");
+              continue;
+            }
             if (prim == "ordered_members" || prim == "segment_size") {
               bool flat =
                   cast<MemRefType>(
@@ -3227,6 +3244,24 @@ struct RowLowerer {
     if (!localBroadcasts.empty())
       sync("io");
 
+    if (auto spec = layout.getAs<DenseI64ArrayAttr>("segment_gather")) {
+      auto buffer = [&](Type type, int64_t n) {
+        return makeOp("nram_buffer", {}, {ptrType(b.getContext(), type, 1)},
+                      {b.getNamedAttr("elements", b.getI64IntegerAttr(n))})
+            ->getResult(0);
+      };
+      segmentTable = buffer(b.getF32Type(), llvm::alignTo(spec[0], 64));
+      segmentOffsets = buffer(b.getI32Type(), spec[1] + 1);
+      segmentScratch = buffer(b.getI32Type(), 3 * spec[2]);
+      for (auto *root : oldOps)
+        root->walk([&](Operation *op) {
+          if (op->getName().getStringRef() == "block.segment_fold") {
+            auto a = indexedProduct(op);
+            memcpy1D(segmentTable, a->table, cI64(spec[0]), "GDRAM2NRAM",
+                     false);
+          }
+        });
+    }
     prepareHistogram(oldOps);
     if (failed(emitOuterOps(oldOps, cI64(0))))
       return fn.emitError("failed to lower row program to bangc_src");

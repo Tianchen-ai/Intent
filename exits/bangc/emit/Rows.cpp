@@ -167,6 +167,8 @@ TerminalPrinter rowPrinter() {
       PrintRule::format("Moment $r0 = welford_row($0, $1, (int)($2));");
   rules["bangc_src.summary_merge"] =
       PrintRule::format("Moment $r0 = merge_moments($0, $1);");
+  rules["bangc_src.segment_product"] = PrintRule::format(
+      "segment_product($0,$1,$2,$3,$4,$5,$6,(int)$7,(int)$8,(int)$9);");
   rules["bangc_src.reserve_tickets"] = PrintRule::format(
       "reserve_tickets($0,$1,$2,$3,$4,(int)$5,(int)$6,(int)$7,(int)$8,$9);");
   rules["bangc_src.member_ramp"] =
@@ -564,6 +566,15 @@ TerminalPrinter rowPrinter() {
                return llvm::Error::success();
              });
 
+  enterLocal("bangc_src.record_dot",
+             [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
+               std::string args = llvm::join(view.operands(), ",");
+               for (int32_t v :
+                    view.attrOfType<DenseI32ArrayAttr>("layout").asArrayRef())
+                 args += "," + std::to_string(v);
+               c.line("packed_nibble_dot(" + args + ");");
+               return llvm::Error::success();
+             });
   enterLocal("bangc_src.vec_scalar",
              [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
                auto k = view.attrOfType<StringAttr>("op").getValue();

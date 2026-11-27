@@ -318,21 +318,36 @@ struct MatrixLowerer {
 
     Value w = p.dot.getOperand(0);
     Value x = encoder->getOperand(0);
-    Value rec = nramBuf(b.getI8Type(), llvm::alignTo(q4.bytes, 64));
+    auto panel = p.dot.getAttrOfType<IntegerAttr>("bangc.record_rows").getInt();
+    Value rec = nramBuf(b.getI8Type(), llvm::alignTo(panel * q4.bytes, 64));
+    Value work = panel > 1
+                     ? nramBuf(b.getI32Type(), 512 + 3 * 2048 + 256 + 3 * 64)
+                     : Value{};
+    Value xTile =
+        p.stride(x, 1) == 1 ? nramBuf(b.getF32Type(), q8.elements) : Value{};
     int64_t numGroups = q4.elements / q4.group;
-    Value qArr = localVar(b.getI32Type(), q8.elements);
-    Value sumsArr = localVar(b.getI32Type(), numGroups);
+    Value qArr = panel > 1 ? nramBuf(b.getI32Type(), q8.elements)
+                           : localVar(b.getI32Type(), q8.elements);
+    Value sumsArr = panel > 1 ? nramBuf(b.getI32Type(), numGroups)
+                              : localVar(b.getI32Type(), numGroups);
 
     forLoop(cI64(0), nr, cI64(1),
             [&](Value i) { storeAt(acc, i, cF32(0.0f)); });
 
     int64_t recordGroups = p.shape[2] / q4.elements;
     forLoop(cI64(0), cI64(recordGroups), cI64(1), [&](Value gq) {
+      if (xTile)
+        memcpy1D(xTile, globalPtr(x, {gq, cI64(0)}), cI64(q8.elements),
+                 "GDRAM2NRAM");
+      auto getX = [&](Value k) {
+        return xTile ? loadAt(xTile, k)
+                     : loadAt(globalPtr(x, {gq, k}), cI64(0), b.getF32Type());
+      };
       // Find first signed value with maximum magnitude (GGML tie-breaking).
       auto maxLoop = forLoopCarry(
           cI64(0), cI64(q8.elements), cI64(1), ValueRange{cF32(0.0f)},
           [&](Value k, ValueRange iter) {
-            Value xk = loadAt(globalPtr(x, {gq, k}), cI64(0), b.getF32Type());
+            Value xk = getX(k);
             Value ax = makeOp("scalar_math", {xk}, {b.getF32Type()},
                               {b.getNamedAttr("op", b.getStringAttr("fabs"))})
                            ->getResult(0);
@@ -383,7 +398,7 @@ struct MatrixLowerer {
             forLoop(cI64(0), cI64(numGroups), cI64(1),
                     [&](Value g) { storeAt(sumsArr, g, cI32(0)); });
             forLoop(cI64(0), cI64(q8.elements), cI64(1), [&](Value k) {
-              Value xk = loadAt(globalPtr(x, {gq, k}), cI64(0), b.getF32Type());
+              Value xk = getX(k);
               Value f = b.create<arith::MulFOp>(loc, xk, inv);
               Value fl =
                   makeOp("scalar_math", {f}, {b.getF32Type()},
@@ -413,6 +428,34 @@ struct MatrixLowerer {
                       b.create<arith::AddIOp>(loc, loadAt(sumsArr, grp), cl));
             });
 
+            if (panel > 1) {
+              forLoop(cI64(0), nr, cI64(panel), [&](Value i) {
+                auto take = b.create<arith::MinSIOp>(
+                    loc, cI64(panel), b.create<arith::SubIOp>(loc, nr, i));
+                auto ptr = globalPtr(
+                    w, {b.create<arith::AddIOp>(loc, r, i), gq, cI64(0)});
+                ifThen(b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt,
+                                               take, cI64(panel)),
+                       [&] {
+                         fillVec(rec, cI64(panel * q4.bytes),
+                                 b.create<arith::ConstantIntOp>(loc, 0, 8));
+                       });
+                memcpy2D(rec, ptr, cI64(q4.bytes), cI64(q4.bytes),
+                         cI64(p.stride(w, 0)),
+                         b.create<arith::SubIOp>(loc, take, cI64(1)),
+                         "GDRAM2NRAM");
+                auto out = makeAddr(acc, {i}, {cI64(1)}, 1);
+                makeOp("record_dot", {out, rec, qArr, sumsArr, work, ds, take},
+                       {},
+                       {b.getNamedAttr(
+                           "layout",
+                           b.getDenseI32ArrayAttr(
+                               {q4.bytes, q4.packed, q4.factors, q4.d, q4.dmin,
+                                q4.halfGroups, q4.scaleBits, q4.nibbleBits}))},
+                       "packed-nibble-dot");
+              });
+              return;
+            }
             int64_t st2 = p.stride(w, 2);
             forLoop(cI64(0), nr, cI64(1), [&](Value i) {
               Value ri = b.create<arith::AddIOp>(loc, r, i);

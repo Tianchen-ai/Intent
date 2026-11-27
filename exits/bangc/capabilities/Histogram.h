@@ -1,6 +1,7 @@
 #pragma once
 #include "../legalize/Broadcast.h"
 #include "../legalize/Slab.h"
+#include "SegmentGather.h"
 #include "intentdsl/levels/storage/dsa/ir/Matrix.h"
 #include "mlir/IR/Builders.h"
 
@@ -90,6 +91,8 @@ inline mlir::DictionaryAttr keyPanel(mlir::func::FuncOp fn,
                                      const compilerinfra::TargetProfile &p,
                                      mlir::DictionaryAttr layout) {
   using namespace mlir;
+  if (auto gather = segmentGather(fn, p, layout))
+    return gather;
   if (fn->getAttrOfType<StringAttr>("block.topology") != "resident" ||
       layout.getAs<ArrayAttr>("rows").empty())
     return {};

@@ -216,7 +216,8 @@ LogicalResult verifyProgram(ModuleOp m, const compilerinfra::TargetProfile &p,
     if (!expected) {
       return fn.emitError() << llvm::toString(expected.takeError());
     }
-    if ((d.contains("histogram_panel") || d.contains("ticket_panel")) &&
+    if ((d.contains("histogram_panel") || d.contains("ticket_panel") ||
+         d.contains("segment_gather")) &&
         caps->keyPanel)
       *expected = caps->keyPanel(fn, p, *expected);
     if (*expected != d)

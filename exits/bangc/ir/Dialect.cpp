@@ -720,6 +720,21 @@ void FinitePanelOp::getEffects(EffectList &effects) {
   addRead(effects, getOperation(), 0);
   addWrite(effects, getOperation(), 1);
 }
+void RecordDotOp::getEffects(EffectList &effects) {
+  auto *op = getOperation();
+  addReadWrite(effects, op, 0);
+  for (unsigned i : {1u, 2u, 3u})
+    addRead(effects, op, i);
+  addReadWrite(effects, op, 4);
+}
+void SegmentProductOp::getEffects(EffectList &effects) {
+  auto *op = getOperation();
+  addWrite(effects, op, 0);
+  for (unsigned i : {1u, 2u, 3u, 4u})
+    addRead(effects, op, i);
+  for (unsigned i : {5u, 6u})
+    addReadWrite(effects, op, i);
+}
 void ReserveTicketsOp::getEffects(EffectList &effects) {
   auto *op = getOperation();
   addReadWrite(effects, op, 0);
@@ -973,6 +988,8 @@ void BangcSrcDialect::initialize() {
   DivRnOp::attachInterface<F32AccContract<DivRnOp>>(*ctx);
   Bf16ScalarOp::attachInterface<F32AccContract<Bf16ScalarOp>>(*ctx);
   FinitePanelOp::attachInterface<I16AccContract<FinitePanelOp>>(*ctx);
+  RecordDotOp::attachInterface<I32AccContract<RecordDotOp>>(*ctx);
+  SegmentProductOp::attachInterface<F32AccContract<SegmentProductOp>>(*ctx);
   ReserveTicketsOp::attachInterface<I32AccContract<ReserveTicketsOp>>(*ctx);
   MemberRampOp::attachInterface<I32AccContract<MemberRampOp>>(*ctx);
   StableFilterOp::attachInterface<I32AccContract<StableFilterOp>>(*ctx);

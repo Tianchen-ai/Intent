@@ -409,6 +409,13 @@ def Bf16ScalarOp : BangcOp<"bf16_scalar", [Pure]> {
   let results = (outs AnyType:$result);
 }
 
+def RecordDotOp : BangcOp<"record_dot",[DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments=(ins AnyMemRef:$acc,AnyMemRef:$records,AnyMemRef:$act,AnyMemRef:$sums,AnyMemRef:$scratch,F32:$scale,I64:$rows,DenseI32ArrayAttr:$layout);
+}
+def SegmentProductOp : BangcOp<"segment_product",[DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments=(ins AnyMemRef:$dst,AnyMemRef:$offsets,AnyMemRef:$weights,AnyMemRef:$indices,AnyMemRef:$table,
+                     AnyMemRef:$row_offsets,AnyMemRef:$scratch,I64:$n,I64:$span,I64:$tableLength);
+}
 def ReserveTicketsOp : BangcOp<"reserve_tickets", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let arguments=(ins AnyMemRef:$counter, AnyMemRef:$keys, AnyMemRef:$counts, AnyMemRef:$bases, AnyMemRef:$tickets,
                      I64:$rows,I64:$cols,I64:$pitch,I64:$bins,I1:$replay);

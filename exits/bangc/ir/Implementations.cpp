@@ -1,6 +1,7 @@
-#include "compilerinfra/Assembly.h"
 #include "Alignment.h"
+#include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
+#include "intentdsl/levels/algorithm/kir/ir/StorageLayout.h"
 #include "intentdsl/levels/storage/dsa/ir/Matrix.h"
 #include "intentdsl/levels/storage/dsa/ir/Supply.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -840,6 +841,52 @@ void rowContracts(Unit &unit) {
                        cast<MemRefType>(op->getOperand(1).getType())
                                .getElementType()
                                .getIntOrFloatBitWidth() == 16);
+      });
+  add("packed-nibble-dot", "record_dot", "packed_nibble_dot", "record.mlu",
+      "accumulator, record panel, quantized activation, group sums, workspace, "
+      "scale and rows",
+      "64 records, groups of 32", "i32",
+      "adds the scaled weighted integer product minus its minimum correction "
+      "to each output",
+      "exact integer subgroup products, followed by source binary32 scaling",
+      makeTyped(7, 7, 0, {STK::I32, STK::I8, STK::F32, STK::I64}, {},
+                {STK::I32}, EffectMask::ReadWrite, 1, std::nullopt),
+      [](Operation *op) {
+        auto layout = op->getAttrOfType<DenseI32ArrayAttr>("layout");
+        using Q = intentdsl::kir::Q4KRecord;
+        const int32_t fields[] = {Q::bytes,     Q::packed,    Q::factors,
+                                  Q::d,         Q::dmin,      Q::halfGroups,
+                                  Q::scaleBits, Q::nibbleBits};
+        if (!layout || layout.asArrayRef() != ArrayRef<int32_t>(fields))
+          return failure();
+        for (unsigned i = 0; i < 5; ++i) {
+          auto ty =
+              cast<MemRefType>(op->getOperand(i).getType()).getElementType();
+          if (!isSpace(op->getOperand(i), 1) ||
+              !(i == 0 ? ty.isF32() : ty.isInteger(i == 1 ? 8 : 32)))
+            return failure();
+        }
+        return success();
+      });
+  add("segmented-indexed-product", "segment_product", "segment_product",
+      "segment.mlu",
+      "segment starts, consecutive coefficients and i32 keys, resident f32 "
+      "table and workspace",
+      "unit stride", "f32",
+      "reads three global streams and writes private results",
+      "separate binary32 multiply and addition in source member order",
+      makeTyped(10, 10, 0, {STK::I32, STK::F32, STK::I64}, {}, {STK::F32},
+                EffectMask::ReadWrite, 1, std::nullopt),
+      [](Operation *op) {
+        for (unsigned i = 0; i < 7; ++i) {
+          auto t =
+              cast<MemRefType>(op->getOperand(i).getType()).getElementType();
+          bool integer = i == 1 || i == 3 || i == 5 || i == 6;
+          if (!isSpace(op->getOperand(i), i >= 1 && i <= 3 ? 0 : 1) ||
+              !(integer ? t.isInteger(32) : t.isF32()))
+            return failure();
+        }
+        return success();
       });
   add("key-reservation", "reserve_tickets", "reserve_tickets",
       "reservations.mlu",

@@ -56,6 +56,24 @@ inline mlir::LogicalResult bindMatrix(mlir::func::FuncOp fn, unsigned phase,
                           : type.isF16() || type.isBF16() ? "wram-conv"
                           : type.isInteger(8)             ? "exact-i8-conv"
                                                           : "f32-outer";
+    if (name == "q4k_dot") {
+      auto attr = p.dot.getAttrOfType<TypeAttr>("kir.storage");
+      auto record = attr ? dyn_cast<intentdsl::kir::Q4KType>(attr.getValue())
+                         : intentdsl::kir::Q4KType{};
+      // The vector pool operates on 64 records at once, one output per
+      // channel. Only byte-contiguous records share this pitched transfer.
+      int64_t panel =
+          record && record.getLayout().group == 32 && p.tile[0] >= 64 &&
+                  p.shape[0] >= 64 && p.stride(p.dot.getOperand(0), 2) == 1 &&
+                  p.stride(p.dot.getOperand(1).getDefiningOp()->getOperand(0),
+                           1) == 1 &&
+                  std::min(local->capacity, local->budget) >=
+                      setup.getAttrOfType<IntegerAttr>("scratch_bytes").getInt()
+              ? 64
+              : 1;
+      if (!field(p.dot, "bangc.record_rows", b.getI64IntegerAttr(panel)))
+        return p.dot.emitError("record panel disagrees with storage layout");
+    }
     if (!field(p.dot, "bangc.matrix", b.getStringAttr(primitive)))
       return p.dot.emitError("incorrect matrix microkernel");
     if ((primitive == "wram-conv" || primitive == "exact-i8-conv") &&

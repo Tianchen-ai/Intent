@@ -1,0 +1,56 @@
+// Integer subproducts (32 * 15 * 128) are exactly representable in f32.
+__mlu_func__ void packed_nibble_dot(float *acc, const unsigned char *records,
+                                    const int *q, const int *groupSums,
+                                    int *workspace, float scale, int rows,
+                                    int pitch, int packed, int factors, int d,
+                                    int dmin, int halfGroups, int scaleBits,
+                                    int fieldBits) {
+  unsigned char *bytes = (unsigned char *)workspace;
+  int *fields = workspace + 512;
+  float *a = (float *)(fields + 2048), *tr = a + 2048;
+  float *qa = tr + 2048, *sub = qa + 256;
+  int *sum = (int *)(sub + 64), *cor = sum + 64;
+  __bang_write_value(sum, 64, 0);
+  __bang_write_value(cor, 64, 0);
+  __bang_int322float(qa, q, halfGroups * 2 * 32, 0);
+  int mask = (1 << fieldBits) - 1, scaleMask = (1 << scaleBits) - 1;
+  for (int j = 0; j < 2 * halfGroups; ++j) {
+    int shift = (j & 1) * fieldBits;
+    if (!(j & 1)) {
+      __memcpy(bytes, records + packed + (j / 2) * 32, 32, NRAM2NRAM, 32, pitch,
+               63);
+    }
+    __bang_uchar2int32(fields, bytes, 2048, 0);
+    __bang_band_scalar(fields, fields, mask << shift, 2048);
+    __bang_int322float(a, fields, 2048, -shift);
+    __bang_cycle_mul(a, a, qa + j * 32, 2048, 32);
+    __bang_transpose(tr, a, 64, 32);
+    __bang_sumpool(sub, tr, 64, 32, 1, 32, 1, 1, 1);
+    for (int r = 0; r < rows; ++r) {
+      const unsigned char *f =
+          (const unsigned char *)records + r * pitch + factors;
+      int slot = j % halfGroups, l = f[slot], h = f[slot + halfGroups],
+          p = f[slot + 2 * halfGroups];
+      int sc = j < halfGroups ? (l & scaleMask)
+                              : ((p & mask) | ((l >> scaleBits) << fieldBits));
+      int mn = j < halfGroups
+                   ? (h & scaleMask)
+                   : ((p >> fieldBits) | ((h >> scaleBits) << fieldBits));
+      sum[r] += sc * (int)sub[r];
+      cor[r] += mn * groupSums[j];
+    }
+  }
+  for (int r = 0; r < rows; ++r) {
+    const unsigned char *v = (const unsigned char *)records + r * pitch;
+    union {
+      unsigned short bits;
+      half value;
+    } hi, lo;
+    hi.bits = v[d] | ((unsigned)v[d + 1] << 8);
+    lo.bits = v[dmin] | ((unsigned)v[dmin + 1] << 8);
+    volatile float gain = (float)hi.value * (float)sum[r],
+                   bias = (float)lo.value * (float)cor[r];
+    volatile float scaled = scale * (gain - bias);
+    acc[r] += scaled;
+  }
+}

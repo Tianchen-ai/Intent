@@ -1,0 +1,40 @@
+// Offsets delimit independent sums. Stage consecutive member ranges across
+// rows but finish each row in original order, including across DMA chunks.
+__mlu_func__ void segment_product(float *out, const int *offsets,
+                                  const float *weights, const int *indices,
+                                  const float *table, int *edges, int *scratch,
+                                  int rows, int span, int tableLength) {
+  float *w = (float *)(scratch + span), *x = w + span;
+  __memcpy(edges, offsets, (rows + 1) * 4, GDRAM2NRAM);
+  for (int start = 0; start < rows;) {
+    int end = start;
+    while (end < rows && edges[end + 1] >= edges[end])
+      ++end;
+    if (end == start) {
+      out[start++] = 0.f;
+      continue;
+    }
+    int lo = edges[start], limit = edges[end], resident = lo, until = lo;
+    for (int r = start; r < end; ++r) {
+      float sum = 0.f;
+      for (int m = edges[r]; m < edges[r + 1];) {
+        if (m == until) {
+          int n = limit - m < span ? limit - m : span;
+          __memcpy(w, weights + m, n * 4, GDRAM2NRAM);
+          __memcpy(scratch, indices + m, n * 4, GDRAM2NRAM);
+          __bang_lut((int *)x, (const unsigned *)scratch, (const int *)table, n,
+                     tableLength);
+          resident = m;
+          until = m + n;
+        }
+        int stop = edges[r + 1] < until ? edges[r + 1] : until;
+        for (; m < stop; ++m) {
+          volatile float product = w[m - resident] * x[m - resident];
+          sum += product;
+        }
+      }
+      out[r] = sum;
+    }
+    start = end;
+  }
+}

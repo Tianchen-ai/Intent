@@ -56,6 +56,7 @@ void supplyCost(Unit &u) {
           unsigned vecOps = 0, scalarOps = 0;
           unsigned summaries = 0, scans = 0, atomics = 0;
           bool hasIndexed = false;
+          double indirectMembers = 0.;
           int64_t keySpan = 0;
           op->walk([&](Operation *i) {
             auto k = i->getName().stripDialect();
@@ -65,6 +66,15 @@ void supplyCost(Unit &u) {
               keySpan = i->getAttrOfType<IntegerAttr>("span").getInt();
             atomics += k == "atomic_add_at";
             hasIndexed |= k == "indexed_tile_read";
+            if (k == "member_load" && i->getNumOperands() == 2) {
+              auto *index = i->getOperand(1).getDefiningOp();
+              if (index && index->getName().stripDialect() == "member_load")
+                indirectMembers +=
+                    facts->viewBytes(index->getOperand(0)) /
+                    (cast<MemRefType>(index->getOperand(0).getType())
+                         .getElementTypeBitWidth() /
+                     8.);
+            }
             if (k == "reduce") {
               ++vecOps;
               return;
@@ -226,8 +236,26 @@ void supplyCost(Unit &u) {
               }
               if(segmentWork || keys){
                 auto rate=intentdsl::quantity(ctx,"read_1","B/ns");
-                if (rate)
-                  *pred.timeNs += (segmentWork + keys) / *rate;
+                if (rate) {
+                  auto gather = d.getAs<DenseI64ArrayAttr>("segment_gather");
+                  double traffic = (segmentWork + keys) / *rate;
+                  if (gather && fullInBw) {
+                    // Stream packed members; each participant stages its
+                    // lookup table once before processing independent tiles.
+                    double bandwidth = std::min(singleInBw.value_or(*fullInBw) *
+                                                    activeParticipants,
+                                                *fullInBw * maxConsumers);
+                    traffic =
+                        (segmentWork + 4.0 * gather[0] * activeParticipants) /
+                        bandwidth;
+                    // One dependent scalar addition for each live member.
+                    traffic += segmentWork / (3 * sizeof(float) *
+                                              activeParticipants * (*vector));
+                  }
+                  if (!gather && inLat)
+                    traffic += indirectMembers * (*inLat) / activeParticipants;
+                  *pred.timeNs += traffic;
+                }
               }
               if (!e.timeNs || *pred.timeNs < *e.timeNs)
                 e.timeNs = pred.timeNs;
