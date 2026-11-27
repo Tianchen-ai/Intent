@@ -63,8 +63,8 @@ device,exit,workload,case,mode,v2_us,reference,reference_us,reference_env,ratio,
 5090d,cutile,group7/topk_rows,1024x4096-k8-f32,作者默认,30.72,torch,88.064,5090d,0.34884,快,,,,,30.72
 5090d,triton,group7/triangular_solve,32x128x64-f32,作者默认,55.296,torch,65.536,5090d,0.84375,快,,,,,55.296
 5090d,cutile,group7/triangular_solve,32x128x64-f32,作者默认,196.608,torch,65.536,5090d,3.0,慢,,,,,196.608
-5090d,triton,program/adamw,author,作者默认,4.096,aten:source,20.48,5090d,0.2,快,,,torch,28.672,4.096
-5090d,cutile,program/adamw,author,作者默认,4.096,aten:source,20.48,5090d,0.2,快,,,torch,28.672,4.096
+5090d,triton,program/adamw,author,作者默认,4.096,aten:source,32.768,5090d,0.125,快,,,torch,28.672,4.096
+5090d,cutile,program/adamw,author,作者默认,4.096,aten:source,32.768,5090d,0.125,快,,,torch,28.672,4.096
 5090d,triton,program/attention,author,作者默认,10.24,cutile,10.24,5090d,1.0,平,,,,,10.24
 5090d,cutile,program/attention,author,作者默认,12.288,cutile,10.24,5090d,1.2,慢,,,,,12.288
 5090d,triton,program/batch_norm,author,作者默认,4.096,aten:source,26.624,5090d,0.15385,快,,,torch,6.144,4.096
@@ -244,7 +244,7 @@ x86-mojo,mojo,group7/retention_recurrence,2x512x8x64-bf16,作者默认,494.827,i
 x86-mojo,mojo,group7/sliding_window_attention,2x32x8x4096x128-w1024-f16,作者默认,273569.76,aten:source,5613346.7399,x86-weft,0.04874,快,,,aten:cpu,566861.399,273569.76
 x86-mojo,mojo,group7/topk_rows,1024x4096-k8-f32,作者默认,364.262,aten:cpu,1934.362,x86-mojo,0.18831,快,,,,,364.262
 x86-mojo,mojo,group7/triangular_solve,32x128x64-f32,作者默认,164.539,aten:cpu,324.231,x86-weft,0.50747,快,,,,,164.539
-x86-mojo,mojo,program/adamw,author,作者默认,16.156,aten:source,268.182,x86-weft,0.06024,快,,,aten:cpu,13.211,16.156
+x86-mojo,mojo,program/adamw,author,作者默认,16.156,aten:source,280.0199,x86-weft,0.0577,快,,,aten:cpu,13.211,16.156
 x86-mojo,mojo,program/attention,author,preserve-sign；作者归一化许可,233.45,aten:cpu,284.875,x86-mojo,0.81948,快,,,,,378.212
 x86-mojo,mojo,program/batch_norm,author,作者默认,7.414,aten:source,144.4659,x86-weft,0.05132,快,,,aten:cpu,19.237,7.414
 x86-mojo,mojo,program/batched_gemm,author,作者默认,103.889,aten:cpu,150.612,x86-mojo,0.68978,快,,,,,103.889
@@ -315,7 +315,7 @@ x86-weft,weft,group7/retention_recurrence,2x512x8x64-bf16,作者默认,434.511,i
 x86-weft,weft,group7/sliding_window_attention,2x32x8x4096x128-w1024-f16,作者默认,531612.179,aten:source,5613346.7399,x86-weft,0.09471,快,,,aten:cpu,566861.399,531612.179
 x86-weft,weft,group7/topk_rows,1024x4096-k8-f32,作者默认,330.043,aten:cpu,1934.362,x86-mojo,0.17062,快,,,,,330.043
 x86-weft,weft,group7/triangular_solve,32x128x64-f32,作者默认,158.201,aten:cpu,324.231,x86-weft,0.48793,快,,,,,158.201
-x86-weft,weft,program/adamw,author,作者默认,30.138,aten:source,268.182,x86-weft,0.11238,快,,,aten:cpu,13.211,30.138
+x86-weft,weft,program/adamw,author,作者默认,30.138,aten:source,280.0199,x86-weft,0.10763,快,,,aten:cpu,13.211,30.138
 x86-weft,weft,program/attention,author,preserve-sign；作者归一化许可,619.855,aten:cpu,314.936,x86-weft,1.96819,慢,,,,,338.558
 x86-weft,weft,program/batch_norm,author,作者默认,7.19,aten:source,144.4659,x86-weft,0.04977,快,,,aten:cpu,19.237,7.19
 x86-weft,weft,program/batched_gemm,author,作者默认,152.396,aten:cpu,150.612,x86-mojo,1.01185,平,,,,,152.396
