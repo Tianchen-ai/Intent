@@ -2,6 +2,7 @@
 #include "Rows.h"
 #include "intentdsl/exits/bangc/ir/Dialect.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
+#include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
 #include "intentdsl/levels/execution/block/ir/FoldPanel.h"
 #include "intentdsl/levels/storage/dsa/ir/Owners.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -4681,9 +4682,29 @@ struct OrderedLowerer {
         makeOp("row_exp", {out, scratch, input(0), lanes, lanes}, {}, {},
                "validated-exp");
       else if (k == "arith.divf") {
-        makeOp("vec_div_rn", {out, input(0), input(1), scratch, lanes, lanes},
-               {}, {b.getNamedAttr("mode", b.getStringAttr("vv"))},
-               "ieee-div-rn-vv");
+        if (!compilerinfra::hasFastMath(op, arith::FastMathFlags::arcp,
+                                        profile.numerical)) {
+          makeOp("vec_div_rn", {out, input(0), input(1), scratch, lanes, lanes},
+                 {}, {b.getNamedAttr("mode", b.getStringAttr("vv"))},
+                 "ieee-div-rn-vv");
+          continue;
+        }
+        SmallVector<NamedAttribute> attrs{
+            b.getNamedAttr("fastmath",
+                           arith::FastMathFlagsAttr::get(
+                               b.getContext(),
+                               compilerinfra::effectiveFastMath(
+                                   op, profile.numerical.defaultFastMath))),
+            b.getNamedAttr(
+                "denormal-fp-math",
+                b.getStringAttr(intentdsl::kir::getDenormalFpMath(op)))};
+        if (compilerinfra::allowsSubnormalFlush(op, profile.numerical))
+          makeOp("vec_div_approx", {out, input(0), input(1), scratch, lanes},
+                 {}, attrs, "reciprocal-product");
+        else
+          makeOp("vec_guarded_div",
+                 {out, input(0), input(1), scratch, lanes, lanes}, {}, attrs,
+                 "guarded-reciprocal-product");
       } else if (k == "arith.truncf")
         makeOp("vec_cast", {out, input(0), lanes}, {},
                {b.getNamedAttr("kind", b.getStringAttr("f32_to_f16_ieee"))});

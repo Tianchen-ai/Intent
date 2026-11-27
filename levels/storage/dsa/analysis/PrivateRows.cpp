@@ -123,7 +123,7 @@ static void matchWindowFold(func::FuncOp fn, Block &bb, PrivateRows &r,
       continue;
     auto cond = mul.getLhs().getDefiningOp<scf::IfOp>();
     auto weight = widening(mul.getRhs());
-    if (!cond || !weight ||
+    if (!cond || cond.getNumResults() != 1 || !weight ||
         weight.getIndices().back() != loop.getInductionVar() ||
         !cond.elseBlock() || !fzero(cond.elseYield().getOperand(0)))
       continue;
