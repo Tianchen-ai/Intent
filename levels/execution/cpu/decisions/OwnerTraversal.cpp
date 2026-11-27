@@ -365,14 +365,10 @@ void sharedOwnerTraversal(compilerinfra::Unit &u) {
           if (batch > machine.packedOwners && !matrixOnly) {
             if (!vectorValue)
               continue;
-            // The unfused FP32 product has one element and one validity byte
-            // per owner, key and depth coordinate. The score window is live
-            // alongside the product and the two widened input panels.
-            double tile = machine.orderedDotTokens, depth = vectorDot->depth;
-            double bytes = sizeof(float) * double(batch) * std::min(slots, vectorDot->tokens) +
-                           (sizeof(float) + 1) *
-                               (depth * (batch * tile + batch + tile) + batch * vectorValue->columns);
-            if (bytes > machine.ownerStackBytes)
+            if (intentdsl::cpu::vectorScoreBytes(
+                    batch, machine.orderedDotTokens, vectorDot->depth,
+                    std::min(slots, vectorDot->tokens), vectorValue->columns) >
+                machine.ownerStackBytes)
               continue;
           }
           row.set("window", b.getI64IntegerAttr(slots));

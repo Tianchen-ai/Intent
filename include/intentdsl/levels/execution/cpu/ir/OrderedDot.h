@@ -11,6 +11,15 @@ inline int64_t scoreSlotLimit(const RowMachine &machine) {
   return std::max<int64_t>(batchScoreSlots,
                            machine.l2CacheBytes / (4 * sizeof(float)));
 }
+// Score windows stay resident while vector operands are widened. Each
+// uncontracted FP32 product has an element and a validity byte.
+inline double vectorScoreBytes(int64_t rows, int64_t tile, int64_t depth,
+                               int64_t retained, int64_t columns) {
+  return sizeof(float) * double(rows) * retained +
+         (sizeof(float) + sizeof(uint8_t)) *
+             (double(depth) * (rows * tile + rows + tile) + rows * columns);
+}
+
 struct OrderedDotPanel {
   mlir::Operation *dot, *query, *key;
   int64_t depth, tokens;

@@ -61,11 +61,20 @@ orderedGeometry(mlir::Operation &space, const compilerinfra::TargetProfile &p) {
           std::min(cached, std::max<int64_t>(1, budget / tileBytes) * tokens);
     }
   }
+  auto inner = space.getAttrOfType<IntegerAttr>("cpu.innermost_owner");
+  if (machine->repeatedScoreOwners && cached && inner && !score) {
+    auto dot = orderedDotPanel(space, *facts, inner.getInt(), rows, false);
+    int64_t paired = 2 * tokens;
+    if (dot && paired <= machine->wideningPanel && paired <= dot->tokens &&
+        cached % paired == 0 &&
+        vectorScoreBytes(rows, paired, dot->depth, std::min(cached, dot->tokens),
+                         columns) <= machine->ownerStackBytes)
+      tokens = paired;
+  }
   NamedAttrList geometry;
   geometry.set("token_tile", b.getI64IntegerAttr(tokens));
   geometry.set("value_width", b.getI64IntegerAttr(width));
   geometry.set("score_slots", b.getI64IntegerAttr(cached));
-  auto inner = space.getAttrOfType<IntegerAttr>("cpu.innermost_owner");
   if (score && inner && machine->orderedDotTokens &&
       space.hasAttr("cpu.value_width")) {
     auto dot = orderedDotPanel(space, *facts, inner.getInt(), rows);
