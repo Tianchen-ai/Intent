@@ -23,8 +23,11 @@ bool usesApproximateMath(Operation *op) {
 }
 StringRef primitive(Operation *op, int64_t depth) {
   auto n = op->getName().getStringRef();
-  if (usesApproximateMath(op))
-    return n == "block.div" ? "approximate_div" : "approximate_sqrt";
+  if (usesApproximateMath(op)) {
+    if (n == "block.sqrt") return "approximate_sqrt";
+    return allowsInputSubnormalFlush(op) && allowsOutputSubnormalFlush(op)
+               ? "approximate_div" : "guarded_reciprocal";
+  }
   if(n=="block.segment_size") return "segment_size";
   if(n=="block.segment_fold"){
     if(intentdsl::kir::contiguousFeatureRead(op))return "feature_panel_sum";

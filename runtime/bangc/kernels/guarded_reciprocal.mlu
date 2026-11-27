@@ -1,0 +1,51 @@
+// arcp permits a reciprocal and a multiply. Without FTZ permission only use
+// vector results on lanes where both operations have normal inputs and outputs.
+__mlu_func__ float recip_lane(const float *p, int i) { return p[i]; }
+__mlu_func__ float recip_lane(float x, int) { return x; }
+
+__mlu_func__ void mark_exception(int *mask, int *bits, int *tmp, const float *x, int n) {
+  __bang_band_scalar(bits, (const int *)x, 0x7f800000, n);
+  __bang_eq_scalar(tmp, bits, 0, n);
+  __bang_bor((char *)mask, (const char *)mask, (const char *)tmp, n * 4);
+  __bang_eq_scalar(tmp, bits, 0x7f800000, n);
+  __bang_bor((char *)mask, (const char *)mask, (const char *)tmp, n * 4);
+}
+__mlu_func__ void mark_exception(int *mask, int *, int *, float x, int n) {
+  union { float f; unsigned u; } v;
+  v.f = x;
+  unsigned e = v.u & 0x7f800000u;
+  if (e == 0 || e == 0x7f800000u) __bang_write_value(mask, n, 1);
+}
+
+__mlu_func__ void reciprocal_tile(float *r, const float *b, int n) { __bang_recip(r, b, n); }
+__mlu_func__ void reciprocal_tile(float *r, float b, int n) {
+  __bang_write_value(r, n, __cn_scalar_div_f32_rn(1.0f, b));
+}
+__mlu_func__ void mul_reciprocal(float *dst, const float *a, const float *r, int n) {
+  __bang_mul(dst, a, r, n);
+}
+__mlu_func__ void mul_reciprocal(float *dst, float a, const float *r, int n) {
+  __bang_mul_scalar(dst, r, a, n);
+}
+
+template <class A, class B>
+__mlu_func__ void guarded_reciprocal_product(float *dst, A a, B b, float *sc, int live, int n) {
+  float *out = sc, *r = sc + n;
+  int *mask = (int *)(sc + 2*n), *bits = mask + n, *tmp = bits + n;
+  reciprocal_tile(r, b, n);
+  mul_reciprocal(out, a, r, n);
+  __bang_write_value(mask, n, 0);
+  mark_exception(mask, bits, tmp, a, n);
+  mark_exception(mask, bits, tmp, b, n);
+  mark_exception(mask, bits, tmp, r, n);
+  mark_exception(mask, bits, tmp, out, n);
+  __bang_ne_scalar(mask, mask, 0, n);
+  __bang_int322float(r, mask, n, 0);
+  if (__bang_count(r, live)) {
+    __sync_compute();
+    for (int i = 0; i < live; ++i)
+      if (((volatile int *)mask)[i])
+        out[i] = __cn_scalar_div_f32_rn(recip_lane(a, i), recip_lane(b, i));
+  }
+  __memcpy(dst, out, n * sizeof(float), NRAM2NRAM);
+}

@@ -671,12 +671,12 @@ void rowContracts(Unit &unit) {
                        sc.getElementType().isF32());
       });
 
-  auto approximate = [&](unsigned operands, arith::FastMathFlags permission) {
+  auto approximate = [&](unsigned operands, arith::FastMathFlags permission, bool ftz = true) {
     auto tc = makeTyped(operands, operands, 0, {STK::F32, STK::I64}, {}, {STK::F32},
                         EffectMask::ReadWrite, 64, 1);
     tc.numerical.requiredFastMath = permission;
-    tc.numerical.requireInputSubnormalFlush = true;
-    tc.numerical.requireOutputSubnormalFlush = true;
+    tc.numerical.requireInputSubnormalFlush = ftz;
+    tc.numerical.requireOutputSubnormalFlush = ftz;
     return tc;
   };
   auto floatNram = [](Value v) {
@@ -701,6 +701,16 @@ void rowContracts(Unit &unit) {
                        (floatNram(b) || b.getType().isF32()) && (floatNram(a) || floatNram(b)));
       });
 
+  add("guarded-reciprocal-product", "vec_guarded_div", "guarded_reciprocal_product", "guarded_reciprocal.mlu",
+      "NRAM f32 quotient and operands, five scratch tiles, live and padded lanes",
+      "contiguous NRAM", "f32", "read operands, write scratch and quotient",
+      "LLVM arcp: reciprocal multiply for normal lanes; SDK RN for exceptional lanes",
+      approximate(6, arith::FastMathFlags::arcp, false), [=](Operation *op) {
+        auto a = op->getOperand(1), b = op->getOperand(2);
+        return success(floatNram(op->getOperand(0)) && floatNram(op->getOperand(3)) &&
+                       (floatNram(a) || a.getType().isF32()) && (floatNram(b) || b.getType().isF32()) &&
+                       (floatNram(a) || floatNram(b)));
+      });
   add("ieee-sqrt-rn", "vec_sqrt_rn", "vec_sqrt_rn", "ieee_math.mlu",
       "NRAM f32 destination, NRAM f32 input and NRAM f32 scratch",
       "64-lane aligned NRAM vector fragment with 6x lanes f32 scratch", "f32",

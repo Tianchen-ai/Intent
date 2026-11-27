@@ -727,6 +727,8 @@ TerminalPrinter rowPrinter() {
                return llvm::Error::success();
              });
 
+  rules["bangc_src.vec_guarded_div"] = PrintRule::format(
+      "guarded_reciprocal_product($0, $1, $2, $3, (int)($4), (int)($5));");
   rules["bangc_src.vec_div_rn"] = PrintRule::format(
       "certified_div_rn($0, $1, $2, $3, (int)($4), (int)($5));");
   rules["bangc_src.div_rn"] =

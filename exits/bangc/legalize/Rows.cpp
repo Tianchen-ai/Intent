@@ -2294,7 +2294,7 @@ struct RowLowerer {
               int r0 = rankOf(inst.getOperand(0).getType());
               int r1 = rankOf(inst.getOperand(1).getType());
               bool approximate = prim == "approximate_div";
-              if (!approximate && prim != "div_rn") {
+              if (!approximate && prim != "guarded_reciprocal" && prim != "div_rn") {
                 bodyStatus = inst.emitError(
                     "missing resolved f32 quotient implementation");
                 return;
@@ -2326,6 +2326,14 @@ struct RowLowerer {
                 }
                 Value scratch = nramAt(b.getF32Type(), phaseByteOffset(
                     inst.getAttrOfType<DenseI64ArrayAttr>("bangc.scratch"), groupedShift));
+                if (prim == "guarded_reciprocal") {
+                  makeOp("vec_guarded_div", {output, x, y, scratch, active, length}, {},
+                         {b.getNamedAttr("fastmath", arith::FastMathFlagsAttr::get(
+                              b.getContext(), compilerinfra::effectiveFastMath(&inst))),
+                          b.getNamedAttr("denormal-fp-math", b.getStringAttr(intentdsl::kir::getDenormalFpMath(&inst)))},
+                         "guarded-reciprocal-product");
+                  return;
+                }
                 makeOp("vec_div_rn", {output, x, y, scratch, active, length}, {},
                        {b.getNamedAttr("mode", b.getStringAttr(mode))},
                        ("ieee-div-rn-" + mode).str());

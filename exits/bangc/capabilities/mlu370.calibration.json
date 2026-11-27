@@ -517,6 +517,114 @@
         "error": "range [1.51228, 1.56592], n=8"
       }
     },
+    "compute_guarded_div_vv_64": {
+      "value": 1482.142857142857,
+      "unit": "ns",
+      "source": {
+        "device": "MLU370",
+        "isa": "mtp_372",
+        "toolchain": "cncc v4.7.2 clang version 11.1.0",
+        "conditions": "16 block tasks; FP32 operands 1 and 1.75; CNRT notifier differential 128 minus 16 invocations of the installed guarded_reciprocal_product",
+        "benchmark": "intent_bench.calibration/compute_guarded_div_vv_64",
+        "error": "range [1482.14, 1491.07], n=9"
+      }
+    },
+    "compute_guarded_div_vv_512": {
+      "value": 2214.285714285714,
+      "unit": "ns",
+      "source": {
+        "device": "MLU370",
+        "isa": "mtp_372",
+        "toolchain": "cncc v4.7.2 clang version 11.1.0",
+        "conditions": "16 block tasks; FP32 operands 1 and 1.75; CNRT notifier differential 128 minus 16 invocations of the installed guarded_reciprocal_product",
+        "benchmark": "intent_bench.calibration/compute_guarded_div_vv_512",
+        "error": "range [2205.36, 2214.29], n=9"
+      }
+    },
+    "compute_guarded_div_vv_2048": {
+      "value": 4705.357142857143,
+      "unit": "ns",
+      "source": {
+        "device": "MLU370",
+        "isa": "mtp_372",
+        "toolchain": "cncc v4.7.2 clang version 11.1.0",
+        "conditions": "16 block tasks; FP32 operands 1 and 1.75; CNRT notifier differential 128 minus 16 invocations of the installed guarded_reciprocal_product",
+        "benchmark": "intent_bench.calibration/compute_guarded_div_vv_2048",
+        "error": "range [4696.43, 4714.29], n=9"
+      }
+    },
+    "compute_guarded_div_vs_64": {
+      "value": 1348.2142857142858,
+      "unit": "ns",
+      "source": {
+        "device": "MLU370",
+        "isa": "mtp_372",
+        "toolchain": "cncc v4.7.2 clang version 11.1.0",
+        "conditions": "16 block tasks; FP32 operands 1 and 1.75; CNRT notifier differential 128 minus 16 invocations of the installed guarded_reciprocal_product",
+        "benchmark": "intent_bench.calibration/compute_guarded_div_vs_64",
+        "error": "range [1348.21, 1357.14], n=9"
+      }
+    },
+    "compute_guarded_div_vs_512": {
+      "value": 1794.642857142857,
+      "unit": "ns",
+      "source": {
+        "device": "MLU370",
+        "isa": "mtp_372",
+        "toolchain": "cncc v4.7.2 clang version 11.1.0",
+        "conditions": "16 block tasks; FP32 operands 1 and 1.75; CNRT notifier differential 128 minus 16 invocations of the installed guarded_reciprocal_product",
+        "benchmark": "intent_bench.calibration/compute_guarded_div_vs_512",
+        "error": "range [1785.71, 1794.64], n=9"
+      }
+    },
+    "compute_guarded_div_vs_2048": {
+      "value": 3357.1428571428573,
+      "unit": "ns",
+      "source": {
+        "device": "MLU370",
+        "isa": "mtp_372",
+        "toolchain": "cncc v4.7.2 clang version 11.1.0",
+        "conditions": "16 block tasks; FP32 operands 1 and 1.75; CNRT notifier differential 128 minus 16 invocations of the installed guarded_reciprocal_product",
+        "benchmark": "intent_bench.calibration/compute_guarded_div_vs_2048",
+        "error": "range [3348.21, 3357.14], n=9"
+      }
+    },
+    "compute_guarded_div_sv_64": {
+      "value": 1196.4285714285713,
+      "unit": "ns",
+      "source": {
+        "device": "MLU370",
+        "isa": "mtp_372",
+        "toolchain": "cncc v4.7.2 clang version 11.1.0",
+        "conditions": "16 block tasks; FP32 operands 1 and 1.75; CNRT notifier differential 128 minus 16 invocations of the installed guarded_reciprocal_product",
+        "benchmark": "intent_bench.calibration/compute_guarded_div_sv_64",
+        "error": "range [1187.50, 1196.43], n=9"
+      }
+    },
+    "compute_guarded_div_sv_512": {
+      "value": 1803.5714285714287,
+      "unit": "ns",
+      "source": {
+        "device": "MLU370",
+        "isa": "mtp_372",
+        "toolchain": "cncc v4.7.2 clang version 11.1.0",
+        "conditions": "16 block tasks; FP32 operands 1 and 1.75; CNRT notifier differential 128 minus 16 invocations of the installed guarded_reciprocal_product",
+        "benchmark": "intent_bench.calibration/compute_guarded_div_sv_512",
+        "error": "range [1794.64, 1803.57], n=9"
+      }
+    },
+    "compute_guarded_div_sv_2048": {
+      "value": 3901.785441807338,
+      "unit": "ns",
+      "source": {
+        "device": "MLU370",
+        "isa": "mtp_372",
+        "toolchain": "cncc v4.7.2 clang version 11.1.0",
+        "conditions": "16 block tasks; FP32 operands 1 and 1.75; CNRT notifier differential 128 minus 16 invocations of the installed guarded_reciprocal_product",
+        "benchmark": "intent_bench.calibration/compute_guarded_div_sv_2048",
+        "error": "range [3892.86, 3901.79], n=9"
+      }
+    },
     "compute_certified_div_vv_64": {
       "value": 5937.5,
       "unit": "ns",

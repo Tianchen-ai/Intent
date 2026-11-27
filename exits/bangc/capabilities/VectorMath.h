@@ -13,8 +13,8 @@ inline std::optional<int64_t> approximateScratch(mlir::Operation *op) {
                                     : arith::FastMathFlags::arcp;
   if (!out || out.getRank() != 2 || !out.getElementType().isF32() ||
       !arith::bitEnumContainsAll(compilerinfra::effectiveFastMath(op), flags) ||
-      !compilerinfra::allowsInputSubnormalFlush(op) ||
-      !compilerinfra::allowsOutputSubnormalFlush(op))
+      (name == "block.sqrt" && (!compilerinfra::allowsInputSubnormalFlush(op) ||
+                                !compilerinfra::allowsOutputSubnormalFlush(op))))
     return {};
   unsigned tiles = 0;
   for (auto v : op->getOperands()) {
@@ -29,6 +29,9 @@ inline std::optional<int64_t> approximateScratch(mlir::Operation *op) {
   }
   if (!tiles)
     return {};
+  if (name == "block.div" && (!compilerinfra::allowsInputSubnormalFlush(op) ||
+                              !compilerinfra::allowsOutputSubnormalFlush(op)))
+    return 5 * sizeof(float);
   return tiles == 2 ? sizeof(float) : 0;
 }
 }

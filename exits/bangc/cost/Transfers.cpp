@@ -113,7 +113,10 @@ void dmaCost(Unit &u) {
           double lanes = n * batch;
           op->walk([&](Operation *i) {
             auto code=i->getName().stripDialect();
-            if (approximateScratch(i) &&
+            bool guarded = code == "div" && approximateScratch(i) &&
+                choice.contains("approximate_math") &&
+                !(allowsInputSubnormalFlush(i) && allowsOutputSubnormalFlush(i));
+            if (!guarded && approximateScratch(i) &&
                 (code == "sqrt" || choice.contains("approximate_math"))) {
               // Strict sqrt certifies candidates; reciprocal and fast sqrt use
               // only the vector traversals permitted by the effective IR flags.
@@ -146,9 +149,8 @@ void dmaCost(Unit &u) {
                 return t ? t.getRank() : 0;
               };
               auto lhs = rank(i->getOperand(0)), rhs = rank(i->getOperand(1));
-              primitive = lhs != 2   ? "certified_div_sv"
-                          : rhs != 2 ? "certified_div_vs"
-                                     : "certified_div_vv";
+              primitive = guarded ? "guarded_div_" : "certified_div_";
+              primitive += lhs != 2 ? "sv" : rhs != 2 ? "vs" : "vv";
               if (lhs == 1 || rhs == 1) {
                 invocationLanes = n;
                 callsPerBatch = batch;
