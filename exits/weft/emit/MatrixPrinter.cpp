@@ -115,8 +115,18 @@ TerminalPrinter weftTerminalPrinter() {
       "%$r0=\"weft_kernel.local_alloc\"() <{{alignment={alignment}:i64,elements={elements}:i64}}>:()->{ptr_type}");
   rules["weft_host.task_atomic_rmw"] = PrintRule::format(
       "%$r0=\"weft_kernel.atomic_rmw\"(%$0,%$1) <{{kind=\"{kind}\",ordering=\"{ordering}\"}}>:({val_type},{slice_type})->{val_type}");
-  rules["weft_host.task_binary"] = PrintRule::format(
-      "%$r0=\"weft_kernel.binary\"(%$0,%$1) <{{kind=\"{kind}\"}}>:({lhs_type},{rhs_type})->{val_type}");
+  enterLocal("weft_host.task_binary", [](const LocalOpView &view, PrintContext &c) {
+    std::string flags;
+    if (auto attr = view.attrOfType<Attribute>("fastmath")) {
+      llvm::raw_string_ostream os(flags);
+      os << " {fastmath = " << attr << "}";
+    }
+    c.line(irId(view.result(0)) + "=\"weft_kernel.binary\"(" + irId(view.operand(0)) +
+           "," + irId(view.operand(1)) + ") <{kind=\"" + view.attrOfType<StringAttr>("kind").str() +
+           "\"}>" + flags + ":(" + view.attrOfType<StringAttr>("lhs_type").str() + "," +
+           view.attrOfType<StringAttr>("rhs_type").str() + ")->" + view.attrOfType<StringAttr>("val_type").str());
+    return llvm::Error::success();
+  });
   rules["weft_host.task_compare"] = PrintRule::format(
       "%$r0=\"weft_kernel.compare\"(%$0,%$1) <{{predicate=\"{predicate}\"}}>:({lhs_type},{rhs_type})->{val_type}");
   rules["weft_host.task_assume"] =

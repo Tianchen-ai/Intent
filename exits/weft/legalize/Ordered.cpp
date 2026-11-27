@@ -318,6 +318,7 @@ std::optional<TightenedLoopBound> analyzeCausalLoop(func::FuncOp fn,
 
 struct TiledTwoPassPlan {
   StringAttr scoreEngine, valueEngine;
+  arith::FastMathFlagsAttr accumulatorFlags;
   int64_t innerAx = -1;
   int64_t tokenTile = 0, valueWidth = 0;
   Operation *qReadOp = nullptr;
@@ -1297,6 +1298,12 @@ struct OrderedLowerer {
         vVecVal = vMul.getLhs();
       } else {
         return false;
+      }
+      if (recordV) {
+        auto flags = accAdd.getFastmath() & (arith::FastMathFlags::contract | arith::FastMathFlags::reassoc);
+        if (!arith::bitEnumContainsAll(vMul.getFastmath(), arith::FastMathFlags::contract))
+          flags = flags & arith::FastMathFlags::reassoc;
+        plan.accumulatorFlags = arith::FastMathFlagsAttr::get(b.getContext(), flags);
       }
       Value factorVal = splatVal.getDefiningOp()->getOperand(0);
       std::optional<Type> roundTy;
@@ -2721,6 +2728,7 @@ struct OrderedLowerer {
             TaskTerm dO = outerContractOp(wForPV, vForC, plan.axTok, outMatTy,
                                           plan.valueEngine);
             TaskTerm nacc = bin("add", accIter, dO, outMatTy);
+            nacc.v.getDefiningOp()->setAttr("fastmath", plan.accumulatorFlags);
             makeOp(b, loc, "task_yield", {nms.v, nacc.v}, {},
                    {b.getNamedAttr("val_types", p2IterTys)});
           }
