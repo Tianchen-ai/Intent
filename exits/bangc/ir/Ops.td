@@ -409,6 +409,24 @@ def Bf16ScalarOp : BangcOp<"bf16_scalar", [Pure]> {
   let results = (outs AnyType:$result);
 }
 
+def ReserveTicketsOp : BangcOp<"reserve_tickets", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments=(ins AnyMemRef:$counter, AnyMemRef:$keys, AnyMemRef:$counts, AnyMemRef:$bases, AnyMemRef:$tickets,
+                     I64:$rows,I64:$cols,I64:$pitch,I64:$bins,I1:$replay);
+}
+def MemberRampOp : BangcOp<"member_ramp",[DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments=(ins AnyMemRef:$dst,I64:$first,I64:$live);
+}
+def StableFilterOp : BangcOp<"stable_filter", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments=(ins AnyMemRef:$dst, AnyMemRef:$src, AnyMemRef:$mask, AnyMemRef:$scratch,I64:$live);
+  let results=(outs I32:$count);
+}
+def FinitePanelOp : BangcOp<"finite_panel", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments=(ins AnyMemRef:$src, AnyMemRef:$scratch, I64:$elements, I32:$exp);
+  let results=(outs I1:$ok);
+}
+def OrderedSelectOp : BangcOp<"ordered_select", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments=(ins AnyMemRef:$values, AnyMemRef:$indices, AnyMemRef:$src, AnyMemRef:$scratch, I64:$n, I64:$k, I64:$width);
+}
 def ScanSumOp : BangcOp<"scan_sum",
                         [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let arguments = (ins AnyMemRef:$dst, AnyMemRef:$src, AnyMemRef:$scratch,

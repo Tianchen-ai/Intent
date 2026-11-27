@@ -213,9 +213,17 @@ void supplyCost(Unit &u) {
               pred.timeNs = *launch + firstIo + sharedPrologue +
                             steps * (fetch + compute + write) - overlap +
                             waitNs;
-              if (atomics)
-                pred.timeNs =
-                    *pred.timeNs + steps * effGroup * n * atomics * (*sync);
+              if (atomics) {
+                double members = effGroup * n;
+                auto ticket = d.getAs<DenseI64ArrayAttr>("ticket_panel");
+                double issues =
+                    ticket ? std::min<double>(ticket[0], members) : members;
+                *pred.timeNs += steps * atomics * issues * (*sync);
+                if (ticket)
+                  *pred.timeNs += steps * (members + ticket[0]) / (*vector);
+                pred.terms["atomic_reservations"] = {steps * atomics * issues,
+                                                     "count"};
+              }
               if(segmentWork || keys){
                 auto rate=intentdsl::quantity(ctx,"read_1","B/ns");
                 if (rate)

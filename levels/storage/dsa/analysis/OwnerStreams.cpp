@@ -1,6 +1,7 @@
-#include "intentdsl/levels/storage/dsa/ir/Owners.h"
 #include "compilerinfra/Proofs.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
+#include "intentdsl/levels/execution/block/ir/FoldPanel.h"
+#include "intentdsl/levels/storage/dsa/ir/Owners.h"
 #include "mlir/Analysis/AliasAnalysis.h"
 #include "mlir/Analysis/AliasAnalysis/LocalAliasAnalysis.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -374,9 +375,10 @@ OwnerStreams ownerStreams(func::FuncOp fn,
   return buildForPack(1);
 }
 
-std::optional<PanelFoldSupply> panelFoldSupply(
-    func::FuncOp fn, const compilerinfra::TargetProfile &p,
-    llvm::DenseMap<Operation *, SmallVector<int64_t>> *opOffsets) {
+static std::optional<PanelFoldSupply>
+tryPanelFold(unsigned rowAxis, int64_t M, func::FuncOp fn,
+             const compilerinfra::TargetProfile &p,
+             llvm::DenseMap<Operation *, SmallVector<int64_t>> *opOffsets) {
   auto caps = p.services.get<LocalSupply>();
   auto ms = p.services.get<MatrixStorage>();
   if (!caps || !ms || ms->wramBytes <= 0 ||
@@ -393,20 +395,11 @@ std::optional<PanelFoldSupply> panelFoldSupply(
     return fn.getArgAttrOfType<DenseI64ArrayAttr>(
         cast<BlockArgument>(v).getArgNumber(), k);
   };
-  Value rowArg = bb.getArguments().back();
+  Value rowArg = bb.getArgument(rowAxis);
   int64_t rowExtent =
-      layout(space.getOperand(axes.size() - 1),
-             "block.shape")[axes[axes.size() - 1]];
-  int64_t M = 0;
-  for (int64_t cand : {int64_t(64), int64_t(32), int64_t(16)}) {
-    int64_t stepTile = std::max<int64_t>(tile, cand);
-    if ((tile % cand == 0 || cand % tile == 0) && rowExtent >= stepTile &&
-        rowExtent % stepTile == 0) {
-      M = cand;
-      break;
-    }
-  }
-  if (!M)
+      layout(space.getOperand(rowAxis), "block.shape")[axes[rowAxis]];
+  int64_t stepTile = std::max(tile, M);
+  if ((tile % M && M % tile) || rowExtent % stepTile || rowExtent < stepTile)
     return {};
   constexpr int64_t S = 64;
 
@@ -425,28 +418,31 @@ std::optional<PanelFoldSupply> panelFoldSupply(
       return false;
     auto mt = cast<MemRefType>(view.getType());
     Type et = mt.getElementType();
-    if (!et.isBF16() && !et.isF16())
+    if (!(isWrite && et.isF32()) && !et.isBF16() && !et.isF16())
       return false;
-    if (halfTy && et != halfTy)
+    if (!et.isF32() && halfTy && et != halfTy)
       return false;
     int64_t rank = mt.getRank();
     auto axisAttr = sl->getAttrOfType<IntegerAttr>("axis");
     if (rank < 2 || !axisAttr || axisAttr.getInt() != rank - 1)
       return false;
     auto coords = sl->getOperands().drop_front(isWrite ? 2 : 1);
-    if (int64_t(coords.size()) != rank - 1 || coords.back() != lastCoord)
+    auto hit = llvm::find(coords, lastCoord);
+    if (int64_t(coords.size()) != rank - 1 || hit == coords.end() ||
+        llvm::count(coords, lastCoord) != 1 ||
+        (!isWrite && coords.back() != lastCoord))
       return false;
-    for (Value c : coords.drop_back())
-      if (!rowInvariant(c, loopIv))
+    for (Value c : coords)
+      if (c != lastCoord && !rowInvariant(c, loopIv))
         return false;
     auto sh = layout(view, "block.shape"), st = layout(view, "block.strides");
     if (!sh || !st || st[rank - 1] != 1)
       return false;
     featExt = sh[rank - 1];
-    outerExt = sh[rank - 2];
-    if (featExt < 32 || featExt > 256 || featExt % 32 != 0)
+    outerExt = sh[hit - coords.begin()];
+    if (featExt < 32 || (featExt > 64 && featExt % 64) || featExt % 32 != 0)
       return false;
-    if (!halfTy)
+    if (!halfTy && !et.isF32())
       halfTy = et;
     return true;
   };
@@ -512,8 +508,9 @@ std::optional<PanelFoldSupply> panelFoldSupply(
   llvm::DenseMap<Value, VInfo> vals;
   for (Value arg : fn.getArguments())
     vals[arg] = {VKind::InvScalar, 0};
-  for (Value arg : bb.getArguments().drop_back())
-    vals[arg] = {VKind::InvScalar, 0};
+  for (Value arg : bb.getArguments())
+    if (arg != rowArg)
+      vals[arg] = {VKind::InvScalar, 0};
 
   struct RoleSpec {
     Operation *op;
@@ -582,6 +579,8 @@ std::optional<PanelFoldSupply> panelFoldSupply(
     if (!okBound(loop.getLowerBound()) || !okBound(loop.getUpperBound()))
       return false;
 
+    llvm::DenseSet<Operation *> indexOps;
+    llvm::DenseSet<Operation *> paged;
     int64_t K = -1;
     Value iv = loop.getInductionVar();
     loop.walk([&](Operation *sub) {
@@ -601,6 +600,52 @@ std::optional<PanelFoldSupply> panelFoldSupply(
         }
       }
     });
+    // A page table supplies the major coordinate. Consecutive tokens keep
+    // that entry until the remainder of the same positive divisor wraps.
+    for (Operation &read : loop.getBody()->without_terminator()) {
+      if (read.getName().stripDialect() != "slice_read")
+        continue;
+      Value view = read.getOperand(0);
+      auto coords = read.getOperands().drop_front();
+      if (coords.size() < 2)
+        continue;
+      auto rem = coords[1].getDefiningOp<arith::RemSIOp>();
+      auto cast = coords[0].getDefiningOp<arith::IndexCastOp>();
+      auto ld = cast ? cast.getIn().getDefiningOp<memref::LoadOp>()
+                     : memref::LoadOp{};
+      if (!rem || rem.getLhs() != iv || !ld || ld.getIndices().size() != 1)
+        continue;
+      auto addr = ld.getIndices()[0].getDefiningOp<arith::AddIOp>();
+      if (!addr)
+        continue;
+      auto div = addr.getRhs().getDefiningOp<arith::FloorDivSIOp>();
+      auto dim = rem.getRhs().getDefiningOp<memref::DimOp>();
+      if (!isa<BlockArgument>(ld.getMemref()) || !div || div.getLhs() != iv ||
+          div.getRhs() != rem.getRhs() || !dim ||
+          !isa<BlockArgument>(dim.getSource()) || !dim.getConstantIndex() ||
+          !rowInvariant(addr.getLhs(), iv) ||
+          !loop.isDefinedOutsideOfLoop(addr.getLhs()) ||
+          !isa<BlockArgument>(view) ||
+          layout(view, "block.shape")[1] !=
+              layout(dim.getSource(), "block.shape")[*dim.getConstantIndex()] ||
+          layout(view, "block.shape")[1] <= 0 ||
+          !llvm::all_of(coords.drop_front(2), [&](Value c) {
+            auto i = vals.find(c);
+            return i != vals.end() && i->second.kind == VKind::InvScalar;
+          }))
+        return false;
+      if (!rowInvariant(loop.getLowerBound()) ||
+          !rowInvariant(loop.getUpperBound()))
+        return false;
+      for (Operation *idx :
+           {rem.getOperation(), cast.getOperation(), ld.getOperation(),
+            addr.getOperation(), div.getOperation()})
+        indexOps.insert(idx);
+      paged.insert(&read);
+      invLoads.push_back(ld);
+      K = layout(ld.getMemref(), "block.shape")[0] *
+          layout(view, "block.shape")[1];
+    }
     if (auto dimOp = loop.getUpperBound().getDefiningOp<memref::DimOp>()) {
       if (!isa<BlockArgument>(dimOp.getSource()) || !dimOp.getConstantIndex())
         return false;
@@ -635,7 +680,7 @@ std::optional<PanelFoldSupply> panelFoldSupply(
         if (!rt.getElementType().isF32())
           return false;
         int64_t F = kir::memberExtent(fn, loop.getResult(k), "block.shape");
-        if (F < 32 || F > 256 || F % 32 != 0)
+        if (F < 32 || (F > 64 && F % 64) || F % 32 != 0)
           return false;
         if ((it->second.kind != VKind::OwnerSplat &&
              it->second.kind != VKind::OwnerPanelF32) ||
@@ -723,6 +768,8 @@ std::optional<PanelFoldSupply> panelFoldSupply(
     int64_t hb = halfBytes();
     bool loopHasContraction = false;
     for (Operation &bop : body.without_terminator()) {
+      if (indexOps.contains(&bop))
+        continue;
       if (yieldCombOps.contains(&bop) || dotMulOps.contains(&bop))
         continue;
       StringRef sn = bop.getName().stripDialect();
@@ -752,26 +799,62 @@ std::optional<PanelFoldSupply> panelFoldSupply(
         continue;
       }
 
+      if (auto ld = dyn_cast<memref::LoadOp>(bop)) {
+        auto coords = ld.getIndices();
+        if (!ld.getType().isF32() || coords.empty() || coords.back() != iv ||
+            !isa<BlockArgument>(ld.getMemref()) ||
+            !llvm::all_of(coords.drop_back(),
+                          [&](Value v) { return rowInvariant(v, iv); }) ||
+            layout(ld.getMemref(), "block.shape").asArrayRef().back() != K)
+          return false;
+        roleSpecs.push_back({&bop, "strip_scalar_read", {M * S * 4}});
+        vals[ld.getResult()] = {VKind::StripPanelF32, S};
+        invLoads.push_back(&bop);
+        continue;
+      }
       if (sn == "slice_read") {
         int64_t kTok = 0, kFeat = 0;
-        if (!checkSlice(&bop, iv, iv, kTok, kFeat) || kTok != K ||
+        bool gather = paged.contains(&bop);
+        if (!paged.empty() && !gather)
+          return false;
+        if (gather) {
+          auto v = bop.getOperand(0);
+          auto sh = layout(v, "block.shape");
+          kFeat = sh.asArrayRef().back();
+          kTok = K;
+          if (!halfTy ||
+              cast<MemRefType>(v.getType()).getElementType() != halfTy ||
+              layout(v, "block.strides").asArrayRef().back() != 1 ||
+              kFeat < 32 || kFeat % 32 || (kFeat > 64 && kFeat % 64) ||
+              bop.getAttrOfType<IntegerAttr>("axis").getInt() != sh.size() - 1)
+            return false;
+        }
+        if ((!gather && !checkSlice(&bop, iv, iv, kTok, kFeat)) || kTok != K ||
             !bop.hasOneUse())
           return false;
         auto extOp = dyn_cast<arith::ExtFOp>(*bop.getUsers().begin());
         auto extRt =
             extOp ? dyn_cast<RankedTensorType>(extOp.getType()) : RankedTensorType{};
-        if (!extRt || !extRt.getElementType().isF32() || !extOp->hasOneUse())
+        if (!extRt || !extRt.getElementType().isF32() || extOp.use_empty())
           return false;
-        Operation *extUser = *extOp->getUsers().begin();
-        if (dotMulOps.contains(extUser)) {
-          roleSpecs.push_back({&bop, "strip_slice", {S * kFeat * hb}});
-        } else if (outerMulOps.contains(extUser)) {
-          roleSpecs.push_back({&bop,
-                               "strip_transpose_slice",
-                               {S * kFeat * hb, kFeat * S * hb}});
-        } else {
-          return false;
+        bool dot = false, outer = false;
+        for (Operation *use : extOp->getUsers()) {
+          if (dotMulOps.contains(use))
+            dot = true;
+          else if (outerMulOps.contains(use))
+            outer = true;
+          else
+            return false;
         }
+        if (outer)
+          roleSpecs.push_back({&bop,
+                               gather ? "paged_dual_slice"
+                               : dot  ? "strip_dual_slice"
+                                      : "strip_transpose_slice",
+                               {S * kFeat * hb, kFeat * S * hb}});
+        else
+          roleSpecs.push_back(
+              {&bop, gather ? "paged_slice" : "strip_slice", {S * kFeat * hb}});
         vals[bop.getResult(0)] = {VKind::StripSliceHalf, kFeat};
         vals[extOp.getResult()] = {VKind::StripSliceWidenRef, kFeat};
         int64_t panels = std::max<int64_t>(1, (K + S - 1) / S);
@@ -965,7 +1048,9 @@ std::optional<PanelFoldSupply> panelFoldSupply(
     if (sn == "slice_write") {
       int64_t yRows = 0, feat = 0;
       auto itSrc = vals.find(op.getOperand(0));
-      if (itSrc == vals.end() || itSrc->second.kind != VKind::OwnerPanelHalf ||
+      if (itSrc == vals.end() ||
+          (itSrc->second.kind != VKind::OwnerPanelHalf &&
+           itSrc->second.kind != VKind::OwnerPanelF32) ||
           !checkSlice(&op, rowArg, Value{}, yRows, feat) ||
           yRows != rowExtent || feat != itSrc->second.feat)
         return {};
@@ -1048,7 +1133,37 @@ std::optional<PanelFoldSupply> panelFoldSupply(
       continue;
     }
 
+    if (auto st = dyn_cast<memref::StoreOp>(op)) {
+      auto cs = st.getIndices();
+      auto it = vals.find(st.getValue());
+      if (llvm::count(cs, rowArg) != 1 || it == vals.end() ||
+          it->second.kind != VKind::OwnerScalar ||
+          !llvm::all_of(
+              cs, [&](Value c) { return c == rowArg || rowInvariant(c); }))
+        return {};
+      roleSpecs.push_back({&op, "owner_scalar_write", {}});
+      continue;
+    }
+    if (auto div = dyn_cast<arith::FloorDivSIOp>(op);
+        div && div.getLhs() == rowArg) {
+      APInt group;
+      if (matchPattern(div.getRhs(), m_ConstantInt(&group)) &&
+          group.getSExtValue() > 0 && group.getSExtValue() % M == 0) {
+        roleSpecs.push_back({&op, "owner_group", {}});
+        vals[div.getResult()] = {VKind::InvScalar, 0};
+        continue;
+      }
+    }
     if (auto ld = dyn_cast<memref::LoadOp>(op)) {
+      if (isa<BlockArgument>(ld.getMemref()) && ld.getType().isF32() &&
+          !ld.getIndices().empty() && ld.getIndices().back() == rowArg &&
+          llvm::all_of(ld.getIndices().drop_back(),
+                       [&](Value v) { return rowInvariant(v); })) {
+        vals[ld.getResult()] = {VKind::OwnerScalar, 0};
+        roleSpecs.push_back({&op, "owner_scalar", {M * 4}});
+        invLoads.push_back(&op);
+        continue;
+      }
       if (!isa<BlockArgument>(ld.getMemref()) ||
           isa<RankedTensorType>(ld.getType()) ||
           llvm::any_of(ld.getIndices(),
@@ -1127,25 +1242,43 @@ std::optional<PanelFoldSupply> panelFoldSupply(
       return {};
     }
     const auto &abiArr = *abiParsed->getAsArray();
-    struct PublicAbiAliasModel {
-      Block *entryBlock;
-      const llvm::json::Array &abi;
+    // Reordering reads across owners also requires disjoint drains. The
+    // runtime alias groups describe storage; ABI direction alone does not.
+    SmallVector<Value> reads, writes;
+    for (const auto &rs : roleSpecs) {
+      if (rs.role == "owner_write" || rs.role == "owner_scalar_write")
+        writes.push_back(rs.op->getOperand(1));
+      else if (rs.op->getName().stripDialect() == "slice_read")
+        reads.push_back(rs.op->getOperand(0));
+    }
+    for (auto *ld : invLoads)
+      reads.push_back(ld->getOperand(0));
+    for (auto [i, v] : llvm::enumerate(writes)) {
+      auto apart = [&](Value other) {
+        return block::orderedViewsDisjoint(fn, nullptr, v, other);
+      };
+      if (!llvm::all_of(reads, apart) ||
+          !llvm::all_of(ArrayRef<Value>(writes).take_front(i), apart))
+        return {};
+      auto sh = layout(v, "block.shape"), st = layout(v, "block.strides");
+      if (!sh || !st)
+        return {};
+      SmallVector<std::pair<int64_t, int64_t>> dims;
+      for (auto [step, n] : llvm::zip(st.asArrayRef(), sh.asArrayRef()))
+        if (n > 1)
+          dims.emplace_back(step, n);
+      llvm::sort(dims);
+      int64_t span = 1;
+      for (auto [step, n] : dims) {
+        if (step < span)
+          return {};
+        span += (n - 1) * step;
+      }
+    }
+    struct PanelAliasModel {
+      func::FuncOp fn;
       bool isDisjoint(Value a, Value b) const {
-        auto ba = dyn_cast<BlockArgument>(a), bbArg = dyn_cast<BlockArgument>(b);
-        if (!ba || !bbArg || ba.getOwner() != entryBlock ||
-            bbArg.getOwner() != entryBlock)
-          return false;
-        if (ba == bbArg)
-          return false;
-        auto *da = abi[ba.getArgNumber()].getAsObject();
-        auto *db = abi[bbArg.getArgNumber()].getAsObject();
-        if (!da || !db)
-          return false;
-        auto dirA = da->getString("direction").value_or("");
-        auto dirB = db->getString("direction").value_or("");
-        // Distinct In and Out public buffers never alias; InOut may alias.
-        return (dirA == "In" && dirB == "Out") ||
-               (dirA == "Out" && dirB == "In");
+        return block::orderedViewsDisjoint(fn, nullptr, a, b);
       }
       AliasResult alias(Value lhs, Value rhs) {
         if (lhs == rhs)
@@ -1178,7 +1311,7 @@ std::optional<PanelFoldSupply> panelFoldSupply(
     };
     AliasAnalysis aa(&space);
     aa.addAnalysisImplementation(LocalAliasAnalysis());
-    aa.addAnalysisImplementation(PublicAbiAliasModel{&fn.front(), abiArr});
+    aa.addAnalysisImplementation(PanelAliasModel{fn});
 
     for (const auto &rs : roleSpecs) {
       if (rs.role != "owner_slice")
@@ -1293,16 +1426,21 @@ std::optional<PanelFoldSupply> panelFoldSupply(
   }
   int64_t magOff = alloc.alloc(scratchLo, scratchHi, 4096 * 2);
   int64_t flagOff = alloc.alloc(scratchLo, scratchHi, 4096 * 2);
-  int64_t auxBytes = 1536 + M * 64 * 4;
+  int64_t auxBytes =
+      1536 + std::max<int64_t>(64 * 64 * halfBytes(), M * 64 * 4);
   int64_t auxOff = alloc.alloc(scratchLo, scratchHi, auxBytes);
 
-  if (alloc.peak > std::min(caps->budget, caps->capacity))
+  bool iota = llvm::any_of(
+      roleSpecs, [](const RoleSpec &r) { return r.role == "strip_index_f32"; });
+  if (alloc.peak + (2 + iota) * M * S * 4 + std::max<int64_t>(64, M) * 4 >
+      std::min(caps->budget, caps->capacity))
     return {};
 
   if (opOffsets)
     *opOffsets = std::move(map);
 
   PanelFoldSupply res;
+  res.rowAxis = rowAxis;
   res.rows = M;
   res.span = S;
   res.wramBytes = wramBytes;
@@ -1314,5 +1452,16 @@ std::optional<PanelFoldSupply> panelFoldSupply(
   res.scratchOffsets = {magOff, flagOff, auxOff};
   res.roles = std::move(roleMap);
   return res;
+}
+std::optional<PanelFoldSupply>
+panelFoldSupply(func::FuncOp fn, const compilerinfra::TargetProfile &p,
+                llvm::DenseMap<Operation *, SmallVector<int64_t>> *offsets) {
+  auto axes = fn.front().front().getAttrOfType<DenseI64ArrayAttr>("axes");
+  if (axes)
+    for (int a = axes.size() - 1; a >= 0; --a)
+      for (int64_t m : {64, 32, 16})
+        if (auto plan = tryPanelFold(a, m, fn, p, offsets))
+          return plan;
+  return {};
 }
 } // namespace intentdsl::dsa

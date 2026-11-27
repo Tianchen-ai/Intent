@@ -11,6 +11,13 @@ mlir::LogicalResult verifyOwners(mlir::func::FuncOp,
 
 bool ownerValueDependsOn(mlir::Value v, mlir::Value target);
 
+struct PrivateRows {
+  llvm::SmallVector<mlir::Value> views;
+  llvm::DenseSet<mlir::Value> writes;
+  int64_t bytes = 0, scanWidth = 0, selectionWidth = 0, k = 0;
+};
+std::optional<PrivateRows> privateRows(mlir::func::FuncOp,
+                                       const compilerinfra::TargetProfile &);
 struct IndexedRowAdd {
   mlir::Value keys, source, destination;
   int64_t rows, width, batch;
@@ -29,6 +36,7 @@ struct OwnerStreams {
 };
 
 struct PanelFoldSupply {
+  unsigned rowAxis = 0;
   int64_t rows = 0;
   int64_t span = 0;
   int64_t wramBytes = 0;

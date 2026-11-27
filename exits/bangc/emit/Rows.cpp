@@ -167,6 +167,17 @@ TerminalPrinter rowPrinter() {
       PrintRule::format("Moment $r0 = welford_row($0, $1, (int)($2));");
   rules["bangc_src.summary_merge"] =
       PrintRule::format("Moment $r0 = merge_moments($0, $1);");
+  rules["bangc_src.reserve_tickets"] = PrintRule::format(
+      "reserve_tickets($0,$1,$2,$3,$4,(int)$5,(int)$6,(int)$7,(int)$8,$9);");
+  rules["bangc_src.member_ramp"] =
+      PrintRule::format("i32_ramp($0,(unsigned)$1,(int)$2);");
+  rules["bangc_src.stable_filter"] =
+      PrintRule::format("int $r0=filter_i32($0,$1,$2,$3,(int)$4);");
+  rules["bangc_src.finite_panel"] = PrintRule::format(
+      "unsigned char $r0=finite_narrow_panel((const unsigned short "
+      "*)$0,(unsigned short *)$1,(int)$2,(unsigned short)$3);");
+  rules["bangc_src.ordered_select"] =
+      PrintRule::format("select_ordered($0,$1,$2,$3,(int)$4,(int)$5,(int)$6);");
   rules["bangc_src.key_histogram"] =
       PrintRule::format("tile_key_histogram($0,$1,$2,$3,$4,(int)$5,(int)$6);");
   rules["bangc_src.atomic_add"] =

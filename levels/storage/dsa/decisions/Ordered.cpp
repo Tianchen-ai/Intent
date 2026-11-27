@@ -247,6 +247,10 @@ LogicalResult verifyOwners(func::FuncOp fn, const TargetProfile &p,
     auto m = d ? d.getAs<StringAttr>("mode") : StringAttr();
     if (!b || !m)
       return space.emitError("missing supply decision");
+    if (m == "private-rows") {
+      auto plan = privateRows(fn, p);
+      return success(plan && plan->bytes == b.getInt());
+    }
     if (m == "indexed-row-add")
       return success(!b.getInt() && indexedRowAdd(fn, p).has_value());
     if (m == "panel-fold") {
@@ -273,19 +277,26 @@ LogicalResult verifyOwners(func::FuncOp fn, const TargetProfile &p,
   if (!transfers)
     return space.emitError("missing ordered transfers");
 
+  if (transfers == "private-rows") {
+    auto plan = privateRows(fn, p);
+    return success(plan && bytes.getInt() == 0 &&
+                   space.getAttrOfType<StringAttr>("dsa.schedule") ==
+                       "participant-stride");
+  }
   if (transfers == "indexed-row-add")
     return success(bytes.getInt() == 0 && indexedRowAdd(fn, p).has_value() &&
                    space.getAttrOfType<StringAttr>("dsa.schedule") ==
                        "participant-stride");
   if (transfers == "panel-fold") {
     auto pf = panelFoldSupply(fn, p);
+    auto axis = space.getAttrOfType<IntegerAttr>("dsa.panel_axis");
     auto rows = space.getAttrOfType<IntegerAttr>("dsa.panel_rows");
     auto span = space.getAttrOfType<IntegerAttr>("dsa.panel_span");
     auto wram = space.getAttrOfType<IntegerAttr>("dsa.wram_bytes");
     auto sched = space.getAttrOfType<StringAttr>("dsa.schedule");
-    if (!pf || !rows || !span || !wram || bytes.getInt() != 0 ||
-        rows.getInt() != pf->rows || span.getInt() != pf->span ||
-        wram.getInt() != pf->wramBytes || !sched ||
+    if (!pf || !axis || axis.getInt() != pf->rowAxis || !rows || !span ||
+        !wram || bytes.getInt() != 0 || rows.getInt() != pf->rows ||
+        span.getInt() != pf->span || wram.getInt() != pf->wramBytes || !sched ||
         sched.getValue() != "participant-stride")
       return space.emitError("invalid cooperative panel fold supply");
     return memberStorage(fn, p, 1, true, false);
@@ -350,6 +361,12 @@ void ownerSupply(Unit &u) {
     auto mode = d ? d.getAs<StringAttr>("mode") : StringAttr();
     if (!b || !mode)
       return llvm::createStringError("missing ordered supply mode");
+    if (mode == "private-rows") {
+      auto plan = dsa::privateRows(fn, p);
+      if (!plan || plan->bytes != b.getInt())
+        return llvm::createStringError("invalid private row selection or scan");
+      return llvm::Error::success();
+    }
     if (mode == "indexed-row-add") {
       if (b.getInt() || !dsa::indexedRowAdd(fn, p))
         return llvm::createStringError("invalid indexed row reduction");
@@ -406,6 +423,8 @@ void ownerSupply(Unit &u) {
     };
     add("direct", 0);
     auto fn = o->getParentOfType<func::FuncOp>();
+    if (auto rows = dsa::privateRows(fn, p))
+      add("private-rows", rows->bytes);
     if (dsa::indexedRowAdd(fn, p))
       add("indexed-row-add", 0);
     if (auto bytes = dsa::privateBytes(fn, p);
@@ -436,6 +455,7 @@ void ownerSupply(Unit &u) {
       if (!pf || failed(dsa::memberStorage(fn, p, 1, true, true)))
         return llvm::createStringError("cannot place panel fold fragments");
       o->setAttr("dsa.owner_bytes", b.getI64IntegerAttr(0));
+      o->setAttr("dsa.panel_axis", b.getI64IntegerAttr(pf->rowAxis));
       o->setAttr("dsa.panel_rows", b.getI64IntegerAttr(pf->rows));
       o->setAttr("dsa.panel_span", b.getI64IntegerAttr(pf->span));
       o->setAttr("dsa.wram_bytes", b.getI64IntegerAttr(pf->wramBytes));

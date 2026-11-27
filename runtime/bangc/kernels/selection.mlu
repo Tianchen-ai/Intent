@@ -1,0 +1,90 @@
+// Compact only members that can still enter the carried insertion chain.
+// The stable filter and scalar updates keep the source ordering of tied values.
+__mlu_func__ void select_ordered(float *values, int *indices, float *row,
+                                 int *scratch, int n, int k, int width) {
+  float *ordinal = (float *)scratch, *kept = ordinal + width;
+  float *mask = (float *)(scratch + 2 * width);
+  // A strict descending set of k maxima, separated also from the next
+  // member, fixes both values and indices independently of insertion order.
+  // Restore the private row before either returning or replaying ties.
+  if (n > k && width >= 32) {
+    int used = 0;
+    bool unique = true;
+    for (int j = 0; j <= k; ++j) {
+      __bang_argmax(kept, row, n);
+      float best = kept[0];
+      unsigned pos = ((unsigned *)kept)[1];
+      if (!(best >= 0x1p-126f) || pos >= (unsigned)n || row[pos] != best ||
+          (j && !(values[j - 1] > best))) {
+        unique = false;
+        break;
+      }
+      if (j < k) {
+        values[j] = best;
+        indices[j] = (int)pos;
+        row[pos] = -__builtin_inff();
+        ++used;
+      }
+    }
+    for (int j = 0; j < used; ++j)
+      row[indices[j]] = values[j];
+    if (unique)
+      return;
+  }
+  for (int j = 0; j < k; ++j) {
+    values[j] = -__builtin_inff();
+    indices[j] = -1;
+  }
+  for (int i = 0; i < width; ++i)
+    ordinal[i] = i;
+  for (int base = 0; base < n; base += width) {
+    int live = n - base < width ? n - base : width;
+    float cut = values[k - 1];
+    unsigned bits = ((const unsigned *)values)[k - 1] & 0x7fffffffU;
+    int count = live;
+    bool filter = bits >= 0x00800000u && live >= 32;
+    if (filter) {
+      __bang_gt_scalar(mask, row + base, cut, live);
+      count = __bang_filter(kept, ordinal, mask, live);
+    }
+    for (int u = 0; u < count; ++u) {
+      int pos = base + (filter ? (int)kept[u] : u);
+      float v = row[pos];
+      for (int j = 0; j < k; ++j) {
+        if (v > values[j]) {
+          float prev = values[j];
+          values[j] = v;
+          v = prev;
+          int id = indices[j];
+          indices[j] = pos;
+          pos = id;
+        }
+      }
+    }
+  }
+}
+
+__mlu_func__ int filter_i32(int *dst, const int *src, const int *mask,
+                            int *scratch, int live) {
+  // The MLU370 stream filter transports 32-bit lanes; only the mask is numeric.
+  __bang_int322float((float *)scratch, mask, live, 0);
+  return __bang_filter((float *)dst, (const float *)src, (float *)scratch,
+                       live);
+}
+
+__mlu_func__ int filter_i32(int *dst, const int *src, const float *input,
+                            int *scratch, int live) {
+  __bang_band_scalar(scratch, (const int *)input, 0x7fffffff, live);
+  return filter_i32(dst, src, scratch, scratch, live);
+}
+
+__mlu_func__ void i32_ramp(int *dst, unsigned first, int live) {
+  int n = live < 32 ? live : 32;
+  for (int i = 0; i < n; ++i)
+    dst[i] = first + i;
+  while (n < live) {
+    int take = live - n < n ? live - n : n;
+    __bang_add_scalar(dst + n, dst, n, take);
+    n += take;
+  }
+}

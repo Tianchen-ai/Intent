@@ -1,0 +1,27 @@
+__mlu_func__ void reserve_tickets(int *counter, const int *keys, int *counts,
+                                  int *bases, int *tickets, int rows, int cols,
+                                  int pitch, int bins, bool replay) {
+  __bang_write_value(counts, bins, 0);
+  for (int r = 0; r < rows; ++r)
+    for (int k = 0; k < cols; ++k)
+      ++counts[keys[r * pitch + k]];
+  for (int lo = 0; lo < bins;) {
+    if (!counts[lo]) {
+      ++lo;
+      continue;
+    }
+    int hi = lo + 1;
+    while (hi < bins && counts[hi])
+      ++hi;
+    __bang_atomic_add(bases + lo, counter + lo, counts + lo, hi - lo);
+    lo = hi;
+  }
+  __sync();
+  if (replay) {
+    for (int r = 0; r < rows; ++r)
+      for (int k = 0; k < cols; ++k) {
+        unsigned *ticket = (unsigned *)bases + keys[r * pitch + k];
+        tickets[r * cols + k] = (*ticket)++;
+      }
+  }
+}

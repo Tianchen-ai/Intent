@@ -75,6 +75,40 @@ llvm::Error describeRowArtifact(func::FuncOp fn, llvm::raw_pwrite_stream &out) {
 }
 
 namespace {
+bool isFilterPrefix(Operation *scan) {
+  if (!scan || scan->getName().getStringRef() != "block.scan_sum" ||
+      !scan->hasOneUse())
+    return false;
+  auto *op = *scan->getUsers().begin();
+  if (op->getName().getStringRef() != "dsa.scatter_fragment" ||
+      op->getOperand(6) != scan->getResult(0))
+    return false;
+  auto *cast = scan->getOperand(0).getDefiningOp();
+  return cast && cast->getName().getStringRef() == "block.cast" &&
+         cast->getOperand(0) == op->getOperand(5) &&
+         getElementTypeOrSelf(scan->getResult(0).getType()).isInteger(32) &&
+         getElementTypeOrSelf(op->getOperand(7).getType()).isInteger(32);
+}
+
+Value filterNonzeroInput(Operation *scan) {
+  if (!isFilterPrefix(scan))
+    return {};
+  auto cast = scan->getOperand(0).getDefiningOp();
+  auto pred = cast->getOperand(0).getDefiningOp();
+  if (!cast->hasOneUse() || !pred ||
+      pred->getName().getStringRef() != "block.ne" ||
+      std::distance(pred->use_begin(), pred->use_end()) != 2)
+    return {};
+  auto src = pred->getOperand(0);
+  auto zero = pred->getOperand(1).getDefiningOp();
+  auto v = zero ? zero->getAttrOfType<FloatAttr>("value") : FloatAttr{};
+  if (!v || !v.getValue().isZero() ||
+      !getElementTypeOrSelf(src.getType()).isF32() || !src.getDefiningOp() ||
+      src.getDefiningOp()->getName().getStringRef() != "dsa.await")
+    return {};
+  return src;
+}
+
 Type elemOf(Type t) {
   if (auto s = dyn_cast<ShapedType>(t))
     return s.getElementType();
@@ -131,6 +165,7 @@ struct RowLowerer {
   llvm::DenseMap<std::tuple<Block *, Value, Value, int64_t>, Value>
       memberCoordCache;
   Value storage;
+  Value ticketCounts, ticketBases, ticketValues;
   Value histogramRaw, histogramKeys, histogramFilters, histogramAxis;
   llvm::DenseMap<Value, Value> localBroadcasts;
   int64_t boundRows = 0, boundColumns = 0;
@@ -199,6 +234,17 @@ struct RowLowerer {
   }
 
   void prepareHistogram(ArrayRef<Operation *> ops) {
+    if (auto tickets = layout.getAs<DenseI64ArrayAttr>("ticket_panel")) {
+      auto buffer = [&](int64_t n) {
+        return makeOp("nram_buffer", {},
+                      {ptrType(b.getContext(), b.getI32Type(), 1)},
+                      {b.getNamedAttr("elements", b.getI64IntegerAttr(n))})
+            ->getResult(0);
+      };
+      ticketCounts = buffer(tickets[0]);
+      ticketBases = buffer(tickets[0]);
+      ticketValues = buffer(tickets[1]);
+    }
     auto panel = layout.getAs<DenseI64ArrayAttr>("histogram_panel");
     if (!panel)
       return;
@@ -1115,6 +1161,25 @@ struct RowLowerer {
       live = symW;
     if (fullMembers)
       count = symEB;
+    if (ticketCounts) {
+      Operation *atom = nullptr, *copy = nullptr;
+      for (auto &inst : body)
+        if (inst.getName().getStringRef() == "block.atomic_add_at")
+          atom = &inst;
+      for (auto &inst : fetch)
+        if (inst.getName().getStringRef() == "dsa.copy_in")
+          copy = &inst;
+      if (!atom || !copy)
+        return failure();
+      auto start = b.create<arith::MulIOp>(loc, slot, symEB);
+      auto keys = makeAddr(copyBuffers.lookup(copy), {start}, {symP}, 1);
+      makeOp("reserve_tickets",
+             {mapped.lookup(atom->getOperand(0)), keys, ticketCounts,
+              ticketBases, ticketValues, count, live, symP,
+              cI64(layout.getAs<DenseI64ArrayAttr>("ticket_panel")[0]),
+              b.create<arith::ConstantIntOp>(loc, !atom->use_empty(), 1)},
+             {}, {}, "key-reservation");
+    }
     bool bodyHasCompute = blockHasCompute(body);
     int64_t numRowSums = 0;
     for (auto &inst : body) {
@@ -1154,6 +1219,11 @@ struct RowLowerer {
       llvm::DenseMap<Operation *, Operation *> fusedGtCast;
       for (auto &inst : body) {
         auto code = inst.getName().getStringRef();
+        if (filterNonzeroInput(&inst)) {
+          auto *cast = inst.getOperand(0).getDefiningOp();
+          skipOps.insert(cast);
+          skipOps.insert(cast->getOperand(0).getDefiningOp());
+        }
         if (code == "block.linear_index" && inst.hasOneUse() &&
             inst.use_begin()->getOwner()->getName().getStringRef() ==
                 "block.uniform" &&
@@ -1631,32 +1701,53 @@ struct RowLowerer {
                 b.getI32Type(), b.create<arith::SubIOp>(loc, symBytes, pBytes));
             Value hasElem = b.create<arith::CmpIOp>(
                 loc, arith::CmpIPredicate::sgt, live, cI64(0));
-            auto cntIf = ifThenElse(
-                hasElem,
-                [&]() {
-                  Value last = b.create<arith::SubIOp>(loc, live, cI64(1));
-                  b.create<scf::YieldOp>(loc,
-                                         ValueRange{loadAt(prefix, last)});
-                },
-                [&]() { b.create<scf::YieldOp>(loc, ValueRange{cI32(0)}); },
-                false);
-            Value totalCnt = cntIf.getResult(0);
-            Value totalCnt64 = toI64(totalCnt);
-            forLoop(cI64(0), live, cI64(1), [&](Value k) {
-              Value p = toI64(loadAt(prefix, k));
-              Value keep = loadAt(mask, k);
-              ifThenElse(
-                  keep,
+            Value totalCnt;
+            if (isFilterPrefix(inst.getOperand(6).getDefiningOp())) {
+              totalCnt =
+                  ifThenElse(
+                      hasElem,
+                      [&] {
+                        fillVec(packedBuf, lanes, cI32(fillVal));
+                        Value src = filterNonzeroInput(
+                            inst.getOperand(6).getDefiningOp());
+                        auto *op =
+                            makeOp("stable_filter",
+                                   {packedBuf, payload,
+                                    src ? getVal(src) : prefix, prefix, live},
+                                   {b.getI32Type()}, {}, "stable-filter");
+                        b.create<scf::YieldOp>(loc, op->getResults());
+                      },
+                      [&] { b.create<scf::YieldOp>(loc, ValueRange{cI32(0)}); },
+                      false)
+                      .getResult(0);
+            } else {
+              auto cntIf = ifThenElse(
+                  hasElem,
                   [&]() {
-                    Value idx = b.create<arith::SubIOp>(loc, p, cI64(1));
-                    storeAt(packedBuf, idx, loadAt(payload, k));
+                    Value last = b.create<arith::SubIOp>(loc, live, cI64(1));
+                    b.create<scf::YieldOp>(loc,
+                                           ValueRange{loadAt(prefix, last)});
                   },
-                  [&]() {
-                    Value idx = b.create<arith::SubIOp>(
-                        loc, b.create<arith::AddIOp>(loc, totalCnt64, k), p);
-                    storeAt(packedBuf, idx, cI32(fillVal));
-                  });
-            });
+                  [&]() { b.create<scf::YieldOp>(loc, ValueRange{cI32(0)}); },
+                  false);
+              totalCnt = cntIf.getResult(0);
+              Value totalCnt64 = toI64(totalCnt);
+              forLoop(cI64(0), live, cI64(1), [&](Value k) {
+                Value p = toI64(loadAt(prefix, k));
+                Value keep = loadAt(mask, k);
+                ifThenElse(
+                    keep,
+                    [&]() {
+                      Value idx = b.create<arith::SubIOp>(loc, p, cI64(1));
+                      storeAt(packedBuf, idx, loadAt(payload, k));
+                    },
+                    [&]() {
+                      Value idx = b.create<arith::SubIOp>(
+                          loc, b.create<arith::AddIOp>(loc, totalCnt64, k), p);
+                      storeAt(packedBuf, idx, cI32(fillVal));
+                    });
+              });
+            }
             Value rIdx = b.create<arith::AddIOp>(loc, row0, j);
             ifThen(hasElem, [&]() {
               Value outS0 = viewStride(out, 0), outS1 = viewStride(out, 1);
@@ -1873,6 +1964,10 @@ struct RowLowerer {
             }
 
             if (prim == "atomic_fetch_add") {
+              if (ticketCounts) {
+                localMap[resVal] = makeAddr(ticketValues, {j}, {live}, 1);
+                continue;
+              }
               Value base = getVal(inst.getOperand(0));
               Value keys = getVal(inst.getOperand(1));
               Value deltaVal = getVal(inst.getOperand(2));
@@ -1895,11 +1990,7 @@ struct RowLowerer {
             }
 
             if (prim == "member_tile") {
-              forLoop(cI64(0), live, cI64(1), [&](Value k) {
-                Value v = b.create<arith::TruncIOp>(
-                    loc, b.getI32Type(), b.create<arith::AddIOp>(loc, col, k));
-                storeAt(dst, k, v);
-              });
+              makeOp("member_ramp", {dst, col, live}, {}, {}, "member-ramp");
               continue;
             }
 
@@ -2152,6 +2243,12 @@ struct RowLowerer {
             }
 
             if (prim == "row_inclusive_sum") {
+              if (isFilterPrefix(&inst)) {
+                if (!filterNonzeroInput(&inst))
+                  memcpy1D(dst, getVal(inst.getOperand(0)), live, "NRAM2NRAM",
+                           false);
+                continue;
+              }
               Value scratch = nramAt(
                   dstElem,
                   phaseByteOffset(

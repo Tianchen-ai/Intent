@@ -716,6 +716,33 @@ static void quotientEffects(Operation *op, EffectList &effects) {
 void VecDivRnOp::getEffects(EffectList &effects) { quotientEffects(getOperation(), effects); }
 void VecGuardedDivOp::getEffects(EffectList &effects) { quotientEffects(getOperation(), effects); }
 
+void FinitePanelOp::getEffects(EffectList &effects) {
+  addRead(effects, getOperation(), 0);
+  addWrite(effects, getOperation(), 1);
+}
+void ReserveTicketsOp::getEffects(EffectList &effects) {
+  auto *op = getOperation();
+  addReadWrite(effects, op, 0);
+  addRead(effects, op, 1);
+  for (unsigned i : {2u, 3u, 4u})
+    addReadWrite(effects, op, i);
+}
+void MemberRampOp::getEffects(EffectList &effects) {
+  addWrite(effects, getOperation(), 0);
+}
+void StableFilterOp::getEffects(EffectList &effects) {
+  addWrite(effects, getOperation(), 0);
+  addRead(effects, getOperation(), 1);
+  addRead(effects, getOperation(), 2);
+  addWrite(effects, getOperation(), 3);
+}
+void OrderedSelectOp::getEffects(EffectList &effects) {
+  auto *op = getOperation();
+  addReadWrite(effects, op, 0);
+  addReadWrite(effects, op, 1);
+  addRead(effects, op, 2);
+  addReadWrite(effects, op, 3);
+}
 void ScanSumOp::getEffects(EffectList &effects) {
   Operation *op = getOperation();
   addWrite(effects, op, 0);
@@ -945,6 +972,11 @@ void BangcSrcDialect::initialize() {
   VecDivRnOp::attachInterface<F32AccContract<VecDivRnOp>>(*ctx);
   DivRnOp::attachInterface<F32AccContract<DivRnOp>>(*ctx);
   Bf16ScalarOp::attachInterface<F32AccContract<Bf16ScalarOp>>(*ctx);
+  FinitePanelOp::attachInterface<I16AccContract<FinitePanelOp>>(*ctx);
+  ReserveTicketsOp::attachInterface<I32AccContract<ReserveTicketsOp>>(*ctx);
+  MemberRampOp::attachInterface<I32AccContract<MemberRampOp>>(*ctx);
+  StableFilterOp::attachInterface<I32AccContract<StableFilterOp>>(*ctx);
+  OrderedSelectOp::attachInterface<F32AccContract<OrderedSelectOp>>(*ctx);
   ScanSumOp::attachInterface<ScanSumContract>(*ctx);
   SummaryReduceOp::attachInterface<SummaryReduceContract>(*ctx);
   SummaryMergeOp::attachInterface<SummaryMergeContract>(*ctx);

@@ -58,6 +58,28 @@ void ownerSupplyCost(compilerinfra::Unit &u) {
           e.bottleneck = "state accesses";
           auto bw = intentdsl::quantity(ctx, "dma_in_bw", "B/ns"),
                lat = intentdsl::quantity(ctx, "dma_in_latency", "ns");
+          if (auto plan = intentdsl::dsa::privateRows(fn, ctx.target); plan) {
+            double issues =
+                c.id != "private-rows"
+                    ? double(reads + writes) * foldSteps
+                    : double(plan->views.size() + plan->writes.size());
+            if (c.id == "streamed-owner-views")
+              issues = reads + writes;
+            e.terms["row_transfer_issues"] = {issues, "count"};
+            if (bw && lat) {
+              e.timeNs =
+                  issues * *lat +
+                  (c.id == "direct" ? 4 * issues : 2.0 * plan->bytes) / *bw;
+              if (plan->k && c.id != "private-rows") {
+                // A scalar comparison chain still executes for every member of
+                // a staged row.
+                auto rate = intentdsl::quantity(ctx, "compute", "lane/ns");
+                if (rate)
+                  *e.timeNs += foldSteps * plan->k / *rate;
+              }
+            }
+            return e;
+          }
           if (auto plan = intentdsl::dsa::indexedRowAdd(fn, ctx.target)) {
             // Compare transfer issues and bytes on the same per-column basis.
             bool atomic = c.id == "indexed-row-add";
@@ -73,16 +95,19 @@ void ownerSupplyCost(compilerinfra::Unit &u) {
               e.timeNs = issues * *lat + bytes / *bw;
             return e;
           }
-          if (c.id == "panel-fold") {
-            auto pf = intentdsl::dsa::panelFoldSupply(fn, ctx.target);
-            double m = pf ? double(std::max<int64_t>(1, pf->rows)) : 64.0;
-            double panels = std::max(1.0, std::ceil(foldSteps / 64.0));
+          auto pf = intentdsl::dsa::panelFoldSupply(fn, ctx.target);
+          if (pf && (c.id == "panel-fold" || c.id == "direct")) {
+            double m = pf->rows;
             double transfers =
-                pf ? double(pf->ownerTransferSites + pf->stripTransferSites) / m
-                   : (2.0 + 3.0 * panels) / m;
+                (pf->ownerTransferSites + pf->stripTransferSites) / m;
             double bytesPerOwner =
-                pf ? double(pf->ownerTransferBytes + pf->stripTransferBytes) / m
-                   : double(b);
+                (pf->ownerTransferBytes + pf->stripTransferBytes) / m;
+            if (c.id == "direct") {
+              transfers =
+                  pf->ownerTransferSites + pf->stripTransferSites * pf->span;
+              bytesPerOwner =
+                  double(pf->ownerTransferBytes) / m + pf->stripTransferBytes;
+            }
             e.terms["memory_access_sites"] = {double(reads + writes + slices),
                                               "count"};
             e.terms["private_slab_bytes"] = {double(b), "B"};

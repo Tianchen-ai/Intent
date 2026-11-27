@@ -2,6 +2,7 @@
 #include "Rows.h"
 #include "intentdsl/exits/bangc/ir/Dialect.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
+#include "intentdsl/levels/execution/block/ir/FoldPanel.h"
 #include "intentdsl/levels/storage/dsa/ir/Owners.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Math/IR/Math.h"
@@ -257,6 +258,14 @@ struct OrderedLowerer {
     StringRef n = op.getName().getStringRef();
     StringRef kind = op.getName().stripDialect();
     auto a = [&](unsigned i) { return env.lookup(op.getOperand(i)); };
+    if (auto ld = dyn_cast<memref::LoadOp>(op)) {
+      SmallVector<Value> cs, ss;
+      for (auto [i, v] : llvm::enumerate(ld.getIndices())) {
+        cs.push_back(env.lookup(v));
+        ss.push_back(cI64(dimAttr(ld.getMemref(), "block.strides", i)));
+      }
+      return loadAt(makeAddr(ld.getMemref(), cs, ss, 0), cI64(0));
+    }
     if (auto d = dyn_cast<memref::DimOp>(op))
       return cI64(dimAttr(d.getSource(), "block.shape", *d.getConstantIndex()));
     if (auto c = dyn_cast<arith::ConstantOp>(op)) {
@@ -710,7 +719,9 @@ struct OrderedLowerer {
       return isFloatConstPred(v, [](const APFloat &x) { return x.isZero(); });
     };
 
-    Value rowArg = bb.getArguments().back();
+    unsigned rowAxis =
+        space.getAttrOfType<IntegerAttr>("dsa.panel_axis").getInt();
+    Value rowArg = bb.getArgument(rowAxis);
     int64_t stepTile = std::max<int64_t>(tile, M);
     auto axes = space.getAttrOfType<DenseI64ArrayAttr>("axes");
 
@@ -725,6 +736,7 @@ struct OrderedLowerer {
               llvm::DenseMap<Value, Value> scalarEnv;
               llvm::DenseMap<Value, Value> slotEnv;
               llvm::DenseMap<Value, int64_t> panelFeat;
+              llvm::DenseMap<Value, Value> transposed;
               llvm::DenseSet<Value> ownerScalars;
               llvm::DenseSet<Value> causalMaskedStrips;
               llvm::DenseSet<Value> windowZeroedStrips;
@@ -735,13 +747,17 @@ struct OrderedLowerer {
               for (Value arg : fn.getArguments())
                 scalarEnv[arg] = arg;
               int64_t pitch = 1;
-              for (int i = axes.size() - 1; i >= 0; --i) {
+              SmallVector<unsigned> ownerAxes{rowAxis};
+              for (unsigned i = axes.size(); i-- > 0;)
+                if (i != rowAxis)
+                  ownerAxes.push_back(i);
+              for (unsigned i : ownerAxes) {
                 int64_t ext = std::max<int64_t>(
                     1, dimAttr(space.getOperand(i), "block.shape", axes[i]));
                 Value coord = b.create<arith::RemSIOp>(
                     loc, b.create<arith::DivSIOp>(loc, ownerBase, cI64(pitch)),
                     cI64(ext));
-                if (size_t(i) + 1 < bb.getNumArguments())
+                if (i != rowAxis)
                   scalarEnv[bb.getArgument(i)] = coord;
                 else
                   scalarEnv[rowArg] = coord;
@@ -961,6 +977,27 @@ struct OrderedLowerer {
                 }
                 StringRef role = roleAttr.getValue();
 
+                if (role == "owner_group") {
+                  scalarEnv[op.getResult(0)] = b.create<arith::DivSIOp>(
+                      loc, rowBase, scalarEnv.lookup(op.getOperand(1)));
+                  continue;
+                }
+                if (role == "owner_scalar_write") {
+                  auto st = cast<memref::StoreOp>(op);
+                  forLoop(cI64(0), cI64(M), cI64(1), [&](Value r) {
+                    SmallVector<Value> cs, ss;
+                    for (auto [i, v] : llvm::enumerate(st.getIndices())) {
+                      cs.push_back(v == rowArg ? Value(b.create<arith::AddIOp>(
+                                                     loc, rowBase, r))
+                                               : scalarEnv.lookup(v));
+                      ss.push_back(
+                          cI64(dimAttr(st.getMemref(), "block.strides", i)));
+                    }
+                    storeAt(makeAddr(st.getMemref(), cs, ss, 0), cI64(0),
+                            loadAt(slotEnv.lookup(st.getValue()), r));
+                  });
+                  continue;
+                }
                 if (role == "owner_slice") {
                   Value qView = op.getOperand(0);
                   int64_t rank = cast<MemRefType>(qView.getType()).getRank();
@@ -1088,12 +1125,17 @@ struct OrderedLowerer {
                   Value src = slotEnv.lookup(op.getOperand(0));
                   int64_t F = panelFeat.lookup(op.getOperand(0));
                   Value yView = op.getOperand(1);
-                  int64_t yRank = cast<MemRefType>(yView.getType()).getRank();
-                  int64_t yStride = dimAttr(yView, "block.strides", yRank - 2);
-                  SmallVector<Value> prefix;
-                  for (Value c : op.getOperands().drop_front(2).drop_back())
-                    prefix.push_back(scalarEnv.lookup(c));
-                  Value yPtr = sliceBasePtr(yView, prefix, rowBase);
+                  SmallVector<Value> cs, ss;
+                  int64_t yStride = 0;
+                  for (auto [i, v] :
+                       llvm::enumerate(op.getOperands().drop_front(2))) {
+                    cs.push_back(v == rowArg ? rowBase : scalarEnv.lookup(v));
+                    auto stride = dimAttr(yView, "block.strides", i);
+                    ss.push_back(cI64(stride));
+                    if (v == rowArg)
+                      yStride = stride;
+                  }
+                  Value yPtr = makeAddr(yView, cs, ss, 0);
                   if (yStride == F)
                     memcpy1D(yPtr, src, cI64(M * F), "NRAM2GDRAM");
                   else
@@ -1120,8 +1162,10 @@ struct OrderedLowerer {
                   }
                   if (K < 0) {
                     for (Operation &bop : loop.getBody()->without_terminator()) {
-                      if (bop.getAttrOfType<StringAttr>("dsa.panel_role") ==
-                          StringAttr::get(b.getContext(), "strip_slice")) {
+                      if (auto r =
+                              bop.getAttrOfType<StringAttr>("dsa.panel_role");
+                          r && (r == "strip_slice" || r == "strip_dual_slice" ||
+                                r == "strip_transpose_slice")) {
                         Value kv = bop.getOperand(0);
                         int64_t rk = cast<MemRefType>(kv.getType()).getRank();
                         K = dimAttr(kv, "block.shape", rk - 2);
@@ -1129,9 +1173,15 @@ struct OrderedLowerer {
                       }
                     }
                   }
+                  bool paged = llvm::any_of(
+                      loop.getBody()->getOperations(), [](Operation &o) {
+                        auto r = o.getAttrOfType<StringAttr>("dsa.panel_role");
+                        return r && r.getValue().starts_with("paged_");
+                      });
                   bool hasWindow =
-                      !matchPattern(loop.getLowerBound(), m_Zero()) ||
-                      !ubIsFullDimK;
+                      !paged &&
+                      (!matchPattern(loop.getLowerBound(), m_Zero()) ||
+                       !ubIsFullDimK);
                   curLoopHasWindow = hasWindow;
                   windowZeroedStrips.clear();
 
@@ -1300,6 +1350,15 @@ struct OrderedLowerer {
                     winMinHi = winScan.getResult(3);
                   }
 
+                  if (paged) {
+                    auto bound = [&](Value v) {
+                      return ownerScalars.contains(v)
+                                 ? toI64(loadAt(slotEnv.lookup(v), cI64(0)))
+                                 : toI64(scalarEnv.lookup(v));
+                    };
+                    tStart = bound(loop.getLowerBound());
+                    tokLimit = bound(loop.getUpperBound());
+                  }
                   auto causalLive = [&](Value r, Value t0, Value nt) {
                     return b.create<arith::MinSIOp>(
                         loc,
@@ -1319,7 +1378,9 @@ struct OrderedLowerer {
                   forLoop(tStart, tokLimit, cI64(S), [&](Value t0) {
                     curStripT0 = t0;
                     Value nt = b.create<arith::MinSIOp>(
-                        loc, b.create<arith::SubIOp>(loc, cI64(K), t0),
+                        loc,
+                        b.create<arith::SubIOp>(loc, paged ? tokLimit : cI64(K),
+                                                t0),
                         cI64(S));
                     Value fullNt = b.create<arith::CmpIOp>(
                         loc, arith::CmpIPredicate::eq, nt, cI64(S));
@@ -1386,6 +1447,78 @@ struct OrderedLowerer {
                         continue;
                       }
 
+                      if (bRole.starts_with("paged_")) {
+                        Value view = bop.getOperand(0);
+                        auto coords = bop.getOperands().drop_front();
+                        int64_t width = dimAttr(view, "block.shape", 1);
+                        int64_t f = dimAttr(view, "block.shape", coords.size());
+                        Value dst = slotAt(&bop, 0, halfTy);
+                        ifThen(b.create<arith::CmpIOp>(
+                                   loc, arith::CmpIPredicate::slt, nt, cI64(S)),
+                               [&] {
+                                 fillVec(dst, cI64(S * f),
+                                         b.create<arith::ConstantOp>(
+                                             loc, b.getZeroAttr(halfTy)));
+                               });
+                        Value end = b.create<arith::AddIOp>(loc, t0, nt);
+                        Value first =
+                            b.create<arith::DivSIOp>(loc, t0, cI64(width));
+                        Value last = b.create<arith::AddIOp>(
+                            loc,
+                            b.create<arith::DivSIOp>(
+                                loc, b.create<arith::SubIOp>(loc, end, cI64(1)),
+                                cI64(width)),
+                            cI64(1));
+                        forLoop(first, last, cI64(1), [&](Value pg) {
+                          Value start =
+                              b.create<arith::MulIOp>(loc, pg, cI64(width));
+                          Value from = b.create<arith::MaxSIOp>(loc, t0, start);
+                          Value to = b.create<arith::MinSIOp>(
+                              loc, end,
+                              b.create<arith::AddIOp>(loc, start, cI64(width)));
+                          auto env = loopScalars;
+                          env[loop.getInductionVar()] = from;
+                          auto eval = [&](auto &self, Value v) -> Value {
+                            if (auto found = env.lookup(v))
+                              return found;
+                            auto def = v.getDefiningOp();
+                            for (auto operand : def->getOperands())
+                              self(self, operand);
+                            return env[v] = lowerScalarExpr(*def, env);
+                          };
+                          SmallVector<Value> cs, ss;
+                          for (auto [i, v] : llvm::enumerate(coords)) {
+                            cs.push_back(eval(eval, v));
+                            ss.push_back(
+                                cI64(dimAttr(view, "block.strides", i)));
+                          }
+                          auto src = makeAddr(view, cs, ss, 0);
+                          auto out = makeAddr(
+                              dst, {b.create<arith::SubIOp>(loc, from, t0)},
+                              {cI64(f)}, 1);
+                          Value len = b.create<arith::SubIOp>(loc, to, from);
+                          int64_t stride = dimAttr(view, "block.strides", 1);
+                          if (stride == f)
+                            memcpy1D(out, src,
+                                     b.create<arith::MulIOp>(loc, len, cI64(f)),
+                                     "GDRAM2NRAM");
+                          else
+                            memcpy2D(out, src, cI64(f), cI64(f), cI64(stride),
+                                     b.create<arith::SubIOp>(loc, len, cI64(1)),
+                                     "GDRAM2NRAM");
+                        });
+                        sync("io");
+                        slotEnv[bop.getResult(0)] = dst;
+                        panelFeat[bop.getResult(0)] = f;
+                        if (bRole == "paged_dual_slice") {
+                          auto tr = slotAt(&bop, 1, halfTy);
+                          makeOp("tile_transpose", {tr, dst, cI64(S), cI64(f)},
+                                 {}, {}, "nram-transpose");
+                          sync("compute");
+                          transposed[bop.getResult(0)] = tr;
+                        }
+                        continue;
+                      }
                       if (bRole == "strip_slice") {
                         Value kView = bop.getOperand(0);
                         int64_t kRank =
@@ -1415,7 +1548,35 @@ struct OrderedLowerer {
                         continue;
                       }
 
-                      if (bRole == "strip_transpose_slice") {
+                      if (bRole == "strip_scalar_read") {
+                        auto ld = cast<memref::LoadOp>(bop);
+                        SmallVector<Value> cs, ss;
+                        for (auto [i, v] : llvm::enumerate(ld.getIndices())) {
+                          cs.push_back(v == loop.getInductionVar()
+                                           ? t0
+                                           : loopScalars.lookup(v));
+                          ss.push_back(cI64(
+                              dimAttr(ld.getMemref(), "block.strides", i)));
+                        }
+                        Value slot = slotAt(&bop, 0, b.getF32Type());
+                        auto ptr = makeAddr(ld.getMemref(), cs, ss, 0);
+                        fillVec(slot, cI64(S), cF32(0));
+                        if (dimAttr(ld.getMemref(), "block.strides",
+                                    cs.size() - 1) == 1)
+                          memcpy1D(slot, ptr, nt, "GDRAM2NRAM");
+                        else
+                          memcpy2D(slot, ptr, cI64(1), cI64(1), ss.back(),
+                                   b.create<arith::SubIOp>(loc, nt, cI64(1)),
+                                   "GDRAM2NRAM");
+                        forLoop(cI64(1), cI64(M), cI64(1), [&](Value r) {
+                          memcpy1D(makeAddr(slot, {r}, {cI64(S)}, 1), slot,
+                                   cI64(S), "NRAM2NRAM");
+                        });
+                        slotEnv[ld.getResult()] = slot;
+                        continue;
+                      }
+                      if (bRole == "strip_transpose_slice" ||
+                          bRole == "strip_dual_slice") {
                         Value vView = bop.getOperand(0);
                         int64_t vRank =
                             cast<MemRefType>(vView.getType()).getRank();
@@ -1434,7 +1595,8 @@ struct OrderedLowerer {
                                {vtSlot, vSlot, cI64(S), cI64(vFeat)}, {}, {},
                                "nram-transpose");
                         sync("compute");
-                        slotEnv[bop.getResult(0)] = vtSlot;
+                        slotEnv[bop.getResult(0)] = vSlot;
+                        transposed[bop.getResult(0)] = vtSlot;
                         panelFeat[bop.getResult(0)] = vFeat;
                         continue;
                       }
@@ -1640,8 +1802,65 @@ struct OrderedLowerer {
                         Value wVal = u0IsW ? u0 : u1;
                         Value vVal = u0IsW ? u1 : u0;
                         int64_t DV = panelFeat.lookup(vVal);
-                        emitPanelProduct(carrySlot, slotEnv.lookup(wVal),
-                                         slotEnv.lookup(vVal), S, DV, true);
+                        auto dense = [&] {
+                          emitPanelProduct(carrySlot, slotEnv.lookup(wVal),
+                                           transposed.lookup(vVal), S, DV,
+                                           true);
+                        };
+                        if (!hasWindow) {
+                          dense();
+                          continue;
+                        }
+                        // Zero weights alone cannot suppress a NaN or infinity
+                        // from a token outside this row's logical loop bounds.
+                        auto ok = ifThenElse(
+                            curFullWinStrip, {b.getI1Type()},
+                            [&] { b.create<scf::YieldOp>(loc, cI1(true)); },
+                            [&] {
+                              auto *finite = makeOp(
+                                  "finite_panel",
+                                  {transposed.lookup(vVal), magScratch,
+                                   cI64(S * DV),
+                                   cI32(halfTy.isF16() ? 0x7c00 : 0x7f80)},
+                                  {b.getI1Type()}, {}, "finite-panel");
+                              b.create<scf::YieldOp>(loc, finite->getResults());
+                            },
+                            false);
+                        ifThenElse(ok.getResult(0), {}, dense, [&] {
+                          forLoop(cI64(0), cI64(M), cI64(1), [&](Value r) {
+                            Value lo = b.create<arith::MaxSIOp>(
+                                loc, cI64(0),
+                                b.create<arith::SubIOp>(loc, loadAt(loBuf, r),
+                                                        t0));
+                            Value hi = b.create<arith::MinSIOp>(
+                                loc, nt,
+                                b.create<arith::SubIOp>(loc, loadAt(hiBuf, r),
+                                                        t0));
+                            forLoop(cI64(0), cI64(DV), cI64(1), [&](Value f) {
+                              auto out = makeAddr(carrySlot, {r, f},
+                                                  {cI64(DV), cI64(1)}, 1);
+                              auto lhs = makeAddr(slotEnv.lookup(wVal), {r},
+                                                  {cI64(S)}, 1);
+                              auto rhs = makeAddr(transposed.lookup(vVal), {f},
+                                                  {cI64(S)}, 1);
+                              auto sum = forLoopCarry(
+                                  lo, hi, cI64(1),
+                                  ValueRange{loadAt(out, cI64(0))},
+                                  [&](Value j, ValueRange acc) {
+                                    Value a = b.create<arith::ExtFOp>(
+                                        loc, b.getF32Type(), loadAt(lhs, j));
+                                    Value v = b.create<arith::ExtFOp>(
+                                        loc, b.getF32Type(), loadAt(rhs, j));
+                                    Value prod =
+                                        b.create<arith::MulFOp>(loc, a, v);
+                                    b.create<scf::YieldOp>(
+                                        loc, ValueRange{b.create<arith::AddFOp>(
+                                                 loc, acc.front(), prod)});
+                                  });
+                              storeAt(out, cI64(0), sum.getResult(0));
+                            });
+                          });
+                        });
                         continue;
                       }
                     }
@@ -2339,6 +2558,9 @@ struct OrderedLowerer {
   struct GeneralState {
     Value storage, streambuf, deferred, slabLocal, poolScratch, scalarOut,
         vecPool;
+    llvm::DenseMap<Value, Value> privateRows;
+    Value scanOut, scanScratch, selectVals, selectIdx, selectScratch;
+    int64_t selectWidth = 0;
     int64_t slabBytes = 0;
     int64_t vecChunk = 1024;
     Value rowCacheView, rowCacheRaw, rowCacheF32, rowCacheExpShift;
@@ -3177,6 +3399,8 @@ struct OrderedLowerer {
 
   std::pair<Value, Value> generalScalarPtr(Operation &op, Value view,
                                            ValueRange at, GeneralState &st) {
+    if (Value cache = st.privateRows.lookup(view))
+      return {cache, st.env.lookup(at.back())};
     if (auto d = op.getAttrOfType<DenseI64ArrayAttr>("dsa.stream"))
       return {st.streams.lookup(&op), st.env.lookup(at[d[1]])};
     SmallVector<Value> coords, strides;
@@ -3205,7 +3429,52 @@ struct OrderedLowerer {
       StringRef impl = implAttr ? implAttr.getValue() : StringRef();
 
       if (auto loop = dyn_cast<scf::ForOp>(op)) {
-        if (tryEmitVectorStreamLoop(loop, st))
+        intentdsl::block::OrderedSelectionInfo sel;
+        if (st.selectScratch &&
+            loop->getBlock() == &space.getRegion(0).front() &&
+            intentdsl::block::matchOrderedSelectionChain(loop, &sel)) {
+          auto ld = sel.candidateVal.getDefiningOp<memref::LoadOp>();
+          if (ld && ld.getIndices().back() == loop.getInductionVar() &&
+              st.privateRows.count(ld.getMemref())) {
+            makeOp("ordered_select",
+                   {st.selectVals, st.selectIdx,
+                    st.privateRows.lookup(ld.getMemref()), st.selectScratch,
+                    arg(1), cI64(sel.k), cI64(st.selectWidth)},
+                   {}, {}, "ordered-selection");
+            for (unsigned i = 0; i < sel.k; ++i) {
+              st.env[loop.getResult(i)] = loadAt(st.selectVals, cI64(i));
+              st.env[loop.getResult(i + sel.k)] = loadAt(st.selectIdx, cI64(i));
+            }
+            continue;
+          }
+        }
+        intentdsl::block::ExclusiveScanLoopInfo scan;
+        if (st.scanScratch && loop->getBlock() == &space.getRegion(0).front() &&
+            intentdsl::block::matchExclusiveScanLoop(loop, fn, nullptr,
+                                                     &scan) &&
+            loop.getResult(0).getType().isInteger(32)) {
+          auto n = scan.extent;
+          Value src = st.privateRows.lookup(scan.srcLoad.getMemref());
+          makeOp("scan_sum",
+                 {st.scanOut, src, st.scanScratch, cI64(n), cI64(n)}, {}, {},
+                 "inclusive-scan");
+          auto seed = st.env.lookup(loop.getInitArgs()[0]);
+          makeOp("vec_scalar", {st.scanOut, st.scanOut, seed, cI64(n)}, {},
+                 {b.getNamedAttr("op", b.getStringAttr("add"))});
+          for (auto [store, inclusive] : scan.stores) {
+            Value dst = st.privateRows.lookup(store.getMemref());
+            if (inclusive)
+              memcpy1D(dst, st.scanOut, cI64(n), "NRAM2NRAM");
+            else {
+              storeAt(dst, cI64(0), seed);
+              memcpy1D(makeAddr(dst, {cI64(1)}, {cI64(1)}, 1), st.scanOut,
+                       cI64(n - 1), "NRAM2NRAM");
+            }
+          }
+          st.env[loop.getResult(0)] = loadAt(st.scanOut, cI64(n - 1));
+          continue;
+        }
+        if (st.privateRows.empty() && tryEmitVectorStreamLoop(loop, st))
           continue;
         emitGeneralStreamTransfers(loop, false, st);
         unsigned pos = 0;
@@ -4375,7 +4644,9 @@ struct OrderedLowerer {
     return success();
   }
 
-  LogicalResult lowerGeneral(int64_t tile) {
+  LogicalResult
+  lowerGeneral(int64_t tile,
+               const std::optional<intentdsl::dsa::PrivateRows> &privatePlan) {
     auto &bb = space.getRegion(0).front();
     int64_t owners = space.getAttrOfType<IntegerAttr>("block.owners").getInt();
     int64_t slabBytes =
@@ -4387,6 +4658,22 @@ struct OrderedLowerer {
 
     GeneralState st;
     st.slabBytes = slabBytes;
+    if (privatePlan) {
+      for (Value v : privatePlan->views)
+        st.privateRows[v] =
+            nramBuf(cast<MemRefType>(v.getType()).getElementType(),
+                    dimAttr(v, "block.shape", 1));
+      if (privatePlan->scanWidth) {
+        st.scanOut = nramBuf(b.getI32Type(), privatePlan->scanWidth);
+        st.scanScratch = nramBuf(b.getI32Type(), privatePlan->scanWidth);
+      }
+      if (privatePlan->k) {
+        st.selectVals = nramBuf(b.getF32Type(), privatePlan->k);
+        st.selectIdx = nramBuf(b.getI32Type(), privatePlan->k);
+        st.selectWidth = privatePlan->selectionWidth;
+        st.selectScratch = nramBuf(b.getI32Type(), st.selectWidth * 3);
+      }
+    }
     bool needsReduce = false;
     bool wantsVecPool = false;
     space.walk([&](Operation *op) {
@@ -4400,7 +4687,7 @@ struct OrderedLowerer {
     int64_t maxVecN = 0;
     for (Operation &topOp : bb.without_terminator()) {
       if (auto lOp = dyn_cast<scf::ForOp>(topOp)) {
-        if (canVectorizeStreamLoop(lOp)) {
+        if (!privatePlan && canVectorizeStreamLoop(lOp)) {
           wantsVecPool = true;
           auto dOp = lOp.getUpperBound().getDefiningOp<memref::DimOp>();
           int64_t lN =
@@ -4409,7 +4696,7 @@ struct OrderedLowerer {
         }
       }
     }
-    int64_t usedNram = 0;
+    int64_t usedNram = privatePlan ? privatePlan->bytes : 0;
     if (needsReduce) {
       st.poolScratch = nramBuf(b.getF32Type(), 32);
       st.scalarOut = nramBuf(b.getF32Type(), 32);
@@ -4667,8 +4954,23 @@ struct OrderedLowerer {
         memcpy1D(st.slabLocal, slabGlobal, cI64(slabElems), "GDRAM2NRAM");
         sync("io");
       }
+      auto moveRow = [&](Value v, bool store) {
+        auto global =
+            makeAddr(v, {owner}, {cI64(dimAttr(v, "block.strides", 0))}, 0);
+        auto nr = st.privateRows.lookup(v);
+        memcpy1D(store ? global : nr, store ? nr : global,
+                 cI64(dimAttr(v, "block.shape", 1)),
+                 store ? "NRAM2GDRAM" : "GDRAM2NRAM");
+      };
+      if (privatePlan)
+        for (auto v : privatePlan->views)
+          moveRow(v, false);
       if (failed(emitGeneralBlock(bb, st)))
         status = failure();
+      if (privatePlan)
+        for (auto v : privatePlan->views)
+          if (privatePlan->writes.contains(v))
+            moveRow(v, true);
       if (slabBytes) {
         sync("compute");
         memcpy1D(slabGlobal, st.slabLocal, cI64(slabElems), "NRAM2GDRAM");
@@ -4737,6 +5039,11 @@ struct OrderedLowerer {
     std::optional<PlaneStencilPlan> stencilPlan;
     if (!indexed && transfers != "panel-fold" && pack <= 1)
       stencilPlan = matchPlaneStencil();
+    auto privatePlan = transfers == "private-rows"
+                           ? intentdsl::dsa::privateRows(fn, profile)
+                           : std::nullopt;
+    if (transfers == "private-rows" && !privatePlan)
+      return failure();
     bool isGeneral = transfers != "panel-fold" && pack <= 1 && !stencilPlan;
     int64_t stencilTile = stencilPlan ? stencilPlan->H * stencilPlan->W : 1;
     int64_t launchTile =
@@ -4777,7 +5084,7 @@ struct OrderedLowerer {
                        : transfers == "panel-fold" ? lowerPanelFold()
                        : pack > 1                  ? lowerPackedStreams(pack)
                        : stencilPlan ? lowerPlaneStencil(*stencilPlan)
-                                     : lowerGeneral(launchTile);
+                                     : lowerGeneral(launchTile, privatePlan);
     if (failed(st))
       return failure();
 

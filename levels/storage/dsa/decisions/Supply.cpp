@@ -891,7 +891,8 @@ void supply(Unit &u) {
     if (!check)
       return check.takeError();
     if(!d.getAs<ArrayAttr>("rows") || d.getAs<ArrayAttr>("rows").empty())return llvm::createStringError("no legal private storage row or DMA completion");
-    if (d.contains("histogram_panel") && facts->keyPanel)
+    if ((d.contains("histogram_panel") || d.contains("ticket_panel")) &&
+        facts->keyPanel)
       *check = facts->keyPanel(cast<func::FuncOp>(op), p, *check);
     if (*check != d)
       return llvm::createStringError(
@@ -916,7 +917,7 @@ void supply(Unit &u) {
     if(d.getAs<BoolAttr>("persistent").getValue())topology+="-shared";
     std::string expectedId = topology + "-" + std::to_string(count) +
                              (batch > 1 ? "-b" + std::to_string(batch) : "");
-    if (d.contains("histogram_panel"))
+    if (d.contains("histogram_panel") || d.contains("ticket_panel"))
       expectedId += "-key-panel";
     if (d.contains("approximate_math")) expectedId += "-approx";
     if(c.topology!=topology || c.id!=expectedId || c.preconditions!=std::vector<std::string>{"legal-private-supply"})return llvm::createStringError("supply topology or participants mismatch");

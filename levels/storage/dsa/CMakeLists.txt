@@ -1,5 +1,5 @@
 compilerinfra_target(block levels/execution/block)
-compilerinfra_unit(SOURCES cost/Supply.cpp cost/Contraction.cpp ir/Dialect.cpp analysis/Verify.cpp analysis/Lifetime.cpp analysis/OwnerStreams.cpp analysis/IndexedRowAdd.cpp lowering/Stages.cpp decisions/Supply.cpp decisions/Matrix.cpp decisions/Ordered.cpp cost/Ordered.cpp transforms/ReuseFragments.cpp
+compilerinfra_unit(SOURCES cost/Supply.cpp cost/Contraction.cpp ir/Dialect.cpp analysis/Verify.cpp analysis/Lifetime.cpp analysis/OwnerStreams.cpp analysis/IndexedRowAdd.cpp analysis/PrivateRows.cpp lowering/Stages.cpp decisions/Supply.cpp decisions/Matrix.cpp decisions/Ordered.cpp cost/Ordered.cpp transforms/ReuseFragments.cpp
   LINK_LIBRARIES ${block}
   TABLEGEN "ir/Ops.td Dialect.h.inc -gen-dialect-decls -dialect=dsa"
            "ir/Ops.td Dialect.cpp.inc -gen-dialect-defs -dialect=dsa"

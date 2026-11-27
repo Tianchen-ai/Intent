@@ -1,3 +1,13 @@
+__mlu_func__ unsigned char finite_narrow_panel(const unsigned short *src,unsigned short *scratch,int n,unsigned short exp){
+  for(int i=0;i<n;i+=4096){
+    int m=n-i<4096?n-i:4096;
+    __bang_band_scalar(scratch,src+i,exp,m);
+    __bang_eq_scalar(scratch,scratch,exp,m);
+    if(__bang_count(scratch,m))return 0;
+  }
+  return 1;
+}
+
 __mlu_func__ unsigned char ordinary_panel(const unsigned short *v, int n,
                                           unsigned short *mag,
                                           unsigned short *flag) {

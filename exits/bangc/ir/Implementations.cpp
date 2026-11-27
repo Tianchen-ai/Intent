@@ -826,6 +826,88 @@ void rowContracts(Unit &unit) {
                        isSpace(op->getOperand(4), 1) && elem(4).isInteger(16) &&
                        elem(2).isInteger(16) && elem(3).isInteger(16));
       });
+  add("finite-panel", "finite_panel", "finite_narrow_panel", "matrix.mlu",
+      "narrow source, 4096-element u16 workspace, count, exponent mask",
+      "contiguous NRAM", "u16", "writes temporary exponent mask",
+      "checks the exponent bits for infinity and NaN",
+      makeTyped(4, 4, 1, {STK::F16, STK::BF16, STK::I64, STK::I32}, {STK::I1},
+                {STK::I16}, EffectMask::ReadWrite, 64, 1),
+      [](Operation *op) {
+        auto t = cast<MemRefType>(op->getOperand(0).getType()).getElementType();
+        return success(isSpace(op->getOperand(0), 1) &&
+                       isSpace(op->getOperand(1), 1) &&
+                       (t.isF16() || t.isBF16()) &&
+                       cast<MemRefType>(op->getOperand(1).getType())
+                               .getElementType()
+                               .getIntOrFloatBitWidth() == 16);
+      });
+  add("key-reservation", "reserve_tickets", "reserve_tickets",
+      "reservations.mlu",
+      "i32 counters, pitched keys, counts, range bases, compact output tickets "
+      "and shape",
+      "GDRAM counters, NRAM tile", "i32",
+      "atomic fetch-add on touched counters",
+      "one ordered ticket per live key with relaxed atomic ordering",
+      makeTyped(10, 10, 0, {STK::I32, STK::I64, STK::I1}, {}, {STK::I32},
+                EffectMask::ReadWrite, 1, std::nullopt),
+      [](Operation *op) {
+        for (unsigned i = 0; i < 5; ++i)
+          if (!isSpace(op->getOperand(i), i ? 1 : 0) ||
+              !cast<MemRefType>(op->getOperand(i).getType())
+                   .getElementType()
+                   .isInteger(32))
+            return failure();
+        return success();
+      });
+  add("member-ramp", "member_ramp", "i32_ramp", "selection.mlu",
+      "output, first, live", "contiguous NRAM", "i32",
+      "writes one row of indices", "integer ordinal modulo 2^32",
+      makeTyped(3, 3, 0, {STK::I32, STK::I64}, {}, {STK::I32},
+                EffectMask::Write, 64, 1),
+      [](Operation *op) {
+        return success(isSpace(op->getOperand(0), 1) &&
+                       cast<MemRefType>(op->getOperand(0).getType())
+                           .getElementType()
+                           .isInteger(32));
+      });
+  add("stable-filter", "stable_filter", "filter_i32", "selection.mlu",
+      "destination, payload, predicate, scratch and length", "contiguous NRAM",
+      "i32", "writes selected payloads in source order",
+      "integer 0/1 mask or binary32 nonzero predicate including NaN and "
+      "subnormals",
+      makeTyped(5, 5, 1, {STK::F32, STK::I32, STK::I64}, {STK::I32}, {STK::I32},
+                EffectMask::ReadWrite, 64, 1),
+      [](Operation *op) {
+        for (unsigned i = 0; i < 4; ++i) {
+          auto t =
+              cast<MemRefType>(op->getOperand(i).getType()).getElementType();
+          if (!isSpace(op->getOperand(i), 1) ||
+              !(t.isInteger(32) || (i == 2 && t.isF32())))
+            return failure();
+        }
+        return success();
+      });
+  add("ordered-selection", "ordered_select", "select_ordered", "selection.mlu",
+      "values, indices, contiguous f32 row, filter scratch, n, k, width",
+      "private NRAM", "f32/i32", "writes carried values and indices",
+      "ordered greater-than, NaNs skipped, equal values follow the original "
+      "insertion chain",
+      makeTyped(7, 7, 0, {STK::F32, STK::I32, STK::I64}, {}, {STK::F32},
+                EffectMask::ReadWrite, 64, 1),
+      [](Operation *op) {
+        return success(cast<MemRefType>(op->getOperand(0).getType())
+                           .getElementType()
+                           .isF32() &&
+                       cast<MemRefType>(op->getOperand(1).getType())
+                           .getElementType()
+                           .isInteger(32) &&
+                       cast<MemRefType>(op->getOperand(2).getType())
+                           .getElementType()
+                           .isF32() &&
+                       cast<MemRefType>(op->getOperand(3).getType())
+                           .getElementType()
+                           .isInteger(32));
+      });
   add("inclusive-scan", "scan_sum", "tile_prefix", "scan.mlu",
       "NRAM source, destination and scratch tiles of matching element type",
       "contiguous NRAM row fragment", "i32 or f32",
