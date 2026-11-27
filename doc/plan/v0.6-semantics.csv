@@ -226,8 +226,8 @@ x86-mojo,mojo,corpus/triton/moe_expert_projection,T2048-E8-top2-4096x14336-bf16,
 x86-mojo,mojo,corpus/weft/q4_k_projection,N4096-K4096-Q4_K-f32-1core,作者默认,855.084,weft,12175.089,x86-weft,0.07023,快,,,,,855.084
 x86-mojo,mojo,cpu/histogram,large,作者默认,100.378,mojo,490.5465,x86-weft,0.20462,快,,,,,100.378
 x86-mojo,mojo,cpu/histogram,small,作者默认,1.746,mojo,0.4336,x86-weft,4.02676,慢,,,,,1.746
-x86-mojo,mojo,group7/alibi_attention,2x32x8x2048x128-bf16,preserve-sign；作者归一化许可,30229.174,aten:cpu,52902.5,x86-mojo,0.57141,快,,,aten:source,786513.763,237332.152
-x86-mojo,mojo,group7/attention_unscaled_max,2x32x8x2048x128-bf16,preserve-sign；作者归一化许可,39705.183,aten:cpu,25775.888,x86-mojo,1.5404,慢,,,aten:source,576384.024,144512.535
+x86-mojo,mojo,group7/alibi_attention,2x32x8x2048x128-bf16,作者默认，允许原生 BF16 点积,59707.302,aten:cpu,44081.349,x86-mojo,1.35448,慢,,,aten:source,786513.763,59707.302
+x86-mojo,mojo,group7/attention_unscaled_max,2x32x8x2048x128-bf16,作者默认，允许原生 BF16 点积,28428.241,aten:cpu,24192.767,x86-mojo,1.17507,慢,,,aten:source,576384.024,28428.241
 x86-mojo,mojo,group7/awq_int4_gemm,256x4096x4096-g128-awq,作者默认,10621.792,inductor,16389.134,x86-mojo,0.6481,快,,,,,10621.792
 x86-mojo,mojo,group7/cross_entropy,4096x32768-bf16,作者默认,14307.634,aten:source,407223.077,x86-weft,0.03513,快,,,aten:cpu,273963.7139,14307.634
 x86-mojo,mojo,group7/depthwise_conv2d,8x128x56x56-k3-f32,作者默认,2017.175,aten:cpu,732.464,x86-mojo,2.75396,慢,,,,,2017.175
@@ -245,7 +245,7 @@ x86-mojo,mojo,group7/sliding_window_attention,2x32x8x4096x128-w1024-f16,作者�
 x86-mojo,mojo,group7/topk_rows,1024x4096-k8-f32,作者默认,364.262,aten:cpu,1934.362,x86-mojo,0.18831,快,,,,,364.262
 x86-mojo,mojo,group7/triangular_solve,32x128x64-f32,作者默认,164.539,aten:cpu,324.231,x86-weft,0.50747,快,,,,,164.539
 x86-mojo,mojo,program/adamw,author,作者默认,16.156,aten:source,280.0199,x86-weft,0.0577,快,,,aten:cpu,13.211,16.156
-x86-mojo,mojo,program/attention,author,preserve-sign；作者归一化许可,212.958,aten:cpu,300.047,x86-mojo,0.70975,快,,,,,378.212
+x86-mojo,mojo,program/attention,author,作者默认，允许原生 BF16 点积,195.625,aten:cpu,228.132,x86-mojo,0.85751,快,,,,,195.625
 x86-mojo,mojo,program/batch_norm,author,作者默认,7.414,aten:source,144.4659,x86-weft,0.05132,快,,,aten:cpu,19.237,7.414
 x86-mojo,mojo,program/batched_gemm,author,作者默认,103.889,aten:cpu,150.612,x86-mojo,0.68978,快,,,,,103.889
 x86-mojo,mojo,program/batched_gemm,subnormal_ftz,作者默认,104.247,aten:cpu,68.779,x86-weft,1.51568,慢,,,,,104.247
@@ -297,8 +297,8 @@ x86-weft,weft,corpus/triton/moe_expert_projection,T2048-E8-top2-4096x14336-bf16,
 x86-weft,weft,corpus/weft/q4_k_projection,N4096-K4096-Q4_K-f32-1core,作者默认,642.012,weft,12175.089,x86-weft,0.05273,快,,,,,642.012
 x86-weft,weft,cpu/histogram,large,作者默认,80.778,mojo,490.5465,x86-weft,0.16467,快,,,,,80.778
 x86-weft,weft,cpu/histogram,small,作者默认,0.988,mojo,0.4336,x86-weft,2.2786,慢,,,,,0.988
-x86-weft,weft,group7/alibi_attention,2x32x8x2048x128-bf16,preserve-sign；作者归一化许可,45718.438,aten:cpu,56438.509,x86-weft,0.81006,快,,,aten:source,786513.763,233366.529
-x86-weft,weft,group7/attention_unscaled_max,2x32x8x2048x128-bf16,preserve-sign；作者归一化许可,52867.635,aten:cpu,31266.1841,x86-weft,1.69089,慢,,,aten:source,576384.024,185997.375
+x86-weft,weft,group7/alibi_attention,2x32x8x2048x128-bf16,作者默认，允许原生 BF16 点积,42878.332,aten:cpu,50578.225,x86-weft,0.84776,快,,,aten:source,786513.763,42878.332
+x86-weft,weft,group7/attention_unscaled_max,2x32x8x2048x128-bf16,作者默认，允许原生 BF16 点积,50925.590,aten:cpu,27408.595,x86-weft,1.85802,慢,,,aten:source,576384.024,50925.590
 x86-weft,weft,group7/awq_int4_gemm,256x4096x4096-g128-awq,作者默认,10273.62,inductor,16389.134,x86-mojo,0.62686,快,,,,,10273.62
 x86-weft,weft,group7/cross_entropy,4096x32768-bf16,作者默认,26901.099,aten:source,407223.077,x86-weft,0.06606,快,,,aten:cpu,273963.7139,26901.099
 x86-weft,weft,group7/depthwise_conv2d,8x128x56x56-k3-f32,作者默认,1758.966,aten:cpu,732.464,x86-mojo,2.40144,慢,,,,,1758.966
@@ -316,7 +316,7 @@ x86-weft,weft,group7/sliding_window_attention,2x32x8x4096x128-w1024-f16,作者�
 x86-weft,weft,group7/topk_rows,1024x4096-k8-f32,作者默认,330.043,aten:cpu,1934.362,x86-mojo,0.17062,快,,,,,330.043
 x86-weft,weft,group7/triangular_solve,32x128x64-f32,作者默认,158.201,aten:cpu,324.231,x86-weft,0.48793,快,,,,,158.201
 x86-weft,weft,program/adamw,author,作者默认,30.138,aten:source,280.0199,x86-weft,0.10763,快,,,aten:cpu,13.211,30.138
-x86-weft,weft,program/attention,author,preserve-sign；作者归一化许可,288.583,aten:cpu,307.922,x86-weft,0.9372,快,,,,,338.558
+x86-weft,weft,program/attention,author,作者默认，允许原生 BF16 点积,286.242,aten:cpu,314.474,x86-weft,0.91022,快,,,,,286.242
 x86-weft,weft,program/batch_norm,author,作者默认,7.19,aten:source,144.4659,x86-weft,0.04977,快,,,aten:cpu,19.237,7.19
 x86-weft,weft,program/batched_gemm,author,作者默认,152.396,aten:cpu,150.612,x86-mojo,1.01185,平,,,,,152.396
 x86-weft,weft,program/batched_gemm,subnormal_ftz,作者默认,143.446,aten:cpu,68.779,x86-weft,2.08561,慢,,,,,143.446
