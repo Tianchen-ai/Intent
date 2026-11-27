@@ -705,7 +705,7 @@ void rowContracts(Unit &unit) {
       "NRAM f32 destination, NRAM f32 input and NRAM f32 scratch",
       "64-lane aligned NRAM vector fragment with 6x lanes f32 scratch", "f32",
       "writes NRAM f32 scratch and correctly rounded NRAM f32 square root",
-      "correctly rounded IEEE-754 binary32 round-to-nearest-even (0 ULP): "
+      "IEEE-754 squareRoot roundTiesToEven (0 ULP); cncc bang_math_decls.h vector sqrt is only a candidate: "
       "correctness guaranteed solely by unconditional symmetric exact runtime "
       "endpoint certification on exact Veltkamp-Dekker/TwoDiff residual "
       "x - r^2 with bit-exact integer RN-even fallback (a priori candidate "
@@ -726,20 +726,17 @@ void rowContracts(Unit &unit) {
                        sc.getElementType().isF32());
       });
 
-  for (auto [mode, symbol] :
-       {std::pair{"vv", "__cn_vector_div_f32_rn"},
-        std::pair{"vs", "__cn_vector_div_scalar_f32_rn"},
-        std::pair{"sv", "__cn_scalar_div_vector_f32_rn"}}) {
-    addBuiltin(std::string("ieee-div-rn-") + mode, "vec_div_rn", symbol,
-               "exits/bangc::dma", "f32 NRAM tile or broadcast scalar operands",
-               "aligned contiguous NRAM lanes", "f32", "write quotient tile",
-               "BANG C bang_math_decls.h: IEEE binary32 round to nearest, ties "
-               "to even (0 ULP)",
-               makeTyped(4, 4, 0, {STK::F32, STK::I64}, {}, {STK::F32},
-                         EffectMask::ReadWrite, 4, std::nullopt),
-               hasNram, [mode, floatNram](Operation *op) {
+  for (StringRef mode : {"vv", "vs", "sv"}) {
+    add(("ieee-div-rn-" + mode).str(), "vec_div_rn", "certified_div_rn", "certified_div.mlu",
+        "NRAM f32 quotient, vector or scalar operands, six scratch tiles, live and padded lanes",
+        "aligned contiguous NRAM", "f32", "read operands and write scratch and quotient",
+        "IEEE-754 binary32 roundTiesToEven (0 ULP); BANG C bang_math_decls.h "
+        "__cn_scalar_div_f32_rn. Certify the reciprocal/Newton candidate against "
+        "both rounding boundaries; repair uncertified lanes with SDK RN.",
+        makeTyped(6, 6, 0, {STK::F32, STK::I64}, {}, {STK::F32}, EffectMask::ReadWrite, 64, 1),
+        [mode, floatNram](Operation *op) {
                  if (op->getAttrOfType<StringAttr>("mode") != mode ||
-                     !floatNram(op->getOperand(0)))
+                     !floatNram(op->getOperand(0)) || !floatNram(op->getOperand(3)))
                    return failure();
                  for (unsigned i : {0u, 1u}) {
                    Value v = op->getOperand(i + 1);

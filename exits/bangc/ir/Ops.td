@@ -387,8 +387,8 @@ def VecSqrtRnOp : BangcOp<"vec_sqrt_rn",
 
 def VecDivRnOp : BangcOp<"vec_div_rn",
                          [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
-  let arguments = (ins AnyMemRef:$dst, AnyType:$lhs, AnyType:$rhs, I64:$lanes,
-                       StrAttr:$mode);
+  let arguments = (ins AnyMemRef:$dst, AnyType:$lhs, AnyType:$rhs, AnyMemRef:$scratch,
+                       I64:$live, I64:$lanes, StrAttr:$mode);
 }
 
 def DivRnOp : BangcOp<"div_rn", [Pure]> {

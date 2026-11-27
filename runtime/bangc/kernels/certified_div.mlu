@@ -1,0 +1,476 @@
+// IEEE-754 binary32 division, roundTiesToEven (cncc bang_math_decls.h).
+//   Given dividend a, divisor b, and untrusted candidate r = dst[i], lane i is
+//   accepted iff all runtime checks (D1)-(D5) in certify_div_rn_lanes pass
+//   (otherwise __cn_scalar_div_f32_rn(a, b) overwrites dst[i]):
+//     (D1) |a|_bits in [0x00800000, 0x7f800000) and |b|_bits in
+//          [0x0d800000, 0x72800000): scale = sgn(b) * 2^(127 - exp(b)) in
+//          [2^-101, 2^100] is an exact normal power of two, and b' = fl(b*scale)
+//          = b * scale in [1, 2) is exact (b' > 0). Runtime check |a'|_bits in
+//          [0x19800000, 0x72800000) on a' = fl(a * scale) guarantees a * scale
+//          experienced neither subnormal rounding/FTZ nor overflow, so a' =
+//          a * scale is exact and a / b == a' / b' identically.
+//     (D2) |r|_bits in [0x19800001, 0x72000000) and (r_bits & 0x007fffff) != 0:
+//          r is finite normal with |r| in (2^-76, 2^101) and not a power of two,
+//          so adjacent binary32 floats of r are symmetrically r - delta and
+//          r + delta with delta = ulp(r) = 2^(exp(r) - 150) in [2^-99, 2^77].
+//          Since b' > 0, the strict symmetric inequality
+//            -0.5 * b' * delta < a' - r * b' < +0.5 * b' * delta
+//          implies r - 0.5 * delta < a / b < r + 0.5 * delta, which suffices
+//          unconditionally for RN(a / b) == r (exact midpoint ties fail strict
+//          < and are resolved by exact scalar fallback).
+//     (D3) Masking b' = b_hi + b_lo and r = r_hi + r_lo with 0xfffff000U gives
+//          exact <=24-bit products P00 = b_hi*r_hi, P10 = b_hi*r_lo,
+//          P01 = r_hi*b_lo, P11 = b_lo*r_lo, all integer multiples of
+//          u0 = 2^-23 * delta >= 2^-122 > 2^-126 (no FTZ, no overflow). Runtime
+//          checks signbit(a') == signbit(P00) and -0x00800000 <= |a'|_bits -
+//          |P00|_bits <= +0x00800000 verify 0.5*|P00| <= |a'| <= 2*|P00|; since
+//          |a'| >= 0.5*|P00| >= 2^22 * delta has ulp(a') >= 0.5 * delta =
+//          2^22 * u0, Sterbenz's Lemma guarantees r0 = fl(a' - P00) = a' - P00
+//          is exact and an integer multiple of u0.
+//     (D4) Knuth TwoDiff(r0, P10) -> (sA, eA), TwoDiff(sA, P01) -> (sB, eB),
+//          TwoDiff(sB, -eA) -> (sC, eAB), and TwoDiff(sC, P11) -> (R_hi, eC).
+//          Every operand and intermediate is an integer multiple of u0 >= 2^-122
+//          > 2^-126 with magnitude < 2^104, so a' - r * b' = R_hi + eB + eAB + eC
+//          holds exactly without FTZ or overflow. Runtime checks eB == 0,
+//          eAB == 0, and eC == 0 certify R_hi == a' - r * b' with zero error.
+//     (D5) half_delta = 0.5 * delta = 2^(exp(r) - 151) in [2^-100, 2^76] is an
+//          exact normal power of two, so tau = fl(b' * half_delta) =
+//          0.5 * b' * delta in [2^-100, 2^77) is exact. Runtime symmetric check
+//          tau_bits - |R_hi|_bits >= 1 certifies -tau < a' - r * b' < +tau on
+//          both sides (and rejects Inf/NaN), proving RN(a / b) == r (0 ULP).
+
+#define BANG_TWODIFF_SE(s_out, u, v_e, t, n)                                   \
+  do {                                                                         \
+    __bang_sub(s_out, u, v_e, n);                                              \
+    __bang_add(t, s_out, v_e, n);                                              \
+    __bang_sub(u, u, t, n);                                                    \
+    __bang_sub(t, t, s_out, n);                                                \
+    __bang_sub(v_e, t, v_e, n);                                                \
+    __bang_add(v_e, u, v_e, n);                                                \
+  } while (0)
+
+
+// Unconditional symmetric runtime endpoint certification for candidate r = dst
+// against a / b (given s1 = b' = b * scale and s2 = a' = a * scale already
+// computed), writing per-lane fault flags into s5 = sc + 5 * lanes.
+__mlu_func__ void certify_div_rn_lanes(float *dst, const float *a_vec,
+                                       int a_is_vec, const float *b_vec,
+                                       float *sc, int lanes) {
+  float *s0 = sc;
+  float *s1 = sc + lanes;
+  float *s2 = sc + 2 * lanes;
+  float *s3 = sc + 3 * lanes;
+  float *s4 = sc + 4 * lanes;
+  float *s5 = sc + 5 * lanes;
+
+  // Clear fault mask s5 (s1 holds b' and s2 holds a').
+  __bang_band_scalar((int *)s5, (const int *)dst, 0, lanes);
+
+  // (D1) Normal finite dividend a and interior normal divisor b in [2^-100, 2^102).
+  if (a_is_vec) {
+    __bang_band_scalar((int *)s0, (const int *)a_vec, 0x7fffffff, lanes);
+    __bang_lt_scalar((int *)s3, (const int *)s0, 0x00800000, lanes);
+    __bang_ge_scalar((int *)s4, (const int *)s0, 0x7f800000, lanes);
+    __bang_bor((char *)s5, (const char *)s5, (const char *)s3, lanes * 4);
+    __bang_bor((char *)s5, (const char *)s5, (const char *)s4, lanes * 4);
+  }
+  __bang_band_scalar((int *)s0, (const int *)b_vec, 0x7fffffff, lanes);
+  __bang_lt_scalar((int *)s3, (const int *)s0, 0x0d800000, lanes);
+  __bang_ge_scalar((int *)s4, (const int *)s0, 0x72800000, lanes);
+  __bang_bor((char *)s5, (const char *)s5, (const char *)s3, lanes * 4);
+  __bang_bor((char *)s5, (const char *)s5, (const char *)s4, lanes * 4);
+
+  // Certify |a'| in [2^-76, 2^102), guaranteeing a' = a * scale is exact.
+  __bang_band_scalar((int *)s0, (const int *)s2, 0x7fffffff, lanes);
+  __bang_lt_scalar((int *)s3, (const int *)s0, 0x19800000, lanes);
+  __bang_ge_scalar((int *)s4, (const int *)s0, 0x72800000, lanes);
+  __bang_bor((char *)s5, (const char *)s5, (const char *)s3, lanes * 4);
+  __bang_bor((char *)s5, (const char *)s5, (const char *)s4, lanes * 4);
+
+  // (D2) Candidate |r| in (2^-76, 2^101) and non-power-of-two (M > 2^23).
+  __bang_band_scalar((int *)s0, (const int *)dst, 0x7fffffff, lanes);
+  __bang_lt_scalar((int *)s3, (const int *)s0, 0x19800001, lanes);
+  __bang_ge_scalar((int *)s4, (const int *)s0, 0x72000000, lanes);
+  __bang_bor((char *)s5, (const char *)s5, (const char *)s3, lanes * 4);
+  __bang_bor((char *)s5, (const char *)s5, (const char *)s4, lanes * 4);
+  __bang_band_scalar((int *)s3, (const int *)dst, 0x007fffff, lanes);
+  __bang_lt_scalar((int *)s3, (const int *)s3, 1, lanes);
+  __bang_bor((char *)s5, (const char *)s5, (const char *)s3, lanes * 4);
+
+  // (D3) Exact P00 = b_hi * r_hi and runtime Sterbenz check on (a', P00).
+  __bang_band_scalar((int *)s0, (const int *)s1, (int)0xfffff000U, lanes);
+  __bang_band_scalar((int *)s3, (const int *)dst, (int)0xfffff000U, lanes);
+  __bang_mul(s0, s0, s3, lanes);
+  __bang_bxor((char *)s3, (const char *)s2, (const char *)s0, lanes * 4);
+  __bang_lt_scalar((int *)s3, (const int *)s3, 0, lanes);
+  __bang_bor((char *)s5, (const char *)s5, (const char *)s3, lanes * 4);
+  __bang_band_scalar((int *)s3, (const int *)s2, 0x7fffffff, lanes);
+  __bang_band_scalar((int *)s4, (const int *)s0, 0x7fffffff, lanes);
+  __bang_mul_scalar((int *)s4, (const int *)s4, -1, lanes);
+  __bang_add((int *)s3, (const int *)s3, (const int *)s4, lanes);
+  __bang_lt_scalar((int *)s4, (const int *)s3, -0x00800000, lanes);
+  __bang_bor((char *)s5, (const char *)s5, (const char *)s4, lanes * 4);
+  __bang_ge_scalar((int *)s4, (const int *)s3, 0x00800001, lanes);
+  __bang_bor((char *)s5, (const char *)s5, (const char *)s4, lanes * 4);
+  __bang_sub(s2, s2, s0, lanes); // s2 = r0 = a' - P00 exact
+
+  // (D4) Exact 4-term Knuth TwoDiff chain for a' - r * b'; require eB == eAB == eC == 0.
+  __bang_band_scalar((int *)s0, (const int *)s1, (int)0xfffff000U, lanes);
+  __bang_sub(s1, s1, s0, lanes); // s1 = b_lo
+  __bang_band_scalar((int *)s3, (const int *)dst, (int)0xfffff000U, lanes);
+  __bang_sub(s3, dst, s3, lanes); // s3 = r_lo
+  __bang_mul(s0, s0, s3, lanes);  // s0 = P10 = b_hi * r_lo
+  BANG_TWODIFF_SE(s4, s2, s0, s3, lanes); // s4 = sA, s0 = eA
+
+  __bang_band_scalar((int *)s3, (const int *)dst, (int)0xfffff000U, lanes);
+  __bang_mul(s1, s3, s1, lanes);          // s1 = P01 = r_hi * b_lo
+  BANG_TWODIFF_SE(s2, s4, s1, s3, lanes); // s2 = sB, s1 = eB
+  __bang_band_scalar((int *)s1, (const int *)s1, 0x7fffffff, lanes);
+  __bang_bor((char *)s5, (const char *)s5, (const char *)s1, lanes * 4);
+
+  __bang_mul_scalar(s0, s0, -1.0f, lanes);
+  BANG_TWODIFF_SE(s4, s2, s0, s3, lanes); // s4 = sC, s0 = eAB
+  __bang_band_scalar((int *)s0, (const int *)s0, 0x7fffffff, lanes);
+  __bang_bor((char *)s5, (const char *)s5, (const char *)s0, lanes * 4);
+
+  __bang_band_scalar((int *)s0, (const int *)b_vec, 0x7f800000, lanes);
+  __bang_mul_scalar((int *)s0, (const int *)s0, -1, lanes);
+  __bang_add_scalar((int *)s0, (const int *)s0, 0x7f000000, lanes);
+  __bang_band_scalar((int *)s1, (const int *)b_vec, (int)0x80000000U, lanes);
+  __bang_bor((char *)s0, (const char *)s0, (const char *)s1, lanes * 4);
+  __bang_mul(s0, (float *)b_vec, s0, lanes); // s0 = b'
+  __bang_band_scalar((int *)s1, (const int *)s0, (int)0xfffff000U, lanes);
+  __bang_sub(s1, s0, s1, lanes); // s1 = b_lo (s0 keeps b')
+  __bang_band_scalar((int *)s3, (const int *)dst, (int)0xfffff000U, lanes);
+  __bang_sub(s3, dst, s3, lanes);
+  __bang_mul(s1, s1, s3, lanes);          // s1 = P11 = b_lo * r_lo
+  BANG_TWODIFF_SE(s2, s4, s1, s3, lanes); // s2 = R_hi, s1 = eC
+  __bang_band_scalar((int *)s1, (const int *)s1, 0x7fffffff, lanes);
+  __bang_bor((char *)s5, (const char *)s5, (const char *)s1, lanes * 4);
+
+  // (D5) Symmetric exact endpoint check: -tau < R_hi < +tau, tau = 0.5 * b' * ulp(r).
+  __bang_band_scalar((int *)s1, (const int *)dst, 0x7f800000, lanes);
+  __bang_add_scalar((int *)s1, (const int *)s1, -0x0c000000, lanes);
+  __bang_mul(s0, s0, s1, lanes);
+  __bang_band_scalar((int *)s2, (const int *)s2, 0x7fffffff, lanes);
+  __bang_mul_scalar((int *)s2, (const int *)s2, -1, lanes);
+  __bang_add((int *)s0, (const int *)s0, (const int *)s2, lanes);
+  __bang_lt_scalar((int *)s0, (const int *)s0, 1, lanes);
+  __bang_bor((char *)s5, (const char *)s5, (const char *)s0, lanes * 4);
+}
+
+__mlu_func__ void certified_div_rn(float *dst, const float *a, const float *b,
+                             float *sc, int live, int lanes) {
+  if (live <= 0)
+    return;
+  if (dst == a || dst == b) {
+    __sync_compute();
+    for (int i = 0; i < live; ++i)
+      dst[i] = __cn_scalar_div_f32_rn(a[i], b[i]);
+    return;
+  }
+  float *s0 = sc;
+  float *s1 = sc + lanes;
+  float *s2 = sc + 2 * lanes;
+  float *s3 = sc + 3 * lanes;
+  float *s4 = sc + 4 * lanes;
+  float *s5 = sc + 5 * lanes;
+
+  // Heuristic candidate generation (keeps s1 = b' and s2 = a' intact).
+  __bang_band_scalar((int *)s0, (const int *)b, 0x7f800000, lanes);
+  __bang_mul_scalar((int *)s0, (const int *)s0, -1, lanes);
+  __bang_add_scalar((int *)s0, (const int *)s0, 0x7f000000, lanes);
+  __bang_band_scalar((int *)s1, (const int *)b, (int)0x80000000U, lanes);
+  __bang_bor((char *)s0, (const char *)s0, (const char *)s1, lanes * 4);
+  __bang_mul(s1, (float *)b, s0, lanes);
+  __bang_mul(s2, (float *)a, s0, lanes);
+
+  __bang_active_recip(s0, s1, lanes);
+  __bang_mul(s3, s1, s0, lanes);
+  __bang_mul_scalar(s3, s3, -1.0f, lanes);
+  __bang_add_scalar(s3, s3, 2.0f, lanes);
+  __bang_mul(s0, s0, s3, lanes);
+  __bang_mul(s3, s1, s0, lanes);
+  __bang_mul_scalar(s3, s3, -1.0f, lanes);
+  __bang_add_scalar(s3, s3, 2.0f, lanes);
+  __bang_mul(s0, s0, s3, lanes);
+
+  __bang_mul(dst, s2, s0, lanes);
+  __bang_band_scalar((int *)s3, (const int *)s1, (int)0xfffff000U, lanes);
+  __bang_band_scalar((int *)s4, (const int *)dst, (int)0xfffff000U, lanes);
+  __bang_mul(s5, s3, s4, lanes);
+  __bang_sub(s5, s2, s5, lanes);
+  __bang_sub(s4, dst, s4, lanes);
+  __bang_mul(s3, s3, s4, lanes);
+  __bang_sub(s5, s5, s3, lanes);
+  __bang_band_scalar((int *)s3, (const int *)s1, (int)0xfffff000U, lanes);
+  __bang_sub(s3, s1, s3, lanes);
+  __bang_mul(s4, s3, s4, lanes);
+  __bang_sub(s5, s5, s4, lanes);
+  __bang_band_scalar((int *)s4, (const int *)dst, (int)0xfffff000U, lanes);
+  __bang_mul(s3, s3, s4, lanes);
+  __bang_sub(s5, s5, s3, lanes);
+  __bang_mul(s5, s5, s0, lanes);
+  __bang_add(dst, dst, s5, lanes);
+
+  certify_div_rn_lanes(dst, a, 1, b, sc, lanes);
+
+  __bang_ne_scalar((int *)s5, (const int *)s5, 0, lanes);
+  __bang_int322float(s0, (const int *)s5, lanes, 0);
+  unsigned bad = __bang_count(s0, live);
+  if (bad > 0) {
+    __sync_compute();
+    if (bad <= 16) {
+      for (unsigned k = 0; k < bad; ++k) {
+        unsigned idx = __bang_findfirst1(s0, live);
+        ((volatile float *)dst)[idx] = __cn_scalar_div_f32_rn(a[idx], b[idx]);
+        ((volatile float *)s0)[idx] = 0.0f;
+        __sync_compute();
+      }
+    } else {
+      for (int i = 0; i < live; ++i)
+        if (((const volatile int *)s5)[i] != 0)
+          dst[i] = __cn_scalar_div_f32_rn(a[i], b[i]);
+    }
+  }
+}
+
+__mlu_func__ void certified_div_rn(float *dst, float a, const float *b,
+                                    float *sc, int live, int lanes) {
+  if (live <= 0)
+    return;
+  union {
+    float f;
+    unsigned u;
+  } ua;
+  ua.f = a;
+  unsigned a_mag = ua.u & 0x7fffffffU;
+  if (dst == b || a_mag < 0x00800000U || a_mag >= 0x7f800000U) {
+    __sync_compute();
+    for (int i = 0; i < live; ++i)
+      dst[i] = __cn_scalar_div_f32_rn(a, b[i]);
+    return;
+  }
+  float *s0 = sc;
+  float *s1 = sc + lanes;
+  float *s2 = sc + 2 * lanes;
+  float *s3 = sc + 3 * lanes;
+  float *s4 = sc + 4 * lanes;
+  float *s5 = sc + 5 * lanes;
+
+  // Heuristic candidate generation (keeps s1 = b' and s2 = a' intact).
+  __bang_band_scalar((int *)s0, (const int *)b, 0x7f800000, lanes);
+  __bang_mul_scalar((int *)s0, (const int *)s0, -1, lanes);
+  __bang_add_scalar((int *)s0, (const int *)s0, 0x7f000000, lanes);
+  __bang_band_scalar((int *)s1, (const int *)b, (int)0x80000000U, lanes);
+  __bang_bor((char *)s0, (const char *)s0, (const char *)s1, lanes * 4);
+  __bang_mul(s1, (float *)b, s0, lanes);
+  __bang_mul_scalar(s2, s0, a, lanes);
+
+  __bang_active_recip(s0, s1, lanes);
+  __bang_mul(s3, s1, s0, lanes);
+  __bang_mul_scalar(s3, s3, -1.0f, lanes);
+  __bang_add_scalar(s3, s3, 2.0f, lanes);
+  __bang_mul(s0, s0, s3, lanes);
+  __bang_mul(s3, s1, s0, lanes);
+  __bang_mul_scalar(s3, s3, -1.0f, lanes);
+  __bang_add_scalar(s3, s3, 2.0f, lanes);
+  __bang_mul(s0, s0, s3, lanes);
+
+  __bang_mul(dst, s2, s0, lanes);
+  __bang_band_scalar((int *)s3, (const int *)s1, (int)0xfffff000U, lanes);
+  __bang_band_scalar((int *)s4, (const int *)dst, (int)0xfffff000U, lanes);
+  __bang_mul(s5, s3, s4, lanes);
+  __bang_sub(s5, s2, s5, lanes);
+  __bang_sub(s4, dst, s4, lanes);
+  __bang_mul(s3, s3, s4, lanes);
+  __bang_sub(s5, s5, s3, lanes);
+  __bang_band_scalar((int *)s3, (const int *)s1, (int)0xfffff000U, lanes);
+  __bang_sub(s3, s1, s3, lanes);
+  __bang_mul(s4, s3, s4, lanes);
+  __bang_sub(s5, s5, s4, lanes);
+  __bang_band_scalar((int *)s4, (const int *)dst, (int)0xfffff000U, lanes);
+  __bang_mul(s3, s3, s4, lanes);
+  __bang_sub(s5, s5, s3, lanes);
+  __bang_mul(s5, s5, s0, lanes);
+  __bang_add(dst, dst, s5, lanes);
+
+  certify_div_rn_lanes(dst, (const float *)0, 0, b, sc, lanes);
+
+  __bang_ne_scalar((int *)s5, (const int *)s5, 0, lanes);
+  __bang_int322float(s0, (const int *)s5, lanes, 0);
+  unsigned bad = __bang_count(s0, live);
+  if (bad > 0) {
+    __sync_compute();
+    if (bad <= 16) {
+      for (unsigned k = 0; k < bad; ++k) {
+        unsigned idx = __bang_findfirst1(s0, live);
+        ((volatile float *)dst)[idx] = __cn_scalar_div_f32_rn(a, b[idx]);
+        ((volatile float *)s0)[idx] = 0.0f;
+        __sync_compute();
+      }
+    } else {
+      for (int i = 0; i < live; ++i)
+        if (((const volatile int *)s5)[i] != 0)
+          dst[i] = __cn_scalar_div_f32_rn(a, b[i]);
+    }
+  }
+}
+
+__mlu_func__ void certify_div_scalar_rn_lanes(float *dst, const float *a,
+                                              float b_hi, float b_lo,
+                                              float half_bp, float *sc,
+                                              int lanes) {
+  float *s0 = sc;
+  float *s1 = sc + lanes;
+  float *s2 = sc + 2 * lanes;
+  float *s3 = sc + 3 * lanes;
+  float *s4 = sc + 4 * lanes;
+  float *s5 = sc + 5 * lanes;
+
+  // (D1) Normal finite dividend a and |a'| (in s2) in [2^-76, 2^102).
+  __bang_band_scalar((int *)s0, (const int *)a, 0x7fffffff, lanes);
+  __bang_lt_scalar((int *)s5, (const int *)s0, 0x00800000, lanes);
+  __bang_ge_scalar((int *)s4, (const int *)s0, 0x7f800000, lanes);
+  __bang_bor((char *)s5, (const char *)s5, (const char *)s4, lanes * 4);
+
+  __bang_band_scalar((int *)s0, (const int *)s2, 0x7fffffff, lanes);
+  __bang_lt_scalar((int *)s3, (const int *)s0, 0x19800000, lanes);
+  __bang_ge_scalar((int *)s4, (const int *)s0, 0x72800000, lanes);
+  __bang_bor((char *)s5, (const char *)s5, (const char *)s3, lanes * 4);
+  __bang_bor((char *)s5, (const char *)s5, (const char *)s4, lanes * 4);
+
+  // (D2) Candidate |r| in (2^-76, 2^101) and non-power-of-two (M > 2^23).
+  __bang_band_scalar((int *)s0, (const int *)dst, 0x7fffffff, lanes);
+  __bang_lt_scalar((int *)s3, (const int *)s0, 0x19800001, lanes);
+  __bang_ge_scalar((int *)s4, (const int *)s0, 0x72000000, lanes);
+  __bang_bor((char *)s5, (const char *)s5, (const char *)s3, lanes * 4);
+  __bang_bor((char *)s5, (const char *)s5, (const char *)s4, lanes * 4);
+  __bang_band_scalar((int *)s3, (const int *)dst, 0x007fffff, lanes);
+  __bang_lt_scalar((int *)s3, (const int *)s3, 1, lanes);
+  __bang_bor((char *)s5, (const char *)s5, (const char *)s3, lanes * 4);
+
+  // (D3) Split r_hi = s0; exact P00 = r_hi * b_hi & Sterbenz check on (a', P00).
+  __bang_band_scalar((int *)s0, (const int *)dst, (int)0xfffff000U, lanes);
+  __bang_mul_scalar(s3, s0, b_hi, lanes);
+  __bang_bxor((char *)s4, (const char *)s2, (const char *)s3, lanes * 4);
+  __bang_lt_scalar((int *)s4, (const int *)s4, 0, lanes);
+  __bang_bor((char *)s5, (const char *)s5, (const char *)s4, lanes * 4);
+  __bang_band_scalar((int *)s4, (const int *)s2, 0x7fffffff, lanes);
+  __bang_band_scalar((int *)s1, (const int *)s3, 0x7fffffff, lanes);
+  __bang_mul_scalar((int *)s1, (const int *)s1, -1, lanes);
+  __bang_add((int *)s4, (const int *)s4, (const int *)s1, lanes);
+  __bang_lt_scalar((int *)s1, (const int *)s4, -0x00800000, lanes);
+  __bang_bor((char *)s5, (const char *)s5, (const char *)s1, lanes * 4);
+  __bang_ge_scalar((int *)s1, (const int *)s4, 0x00800001, lanes);
+  __bang_bor((char *)s5, (const char *)s5, (const char *)s1, lanes * 4);
+  __bang_sub(s2, s2, s3, lanes); // s2 = r0 = a' - P00 exact
+
+  // (D4) Exact 4-term Knuth TwoDiff chain for a' - r * b'; require eB == eAB == eC == 0.
+  __bang_sub(s1, dst, s0, lanes);
+  __bang_mul_scalar(s3, s1, b_hi, lanes);
+  BANG_TWODIFF_SE(s4, s2, s3, s1, lanes); // s4 = sA, s3 = eA (s0 = r_hi intact)
+
+  __bang_mul_scalar(s0, s0, b_lo, lanes);
+  BANG_TWODIFF_SE(s2, s4, s0, s1, lanes); // s2 = sB, s0 = eB
+  __bang_band_scalar((int *)s0, (const int *)s0, 0x7fffffff, lanes);
+  __bang_bor((char *)s5, (const char *)s5, (const char *)s0, lanes * 4);
+
+  __bang_mul_scalar(s3, s3, -1.0f, lanes);
+  BANG_TWODIFF_SE(s4, s2, s3, s0, lanes); // s4 = sC, s3 = eAB
+  __bang_band_scalar((int *)s3, (const int *)s3, 0x7fffffff, lanes);
+  __bang_bor((char *)s5, (const char *)s5, (const char *)s3, lanes * 4);
+
+  __bang_band_scalar((int *)s0, (const int *)dst, (int)0xfffff000U, lanes);
+  __bang_sub(s1, dst, s0, lanes);
+  __bang_mul_scalar(s1, s1, b_lo, lanes);
+  BANG_TWODIFF_SE(s2, s4, s1, s0, lanes); // s2 = R_hi, s1 = eC
+  __bang_band_scalar((int *)s1, (const int *)s1, 0x7fffffff, lanes);
+  __bang_bor((char *)s5, (const char *)s5, (const char *)s1, lanes * 4);
+
+  // (D5) Symmetric exact endpoint check: -tau < R_hi < +tau, tau = 0.5 * b' * ulp(r).
+  __bang_band_scalar((int *)s0, (const int *)dst, 0x7f800000, lanes);
+  __bang_add_scalar((int *)s0, (const int *)s0, -0x0b800000, lanes);
+  __bang_mul_scalar(s0, s0, half_bp, lanes);
+  __bang_band_scalar((int *)s2, (const int *)s2, 0x7fffffff, lanes);
+  __bang_mul_scalar((int *)s2, (const int *)s2, -1, lanes);
+  __bang_add((int *)s0, (const int *)s0, (const int *)s2, lanes);
+  __bang_lt_scalar((int *)s0, (const int *)s0, 1, lanes);
+  __bang_bor((char *)s5, (const char *)s5, (const char *)s0, lanes * 4);
+}
+
+__mlu_func__ void certified_div_rn(float *dst, const float *a, float b,
+                                    float *sc, int live, int lanes) {
+  if (live <= 0)
+    return;
+  union {
+    float f;
+    unsigned u;
+  } ub;
+  ub.f = b;
+  unsigned b_mag = ub.u & 0x7fffffffU;
+  if (dst == a || b_mag < 0x0d800000U || b_mag >= 0x72800000U) {
+    __sync_compute();
+    for (int i = 0; i < live; ++i)
+      dst[i] = __cn_scalar_div_f32_rn(a[i], b);
+    return;
+  }
+  float *s0 = sc;
+  float *s1 = sc + lanes;
+  float *s2 = sc + 2 * lanes;
+  float *s3 = sc + 3 * lanes;
+  float *s4 = sc + 4 * lanes;
+  float *s5 = sc + 5 * lanes;
+
+  // Heuristic candidate generation (keeps s2 = a' = a * scale intact).
+  union {
+    float f;
+    unsigned u;
+  } uscale, ubp, ubhi;
+  uscale.u = (0x7f000000U - (ub.u & 0x7f800000U)) | (ub.u & 0x80000000U);
+  float scale = uscale.f;
+  ubp.f = b * scale;
+  float bp = ubp.f;
+  float y = __cn_scalar_div_f32_rn(1.0f, bp);
+  ubhi.u = ubp.u & 0xfffff000U;
+  float b_hi = ubhi.f;
+  float b_lo = bp - b_hi;
+
+  __bang_mul_scalar(s2, (float *)a, scale, lanes);
+  __bang_mul_scalar(dst, s2, y, lanes);
+  __bang_band_scalar((int *)s0, (const int *)dst, (int)0xfffff000U, lanes);
+  __bang_sub(s1, dst, s0, lanes);
+  __bang_mul_scalar(s3, s0, b_hi, lanes);
+  __bang_sub(s3, s2, s3, lanes);
+  __bang_mul_scalar(s4, s1, b_hi, lanes);
+  __bang_sub(s3, s3, s4, lanes);
+  __bang_mul_scalar(s4, s0, b_lo, lanes);
+  __bang_sub(s3, s3, s4, lanes);
+  __bang_mul_scalar(s4, s1, b_lo, lanes);
+  __bang_sub(s3, s3, s4, lanes);
+  __bang_mul_scalar(s3, s3, y, lanes);
+  __bang_add(dst, dst, s3, lanes);
+
+  certify_div_scalar_rn_lanes(dst, a, b_hi, b_lo, 0.5f * bp, sc, lanes);
+
+  __bang_ne_scalar((int *)s5, (const int *)s5, 0, lanes);
+  __bang_int322float(s0, (const int *)s5, lanes, 0);
+  unsigned bad = __bang_count(s0, live);
+  if (bad > 0) {
+    __sync_compute();
+    if (bad <= 16) {
+      for (unsigned k = 0; k < bad; ++k) {
+        unsigned idx = __bang_findfirst1(s0, live);
+        ((volatile float *)dst)[idx] = __cn_scalar_div_f32_rn(a[idx], b);
+        ((volatile float *)s0)[idx] = 0.0f;
+        __sync_compute();
+      }
+    } else {
+      for (int i = 0; i < live; ++i)
+        if (((const volatile int *)s5)[i] != 0)
+          dst[i] = __cn_scalar_div_f32_rn(a[i], b);
+    }
+  }
+}
+
+#undef BANG_TWODIFF_SE

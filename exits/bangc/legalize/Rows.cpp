@@ -2302,7 +2302,7 @@ struct RowLowerer {
               Value a = getVal(inst.getOperand(0)),
                     divisor = getVal(inst.getOperand(1));
               StringRef mode = r0 != 2 ? "sv" : r1 != 2 ? "vs" : "vv";
-              auto divide = [&](Value output, Value x, Value y, Value length) {
+              auto divide = [&](Value output, Value x, Value y, Value active, Value length) {
                 if (approximate) {
                   Value scratch = output;
                   if (mode == "vv")
@@ -2324,12 +2324,17 @@ struct RowLowerer {
                          "reciprocal-product");
                   return;
                 }
-                makeOp("vec_div_rn", {output, x, y, length}, {},
+                Value scratch = nramAt(b.getF32Type(), phaseByteOffset(
+                    inst.getAttrOfType<DenseI64ArrayAttr>("bangc.scratch"), groupedShift));
+                makeOp("vec_div_rn", {output, x, y, scratch, active, length}, {},
                        {b.getNamedAttr("mode", b.getStringAttr(mode))},
                        ("ieee-div-rn-" + mode).str());
               };
               if (r0 != 1 && r1 != 1) {
-                divide(dst, a, divisor, lanes);
+                Value active = b.create<arith::SelectOp>(loc,
+                    b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, members, cI64(1)),
+                    live, b.create<arith::MulIOp>(loc, members, symP));
+                divide(dst, a, divisor, active, lanes);
               } else {
                 forLoop(cI64(0), members, cI64(1), [&](Value h) {
                   Value row = b.create<arith::AddIOp>(loc, j, h);
@@ -2339,7 +2344,7 @@ struct RowLowerer {
                                        : v;
                   };
                   divide(makeAddr(dst, {h}, {symP}, 1), input(a, r0),
-                         input(divisor, r1), rowLanes);
+                         input(divisor, r1), live, rowLanes);
                 });
               }
               continue;

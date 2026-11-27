@@ -698,6 +698,7 @@ void VecDivApproxOp::getEffects(EffectList &effects) {
 
 void VecDivRnOp::getEffects(EffectList &effects) {
   Operation *op = getOperation();
+  addReadWrite(effects, op, 3);
   addWrite(effects, op, 0);
   for (unsigned i : {1u, 2u})
     if (isa<MemRefType>(op->getOperand(i).getType()))

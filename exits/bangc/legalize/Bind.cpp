@@ -225,7 +225,7 @@ LogicalResult offsets(func::FuncOp f, bool install) {
           (code == "block.cast" && resTy && resTy.getRank() == 2 &&
            resTy.getElementType().isBF16()) ||
           (code == "block.div" && resTy && resTy.getRank() == 2 &&
-           resTy.getElementType().isF32() && usesApproximateMath(&o)) ||
+           resTy.getElementType().isF32()) ||
           (code == "block.sqrt" && resTy && resTy.getRank() == 2 &&
            resTy.getElementType().isF32()) ||
           (code == "block.exp" && resTy && resTy.getRank() == 2 &&
@@ -609,7 +609,7 @@ void bind(Unit &u) {
               "exits/bangc::ieee-div-rn-vs", "exits/bangc::ieee-div-rn-sv",
               "exits/bangc::ieee-sqrt-rn", "exits/bangc::validated-exp",
               "exits/bangc::validated-exp2"},
-             "SDK RN division, certified square root, and validated exp/exp2"});
+             "Certified RN division and square root, and validated exp/exp2"});
   addParity({"levels/storage/dsa::hardware-vector-gather-dma",
              "*",
              ParityStatus::Unsupported,

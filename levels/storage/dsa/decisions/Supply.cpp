@@ -58,7 +58,7 @@ struct Footprint {
         auto fastScratch = approximate && c.approxScratch ? c.approxScratch(&op) : std::nullopt;
         if (fastScratch) {
           f.collectiveBytes = std::max(f.collectiveBytes, *fastScratch);
-        } else if (t.getRank() == 2 && code == "sqrt" &&
+        } else if (t.getRank() == 2 && (code == "sqrt" || code == "div") &&
                    t.getElementType().isF32())
           f.collectiveBytes = std::max<int64_t>(f.collectiveBytes,
                                                 6 * int64_t(sizeof(float)));

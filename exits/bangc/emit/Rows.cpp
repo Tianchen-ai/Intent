@@ -727,18 +727,8 @@ TerminalPrinter rowPrinter() {
                return llvm::Error::success();
              });
 
-  enterLocal("bangc_src.vec_div_rn",
-             [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
-               auto mode = view.attrOfType<StringAttr>("mode").getValue();
-               StringRef symbol = mode == "vv" ? "__cn_vector_div_f32_rn"
-                                  : mode == "vs"
-                                      ? "__cn_vector_div_scalar_f32_rn"
-                                      : "__cn_scalar_div_vector_f32_rn";
-               c.line(symbol.str() + "((int)(" + view.operand(3).str() + "), " +
-                      view.operand(0).str() + ", " + view.operand(1).str() +
-                      ", " + view.operand(2).str() + ");");
-               return llvm::Error::success();
-             });
+  rules["bangc_src.vec_div_rn"] = PrintRule::format(
+      "certified_div_rn($0, $1, $2, $3, (int)($4), (int)($5));");
   rules["bangc_src.div_rn"] =
       PrintRule::format("float $r0 = __cn_scalar_div_f32_rn($0, $1);");
 

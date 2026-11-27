@@ -146,9 +146,9 @@ void dmaCost(Unit &u) {
                 return t ? t.getRank() : 0;
               };
               auto lhs = rank(i->getOperand(0)), rhs = rank(i->getOperand(1));
-              primitive = lhs != 2   ? "div_rn_sv"
-                          : rhs != 2 ? "div_rn_vs"
-                                     : "div_rn_vv";
+              primitive = lhs != 2   ? "certified_div_sv"
+                          : rhs != 2 ? "certified_div_vs"
+                                     : "certified_div_vv";
               if (lhs == 1 || rhs == 1) {
                 invocationLanes = n;
                 callsPerBatch = batch;
