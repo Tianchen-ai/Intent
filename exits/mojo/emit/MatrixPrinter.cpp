@@ -162,7 +162,7 @@ TerminalPrinter mojoMatrixPrinter() {
   rules["mojo_row.simd_cmpi"] = PrintRule::format("var $r0 = $0.{pred}($1)");
   rules["mojo_row.extract_lane"] = PrintRule::format("var $r0 = $0[{lane}]");
   rules["mojo_row.atomic_fetch_add_i32"] = PrintRule::format(
-      "var $r0 = Atomic[DType.int32].fetch_add($0.unsafe_offset($1), $2)");
+      "var $r0 = Atomic[Scalar[DType.int32]].fetch_add($0.unsafe_offset($1), $2)");
   rules["mojo_row.memcpy_elems"] = PrintRule::format(
       "unsafe_memcpy(dest=$0.unsafe_offset($1), src=$2.unsafe_offset($3), count=$4)");
   rules["mojo_row.simd_select"] =
