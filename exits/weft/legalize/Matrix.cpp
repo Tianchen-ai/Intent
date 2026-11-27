@@ -2922,7 +2922,14 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, const RecordFields &record) {
         emitSpan("zero", "out", "", "kPad*nr", bytes);
       }
       enterHostBlock(pBb);
-      {
+      if (auto tile = pop->getAttrOfType<IntegerAttr>("source_k_tile");
+          tile && tile.getInt() > 0) {
+        emitPtr("const " + cTy, "src", "a" + std::to_string(opSlots[0]),
+                "g*" + std::to_string(bb < 0 ? 0 : st[bb]) + "LL + c*" +
+                    std::to_string(st[bn]) + "LL");
+        intentdsl::cpu::emitVnniWordTranspose(
+            tile.getInt(), kBlk, st[bn], makeHostFor, enterHostBlock, emitElem);
+      } else {
         Block *kbBb =
             makeHostFor("kb", "0", "kFull", std::to_string(kBlk));
         enterHostBlock(kbBb);

@@ -37,6 +37,19 @@ mlir::LogicalResult verifyMatrixBuffers(
 inline int64_t paddedLhsPanelStride(int64_t K) {
   return (K >= 512 && K % 128 == 0) ? (K + 16) : K;
 }
+// Transpose complete packed words in source cache-line tiles. The caller
+// handles the final partial word and column padding with the regular packer.
+template <class For, class Enter, class Element>
+void emitVnniWordTranspose(int64_t tile, int64_t block, int64_t nStride,
+                           For &loop, Enter &enter, Element &element) {
+  std::string step = std::to_string(block), width = std::to_string(tile);
+  enter(loop("kt", "0", "kFull", width));
+  enter(loop("j", "0", "valid", "1"));
+  enter(loop("k", "kt", "(kFull-kt < " + width + " ? kFull : kt+" + width + ")",
+             step));
+  element("memcpy", "out + (k/" + step + "*nr+j)*" + step,
+          "src + j*" + std::to_string(nStride) + "LL + k", "", 4);
+}
 // Host ABI follows runtime/cpu's typed slot order for CPU containers.
 std::string matrixHostParams(mlir::func::FuncOp);
 } // namespace intentdsl::cpu

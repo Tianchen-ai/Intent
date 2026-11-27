@@ -131,11 +131,23 @@ llvm::Error materializeMatrixBuffers(func::FuncOp fn, RewriterBase &rw,
     int64_t banks = batch < 0 ? 1 : G;
     Value rhs = allocBuf("heap", clampCount(banks, tiles, kPad, nr), bytes,
                          "rhs-panels", bTy);
-    emitPrep({b, rhs}, "pack-vnni",
-             {rw.getNamedAttr("rhs_k", dot.getAttr("rhs_k")),
-              rw.getNamedAttr("rhs_batch", dot.getAttr("rhs_batch")),
-              rw.getNamedAttr("panel_cols", rw.getI64IntegerAttr(nr)),
-              rw.getNamedAttr("k_block", rw.getI64IntegerAttr(kBlk))});
+    auto strides = fn.getArgAttrOfType<DenseI64ArrayAttr>(
+        cast<BlockArgument>(b).getArgNumber(), "cpu.strides");
+    int64_t bk = dot.getAttrOfType<IntegerAttr>("rhs_k").getInt();
+    int64_t bn = 0;
+    while (bn == bk || bn == batch)
+      ++bn;
+    // Each VNNI word occupies four bytes. When K is contiguous, read a
+    // cache line at a time from each source column before advancing in K.
+    bool transposeWords = strides && strides[bk] == 1 && strides[bn] != 1;
+    emitPrep(
+        {b, rhs}, "pack-vnni",
+        {rw.getNamedAttr("rhs_k", dot.getAttr("rhs_k")),
+         rw.getNamedAttr("rhs_batch", dot.getAttr("rhs_batch")),
+         rw.getNamedAttr("panel_cols", rw.getI64IntegerAttr(nr)),
+         rw.getNamedAttr("source_k_tile",
+                         rw.getI64IntegerAttr(transposeWords ? 64 / bytes : 0)),
+         rw.getNamedAttr("k_block", rw.getI64IntegerAttr(kBlk))});
   } else if (packing == "f32-panels-per-call") {
     auto b = dot.getOperand(1);
     int64_t bb = dot.getAttrOfType<IntegerAttr>("rhs_batch").getInt();
