@@ -1,0 +1,82 @@
+device,exit,workload,case,original_reason,original_evidence,disposition,reference,detail
+5090d,triton,corpus/mojo/dropout_residual_rms_norm,4096x4096-bf16-seed17-p0.1-8cores-host,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:accelerator,作者默认
+5090d,cutile,corpus/mojo/dropout_residual_rms_norm,4096x4096-bf16-seed17-p0.1-8cores-host,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:accelerator,作者默认
+5090d,triton,corpus/mojo/paged_mla_decode_partials,B8-HQ128-HK1-K8192-C512-R64-page16-split8-f16-8cores-host,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:accelerator,作者默认
+5090d,cutile,corpus/mojo/paged_mla_decode_partials,B8-HQ128-HK1-K8192-C512-R64-page16-split8-f16-8cores-host,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:accelerator,作者默认
+5090d,triton,corpus/mojo/qkv_projection,P3-T4096-K4096-N4096-f16-8cores-host,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:accelerator,作者默认
+5090d,cutile,corpus/mojo/qkv_projection,P3-T4096-K4096-N4096-f16-8cores-host,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:accelerator,作者默认
+5090d,triton,corpus/mojo/rotary_embedding_equivalent_index,rows65536-D128-heads32-f16-8cores-host,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:accelerator,作者默认
+5090d,cutile,corpus/mojo/rotary_embedding_equivalent_index,rows65536-D128-heads32-f16-8cores-host,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:accelerator,作者默认
+5090d,triton,corpus/mojo/selective_state_scan,B128-L4096-f32-8cores-host,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:accelerator,作者默认
+5090d,cutile,corpus/mojo/selective_state_scan,B128-L4096-f32-8cores-host,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:accelerator,作者默认
+5090d,triton,corpus/weft/q4_k_projection,N4096-K4096-Q4_K-f32-1core,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:accelerator,作者默认
+5090d,cutile,corpus/weft/q4_k_projection,N4096-K4096-Q4_K-f32-1core,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:accelerator,作者默认
+5090d,triton,cpu/histogram,large,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:accelerator,作者默认
+5090d,cutile,cpu/histogram,large,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:accelerator,作者默认
+5090d,triton,cpu/histogram,small,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:accelerator,作者默认
+5090d,cutile,cpu/histogram,small,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:accelerator,作者默认
+5090d,triton,program/q4_projection,author,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:source,作者默认
+5090d,cutile,program/q4_projection,author,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:source,作者默认
+mlu370,bangc,corpus/cutile/grouped_flash_decode,B8-QH32-KVH8-S8192-D128-bf16,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,参照跑不了,,MLU370 上该输入所需的 CNNL BF16 primitive 不受支持
+mlu370,bangc,corpus/mojo/dropout_residual_rms_norm,4096x4096-bf16-seed17-p0.1-8cores-host,参照跑不了,torch measurement_failed,参照跑不了,,MLU370 上该输入所需的 CNNL BF16 primitive 不受支持
+mlu370,bangc,corpus/mojo/layer_norm_backward,4096x4096-partial128-bf16-8cores-host,参照跑不了,torch measurement_failed / aten:accelerator execution_failed,参照跑不了,,MLU370 上该输入所需的 CNNL BF16 primitive 不受支持
+mlu370,bangc,corpus/mojo/paged_mla_decode_partials,B8-HQ128-HK1-K8192-C512-R64-page16-split8-f16-8cores-host,参照跑不了,torch measurement_failed,补齐,aten:accelerator,作者默认
+mlu370,bangc,corpus/mojo/qkv_projection,P3-T4096-K4096-N4096-f16-8cores-host,参照跑不了,torch preparation_failed,补齐,aten:accelerator,作者默认
+mlu370,bangc,corpus/mojo/rotary_embedding_equivalent_index,rows65536-D128-heads32-f16-8cores-host,参照跑不了,torch measurement_failed,补齐,aten:accelerator,作者默认
+mlu370,bangc,corpus/mojo/selective_state_scan,B128-L4096-f32-8cores-host,参照跑不了,torch preparation_failed,补齐,aten:accelerator,作者默认
+mlu370,bangc,corpus/triton/flaggems_histogram,N8388608-bins256-fp32,参照跑不了,torch preparation_failed,补齐,aten:accelerator,作者默认
+mlu370,bangc,corpus/triton/flash_attention_backward,B2-H16-S2048-D128-fp16-causal,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:accelerator,作者默认
+mlu370,bangc,corpus/triton/fused_add_rms_norm,8192x4096-bf16,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,参照跑不了,,MLU370 上该输入所需的 CNNL BF16 primitive 不受支持
+mlu370,bangc,corpus/triton/moe_expert_projection,T2048-E8-top2-4096x14336-bf16,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,参照跑不了,,MLU370 上该输入所需的 CNNL BF16 primitive 不受支持
+mlu370,bangc,corpus/weft/q4_k_projection,N4096-K4096-Q4_K-f32-1core,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:accelerator,作者默认
+mlu370,bangc,cpu/histogram,large,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:accelerator,作者默认
+mlu370,bangc,cpu/histogram,small,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:accelerator,作者默认
+mlu370,bangc,group7/alibi_attention,2x32x8x2048x128-bf16,参照跑不了,torch preparation_failed,参照跑不了,,MLU370 上该输入所需的 CNNL BF16 primitive 不受支持
+mlu370,bangc,group7/attention_unscaled_max,2x32x8x2048x128-bf16,参照跑不了,torch execution_failed,参照跑不了,,MLU370 上该输入所需的 CNNL BF16 primitive 不受支持
+mlu370,bangc,group7/cross_entropy,4096x32768-bf16,参照跑不了,torch execution_failed,参照跑不了,,MLU370 上该输入所需的 CNNL BF16 primitive 不受支持
+mlu370,bangc,group7/embedding_bag,4096x256-v32768-f32,参照跑不了,torch execution_failed,参照跑不了,,MLU370 上该输入所需的 CNNL BF16 primitive 不受支持
+mlu370,bangc,group7/index_add,4096x256-n16384-f32,参照跑不了,torch measurement_failed,补齐,torch,作者默认
+mlu370,bangc,group7/layer_norm_welford,4096x4096-f32,参照跑不了,torch measurement_failed,补齐,aten:source,作者默认
+mlu370,bangc,group7/log_softmax_kl,2048x4096-f32,参照跑不了,torch measurement_failed,补齐,aten:source,作者默认
+mlu370,bangc,group7/qk_norm_rope,4x32x8x2048x128-bf16,参照跑不了,torch execution_failed,参照跑不了,,MLU370 上该输入所需的 CNNL BF16 primitive 不受支持
+mlu370,bangc,group7/radix_pass,128x4096-b8-i32,参照跑不了,torch measurement_failed,补齐,torch,作者默认
+mlu370,bangc,group7/retention_recurrence,2x512x8x64-bf16,参照跑不了,torch execution_failed,参照跑不了,,MLU370 上该输入所需的 CNNL BF16 primitive 不受支持
+mlu370,bangc,group7/sliding_window_attention,2x32x8x4096x128-w1024-f16,参照跑不了,torch measurement_failed,补齐,aten:source,作者默认
+mlu370,bangc,group7/topk_rows,1024x4096-k8-f32,参照跑不了,torch measurement_failed,补齐,torch,作者默认
+mlu370,bangc,group7/triangular_solve,32x128x64-f32,参照跑不了,torch measurement_failed,参照跑不了,,torch_mlu 将线性代数 primitive 回退到 CPU
+mlu370,bangc,program/attention,author,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,参照跑不了,,MLU370 上该输入所需的 CNNL BF16 primitive 不受支持
+mlu370,bangc,program/causal_convolution,author,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:source,作者默认
+mlu370,bangc,program/causal_linear_attention,author,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:source,作者默认
+mlu370,bangc,program/cholesky,author,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,参照跑不了,,torch_mlu 将线性代数 primitive 回退到 CPU
+mlu370,bangc,program/csr_spmv,author,参照跑不了,torch preparation_failed,补齐,aten:source,作者默认
+mlu370,bangc,program/dropout,author,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:source,作者默认
+mlu370,bangc,program/fp8_gemm,author,参照跑不了,torch preparation_failed,参照跑不了,,torch_mlu 无 FP8 E4M3 数据类型
+mlu370,bangc,program/gated_delta,author,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,参照跑不了,,MLU370 上该输入所需的 CNNL BF16 primitive 不受支持
+mlu370,bangc,program/histogram,author,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:source,作者默认
+mlu370,bangc,program/int8_gemm,author,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,参照跑不了,,torch_mlu 的 INT8 输入、INT32 累加矩阵乘回退 CPU
+mlu370,bangc,program/jagged_mean,author,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:source,作者默认
+mlu370,bangc,program/mamba_chunk_state,author,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,参照跑不了,,MLU370 上该输入所需的 CNNL BF16 primitive 不受支持
+mlu370,bangc,program/moe_alignment,author,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:source,作者默认
+mlu370,bangc,program/nonzero,author,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:source,作者默认
+mlu370,bangc,program/paged_decode,author,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:source,作者默认
+mlu370,bangc,program/q4_projection,author,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:source,作者默认
+mlu370,bangc,program/ragged_gemm,author,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:source,作者默认
+mlu370,bangc,program/swiglu,author,参照跑不了,torch preparation_failed,参照跑不了,,MLU370 上该输入所需的 CNNL BF16 primitive 不受支持
+x86-mojo,mojo,corpus/cutile/grouped_flash_decode,B8-QH32-KVH8-S8192-D128-bf16,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:cpu,作者默认
+x86-mojo,mojo,corpus/mojo/dropout_residual_rms_norm,4096x4096-bf16-seed17-p0.1-8cores-host,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:cpu,作者默认
+x86-mojo,mojo,corpus/mojo/paged_mla_decode_partials,B8-HQ128-HK1-K8192-C512-R64-page16-split8-f16-8cores-host,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:cpu,作者默认
+x86-mojo,mojo,corpus/mojo/rotary_embedding_equivalent_index,rows65536-D128-heads32-f16-8cores-host,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:cpu,作者默认
+x86-mojo,mojo,corpus/mojo/selective_state_scan,B128-L4096-f32-8cores-host,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:cpu,作者默认
+x86-mojo,mojo,corpus/triton/flaggems_histogram,N8388608-bins256-fp32,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:cpu,作者默认
+x86-mojo,mojo,corpus/triton/flash_attention_backward,B2-H16-S2048-D128-fp16-causal,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:cpu,作者默认
+x86-mojo,mojo,corpus/triton/fused_add_rms_norm,8192x4096-bf16,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:cpu,作者默认
+x86-mojo,mojo,corpus/triton/moe_expert_projection,T2048-E8-top2-4096x14336-bf16,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:cpu,作者默认
+x86-weft,weft,corpus/cutile/grouped_flash_decode,B8-QH32-KVH8-S8192-D128-bf16,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:cpu,作者默认
+x86-weft,weft,corpus/mojo/dropout_residual_rms_norm,4096x4096-bf16-seed17-p0.1-8cores-host,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:cpu,作者默认
+x86-weft,weft,corpus/mojo/paged_mla_decode_partials,B8-HQ128-HK1-K8192-C512-R64-page16-split8-f16-8cores-host,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:cpu,作者默认
+x86-weft,weft,corpus/mojo/rotary_embedding_equivalent_index,rows65536-D128-heads32-f16-8cores-host,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:cpu,作者默认
+x86-weft,weft,corpus/mojo/selective_state_scan,B128-L4096-f32-8cores-host,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:cpu,作者默认
+x86-weft,weft,corpus/triton/flaggems_histogram,N8388608-bins256-fp32,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:cpu,作者默认
+x86-weft,weft,corpus/triton/flash_attention_backward,B2-H16-S2048-D128-fp16-causal,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:cpu,作者默认
+x86-weft,weft,corpus/triton/fused_add_rms_norm,8192x4096-bf16,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:cpu,作者默认
+x86-weft,weft,corpus/triton/moe_expert_projection,T2048-E8-top2-4096x14336-bf16,缺参照实现,旧 Bench 未登记或未调度同设备完整调用,补齐,aten:cpu,作者默认
