@@ -55,8 +55,8 @@ device,exit,workload,case,mode,v2_us,reference,reference_us,reference_env,ratio,
 5090d,cutile,group7/qk_norm_rope,4x32x8x2048x128-bf16,作者默认,116.768,inductor,112.64,5090d,1.03665,平,,,,,116.768
 5090d,triton,group7/radix_pass,128x4096-b8-i32,作者默认,73.312,torch,61.44,5090d,1.19323,慢,,,,,73.312
 5090d,cutile,group7/radix_pass,128x4096-b8-i32,作者默认,67.584,torch,61.44,5090d,1.1,慢,,,,,67.584
-5090d,triton,group7/retention_recurrence,2x512x8x64-bf16,作者默认，逐步 FP32 状态,59.392,aten:source,3816.448,5090d,0.01556,快,,,inductor（衰减矩阵展开）,75.744,59.392
-5090d,cutile,group7/retention_recurrence,2x512x8x64-bf16,作者默认，逐步 FP32 状态,348.160,aten:source,3816.448,5090d,0.09123,快,,,inductor（衰减矩阵展开）,75.744,348.160
+5090d,triton,group7/retention_recurrence,2x512x8x64-bf16,作者默认，逐步 FP32 状态,59.392,aten:source,3817.504,5090d,0.01556,快,,,inductor（衰减矩阵展开）,75.744,59.392
+5090d,cutile,group7/retention_recurrence,2x512x8x64-bf16,作者默认，逐步 FP32 状态,73.184,aten:source,3817.504,5090d,0.01917,快,,,inductor（衰减矩阵展开）,75.744,73.184
 5090d,triton,group7/sliding_window_attention,2x32x8x4096x128-w1024-f16,作者默认,1404.928,aten:source,44050.4303,5090d,0.03189,快,,,cutile,831.072,1404.928
 5090d,cutile,group7/sliding_window_attention,2x32x8x4096x128-w1024-f16,作者默认,4311.0399,aten:source,44050.4303,5090d,0.09787,快,,,cutile,831.072,4311.0399
 5090d,triton,group7/topk_rows,1024x4096-k8-f32,作者默认,32.768,torch,88.064,5090d,0.37209,快,,,,,32.768
@@ -144,15 +144,15 @@ device,exit,workload,case,mode,v2_us,reference,reference_us,reference_env,ratio,
 mlu370,bangc,corpus/cutile/grouped_flash_decode,B8-QH32-KVH8-S8192-D128-bf16,作者默认,224395.0,,,,,无有效对照,参照跑不了,MLU370 上该输入所需的 CNNL BF16 primitive 不受支持,,,224395.0
 mlu370,bangc,corpus/mojo/dropout_residual_rms_norm,4096x4096-bf16-seed17-p0.1-8cores-host,作者默认,15288.0,,,,,无有效对照,参照跑不了,MLU370 上该输入所需的 CNNL BF16 primitive 不受支持,,,15288.0
 mlu370,bangc,corpus/mojo/layer_norm_backward,4096x4096-partial128-bf16-8cores-host,作者默认,42871.0,,,,,无有效对照,参照跑不了,MLU370 上该输入所需的 CNNL BF16 primitive 不受支持,,,42871.0
-mlu370,bangc,corpus/mojo/paged_mla_decode_partials,B8-HQ128-HK1-K8192-C512-R64-page16-split8-f16-8cores-host,作者默认,2043353.0,aten:accelerator,15044.0,mlu370,135.82511,慢,,,,,2043353.0
+mlu370,bangc,corpus/mojo/paged_mla_decode_partials,B8-HQ128-HK1-K8192-C512-R64-page16-split8-f16-8cores-host,作者默认,6564.0,aten:accelerator,14890.0,mlu370,0.44083,快,,,,,6564.0
 mlu370,bangc,corpus/mojo/qkv_projection,P3-T4096-K4096-N4096-f16-8cores-host,作者默认,9090.0,aten:accelerator,38418.0,mlu370,0.23661,快,,,,,9090.0
 mlu370,bangc,corpus/mojo/rotary_embedding_equivalent_index,rows65536-D128-heads32-f16-8cores-host,作者默认,1090.0,aten:accelerator,3598.0,mlu370,0.30295,快,,,,,1090.0
 mlu370,bangc,corpus/mojo/selective_state_scan,B128-L4096-f32-8cores-host,作者默认,1698.0,aten:accelerator,127905.0,mlu370,0.01328,快,,,,,1698.0
 mlu370,bangc,corpus/triton/flaggems_histogram,N8388608-bins256-fp32,作者默认,846.000,aten:accelerator,19821.000,mlu370,0.04268,快,,,,,846.000
-mlu370,bangc,corpus/triton/flash_attention_backward,B2-H16-S2048-D128-fp16-causal,作者默认,11333192.0,aten:accelerator,72816.0,mlu370,155.64151,慢,,,,,11333192.0
+mlu370,bangc,corpus/triton/flash_attention_backward,B2-H16-S2048-D128-fp16-causal,作者默认,66292.0,aten:accelerator,72551.0,mlu370,0.91373,快,,,,,66292.0
 mlu370,bangc,corpus/triton/fused_add_rms_norm,8192x4096-bf16,作者默认,1638.0,,,,,无有效对照,参照跑不了,MLU370 上该输入所需的 CNNL BF16 primitive 不受支持,,,1638.0
 mlu370,bangc,corpus/triton/moe_expert_projection,T2048-E8-top2-4096x14336-bf16,作者默认,197446.0,,,,,无有效对照,参照跑不了,MLU370 上该输入所需的 CNNL BF16 primitive 不受支持,,,197446.0
-mlu370,bangc,corpus/weft/q4_k_projection,N4096-K4096-Q4_K-f32-1core,作者默认,46153.0,aten:accelerator,5532.0,mlu370,8.34291,慢,,,,,46153.0
+mlu370,bangc,corpus/weft/q4_k_projection,N4096-K4096-Q4_K-f32-1core,作者默认,5215.0,aten:accelerator,5537.0,mlu370,0.94185,快,,,,,5215.0
 mlu370,bangc,cpu/histogram,large,作者默认,180.000,aten:accelerator,1341.000,mlu370,0.13423,快,,,,,180.000
 mlu370,bangc,cpu/histogram,small,作者默认,48.000,aten:accelerator,47.000,mlu370,1.02128,平,,,,,48.000
 mlu370,bangc,group7/alibi_attention,2x32x8x2048x128-bf16,作者默认,456665.0,,,,,无有效对照,参照跑不了,MLU370 上该输入所需的 CNNL BF16 primitive 不受支持,,,456665.0
@@ -168,20 +168,20 @@ mlu370,bangc,group7/log_softmax_kl,2048x4096-f32,作者默认,2812.0,aten:source
 mlu370,bangc,group7/mxfp4_gemm,512x4096x4096-mxfp4,作者默认,1172.0,torch,7840.0,mlu370,0.14949,快,,,,,1172.0
 mlu370,bangc,group7/q6k_gemv,4096x4096-q6k,作者默认,1527.0,torch,22931.0,mlu370,0.06659,快,,,,,1527.0
 mlu370,bangc,group7/qk_norm_rope,4x32x8x2048x128-bf16,作者默认,27109.0,,,,,无有效对照,参照跑不了,MLU370 上该输入所需的 CNNL BF16 primitive 不受支持,,,27109.0
-mlu370,bangc,group7/radix_pass,128x4096-b8-i32,作者默认,78327.0,torch,7834.0,mlu370,9.99834,慢,,,,,78327.0
+mlu370,bangc,group7/radix_pass,128x4096-b8-i32,作者默认,7429.0,torch,7831.0,mlu370,0.94867,快,,,,,7429.0
 mlu370,bangc,group7/retention_recurrence,2x512x8x64-bf16,作者默认,12788.0,,,,,无有效对照,参照跑不了,MLU370 上该输入所需的 CNNL BF16 primitive 不受支持,,,12788.0
 mlu370,bangc,group7/sliding_window_attention,2x32x8x4096x128-w1024-f16,作者默认,109705.0,aten:source,464654.0,mlu370,0.2361,快,,,torch,228924.0,109705.0
-mlu370,bangc,group7/topk_rows,1024x4096-k8-f32,作者默认,53440.0,torch,566.0,mlu370,94.41696,慢,,,,,53440.0
+mlu370,bangc,group7/topk_rows,1024x4096-k8-f32,作者默认,281.0,torch,561.0,mlu370,0.50089,快,,,,,281.0
 mlu370,bangc,group7/triangular_solve,32x128x64-f32,作者默认,378360.0,,,,,无有效对照,参照跑不了,torch_mlu 将线性代数 primitive 回退到 CPU,,,378360.0
 mlu370,bangc,program/adamw,author,3 × arcp；IEEE 次正规数,50.0,torch,55.0,mlu370,0.90909,快,,,,,98.0
 mlu370,bangc,program/attention,author,作者默认,947.0,,,,,无有效对照,参照跑不了,MLU370 上该输入所需的 CNNL BF16 primitive 不受支持,,,947.0
 mlu370,bangc,program/batch_norm,author,作者默认,15.0,aten:source,81.0,mlu370,0.18519,快,,,torch,18.0,15.0
-mlu370,bangc,program/batched_gemm,author,作者默认,31.0,torch,16.0,mlu370,1.9375,慢,,,,,31.0
-mlu370,bangc,program/batched_gemm,subnormal_ftz,作者默认,20.0,torch,16.0,mlu370,1.25,慢,,,,,20.0
+mlu370,bangc,program/batched_gemm,author,作者默认,30.0,torch,15.0,mlu370,2.0,慢,,,,,30.0
+mlu370,bangc,program/batched_gemm,subnormal_ftz,作者默认,20.0,torch,15.0,mlu370,1.33333,慢,,,,,20.0
 mlu370,bangc,program/causal_convolution,author,作者默认,1465.0,aten:source,68.0,mlu370,21.54412,慢,,,,,1465.0
 mlu370,bangc,program/causal_linear_attention,author,作者默认,57.0,aten:source,9911.0,mlu370,0.00575,快,,,,,57.0
 mlu370,bangc,program/cholesky,author,作者默认,29.0,,,,,无有效对照,参照跑不了,torch_mlu 将线性代数 primitive 回退到 CPU,,,29.0
-mlu370,bangc,program/csr_spmv,author,作者默认,51883.0,aten:source,9471.0,mlu370,5.47809,慢,,,,,51883.0
+mlu370,bangc,program/csr_spmv,author,作者默认,7604.0,aten:source,9451.0,mlu370,0.80457,快,,,,,7604.0
 mlu370,bangc,program/cumsum,author,作者默认,12.0,torch,25.0,mlu370,0.48,快,,,,,12.0
 mlu370,bangc,program/dropout,author,作者默认,1263.0,aten:source,170.0,mlu370,7.42941,慢,,,,,1263.0
 mlu370,bangc,program/embedding,author,作者默认,20.0,torch,21.0,mlu370,0.95238,平,,,,,20.0
@@ -194,10 +194,10 @@ mlu370,bangc,program/int8_gemm,author,作者默认,12.0,,,,,无有效对照,参�
 mlu370,bangc,program/jagged_mean,author,作者默认,410.0,aten:source,2954.0,mlu370,0.13879,快,,,,,410.0
 mlu370,bangc,program/layer_norm,author,作者默认,8.0,aten:source,68.0,mlu370,0.11765,快,,,torch,18.0,8.0
 mlu370,bangc,program/mamba_chunk_state,author,作者默认,47.0,,,,,无有效对照,参照跑不了,MLU370 上该输入所需的 CNNL BF16 primitive 不受支持,,,47.0
-mlu370,bangc,program/moe_alignment,author,作者默认,1160.0,aten:source,1003.0,mlu370,1.15653,慢,,,,,1160.0
-mlu370,bangc,program/nonzero,author,作者默认,1882.0,aten:source,670.0,mlu370,2.80896,慢,,,,,1882.0
+mlu370,bangc,program/moe_alignment,author,作者默认,395.0,aten:source,938.0,mlu370,0.42111,快,,,,,395.0
+mlu370,bangc,program/nonzero,author,作者默认,19.0,aten:source,669.0,mlu370,0.0284,快,,,,,19.0
 mlu370,bangc,program/paged_decode,author,作者默认,1276.0,aten:source,1669.0,mlu370,0.76453,快,,,,,1276.0
-mlu370,bangc,program/q4_projection,author,作者默认,1122.0,aten:source,343.0,mlu370,3.27114,慢,,,,,1122.0
+mlu370,bangc,program/q4_projection,author,作者默认,482.0,aten:source,329.0,mlu370,1.46505,慢,,,,,482.0
 mlu370,bangc,program/ragged_gemm,author,作者默认,18.0,aten:source,129.0,mlu370,0.13953,快,,,,,18.0
 mlu370,bangc,program/relu,author,作者默认,4.0,torch,5.0,mlu370,0.8,快,,,,,4.0
 mlu370,bangc,program/rope,author,作者默认,69.0,torch,301.0,mlu370,0.22924,快,,,,,69.0
