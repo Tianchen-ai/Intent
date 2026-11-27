@@ -13,7 +13,7 @@ compilerinfra_unit(SOURCES
   legalize/Ordered.cpp
   legalize/Rows.cpp
   transforms/NarrowAddress.cpp
-  LINK_LIBRARIES ${cpu} ${algorithm}
+  LINK_LIBRARIES ${cpu} ${algorithm} MLIRSCFUtils
   TABLEGEN "ir/Loop.td Dialect.h.inc -gen-dialect-decls -dialect=mojo_row"
   "ir/Loop.td Dialect.cpp.inc -gen-dialect-defs -dialect=mojo_row"
   "ir/Loop.td Ops.h.inc -gen-op-decls" "ir/Loop.td Ops.cpp.inc -gen-op-defs")

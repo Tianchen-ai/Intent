@@ -10,6 +10,8 @@
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/SCF/Utils/Utils.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/IRMapping.h"
 #include "llvm/ADT/DenseSet.h"
@@ -26,6 +28,40 @@ TerminalPrinter mojoMatrixPrinter();
 void lowerMojoScfIfs(Operation *rootOp);
 
 namespace {
+void unrollShortWindow(Operation &space) {
+  auto &body = space.getRegion(0).front();
+  for (auto loop : llvm::make_early_inc_range(body.getOps<scf::ForOp>())) {
+    auto hi = getConstantIntValue(loop.getUpperBound());
+    if (getConstantIntValue(loop.getLowerBound()) != 0 ||
+        getConstantIntValue(loop.getStep()) != 1 || !hi || *hi < 2 || *hi > 16)
+      continue;
+    // Unrolling a small fixed window exposes constant tap coordinates to
+    // the target compiler. Retain the source accumulator and guard order.
+    auto variesWithTap = [&](auto &self, Value value) -> bool {
+      if (value == loop.getInductionVar())
+        return true;
+      Operation *def = value.getDefiningOp();
+      return def && loop->isAncestor(def) &&
+             def->getName().getDialectNamespace() == "arith" &&
+             llvm::any_of(def->getOperands(),
+                          [&](Value operand) { return self(self, operand); });
+    };
+    bool guardedTap = false;
+    unsigned ops = 0;
+    loop.walk([&](Operation *op) {
+      ++ops;
+      if (auto load = dyn_cast<memref::LoadOp>(op))
+        guardedTap |= isa<scf::IfOp>(load->getParentOp()) &&
+                      llvm::any_of(load.getIndices(), [&](Value index) {
+                        return variesWithTap(variesWithTap, index);
+                      });
+    });
+    if (!guardedTap || ops * *hi > 512)
+      continue;
+    (void)loopUnrollByFactor(loop, *hi);
+  }
+}
+
 std::string scalarTypeStr(Type t) {
   if (t.isIndex())
     return "Int";
@@ -2393,6 +2429,7 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn,
                                const intentdsl::CallFacts &facts) {
   auto &task = fn.front().front();
   auto &space = task.getRegion(0).front().front();
+  unrollShortWindow(space);
   Location loc = space.getLoc();
   OpBuilder b(&fn.front().front());
 
