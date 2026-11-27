@@ -527,18 +527,12 @@ void dmaCost(Unit &);
 void panelCost(Unit &);
 void registerCNNL(Unit &);
 void bind(Unit &u) {
-  intentdsl::kir::registerDotSemantics(
-      u, "bangc", "bf16", "Cambricon BANG C matrix operations", "undocumented",
-      "MLU370 cncc 4.7 neuware headers: matrix-unit subnormal and "
-      "intermediate-rounding guarantees not found.");
-  intentdsl::kir::registerDotSemantics(
-      u, "bangc", "f16", "Cambricon BANG C matrix operations", "undocumented",
-      "MLU370 cncc 4.7 neuware headers: matrix-unit subnormal and "
-      "intermediate-rounding guarantees not found.");
-  intentdsl::kir::registerDotSemantics(
-      u, "bangc", "fp8", "Cambricon BANG C matrix operations", "undocumented",
-      "MLU370 cncc 4.7 neuware headers: matrix-unit subnormal and "
-      "intermediate-rounding guarantees not found.");
+  for (auto format : {"bf16", "f16", "fp8"})
+    intentdsl::kir::registerDotSemantics(
+        u, "bangc", format, "Cambricon BANG C matrix operations",
+        "undocumented",
+        "MLU370 cncc 4.7 neuware headers: matrix-unit subnormal and "
+        "intermediate-rounding guarantees not found.");
   registerCNNL(u);
   dmaCost(u);
   panelCost(u);

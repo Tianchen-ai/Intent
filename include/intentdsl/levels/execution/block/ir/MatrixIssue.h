@@ -1,6 +1,8 @@
 #pragma once
+#include "intentdsl/levels/algorithm/kir/ir/NativeDot.h"
 #include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 #include "intentdsl/levels/execution/block/ir/Contraction.h"
+#include "intentdsl/levels/execution/block/ir/Owners.h"
 namespace intentdsl::block {
 // The exit provides the primitive's native fragment geometry. This estimate
 // counts instruction groups for one output panel and never prunes a choice.
@@ -20,6 +22,33 @@ matrixIssues(mlir::Operation *domain,
   double blockElems = 256.0;
   for (mlir::Operation &o : domain->getRegion(0).front()) {
     auto kind = o.getName().stripDialect();
+    if ((kind == "contract" || kind == "window_contract" ||
+         kind == "scaled_contract") &&
+        kir::requiresSourceDot(
+            &o, mlir::cast<mlir::ShapedType>(o.getOperand(0).getType())
+                    .getElementType())) {
+      // Widened products and both input panels are live before the K reduction.
+      // Model traffic to local memory when that working set spills.
+      double mRows = t[0], nCols = t[1], depth = t[2];
+      double products = mRows * nCols * depth;
+      double words = products + mRows * depth + nCols * depth + mRows * nCols;
+      estimate.bottleneck = "FP32 product and reduction";
+      estimate.terms["simt_products"] = {products, "count"};
+      estimate.terms["simt_live_words"] = {words, "reg32"};
+      auto f = ctx.target.services.get<CallFacts>();
+      double sms = std::max<int64_t>(1, f ? f->participants : 1);
+      if (auto rate = quantity(ctx, "compute", "lane/ns"))
+        estimate.timeNs = 2. * products * sms / *rate;
+      auto machine = ctx.target.services.get<OwnerMachine>();
+      if (machine && machine->residentRegisters > 0) {
+        double spill = 2. * sizeof(uint32_t) *
+                       std::max(0., words - machine->residentRegisters);
+        estimate.terms["simt_spill_bytes"] = {spill, "B"};
+        if (auto bw = quantity(ctx, "read_1", "B/ns"))
+          estimate.timeNs = estimate.timeNs.value_or(0.) + spill * sms / *bw;
+      }
+      return estimate;
+    }
     if (kind == "q4k_dot") {
       records = true;
     } else if (kind == "quant_contract") {

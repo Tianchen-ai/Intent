@@ -965,9 +965,6 @@ Value tritonScaledPanels(Tiles &t, MatrixAccess &p) {
             loc, arith::CmpIPredicate::slt, t.reduce(codes, "max", 0),
             b.create<arith::ConstantIntOp>(loc, range[1] + 1, 32)));
   };
-  Value validScales =
-      b.create<arith::AndIOp>(loc, inside(leftScale), inside(rightScaleNG));
-  auto branch = b.create<scf::IfOp>(loc, TypeRange{matrix}, validScales, true);
   auto product = [&](bool fast) -> Value {
     if (native && fast)
       return t
@@ -995,13 +992,20 @@ Value tritonScaledPanels(Tiles &t, MatrixAccess &p) {
                     {k, n}),
         false, acc);
   };
-  b.setInsertionPointToStart(branch.thenBlock());
-  b.create<scf::YieldOp>(loc, product(dispatch->getAttrOfType<StringAttr>(
-                                          "on_match") != "float32"));
-  b.setInsertionPointToStart(branch.elseBlock());
-  b.create<scf::YieldOp>(loc, product(false));
-  b.setInsertionPointAfter(branch);
-  b.create<scf::YieldOp>(loc, branch.getResults());
+  if (dispatch->getAttrOfType<StringAttr>("on_match") == "float32") {
+    b.create<scf::YieldOp>(loc, product(false));
+  } else {
+    Value validScales =
+        b.create<arith::AndIOp>(loc, inside(leftScale), inside(rightScaleNG));
+    auto branch =
+        b.create<scf::IfOp>(loc, TypeRange{matrix}, validScales, true);
+    b.setInsertionPointToStart(branch.thenBlock());
+    b.create<scf::YieldOp>(loc, product(true));
+    b.setInsertionPointToStart(branch.elseBlock());
+    b.create<scf::YieldOp>(loc, product(false));
+    b.setInsertionPointAfter(branch);
+    b.create<scf::YieldOp>(loc, branch.getResults());
+  }
   b.setInsertionPointAfter(loop);
   return loop.getResult(0);
 }

@@ -1,11 +1,12 @@
 #pragma once
+#include "intentdsl/levels/algorithm/kir/ir/NativeDot.h"
 #include "intentdsl/levels/execution/block/ir/MatrixAccess.h"
 #include "mlir/IR/Builders.h"
 namespace intentdsl::block {
 inline llvm::StringRef scaleMode(mlir::Operation &dot, llvm::StringRef native) {
-  auto fn = dot.getParentOfType<mlir::func::FuncOp>();
-  auto mode = fn->getAttrOfType<mlir::StringAttr>("kir.fp8_dot");
-  return mode == "source" || mode == "fp32-product" ? "float32" : native;
+  auto elem = mlir::cast<mlir::ShapedType>(dot.getOperand(0).getType())
+                  .getElementType();
+  return kir::requiresSourceDot(&dot, elem) ? "float32" : native;
 }
 inline void formScaleDispatch(mlir::Operation &dot,llvm::StringRef fast){
   mlir::OpBuilder b(&dot);

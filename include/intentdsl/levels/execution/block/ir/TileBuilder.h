@@ -1,4 +1,5 @@
 #pragma once
+#include "intentdsl/levels/algorithm/kir/ir/NativeDot.h"
 #include "intentdsl/levels/execution/block/ir/MatrixAccess.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Math/IR/Math.h"
@@ -186,40 +187,27 @@ struct Tiles {
                     l.getElementType().isInteger(8) ? Type(b.getI32Type())
                                                     : Type(b.getF32Type()));
     auto elemType = l.getElementType();
-    bool scaled =
-        sourceDot && sourceDot->getName().stripDialect() == "scaled_contract";
-    if (sourceDot &&
-        (elemType.isBF16() || elemType.isF16() ||
-         (scaled && elemType.isF32())) &&
-        r.getElementType() == elemType) {
-      auto mode =
-          fn->getAttrOfType<StringAttr>(scaled              ? "kir.fp8_dot"
-                                        : elemType.isBF16() ? "kir.bf16_dot"
-                                                            : "kir.f16_dot");
-      auto local = sourceDot->getAttrOfType<StringAttr>("denormal-fp-math");
-      if (mode == "fp32-product" ||
-          (local ? !compilerinfra::allowsSubnormalFlush(sourceDot)
-                 : mode == "source")) {
-        // PTX does not specify subnormal input handling for narrow MMA.
-        // Express the required product rounding before the K reduction.
-        auto m = l.getDimSize(0), k = l.getDimSize(1),
-             n = r.getDimSize(trans ? 0 : 1);
-        SmallVector<int64_t> dims = trans ? SmallVector<int64_t>{m, n, k}
-                                          : SmallVector<int64_t>{m, k, n};
-        auto expand = [&](Value v, int axis) {
-          auto type = cast<RankedTensorType>(v.getType()).clone(b.getF32Type());
-          Value wide = v.getType() == type
-                           ? v
-                           : Value(b.create<arith::ExtFOp>(loc, type, v));
-          return op("expand_scale", wide, shaped(dims, b.getF32Type()),
-                    {b.getNamedAttr("axis", b.getI64IntegerAttr(axis))})
-              ->getResult(0);
-        };
-        auto lhs3 = expand(a, trans ? 1 : 2), rhs3 = expand(rhs, 0);
-        auto sum = reduce(b.create<arith::MulFOp>(loc, lhs3, rhs3), "sum",
-                          trans ? 2 : 1);
-        return acc ? Value(b.create<arith::AddFOp>(loc, acc, sum)) : sum;
-      }
+    if (sourceDot && r.getElementType() == elemType &&
+        kir::requiresSourceDot(sourceDot, elemType)) {
+      // PTX does not specify subnormal input handling for narrow MMA.
+      // Express the required product rounding before the K reduction.
+      auto m = l.getDimSize(0), k = l.getDimSize(1),
+           n = r.getDimSize(trans ? 0 : 1);
+      SmallVector<int64_t> dims =
+          trans ? SmallVector<int64_t>{m, n, k} : SmallVector<int64_t>{m, k, n};
+      auto expand = [&](Value v, int axis) {
+        auto type = cast<RankedTensorType>(v.getType()).clone(b.getF32Type());
+        Value wide = v.getType() == type
+                         ? v
+                         : Value(b.create<arith::ExtFOp>(loc, type, v));
+        return op("expand_scale", wide, shaped(dims, b.getF32Type()),
+                  {b.getNamedAttr("axis", b.getI64IntegerAttr(axis))})
+            ->getResult(0);
+      };
+      auto lhs3 = expand(a, trans ? 1 : 2), rhs3 = expand(rhs, 0);
+      auto sum = reduce(b.create<arith::MulFOp>(loc, lhs3, rhs3), "sum",
+                        trans ? 2 : 1);
+      return acc ? Value(b.create<arith::AddFOp>(loc, acc, sum)) : sum;
     }
     SmallVector<Value> args{a, rhs};
     if (acc)

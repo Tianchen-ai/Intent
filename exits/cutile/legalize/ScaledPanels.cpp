@@ -259,8 +259,6 @@ Value scaledPanels(Tiles &t, MatrixAccess &p) {
             loc, arith::CmpIPredicate::slt, t.reduce(codes, "max", 0),
             b.create<arith::ConstantIntOp>(loc, range[1] + 1, 32)));
   };
-  auto valid = b.create<arith::AndIOp>(loc, inside(left), inside(right));
-  auto branch = b.create<scf::IfOp>(loc, TypeRange{matrix}, valid, true);
   auto product = [&](bool fast) -> Value {
     if (native && fast)
       return t
@@ -287,13 +285,18 @@ Value scaledPanels(Tiles &t, MatrixAccess &p) {
                  reshape(rescale(rv, right, {g, format.group, n}, 1), {k, n}),
                  false, acc);
   };
-  b.setInsertionPointToStart(branch.thenBlock());
-  b.create<scf::YieldOp>(loc, product(dispatch->getAttrOfType<StringAttr>(
-                                          "on_match") != "float32"));
-  b.setInsertionPointToStart(branch.elseBlock());
-  b.create<scf::YieldOp>(loc, product(false));
-  b.setInsertionPointAfter(branch);
-  b.create<scf::YieldOp>(loc, branch.getResults());
+  if (dispatch->getAttrOfType<StringAttr>("on_match") == "float32") {
+    b.create<scf::YieldOp>(loc, product(false));
+  } else {
+    auto valid = b.create<arith::AndIOp>(loc, inside(left), inside(right));
+    auto branch = b.create<scf::IfOp>(loc, TypeRange{matrix}, valid, true);
+    b.setInsertionPointToStart(branch.thenBlock());
+    b.create<scf::YieldOp>(loc, product(true));
+    b.setInsertionPointToStart(branch.elseBlock());
+    b.create<scf::YieldOp>(loc, product(false));
+    b.setInsertionPointAfter(branch);
+    b.create<scf::YieldOp>(loc, branch.getResults());
+  }
   b.setInsertionPointAfter(loop);
   return loop.getResult(0);
 }

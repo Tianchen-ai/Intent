@@ -2278,27 +2278,14 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
 } // namespace
 void matrixIssues(Unit &);
 void bind(Unit &unit) {
-  intentdsl::kir::registerDotSemantics(
-      unit, "cutile", "bf16", "NVIDIA PTX matrix multiply-accumulate",
-      "unspecified",
-      "PTX ISA, Warp Level Matrix Multiply-Accumulate Instructions, mma "
-      "Precision and rounding: accumulation order and handling of subnormal "
-      "inputs unspecified; CUDA Tile mma use_fast_acc is a separate "
-      "accumulation option.");
-  intentdsl::kir::registerDotSemantics(
-      unit, "cutile", "f16", "NVIDIA PTX matrix multiply-accumulate",
-      "unspecified",
-      "PTX ISA, Warp Level Matrix Multiply-Accumulate Instructions, mma "
-      "Precision and rounding: accumulation order and handling of subnormal "
-      "inputs unspecified; CUDA Tile mma use_fast_acc is a separate "
-      "accumulation option.");
-  intentdsl::kir::registerDotSemantics(
-      unit, "cutile", "fp8", "NVIDIA PTX matrix multiply-accumulate",
-      "unspecified",
-      "PTX ISA, Warp Level Matrix Multiply-Accumulate Instructions, mma "
-      "Precision and rounding: accumulation order and handling of subnormal "
-      "inputs unspecified; CUDA Tile mma use_fast_acc is a separate "
-      "accumulation option.");
+  for (auto format : {"bf16", "f16", "fp8"})
+    intentdsl::kir::registerDotSemantics(
+        unit, "cutile", format, "NVIDIA PTX matrix multiply-accumulate",
+        "unspecified",
+        "PTX ISA, Warp Level Matrix Multiply-Accumulate Instructions, mma "
+        "Precision and rounding: accumulation order and handling of subnormal "
+        "inputs unspecified; CUDA Tile mma use_fast_acc is a separate "
+        "accumulation option.");
   matrixIssues(unit);
   registerContracts(unit);
   auto addParity = [&](ParityDeclaration p) {
