@@ -26,8 +26,22 @@ void matrixCost(Unit &u) {
               auto elem =
                   mlir::cast<mlir::ShapedType>(o.getOperand(0).getType())
                       .getElementType();
+              // This supply estimate assumes contiguous K-runs in both
+              // operands. A K-strided RHS has a different transfer geometry.
+              auto contiguousK = [&](unsigned slot, llvm::StringRef axis) {
+                auto stride = f->axisStride(
+                    &o, slot,
+                    o.getAttrOfType<mlir::IntegerAttr>(axis).getInt());
+                if (!stride) {
+                  llvm::consumeError(stride.takeError());
+                  return false;
+                }
+                return *stride == 1;
+              };
               nativeNarrow = (elem.isF16() || elem.isBF16()) &&
-                             !intentdsl::kir::requiresSourceDot(&o, elem);
+                             !intentdsl::kir::requiresSourceDot(&o, elem) &&
+                             contiguousK(shape->lhs, "lhs_k") &&
+                             contiguousK(shape->rhs, "rhs_k");
             }
             if (k == "q4k_dot") {
               records = true;
