@@ -1,11 +1,8 @@
-#include "intentdsl/levels/execution/block/ir/RowProgram.h"
-#include "intentdsl/levels/execution/block/ir/MatrixProgram.h"
-#include "intentdsl/levels/execution/block/ir/OwnerProgram.h"
 #include "../capabilities/Index.h"
-#include "intentdsl/levels/execution/block/ir/ScaleDispatch.h"
 #include "compilerinfra/Assembly.h"
 #include "compilerinfra/Proofs.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
+#include "intentdsl/levels/algorithm/kir/ir/DotSemantics.h"
 #include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
 #include "intentdsl/levels/algorithm/kir/ir/KeyReduction.h"
 #include "intentdsl/levels/algorithm/kir/ir/ProjectedLayout.h"
@@ -14,7 +11,11 @@
 #include "intentdsl/levels/execution/block/ir/Access.h"
 #include "intentdsl/levels/execution/block/ir/Contraction.h"
 #include "intentdsl/levels/execution/block/ir/Grid.h"
+#include "intentdsl/levels/execution/block/ir/MatrixProgram.h"
+#include "intentdsl/levels/execution/block/ir/OwnerProgram.h"
 #include "intentdsl/levels/execution/block/ir/Owners.h"
+#include "intentdsl/levels/execution/block/ir/RowProgram.h"
+#include "intentdsl/levels/execution/block/ir/ScaleDispatch.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Pass/Pass.h"
@@ -2277,6 +2278,27 @@ LogicalResult verify(ModuleOp module, const TargetProfile &profile,
 } // namespace
 void matrixIssues(Unit &);
 void bind(Unit &unit) {
+  intentdsl::kir::registerDotSemantics(
+      unit, "cutile", "bf16", "NVIDIA PTX matrix multiply-accumulate",
+      "unspecified",
+      "PTX ISA, Warp Level Matrix Multiply-Accumulate Instructions, mma "
+      "Precision and rounding: accumulation order and handling of subnormal "
+      "inputs unspecified; CUDA Tile mma use_fast_acc is a separate "
+      "accumulation option.");
+  intentdsl::kir::registerDotSemantics(
+      unit, "cutile", "f16", "NVIDIA PTX matrix multiply-accumulate",
+      "unspecified",
+      "PTX ISA, Warp Level Matrix Multiply-Accumulate Instructions, mma "
+      "Precision and rounding: accumulation order and handling of subnormal "
+      "inputs unspecified; CUDA Tile mma use_fast_acc is a separate "
+      "accumulation option.");
+  intentdsl::kir::registerDotSemantics(
+      unit, "cutile", "fp8", "NVIDIA PTX matrix multiply-accumulate",
+      "unspecified",
+      "PTX ISA, Warp Level Matrix Multiply-Accumulate Instructions, mma "
+      "Precision and rounding: accumulation order and handling of subnormal "
+      "inputs unspecified; CUDA Tile mma use_fast_acc is a separate "
+      "accumulation option.");
   matrixIssues(unit);
   registerContracts(unit);
   auto addParity = [&](ParityDeclaration p) {

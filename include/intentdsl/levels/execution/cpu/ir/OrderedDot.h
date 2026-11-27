@@ -1,4 +1,5 @@
 #pragma once
+#include "intentdsl/levels/algorithm/kir/ir/NativeDot.h"
 #include "intentdsl/levels/execution/cpu/ir/ScoreCache.h"
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
 
@@ -87,12 +88,12 @@ inline std::optional<OrderedDotPanel> orderedDotPanel(mlir::Operation &space,
       continue;
     for (auto &dot : loop.getBody()->without_terminator()) {
       if (dot.getName().stripDialect() != "lane_sum" ||
-          (requiresFtz && !compilerinfra::allowsSubnormalFlush(&dot)) ||
+          (requiresFtz && !intentdsl::kir::permitsBf16Dot(&dot)) ||
           !arith::bitEnumContainsAll(kir::getFastMathFlags(&dot),
                                      arith::FastMathFlags::reassoc))
         continue;
       auto mul = dot.getOperand(0).getDefiningOp<arith::MulFOp>();
-      if (!mul || (requiresFtz && !compilerinfra::allowsSubnormalFlush(mul)))
+      if (!mul || (requiresFtz && !intentdsl::kir::permitsBf16Dot(mul)))
         continue;
       Operation *q = nullptr, *k = nullptr;
       int64_t depth = 0;
@@ -175,7 +176,6 @@ selectOrderedDot(mlir::Operation &space, const compilerinfra::TargetProfile &p,
   // matrix panel. A four-vector reduction is the minimum wide-slice backend.
   auto lanes = machine->vectorBits / 32;
   if (!panel || lanes <= 0 ||
-      panel->tokens > scoreSlotLimit(*machine) / batch ||
       panel->depth > 2 * batchScoreSlots / batch || panel->depth < 4 * lanes ||
       panel->depth % lanes || panel->tokens < batch)
     return {};

@@ -1,4 +1,5 @@
 #pragma once
+#include "intentdsl/levels/algorithm/kir/ir/NativeDot.h"
 #include "intentdsl/levels/execution/cpu/ir/OrderedDot.h"
 
 namespace intentdsl::cpu {
@@ -57,8 +58,9 @@ orderedValuePanel(mlir::Operation &space, const CallFacts &facts,
     auto carry = loop.getRegionIterArgs()[1];
     if (!add ||
         !compilerinfra::hasFastMath(add, arith::FastMathFlags::reassoc) ||
-        (requiresFtz ? !compilerinfra::allowsSubnormalFlush(add)
-                     : !compilerinfra::hasFastMath(add, arith::FastMathFlags::contract)) ||
+        (requiresFtz ? !intentdsl::kir::permitsBf16Dot(add)
+                     : !compilerinfra::hasFastMath(
+                           add, arith::FastMathFlags::contract)) ||
         !carry.hasOneUse())
       return;
     auto *zero = loop.getInitArgs()[1].getDefiningOp();
@@ -69,8 +71,9 @@ orderedValuePanel(mlir::Operation &space, const CallFacts &facts,
              : add.getRhs() == carry ? add.getLhs()
                                      : Value{};
     auto mul = v ? v.getDefiningOp<arith::MulFOp>() : arith::MulFOp{};
-    if (!mul || (requiresFtz ? !compilerinfra::allowsSubnormalFlush(mul)
-                             : !compilerinfra::hasFastMath(mul, arith::FastMathFlags::contract)))
+    if (!mul || (requiresFtz ? !intentdsl::kir::permitsBf16Dot(mul)
+                             : !compilerinfra::hasFastMath(
+                                   mul, arith::FastMathFlags::contract)))
       return;
     for (unsigned i = 0; i < 2; ++i) {
       auto *splat = mul->getOperand(i).getDefiningOp();

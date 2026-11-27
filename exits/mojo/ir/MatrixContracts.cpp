@@ -1,6 +1,7 @@
 #include "compilerinfra/Assembly.h"
-#include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 #include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
+#include "intentdsl/levels/algorithm/kir/ir/NativeDot.h"
+#include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 
@@ -231,7 +232,7 @@ void registerMatrixContracts(Unit &u) {
       if (!ftz || ftz.getValue() != requiresFtz)
         return failure();
       auto fn = op->getParentOfType<func::FuncOp>();
-      if (!fn || (requiresFtz && !intentdsl::kir::allowsSubnormalFtz(op)))
+      if (!fn || (requiresFtz && !intentdsl::kir::permitsBf16Dot(op)))
         return failure();
       return success();
     };
@@ -244,8 +245,7 @@ void registerMatrixContracts(Unit &u) {
     tc.resultTypes = {ScalarTypeKind::I32};
     tc.accumulatorTypes = {accKind};
     tc.effects = EffectMask::ReadWrite;
-    tc.numerical.requireInputSubnormalFlush = requiresFtz;
-    tc.numerical.requireOutputSubnormalFlush = requiresFtz;
+    // The BF16 verifier checks the resolved dot contract.
     c.typed = std::move(tc);
     populateTypedContractSummaries(c);
     add(std::move(c));
@@ -392,7 +392,8 @@ void registerMatrixContracts(Unit &u) {
         return op->getAttrOfType<IntegerAttr>(name).getInt();
       };
       return success(dim("rows") > 0 && dim("columns") > 0 && dim("lda") > 0 &&
-                     dim("ldc") >= dim("columns") && allowsSubnormalFlush(op));
+                     dim("ldc") >= dim("columns") &&
+                     intentdsl::kir::permitsBf16Dot(op));
     };
     TypedContract t;
     t.shape.minOperands = t.shape.maxOperands = 6;
@@ -401,8 +402,7 @@ void registerMatrixContracts(Unit &u) {
     t.resultTypes = {ScalarTypeKind::I32};
     t.accumulatorTypes = {ScalarTypeKind::F32};
     t.effects = EffectMask::ReadWrite;
-    t.numerical.requireInputSubnormalFlush =
-        t.numerical.requireOutputSubnormalFlush = true;
+    // The verifier checks the resolved BF16 dot contract.
     c.typed = std::move(t);
     populateTypedContractSummaries(c);
     add(std::move(c));

@@ -125,10 +125,10 @@ def capture(fn):
             raise ValueError("axis indices must be integers")
         acc_ty = spelling(kw["acc"], api)
         attr_items = []
-        if ftz:
+        if "allow_subnormal_ftz" in kw:
             if acc_ty == "i32":
                 raise ValueError("allow_subnormal_ftz requires floating-point operands")
-            attr_items.append('"denormal-fp-math"="preserve-sign"')
+            attr_items.append('"denormal-fp-math"="preserve-sign"' if ftz else '"denormal-fp-math"="ieee"')
         if acc_ty != "i32":
             cfm = format_fastmath_attr((*default_flags, "reassoc", "contract"))
             attr_items.append(f"fastmath={cfm}")

@@ -420,6 +420,31 @@ struct Canonicalize : PassWrapper<Canonicalize, OperationPass<ModuleOp>> {
           return signalPassFailure();
         }
       }
+      for (StringRef format : {"bf16", "f16", "fp8"}) {
+        auto native =
+            "exits/" + target->name + "::" + format.str() + "-dot-denormal";
+        if (!target->semanticDefaults.count(native))
+          continue;
+        auto attr = "kir." + format.str() + "_dot";
+        auto bindings = fn->getAttrOfType<DictionaryAttr>("ci.semantics");
+        auto authorValue = [&](StringRef attr) {
+          auto entry = bindings.getAs<DictionaryAttr>(attr);
+          return entry && entry.getAs<StringAttr>("source") == "author";
+        };
+        if ((authorValue("kir.matmul_precision") &&
+             fn->getAttrOfType<StringAttr>("kir.matmul_precision") ==
+                 "highest") ||
+            (authorValue("kir.fp_contract") &&
+             fn->getAttrOfType<StringAttr>("kir.fp_contract") == "off"))
+          fn->setAttr(attr, StringAttr::get(ctx, "fp32-product"));
+        else if (authorValue("denormal-fp-math") &&
+                 !compilerinfra::allowsSubnormalFlush(fn))
+          fn->setAttr(attr, StringAttr::get(ctx, "source"));
+        if (auto err = target->bindSemantic(fn, attr, native)) {
+          fn.emitError() << llvm::toString(std::move(err));
+          return signalPassFailure();
+        }
+      }
       auto owner=cast<BlockArgument>(fn.front().front().getOperand(0)).getArgNumber();
       fn->setAttr("kir.domain_arg", IntegerAttr::get(IntegerType::get(ctx,64),owner));
       if(intentdsl::kir::matrixDomain(fn)){
@@ -432,10 +457,6 @@ struct Canonicalize : PassWrapper<Canonicalize, OperationPass<ModuleOp>> {
           if(op.getNumResults()==1 && op.getResult(0).use_empty()){op.erase();continue;}
         }
       }
-      fn.walk([&](Operation *op) {
-        if (op->getName().getStringRef() == "kir.lane_sum" && !op->hasAttr("denormal-fp-math"))
-          op->setAttr("denormal-fp-math", fn->getAttr("denormal-fp-math"));
-      });
       auto contraction = fn->getAttrOfType<StringAttr>("kir.fp_contract");
       fn.walk([&](Operation *op) {
         auto code = op->getName().stripDialect();

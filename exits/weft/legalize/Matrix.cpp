@@ -1,6 +1,7 @@
 #include "Matrix.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
+#include "intentdsl/levels/algorithm/kir/ir/NativeDot.h"
 #include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -538,7 +539,7 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, const RecordFields &record) {
   StringRef packing = packingAttr ? packingAttr.getValue() : StringRef();
   bool routed = domain.hasAttr("cpu.route_storage");
   bool usesBrgemm = shortImpl.starts_with("onednn-brgemm");
-  bool allowSubnormalFtz = intentdsl::kir::allowsSubnormalFtz(&dot);
+  bool allowSubnormalFtz = intentdsl::kir::permitsBf16Dot(&dot);
 
   int64_t M = extents[0], N = extents[1], K = extents[2], G = extents[3];
   int64_t mr = tile[0], nr = tile[1];

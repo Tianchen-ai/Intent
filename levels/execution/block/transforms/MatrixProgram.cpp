@@ -582,6 +582,7 @@ void splitGroupedRhsProgram(func::FuncOp fn, intentdsl::block::MatrixAccess &p,
   Value mainWs = fn.getArgument(mainWsSlot);
 
   Tiles tiles(fn, "matrix", unit);
+  tiles.sourceDot = &p.dot;
   if (p.domain.hasAttr("block.split_library")) {
     tiles.program->setAttr("block.split_library", fb.getUnitAttr());
     fn->setAttr("block.library_gemm", fb.getUnitAttr());
@@ -639,6 +640,7 @@ void expandMatrixProgram(func::FuncOp fn, StringRef unit,
                              permitTma, libraryGemmImpl);
     } else {
       Tiles tiles(fn, "matrix", unit);
+      tiles.sourceDot = &p.dot;
       if (p.dot.getName().stripDialect() == "contract")
         matrixTiles(tiles, p, native, write);
       else

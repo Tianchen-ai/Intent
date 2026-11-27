@@ -1,4 +1,5 @@
 #include "../legalize/Matrix.h"
+#include "intentdsl/levels/algorithm/kir/ir/DotSemantics.h"
 #include "intentdsl/levels/algorithm/kir/ir/Performance.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
@@ -195,6 +196,20 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
 
 void nativePanelCost(Unit &);
 void bind(Unit &u) {
+  intentdsl::kir::registerDotSemantics(
+      u, "weft", "bf16", "oneDNN BRGEMM; ATen FlashAttentionKernel.cpp",
+      "native",
+      "oneDNN Data Types and Floating-point Math Mode; Intel SDM TDPBF16PS and "
+      "VDPBF16PS: DAZ inputs, FTZ FP32 results independent of MXCSR. RVV BF16 "
+      "extension vfwmaccbf16.vv: FP32 widening FMA, IEEE subnormals.",
+      "weft_brgemm_bf16");
+  intentdsl::kir::registerDotSemantics(
+      u, "weft", "f16", "oneDNN data types; RISC-V V widening FMA", "source",
+      "FP16 widened to FP32 for accumulation; RISC-V V §13 vector "
+      "floating-point instructions and vfwmacc; Intel SDM VCVTPH2PS.");
+  intentdsl::kir::registerDotSemantics(
+      u, "weft", "fp8", "target matrix primitive", "undocumented",
+      "FP8 matrix unit on this CPU target: no documented implementation.");
   nativePanelCost(u);
   registerWeftMatrixContracts(u);
   registerWeftAddressOptimization(u);

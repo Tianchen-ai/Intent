@@ -1,3 +1,4 @@
+#include "intentdsl/levels/algorithm/kir/ir/DotSemantics.h"
 #include "intentdsl/levels/algorithm/kir/ir/Performance.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
@@ -92,6 +93,20 @@ void registerOneDNN(Unit &);
 void registerMatrixContracts(Unit &);
 void registerMojoAddressOptimization(Unit &);
 void bind(Unit &u) {
+  intentdsl::kir::registerDotSemantics(
+      u, "mojo", "bf16", "oneDNN BRGEMM; ATen CPU FlashAttentionKernel.cpp",
+      "native",
+      "oneDNN Data Types and Floating-point Math Mode; Intel SDM TDPBF16PS and "
+      "VDPBF16PS: DAZ inputs, FTZ FP32 results independent of MXCSR. RVV BF16 "
+      "extension vfwmaccbf16.vv: FP32 widening FMA, IEEE subnormals.",
+      "amx_bf16");
+  intentdsl::kir::registerDotSemantics(
+      u, "mojo", "f16", "oneDNN data types; RISC-V V widening FMA", "source",
+      "FP16 widened to FP32 for accumulation; RISC-V V §13 vector "
+      "floating-point instructions and vfwmacc; Intel SDM VCVTPH2PS.");
+  intentdsl::kir::registerDotSemantics(
+      u, "mojo", "fp8", "target matrix primitive", "undocumented",
+      "FP8 matrix unit on this CPU target: no documented implementation.");
   registerBlockCost(u);
   registerOneDNN(u);
   registerMatrixContracts(u);

@@ -1,9 +1,10 @@
+#include "../capabilities/VectorMath.h"
 #include "Matrix.h"
 #include "OwnerVectors.h"
 #include "Rows.h"
 #include "Slab.h"
-#include "../capabilities/VectorMath.h"
 #include "intentdsl/exits/bangc/ir/Dialect.h"
+#include "intentdsl/levels/algorithm/kir/ir/DotSemantics.h"
 #include "intentdsl/levels/algorithm/kir/ir/Segment.h"
 #include "intentdsl/levels/storage/dsa/ir/Owners.h"
 #include "intentdsl/levels/storage/dsa/ir/Supply.h"
@@ -526,6 +527,18 @@ void dmaCost(Unit &);
 void panelCost(Unit &);
 void registerCNNL(Unit &);
 void bind(Unit &u) {
+  intentdsl::kir::registerDotSemantics(
+      u, "bangc", "bf16", "Cambricon BANG C matrix operations", "undocumented",
+      "MLU370 cncc 4.7 neuware headers: matrix-unit subnormal and "
+      "intermediate-rounding guarantees not found.");
+  intentdsl::kir::registerDotSemantics(
+      u, "bangc", "f16", "Cambricon BANG C matrix operations", "undocumented",
+      "MLU370 cncc 4.7 neuware headers: matrix-unit subnormal and "
+      "intermediate-rounding guarantees not found.");
+  intentdsl::kir::registerDotSemantics(
+      u, "bangc", "fp8", "Cambricon BANG C matrix operations", "undocumented",
+      "MLU370 cncc 4.7 neuware headers: matrix-unit subnormal and "
+      "intermediate-rounding guarantees not found.");
   registerCNNL(u);
   dmaCost(u);
   panelCost(u);

@@ -1,15 +1,16 @@
 #include "../capabilities/Target.h"
-#include "intentdsl/levels/execution/block/ir/MatrixProgram.h"
-#include "intentdsl/levels/execution/block/ir/OwnerProgram.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/exits/triton/ir/Dialect.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
+#include "intentdsl/levels/algorithm/kir/ir/DotSemantics.h"
 #include "intentdsl/levels/algorithm/kir/ir/Literal.h"
 #include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
 #include "intentdsl/levels/execution/block/decisions/Verify.h"
 #include "intentdsl/levels/execution/block/ir/Access.h"
 #include "intentdsl/levels/execution/block/ir/Contraction.h"
 #include "intentdsl/levels/execution/block/ir/Grid.h"
+#include "intentdsl/levels/execution/block/ir/MatrixProgram.h"
+#include "intentdsl/levels/execution/block/ir/OwnerProgram.h"
 #include "intentdsl/levels/execution/block/ir/Owners.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -790,6 +791,27 @@ static LogicalResult verifyBoundary(ModuleOp m, const TargetProfile &profile,
 void matrixIssues(Unit &);
 void addressOptimization(Unit &);
 void bind(Unit &unit) {
+  intentdsl::kir::registerDotSemantics(
+      unit, "triton", "bf16", "NVIDIA PTX matrix multiply-accumulate",
+      "unspecified",
+      "PTX ISA, Warp Level Matrix Multiply-Accumulate Instructions, mma "
+      "Precision and rounding: accumulation order and handling of subnormal "
+      "inputs unspecified; CUDA Tile mma use_fast_acc is a separate "
+      "accumulation option.");
+  intentdsl::kir::registerDotSemantics(
+      unit, "triton", "f16", "NVIDIA PTX matrix multiply-accumulate",
+      "unspecified",
+      "PTX ISA, Warp Level Matrix Multiply-Accumulate Instructions, mma "
+      "Precision and rounding: accumulation order and handling of subnormal "
+      "inputs unspecified; CUDA Tile mma use_fast_acc is a separate "
+      "accumulation option.");
+  intentdsl::kir::registerDotSemantics(
+      unit, "triton", "fp8", "NVIDIA PTX matrix multiply-accumulate",
+      "unspecified",
+      "PTX ISA, Warp Level Matrix Multiply-Accumulate Instructions, mma "
+      "Precision and rounding: accumulation order and handling of subnormal "
+      "inputs unspecified; CUDA Tile mma use_fast_acc is a separate "
+      "accumulation option.");
   unit.semantics.push_back({{"fp32-dot", "NVIDIA f32 dot operands", "tl.dot(input_precision)", "tf32",
       "Triton language dot: default NVIDIA input_precision=tf32",
       [](const TargetProfile &, const llvm::json::Object &o) -> std::optional<SemanticChoice> {

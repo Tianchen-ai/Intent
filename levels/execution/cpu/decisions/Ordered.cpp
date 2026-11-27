@@ -138,8 +138,9 @@ LogicalResult verifyOwnerGrain(func::FuncOp fn, Operation &space,
   auto window = space.getAttrOfType<IntegerAttr>("cpu.batch_score_window");
   if (window &&
       (!batch || batch.getInt() < 2 || !repeat || window.getInt() <= 0 ||
-       window.getInt() >
-           scoreSlotLimit(*p.services.get<RowMachine>()) / batch.getInt()))
+       (!space.hasAttr("cpu.online_normalization") &&
+        window.getInt() >
+            scoreSlotLimit(*p.services.get<RowMachine>()) / batch.getInt())))
     return space.emitError("invalid private score window");
   Operation *expectedRecord =
       panel ? panel->record : (window && repeat ? repeat->record : nullptr);
@@ -666,8 +667,9 @@ LogicalResult verifyOwnerBuffers(func::FuncOp fn, const TargetProfile &p,
   auto batch = space.getAttrOfType<IntegerAttr>("cpu.owner_batch");
   if (window &&
       (!batch || batch.getInt() < 2 || window.getInt() <= 0 ||
-       window.getInt() >
-           scoreSlotLimit(*p.services.get<RowMachine>()) / batch.getInt()))
+       (!space.hasAttr("cpu.online_normalization") &&
+        window.getInt() >
+            scoreSlotLimit(*p.services.get<RowMachine>()) / batch.getInt())))
     return space.emitError("invalid materialized score window");
 
   Operation *localBuf = nullptr;
@@ -933,8 +935,10 @@ void ownerTasks(Unit &u) {
             reuse->extent % w ||
             (retained &&
              (retained.getInt() <= 0 ||
-              retained.getInt() >
-                  cpu::scoreSlotLimit(*p.services.get<cpu::RowMachine>()) / w ||
+              (!online &&
+               retained.getInt() >
+                   cpu::scoreSlotLimit(*p.services.get<cpu::RowMachine>()) /
+                       w) ||
               !cpu::repeatedScore(*o))))
           return llvm::createStringError("invalid shared interval traversal");
       } else {

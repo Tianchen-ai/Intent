@@ -996,7 +996,8 @@ Value tritonScaledPanels(Tiles &t, MatrixAccess &p) {
         false, acc);
   };
   b.setInsertionPointToStart(branch.thenBlock());
-  b.create<scf::YieldOp>(loc, product(true));
+  b.create<scf::YieldOp>(loc, product(dispatch->getAttrOfType<StringAttr>(
+                                          "on_match") != "float32"));
   b.setInsertionPointToStart(branch.elseBlock());
   b.create<scf::YieldOp>(loc, product(false));
   b.setInsertionPointAfter(branch);

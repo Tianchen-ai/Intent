@@ -1,6 +1,7 @@
 #include "compilerinfra/Assembly.h"
-#include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 #include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
+#include "intentdsl/levels/algorithm/kir/ir/NativeDot.h"
+#include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include <cstdlib>
@@ -61,7 +62,7 @@ static bool validOrderedBrgemm(mlir::Operation *op, int64_t axis) {
                   std::to_string(freeAxes[1]) + "]>";
   return freeAxes[0] != freeAxes[1] &&
          op->getAttrOfType<StringAttr>("val_type") == expected &&
-         compilerinfra::allowsSubnormalFlush(op);
+         intentdsl::kir::permitsBf16Dot(op);
 }
 static bool validPackedOrderedBrgemm(mlir::Operation *op,
                                      mlir::DenseI64ArrayAttr over) {
@@ -104,7 +105,7 @@ static bool validPackedOrderedBrgemm(mlir::Operation *op,
                   std::to_string(axes[1][1]) + "]>";
   return shape[0][1] == shape[1][0] && axes[0][0] != axes[1][1] &&
          op->getAttrOfType<StringAttr>("val_type") == expected &&
-         compilerinfra::allowsSubnormalFlush(op);
+         intentdsl::kir::permitsBf16Dot(op);
 }
 using namespace compilerinfra;
 using namespace mlir;
@@ -414,7 +415,7 @@ void registerWeftMatrixContracts(Unit &u) {
       if (!ftz || ftz.getValue() != requiresFtz)
         return failure();
       auto fn = op->getParentOfType<func::FuncOp>();
-      if (!fn || (requiresFtz && !intentdsl::kir::allowsSubnormalFtz(op)))
+      if (!fn || (requiresFtz && !intentdsl::kir::permitsBf16Dot(op)))
         return failure();
       auto q4kAttr =
           TypeAttr::get(intentdsl::kir::Q4KType::get(op->getContext()));
@@ -435,8 +436,7 @@ void registerWeftMatrixContracts(Unit &u) {
     tc.accumulatorTypes = {expectedAcc == "f32" ? ScalarTypeKind::F32
                                                 : ScalarTypeKind::I32};
     tc.effects = EffectMask::None;
-    tc.numerical.requireInputSubnormalFlush = requiresFtz;
-    tc.numerical.requireOutputSubnormalFlush = requiresFtz;
+    // The BF16 verifier checks the resolved dot contract.
     c.typed = std::move(tc);
     populateTypedContractSummaries(c);
     add(std::move(c));
@@ -456,13 +456,14 @@ void registerWeftMatrixContracts(Unit &u) {
       "f32 AVX-512 FP16/FMA BRGeMM accumulator",
       "IEEE-754 f16 widened to f32 FMA preserving f16 subnormals, Inf, and qNaN");
 
-  makeBrgemm(
-      "onednn-brgemm-bf16", "weft_brgemm_bf16", "bf16", "bf16", "f32", 2,
-      "bf16 x bf16 -> f32",
-      "LHS 3D view [R, K/2, 2] (unit K stride, K%2==0), RHS zero-copy VNNI pack32 [K/2, nr, 2]",
-      "f32 AMX-BF16 dot2 tile accumulator",
-      "AMX-BF16 dot2 to f32; flushes BF16 subnormals to zero (requires allow_subnormal_ftz)",
-      /*requiresFtz=*/true);
+  makeBrgemm("onednn-brgemm-bf16", "weft_brgemm_bf16", "bf16", "bf16", "f32", 2,
+             "bf16 x bf16 -> f32",
+             "LHS 3D view [R, K/2, 2] (unit K stride, K%2==0), RHS zero-copy "
+             "VNNI pack32 [K/2, nr, 2]",
+             "f32 AMX-BF16 dot2 tile accumulator",
+             "AMX-BF16 dot2 to f32; flushes BF16 inputs and FP32 subnormal "
+             "results under the resolved dot contract",
+             /*requiresFtz=*/true);
 
   makeBrgemm(
       "onednn-brgemm-s8", "weft_brgemm_s8", "si8", "si8", "si32", 4,

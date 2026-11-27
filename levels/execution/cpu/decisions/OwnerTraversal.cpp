@@ -413,16 +413,20 @@ void sharedOwnerTraversal(compilerinfra::Unit &u) {
                               row.getDictionary(b.getContext()),
                               {"exclusive-output"},
                               {"exits/" + p.name + "::onednn-brgemm-bf16"}});
-              if (value && value->supported(p) && slots >= panel->tokens) {
+              if (value && value->supported(p) &&
+                  (slots >= panel->tokens || online)) {
                 NamedAttrList pv(row);
                 pv.set("value_width", b.getI64IntegerAttr(value->columns));
-                if (mult <= 4)
+                if (mult <= 4 && slots >= panel->tokens)
                   cs.push_back({candidate + "-pv",
                                 "shared-interval-owners",
                                 pv.getDictionary(b.getContext()),
                                 {"exclusive-output"},
                                 {"exits/" + p.name + "::onednn-brgemm-bf16"}});
                 if (online && panel->tokens % tile == 0) {
+                  // The online fold spans all keys but stores only the current
+                  // tile.
+                  pv.set("window", b.getI64IntegerAttr(panel->tokens));
                   pv.set("online", b.getUnitAttr());
                   cs.push_back({candidate + "-pv-online",
                                 "shared-interval-owners",

@@ -1,6 +1,7 @@
 #include "compilerinfra/Assembly.h"
 #include "compilerinfra/Proofs.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
+#include "intentdsl/levels/algorithm/kir/ir/NativeDot.h"
 #include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -182,12 +183,13 @@ llvm::Error describeMojoMatrixPackage(func::FuncOp fn, Operation &prog,
   bool usesBrgemm = prog.getAttrOfType<BoolAttr>("uses_brgemm").getValue();
   out << llvm::json::Value(llvm::json::Object{
       {"version", 2},
-      {"fp_contract", fn->getAttrOfType<StringAttr>("mojo_row.fp_contract").str()},
+      {"fp_contract",
+       fn->getAttrOfType<StringAttr>("mojo_row.fp_contract").str()},
       {"source", ""},
       {"host", ""},
       {"returns_status", true},
       {"onednn", usesBrgemm},
-      {"allow_subnormal_ftz", intentdsl::kir::allowsSubnormalFtz(&prog)},
+      {"allow_subnormal_ftz", intentdsl::kir::permitsBf16Dot(&prog)},
       {"domain", intentdsl::publishDomain(fn)},
       {"abi", std::move(*abi)},
       {"rows", llvm::json::Array{llvm::json::Object{{"grain", tile[0]},
@@ -212,7 +214,7 @@ LogicalResult lowerMojoMatrix(func::FuncOp fn) {
   StringRef packing = packingAttr ? packingAttr.getValue() : StringRef();
   bool routed = domain.hasAttr("cpu.route_storage");
   bool usesBrgemm = implId.contains("onednn-brgemm");
-  bool allowSubnormalFtz = intentdsl::kir::allowsSubnormalFtz(&dot);
+  bool allowSubnormalFtz = intentdsl::kir::permitsBf16Dot(&dot);
   bool emitFtz = implId == "exits/mojo::onednn-brgemm-bf16";
   if (emitFtz && !allowSubnormalFtz)
     return dot.emitError(
