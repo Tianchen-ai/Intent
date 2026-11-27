@@ -939,6 +939,136 @@ struct RowLowerer {
     return {b.create<arith::MulIOp>(loc, outerGroup, symR), col};
   }
 
+  // Projected slices of one public operand often differ only by a channel
+  // offset. Issue one pitched DMA across those slices for each logical row.
+  llvm::DenseSet<Operation *>
+  issueProjectedRuns(Block &fetch, Value row0, Value col, Value slot,
+                     Value count, Value live,
+                     const llvm::DenseMap<Operation *, Value> &buffers) {
+    struct Slice {
+      Operation *copy;
+      int64_t start, dst;
+    };
+    const auto &facts = *profile.services.get<intentdsl::CallFacts>();
+    std::map<int64_t, SmallVector<Slice>> groups;
+    auto coordEqual = [](Value a, Value c) {
+      if (a == c)
+        return true;
+      auto *x = a.getDefiningOp(), *y = c.getDefiningOp();
+      return x && y && x->getName().getStringRef() == "dsa.member_axis" &&
+             x->getName() == y->getName() &&
+             x->getAttr("axis") == y->getAttr("axis") &&
+             llvm::equal(x->getOperands(), y->getOperands());
+    };
+    for (auto &op : fetch.without_terminator()) {
+      if (op.getName().getStringRef() != "dsa.copy_in" ||
+          op.hasAttr("dsa.shared"))
+        continue;
+      auto arg = dyn_cast<BlockArgument>(op.getOperand(0));
+      auto pr = op.getAttrOfType<StringAttr>("bangc.primitive");
+      if (!arg || !pr || !pr.getValue().starts_with("group_dma"))
+        continue;
+      unsigned i = arg.getArgNumber();
+      auto src = fn.getArgAttrOfType<IntegerAttr>(i, "kir.source");
+      auto map = fn.getArgAttrOfType<AffineMapAttr>(i, "kir.indexing");
+      auto layout = intentdsl::projectedLayout(fn, i, facts, false);
+      if (!src || !map || !layout || layout.empty() ||
+          layout.asArrayRef().back() != 1 ||
+          op.getNumOperands() != 2 + layout.size() || src.getInt() < 0 ||
+          size_t(src.getInt()) >= facts.arguments.size())
+        continue;
+      auto last = dyn_cast<OpResult>(op.getOperands().back());
+      if (!last ||
+          last.getDefiningOp()->getName().getStringRef() != "dsa.window" ||
+          last.getResultNumber() != 1)
+        continue;
+      auto *record = facts.arguments[src.getInt()].getAsObject();
+      auto *st = record ? record->getArray("strides") : nullptr;
+      if (!st || st->size() != map.getValue().getNumResults())
+        continue;
+      int64_t offset = 0;
+      bool valid = true;
+      for (auto [axis, expr] : llvm::enumerate(map.getValue().getResults())) {
+        SmallVector<int64_t> coeff(map.getValue().getNumDims() + 1, 0);
+        int64_t term;
+        auto stride = (*st)[axis].getAsInteger();
+        if (!stride || !intentdsl::coefficients(expr, coeff) ||
+            __builtin_mul_overflow(coeff.back(), *stride, &term) ||
+            __builtin_add_overflow(offset, term, &offset)) {
+          valid = false;
+          break;
+        }
+      }
+      auto addr = op.getAttrOfType<DenseI64ArrayAttr>("bangc.offset");
+      if (valid && addr && addr[1] == 0 && offset >= 0)
+        groups[src.getInt()].push_back({&op, offset, addr[0]});
+    }
+    llvm::DenseSet<Operation *> issued;
+    for (auto &[source, slices] : groups) {
+      llvm::sort(slices, [](const auto &a, const auto &c) {
+        return a.start < c.start;
+      });
+      for (size_t i = 0; i + 2 < slices.size();) {
+        auto head = slices[i];
+        auto *first = head.copy;
+        auto arg = cast<BlockArgument>(first->getOperand(0));
+        auto strides =
+            intentdsl::projectedLayout(fn, arg.getArgNumber(), facts, false);
+        int64_t elem =
+            cast<MemRefType>(arg.getType()).getElementTypeBitWidth() / 8;
+        int64_t srcStep = slices[i + 1].start - head.start,
+                dstStep = slices[i + 1].dst - head.dst;
+        if (!elem || srcStep <= 0 || dstStep <= 0 || dstStep % elem ||
+            srcStep > INT32_MAX / elem) {
+          ++i;
+          continue;
+        }
+        size_t j = i + 1;
+        for (; j < slices.size(); ++j) {
+          auto *next = slices[j].copy;
+          auto v = cast<BlockArgument>(next->getOperand(0));
+          if (slices[j].start - slices[j - 1].start != srcStep ||
+              slices[j].dst - slices[j - 1].dst != dstStep ||
+              arg.getType() != v.getType() ||
+              intentdsl::projectedLayout(fn, v.getArgNumber(), facts, false) !=
+                  strides ||
+              first->getAttr("bangc.primitive") !=
+                  next->getAttr("bangc.primitive") ||
+              !std::equal(first->operand_begin() + 1, first->operand_end(),
+                          next->operand_begin() + 1, next->operand_end(),
+                          coordEqual))
+            break;
+        }
+        if (j - i < 3) {
+          ++i;
+          continue;
+        }
+        auto dPitch = b.create<arith::MulIOp>(
+            loc, symP,
+            b.create<arith::MulIOp>(loc, symEB, cI64(depth * dstStep / elem)));
+        auto target = buffers.lookup(first);
+        forLoop(cI64(0), count, cI64(1), [&](Value member) {
+          Value ignored;
+          auto row = b.create<arith::AddIOp>(loc, row0, member);
+          Value global =
+              buildRowPtr(*first, 2, mapped.lookup(arg), row, col, ignored);
+          auto localRow = b.create<arith::AddIOp>(
+              loc, b.create<arith::MulIOp>(loc, slot, symEB), member);
+          Value dest = makeAddr(target, {localRow}, {symP}, 1);
+          memcpy2D(dest, global, live, dPitch, cI64(srcStep), cI64(j - i - 1),
+                   "GDRAM2NRAM",
+                   first->getAttrOfType<StringAttr>("bangc.primitive")
+                       .getValue()
+                       .ends_with("_async"));
+        });
+        for (size_t k = i; k < j; ++k)
+          issued.insert(slices[k].copy);
+        i = j;
+      }
+    }
+    return issued;
+  }
+
   void emitIssue(Block &fetch, Value iterPos, Value slot, Value outerGroup,
                  const llvm::DenseMap<Operation *, Value> &copyBuffers) {
     auto [row0, col] = phaseCoords(iterPos, outerGroup);
@@ -954,7 +1084,11 @@ struct RowLowerer {
           loc, b.create<arith::MaxSIOp>(loc, remM, cI64(0)), symEB);
       if (fullMembers)
         count = symEB;
+      auto issued =
+          issueProjectedRuns(fetch, row0, col, slot, count, live, copyBuffers);
       for (auto &op : fetch.without_terminator()) {
+        if (issued.contains(&op))
+          continue;
         auto code = op.getName().getStringRef();
         if (code == "dsa.window" || code == "dsa.member_axis" ||
             code == "dsa.slab_axis" || code == "dsa.lookup_axis" ||
@@ -1935,6 +2069,48 @@ struct RowLowerer {
                                  groupedShift));
             localMap[resVal] = dst;
 
+            if (n == "gt" && rankOf(inst.getOperand(0).getType()) == 2 &&
+                elemOf(inst.getOperand(0).getType()).isF32() &&
+                inst.getOperand(1).getType().isF32()) {
+              auto off = inst.getAttrOfType<DenseI64ArrayAttr>("bangc.scratch");
+              Value mask =
+                  nramAt(b.getI32Type(), phaseByteOffset(off, groupedShift));
+              Value scratch = nramAt(
+                  b.getI32Type(),
+                  phaseByteOffset(b.getDenseI64ArrayAttr({off[0], off[1] + 4}),
+                                  groupedShift));
+              makeOp("vec_cmpf_mask",
+                     {mask, scratch, getVal(inst.getOperand(0)),
+                      getVal(inst.getOperand(1)), lanes},
+                     {},
+                     {b.getNamedAttr("pred_code", b.getI32IntegerAttr(2)),
+                      b.getNamedAttr("rhs_is_vec", b.getBoolAttr(false))},
+                     "ieee-vec-cmpf");
+              makeOp("vec_scalar", {mask, mask, cI32(-1), lanes}, {},
+                     {b.getNamedAttr("op", b.getStringAttr("mul"))});
+              makeOp("vec_cast", {dst, mask, lanes}, {},
+                     {b.getNamedAttr("kind", b.getStringAttr("i32_to_u8"))});
+              continue;
+            }
+            if (n == "select" && dstElem.isF16() &&
+                rankOf(inst.getOperand(0).getType()) == 2 &&
+                rankOf(inst.getOperand(1).getType()) == 2 &&
+                inst.getOperand(2).getType().isF16()) {
+              auto *def = inst.getOperand(2).getDefiningOp();
+              auto zero =
+                  def ? def->getAttrOfType<FloatAttr>("value") : FloatAttr{};
+              if (zero && zero.getValue().isPosZero()) {
+                Value scratch = nramAt(
+                    b.getI16Type(),
+                    phaseByteOffset(
+                        inst.getAttrOfType<DenseI64ArrayAttr>("bangc.scratch"),
+                        groupedShift));
+                makeOp("mask_zero_b16",
+                       {dst, scratch, getVal(inst.getOperand(0)),
+                        getVal(inst.getOperand(1)), lanes});
+                continue;
+              }
+            }
             if (fusedGtCast.count(&inst)) {
               Operation *gt = fusedGtCast.lookup(&inst);
               int r0 = rankOf(gt->getOperand(0).getType());

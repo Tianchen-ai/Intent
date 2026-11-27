@@ -49,6 +49,13 @@ struct Footprint {
         auto t = dyn_cast<RankedTensorType>(op.getResult(0).getType());
         if (!t || t.getRank() < 1 || !t.getElementType().isIntOrFloat())
           continue;
+        if (t.getRank() == 2 && code == "gt" &&
+            op.getOperand(1).getType().isF32())
+          f.collectiveBytes =
+              std::max<int64_t>(f.collectiveBytes, 2 * sizeof(float));
+        if (t.getRank() == 2 && code == "select" && t.getElementType().isF16())
+          f.collectiveBytes =
+              std::max<int64_t>(f.collectiveBytes, sizeof(uint16_t));
         if (t.getRank() == 2 && code == "mul" && t.getElementType().isBF16())
           f.collectiveBytes =
               std::max<int64_t>(f.collectiveBytes, 2 * int64_t(sizeof(float)));

@@ -186,6 +186,10 @@ TerminalPrinter rowPrinter() {
       PrintRule::format("__bang_atomic_add($0, $1, $2, (int)($3));");
   rules["bangc_src.vec_binary"] =
       PrintRule::format("__bang_{op}($0, $1, $2, (int)($3));");
+  rules["bangc_src.mask_zero_b16"] = PrintRule::format(
+      "__cn_vector_cast_u8_to_s16((int)($4), $1, $2); "
+      "__bang_mul_scalar($1,$1,(short)-1,(int)($4)); "
+      "__bang_band((char *)$0,(const char *)$3,(const char *)$1,2*(int)($4));");
   rules["bangc_src.positive_half_or_nan"] = PrintRule::format(
       "__bang_ge_scalar((short *)$0, (const short *)$1, (short)-1023, "
       "(int)($2)); __bang_mul((short *)$0, (const short *)$1, (const short "
@@ -218,7 +222,8 @@ TerminalPrinter rowPrinter() {
       "vec_min_scalar_ieee($0, $1, $2, $3, (int)($4), (int)($5));");
   rules["bangc_src.bf16_panel_ok"] = PrintRule::format(
       "unsigned char $r0 = ordinary_panel((const unsigned short *)$0, "
-      "(int)($3), (unsigned short *)$1, (unsigned short *)$2);");
+      "(int)($3), (unsigned short *)$1, (unsigned short *)$2, "
+      "{scratch_elements});");
   rules["bangc_src.bf16_ieee_dot"] = PrintRule::format(
       "bf16_ieee_dot_panel($0, (const unsigned short *)$1, (const unsigned "
       "short *)$2, (int)($3), (int)($4), (int)($5), (int)($6), (int)($7));");
@@ -599,6 +604,12 @@ TerminalPrinter rowPrinter() {
   enterLocal("bangc_src.vec_cast",
              [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
                auto k = view.attrOfType<StringAttr>("kind").getValue();
+               if (k == "i32_to_u8") {
+                 c.line("__cn_vector_cast_s32_to_u8((int)(" +
+                        view.operand(2).str() + ")," + view.operand(0).str() +
+                        "," + view.operand(1).str() + ");");
+                 return llvm::Error::success();
+               }
                if (k == "i32_to_f32") {
                  c.line("__bang_int322float(" + view.operand(0).str() + "," +
                         view.operand(1).str() + ",(int)(" +

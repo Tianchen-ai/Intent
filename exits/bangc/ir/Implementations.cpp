@@ -309,7 +309,33 @@ void rowContracts(Unit &unit) {
         auto p = dyn_cast<MemRefType>(op->getOperand(0).getType());
         auto m = dyn_cast<MemRefType>(op->getOperand(1).getType());
         auto f = dyn_cast<MemRefType>(op->getOperand(2).getType());
-        return success(isSpace(op->getOperand(0), 1) &&
+        auto capacity = op->getAttrOfType<IntegerAttr>("scratch_elements");
+        auto fits = [&](Value v) {
+          auto *alloc = v.getDefiningOp();
+          int64_t byteOffset = 0;
+          if (alloc && alloc->getName().stripDialect() == "nram_ptr") {
+            auto c = alloc->getOperand(1).getDefiningOp<arith::ConstantIntOp>();
+            if (!c || c.value() < 0)
+              return false;
+            byteOffset = c.value();
+            alloc = alloc->getOperand(0).getDefiningOp();
+          }
+          if (!alloc || alloc->getName().stripDialect() != "nram_buffer")
+            return false;
+          auto size = alloc->getAttrOfType<IntegerAttr>("elements");
+          auto width = cast<MemRefType>(alloc->getResult(0).getType())
+                           .getElementTypeBitWidth() /
+                       8;
+          int64_t bytes;
+          return size && capacity && capacity.getInt() >= 64 &&
+                 capacity.getInt() % 64 == 0 &&
+                 !__builtin_mul_overflow(size.getInt(), int64_t(width),
+                                         &bytes) &&
+                 byteOffset <= bytes &&
+                 capacity.getInt() <= (bytes - byteOffset) / 2;
+        };
+        return success(fits(op->getOperand(1)) && fits(op->getOperand(2)) &&
+                       isSpace(op->getOperand(0), 1) &&
                        isSpace(op->getOperand(1), 1) &&
                        isSpace(op->getOperand(2), 1) &&
                        p.getElementType().getIntOrFloatBitWidth() == 16 &&

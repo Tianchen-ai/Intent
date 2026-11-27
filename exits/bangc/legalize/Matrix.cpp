@@ -3220,23 +3220,32 @@ struct MatrixLowerer {
           memcpy1D(left1, makeAddr(aBase, {cI64(HM * bk)}, {cI64(1)}, 4),
                    cI64(HM * bk), "SRAM2NRAM", true);
           sync("sram_to_nram");
-          Value okL0 = makeOp("bf16_panel_ok",
-                              {left0, magSc, flgSc, cI64(HM * bk)},
-                              {b.getI1Type()}, {}, "bf16-panel-guard")
-                           ->getResult(0);
-          Value okL1 = makeOp("bf16_panel_ok",
-                              {left1, magSc, flgSc, cI64(HM * bk)},
-                              {b.getI1Type()}, {}, "bf16-panel-guard")
-                           ->getResult(0);
+          Value okL0 =
+              makeOp("bf16_panel_ok", {left0, magSc, flgSc, cI64(HM * bk)},
+                     {b.getI1Type()},
+                     {b.getNamedAttr("scratch_elements",
+                                     b.getI64IntegerAttr(4096))},
+                     "bf16-panel-guard")
+                  ->getResult(0);
+          Value okL1 =
+              makeOp("bf16_panel_ok", {left1, magSc, flgSc, cI64(HM * bk)},
+                     {b.getI1Type()},
+                     {b.getNamedAttr("scratch_elements",
+                                     b.getI64IntegerAttr(4096))},
+                     "bf16-panel-guard")
+                  ->getResult(0);
           Value allOk = b.create<arith::AndIOp>(loc, okL0, okL1);
           for (int u = 0; u < 4; ++u) {
             Value bSub = makeAddr(bBase, {cI64(u * 64 * bk)}, {cI64(1)}, 4);
             memcpy1D(transSub, bSub, cI64(64 * bk), "SRAM2NRAM");
             sync("sram_to_nram");
-            Value okR = makeOp("bf16_panel_ok",
-                               {transSub, magSc, flgSc, cI64(64 * bk)},
-                               {b.getI1Type()}, {}, "bf16-panel-guard")
-                            ->getResult(0);
+            Value okR =
+                makeOp("bf16_panel_ok", {transSub, magSc, flgSc, cI64(64 * bk)},
+                       {b.getI1Type()},
+                       {b.getNamedAttr("scratch_elements",
+                                       b.getI64IntegerAttr(4096))},
+                       "bf16-panel-guard")
+                    ->getResult(0);
             allOk = b.create<arith::AndIOp>(loc, allOk, okR);
             sync("compute");
             memcpy1D(flt[u], transSub, cI64(64 * bk), "NRAM2WRAM");
@@ -5166,12 +5175,18 @@ struct MatrixLowerer {
                     Value okL =
                         makeOp("bf16_panel_ok",
                                {left, right, flags, cI64(bm * bk)},
-                               {b.getI1Type()}, {}, "bf16-panel-guard")
+                               {b.getI1Type()},
+                               {b.getNamedAttr("scratch_elements",
+                                               b.getI64IntegerAttr(bk * bn))},
+                               "bf16-panel-guard")
                             ->getResult(0);
                     Value okR =
                         makeOp("bf16_panel_ok",
                                {trans, right, flags, cI64(bn * bk)},
-                               {b.getI1Type()}, {}, "bf16-panel-guard")
+                               {b.getI1Type()},
+                               {b.getNamedAttr("scratch_elements",
+                                               b.getI64IntegerAttr(bk * bn))},
+                               "bf16-panel-guard")
                             ->getResult(0);
                     Value bothOk = b.create<arith::AndIOp>(loc, okL, okR);
                     Value nextStrict = b.create<arith::OrIOp>(

@@ -2,6 +2,7 @@
 #include "intentdsl/levels/execution/block/ir/Owners.h"
 #include "intentdsl/levels/storage/dsa/ir/Matrix.h"
 #include "intentdsl/levels/storage/dsa/ir/Supply.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "llvm/ADT/DenseMap.h"
 
 namespace intentdsl::dsa {
@@ -15,6 +16,15 @@ struct PrivateRows {
   llvm::SmallVector<mlir::Value> views;
   llvm::DenseSet<mlir::Value> writes;
   llvm::DenseMap<mlir::Value, llvm::SmallVector<mlir::Value>> prefixes;
+  struct WindowFold {
+    mlir::scf::ForOp loop;
+    mlir::Value samples, weights;
+    int64_t taps;
+  };
+  std::optional<WindowFold> windowFold;
+  mlir::Operation *pointwise = nullptr;
+  llvm::SmallVector<mlir::Value> inputs, temporaries;
+  int64_t workArrays = 0;
   int64_t lanes = 1;
   int64_t bytes = 0, scanWidth = 0, selectionWidth = 0, k = 0;
 };

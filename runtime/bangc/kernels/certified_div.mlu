@@ -410,11 +410,10 @@ __mlu_func__ void certified_div_rn(float *dst, const float *a, float b,
   ub.f = b;
   unsigned b_mag = ub.u & 0x7fffffffU;
   // A broadcast divisor lets every lane use the same integer significand.
-  // Work at 24 fraction bits below one and 23 at/above one. A rounded
-  // reciprocal and multiply miss the nearest significand by at most one:
-  // before the multiply rounds, the error in 24-bit units is strictly < 1.
-  // The exact small residual fits i32, so the low word of A*2^k - Q*B
-  // suffices even though the two products individually need 48 bits.
+  // Normalize A into [B,2B), where both significands have 24 bits. For
+  // B>2^23, m=floor(2^55/B) fits u32. mulhi(A,m) truncates a lower
+  // bound on A*2^23/B whose error is < A/2^32 < 1/128. The exact low-
+  // word remainder is nonnegative and < 1.008*B, so RN adds at most one.
   unsigned eb = b_mag >> 23;
   if (eb > 0 && eb < 255 && dst != a && live == lanes) {
     int *ma = (int *)sc, *q = ma + lanes, *ge = q + lanes, *t = ge + lanes,
@@ -427,41 +426,43 @@ __mlu_func__ void certified_div_rn(float *dst, const float *a, float b,
     __bang_sub_scalar(t, ma, minE * 0x800000, lanes);
     __bang_ge_scalar((unsigned *)u, (unsigned *)t,
                      (unsigned)(maxE - minE + 1) * 0x800000u, lanes);
-    __bang_int322float((float *)t, u, lanes, 0);
-    if (!__bang_count((float *)t, live)) {
-      __bang_band_scalar(ma, ma, 0x7fffff, lanes);
-      __bang_add_scalar(ma, ma, 0x800000, lanes);
-      __bang_ge_scalar(ge, ma, mb, lanes);
-      __bang_mul_scalar(t, ge, -0x800000, lanes);
-      __bang_add_scalar(t, t, 0x3f800000, lanes);
-      __bang_int322float(dst, ma, lanes, 0);
-      __bang_mul_scalar(dst, dst, __cn_scalar_div_f32_rn(16777216.f, (float)mb),
-                        lanes);
-      __bang_mul(dst, dst, (float *)t, lanes);
-      __bang_float2int32_rn(q, dst, lanes, 0);
-      __bang_mul_scalar(r, ma, 0x800000, lanes);
-      __bang_mul_scalar(t, ge, -1, lanes);
-      __bang_add_scalar(t, t, 2, lanes);
-      __bang_mul(r, r, t, lanes);
-      __bang_mul_scalar(t, q, mb, lanes);
-      __bang_sub(r, r, t, lanes);
-      __bang_add(r, r, r, lanes);
-      __bang_band_scalar(t, q, 1, lanes);
-      __bang_add(u, r, t, lanes);
-      __bang_ge_scalar(u, u, mb + 1, lanes);
-      __bang_sub(t, t, r, lanes);
-      __bang_ge_scalar(t, t, mb + 1, lanes);
-      __bang_add(q, q, u, lanes);
-      __bang_sub(q, q, t, lanes);
-      __bang_band_scalar(t, (const int *)a, 0x7f800000, lanes);
-      __bang_add_scalar(t, t, (125 - (int)eb) * 0x800000, lanes);
-      __bang_mul_scalar(ge, ge, 0x800000, lanes);
-      __bang_add(t, t, ge, lanes);
-      __bang_add((int *)dst, t, q, lanes);
-      __bang_band_scalar(t, (const int *)a, (int)0x80000000u, lanes);
+    if (!__bang_count(u, live)) {
+      if (mb == 0x800000) {
+        __bang_add_scalar((int *)dst, (const int *)a,
+                          (127 - (int)eb) * 0x800000, lanes);
+      } else {
+        __bang_band_scalar(ma, ma, 0x7fffff, lanes);
+        __bang_add_scalar(ma, ma, 0x800000, lanes);
+        __bang_lt_scalar(ge, ma, mb, lanes);
+        __bang_add_scalar(t, ge, 1, lanes);
+        __bang_mul(ma, ma, t, lanes);
+        // Compute 2^55/B in radix 256 with the MLU370 scalar u32 divider.
+        unsigned magic = 0, rem = 1u << 23;
+        for (int digit = 0; digit < 4; ++digit) {
+          unsigned num = rem << 8, part = num / (unsigned)mb;
+          magic = (magic << 8) | part;
+          rem = num - part * (unsigned)mb;
+        }
+        __bang_write_value((unsigned *)u, lanes, magic);
+        __bang_mulh((unsigned *)q, (const unsigned *)ma, (const unsigned *)u,
+                    lanes);
+        __bang_mul_scalar(r, ma, 0x800000, lanes);
+        __bang_mul_scalar(t, q, mb, lanes);
+        __bang_sub(r, r, t, lanes);
+        __bang_add(r, r, r, lanes);
+        __bang_band_scalar(t, q, 1, lanes);
+        __bang_add(r, r, t, lanes);
+        __bang_ge_scalar(r, r, mb + 1, lanes);
+        __bang_add(q, q, r, lanes);
+        __bang_band_scalar(t, (const int *)a, (int)0xff800000u, lanes);
+        __bang_add_scalar(t, t, (126 - (int)eb) * 0x800000, lanes);
+        __bang_mul_scalar(ge, ge, -0x800000, lanes);
+        __bang_add(t, t, ge, lanes);
+        __bang_add((int *)dst, t, q, lanes);
+      }
       if (ub.u >> 31)
-        __bang_bxor_scalar(t, t, (int)0x80000000u, lanes);
-      __bang_bor((int *)dst, (int *)dst, t, lanes);
+        __bang_bxor_scalar((int *)dst, (const int *)dst, (int)0x80000000u,
+                           lanes);
       return;
     }
   }

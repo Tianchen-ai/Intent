@@ -65,10 +65,21 @@ static int64_t matrixPrivateBytes(int64_t rows, int64_t columns, int64_t depth,
   }
   // Upper bound shared by the supported convolution, record and scaled-dot
   // microkernels, including conversion and record scratch.
-  return 256 + 4 * (rows * depth + 2 * depth * columns + 2 * rows * columns) +
-         2 * 292 +
-         (computation == "window_contract" ? 4 * depth * (columns + 3) : 0) +
-         (computation == "quant_contract" ? 98304 : 0);
+  int64_t bound =
+      256 + 4 * (rows * depth + 2 * depth * columns + 2 * rows * columns) +
+      2 * 292 +
+      (computation == "window_contract" ? 4 * depth * (columns + 3) : 0) +
+      (computation == "quant_contract" ? 98304 : 0);
+  if (computation == "q4k_dot") {
+    using namespace intentdsl::kir;
+    // The 64-channel pool accepts padded rows. Include the input records,
+    // decode workspace, widened and quantized activations, and subgroup sums.
+    int64_t packed = 4 * rows * columns + 64 * Q4KRecord::bytes +
+                     4 * (512 + 3 * 2048 + 256 + 3 * 64) +
+                     2 * Q8KRecord::elements * 4 + 128;
+    bound = std::max(bound, packed);
+  }
+  return bound;
 }
 llvm::Expected<compilerinfra::TargetProfile>
 capabilities(const llvm::json::Object &opts) {

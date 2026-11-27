@@ -69,7 +69,7 @@ def VecMinScalarOp : BangcOp<"vec_min_scalar",
 def Bf16PanelGuardOp : BangcOp<"bf16_panel_ok",
                                [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let arguments = (ins AnyMemRef:$panel, AnyMemRef:$mag_scratch,
-                       AnyMemRef:$flag_scratch, I64:$elements);
+                       AnyMemRef:$flag_scratch, I64:$elements, I64Attr:$scratch_elements);
   let results = (outs I1:$ok);
 }
 
@@ -244,6 +244,10 @@ def VecCastOp : BangcOp<"vec_cast",
                         [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let arguments = (ins AnyMemRef:$dst, AnyMemRef:$src, I64:$lanes,
                        StrAttr:$kind);
+}
+
+def MaskZeroB16Op : BangcOp<"mask_zero_b16", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments = (ins AnyMemRef:$dst, AnyMemRef:$scratch, AnyMemRef:$mask, AnyMemRef:$value, I64:$lanes);
 }
 
 def PositiveHalfOrNanOp : BangcOp<"positive_half_or_nan",

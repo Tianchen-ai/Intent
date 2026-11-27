@@ -10,18 +10,20 @@ __mlu_func__ unsigned char finite_narrow_panel(const unsigned short *src,unsigne
 
 __mlu_func__ unsigned char ordinary_panel(const unsigned short *v, int n,
                                           unsigned short *mag,
-                                          unsigned short *flag) {
-  if (n <= 4096) {
+                                          unsigned short *flag,
+                                          int capacity = 4096) {
+  if (n <= capacity) {
     __bang_band_scalar(mag, v, (unsigned short)0x7fff, n);
     __bang_sub_scalar(flag, mag, (unsigned short)((127 - 48) << 7), n);
     __bang_ge_scalar(flag, flag, (unsigned short)(91 << 7), n);
     __bang_mul(flag, mag, flag, n);
     return __bang_count(flag, n) == 0;
   }
-  unsigned short *acc_flag = flag + 2048;
-  __bang_write_value(acc_flag, 2048, (unsigned short)0);
-  for (int i = 0; i < n; i += 2048) {
-    int count = n - i < 2048 ? n - i : 2048;
+  int part = capacity / 2;
+  unsigned short *acc_flag = flag + part;
+  __bang_write_value(acc_flag, part, (unsigned short)0);
+  for (int i = 0; i < n; i += part) {
+    int count = n - i < part ? n - i : part;
     __bang_band_scalar(mag, v + i, (unsigned short)0x7fff, count);
     __bang_sub_scalar(flag, mag, (unsigned short)((127 - 48) << 7), count);
     __bang_ge_scalar(flag, flag, (unsigned short)(91 << 7), count);
@@ -29,7 +31,7 @@ __mlu_func__ unsigned char ordinary_panel(const unsigned short *v, int n,
     __bang_bor((char *)acc_flag, (const char *)acc_flag, (const char *)flag,
                count * 2);
   }
-  return __bang_count(acc_flag, 2048) == 0;
+  return __bang_count(acc_flag, part) == 0;
 }
 
 __mlu_func__ unsigned sticky_u32(unsigned v, int n) {

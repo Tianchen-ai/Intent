@@ -547,6 +547,13 @@ void VecCastOp::getEffects(EffectList &effects) {
   addRead(effects, op, 1);
 }
 
+void MaskZeroB16Op::getEffects(EffectList &effects) {
+  auto *op = getOperation();
+  addWrite(effects, op, 0);
+  addReadWrite(effects, op, 1);
+  addRead(effects, op, 2);
+  addRead(effects, op, 3);
+}
 void PositiveHalfOrNanOp::getEffects(EffectList &effects) {
   Operation *op = getOperation();
   addWrite(effects, op, 0);

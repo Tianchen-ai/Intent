@@ -660,12 +660,18 @@ struct OrderedLowerer {
         sync("compute");
         Value okL = makeOp("bf16_panel_ok",
                            {lhsHalf, magScratch, flagScratch, cI64(M * Kdim)},
-                           {b.getI1Type()}, {}, "bf16-panel-guard")
+                           {b.getI1Type()},
+                           {b.getNamedAttr("scratch_elements",
+                                           b.getI64IntegerAttr(4096))},
+                           "bf16-panel-guard")
                         ->getResult(0);
         Value okR =
-            makeOp("bf16_panel_ok",
-                   {rhsFilterMajor, magScratch, flagScratch, cI64(Cdim * Kdim)},
-                   {b.getI1Type()}, {}, "bf16-panel-guard")
+            makeOp(
+                "bf16_panel_ok",
+                {rhsFilterMajor, magScratch, flagScratch, cI64(Cdim * Kdim)},
+                {b.getI1Type()},
+                {b.getNamedAttr("scratch_elements", b.getI64IntegerAttr(4096))},
+                "bf16-panel-guard")
                 ->getResult(0);
         Value bothOk = b.create<arith::AndIOp>(loc, okL, okR);
         ifThenElse(
@@ -2560,6 +2566,8 @@ struct OrderedLowerer {
         vecPool;
     llvm::DenseMap<Value, Value> privateRows;
     Value scanOut, scanScratch, selectVals, selectIdx, selectScratch;
+    Operation *windowFold = nullptr;
+    Value foldedColumn, windowLane;
     int64_t selectWidth = 0;
     int64_t slabBytes = 0;
     int64_t vecChunk = 1024;
@@ -3418,8 +3426,15 @@ struct OrderedLowerer {
     return {makeAddr(base, coords, strides, sp), cI64(0)};
   }
 
-  LogicalResult emitGeneralBlock(Block &blk, GeneralState &st) {
+  LogicalResult emitGeneralBlock(Block &blk, GeneralState &st,
+                                 Operation *stop = nullptr) {
     for (auto &op : blk) {
+      if (&op == stop)
+        break;
+      if (&op == st.windowFold) {
+        st.env[op.getResult(0)] = loadAt(st.foldedColumn, st.windowLane);
+        continue;
+      }
       StringRef n = op.getName().getStringRef();
       StringRef kind = op.getName().stripDialect();
       if (kind == "end" || n == "scf.yield")
@@ -4644,6 +4659,50 @@ struct OrderedLowerer {
     return success();
   }
 
+  // Elementwise evaluation across independent positions in a staged row.
+  // Scalar IR arithmetic between vector intrinsics keeps its own rounding.
+  void emitPointwise(const intentdsl::dsa::PrivateRows &plan, GeneralState &st,
+                     llvm::DenseMap<Value, Value> &buffers, Value scratch) {
+    Value lanes = cI64(plan.lanes);
+    for (Operation *op = plan.pointwise;
+         op && !op->hasTrait<OpTrait::IsTerminator>(); op = op->getNextNode()) {
+      if (auto store = dyn_cast<memref::StoreOp>(op)) {
+        sync("compute");
+        memcpy1D(st.privateRows.lookup(store.getMemref()),
+                 buffers.lookup(store.getValue()), lanes, "NRAM2NRAM");
+        continue;
+      }
+      auto out = buffers.lookup(op->getResult(0));
+      auto input = [&](unsigned i) {
+        return buffers.lookup(op->getOperand(i));
+      };
+      auto k = op->getName().getStringRef();
+      if (k == "math.exp")
+        makeOp("row_exp", {out, scratch, input(0), lanes, lanes}, {}, {},
+               "validated-exp");
+      else if (k == "arith.divf") {
+        makeOp("vec_div_rn", {out, input(0), input(1), scratch, lanes, lanes},
+               {}, {b.getNamedAttr("mode", b.getStringAttr("vv"))},
+               "ieee-div-rn-vv");
+      } else if (k == "arith.truncf")
+        makeOp("vec_cast", {out, input(0), lanes}, {},
+               {b.getNamedAttr("kind", b.getStringAttr("f32_to_f16_ieee"))});
+      else if (auto constant = dyn_cast<arith::ConstantOp>(op)) {
+        fillVec(out, lanes,
+                b.create<arith::ConstantOp>(loc, constant.getValue()));
+      } else {
+        sync("compute");
+        forLoop(cI64(0), lanes, cI64(1), [&](Value lane) {
+          llvm::DenseMap<Value, Value> env;
+          for (auto [i, v] : llvm::enumerate(op->getOperands()))
+            env[v] = loadAt(input(i), lane);
+          storeAt(out, lane, lowerScalarExpr(*op, env));
+        });
+      }
+    }
+    sync("compute");
+  }
+
   LogicalResult
   lowerGeneral(int64_t tile,
                const std::optional<intentdsl::dsa::PrivateRows> &privatePlan) {
@@ -4658,6 +4717,22 @@ struct OrderedLowerer {
 
     GeneralState st;
     st.slabBytes = slabBytes;
+    llvm::DenseMap<Value, Value> rowValues;
+    Value rowScratch, paddedSamples, products;
+    if (privatePlan && privatePlan->windowFold) {
+      auto window = *privatePlan->windowFold;
+      st.windowFold = window.loop;
+      st.foldedColumn = nramBuf(b.getF32Type(), tile);
+      paddedSamples = nramBuf(b.getF16Type(), tile + window.taps - 1);
+      products = nramBuf(b.getF32Type(), tile);
+    }
+    if (privatePlan && privatePlan->pointwise) {
+      for (Value v : privatePlan->inputs)
+        rowValues[v] = nramBuf(v.getType(), tile);
+      for (Value v : privatePlan->temporaries)
+        rowValues[v] = nramBuf(v.getType(), tile);
+      rowScratch = nramBuf(b.getF32Type(), tile * privatePlan->workArrays);
+    }
     if (privatePlan) {
       for (Value v : privatePlan->views)
         st.privateRows[v] =
@@ -5000,11 +5075,44 @@ struct OrderedLowerer {
         for (auto v : privatePlan->views)
           if (!privatePlan->writes.contains(v))
             transfer(v, false);
+        if (privatePlan->windowFold) {
+          const auto &window = *privatePlan->windowFold;
+          if (window.taps > 1)
+            fillVec(paddedSamples, cI64(window.taps - 1),
+                    b.create<arith::ConstantOp>(
+                        loc, b.getFloatAttr(b.getF16Type(), 0.)));
+          sync("compute");
+          memcpy1D(
+              makeAddr(paddedSamples, {cI64(window.taps - 1)}, {cI64(1)}, 1),
+              st.privateRows.lookup(window.samples), cI64(tile), "NRAM2NRAM");
+          fillVec(st.foldedColumn, cI64(tile), cF32(0));
+          forLoop(cI64(0), cI64(window.taps), cI64(1), [&](Value tap) {
+            auto row = makeAddr(paddedSamples, {tap}, {cI64(1)}, 1);
+            makeOp("vec_cast", {products, row, cI64(tile)}, {},
+                   {b.getNamedAttr("kind", b.getStringAttr("f16_to_f32"))});
+            Value weight = b.create<arith::ExtFOp>(
+                loc, b.getF32Type(),
+                loadAt(st.privateRows.lookup(window.weights), tap));
+            makeOp("vec_scalar", {products, products, weight, cI64(tile)}, {},
+                   {b.getNamedAttr("op", b.getStringAttr("mul"))});
+            makeOp("vec_binary",
+                   {st.foldedColumn, st.foldedColumn, products, cI64(tile)}, {},
+                   {b.getNamedAttr("op", b.getStringAttr("add"))});
+          });
+          sync("compute");
+        }
         forLoop(cI64(0), cI64(tile), cI64(1), [&](Value lane) {
+          st.windowLane = lane;
           st.env[bb.getArguments().back()] = lane;
-          if (failed(emitGeneralBlock(bb, st)))
+          if (failed(emitGeneralBlock(bb, st, privatePlan->pointwise))) {
             status = failure();
+            return;
+          }
+          for (Value v : privatePlan->inputs)
+            storeAt(rowValues.lookup(v), lane, st.env.lookup(v));
         });
+        if (privatePlan->pointwise && succeeded(status))
+          emitPointwise(*privatePlan, st, rowValues, rowScratch);
         for (auto v : privatePlan->views)
           if (privatePlan->writes.contains(v))
             transfer(v, true);

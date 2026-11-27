@@ -3,6 +3,168 @@
 
 using namespace mlir;
 namespace intentdsl::dsa {
+// Split the pointwise suffix after a lane-private fold. All values crossing
+// the split have explicit row storage and no intermediate write is observable.
+static void planPointwise(Block &body, PrivateRows &rows,
+                          const LocalSupply &local) {
+  if (rows.lanes % 64)
+    return;
+  Operation *begin = nullptr;
+  SmallVector<Value> inputs, temps;
+  llvm::DenseSet<Value> values;
+  int64_t work = 0;
+  for (auto &op : body.without_terminator()) {
+    auto k = op.getName().getStringRef();
+    if (!begin && (k == "math.exp" || k == "arith.divf"))
+      begin = &op;
+    if (!begin)
+      continue;
+    if (auto store = dyn_cast<memref::StoreOp>(op)) {
+      if (!rows.writes.contains(store.getMemref()) ||
+          !values.contains(store.getValue()))
+        return;
+      continue;
+    }
+    if (!(k == "math.exp" || k == "arith.divf" || k == "arith.addf" ||
+          k == "arith.subf" || k == "arith.mulf" || k == "arith.truncf" ||
+          k == "arith.constant"))
+      return;
+    Type out = op.getResult(0).getType();
+    if ((!out.isF32() && !(k == "arith.truncf" && out.isF16())) ||
+        !llvm::all_of(op.getOperands(),
+                      [](Value v) { return v.getType().isF32(); }))
+      return;
+    for (Value v : op.getOperands())
+      if (values.insert(v).second)
+        inputs.push_back(v);
+    values.insert(op.getResult(0));
+    temps.push_back(op.getResult(0));
+    if (k == "math.exp")
+      work = std::max<int64_t>(work, 1);
+    if (k == "arith.divf")
+      work = 6;
+  }
+  if (!begin || !work)
+    return;
+  int64_t extra = (inputs.size() + temps.size() + work) *
+                  llvm::alignTo(rows.lanes * 4, local.alignment);
+  if (extra > std::min(local.capacity, local.budget) - rows.bytes)
+    return;
+  rows.bytes += extra;
+  rows.pointwise = begin;
+  rows.inputs = std::move(inputs);
+  rows.temporaries = std::move(temps);
+  rows.workArrays = work;
+}
+// Recognize an affine tap displacement lane + tap + c. All three
+// coefficients must be known and all index arithmetic representable.
+static std::optional<std::array<int64_t, 3>>
+windowIndex(Value v, Value lane, Value tap, func::FuncOp fn) {
+  using Coeff = std::array<int64_t, 3>;
+  if (v == lane)
+    return Coeff{1, 0, 0};
+  if (v == tap)
+    return Coeff{0, 1, 0};
+  if (auto c = v.getDefiningOp<arith::ConstantIndexOp>())
+    return Coeff{0, 0, c.value()};
+  if (auto dim = v.getDefiningOp<memref::DimOp>();
+      dim && dim.getConstantIndex()) {
+    if (auto n = block::orderedArgDim(fn, nullptr, dim.getSource(),
+                                      *dim.getConstantIndex()))
+      return Coeff{0, 0, *n};
+  }
+  auto *op = v.getDefiningOp();
+  if (!op || !isa<arith::AddIOp, arith::SubIOp>(op))
+    return {};
+  auto a = windowIndex(op->getOperand(0), lane, tap, fn),
+       b = windowIndex(op->getOperand(1), lane, tap, fn);
+  if (!a || !b)
+    return {};
+  for (int i = 0; i < 3; ++i)
+    if (isa<arith::AddIOp>(op)
+            ? __builtin_add_overflow((*a)[i], (*b)[i], &(*a)[i])
+            : __builtin_sub_overflow((*a)[i], (*b)[i], &(*a)[i]))
+      return {};
+  return a;
+}
+static void matchWindowFold(func::FuncOp fn, Block &bb, PrivateRows &r,
+                            const LocalSupply &local) {
+  if (r.lanes % 64)
+    return;
+  auto fzero = [](Value v) {
+    auto c = v.getDefiningOp<arith::ConstantOp>();
+    auto a = c ? dyn_cast<FloatAttr>(c.getValue()) : FloatAttr{};
+    return a && a.getValue().isPosZero();
+  };
+  auto izero = [](Value v, int64_t n) {
+    auto c = v.getDefiningOp<arith::ConstantIndexOp>();
+    return c && c.value() == n;
+  };
+  auto widening = [](Value v) {
+    auto ext = v.getDefiningOp<arith::ExtFOp>();
+    return ext && ext.getIn().getType().isF16() && ext.getType().isF32()
+               ? ext.getIn().getDefiningOp<memref::LoadOp>()
+               : memref::LoadOp{};
+  };
+  for (auto loop : bb.getOps<scf::ForOp>()) {
+    auto n = block::orderedStaticLoopExtent(loop, fn, nullptr);
+    if (!n || *n < 1 || *n > r.lanes || !izero(loop.getLowerBound(), 0) ||
+        !izero(loop.getStep(), 1) || loop.getNumResults() != 1 ||
+        !fzero(loop.getInitArgs()[0]))
+      continue;
+    auto add = loop.getBody()
+                   ->getTerminator()
+                   ->getOperand(0)
+                   .getDefiningOp<arith::AddFOp>();
+    if (!add || add.getLhs() != loop.getRegionIterArgs()[0])
+      continue;
+    auto mul = add.getRhs().getDefiningOp<arith::MulFOp>();
+    if (!mul)
+      continue;
+    auto cond = mul.getLhs().getDefiningOp<scf::IfOp>();
+    auto weight = widening(mul.getRhs());
+    if (!cond || !weight ||
+        weight.getIndices().back() != loop.getInductionVar() ||
+        !cond.elseBlock() || !fzero(cond.elseYield().getOperand(0)))
+      continue;
+    auto input = widening(cond.thenYield().getOperand(0));
+    auto guard = cond.getCondition().getDefiningOp<arith::CmpIOp>();
+    if (!input || !guard || guard.getPredicate() != arith::CmpIPredicate::sge ||
+        guard.getLhs() != input.getIndices().back() ||
+        !izero(guard.getRhs(), 0))
+      continue;
+    auto idx = windowIndex(guard.getLhs(), bb.getArguments().back(),
+                           loop.getInductionVar(), fn);
+    if (!idx || *idx != std::array<int64_t, 3>{1, 1, 1 - *n})
+      continue;
+    auto a = input.getMemRef(), w = weight.getMemRef();
+    if (!r.prefixes.count(a) || !r.prefixes.count(w) || r.writes.contains(a) ||
+        r.writes.contains(w))
+      continue;
+    auto length = [&](Value v) {
+      return block::orderedArgDim(fn, nullptr, v,
+                                  cast<MemRefType>(v.getType()).getRank() - 1);
+    };
+    if (length(a) != r.lanes || length(w) != *n)
+      continue;
+    if (loop.walk([&](Operation *op) {
+              return op == loop || op == cond || op == input || op == weight ||
+                             isMemoryEffectFree(op)
+                         ? WalkResult::advance()
+                         : WalkResult::interrupt();
+            })
+            .wasInterrupted())
+      continue;
+    // Padded half row, widened product, FP32 accumulator.
+    int64_t bytes = llvm::alignTo((r.lanes + *n - 1) * 2, local.alignment) +
+                    2 * llvm::alignTo(r.lanes * 4, local.alignment);
+    if (bytes > std::min(local.capacity, local.budget) - r.bytes)
+      return;
+    r.bytes += bytes;
+    r.windowFold = PrivateRows::WindowFold{loop, a, w, *n};
+    return;
+  }
+}
 // Neighboring positions share a contiguous input window. A task owns the
 // entire output row, including any boundary predicates on the member loads.
 static std::optional<PrivateRows> windowRows(func::FuncOp fn, Operation &space,
@@ -99,6 +261,8 @@ static std::optional<PrivateRows> windowRows(func::FuncOp fn, Operation &space,
   if (!hasWindow || plan.writes.empty() ||
       plan.bytes > std::min(local.capacity, local.budget))
     return {};
+  planPointwise(bb, plan, local);
+  matchWindowFold(fn, bb, plan, local);
   return plan;
 }
 std::optional<PrivateRows> privateRows(func::FuncOp fn,

@@ -224,7 +224,11 @@ LogicalResult offsets(func::FuncOp f, bool install) {
         if (o.getAttr("bangc.scan_scratch") != addr)
           return WalkResult::interrupt();
       }
-      if ((code == "block.mul" && resTy && resTy.getRank() == 2 &&
+      if ((code == "block.gt" && resTy && resTy.getRank() == 2 &&
+           o.getOperand(1).getType().isF32()) ||
+          (code == "block.select" && resTy && resTy.getRank() == 2 &&
+           resTy.getElementType().isF16()) ||
+          (code == "block.mul" && resTy && resTy.getRank() == 2 &&
            resTy.getElementType().isBF16()) ||
           (code == "block.cast" && resTy && resTy.getRank() == 2 &&
            resTy.getElementType().isBF16()) ||
