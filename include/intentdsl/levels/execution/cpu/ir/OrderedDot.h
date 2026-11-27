@@ -19,7 +19,8 @@ struct OrderedDotPanel {
 inline std::optional<OrderedDotPanel> orderedDotPanel(mlir::Operation &space,
                                                       const CallFacts &facts,
                                                       int64_t axis,
-                                                      int64_t batch) {
+                                                      int64_t batch,
+                                                      bool requiresFtz = true) {
   using namespace mlir;
   if (axis < 0 ||
       size_t(axis) >= space.getRegion(0).front().getNumArguments() ||
@@ -63,12 +64,12 @@ inline std::optional<OrderedDotPanel> orderedDotPanel(mlir::Operation &space,
       continue;
     for (auto &dot : loop.getBody()->without_terminator()) {
       if (dot.getName().stripDialect() != "lane_sum" ||
-          !compilerinfra::allowsSubnormalFlush(&dot) ||
+          (requiresFtz && !compilerinfra::allowsSubnormalFlush(&dot)) ||
           !arith::bitEnumContainsAll(kir::getFastMathFlags(&dot),
                                      arith::FastMathFlags::reassoc))
         continue;
       auto mul = dot.getOperand(0).getDefiningOp<arith::MulFOp>();
-      if (!mul || !compilerinfra::allowsSubnormalFlush(mul))
+      if (!mul || (requiresFtz && !compilerinfra::allowsSubnormalFlush(mul)))
         continue;
       Operation *q = nullptr, *k = nullptr;
       int64_t depth = 0;

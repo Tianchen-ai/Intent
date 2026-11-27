@@ -318,6 +318,7 @@ std::optional<TightenedLoopBound> analyzeCausalLoop(func::FuncOp fn,
 
 struct TiledTwoPassPlan {
   StringAttr scoreEngine, valueEngine;
+  bool fusedScore = false;
   arith::FastMathFlagsAttr accumulatorFlags;
   int64_t innerAx = -1;
   int64_t tokenTile = 0, valueWidth = 0;
@@ -946,6 +947,10 @@ struct OrderedLowerer {
     auto dotMul = laneSum->getOperand(0).getDefiningOp<arith::MulFOp>();
     if (!dotMul)
       return false;
+    plan.fusedScore = compilerinfra::hasFastMath(dotMul, arith::FastMathFlags::contract) &&
+                      compilerinfra::hasFastMath(laneSum, arith::FastMathFlags::contract);
+    if (isRvv && !compilerinfra::hasFastMath(laneSum, arith::FastMathFlags::reassoc))
+      return false;
     Value qVecVal, kVecVal;
     if (dotMul.getLhs().getParentBlock() == &srcBb &&
         dotMul.getRhs().getParentBlock() == loop1.getBody()) {
@@ -1299,12 +1304,14 @@ struct OrderedLowerer {
       } else {
         return false;
       }
-      if (recordV) {
-        auto flags = accAdd.getFastmath() & (arith::FastMathFlags::contract | arith::FastMathFlags::reassoc);
-        if (!arith::bitEnumContainsAll(vMul.getFastmath(), arith::FastMathFlags::contract))
-          flags = flags & arith::FastMathFlags::reassoc;
+      auto required = arith::FastMathFlags::contract | arith::FastMathFlags::reassoc;
+      auto flags = accAdd.getFastmath() & required;
+      if (!arith::bitEnumContainsAll(vMul.getFastmath(), arith::FastMathFlags::contract))
+        flags = flags & arith::FastMathFlags::reassoc;
+      if (isRvv && !arith::bitEnumContainsAll(flags, required))
+        return false;
+      if (recordV)
         plan.accumulatorFlags = arith::FastMathFlagsAttr::get(b.getContext(), flags);
-      }
       Value factorVal = splatVal.getDefiningOp()->getOperand(0);
       std::optional<Type> roundTy;
       if (factorVal != weightVal) {
@@ -1724,6 +1731,17 @@ struct OrderedLowerer {
         sc1D = bin("mul", sc1D, outerScaleTerm, vecBTy);
       return sc1D;
     };
+    auto scoreProduct = [&](TaskTerm left, TaskTerm right) {
+      if (!isRvv || plan.fusedScore)
+        return outerContractOp(left, right, plan.axD, scoreMatTy, plan.scoreEngine);
+      // RVV stream-contract uses vfmacc. A reassignable sum may still
+      // require each FP32 multiply to round before the reduction.
+      std::string products = "!weft_kernel.value<f32,[" + std::to_string(B) + "," +
+          std::to_string(plan.D) + "," + std::to_string(T) + "],[" +
+          std::to_string(plan.axOwn) + "," + std::to_string(plan.axD) + "," +
+          std::to_string(plan.axTok) + "]>";
+      return reduceOp(bin("mul", left, right, products), "add", 1, scoreMatTy);
+    };
     auto applyPostSubScale = [&](TaskTerm diff, StringRef ty) -> TaskTerm {
       if (postScaleTerm.v)
         diff = bin("mul", diff, postScaleTerm, ty);
@@ -1950,8 +1968,7 @@ struct OrderedLowerer {
               subview2D(kSl2D, tIv.v, c0.v, T, plan.D, true, kRawMatTy);
           TaskTerm kForC =
               (nativeQK || kElem == "f32") ? kRaw : castOp(kRaw, kF32MatTy);
-          TaskTerm sc = outerContractOp(qForContract, kForC, plan.axD,
-                                        scoreMatTy, plan.scoreEngine);
+          TaskTerm sc = scoreProduct(qForContract, kForC);
           sc = applyScoreAffine2D(sc, tIv);
           if (plan.hasScoreBuffer) {
             TaskTerm offIdx = loC && *loC == 0 ? tIv : bin("sub", tIv, lb, "index");
@@ -2461,8 +2478,7 @@ struct OrderedLowerer {
                   subview2D(kSl2D, tIv.v, c0.v, T, plan.D, true, kRawMatTy);
               TaskTerm kForC =
                   (nativeQK || kElem == "f32") ? kRaw : castOp(kRaw, kF32MatTy);
-              TaskTerm sc = outerContractOp(qForContract, kForC, plan.axD,
-                                            scoreMatTy, plan.scoreEngine);
+              TaskTerm sc = scoreProduct(qForContract, kForC);
               sc = applyScoreAffine2D(sc, tIv);
               TaskTerm diff =
                   applyPostSubScale(bin("sub", sc, peakVec, scoreMatTy),
@@ -2703,8 +2719,7 @@ struct OrderedLowerer {
                   subview2D(kSl2D, tIv.v, c0.v, T, plan.D, true, kRawMatTy);
               TaskTerm kForC =
                   (nativeQK || kElem == "f32") ? kRaw : castOp(kRaw, kF32MatTy);
-              sc = outerContractOp(qForContract, kForC, plan.axD, scoreMatTy,
-                                   plan.scoreEngine);
+              sc = scoreProduct(qForContract, kForC);
               sc = applyScoreAffine2D(sc, tIv);
             }
             TaskTerm diff =

@@ -130,7 +130,8 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
   caps->vectorBits = *bits;
   caps->l2CacheBytes = options.getInteger("l2_cache_bytes").value_or(0);
   caps->structuredRows = false;
-  caps->orderedDotTokens = intentdsl::cpu::RowMachine::streamedDotTokens;
+  caps->orderedDotTokens = isRvv ? std::min<int64_t>(v, intentdsl::cpu::RowMachine::streamedDotTokens)
+                                 : intentdsl::cpu::RowMachine::streamedDotTokens;
   caps->ownerStackBytes = privStack;
   caps->ownerRegisters = vecRegs;
   if (!isRvv) {
