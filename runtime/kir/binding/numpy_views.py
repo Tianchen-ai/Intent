@@ -13,6 +13,7 @@ def describe(a):
         np.dtype("float32"): "f32",
         np.dtype("int32"): "i32",
         np.dtype("int64"): "i64",
+        np.dtype("uint64"): "u64",
         np.dtype("int8"): "i8",
         np.dtype("uint8"): "u8",
     }.get(a.dtype)
@@ -45,11 +46,22 @@ def overlaps(a, b):
 def allocate(shape, dtype, device):
     import numpy as np
 
+    if dtype in ("bf16", "f8e4m3fn"):
+        import ml_dtypes
+
     return np.empty(
         shape,
-        dtype={"f32": "float32", "f16": "float16", "bf16": "bfloat16", "i32": "int32", "i64":"int64"}[
-            dtype
-        ],
+        dtype={
+            "f32": "float32",
+            "f16": "float16",
+            "bf16": "bfloat16",
+            "f8e4m3fn": "float8_e4m3fn",
+            "i32": "int32",
+            "i64": "int64",
+            "u64": "uint64",
+            "i8": "int8",
+            "u8": "uint8",
+        }[dtype],
     )
 
 
