@@ -15,7 +15,8 @@ struct RowMachine {
   // panel.
   unsigned orderedDotTokens = 0;
   int64_t ownerStackBytes = 0, ownerRegisters = 0;
-  int64_t l2CacheBytes = 0;
+  int64_t l1CacheBytes = 0, l2CacheBytes = 0;
+  unsigned maxVectorElements = 0;
   static constexpr unsigned streamedDotTokens = 16;
   llvm::SmallVector<RowConfig> rows;
   llvm::SmallVector<int64_t, 2> unrollFactors = {1};

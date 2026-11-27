@@ -383,15 +383,31 @@ void sharedOwnerTraversal(compilerinfra::Unit &u) {
             int64_t width =
                 p.services.get<intentdsl::cpu::RowMachine>()->orderedDotTokens;
             auto value = orderedValuePanel(*op, facts, *panel);
-            for (int mult : {1, 2, 4}) {
+            bool online =
+                width && value && value->supported(p) &&
+                machine.maxVectorElements && machine.l1CacheBytes &&
+                machine.l2CacheBytes &&
+                op->getParentOfType<func::FuncOp>()->getAttrOfType<StringAttr>(
+                    "kir.normalization") == "online-eligible";
+            int64_t limit = width ? 4 : 1;
+            if (online) {
+              // Both input panels and the live C tile share private L2.
+              int64_t bytes =
+                  sizeof(uint16_t) * (panel->depth + value->columns) * width;
+              int64_t room = machine.l2CacheBytes -
+                             int64_t(sizeof(float)) * batch * value->columns;
+              limit = std::max(limit,
+                               std::min(panel->tokens / width, room / bytes));
+            }
+            for (int64_t mult = 1; mult <= limit; mult *= 2) {
               int64_t tile = width * mult;
-              if ((!width && mult > 1) || tile > panel->tokens)
-                continue;
+              if (tile > panel->tokens)
+                break;
               row.set("score_tile",
                       b.getI64IntegerAttr(tile ? tile : panel->tokens));
               auto candidate =
                   base + (mult == 1 ? "" : "-" + std::to_string(tile));
-              if (!matrixOnly)
+              if (!matrixOnly && mult <= 4)
                 cs.push_back({candidate,
                               "shared-interval-owners",
                               row.getDictionary(b.getContext()),
@@ -400,11 +416,20 @@ void sharedOwnerTraversal(compilerinfra::Unit &u) {
               if (value && value->supported(p) && slots >= panel->tokens) {
                 NamedAttrList pv(row);
                 pv.set("value_width", b.getI64IntegerAttr(value->columns));
-                cs.push_back({candidate + "-pv",
-                              "shared-interval-owners",
-                              pv.getDictionary(b.getContext()),
-                              {"exclusive-output"},
-                              {"exits/" + p.name + "::onednn-brgemm-bf16"}});
+                if (mult <= 4)
+                  cs.push_back({candidate + "-pv",
+                                "shared-interval-owners",
+                                pv.getDictionary(b.getContext()),
+                                {"exclusive-output"},
+                                {"exits/" + p.name + "::onednn-brgemm-bf16"}});
+                if (online && panel->tokens % tile == 0) {
+                  pv.set("online", b.getUnitAttr());
+                  cs.push_back({candidate + "-pv-online",
+                                "shared-interval-owners",
+                                pv.getDictionary(b.getContext()),
+                                {"exclusive-output"},
+                                {"exits/" + p.name + "::onednn-brgemm-bf16"}});
+                }
               }
             }
           }

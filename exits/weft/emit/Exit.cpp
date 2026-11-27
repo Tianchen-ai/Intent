@@ -128,8 +128,12 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
 
   auto caps = std::make_shared<intentdsl::cpu::RowMachine>();
   caps->vectorBits = *bits;
+  caps->l1CacheBytes = options.getInteger("l1_cache_bytes").value_or(0);
   caps->l2CacheBytes = options.getInteger("l2_cache_bytes").value_or(0);
   caps->structuredRows = false;
+  // ConvertWeftToX86::physicalType uses private arrays above 4096 elements.
+  if (p.features.count("weft_brgemm_bf16"))
+    caps->maxVectorElements = 4096;
   caps->orderedDotTokens = isRvv ? std::min<int64_t>(v, intentdsl::cpu::RowMachine::streamedDotTokens)
                                  : intentdsl::cpu::RowMachine::streamedDotTokens;
   caps->ownerStackBytes = privStack;

@@ -1,6 +1,7 @@
-#include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
 #include "compilerinfra/Assembly.h"
 #include "compilerinfra/Proofs.h"
+#include "intentdsl/levels/algorithm/kir/ir/OnlineNormalization.h"
+#include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
@@ -114,26 +115,43 @@ bool fuse(Reduction peak, Reduction mass) {
     st.addTypes(type);
     return b.create(st)->getResult(0);
   };
-  Value finitePeak = make("ne", {newMax, peak.init}, predicate);
-  Value safeMax = make("select", {finitePeak, newMax, mass.init}, row);
-  Operation *delta = b.clone(*sub, values);
-  delta->setOperands({body->getArgument(1), safeMax});
-  delta->getResult(0).setType(row);
-  Operation *scale = b.clone(*exp, values);
-  scale->setOperand(0, delta->getResult(0));
-  scale->getResult(0).setType(row);
-  Value rescaled = make("mul", {body->getArgument(2), scale->getResult(0)}, row);
-  IRMapping weights;
-  weights.map(sub->getOperand(0), values.lookup(peak.input));
-  weights.map(sub->getOperand(1), safeMax);
-  weights.map(mass.mask, values.lookup(peak.mask));
-  b.clone(*sub, weights);
-  b.clone(*exp, weights);
-  b.clone(*mass.reduce, weights);
-  weights.map(second.getArgument(1), rescaled);
-  auto *combined = b.clone(*second.back().getOperand(0).getDefiningOp(), weights);
+  auto update = intentdsl::kir::mergeNormalizationPanel(
+      Value(body->getArgument(1)), newMax, Value(body->getArgument(2)),
+      [&](Value nextPeak) {
+        Value present = make("ne", {nextPeak, peak.init}, predicate);
+        return make("select", {present, nextPeak, mass.init}, row);
+      },
+      [&](Value prior, Value origin) {
+        Operation *delta = b.clone(*sub, values);
+        delta->setOperands({prior, origin});
+        delta->getResult(0).setType(row);
+        Operation *scale = b.clone(*exp, values);
+        scale->setOperand(0, delta->getResult(0));
+        scale->getResult(0).setType(row);
+        return scale->getResult(0);
+      },
+      [&](Value origin) {
+        IRMapping weights;
+        weights.map(sub->getOperand(0), values.lookup(peak.input));
+        weights.map(sub->getOperand(1), origin);
+        weights.map(mass.mask, values.lookup(peak.mask));
+        b.clone(*sub, weights);
+        auto *weight = b.clone(*exp, weights);
+        return std::pair{b.clone(*mass.reduce, weights)->getResult(0),
+                         weight->getResult(0)};
+      },
+      [&](Value oldMass, Value scale) {
+        return make("mul", {oldMass, scale}, row);
+      },
+      [&](Value previous, Value current) {
+        IRMapping operands;
+        operands.map(second.getArgument(1), previous);
+        operands.map(mass.reduce->getResult(0), current);
+        return b.clone(*second.back().getOperand(0).getDefiningOp(), operands)
+            ->getResult(0);
+      });
   OperationState yield(loc, "block.yield");
-  yield.addOperands({newMax, combined->getResult(0)});
+  yield.addOperands({newMax, std::get<1>(update)});
   b.create(yield);
 
   b.setInsertionPointAfter(loop);

@@ -152,6 +152,7 @@ class Target:
             vector_bits=bits,
             workers=self.workers,
             calibration=calibration(scope, self.workers, bits),
+            l1_cache_bytes=private_cache_bytes(scope, 1),
             l2_cache_bytes=private_cache_bytes(scope),
             **feats,
         )

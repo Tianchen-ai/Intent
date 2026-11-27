@@ -20,6 +20,20 @@ inline double vectorScoreBytes(int64_t rows, int64_t tile, int64_t depth,
              (double(depth) * (rows * tile + rows + tile) + rows * columns);
 }
 
+inline bool acceptsScoreTile(const RowMachine &machine, int64_t tile,
+                             int64_t keys, bool online) {
+  if (tile <= 0 || tile > keys)
+    return false;
+  auto native = machine.orderedDotTokens;
+  if (!native)
+    return !online && tile == keys;
+  if (tile % native || !llvm::isPowerOf2_64(tile / native))
+    return false;
+  return online ? machine.maxVectorElements && machine.l1CacheBytes > 0 &&
+                      machine.l2CacheBytes > 0 && keys % tile == 0
+                : tile <= 4 * native;
+}
+
 struct OrderedDotPanel {
   mlir::Operation *dot, *query, *key;
   int64_t depth, tokens;

@@ -70,7 +70,7 @@ double meanKeySpan(const intentdsl::cpu::ScoreCachePlan &panel,
 } // namespace
 void ownerCost(Unit &u) {
   u.costModels.push_back(
-      {{"ordered-tasks", u.qualify("ordered-owners"), "3",
+      {{"ordered-tasks", u.qualify("ordered-owners"), "4",
         [](mlir::Operation *o, const StructuralCandidate &c,
            CostContext &ctx) -> llvm::Expected<CostEstimate> {
           auto f = ctx.target.services.get<intentdsl::CallFacts>();
@@ -212,6 +212,32 @@ void ownerCost(Unit &u) {
                       double(batch) * tokens *
                           (sizeof(uint16_t) + sizeof(uint8_t)) +
                       double(tokens) * cols.getInt() * sizeof(uint16_t);
+                  bool online = cache.contains("online");
+                  if (online) {
+                    // The projected QK tile feeds the weight expression in
+                    // the same iteration. Its pointwise rescaling of C walks
+                    // contiguous private storage before BRGEMM reads C.
+                    packedBytes -= 2 * scoreEntries * sizeof(float);
+                    auto read =
+                        intentdsl::quantity(ctx, "read_1_private_bw", "B/ns")
+                            .value_or(bwVal);
+                    auto write =
+                        intentdsl::quantity(ctx, "write_1_private_bw", "B/ns")
+                            .value_or(bwVal);
+                    *e.timeNs += panels * outBytes * (1. / read + 1. / write);
+                    e.terms["rescale_bytes"] = {2 * panels * outBytes, "B"};
+                    double active =
+                        batch * tokens * (sizeof(float) + sizeof(uint16_t) + 2);
+                    double coldBytes = std::max(0., active - rm->l1CacheBytes);
+                    packedBytes += 2 * panels * coldBytes;
+                    // Over the downstream vector-value limit each intermediate
+                    // needs a separate payload and validity traversal.
+                    if (batch * tokens > rm->maxVectorElements)
+                      packedBytes +=
+                          8 * scoreEntries * (sizeof(float) + sizeof(uint8_t));
+                    if (batch * cols.getInt() > rm->maxVectorElements)
+                      packedBytes += 2 * panels * outBytes;
+                  }
                   double liveBytes = std::max(scoreLive, valueLive);
                   double spill = std::max(0., liveBytes - rm->ownerStackBytes);
                   e.terms["matrix_spill_bytes"] = {2 * panels * spill, "B"};
@@ -284,7 +310,7 @@ void ownerCost(Unit &u) {
                         : shared->readBytes * .5;
               bytes = (shared->readBytes - savedPerStep) * trip * n /
                           ownersPerLoad +
-                      8. * trip * n;
+                      (cache.contains("online") ? 0. : 8. * trip * n);
             }
             int64_t regCapFloats = (rm->vectorBits >= 512) ? 256 : 128;
             if (together && regCarryFloats * ownersPerLoad > regCapFloats) {

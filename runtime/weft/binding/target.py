@@ -99,6 +99,7 @@ class Target:
             weft_brgemm_s8=bool(brg.get("s8")),
             weft_brgemm_u8s8=bool(brg.get("u8s8")),
             calibration=calibration(scope, self.workers, bits),
+            l1_cache_bytes=private_cache_bytes(scope, 1),
             l2_cache_bytes=private_cache_bytes(scope),
         )
 

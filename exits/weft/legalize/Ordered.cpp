@@ -2,6 +2,7 @@
 #include "Arithmetic.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
+#include "intentdsl/levels/algorithm/kir/ir/OnlineNormalization.h"
 #include "intentdsl/levels/algorithm/kir/ir/Ordered.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
 #include "intentdsl/levels/execution/cpu/ir/OwnerTraversal.h"
@@ -340,6 +341,7 @@ struct TiledTwoPassPlan {
   Value causalBoundVal;
   bool causalInclusive = true;
   bool hasScoreBuffer = false;
+  bool online = false;
   int64_t scoreSlots = 0;
   bool windowGuarded = false;
 
@@ -1838,11 +1840,11 @@ struct OrderedLowerer {
     bool exactOrigTiles =
         isStaticMultipleOf(fn, plan.loop1.getLowerBound(), T) &&
         isStaticMultipleOf(fn, plan.loop1.getUpperBound(), T);
+    bool online = plan.online;
     bool exactTiles =
-        exactOrigTiles &&
-        (!plan.hasCausal ||
-         (plan.causalBoundVal == innerArg && plan.causalInclusive &&
-          B % T == 0));
+        online || (exactOrigTiles &&
+                   (!plan.hasCausal || (plan.causalBoundVal == innerArg &&
+                                        plan.causalInclusive && B % T == 0)));
 
     auto tightenCausalUb = [&](TaskTerm lbTerm, TaskTerm origUbTerm) -> TaskTerm {
       if (!plan.hasCausal)
@@ -1861,6 +1863,15 @@ struct OrderedLowerer {
       }
       TaskTerm clampedLo = sel(cmp("gt", lim64, lb64, "i1"), lim64, lb64, "si64");
       TaskTerm clampedUb = sel(cmp("lt", clampedLo, ub64, "i1"), clampedLo, ub64, "si64");
+      if (online) {
+        auto tile = lit(std::to_string(T), "si64");
+        auto length = bin("sub", clampedUb, lb64, "si64");
+        auto n =
+            bin("div",
+                bin("add", length, lit(std::to_string(T - 1), "si64"), "si64"),
+                tile, "si64");
+        clampedUb = bin("add", lb64, bin("mul", n, tile, "si64"), "si64");
+      }
       return castOp(clampedUb, "index");
     };
 
@@ -1951,6 +1962,99 @@ struct OrderedLowerer {
           }
         }
 
+        if (online && exactTiles) {
+          SmallVector<Value> vCoords;
+          for (auto [pos, c] : llvm::enumerate(plan.vCoords))
+            if (int64_t(pos) != plan.vTokCoordPos)
+              vCoords.push_back(c);
+          auto vView =
+              slice2D(plan.vMem, vCoords, plan.vTokMemAx, plan.vVecMemAx);
+          auto tys =
+              b.getArrayAttr({b.getStringAttr(vecBTy), b.getStringAttr(vecBTy),
+                              b.getStringAttr(outMatTy)});
+          Operation *fold = makeOp(
+              b, loc, "task_for", {lb.v, ub.v, cT.v, ninfV.v, zeroV.v, zeroO.v},
+              {b.getIndexType(), b.getIndexType(), b.getIndexType()},
+              {b.getNamedAttr("iter_types", tys)}, 1);
+          {
+            auto &bb = fold->getRegion(0).emplaceBlock();
+            auto arg = [&](StringRef ty) {
+              return TaskTerm{bb.addArgument(b.getIndexType(), loc), ty.str()};
+            };
+            auto t = arg("index"), max0 = arg(vecBTy), mass0 = arg(vecBTy),
+                 acc0 = arg(outMatTy);
+            OpBuilder::InsertionGuard insertion(b);
+            b.setInsertionPointToEnd(&bb);
+            auto k = subview2D(kSl2D, t.v, c0.v, T, plan.D, true, kRawMatTy);
+            auto scores = applyScoreAffine2D(
+                outerContractOp(qForContract, k, plan.axD, scoreMatTy,
+                                plan.scoreEngine),
+                t);
+            auto cols = bin("add", iotaTok64, castOp(t, "si64"), si64TTy);
+            auto limit =
+                castOp(lanes[0].at(plan.loop1.getUpperBound()), "si64");
+            auto inRange = cmp("lt", cols, limit,
+                               "!weft_kernel.value<i1,[" + std::to_string(T) +
+                                   "],[" + std::to_string(plan.axTok) + "]>");
+            auto selected = sel(inRange, scores, ninfM, scoreMatTy);
+            if (plan.hasCausal) {
+              selected = sel(cmp(causalPred, boundVec64, cols, maskMatTy),
+                             selected, ninfM, scoreMatTy);
+            }
+            auto max1 =
+                bin("max", max0, reduceOp(selected, "max", 1, vecBTy), vecBTy);
+            auto [alpha, mass1, w] = intentdsl::kir::mergeNormalizationPanel(
+                max0, max1, mass0,
+                [&](TaskTerm peak) {
+                  return sel(cmp("ne", peak, ninfV, maskBTy), peak, zeroV,
+                             vecBTy);
+                },
+                [&](TaskTerm oldPeak, TaskTerm origin) {
+                  auto delta = applyPostSubScale(
+                      bin("sub", oldPeak, origin, vecBTy), vecBTy);
+                  auto scale = expWeight(delta, zeroV, vecBTy, maskBTy);
+                  return sel(cmp("eq", oldPeak, ninfV, maskBTy), zeroV, scale,
+                             vecBTy);
+                },
+                [&](TaskTerm origin) {
+                  auto delta = applyPostSubScale(
+                      bin("sub", scores, origin, scoreMatTy), scoreMatTy);
+                  auto weights =
+                      emitExpWeight2D(delta, t, boundVec64, causalPred);
+                  weights = sel(inRange, weights, zeroM, scoreMatTy);
+                  return std::pair{reduceOp(weights, "add", 1, vecBTy),
+                                   weights};
+                },
+                [&](TaskTerm mass, TaskTerm scale) {
+                  return bin("mul", mass, scale, vecBTy);
+                },
+                [&](TaskTerm oldMass, TaskTerm tileMass) {
+                  return bin("add", oldMass, tileMass, vecBTy);
+                });
+            if (plan.weightRoundType) {
+              std::string ty = scoreMatTy;
+              ty.replace(ty.find("<f32,") + 1, 3,
+                         scalarType(*plan.weightRoundType));
+              w = castOp(w, ty);
+            }
+            auto v = subview2D(vView, t.v, c0.v, T, plan.DV, true, vRawMatTy);
+            auto prior = bin("mul", acc0, alpha, outMatTy);
+            auto product =
+                outerContractOp(w, v, plan.axTok, outMatTy, plan.valueEngine);
+            auto acc1 = bin("add", prior, product, outMatTy);
+            acc1.v.getDefiningOp()->setAttr("fastmath", plan.accumulatorFlags);
+            makeOp(b, loc, "task_yield", {max1.v, mass1.v, acc1.v}, {},
+                   {b.getNamedAttr("val_types", tys)});
+          }
+          peakVec = {fold->getResult(0), vecBTy};
+          massVec = {fold->getResult(1), vecBTy};
+          outMat = {fold->getResult(2), outMatTy};
+          if (llvm::any_of(
+                  plan.loop1.getResult(0).getUsers(),
+                  [&](Operation *u) { return !plan.stage2Op->isAncestor(u); }))
+            extractScalarLanes(peakVec, plan.loop1.getResult(0));
+          continue;
+        }
         // Pass 1 main loop (step = T)
         Operation *p1Main = makeOp(
             b, loc, "task_for", {lb.v, tMain.v, cT.v, ninfV.v},
@@ -2107,6 +2211,15 @@ struct OrderedLowerer {
       }
 
       if (&op == plan.stage2Op) {
+        if (online && exactTiles) {
+          if (llvm::any_of(plan.stage2MassRes.getUsers(), [&](Operation *u) {
+                return !skipOps.contains(u) &&
+                       (!plan.invIfOrSelOp ||
+                        !plan.invIfOrSelOp->isAncestor(u));
+              }))
+            extractScalarLanes(massVec, plan.stage2MassRes);
+          continue;
+        }
         TaskTerm c0 = idx(0), c1 = idx(1), cT = idx(T);
         TaskTerm lb = lanes[0].at(plan.loop1.getLowerBound());
         TaskTerm ub =
@@ -4274,6 +4387,19 @@ LogicalResult lowerWeftOrdered(func::FuncOp fn,
   TiledTwoPassPlan tiledPlan;
   bool useTiled2D =
       lowerer.matchTiledTwoPassContraction(srcBb, localBufOp, tiledPlan);
+  if (space.hasAttr("cpu.online_normalization")) {
+    if (!useTiled2D || !tiledPlan.valueEngine ||
+        tiledPlan.valueWidth != tiledPlan.DV)
+      return space.emitError(
+          "online normalization requires legal score and value contractions");
+    auto lo = staticIndexVal(fn, tiledPlan.loop1.getLowerBound());
+    auto hi = maxStaticIndexVal(fn, tiledPlan.loop1.getUpperBound());
+    if (!lo || *lo || !hi || *hi > tiledPlan.KExt ||
+        tiledPlan.KExt % tiledPlan.tokenTile)
+      return space.emitError(
+          "online normalization requires a bounded panel view");
+    tiledPlan.online = true;
+  }
   TaskTerm iotaOwn64, iotaTok64, qSlotOff, tileSlotOff;
   if (useTiled2D) {
     if (tiledPlan.hasCausal)
@@ -4306,13 +4432,13 @@ LogicalResult lowerWeftOrdered(func::FuncOp fn,
         std::to_string(tiledPlan.axDV) + "]>";
     const bool needTiledOut = tiledPlan.valueWidth < tiledPlan.DV;
     lowerer.ninfV = lowerer.newVec(lowerer.ninfS, vecBTy);
-    if (tiledPlan.hasCausal)
+    if (tiledPlan.hasCausal || tiledPlan.online)
       lowerer.ninfM = lowerer.newVec(lowerer.ninfS, scoreMatTy);
     lowerer.zeroV = lowerer.newVec(lowerer.zeroS, vecBTy);
     lowerer.zeroM = lowerer.newVec(lowerer.zeroS, scoreMatTy);
     if (!needTiledOut)
       lowerer.zeroO = lowerer.newVec(lowerer.zeroS, outMatTy);
-    if (tiledPlan.hasScoreBuffer) {
+    if (tiledPlan.hasScoreBuffer && !tiledPlan.online) {
       lowerer.trueM = lowerer.newVec(lowerer.true1, maskMatTy);
       lowerer.trueB = lowerer.newVec(lowerer.true1, maskBTy);
     }
@@ -4342,7 +4468,7 @@ LogicalResult lowerWeftOrdered(func::FuncOp fn,
                 b.getNamedAttr("val_type", b.getStringAttr(idxTokTy))})
             ->getResult(0);
     iotaTok64 = lowerer.castOp({itIdx, idxTokTy}, si64TokTy);
-    if (tiledPlan.hasScoreBuffer) {
+    if (tiledPlan.hasScoreBuffer && !tiledPlan.online) {
       int64_t allocSlots = tiledPlan.scoreSlots;
       auto loC = staticIndexVal(fn, tiledPlan.loop1.getLowerBound());
       auto hiMax = maxStaticIndexVal(fn, tiledPlan.loop1.getUpperBound());

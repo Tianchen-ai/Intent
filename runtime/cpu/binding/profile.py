@@ -3,15 +3,15 @@ from functools import lru_cache
 from pathlib import Path
 
 @lru_cache(maxsize=32)
-def private_cache_bytes(scope):
-    """Minimum unified L2 capacity across processors in this affinity mask."""
+def private_cache_bytes(scope, level=2):
+    """Minimum data or unified cache capacity at this level across the affinity mask."""
     sizes = []
     units = {"K": 1 << 10, "M": 1 << 20}
     for cpu in scope:
         root = Path(f"/sys/devices/system/cpu/cpu{cpu}/cache")
         for entry in root.glob("index*"):
             try:
-                if (entry / "level").read_text().strip() != "2":
+                if (entry / "level").read_text().strip() != str(level):
                     continue
                 if (entry / "type").read_text().strip() not in ("Unified", "Data"):
                     continue

@@ -151,14 +151,17 @@ LogicalResult verifyOwnerGrain(func::FuncOp fn, Operation &space,
           ? selectOrderedDot(space, p, inner.getInt(), batch.getInt())
           : std::nullopt;
   auto scoreTile = space.getAttrOfType<IntegerAttr>("cpu.score_tile");
-  auto maxTile = p.services.get<RowMachine>()->orderedDotTokens;
-  if (scoreTile && (!dotPanel || scoreTile.getInt() <= 0 ||
-                    scoreTile.getInt() > dotPanel->tokens ||
-                    (maxTile ? scoreTile.getInt() != maxTile &&
-                                   scoreTile.getInt() != 2 * maxTile &&
-                                   scoreTile.getInt() != 4 * maxTile
-                             : scoreTile.getInt() != dotPanel->tokens)))
+  bool online = space.hasAttr("cpu.online_normalization");
+  if (scoreTile &&
+      (!dotPanel ||
+       !acceptsScoreTile(*p.services.get<RowMachine>(), scoreTile.getInt(),
+                         dotPanel->tokens, online)))
     return space.emitError("invalid ordered dot tile");
+  if (online &&
+      (!scoreTile || !space.hasAttr("cpu.value_width") ||
+       fn->getAttrOfType<StringAttr>("kir.normalization") != "online-eligible"))
+    return space.emitError(
+        "online normalization requires a permitted contraction chain");
   auto implId = Builder(fn.getContext())
                     .getStringAttr("exits/" + p.name + "::onednn-brgemm-bf16");
   auto valueWidth = space.getAttrOfType<IntegerAttr>("cpu.value_width");
@@ -892,7 +895,7 @@ void ownerTasks(Unit &u) {
         auto retained = d.getAs<IntegerAttr>("window");
         bool brg = bool(d.get("engine"));
         auto tile = d.getAs<IntegerAttr>("score_tile");
-        auto nativeTile = p.services.get<cpu::RowMachine>()->orderedDotTokens;
+        bool online = d.contains("online");
         auto panel = brg ? cpu::selectOrderedDot(*o, p, inner.getInt(), w)
                          : std::nullopt;
         auto valueWidth = d.getAs<IntegerAttr>("value_width");
@@ -908,19 +911,24 @@ void ownerTasks(Unit &u) {
             (brg &&
              (!retained ||
               d.getAs<StringAttr>("engine") != "onednn-brgemm-bf16" || !panel ||
-              !tile || tile.getInt() <= 0 || tile.getInt() > panel->tokens ||
-              (nativeTile ? (tile.getInt() != nativeTile &&
-                             tile.getInt() != 2 * nativeTile &&
-                             tile.getInt() != 4 * nativeTile)
-                          : tile.getInt() != panel->tokens))) ||
-            d.size() != (retained ? 4u : 3u) + 2 * brg + bool(valueWidth) ||
+              !tile ||
+              !cpu::acceptsScoreTile(*p.services.get<cpu::RowMachine>(),
+                                     tile.getInt(), panel->tokens, online))) ||
+            (d.contains("online") &&
+             (!valuePanel || !tile || panel->tokens % tile.getInt() ||
+              o->getParentOfType<func::FuncOp>()->getAttrOfType<StringAttr>(
+                  "kir.normalization") != "online-eligible")) ||
+            d.size() != (retained ? 4u : 3u) + 2 * brg + bool(valueWidth) +
+                            d.contains("online") ||
             w < 2 || !llvm::isPowerOf2_64(w) ||
             w > (d.contains("value_width")
                      ? std::max(p.services.get<cpu::RowMachine>()
                                     ->orderedMatrixOwners,
                                 p.services.get<cpu::RowMachine>()->packedOwners)
                      : std::max(p.services.get<cpu::RowMachine>()->packedOwners,
-                                retained ? p.services.get<cpu::RowMachine>()->repeatedScoreOwners : 0u)) ||
+                                retained ? p.services.get<cpu::RowMachine>()
+                                               ->repeatedScoreOwners
+                                         : 0u)) ||
             !grain || grain.getInt() % w || reuse->group % w ||
             reuse->extent % w ||
             (retained &&
@@ -960,7 +968,8 @@ void ownerTasks(Unit &u) {
                       (tile && tw && tile.getInt() != tw
                            ? "-" + std::to_string(tile.getInt())
                            : "") +
-                      (d.contains("value_width") ? "-pv" : "") ||
+                      (d.contains("value_width") ? "-pv" : "") +
+                      (d.contains("online") ? "-online" : "") ||
           c.topology !=
               (shared ? "shared-interval-owners" : "retained-scores") ||
           c.preconditions != std::vector<std::string>{"exclusive-output"})
@@ -1038,6 +1047,8 @@ void ownerTasks(Unit &u) {
         o->setAttr("cpu.innermost_owner", axis);
         useBrgemm = d.contains("engine");
         usePV = d.contains("value_width");
+        if (d.contains("online"))
+          o->setAttr("cpu.online_normalization", b.getUnitAttr());
         if (useBrgemm)
           o->setAttr("cpu.score_tile", d.get("score_tile"));
         ownerBatch = d.getAs<IntegerAttr>("batch").getInt();
