@@ -140,8 +140,20 @@ TerminalPrinter weftTerminalPrinter() {
       "%$r0=\"weft_kernel.field\"(%$0) <{{name=\"{field_name}\"}}>:({in_type})->{val_type}");
   rules["weft_host.task_fold2"] =
       PrintRule::format("%$r0=\"weft_kernel.fold2\"(%$0):({in_type})->{val_type}");
-  rules["weft_host.task_extract"] = PrintRule::format(
-      "%$r0=\"weft_kernel.extract\"(%$0,%$1) <{{selectors=[\"{selector}\"]}}>:({in_type},{point_type})->{val_type}");
+  enterLocal("weft_host.task_extract",
+             [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
+               std::string sels =
+                   "\"" + view.attrOfType<StringAttr>("selector").str() + "\"";
+               if (view.attr("keep_columns"))
+                 sels += ",\"all\"";
+               c.line(irId(view.result(0)) + "=\"weft_kernel.extract\"(" +
+                      irId(view.operand(0)) + "," + irId(view.operand(1)) +
+                      ") <{selectors=[" + sels + "]}>:(" +
+                      view.attrOfType<StringAttr>("in_type").str() + "," +
+                      view.attrOfType<StringAttr>("point_type").str() + ")->" +
+                      view.attrOfType<StringAttr>("val_type").str());
+               return llvm::Error::success();
+             });
   rules["weft_host.task_lookup"] = PrintRule::format(
       "%$r0=\"weft_kernel.lookup\"(%$0,%$1) <{{bounds=\"{bounds}\"}}>:({table_type},{idx_type})->{val_type}");
   enterLocal("weft_host.task_handoff",

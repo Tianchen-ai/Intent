@@ -1618,9 +1618,14 @@ TerminalPrinter mojoMatrixPrinter() {
       PrintRule::format("var $r0=external_call[\"intent_brgemm_bf16_prefix\", "
                         "Int32]($0,$1,$2,Int64({rows}),Int64({columns}),Int64($"
                         "3),Int64({lda}),Int64({ldc}),$4,$5)");
+  rules["mojo_row.fold_gemm"] = PrintRule::format(
+      "var $r0 = external_call[\"intent_fold_brgemm\", "
+      "Int32]($0,$1,$2,$3,$4,Int64({rows}),Int64({cols}),Int64({depth}),Int64({"
+      "lda}),Int64({ldb}),Int32({add_c}))");
   rules["mojo_row.owner_brgemm_plan"] = PrintRule::format(
       "const void *bh = "
-      "intent_brgemm_get({rows},{cols},{depth},{depth},{cols},{cols},1,1,0);\n"
+      "intent_brgemm_get({rows},{cols},{depth},{depth},{cols},{cols},{dtype},{"
+      "dtype},0);\n"
       "if (!bh) return 1;\n"
       "int64_t scratch_bytes=intent_brgemm_scratch_bytes(bh);\n"
       "if (scratch_bytes <= 0) return 2;\nint status=0;");

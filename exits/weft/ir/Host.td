@@ -208,7 +208,8 @@ def TaskSubquantLevelOp : Op<WeftHost_Dialect, "task_subquant_level"> {
 
 def TaskExtractOp : Op<WeftHost_Dialect, "task_extract"> {
   let arguments = (ins Index:$input, Index:$point, StrAttr:$selector,
-                       StrAttr:$in_type, StrAttr:$point_type, StrAttr:$val_type);
+                       StrAttr:$in_type, StrAttr:$point_type, StrAttr:$val_type,
+                       OptionalAttr<UnitAttr>:$keep_columns);
   let results = (outs Index:$res);
 }
 

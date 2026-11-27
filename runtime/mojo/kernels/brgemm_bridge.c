@@ -269,6 +269,58 @@ int32_t intent_brgemm_tile(const void *handle, const void *A, const void *B,
              : 4;
 }
 
+// Narrow score panels transpose raw 16-bit words; weighted updates use the
+// source row layout and add to the live F32 accumulator. All callers supply
+// disjoint compiler-owned scratch and the worker's configured BRGEMM handle.
+int32_t intent_fold_brgemm(const void *primary, void *scratch,
+                           const uint16_t *a, const uint16_t *b, float *c,
+                           int64_t m, int64_t n, int64_t k, int64_t lda,
+                           int64_t ldb, int32_t add_c) {
+  int dtype = ((const IntentBrgemmEntry *)primary)->key.a_dt;
+  dnnl_pack_type_t layout;
+  if (dnnl_brgemm_get_B_pack_type(&layout, map_dtype(dtype),
+                                  map_dtype(dtype)) != dnnl_success)
+    return 1;
+  if (layout != dnnl_pack_type_no_trans && layout != dnnl_pack_type_pack32)
+    return 1;
+  uint16_t packed[(!add_c || layout == dnnl_pack_type_pack32) ? k * n : 1]
+      __attribute__((aligned(64)));
+  if (layout == dnnl_pack_type_pack32) {
+    if (k % 2)
+      return 1;
+    if (add_c)
+      intent_pack_bf16_rows(b, packed, k, n, ldb);
+    else {
+      for (int64_t t = 0; t < k; t += 2)
+        for (int64_t j = 0; j < n; ++j)
+          memcpy(packed + t * n + 2 * j, b + j * ldb + t, 2 * sizeof(uint16_t));
+    }
+    b = packed;
+  } else if (!add_c) {
+    intent_transpose_bf16(b, packed, n, k, ldb, n);
+    b = packed;
+  }
+  if (!add_c)
+    return intent_brgemm_tile(primary, a, b, c, scratch);
+  const void *plan =
+      intent_brgemm_get_ex(m, n, k, lda, n, n, dtype, dtype, 0, 1);
+  if (!plan)
+    return 1;
+  int64_t bytes = intent_brgemm_scratch_bytes(plan);
+  void *own = NULL;
+  if (bytes > intent_brgemm_scratch_bytes(primary)) {
+    own = aligned_alloc(64, (bytes + 63) & ~(size_t)63);
+    if (!own)
+      return 2;
+  }
+  int rc = intent_brgemm_thread_enter(plan);
+  if (!rc)
+    rc = intent_brgemm_tile(plan, a, b, c, own ? own : scratch);
+  free(own);
+  int restore = intent_brgemm_thread_enter(primary);
+  return rc ? rc : restore;
+}
+
 static float widen_bf16_ftz(uint16_t value) {
   uint32_t bits = (uint32_t)value << 16;
   if (!(bits & 0x7f800000u))

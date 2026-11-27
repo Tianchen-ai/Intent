@@ -4,6 +4,7 @@
 #include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
 #include "intentdsl/levels/algorithm/kir/ir/OnlineNormalization.h"
 #include "intentdsl/levels/algorithm/kir/ir/Ordered.h"
+#include "intentdsl/levels/execution/cpu/ir/FoldProducts.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
 #include "intentdsl/levels/execution/cpu/ir/OwnerTraversal.h"
 #include "intentdsl/levels/execution/cpu/ir/Owners.h"
@@ -572,11 +573,14 @@ struct OrderedLowerer {
              b.getNamedAttr("kind", b.getStringAttr("outer_contract")),
              b.getNamedAttr("over", b.getDenseI64ArrayAttr({overAx})),
              b.getNamedAttr("acc_type", b.getStringAttr("f32")),
-             b.getNamedAttr("engine",
-                            b.getStringAttr(engine  ? "onednn-brgemm-bf16"
-                                            : isRvv ? "vector"
-                                                    : "auto")),
-             b.getNamedAttr("allow_subnormal_ftz", b.getBoolAttr(bool(engine))),
+             b.getNamedAttr(
+                 "engine",
+                 b.getStringAttr(engine  ? engine.getValue().split("::").second
+                                 : isRvv ? "vector"
+                                         : "auto")),
+             b.getNamedAttr("allow_subnormal_ftz",
+                            b.getBoolAttr(engine && engine.getValue().ends_with(
+                                                        "brgemm-bf16"))),
              b.getNamedAttr("in_types",
                             b.getArrayAttr({b.getStringAttr(lhs.type),
                                             b.getStringAttr(rhs.type)})),
@@ -4230,6 +4234,8 @@ LogicalResult bindWeftMemberStores(Operation &task, bool rvv, bool assign) {
   return success(!result.wasInterrupted());
 }
 
+#include "FoldProducts.h"
+
 LogicalResult lowerWeftOrdered(func::FuncOp fn,
                                const intentdsl::CallFacts &facts, bool rvv) {
   auto &task = fn.front().front();
@@ -4248,7 +4254,8 @@ LogicalResult lowerWeftOrdered(func::FuncOp fn,
   auto bAttr = space.getAttrOfType<IntegerAttr>("cpu.owner_batch");
   if (!bAttr || bAttr.getInt() < 1)
     return space.emitError("missing cpu.owner_batch decision from cpu@tasked");
-  int64_t batch = bAttr.getInt();
+  auto foldTile = space.getAttrOfType<DenseI64ArrayAttr>("cpu.fold_panel");
+  int64_t batch = foldTile ? foldTile[0] : bAttr.getInt();
 
   OrderedLowerer lowerer{fn, space, b, loc, batch};
   lowerer.isRvv = rvv;
@@ -4564,10 +4571,11 @@ LogicalResult lowerWeftOrdered(func::FuncOp fn,
   }
 
   LogicalResult bodyStatus =
-      useTiled2D ? lowerer.lowerTiledTwoPassBody(srcBb, tiledPlan, iotaOwn64,
-                                                 iotaTok64, qSlotOff,
-                                                 tileSlotOff)
-                 : lowerer.lowerBlock(srcBb, batch, 0);
+      foldTile ? lowerFoldProducts(lowerer, srcBb, foldTile[1], facts)
+      : useTiled2D
+          ? lowerer.lowerTiledTwoPassBody(srcBb, tiledPlan, iotaOwn64,
+                                          iotaTok64, qSlotOff, tileSlotOff)
+          : lowerer.lowerBlock(srcBb, batch, 0);
   if (failed(bodyStatus))
     return failure();
   makeOp(b, loc, "task_yield", {}, {},

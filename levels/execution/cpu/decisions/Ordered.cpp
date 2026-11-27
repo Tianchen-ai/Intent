@@ -1,4 +1,5 @@
 #include "compilerinfra/Proofs.h"
+#include "intentdsl/levels/execution/cpu/ir/FoldProducts.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
 #include "intentdsl/levels/execution/cpu/ir/OrderedGeometry.h"
 #include "intentdsl/levels/execution/cpu/ir/OrderedValue.h"
@@ -889,7 +890,26 @@ void ownerTasks(Unit &u) {
   f.verify = [](Operation *o, Attribute a,
                 const TargetProfile &p) -> llvm::Error {
     if (auto d = dyn_cast<DictionaryAttr>(a)) {
-      if (auto inner = d.getAs<IntegerAttr>("inner")) {
+      if (auto tile = d.getAs<DenseI64ArrayAttr>("fold_panel")) {
+        auto *facts = p.services.get<CallFacts>();
+        auto plan =
+            cpu::foldProducts(*o, o->getParentOfType<func::FuncOp>(), *facts);
+        auto *shape = facts->shapeOf(o->getOperands().back());
+        auto axis =
+            o->getAttrOfType<DenseI64ArrayAttr>("axes").asArrayRef().back();
+        if (!shape || !plan || tile.size() != 2 ||
+            !d.getAs<IntegerAttr>("grain") ||
+            !cpu::fitsProductPanel(*plan, tile[0], tile[1],
+                                   (*shape)[axis].getAsInteger().value_or(0),
+                                   *p.services.get<cpu::RowMachine>()) ||
+            d.getAs<IntegerAttr>("grain").getInt() % tile[0])
+          return llvm::createStringError("invalid contraction fold panel");
+        if (auto error = p.checkImplementation("exits/" + p.name +
+                                               (plan->nativeBf16
+                                                    ? "::onednn-brgemm-bf16"
+                                                    : "::onednn-brgemm-f16")))
+          return error;
+      } else if (auto inner = d.getAs<IntegerAttr>("inner")) {
         auto reuse = cpu::sharedInterval(o, *p.services.get<CallFacts>());
         auto batch = d.getAs<IntegerAttr>("batch"),
              grain = d.getAs<IntegerAttr>("grain");
@@ -959,6 +979,14 @@ void ownerTasks(Unit &u) {
                          const TargetProfile &p) -> llvm::Error {
     if (auto d = dyn_cast<DictionaryAttr>(c.value)) {
       auto w = d.getAs<IntegerAttr>("grain");
+      if (auto tile = d.getAs<DenseI64ArrayAttr>("fold_panel")) {
+        if (tile.size() != 2 || c.topology != "product-panels" ||
+            c.id != "product-" + std::to_string(tile[0]) + "x" +
+                        std::to_string(tile[1]))
+          return llvm::createStringError(
+              "incorrect contraction fold candidate");
+        return llvm::Error::success();
+      }
       bool shared = bool(d.getAs<IntegerAttr>("inner"));
       auto batch = d.getAs<IntegerAttr>("batch");
       auto tile = d.getAs<IntegerAttr>("score_tile");
@@ -1000,6 +1028,39 @@ void ownerTasks(Unit &u) {
                     "independent-owners",
                     Builder(o->getContext()).getI64IntegerAttr(w),
                     {"exclusive-output"}});
+    auto *facts = p.services.get<CallFacts>();
+    if (auto fold =
+            cpu::foldProducts(*o, o->getParentOfType<func::FuncOp>(), *facts)) {
+      auto engine =
+          "exits/" + p.name +
+          (fold->nativeBf16 ? "::onednn-brgemm-bf16" : "::onednn-brgemm-f16");
+      if (auto err = p.checkImplementation(engine))
+        llvm::consumeError(std::move(err));
+      else {
+        auto axis =
+            o->getAttrOfType<DenseI64ArrayAttr>("axes").asArrayRef().back();
+        auto extent = (*facts->shapeOf(o->getOperands().back()))[axis]
+                          .getAsInteger()
+                          .value_or(0);
+        Builder b(o->getContext());
+        for (int64_t rows : {16, 32, 64, 128})
+          for (int64_t keys : {32, 64, 128, 256}) {
+            if (!cpu::fitsProductPanel(*fold, rows, keys, extent,
+                                       *p.services.get<cpu::RowMachine>()))
+              continue;
+            auto d = b.getDictionaryAttr(
+                {b.getNamedAttr("grain", b.getI64IntegerAttr(2 * rows)),
+                 b.getNamedAttr("fold_panel",
+                                b.getDenseI64ArrayAttr({rows, keys}))});
+            cs.push_back(
+                {"product-" + std::to_string(rows) + "x" + std::to_string(keys),
+                 "product-panels",
+                 d,
+                 {"exclusive-output", "reassociable-fold"},
+                 {engine}});
+          }
+      }
+    }
     if (auto panel = cpu::reusableScores(o, p)) {
       Builder b(o->getContext());
       for (int w : {8, 32, 128}) {
@@ -1047,7 +1108,9 @@ void ownerTasks(Unit &u) {
     int64_t ownerBatch = 1;
     bool useBrgemm = false, usePV = false;
     if (auto d = dyn_cast<DictionaryAttr>(a)) {
-      if (auto axis = d.getAs<IntegerAttr>("inner")) {
+      if (auto tile = d.getAs<DenseI64ArrayAttr>("fold_panel")) {
+        o->setAttr("cpu.fold_panel", tile);
+      } else if (auto axis = d.getAs<IntegerAttr>("inner")) {
         o->setAttr("cpu.innermost_owner", axis);
         useBrgemm = d.contains("engine");
         usePV = d.contains("value_width");
@@ -1076,6 +1139,7 @@ void ownerTasks(Unit &u) {
       }
       a = d.get("grain");
     }
+
     o->setAttr("cpu.owner_batch", b.getI64IntegerAttr(ownerBatch));
     o->setAttr("cpu.grain", a);
     o->setAttr("cpu.owners", b.getI64IntegerAttr(count));

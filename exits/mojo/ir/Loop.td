@@ -130,6 +130,11 @@ def MojoBrgemmCall : RowInst<"brgemm_call", [DeclareOpInterfaceMethods<MemoryEff
   let arguments=(ins AnyType:$handle, AnyType:$a_ptr, AnyType:$b_ptr, AnyType:$c_ptr, AnyType:$scratch, BoolAttr:$allow_subnormal_ftz);
   let results=(outs I32:$status);
 }
+def MojoFoldGemm : RowInst<"fold_gemm", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments=(ins Index:$plan, Index:$scratch, AnyType:$lhs, AnyType:$rhs, AnyType:$output,
+      I64Attr:$rows, I64Attr:$cols, I64Attr:$depth, I64Attr:$lda, I64Attr:$ldb, I64Attr:$add_c);
+  let results=(outs I32:$status);
+}
 def MojoCheckStatus : RowInst<"check_status"> {
   let arguments=(ins I32:$status);
 }
@@ -362,7 +367,7 @@ def MojoValuePrefix : RowInst<"value_prefix",[DeclareOpInterfaceMethods<MemoryEf
   let results=(outs I32:$status);
 }
 def MojoOwnerBrgemmPlan : RowInst<"owner_brgemm_plan"> {
-  let arguments=(ins I64Attr:$rows, I64Attr:$cols, I64Attr:$depth);
+  let arguments=(ins I64Attr:$rows, I64Attr:$cols, I64Attr:$depth, I64Attr:$dtype);
 }
 def MojoCOwnerCall : RowInst<"c_owner_call"> {
   let arguments=(ins StrAttr:$call_args, BoolAttr:$cyclic, I64Attr:$count, I64Attr:$grain);

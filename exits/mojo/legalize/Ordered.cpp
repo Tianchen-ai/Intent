@@ -1,6 +1,7 @@
 #include "intentdsl/levels/algorithm/kir/ir/Ordered.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
+#include "intentdsl/levels/execution/cpu/ir/FoldProducts.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
 #include "intentdsl/levels/execution/cpu/ir/OrderedValue.h"
 #include "intentdsl/levels/execution/cpu/ir/OwnerTraversal.h"
@@ -1376,9 +1377,15 @@ struct OrderedLowerer {
     makeOp(b, loc, "check_status", {status});
   }
 
-  LogicalResult lowerBlock(Block &srcBb, SmallVectorImpl<IRMapping> &lanes) {
+  LogicalResult lowerBlock(Block &srcBb, SmallVectorImpl<IRMapping> &lanes,
+                           Operation *start = nullptr,
+                           Operation *stop = nullptr) {
     const bool vecActive = batchSimd && lanes.size() == size_t(batch);
     for (Operation &op : srcBb.without_terminator()) {
+      if (&op == stop)
+        break;
+      if (start && op.isBeforeInBlock(start))
+        continue;
       if (auto loop = dyn_cast<scf::ForOp>(op)) {
         if (dotPanel && dotPanel->dot->getParentOp() == &op)
           emitDotPanel(loop, lanes);
@@ -2425,6 +2432,8 @@ llvm::Error describeMojoOrderedPackage(func::FuncOp fn, Operation &prog,
   return llvm::Error::success();
 }
 
+#include "FoldProducts.h"
+
 LogicalResult lowerMojoOrdered(func::FuncOp fn,
                                const intentdsl::CallFacts &facts) {
   auto &task = fn.front().front();
@@ -2440,6 +2449,13 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn,
     batch = bAttr.getInt();
   auto windowAttr = space.getAttrOfType<IntegerAttr>("cpu.batch_score_window");
 
+  auto foldTile = space.getAttrOfType<DenseI64ArrayAttr>("cpu.fold_panel");
+  auto foldPlan =
+      foldTile ? intentdsl::cpu::foldProducts(space, fn, facts) : std::nullopt;
+  if (foldTile && !foldPlan)
+    return space.emitError("invalid fold panel");
+  if (foldTile)
+    batch = foldTile[0];
   Operation *foundLocalBuf = nullptr;
   for (Operation &op : space.getRegion(0).front()) {
     if (op.getName().getStringRef() == "cpu.local_buffer") {
@@ -2477,15 +2493,17 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn,
   bool useCyclic = hasVariableOwnerTrip && owners > grain;
 
   OrderedLowerer lowerer{fn, space, b, loc, batch};
-  lowerer.batchSimd = batch >= 2 && llvm::isPowerOf2_64(uint64_t(batch));
-  lowerer.analyzeChunkableWideMode();
+  lowerer.batchSimd =
+      !foldTile && batch >= 2 && llvm::isPowerOf2_64(uint64_t(batch));
+  if (!foldTile)
+    lowerer.analyzeChunkableWideMode();
   auto innerAxis = space.getAttrOfType<IntegerAttr>("cpu.innermost_owner");
   auto panel = innerAxis ? intentdsl::cpu::orderedDotPanel(
                                space, facts, innerAxis.getInt(), batch)
                          : std::nullopt;
   if (panel && panel->dot->hasAttr("cpu.panel_engine") && lowerer.chunkedMode)
     lowerer.dotPanel = panel;
-  bool brg = bool(lowerer.dotPanel);
+  bool brg = bool(lowerer.dotPanel) || foldPlan.has_value();
   if (brg && space.hasAttr("cpu.value_width")) {
     auto value = intentdsl::cpu::orderedValuePanel(space, facts, *panel);
     if (!value)
@@ -2497,8 +2515,8 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn,
     return space.emitError("selected value panel requires wide owner replay");
   lowerer.wideViews.resize(batch);
   lowerer.wideSplats.resize(batch);
-  bool usesStack = foundLocalBuf != nullptr || lowerer.invFloatsPerLane > 0 ||
-                   lowerer.accExtent > 0;
+  bool usesStack = bool(foldTile) || foundLocalBuf != nullptr ||
+                   lowerer.invFloatsPerLane > 0 || lowerer.accExtent > 0;
 
   OperationState progState(loc, "mojo_row.ordered_program");
   progState.addAttribute("grain", b.getI64IntegerAttr(grain));
@@ -2556,7 +2574,7 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn,
 
   b.setInsertionPointToEnd(&fnBb);
 
-  if (brg) {
+  if (brg && !foldTile) {
     auto buffer = [&](StringRef dtype, int64_t count) {
       return makeOp(b, loc, "stack_alloc", {}, {b.getIndexType()},
                     {b.getNamedAttr("dtype", b.getStringAttr(dtype)),
@@ -2676,7 +2694,9 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn,
     pitch *= ext;
   }
 
-  if (failed(lowerer.lowerBlock(srcBody, lanes)))
+  if (failed(foldTile ? lowerFoldProducts(lowerer, srcBody, lanes, *foldPlan,
+                                          foldTile[1], ownerFn)
+                      : lowerer.lowerBlock(srcBody, lanes)))
     return failure();
   if (pv && !lowerer.emittedValuePanel)
     return space.emitError(
@@ -2732,9 +2752,16 @@ LogicalResult lowerMojoOrdered(func::FuncOp fn,
   if (brg) {
     cFn->setAttr("brgemm", b.getUnitAttr());
     makeOp(b, loc, "owner_brgemm_plan", {}, {},
-           {b.getNamedAttr("rows", b.getI64IntegerAttr(panel->tokens)),
-            b.getNamedAttr("cols", b.getI64IntegerAttr(batch)),
-            b.getNamedAttr("depth", b.getI64IntegerAttr(panel->depth))});
+           {b.getNamedAttr(
+                "rows", b.getI64IntegerAttr(foldTile ? batch : panel->tokens)),
+            b.getNamedAttr("cols",
+                           b.getI64IntegerAttr(foldTile ? foldTile[1] : batch)),
+            b.getNamedAttr(
+                "dtype",
+                b.getI64IntegerAttr(foldPlan && !foldPlan->nativeBf16 ? 2 : 1)),
+            b.getNamedAttr("depth",
+                           b.getI64IntegerAttr(foldPlan ? foldPlan->depth
+                                                        : panel->depth))});
   }
   if (pv) {
     auto &value = *lowerer.valuePanel;

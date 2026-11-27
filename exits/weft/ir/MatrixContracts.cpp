@@ -9,7 +9,8 @@
 namespace CI_UNIT_NAMESPACE {
 // An ordered tile may contract a pair of admitted subviews (QK), or an
 // explicitly narrowed weight panel and an admitted value subview (PV).
-static bool validOrderedBrgemm(mlir::Operation *op, int64_t axis) {
+static bool validOrderedBrgemm(mlir::Operation *op, int64_t axis,
+                               llvm::StringRef element) {
   using namespace mlir;
   auto inputs = op->getAttrOfType<ArrayAttr>("in_types");
   if (!inputs || inputs.size() != 2 || op->getNumOperands() != 2)
@@ -22,7 +23,8 @@ static bool validOrderedBrgemm(mlir::Operation *op, int64_t axis) {
     if (!view || !type || view->getAttr("val_type") != type)
       return false;
     StringRef spelling = type.getValue();
-    if (!spelling.consume_front("!weft_kernel.value<bf16,[") ||
+    if (!spelling.consume_front(
+            ("!weft_kernel.value<" + element + ",[").str()) ||
         !spelling.consume_back("]>"))
       return false;
     auto [extents, axes] = spelling.split("],[");
@@ -62,7 +64,7 @@ static bool validOrderedBrgemm(mlir::Operation *op, int64_t axis) {
                   std::to_string(freeAxes[1]) + "]>";
   return freeAxes[0] != freeAxes[1] &&
          op->getAttrOfType<StringAttr>("val_type") == expected &&
-         intentdsl::kir::permitsBf16Dot(op);
+         (element != "bf16" || intentdsl::kir::permitsBf16Dot(op));
 }
 static bool validPackedOrderedBrgemm(mlir::Operation *op,
                                      mlir::DenseI64ArrayAttr over) {
@@ -370,7 +372,8 @@ void registerWeftMatrixContracts(Unit &u) {
       for (auto *parent = op->getParentOp(); parent;
            parent = parent->getParentOp())
         if (parent->getName().getStringRef() == "weft_host.owner_program")
-          ownerDot = contractName == "onednn-brgemm-bf16";
+          ownerDot = contractName == "onednn-brgemm-bf16" ||
+                     contractName == "onednn-brgemm-f16";
       ArrayRef<int64_t> expectedOver =
           vnniPack > 1 ? ArrayRef<int64_t>(packAxes)
                        : ArrayRef<int64_t>(singleAxis);
@@ -380,9 +383,9 @@ void registerWeftMatrixContracts(Unit &u) {
           return failure();
       } else if (kind.getValue() != (isQ4k ? "contract" : "outer_contract") ||
                  !over ||
-                 (ownerDot
-                      ? over.size() != 1 || !validOrderedBrgemm(op, over[0])
-                      : over.asArrayRef() != expectedOver))
+                 (ownerDot ? over.size() != 1 ||
+                                 !validOrderedBrgemm(op, over[0], expectedLhs)
+                           : over.asArrayRef() != expectedOver))
         return failure();
       auto accAttr = op->getAttrOfType<StringAttr>("acc_type");
       if (!accAttr || accAttr.getValue() != expectedAcc)

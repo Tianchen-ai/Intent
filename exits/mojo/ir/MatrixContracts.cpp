@@ -367,6 +367,48 @@ void registerMatrixContracts(Unit &u) {
     populateTypedContractSummaries(c);
     add(std::move(c));
   }
+  for (bool bf16 : {false, true}) {
+    ImplementationContract c;
+    c.name = bf16 ? "bf16-fold-gemm" : "f16-fold-gemm";
+    c.operation = "mojo_row.fold_gemm";
+    c.symbol = "intent_fold_brgemm";
+    c.source = ImplementationSource::External;
+    c.minimum = Reuse::Vendor;
+    c.dependencies = {"onednn"};
+    c.operands = "worker plan and scratch, two native narrow input panels, F32 "
+                 "destination";
+    c.layout = "row-major with transposed B for scores or direct B for updates";
+    c.accumulator = "F32";
+    c.effects = "writes worker-private output and scratch";
+    c.numerical = bf16 ? "native BF16 dot with F32 accumulation"
+                       : "F16 operands widened for F32 accumulation";
+    c.estimator = u.qualify("brgemm-tile");
+    c.costParameters = {"vector_bits", "workers"};
+    c.available = [bf16](const TargetProfile &p) {
+      return p.checkImplementation(bf16 ? "exits/mojo::onednn-brgemm-bf16"
+                                        : "exits/mojo::onednn-brgemm-f16");
+    };
+    c.verify = [bf16](Operation *op) {
+      if (bf16 && !intentdsl::kir::permitsBf16Dot(op))
+        return failure();
+      auto dim = [&](StringRef n) {
+        return op->getAttrOfType<IntegerAttr>(n).getInt();
+      };
+      bool update = dim("add_c") == 1;
+      return success(dim("rows") > 0 && dim("cols") > 0 && dim("depth") > 0 &&
+                     dim("lda") == dim("depth") &&
+                     dim("ldb") == dim(update ? "cols" : "depth") &&
+                     (update || dim("add_c") == 0));
+    };
+    TypedContract t;
+    t.shape.minOperands = t.shape.maxOperands = 5;
+    t.shape.minResults = t.shape.maxResults = 1;
+    t.operandTypes = {ScalarTypeKind::Index};
+    t.resultTypes = {ScalarTypeKind::I32};
+    t.effects = EffectMask::ReadWrite;
+    c.typed = std::move(t);
+    add(std::move(c));
+  }
   {
     ImplementationContract c;
     c.name = "bf16-value-prefix";

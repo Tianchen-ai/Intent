@@ -779,6 +779,11 @@ void MojoValuePrefix::getEffects(EffectList &effects) {
   effects.emplace_back(MemoryEffects::Write::get());
 }
 
+void MojoFoldGemm::getEffects(EffectList &effects) {
+  effects.emplace_back(MemoryEffects::Read::get());
+  effects.emplace_back(MemoryEffects::Write::get());
+}
+
 void MojoBrgemmCall::getEffects(EffectList &effects) {
   effects.emplace_back(MemoryEffects::Read::get());
   effects.emplace_back(MemoryEffects::Write::get());

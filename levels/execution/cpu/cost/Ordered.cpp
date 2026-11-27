@@ -1,4 +1,5 @@
 #include "intentdsl/levels/execution/cpu/cost/PanelLayout.h"
+#include "intentdsl/levels/execution/cpu/ir/FoldProducts.h"
 #include "intentdsl/levels/execution/cpu/ir/OrderedValue.h"
 #include "intentdsl/levels/execution/cpu/ir/OwnerTraversal.h"
 #include "intentdsl/levels/execution/cpu/ir/Owners.h"
@@ -325,6 +326,34 @@ void ownerCost(Unit &u) {
                 bwVal * (activeWorkers / std::max<double>(1, workers));
             e.terms["common_input_bytes_per_member"] = {bytes, "B"};
             *e.timeNs += bytes / effBw;
+          }
+          if (auto plan = intentdsl::cpu::foldProducts(
+                  *o, o->getParentOfType<mlir::func::FuncOp>(), *f)) {
+            auto tile = cache
+                            ? cache.getAs<mlir::DenseI64ArrayAttr>("fold_panel")
+                            : mlir::DenseI64ArrayAttr{};
+            double rows = tile ? tile[0] : 1, keys = tile ? tile[1] : 1;
+            double steps = plan->steps * (plan->rectangular ? 1. : 0.5);
+            double calls = std::ceil(n / rows) * std::ceil(steps / keys);
+            double reductions =
+                plan->products.size() + plan->loop.getNumResults();
+            double edge = tile ? (plan->rectangular
+                                      ? 0.
+                                      : std::min(steps, (rows + keys) * 0.5))
+                               : steps;
+            double panelBytes =
+                n * plan->depth *
+                (2 * (steps - edge) * (1 / rows + 1 / keys) + 2 * edge);
+            double flop = 2 * n * plan->depth * reductions;
+            e.terms["panel_input_bytes"] = {panelBytes, "B"};
+            e.terms["fringe_steps_per_owner"] = {edge, "count"};
+            e.timeNs =
+                launchVal + panelBytes / bwVal +
+                flop *
+                    (edge +
+                     (steps - edge) / std::max(1., std::min(rows, keys) / 8.)) /
+                    rateVal +
+                (tile ? calls * reductions * launchVal / workers : 0);
           }
           return e;
         }},
