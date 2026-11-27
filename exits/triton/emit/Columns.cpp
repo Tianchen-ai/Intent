@@ -35,8 +35,12 @@ void registerColumnRules(TerminalPrinter &printer) {
                     args.push_back(id + "_d" + std::to_string(i) +
                                    ":tl.constexpr");
                 for (int i = 0; i < dims; ++i)
-                  args.push_back(id + "_s" + std::to_string(i) +
-                                 (dims > 2 ? ":tl.constexpr" : ""));
+                  args.push_back(
+                      id + "_s" + std::to_string(i) +
+                      (dims > 2 ||
+                               view.attr("triton_src.specialize_row_strides")
+                           ? ":tl.constexpr"
+                           : ""));
               }
           }
           if (row)

@@ -334,6 +334,15 @@ struct BindCallable : PassWrapper<BindCallable, OperationPass<ModuleOp>> {
       fn->setAttr("triton_src.min_width", b.getI64IntegerAttr(guard[0]));
       fn->setAttr("triton_src.max_width", b.getI64IntegerAttr(guard[1]));
       lowerRows(fn, profile);
+      // A panel load spans reduction and feature axes. Specializing its
+      // runtime strides lets Triton prove which lane accesses are contiguous.
+      fn.walk([&](Operation *op) {
+        if (op->getName().getStringRef() == "triton_src.read_at")
+          if (auto lanes =
+                  dyn_cast<RankedTensorType>(op->getResult(0).getType());
+              lanes && lanes.getRank() >= 3)
+            fn->setAttr("triton_src.specialize_row_strides", b.getUnitAttr());
+      });
     }
     for (auto f : module.getOps<func::FuncOp>()) {
       if (tritonCap && tritonCap->permitTma)
