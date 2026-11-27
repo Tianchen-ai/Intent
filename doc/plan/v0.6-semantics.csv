@@ -55,8 +55,8 @@ device,exit,workload,case,mode,v2_us,reference,reference_us,reference_env,ratio,
 5090d,cutile,group7/qk_norm_rope,4x32x8x2048x128-bf16,作者默认,116.768,inductor,112.64,5090d,1.03665,平,,,,,116.768
 5090d,triton,group7/radix_pass,128x4096-b8-i32,作者默认,73.312,torch,61.44,5090d,1.19323,慢,,,,,73.312
 5090d,cutile,group7/radix_pass,128x4096-b8-i32,作者默认,67.584,torch,61.44,5090d,1.1,慢,,,,,67.584
-5090d,triton,group7/retention_recurrence,2x512x8x64-bf16,作者默认,58.72,inductor,75.776,5090d,0.77492,快,,,,,58.72
-5090d,cutile,group7/retention_recurrence,2x512x8x64-bf16,作者默认,348.16,inductor,75.776,5090d,4.59459,慢,,,,,348.16
+5090d,triton,group7/retention_recurrence,2x512x8x64-bf16,作者默认，逐步 FP32 状态,59.392,aten:source,3816.448,5090d,0.01556,快,,,inductor（衰减矩阵展开）,75.744,59.392
+5090d,cutile,group7/retention_recurrence,2x512x8x64-bf16,作者默认，逐步 FP32 状态,348.160,aten:source,3816.448,5090d,0.09123,快,,,inductor（衰减矩阵展开）,75.744,348.160
 5090d,triton,group7/sliding_window_attention,2x32x8x4096x128-w1024-f16,作者默认,1404.928,aten:source,44050.4303,5090d,0.03189,快,,,cutile,831.072,1404.928
 5090d,cutile,group7/sliding_window_attention,2x32x8x4096x128-w1024-f16,作者默认,4311.0399,aten:source,44050.4303,5090d,0.09787,快,,,cutile,831.072,4311.0399
 5090d,triton,group7/topk_rows,1024x4096-k8-f32,作者默认,32.768,torch,88.064,5090d,0.37209,快,,,,,32.768
@@ -148,13 +148,13 @@ mlu370,bangc,corpus/mojo/paged_mla_decode_partials,B8-HQ128-HK1-K8192-C512-R64-p
 mlu370,bangc,corpus/mojo/qkv_projection,P3-T4096-K4096-N4096-f16-8cores-host,作者默认,9090.0,aten:accelerator,38418.0,mlu370,0.23661,快,,,,,9090.0
 mlu370,bangc,corpus/mojo/rotary_embedding_equivalent_index,rows65536-D128-heads32-f16-8cores-host,作者默认,1090.0,aten:accelerator,3598.0,mlu370,0.30295,快,,,,,1090.0
 mlu370,bangc,corpus/mojo/selective_state_scan,B128-L4096-f32-8cores-host,作者默认,1698.0,aten:accelerator,127905.0,mlu370,0.01328,快,,,,,1698.0
-mlu370,bangc,corpus/triton/flaggems_histogram,N8388608-bins256-fp32,作者默认,44524.0,aten:accelerator,19815.0,mlu370,2.24698,慢,,,,,44524.0
+mlu370,bangc,corpus/triton/flaggems_histogram,N8388608-bins256-fp32,作者默认,846.000,aten:accelerator,19821.000,mlu370,0.04268,快,,,,,846.000
 mlu370,bangc,corpus/triton/flash_attention_backward,B2-H16-S2048-D128-fp16-causal,作者默认,11333192.0,aten:accelerator,72816.0,mlu370,155.64151,慢,,,,,11333192.0
 mlu370,bangc,corpus/triton/fused_add_rms_norm,8192x4096-bf16,作者默认,1638.0,,,,,无有效对照,参照跑不了,MLU370 上该输入所需的 CNNL BF16 primitive 不受支持,,,1638.0
 mlu370,bangc,corpus/triton/moe_expert_projection,T2048-E8-top2-4096x14336-bf16,作者默认,197446.0,,,,,无有效对照,参照跑不了,MLU370 上该输入所需的 CNNL BF16 primitive 不受支持,,,197446.0
 mlu370,bangc,corpus/weft/q4_k_projection,N4096-K4096-Q4_K-f32-1core,作者默认,46153.0,aten:accelerator,5532.0,mlu370,8.34291,慢,,,,,46153.0
-mlu370,bangc,cpu/histogram,large,作者默认,2695.0,aten:accelerator,1339.0,mlu370,2.0127,慢,,,,,2695.0
-mlu370,bangc,cpu/histogram,small,作者默认,48.0,aten:accelerator,46.0,mlu370,1.04348,平,,,,,48.0
+mlu370,bangc,cpu/histogram,large,作者默认,180.000,aten:accelerator,1341.000,mlu370,0.13423,快,,,,,180.000
+mlu370,bangc,cpu/histogram,small,作者默认,48.000,aten:accelerator,47.000,mlu370,1.02128,平,,,,,48.000
 mlu370,bangc,group7/alibi_attention,2x32x8x2048x128-bf16,作者默认,456665.0,,,,,无有效对照,参照跑不了,MLU370 上该输入所需的 CNNL BF16 primitive 不受支持,,,456665.0
 mlu370,bangc,group7/attention_unscaled_max,2x32x8x2048x128-bf16,作者默认,112794.0,,,,,无有效对照,参照跑不了,MLU370 上该输入所需的 CNNL BF16 primitive 不受支持,,,112794.0
 mlu370,bangc,group7/awq_int4_gemm,256x4096x4096-g128-awq,作者默认,874.0,torch,4990.0,mlu370,0.17515,快,,,,,874.0
@@ -162,7 +162,7 @@ mlu370,bangc,group7/cross_entropy,4096x32768-bf16,作者默认,23686.0,,,,,无�
 mlu370,bangc,group7/depthwise_conv2d,8x128x56x56-k3-f32,作者默认,241.0,torch,248.0,mlu370,0.97177,平,,,,,241.0
 mlu370,bangc,group7/embedding_bag,4096x256-v32768-f32,作者默认,3988.0,,,,,无有效对照,参照跑不了,MLU370 上该输入所需的 CNNL BF16 primitive 不受支持,,,3988.0
 mlu370,bangc,group7/gemm_nt,2048x2048x2048-f16,作者默认,401.0,torch,401.0,mlu370,1.0,平,,,,,401.0
-mlu370,bangc,group7/index_add,4096x256-n16384-f32,作者默认,293522.0,torch,889.0,mlu370,330.17098,慢,,,,,293522.0
+mlu370,bangc,group7/index_add,4096x256-n16384-f32,作者默认,710.000,torch,891.000,mlu370,0.79686,快,,,,,710.000
 mlu370,bangc,group7/layer_norm_welford,4096x4096-f32,作者默认,10808.0,aten:source,2771.0,mlu370,3.9004,慢,,,torch,627.0,10808.0
 mlu370,bangc,group7/log_softmax_kl,2048x4096-f32,作者默认,2812.0,aten:source,2936.0,mlu370,0.95777,平,,,torch,3442.0,2812.0
 mlu370,bangc,group7/mxfp4_gemm,512x4096x4096-mxfp4,作者默认,1172.0,torch,7840.0,mlu370,0.14949,快,,,,,1172.0
@@ -189,7 +189,7 @@ mlu370,bangc,program/fp8_gemm,author,作者默认,9352.0,,,,,无有效对照,参
 mlu370,bangc,program/gated_delta,author,作者默认,2303.0,,,,,无有效对照,参照跑不了,MLU370 上该输入所需的 CNNL BF16 primitive 不受支持,,,2303.0
 mlu370,bangc,program/gemm,author,作者默认,10.0,torch,10.0,mlu370,1.0,平,,,,,10.0
 mlu370,bangc,program/group_norm_backward,author,作者默认,1307.0,torch,879.0,mlu370,1.48692,慢,,,,,1307.0
-mlu370,bangc,program/histogram,author,作者默认,683.0,aten:source,270.0,mlu370,2.52963,慢,,,,,683.0
+mlu370,bangc,program/histogram,author,作者默认,15.000,aten:source,270.000,mlu370,0.05556,快,,,,,15.000
 mlu370,bangc,program/int8_gemm,author,作者默认,12.0,,,,,无有效对照,参照跑不了,torch_mlu 的 INT8 输入、INT32 累加矩阵乘回退 CPU,,,12.0
 mlu370,bangc,program/jagged_mean,author,作者默认,410.0,aten:source,2954.0,mlu370,0.13879,快,,,,,410.0
 mlu370,bangc,program/layer_norm,author,作者默认,8.0,aten:source,68.0,mlu370,0.11765,快,,,torch,18.0,8.0
@@ -240,7 +240,7 @@ x86-mojo,mojo,group7/mxfp4_gemm,512x4096x4096-mxfp4,作者默认,32001.943,aten:
 x86-mojo,mojo,group7/q6k_gemv,4096x4096-q6k,作者默认,114.799,ggml,101.036,x86-weft,1.13622,慢,,,,,114.799
 x86-mojo,mojo,group7/qk_norm_rope,4x32x8x2048x128-bf16,作者默认,5585.797,aten:cpu,149316.2629,x86-mojo,0.03741,快,,,,,5585.797
 x86-mojo,mojo,group7/radix_pass,128x4096-b8-i32,作者默认,471.028,aten:cpu,3586.3799,x86-weft,0.13134,快,,,,,471.028
-x86-mojo,mojo,group7/retention_recurrence,2x512x8x64-bf16,作者默认,494.827,inductor,2235.2439,x86-mojo,0.22137,快,,,,,494.827
+x86-mojo,mojo,group7/retention_recurrence,2x512x8x64-bf16,作者默认，逐步 FP32 状态,628.870,aten:source,44224.470,x86-mojo,0.01422,快,,,inductor（衰减矩阵展开）,2235.2439,628.870
 x86-mojo,mojo,group7/sliding_window_attention,2x32x8x4096x128-w1024-f16,作者默认,273569.76,aten:source,5613346.7399,x86-weft,0.04874,快,,,aten:cpu,566861.399,273569.76
 x86-mojo,mojo,group7/topk_rows,1024x4096-k8-f32,作者默认,364.262,aten:cpu,1934.362,x86-mojo,0.18831,快,,,,,364.262
 x86-mojo,mojo,group7/triangular_solve,32x128x64-f32,作者默认,164.539,aten:cpu,324.231,x86-weft,0.50747,快,,,,,164.539
@@ -311,7 +311,7 @@ x86-weft,weft,group7/mxfp4_gemm,512x4096x4096-mxfp4,作者默认,18255.576,aten:
 x86-weft,weft,group7/q6k_gemv,4096x4096-q6k,作者默认,125.507,ggml,101.036,x86-weft,1.2422,慢,,,,,125.507
 x86-weft,weft,group7/qk_norm_rope,4x32x8x2048x128-bf16,作者默认,10057.532,aten:cpu,149316.2629,x86-mojo,0.06736,快,,,,,10057.532
 x86-weft,weft,group7/radix_pass,128x4096-b8-i32,作者默认,332.227,aten:cpu,3586.3799,x86-weft,0.09264,快,,,,,332.227
-x86-weft,weft,group7/retention_recurrence,2x512x8x64-bf16,作者默认,434.511,inductor,2235.2439,x86-mojo,0.19439,快,,,,,434.511
+x86-weft,weft,group7/retention_recurrence,2x512x8x64-bf16,作者默认，逐步 FP32 状态,633.496,aten:source,41854.398,x86-weft,0.01514,快,,,inductor（衰减矩阵展开）,2235.2439,633.496
 x86-weft,weft,group7/sliding_window_attention,2x32x8x4096x128-w1024-f16,作者默认,531612.179,aten:source,5613346.7399,x86-weft,0.09471,快,,,aten:cpu,566861.399,531612.179
 x86-weft,weft,group7/topk_rows,1024x4096-k8-f32,作者默认,330.043,aten:cpu,1934.362,x86-mojo,0.17062,快,,,,,330.043
 x86-weft,weft,group7/triangular_solve,32x128x64-f32,作者默认,158.201,aten:cpu,324.231,x86-weft,0.48793,快,,,,,158.201
