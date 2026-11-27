@@ -1990,17 +1990,23 @@ struct OrderedLowerer {
                 outerContractOp(qForContract, k, plan.axD, scoreMatTy,
                                 plan.scoreEngine),
                 t);
-            auto cols = bin("add", iotaTok64, castOp(t, "si64"), si64TTy);
-            auto limit =
-                castOp(lanes[0].at(plan.loop1.getUpperBound()), "si64");
-            auto inRange = cmp("lt", cols, limit,
-                               "!weft_kernel.value<i1,[" + std::to_string(T) +
-                                   "],[" + std::to_string(plan.axTok) + "]>");
-            auto selected = sel(inRange, scores, ninfM, scoreMatTy);
-            if (plan.hasCausal) {
-              selected = sel(cmp(causalPred, boundVec64, cols, maskMatTy),
-                             selected, ninfM, scoreMatTy);
+            TaskTerm valid;
+            if (!exactOrigTiles || plan.hasCausal) {
+              auto cols = bin("add", iotaTok64, castOp(t, "si64"), si64TTy);
+              if (!exactOrigTiles) {
+                auto limit =
+                    castOp(lanes[0].at(plan.loop1.getUpperBound()), "si64");
+                valid = cmp("lt", cols, limit,
+                            "!weft_kernel.value<i1,[" + std::to_string(T) +
+                                "],[" + std::to_string(plan.axTok) + "]>");
+              }
+              if (plan.hasCausal) {
+                auto causal = cmp(causalPred, boundVec64, cols, maskMatTy);
+                valid = valid.v ? bin("and", causal, valid, maskMatTy) : causal;
+              }
             }
+            auto selected =
+                valid.v ? sel(valid, scores, ninfM, scoreMatTy) : scores;
             auto max1 =
                 bin("max", max0, reduceOp(selected, "max", 1, vecBTy), vecBTy);
             auto [alpha, mass1, w] = intentdsl::kir::mergeNormalizationPanel(
@@ -2019,9 +2025,11 @@ struct OrderedLowerer {
                 [&](TaskTerm origin) {
                   auto delta = applyPostSubScale(
                       bin("sub", scores, origin, scoreMatTy), scoreMatTy);
-                  auto weights =
-                      emitExpWeight2D(delta, t, boundVec64, causalPred);
-                  weights = sel(inRange, weights, zeroM, scoreMatTy);
+                  if (plan.useExp2 && isRvv)
+                    delta = bin("mul", delta, ln2S, scoreMatTy);
+                  auto weights = expWeight(delta, zeroM, scoreMatTy, maskMatTy);
+                  if (valid.v)
+                    weights = sel(valid, weights, zeroM, scoreMatTy);
                   return std::pair{reduceOp(weights, "add", 1, vecBTy),
                                    weights};
                 },
