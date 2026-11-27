@@ -83,11 +83,37 @@ __mlu_func__ Moment welford_row(const float *samples, float *scratch,
       }
 
       __sync_compute();
+      // Merge adjacent, equal-size summaries together. The preceding range
+      // proof permits exact power-of-two scaling of the mean correction.
+      int count = blocks, per = 32;
+      float *left = scratch + blocks;
+      float *right = left + blocks;
+      float *m2left = right + blocks;
+      float *m2right = m2left + blocks;
+      // Sample quantum >= 2^-58 gives a nonzero correction >= 2^-126
+      // for per <= 512, including cancellation between adjacent means.
+      while (count >= 2 && (count & 1) == 0 && per <= 512) {
+        int pairs = count / 2;
+        __memcpy(left, mean_buf, 4, NRAM2NRAM, 4, 8, pairs - 1);
+        __memcpy(right, mean_buf + 1, 4, NRAM2NRAM, 4, 8, pairs - 1);
+        __memcpy(m2left, m2_buf, 4, NRAM2NRAM, 4, 8, pairs - 1);
+        __memcpy(m2right, m2_buf + 1, 4, NRAM2NRAM, 4, 8, pairs - 1);
+        __bang_sub(right, right, left, pairs);
+        __bang_mul_scalar(change, right, 0.5f, pairs);
+        __bang_add(mean_buf, left, change, pairs);
+        __bang_mul_scalar(right, right, (float)per, pairs);
+        __bang_mul(right, right, change, pairs);
+        __bang_add(m2_buf, m2left, m2right, pairs);
+        __bang_add(m2_buf, m2_buf, right, pairs);
+        count = pairs;
+        per *= 2;
+      }
+      __sync_compute();
       Moment acc = {0, 0.0f, 0.0f};
-      for (int b = 0; b < blocks; ++b)
-        acc = merge_moments(
-            acc, Moment{32, ((const volatile float *)mean_buf)[b],
-                        ((const volatile float *)m2_buf)[b]});
+      for (int b = 0; b < count; ++b)
+        acc = merge_moments(acc,
+                            Moment{per, ((const volatile float *)mean_buf)[b],
+                                   ((const volatile float *)m2_buf)[b]});
       for (int k = full; k < live; ++k)
         acc = merge_moments(acc, Moment{1, samples[k], 0.0f});
       return acc;

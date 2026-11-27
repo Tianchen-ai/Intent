@@ -4662,7 +4662,8 @@ struct OrderedLowerer {
       for (Value v : privatePlan->views)
         st.privateRows[v] =
             nramBuf(cast<MemRefType>(v.getType()).getElementType(),
-                    dimAttr(v, "block.shape", 1));
+                    dimAttr(v, "block.shape",
+                            cast<MemRefType>(v.getType()).getRank() - 1));
       if (privatePlan->scanWidth) {
         st.scanOut = nramBuf(b.getI32Type(), privatePlan->scanWidth);
         st.scanScratch = nramBuf(b.getI32Type(), privatePlan->scanWidth);
@@ -4883,7 +4884,7 @@ struct OrderedLowerer {
 
     auto axes = space.getAttrOfType<DenseI64ArrayAttr>("axes");
     LogicalResult status = success();
-    auto emitSingleOwner = [&](Value owner) {
+    auto setOwnerCoords = [&](Value owner) {
       st.env.clear();
       st.streams.clear();
       st.rowCacheExpReady = false;
@@ -4912,6 +4913,9 @@ struct OrderedLowerer {
         st.env[bb.getArgument(i)] = coord;
         pitch *= ext;
       }
+    };
+    auto emitSingleOwner = [&](Value owner) {
+      setOwnerCoords(owner);
       if (st.rowCacheView) {
         SmallVector<Value, 4> rcC, rcS;
         for (auto [ax, cv] : llvm::enumerate(st.rowCacheOuter)) {
@@ -4962,12 +4966,12 @@ struct OrderedLowerer {
                  cI64(dimAttr(v, "block.shape", 1)),
                  store ? "NRAM2GDRAM" : "GDRAM2NRAM");
       };
-      if (privatePlan)
+      if (privatePlan && privatePlan->lanes == 1)
         for (auto v : privatePlan->views)
           moveRow(v, false);
       if (failed(emitGeneralBlock(bb, st)))
         status = failure();
-      if (privatePlan)
+      if (privatePlan && privatePlan->lanes == 1)
         for (auto v : privatePlan->views)
           if (privatePlan->writes.contains(v))
             moveRow(v, true);
@@ -4977,7 +4981,34 @@ struct OrderedLowerer {
       }
     };
     forLoop(symTaskId, symGrid, symTaskDim, [&](Value job) {
-      if (tile <= 1) {
+      if (privatePlan && privatePlan->lanes > 1) {
+        Value first = b.create<arith::MulIOp>(loc, job, cI64(tile));
+        setOwnerCoords(first);
+        auto transfer = [&](Value v, bool store) {
+          SmallVector<Value> cs, ss;
+          for (auto [i, c] : llvm::enumerate(privatePlan->prefixes.lookup(v))) {
+            cs.push_back(st.env.lookup(c));
+            ss.push_back(cI64(dimAttr(v, "block.strides", i)));
+          }
+          auto g = cs.empty() ? v : makeAddr(v, cs, ss, 0),
+               cache = st.privateRows.lookup(v);
+          auto len = cI64(dimAttr(v, "block.shape",
+                                  cast<MemRefType>(v.getType()).getRank() - 1));
+          memcpy1D(store ? g : cache, store ? cache : g, len,
+                   store ? "NRAM2GDRAM" : "GDRAM2NRAM");
+        };
+        for (auto v : privatePlan->views)
+          if (!privatePlan->writes.contains(v))
+            transfer(v, false);
+        forLoop(cI64(0), cI64(tile), cI64(1), [&](Value lane) {
+          st.env[bb.getArguments().back()] = lane;
+          if (failed(emitGeneralBlock(bb, st)))
+            status = failure();
+        });
+        for (auto v : privatePlan->views)
+          if (privatePlan->writes.contains(v))
+            transfer(v, true);
+      } else if (tile <= 1) {
         emitSingleOwner(job);
       } else {
         Value baseOwner = b.create<arith::MulIOp>(loc, job, cI64(tile));
@@ -5049,6 +5080,8 @@ struct OrderedLowerer {
     int64_t launchTile =
         isGeneral ? 1 : std::max<int64_t>({tile, pack, panelM, stencilTile});
 
+    if (privatePlan && privatePlan->lanes > 1)
+      launchTile = privatePlan->lanes;
     if (indexed) {
       owners = indexed->rows;
       launchTile = indexed->batch;

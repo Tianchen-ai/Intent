@@ -579,6 +579,15 @@ TerminalPrinter rowPrinter() {
              [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
                auto k = view.attrOfType<StringAttr>("op").getValue();
                auto sc = view.operand(2).str();
+               if (k == "ashr" || k == "shl") {
+                 auto fn = k == "ashr"
+                               ? "__cn_vector_shift_right_arithmetic_scalar_s32"
+                               : "__cn_vector_shift_left_scalar_s32";
+                 c.line(std::string(fn) + "((int)(" + view.operand(3).str() +
+                        ")," + view.operand(0).str() + "," +
+                        view.operand(1).str() + "," + sc + ");");
+                 return llvm::Error::success();
+               }
                std::string fnName = (k == "sub") ? "add" : k.str();
                std::string scExpr = (k == "sub") ? "-(" + sc + ")" : sc;
                c.line("__bang_" + fnName + "_scalar(" + view.operand(0).str() +
@@ -590,6 +599,12 @@ TerminalPrinter rowPrinter() {
   enterLocal("bangc_src.vec_cast",
              [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
                auto k = view.attrOfType<StringAttr>("kind").getValue();
+               if (k == "i32_to_f32") {
+                 c.line("__bang_int322float(" + view.operand(0).str() + "," +
+                        view.operand(1).str() + ",(int)(" +
+                        view.operand(2).str() + "),0);");
+                 return llvm::Error::success();
+               }
                if (k == "f32_to_f16_ieee") {
                  c.line("__cn_vector_cast_f32_to_f16_rn((int)(" +
                         view.operand(2).str() + "), " + view.operand(0).str() +

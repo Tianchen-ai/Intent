@@ -2867,6 +2867,9 @@ struct MatrixLowerer {
       cs.addAttribute("in_dtype", b.getI32IntegerAttr(plan->inDtype));
       cs.addAttribute("out_dtype", b.getI32IntegerAttr(plan->outDtype));
       cs.addAttribute("ci.implementation", lib);
+      cs.addAttribute(
+          "denormal-fp-math",
+          b.getStringAttr(intentdsl::kir::getDenormalFpMath(&p.dot)));
       b.create(cs);
 
       uint64_t grid = llvm::divideCeil(uint64_t(shapeM), uint64_t(bm)) *

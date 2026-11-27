@@ -13,7 +13,8 @@ void matrixSupplyCost(Unit &u) {
                   "missing target library matrix estimator");
             return ctx.local(ms->libraryEstimator);
           }
-          intentdsl::block::MatrixAccess a(mlir::cast<mlir::func::FuncOp>(op));
+          intentdsl::block::MatrixAccess a(
+              op->getParentOfType<mlir::func::FuncOp>());
           auto t = a.tile, d = a.shape;
           double jobs = std::ceil(double(d[0]) / t[0]) *
                         std::ceil(double(d[1]) / t[1]) * d[3];

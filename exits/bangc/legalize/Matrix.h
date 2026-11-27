@@ -63,7 +63,9 @@ inline mlir::LogicalResult bindMatrix(mlir::func::FuncOp fn, unsigned phase,
       // The vector pool operates on 64 records at once, one output per
       // channel. Only byte-contiguous records share this pitched transfer.
       int64_t panel =
-          record && record.getLayout().group == 32 && p.tile[0] >= 64 &&
+          record && record.getLayout().group == 32 &&
+                  p.tile[0] >=
+                      record.getLayout().elements / record.getLayout().group &&
                   p.shape[0] >= 64 && p.stride(p.dot.getOperand(0), 2) == 1 &&
                   p.stride(p.dot.getOperand(1).getDefiningOp()->getOperand(0),
                            1) == 1 &&

@@ -2319,6 +2319,11 @@ struct RowLowerer {
                 Value rowBase = b.create<arith::AddIOp>(
                     loc, b.create<arith::MulIOp>(loc, rIdx, symN), col);
                 Value dstH = makeAddr(dst, {h}, {symP}, 1);
+                if (storeTy.isInteger(32)) {
+                  makeOp("member_ramp", {dstH, rowBase, live}, {}, {},
+                         "member-ramp");
+                  return;
+                }
                 forLoop(cI64(0), live, cI64(1), [&](Value k) {
                   Value lin = b.create<arith::AddIOp>(loc, rowBase, k);
                   Value v = storeTy.isInteger(32)
@@ -2372,6 +2377,37 @@ struct RowLowerer {
             Type in0Elem = inst.getNumOperands() >= 1
                                ? elemOf(inst.getOperand(0).getType())
                                : Type{};
+            if (n == "cast" && in0Elem.isInteger(32) && dstElem.isF32() &&
+                rankOf(inst.getOperand(0).getType()) == 2) {
+              makeOp("vec_cast", {dst, getVal(inst.getOperand(0)), lanes}, {},
+                     {b.getNamedAttr("kind", b.getStringAttr("i32_to_f32"))});
+              continue;
+            }
+            if ((n == "xor" || n == "and" || n == "shl" || n == "shr") &&
+                dstElem.isInteger(32) &&
+                rankOf(inst.getOperand(0).getType()) == 2) {
+              int rhs = rankOf(inst.getOperand(1).getType());
+              if ((n == "xor" || n == "and") && (rhs == 0 || rhs == 2)) {
+                makeOp(
+                    rhs ? "vec_binary" : "vec_scalar",
+                    {dst, getVal(inst.getOperand(0)),
+                     getVal(inst.getOperand(1)), lanes},
+                    {},
+                    {b.getNamedAttr(
+                        "op", b.getStringAttr(n == "xor" ? "bxor" : "band"))});
+                continue;
+              }
+              if ((n == "shr" || n == "shl") && rhs == 0) {
+                makeOp(
+                    "vec_scalar",
+                    {dst, getVal(inst.getOperand(0)),
+                     getVal(inst.getOperand(1)), lanes},
+                    {},
+                    {b.getNamedAttr(
+                        "op", b.getStringAttr(n == "shr" ? "ashr" : "shl"))});
+                continue;
+              }
+            }
             if (n == "cast" && rankOf(inst.getOperand(0).getType()) == 2 &&
                 ((dstElem.isF16() && in0Elem.isF32()) ||
                  (dstElem.isF32() && in0Elem.isF16()))) {
@@ -2457,6 +2493,25 @@ struct RowLowerer {
             if (n == "div" && dstElem.isF32()) {
               int r0 = rankOf(inst.getOperand(0).getType());
               int r1 = rankOf(inst.getOperand(1).getType());
+              if (r0 == 2 && r1 == 0) {
+                auto *input = inst.getOperand(0).getDefiningOp();
+                auto *den = inst.getOperand(1).getDefiningOp();
+                auto fa =
+                    den ? den->getAttrOfType<FloatAttr>("value") : FloatAttr{};
+                if (input && input->getName().getStringRef() == "block.cast" &&
+                    elemOf(input->getOperand(0).getType()).isInteger(32) &&
+                    fa) {
+                  int e;
+                  float f = fa.getValueAsDouble();
+                  if (std::frexp(f, &e) == 0.5f && e >= -94 && e <= 126) {
+                    makeOp("vec_scalar",
+                           {dst, getVal(inst.getOperand(0)), cF32(1.0f / f),
+                            lanes},
+                           {}, {b.getNamedAttr("op", b.getStringAttr("mul"))});
+                    continue;
+                  }
+                }
+              }
               bool approximate = prim == "approximate_div";
               if (!approximate && prim != "guarded_reciprocal" && prim != "div_rn") {
                 bodyStatus = inst.emitError(

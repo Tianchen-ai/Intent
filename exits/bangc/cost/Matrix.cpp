@@ -108,7 +108,8 @@ void panelCost(compilerinfra::Unit &u) {
       {{"cnnl-matmul-cost", "levels/storage/dsa::panel-supply", "2",
         [](mlir::Operation *op, const compilerinfra::StructuralCandidate &,
            compilerinfra::CostContext &ctx) {
-          intentdsl::block::MatrixAccess a(mlir::cast<mlir::func::FuncOp>(op));
+          intentdsl::block::MatrixAccess a(
+              op->getParentOfType<mlir::func::FuncOp>());
           auto d = a.shape;
           double M = d[0], N = d[1], K = d[2], B = d[3];
           double elemBytes =

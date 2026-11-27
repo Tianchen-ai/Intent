@@ -65,11 +65,14 @@ void ownerSupplyCost(compilerinfra::Unit &u) {
                     : double(plan->views.size() + plan->writes.size());
             if (c.id == "streamed-owner-views")
               issues = reads + writes;
+            if (c.id == "private-rows" && plan->lanes > 1)
+              issues = double(plan->views.size()) / plan->lanes;
             e.terms["row_transfer_issues"] = {issues, "count"};
             if (bw && lat) {
-              e.timeNs =
-                  issues * *lat +
-                  (c.id == "direct" ? 4 * issues : 2.0 * plan->bytes) / *bw;
+              e.timeNs = issues * *lat +
+                         (c.id == "direct" ? 4 * issues
+                                           : 2.0 * plan->bytes / plan->lanes) /
+                             *bw;
               if (plan->k && c.id != "private-rows") {
                 // A scalar comparison chain still executes for every member of
                 // a staged row.

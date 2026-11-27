@@ -246,8 +246,13 @@ bool supportsSupply(block::MatrixAccess &a, Attribute v,
                     const TargetProfile &p) {
   if (auto lib = dyn_cast_or_null<StringAttr>(v)) {
     auto plan = matchLibraryMatrix(a, p);
-    return plan && plan->impl == lib.getValue() &&
-           !p.checkImplementationForOp(lib.getValue(), a.fn.getOperation());
+    if (!plan || plan->impl != lib.getValue())
+      return false;
+    if (auto err = p.checkImplementationForOp(lib.getValue(), &a.dot)) {
+      llvm::consumeError(std::move(err));
+      return false;
+    }
+    return true;
   }
   auto cap = p.services.get<LocalSupply>();
   auto ms = p.services.get<MatrixStorage>();
@@ -263,7 +268,7 @@ LogicalResult verifyMatrix(func::FuncOp fn, const TargetProfile &p,
     if (failed(block::verifyTiledMatrix(fn, p, "block")))
       return failure();
     block::MatrixAccess a(fn);
-    if (!supportsSupply(a, fn->getAttr("dsa.matrix_choice"), p))
+    if (!supportsSupply(a, a.dot.getAttr("dsa.matrix_choice"), p))
       return fn.emitError(
           "matrix choice exceeds worker count or private storage");
     return success();
@@ -281,8 +286,7 @@ LogicalResult verifyMatrix(func::FuncOp fn, const TargetProfile &p,
       if (!cap || !plan || plan->impl != lib.getValue() || tasks != 1 ||
           scratch != 0)
         return setup.emitError("invalid external library matrix supply");
-      if (auto err =
-              p.checkImplementationForOp(lib.getValue(), fn.getOperation()))
+      if (auto err = p.checkImplementationForOp(lib.getValue(), &a.dot))
         return setup.emitError() << llvm::toString(std::move(err));
       if (setup.hasAttr("placement"))
         return setup.emitError("external library cannot use native panel storage");
@@ -320,7 +324,8 @@ void matrixSupply(Unit &u) {
   DecisionFamily f;
   f.name = "panel-supply";
   f.applies = [](Operation *op) {
-    return kir::matrixDomain(dyn_cast<func::FuncOp>(op));
+    return kir::isContraction(op->getName().stripDialect()) &&
+           kir::matrixDomain(op->getParentOfType<func::FuncOp>());
   };
   f.read = [](Operation *op) { return op->getAttr("dsa.matrix_choice"); };
   f.write = [](Operation *op, Attribute v) {
@@ -329,12 +334,12 @@ void matrixSupply(Unit &u) {
   };
   f.verify = [](Operation *op, Attribute v,
                 const TargetProfile &p) -> llvm::Error {
-    block::MatrixAccess a(cast<func::FuncOp>(op));
+    block::MatrixAccess a(op->getParentOfType<func::FuncOp>());
     if (auto lib = dyn_cast_or_null<StringAttr>(v)) {
       auto plan = dsa::matchLibraryMatrix(a, p);
       if (!plan || plan->impl != lib.getValue())
         return llvm::createStringError("unsupported library matrix ABI");
-      if (auto err = p.checkImplementationForOp(lib.getValue(), op))
+      if (auto err = p.checkImplementationForOp(lib.getValue(), &a.dot))
         return err;
       return llvm::Error::success();
     }
@@ -352,7 +357,7 @@ void matrixSupply(Unit &u) {
         return llvm::createStringError("invalid library matrix candidate");
       return llvm::Error::success();
     }
-    block::MatrixAccess a(cast<func::FuncOp>(op));
+    block::MatrixAccess a(op->getParentOfType<func::FuncOp>());
     auto ms = p.services.get<dsa::MatrixStorage>();
     auto plan = ms ? dsa::PanelPlan::read(c.value, a, *ms) : std::nullopt;
     if (!plan || c.id != plan->id() ||
@@ -369,7 +374,7 @@ void matrixSupply(Unit &u) {
   s.enumerate = [](Operation *op, const TargetProfile &p, AnalysisManager &)
       -> llvm::Expected<std::vector<StructuralCandidate>> {
     auto cap = p.services.get<dsa::LocalSupply>();
-    block::MatrixAccess a(cast<func::FuncOp>(op));
+    block::MatrixAccess a(op->getParentOfType<func::FuncOp>());
     std::vector<StructuralCandidate> cs;
     Builder b(op->getContext());
     auto ms = p.services.get<dsa::MatrixStorage>();
@@ -398,7 +403,7 @@ void matrixSupply(Unit &u) {
                           AnalysisManager &)
       -> llvm::Expected<std::vector<StructuralCandidate>> {
     std::vector<StructuralCandidate> cs;
-    block::MatrixAccess a(cast<func::FuncOp>(op));
+    block::MatrixAccess a(op->getParentOfType<func::FuncOp>());
     if (auto plan = dsa::matchLibraryMatrix(a, p)) {
       cs.push_back({"library-cnnl",
                     "external-library",
@@ -415,7 +420,7 @@ void matrixSupply(Unit &u) {
   r.apply = [](Operation *op, Attribute choice, const TargetProfile &p,
                RewriterBase &b) -> llvm::Error {
     op->getContext()->getOrLoadDialect("dsa");
-    block::MatrixAccess a(cast<func::FuncOp>(op));
+    block::MatrixAccess a(op->getParentOfType<func::FuncOp>());
     b.setInsertionPoint(&a.dot);
     OperationState setup(op->getLoc(), "dsa.panel_supply");
     if (auto lib = dyn_cast<StringAttr>(choice)) {

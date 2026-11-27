@@ -409,6 +409,62 @@ __mlu_func__ void certified_div_rn(float *dst, const float *a, float b,
   } ub;
   ub.f = b;
   unsigned b_mag = ub.u & 0x7fffffffU;
+  // A broadcast divisor lets every lane use the same integer significand.
+  // Work at 24 fraction bits below one and 23 at/above one. A rounded
+  // reciprocal and multiply miss the nearest significand by at most one:
+  // before the multiply rounds, the error in 24-bit units is strictly < 1.
+  // The exact small residual fits i32, so the low word of A*2^k - Q*B
+  // suffices even though the two products individually need 48 bits.
+  unsigned eb = b_mag >> 23;
+  if (eb > 0 && eb < 255 && dst != a && live == lanes) {
+    int *ma = (int *)sc, *q = ma + lanes, *ge = q + lanes, *t = ge + lanes,
+        *r = t + lanes, *u = r + lanes;
+    int mb = (b_mag & 0x7fffff) | 0x800000;
+    int minE = (int)eb - 125, maxE = (int)eb + 126;
+    minE = minE < 1 ? 1 : minE;
+    maxE = maxE > 254 ? 254 : maxE;
+    __bang_band_scalar(ma, (const int *)a, 0x7fffffff, lanes);
+    __bang_sub_scalar(t, ma, minE * 0x800000, lanes);
+    __bang_ge_scalar((unsigned *)u, (unsigned *)t,
+                     (unsigned)(maxE - minE + 1) * 0x800000u, lanes);
+    __bang_int322float((float *)t, u, lanes, 0);
+    if (!__bang_count((float *)t, live)) {
+      __bang_band_scalar(ma, ma, 0x7fffff, lanes);
+      __bang_add_scalar(ma, ma, 0x800000, lanes);
+      __bang_ge_scalar(ge, ma, mb, lanes);
+      __bang_mul_scalar(t, ge, -0x800000, lanes);
+      __bang_add_scalar(t, t, 0x3f800000, lanes);
+      __bang_int322float(dst, ma, lanes, 0);
+      __bang_mul_scalar(dst, dst, __cn_scalar_div_f32_rn(16777216.f, (float)mb),
+                        lanes);
+      __bang_mul(dst, dst, (float *)t, lanes);
+      __bang_float2int32_rn(q, dst, lanes, 0);
+      __bang_mul_scalar(r, ma, 0x800000, lanes);
+      __bang_mul_scalar(t, ge, -1, lanes);
+      __bang_add_scalar(t, t, 2, lanes);
+      __bang_mul(r, r, t, lanes);
+      __bang_mul_scalar(t, q, mb, lanes);
+      __bang_sub(r, r, t, lanes);
+      __bang_add(r, r, r, lanes);
+      __bang_band_scalar(t, q, 1, lanes);
+      __bang_add(u, r, t, lanes);
+      __bang_ge_scalar(u, u, mb + 1, lanes);
+      __bang_sub(t, t, r, lanes);
+      __bang_ge_scalar(t, t, mb + 1, lanes);
+      __bang_add(q, q, u, lanes);
+      __bang_sub(q, q, t, lanes);
+      __bang_band_scalar(t, (const int *)a, 0x7f800000, lanes);
+      __bang_add_scalar(t, t, (125 - (int)eb) * 0x800000, lanes);
+      __bang_mul_scalar(ge, ge, 0x800000, lanes);
+      __bang_add(t, t, ge, lanes);
+      __bang_add((int *)dst, t, q, lanes);
+      __bang_band_scalar(t, (const int *)a, (int)0x80000000u, lanes);
+      if (ub.u >> 31)
+        __bang_bxor_scalar(t, t, (int)0x80000000u, lanes);
+      __bang_bor((int *)dst, (int *)dst, t, lanes);
+      return;
+    }
+  }
   if (dst == a || b_mag < 0x0d800000U || b_mag >= 0x72800000U) {
     __sync_compute();
     for (int i = 0; i < live; ++i)
