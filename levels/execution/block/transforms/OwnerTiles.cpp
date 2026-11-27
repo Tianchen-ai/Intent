@@ -1,5 +1,6 @@
 #include "OwnerTiles.h"
 #include "compilerinfra/Proofs.h"
+#include "intentdsl/levels/execution/block/ir/BucketRanges.h"
 #include "intentdsl/levels/execution/block/ir/FoldPanel.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 using namespace mlir;
@@ -1021,6 +1022,14 @@ void OwnerTiles::boundedScatterLoop(scf::ForOp loop,
   bool useMemoryCursors = !useNativeGatherHist && access.blockAtomicMemoryBins;
   int64_t P = access.scatterPanelWidth > 0 ? access.scatterPanelWidth
                                            : (useMemoryCursors ? 64 : 32);
+  auto staticHi = orderedStaticLoopExtent(loop, fn, nullptr);
+  int64_t sortWidth =
+      useNativeGatherHist
+          ? sortedBucketWidth(loop, fn, scat, P, access.sortPanelWidth)
+          : 0;
+  bool sortRanks = sortWidth > 0;
+  if (sortRanks)
+    P = sortWidth;
   Type pIdxTy = shaped({P}, b.getI64Type());
   Type pI32Ty = shaped({P}, b.getI32Type());
   Type bIdxTy = shaped({B_pad}, b.getI64Type());
@@ -1123,13 +1132,9 @@ void OwnerTiles::boundedScatterLoop(scf::ForOp loop,
   }
 
   Value lanesPI32 = b.create<arith::TruncIOp>(loc, pI32Ty, lanes(P));
-  Value afterPP = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt,
-                                          broadcast(lanesPI32, ppI32Ty, 0),
-                                          broadcast(lanesPI32, ppI32Ty, 1));
   Value zeroP32 = like(b.create<arith::ConstantIntOp>(loc, 0, 32), pI32Ty);
 
   Value hiScalar = toScalar(loop.getUpperBound());
-  auto staticHi = orderedStaticLoopExtent(loop, fn, nullptr);
   bool exactP = exactMask && staticHi && *staticHi > 0 && (*staticHi % P == 0);
   pLoop = useMemoryCursors
               ? b.create<scf::ForOp>(loc, integer(0), hiScalar, integer(P))
@@ -1241,8 +1246,42 @@ void OwnerTiles::boundedScatterLoop(scf::ForOp loop,
 
   Value binI32 = b.create<arith::TruncIOp>(loc, pI32Ty, bin1D);
   Value baseCursor1D, matchBP, safeBin, stepCurAddr;
+  Value permutation, panelCounts, rank1D, publicationMask = validBinP;
   if (useNativeGatherHist) {
     safeBin = select(validBinP, binI32, zeroP32);
+    panelCounts = tileHistogram(safeBin, validBinP, B_pad);
+    if (sortRanks) {
+      // Sorting (bucket, source lane) preserves source order for equal keys.
+      // Subtract the local bucket start to recover the author's cursor rank.
+      auto splat = [&](int64_t n) {
+        return like(b.create<arith::ConstantIntOp>(loc, n, 32), pI32Ty);
+      };
+      Value sentinel = splat(B);
+      Value digit = select(validBinP, binI32, sentinel);
+      Value packed = b.create<arith::AddIOp>(
+          loc, b.create<arith::MulIOp>(loc, digit, splat(P)), lanesPI32);
+      Value sorted = op("tile_sort", packed, pI32Ty,
+                        {b.getNamedAttr(
+                            "ci.implementation",
+                            b.getStringAttr((unit + "::tile-sort-i32").str()))})
+                         ->getResult(0);
+      permutation = b.create<arith::AndIOp>(loc, sorted, splat(P - 1));
+      digit = b.create<arith::ShRUIOp>(loc, sorted, splat(llvm::Log2_64(P)));
+      publicationMask = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt,
+                                                digit, sentinel);
+      safeBin = select(publicationMask, digit, zeroP32);
+      auto scanTy = shaped({1, B_pad}, b.getI32Type());
+      Value inclusive =
+          op("scan_sum", reshapeTile(panelCounts, {1, B_pad}), scanTy,
+             {b.getNamedAttr(
+                 "ci.implementation",
+                 b.getStringAttr((unit + "::inclusive-scan").str()))})
+              ->getResult(0);
+      Value starts = b.create<arith::SubIOp>(
+          loc, reshapeTile(inclusive, {B_pad}), panelCounts);
+      rank1D = b.create<arith::SubIOp>(loc, lanesPI32,
+                                       tileGather(starts, safeBin, 0));
+    }
     baseCursor1D = tileGather(curVec, safeBin, 0);
   } else if (useMemoryCursors) {
     // Keep the owner-private cursor table in L1 cache and update each distinct
@@ -1274,15 +1313,20 @@ void OwnerTiles::boundedScatterLoop(scf::ForOp loop,
         "sum", 0);
   }
 
-  Value sameBinPP =
-      b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
-                              broadcast(binI32, ppI32Ty, 0),
-                              broadcast(binI32, ppI32Ty, 1));
-  Value sameValidPP = b.create<arith::AndIOp>(
-      loc, sameBinPP, broadcast(validBinP, ppBoolTy, 1));
-  Value priorValidPP = b.create<arith::AndIOp>(loc, sameValidPP, afterPP);
-  Value rank1D = reduce(
-      b.create<arith::ExtUIOp>(loc, ppI32Ty, priorValidPP), "sum", 1);
+  Value sameValidPP;
+  if (!sortRanks) {
+    Value afterPP = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt,
+                                            broadcast(lanesPI32, ppI32Ty, 0),
+                                            broadcast(lanesPI32, ppI32Ty, 1));
+    Value sameBinPP = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                              broadcast(binI32, ppI32Ty, 0),
+                                              broadcast(binI32, ppI32Ty, 1));
+    sameValidPP = b.create<arith::AndIOp>(loc, sameBinPP,
+                                          broadcast(validBinP, ppBoolTy, 1));
+    Value priorValidPP = b.create<arith::AndIOp>(loc, sameValidPP, afterPP);
+    rank1D =
+        reduce(b.create<arith::ExtUIOp>(loc, ppI32Ty, priorValidPP), "sum", 1);
+  }
 
   Value dstI32 = b.create<arith::AddIOp>(loc, baseCursor1D, rank1D);
   Value dstI64 = b.create<arith::ExtSIOp>(loc, pIdxTy, dstI32);
@@ -1296,8 +1340,11 @@ void OwnerTiles::boundedScatterLoop(scf::ForOp loop,
     }
     sCoords.push_back(dstI64);
     sAxes.push_back(0);
-    write(st.getMemRef(), address(st.getMemRef(), sCoords, sAxes),
-          lift1D(st.getValue()), validBinP);
+    Value payload = lift1D(st.getValue());
+    if (sortRanks)
+      payload = tileGather(payload, permutation, 0);
+    write(st.getMemRef(), address(st.getMemRef(), sCoords, sAxes), payload,
+          publicationMask);
   }
 
   if (useMemoryCursors) {
@@ -1312,10 +1359,9 @@ void OwnerTiles::boundedScatterLoop(scf::ForOp loop,
     return;
   }
 
-  Value panelCounts =
-      useNativeGatherHist
-          ? tileHistogram(safeBin, validBinP, B_pad)
-          : reduce(b.create<arith::ExtUIOp>(loc, bpI32Ty, matchBP), "sum", 1);
+  if (!panelCounts)
+    panelCounts =
+        reduce(b.create<arith::ExtUIOp>(loc, bpI32Ty, matchBP), "sum", 1);
   Value nextCur = b.create<arith::AddIOp>(loc, curVec, panelCounts);
   b.create<scf::YieldOp>(loc, ValueRange{nextCur});
   b.setInsertionPointAfter(pLoop);

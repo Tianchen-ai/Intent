@@ -1,3 +1,4 @@
+#include "intentdsl/levels/execution/block/ir/BucketRanges.h"
 #include "intentdsl/levels/execution/block/ir/FoldIssue.h"
 #include "intentdsl/levels/execution/block/ir/FoldPanel.h"
 #include "intentdsl/levels/execution/block/ir/Owners.h"
@@ -516,8 +517,18 @@ void orderedCost(Unit &u) {
                 int64_t ext =
                     intentdsl::block::orderedStaticLoopExtent(loop, fnOp, f)
                         .value_or(1024);
+                int64_t rankWidth = caps && caps->scatterPanelWidth > 0
+                                        ? caps->scatterPanelWidth
+                                        : 32;
+                auto sorted = caps && w == 1
+                                  ? intentdsl::block::sortedBucketWidth(
+                                        loop, fnOp, scatInfo, rankWidth,
+                                        caps->sortPanelWidth)
+                                  : 0;
                 panelBucketSteps +=
-                    (w == 1) ? std::ceil(double(ext) / 32.0) : double(ext);
+                    w == 1
+                        ? std::ceil(double(ext) / (sorted ? sorted : rankWidth))
+                        : double(ext);
                 continue;
               }
               if (lanes == 1 && triLanes == 1 &&

@@ -138,6 +138,7 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
   if (!warp || !threads || *warp <= 0 || *threads <= 0)
     return llvm::createStringError(
         "expected local warp size and block thread limit");
+  caps->scheduledWarpWidth = unsigned(*warp);
   for (const auto &r : (*arch == 90 ? hopper : blackwell)) {
     if (r.warps > *threads / *warp)
       continue;
@@ -169,11 +170,11 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
                   *arch == 90
                       ? options.getInteger("registers").value_or(0) * 7 / 16
                       : options.getInteger("registers").value_or(0) * 3 / 8,
-                  *arch == 90 ? 64 : 0, *arch == 90 ? 2 : 1, 16, true,
-                  *warp,
+                  *arch == 90 ? 64 : 0, *arch == 90 ? 2 : 1, 16, true, *warp,
                   /*scatterPanelWidth=*/*arch == 90 ? 32 : 64,
                   /*histogramPanelWidth=*/residentEl * 2,
-                  /*minHistogramPanelWidth=*/64})))
+                  /*minHistogramPanelWidth=*/64,
+                  /*sortPanelWidth=*/*warp * *warp})))
     return err;
   std::string cal = options.getString("calibration")
                         .value_or(*arch == 90 ? "sm90" : "sm120")

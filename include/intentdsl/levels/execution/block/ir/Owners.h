@@ -18,6 +18,7 @@ struct OwnerMachine {
   int64_t scatterPanelWidth = 0;
   int64_t histogramPanelWidth = 0;
   int64_t minHistogramPanelWidth = 0;
+  int64_t sortPanelWidth = 0;
 };
 bool canForwardOwners(mlir::Operation *, const compilerinfra::TargetProfile &);
 mlir::LogicalResult forwardOwners(mlir::func::FuncOp);

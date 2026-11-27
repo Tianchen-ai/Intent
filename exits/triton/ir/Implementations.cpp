@@ -413,6 +413,39 @@ void tileContracts(Unit &unit) {
     unit.implementations.push_back({std::move(ac), COMPILERINFRA_SOURCE});
   }
   {
+    ImplementationContract c;
+    c.name = "tile-sort-i32";
+    c.operation = "triton_src.tile_sort";
+    c.symbol = "tl.sort";
+    c.source = ImplementationSource::Builtin;
+    c.minimum = Reuse::Native;
+    c.operands = "one signed i32 register vector of power-of-two length";
+    c.layout = "one-dimensional CTA tile";
+    c.accumulator = "i32";
+    c.effects = "pure within program instance";
+    c.numerical = "exact ascending integer order";
+    c.estimator = "exits/triton::collective-steps";
+    c.costParameters = {"participants", "width"};
+    TypedContract tc;
+    tc.effects = EffectMask::None;
+    tc.shape.minOperands = tc.shape.maxOperands = 1;
+    tc.shape.minResults = tc.shape.maxResults = 1;
+    tc.operandTypes = tc.resultTypes = {ScalarTypeKind::I32};
+    c.typed = std::move(tc);
+    c.available = [](const TargetProfile &p) -> llvm::Error {
+      if (!p.services.get<intentdsl::block::OwnerMachine>())
+        return llvm::createStringError("missing CUDA execution capabilities");
+      return llvm::Error::success();
+    };
+    c.verify = [](Operation *op) {
+      auto keys = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
+      return success(keys && keys.getRank() == 1 && keys.hasStaticShape() &&
+                     llvm::isPowerOf2_64(keys.getDimSize(0)) &&
+                     keys == op->getResult(0).getType());
+    };
+    unit.implementations.push_back({std::move(c), COMPILERINFRA_SOURCE});
+  }
+  {
     ImplementationContract gc;
     gc.name = "tile-gather";
     gc.operation = "triton_src.tile_gather";

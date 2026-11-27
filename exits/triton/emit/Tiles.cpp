@@ -86,6 +86,8 @@ TerminalPrinter tilePrinter() {
   p.operations["triton_src.transpose"] = PrintRule::format("$r0 = tl.trans($0)");
   p.operations["triton_src.scan_sum"] =
       PrintRule::format("$r0 = tl.cumsum($0,axis=1)");
+  p.operations["triton_src.tile_sort"] =
+      PrintRule::format("$r0 = tl.sort($0,0)");
   p.operations["triton_src.tile_gather"] =
       PrintRule::format("$r0 = tl.gather($0,$1,axis={axis})");
   p.operations["triton_src.tile_histogram"] =

@@ -62,13 +62,32 @@ void registerSegment(Unit &unit) {
         }
         if (!widePanels.empty()) {
           for (int64_t batch : {int64_t(32), int64_t(64)}) {
-            NamedAttrList panel(d);
-            panel.set("member_batch", b.getI64IntegerAttr(batch));
-            panel.set("rows", b.getArrayAttr(widePanels));
-            candidates.push_back(
-                {"segment-tile-" + std::to_string(batch), walk.str(),
-                 panel.getDictionary(op->getContext()),
-                 {"distinct-segment-outputs"}});
+            if (!caps->scheduledWarpWidth) {
+              NamedAttrList panel(d);
+              panel.set("member_batch", b.getI64IntegerAttr(batch));
+              panel.set("rows", b.getArrayAttr(widePanels));
+              candidates.push_back({"segment-tile-" + std::to_string(batch),
+                                    walk.str(),
+                                    panel.getDictionary(op->getContext()),
+                                    {"distinct-segment-outputs"}});
+              continue;
+            }
+            // The feature width changes both the resident register footprint
+            // and the number of CTAs. Score each footprint independently.
+            for (auto [index, row] : llvm::enumerate(widePanels)) {
+              auto spec = cast<DictionaryAttr>(row);
+              std::string id = "segment-tile-" + std::to_string(batch);
+              if (index)
+                id += "-row-" +
+                      std::to_string(spec.getAs<IntegerAttr>("id").getInt());
+              NamedAttrList panel(d);
+              panel.set("member_batch", b.getI64IntegerAttr(batch));
+              panel.set("rows", b.getArrayAttr({row}));
+              candidates.push_back({id,
+                                    walk.str(),
+                                    panel.getDictionary(op->getContext()),
+                                    {"distinct-segment-outputs"}});
+            }
           }
         }
       }

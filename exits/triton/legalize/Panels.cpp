@@ -1022,7 +1022,9 @@ tritonOwnerViews(const intentdsl::block::OwnerMachine *om) {
           /*groupedPanel=*/nullptr,
           /*scatterPanelWidth=*/om ? om->scatterPanelWidth : 0,
           /*histogramPanelWidth=*/om ? om->histogramPanelWidth : 0,
-          /*minHistogramPanelWidth=*/om ? om->minHistogramPanelWidth : 0};
+          /*minHistogramPanelWidth=*/om ? om->minHistogramPanelWidth : 0,
+          /*scatterFragmentElements=*/0,
+          /*sortPanelWidth=*/om ? om->sortPanelWidth : 0};
 }
 
 LogicalResult verifyTritonGeometry(func::FuncOp fn,

@@ -56,6 +56,9 @@ struct RowCapacity {
   bool onlineRowReductions = false;
   bool rectangularProjectedRows = false;
   llvm::SmallVector<unsigned> independentWidths;
+  // Width of an explicitly scheduled warp. With compiler-managed CTA
+  // geometry the downstream launcher measures the width alternatives.
+  unsigned scheduledWarpWidth = 0;
   bool globalAtomicBins=false, nativePrivateHistogram=false;
   std::optional<int64_t> privateBinCapacity;
   bool acceptsGroup(mlir::Operation *op, unsigned count) const {

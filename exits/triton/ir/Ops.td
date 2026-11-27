@@ -253,6 +253,10 @@ def Itsrc_ScaledMMA : Op<Itsrc_Dialect, "scaled_mma", [Pure]> {
                        AnyRankedTensor:$acc);
   let results = (outs AnyRankedTensor:$value);
 }
+def Itsrc_TileSort : Op<Itsrc_Dialect, "tile_sort", [Pure, SameOperandsAndResultType]> {
+  let arguments = (ins I32Tensor:$keys);
+  let results = (outs I32Tensor:$sorted);
+}
 def Itsrc_TileGather : Op<Itsrc_Dialect, "tile_gather", [Pure]> {
   let arguments = (ins AnyRankedTensor:$src, AnyRankedTensor:$indices,
                        I64Attr:$axis);
