@@ -5,7 +5,7 @@ using namespace mlir;
 using namespace compilerinfra;
 void dmaCost(Unit &u) {
   u.costModels.push_back(
-      {{"dma", "levels/storage/dsa::supply", "2",
+      {{"dma", "levels/storage/dsa::supply", "3",
         [](Operation *op, const StructuralCandidate &c,
            CostContext &ctx) -> llvm::Expected<CostEstimate> {
           CostEstimate e;
@@ -113,12 +113,15 @@ void dmaCost(Unit &u) {
           double lanes = n * batch;
           op->walk([&](Operation *i) {
             auto code=i->getName().stripDialect();
-            if (approximateScratch(i)) {
-              // A certified vector runs candidate generation, both endpoint
-              // checks and a mask reduction before any exceptional-lane repair.
-              // Charge the minimum vector traversals, even if no lane repairs.
+            if (approximateScratch(i) &&
+                (code == "sqrt" || choice.contains("approximate_math"))) {
+              // Strict sqrt certifies candidates; reciprocal and fast sqrt use
+              // only the vector traversals permitted by the effective IR flags.
               bool fast = choice.contains("approximate_math");
-              bool scalarDivisor = code == "div" && i->getOperand(1).getType().isF32();
+              auto divisorType = dyn_cast<RankedTensorType>(
+                  i->getOperand(i->getNumOperands() - 1).getType());
+              bool scalarDivisor =
+                  code == "div" && (!divisorType || divisorType.getRank() == 1);
               double passes = fast ? (code == "sqrt" || scalarDivisor ? 1 : 2) : 6;
               mathPasses += passes;
               if (auto rate = intentdsl::quantity(ctx, "compute", "lane/ns")) {
@@ -128,35 +131,48 @@ void dmaCost(Unit &u) {
               return;
             }
             std::string primitive;
-            double replacedOps = 1.;
+            double invocationLanes = lanes, callsPerBatch = 1.;
             if(code=="reduce"){
               auto algebra=i->getAttrOfType<StringAttr>("algebra");
               if(algebra=="max_num")primitive="max";
               if(algebra=="sum")primitive="sum";
             } else if (code=="exp") primitive="exp";
-            else if (code=="div" && i->hasOneUse()){
-              Operation *consumer=*i->getUsers().begin();
-              auto ty=consumer->getNumResults()==1?dyn_cast<ShapedType>(consumer->getResult(0).getType()):ShapedType{};
-              if(consumer->getName().stripDialect()=="cast" && ty && ty.getElementType().isF16()) {
-                primitive="quotient";
-                replacedOps = 2.;
+            else if (code == "div") {
+              auto out = dyn_cast<RankedTensorType>(i->getResult(0).getType());
+              if (!out || out.getRank() != 2 || !out.getElementType().isF32())
+                return;
+              auto rank = [](Value v) -> int64_t {
+                auto t = dyn_cast<RankedTensorType>(v.getType());
+                return t ? t.getRank() : 0;
+              };
+              auto lhs = rank(i->getOperand(0)), rhs = rank(i->getOperand(1));
+              primitive = lhs != 2   ? "div_rn_sv"
+                          : rhs != 2 ? "div_rn_vs"
+                                     : "div_rn_vv";
+              if (lhs == 1 || rhs == 1) {
+                invocationLanes = n;
+                callsPerBatch = batch;
               }
             }
             if(primitive.empty())return;
-            int low = lanes <= 512 ? 64 : 512, high = lanes <= 512 ? 512 : 2048;
+            int low = invocationLanes <= 512 ? 64 : 512,
+                high = invocationLanes <= 512 ? 512 : 2048;
             auto prefix="compute_"+primitive+"_";
             auto a=intentdsl::quantity(ctx,prefix+std::to_string(low),"ns");
             auto b=intentdsl::quantity(ctx,prefix+std::to_string(high),"ns");
             if(a && b){
-              double u = lanes <= 512
-                             ? std::clamp((lanes - low) / (high - low), 0., 1.)
-                             : (lanes - low) / (high - low);
-              specialized += ((*a) + ((*b) - (*a)) * u) / batch;
-              count += replacedOps;
+              double u =
+                  invocationLanes <= 512
+                      ? std::clamp((invocationLanes - low) / (high - low), 0.,
+                                   1.)
+                      : (invocationLanes - low) / (high - low);
+              specialized += callsPerBatch * ((*a) + ((*b) - (*a)) * u) / batch;
+              ++count;
             }
           });
           e.terms["native_compute"]={specialized,"ns"};
-          if (mathPasses) e.terms["vector_math_passes"] = {mathPasses, "count"};
+          if (mathPasses)
+            e.terms["vector_math_passes"] = {mathPasses, "count"};
           e.terms["native_operations"]={count,"count"};
           if (bi && bo && li && lo && bw) {
             double fetch = in / *bi + r * *li,
