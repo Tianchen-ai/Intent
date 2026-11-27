@@ -131,9 +131,9 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
   caps->l2CacheBytes = options.getInteger("l2_cache_bytes").value_or(0);
   caps->structuredRows = false;
   caps->orderedDotTokens = intentdsl::cpu::RowMachine::streamedDotTokens;
+  caps->ownerStackBytes = privStack;
+  caps->ownerRegisters = vecRegs;
   if (!isRvv) {
-    caps->ownerStackBytes = privStack;
-    caps->ownerRegisters = vecRegs;
     // A packed contraction can cover the whole task grain. The CPU decision
     // separately checks score capacity, dot depth and shared-input bounds.
     caps->orderedMatrixOwners = p.features.count("amx_bf16") ? 256 : 0;
@@ -155,7 +155,9 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
     caps->wideningPanel = v;
   }
   caps->boundWidening = isRvv;
-  if (!isRvv && *bits >= 256)
+  if (isRvv)
+    caps->repeatedScoreOwners = std::min<int64_t>(v, vecRegs / 4);
+  else if (*bits >= 256)
     caps->packedOwners = std::clamp<int64_t>(*bits / 32, 4, 16);
 
   auto matrix = std::make_shared<intentdsl::cpu::MatrixMachine>();

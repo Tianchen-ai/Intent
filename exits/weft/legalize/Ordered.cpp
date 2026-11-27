@@ -660,7 +660,7 @@ struct OrderedLowerer {
 
   bool matchTiledTwoPassContraction(Block &srcBb, Operation *localBufOp,
                                     TiledTwoPassPlan &plan) {
-    if (isRvv || batch < 2 || !llvm::isPowerOf2_64(uint64_t(batch)))
+    if (batch < 2 || !llvm::isPowerOf2_64(uint64_t(batch)))
       return false;
     auto geometry = space.getAttrOfType<DictionaryAttr>("cpu.vector_panel");
     if (!geometry)
@@ -1484,10 +1484,13 @@ struct OrderedLowerer {
       pubVal = trOp.getResult();
       accUser = *pubVal.getUsers().begin();
     }
+    // The RVV member-store binding normally multiplies by the row's inverse
+    // at publication. The tiled path matched that exact multiply above and
+    // emits it once when committing the output panel.
     if (!accUser || accUser->getBlock() != &srcBb ||
         accUser->getName().stripDialect() != "slice_write" ||
         accUser->getOperand(0) != pubVal ||
-        accUser->hasAttr("weft_host.member_store"))
+        (!isRvv && accUser->hasAttr("weft_host.member_store")))
       return false;
     plan.yWriteOp = accUser;
     plan.yMem = accUser->getOperand(1);

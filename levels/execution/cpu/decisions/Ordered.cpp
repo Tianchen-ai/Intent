@@ -83,7 +83,8 @@ LogicalResult verifyOwnerGrain(func::FuncOp fn, Operation &space,
         w > (space.hasAttr("cpu.value_width")
                  ? std::max(p.services.get<RowMachine>()->orderedMatrixOwners,
                             p.services.get<RowMachine>()->packedOwners)
-                 : p.services.get<RowMachine>()->packedOwners) ||
+                 : std::max(p.services.get<RowMachine>()->packedOwners,
+                            space.hasAttr("cpu.batch_score_window") ? p.services.get<RowMachine>()->repeatedScoreOwners : 0u)) ||
         !grain || grain.getInt() % w || reuse->group % w || reuse->extent % w)
       return space.emitError("shared interval must project identical input "
                              "coordinates across independent owners");
@@ -918,7 +919,8 @@ void ownerTasks(Unit &u) {
                      ? std::max(p.services.get<cpu::RowMachine>()
                                     ->orderedMatrixOwners,
                                 p.services.get<cpu::RowMachine>()->packedOwners)
-                     : p.services.get<cpu::RowMachine>()->packedOwners) ||
+                     : std::max(p.services.get<cpu::RowMachine>()->packedOwners,
+                                retained ? p.services.get<cpu::RowMachine>()->repeatedScoreOwners : 0u)) ||
             !grain || grain.getInt() % w || reuse->group % w ||
             reuse->extent % w ||
             (retained &&

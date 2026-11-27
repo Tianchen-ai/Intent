@@ -8,6 +8,7 @@ struct RowConfig {
 struct RowMachine {
   int64_t vectorBits, workers;
   unsigned packedOwners = 0;
+  unsigned repeatedScoreOwners = 0;
   unsigned orderedMatrixOwners = 0;
   unsigned orderedValueMinColumns = 1, orderedValueColumnMultiple = 1;
   // Width of a downstream score contraction. Zero covers the complete key

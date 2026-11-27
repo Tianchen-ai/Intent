@@ -314,12 +314,15 @@ void sharedOwnerTraversal(compilerinfra::Unit &u) {
     std::vector<StructuralCandidate> cs;
     const auto &facts = *p.services.get<intentdsl::CallFacts>();
     auto reuse = intentdsl::cpu::sharedInterval(op, facts);
-    auto maximum = p.services.get<intentdsl::cpu::RowMachine>()->packedOwners;
-    if (!reuse || !maximum)
+    auto &machine = *p.services.get<intentdsl::cpu::RowMachine>();
+    if (!reuse || (!machine.packedOwners && !machine.repeatedScoreOwners))
       return cs;
     Builder b(op->getContext());
     bool repeat = bool(intentdsl::cpu::repeatedScore(*op));
-    auto &machine = *p.services.get<intentdsl::cpu::RowMachine>();
+    auto maximum = repeat ? std::max(machine.packedOwners, machine.repeatedScoreOwners)
+                          : machine.packedOwners;
+    if (!maximum)
+      return cs;
     auto score = repeat ? intentdsl::cpu::reusableScores(
                               op, p, intentdsl::cpu::scoreSlotLimit(machine))
                         : std::nullopt;
@@ -346,7 +349,7 @@ void sharedOwnerTraversal(compilerinfra::Unit &u) {
             {b.getNamedAttr("grain", b.getI64IntegerAttr(grain)),
              b.getNamedAttr("inner", b.getI64IntegerAttr(reuse->axis)),
              b.getNamedAttr("batch", b.getI64IntegerAttr(batch))});
-        if (!matrixOnly)
+        if (batch <= machine.packedOwners)
           cs.push_back({id, "shared-interval-owners", d, {"exclusive-output"}});
         if (repeat) {
           NamedAttrList row(d);
