@@ -531,7 +531,14 @@ void dmaCost(Unit &);
 void panelCost(Unit &);
 void registerCNNL(Unit &);
 void bind(Unit &u) {
-  for (auto format : {"bf16", "f16", "fp8"})
+  intentdsl::kir::registerDotSemantics(
+      u, "bangc", "bf16", "torch.bmm on MLU370", "native",
+      "torch.bmm -> torch_mlu::ops::cnnl_baddbmm_out_internal -> "
+      "cnnlStrideBatchMatMul_v3, BF16 inputs and FP32 "
+      "accumulation. "
+      "MLU370: 256 products 2^-127 * 2^119 and 2^-100 * 2^-33 both give zero "
+      "(IEEE: 1 and 2^-125); v0.6-semantics.md, MLU BF16 dot.");
+  for (auto format : {"f16", "fp8"})
     intentdsl::kir::registerDotSemantics(
         u, "bangc", format, "Cambricon BANG C matrix operations",
         "undocumented",

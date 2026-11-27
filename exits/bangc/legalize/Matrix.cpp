@@ -116,6 +116,9 @@ struct MatrixLowerer {
     st.addOperands(operands);
     st.addTypes(results);
     st.addAttributes(attrs);
+    if (contract == "wram-conv-bf16")
+      if (auto mode = p.dot.getAttr("denormal-fp-math"))
+        st.addAttribute("denormal-fp-math", mode);
     if (!contract.empty()) {
       st.addAttribute("ci.implementation",
                       b.getStringAttr(("exits/bangc::" + contract).str()));
@@ -2867,9 +2870,8 @@ struct MatrixLowerer {
       cs.addAttribute("in_dtype", b.getI32IntegerAttr(plan->inDtype));
       cs.addAttribute("out_dtype", b.getI32IntegerAttr(plan->outDtype));
       cs.addAttribute("ci.implementation", lib);
-      cs.addAttribute(
-          "denormal-fp-math",
-          b.getStringAttr(intentdsl::kir::getDenormalFpMath(&p.dot)));
+      if (auto mode = p.dot.getAttr("denormal-fp-math"))
+        cs.addAttribute("denormal-fp-math", mode);
       b.create(cs);
 
       uint64_t grid = llvm::divideCeil(uint64_t(shapeM), uint64_t(bm)) *

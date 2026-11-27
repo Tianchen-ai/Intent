@@ -176,8 +176,8 @@ mlu370,bangc,group7/triangular_solve,32x128x64-f32,作者默认,377062.0,,,,,无
 mlu370,bangc,program/adamw,author,3 × arcp；IEEE 次正规数,50.0,torch,55.0,mlu370,0.90909,快,,,,,77.0
 mlu370,bangc,program/attention,author,作者默认,935.0,,,,,无有效对照,参照跑不了,MLU370 上该输入所需的 CNNL BF16 primitive 不受支持,,,935.0
 mlu370,bangc,program/batch_norm,author,作者默认,13.0,aten:source,79.0,mlu370,0.16456,快,,,torch,18.0,13.0
-mlu370,bangc,program/batched_gemm,author,作者默认,23.0,,,,,无有效对照,口径不同,MLU370 Torch BF16 bmm 在次正规数输入、或正规数乘出次正规数时均冲零；默认档逐项保留。,torch（原生 BF16、FTZ）,16.0,23.0
-mlu370,bangc,program/batched_gemm,subnormal_ftz,作者默认,16.0,torch,16.0,mlu370,1.0,平,,,,,16.0
+mlu370,bangc,program/batched_gemm,author,作者默认,16.0,torch,16.0,mlu370,1.0,平,,,,,16.0
+mlu370,bangc,program/batched_gemm,subnormal_ftz,作者默认,15.0,torch,16.0,mlu370,0.9375,快,,,,,15.0
 mlu370,bangc,program/causal_convolution,author,作者默认,53.0,aten:source,65.0,mlu370,0.81538,快,,,,,53.0
 mlu370,bangc,program/causal_linear_attention,author,作者默认,49.0,aten:source,8999.0,mlu370,0.00545,快,,,,,49.0
 mlu370,bangc,program/cholesky,author,作者默认,29.0,,,,,无有效对照,参照跑不了,torch_mlu 将线性代数 primitive 回退到 CPU,,,29.0

@@ -1,6 +1,7 @@
 #pragma once
 #include "../capabilities/ScaledPanels.h"
 #include "compilerinfra/Assembly.h"
+#include "intentdsl/levels/algorithm/kir/ir/NativeDot.h"
 #include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 #include "intentdsl/levels/storage/dsa/ir/Matrix.h"
 namespace CI_UNIT_NAMESPACE {
@@ -83,7 +84,9 @@ inline mlir::LogicalResult bindMatrix(mlir::func::FuncOp fn, unsigned phase,
       return p.dot.emitError(
           "native filter copy implements one 64-channel weight bank");
     bool allowFtz =
-        compilerinfra::allowsSubnormalFlush(&p.dot, profile.numerical);
+        type.isBF16()
+            ? intentdsl::kir::permitsBf16Dot(&p.dot)
+            : compilerinfra::allowsSubnormalFlush(&p.dot, profile.numerical);
     if (type.isBF16() && !allowFtz &&
         !field(p.dot, "bangc.bf16_arithmetic",
                b.getStringAttr("checked-conv-ieee-fallback")))

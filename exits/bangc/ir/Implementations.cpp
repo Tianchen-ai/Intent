@@ -1,6 +1,7 @@
 #include "Alignment.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
+#include "intentdsl/levels/algorithm/kir/ir/NativeDot.h"
 #include "intentdsl/levels/algorithm/kir/ir/StorageLayout.h"
 #include "intentdsl/levels/storage/dsa/ir/Matrix.h"
 #include "intentdsl/levels/storage/dsa/ir/Supply.h"
@@ -171,7 +172,7 @@ void rowContracts(Unit &unit) {
                   EffectMask::ReadWrite, 64, std::nullopt);
     bf16ConvTyped.precondition =
         [](Operation *op, const TargetProfile &target) -> llvm::Error {
-      if (allowsSubnormalFlush(op, target.numerical))
+      if (intentdsl::kir::permitsBf16Dot(op))
         return llvm::Error::success();
       if (op->getName().getStringRef() != "bangc_src.wram_conv")
         return llvm::Error::success();
@@ -192,7 +193,7 @@ void rowContracts(Unit &unit) {
         }
       }
       return llvm::createStringError(
-          "wram-conv-bf16 requires function denormal-fp-math FTZ permission or "
+          "wram-conv-bf16 requires native BF16 dot semantics or "
           "an explicit bf16_panel_ok normal-exponent guard");
     };
     addBuiltin(
@@ -203,7 +204,7 @@ void rowContracts(Unit &unit) {
         "NRAM row-major [BM, BK] x WRAM 64-channel filter [BN=64, BK]", "f32",
         "writes NRAM f32[BM, BN] accumulator",
         "MLU370 matrix-engine BF16xBF16 contraction accumulated in FP32 over "
-        "verified finite normal exponent window or denormal-fp-math FTZ",
+        "verified finite normal exponent window or native BF16 dot contract",
         std::move(bf16ConvTyped), hasWram, [](Operation *op) {
           auto mode = op->getAttrOfType<StringAttr>("mode");
           auto bn = op->getAttrOfType<IntegerAttr>("bn");
@@ -1168,16 +1169,33 @@ void rowContracts(Unit &unit) {
     TypedContract ftzMm = makeTyped(
         3, std::nullopt, 0, {STK::BF16, STK::F32, STK::I32, STK::I64}, {},
         {STK::F32}, EffectMask::ReadWrite, 0, std::nullopt);
-    ftzMm.numerical.requireInputSubnormalFlush = true;
-    ftzMm.numerical.requireOutputSubnormalFlush = true;
+    ftzMm.precondition = [](Operation *op,
+                            const TargetProfile &target) -> llvm::Error {
+      bool bf16;
+      if (auto dt = op->getAttrOfType<IntegerAttr>("in_dtype"))
+        bf16 = dt.getInt() == 17;
+      else {
+        auto lhs = op->getNumOperands()
+                       ? dyn_cast<MemRefType>(op->getOperand(0).getType())
+                       : MemRefType{};
+        bf16 = lhs && lhs.getElementType().isBF16();
+      }
+      if (bf16 ? intentdsl::kir::permitsBf16Dot(op)
+               : allowsSubnormalFlush(op, target.numerical))
+        return llvm::Error::success();
+      return llvm::createStringError("CNNL matrix ABI requires native BF16 dot "
+                                     "or explicit F32 flush permission");
+    };
     addCnnl(
         "cnnl-matmul-ftz", "cnnl_matmul", "intent_cnnl_matmul",
         "exits/bangc::cnnl-matmul-cost", {"m", "n", "k", "batch"},
-        "GDRAM bf16/f32[M,K]/[K,M] lhs, bf16/f32[K,N]/[N,K] rhs -> bf16/f32[M,N]",
+        "GDRAM bf16/f32[M,K]/[K,M] lhs, bf16/f32[K,N]/[N,K] rhs -> "
+        "bf16/f32[M,N]",
         "contiguous or transposed 2D/3D GDRAM tensors", "f32",
         "reads GDRAM lhs/rhs and writes GDRAM bf16/f32 output on CNRT queue",
-        "Cambricon CNNL cnnlMatMul_v2 or strided BF16 batch with f32 accumulation "
-        "(ALLOW_TF32=0); flushes binary32 subnormals (requires denormal-fp-math FTZ)",
+        "Cambricon CNNL cnnlMatMul_v2 or strided BF16 batch with f32 "
+        "accumulation "
+        "(ALLOW_TF32=0); native BF16 dot, F32 inputs require explicit FTZ",
         std::move(ftzMm), [](Operation *op) {
           auto dt = op->getAttrOfType<IntegerAttr>("in_dtype");
           return success(dt && (dt.getInt() == 2 || dt.getInt() == 17));
