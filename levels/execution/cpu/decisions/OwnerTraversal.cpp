@@ -332,6 +332,8 @@ void sharedOwnerTraversal(compilerinfra::Unit &u) {
     auto vectorDot = machine.repeatedScoreOwners
                          ? intentdsl::cpu::orderedDotPanel(*op, facts, reuse->axis, maximum, false)
                          : std::nullopt;
+    auto vectorValue = vectorDot ? intentdsl::cpu::orderedValuePanel(*op, facts, *vectorDot, false)
+                                 : std::nullopt;
     for (int grain : {2, 4, 8, 16, 32, 128, 256}) {
       unsigned limit =
           panel ? std::max(maximum, machine.orderedMatrixOwners) : maximum;
@@ -361,14 +363,15 @@ void sharedOwnerTraversal(compilerinfra::Unit &u) {
               score->keys <= intentdsl::cpu::scoreSlotLimit(machine) / batch)
             slots = score->keys;
           if (batch > machine.packedOwners && !matrixOnly) {
-            if (!vectorDot)
+            if (!vectorValue)
               continue;
             // The unfused FP32 product has one element and one validity byte
             // per owner, key and depth coordinate. The score window is live
             // alongside the product and the two widened input panels.
             double tile = machine.orderedDotTokens, depth = vectorDot->depth;
             double bytes = sizeof(float) * double(batch) * std::min(slots, vectorDot->tokens) +
-                           (sizeof(float) + 1) * depth * (batch * tile + batch + tile);
+                           (sizeof(float) + 1) *
+                               (depth * (batch * tile + batch + tile) + batch * vectorValue->columns);
             if (bytes > machine.ownerStackBytes)
               continue;
           }

@@ -34,7 +34,7 @@ struct OrderedValuePanel {
 // Replay keeps every other use of the same weight (e.g. mass) in f32.
 inline std::optional<OrderedValuePanel>
 orderedValuePanel(mlir::Operation &space, const CallFacts &facts,
-                  const OrderedDotPanel &qk) {
+                  const OrderedDotPanel &qk, bool requiresFtz = true) {
   using namespace mlir;
   std::optional<OrderedValuePanel> result;
   auto repeated = repeatedScore(space);
@@ -57,7 +57,9 @@ orderedValuePanel(mlir::Operation &space, const CallFacts &facts,
     auto carry = loop.getRegionIterArgs()[1];
     if (!add ||
         !compilerinfra::hasFastMath(add, arith::FastMathFlags::reassoc) ||
-        !compilerinfra::allowsSubnormalFlush(add) || !carry.hasOneUse())
+        (requiresFtz ? !compilerinfra::allowsSubnormalFlush(add)
+                     : !compilerinfra::hasFastMath(add, arith::FastMathFlags::contract)) ||
+        !carry.hasOneUse())
       return;
     auto *zero = loop.getInitArgs()[1].getDefiningOp();
     if (!zero || zero->getName().stripDialect() != "lane_splat" ||
@@ -67,7 +69,8 @@ orderedValuePanel(mlir::Operation &space, const CallFacts &facts,
              : add.getRhs() == carry ? add.getLhs()
                                      : Value{};
     auto mul = v ? v.getDefiningOp<arith::MulFOp>() : arith::MulFOp{};
-    if (!mul || !compilerinfra::allowsSubnormalFlush(mul))
+    if (!mul || (requiresFtz ? !compilerinfra::allowsSubnormalFlush(mul)
+                             : !compilerinfra::hasFastMath(mul, arith::FastMathFlags::contract)))
       return;
     for (unsigned i = 0; i < 2; ++i) {
       auto *splat = mul->getOperand(i).getDefiningOp();
