@@ -1,4 +1,5 @@
 #include "intentdsl/levels/execution/block/ir/Contraction.h"
+#include "intentdsl/levels/algorithm/kir/ir/NativeDot.h"
 #include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 namespace CI_UNIT_NAMESPACE {
 using namespace compilerinfra;
@@ -15,12 +16,19 @@ void matrixCost(Unit &u) {
           bool isSplit = tile.size() == 4 && (tile[3] == 1 || tile[3] == 2);
           bool isSplitLib = tile.size() == 4 && tile[3] == 2;
           double tm = tile[0], tn = tile[1], tk = tile[2];
-          bool records = false;
+          bool records = false, nativeNarrow = false;
           double recordBytes = 144.0, recordElems = 256.0;
           double lhsElemBytes = 2.0, outElemBytes = 2.0;
           const intentdsl::kir::QuantFormatSpec *qSpec = nullptr;
           for (mlir::Operation &o : op->getRegion(0).front()) {
             auto k = o.getName().stripDialect();
+            if (k == "contract") {
+              auto elem =
+                  mlir::cast<mlir::ShapedType>(o.getOperand(0).getType())
+                      .getElementType();
+              nativeNarrow = (elem.isF16() || elem.isBF16()) &&
+                             !intentdsl::kir::requiresSourceDot(&o, elem);
+            }
             if (k == "q4k_dot") {
               records = true;
             } else if (k == "quant_contract") {
@@ -216,6 +224,30 @@ void matrixCost(Unit &u) {
               e.terms["routed_matrix_ops"] = {ops, "count"};
               e.timeNs = *startup + std::max({dramNs, panelNs, mmaNs}) +
                          launched * 2 * sizeof(int32_t) / sharedBw;
+            } else if (nativeNarrow && jobs > 0 && mt &&
+                       mt->smMmaOpsPerNs > 0 && mt->l2CacheBytes > 0 && sbw &&
+                       2. * shape->k * (shape->m + shape->n) <=
+                           mt->l2CacheBytes) {
+              // The X launch dimension traverses M. CTAs in a wave share a
+              // column panel, and each new band revisits the same row panels.
+              double sms = std::max<int64_t>(1, f->participants);
+              double rowTiles = std::ceil(shape->m / tm);
+              double cohort = std::min({jobs, sms, rowTiles});
+              double panelTraffic =
+                  waves * panels * tk * 2. *
+                  (cohort * tm + std::ceil(std::min(jobs, sms) / cohort) * tn);
+              double mmaNs =
+                  waves * 2. * tm * tn * panels * tk / mt->smMmaOpsPerNs;
+              double supplyNs = panelTraffic / *sbw;
+              double outputNs =
+                  jobs * tm * tn * outElemBytes / wbw.value_or(*bw);
+              double issueNs = sync.value_or(0.) / sms * waves * panels;
+              e.bottleneck = "cache-resident matrix waves";
+              e.terms["wave_panel_bytes"] = {panelTraffic, "B"};
+              e.terms["wave_mma_ns"] = {mmaNs, "ns"};
+              e.timeNs = *startup + outputNs + issueNs +
+                         std::max(mmaNs, supplyNs) +
+                         0.25 * std::min(mmaNs, supplyNs);
             } else if (groupedRhs) {
               double l2Bw = sbw.value_or(*bw * 4.0);
               double l2Traffic = jobs * panels * panelBytes;

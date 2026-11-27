@@ -870,9 +870,7 @@ struct Lower : PassWrapper<Lower, OperationPass<ModuleOp>> {
   }
 };
 // cuTile 1.6 fuses two equal rounding modes even when RN is explicit.
-// Widen an unlicensed product at a contraction edge, then round it at the
-// original SSA definition. Products of two f16 (f32/bf16) values are exactly
-// representable in f32 (f64), including their full finite exponent range.
+// Preserve the representation of an independently rounded product at its use.
 static void preserveProductRounding(func::FuncOp f) {
   SmallVector<Operation *> products;
   f.walk([&](Operation *mul) {
@@ -896,33 +894,17 @@ static void preserveProductRounding(func::FuncOp f) {
   for (auto *mul : products) {
     OpBuilder b(mul);
     auto result = mul->getResult(0).getType();
-    if (getElementTypeOrSelf(result).isF32()) {
-      // cuda.tile's fuse_mul_addsub matches an immediate floating multiply.
-      // Expose the rounded bits at this use so the tile frontend retains the
-      // separate operations without promoting a binary32 product to binary64.
-      b.setInsertionPointAfter(mul);
-      Type bits = b.getI32Type();
-      if (auto shape = dyn_cast<ShapedType>(result))
-        bits = shape.clone(bits);
-      auto raw = b.create<arith::BitcastOp>(mul->getLoc(), bits, mul->getResult(0));
-      auto rounded = b.create<arith::BitcastOp>(mul->getLoc(), result, raw);
-      mul->getResult(0).replaceAllUsesExcept(rounded, raw);
-      continue;
-    }
-    Type wide = getElementTypeOrSelf(result).isF16() ? b.getF32Type() : b.getF64Type();
-    auto wider = [&](Type t) -> Type {
-      if (auto s = dyn_cast<ShapedType>(t))
-        return s.clone(wide);
-      return wide;
-    };
-    OperationState product(mul->getLoc(), mul->getName());
-    for (Value v : mul->getOperands())
-      product.addOperands(b.create<arith::ExtFOp>(mul->getLoc(), wider(v.getType()), v).getResult());
-    product.addTypes(wider(result));
-    auto *p = b.create(product);
-    auto rounded = b.create<arith::TruncFOp>(mul->getLoc(), result, p->getResult(0));
-    mul->replaceAllUsesWith(rounded.getOperation());
-    mul->erase();
+    // cuda.tile's fuse_mul_addsub matches an immediate floating multiply.
+    // Materialize the rounded bits at the declared width before addition.
+    b.setInsertionPointAfter(mul);
+    Type bits =
+        b.getIntegerType(getElementTypeOrSelf(result).getIntOrFloatBitWidth());
+    if (auto shape = dyn_cast<ShapedType>(result))
+      bits = shape.clone(bits);
+    auto raw =
+        b.create<arith::BitcastOp>(mul->getLoc(), bits, mul->getResult(0));
+    auto rounded = b.create<arith::BitcastOp>(mul->getLoc(), result, raw);
+    mul->getResult(0).replaceAllUsesExcept(rounded, raw);
   }
 }
 
@@ -974,7 +956,7 @@ struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
           cap && cap->permitTma,
           mt ? StringRef(mt->libraryGemmImpl) : StringRef(""));
       if (cap && cap->preferRectRowReads) {
-        // On SM90, aligned 1-row contiguous loads inside a TMA contraction
+        // Aligned 1-row contiguous loads inside a TMA contraction
         // K-loop stall warpgroup scheduling when lowered as per-lane gathers.
         // Rewrite unmasked aligned 2D 1-row tile_reads to non-TMA rect_reads.
         auto extractAlignedBlock = [](Value coord, int64_t width) -> Value {

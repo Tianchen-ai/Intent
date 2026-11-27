@@ -55,7 +55,7 @@ capabilities(const llvm::json::Object &options) {
   indices->bits = *bits;
   indices->scaledMma=*architecture>=100;
   indices->permitTma = options.getBoolean("allow_tma").value_or(false);
-  indices->preferRectRowReads = (*architecture == 90);
+  indices->preferRectRowReads = true;
   int64_t warpSize = options.getInteger("warp_size").value_or(32);
   int64_t exchangeW = *architecture == 90 ? 64 : 32;
   int64_t residentEl = 256;
