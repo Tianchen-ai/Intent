@@ -49,13 +49,16 @@ LogicalResult verifyRowComputation(func::FuncOp fn, Block &row, ValueRange captu
       return fn.emitError("direction disagrees with the scalar or view type");
     if (rank != desc->getArray("dims")->size() ||
         (!elt.isF16() && !elt.isF32() && !elt.isBF16() && !elt.isInteger(32) &&
-         !(rank == 0 && elt.isUnsignedInteger(64)) && !(rank && elt.isSignlessInteger(64))) ||
-        desc->getString("dtype") != (elt.isF16()                 ? "f16"
-                                     : elt.isBF16()              ? "bf16"
-                                     : elt.isUnsignedInteger(64) ? "u64"
-                                     : elt.isSignlessInteger(64) ? "i64"
-                                     : elt.isInteger(32)         ? "i32"
-                                                                 : "f32"))
+         !(rank == 0 && elt.isUnsignedInteger(64)) && !(rank && elt.isSignlessInteger(64)) &&
+         !(rank && elt.isSignlessInteger(8))) ||
+        (elt.isSignlessInteger(8)
+             ? (desc->getString("dtype") != "u8" && desc->getString("dtype") != "i8")
+             : desc->getString("dtype") != (elt.isF16()                 ? "f16"
+                                            : elt.isBF16()              ? "bf16"
+                                            : elt.isUnsignedInteger(64) ? "u64"
+                                            : elt.isSignlessInteger(64) ? "i64"
+                                            : elt.isInteger(32)         ? "i32"
+                                                                        : "f32")))
       return fn.emitError("parameter descriptor does not match its IR type");
   }
   bool indexed=fn->hasAttr("kir.iteration");
