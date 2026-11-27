@@ -520,11 +520,12 @@ void orderedCost(Unit &u) {
                 int64_t rankWidth = caps && caps->scatterPanelWidth > 0
                                         ? caps->scatterPanelWidth
                                         : 32;
-                auto sorted = caps && w == 1
-                                  ? intentdsl::block::sortedBucketWidth(
-                                        loop, fnOp, scatInfo, rankWidth,
-                                        caps->sortPanelWidth)
-                                  : 0;
+                auto sorted =
+                    caps && w == 1
+                        ? intentdsl::block::sortedBucketWidth(
+                              loop, fnOp, scatInfo, rankWidth,
+                              caps->sortPanelWidth, !caps->nativeTileGather)
+                        : 0;
                 panelBucketSteps +=
                     w == 1
                         ? std::ceil(double(ext) / (sorted ? sorted : rankWidth))

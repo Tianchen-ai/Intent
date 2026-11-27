@@ -73,11 +73,11 @@ capabilities(const llvm::json::Object &options) {
                   *architecture == 90 ? 64 : 0,
                   /*maxWarpgroups=*/1,
                   /*maxGroupReads=*/16,
-                  /*nativeTileGather=*/false,
-                  warpSize,
+                  /*nativeTileGather=*/false, warpSize,
                   /*scatterPanelWidth=*/64,
                   /*histogramPanelWidth=*/residentEl * 2,
-                  /*minHistogramPanelWidth=*/64})))
+                  /*minHistogramPanelWidth=*/64,
+                  /*sortPanelWidth=*/warpSize * 16})))
     return err;
   std::string cal = options.getString("calibration")
                         .value_or(*architecture == 90 ? "sm90" : "sm120")

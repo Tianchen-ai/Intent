@@ -1024,8 +1024,9 @@ void OwnerTiles::boundedScatterLoop(scf::ForOp loop,
                                            : (useMemoryCursors ? 64 : 32);
   auto staticHi = orderedStaticLoopExtent(loop, fn, nullptr);
   int64_t sortWidth =
-      useNativeGatherHist
-          ? sortedBucketWidth(loop, fn, scat, P, access.sortPanelWidth)
+      (useNativeGatherHist || (useMemoryCursors && access.sortKeys))
+          ? sortedBucketWidth(loop, fn, scat, P, access.sortPanelWidth,
+                              useMemoryCursors)
           : 0;
   bool sortRanks = sortWidth > 0;
   if (sortRanks)
@@ -1247,29 +1248,47 @@ void OwnerTiles::boundedScatterLoop(scf::ForOp loop,
   Value binI32 = b.create<arith::TruncIOp>(loc, pI32Ty, bin1D);
   Value baseCursor1D, matchBP, safeBin, stepCurAddr;
   Value permutation, panelCounts, rank1D, publicationMask = validBinP;
+  Value endOfRun;
   if (useNativeGatherHist) {
     safeBin = select(validBinP, binI32, zeroP32);
     panelCounts = tileHistogram(safeBin, validBinP, B_pad);
-    if (sortRanks) {
-      // Sorting (bucket, source lane) preserves source order for equal keys.
-      // Subtract the local bucket start to recover the author's cursor rank.
-      auto splat = [&](int64_t n) {
-        return like(b.create<arith::ConstantIntOp>(loc, n, 32), pI32Ty);
+  }
+  if (sortRanks) {
+    // Sorting (bucket, source lane) preserves source order for equal keys.
+    // Subtract the local bucket start to recover the author's cursor rank.
+    auto splat = [&](int64_t n) {
+      return like(b.create<arith::ConstantIntOp>(loc, n, 32), pI32Ty);
+    };
+    Value sentinel = splat(B);
+    Value digit = select(validBinP, binI32, sentinel);
+    Value packed = b.create<arith::AddIOp>(
+        loc, b.create<arith::MulIOp>(loc, digit, splat(P)), lanesPI32);
+    Value sorted =
+        access.sortKeys
+            ? access.sortKeys(*this, packed)
+            : op("tile_sort", packed, pI32Ty,
+                 {b.getNamedAttr(
+                     "ci.implementation",
+                     b.getStringAttr((unit + "::tile-sort-i32").str()))})
+                  ->getResult(0);
+    permutation = b.create<arith::AndIOp>(loc, sorted, splat(P - 1));
+    digit = b.create<arith::ShRUIOp>(loc, sorted, splat(llvm::Log2_64(P)));
+    publicationMask = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt,
+                                              digit, sentinel);
+    safeBin = select(publicationMask, digit, zeroP32);
+    if (useMemoryCursors) {
+      auto scan = [&](bool reverse) {
+        return op("run_length_scan", {digit, splat(1)}, pI32Ty,
+                  {b.getNamedAttr("reverse", b.getI64IntegerAttr(reverse)),
+                   b.getNamedAttr(
+                       "ci.implementation",
+                       b.getStringAttr((unit + "::sorted-run-scan").str()))})
+            ->getResult(0);
       };
-      Value sentinel = splat(B);
-      Value digit = select(validBinP, binI32, sentinel);
-      Value packed = b.create<arith::AddIOp>(
-          loc, b.create<arith::MulIOp>(loc, digit, splat(P)), lanesPI32);
-      Value sorted = op("tile_sort", packed, pI32Ty,
-                        {b.getNamedAttr(
-                            "ci.implementation",
-                            b.getStringAttr((unit + "::tile-sort-i32").str()))})
-                         ->getResult(0);
-      permutation = b.create<arith::AndIOp>(loc, sorted, splat(P - 1));
-      digit = b.create<arith::ShRUIOp>(loc, sorted, splat(llvm::Log2_64(P)));
-      publicationMask = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt,
-                                                digit, sentinel);
-      safeBin = select(publicationMask, digit, zeroP32);
+      rank1D = b.create<arith::SubIOp>(loc, scan(false), splat(1));
+      endOfRun = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                         scan(true), splat(1));
+    } else {
       auto scanTy = shaped({1, B_pad}, b.getI32Type());
       Value inclusive =
           op("scan_sum", reshapeTile(panelCounts, {1, B_pad}), scanTy,
@@ -1282,6 +1301,8 @@ void OwnerTiles::boundedScatterLoop(scf::ForOp loop,
       rank1D = b.create<arith::SubIOp>(loc, lanesPI32,
                                        tileGather(starts, safeBin, 0));
     }
+  }
+  if (useNativeGatherHist) {
     baseCursor1D = tileGather(curVec, safeBin, 0);
   } else if (useMemoryCursors) {
     // Keep the owner-private cursor table in L1 cache and update each distinct
@@ -1294,10 +1315,12 @@ void OwnerTiles::boundedScatterLoop(scf::ForOp loop,
       stepCoords.push_back(like(toScalar(idx), pIdxTy));
       stepAxes.push_back(0);
     }
-    stepCoords.push_back(bin1D);
+    stepCoords.push_back(
+        sortRanks ? Value(b.create<arith::ExtSIOp>(loc, pIdxTy, safeBin))
+                  : bin1D);
     stepAxes.push_back(0);
     stepCurAddr = address(curSt.getMemRef(), stepCoords, stepAxes);
-    baseCursor1D = read(curSt.getMemRef(), stepCurAddr, validBinP);
+    baseCursor1D = read(curSt.getMemRef(), stepCurAddr, publicationMask);
   } else {
     Value lanesBI32 = b.create<arith::TruncIOp>(loc, bI32Ty, lanes(B_pad));
     matchBP = b.create<arith::AndIOp>(
@@ -1341,12 +1364,32 @@ void OwnerTiles::boundedScatterLoop(scf::ForOp loop,
     sCoords.push_back(dstI64);
     sAxes.push_back(0);
     Value payload = lift1D(st.getValue());
-    if (sortRanks)
+    if (sortRanks && useMemoryCursors) {
+      auto src = st.getValue().getDefiningOp<memref::LoadOp>();
+      SmallVector<Value> coords;
+      for (Value idx : src.getIndices().drop_back())
+        coords.push_back(like(toScalar(idx), pIdxTy));
+      coords.push_back(b.create<arith::AddIOp>(
+          loc, like(base, pIdxTy),
+          b.create<arith::ExtSIOp>(loc, pIdxTy, permutation)));
+      payload = read(src.getMemRef(),
+                     address(src.getMemRef(), coords,
+                             SmallVector<int64_t>(coords.size(), 0)),
+                     publicationMask);
+    } else if (sortRanks)
       payload = tileGather(payload, permutation, 0);
     write(st.getMemRef(), address(st.getMemRef(), sCoords, sAxes), payload,
           publicationMask);
   }
 
+  if (useMemoryCursors && sortRanks) {
+    Value next = b.create<arith::AddIOp>(
+        loc, dstI32, like(b.create<arith::ConstantIntOp>(loc, 1, 32), pI32Ty));
+    write(curSt.getMemRef(), stepCurAddr, next,
+          b.create<arith::AndIOp>(loc, publicationMask, endOfRun));
+    b.setInsertionPointAfter(pLoop);
+    return;
+  }
   if (useMemoryCursors) {
     Value tot1D = reduce(
         b.create<arith::ExtUIOp>(loc, ppI32Ty, sameValidPP), "sum", 1);

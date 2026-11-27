@@ -75,6 +75,13 @@ TerminalPrinter cutilePrinter() {
       "$r0 = ct.astype(ct.bitcast(ct.astype($0|($1<<8),ct.uint16),ct.float16),ct.float32)");
   p.operations["ct_src.transpose"] =
       PrintRule::format("$r0 = ct.transpose($0)");
+  p.operations["ct_src.extract_half"] = PrintRule::format(
+      "$r0 = ct.extract($0,(0,{side},0),shape=({groups},1,{span}))");
+  p.operations["ct_src.cat_pair"] =
+      PrintRule::format("$r0 = ct.cat(($0,$1),1)");
+  p.operations["ct_src.run_length_scan"] = PrintRule::format(
+      "$r0 = ct.scan(($0,$1),0,lambda "
+      "a,n,b,m:(b,ct.where(a==b,n+m,m)),(-1,0),reverse=({reverse}!=0))[1]");
   p.operations["ct_src.scan_sum"] =
       PrintRule::format("$r0 = ct.cumsum($0,axis=1)");
   p.operations["math.roundeven"] = PrintRule::format(

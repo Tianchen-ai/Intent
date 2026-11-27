@@ -5,6 +5,9 @@ def TileSource : Dialect { let name="ct_src"; let cppNamespace="::intentdsl::cut
 class Inst<string name,dag args,dag outputs,list<Trait> traits=[]> : Op<TileSource,name,traits> {
   let arguments=args; let results=outputs;
 }
+def ExtractHalf : Inst<"extract_half",(ins I32Tensor:$input,I64Attr:$side,I64Attr:$groups,I64Attr:$span),(outs I32Tensor:$result),[Pure]>;
+def CatPair : Inst<"cat_pair",(ins I32Tensor:$left,I32Tensor:$right),(outs I32Tensor:$result),[Pure]>;
+def RunLengthScan : Inst<"run_length_scan",(ins I32Tensor:$sorted,I32Tensor:$ones,I64Attr:$reverse),(outs I32Tensor:$result),[Pure]>;
 def Bid : Inst<"pid",(ins),(outs Index:$id)>;
 def OutputPartition : Op<TileSource,"output_partition"> {
   let arguments=(ins I32Attr:$index);

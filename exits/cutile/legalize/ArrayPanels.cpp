@@ -428,20 +428,58 @@ bool nativeMatrixWrite(Tiles &t, intentdsl::block::MatrixAccess &p, Value y,
   t.op("rect_write", args);
   return true;
 }
+// Bitonic compare/exchange network over a power-of-two integer tile.
+static Value sortKeys(Tiles &t, Value keys) {
+  int64_t n = cast<RankedTensorType>(keys.getType()).getDimSize(0);
+  for (int64_t size = 2; size <= n; size *= 2) {
+    for (int64_t span = size / 2; span; span /= 2) {
+      int64_t groups = n / (2 * span);
+      Value block = reshape(t, keys, {groups, 2, span});
+      Type halfTy = t.shaped({groups, 1, span}, t.b.getI32Type());
+      auto half = [&](int64_t side) {
+        return t
+            .op("extract_half", block, halfTy,
+                {t.b.getNamedAttr("side", t.b.getI64IntegerAttr(side)),
+                 t.b.getNamedAttr("groups", t.b.getI64IntegerAttr(groups)),
+                 t.b.getNamedAttr("span", t.b.getI64IntegerAttr(span))})
+            ->getResult(0);
+      };
+      Value a = half(0), b = half(1);
+      Value low = t.b.create<arith::MinSIOp>(t.loc, a, b),
+            high = t.b.create<arith::MaxSIOp>(t.loc, a, b);
+      auto axis = t.lanes(groups);
+      auto flag = t.b.create<arith::AndIOp>(
+          t.loc, axis, t.like(t.integer(size / (2 * span)), axis.getType()));
+      auto ascending =
+          t.b.create<arith::CmpIOp>(t.loc, arith::CmpIPredicate::eq, flag,
+                                    t.like(t.integer(0), axis.getType()));
+      auto direction = reshape(t, ascending, {groups, 1, 1});
+      auto pair = [&](Value lhs, Value rhs) {
+        return t.op("select", {direction, lhs, rhs}, halfTy)->getResult(0);
+      };
+      Value merged =
+          t.op("cat_pair", {pair(low, high), pair(high, low)}, block.getType())
+              ->getResult(0);
+      keys = reshape(t, merged, {n});
+    }
+  }
+  return keys;
+}
 intentdsl::block::OwnerAccess
 nativeOwnerViews(const intentdsl::block::OwnerMachine *om) {
-  return {
-      rectangle,
-      panel,
-      /*scalarBroadcastRead=*/false,
-      /*nativeTileGather=*/false,
-      /*nativeTileHistogram=*/false,
-      /*blockAtomicMemoryBins=*/true,
-      /*minMmaRows=*/om ? om->operandGroupRows : 0,
-      groupedPanel,
-      /*scatterPanelWidth=*/om ? om->scatterPanelWidth : 0,
-      /*histogramPanelWidth=*/om ? om->histogramPanelWidth : 0,
-      /*minHistogramPanelWidth=*/om ? om->minHistogramPanelWidth : 0,
-      /*scatterFragmentElements=*/om ? om->warpSize * om->maxGroupReads : 0};
+  return {rectangle,
+          panel,
+          /*scalarBroadcastRead=*/false,
+          /*nativeTileGather=*/false,
+          /*nativeTileHistogram=*/false,
+          /*blockAtomicMemoryBins=*/true,
+          /*minMmaRows=*/om ? om->operandGroupRows : 0,
+          groupedPanel,
+          /*scatterPanelWidth=*/om ? om->scatterPanelWidth : 0,
+          /*histogramPanelWidth=*/om ? om->histogramPanelWidth : 0,
+          /*minHistogramPanelWidth=*/om ? om->minHistogramPanelWidth : 0,
+          /*scatterFragmentElements=*/om ? om->warpSize * om->maxGroupReads : 0,
+          /*sortPanelWidth=*/om ? om->sortPanelWidth : 0,
+          sortKeys};
 }
 } // namespace CI_UNIT_NAMESPACE

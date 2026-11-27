@@ -96,13 +96,31 @@ inline bool hasBucketPrefixes(mlir::scf::ForOp scatter, mlir::func::FuncOp fn,
 }
 inline int64_t sortedBucketWidth(mlir::scf::ForOp loop, mlir::func::FuncOp fn,
                                  const BoundedScatterLoopInfo &scat,
-                                 int64_t rankWidth, int64_t sortLimit) {
+                                 int64_t rankWidth, int64_t sortLimit,
+                                 bool reloadPayload = false) {
   auto extent = orderedStaticLoopExtent(loop, fn, nullptr);
   if (!extent || *extent <= rankWidth || *extent > INT32_MAX ||
       sortLimit <= rankWidth || scat.bins >= INT32_MAX / sortLimit)
     return 0;
   // The gather implementation must accept every payload, including tails.
   for (auto store : scat.scatterStores) {
+    if (reloadPayload) {
+      auto read = store.getValue().getDefiningOp<mlir::memref::LoadOp>();
+      if (!read || read.getIndices().empty() ||
+          read.getIndices().back() != loop.getInductionVar() ||
+          !llvm::all_of(read.getIndices().drop_back(), [&](mlir::Value i) {
+            return loop.isDefinedOutsideOfLoop(i);
+          }))
+        return 0;
+      for (auto dest : scat.scatterStores)
+        if (!orderedViewsDisjoint(fn, nullptr, read.getMemRef(),
+                                  dest.getMemRef()))
+          return 0;
+      auto cursor = scat.cursorStore;
+      if (!orderedViewsDisjoint(fn, nullptr, read.getMemRef(),
+                                cursor.getMemRef()))
+        return 0;
+    }
     auto t = store.getValue().getType();
     if (!t.isInteger(32) && !t.isInteger(64) && !t.isF16() && !t.isBF16() &&
         !t.isF32())

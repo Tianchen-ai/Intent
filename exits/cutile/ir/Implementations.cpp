@@ -104,6 +104,7 @@ void registerContracts(Unit &unit) {
         {"dynamic-collective", "axis_reduce", "ct.sum/ct.max"},
         {"native-row-reduce", "reduce", "ct.sum/ct.max"},
         {"inclusive-scan", "scan_sum", "ct.cumsum"},
+        {"sorted-run-scan", "run_length_scan", "ct.scan"},
         {"moments-reduction", "summary_reduce", "merge_moments"},
         {"moments-merge", "summary_merge", "merge_moments"},
         {"random", "uniform", "uniform_at"},
@@ -180,6 +181,13 @@ void registerContracts(Unit &unit) {
       tc.shape.resultRanks = {1};
       tc.operandTypes = {ScalarTypeKind::F32, ScalarTypeKind::I1};
       tc.resultTypes = {ScalarTypeKind::F32};
+    } else if (n == "sorted-run-scan") {
+      tc.shape.minOperands = tc.shape.maxOperands = 2;
+      tc.shape.operandRanks = {1, 1};
+      tc.shape.resultRanks = {1};
+      tc.shape.sameFirstOperandAndResultShape = true;
+      tc.operandTypes = tc.resultTypes = {ScalarTypeKind::I32};
+      c.numerical = "inclusive integer sums over equal adjacent sorted keys";
     } else if (n == "inclusive-scan") {
       tc.shape.minOperands = 1;
       tc.shape.maxOperands = 1;
@@ -210,6 +218,16 @@ void registerContracts(Unit &unit) {
       if (!isMemoryEffectFree(op) || op->getNumResults() != 1)
         return failure();
       auto n = op->getName().stripDialect();
+      if (n == "run_length_scan") {
+        auto t = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+        auto dir = op->getAttrOfType<IntegerAttr>("reverse");
+        return success(t && t.getRank() == 1 && t.hasStaticShape() &&
+                       llvm::isPowerOf2_64(t.getDimSize(0)) &&
+                       t.getElementType().isInteger(32) && dir &&
+                       (dir.getInt() == 0 || dir.getInt() == 1) &&
+                       llvm::all_of(op->getOperandTypes(),
+                                    [&](Type x) { return x == t; }));
+      }
       if (n == "summary_merge") {
         auto alg = op->getAttrOfType<StringAttr>("algebra");
         if (op->getNumOperands() != 2 || !alg || alg.getValue() != "welford")
