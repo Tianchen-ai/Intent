@@ -162,22 +162,6 @@ struct RowReduceContract
   }
 };
 
-struct NarrowQuotientContract
-    : public compilerinfra::ContractOpInterface::ExternalModel<
-          NarrowQuotientContract, NarrowQuotientOp> {
-  Type getAccumulatorType(Operation *op) const {
-    return Float32Type::get(op->getContext());
-  }
-  LogicalResult verifyLayoutAndAddressSpace(Operation *op) const {
-    return success(hasMemSpace(op->getOperand(0), 1) &&
-                   hasMemSpace(op->getOperand(1), 1) &&
-                   hasMemSpace(op->getOperand(2), 1) &&
-                   hasMemSpace(op->getOperand(3), 1) &&
-                   (hasMemSpace(op->getOperand(4), 1) ||
-                    hasMemSpace(op->getOperand(4), 2)));
-  }
-};
-
 struct ScanSumContract
     : public compilerinfra::ContractOpInterface::ExternalModel<ScanSumContract,
                                                                ScanSumOp> {
@@ -672,15 +656,6 @@ void TileTransposeOp::getEffects(EffectList &effects) {
   addRead(effects, op, 1);
 }
 
-void NarrowQuotientOp::getEffects(EffectList &effects) {
-  Operation *op = getOperation();
-  addWrite(effects, op, 0);
-  addReadWrite(effects, op, 1);
-  addReadWrite(effects, op, 2);
-  addRead(effects, op, 3);
-  addRead(effects, op, 4);
-}
-
 void Bf16TileOp::getEffects(EffectList &effects) {
   Operation *op = getOperation();
   unsigned nBufs = getBuffers().size();
@@ -724,9 +699,9 @@ void VecDivApproxOp::getEffects(EffectList &effects) {
 void VecDivRnOp::getEffects(EffectList &effects) {
   Operation *op = getOperation();
   addWrite(effects, op, 0);
-  addRead(effects, op, 1);
-  addRead(effects, op, 2);
-  addReadWrite(effects, op, 3);
+  for (unsigned i : {1u, 2u})
+    if (isa<MemRefType>(op->getOperand(i).getType()))
+      addRead(effects, op, i);
 }
 
 void ScanSumOp::getEffects(EffectList &effects) {
@@ -948,13 +923,13 @@ void BangcSrcDialect::initialize() {
   Reduce32SumOp::attachInterface<F32AccContract<Reduce32SumOp>>(*ctx);
   SumpoolOp::attachInterface<F32AccContract<SumpoolOp>>(*ctx);
   TileTransposeOp::attachInterface<TileTransposeContract>(*ctx);
-  NarrowQuotientOp::attachInterface<NarrowQuotientContract>(*ctx);
   Bf16TileOp::attachInterface<F32AccContract<Bf16TileOp>>(*ctx);
   Bf16ProductOp::attachInterface<F32AccContract<Bf16ProductOp>>(*ctx);
   VecSqrtRnOp::attachInterface<F32AccContract<VecSqrtRnOp>>(*ctx);
   VecSqrtOp::attachInterface<F32AccContract<VecSqrtOp>>(*ctx);
   VecDivApproxOp::attachInterface<F32AccContract<VecDivApproxOp>>(*ctx);
   VecDivRnOp::attachInterface<F32AccContract<VecDivRnOp>>(*ctx);
+  DivRnOp::attachInterface<F32AccContract<DivRnOp>>(*ctx);
   Bf16ScalarOp::attachInterface<F32AccContract<Bf16ScalarOp>>(*ctx);
   ScanSumOp::attachInterface<ScanSumContract>(*ctx);
   SummaryReduceOp::attachInterface<SummaryReduceContract>(*ctx);

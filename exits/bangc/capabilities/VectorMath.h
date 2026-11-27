@@ -16,14 +16,19 @@ inline std::optional<int64_t> approximateScratch(mlir::Operation *op) {
       !compilerinfra::allowsInputSubnormalFlush(op) ||
       !compilerinfra::allowsOutputSubnormalFlush(op))
     return {};
+  unsigned tiles = 0;
   for (auto v : op->getOperands()) {
-    auto t = dyn_cast<RankedTensorType>(v.getType());
-    if (t ? t.getRank() != 2 || !t.getElementType().isF32() : !v.getType().isF32())
+    if (auto t = dyn_cast<RankedTensorType>(v.getType())) {
+      if (!t.getElementType().isF32() ||
+          (t.getRank() != 2 && !(name == "block.div" && t.getRank() == 1)))
+        return {};
+      tiles += t.getRank() == 2;
+    } else if (!v.getType().isF32()) {
       return {};
+    }
   }
-  bool vectorPair = name == "block.div" &&
-                    isa<RankedTensorType>(op->getOperand(0).getType()) &&
-                    isa<RankedTensorType>(op->getOperand(1).getType());
-  return vectorPair ? sizeof(float) : 0;
+  if (!tiles)
+    return {};
+  return tiles == 2 ? sizeof(float) : 0;
 }
 }

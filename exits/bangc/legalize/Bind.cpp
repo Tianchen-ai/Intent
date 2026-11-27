@@ -15,36 +15,11 @@ namespace CI_UNIT_NAMESPACE {
 using namespace compilerinfra;
 llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &);
 namespace {
-// A preceding collective releases its scratch before the division. A second
-// consumer of the FP32 quotient would require a separately rounded FP32 value.
-Operation *availableCollective(Operation *op) {
-  for (auto *prev = op->getPrevNode(); prev; prev = prev->getPrevNode())
-    if (prev->getName().getStringRef() == "dsa.reduce")
-      return prev;
-  return nullptr;
-}
 bool usesApproximateMath(Operation *op) {
   if (!op || !approximateScratch(op))
     return false;
   auto layout = op->getParentOfType<func::FuncOp>()->getAttrOfType<DictionaryAttr>("dsa.layout");
   return layout && layout.contains("approximate_math");
-}
-bool narrowedQuotient(Operation *div) {
-  if (!div || div->getName().getStringRef() != "block.div" ||
-      !div->hasOneUse() || !availableCollective(div) || usesApproximateMath(div))
-    return false;
-  auto *castOp = *div->getUsers().begin();
-  if (castOp->getName().getStringRef() != "block.cast" ||
-      castOp->getBlock() != div->getBlock())
-    return false;
-  auto lhs = dyn_cast<RankedTensorType>(div->getOperand(0).getType());
-  auto rhs = div->getOperand(1).getType();
-  auto scalar = dyn_cast<RankedTensorType>(rhs);
-  auto out = dyn_cast<RankedTensorType>(castOp->getResult(0).getType());
-  return lhs && lhs.getRank() == 2 && lhs.getElementType().isF32() &&
-         (rhs.isF32() || (scalar && scalar.getRank() == 1 &&
-                          scalar.getElementType().isF32())) &&
-         out && out.getElementType().isF16();
 }
 StringRef primitive(Operation *op, int64_t depth) {
   auto n = op->getName().getStringRef();
@@ -83,10 +58,9 @@ StringRef primitive(Operation *op, int64_t depth) {
     if (n == "block.cast" && elem(op->getOperand(0).getType()).isBF16())
       return "bf16_widen";
   }
-  if (n == "block.div" && narrowedQuotient(op))
-    return "quotient_for_narrow";
-  if (n == "block.cast" && narrowedQuotient(op->getOperand(0).getDefiningOp()))
-    return "certified_half_quotient";
+  if (n == "block.div" &&
+      getElementTypeOrSelf(op->getResult(0).getType()).isF32())
+    return "div_rn";
   if (n == "dsa.load_shared" || n == "dsa.member_axis" || n == "dsa.window" || n == "dsa.task_groups" || n == "dsa.range" ||
       n == "dsa.slot_zero" || n == "dsa.next" || n == "dsa.other_slot" ||
       n == "dsa.issue_if_in_bounds" || n == "dsa.wait_slot" ||
@@ -251,7 +225,7 @@ LogicalResult offsets(func::FuncOp f, bool install) {
           (code == "block.cast" && resTy && resTy.getRank() == 2 &&
            resTy.getElementType().isBF16()) ||
           (code == "block.div" && resTy && resTy.getRank() == 2 &&
-           resTy.getElementType().isF32() && !narrowedQuotient(&o)) ||
+           resTy.getElementType().isF32() && usesApproximateMath(&o)) ||
           (code == "block.sqrt" && resTy && resTy.getRank() == 2 &&
            resTy.getElementType().isF32()) ||
           (code == "block.exp" && resTy && resTy.getRank() == 2 &&
@@ -388,10 +362,7 @@ struct Legalize : PassWrapper<Legalize, OperationPass<ModuleOp>> {
       if(auto slot=emptyCountSlot(o))o->setAttr("bangc.empty_count_slot",slot);
       if(p.starts_with("segmented_slab_"))
         o->setAttr("bangc.slab_loop",slabLoop(o,!p.starts_with("segmented_slab_write"),facts));
-      if (p == "certified_half_quotient")
-        o->setAttr("bangc.scratch",
-                   availableCollective(o->getOperand(0).getDefiningOp())
-                       ->getAttr("bangc.offset"));
+
     });
   }
 };
@@ -535,11 +506,7 @@ LogicalResult verify(ModuleOp m, const TargetProfile &p, unsigned stage) {
             o->emitError("segmented transfer loop differs from the projected strides");
             return WalkResult::interrupt();
           }
-          if (k == "certified_half_quotient" &&
-              o->getAttr("bangc.scratch") !=
-                  availableCollective(o->getOperand(0).getDefiningOp())
-                      ->getAttr("bangc.offset"))
-            return WalkResult::interrupt();
+
           if (k.empty() ||
               o->getAttrOfType<StringAttr>("bangc.primitive") != k) {
             o->emitError(
@@ -638,10 +605,11 @@ void bind(Unit &u) {
   addParity({"levels/storage/dsa::certified-ieee-math",
              "*",
              ParityStatus::Implemented,
-             {"exits/bangc::ieee-div-rn", "exits/bangc::ieee-sqrt-rn",
-              "exits/bangc::certified-half-quotient",
-              "exits/bangc::validated-exp", "exits/bangc::validated-exp2"},
-             "Unconditional symmetric endpoint-certified 0-ULP f32 div/sqrt, f16 quotient, and validated exp/exp2"});
+             {"exits/bangc::ieee-div-rn", "exits/bangc::ieee-div-rn-vv",
+              "exits/bangc::ieee-div-rn-vs", "exits/bangc::ieee-div-rn-sv",
+              "exits/bangc::ieee-sqrt-rn", "exits/bangc::validated-exp",
+              "exits/bangc::validated-exp2"},
+             "SDK RN division, certified square root, and validated exp/exp2"});
   addParity({"levels/storage/dsa::hardware-vector-gather-dma",
              "*",
              ParityStatus::Unsupported,

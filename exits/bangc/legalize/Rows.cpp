@@ -485,6 +485,11 @@ struct RowLowerer {
         ->getResult(0);
   }
 
+  Value strictQuotient(Value a, Value b) {
+    return makeOp("div_rn", {a, b}, {a.getType()}, {}, "ieee-div-rn")
+        ->getResult(0);
+  }
+
   LogicalResult evalScalarExpr(StringRef code, StringRef prim, ValueRange ops,
                                Type dstTy, TypedAttr constAttr, Value &out) {
     if (code == "constant") {
@@ -564,6 +569,10 @@ struct RowLowerer {
         out = makeOp("scalar_math", {ops[0], ops[1]}, {dstTy},
                      {b.getNamedAttr("op", b.getStringAttr("max_num"))})
                   ->getResult(0);
+      return success();
+    }
+    if (prim == "div_rn") {
+      out = strictQuotient(ops[0], ops[1]);
       return success();
     }
     if (code == "add" || code == "sub" || code == "mul" || code == "div") {
@@ -1094,8 +1103,8 @@ struct RowLowerer {
         hasTransposeStore |= pr.starts_with("transpose_store");
         StringRef cn = inst.getName().stripDialect();
         needsFullPitch |= cn == "reduce" || cn == "exp" || cn == "div" ||
-                          cn == "sqrt" || pr == "certified_half_quotient" ||
-                          pr == "bf16_product" || pr == "bf16_round";
+                          cn == "sqrt" || pr == "bf16_product" ||
+                          pr == "bf16_round";
       }
       Value members = cI64(1);
       if (packed) {
@@ -1455,8 +1464,7 @@ struct RowLowerer {
                 bool pureVec = false;
                 if (n == "cast") {
                   Type sEl = elemOf(inst.getOperand(0).getType());
-                  pureVec = (pr != "certified_half_quotient" &&
-                             pr != "bf16_round" && pr != "bf16_widen" &&
+                  pureVec = (pr != "bf16_round" && pr != "bf16_widen" &&
                              ((dEl.isF16() && sEl.isF32()) ||
                               (dEl.isF32() && sEl.isF16())));
                 } else {
@@ -1802,36 +1810,6 @@ struct RowLowerer {
                                      "bangc.offset"),
                                  groupedShift));
             localMap[resVal] = dst;
-
-            if (prim == "quotient_for_narrow")
-              continue;
-
-            if (prim == "certified_half_quotient") {
-              auto *divOp = inst.getOperand(0).getDefiningOp();
-              Value qBuf = getVal(inst.getOperand(0));
-              Value scratch = nramAt(
-                  b.getF32Type(),
-                  phaseByteOffset(
-                      inst.getAttrOfType<DenseI64ArrayAttr>("bangc.scratch"),
-                      groupedShift));
-              Value num = getVal(divOp->getOperand(0));
-              Value divIn = getVal(divOp->getOperand(1));
-              Value divSlice;
-              if (rankOf(divOp->getOperand(1).getType()) == 1) {
-                divSlice = makeAddr(divIn, {j}, {cI64(1)}, 2);
-              } else {
-                Value dArr = localVar(b.getF32Type(), "EB");
-                forLoop(cI64(0), members, cI64(1), [&](Value h) {
-                  storeAt(dArr, b.create<arith::AddIOp>(loc, j, h), divIn);
-                });
-                divSlice = makeAddr(dArr, {j}, {cI64(1)}, 2);
-              }
-              makeOp("narrow_quotient",
-                     {dst, qBuf, scratch, num, divSlice, members, symP, live,
-                      rowLanes},
-                     {}, {}, "certified-half-quotient");
-              continue;
-            }
 
             if (fusedGtCast.count(&inst)) {
               Operation *gt = fusedGtCast.lookup(&inst);
@@ -2233,7 +2211,12 @@ struct RowLowerer {
             if (n == "cast" && rankOf(inst.getOperand(0).getType()) == 2 &&
                 ((dstElem.isF16() && in0Elem.isF32()) ||
                  (dstElem.isF32() && in0Elem.isF16()))) {
-              StringRef kind = dstElem.isF16() ? "f32_to_f16" : "f16_to_f32";
+              bool flushSignedZero =
+                  compilerinfra::allowsOutputSubnormalFlush(&inst) &&
+                  compilerinfra::hasFastMath(&inst, arith::FastMathFlags::nsz);
+              StringRef kind = !dstElem.isF16()  ? "f16_to_f32"
+                               : flushSignedZero ? "f32_to_f16"
+                                                 : "f32_to_f16_ieee";
               makeOp("vec_cast", {dst, getVal(inst.getOperand(0)), lanes}, {},
                      {b.getNamedAttr("kind", b.getStringAttr(kind))});
               continue;
@@ -2260,8 +2243,15 @@ struct RowLowerer {
                 rankOf(inst.getOperand(0).getType()) == 2) {
               if (prim == "approximate_sqrt") {
                 makeOp("vec_sqrt", {dst, getVal(inst.getOperand(0)), lanes}, {},
-                       {b.getNamedAttr("fastmath", inst.getAttr("fastmath")),
-                        b.getNamedAttr("denormal-fp-math", b.getStringAttr(intentdsl::kir::getDenormalFpMath(&inst)))},
+                       {b.getNamedAttr(
+                            "fastmath",
+                            arith::FastMathFlagsAttr::get(
+                                b.getContext(),
+                                compilerinfra::effectiveFastMath(&inst))),
+                        b.getNamedAttr(
+                            "denormal-fp-math",
+                            b.getStringAttr(
+                                intentdsl::kir::getDenormalFpMath(&inst)))},
                        "approximate-sqrt");
                 continue;
               }
@@ -2300,74 +2290,59 @@ struct RowLowerer {
                      {}, {}, "bf16-tile-product");
               continue;
             }
-            if (n == "div" && prim != "quotient_for_narrow" &&
-                dstElem.isF32()) {
+            if (n == "div" && dstElem.isF32()) {
               int r0 = rankOf(inst.getOperand(0).getType());
               int r1 = rankOf(inst.getOperand(1).getType());
-              if (prim == "approximate_div") {
-                Value reciprocal = dst;
-                if (r0 == 2 && r1 == 2)
-                  reciprocal = nramAt(
-                      b.getF32Type(), phaseByteOffset(
-                          inst.getAttrOfType<DenseI64ArrayAttr>("bangc.scratch"), groupedShift));
-                makeOp("vec_div_approx",
-                       {dst, getVal(inst.getOperand(0)), getVal(inst.getOperand(1)), reciprocal, lanes},
-                       {}, {b.getNamedAttr("fastmath", inst.getAttr("fastmath")),
-                            b.getNamedAttr("denormal-fp-math", b.getStringAttr(intentdsl::kir::getDenormalFpMath(&inst)))},
-                       "reciprocal-product");
-                continue;
+              bool approximate = prim == "approximate_div";
+              if (!approximate && prim != "div_rn") {
+                bodyStatus = inst.emitError(
+                    "missing resolved f32 quotient implementation");
+                return;
               }
-              Value scratch = nramAt(
-                  b.getF32Type(),
-                  phaseByteOffset(
-                      inst.getAttrOfType<DenseI64ArrayAttr>("bangc.scratch"),
-                      groupedShift));
-              Value oneRow = b.create<arith::CmpIOp>(
-                  loc, arith::CmpIPredicate::eq, members, cI64(1));
-              Value activeElems = b.create<arith::SelectOp>(
-                  loc, oneRow, live,
-                  b.create<arith::MulIOp>(loc, members, symP));
-              if ((r0 == 2 && r1 == 2) || (r0 == 2 && r1 == 0) ||
-                  (r0 == 0 && r1 == 2)) {
-                StringRef mode = (r0 == 2 && r1 == 2)   ? "vv"
-                                 : (r0 == 2 && r1 == 0) ? "vs"
-                                                        : "sv";
-                makeOp("vec_div_rn",
-                       {dst, getVal(inst.getOperand(0)),
-                        getVal(inst.getOperand(1)), scratch, activeElems,
-                        lanes},
-                       {}, {b.getNamedAttr("mode", b.getStringAttr(mode))},
-                       "ieee-div-rn");
-                continue;
-              }
-              if (r0 == 2 && r1 == 1) {
-                Value lhsIn = getVal(inst.getOperand(0));
-                Value rhsIn = getVal(inst.getOperand(1));
-                if (wide) {
-                  int64_t rhsSp = 2;
-                  if (auto spAttr = dyn_cast_or_null<IntegerAttr>(
-                          cast<MemRefType>(rhsIn.getType()).getMemorySpace()))
-                    rhsSp = spAttr.getInt();
-                  Value rhsSlice = makeAddr(rhsIn, {j}, {cI64(1)}, rhsSp);
-                  makeOp("vec_div_rn",
-                         {dst, lhsIn, rhsSlice, scratch, members, symP, live,
-                          rowLanes},
-                         {}, {b.getNamedAttr("mode", b.getStringAttr("vg"))},
-                         "ieee-div-rn");
-                } else {
-                  forLoop(cI64(0), members, cI64(1), [&](Value h) {
-                    Value dH = makeAddr(dst, {h}, {symP}, 1);
-                    Value sH = makeAddr(lhsIn, {h}, {symP}, 1);
-                    Value scVal =
-                        loadAt(rhsIn, b.create<arith::AddIOp>(loc, j, h));
-                    makeOp("vec_div_rn",
-                           {dH, sH, scVal, scratch, live, rowLanes}, {},
-                           {b.getNamedAttr("mode", b.getStringAttr("vs"))},
-                           "ieee-div-rn");
-                  });
+              Value a = getVal(inst.getOperand(0)),
+                    divisor = getVal(inst.getOperand(1));
+              StringRef mode = r0 != 2 ? "sv" : r1 != 2 ? "vs" : "vv";
+              auto divide = [&](Value output, Value x, Value y, Value length) {
+                if (approximate) {
+                  Value scratch = output;
+                  if (mode == "vv")
+                    scratch = nramAt(
+                        b.getF32Type(),
+                        phaseByteOffset(inst.getAttrOfType<DenseI64ArrayAttr>(
+                                            "bangc.scratch"),
+                                        groupedShift));
+                  makeOp("vec_div_approx", {output, x, y, scratch, length}, {},
+                         {b.getNamedAttr(
+                              "fastmath",
+                              arith::FastMathFlagsAttr::get(
+                                  b.getContext(),
+                                  compilerinfra::effectiveFastMath(&inst))),
+                          b.getNamedAttr(
+                              "denormal-fp-math",
+                              b.getStringAttr(
+                                  intentdsl::kir::getDenormalFpMath(&inst)))},
+                         "reciprocal-product");
+                  return;
                 }
-                continue;
+                makeOp("vec_div_rn", {output, x, y, length}, {},
+                       {b.getNamedAttr("mode", b.getStringAttr(mode))},
+                       ("ieee-div-rn-" + mode).str());
+              };
+              if (r0 != 1 && r1 != 1) {
+                divide(dst, a, divisor, lanes);
+              } else {
+                forLoop(cI64(0), members, cI64(1), [&](Value h) {
+                  Value row = b.create<arith::AddIOp>(loc, j, h);
+                  auto input = [&](Value v, int rank) {
+                    return rank == 2   ? makeAddr(v, {h}, {symP}, 1)
+                           : rank == 1 ? loadAt(v, row)
+                                       : v;
+                  };
+                  divide(makeAddr(dst, {h}, {symP}, 1), input(a, r0),
+                         input(divisor, r1), rowLanes);
+                });
               }
+              continue;
             }
             if ((n == "add" || n == "sub" || n == "mul") &&
                 prim != "bf16_product" &&
@@ -2584,8 +2559,7 @@ struct RowLowerer {
           n == "constant") {
         StringRef pr =
             inst.getAttrOfType<StringAttr>("bangc.primitive").getValue();
-        if (pr == "certified_half_quotient" || pr == "bf16_product" ||
-            pr == "bf16_round")
+        if (pr == "bf16_product" || pr == "bf16_round")
           return false;
         if (auto off = inst.getAttrOfType<DenseI64ArrayAttr>("bangc.offset")) {
           int64_t eb = llvm::divideCeil(

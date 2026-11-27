@@ -100,13 +100,10 @@ void loadRuntimeSources(TerminalPrinter &p) {
       {"exits/bangc::quant-grouped-rhs", "runtime/bangc/kernels/quant.mlu"},
       {"exits/bangc::quant-record-gemv", "runtime/bangc/kernels/quant.mlu"},
       {"exits/bangc::nram-transpose", "runtime/bangc/kernels/transpose.mlu"},
-      {"exits/bangc::certified-half-quotient",
-       "runtime/bangc/kernels/quotient.mlu"},
       {"exits/bangc::bf16-tile-convert", "runtime/bangc/kernels/bf16.mlu"},
       {"exits/bangc::bf16-tile-product", "runtime/bangc/kernels/bf16.mlu"},
       {"exits/bangc::bf16-scalar-convert", "runtime/bangc/kernels/bf16.mlu"},
       {"exits/bangc::ieee-sqrt-rn", "runtime/bangc/kernels/ieee_math.mlu"},
-      {"exits/bangc::ieee-div-rn", "runtime/bangc/kernels/ieee_math.mlu"},
       {"exits/bangc::inclusive-scan", "runtime/bangc/kernels/scan.mlu"},
       {"exits/bangc::moments-reduce", "runtime/bangc/kernels/moments.mlu"},
       {"exits/bangc::moments-merge", "runtime/bangc/kernels/moments.mlu"},
@@ -218,9 +215,6 @@ TerminalPrinter rowPrinter() {
       "float $r0; {{ union {{ unsigned short u; half h; }} _h; _h.u = "
       "(unsigned short)(((unsigned)($0) & 0xffu) | (((unsigned)($1) & 0xffu) "
       "<< 8)); $r0 = (float)_h.h; }}");
-  rules["bangc_src.narrow_quotient"] = PrintRule::format(
-      "group_narrow_quotient($0, $1, $2, $3, $4, (int)($5), (int)($6), "
-      "(int)($7), (int)($8));");
   rules["bangc_src.bf16_product"] = PrintRule::format(
       "bf16_product_tile($0, $1, $2, $3, (int)($4), (int)($5));");
   rules["bangc_src.vec_sqrt_rn"] =
@@ -572,6 +566,12 @@ TerminalPrinter rowPrinter() {
   enterLocal("bangc_src.vec_cast",
              [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
                auto k = view.attrOfType<StringAttr>("kind").getValue();
+               if (k == "f32_to_f16_ieee") {
+                 c.line("__cn_vector_cast_f32_to_f16_rn((int)(" +
+                        view.operand(2).str() + "), " + view.operand(0).str() +
+                        ", " + view.operand(1).str() + ");");
+                 return llvm::Error::success();
+               }
                std::string fnName = k == "f32_to_f16" ? "__bang_float2half_rn"
                                                       : "__bang_half2float";
                c.line(fnName + "(" + view.operand(0).str() + ", " +
@@ -730,26 +730,17 @@ TerminalPrinter rowPrinter() {
   enterLocal("bangc_src.vec_div_rn",
              [](const LocalOpView &view, PrintContext &c) -> llvm::Error {
                auto mode = view.attrOfType<StringAttr>("mode").getValue();
-               if (mode == "vg") {
-                 c.line("group_div_scalar_rn(" + view.operand(0).str() + ", " +
-                        view.operand(1).str() + ", " + view.operand(2).str() +
-                        ", " + view.operand(3).str() + ", (int)(" +
-                        view.operand(4).str() + "), (int)(" +
-                        view.operand(5).str() + "), (int)(" +
-                        view.operand(6).str() + "), (int)(" +
-                        view.operand(7).str() + "));");
-                 return llvm::Error::success();
-               }
-               std::string fnName = mode == "vv"   ? "vec_div_rn"
-                                    : mode == "vs" ? "vec_div_scalar_rn"
-                                                   : "scalar_div_vec_rn";
-               c.line(fnName + "(" + view.operand(0).str() + ", " +
-                      view.operand(1).str() + ", " + view.operand(2).str() +
-                      ", " + view.operand(3).str() + ", (int)(" +
-                      view.operand(4).str() + "), (int)(" +
-                      view.operand(5).str() + "));");
+               StringRef symbol = mode == "vv" ? "__cn_vector_div_f32_rn"
+                                  : mode == "vs"
+                                      ? "__cn_vector_div_scalar_f32_rn"
+                                      : "__cn_scalar_div_vector_f32_rn";
+               c.line(symbol.str() + "((int)(" + view.operand(3).str() + "), " +
+                      view.operand(0).str() + ", " + view.operand(1).str() +
+                      ", " + view.operand(2).str() + ");");
                return llvm::Error::success();
              });
+  rules["bangc_src.div_rn"] =
+      PrintRule::format("float $r0 = __cn_scalar_div_f32_rn($0, $1);");
 
   enterLocal("bangc_src.vec_cmpf_mask",
              [](const LocalOpView &view, PrintContext &c) -> llvm::Error {

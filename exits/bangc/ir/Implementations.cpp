@@ -615,37 +615,6 @@ void rowContracts(Unit &unit) {
         return success(bits == 8 || bits == 16 || bits == 32);
       });
 
-  add("certified-half-quotient", "narrow_quotient", "group_narrow_quotient",
-      "quotient.mlu",
-      "NRAM f32 numerator, per-member f32 divisor, NRAM f32 quotient/scratch, "
-      "NRAM f16 output",
-      "pitched rows [members, pitch] in NRAM", "f32",
-      "writes NRAM quotient/scratch and certified f16 output",
-      "+-2 ULP f32 endpoint certification with exact RN f32->f16 fallback",
-      makeTyped(9, 9, 0, {STK::F16, STK::F32, STK::I64}, {}, {STK::F32},
-                EffectMask::ReadWrite, 4, std::nullopt),
-      [](Operation *op) {
-        auto outTy = dyn_cast<MemRefType>(op->getOperand(0).getType());
-        auto qTy = dyn_cast<MemRefType>(op->getOperand(1).getType());
-        auto scTy = dyn_cast<MemRefType>(op->getOperand(2).getType());
-        auto xTy = dyn_cast<MemRefType>(op->getOperand(3).getType());
-        auto dTy = dyn_cast<MemRefType>(op->getOperand(4).getType());
-        // The divisor array is indexed by member and loaded as a scalar.
-        return success(llvm::all_of(op->getOperands().take_front(4), [](Value v) {
-                         return intentdsl::bangc::storageAlignment(v) >= 64;
-                       }) && isSpace(op->getOperand(0), 1) &&
-                       isSpace(op->getOperand(1), 1) &&
-                       isSpace(op->getOperand(2), 1) &&
-                       isSpace(op->getOperand(3), 1) &&
-                       (isSpace(op->getOperand(4), 1) ||
-                        isSpace(op->getOperand(4), 2)) &&
-                       outTy.getElementType().isF16() &&
-                       qTy.getElementType().isF32() &&
-                       scTy.getElementType().isF32() &&
-                       xTy.getElementType().isF32() &&
-                       dTy.getElementType().isF32());
-      });
-
   add("bf16-tile-convert", "bf16_tile",
       "widen_bf16_tile/narrow_bf16_tile/narrow_bf16_tile_fast", "bf16.mlu",
       "NRAM bf16 and f32 tile buffers (with optional u16 scratch)",
@@ -757,75 +726,35 @@ void rowContracts(Unit &unit) {
                        sc.getElementType().isF32());
       });
 
-  unit.semantics.push_back(
-      {{"strict-quotient", "BANG C ieee-div-rn implementation",
-        "__cn_scalar_div_f32_rn", "rn",
-        "BANG C SDK __cn_scalar_div_f32_rn; ieee_math.mlu certification D1-D5",
-        [](const TargetProfile &, const llvm::json::Object &)
-            -> std::optional<SemanticChoice> {
-          return SemanticChoice{"rn", "reference", "__cn_scalar_div_f32_rn", ""};
-        },
-        {"runtime/bangc/kernels/ieee_math.mlu: certified quotient and scalar fallback"}},
-       COMPILERINFRA_SOURCE});
-  add("ieee-div-rn", "vec_div_rn",
-      "vec_div_rn/vec_div_scalar_rn/scalar_div_vec_rn/group_div_scalar_rn",
-      "ieee_math.mlu",
-      "NRAM f32 destination, NRAM or scalar f32 dividend and divisor, and NRAM "
-      "f32 scratch",
-      "64-lane aligned NRAM vector fragment with 6x lanes f32 scratch", "f32",
-      "writes NRAM f32 scratch and correctly rounded NRAM f32 quotient",
-      "correctly rounded IEEE-754 binary32 round-to-nearest-even (0 ULP): "
-      "correctness guaranteed solely by unconditional symmetric exact runtime "
-      "endpoint certification on exact Veltkamp-Dekker/TwoDiff residual "
-      "a' - r * b' with exact __cn_scalar_div_f32_rn fallback (a priori "
-      "candidate accuracy only bounds fallback frequency)",
-      makeTyped(6, 8, 0, {STK::F32, STK::I64}, {}, {STK::F32},
-                EffectMask::ReadWrite, 4, std::nullopt),
-      [](Operation *op) {
-        auto mode = op->getAttrOfType<StringAttr>("mode");
-        auto dst = dyn_cast<MemRefType>(op->getOperand(0).getType());
-        auto sc = dyn_cast<MemRefType>(op->getOperand(3).getType());
-        for (auto [i, value] : llvm::enumerate(op->getOperands().take_front(4))) {
-          if (isa<MemRefType>(value.getType()) && !(i == 2 && mode == "vg") &&
-              intentdsl::bangc::storageAlignment(value) < 64)
-            return failure();
-        }
-        if (!mode || !isSpace(op->getOperand(0), 1) ||
-            !isSpace(op->getOperand(3), 1) || !dst.getElementType().isF32() ||
-            !sc.getElementType().isF32())
-          return failure();
-        if (mode == "vv") {
-          auto l = dyn_cast<MemRefType>(op->getOperand(1).getType());
-          auto r = dyn_cast<MemRefType>(op->getOperand(2).getType());
-          return success(isSpace(op->getOperand(1), 1) &&
-                         isSpace(op->getOperand(2), 1) &&
-                         l.getElementType().isF32() &&
-                         r.getElementType().isF32());
-        }
-        if (mode == "vs") {
-          auto l = dyn_cast<MemRefType>(op->getOperand(1).getType());
-          return success(isSpace(op->getOperand(1), 1) &&
-                         l.getElementType().isF32() &&
-                         op->getOperand(2).getType().isF32());
-        }
-        if (mode == "sv") {
-          auto r = dyn_cast<MemRefType>(op->getOperand(2).getType());
-          return success(op->getOperand(1).getType().isF32() &&
-                         isSpace(op->getOperand(2), 1) &&
-                         r.getElementType().isF32());
-        }
-        if (mode == "vg") {
-          auto l = dyn_cast<MemRefType>(op->getOperand(1).getType());
-          auto r = dyn_cast<MemRefType>(op->getOperand(2).getType());
-          return success(op->getNumOperands() == 8 &&
-                         isSpace(op->getOperand(1), 1) &&
-                         (isSpace(op->getOperand(2), 1) ||
-                          isSpace(op->getOperand(2), 2)) &&
-                         l && r && l.getElementType().isF32() &&
-                         r.getElementType().isF32());
-        }
-        return failure();
-      });
+  for (auto [mode, symbol] :
+       {std::pair{"vv", "__cn_vector_div_f32_rn"},
+        std::pair{"vs", "__cn_vector_div_scalar_f32_rn"},
+        std::pair{"sv", "__cn_scalar_div_vector_f32_rn"}}) {
+    addBuiltin(std::string("ieee-div-rn-") + mode, "vec_div_rn", symbol,
+               "exits/bangc::dma", "f32 NRAM tile or broadcast scalar operands",
+               "aligned contiguous NRAM lanes", "f32", "write quotient tile",
+               "BANG C bang_math_decls.h: IEEE binary32 round to nearest, ties "
+               "to even (0 ULP)",
+               makeTyped(4, 4, 0, {STK::F32, STK::I64}, {}, {STK::F32},
+                         EffectMask::ReadWrite, 4, std::nullopt),
+               hasNram, [mode, floatNram](Operation *op) {
+                 if (op->getAttrOfType<StringAttr>("mode") != mode ||
+                     !floatNram(op->getOperand(0)))
+                   return failure();
+                 for (unsigned i : {0u, 1u}) {
+                   Value v = op->getOperand(i + 1);
+                   if (mode[i] == 's' ? !v.getType().isF32() : !floatNram(v))
+                     return failure();
+                 }
+                 return success();
+               });
+  }
+  addBuiltin("ieee-div-rn", "div_rn", "__cn_scalar_div_f32_rn",
+             "exits/bangc::dma", "f32 dividend and divisor", "scalar", "f32",
+             "pure quotient", "IEEE binary32 round to nearest, ties to even",
+             makeTyped(2, 2, 1, {STK::F32}, {STK::F32}, {STK::F32},
+                       EffectMask::None, 0, std::nullopt),
+             hasNram, [](Operation *) { return success(); });
 
   add("bf16-scalar-convert", "bf16_scalar", "widen_bf16/round_bf16", "bf16.mlu",
       "scalar bf16 or f32 values", "scalar value", "f32", "pure scalar result",

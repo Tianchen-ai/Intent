@@ -359,13 +359,6 @@ def TileTransposeOp : BangcOp<"tile_transpose",
   let arguments = (ins AnyMemRef:$dst, AnyMemRef:$src, I64:$rows, I64:$cols);
 }
 
-def NarrowQuotientOp : BangcOp<"narrow_quotient",
-                               [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
-  let arguments = (ins AnyMemRef:$out, AnyMemRef:$quotient, AnyMemRef:$scratch,
-                       AnyMemRef:$numerator, AnyMemRef:$divisor, I64:$members,
-                       I64:$pitch, I64:$live, I64:$row_lanes);
-}
-
 def Bf16TileOp : BangcOp<"bf16_tile",
                          [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let arguments = (ins Variadic<AnyMemRef>:$buffers, I64:$live, I64:$lanes,
@@ -394,7 +387,13 @@ def VecSqrtRnOp : BangcOp<"vec_sqrt_rn",
 
 def VecDivRnOp : BangcOp<"vec_div_rn",
                          [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
-  let arguments = (ins Variadic<AnyType>:$inputs, StrAttr:$mode);
+  let arguments = (ins AnyMemRef:$dst, AnyType:$lhs, AnyType:$rhs, I64:$lanes,
+                       StrAttr:$mode);
+}
+
+def DivRnOp : BangcOp<"div_rn", [Pure]> {
+  let arguments = (ins F32:$lhs, F32:$rhs);
+  let results = (outs F32:$result);
 }
 
 def Bf16ScalarOp : BangcOp<"bf16_scalar", [Pure]> {

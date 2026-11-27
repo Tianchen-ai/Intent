@@ -58,25 +58,8 @@ struct Footprint {
         auto fastScratch = approximate && c.approxScratch ? c.approxScratch(&op) : std::nullopt;
         if (fastScratch) {
           f.collectiveBytes = std::max(f.collectiveBytes, *fastScratch);
-        } else if (t.getRank() == 2 && code == "div" && t.getElementType().isF32()) {
-          bool narrowed = false;
-          if (op.hasOneUse()) {
-            Operation *u = *op.getUsers().begin();
-            auto uTy = u->getNumResults() == 1
-                           ? dyn_cast<RankedTensorType>(u->getResult(0).getType())
-                           : RankedTensorType{};
-            if (u->getBlock() == &body && u->getName().stripDialect() == "cast" &&
-                uTy && uTy.getElementType().isF16()) {
-              for (auto *prev = op.getPrevNode(); prev; prev = prev->getPrevNode())
-                if (prev->getName().stripDialect() == "reduce")
-                  narrowed = true;
-            }
-          }
-          if (!narrowed)
-            f.collectiveBytes = std::max<int64_t>(f.collectiveBytes,
-                                                  6 * int64_t(sizeof(float)));
-        }
-        else if (t.getRank() == 2 && code == "sqrt" && t.getElementType().isF32())
+        } else if (t.getRank() == 2 && code == "sqrt" &&
+                   t.getElementType().isF32())
           f.collectiveBytes = std::max<int64_t>(f.collectiveBytes,
                                                 6 * int64_t(sizeof(float)));
         // Rank-one calculation results in the block contract are per-row
