@@ -10,7 +10,7 @@ x86 多核 CPU 上的算子吞吐由以下四项显式执行决定支配：
 2. **遍历方向与跨步访存不对称性**：在 x86 写分配缓存层级上，跨步聚集读（gather）配连续向量写（`destination` 遍历）或片内 `8×8` SIMD 蝴蝶转置（`tile` 遍历）显著快于跨步散射写（`source` 遍历）。
 3. **计算引擎与寄存器分块**：稠密、批处理、路由与量化矩阵收缩可在寄存器分块 SIMD FMA、AVX-512 VNNI `vpdpbusd` 点积与 oneDNN 3.13+ BRGeMM / AMX 微核之间按实际块形与打包摊销选择。
 4. **严格 IEEE-754 合同与快速路径边界**：
-   - 默认函数级 `denormal-fp-math=ieee,ieee` 下，BF16 矩阵收缩保留次正规数精度，走拓宽 FP32 SIMD 累加或带正规性守卫的路径；仅当函数显式授予次正规冲零许可（`allow_subnormal_ftz`）时启用 `onednn-brgemm-bf16`；
+   - 作者留白时，BF16 × BF16 → FP32 可按布局与代价选择原生 `onednn-brgemm-bf16` 或拓宽 SIMD。显式 IEEE 或 FP32 乘积约束走保留源语义的路径。[点积合同及出处](kir.md#窄精度点积的目标语义)仅当函数显式授予次正规冲零许可（`allow_subnormal_ftz`）时启用 `onednn-brgemm-bf16`；
    - 有序注意力与状态递推通过 `proveValueReplay` 证明无别名写干扰后兑现 L1/L2 分数缓存或受守卫的 `score_window` 回放（超窗分支零回读自动重算），并在 `afn` 许可下将 `exp2(x)` 降为向量 `exp(x · ln 2)`。
 
 ## 2. 候选空间（Decision Families）

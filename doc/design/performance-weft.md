@@ -10,7 +10,7 @@
 2. **Host 显式预打包与路由散射**：所有 OpenMP 并行面板打包（A/B F32/BF16 展宽、VNNI S8 四元组重排）与 MoE 路由累加写回均在 `weft@realized` 显式物化为 `weft_host` 操作，经 `proveTailAccess` 消除可证明整除维度的标量尾部分支，经 `proveNarrowAddress` 收窄 32 位偏移。
 3. **跨架构缓存与跨步访存特性**：x86 与 K3 X100/SG2044/V100 的跨步读（`vlse` / gather）与跨步写（`vsse` / scatter）带宽比差异显著；按实测每设备校准档由 `permutation-time` 自动在 `destination`、`tile` 与 `source` 间择优。
 4. **严格 IEEE-754 合同与微核对齐**：
-   - x86 上对满足布局与次正规合同的收缩绑定 `triton-weft >= 0.2.0` 的 `onednn-brgemm-{f32,f16,bf16,s8,u8s8}` 微核，默认 `ieee,ieee` 下 BF16 自动走拓宽 `weft-f32-panel-fma` 以保持次正规数精确，仅在显式 FTZ 许可下启用 `onednn-brgemm-bf16`；
+   - x86 上对满足布局与次正规合同的收缩绑定 `triton-weft >= 0.2.0` 的 `onednn-brgemm-{f32,f16,bf16,s8,u8s8}` 微核，作者留白时，BF16 × BF16 → FP32 可选原生 `onednn-brgemm-bf16`。显式 IEEE 或 FP32 乘积约束走保留源语义的路径。[点积合同及出处](kir.md#窄精度点积的目标语义)
    - RISC-V 上声明不支持 x86 专属 BRGeMM/VNNI，统一走原生 RVV `weft-simd-fma`、`weft-f32-panel-fma` 与声明式 `encoding_decl` `weft-q4k-dot`；
    - 行程序对齐 L1d 单行多次归约缓存、Welford 三元组归约、前缀扫描、区间票据预留与 10 轮 Philox-4x32 连续四通道复用。
 

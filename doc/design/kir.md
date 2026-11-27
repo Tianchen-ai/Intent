@@ -2,6 +2,17 @@
 
 **V2-1b 设计合同。** 下列代码是作者表面的规范样例，可供评审和后续实现对照。V2-2 优先实现稳定 softmax 和 weighted RMSNorm 所需的子集。文中的 `import intentdsl as I` 是建议的公共导入名。`I.jit(definition, backend=...)` 创建本机可复用调用对象。
 
+## 窄精度点积的目标语义
+
+0.6 用 `bf16-dot-denormal`、`f16-dot-denormal` 和 `fp8-dot-denormal` 分别登记出口的参考默认、适用范围和出处。解析后的 `ci.semantics` 记录来源；inspect 可查当前设备的绑定，readiness 可查各出口的登记。函数默认的 `denormal-fp-math=ieee` 仍用于普通 FP32 运算。显式 IEEE 环境、逐 contraction 的 `allow_subnormal_ftz=False`、显式 FP32 乘积要求分别进入点积的合法性检查。
+
+| 目标 | 点积合同及其适用范围 |
+|---|---|
+| x86 Weft、Mojo | BF16 输入、FP32 累加且 BRGEMM 可用时，作者留白允许原生 BF16 点积。AMX TDPBF16PS 和 VDPBF16PS 将次正规输入视零、将次正规结果冲零，独立于 MXCSR。oneDNN strict 约束计算中的隐式降精度。显式 IEEE 或 FP32 乘积用保留源语义的实现。参考程序为 ATen 的 CPU FlashAttention。[oneDNN 数据类型](https://uxlfoundation.github.io/oneDNN/v3.13/dev_guide_data_types.html) · [Floating-point Math Mode](https://uxlfoundation.github.io/oneDNN/v3.13/dev_guide_attributes_fpmath_mode.html) · [Intel SDM](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html) · [ATen FlashAttentionKernel.cpp](https://github.com/pytorch/pytorch/blob/449b1768410104d3ed79d3bcfe4ba1d65c7f22c0/aten/src/ATen/native/cpu/FlashAttentionKernel.cpp) |
+| NVIDIA Triton、cuTile | PTX 对相应浮点 MMA 的累加顺序和次正规输入处理未作保证。默认允许目标 MMA，显式要求保留时发出 FP32 乘法和归约。缩放 FP8 在该档先用 FP32 解码和缩放。SIMT 分块代价计入乘积、输入面板及累加器的活跃字数和溢出流量。[PTX MMA Precision and rounding](https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-instructions-mma) · [CUDA Tile mma](https://docs.nvidia.com/cuda/cutile-python/generated/cuda.tile.mma.html) |
+| RVV Weft | RISC-V 向量浮点规范采用 IEEE 次正规数，BF16 扩展定义宽化浮点累加。SG2044 的 BF16 路径提升到 FP32，用其支持的向量算术执行。[RISC-V BF16](https://docs.riscv.org/reference/isa/unpriv/bfloat16.html) · [RISC-V V](https://docs.riscv.org/reference/isa/unpriv/v-st-ext.html) |
+| MLU370 BANG C | 所查 cncc 4.7 SDK 与 CNNL 矩阵描述符提供计算类型及 `CNNL_MATMUL_ALLOW_TF32`。矩阵单元次正规数和中间舍入的保证未查到，登记为 `undocumented`，沿用已有类型及许可条件。 |
+
 ## 从作者选择到语义
 
 | 作者决定／表面 | 前端写入的 KIR | 消费者、检查及与 V1 的关系 |
