@@ -156,9 +156,10 @@ LogicalResult phase(Operation *anchor, Block &source, bool stream,
   b.setInsertionPointToEnd(fetch);
   inst(b, loc, "dsa.issued", reads);
   b.setInsertionPointToEnd(calc);
-  if (stream && p->getNumResults())
-    map.map(source.getArgument(1),
-            calc->addArgument(p->getResult(0).getType(), loc));
+  if (stream)
+    for (auto [carry, type] : llvm::zip_equal(
+             source.getArguments().drop_front(), p->getResultTypes()))
+      map.map(carry, calc->addArgument(type, loc));
   SmallVector<Value> yields, completions;
   map.map(active->getOperand(1),writeWindow->getResult(0));
   map.map(active->getOperand(2),writeWindow->getResult(1));

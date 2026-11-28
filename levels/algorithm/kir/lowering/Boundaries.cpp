@@ -1,3 +1,4 @@
+#include "SharedPartials.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/Dialect.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
@@ -504,6 +505,8 @@ struct Canonicalize : PassWrapper<Canonicalize, OperationPass<ModuleOp>> {
       }
     }
     getOperation().walk([](Operation *op) {
+      if (op->getName().getStringRef() == "kir.parallel")
+        intentdsl::kir::sharePartialSums(op->getRegion(0).front());
       if (op->getName().getStringRef() == "kir.cast" &&
           op->getOperand(0).getType() == op->getResult(0).getType()) {
         op->getResult(0).replaceAllUsesWith(op->getOperand(0));

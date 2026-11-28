@@ -2,17 +2,19 @@
 #include "intentdsl/levels/algorithm/kir/ir/Performance.h"
 #include "intentdsl/levels/execution/block/ir/Contraction.h"
 #include "intentdsl/levels/execution/block/ir/FoldStripes.h"
+#include "intentdsl/levels/execution/block/ir/OwnerReductions.h"
 #include "intentdsl/levels/execution/block/ir/Owners.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallPtrSet.h"
 
-namespace CI_UNIT_NAMESPACE {
+namespace intentdsl::block {
 using namespace mlir;
-namespace {
-void partitionOwnerReductions(func::FuncOp fn,
-                              const compilerinfra::TargetProfile &profile) {
+void fuseOwnerReductions(func::FuncOp fn,
+                         const compilerinfra::TargetProfile &profile,
+                         bool partitionOutputs) {
   auto &body = fn.front();
   if (!fn->hasAttr("kir.owner_axis") ||
       fn->getAttrOfType<StringAttr>("block.topology") != "stream")
@@ -32,8 +34,9 @@ void partitionOwnerReductions(func::FuncOp fn,
     if (slot.getAsObject()->getString("direction") == "InOut")
       return;
   auto [owners, columns] = facts->geometry(fn);
-  if (!owners || owners >= facts->participants)
+  if (!owners)
     return;
+  bool splitOutputs = partitionOutputs && owners < facts->participants;
 
   SmallVector<Operation *> stores;
   Value rowsVal;
@@ -104,6 +107,10 @@ void partitionOwnerReductions(func::FuncOp fn,
             seenViews.insert(arg).second)
           views.push_back(arg);
       }
+      if (inner != loop && inner->getName().getStringRef() != "block.load" &&
+          inner->getName().getStringRef() != "block.yield" &&
+          (inner->getNumRegions() || !isMemoryEffectFree(inner)))
+        dependent = true;
       for (auto v : inner->getOperands()) {
         auto *producer = v.getDefiningOp();
         if (producer && producer->getBlock() == &body && producer != loop &&
@@ -143,8 +150,15 @@ void partitionOwnerReductions(func::FuncOp fn,
 
   bool anyMulti = llvm::any_of(
       groups, [](const auto &g) { return g.size() >= 2; });
-  if (groups.size() < 2 && !anyMulti)
+  if (!anyMulti && (!splitOutputs || groups.size() < 2))
     return;
+
+  // Realize emits all input sweeps ahead of publication. Fusion cannot
+  // cross a store: projected inputs and outputs may share backing storage.
+  for (const Chain &chain : chains)
+    for (Operation *store : stores)
+      if (!chain.loop->isBeforeInBlock(store))
+        return;
 
   OpBuilder b(body.getTerminator());
   Location loc = fn.getLoc();
@@ -155,6 +169,18 @@ void partitionOwnerReductions(func::FuncOp fn,
       continue;
     }
     Value domain = chains[members[0]].loop->getOperand(0);
+    Operation *first = chains[members.front()].loop;
+    for (unsigned m : members)
+      if (chains[m].loop->isBeforeInBlock(first))
+        first = chains[m].loop;
+    // Identities are pure. Keep the joined sweep ahead of every consumer,
+    // including casts that may precede a later sweep.
+    for (unsigned m : members) {
+      auto *init = chains[m].loop->getOperand(1).getDefiningOp();
+      if (first->isBeforeInBlock(init))
+        init->moveBefore(first);
+    }
+    b.setInsertionPoint(first);
     OperationState fusedSt(loc, "block.tiles");
     fusedSt.addOperands(domain);
     for (unsigned m : members) {
@@ -182,7 +208,6 @@ void partitionOwnerReductions(func::FuncOp fn,
         {ShapedType::kDynamic, ShapedType::kDynamic}, ib.getI1Type()));
     Value act = ib.create(actSt)->getResult(0);
 
-    llvm::DenseMap<Value, Value> sharedLoads;
     SmallVector<Value> yieldVals;
     for (auto [k, m] : llvm::enumerate(members)) {
       Block &src = chains[m].loop->getRegion(0).front();
@@ -199,22 +224,8 @@ void partitionOwnerReductions(func::FuncOp fn,
           map.map(inst.getResult(0), act);
           continue;
         }
-        if (iname == "load") {
-          Value view = inst.getOperand(0);
-          if (auto existing = sharedLoads.lookup(view)) {
-            map.map(inst.getResult(0), existing);
-            continue;
-          }
-          Operation *cloned = ib.clone(inst, map);
-          sharedLoads[view] = cloned->getResult(0);
-          map.map(inst.getResult(0), cloned->getResult(0));
-          continue;
-        }
         if (inst.getNumResults() == 1 && inst.getNumRegions() == 0 &&
-            llvm::StringSwitch<bool>(iname)
-                .Cases("cast", "add", "sub", "mul", "div", "rsqrt", "exp",
-                       "sqrt", "maximum", "constant", true)
-                .Default(false)) {
+            (iname == "load" || isMemoryEffectFree(&inst))) {
           SmallVector<Value, 4> mappedOps;
           for (Value opnd : inst.getOperands())
             mappedOps.push_back(map.lookupOrDefault(opnd));
@@ -250,7 +261,7 @@ void partitionOwnerReductions(func::FuncOp fn,
     groupLoops[gIdx] = fused;
   }
 
-  if (groups.size() < 2)
+  if (!splitOutputs || groups.size() < 2)
     return;
 
   b.setInsertionPoint(body.getTerminator());
@@ -272,8 +283,10 @@ void partitionOwnerReductions(func::FuncOp fn,
     pb.create(OperationState(loc, "block.partition_end"));
   }
 }
-} // namespace
+} // namespace intentdsl::block
 
+namespace CI_UNIT_NAMESPACE {
+using namespace mlir;
 void formOnlineReductions(func::FuncOp, const compilerinfra::TargetProfile &);
 struct Normalize : PassWrapper<Normalize, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(Normalize)
@@ -293,7 +306,8 @@ struct Normalize : PassWrapper<Normalize, OperationPass<ModuleOp>> {
           return;
         }
         formOnlineReductions(fn, profile);
-        partitionOwnerReductions(fn, profile);
+        intentdsl::block::fuseOwnerReductions(fn, profile,
+                                              /*partitionOutputs=*/true);
       }
     }
     getOperation().walk([](Operation *op) {

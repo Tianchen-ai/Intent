@@ -1,5 +1,6 @@
 #include "compilerinfra/Proofs.h"
 #include "intentdsl/levels/algorithm/kir/ir/Performance.h"
+#include "intentdsl/levels/execution/block/ir/OwnerReductions.h"
 #include "mlir/Analysis/AliasAnalysis.h"
 #include "mlir/Analysis/AliasAnalysis/LocalAliasAnalysis.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -143,6 +144,8 @@ struct ReuseFragments : PassWrapper<ReuseFragments, OperationPass<ModuleOp>> {
         }
       }
     });
+    for (auto fn : mod.getOps<func::FuncOp>())
+      block::fuseOwnerReductions(fn, profile, /*partitionOutputs=*/false);
   }
 };
 } // namespace

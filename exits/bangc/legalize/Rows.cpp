@@ -1280,12 +1280,12 @@ struct RowLowerer {
     });
   }
 
-  LogicalResult emitCompute(Block &fetch, Block &body, Operation *phaseOp,
-                            Value iterPos, Value slot, Value outerGroup,
-                            Value carrySlot, bool carryIsMoment, bool packed,
-                            const llvm::DenseMap<Operation *, Value> &copyBuffers,
-                            const llvm::DenseMap<Operation *, Value> &writeBuffers,
-                            int64_t groupedShift = 0) {
+  LogicalResult
+  emitCompute(Block &fetch, Block &body, Operation *phaseOp, Value iterPos,
+              Value slot, Value outerGroup, ValueRange carrySlots, bool packed,
+              const llvm::DenseMap<Operation *, Value> &copyBuffers,
+              const llvm::DenseMap<Operation *, Value> &writeBuffers,
+              int64_t groupedShift = 0) {
     auto [row0, col] = phaseCoords(iterPos, outerGroup);
     Value remN = b.create<arith::SubIOp>(loc, symN, col);
     Value live = b.create<arith::MinSIOp>(
@@ -1410,13 +1410,13 @@ struct RowLowerer {
           }
           localMap[body.getArgument(argIdx++)] = ptr;
         }
-        if (carrySlot) {
-          Value curCarry = carryIsMoment
-                               ? makeOp("moment_get", {carrySlot, j},
-                                        {momentTuple(b.getContext())})
-                                     ->getResult(0)
-                               : carrySlot;
-          localMap[body.getArgument(argIdx)] = curCarry;
+        for (Value carry : carrySlots) {
+          Value arg = body.getArgument(argIdx++);
+          localMap[arg] = isa<TupleType>(arg.getType())
+                              ? makeOp("moment_get", {carry, j},
+                                       {momentTuple(b.getContext())})
+                                    ->getResult(0)
+                              : carry;
         }
 
         llvm::DenseMap<Operation *, Value> directWriteDst;
@@ -1908,14 +1908,15 @@ struct RowLowerer {
             continue;
           }
           if (n == "complete") {
-            if (inst.getNumOperands() > 1 && carrySlot) {
-              Value res = getVal(inst.getOperand(1));
-              if (carryIsMoment)
-                makeOp("moment_set", {carrySlot, j, res});
+            for (auto [value, carry] :
+                 llvm::zip_equal(inst.getOperands().drop_front(), carrySlots)) {
+              Value res = getVal(value);
+              if (isa<TupleType>(value.getType()))
+                makeOp("moment_set", {carry, j, res});
               else {
-                if (rankOf(inst.getOperand(1).getType()) == 1)
+                if (rankOf(value.getType()) == 1)
                   res = loadAt(res, j);
-                storeAt(carrySlot, j, res);
+                storeAt(carry, j, res);
               }
             }
             continue;
@@ -2993,12 +2994,14 @@ struct RowLowerer {
     auto &fetch = phaseOp.getRegion(0).front();
     auto &body = phaseOp.getRegion(1).front();
     auto &sched = phaseOp.getRegion(2).front();
-    Value carrySlot;
-    bool carryIsMoment = false;
-    if (phaseOp.getNumResults()) {
-      carrySlot = mapped.lookup(phaseOp.getOperand(0));
-      carryIsMoment = isa<TupleType>(phaseOp.getResult(0).getType());
-      mapped[phaseOp.getResult(0)] = carrySlot;
+    SmallVector<Value> carrySlots;
+    for (auto [init, result] :
+         llvm::zip_equal(phaseOp.getOperands(), phaseOp.getResults())) {
+      auto slot = mapped.lookup(init);
+      if (!slot)
+        return phaseOp.emitError("unbound reduction accumulator");
+      mapped[result] = slot;
+      carrySlots.push_back(slot);
     }
 
     llvm::DenseMap<Operation *, Value> copyBuffers;
@@ -3158,8 +3161,8 @@ struct RowLowerer {
           Value curPos = sMap.lookup(op.getOperand(0));
           Value curSlot = sMap.lookup(op.getOperand(1));
           if (failed(emitCompute(fetch, body, &phaseOp, curPos, curSlot,
-                                 outerGroup, carrySlot, carryIsMoment, isPacked,
-                                 copyBuffers, writeBuffers)))
+                                 outerGroup, carrySlots, isPacked, copyBuffers,
+                                 writeBuffers)))
             return failure();
           llvm::DenseMap<Operation *, Value> emptyWrites;
           for (auto &fi : fInfos) {
@@ -3169,11 +3172,11 @@ struct RowLowerer {
                 fPacked = sOp->getAttrOfType<StringAttr>("bangc.primitive") ==
                           "packed_pointwise";
             });
-            if (failed(emitCompute(fi.op->getRegion(0).front(),
-                                   fi.op->getRegion(1).front(), fi.op, curPos,
-                                   curSlot, outerGroup, fi.carrySlot, false,
-                                   fPacked, fi.copyBuffers, emptyWrites,
-                                   fi.groupedShift)))
+            if (failed(emitCompute(
+                    fi.op->getRegion(0).front(), fi.op->getRegion(1).front(),
+                    fi.op, curPos, curSlot, outerGroup,
+                    ValueRange{fi.carrySlot}, fPacked, fi.copyBuffers,
+                    emptyWrites, fi.groupedShift)))
               return failure();
           }
         } else if (n == "advance") {
