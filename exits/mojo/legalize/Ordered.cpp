@@ -564,32 +564,50 @@ struct OrderedLowerer {
         e2 && bitEnumContainsAll(e2.getFastmath(), arith::FastMathFlags::afn) &&
         resTy.isF32() && canBatchVecType(e2.getOperand().getType())) {
       auto vTy = batchVecType(resTy);
-      Value ln2Scalar = constF32(b, loc, 0.6931471824645996f);
-      Value ln2Vec =
-          makeOp(b, loc, "splat_scalar", {ln2Scalar}, {vTy},
-                 {b.getNamedAttr("dtype", b.getStringAttr("float32")),
-                  b.getNamedAttr("width", b.getI64IntegerAttr(batch))})
-              ->getResult(0);
-      Value scaled = b.create<arith::MulFOp>(
-          loc, getBatchVec(e2.getOperand(), lanes), ln2Vec, e2.getFastmath());
-      // exp(-104) is below half the least positive f32 subnormal (2^-150).
-      // Keep mixed SIMD packs on the normal exp path without flushing any
-      // representable subnormal. Ordered comparison preserves NaNs.
+      // Mojo's SIMD exp2 clamps its exponent range. Split exceptional lanes
+      // by an exact power of two to preserve f32 subnormals and overflow.
       auto splat = [&](float x) {
         return makeOp(b, loc, "splat_scalar", {constF32(b, loc, x)}, {vTy},
                       {b.getNamedAttr("dtype", b.getStringAttr("float32")),
                        b.getNamedAttr("width", b.getI64IntegerAttr(batch))})->getResult(0);
       };
-      Value zero = splat(0.0f);
-      Value underflow =
-          makeOp(b, loc, "simd_cmpi", {scaled, splat(-104.0f)},
-                 {batchVecType(b.getI1Type())},
-                 {b.getNamedAttr("pred", b.getStringAttr("le"))})->getResult(0);
-      auto zeroTiny = [&](Value input) {
-        return makeOp(b, loc, "simd_select", {underflow, zero, input}, {vTy})->getResult(0);
+      Value x = getBatchVec(e2.getOperand(), lanes);
+      auto cmp = [&](StringRef pred, Value rhs) {
+        return makeOp(b, loc, "simd_cmpi", {x, rhs}, {batchVecType(b.getI1Type())},
+                      {b.getNamedAttr("pred", b.getStringAttr(pred))})->getResult(0);
       };
-      Value weight = b.create<math::ExpOp>(loc, zeroTiny(scaled), e2.getFastmath());
-      batchVecs[e2.getResult()] = zeroTiny(weight);
+      auto select = [&](Value mask, Value yes, Value no) {
+        return makeOp(b, loc, "simd_select", {mask, yes, no}, {vTy})->getResult(0);
+      };
+      Value zero = splat(0), one = splat(1);
+      Value tiny = cmp("le", splat(-150)), overflow = cmp("ge", splat(128));
+      Value low = cmp("lt", splat(-126)), high = cmp("gt", splat(126));
+      Value shift = select(low, splat(64), select(high, splat(-64), zero));
+      Value arg = select(tiny, zero, select(overflow, zero, x));
+      arg = b.create<arith::AddFOp>(loc, arg, shift);
+      Value frac = b.create<math::Exp2Op>(loc, arg, e2.getFastmath());
+      Value factor = select(low, splat(0x1p-64f), select(high, splat(0x1p64f), one));
+      Value weight = b.create<arith::MulFOp>(loc, frac, factor);
+      auto intTy = batchVecType(b.getI32Type());
+      auto integer = [&](int32_t value) {
+        auto word = b.create<arith::ConstantIntOp>(loc, value, 32);
+        return makeOp(b, loc, "splat_scalar", {word}, {intTy},
+                      {b.getNamedAttr("dtype", b.getStringAttr("int32")),
+                       b.getNamedAttr("width", b.getI64IntegerAttr(batch))})->getResult(0);
+      };
+      auto bitsAs = [&](Value value, Type type, StringRef dtype) {
+        return makeOp(b, loc, "simd_bitcast", {value}, {type},
+                      {b.getNamedAttr("dtype", b.getStringAttr(dtype))})->getResult(0);
+      };
+      // Between -150 and -149 the exact result rounds to the least
+      // subnormal. Avoid a second rounding at the zero/minsub midpoint.
+      weight = select(cmp("lt", splat(-149)), bitsAs(integer(1), vTy, "float32"), weight);
+      weight = select(tiny, zero, select(overflow, splat(std::numeric_limits<float>::infinity()), weight));
+      Value magnitude = b.create<arith::AndIOp>(loc, bitsAs(x, intTy, "int32"), integer(0x7fffffff));
+      Value nan = makeOp(b, loc, "simd_cmpi", {magnitude, integer(0x7f800000)},
+                         {batchVecType(b.getI1Type())},
+                         {b.getNamedAttr("pred", b.getStringAttr("gt"))})->getResult(0);
+      batchVecs[e2.getResult()] = select(nan, x, weight);
       return true;
     }
     if (isa<math::ExpOp, math::Exp2Op, math::LogOp, math::SqrtOp,

@@ -339,6 +339,10 @@ def MojoReduceSum16x16 : RowInst<"reduce_sum_16x16", [Pure]> {
   let arguments=(ins Variadic<AnyType>:$inputs);
   let results=(outs AnyType:$result);
 }
+def MojoSimdBitcast : RowInst<"simd_bitcast", [Pure]> {
+  let arguments=(ins AnyType:$input, StrAttr:$dtype);
+  let results=(outs AnyType:$result);
+}
 def MojoSimdCmpI : RowInst<"simd_cmpi"> {
   let arguments=(ins AnyType:$lhs, AnyType:$rhs, StrAttr:$pred);
   let results=(outs AnyType:$result);

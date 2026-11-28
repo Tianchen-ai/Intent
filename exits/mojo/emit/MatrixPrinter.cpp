@@ -159,6 +159,7 @@ TerminalPrinter mojoMatrixPrinter() {
   rules["mojo_row.lane_any"] = PrintRule::format("var $r0 = $0.reduce_or()");
   rules["mojo_row.reduce_sum_16x16"] =
       PrintRule::format("var $r0 = reduce_sum_16x16($operands)");
+  rules["mojo_row.simd_bitcast"] = PrintRule::format("var $r0 = bitcast[DType.{dtype}]($0)");
   rules["mojo_row.simd_cmpi"] = PrintRule::format("var $r0 = $0.{pred}($1)");
   rules["mojo_row.extract_lane"] = PrintRule::format("var $r0 = $0[{lane}]");
   rules["mojo_row.atomic_fetch_add_i32"] = PrintRule::format(
