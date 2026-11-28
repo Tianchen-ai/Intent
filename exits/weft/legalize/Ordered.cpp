@@ -1224,13 +1224,14 @@ struct OrderedLowerer {
         return false;
       bool isExp2 = expOp->getName().getStringRef() == "math.exp2";
       bool flushOutput = allowsOutputSubnormalFlush(expOp);
+      auto implementation = expOp->getAttrOfType<StringAttr>("cpu.weight_exp");
+      bool reduced = implementation && implementation == "fexp_u20";
       if (recordV) {
-        auto implementation =
-            expOp->getAttrOfType<StringAttr>("cpu.weight_exp");
-        plan.reducedWeightExp = implementation && implementation == "fexp_u20";
+        plan.reducedWeightExp = reduced;
         plan.useExp2 = isExp2;
         plan.flushExpOutput = flushOutput;
-      } else if (plan.useExp2 != isExp2 || plan.flushExpOutput != flushOutput) {
+      } else if (plan.useExp2 != isExp2 || plan.flushExpOutput != flushOutput ||
+                 plan.reducedWeightExp != reduced) {
         return false;
       }
 
