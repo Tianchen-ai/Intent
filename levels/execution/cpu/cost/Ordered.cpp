@@ -101,7 +101,7 @@ void ownerCost(Unit &u) {
                      tasks / rateVal;
           auto panel = intentdsl::cpu::reusableScores(
               o, ctx.target, intentdsl::cpu::scoreSlotLimit(*rm));
-          auto shared = intentdsl::cpu::sharedInterval(o, *f);
+          auto shared = intentdsl::cpu::sharedInterval(o, *f, *rm);
           double keySpan = panel ? panel->keys : 1.;
           int64_t batch = cache && cache.contains("batch")
                               ? cache.getAs<mlir::IntegerAttr>("batch").getInt()

@@ -297,6 +297,10 @@ def MojoLoadSlice : RowInst<"load_slice"> {
   let arguments=(ins AnyType:$ptr, Index:$offset, I64Attr:$width, OptionalAttr<I64Attr>:$slice_axis);
   let results=(outs AnyType:$value);
 }
+def MojoMaskedSlice : RowInst<"masked_slice"> {
+  let arguments=(ins AnyType:$ptr, Index:$offset, AnyTensor:$mask, AnyTensor:$pad, I64Attr:$width, I64Attr:$bytes, StrAttr:$dtype);
+  let results=(outs AnyTensor:$value);
+}
 def MojoGatherSlice : RowInst<"gather_slice"> {
   let arguments=(ins AnyType:$ptr, AnyType:$offsets);
   let results=(outs AnyType:$value);

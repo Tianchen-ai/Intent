@@ -130,6 +130,11 @@ TerminalPrinter mojoMatrixPrinter() {
       PrintRule::format("$0[unsafe_offset=$1] = $2");
   rules["mojo_row.load_slice"] = PrintRule::format(
       "var $r0 = $0.unsafe_offset($1).unsafe_load[width={width}]()");
+  rules["mojo_row.masked_slice"] =
+      PrintRule::format("var $r0 = "
+                        "$2.select(masked_load[{width}](Pointer[Scalar[DType.{"
+                        "dtype}],MutUntrackedOrigin](unsafe_from_address=Int($"
+                        "0)+$1*{bytes}), $2, Scalar[DType.{dtype}](0)), $3)");
   rules["mojo_row.gather_slice"] =
       PrintRule::format("var $r0 = $0.unsafe_gather($1)");
   rules["mojo_row.store_slice"] =
@@ -1524,6 +1529,7 @@ TerminalPrinter mojoMatrixPrinter() {
           if (brg)
             c.line("from std.ffi import external_call");
           c.line("from std.math import exp, sqrt, rsqrt, exp2, log, max, isnan, fma");
+          c.line("from std.sys.intrinsics import masked_load");
           c.line("from std.memory import bitcast");
           if (view.attrOfType<BoolAttr>("uses_stack").getValue())
             c.line("from std.memory import unsafe_stack_allocation");

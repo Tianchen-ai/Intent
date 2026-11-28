@@ -46,7 +46,8 @@ bool invariantOwnerValue(Value v, Operation &space, const OwnerReuse &r) {
                       r.quotient);
 }
 std::optional<OwnerReuse> sharedInterval(Operation *space,
-                                         const CallFacts &facts) {
+                                         const CallFacts &facts,
+                                         const RowMachine &machine) {
   auto &body = space->getRegion(0).front();
   auto axes = space->getAttrOfType<DenseI64ArrayAttr>("axes");
   // Interleaving is legal for read-only folds followed by publications, and
@@ -195,6 +196,19 @@ std::optional<OwnerReuse> sharedInterval(Operation *space,
     }
     if (bytes <= 0 && !quotient) {
       bool hasDivergentMemIf = false;
+      double contiguousWindowBytes = 0.;
+      auto unitStep = [&](auto &self, Value index) -> bool {
+        if (index == h)
+          return true;
+        if (auto add = index.getDefiningOp<arith::AddIOp>())
+          return (self(self, add.getLhs()) &&
+                  sameInterval(add.getRhs(), h, {})) ||
+                 (sameInterval(add.getLhs(), h, {}) &&
+                  self(self, add.getRhs()));
+        if (auto sub = index.getDefiningOp<arith::SubIOp>())
+          return self(self, sub.getLhs()) && sameInterval(sub.getRhs(), h, {});
+        return false;
+      };
       for (auto loop : body.getOps<scf::ForOp>()) {
         if (!sameInterval(loop.getLowerBound(), h, Value{}) ||
             !sameInterval(loop.getUpperBound(), h, Value{}) ||
@@ -218,6 +232,16 @@ std::optional<OwnerReuse> sharedInterval(Operation *space,
                               : 1.0;
           if (auto ld = dyn_cast<memref::LoadOp>(op)) {
             double elemB = ld.getType().getIntOrFloatBitWidth() / 8.0;
+            if (auto guard = dyn_cast<scf::IfOp>(ld->getParentOp());
+                machine.maskedContiguousLoads && guard &&
+                !sameInterval(guard.getCondition(), h, {}) &&
+                !ld.getIndices().empty() &&
+                unitTrailingStride(ld.getMemref()) &&
+                unitStep(unitStep, ld.getIndices().back()) &&
+                llvm::all_of(ld.getIndices().drop_back(),
+                             [&](Value i) { return sameInterval(i, h, {}); })) {
+              contiguousWindowBytes += elemB * weight;
+            }
             if (!writeSites.contains(ld.getMemref()) &&
                 llvm::all_of(ld.getIndices(), [&](Value v) {
                   return sameInterval(v, h, Value{});
@@ -246,6 +270,7 @@ std::optional<OwnerReuse> sharedInterval(Operation *space,
       }
       if (hasDivergentMemIf)
         bytes *= 0.25;
+      bytes += contiguousWindowBytes;
     }
     if (bytes <= 0)
       return {};
@@ -313,7 +338,8 @@ void sharedOwnerTraversal(compilerinfra::Unit &u) {
       -> llvm::Expected<std::vector<StructuralCandidate>> {
     std::vector<StructuralCandidate> cs;
     const auto &facts = *p.services.get<intentdsl::CallFacts>();
-    auto reuse = intentdsl::cpu::sharedInterval(op, facts);
+    auto reuse = intentdsl::cpu::sharedInterval(
+        op, facts, *p.services.get<intentdsl::cpu::RowMachine>());
     auto &machine = *p.services.get<intentdsl::cpu::RowMachine>();
     if (!reuse || (!machine.packedOwners && !machine.repeatedScoreOwners))
       return cs;

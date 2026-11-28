@@ -23,6 +23,7 @@ struct RowMachine {
   llvm::SmallVector<int64_t, 2> segmentWidths = {8};
   std::string estimate;
   bool structuredRows = false;
+  bool maskedContiguousLoads = false;
   bool boundWidening = false;
   int64_t wideningPanel =
       0; // Fixed-width panels supported for mixed-width live values.

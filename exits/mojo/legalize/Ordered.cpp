@@ -1792,16 +1792,17 @@ struct OrderedLowerer {
             continue;
           }
         }
-        // Fast path for masked unit-stride stencil/window loads across batched
-        // contiguous lanes: when all lanes are in-bounds (interior tiles),
-        // issue a single SIMD load_slice; when all lanes are out-of-bounds,
-        // splat the else value; only scalarize on partial boundary tiles.
+        // Form the lane-zero address once. Only lanes selected by the author's
+        // guard may access memory; inactive lanes retain the original else
+        // value.
         if (vecActive && numRes == 1 && hasElse &&
             !isWideVal(branch.thenYield().getOperand(0)) &&
             canBatchVecType(branch.getResult(0).getType()) &&
             !branch.getResult(0).getType().isInteger(1) &&
             batchVecs.contains(branch.getCondition()) &&
-            branch.getElseRegion().front().without_terminator().empty()) {
+            llvm::all_of(
+                branch.getElseRegion().front().without_terminator(),
+                [](Operation &op) { return isa<arith::ConstantOp>(op); })) {
           memref::LoadOp theLoad;
           bool thenPurePlusOneLoad = true;
           for (Operation &top :
@@ -1836,108 +1837,63 @@ struct OrderedLowerer {
                        isLaneUniformVal(sub.getRhs(), lanes);
               return false;
             };
-            bool leadUniform = llvm::all_of(
-                theLoad.getIndices().drop_back(), [&](Value idx) {
-                  return !branch->isProperAncestor(
-                             idx.getParentRegion()->getParentOp()) &&
-                         isLaneUniformVal(idx, lanes);
-                });
+            auto uniform = [&](auto &self, Value i) -> bool {
+              if (isLaneUniformVal(i, lanes))
+                return true;
+              auto *def = i.getDefiningOp();
+              return def &&
+                     isa<arith::AddIOp, arith::SubIOp, arith::IndexCastOp>(
+                         def) &&
+                     llvm::all_of(def->getOperands(),
+                                  [&](Value v) { return self(self, v); });
+            };
+            bool leadUniform =
+                llvm::all_of(theLoad.getIndices().drop_back(),
+                             [&](Value idx) { return uniform(uniform, idx); });
             if (!strides.empty() && strides[strides.size() - 1] == 1 &&
                 !theLoad.getIndices().empty() && leadUniform &&
                 checkContigInThen(checkContigInThen,
                                   theLoad.getIndices().back())) {
               Type resTy = branch.getResult(0).getType();
+              for (auto &op :
+                   branch.getElseRegion().front().without_terminator())
+                for (size_t l = 0; l < lanes.size(); ++l)
+                  if (failed(lowerSingleOp(op, l, lanes[l])))
+                    return failure();
               Value condVec = getBatchVec(branch.getCondition(), lanes);
               Value elseVec =
                   getBatchVec(branch.elseYield().getOperand(0), lanes);
-              Value vecSlot = declBatchVecSlot(batchVecType(resTy), elseVec);
-              Value allCond =
-                  makeOp(b, loc, "lane_all", {condVec}, {b.getI1Type()})
+              IRMapping m0 = lanes[0];
+              for (Value idx : theLoad.getIndices())
+                if (!branch->isProperAncestor(
+                        idx.getParentRegion()->getParentOp()))
+                  evalScalarIndexLane0(idx, m0);
+              for (Operation &top :
+                   branch.getThenRegion().front().without_terminator()) {
+                if (&top == theLoad.getOperation())
+                  continue;
+                for (Value operand : top.getOperands())
+                  if (!m0.contains(operand))
+                    evalScalarIndexLane0(operand, m0);
+                if (failed(lowerSingleOp(top, 0, m0)))
+                  return failure();
+              }
+              SmallVector<Value> idxs;
+              for (Value idx : theLoad.getIndices())
+                idxs.push_back(m0.lookup(idx));
+              Value ptr = m0.lookup(theLoad.getMemref());
+              Value addr = makeAddr(b, loc, ptr, idxs, strides.asArrayRef());
+              auto e = vecElemType(resTy);
+              batchVecs[branch.getResult(0)] =
+                  makeOp(
+                      b, loc, "masked_slice", {ptr, addr, condVec, elseVec},
+                      {batchVecType(resTy)},
+                      {b.getNamedAttr("width", b.getI64IntegerAttr(batch)),
+                       b.getNamedAttr(
+                           "bytes",
+                           b.getI64IntegerAttr(e.getIntOrFloatBitWidth() / 8)),
+                       b.getNamedAttr("dtype", b.getStringAttr(dtypeBare(e)))})
                       ->getResult(0);
-              auto fastIf =
-                  b.create<scf::IfOp>(loc, TypeRange{}, allCond, true);
-              {
-                OpBuilder::InsertionGuard fg(b);
-                b.setInsertionPointToStart(&fastIf.getThenRegion().front());
-                IRMapping m0 = lanes[0];
-                for (Value idx : theLoad.getIndices())
-                  if (!branch->isProperAncestor(
-                          idx.getParentRegion()->getParentOp()))
-                    evalScalarIndexLane0(idx, m0);
-                bool ok0 = true;
-                for (Operation &top :
-                     branch.getThenRegion().front().without_terminator()) {
-                  if (&top == theLoad.getOperation())
-                    continue;
-                  for (Value opd : top.getOperands())
-                    if (!m0.contains(opd))
-                      evalScalarIndexLane0(opd, m0);
-                  if (failed(lowerSingleOp(top, 0, m0))) {
-                    ok0 = false;
-                    break;
-                  }
-                }
-                if (ok0) {
-                  Value ptr = m0.lookup(theLoad.getMemref());
-                  SmallVector<Value> idxs;
-                  for (Value idx : theLoad.getIndices())
-                    idxs.push_back(m0.lookup(idx));
-                  Value addr = makeAddr(b, loc, ptr, idxs, strides.asArrayRef());
-                  Value loadedVec = loadContiguousSlice(
-                      ptr, addr, vecElemType(resTy), batch);
-                  writeSlot(vecSlot, loadedVec);
-                }
-              }
-              {
-                OpBuilder::InsertionGuard eg(b);
-                b.setInsertionPointToStart(&fastIf.getElseRegion().front());
-                Value anyCond =
-                    makeOp(b, loc, "lane_any", {condVec}, {b.getI1Type()})
-                        ->getResult(0);
-                auto partialIf =
-                    b.create<scf::IfOp>(loc, TypeRange{}, anyCond, false);
-                OpBuilder::InsertionGuard pg(b);
-                b.setInsertionPointToStart(&partialIf.getThenRegion().front());
-                materializeScalarLanes(branch.getCondition(), lanes);
-                materializeScalarLanes(branch.elseYield().getOperand(0), lanes);
-                branch.walk([&](Operation *inner) {
-                  for (Value operand : inner->getOperands())
-                    if (!branch->isProperAncestor(
-                            operand.getParentRegion()->getParentOp()))
-                      materializeScalarLanes(operand, lanes);
-                });
-                Value elseScalar0 =
-                    lanes[0].lookup(branch.elseYield().getOperand(0));
-                SmallVector<Value, 16> scSlots;
-                for (size_t l = 0; l < lanes.size(); ++l)
-                  scSlots.push_back(
-                      declSlot(resTy, elseScalar0,
-                               branch.elseYield().getOperand(0)));
-                for (size_t l = 0; l < lanes.size(); ++l) {
-                  SmallVector<IRMapping, 1> single{lanes[l]};
-                  auto lIf = b.create<scf::IfOp>(
-                      loc, TypeRange{}, single[0].lookup(branch.getCondition()),
-                      false);
-                  OpBuilder::InsertionGuard lg(b);
-                  b.setInsertionPointToStart(&lIf.getThenRegion().front());
-                  if (succeeded(
-                          lowerBlock(branch.getThenRegion().front(), single)))
-                    writeSlot(scSlots[l],
-                              single[0].lookup(branch.thenYield().getOperand(0)));
-                }
-                SmallVector<Value, 16> scVals;
-                for (size_t l = 0; l < lanes.size(); ++l)
-                  scVals.push_back(readSlot(scSlots[l]));
-                StringRef dtStr = dtypeBare(vecElemType(resTy));
-                Value packed =
-                    makeOp(b, loc, "pack_apply", scVals, {batchVecType(resTy)},
-                           {b.getNamedAttr("in_dtype", b.getStringAttr(dtStr)),
-                            b.getNamedAttr("out_dtype", b.getStringAttr(dtStr)),
-                            b.getNamedAttr("kind", b.getStringAttr("id"))})
-                        ->getResult(0);
-                writeSlot(vecSlot, packed);
-              }
-              batchVecs[branch.getResult(0)] = readSlot(vecSlot);
               continue;
             }
           }

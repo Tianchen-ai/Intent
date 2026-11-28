@@ -9,7 +9,8 @@ struct OwnerReuse {
   double readBytes;
   mlir::Value quotient;
 };
-std::optional<OwnerReuse> sharedInterval(mlir::Operation *, const CallFacts &);
+std::optional<OwnerReuse> sharedInterval(mlir::Operation *, const CallFacts &,
+                                         const RowMachine &);
 bool invariantOwnerValue(mlir::Value, mlir::Operation &, const OwnerReuse &);
 llvm::SmallVector<unsigned> ownerRadices(mlir::Operation &);
 } // namespace intentdsl::cpu

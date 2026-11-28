@@ -76,7 +76,9 @@ LogicalResult verifyOwnerGrain(func::FuncOp fn, Operation &space,
   auto grain = space.getAttrOfType<IntegerAttr>("cpu.grain");
   auto cached = space.getAttrOfType<IntegerAttr>("cpu.score_cache");
   if (auto axis = space.getAttrOfType<IntegerAttr>("cpu.innermost_owner")) {
-    auto reuse = facts ? sharedInterval(&space, *facts) : std::nullopt;
+    auto reuse =
+        facts ? sharedInterval(&space, *facts, *p.services.get<RowMachine>())
+              : std::nullopt;
     auto batch = space.getAttrOfType<IntegerAttr>("cpu.owner_batch");
     int64_t w = batch ? batch.getInt() : 0;
     if (!reuse || axis.getInt() != reuse->axis || cached ||
@@ -910,7 +912,8 @@ void ownerTasks(Unit &u) {
                                                     : "::onednn-brgemm-f16")))
           return error;
       } else if (auto inner = d.getAs<IntegerAttr>("inner")) {
-        auto reuse = cpu::sharedInterval(o, *p.services.get<CallFacts>());
+        auto reuse = cpu::sharedInterval(o, *p.services.get<CallFacts>(),
+                                         *p.services.get<cpu::RowMachine>());
         auto batch = d.getAs<IntegerAttr>("batch"),
              grain = d.getAs<IntegerAttr>("grain");
         auto w = batch ? batch.getInt() : 0;
@@ -1125,7 +1128,8 @@ void ownerTasks(Unit &u) {
           rep.record->setAttr("cpu.record_score", b.getUnitAttr());
           rep.replay->setAttr("cpu.replay_score", b.getUnitAttr());
         }
-        auto shared = *cpu::sharedInterval(o, *f);
+        auto shared =
+            *cpu::sharedInterval(o, *f, *p.services.get<cpu::RowMachine>());
         o->walk([&](Operation *op) {
           if (op->getNumResults() == 1 &&
               cpu::invariantOwnerValue(op->getResult(0), *o, shared))

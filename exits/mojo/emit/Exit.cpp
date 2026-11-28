@@ -51,6 +51,7 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
   if (options.getBoolean("onednn_runtime").value_or(true))
     p.features.insert("onednn_runtime");
   auto caps = std::make_shared<intentdsl::cpu::RowMachine>();
+  caps->maskedContiguousLoads = true;
   caps->vectorBits = *bits;
   // The x86-64 AVX-512 encoding addresses 32 vector registers, AVX2 16.
   caps->ownerRegisters = *bits == 512 ? 32 : *bits == 256 ? 16 : 0;
