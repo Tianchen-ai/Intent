@@ -352,6 +352,10 @@ bool tritonPagePermitsTma(Operation *op, func::FuncOp fn, bool permitTma) {
 static bool matrixTmaAmortized(const MatrixAccess &p) {
   if (p.shape[2] <= 0 || p.tile[2] <= 0)
     return false;
+  // Contiguous panels from the decoder are already in L2. A tall skinny
+  // output tile reuses each RHS segment across more rows than columns.
+  if (p.domain.hasAttr("block.split_dequant") && p.tile[0] >= 2 * p.tile[1])
+    return false;
   int64_t kPanels = llvm::divideCeil(p.shape[2], p.tile[2]);
   return kPanels >= 8 || (p.tile[0] * p.tile[1] >= 4096 && kPanels >= 4);
 }

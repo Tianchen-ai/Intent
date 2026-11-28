@@ -120,7 +120,9 @@ void matrixCost(Unit &u) {
                 jobs = mBlocks * nBlocks;
                 panels = std::ceil(shape->k / tk);
                 waves = std::ceil(jobs / sms);
-                double activeSms = std::min(jobs, sms);
+                // In a partial final wave each resident tile still executes
+                // the whole K loop before its SM can complete the dispatch.
+                double activeSms = jobs / waves;
                 double sDram = (B_lhs + (fitsL2 ? 0.0 : B_unpacked)) / dramR +
                                B_out / dramW;
                 double sL2 =

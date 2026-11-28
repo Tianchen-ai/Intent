@@ -103,12 +103,12 @@ void matrixTiles(Tiles &t, intentdsl::block::MatrixAccess &p,
   auto left = native ? native(t, p, true, gp, panel) : Value();
   if (!left)
     left = t.read(a, panelAddress(a, src, p.freeAxis(a, ak, ab), ak, ab, 0),
-                  mask(validRow, km, bm, bk));
+                  splitWorkspace && m % bm == 0 && k % bk == 0 ? Value() : mask(validRow, km, bm, bk));
   auto right = native ? native(t, p, false, gp, panel) : Value();
   if (!right)
     right =
         t.read(rhs, panelAddress(rhs, col, p.freeAxis(rhs, rk, rb), rk, rb, 1),
-               mask(km, validCol, bk, bn));
+               splitWorkspace && k % bk == 0 && n % bn == 0 ? Value() : mask(km, validCol, bk, bn));
   auto acc = t.dot(left, right, false, loop.getRegionIterArgs()[0]);
   b.create<scf::YieldOp>(loc, acc);
   b.setInsertionPointAfter(loop);
@@ -159,7 +159,8 @@ void matrixTiles(Tiles &t, intentdsl::block::MatrixAccess &p,
         addr = t.address(y, {gp, dst, col}, {-1, 0, 1});
       else
         addr = t.address(y, {dst, col}, {0, 1});
-      t.write(y, addr, v, mask(validRow, validCol, bm, bn));
+      bool fullOutput = splitWorkspace && m % bm == 0 && n % bn == 0;
+      t.write(y, addr, v, fullOutput ? Value() : mask(validRow, validCol, bm, bn));
     }
   }
   if (active)
