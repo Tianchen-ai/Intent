@@ -572,8 +572,24 @@ struct OrderedLowerer {
               ->getResult(0);
       Value scaled = b.create<arith::MulFOp>(
           loc, getBatchVec(e2.getOperand(), lanes), ln2Vec, e2.getFastmath());
-      batchVecs[e2.getResult()] =
-          b.create<math::ExpOp>(loc, scaled, e2.getFastmath())->getResult(0);
+      // exp(-104) is below half the least positive f32 subnormal (2^-150).
+      // Keep mixed SIMD packs on the normal exp path without flushing any
+      // representable subnormal. Ordered comparison preserves NaNs.
+      auto splat = [&](float x) {
+        return makeOp(b, loc, "splat_scalar", {constF32(b, loc, x)}, {vTy},
+                      {b.getNamedAttr("dtype", b.getStringAttr("float32")),
+                       b.getNamedAttr("width", b.getI64IntegerAttr(batch))})->getResult(0);
+      };
+      Value zero = splat(0.0f);
+      Value underflow =
+          makeOp(b, loc, "simd_cmpi", {scaled, splat(-104.0f)},
+                 {batchVecType(b.getI1Type())},
+                 {b.getNamedAttr("pred", b.getStringAttr("le"))})->getResult(0);
+      auto zeroTiny = [&](Value input) {
+        return makeOp(b, loc, "simd_select", {underflow, zero, input}, {vTy})->getResult(0);
+      };
+      Value weight = b.create<math::ExpOp>(loc, zeroTiny(scaled), e2.getFastmath());
+      batchVecs[e2.getResult()] = zeroTiny(weight);
       return true;
     }
     if (isa<math::ExpOp, math::Exp2Op, math::LogOp, math::SqrtOp,

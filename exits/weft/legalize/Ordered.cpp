@@ -522,12 +522,10 @@ struct OrderedLowerer {
     return {res, outTy};
   }
 
-  bool operandsUniform(Operation &op) {
-    if (batch <= 1)
-      return false;
+  bool operandsUniform(Operation &op, int64_t first, int64_t count) {
     for (Value v : op.getOperands()) {
-      Value v0 = lanes[0].at(v).v;
-      for (int64_t l = 1; l < batch; ++l)
+      Value v0 = lanes[first].at(v).v;
+      for (int64_t l = first + 1; l < first + count; ++l)
         if (lanes[l].at(v).v != v0)
           return false;
     }
@@ -3905,7 +3903,16 @@ struct OrderedLowerer {
           unsigned idxRes = 0;
           for (int64_t l = grpStart; l < grpStart + grpCount; ++l) {
             for (Value r : branch.getResults()) {
-              lanes[l][r] = {ifOp->getResult(idxRes), resTyStrs[idxRes]};
+              unsigned representative = idxRes;
+              if (grpCount > 1 && !branch.getElseRegion().empty()) {
+                auto thenValues = thenBb.back().getOperands();
+                auto elseValues = ifOp->getRegion(1).front().back().getOperands();
+                unsigned first = idxRes % branch.getNumResults();
+                if (thenValues[first] == thenValues[idxRes] &&
+                    elseValues[first] == elseValues[idxRes])
+                  representative = first;
+              }
+              lanes[l][r] = {ifOp->getResult(representative), resTyStrs[idxRes]};
               ++idxRes;
             }
           }
@@ -4039,8 +4046,12 @@ struct OrderedLowerer {
       bool isCommonQuotient = isa<arith::FloorDivSIOp>(op) &&
                               op.hasAttr("cpu.owner_common") &&
                               activeLanes == batch;
-      bool emitOnce = activeLanes > 1 && op.hasAttr("cpu.owner_common") &&
-                      (operandsUniform(op) || isCommonQuotient);
+      bool scalarArithmetic = op.getName().getDialectNamespace() == "arith" &&
+                              op.getNumResults() == 1 &&
+                              !isa<ShapedType>(op.getResult(0).getType());
+      bool emitOnce = activeLanes > 1 &&
+                      (isCommonQuotient || ((op.hasAttr("cpu.owner_common") || scalarArithmetic) &&
+                                            operandsUniform(op, laneStart, activeLanes)));
       int64_t count = emitOnce ? 1 : activeLanes;
       for (int64_t stepIdx = 0; stepIdx < count; ++stepIdx) {
         int64_t l = laneStart + stepIdx;
