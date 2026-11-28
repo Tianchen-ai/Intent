@@ -18,7 +18,8 @@ def MatrixProgramOp : Op<WeftHost_Dialect, "matrix_program"> {
 def RowProgramOp : Op<WeftHost_Dialect, "row_program"> {
   let arguments = (ins ArrayAttr:$rows, ArrayAttr:$shape_parameters,
                        DenseI64ArrayAttr:$contiguous_slots,
-                       DenseI64ArrayAttr:$task_ranks);
+                       DenseI64ArrayAttr:$task_ranks,
+                       OptionalAttr<ArrayAttr>:$task_slots_json);
   let regions = (region AnyRegion:$task, AnyRegion:$host);
 }
 
@@ -114,6 +115,12 @@ def TaskSelectOp : Op<WeftHost_Dialect, "task_select"> {
 
 def TaskCastOp : Op<WeftHost_Dialect, "task_cast"> {
   let arguments = (ins Index:$input, StrAttr:$op_kind,
+                       StrAttr:$in_type, StrAttr:$val_type);
+  let results = (outs Index:$res);
+}
+
+def TaskNarrowOp : Op<WeftHost_Dialect, "task_narrow"> {
+  let arguments = (ins Index:$input, StrAttr:$rounding, BoolAttr:$saturate,
                        StrAttr:$in_type, StrAttr:$val_type);
   let results = (outs Index:$res);
 }

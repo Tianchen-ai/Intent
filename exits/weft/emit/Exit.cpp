@@ -44,6 +44,8 @@ std::string probeHostWeftCalibration() {
       break;
     }
   }
+  if (model == "Spacemit(R) X60")
+    return "k1";
   if (model == "Spacemit(R) X100")
     return "k3-x100";
   if (model == "Spacemit(R) A100")
@@ -180,7 +182,8 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
     return e;
 
   // Locally reported mvendorid/marchid for the V100 core.
-  bool v100 = options.getString("core") == "0x710/0x8000000058000002";
+  bool v100 =
+      options.getString("core") == "0x710/0x8000000058000002" && hasZvfbfmin;
   int64_t columns =
       isRvv ? std::max<int64_t>(32, 4 * v) : (*bits == 128 ? 32 : 64);
   int64_t midGrain = (*bits == 1024 || (*bits == 256 && v100)) ? 2 : 4;
@@ -292,7 +295,7 @@ void bind(Unit &u) {
              "*",
              ParityStatus::Implemented,
              {"exits/weft::weft-simd-fma", "exits/weft::task-values"},
-             "Native RVV 1.0 vector/panel compilation across SG2044, RVV V100, K3 X100, and K3 A100"});
+             "Native RVV 1.0 vector/panel compilation across SG2044, RVV V100, SpacemiT K1, K3 X100, and K3 A100"});
   u.dialects = dialect;
   u.realizers.push_back(
       {{"task-values", "levels/execution/cpu::storage",

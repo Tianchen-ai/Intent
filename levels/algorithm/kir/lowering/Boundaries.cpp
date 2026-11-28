@@ -49,13 +49,16 @@ LogicalResult verifyRowComputation(func::FuncOp fn, Block &row, ValueRange captu
       return fn.emitError("direction disagrees with the scalar or view type");
     if (rank != desc->getArray("dims")->size() ||
         (!elt.isF16() && !elt.isF32() && !elt.isBF16() && !elt.isInteger(32) &&
-         !(rank == 0 && elt.isUnsignedInteger(64)) && !(rank && elt.isSignlessInteger(64))) ||
-        desc->getString("dtype") != (elt.isF16()                 ? "f16"
-                                     : elt.isBF16()              ? "bf16"
-                                     : elt.isUnsignedInteger(64) ? "u64"
-                                     : elt.isSignlessInteger(64) ? "i64"
-                                     : elt.isInteger(32)         ? "i32"
-                                                                 : "f32"))
+         !(rank == 0 && elt.isUnsignedInteger(64)) && !(rank && elt.isSignlessInteger(64)) &&
+         !(rank && elt.isSignlessInteger(8))) ||
+        (elt.isSignlessInteger(8)
+             ? (desc->getString("dtype") != "u8" && desc->getString("dtype") != "i8")
+             : desc->getString("dtype") != (elt.isF16()                 ? "f16"
+                                            : elt.isBF16()              ? "bf16"
+                                            : elt.isUnsignedInteger(64) ? "u64"
+                                            : elt.isSignlessInteger(64) ? "i64"
+                                            : elt.isInteger(32)         ? "i32"
+                                                                        : "f32")))
       return fn.emitError("parameter descriptor does not match its IR type");
   }
   bool indexed=fn->hasAttr("kir.iteration");
@@ -181,6 +184,26 @@ LogicalResult verifyRowComputation(func::FuncOp fn, Block &row, ValueRange captu
       auto *scan=op.getOperand(3).getDefiningOp();auto n=*axes.front().getAsInteger();
       if(n<=0 || n==INT64_MAX || !valid(o,n+1) || !valid(t,1) || !scan || scan->getName().stripDialect()!="scan_sum" ||
          !written.insert(o).second || !written.insert(t).second)return op.emitError("prefix must publish zero, all endpoints and its terminal count");
+      sawWrite=true;continue;
+    }
+    if(name=="encode_q8k"){
+      auto out=llvm::find(captures,op.getOperand(0));
+      const bool validRows =
+          !axes.empty() &&
+          ((axes[0].getAsInteger() && *axes[0].getAsInteger() > 0) ||
+           (axes[0].getAsString() && !axes[0].getAsString()->empty()));
+      if(out==captures.end() || axes.size()!=2 || !validRows ||
+         axes[1].getAsInteger()!=kir::Q8KRecord::elements ||
+         op.getOperand(1)!=row.getArgument(0) ||
+         op.getOperand(2).getType()!=RankedTensorType::get({ShapedType::kDynamic},Float32Type::get(fn.getContext())))
+        return op.emitError("encode_q8k requires f32[256] row values");
+      auto o=out-captures.begin();
+      auto *a=(*args)[o].getAsObject();
+      auto dt=a ? a->getString("dtype").value_or("") : "";
+      if(!a || a->getString("direction")!="Out" || (dt!="u8" && dt!="i8") ||
+         *a->getArray("dims")!=llvm::json::Array{axes[0],kir::Q8KRecord::bytes} ||
+         !written.insert(o).second)
+        return op.emitError("encode_q8k output must match [G,292] bytes");
       sawWrite=true;continue;
     }
     if(name=="fill_ranges"){

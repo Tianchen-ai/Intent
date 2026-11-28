@@ -209,8 +209,12 @@ SmallVector<std::pair<Value, std::string>> feeds(block::MatrixAccess &a) {
             {dot.getOperand(3), "row-prefix"}};
   if (n == "q4k_dot")
     return {{dot.getOperand(0), "packed-weight"},
-            {dot.getOperand(1).getDefiningOp()->getOperand(0),
-             "encode-activation"}};
+            dot.getOperand(1).getDefiningOp()
+                ? std::pair<Value, std::string>{
+                      dot.getOperand(1).getDefiningOp()->getOperand(0),
+                      "encode-activation"}
+                : std::pair<Value, std::string>{dot.getOperand(1),
+                                                "packed-weight"}};
   if (n == "scaled_contract")
     return {{dot.getOperand(0), "left-groups"},
             {dot.getOperand(1), "left-scales"},

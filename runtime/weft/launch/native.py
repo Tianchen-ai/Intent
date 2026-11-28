@@ -99,7 +99,7 @@ class Artifact:
 
                 toolchain = Toolchain.resolve({}, self.info).to_dict()
                 identity = [
-                    "typed-host-with-runtime-v2",
+                    "typed-host-with-runtime-v3",
                     asdict(self.info),
                     triton.__version__,
                     weft_compiler_identity(),
@@ -113,6 +113,7 @@ class Artifact:
                         milliseconds=(perf_counter() - start) * 1000,
                         cache_hit=hit,
                         rows=self.data["rows"],
+                        build_dir=str(path),
                     )
                 ]
                 self.library = ct.CDLL(str(path / "host.so"))
@@ -172,8 +173,18 @@ class Artifact:
                 raise ValueError(
                     f"task slot {i} disagrees with compiled declaration: {arg}"
                 )
-        if abi.get("used_extensions"):
+        used_ext = set(abi.get("used_extensions") or ())
+        allowed_ext = (
+            {self.info.matrix_extension}
+            if self.info.arch == "riscv64"
+            and getattr(self.info, "matrix_extension", "none") != "none"
+            else set()
+        )
+        if used_ext - allowed_ext:
             raise ValueError("row task requires an unhandled worker permission")
+        c_asm = getattr(native, "asm", {}).get("c")
+        if c_asm:
+            (path / "intrinsic.c").write_text(c_asm)
         native.export(path / "task")
         name = "task_" + native.hash + ".so"
         (path / "task/kernel.so").rename(path / "task" / name)

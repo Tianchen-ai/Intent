@@ -62,7 +62,12 @@ def capture(fn):
         if name == "cast" and len(node.args) == 2 and not kw:
             return emit("convert_matrix", [expr(node.args[0])], tensor(rank, spelling(node.args[1], api)))
         if name == "quantize_q8k" and len(node.args) == 1 and not kw:
-            return emit("quantize_q8k", [view(node.args[0])], "tensor<?x292xi8>")
+            src = view(node.args[0])
+            dims = len(slots[node.args[0].value.id]["dims"])
+            if dims not in (2, 3):
+                raise ValueError("quantize_q8k expects [G,256] or [B,G,256] view")
+            res_ty = "tensor<?x292xi8>" if dims == 2 else "tensor<?x?x292xi8>"
+            return emit("quantize_q8k", [src], res_ty)
         if name == "window_contract":
             from .window import capture_value_map
             if len(node.args)!=4 or set(kw)!={"head_group","rhs","acc"} or spelling(kw["acc"],api)!="f32":
@@ -78,7 +83,8 @@ def capture(fn):
             return ssa,result
         if name == "q4k_dot" and len(node.args) == 2 and not kw:
             qfm = format_fastmath_attr((*default_flags, "reassoc", "contract"))
-            return emit("q4k_dot", [view(node.args[0]), expr(node.args[1])], tensor(rank, "f32"), f"{{fastmath={qfm}}}")
+            act = view(node.args[1]) if isinstance(node.args[1], ast.Subscript) else expr(node.args[1])
+            return emit("q4k_dot", [view(node.args[0]), act], tensor(rank, "f32"), f"{{fastmath={qfm}}}")
         if name == "quant_contract" and len(node.args) in (2, 3, 4) and set(kw) == {"format", "acc"}:
             fmt = ast.literal_eval(kw["format"])
             if type(fmt) is not str or not fmt:

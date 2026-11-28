@@ -99,7 +99,8 @@ bool supportsSweepUnroll(Operation *op) {
     blocked |= n == "welford" || n == "scan_sum" || n == "uniform" ||
                n == "count_keys" || n == "column_sum" || n == "ordered_sum" ||
                n == "atomic_add" || n == "fill_ranges" || n == "unique_put" ||
-               n == "write_offsets" || n == "prefix_scatter";
+               n == "write_offsets" || n == "prefix_scatter" ||
+               n == "encode_q8k";
   });
   return !blocked;
 }
@@ -194,7 +195,7 @@ void registerPartition(Unit &u,bool permuted) {
                          n == "atomic_add" || n == "unique_put" ||
                          n == "pack_members" || n == "fill_ranges" ||
                          n == "reserve_tickets" || n == "distribute_tickets" ||
-                         n == "write_offsets";
+                         n == "write_offsets" || n == "encode_q8k";
       });
       if (!rank1 || walk != "source" ||
           (!hasOrderedSum && (!hasWrite || hasDisallowed)))

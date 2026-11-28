@@ -54,11 +54,18 @@ contractionShape(mlir::Operation &op, mlir::Value out, const CallFacts &f) {
                               slot(a),    slot(b),    slot(out)};
     }
     if (name == "q4k_dot") {
-      auto x = op.getOperand(1).getDefiningOp()->getOperand(0);
+      auto rhs = op.getOperand(1);
+      auto x = rhs.getDefiningOp() ? rhs.getDefiningOp()->getOperand(0) : rhs;
+      auto *xs = f.shapeOf(x);
+      if (!xs || (xs->size() != 2 && xs->size() != 3))
+        return llvm::createStringError("Q8_K activation must have rank 2 or 3");
+      int64_t batches = xs->size() == 3 ? axis(x, 0) : 1;
+      int64_t gExtent = axis(x, xs->size() == 3 ? 1 : 0);
       int64_t k;
-      if (__builtin_mul_overflow(axis(x, 0), int64_t(Q8KRecord::elements), &k))
+      if (batches < 0 || gExtent < 0 ||
+          __builtin_mul_overflow(gExtent, int64_t(Q8KRecord::elements), &k))
         return llvm::createStringError("Q8_K contraction extent exceeds i64");
-      return ContractionShape{axis(a, 0), 1, k, 1, slot(a), slot(x), slot(out)};
+      return ContractionShape{axis(a, 0), 1, k, batches, slot(a), slot(x), slot(out)};
     }
     if (name == "quant_contract") {
       auto fmtAttr = op.getAttrOfType<StringAttr>("format");

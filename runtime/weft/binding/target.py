@@ -34,7 +34,16 @@ def discover(scope):
         if ids:
             core_id = "/".join(ids.pop())
     weft_ver = str(facts.get("weft_version") or getattr(weft_core, "__version__", ""))
-    isa = frozenset(facts.get("available_isa_extensions") or facts.get("isa_extensions") or ())
+    isa = frozenset().union(
+        *(
+            facts.get(key) or ()
+            for key in (
+                "available_isa_extensions",
+                "execution_isa_extensions",
+                "isa_extensions",
+            )
+        )
+    )
     brg = dict(facts.get("onednn_brgemm") or {})
     caps = dict(facts.get("capabilities") or {})
     bits = int(t["vector_bits"] if cpu.arch == "x86_64" else t["vlen_bits"])

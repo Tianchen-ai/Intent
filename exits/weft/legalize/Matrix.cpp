@@ -130,18 +130,8 @@ struct EpilogueItem {
   std::string targetCarrier;
 };
 
-struct RecordEncodingDesc {
-  std::string symName;
-  int64_t alignment = 0;
-  int64_t elements = 0;
-  int64_t storageBits = 0;
-  SmallVector<std::string, 6> fieldNames;
-  SmallVector<std::string, 6> fieldTypes;
-  SmallVector<int64_t, 6> fieldExtents;
-  SmallVector<std::string, 6> fieldLayouts;
-  SmallVector<int64_t, 6> fieldBitOffsets;
-  SmallVector<int64_t, 6> fieldStorageBits;
-};
+bool canUseWeftQuantEncoding(const intentdsl::kir::QuantFormatSpec &spec);
+} // namespace
 
 std::optional<RecordEncodingDesc> deriveWeftRecordEncoding(Type storageTy) {
   const std::string natural = "[{kind=\"natural\"}]";
@@ -233,6 +223,7 @@ makeRecordEncodingAttrs(OpBuilder &b, Type storageTy,
   };
 }
 
+namespace {
 bool canUseWeftQuantEncoding(const intentdsl::kir::QuantFormatSpec &spec) {
   if (spec.roleLayout != intentdsl::kir::QuantRoleLayout::RecordGemv ||
       spec.valueCode != intentdsl::kir::QuantValueCode::UnsignedAffine ||
@@ -352,6 +343,23 @@ bool nativeQ4KStrides(func::FuncOp fn, Operation &dot) {
   auto shape = fn.getArgAttrOfType<DenseI64ArrayAttr>(slot, "cpu.shape");
   return s && shape && s.size() == 3 && shape.size() == 3 && s[2] == 1 &&
          s[1] == q4.bytes && s[0] == q4.bytes * shape[1];
+}
+
+bool nativeQ8KStrides(func::FuncOp fn, Operation &dot) {
+  auto q8 = intentdsl::kir::Q8KType::get(fn.getContext()).getLayout();
+  Value act = dot.getOperand(1);
+  if (act.getDefiningOp())
+    return true;
+  auto slot = cast<BlockArgument>(act).getArgNumber();
+  auto s = fn.getArgAttrOfType<DenseI64ArrayAttr>(slot, "cpu.strides");
+  auto shape = fn.getArgAttrOfType<DenseI64ArrayAttr>(slot, "cpu.shape");
+  if (!s || !shape)
+    return false;
+  if (shape.size() == 2)
+    return s.size() == 2 && s[1] == 1 && s[0] == q8.bytes;
+  if (shape.size() == 3)
+    return s.size() == 3 && s[2] == 1 && s[1] == q8.bytes;
+  return false;
 }
 
 Operation *makeOp(OpBuilder &b, Location loc, StringRef name,
@@ -604,7 +612,8 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, const RecordFields &record) {
       qSpec && qSpec->roleLayout == intentdsl::kir::QuantRoleLayout::RecordGemv;
   bool useEncodedRecords = !emptyRed && isQ4k &&
                            shortImpl == "weft-q4k-dot" &&
-                           nativeQ4KStrides(fn, dot);
+                           nativeQ4KStrides(fn, dot) &&
+                           nativeQ8KStrides(fn, dot);
   bool useQuantEncoded =
       !emptyRed && isQuantRec && qSpec->q8kActivation &&
       shortImpl == "weft-q4k-dot" &&
@@ -646,6 +655,27 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, const RecordFields &record) {
       int64_t q8Sums = q8.elements / q8.sumGroup;
       unsigned wSlot = slotOf(dot.getOperand(0));
       auto wSt = argStrides(wSlot);
+      bool prepackedQ8k = (dot.getOperand(1).getDefiningOp() == nullptr);
+      SmallVector<int64_t> q8Strides{q8.bytes, 1};
+      std::string q8Base = "packed";
+      int64_t q8BatchByteStride = ng * q8.bytes;
+      if (prepackedQ8k) {
+        unsigned xSlot = slotOf(dot.getOperand(1));
+        auto xSt = argStrides(xSlot);
+        q8Base = "a" + std::to_string(xSlot);
+        if (xSt.size() == 3)
+          q8BatchByteStride = xSt[0];
+        int gAx = int(xSt.size()) - 2;
+        q8Strides = {xSt[gAx], xSt[gAx + 1]};
+      }
+      SmallVector<AddrTerm> q8ByteBatchTerm, q8F32BatchTerm, q8I16BatchTerm;
+      if (G > 1) {
+        q8ByteBatchTerm = {{CoordTag::G, q8BatchByteStride}};
+        q8F32BatchTerm = {
+            {CoordTag::G, q8BatchByteStride / int64_t(sizeof(float))}};
+        q8I16BatchTerm = {
+            {CoordTag::G, q8BatchByteStride / int64_t(sizeof(int16_t))}};
+      }
       if (useEncodedRecords) {
         slots.push_back({{"Q4_K", {rowsDim, ng, q4.elements}, {1, 4, 3}},
                          "a" + std::to_string(wSlot),
@@ -653,8 +683,12 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, const RecordFields &record) {
                          {{CoordTag::Src, wSt[0]}},
                          {},
                          false});
-        slots.push_back(
-            {{"Q8_K", {ng, q8.elements}, {4, 3}}, "packed", 0, {}, {}, false});
+        slots.push_back({{"Q8_K", {ng, q8.elements}, {4, 3}},
+                         q8Base,
+                         0,
+                         q8ByteBatchTerm,
+                         {},
+                         false});
       } else {
         slots.push_back({{"u8", {-1, ng, q4.packed}, {1, 4, 5}},
                          "a" + std::to_string(wSlot),
@@ -669,19 +703,23 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, const RecordFields &record) {
                          {wSt[0], wSt[1], q4.group * wSt[2], wSt[2]},
                          false});
         slots.push_back(
-            {{"f32", {ng}, {4}}, "packed", q8.d, {},
-             {q8.bytes / int64_t(sizeof(float))}, false});
+            {{"f32", {ng}, {4}},
+             q8Base,
+             q8.d,
+             q8F32BatchTerm,
+             {q8Strides[0] / int64_t(sizeof(float))},
+             false});
         slots.push_back({{"i8", {ng, q4Subs, q4.group}, {4, 7, 3}},
-                         "packed",
+                         q8Base,
                          q8.values,
-                         {},
-                         {q8.bytes, q4.group, 1},
+                         q8ByteBatchTerm,
+                         {q8Strides[0], q4.group * q8Strides[1], q8Strides[1]},
                          false});
         slots.push_back({{"i16", {ng, q8Sums}, {4, 8}},
-                         "packed",
+                         q8Base,
                          q8.sums,
-                         {},
-                         {q8.bytes / int64_t(sizeof(int16_t)), 1},
+                         q8I16BatchTerm,
+                         {q8Strides[0] / int64_t(sizeof(int16_t)), 1},
                          false});
       }
     } else if (kind == "contract") {
@@ -882,6 +920,9 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, const RecordFields &record) {
                      mr * nr * dstBytes});
   } else if (dstRank == 1) {
     addArgSlot(dstArg, "", {rowsDim}, {1}, {CoordTag::Dest}, {0}, true);
+  } else if (isQ4k && dstRank == 2) {
+    addArgSlot(dstArg, "", {rowsDim}, {1}, {CoordTag::G, CoordTag::Dest}, {1},
+               true);
   } else if (dstRank == 2) {
     addArgSlot(dstArg, "", {rowsDim, cols}, {1, 2}, {CoordTag::Dest, CoordTag::C},
                {0, 1}, true);
@@ -2477,7 +2518,7 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, const RecordFields &record) {
       prepOps.size() == 1 &&
       prepOps[0]->getAttrOfType<StringAttr>("kind").getValue() ==
           "encode-q8k" &&
-      K <= 8192;
+      G == 1 && K <= 8192;
   bool fuseHostParallel =
       !useTlsPanelStream && !prepOps.empty() && !smallSingleQ8k &&
       llvm::all_of(prepOps, [](Operation *pop) {
@@ -3132,18 +3173,36 @@ LogicalResult lowerWeftMatrix(func::FuncOp fn, const RecordFields &record) {
     } else if (pk == "encode-q8k") {
       auto q8 = intentdsl::kir::Q8KType::get(fn.getContext()).getLayout();
       auto st = argStrides(opSlots[0]);
-      Block *gBb =
-          (!fuseHostParallel && K <= 8192)
-              ? makeHostFor("g", "0", "K/" + std::to_string(q8.elements), "1")
-              : makeHostOmpFor("g", "0", "K/" + std::to_string(q8.elements),
-                               "1", !fuseHostParallel, false, false,
-                               fuseHostParallel ? "" : "K >= 1024", "static",
-                               "workers", hasNextPrep);
-      enterHostBlock(gBb);
-      emitElem("pack_q8k", "&" + dst + "[g]",
-               "(const float*)a" + std::to_string(opSlots[0]) + " + g*" +
-                   std::to_string(st[0]) + "LL",
-               std::to_string(st[1]) + "LL", q8.bytes);
+      if (st.size() == 3) {
+        int64_t ng = std::max<int64_t>(1, K / q8.elements);
+        std::string ngS = std::to_string(ng);
+        Block *idxBb =
+            (!fuseHostParallel && G > 0 && G * K <= 8192)
+                ? makeHostFor("idx", "0", "G*" + ngS, "1")
+                : makeHostOmpFor("idx", "0", "G*" + ngS, "1", !fuseHostParallel,
+                                 false, false,
+                                 fuseHostParallel ? "" : "G*K >= 1024",
+                                 "static", "workers", hasNextPrep);
+        enterHostBlock(idxBb);
+        emitElem("pack_q8k", "&" + dst + "[idx]",
+                 "(const float*)a" + std::to_string(opSlots[0]) +
+                     " + (idx/" + ngS + ")*" + std::to_string(st[0]) +
+                     "LL + (idx%" + ngS + ")*" + std::to_string(st[1]) + "LL",
+                 std::to_string(st[2]) + "LL", q8.bytes);
+      } else {
+        Block *gBb =
+            (!fuseHostParallel && K <= 8192)
+                ? makeHostFor("g", "0", "K/" + std::to_string(q8.elements), "1")
+                : makeHostOmpFor("g", "0", "K/" + std::to_string(q8.elements),
+                                 "1", !fuseHostParallel, false, false,
+                                 fuseHostParallel ? "" : "K >= 1024", "static",
+                                 "workers", hasNextPrep);
+        enterHostBlock(gBb);
+        emitElem("pack_q8k", "&" + dst + "[g]",
+                 "(const float*)a" + std::to_string(opSlots[0]) + " + g*" +
+                     std::to_string(st[0]) + "LL",
+                 std::to_string(st[1]) + "LL", q8.bytes);
+      }
     } else if (pk == "gather-routed-lhs" ||
                pk == "gather-widen-routed-lhs-f32") {
       auto stA = argStrides(opSlots[0]);

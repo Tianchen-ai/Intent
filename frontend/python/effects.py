@@ -48,6 +48,16 @@ def statement(capture, call, outputs):
             raise ValueError("write_offsets takes positional arguments")
         capture.emit("write_offsets", [view[offsets.id], view[total.id], row, capture.expr(prefix)])
         outputs.update((offsets.id, total.id))
+    elif name == "encode_q8k":
+        if options or len(call.args) != 3:
+            raise ValueError("encode_q8k expects positional (out, row, values)")
+        dest, owner_row, values_expr = call.args
+        if (not isinstance(dest, ast.Name)
+                or not isinstance(owner_row, ast.Name)
+                or owner_row.id != capture.row):
+            raise ValueError("encode_q8k must target a buffer by the parallel row variable")
+        capture.emit("encode_q8k", [view[dest.id], row, capture.expr(values_expr)])
+        outputs.add(dest.id)
     elif name == "scatter_unique" and len(call.args) == 3:
         dest, indices, payload = call.args
         if isinstance(dest, ast.Name):

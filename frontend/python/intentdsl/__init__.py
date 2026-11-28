@@ -61,6 +61,11 @@ def kernel(fn=None, *, numerics="source", fast_math=False, denormal_fp_math="iee
 
     return wrap if fn is None else wrap(fn)
 
+def encode_q8k(out, row, values):
+    """Encode an f32[256] row into a Q8_K record inside @intentdsl.kernel."""
+    raise RuntimeError("call inside @intentdsl.kernel")
+
+
 def program(fn):
     """Capture the author's ordered host operations without running their Python."""
     from .composition import capture_program

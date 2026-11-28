@@ -1,10 +1,11 @@
 import intentdsl as I
-from .attention import attention, merge_splits, paged_decode
+from .attention import attention, causal_attention_f32, merge_splits, paged_decode
 from .attention_grad import flash_attention_backward
 from .decode import grouped_flash_decode, paged_mla_decode_partials
 from .recurrences import causal_convolution, causal_linear_attention, cholesky, gated_delta, selective_state_scan
-from .matrix import (gemm, batched_gemm, batched_gemm_subnormal_ftz, ragged_gemm, int8_gemm,
-                     q4_projection, mamba_chunk_state, fp8_gemm, qkv_projection, expert_projection)
+from .matrix import (gemm, linear_f32, batched_gemm, batched_gemm_subnormal_ftz, ragged_gemm, int8_gemm,
+                     q4_projection, q4_projection_batched, q4_dot, q8_quantize,
+                     mamba_chunk_state, fp8_gemm, qkv_projection, expert_projection)
 from .group7 import (sliding_window_attention, alibi_attention, cross_entropy,
                      topk_rows, qk_norm_rope, attention_unscaled_max)
 from .group7_cpu import (embedding_bag, index_add, triangular_solve,
@@ -156,9 +157,28 @@ def rms_norm(
 
 
 @I.kernel
+def rms_norm_f32(
+    x: I.In[I.f32, ("M", "N")],
+    out: I.Out[I.f32, ("M", "N")],
+    inv_c: I.f32,
+    eps: I.f32,
+):
+    for r in I.parallel(x.dim(0)):
+        u = x[r, :]
+        s = I.sum(u * u, axis=0, acc=I.f32)
+        out[r, :] = u * I.rsqrt(s * inv_c + eps)
+
+
+@I.kernel
 def relu(x: I.In[I.f16, ("M", "N")], out: I.Out[I.f16, ("M", "N")]):
     for row in I.parallel(x.dim(0)):
         out[row, :] = I.maximum(x[row, :], I.cast(0.0, I.f16))
+
+
+@I.kernel
+def relu_f32(x: I.In[I.f32, ("M", "N")], out: I.Out[I.f32, ("M", "N")]):
+    for row in I.parallel(x.dim(0)):
+        out[row, :] = I.maximum(x[row, :], I.cast(0.0, I.f32))
 
 
 @I.kernel

@@ -93,7 +93,8 @@ static bool validContractPacking(Operation &dot, StringRef kind,
 static std::string packingFor(Operation &dot, StringRef kind, int64_t packCode,
                               const MatrixMachine &caps) {
   if (kind == "q4k_dot")
-    return "shared-q8k-per-call";
+    return dot.getOperand(1).getDefiningOp() ? "shared-q8k-per-call"
+                                             : "prepacked-q8k";
   if (kind == "quant_contract") {
     const auto *spec = quantSpec(dot);
     if (!spec)
@@ -315,7 +316,10 @@ LogicalResult verifyMatrixPartition(func::FuncOp fn, Operation &region,
         packing && (packing == "mapped-right-per-call" ||
                     packing == "mapped-f32-panels");
   } else if (kind == "q4k_dot") {
-    validPack = packing && packing == "shared-q8k-per-call";
+    bool hasEncoder = dot.getOperand(1).getDefiningOp() != nullptr;
+    validPack = packing &&
+                (hasEncoder ? packing == "shared-q8k-per-call"
+                            : packing == "prepacked-q8k");
   } else if (kind == "quant_contract") {
     if (qSpec) {
       if (qSpec->roleLayout == kir::QuantRoleLayout::RecordGemv)
@@ -334,15 +338,16 @@ LogicalResult verifyMatrixPartition(func::FuncOp fn, Operation &region,
     return region.emitError() << llvm::toString(s.takeError());
   auto placement = region.getAttrOfType<StringAttr>("cpu.record_storage");
   bool needsQ8kRecord =
-      kind == "q4k_dot" ||
+      (kind == "q4k_dot" && dot.getOperand(1).getDefiningOp() != nullptr) ||
       (kind == "quant_contract" && qSpec &&
        qSpec->roleLayout == kir::QuantRoleLayout::RecordGemv &&
        qSpec->q8kActivation);
   int64_t recBlock =
       (qSpec && qSpec->blockElements > 0) ? qSpec->blockElements : 256;
+  int64_t totalRecords =
+      std::max<int64_t>(1, s->batches) * (s->k / recBlock);
   if (needsQ8kRecord
-          ? (!placement ||
-             placement != (s->k / recBlock > 32 ? "heap" : "stack"))
+          ? (!placement || placement != (totalRecords > 32 ? "heap" : "stack"))
           : bool(placement))
     return region.emitError("invalid Q8_K record workspace placement");
   auto sh = region.getAttrOfType<DenseI64ArrayAttr>("cpu.extents");
@@ -536,9 +541,10 @@ void matrixTasks(Unit &u) {
     op->setAttr("cpu.extents",
                 b.getDenseI64ArrayAttr({g->m, g->n, g->k, g->batches}));
     const auto *qSpec = cpu::quantSpec(dot);
-    if (kind == "q4k_dot") {
+    if (kind == "q4k_dot" && dot.getOperand(1).getDefiningOp()) {
+      int64_t totalRecs = std::max<int64_t>(1, g->batches) * (g->k / 256);
       op->setAttr("cpu.record_storage",
-                  b.getStringAttr(g->k / 256 > 32 ? "heap" : "stack"));
+                  b.getStringAttr(totalRecs > 32 ? "heap" : "stack"));
     } else if (kind == "quant_contract" && qSpec &&
                qSpec->roleLayout == kir::QuantRoleLayout::RecordGemv &&
                qSpec->q8kActivation) {
