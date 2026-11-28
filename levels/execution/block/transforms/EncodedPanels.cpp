@@ -1015,7 +1015,7 @@ struct Panel {
     bool exactRhsBounds =
         (p.shape[2] > 0 && p.shape[2] % p.tile[2] == 0 && p.shape[1] > 0 &&
          p.shape[1] % p.tile[1] == 0);
-    return fold(
+    Value result = fold(
         llvm::divideCeil(p.shape[2], p.tile[2]), init,
         [&](Value it, Value acc) {
           Value member = t.stepped(
@@ -1172,6 +1172,9 @@ struct Panel {
               b.create<arith::SelectOp>(loc, rhsMask, rhsCast, zeroRhs);
           return t.dot(lhs, rhsMasked, false, acc);
         });
+    if (auto stages = p.domain.getAttr("block.pipeline_stages"))
+      result.getDefiningOp()->setAttr(t.symbol("pipeline_stages"), stages);
+    return result;
   }
   void run(ScaledPanelLowering native, MatrixPanelRead readNative,
            WindowPanelLowering windowNative, MatrixPanelWrite writeNative,

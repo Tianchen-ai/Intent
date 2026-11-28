@@ -12,6 +12,8 @@ struct MatrixTile {
   int64_t maxOperandBytes = 0;
   bool (*accepts)(mlir::Operation *domain, int64_t depth,
                   const CallFacts &facts) = nullptr;
+  // Explicit residency requested from a native asynchronous tile scheduler.
+  unsigned pipelineResidentCTAs = 0;
 };
 struct MatrixTarget {
   std::vector<MatrixTile> tiles;

@@ -159,6 +159,32 @@ void matrixCost(Unit &u) {
             e.terms["matrix_panel_waves"] = {waves * panels, "count"};
             e.timeNs = *startup + fMem + std::max(fMma, fDequant) +
                        0.5 * std::min(fMma, fDequant) + waveBias;
+            if (tile.size() == 4 && tile[3] == 3) {
+              auto *row = intentdsl::block::findMatrixTile(
+                  op, tile.asArrayRef(), ctx.target);
+              double cover = 1. - 1. / panels;
+              if (row && row->pipelineResidentCTAs) {
+                // Independent CTAs can fill the native fetch queue only when
+                // the tile fits and the grid supplies enough work per SM.
+                double resident = std::clamp(jobs / sms, 1.,
+                                             double(row->pipelineResidentCTAs));
+                double decode = B_unpacked * mBlocks / (l2R * resident);
+                double overlap = std::min(1., resident - 1.) * cover;
+                *e.timeNs = *startup + std::max(fMma, decode) +
+                            fMem * (1. - overlap) +
+                            std::min(fMma, decode) / panels + waveBias;
+                e.terms["resident_producers"] = {resident, "count"};
+                e.terms["decoded_panel_supply"] = {decode, "ns"};
+              } else {
+                // Software-managed staging materializes the next packed
+                // panel across the CTA before its consumers can issue MMA.
+                double exchange =
+                    jobs * panels * tk * (tm * lhsElemBytes + tn * groupedRhsB);
+                double overlap = 0.5 * std::min(fMma, fDequant) * cover;
+                e.terms["staged_panel_bytes"] = {exchange, "B"};
+                *e.timeNs += exchange / l2W - overlap;
+              }
+            }
             return e;
           }
           double jobs = shape->batches * std::ceil(shape->m / tm) *

@@ -255,9 +255,12 @@ TerminalPrinter cutilePrinter() {
   });
   localExpr("ct_src.rect_read", [](const LocalOpView &v) {
     auto coords = llvm::join(llvm::drop_begin(v.operands()), ",");
+    auto latency = v.attrOfType<IntegerAttr>("latency");
+    std::string hint =
+        latency ? ",latency=" + std::to_string(latency.getInt()) : "";
     return ("ct.load(" + v.operand(0) + ",(" + coords +
             ",),shape=" + dims(v.resultType(0)) +
-            ",padding_mode=ct.PaddingMode.ZERO,allow_tma=" +
+            ",padding_mode=ct.PaddingMode.ZERO" + hint + ",allow_tma=" +
             (v.attrOfType<BoolAttr>("allow_tma").getValue() ? "True"
                                                             : "False") +
             ")")

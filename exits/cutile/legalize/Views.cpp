@@ -1,4 +1,5 @@
 #include "../capabilities/Index.h"
+
 #include "compilerinfra/Assembly.h"
 #include "compilerinfra/Proofs.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
@@ -1038,6 +1039,16 @@ struct Signature : PassWrapper<Signature, OperationPass<ModuleOp>> {
             addr->erase();
         }
       }
+      fn.walk([&](scf::ForOp loop) {
+        if (!loop->hasAttr("ct_src.pipeline_stages"))
+          return;
+        // The hint is on the producer loads; tileiras assigns their
+        // asynchronous staging and schedules the downstream MMA.
+        loop.walk([&](Operation *op) {
+          if (op->getName().getStringRef() == "ct_src.rect_read")
+            op->setAttr("latency", b.getI32IntegerAttr(8));
+        });
+      });
     }
     else {
       fn.walk<WalkOrder::PostOrder>([](Operation *op){

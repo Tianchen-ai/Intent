@@ -189,6 +189,13 @@ capabilities(const llvm::json::Object &options) {
          "scaled_contract"},
         {32, 64, 128, R"({"num_ctas":1,"occupancy":2,"opt_level":3})",
          "scaled_contract"}};
+  for (auto &tile : matrix->tiles) {
+    auto native = llvm::json::parse(tile.native);
+    if (!native)
+      return native.takeError();
+    tile.pipelineResidentCTAs =
+        native->getAsObject()->getInteger("occupancy").value_or(1);
+  }
   if (auto err =
           profile.services.provide<intentdsl::block::MatrixTarget>(matrix))
     return std::move(err);

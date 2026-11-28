@@ -126,7 +126,7 @@ def MatrixEnd : Op<TileSource,"end",[Terminator]>;
 class TileInstruction<string mnemonic, list<Trait> traits = []> : Op<TileSource, mnemonic, traits>;
 include "intentdsl/levels/execution/block/ir/TileInstructions.td"
 def NativeRectRead : Op<TileSource,"rect_read",[MemoryEffects<[MemRead]>]> {
-  let arguments=(ins AnyMemRef:$base, Variadic<I64>:$indices,BoolAttr:$allow_tma);
+  let arguments=(ins AnyMemRef:$base, Variadic<I64>:$indices,BoolAttr:$allow_tma,OptionalAttr<I32Attr>:$latency);
   let results=(outs AnyRankedTensor:$tile);
 }
 def NativeScaleMMA : Op<TileSource,"scaled_mma",[Pure]> {

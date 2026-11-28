@@ -76,7 +76,10 @@ void registerColumnRules(TerminalPrinter &printer) {
             p.line(prefix + std::to_string(i) + " = " + view.operand(3 + i).str());
         } else if (at == PrintPoint::BeginBlock) {
           auto bounds = view.attrOfType<ArrayAttr>("triton_src.range_bounds");
-          auto syntax = view.attr("triton_src.runtime_range")
+          auto stages =
+              view.attrOfType<IntegerAttr>("triton_src.pipeline_stages");
+          auto syntax = stages ? " in tl.range("
+                        : view.attr("triton_src.runtime_range")
                             ? " in range("
                             : " in tl.static_range(";
           auto bound = [&](unsigned idx) -> std::string {
@@ -85,8 +88,11 @@ void registerColumnRules(TerminalPrinter &printer) {
                 return std::to_string(ia.getInt());
             return view.operand(idx).str();
           };
-          p.line("for " + view.blockArguments()[0] + syntax + bound(0) + "," +
-                 bound(1) + "," + bound(2) + "):");
+          p.line(
+              "for " + view.blockArguments()[0] + syntax + bound(0) + "," +
+              bound(1) + "," + bound(2) +
+              (stages ? ",num_stages=" + std::to_string(stages.getInt()) : "") +
+              "):");
           ++p.indent;
           for (unsigned i = 0; i < nRes; ++i)
             p.line(view.blockArguments()[1 + i] + " = " + prefix +

@@ -1,4 +1,5 @@
 #include "intentdsl/levels/execution/block/ir/Contraction.h"
+
 #include "intentdsl/levels/algorithm/kir/ir/Storage.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/TypeUtilities.h"
@@ -164,9 +165,45 @@ const MatrixTile *findMatrixTile(Operation *domain, ArrayRef<int64_t> dims,
       }
       return nullptr;
     }
-    if (dims[3] != 1)
+    if (dims[3] == 3) {
+      const auto facts = profile.services.get<CallFacts>();
+      const auto *regs = profile.services.facts.find("register_file");
+      if (!facts || !regs || !canSplitGroupedRhs(domain, profile))
+        return nullptr;
+      auto shape = matrixShape(domain, *facts);
+      if (!shape) {
+        llvm::consumeError(shape.takeError());
+        return nullptr;
+      }
+      auto output = cast<BlockArgument>(domain->getOperand(0)).getArgNumber();
+      auto alias = [&](unsigned slot) -> std::optional<int64_t> {
+        auto *arg = facts->arguments[slot].getAsObject();
+        return arg ? arg->getInteger("alias_group") : std::nullopt;
+      };
+      auto dst = alias(output);
+      if (!dst || *dst < 0)
+        return nullptr;
+      for (unsigned slot = 0; slot < facts->arguments.size(); ++slot) {
+        auto inputGroup = alias(slot);
+        if (slot != output &&
+            (!inputGroup || *inputGroup < 0 || inputGroup == dst))
+          return nullptr;
+      }
+      // One FP32 accumulator plus two narrow operand panels per CTA.
+      if (dims[2] <= 0 || dims[1] <= 0 || dims[0] <= 0 ||
+          !llvm::any_of(target->tiles,
+                        [&](const MatrixTile &t) {
+                          return t.m == dims[0] && t.n == dims[1] &&
+                                 t.k == dims[2];
+                        }) ||
+          shape->k <= dims[2] ||
+          dims[0] * dims[1] + (dims[0] + dims[1]) * dims[2] *
+                                  contractionOperandBytes(domain) / 2 >
+              regs->value.getAsInteger().value_or(0))
+        return nullptr;
+    } else if (dims[3] != 1)
       return nullptr;
-    split = true;
+    split = dims[3] == 1;
     dims = dims.take_front(3);
   }
   if (dims.size() != 3)
@@ -266,6 +303,12 @@ LogicalResult verifyTiledMatrix(func::FuncOp fn,
                                       tile.asArrayRef().end());
       libDims.push_back(2);
       tileOk = isSplit && findMatrixTile(op, libDims, p, native.getValue());
+    } else if (auto stages =
+                   op->getAttrOfType<IntegerAttr>("block.pipeline_stages")) {
+      SmallVector<int64_t, 4> dims(tile.asArrayRef());
+      dims.push_back(3);
+      tileOk = !isSplit && stages.getInt() == 2 &&
+               findMatrixTile(op, dims, p, native.getValue());
     } else {
       tileOk =
           findMatrixTile(op, tile.asArrayRef(), p, native.getValue(), isSplit);

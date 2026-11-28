@@ -27,6 +27,17 @@ void registerContraction(Unit &u) {
   family.verifyCandidate = [](Operation *, const StructuralCandidate &c,
                               const TargetProfile &) -> llvm::Error {
     auto tile = cast<DenseI64ArrayAttr>(c.value);
+    if (tile.size() == 4 && tile[3] == 3) {
+      auto id = "pipeline-" + std::to_string(tile[0]) + "x" +
+                std::to_string(tile[1]) + "x" + std::to_string(tile[2]);
+      if (c.id != id || c.topology != "pipelined-decode" ||
+          c.preconditions !=
+              std::vector<std::string>{"independent-output-tiles",
+                                       "disjoint-panel-loads"})
+        return llvm::createStringError(
+            "invalid producer/consumer pipeline candidate");
+      return llvm::Error::success();
+    }
     if (tile.size() == 4 && tile[3] == 2) {
       if (c.id != "split-library" || c.topology != "split-dequant-library" ||
           c.preconditions !=
@@ -101,6 +112,13 @@ void registerContraction(Unit &u) {
                        std::to_string(t.k);
       if (!seen.insert(id).second)
         continue;
+      auto pipeline = b.getDenseI64ArrayAttr({t.m, t.n, t.k, 3});
+      if (block::supportsMatrixTile(op, pipeline, p))
+        rows.push_back({"pipeline-" + id,
+                        "pipelined-decode",
+                        pipeline,
+                        {"independent-output-tiles", "disjoint-panel-loads"},
+                        implementations});
       rows.push_back({std::move(id),
                       "output-stationary",
                       choice,
@@ -168,6 +186,8 @@ void registerContraction(Unit &u) {
       fn.setArgAttr(i, "block.shape", b.getDenseI64ArrayAttr(extents));
     }
     op->setAttr("block.output_tile", outTile);
+    if (tile.size() == 4 && tile[3] == 3)
+      op->setAttr("block.pipeline_stages", b.getI64IntegerAttr(2));
     if (isSplit)
       op->setAttr("block.split_dequant", b.getUnitAttr());
     if (isSplitLib)

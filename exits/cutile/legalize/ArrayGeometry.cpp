@@ -77,6 +77,11 @@ LogicalResult verifyArrayGeometry(func::FuncOp fn,
                    return n > 0 && llvm::isPowerOf2_64(n);
                  }))
                return reject("array view, tile shape and indices disagree");
+             if (auto latency = op->getAttrOfType<IntegerAttr>("latency");
+                 latency &&
+                 (write || latency.getInt() < 1 || latency.getInt() > 10))
+               return reject(
+                   "array load latency must be within the SDK range 1..10");
              if (!write &&
                  op->getAttrOfType<BoolAttr>("allow_tma").getValue() &&
                  !cap->permitTma)
