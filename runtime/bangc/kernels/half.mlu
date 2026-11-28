@@ -2,25 +2,23 @@
 // halfway and subnormal results, but converts FP32 -0 to FP16 +0.
 // bang_math_decls.h defines the signed-zero behavior of the SDK RN cast.
 __mlu_func__ void narrow_half_rn(half *dst, const float *src, int lanes) {
-  if (lanes == 0)
+  if (!lanes)
     return;
   unsigned long output = (unsigned long)dst, input = (unsigned long)src;
-  // Reuse the output as int32 predicates before writing any half result.
-  // Each packet is aligned to the 64-element vector granularity.
-  int packet = lanes / 128 * 64;
-  if (packet && lanes % 64 == 0 && ((output | input) & 63UL) == 0 &&
+  if (lanes % 128 == 0 && ((output | input) & 63UL) == 0 &&
       (output + 2UL * lanes <= input || input + 4UL * lanes <= output)) {
-    for (int start = 0; start < lanes; start += packet) {
-      int count = lanes - start < packet ? lanes - start : packet;
-      int *mask = (int *)dst;
-      __bang_eq_scalar(mask, (const int *)(src + start), (int)0x80000000u, count);
-      if (__bang_count(mask, count)) {
-        __cn_vector_cast_f32_to_f16_rn(lanes, dst, src);
-        return;
-      }
+    // The signed integer representation of -0 is INT32_MIN. Comparing
+    // paired minima needs one predicate per two inputs, exactly the size
+    // of the output tile, and only one reduction across the vector.
+    int *mask = (int *)dst;
+    const int *bits = (const int *)src;
+    int halfCount = lanes / 2;
+    __bang_minequal(mask, bits, bits + halfCount, halfCount);
+    __bang_eq_scalar(mask, mask, (int)0x80000000u, halfCount);
+    if (!__bang_count(mask, halfCount)) {
+      __bang_float2half_rn(dst, src, lanes);
+      return;
     }
-    __bang_float2half_rn(dst, src, lanes);
-    return;
   }
   __cn_vector_cast_f32_to_f16_rn(lanes, dst, src);
 }
