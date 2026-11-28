@@ -2,7 +2,7 @@
 
 ## 1. Installation and diagnostics (install)
 
-Follow the source checkout README to build the CompilerInfra 0.6.0 static SDK, install the matching Python bindings and install IntentDSL 2.0.0. Source builds need Python ≥3.10, CMake, Ninja, C++17 and PIC static archives for LLVM/MLIR 20.1.8. The resulting wheel includes the native product library.
+Follow the source checkout README to build the CompilerInfra 0.6.0 static SDK, install the matching Python bindings and install IntentDSL 2.1.0. Source builds need Python ≥3.10, CMake, Ninja, C++17 and PIC static archives for LLVM/MLIR 20.1.8. The resulting wheel includes the native product library.
 
 ```sh
 intentdsl setup --backend triton
@@ -27,7 +27,9 @@ IntentDSL parses Python ASTs into typed `kir` IR; kernel bodies are never execut
 - **Domains and Collectives**: `I.parallel(...)` declares parallel instances; `I.domain(0, extent)` declares reduction/streaming member axes; `I.static_range(K)` declares compile-time unrolled stripes; collectives include `I.reduce`, `I.sum`, `I.welford`, `I.cumsum`, `I.reduce_by_key`, `I.ordered_sum`, contractions, and ordered recurrences.
 - **Numerical contracts**: Each reduction declares its combiner and accumulator type. `I.max_num` and `I.maximum` differ on NaNs. Explicit `denormal_fp_math="preserve-sign"` can license flushing subnormals when the operand types and device capability also permit it.
 
-Inspect `ci.semantics` at `kir@canonical` for effective defaults and their sources. Parallel reduction chains can use online normalization. Ordered loops retain their order. Use `I.jit(..., fpmath_mode="strict")` for separate multiply/add rounding and source-order normalization. See the [language and numerical contract](https://github.com/Tianchen-ai/Intent/blob/main/doc/design/kir.md).
+Author defaults follow the corresponding PyTorch or Inductor operation. Ordinary FP32 arithmetic preserves subnormals. For narrow matrix products, the exit registers its operand types, accumulator type and native arithmetic separately. On x86, AMX/VDPBF16PS can treat subnormal BF16 inputs as zero and flush subnormal outputs. On MLU370, the reference is `torch.bmm` through CNNL. Both the subnormal-input and underflow-result probes produced zero. CUDA MMA behavior depends on the instruction. SG2044 uses widened FP32 arithmetic for BF16.
+
+Use `I.jit(kernel, backend="weft", denormal_fp_math="ieee")` to preserve subnormals. Use `float32_matmul_precision="highest"` to require FP32 products. For separate ordinary multiply/add rounding and source-order normalization, pass `fpmath_mode="strict"`. `I.ordered` keeps the declared iteration order. Inspect `ci.semantics` at `kir@canonical` for the effective choice and its source. [Per-target sources and counterexamples](https://github.com/Tianchen-ai/Intent/blob/main/doc/design/kir.md)
 
 ```python
 import intentdsl as I
@@ -73,6 +75,8 @@ python examples/inspect_candidate.py
 ## 5. Formulas and examples (formulas)
 
 From the checkout run `python examples/formulas.py` to compile the nine examples and compare each output to Torch. All functions are available from the installed `intentdsl.examples` module. Dimensions are symbolic; the row reductions below use the last axis.
+
+The nine examples check formula outputs. The milestone scoreboard covers 355 full calls, with 244 faster, 85 tied, 7 slower and 19 without a matched reference. [Measurements and hardware](https://github.com/Tianchen-ai/Intent/blob/main/doc/plan/v0.6-semantics.md)
 
 | Operator | Formula | Function and DSL primitives | Inputs → output |
 |---|---|---|---|

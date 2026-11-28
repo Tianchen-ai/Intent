@@ -1038,7 +1038,8 @@ def _execute_target_locked(
     prod_ver = product_meta["version"]
     ci_whl = next(wheel_dir.glob(f"compilerinfra-{ci_ver}-*.whl"))
     cia_whl = next(wheel_dir.glob(f"compilerinfra_agent-{ci_ver}-*.whl"))
-    prod_whls = sorted(wheel_dir.glob(spec.wheel_glob.replace("2.0.0", prod_ver)))
+    wheel_pattern = spec.wheel_glob.replace("2.0.0", prod_ver)
+    prod_whls = sorted(p for p in wheel_dir.glob(wheel_pattern) if p.name.startswith(f"intentdsl-{prod_ver}-"))
     if not prod_whls:
         raise FileNotFoundError(f"No wheel matching {spec.wheel_glob} in {wheel_dir}")
     prod_whl = prod_whls[0]

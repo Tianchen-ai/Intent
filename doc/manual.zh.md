@@ -2,7 +2,7 @@
 
 ## 1. 安装与诊断（install）
 
-按源码仓 README，从同一工作目录构建 CompilerInfra 0.6.0 静态 SDK，安装同版本 Python 绑定，然后安装 IntentDSL 2.0.0。源码构建需要 Python ≥3.10、CMake、Ninja、C++17 和 LLVM/MLIR 20.1.8 的 PIC 静态库。安装生成的 wheel 后，运行机使用包内的编译库。
+按源码仓 README，从同一工作目录构建 CompilerInfra 0.6.0 静态 SDK，安装同版本 Python 绑定，然后安装 IntentDSL 2.1.0。源码构建需要 Python ≥3.10、CMake、Ninja、C++17 和 LLVM/MLIR 20.1.8 的 PIC 静态库。安装生成的 wheel 后，运行机使用包内的编译库。
 
 ```sh
 intentdsl setup --backend triton
@@ -27,7 +27,9 @@ IntentDSL 只解析 Python AST 生成类型化 `kir` IR，不把内核体当作 
 - **结构化域与集合原语**：`I.parallel(...)` 声明并行实例域；`I.domain(0, extent)` 声明归约/流式成员轴；`I.static_range(K)` 声明编译期展开条带；内置 `I.reduce`、`I.sum`、`I.welford`、`I.cumsum`、`I.reduce_by_key`、`I.ordered_sum` 及矩阵/递推原语。
 - **数值合同**：每个归约声明其组合操作与累加类型。`I.max_num` 与 `I.maximum` 的 NaN 行为不同。可用 `denormal_fp_math="preserve-sign"` 显式授权相应次正规数冲零，出口还需检查类型与目标能力。
 
-在 `kir@canonical` 查看 `ci.semantics` 可追踪每项默认值和覆盖来源。并行归约链默认可考虑在线归一化。有序循环保留顺序。严格乘加和归约重放可通过 `I.jit(..., fpmath_mode="strict")` 请求。详见[语言与数值合同](https://github.com/Tianchen-ai/Intent/blob/main/doc/design/kir.md)。
+作者留白时，对齐同层 PyTorch 或 Inductor 操作的默认行为。普通 FP32 运算默认保留次正规数。窄精度矩阵点积另行登记输入类型、累加类型和目标原生行为。x86 的 AMX/VDPBF16PS 可将 BF16 次正规输入视零，次正规结果冲零。MLU370 以 `torch.bmm` 调用 CNNL 为参照，次正规输入和正规输入乘出次正规结果两组实测均为零。CUDA 按具体 MMA 指令登记。SG2044 的 BF16 路径提升到 FP32。
+
+要求保留次正规数时可写 `I.jit(kernel, backend="weft", denormal_fp_math="ieee")`。要求 FP32 乘积可传 `float32_matmul_precision="highest"`。要求普通乘加分别舍入、归一化按源码执行可传 `fpmath_mode="strict"`。显式 `I.ordered` 保留作者的迭代顺序。在 `kir@canonical` 查看 `ci.semantics` 可追踪每项选择及出处。[各出口合同及反例](https://github.com/Tianchen-ai/Intent/blob/main/doc/design/kir.md)
 
 ```python
 import intentdsl as I
@@ -73,6 +75,8 @@ python examples/inspect_candidate.py
 ## 5. 公式、类型与示例（formulas）
 
 在源码仓运行 `python examples/formulas.py`，逐项编译并用 Torch 验证下表九个公式。DSL 函数均可从已安装的 `intentdsl.examples` 导入。M、N、K 等是符号维，沿最后一轴归约。
+
+九个示例逐项检查公式输出。里程碑性能表另测 355 个完整调用，244 快、85 平、7 慢、19 项无同口径参照。[逐项计时与设备](https://github.com/Tianchen-ai/Intent/blob/main/doc/plan/v0.6-semantics.md)
 
 | 算子 | 公式 | 函数与 DSL 原语 | 输入 → 输出 |
 |---|---|---|---|

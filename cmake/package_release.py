@@ -254,7 +254,8 @@ def main() -> int:
                 env=clean_env,
                 check=True,
             )
-            rebuilt_whl = next(rebuilt_dir.glob("intentdsl-2.0.0-*.whl"))
+            product_version = json.loads((product_root / "product.json").read_text())["version"]
+            rebuilt_whl = next(rebuilt_dir.glob(f"intentdsl-{product_version}-*.whl"))
             subprocess.run([str(vpip), "install", "--no-deps", str(rebuilt_whl)], env=clean_env, check=True)
 
             check_code = """

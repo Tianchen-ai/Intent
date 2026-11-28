@@ -8,7 +8,7 @@ from textwrap import dedent
 from .completion import Completion
 from .signature import valid_denormal_mode
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 
 class _Direction:

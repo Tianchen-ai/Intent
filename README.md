@@ -1,6 +1,6 @@
 # IntentDSL
 
-Write a tensor kernel in Python, choose a backend, and check the compiled result against a reference. IntentDSL 2.0.0 captures the types, accesses, reductions and loop state of `@I.kernel` functions. A static `@I.program` composes kernels and workspaces.
+Write a tensor kernel in Python, choose a backend, and check the compiled result against a reference. IntentDSL 2.1.0 captures the types, accesses, reductions and loop state of `@I.kernel` functions. A static `@I.program` composes kernels and workspaces.
 
 [IntentDSL 工具书 · 中文](doc/index.md) · [Handbook · English](doc/index.en.md) · [Architecture](doc/architecture.md) · [V1 paper figures](doc/paper-results.md)
 
@@ -37,9 +37,10 @@ python -m pip install torch triton
 intentdsl setup --backend triton
 intentdsl doctor --backend triton
 python Intent/examples/first_kernel.py
+python Intent/examples/formulas.py
 ```
 
-The file below is the complete program. Save it as a Python file so the frontend can read its source. The row maximum stabilizes the exponential, and the sum normalizes each row.
+The second script checks nine author formulas against Torch. The first kernel is reproduced below. Save it as a Python file so the frontend can read its source. The row maximum stabilizes the exponential, and the sum normalizes each row.
 
 ```python
 import torch
@@ -81,5 +82,27 @@ cd Intent-Bench
 intent-bench run softmax --env examples/environments/gpu.json --output-root "$PWD/output" --case 64x1024-float16 --impl intent-v2:triton,triton --baseline triton --check-only
 intent-bench run softmax --env examples/environments/gpu.json --output-root "$PWD/output" --case 64x1024-float16 --impl intent-v2:triton,triton --baseline triton
 ```
+
+From the same Bench directory, the Python API runs the same workload and checks both results:
+
+```sh
+export INTENT_BENCH_OUTPUT_ROOT="$PWD/output"
+python - <<'PY'
+from intent_bench import RunRequest, run, load_environment
+outcome = run(RunRequest(
+    "softmax", ("intent-v2:triton", "triton"),
+    environment=load_environment("examples/environments/gpu.json"),
+    cases=("64x1024-float16",), baseline="triton",
+))
+assert len(outcome.results) == 2 and outcome.exit_code == 0
+print(outcome.directory)
+PY
+```
+
+## Performance and numerical defaults
+
+On Xeon 8470Q, RTX 5090 D and MLU370, 336 of 355 complete calls have a same-device reference with matching semantics. Of these, 244 were faster, 85 tied and 7 were slower. Classification uses the spread of both implementations across three rounds. Each reference and timing is identified in the [scoreboard](doc/plan/v0.6-semantics.md).
+
+Author defaults follow PyTorch and Inductor. A narrow matrix product uses the target's registered input, accumulator and subnormal behavior. For example, native x86 BF16 dot may flush tiny inputs and outputs even when ordinary FP32 operations preserve subnormals. Request preservation with `I.jit(kernel, backend="weft", denormal_fp_math="ieee")`. Use `fpmath_mode="strict"` for separate ordinary multiply/add rounding and source-order normalization. See the [target contracts and explicit overrides](doc/design/kir.md).
 
 The [first route](doc/first-route.md) explains the result and output files. The [component guide](doc/manual.en.md#4-component-guide-components) covers inspection and candidate compilation. Both manuals are also available through `intentdsl manual --lang zh` and `intentdsl manual --lang en`.

@@ -11,7 +11,7 @@
 | x86 Weft、Mojo | BF16 输入、FP32 累加且 BRGEMM 可用时，作者留白允许原生 BF16 点积。AMX TDPBF16PS 和 VDPBF16PS 将次正规输入视零、将次正规结果冲零，独立于 MXCSR。oneDNN strict 约束计算中的隐式降精度。显式 IEEE 或 FP32 乘积用保留源语义的实现。参考程序为 ATen 的 CPU FlashAttention。[oneDNN 数据类型](https://uxlfoundation.github.io/oneDNN/v3.13/dev_guide_data_types.html) · [Floating-point Math Mode](https://uxlfoundation.github.io/oneDNN/v3.13/dev_guide_attributes_fpmath_mode.html) · [Intel SDM](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html) · [ATen FlashAttentionKernel.cpp](https://github.com/pytorch/pytorch/blob/449b1768410104d3ed79d3bcfe4ba1d65c7f22c0/aten/src/ATen/native/cpu/FlashAttentionKernel.cpp) |
 | NVIDIA Triton、cuTile | PTX 对相应浮点 MMA 的累加顺序和次正规输入处理未作保证。默认允许目标 MMA，显式要求保留时发出 FP32 乘法和归约。缩放 FP8 在该档先用 FP32 解码和缩放。SIMT 分块代价计入乘积、输入面板及累加器的活跃字数和溢出流量。[PTX MMA Precision and rounding](https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-instructions-mma) · [CUDA Tile mma](https://docs.nvidia.com/cuda/cutile-python/generated/cuda.tile.mma.html) |
 | RVV Weft | RISC-V 向量浮点规范采用 IEEE 次正规数，BF16 扩展定义宽化浮点累加。SG2044 的 BF16 路径提升到 FP32，用其支持的向量算术执行。[RISC-V BF16](https://docs.riscv.org/reference/isa/unpriv/bfloat16.html) · [RISC-V V](https://docs.riscv.org/reference/isa/unpriv/v-st-ext.html) |
-| MLU370 BANG C | 所查 cncc 4.7 SDK 与 CNNL 矩阵描述符提供计算类型及 `CNNL_MATMUL_ALLOW_TF32`。矩阵单元次正规数和中间舍入的保证未查到，登记为 `undocumented`，沿用已有类型及许可条件。 |
+| MLU370 BANG C | 作者留白时，BF16 点积以 `torch.bmm` 的 `torch_mlu::ops::cnnl_baddbmm_out_internal` → `cnnlStrideBatchMatMul_v3` 为参考。256 项点积中，次正规输入和正规输入乘出次正规结果两组探针在原生矩阵核与 Torch 上均为零。显式 IEEE 或 FP32 乘积分别保留 1 与 2⁻¹²⁵。其他类型按其已登记合同选择。[设备反例与实测](../plan/v0.6-semantics.md) |
 
 ## 从作者选择到语义
 
