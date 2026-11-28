@@ -25,7 +25,8 @@ python -m pip install torch triton
 
 1. `intentdsl setup --backend triton` 检查打包的库、资产和前端。查看报告中的具体探针。
 2. `intentdsl doctor --backend triton` 报告所选出口的 `ready` 和 `missing`。补齐列出的驱动、编译器或 Python 包后重跑。
-3. 在三仓的父目录执行 `python Intent/examples/first_kernel.py`。看到 `softmax passed` 表示设备已编译、执行且数值通过。
+3. 在三仓的父目录执行 `python Intent/examples/first_kernel.py`。看到 `softmax passed` 表示设备已编译、执行且数值通过。 接着执行 `python Intent/examples/formulas.py`，九个 `passed` 对应九个公式的 Torch 对照。
 4. 按 README 进入 `Intent-Bench`，先运行带 `--check-only` 的命令，再运行计时命令。`intent-v2:triton` 是本产品，`triton` 是独立参考实现；数值裁判另行执行。用 `--output-root` 指定的目录查看 `latest` 下本次运行的 `results.json`，检查各行的 `status`、`correctness`、`median_ms` 与 `samples_ms`。
+5. 留在 `Intent-Bench`，运行 README 的 Python API 示例。它提交相同设备、用例和参照，输出本次结果目录。
 
 [中文工具书](index.md) · [English handbook](index.en.md)
