@@ -40,6 +40,8 @@ public:
     fn->setAttr("block.topology", choice.get("topology"));
     batch=choice.getAs<IntegerAttr>("member_batch");
     binMode=choice.getAs<StringAttr>("bins");
+    if (auto storage = choice.getAs<IntegerAttr>("private_bin_storage"))
+      fn->setAttr("block.private_bin_storage", storage);
     keyPanel=choice.getAs<IntegerAttr>("key_panel");
   }
   void build() {

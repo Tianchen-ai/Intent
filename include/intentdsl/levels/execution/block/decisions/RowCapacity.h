@@ -61,6 +61,8 @@ struct RowCapacity {
   unsigned scheduledWarpWidth = 0;
   bool globalAtomicBins=false, nativePrivateHistogram=false;
   std::optional<int64_t> privateBinCapacity;
+  // Zero means the target has no private indexed-count primitive.
+  int64_t privateBinGranule = 0, privateBinBytes = sizeof(int32_t);
   bool acceptsGroup(mlir::Operation *op, unsigned count) const {
     if (count == 1) return true;
     auto fn = mlir::dyn_cast<mlir::func::FuncOp>(op);

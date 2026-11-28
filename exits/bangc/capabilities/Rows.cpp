@@ -115,6 +115,12 @@ capabilities(const llvm::json::Object &opts) {
                      {64, 64, 64, "{}", "window_contract"},
                      {32, 64, 64, "{}", "window_contract"}};
   auto wram = opts.getInteger("wram_bytes");
+  if (wram.value_or(0) >= 4096) {
+    caps->privateBinCapacity = *nram;
+    caps->privateBinGranule = 64;
+    caps->privateBinBytes =
+        64; // WRAM filter bank requires a 64-byte NRAM comparison row per bin.
+  }
   auto sram = opts.getInteger("sram_bytes");
   // Only admit implementations that fit physical owners (and cluster SRAM for
   // 512x512 Union4 cooperative tiles). A row-only offline profile can still

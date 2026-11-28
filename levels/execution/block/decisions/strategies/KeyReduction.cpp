@@ -1,6 +1,7 @@
 #include "../Resident.h"
-#include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
 #include "intentdsl/levels/execution/block/decisions/KeyPanels.h"
+#include "intentdsl/levels/execution/block/decisions/PrivateBins.h"
+#include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
 namespace CI_UNIT_NAMESPACE {
 void registerKeyReduction(compilerinfra::Unit &unit) {
   using namespace mlir;
@@ -13,6 +14,7 @@ void registerKeyReduction(compilerinfra::Unit &unit) {
     auto rows=residentCandidates(op,p,true);
     if(!rows)return rows.takeError();
     auto caps=p.services.get<intentdsl::RowCapacity>();
+    auto storage = intentdsl::block::privateBinStorage(op, p);
     bool direct=caps->globalAtomicBins;
     op->walk([&](Operation *k){if(k->getName().stripDialect()=="count_keys")
       direct &= k->hasOneUse() && (*k->getUsers().begin())->getName().stripDialect()=="write";});
@@ -22,6 +24,8 @@ void registerKeyReduction(compilerinfra::Unit &unit) {
       auto params=cast<DictionaryAttr>(cast<ArrayAttr>(d.get("rows"))[0]);
       if(mode=="private-merge" && caps->nativePrivateHistogram && caps->privateBinCapacity &&
          4*params.getAs<IntegerAttr>("width").getInt()>*caps->privateBinCapacity)continue;
+      if (mode == "private-merge" && storage)
+        d.set("private_bin_storage", b.getI64IntegerAttr(*storage));
       d.set("bins",b.getStringAttr(mode));
       choices.push_back({mode.str(),mode.str(),d.getDictionary(op->getContext()),{"exclusive-bin-row"}});
     }

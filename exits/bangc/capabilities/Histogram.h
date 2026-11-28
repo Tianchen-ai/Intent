@@ -106,7 +106,7 @@ inline mlir::DictionaryAttr keyPanel(mlir::func::FuncOp fn,
   });
   if (!matches)
     return ticketPanel(fn, p, layout);
-  if (matches != 1)
+  if (matches != 1 || !fn->hasAttr("block.private_bin_storage"))
     return {};
   auto facts = p.services.get<intentdsl::CallFacts>();
   auto matrix = p.services.get<intentdsl::dsa::MatrixStorage>();

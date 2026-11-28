@@ -2,8 +2,9 @@
 #include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
 #include "intentdsl/levels/algorithm/kir/ir/Permutation.h"
 #include "intentdsl/levels/algorithm/kir/ir/RowSemantics.h"
-#include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
 #include "intentdsl/levels/execution/block/decisions/KeyPanels.h"
+#include "intentdsl/levels/execution/block/decisions/PrivateBins.h"
+#include "intentdsl/levels/execution/block/decisions/RowCapacity.h"
 #include "intentdsl/levels/execution/block/decisions/Verify.h"
 #include "intentdsl/levels/execution/block/ir/Access.h"
 #include "intentdsl/levels/execution/block/ir/Contraction.h"
@@ -98,6 +99,15 @@ void bind(Unit &unit) {
     auto bins=d.getAs<StringAttr>("bins");
     auto mapping = d.getAs<StringAttr>("walk");
     bool binPanels = counts && mapping && mapping == "column-panels";
+    if (auto storage = d.get("private_bin_storage")) {
+      auto bytes = intentdsl::block::privateBinStorage(op, profile);
+      if (bins != "private-merge" ||
+          d.getAs<StringAttr>("topology") != "resident" || !bytes ||
+          storage != Builder(op->getContext()).getI64IntegerAttr(*bytes))
+        return llvm::createStringError(
+            "private counters require disjoint owner rows and sufficient local "
+            "capacity");
+    }
     if (binPanels) {
       auto rows = d.getAs<ArrayAttr>("rows");
       auto panel = d.getAs<IntegerAttr>("key_panel");

@@ -220,13 +220,21 @@ void registerCost(Unit &u) {
                 if(caps->privateBinCapacity)v.terms["per_block_storage_limit"]={double(*caps->privateBinCapacity),"B"};
                 v.terms["bin_merge_bytes"]={local?4.*m*n:0.,"B"};
                 v.terms["contending_global_updates"]={local?0.:collisions,"count"};
-                double occupancy = caps->nativePrivateHistogram ? 1. :
-                    std::clamp(scheduled / f->participants, 1. / f->participants, 1.);
+                bool native = caps->nativePrivateHistogram ||
+                              choice.contains("private_bin_storage");
+                if (auto footprint =
+                        choice.getAs<IntegerAttr>("private_bin_storage"))
+                  v.terms["private_bin_bytes"] = {double(footprint.getInt()),
+                                                  "B"};
+                double occupancy = native
+                                       ? 1.
+                                       : std::clamp(scheduled / f->participants,
+                                                    1. / f->participants, 1.);
                 if(local){
                   auto rate=intentdsl::quantity(ctx,"compute","lane/ns");
-                  double work = updates * (caps->nativePrivateHistogram ? 1. : n);
+                  double work = updates * (native ? 1. : n);
                   if(rate)*v.timeNs+=work / *rate / occupancy;
-                  if(!caps->nativePrivateHistogram){
+                  if (!native) {
                     // Compare/reduce materializes one i32 predicate per key
                     // and bin inside the tile. Use on-chip traffic as a proxy
                     // when the target has no collective instruction.

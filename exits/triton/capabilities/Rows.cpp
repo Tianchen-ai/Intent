@@ -119,11 +119,13 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
         {64, 64, 128, R"({"num_warps":4,"num_stages":3})", "scaled_contract"},
         {64, 128, 128, R"({"num_warps":8,"num_stages":2})", "scaled_contract"},
         {128, 128, 128, R"({"num_warps":8,"num_stages":2})", "scaled_contract"}};
+
   if (auto err =
           profile.services.provide<intentdsl::block::MatrixTarget>(matrix))
     return std::move(err);
   caps->storeSectorBytes = 32;
   caps->nativePrivateHistogram = true;
+  caps->privateBinGranule = 1;
   caps->privateBinCapacity = options.getInteger("shared_per_block");
   caps->maxExpandedReductionLanes = 65536;
   caps->independentWidths = {32, 64, 128};
