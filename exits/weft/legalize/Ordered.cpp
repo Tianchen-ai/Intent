@@ -1,4 +1,5 @@
 #include "Ordered.h"
+#include "intentdsl/levels/execution/cpu/ir/WeightExp.h"
 #include "Arithmetic.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/algorithm/kir/ir/FastMath.h"
@@ -354,6 +355,7 @@ struct TiledTwoPassPlan {
   Value stage2MassRes;
   Value stage2AccRes;
   bool useExp2 = true;
+  bool reducedWeightExp = false;
   bool flushExpOutput = false;
   std::optional<Type> weightRoundType;
   Value vMem;
@@ -1223,6 +1225,9 @@ struct OrderedLowerer {
       bool isExp2 = expOp->getName().getStringRef() == "math.exp2";
       bool flushOutput = allowsOutputSubnormalFlush(expOp);
       if (recordV) {
+        auto implementation =
+            expOp->getAttrOfType<StringAttr>("cpu.weight_exp");
+        plan.reducedWeightExp = implementation && implementation == "fexp_u20";
         plan.useExp2 = isExp2;
         plan.flushExpOutput = flushOutput;
       } else if (plan.useExp2 != isExp2 || plan.flushExpOutput != flushOutput) {
@@ -1756,7 +1761,43 @@ struct OrderedLowerer {
     TaskTerm firstNormal = !isRvv && plan.flushExpOutput
                                ? lit(plan.useExp2 ? "-126.0" : "-87.33654022216796875", "f32")
                                : TaskTerm{};
-    auto expWeight = [&](TaskTerm diff, TaskTerm zero, StringRef ty, StringRef maskTy) {
+    auto expWeight = [&](TaskTerm diff, TaskTerm zero, StringRef ty,
+                         StringRef maskTy, bool narrow = true) {
+      if (narrow && plan.reducedWeightExp) {
+        auto intTy = ty.str();
+        intTy.replace(intTy.find("f32"), 3, "si32");
+        auto literal = [&](float v) {
+          auto bits = llvm::APFloat(v).bitcastToAPInt().getZExtValue();
+          return newVec(lit("0x" + llvm::utohexstr(bits), "f32"), ty);
+        };
+        auto binary = [&](StringRef k, TaskTerm x, TaskTerm y) {
+          return bin(k, x, y, ty);
+        };
+        auto fma = [&](TaskTerm a, TaskTerm x, TaskTerm y) {
+          return bin("add", bin("mul", a, x, ty), y, ty);
+        };
+        auto compare = [&](StringRef k, TaskTerm x, TaskTerm y) {
+          return cmp(k, x, y, maskTy);
+        };
+        auto select = [&](TaskTerm m, TaskTerm x, TaskTerm y) {
+          return sel(m, x, y, ty);
+        };
+        auto convert = [&](TaskTerm x, StringRef to) {
+          if (to != "bitcast")
+            return castOp(x, to == "int32" ? StringRef(intTy) : ty);
+          auto bits =
+              makeOp(b, loc, "task_cast", {x.v}, {b.getIndexType()},
+                     {b.getNamedAttr("op_kind", b.getStringAttr("bitcast")),
+                      b.getNamedAttr("in_type", b.getStringAttr(x.type)),
+                      b.getNamedAttr("val_type", b.getStringAttr(ty))})
+                  ->getResult(0);
+          return TaskTerm{bits, ty.str()};
+        };
+        return intentdsl::cpu::reducedWeightExp(
+            diff, literal, binary, fma, compare, select,
+            [&](TaskTerm x) { return unaryOp("floor", x); }, convert,
+            [&](TaskTerm x) { return compare("ne", x, x); });
+      }
       TaskTerm flush;
       if (firstNormal.v) {
         flush = cmp("lt", diff, firstNormal, maskTy);
@@ -2020,7 +2061,7 @@ struct OrderedLowerer {
                 [&](TaskTerm oldPeak, TaskTerm origin) {
                   auto delta = applyPostSubScale(
                       bin("sub", oldPeak, origin, vecBTy), vecBTy);
-                  auto scale = expWeight(delta, zeroV, vecBTy, maskBTy);
+                  auto scale = expWeight(delta, zeroV, vecBTy, maskBTy, false);
                   return sel(cmp("eq", oldPeak, ninfV, maskBTy), zeroV, scale,
                              vecBTy);
                 },
@@ -4564,17 +4605,21 @@ LogicalResult lowerWeftOrdered(func::FuncOp fn,
   b.setInsertionPointToEnd(&oBb);
 
   auto axesAttr = space.getAttrOfType<DenseI64ArrayAttr>("axes");
-  TaskTerm cursor =
-      batch > 1 ? lowerer.bin("div", {ownerIv, "index"}, stepTerm, "index")
-                : TaskTerm{ownerIv, "index"};
+  // Host task intervals are nonnegative. Unsigned radix digits preserve the
+  // axis bounds through scalar division and remainder in the native compiler.
+  TaskTerm cursor = lowerer.castOp({ownerIv, "index"}, "ui64");
+  if (batch > 1)
+    cursor = lowerer.bin("div", cursor,
+                         lowerer.lit(std::to_string(batch), "ui64"), "ui64");
   auto radices = intentdsl::cpu::ownerRadices(space);
   for (auto [pos, ax] : llvm::enumerate(radices)) {
     int64_t fullExt = std::max<int64_t>(
         1, lowerer.dimOf(space.getOperand(ax), "cpu.shape", axesAttr[ax]));
     int64_t radixExt = (pos == 0 && batch > 1) ? (fullExt / batch) : fullExt;
-    TaskTerm d = lowerer.idx(radixExt);
-    TaskTerm rem = lowerer.bin("mod", cursor, d, "index");
-    cursor = lowerer.bin("div", cursor, d, "index");
+    TaskTerm d = lowerer.lit(std::to_string(radixExt), "ui64");
+    TaskTerm rem =
+        lowerer.castOp(lowerer.bin("mod", cursor, d, "ui64"), "index");
+    cursor = lowerer.bin("div", cursor, d, "ui64");
     TaskTerm baseCoord =
         (pos == 0 && batch > 1) ? lowerer.bin("mul", rem, stepTerm, "index")
                                 : rem;
@@ -4603,8 +4648,8 @@ LogicalResult lowerWeftOrdered(func::FuncOp fn,
   int64_t targetCausalGrain =
       std::max<int64_t>((owners >= 2048 ? 64 : 16), batch);
   int64_t hostGrain =
-      (lowerer.anyTightenedCausalLoop && grain > targetCausalGrain &&
-       grain % targetCausalGrain == 0)
+      (!useTiled2D && lowerer.anyTightenedCausalLoop &&
+       grain > targetCausalGrain && grain % targetCausalGrain == 0)
           ? targetCausalGrain
           : grain;
   prog->setAttr("grain", b.getI64IntegerAttr(hostGrain));

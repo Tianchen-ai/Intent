@@ -1,4 +1,5 @@
 #include "intentdsl/levels/algorithm/kir/ir/DotSemantics.h"
+#include "intentdsl/levels/execution/cpu/ir/WeightExp.h"
 #include "intentdsl/levels/algorithm/kir/ir/Performance.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
@@ -94,6 +95,7 @@ void registerOneDNN(Unit &);
 void registerMatrixContracts(Unit &);
 void registerMojoAddressOptimization(Unit &);
 void bind(Unit &u) {
+  intentdsl::cpu::registerWeightExp(u);
   intentdsl::kir::registerDotSemantics(
       u, "mojo", "bf16", "oneDNN BRGEMM; ATen CPU FlashAttentionKernel.cpp",
       "native",

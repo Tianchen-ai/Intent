@@ -1,4 +1,5 @@
 #pragma once
+#include "mlir/Dialect/Math/IR/Math.h"
 #include "intentdsl/levels/algorithm/kir/ir/NativeDot.h"
 #include "intentdsl/levels/execution/cpu/ir/OrderedDot.h"
 
@@ -22,6 +23,7 @@ inline bool allowsWorkerOutputFtz(mlir::Operation &scope,
 struct OrderedValuePanel {
   mlir::Operation *add, *read;
   int64_t columns, tokens, elements;
+  mlir::Value weight;
   bool supported(const compilerinfra::TargetProfile &profile) const {
     auto &machine = *profile.services.get<RowMachine>();
     // orderedValuePanel already verified the effective FTZ mode of the
@@ -140,10 +142,76 @@ orderedValuePanel(mlir::Operation &space, const CallFacts &facts,
               })
               .wasInterrupted();
       if (!unsafe && extent <= INT64_MAX / 2)
-        result = OrderedValuePanel{
-            add, read, *shape->back().getAsInteger(), qk.tokens, extent};
+        result =
+            OrderedValuePanel{add,       read,   *shape->back().getAsInteger(),
+                              qk.tokens, extent, narrow.getIn()};
     }
   });
   return result;
+}
+// Match the exponential observed by the FP32 row sum and the BF16
+// contraction. Other observers, e.g. an exported FP32 probability, keep their
+// source exponential. An affine post-subtraction scale is part of the input.
+inline llvm::Error
+bindReducedWeightExp(mlir::Operation &space, const OrderedValuePanel &panel,
+                     const compilerinfra::TargetProfile &profile) {
+  using namespace mlir;
+  auto ref = "exits/" + profile.name + "::reduced-weight-exp";
+  auto repeated = repeatedScore(space);
+  if (!repeated || !profile.semanticDefaults.count(ref))
+    return llvm::Error::success();
+  auto weight = panel.weight;
+  auto loop = repeated->second;
+  auto mass = loop.getBody()
+                  ->getTerminator()
+                  ->getOperand(0)
+                  .getDefiningOp<arith::AddFOp>();
+  auto carry = loop.getRegionIterArgs().front();
+  if (!mass || std::distance(weight.use_begin(), weight.use_end()) != 2 ||
+      !((mass.getLhs() == weight && mass.getRhs() == carry) ||
+        (mass.getRhs() == weight && mass.getLhs() == carry)))
+    return llvm::Error::success();
+
+  auto fromZeroArm = [](Value a, Value b) -> Value {
+    if (matchPattern(a, m_AnyZeroFloat()))
+      return b;
+    if (matchPattern(b, m_AnyZeroFloat()))
+      return a;
+    return {};
+  };
+  Value value = weight;
+  if (auto select = weight.getDefiningOp<arith::SelectOp>())
+    value = fromZeroArm(select.getTrueValue(), select.getFalseValue());
+  else if (auto branch = weight.getDefiningOp<scf::IfOp>();
+           branch && branch->getNumResults() == 1 &&
+           !branch.getElseRegion().empty())
+    value = fromZeroArm(branch.thenYield().getOperand(0),
+                        branch.elseYield().getOperand(0));
+  auto exp = value ? value.getDefiningOp<math::ExpOp>() : math::ExpOp{};
+  if (!exp || (value != weight && !value.hasOneUse()) ||
+      exp->hasAttr("kir.exp_accuracy") || exp->hasAttr("denormal-fp-math") ||
+      exp.getFastmath() != arith::FastMathFlags::none)
+    return llvm::Error::success();
+
+  auto isDifference = [&](Value v) {
+    auto sub = v.getDefiningOp<arith::SubFOp>();
+    return sub && sub.getLhs() == repeated->replay->getResult(0) &&
+           sub.getRhs() == repeated->first.getResult(0);
+  };
+  auto input = exp.getOperand();
+  auto scale = input.getDefiningOp<arith::MulFOp>();
+  if (!isDifference(input) && !(scale && (isDifference(scale.getLhs()) ||
+                                          isDifference(scale.getRhs()))))
+    return llvm::Error::success();
+  auto fn = space.getParentOfType<func::FuncOp>();
+  auto semantics = fn->getAttrOfType<DictionaryAttr>("ci.semantics");
+  auto denorm = semantics ? semantics.getAs<DictionaryAttr>("denormal-fp-math")
+                          : DictionaryAttr{};
+  if (fn->hasAttr("kir.author_fastmath") ||
+      fn->getAttr("kir.normalization") ==
+          StringAttr::get(fn.getContext(), "source") ||
+      (denorm && denorm.getAs<StringAttr>("source") == "author"))
+    return llvm::Error::success();
+  return profile.bindSemantic(exp, "cpu.weight_exp", ref);
 }
 } // namespace intentdsl::cpu

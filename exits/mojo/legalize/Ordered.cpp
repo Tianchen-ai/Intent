@@ -1,4 +1,5 @@
 #include "intentdsl/levels/algorithm/kir/ir/Ordered.h"
+#include "intentdsl/levels/execution/cpu/ir/WeightExp.h"
 #include "compilerinfra/Assembly.h"
 #include "intentdsl/levels/algorithm/kir/ir/Domain.h"
 #include "intentdsl/levels/execution/cpu/ir/FoldProducts.h"
@@ -335,6 +336,29 @@ struct OrderedLowerer {
     return RankedTensorType::get({batch}, vecElemType(origTy));
   }
 
+  Value splatInt32(int32_t value) {
+    auto word = b.create<arith::ConstantIntOp>(loc, value, 32);
+    return makeOp(b, loc, "splat_scalar", {word},
+                  {batchVecType(b.getI32Type())},
+                  {b.getNamedAttr("dtype", b.getStringAttr("int32")),
+                   b.getNamedAttr("width", b.getI64IntegerAttr(batch))})
+        ->getResult(0);
+  }
+
+  // Mojo SIMD.ne on floats uses an ordered comparison.
+  Value float32NaNMask(Value x) {
+    auto bits =
+        makeOp(b, loc, "simd_bitcast", {x}, {batchVecType(b.getI32Type())},
+               {b.getNamedAttr("dtype", b.getStringAttr("int32"))})
+            ->getResult(0);
+    Value magnitude =
+        b.create<arith::AndIOp>(loc, bits, splatInt32(0x7fffffff));
+    return makeOp(b, loc, "simd_cmpi", {magnitude, splatInt32(0x7f800000)},
+                  {batchVecType(b.getI1Type())},
+                  {b.getNamedAttr("pred", b.getStringAttr("gt"))})
+        ->getResult(0);
+  }
+
   Value declBatchVecSlot(RankedTensorType vecTy, Value initVal) {
     SmallVector<Value, 1> inits;
     if (initVal)
@@ -560,6 +584,50 @@ struct OrderedLowerer {
       batchVecs[op.getResult(0)] = b.create(st)->getResult(0);
       return true;
     }
+    if (auto implementation = op.getAttrOfType<StringAttr>("cpu.weight_exp");
+        isa<math::ExpOp>(op) && implementation &&
+        implementation == "fexp_u20") {
+      auto ft = batchVecType(b.getF32Type()), it = batchVecType(b.getI32Type());
+      auto literal = [&](float v) {
+        return makeOp(b, loc, "splat_scalar", {constF32(b, loc, v)}, {ft},
+                      {b.getNamedAttr("dtype", b.getStringAttr("float32")),
+                       b.getNamedAttr("width", b.getI64IntegerAttr(batch))})
+            ->getResult(0);
+      };
+      auto binary = [&](StringRef kind, Value x, Value y) -> Value {
+        if (kind == "mul")
+          return b.create<arith::MulFOp>(loc, x, y);
+        return b.create<arith::SubFOp>(loc, x, y);
+      };
+      auto fma = [&](Value a, Value x, Value y) -> Value {
+        return b.create<math::FmaOp>(loc, a, x, y);
+      };
+      auto compare = [&](StringRef pred, Value x, Value y) {
+        return makeOp(b, loc, "simd_cmpi", {x, y},
+                      {batchVecType(b.getI1Type())},
+                      {b.getNamedAttr("pred", b.getStringAttr(pred))})
+            ->getResult(0);
+      };
+      auto select = [&](Value m, Value x, Value y) {
+        return makeOp(b, loc, "simd_select", {m, x, y}, {ft})->getResult(0);
+      };
+      auto convert = [&](Value x, StringRef to) {
+        bool bits = to == "bitcast";
+        return makeOp(b, loc, bits ? "simd_bitcast" : "scalar_cast", {x},
+                      {to == "int32" ? it : ft},
+                      {b.getNamedAttr(
+                          "dtype",
+                          b.getStringAttr(bits ? StringRef("float32") : to))})
+            ->getResult(0);
+      };
+
+      batchVecs[op.getResult(0)] = intentdsl::cpu::reducedWeightExp(
+          getBatchVec(op.getOperand(0), lanes), literal, binary, fma, compare,
+          select,
+          [&](Value x) -> Value { return b.create<math::FloorOp>(loc, x); },
+          convert, [&](Value x) { return float32NaNMask(x); });
+      return true;
+    }
     if (auto e2 = dyn_cast<math::Exp2Op>(op);
         e2 && bitEnumContainsAll(e2.getFastmath(), arith::FastMathFlags::afn) &&
         resTy.isF32() && canBatchVecType(e2.getOperand().getType())) {
@@ -588,26 +656,16 @@ struct OrderedLowerer {
       Value frac = b.create<math::Exp2Op>(loc, arg, e2.getFastmath());
       Value factor = select(low, splat(0x1p-64f), select(high, splat(0x1p64f), one));
       Value weight = b.create<arith::MulFOp>(loc, frac, factor);
-      auto intTy = batchVecType(b.getI32Type());
-      auto integer = [&](int32_t value) {
-        auto word = b.create<arith::ConstantIntOp>(loc, value, 32);
-        return makeOp(b, loc, "splat_scalar", {word}, {intTy},
-                      {b.getNamedAttr("dtype", b.getStringAttr("int32")),
-                       b.getNamedAttr("width", b.getI64IntegerAttr(batch))})->getResult(0);
-      };
-      auto bitsAs = [&](Value value, Type type, StringRef dtype) {
-        return makeOp(b, loc, "simd_bitcast", {value}, {type},
-                      {b.getNamedAttr("dtype", b.getStringAttr(dtype))})->getResult(0);
-      };
+
       // Between -150 and -149 the exact result rounds to the least
       // subnormal. Avoid a second rounding at the zero/minsub midpoint.
-      weight = select(cmp("lt", splat(-149)), bitsAs(integer(1), vTy, "float32"), weight);
+      auto minsub =
+          makeOp(b, loc, "simd_bitcast", {splatInt32(1)}, {vTy},
+                 {b.getNamedAttr("dtype", b.getStringAttr("float32"))})
+              ->getResult(0);
+      weight = select(cmp("lt", splat(-149)), minsub, weight);
       weight = select(tiny, zero, select(overflow, splat(std::numeric_limits<float>::infinity()), weight));
-      Value magnitude = b.create<arith::AndIOp>(loc, bitsAs(x, intTy, "int32"), integer(0x7fffffff));
-      Value nan = makeOp(b, loc, "simd_cmpi", {magnitude, integer(0x7f800000)},
-                         {batchVecType(b.getI1Type())},
-                         {b.getNamedAttr("pred", b.getStringAttr("gt"))})->getResult(0);
-      batchVecs[e2.getResult()] = select(nan, x, weight);
+      batchVecs[e2.getResult()] = select(float32NaNMask(x), x, weight);
       return true;
     }
     if (isa<math::ExpOp, math::Exp2Op, math::LogOp, math::SqrtOp,

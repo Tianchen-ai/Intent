@@ -1157,6 +1157,8 @@ void ownerTasks(Unit &u) {
         auto v = cpu::orderedValuePanel(*o, *f, *panel);
         if (!v)
           return llvm::createStringError("invalid weighted value contraction");
+        if (auto err = cpu::bindReducedWeightExp(*o, *v, p))
+          return err;
         v->add->setAttr(
             "cpu.pv_engine",
             b.getStringAttr("exits/" + p.name + "::onednn-brgemm-bf16"));

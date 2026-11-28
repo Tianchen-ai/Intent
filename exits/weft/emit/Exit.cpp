@@ -1,5 +1,6 @@
 #include "../legalize/Matrix.h"
 #include "intentdsl/levels/algorithm/kir/ir/DotSemantics.h"
+#include "intentdsl/levels/execution/cpu/ir/WeightExp.h"
 #include "intentdsl/levels/algorithm/kir/ir/Performance.h"
 #include "intentdsl/levels/execution/cpu/ir/MatrixTask.h"
 #include "intentdsl/levels/execution/cpu/ir/Task.h"
@@ -196,6 +197,7 @@ llvm::Expected<TargetProfile> capabilities(const llvm::json::Object &options) {
 
 void nativePanelCost(Unit &);
 void bind(Unit &u) {
+  intentdsl::cpu::registerWeightExp(u);
   intentdsl::kir::registerDotSemantics(
       u, "weft", "bf16", "oneDNN BRGEMM; ATen FlashAttentionKernel.cpp",
       "native",

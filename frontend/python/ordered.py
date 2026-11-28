@@ -351,6 +351,9 @@ class Ordered:
                 if a.type != "f32":
                     raise ValueError("expected f32 operand")
                 extra = ("afn",) if approx else ()
+                if name == "exp" and "approximate" in kw and not approx:
+                    attrs = [s for s in (denorm, 'kir.exp_accuracy="source"') if s]
+                    attr = " {" + ", ".join(attrs) + "}"
                 return self.emit(
                     f"math.{name} {a.name}{self.fm_inline(extra)}{attr} : f32", "f32"
                 )
