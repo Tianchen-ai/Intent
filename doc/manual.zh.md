@@ -76,7 +76,7 @@ python examples/inspect_candidate.py
 
 在源码仓运行 `python examples/formulas.py`，逐项编译并用 Torch 验证下表九个公式。DSL 函数均可从已安装的 `intentdsl.examples` 导入。M、N、K 等是符号维，沿最后一轴归约。
 
-九个示例逐项检查公式输出。里程碑性能表另测 355 个完整调用，244 快、85 平、7 慢、19 项无同口径参照。[逐项计时与设备](https://github.com/Tianchen-ai/Intent/blob/main/doc/plan/v0.6-semantics.md)
+九个示例逐项检查公式输出。里程碑性能表另测 355 个完整调用，246 快、85 平、5 慢、19 项无同口径参照。[逐项计时与设备](https://github.com/Tianchen-ai/Intent/blob/main/doc/plan/v0.6-semantics.md)
 
 | 算子 | 公式 | 函数与 DSL 原语 | 输入 → 输出 |
 |---|---|---|---|

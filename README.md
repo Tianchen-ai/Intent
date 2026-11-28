@@ -101,7 +101,7 @@ PY
 
 ## Performance and numerical defaults
 
-On Xeon 8470Q, RTX 5090 D and MLU370, 336 of 355 complete calls have a same-device reference with matching semantics. Of these, 244 were faster, 85 tied and 7 were slower. Classification uses the spread of both implementations across three rounds. Each reference and timing is identified in the [scoreboard](doc/plan/v0.6-semantics.md).
+On Xeon 8470Q, RTX 5090 D and MLU370, 336 of 355 complete calls have a same-device reference with matching semantics. Of these, 246 were faster, 85 tied and 5 were slower. Classification uses the spread of both implementations across three rounds. Each reference and timing is identified in the [scoreboard](doc/plan/v0.6-semantics.md).
 
 Author defaults follow PyTorch and Inductor. A narrow matrix product uses the target's registered input, accumulator and subnormal behavior. For example, native x86 BF16 dot may flush tiny inputs and outputs even when ordinary FP32 operations preserve subnormals. Request preservation with `I.jit(kernel, backend="weft", denormal_fp_math="ieee")`. Use `fpmath_mode="strict"` for separate ordinary multiply/add rounding and source-order normalization. See the [target contracts and explicit overrides](doc/design/kir.md).
 

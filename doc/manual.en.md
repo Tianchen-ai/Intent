@@ -76,7 +76,7 @@ python examples/inspect_candidate.py
 
 From the checkout run `python examples/formulas.py` to compile the nine examples and compare each output to Torch. All functions are available from the installed `intentdsl.examples` module. Dimensions are symbolic; the row reductions below use the last axis.
 
-The nine examples check formula outputs. The milestone scoreboard covers 355 full calls, with 244 faster, 85 tied, 7 slower and 19 without a matched reference. [Measurements and hardware](https://github.com/Tianchen-ai/Intent/blob/main/doc/plan/v0.6-semantics.md)
+The nine examples check formula outputs. The milestone scoreboard covers 355 full calls, with 246 faster, 85 tied, 5 slower and 19 without a matched reference. [Measurements and hardware](https://github.com/Tianchen-ai/Intent/blob/main/doc/plan/v0.6-semantics.md)
 
 | Operator | Formula | Function and DSL primitives | Inputs → output |
 |---|---|---|---|
