@@ -2591,11 +2591,15 @@ struct RowLowerer {
               bool flushSignedZero =
                   compilerinfra::allowsOutputSubnormalFlush(&inst) &&
                   compilerinfra::hasFastMath(&inst, arith::FastMathFlags::nsz);
-              StringRef kind = !dstElem.isF16()  ? "f16_to_f32"
-                               : flushSignedZero ? "f32_to_f16"
-                                                 : "f32_to_f16_ieee";
-              makeOp("vec_cast", {dst, getVal(inst.getOperand(0)), lanes}, {},
-                     {b.getNamedAttr("kind", b.getStringAttr(kind))});
+              if (dstElem.isF16() && !flushSignedZero)
+                makeOp("vec_half_rn", {dst, getVal(inst.getOperand(0)), lanes},
+                       {}, {}, "ieee-half-rn");
+              else
+                makeOp("vec_cast", {dst, getVal(inst.getOperand(0)), lanes}, {},
+                       {b.getNamedAttr("kind",
+                                       b.getStringAttr(dstElem.isF16()
+                                                           ? "f32_to_f16"
+                                                           : "f16_to_f32"))});
               continue;
             }
             if (n == "exp" && dstElem.isF32() &&

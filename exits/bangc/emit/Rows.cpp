@@ -104,6 +104,7 @@ void loadRuntimeSources(TerminalPrinter &p) {
       {"exits/bangc::bf16-tile-product", "runtime/bangc/kernels/bf16.mlu"},
       {"exits/bangc::bf16-scalar-convert", "runtime/bangc/kernels/bf16.mlu"},
       {"exits/bangc::ieee-sqrt-rn", "runtime/bangc/kernels/ieee_math.mlu"},
+      {"exits/bangc::ieee-half-rn", "runtime/bangc/kernels/half.mlu"},
       {"exits/bangc::inclusive-scan", "runtime/bangc/kernels/scan.mlu"},
       {"exits/bangc::moments-reduce", "runtime/bangc/kernels/moments.mlu"},
       {"exits/bangc::moments-merge", "runtime/bangc/kernels/moments.mlu"},
@@ -237,6 +238,8 @@ TerminalPrinter rowPrinter() {
       "<< 8)); $r0 = (float)_h.h; }}");
   rules["bangc_src.bf16_product"] = PrintRule::format(
       "bf16_product_tile($0, $1, $2, $3, (int)($4), (int)($5));");
+  rules["bangc_src.vec_half_rn"] =
+      PrintRule::format("narrow_half_rn($0, $1, (int)($2));");
   rules["bangc_src.vec_sqrt_rn"] =
       PrintRule::format("vec_sqrt_rn($0, $1, $2, (int)($3), (int)($4));");
   rules["bangc_src.vec_sqrt"] = PrintRule::format("__bang_sqrt($0, $1, (int)($2));");

@@ -761,6 +761,20 @@ void rowContracts(Unit &unit) {
                        (floatNram(a) || a.getType().isF32()) && (floatNram(b) || b.getType().isF32()) &&
                        (floatNram(a) || floatNram(b)));
       });
+  add("ieee-half-rn", "vec_half_rn", "narrow_half_rn", "half.mlu",
+      "NRAM half destination, float source, lane count", "contiguous NRAM",
+      "f32", "read source, write destination",
+      "IEEE binary16 roundTiesToEven including subnormals and negative zero; "
+      "cncc 4.7.2 bang_device_functions_decls.h __bang_float2half_rn and "
+      "bang_math_decls.h __cn_vector_cast_f32_to_f16_rn",
+      makeTyped(3, 3, 0, {STK::F16, STK::F32, STK::I64}, {}, {},
+                EffectMask::ReadWrite, 2, 1),
+      [=](Operation *op) {
+        auto dst = dyn_cast<MemRefType>(op->getOperand(0).getType());
+        return success(dst && dst.getElementType().isF16() &&
+                       isSpace(op->getOperand(0), 1) &&
+                       floatNram(op->getOperand(1)));
+      });
   add("ieee-sqrt-rn", "vec_sqrt_rn", "vec_sqrt_rn", "ieee_math.mlu",
       "NRAM f32 destination, NRAM f32 input and NRAM f32 scratch",
       "64-lane aligned NRAM vector fragment with 6x lanes f32 scratch", "f32",

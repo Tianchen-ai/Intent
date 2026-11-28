@@ -240,6 +240,10 @@ def VecScalarOp : BangcOp<"vec_scalar",
                        I64:$lanes, StrAttr:$op);
 }
 
+def VecHalfRnOp : BangcOp<"vec_half_rn"> {
+  let arguments = (ins Arg<AnyMemRef,"",[MemWrite]>:$dst, Arg<AnyMemRef,"",[MemRead]>:$src, I64:$lanes);
+}
+
 def VecCastOp : BangcOp<"vec_cast",
                         [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let arguments = (ins AnyMemRef:$dst, AnyMemRef:$src, I64:$lanes,

@@ -4706,8 +4706,7 @@ struct OrderedLowerer {
                  {out, input(0), input(1), scratch, lanes, lanes}, {}, attrs,
                  "guarded-reciprocal-product");
       } else if (k == "arith.truncf")
-        makeOp("vec_cast", {out, input(0), lanes}, {},
-               {b.getNamedAttr("kind", b.getStringAttr("f32_to_f16_ieee"))});
+        makeOp("vec_half_rn", {out, input(0), lanes}, {}, {}, "ieee-half-rn");
       else if (auto constant = dyn_cast<arith::ConstantOp>(op)) {
         fillVec(out, lanes,
                 b.create<arith::ConstantOp>(loc, constant.getValue()));
