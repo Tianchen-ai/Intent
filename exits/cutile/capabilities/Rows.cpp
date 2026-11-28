@@ -43,6 +43,8 @@ capabilities(const llvm::json::Object &options) {
         options.getString("calibration").value_or(probeCudaCalibration()).str();
     return profile;
   }
+  if (options.getBoolean("device_histogram").value_or(false))
+    profile.features.insert("composed-key-counts");
   auto architecture = options.getInteger("sm");
   if (!architecture || (*architecture != 90 && *architecture != 120))
     return llvm::createStringError(

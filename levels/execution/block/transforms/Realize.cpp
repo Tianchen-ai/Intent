@@ -49,6 +49,31 @@ public:
     auto pid = make("pid", {}, rw.getIndexType(), rw.getNamedAttr("axis",rw.getI32IntegerAttr(0)))->getResult(0);
     rows = make("rows", pid, vector(rw.getIndexType(), 1), rw.getNamedAttr("step",rw.getStringAttr("rows")))->getResult(0);
     auto &body = anchor->getRegion(0).front();
+    // Describe an entire pure member, so a sequence consumer can compose
+    // partition counts and their final reduction across a private workspace.
+    if (profile.reuse == Reuse::Library && profile.features.count("composed-key-counts") &&
+        body.getOperations().size() == 3 &&
+        body.getNumArguments() == 1) {
+      Operation &key = body.front(), &store = *key.getNextNode();
+      auto kind = key.getName().stripDialect();
+      if ((kind == "count_keys" || kind == "column_sum") &&
+          store.getName().stripDialect() == "write" && !store.hasAttr("axes") &&
+          store.getOperand(0) == domain && store.getOperand(1) == body.getArgument(0) &&
+          key.getOperand(1) == body.getArgument(0) && store.getOperand(2) == key.getResult(0)) {
+        auto fn = anchor->getParentOfType<func::FuncOp>();
+        auto src = dyn_cast<BlockArgument>(key.getOperand(0));
+        auto dst = dyn_cast<BlockArgument>(domain);
+        if (!fn->hasAttr("kir.iteration") && src && dst &&
+            src.getOwner() == &fn.front() && dst.getOwner() == &fn.front() &&
+            src != dst && !fn.getArgAttr(src.getArgNumber(), "kir.indexing") &&
+            !fn.getArgAttr(dst.getArgNumber(), "kir.indexing"))
+          fn->setAttr("block.key_summary", rw.getDictionaryAttr({
+              rw.getNamedAttr("operation", rw.getStringAttr(kind)),
+              rw.getNamedAttr("input", rw.getI64IntegerAttr(src.getArgNumber())),
+              rw.getNamedAttr("output", rw.getI64IntegerAttr(dst.getArgNumber())),
+              rw.getNamedAttr("span", kind == "count_keys" ? key.getAttr("span") : rw.getI64IntegerAttr(0))}));
+      }
+    }
     pureTileReads = !llvm::any_of(body.without_terminator(), [](Operation &op) {
       auto c = op.getName().stripDialect();
       return c == "prefix_scatter" || c == "unique_put" || c == "fill_ranges" ||

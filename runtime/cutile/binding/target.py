@@ -2,11 +2,12 @@ from runtime.kir.binding.completion import submit_device as submit
 from math import prod
 import torch
 from runtime.cutile.launch.call import Artifact
-
+from runtime.cutile.launch.histogram import compose_histogram, cub_toolkit
 
 
 class Target:
     submit = staticmethod(submit)
+    compose = staticmethod(compose_histogram)
 
     def profile(self, device, buffers):
         if getattr(device, "type", None) != "cuda":
@@ -41,6 +42,7 @@ class Target:
             l2_cache_bytes=getattr(p, "L2_cache_size", 0),
             warp_size=p.warp_size,
             calibration={"NVIDIA H100 80GB HBM3":"sm90","NVIDIA GeForce RTX 5090 D":"sm120"}.get(torch.cuda.get_device_name(device),""), sm_count=torch.cuda.get_device_properties(device).multi_processor_count,
+            device_histogram=cub_toolkit() is not None,
             sm=10 * arch[0] + arch[1],
             index_bits=bits,
             allow_tma=tensor_map,

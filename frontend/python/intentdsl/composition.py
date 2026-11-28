@@ -144,7 +144,9 @@ class ProgramKernel:
         self.definition = definition
         self.views = compiler.runtime("kir", "binding.views")
         self.sequence = compiler.runtime("kir", "binding.sequence")
-        self.submit = compiler.runtime(backend, "binding.target").Target.submit
+        target = compiler.runtime(backend, "binding.target").Target
+        self.submit = target.submit
+        self.compose = getattr(target, "compose", None)
         self.kernels = {s[1]: Kernel(compiler, s[1], backend, math_options=math_options)
                         for s in definition.steps if s[0] == "call"}
 
@@ -185,9 +187,15 @@ class ProgramKernel:
 
         steps, result = self.bind(*args, **kwargs)
         device = self.views.inspect(result[0] if isinstance(result, tuple) else result).device
-        return self.sequence.PreparedSequence(
-            [member.prepare() if isinstance(member, BoundMember) else member for _, member in steps],
-            [name for name, _ in steps], result, device, self.submit, Completion)
+        calls = [member.prepare() if isinstance(member, BoundMember) else member for _, member in steps]
+        labels = [name for name, _ in steps]
+        if self.compose and len(calls) == 2 and all(isinstance(member, BoundMember) for _, member in steps):
+            # Only an internal allocation can disappear in a paired library call.
+            workspace = {step[1] for step in self.definition.steps
+                         if step[0] == "allocate" and step[1] not in self.definition.returns}
+            sites = [step for step in self.definition.steps if step[0] == "call"]
+            calls, labels = self.compose(calls, labels, sites, workspace)
+        return self.sequence.PreparedSequence(calls, labels, result, device, self.submit, Completion)
 
     def run(self, *args, **kwargs):
         prepared = self.prepare(*args, **kwargs)

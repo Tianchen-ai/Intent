@@ -92,6 +92,9 @@
     }
   },
   "exits": {
+    "cutile": {
+      "reuse": "library"
+    },
     "bangc": {
       "reuse": "library"
     }

@@ -88,7 +88,22 @@ llvm::Error describeArtifact(ModuleOp m, llvm::raw_pwrite_stream &out) {
   Builder b(fn.getContext());
   auto formula = intentdsl::block::gridExpression(fn->getAttr("block.grid"));
   auto guard = fn->getAttrOfType<DenseI64ArrayAttr>("block.guard");
+  llvm::json::Object summary;
+  if (auto key = fn->getAttrOfType<DictionaryAttr>("block.key_summary")) {
+    auto kind = key.getAs<StringAttr>("operation");
+    if (!kind || (kind != "count_keys" && kind != "column_sum"))
+      return llvm::createStringError("invalid composed key reduction");
+    summary["operation"] = kind.str();
+    for (auto name : {"input", "output", "span"}) {
+      auto value = key.getAs<IntegerAttr>(name);
+      if (!value || value.getInt() < 0 ||
+          (StringRef(name) != "span" && value.getInt() >= fn.getNumArguments()))
+        return llvm::createStringError("invalid composed key reduction member");
+      summary[name] = value.getInt();
+    }
+  }
   out << llvm::json::Value(llvm::json::Object{
+      {"key_summary", std::move(summary)},
       {"domain", intentdsl::publishDomain(fn)},
       {"abi", std::move(*abi)},
       {"version", 3},
