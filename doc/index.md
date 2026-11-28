@@ -2,7 +2,7 @@
 
 [English handbook](index.en.md)
 
-IntentDSL 2.1.0 使用 CompilerInfra 0.6.0。五出口同口径配对 336 项，246 快、85 平、5 慢。计分板列出各项的设备、参照及离散度。[里程碑实测](plan/v0.6-semantics.md)
+IntentDSL 2.1.0 使用 CompilerInfra 0.6.0。五出口同口径配对 336 项，248 快、87 平、1 慢。计分板列出各项的设备、参照及离散度。[里程碑实测](plan/v0.6-semantics.md)
 
 1. [从源码到第一次测量](first-route.md) · 先让自己的 GPU kernel 通过 Torch 对照，再用 Bench 计时。
 2. [作者语言与数值合同](manual.zh.md) · 视图、并行实例、归约与精度。

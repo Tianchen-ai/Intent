@@ -2,7 +2,7 @@
 
 [中文工具书](index.md)
 
-IntentDSL 2.1.0 uses CompilerInfra 0.6.0. Across five exits, the 336 matched calls measured 246 faster, 85 tied and 5 slower. The scoreboard records each reference, device and dispersion. [Milestone measurements](plan/v0.6-semantics.md)
+IntentDSL 2.1.0 uses CompilerInfra 0.6.0. Across five exits, the 336 matched calls measured 248 faster, 87 tied and 1 slower. The scoreboard records each reference, device and dispersion. [Milestone measurements](plan/v0.6-semantics.md)
 
 - [Installation and diagnostics](manual.en.md#1-installation-and-diagnostics-install)
 - [Author language and numerical contracts](manual.en.md#2-author-language-and-numerical-contracts-language)
